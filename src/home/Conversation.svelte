@@ -11,7 +11,7 @@
   import { narrate } from '../lib/state/narration';
   import { ui } from '../lib/state/ui.svelte';
   import { clock } from '../lib/util/format';
-  import { PROVIDER_LABEL, prettyModel } from '../lib/util/labels';
+  import { COMPANY_LABEL, PROVIDER_LABEL, prettyModel } from '../lib/util/labels';
   import EmptyState from '../components/EmptyState.svelte';
   import Icon from '../components/Icon.svelte';
   import Markdown from '../components/Markdown.svelte';
@@ -138,7 +138,7 @@
     <header class="one">
       <Portrait agent={owner} size={26} />
       <div class="o-txt">
-        <p class="o-name">1:1 with <b>{owner.name}</b><span class="o-prov">{PROVIDER_LABEL[owner.provider]}{owner.model ? ` · ${prettyModel(owner.model)}` : ''}</span></p>
+        <p class="o-name">1:1 with <b>{owner.name}</b><span class="o-prov">{PROVIDER_LABEL[owner.provider]} ({COMPANY_LABEL[owner.provider]}){owner.model ? ` · ${prettyModel(owner.model)}` : ''}</span></p>
         {#if ownerNow}<p class="o-now truncate"><Say parts={ownerNow.parts} /></p>{/if}
       </div>
       <button class="btn ghost sm" onclick={() => ui.selectAgent(owner.id)}>Details</button>

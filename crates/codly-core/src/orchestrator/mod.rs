@@ -10,8 +10,10 @@
 //! - `gate`     commit → verify → scope → review → merge queue → done
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
+//! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
+pub mod accounts;
 pub mod approvals;
 mod gate;
 mod ingest;
@@ -99,6 +101,8 @@ struct Live {
     run_id: Id,
     role: Role,
     provider: Provider,
+    /// `AccountInfo::id` it runs on (None = no account detected for its CLI).
+    account: Option<String>,
     task_id: Option<Id>,
     workspace_id: Option<Id>,
     cwd: PathBuf,
@@ -161,31 +165,12 @@ struct Inner {
     kg_off: AtomicBool,
     /// Agent names and task keys by id, for readable knowledge-graph entities.
     labels: Mutex<HashMap<Id, String>>,
-    /// Latest rate-limit reading per provider (from RateLimit events).
-    quota: Mutex<HashMap<Provider, Quota>>,
+    /// Every sign-in of every installed CLI, in your order (`limits` empty: see `quota`).
+    accounts: RwLock<Vec<AccountInfo>>,
+    /// Latest usage windows per account id (from RateLimit events; persisted in `kv`).
+    quota: Mutex<HashMap<String, Vec<UsageWindow>>>,
     /// Artifact files already announced (absolute path + size), so rewrites re-announce.
     artifacts_seen: Mutex<HashSet<String>>,
-}
-
-/// A provider's usage window as last reported by one of its agents.
-struct Quota {
-    window: String,
-    used: f64,
-    resets_at: Option<i64>,
-    seen_at: i64,
-}
-
-impl Inner {
-    /// Providers to keep new tasks off: at or above `PARK_AT` of a window that has not reset.
-    /// ponytail: one reading per provider (the latest), no per-window bookkeeping.
-    fn parked(&self) -> HashMap<Provider, String> {
-        let now = now_ms();
-        lock(&self.quota)
-            .iter()
-            .filter(|(_, q)| q.used >= scheduler::PARK_AT && q.resets_at.map_or(now - q.seen_at < 30 * 60_000, |r| r > now))
-            .map(|(p, q)| (*p, format!("{:.0}% of its {} window used", q.used * 100.0, q.window)))
-            .collect()
-    }
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -263,6 +248,28 @@ async fn detect_clis(base: &HashMap<String, String>) -> Vec<CliInfo> {
     }
 }
 
+/// Settings' accounts as ids will see them: homes absolute (`~` expanded, no trailing slash;
+/// empty = the default sign-in), none for CLIs without an account variable, labels trimmed,
+/// one entry per sign-in (the first wins).
+fn normalize_accounts(list: Vec<AccountConfig>, base: &HashMap<String, String>) -> anyhow::Result<Vec<AccountConfig>> {
+    let mut out: Vec<AccountConfig> = vec![];
+    for mut a in list {
+        a.home = match a.home.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+            _ if crate::env::account_var(a.provider).is_none() => None,
+            None => None,
+            Some(h) => Some(
+                crate::env::normalize_home(h, base)
+                    .ok_or_else(|| anyhow!("the {} folder '{h}' must be an absolute path or start with ~/", a.provider.label()))?,
+            ),
+        };
+        a.label = a.label.map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
+        if !out.iter().any(|x| x.provider == a.provider && x.home == a.home) {
+            out.push(a);
+        }
+    }
+    Ok(out)
+}
+
 impl Core {
     /// Open the DB (migrate), capture the login env, detect CLIs, start the MCP server,
     /// reconcile runs left over from a crash, reopen the last workspace if any.
@@ -293,6 +300,9 @@ impl Core {
             Some(c) => c,
             None => detect_clis(&base_env).await,
         };
+        // Fixed CLIs (tests) are not probed: every account takes its CLI's state.
+        let accounts = accounts::detect(&base_env, &clis, &settings.accounts, !fixed_clis, None).await.unwrap_or_default();
+        let quota = accounts::stored_limits(&store);
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (bus, _) = broadcast::channel(4096);
         let inner = Arc::new(Inner {
@@ -324,7 +334,8 @@ impl Core {
             shutting_down: AtomicBool::new(false),
             kg_off: AtomicBool::new(false),
             labels: Mutex::new(HashMap::new()),
-            quota: Mutex::new(HashMap::new()),
+            accounts: RwLock::new(accounts),
+            quota: Mutex::new(quota),
             artifacts_seen: Mutex::new(HashSet::new()),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
@@ -360,8 +371,17 @@ impl Core {
             let clis = detect_clis(&i.base_env).await;
             *write(&i.clis) = clis;
         }
-        i.kick();
+        i.redetect_accounts(false).await;
         Ok(read(&i.clis).clone())
+    }
+
+    /// Every sign-in of every installed CLI, in your order, with the usage windows its agents
+    /// last reported (`limits`). `refresh` = ask each CLI again who is signed in (≤ 5 s).
+    pub async fn accounts(&self, refresh: bool) -> anyhow::Result<Vec<AccountInfo>> {
+        if refresh {
+            self.inner.redetect_accounts(false).await;
+        }
+        Ok(self.inner.accounts())
     }
 
     pub async fn recent_workspaces(&self) -> anyhow::Result<Vec<RecentWorkspace>> {
@@ -380,8 +400,14 @@ impl Core {
         s.max_per_provider = s.max_per_provider.clamp(1, s.max_parallel);
         let mut seen = HashSet::new();
         s.worker_providers.retain(|p| seen.insert(*p));
+        s.accounts = normalize_accounts(std::mem::take(&mut s.accounts), &self.inner.base_env)?;
+        s.lead_account = s.lead_account.filter(|a| !a.trim().is_empty());
+        let accounts_changed = self.inner.settings().accounts != s.accounts;
         self.inner.store.save_settings(&s)?;
         *write(&self.inner.settings) = s.clone();
+        if accounts_changed {
+            self.inner.redetect_accounts(true).await; // only a newly listed home is probed
+        }
         self.inner.kick();
         Ok(s)
     }
@@ -726,7 +752,8 @@ impl Inner {
         Ok(agent)
     }
 
-    /// An agent row not persisted yet (`insert_agent` persists it).
+    /// An agent row not persisted yet (`insert_agent` persists it). Its account (and billing
+    /// badge) is set when a run starts.
     fn new_agent(&self, name: &str, provider: Provider, role: Role, color: i64, model: Option<String>) -> Agent {
         let billing = self.clis().iter().find(|c| c.provider == provider).map_or(Billing::Unknown, |c| c.billing);
         let id = new_id();

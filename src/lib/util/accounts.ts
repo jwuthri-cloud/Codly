@@ -46,7 +46,7 @@ export function derivedLabel(provider: Provider, home: string | null): string {
 
 // ───────────── quota windows ─────────────
 
-/** Contract timestamps are unix seconds; rate-limit events carry ms. Accept both. */
+/** Timestamps are ms (model.rs); a value in unix seconds is read as such, to be safe. */
 export const toMs = (ts: number) => (ts < 1e11 ? ts * 1000 : ts);
 
 /** "5-hour", "Weekly", "Weekly · Opus", "Daily"… */
@@ -83,10 +83,33 @@ function windowRank(w: string): number {
 }
 export const sortWindows = (ws: UsageWindow[]) => [...ws].sort((a, b) => windowRank(a.window) - windowRank(b.window));
 
-/** The fraction used now: a window whose reset time has passed has started over. */
+/** The fraction used now: a window past its reset has started over; "rejected" is all of it. */
 export function usedNow(w: UsageWindow, now: number): number {
   if (w.resets_at != null && toMs(w.resets_at) <= now) return 0;
+  if (w.status === 'rejected') return 1;
   return Math.max(0, Math.min(1, w.used_fraction));
+}
+
+/** Like the core: no new work on a sign-in once a live window is this full (or rejected). */
+export const PARK_AT = 0.85;
+/** A window that never said when it resets stays live this long after it was seen. */
+const UNDATED_LIVE_MS = 30 * 60_000;
+
+/**
+ * Whether the core holds new work back from this sign-in, and until when (ms; null = until a
+ * newer reading). Null when it takes work.
+ */
+export function parked(a: Pick<AccountInfo, 'limits'>, now: number): { until: number | null } | null {
+  let hit = false;
+  let until: number | null = null;
+  for (const w of a.limits) {
+    const live = w.resets_at != null ? toMs(w.resets_at) > now : now - toMs(w.seen_at) < UNDATED_LIVE_MS;
+    if (!live || usedNow(w, now) < PARK_AT) continue;
+    if (w.resets_at == null) return { until: null };
+    hit = true;
+    until = Math.max(until ?? 0, toMs(w.resets_at));
+  }
+  return hit ? { until } : null;
 }
 
 const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
@@ -143,12 +166,12 @@ export function multiProviders(list: Pick<AccountInfo, 'provider' | 'enabled' | 
   return new Set([...n].filter(([, c]) => c > 1).map(([p]) => p));
 }
 
-/** An agent's account: its own, else its provider's primary sign-in. */
+/**
+ * An agent's account: its own, else (agents from before accounts) its provider's primary
+ * sign-in. Null when its own sign-in is no longer listed: never another account's quota.
+ */
 export function accountFor(agent: { provider: Provider; account: string | null }, list: AccountInfo[]): AccountInfo | null {
-  if (agent.account) {
-    const a = list.find((x) => x.id === agent.account);
-    if (a) return a;
-  }
+  if (agent.account) return list.find((x) => x.id === agent.account) ?? null;
   return list.find((x) => x.provider === agent.provider && x.primary) ?? list.find((x) => x.provider === agent.provider) ?? null;
 }
 

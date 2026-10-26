@@ -17,7 +17,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
 use super::runs::{RunReq, new_session};
-use super::{Inner, guard, lock, names, prompts, scheduler};
+use super::{Inner, guard, lock, names, prompts};
 use crate::adapters::SessionMode;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
@@ -94,21 +94,28 @@ enum Delivery {
 }
 
 impl Inner {
+    /// The provider of settings.lead_account if that account is usable, else
     /// settings.lead_provider if usable, else the first signed-in of claude, codex, gemini,
     /// opencode (a CLI with unknown sign-in state comes after the known-good ones).
     fn lead_provider(&self) -> Result<Provider> {
         let clis = self.clis();
-        let find = |p: Provider| clis.iter().find(|c| c.provider == p);
-        if let Some(p) = self.settings().lead_provider
-            && find(p).is_some_and(scheduler::usable)
+        let settings = self.settings();
+        if let Some(a) = settings.lead_account.as_deref().and_then(|id| self.account_states().into_iter().find(|a| a.id == id))
+            && a.usable()
+            && self.provider_usable(a.provider, false)
+        {
+            return Ok(a.provider);
+        }
+        if let Some(p) = settings.lead_provider
+            && self.provider_usable(p, false)
         {
             return Ok(p);
         }
         LEAD_ORDER
             .iter()
             .copied()
-            .find(|p| find(*p).is_some_and(|c| c.path.is_some() && c.logged_in == Some(true)))
-            .or_else(|| LEAD_ORDER.iter().copied().find(|p| find(*p).is_some_and(scheduler::usable)))
+            .find(|p| self.provider_usable(*p, true))
+            .or_else(|| LEAD_ORDER.iter().copied().find(|p| self.provider_usable(*p, false)))
             .ok_or_else(|| {
                 let problems: Vec<String> =
                     clis.iter().filter_map(|c| c.problem.as_ref().map(|p| format!("{}: {p}", c.provider.label()))).collect();
@@ -143,15 +150,42 @@ impl Inner {
         self.insert_agent(&ws.id, lead)
     }
 
+    /// The account a Lead runs on: settings.lead_account if usable (enabled, signed in, not
+    /// parked); else the one its conversation lives on while usable and under its limit;
+    /// else the account with the most quota left. None = no account detected for `provider`.
+    fn lead_account(&self, provider: Provider, lead: &Agent) -> Option<String> {
+        let accounts = self.accounts();
+        let now = now_ms();
+        let usable = |id: &str| {
+            accounts.iter().find(|a| a.id == id && a.provider == provider).map(|a| super::accounts::state_of(a, now)).filter(|s| s.usable())
+        };
+        if let Some(id) = self.settings().lead_account.as_deref()
+            && usable(id).is_some_and(|s| s.parked.is_none())
+        {
+            return Some(id.to_string());
+        }
+        if lead.session_id.is_some()
+            && lead.provider == provider
+            && let Some(own) = self.agent_account(lead)
+            && usable(&own).is_some_and(|s| s.used < 1.0)
+        {
+            return Some(own);
+        }
+        self.choose_account(provider, AccountStrategy::Spread)
+    }
+
     /// Start (or resume by session id) a Lead's run.
     async fn spawn_lead(self: &Arc<Self>, ws: &Workspace, lead: Agent) -> Result<()> {
         let provider = self.lead_provider()?;
         let settings = self.settings();
+        let account = self.lead_account(provider, &lead);
         let mut lead = lead;
-        if lead.provider != provider || lead.model != settings.lead_model {
+        // A session lives in its account's config home: another account starts a new one.
+        let moved = lead.provider == provider && lead.session_id.is_some() && account.is_some() && account != self.agent_account(&lead);
+        if lead.provider != provider || lead.model != settings.lead_model || moved {
             // Sessions are provider-specific: a new provider (or model) starts a new conversation.
             let billing = self.clis().iter().find(|c| c.provider == provider).map_or(Billing::Unknown, |c| c.billing);
-            let switched = lead.provider != provider;
+            let switched = lead.provider != provider || moved;
             lead = self.update_agent(&lead.id, |a| {
                 a.provider = provider;
                 a.model = settings.lead_model.clone();
@@ -160,6 +194,16 @@ impl Inner {
                     a.session_id = None;
                 }
             })?;
+            if moved {
+                let label = account.as_deref().and_then(|id| self.account(id)).map_or_else(|| "another account".into(), |a| a.label);
+                self.decide(
+                    Some(&ws.id),
+                    None,
+                    "route",
+                    format!("{} moves to {} · {label} in a new session (its account is unavailable or not the Lead account you chose)", lead.name, provider.label()),
+                    json!({ "agent": lead.id, "account": account, "rule": "lead_account" }),
+                )?;
+            }
         }
         let req = |session: SessionMode| RunReq {
             agent: lead.clone(),
@@ -170,6 +214,7 @@ impl Inner {
             session,
             system_prompt: prompts::LEAD_SYSTEM.to_string(),
             workspace_id: Some(ws.id.clone()),
+            account: account.clone(),
         };
         lock(&self.leads).forget(&lead.id);
         match &lead.session_id {
@@ -473,6 +518,7 @@ impl Inner {
                     session,
                     system_prompt: prompts::solo_system(&agent.name, &branch),
                     workspace_id: Some(ws.id.clone()),
+                    account: None,
                 }
             }
             // An idle worker or reviewer between tasks: a read-only conversation at the repo root.
@@ -485,6 +531,7 @@ impl Inner {
                 session,
                 system_prompt: prompts::CHAT_SYSTEM.to_string(),
                 workspace_id: Some(ws.id.clone()),
+                account: None,
             },
         };
         let resumed = matches!(req.session, SessionMode::Resume { .. });
@@ -519,6 +566,7 @@ impl Inner {
             session: new_session(agent.provider),
             system_prompt,
             workspace_id: Some(ws.id.clone()),
+            account: None,
         };
         self.spawn_run(req).await?;
         self.send_prompt(agent_id, prompt)

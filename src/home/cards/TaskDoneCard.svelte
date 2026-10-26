@@ -5,9 +5,10 @@
 <script lang="ts">
   import { diffstats, statLine } from '../../lib/state/diffstats.svelte';
   import { store } from '../../lib/state/store.svelte';
+  import { accounts } from '../../lib/state/accounts.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock } from '../../lib/util/format';
-  import { idVar, PROVIDER_LABEL } from '../../lib/util/labels';
+  import { idVar } from '../../lib/util/labels';
   import ArtifactThumb from '../../components/ArtifactThumb.svelte';
   import Icon from '../../components/Icon.svelte';
   import InlineText from '../../components/InlineText.svelte';
@@ -70,7 +71,7 @@
 
     <footer>
       <button class="btn sm" onclick={() => ui.openDiff({ kind: 'task', id: task.id })}><Icon name="diff" size={13} />View changes</button>
-      {#if agent}<span class="by">{PROVIDER_LABEL[agent.provider]}</span>{/if}
+      {#if agent}<span class="by">{accounts.who(agent)}</span>{/if}
     </footer>
   </article>
 {/if}

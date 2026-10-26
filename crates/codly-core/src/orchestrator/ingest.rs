@@ -294,16 +294,11 @@ impl Inner {
                 self.on_turn_completed(ctx, *status, reply);
             }
             EventKind::RateLimit { window, used_fraction, resets_at, status } => {
-                let rejected = status.as_deref().is_some_and(|s| matches!(s, "rejected" | "limited" | "exceeded"));
-                let used = if rejected { 1.0 } else { used_fraction.unwrap_or(0.0) };
-                let provider = lock(&self.live)
-                    .get(&ctx.agent_id)
-                    .map(|l| l.provider)
-                    .or_else(|| self.store.agent(&ctx.agent_id).ok().flatten().map(|a| a.provider));
-                if let Some(p) = provider {
-                    lock(&self.quota).insert(p, super::Quota { window: window.clone(), used, resets_at: *resets_at, seen_at: now_ms() });
-                    if used < scheduler::PARK_AT {
-                        self.kick(); // a provider may have come back
+                // Quota is per sign-in: the account this run uses.
+                if let Some(account) = self.event_account(&ctx.agent_id, &ctx.run_id) {
+                    let used = self.record_usage(&account, window, *used_fraction, *resets_at, status.as_deref());
+                    if used.is_none_or(|u| u < scheduler::PARK_AT) {
+                        self.kick(); // an account may have come back
                     }
                 }
             }

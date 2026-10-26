@@ -10,6 +10,7 @@
   import { diffstats, statLine } from '../lib/state/diffstats.svelte';
   import { narrate } from '../lib/state/narration';
   import { store } from '../lib/state/store.svelte';
+  import { accounts } from '../lib/state/accounts.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { clock, shortSha } from '../lib/util/format';
   import { GLOSSARY, idVar, methodProvenance, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
@@ -70,11 +71,11 @@
       {#if agent}
         <button class="who" onclick={() => ui.selectAgent(agent.id)}>
           <Portrait {agent} size={30} />
-          <span class="w-txt"><b>{agent.name}</b><span class="w-prov">{PROVIDER_LABEL[agent.provider]}</span>{#if n}<span class="w-now truncate"><Say parts={n.parts} /></span>{/if}</span>
+          <span class="w-txt"><b>{agent.name}</b><span class="w-prov">{accounts.who(agent)}</span>{#if n}<span class="w-now truncate"><Say parts={n.parts} /></span>{/if}</span>
           <Icon name="chevron-right" size={13} />
         </button>
       {:else}
-        <p class="small">{task.agent_hint ? `Not started · the planner suggests ${PROVIDER_LABEL[task.agent_hint]}` : 'Not assigned · Codly picks a free agent when it is ready'}</p>
+        <p class="small">{task.agent_hint ? `Not started · the planner suggests ${PROVIDER_LABEL[task.agent_hint]}${accounts.hintTag(task, task.agent_hint) ? ` · ${accounts.hintTag(task, task.agent_hint)}` : ''}` : 'Not assigned · Codly picks a free agent when it is ready'}</p>
       {/if}
       <Why lines={why} label="Why this way?" />
     </Section>

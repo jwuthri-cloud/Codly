@@ -24,6 +24,9 @@ pub(super) struct RunReq {
     pub session: SessionMode,
     pub system_prompt: String,
     pub workspace_id: Option<Id>,
+    /// `AccountInfo::id` to run on. None = a resume runs on the agent's recorded account (its
+    /// session lives there), a new session on `Inner::choose_account`.
+    pub account: Option<String>,
 }
 
 /// A new session id for providers that accept a pre-assigned one (Claude `--session-id`).
@@ -38,19 +41,26 @@ impl Inner {
         let provider = req.agent.provider;
         let cli = self.clis().into_iter().find(|c| c.provider == provider);
         let Some(cli) = cli.filter(|c| c.path.is_some()) else { bail!("{} is not installed", provider.label()) };
-        if cli.logged_in == Some(false) {
-            bail!("{} is not signed in{}", provider.label(), cli.problem.as_deref().map(|p| format!(": {p}")).unwrap_or_default());
-        }
+        let account = match (&req.account, &req.session) {
+            (Some(a), _) => Some(a.clone()),
+            (None, SessionMode::Resume { .. }) => self.agent_account(&req.agent),
+            (None, SessionMode::New { .. }) => self.choose_account(provider, self.settings().account_strategy),
+        };
+        let info = self.run_account(provider, account.as_deref(), &cli)?;
         // Re-resolved at every spawn: CLI updaters re-point their symlinks.
         let bin = guard("env::resolve_bin", || Ok(crate::env::resolve_bin(provider, &self.base_env)))
             .ok()
             .flatten()
             .or_else(|| cli.path.as_ref().map(PathBuf::from))
             .ok_or_else(|| anyhow!("{} binary not found", provider.label()))?;
-        let env = guard("env::child_env", || Ok(crate::env::child_env(&self.base_env, provider))).unwrap_or_else(|e| {
+        let mut env = guard("env::child_env", || Ok(crate::env::child_env(&self.base_env, provider))).unwrap_or_else(|e| {
             tracing::debug!("{e}; using the base env");
             self.base_env.clone()
         });
+        // The sign-in: CLAUDE_CONFIG_DIR / CODEX_HOME / GEMINI_CLI_HOME of that account.
+        if let Some(acct) = &info {
+            crate::env::apply_account(&mut env, provider, acct.home.as_deref());
+        }
         let mcp = self.mcp.get().ok_or_else(|| anyhow!("the Codly MCP server is not running"))?.clone();
         let run_id = new_id();
         let dir = self.data("runs").join(&run_id);
@@ -72,6 +82,7 @@ impl Inner {
             model: req.agent.model.clone(),
             cwd: req.cwd.to_string_lossy().into_owned(),
             session_id,
+            account: account.clone(),
             status: "starting".into(),
             raw_log: raw_log.to_string_lossy().into_owned(),
             report: None,
@@ -84,6 +95,13 @@ impl Inner {
             a.run_id = Some(run_id.clone());
             a.activity = None;
             a.activity_label = None;
+            if account.is_some() {
+                a.account = account.clone();
+            }
+            // The billing badge follows the account (a CLI-wide guess until it is known).
+            if let Some(b) = info.as_ref().map(|i| i.billing).filter(|b| *b != Billing::Unknown) {
+                a.billing = b;
+            }
             if req.task_id.is_some() {
                 a.task_id = req.task_id.clone();
             }
@@ -122,6 +140,7 @@ impl Inner {
                 run_id: run_id.clone(),
                 role: req.role,
                 provider,
+                account,
                 task_id: req.task_id,
                 workspace_id: req.workspace_id,
                 cwd: req.cwd,
@@ -202,6 +221,48 @@ impl Inner {
     }
 
     pub(super) fn cli_usable(&self, p: Provider) -> bool {
-        read(&self.clis).iter().any(|c| c.provider == p && super::scheduler::usable(c))
+        self.provider_usable(p, false)
+    }
+
+    /// The account a run goes on, checked: Some = apply its home to the child env; None =
+    /// no account detected for the CLI (its login shell's sign-in, env untouched).
+    fn run_account(&self, provider: Provider, id: Option<&str>, cli: &CliInfo) -> Result<Option<AccountInfo>> {
+        let label = provider.label();
+        let listed = read(&self.accounts).iter().any(|a| a.provider == provider);
+        let Some(id) = id else {
+            if cli.logged_in == Some(false) {
+                bail!("{label} is not signed in{}", cli.problem.as_deref().map(|p| format!(": {p}")).unwrap_or_default());
+            }
+            return Ok(None);
+        };
+        match self.account(id) {
+            Some(a) if a.provider != provider => bail!("{id} is not a {label} account"),
+            Some(a) if !a.enabled => bail!("the {label} account '{}' is turned off in Settings", a.label),
+            Some(a) if a.logged_in == Some(false) => {
+                let cmd = a.login_command.as_deref().map(|c| format!(": run `{c}` in a terminal")).unwrap_or_default();
+                bail!("the {label} account '{}' is not signed in{cmd}", a.label)
+            }
+            Some(a) => Ok(Some(a)),
+            None if listed => bail!("the {label} account {id} is no longer available"),
+            // No account detected for the CLI: the scheduler's implicit one is the login
+            // shell's sign-in (env untouched); a recorded one has its home in its id.
+            None if id == provider.as_str() => self.run_account(provider, None, cli),
+            None => Ok(crate::env::account_home(provider, id).map(|home| AccountInfo {
+                id: id.to_string(),
+                provider,
+                label: crate::env::account_label(provider, home.as_deref()),
+                home,
+                enabled: true,
+                primary: false,
+                configured: false,
+                logged_in: cli.logged_in,
+                billing: Billing::Unknown,
+                plan: None,
+                identity: None,
+                problem: None,
+                login_command: None,
+                limits: vec![],
+            })),
+        }
     }
 }

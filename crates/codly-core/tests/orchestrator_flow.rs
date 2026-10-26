@@ -144,6 +144,8 @@ struct Log {
     turns: Vec<(String, String)>,
     /// Agents asked to shut down.
     shutdowns: Vec<String>,
+    /// (role, agent id, CLAUDE_CONFIG_DIR) of every run, in spawn order.
+    envs: Vec<(Role, String, Option<String>)>,
 }
 
 struct FakeSpawner {
@@ -170,6 +172,7 @@ impl Spawner for FakeSpawner {
                 let mut l = log.lock().unwrap();
                 l.spawns.push((spec.role, spec.cwd.to_string_lossy().into_owned(), spec.session.clone()));
                 l.runs.push((spec.agent_id.clone(), spec.session.clone()));
+                l.envs.push((spec.role, spec.agent_id.clone(), spec.env.get("CLAUDE_CONFIG_DIR").cloned()));
             }
             let (tx, rx) = mpsc::unbounded_channel::<AgentCmd>();
             let spec = Arc::new(spec);
@@ -589,6 +592,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
                 model: None,
                 cwd: repo_s.clone(),
                 session_id: Some("sess-1".into()),
+                account: None,
                 status: "running".into(),
                 raw_log: "/dev/null".into(),
                 report: None,
@@ -848,6 +852,7 @@ fn core_futures_are_send(core: Arc<Core>, d: ApprovalDecision, s: Settings) {
     send(Core::start(CoreConfig { data_dir: PathBuf::new(), app_exe: PathBuf::new() }));
     send(core.snapshot());
     send(core.redetect_clis());
+    send(core.accounts(true));
     send(core.recent_workspaces());
     send(core.open_workspace("x"));
     send(core.update_settings(s));
@@ -1293,5 +1298,232 @@ async fn a_requests_lead_survives_a_restart() {
     assert_eq!(leads[0].id, lead.id, "the thread's Lead is found again after the restart");
     let runs = log.lock().unwrap().runs.clone();
     assert!(matches!(&runs[0], (a, SessionMode::Resume { session_id }) if *a == lead.id && *session_id == session), "{runs:?}");
+    core.shutdown().await;
+}
+
+// ───────────── accounts (several sign-ins of one CLI) ─────────────
+
+/// Like `start`, with the login shell's CLAUDE_CONFIG_DIR unset (its sign-in is the default).
+async fn start_signed_in(root: &Path, spawner: FakeSpawner) -> Arc<Core> {
+    let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    env.remove("CLAUDE_CONFIG_DIR");
+    let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(env), clis: Some(vec![claude()]), index: false };
+    Core::start_with(cfg, opts).await.unwrap()
+}
+
+fn claude_home(root: &Path, name: &str) -> String {
+    root.join("home").join(name).to_string_lossy().into_owned()
+}
+
+fn claude_account(home: &str) -> AccountConfig {
+    AccountConfig { provider: Provider::Claude, home: Some(home.into()), label: None, enabled: true }
+}
+
+/// Usage windows as Codly persists them (`kv` "account_limits"), for one account.
+fn seed_limits(data: &Path, account: &str, used: f64) {
+    let store = Store::open(&data.join("codly.sqlite")).unwrap();
+    let windows = json!({ account: [{
+        "window": "five_hour", "used_fraction": used, "resets_at": now_ms() + 2 * 3_600_000, "status": "allowed", "seen_at": now_ms(),
+    }] });
+    store.kv_set("account_limits", &windows.to_string()).unwrap();
+}
+
+/// A Lead that plans two independent tasks: a.txt (t1) and b.txt (t2).
+fn two_task_lead() -> Behavior {
+    let task = |id: &str, file: &str| {
+        json!({ "id": id, "title": format!("Create {file}.txt"), "goal": format!("Create {file}.txt"),
+                "acceptance_criteria": [format!("{file}.txt exists")], "write_scope": [format!("{file}.txt")],
+                "depends_on": [], "verify": [format!("test -f {file}.txt")], "size": "M" })
+    };
+    let plan = json!({ "summary": "Add two files", "tasks": [task("t1", "a"), task("t2", "b")] });
+    Arc::new(move |turn: FakeTurn| {
+        let plan = plan.clone();
+        Box::pin(async move {
+            if !turn.prompt.contains("[Codly]") {
+                let reply = turn.tool("codly_submit_plan", plan).await;
+                assert_eq!(reply["ok"], true, "{reply}");
+            }
+            turn.say("Planned.");
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_tasks_spread_over_two_claude_accounts_and_skip_a_hot_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let (work, perso, hot) = (claude_home(dir.path(), ".claude-work"), claude_home(dir.path(), ".claude-perso"), claude_home(dir.path(), ".claude-hot"));
+    let id = |h: &str| format!("claude:{h}");
+    seed_limits(&dir.path().join("data"), &id(&hot), 0.9); // hot is at 90% of its 5h window
+    let log = Arc::new(Mutex::new(Log::default()));
+    let work_dir = work.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let work_dir = work_dir.clone();
+        Box::pin(async move {
+            let task = turn.tool("codly_get_task", json!({})).await;
+            let file = if task["result"]["key"] == "t1" { "a" } else { "b" };
+            // Each worker reports its own account's usage, as the CLI would.
+            let mine = turn.spec.env.get("CLAUDE_CONFIG_DIR").cloned().unwrap_or_default();
+            let used = if mine == work_dir { 0.42 } else { 0.17 };
+            turn.emit(EventKind::RateLimit {
+                window: "five_hour".into(),
+                used_fraction: Some(used),
+                resets_at: Some(now_ms() + 3_600_000),
+                status: Some("allowed".into()),
+            });
+            turn.write(&format!("{file}.txt"), &format!("{file}\n"));
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": format!("Created {file}.txt.") })).await;
+        })
+    });
+    let core = start_signed_in(dir.path(), FakeSpawner { log: log.clone(), lead: two_task_lead(), worker }).await;
+    let accounts = vec![claude_account(&work), claude_account(&format!("{perso}/")), claude_account(&hot)];
+    let settings = Settings { auto_run_plans: true, lead_followups: false, worker_providers: vec![Provider::Claude], accounts, ..Default::default() };
+    let saved = core.update_settings(settings).await.unwrap();
+    assert_eq!(saved.accounts[1].home.as_deref(), Some(perso.as_str()), "homes are normalized");
+
+    // The registry: your three accounts in your order, then the login shell's (off: you listed others).
+    let listed = core.accounts(false).await.unwrap();
+    let ids: Vec<&str> = listed.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(ids, [id(&work).as_str(), id(&perso).as_str(), id(&hot).as_str(), "claude"]);
+    assert_eq!(listed.iter().map(|a| a.enabled).collect::<Vec<_>>(), [true, true, true, false]);
+    assert_eq!(listed[2].limits[0].used_fraction, 0.9, "usage persisted by an earlier run");
+
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Add two files").await.unwrap();
+    let snap = wait_for("the plan to finish", 30, async || {
+        let s = core.snapshot().await.unwrap();
+        s.plans.first().is_some_and(|p| p.status == PlanStatus::Done).then_some(s)
+    })
+    .await;
+
+    // Two parallel workers, one per account, each spawned with its account's config dir.
+    let workers: Vec<(String, Option<String>)> =
+        log.lock().unwrap().envs.iter().filter(|e| e.0 == Role::Worker).map(|e| (e.1.clone(), e.2.clone())).collect();
+    assert_eq!(workers.len(), 2, "{workers:?}");
+    let dirs: std::collections::HashSet<Option<String>> = workers.iter().map(|w| w.1.clone()).collect();
+    assert_eq!(dirs, [Some(work.clone()), Some(perso.clone())].into_iter().collect(), "never the account at 90%");
+    for (agent, dir) in &workers {
+        let a = snap.agents.iter().find(|a| a.id == *agent).unwrap();
+        assert_eq!(a.account, dir.as_deref().map(id), "the agent records its account");
+        assert_eq!(a.billing, Billing::Subscription);
+    }
+    let lead_dir = log.lock().unwrap().envs.iter().find(|e| e.0 == Role::Lead).unwrap().2.clone();
+    assert!(lead_dir == Some(work.clone()) || lead_dir == Some(perso.clone()), "the Lead runs on a usable account: {lead_dir:?}");
+
+    // Each account's quota comes from its own agents' RateLimit events, also in the snapshot.
+    let used = |list: &[AccountInfo], h: &str| list.iter().find(|a| a.id == id(h)).unwrap().limits.iter().map(|w| w.used_fraction).collect::<Vec<_>>();
+    assert_eq!((used(&snap.accounts, &work), used(&snap.accounts, &perso), used(&snap.accounts, &hot)), (vec![0.42], vec![0.17], vec![0.9]));
+    let events = core.events(None, None, 3000).await.unwrap();
+    let routes: Vec<String> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Decision { decision_type, summary, detail, .. } if decision_type == "route" => {
+                assert!(detail["account"].is_string(), "{detail}");
+                Some(summary.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(routes.iter().any(|s| s.starts_with("Claude Code · work · new agent")), "{routes:?}");
+    assert!(routes.iter().any(|s| s.starts_with("Claude Code · perso · new agent")), "{routes:?}");
+    core.shutdown().await;
+    drop(core);
+
+    // A restart still knows them.
+    let store = Store::open(&dir.path().join("data/codly.sqlite")).unwrap();
+    let kept: Value = serde_json::from_str(&store.kv_get("account_limits").unwrap().unwrap()).unwrap();
+    assert_eq!(kept[id(&work)][0]["used_fraction"], 0.42);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resumed_run_keeps_its_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let data = dir.path().join("data");
+    let repo_s = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
+    let (work, perso) = (claude_home(dir.path(), ".claude-work"), claude_home(dir.path(), ".claude-perso"));
+    let work_id = format!("claude:{work}");
+    // Work is the busier account: a new session would go to perso.
+    seed_limits(&data, &work_id, 0.7);
+
+    // What a crash leaves behind: Ada's run on the work account, its task running.
+    let (task_id, agent_id) = {
+        let store = Store::open(&data.join("codly.sqlite")).unwrap();
+        let settings = Settings { accounts: vec![claude_account(&perso), claude_account(&work)], lead_followups: false, ..Default::default() };
+        store.save_settings(&settings).unwrap();
+        let ws = Workspace {
+            id: new_id(),
+            repo_path: repo_s.clone(),
+            name: "repo".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: now_ms(),
+        };
+        store.upsert_workspace(&ws).unwrap();
+        let ev = |kind| EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, kind };
+        let (agent_id, run_id, task_id) = (new_id(), new_id(), new_id());
+        let agent: Agent = serde_json::from_value(json!({
+            "id": agent_id, "name": "Ada", "provider": "claude", "model": null, "role": "worker", "status": "working",
+            "activity": null, "activity_label": null, "task_id": task_id, "run_id": run_id, "session_id": "sess-work",
+            "worktree": null, "billing": "subscription", "account": work_id, "color": 0, "look_seed": agent_id, "thread": null,
+            "usage": Usage::default(), "created_at": now_ms(), "updated_at": now_ms(),
+        }))
+        .unwrap();
+        store.append_event(Some(&ws.id), &ev(EventKind::AgentChanged { agent })).unwrap();
+        let task: Task = serde_json::from_value(json!({
+            "id": task_id, "plan_id": null, "key": "a1", "title": "Write x", "goal": "Create x.txt", "acceptance": [],
+            "write_scope": [], "verify": ["test -f x.txt"], "depends_on": [], "status": "running", "assignee": agent_id,
+            "agent_hint": null, "account_hint": null, "branch": null, "worktree": null, "attempt": 1, "status_reason": null,
+            "summary": null, "created_at": now_ms(), "updated_at": now_ms(),
+        }))
+        .unwrap();
+        store.append_event(Some(&ws.id), &ev(EventKind::TaskChanged { task })).unwrap();
+        store
+            .insert_run(&RunRow {
+                id: run_id,
+                agent_id: agent_id.clone(),
+                task_id: Some(task_id.clone()),
+                role: Role::Worker,
+                provider: Provider::Claude,
+                model: None,
+                cwd: repo_s.clone(),
+                session_id: Some("sess-work".into()),
+                account: Some(work_id.clone()),
+                status: "running".into(),
+                raw_log: "/dev/null".into(),
+                report: None,
+                started_at: now_ms(),
+                ended_at: None,
+            })
+            .unwrap();
+        (task_id, agent_id)
+    };
+
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("x.txt", "x\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created x.txt." })).await;
+        })
+    });
+    let core = start_signed_in(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;
+    let snap = wait_for("the resumed task to finish", 30, async || {
+        let s = core.snapshot().await.unwrap();
+        s.tasks.iter().find(|t| t.id == task_id && t.status == TaskStatus::Done).map(|_| s.clone())
+    })
+    .await;
+    {
+        let log = log.lock().unwrap();
+        assert!(matches!(&log.runs[0], (a, SessionMode::Resume { session_id }) if *a == agent_id && session_id == "sess-work"), "{:?}", log.runs);
+        assert_eq!(log.envs[0].2.as_deref(), Some(work.as_str()), "resumed where its session lives, not on the emptier account");
+    }
+    let ada = snap.agents.iter().find(|a| a.id == agent_id).unwrap();
+    assert_eq!(ada.account.as_deref(), Some(work_id.as_str()));
+    let store = Store::open(&data.join("codly.sqlite")).unwrap();
+    let resumed = store.latest_task_run(&task_id, Some(Role::Worker)).unwrap().unwrap();
+    assert_eq!(resumed.account.as_deref(), Some(work_id.as_str()), "the run records its account");
     core.shutdown().await;
 }

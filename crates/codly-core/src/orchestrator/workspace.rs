@@ -134,8 +134,7 @@ impl Inner {
             chats: self.store.recent_chats(id, 200)?,
             memories,
             triples,
-            // ponytail: accounts are detected per CLI; the account picker isn't wired yet.
-            accounts: vec![],
+            accounts: self.accounts(),
             artifacts: self.store.artifacts(id, 200)?,
             events: self.store.latest_events(id, 300)?,
         })
@@ -146,8 +145,12 @@ impl Inner {
     pub(super) async fn hire_agent(self: &Arc<Self>, provider: Provider, model: Option<String>) -> anyhow::Result<Agent> {
         let ws = self.require_ws()?;
         let cli = self.clis().into_iter().find(|c| c.provider == provider);
-        if !cli.as_ref().is_some_and(scheduler::usable) {
-            bail!("{} is not available: {}", provider.label(), cli.and_then(|c| c.problem).unwrap_or_else(|| "not installed".into()));
+        if !self.provider_usable(provider, false) {
+            let why = match cli.filter(|c| c.path.is_some()) {
+                None => "not installed".to_string(),
+                Some(c) => c.problem.unwrap_or_else(|| "no account is signed in and turned on".into()),
+            };
+            bail!("{} is not available: {why}", provider.label());
         }
         let agents = self.store.agents(&ws.id)?;
         let name = names::next_name(&agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
@@ -210,10 +213,10 @@ impl Inner {
             self.stop_run(id);
         }
         self.wait_for_runs(tokio::time::Instant::now() + RUNS_GRACE).await;
-        // Codex agents share one app-server for the whole app; it outlives its threads.
+        // Codex agents share one app-server per account; it outlives its threads.
         let codex_stopped = tokio::time::timeout(CODEX_GRACE, crate::adapters::codex::shutdown_server()).await.is_ok();
         if !codex_stopped {
-            tracing::warn!("the Codex app-server did not stop in time");
+            tracing::warn!("a Codex app-server did not stop in time");
         }
         if !codex_stopped || !lock(&self.live).is_empty() {
             let groups = child_groups().await;

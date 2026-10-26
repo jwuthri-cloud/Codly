@@ -69,6 +69,12 @@ pub async fn detect_clis(state: State<'_, AppState>) -> R<Vec<CliInfo>> {
     state.core().await?.redetect_clis().await.map_err(err)
 }
 
+/// Every sign-in of every CLI with its usage windows; `refresh` re-probes who is signed in.
+#[tauri::command]
+pub async fn list_accounts(state: State<'_, AppState>, refresh: bool) -> R<Vec<AccountInfo>> {
+    state.core().await?.accounts(refresh).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn recent_workspaces(state: State<'_, AppState>) -> R<Vec<RecentWorkspace>> {
     state.core().await?.recent_workspaces().await.map_err(err)

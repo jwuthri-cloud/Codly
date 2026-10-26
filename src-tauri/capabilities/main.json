@@ -12,7 +12,7 @@
     "opener:default",
     "notification:default",
     "window-state:default",
-    "allow-ui-subscribe", "allow-ui-set-visible", "allow-detect-clis", "allow-recent-workspaces",
+    "allow-ui-subscribe", "allow-ui-set-visible", "allow-detect-clis", "allow-list-accounts", "allow-recent-workspaces",
     "allow-open-workspace", "allow-update-settings", "allow-send-chat", "allow-run-plan", "allow-cancel-plan",
     "allow-resolve-approval", "allow-interrupt-agent", "allow-stop-agent", "allow-hire-agent", "allow-create-task",
     "allow-move-task", "allow-assign-task", "allow-task-diff", "allow-plan-diff", "allow-merge-plan",

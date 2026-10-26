@@ -21,7 +21,7 @@ import { HOME, REPO, Sim } from './demo/sim';
 import { Story } from './demo/story';
 
 const CLIS: CliInfo[] = [
-  { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Max', problem: null, transport: 'stream-json' },
+  { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
   { provider: 'codex', path: '/opt/homebrew/bin/codex', version: '0.161.0', logged_in: true, billing: 'subscription', plan: 'Plus', problem: null, transport: 'app-server' },
   { provider: 'gemini', path: '/opt/homebrew/bin/gemini', version: '0.62.0', logged_in: true, billing: 'subscription', plan: 'Google AI Pro', problem: null, transport: 'acp' },
   { provider: 'opencode', path: `${HOME}/.opencode/bin/opencode`, version: '1.18.31', logged_in: null, billing: 'third_party', plan: 'OpenRouter', problem: null, transport: 'acp' },
@@ -35,7 +35,13 @@ const SETTINGS: Settings = {
   worker_providers: ['claude', 'codex', 'gemini', 'opencode'],
   max_parallel: 3,
   max_per_provider: 2,
-  accounts: [],
+  // Two Claude subscriptions (your terminal's and a work one) and a Codex one not signed in yet.
+  accounts: [
+    { provider: 'claude', home: null, label: null, enabled: true },
+    { provider: 'claude', home: '~/.claude-work', label: null, enabled: true },
+    { provider: 'codex', home: null, label: null, enabled: true },
+    { provider: 'codex', home: '~/.codex-perso', label: null, enabled: true },
+  ],
   account_strategy: 'spread',
   lead_account: null,
   approval_mode: 'balanced',
@@ -97,6 +103,8 @@ export class MockTransport implements Transport {
   async call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
     // A little latency makes loading states honest; terminals stay instant.
     if (!cmd.startsWith('pty_')) await wait(60 + Math.random() * 80);
+    // Re-probing sign-ins runs each CLI's status command: it takes a moment.
+    if (cmd === 'list_accounts' && args.refresh) await wait(900);
     return this.dispatch(cmd, args) as T;
   }
 
@@ -108,12 +116,17 @@ export class MockTransport implements Transport {
         return null;
       case 'detect_clis':
         return sim.clis;
+      case 'list_accounts':
+        return sim.signIns.list(sim.settings, sim.clis);
       case 'recent_workspaces':
         return sim.recent;
       case 'open_workspace':
         return story.openWorkspace(String(a.repoPath ?? REPO));
       case 'update_settings': {
-        sim.settings = a.settings as Settings;
+        const next = sim.signIns.normalize(a.settings as Settings);
+        next.max_parallel = Math.min(8, Math.max(1, next.max_parallel));
+        next.max_per_provider = Math.min(next.max_parallel, Math.max(1, next.max_per_provider));
+        sim.settings = next;
         return sim.settings;
       }
       case 'send_chat': {

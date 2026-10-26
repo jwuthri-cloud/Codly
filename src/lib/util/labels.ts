@@ -257,6 +257,16 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
   copilot: 'Copilot',
 };
 
+/** The company behind each product. OpenCode is open source and routes to any model provider. */
+export const COMPANY_LABEL: Record<Provider, string> = {
+  claude: 'Anthropic',
+  codex: 'OpenAI',
+  gemini: 'Google',
+  opencode: 'Open source',
+  cursor: 'xAI',
+  copilot: 'GitHub',
+};
+
 export const BILLING_LABEL: Record<Billing, string> = {
   subscription: 'Subscription',
   api_key: 'API key',

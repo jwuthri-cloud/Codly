@@ -15,7 +15,7 @@
   import { accounts } from '../lib/state/accounts.svelte';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
-  import { ACCOUNT_VAR, asConfigs, derivedLabel, HOME_SUGGESTION, moveItem, normalizeHome, supportsAccounts, usable, validHome } from '../lib/util/accounts';
+  import { ACCOUNT_VAR, asConfigs, derivedLabel, HOME_SUGGESTION, moveItem, normalizeHome, parked, resetLabel, supportsAccounts, usable, validHome } from '../lib/util/accounts';
   import { PROVIDER_LABEL } from '../lib/util/labels';
   import { tildify } from '../lib/util/sanitize';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -156,7 +156,11 @@
     { id: 'spread', label: 'Spread by quota left', body: 'The sign-in with the most quota left takes the next task.' },
     { id: 'in_order', label: 'In order', body: 'Your first sign-in takes the work; the next one takes over near its limit.' },
   ];
-  const leadProvider = $derived(s.lead_provider ?? 'claude');
+  /** A Lead pinned to a usable sign-in runs on that sign-in's CLI (the core's rule). */
+  const leadProvider = $derived.by(() => {
+    const a = s.lead_account ? accounts.byId.get(s.lead_account) : null;
+    return a && usable(a) ? a.provider : (s.lead_provider ?? 'claude');
+  });
   const leadChoices = $derived(accounts.multi.has(leadProvider) ? listOf(leadProvider).filter(usable) : []);
 
   /** The problem line, unless it only repeats the login command shown below it. */
@@ -190,6 +194,7 @@
         {#each g.list as a, i (a.id)}
           {@const out = a.logged_in === false}
           {@const fix = out || !!a.problem}
+          {@const park = a.enabled && !out ? parked(a, ui.now) : null}
           <li
             class="acct"
             class:many
@@ -202,11 +207,12 @@
             <div class="a-top">
               {#if many}
                 <button class="grip" aria-label="Move {a.label}: drag, or use the arrow keys" onpointerdown={(e) => gripDown(e, a, i)} onpointermove={gripMove} onpointerup={gripUp} onpointercancel={() => (drag = null)} onkeydown={(e) => gripKey(e, a, i)}><Icon name="grip" size={14} /></button>
-                <input class="a-label" value={a.label} aria-label="Name of this {PROVIDER_LABEL[a.provider]} sign-in" spellcheck="false" onblur={(e) => rename(a, e.currentTarget)} onkeydown={(e) => labelKey(e, a)} />
+                <input class="a-label" value={a.label} size={Math.max(4, a.label.length + 1)} aria-label="Name of this {PROVIDER_LABEL[a.provider]} sign-in" spellcheck="false" onblur={(e) => rename(a, e.currentTarget)} onkeydown={(e) => labelKey(e, a)} />
                 {#if a.primary}<span class="chip sm prim" data-tip="Your login shell uses this sign-in: it is what the CLI does in your terminal.">your terminal’s sign-in</span>{/if}
               {:else}
                 <span class="a-state" class:ok={a.logged_in === true} class:warn={out}><span class="dot"></span>{a.logged_in === true ? 'Signed in' : out ? 'Not signed in' : 'Sign-in not checked'}</span>
                 {#if a.identity}<span class="ident truncate selectable">{a.identity}</span>{/if}
+                {#if park}<span class="park" data-tip="Codly starts no new work on it until then">Near its limit{park.until ? ` · ${resetLabel(park.until, ui.now)}` : ''}</span>{/if}
               {/if}
               <span class="grow"></span>
               {#if !out}<BillingBadge billing={a.billing} plan={a.plan} />{/if}
@@ -220,6 +226,7 @@
                 {#if many}
                   <span class="a-state" class:ok={a.logged_in === true} class:warn={out}><span class="dot"></span>{a.logged_in === true ? 'Signed in' : out ? 'Not signed in' : 'Sign-in not checked'}</span>
                   {#if a.identity}<span class="sep">·</span><span class="selectable">{a.identity}</span>{/if}
+                  {#if park}<span class="sep">·</span><span class="park" data-tip="Codly starts no new work on it until then">Near its limit{park.until ? ` · ${resetLabel(park.until, ui.now)}` : ''}</span>{/if}
                 {/if}
                 {#if a.home}{#if many}<span class="sep">·</span>{/if}<code class="home selectable" data-tip="{ACCOUNT_VAR[a.provider] ?? 'Home'} = {a.home}">{tildify(a.home)}</code>{/if}
                 {#if many}
@@ -350,7 +357,7 @@
   .grip { display: grid; place-items: center; width: 20px; height: 26px; border-radius: var(--r-sm); color: var(--ink-4); cursor: grab; touch-action: none; flex-shrink: 0; }
   .grip:hover { color: var(--ink-2); background: var(--surface-2); }
   .dragging .grip { cursor: grabbing; }
-  .a-label { width: 9ch; min-width: 4ch; max-width: 18ch; field-sizing: content; height: 26px; padding: 0 6px; margin-left: -2px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: var(--w-semi); font-size: var(--t-md); outline: none; }
+  .a-label { min-width: 4ch; max-width: 22ch; field-sizing: content; height: 26px; padding: 0 6px; margin-left: -2px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: var(--w-semi); font-size: var(--t-md); outline: none; }
   .a-label:hover { background: var(--surface-2); }
   .a-label:focus { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--focus); }
   .prim { color: var(--ink-3); }
@@ -362,6 +369,7 @@
   .a-state.warn { color: var(--amber-ink); }
   .a-state.warn .dot { background: var(--amber); }
   .ident { font-size: var(--t-sm); color: var(--ink-3); }
+  .park { font-size: var(--t-sm); color: var(--amber-ink); white-space: nowrap; }
   .a-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 0 6px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); min-width: 0; }
   .sep { color: var(--ink-4); }
   .home { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }

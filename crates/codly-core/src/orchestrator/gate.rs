@@ -410,6 +410,7 @@ impl Inner {
             session: new_session(provider),
             system_prompt: prompts::REVIEWER_SYSTEM.to_string(),
             workspace_id: Some(ws_id.to_string()),
+            account: None, // a new session: the account with the most quota left
         };
         if let Err(e) = self.spawn_run(req).await {
             self.decide(

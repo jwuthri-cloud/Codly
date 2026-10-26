@@ -372,7 +372,8 @@ export function deriveIntent(a: AgentState, m: OfficeModel, now: number, errand:
     }
     return { intent: make(DESK, 'think', 'thinking', { emote: 'think', screen: 'think' }), nextAt };
   }
-  if (a.subagents.size) return { intent: make(DESK, 'talk', 'delegate', { screen: 'chat' }), nextAt };
+  // Helpers run in the background: the lead sits and waits rather than gesturing on a loop.
+  if (a.subagents.size) return { intent: make(DESK, 'sit', 'delegate', { screen: 'chat' }), nextAt };
 
   if (a.status === 'done' && a.doneAt != null && now - a.doneAt < DONE_CHECK_MS) {
     soon(a.doneAt + DONE_CHECK_MS);

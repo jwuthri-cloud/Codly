@@ -49,6 +49,7 @@ fn commands_round_trip_with_frontend_arg_names() {
         .manage(AppState { core: rx, bus: UiBus::new(), pty: Default::default(), shell_env: OnceCell::new() })
         .invoke_handler(tauri::generate_handler![
             commands::detect_clis,
+            commands::list_accounts,
             commands::open_workspace,
             commands::update_settings,
             commands::create_task,
@@ -66,6 +67,18 @@ fn commands_round_trip_with_frontend_arg_names() {
 
     let clis = invoke(&wv, "detect_clis", json!({})).unwrap();
     assert!(clis.as_array().unwrap().len() >= 4, "{clis}");
+
+    // One account per installed CLI at least (its primary sign-in), the same either way.
+    let installed = clis.as_array().unwrap().iter().filter(|c| !c["path"].is_null()).count();
+    let cached = invoke(&wv, "list_accounts", json!({ "refresh": false })).unwrap();
+    let probed = invoke(&wv, "list_accounts", json!({ "refresh": true })).unwrap();
+    for accounts in [&cached, &probed] {
+        let list = accounts.as_array().unwrap();
+        assert!(list.len() >= installed, "{accounts}");
+        assert!(list.iter().all(|a| a["id"].is_string() && a["limits"].is_array()), "{accounts}");
+        assert_eq!(list.iter().filter(|a| a["primary"] == true).count(), installed, "one primary sign-in per CLI: {accounts}");
+    }
+    assert!(invoke(&wv, "list_accounts", json!({})).is_err(), "refresh is required");
 
     let ws = invoke(&wv, "open_workspace", json!({ "repoPath": repo.to_str().unwrap() })).unwrap();
     assert_eq!(ws["name"], "repo");

@@ -8,9 +8,11 @@
   import type { Provider } from '../lib/gen/Provider';
   import type { Settings } from '../lib/gen/Settings';
   import { updateSettings } from '../lib/state/actions';
+  import { accounts } from '../lib/state/accounts.svelte';
+  import { usable as accountUsable } from '../lib/util/accounts';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
-  import { PROVIDER_LABEL } from '../lib/util/labels';
+  import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
   import AccountsSection from './AccountsSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
   import Icon from '../components/Icon.svelte';
@@ -21,10 +23,20 @@
     const c = store.clis.find((x) => x.provider === p);
     return !!c?.path && !c.problem && c.logged_in !== false;
   };
+  /** The Lead's CLI: its pinned sign-in's when that one is usable (the core's rule), else your pick. */
+  const leadCli = $derived.by(() => {
+    const a = s.lead_account ? accounts.byId.get(s.lead_account) : null;
+    return a && accountUsable(a) ? a.provider : (s.lead_provider ?? 'claude');
+  });
   const ALL: Provider[] = ['claude', 'codex', 'gemini', 'opencode', 'cursor', 'copilot'];
 
   function set(patch: Partial<Settings>) {
     updateSettings(patch);
+  }
+  /** A Lead pinned to a sign-in decides its CLI, so picking another CLI unpins it. */
+  function pickLead(p: Provider) {
+    const pinned = s.lead_account ? accounts.byId.get(s.lead_account)?.provider ?? s.lead_account.split(':')[0] : null;
+    set(pinned && pinned !== p ? { lead_provider: p, lead_account: null } : { lead_provider: p });
   }
   function move(p: Provider, d: number) {
     const list = [...s.worker_providers];
@@ -68,8 +80,8 @@
         <p class="desc">The supervisor you chat with. It reads the repo, proposes plans, routes tasks, and never edits files.</p>
         <div class="choices">
           {#each ALL.filter((p) => installed.some((c) => c.provider === p)) as p (p)}
-            <button class="choice" class:on={(s.lead_provider ?? 'claude') === p} disabled={!usable(p)} onclick={() => set({ lead_provider: p })}>
-              <span class="radio"></span>{PROVIDER_LABEL[p]}
+            <button class="choice" class:on={leadCli === p} disabled={!usable(p)} onclick={() => pickLead(p)}>
+              <span class="radio"></span>{PROVIDER_LABEL[p]} <span class="muted small">{COMPANY_LABEL[p]}</span>
               {#if !usable(p)}<span class="muted small">unavailable</span>{/if}
             </button>
           {/each}
@@ -86,7 +98,7 @@
             <li class:off={!on}>
               <label class="check">
                 <input type="checkbox" checked={on} disabled={!usable(p) && !on} onchange={() => toggleWorker(p)} />
-                <span class="pname">{PROVIDER_LABEL[p]}</span>
+                <span class="pname">{PROVIDER_LABEL[p]}</span> <span class="muted small">{COMPANY_LABEL[p]}</span>
               </label>
               {#if cli?.path}<BillingBadge billing={cli.billing} plan={cli.plan} />{:else}<span class="muted small">not installed</span>{/if}
               <span class="grow"></span>

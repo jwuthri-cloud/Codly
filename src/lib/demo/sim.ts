@@ -29,6 +29,7 @@ import type { Triple } from '../gen/Triple';
 import type { Usage } from '../gen/Usage';
 import type { Workspace } from '../gen/Workspace';
 import type { JsonValue } from '../gen/serde_json/JsonValue';
+import { DemoAccounts } from './accounts';
 import { VirtualClock } from './clock';
 
 export class Cancelled extends Error {
@@ -78,6 +79,8 @@ export class Sim {
   clis: CliInfo[] = [];
   recent: RecentWorkspace[] = [];
   settings: Settings;
+  /** The demo machine's sign-ins (two Claude accounts, a signed-out Codex one…). */
+  signIns: DemoAccounts;
   workspace: Workspace | null = null;
   agents = new Map<string, Agent>();
   plans = new Map<string, Plan>();
@@ -98,7 +101,8 @@ export class Sim {
   constructor(opts: SimOptions, settings: Settings) {
     this.opts = opts;
     this.clock = new VirtualClock({ speed: opts.speed, skipMs: opts.skipMs });
-    this.settings = settings;
+    this.signIns = new DemoAccounts(HOME, this.clock.now());
+    this.settings = this.signIns.normalize(settings);
     setInterval(() => this.flush(), 33);
   }
 
@@ -143,11 +147,7 @@ export class Sim {
     return {
       as_of: this.lastId,
       clis: this.clis,
-      // One sign-in per CLI (the demo has no extra accounts).
-      accounts: this.clis.map((c) => ({
-        id: c.provider, provider: c.provider, home: null, label: 'default', enabled: !c.problem, primary: true, configured: false,
-        logged_in: c.logged_in, billing: c.billing, plan: c.plan, identity: null, problem: c.problem, login_command: null, limits: [],
-      })),
+      accounts: this.signIns.list(this.settings, this.clis),
       workspace: this.workspace,
       settings: this.settings,
       agents: [...this.agents.values()],
@@ -314,7 +314,7 @@ export class Sim {
     return {
       id: uid('a-'),
       thread: o.role === 'lead' ? (o.thread ?? 'lead') : null,
-      account: null,
+      account: this.signIns.pick(o.provider, o.role, this.settings, this.clis, [...this.agents.values()], now),
       name: o.name,
       provider: o.provider,
       model: o.model,
@@ -519,16 +519,10 @@ export class Actor {
     this.emit({ type: 'usage_updated', usage: { ...t } });
   }
 
-  private rateBase = 0;
+  /** Each turn spends a little of its sign-in's quota; the CLI reports its windows. */
   rate() {
-    const p = this.a.provider;
-    this.rateBase += 0.006;
-    const hour = 3_600_000;
-    if (p === 'claude') {
-      this.emit({ type: 'rate_limit', window: 'five_hour', used_fraction: Math.min(0.97, 0.58 + this.rateBase), resets_at: this.sim.now() + 2.2 * hour, status: 'allowed' });
-      this.emit({ type: 'rate_limit', window: 'seven_day', used_fraction: 0.31 + this.rateBase / 4, resets_at: this.sim.now() + 86 * hour, status: 'allowed' });
-    } else if (p === 'codex') {
-      this.emit({ type: 'rate_limit', window: 'five_hour', used_fraction: 0.16 + this.rateBase, resets_at: this.sim.now() + 3.6 * hour, status: 'allowed' });
-    }
+    const a = this.a;
+    for (const w of this.sim.signIns.bump(a.account ?? a.provider, this.sim.now()))
+      this.emit({ type: 'rate_limit', window: w.window, used_fraction: w.used_fraction, resets_at: w.resets_at, status: w.status });
   }
 }

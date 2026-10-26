@@ -4,6 +4,7 @@
 -->
 <script lang="ts">
   import type { Task } from '../../lib/gen/Task';
+  import { accounts } from '../../lib/state/accounts.svelte';
   import { narrate } from '../../lib/state/narration';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
@@ -51,9 +52,9 @@
   <span class="top"><span class="key">{task.key}</span><span class="st"><StateMark {tone} size={8} />{TASK_STATUS_LABEL[task.status]}</span></span>
   <span class="title">{task.title}</span>
   {#if agent}
-    <span class="who"><Portrait {agent} size={20} /><span class="name">{agent.name}</span><span class="say truncate">{#if n}<Say parts={n.parts} />{:else}{PROVIDER_LABEL[agent.provider]}{/if}</span></span>
+    <span class="who" data-tip={accounts.tag(agent) ? accounts.who(agent) : undefined}><Portrait {agent} size={20} /><span class="name">{agent.name}</span><span class="say truncate">{#if n}<Say parts={n.parts} />{:else}{accounts.who(agent)}{/if}</span></span>
   {:else}
-    <span class="who hint">{task.agent_hint ? `${PROVIDER_LABEL[task.agent_hint]}, suggested` : 'Any free agent'}{task.status_reason ? ` · ${task.status_reason}` : ''}</span>
+    <span class="who hint">{task.agent_hint ? `${PROVIDER_LABEL[task.agent_hint]}${accounts.hintTag(task, task.agent_hint) ? ` · ${accounts.hintTag(task, task.agent_hint)}` : ''}, suggested` : 'Any free agent'}{task.status_reason ? ` · ${task.status_reason}` : ''}</span>
   {/if}
   {#if !compact}
     <span class="bar" aria-hidden="true"><i style:width="{(progress ?? 0) * 100}%"></i></span>

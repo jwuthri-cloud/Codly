@@ -63,6 +63,7 @@ pub fn run() {
             commands::ui_subscribe,
             commands::ui_set_visible,
             commands::detect_clis,
+            commands::list_accounts,
             commands::recent_workspaces,
             commands::open_workspace,
             commands::update_settings,

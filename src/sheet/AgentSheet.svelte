@@ -15,7 +15,7 @@
   import { store, type FileTouch } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { clock, clockSec, dur, pct, resetsIn, timer, tokens, usd } from '../lib/util/format';
-  import { BILLING_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
+  import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
   import ApprovalCard from '../home/cards/ApprovalCard.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -225,7 +225,7 @@
     {#if n}<Orbit size={64} progress={n.progress} tone={n.tone} stroke={2.5}><Portrait {agent} size={50} /></Orbit>{/if}
     <div class="h-text">
       <h2 class="serif">{agent.name}</h2>
-      <p class="h-sub">{agent.role === 'lead' ? 'Lead · ' : agent.role === 'reviewer' ? 'Reviewer · ' : ''}{PROVIDER_LABEL[agent.provider]}{#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{agent.model ? ` · ${prettyModel(agent.model)}` : ''}</p>
+      <p class="h-sub">{agent.role === 'lead' ? 'Lead · ' : agent.role === 'reviewer' ? 'Reviewer · ' : ''}{PROVIDER_LABEL[agent.provider]} ({COMPANY_LABEL[agent.provider]}){#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{agent.model ? ` · ${prettyModel(agent.model)}` : ''}</p>
       <div class="h-tags"><BillingBadge billing={agent.billing} plan={account?.plan ?? cli?.plan} /></div>
     </div>
   </header>

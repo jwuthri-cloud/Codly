@@ -1,8 +1,12 @@
-//! Codex adapter: ONE shared `codex app-server` process for the whole app (JSON-RPC over
+//! Codex adapter: one shared `codex app-server` process per Codex account (JSON-RPC over
 //! stdio, without the "jsonrpc" field), one thread per agent (cli-claude-codex §3.3, §5.3.2).
+//! `CODEX_HOME` (auth, sessions, threads) is per process, so agents on different sign-ins
+//! need different servers: they are keyed by the spawn env's `CODEX_HOME` (unset = default),
+//! each with its own thread routing. Thread-less notifications (account rate limits) reach
+//! only that account's agents.
 //!
-//! The server starts lazily with the first Codex agent and is restarted by the next spawn if
-//! it died (agents on a dead server get `Exited`; respawn them with `SessionMode::Resume`).
+//! A server starts lazily with its account's first agent and is restarted by the next spawn
+//! if it died (agents on a dead server get `Exited`; respawn them with `SessionMode::Resume`).
 //! It exits by itself when its stdin closes, so it never outlives Codly.
 //!
 //! Verified for free against 0.161.0 with `--strict-config` (CRITIQUE §10): nested
@@ -34,7 +38,9 @@ use crate::proc::{self, RawLog, Record, StderrTail};
 /// Notifications Codly never uses (opted out in `initialize`).
 const OPT_OUT: &[&str] = &["remoteControl/status/changed"];
 
-static SERVER: Mutex<Option<Arc<AppServer>>> = Mutex::const_new(None);
+/// One app-server per sign-in: its CODEX_HOME (None = unset) holds the account's auth and
+/// threads, and its thread-less notifications (rate limits) concern that account only.
+static SERVERS: Mutex<Vec<(Option<String>, Arc<AppServer>)>> = Mutex::const_new(Vec::new());
 
 #[derive(Debug, Clone)]
 struct ServerInfo {
@@ -271,21 +277,24 @@ impl AppServer {
 }
 
 async fn server_for(spec: &SpawnSpec, raw: &Arc<RawLog>) -> anyhow::Result<Arc<AppServer>> {
-    let mut guard = SERVER.lock().await;
-    if let Some(s) = guard.as_ref().filter(|s| s.alive.load(Ordering::SeqCst)) {
+    let home = spec.env.get("CODEX_HOME").cloned();
+    let mut guard = SERVERS.lock().await;
+    guard.retain(|(_, s)| s.alive.load(Ordering::SeqCst));
+    if let Some((_, s)) = guard.iter().find(|(h, _)| *h == home) {
         return Ok(s.clone());
     }
     let s = AppServer::start(spec, raw.clone()).await?;
-    *guard = Some(s.clone());
+    guard.push((home, s.clone()));
     Ok(s)
 }
 
-/// Stop the shared app-server (call at app exit). Its agents receive `Exited`.
+/// Stop every app-server (call at app exit). Their agents receive `Exited`.
 pub async fn shutdown_server() {
-    let server = SERVER.lock().await.take();
-    if let Some(s) = server {
-        s.close().await;
+    let mut set = tokio::task::JoinSet::new();
+    for (_, s) in SERVERS.lock().await.drain(..) {
+        set.spawn(async move { s.close().await });
     }
+    set.join_all().await;
 }
 
 /// `thread/start` (or `thread/resume`) and its params for one agent.
@@ -872,6 +881,10 @@ impl CodexNormalizer {
                 if info == "usageLimitExceeded" || info == "rateLimitExceeded" {
                     self.set_status(AgentStatus::RateLimited, &mut out);
                 }
+                if info == "usageLimitExceeded" && p["willRetry"] != true {
+                    // The account's quota is spent (no window in this error).
+                    out.push(EventKind::RateLimit { window: "usage".into(), used_fraction: None, resets_at: None, status: Some("rejected".into()) });
+                }
                 if p["willRetry"] == true {
                     self.retries += 1;
                     out.push(EventKind::Retrying { attempt: self.retries, reason: message });
@@ -1065,6 +1078,9 @@ impl CodexNormalizer {
 
     fn rate_limits(&mut self, rl: &Value, out: &mut Vec<EventKind>) {
         let reached = !rl["rateLimitReachedType"].is_null();
+        let full = |key: &str| rl[key]["usedPercent"].as_f64().is_some_and(|p| p >= 100.0);
+        // The window that is full is the one that was reached (both, if neither says so).
+        let any_full = full("primary") || full("secondary");
         for key in ["primary", "secondary"] {
             let w = &rl[key];
             if !w.is_object() {
@@ -1080,7 +1096,7 @@ impl CodexNormalizer {
                 window,
                 used_fraction: w["usedPercent"].as_f64().map(|p| p / 100.0),
                 resets_at: w["resetsAt"].as_i64().map(|s| s * 1000),
-                status: Some(if reached { "rejected" } else { "allowed" }.into()),
+                status: Some(if reached && (full(key) || !any_full) { "rejected" } else { "allowed" }.into()),
             });
         }
         if reached {

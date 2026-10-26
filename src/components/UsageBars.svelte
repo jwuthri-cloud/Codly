@@ -1,10 +1,11 @@
 <!--
   An account's quota windows as quiet bars: "5-hour ▬▬▬── 62% · resets 14:00". Neutral until
-  80% used (amber), red once the CLI says it is out. Values are what its agents last reported.
+  85% used (amber: Codly sends no new work there), red once the CLI says it is out. Values are
+  what its agents last reported.
 -->
 <script lang="ts">
   import type { UsageWindow } from '../lib/gen/UsageWindow';
-  import { resetLabel, sortWindows, toMs, usedNow, windowLabel } from '../lib/util/accounts';
+  import { PARK_AT, resetLabel, sortWindows, toMs, usedNow, windowLabel } from '../lib/util/accounts';
   import { pct, resetsIn } from '../lib/util/format';
 
   interface Props {
@@ -15,8 +16,7 @@
 
   const rows = $derived(sortWindows(limits).map((w) => {
     const used = usedNow(w, now);
-    const out = w.status === 'rejected' && used > 0;
-    return { w, used, tone: out || used >= 0.98 ? 'out' : used >= 0.8 ? 'near' : 'ok' };
+    return { w, used, tone: used >= 0.98 ? 'out' : used >= PARK_AT ? 'near' : 'ok' };
   }));
 </script>
 

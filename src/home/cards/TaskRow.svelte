@@ -8,6 +8,7 @@
   import type { Task } from '../../lib/gen/Task';
   import type { Tone } from '../../lib/narrate';
   import { moveTask } from '../../lib/state/actions';
+  import { accounts } from '../../lib/state/accounts.svelte';
   import { narrate } from '../../lib/state/narration';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
@@ -98,9 +99,9 @@
   </span>
   <span class="who">
     {#if agent}
-      <Portrait {agent} size={20} /><span class="wn">{agent.name}</span><span class="wp">{PROVIDER_LABEL[agent.provider]}</span>
+      <Portrait {agent} size={20} /><span class="wn">{agent.name}</span><span class="wp">{accounts.who(agent)}</span>
     {:else if task.agent_hint}
-      <span class="wp hint">{PROVIDER_LABEL[task.agent_hint]}</span>
+      <span class="wp hint">{PROVIDER_LABEL[task.agent_hint]}{#if accounts.hintTag(task, task.agent_hint)}{` · ${accounts.hintTag(task, task.agent_hint)}`}{/if}</span>
     {:else}
       <span class="wp hint">Any agent</span>
     {/if}

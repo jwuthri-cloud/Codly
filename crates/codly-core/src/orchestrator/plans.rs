@@ -327,7 +327,7 @@ impl Inner {
         let clis = self.clis();
         let settings = self.settings();
         let busy: HashSet<Id> = lock(&self.live).keys().cloned().collect();
-        let parked = self.parked();
+        let accounts = self.account_states();
         let actions = scheduler::schedule(&SchedInput {
             tasks: &tasks,
             plans: &plans,
@@ -335,7 +335,7 @@ impl Inner {
             clis: &clis,
             settings: &settings,
             busy: &busy,
-            parked: &parked,
+            accounts: &accounts,
         });
         let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
         for a in actions {
@@ -358,8 +358,8 @@ impl Inner {
                         self.decide(Some(&ws.id), Some(&task_id), "schedule", reason, detail)?;
                     }
                 }
-                Action::Start { task_id, provider, agent, summary, detail } => {
-                    if let Err(e) = self.claim(&ws, &task_id, provider, agent, summary, detail) {
+                Action::Start { task_id, provider, account, agent, summary, detail } => {
+                    if let Err(e) = self.claim(&ws, &task_id, provider, account, agent, summary, detail) {
                         tracing::warn!("could not start task {task_id}: {e}");
                     }
                 }
@@ -377,11 +377,13 @@ impl Inner {
     }
 
     /// Persist the scheduler's choice before any side effect, then start the run.
+    #[allow(clippy::too_many_arguments)]
     fn claim(
         self: &Arc<Self>,
         ws: &Workspace,
         task_id: &str,
         provider: Provider,
+        account: String,
         pick: AgentPick,
         summary: String,
         detail: Value,
@@ -405,12 +407,12 @@ impl Inner {
         self.decide(Some(&ws.id), Some(task_id), "route", summary, detail)?;
         let me = self.clone();
         let (t, a) = (task_id.to_string(), agent.id.clone());
-        tokio::spawn(async move { me.start_worker(t, a, why).await });
+        tokio::spawn(async move { me.start_worker(t, a, account, why).await });
         Ok(())
     }
 
-    async fn start_worker(self: Arc<Self>, task_id: Id, agent_id: Id, why: Option<String>) {
-        let Err(e) = self.try_start_worker(&task_id, &agent_id, why.as_deref()).await else { return };
+    async fn start_worker(self: Arc<Self>, task_id: Id, agent_id: Id, account: String, why: Option<String>) {
+        let Err(e) = self.try_start_worker(&task_id, &agent_id, &account, why.as_deref()).await else { return };
         let reason = format!("blocked: could not start the worker: {e}");
         let _ = self.update_task(&task_id, |t| {
             if t.status == TaskStatus::Running {
@@ -432,7 +434,7 @@ impl Inner {
         self.kick();
     }
 
-    async fn try_start_worker(self: &Arc<Self>, task_id: &str, agent_id: &str, why: Option<&str>) -> Result<()> {
+    async fn try_start_worker(self: &Arc<Self>, task_id: &str, agent_id: &str, account: &str, why: Option<&str>) -> Result<()> {
         let task = self.task(task_id)?;
         let agent = self.agent(agent_id)?;
         let ws_id = self.store.task_workspace(task_id)?.ok_or_else(|| anyhow!("task without workspace"))?;
@@ -465,11 +467,16 @@ impl Inner {
             t.worktree = Some(wt_s.clone());
             Ok(())
         })?;
-        // Same agent, same task, a previous session: resume it (crash, stop, retry).
-        let prev = self
-            .store
-            .latest_task_run(task_id, Some(Role::Worker))?
-            .filter(|r| r.agent_id == agent.id && r.provider == agent.provider && r.session_id.is_some());
+        // Same agent, same task, a previous session on this account: resume it (crash, stop,
+        // retry). A session only exists in its account's config home; on another account the
+        // worker starts over in a new session (the worktree keeps its work).
+        let primary = self.primary_account(agent.provider);
+        let prev = self.store.latest_task_run(task_id, Some(Role::Worker))?.filter(|r| {
+            r.agent_id == agent.id
+                && r.provider == agent.provider
+                && r.session_id.is_some()
+                && r.account.clone().or_else(|| primary.clone()).as_deref().is_none_or(|a| a == account)
+        });
         let feedback = lock(&self.pending_feedback).remove(task_id);
         let req = |session: SessionMode| RunReq {
             agent: agent.clone(),
@@ -480,6 +487,7 @@ impl Inner {
             session,
             system_prompt: prompts::WORKER_SYSTEM.to_string(),
             workspace_id: Some(ws.id.clone()),
+            account: Some(account.to_string()),
         };
         let resumed = match prev.and_then(|r| r.session_id) {
             Some(session_id) => match self.spawn_run(req(SessionMode::Resume { session_id })).await {

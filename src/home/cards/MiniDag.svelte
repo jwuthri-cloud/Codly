@@ -2,6 +2,7 @@
 <script lang="ts">
   import type { Task } from '../../lib/gen/Task';
   import { store } from '../../lib/state/store.svelte';
+  import { accounts } from '../../lib/state/accounts.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { layoutDag } from '../../lib/util/dag';
   import { idVar, PROVIDER_LABEL } from '../../lib/util/labels';
@@ -55,7 +56,7 @@
         onpointerleave={() => ui.setHover(null)}
       >
         <span class="top"><span class="key">{t.key}</span><span class="title truncate">{t.title}</span></span>
-        <span class="who truncate">{a ? `${a.name} · ${PROVIDER_LABEL[a.provider]}` : t.agent_hint ? PROVIDER_LABEL[t.agent_hint] : 'Any agent'}</span>
+        <span class="who truncate">{a ? `${a.name} · ${accounts.who(a)}` : t.agent_hint ? PROVIDER_LABEL[t.agent_hint] : 'Any agent'}</span>
       </button>
     {/if}
   {/each}
