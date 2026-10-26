@@ -1,0 +1,185 @@
+/* tokens.css — Codly "Observatory" (REDESIGN §5).
+   Night: deep blue-black, glass sheets floating over the office. Day: warm paper.
+   Light that means something: the aurora (teal → violet) appears ONLY for live activity and the
+   one primary action. Agent identity hues carry who-did-what everywhere.
+   The theme is always resolved to [data-theme] by the app (index.html sets it before paint). */
+@import "@fontsource-variable/inter/opsz.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+@import "@fontsource/instrument-serif/latin-400.css";
+@import "@fontsource/instrument-serif/latin-400-italic.css";
+
+:root {
+  /* ---------- type ---------- */
+  --font-display: "Instrument Serif", "Iowan Old Style", "Times New Roman", serif;
+  --font-ui: "Inter Variable", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-features: "cv05" 1, "cv08" 1, "ss03" 1;
+  /* few sizes, generous leading */
+  --t-xs: 11px;  --lh-xs: 16px;   /* eyebrows, captions */
+  --t-sm: 12px;  --lh-sm: 17px;   /* metadata */
+  --t-md: 13px;  --lh-md: 20px;   /* UI */
+  --t-lg: 14.5px; --lh-lg: 23px;  /* conversation */
+  --d-sm: 22px;  --d-md: 28px;  --d-lg: 36px;  --d-xl: 52px;   /* display (serif) */
+  --mono: 12px;  --lh-mono: 19px;
+  --w-reg: 420; --w-med: 520; --w-semi: 600;
+
+  /* ---------- space ---------- */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px; --s8: 32px; --s10: 40px; --s12: 48px;
+  --rail-w: 52px;
+  --top-h: 64px;
+  --col-w: 720px;
+  --sheet-w: 404px;
+  --gutter: 14px;
+
+  /* ---------- radii ---------- */
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-xl: 20px; --r-2xl: 26px; --r-full: 999px;
+
+  /* ---------- motion: physical, short, never looping without cause ---------- */
+  --d-1: 120ms; --d-2: 180ms; --d-3: 260ms; --d-4: 380ms; --d-5: 560ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --spring: var(--ease-out);
+
+  /* ---------- z ---------- */
+  --z-world: 0; --z-ui: 10; --z-sheet: 30; --z-pop: 40; --z-toast: 50; --z-modal: 60; --z-palette: 70; --z-tip: 80;
+}
+
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    /* damped spring (ζ≈0.72): lands fast with a small, physical overshoot */
+    --spring: linear(0, 0.06 2.1%, 0.25 6.6%, 0.52 13%, 0.8 21%, 0.95 28%, 1.03 35%, 1.05 41%, 1.04 49%, 1.01 61%, 0.998 78%, 1);
+  }
+}
+
+/* ===================== NIGHT (default) ===================== */
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --night: #0a0d14;
+  --night-2: #0d111a;
+  --night-glow: #13203a;
+  --glass: rgba(18, 22, 32, 0.72);
+  --glass-strong: rgba(15, 19, 28, 0.9);
+  --glass-solid: #121722;
+  --glass-blur: blur(22px) saturate(150%);
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.07), inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+  --glass-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.7), 0 2px 8px -2px rgba(0, 0, 0, 0.3);
+  --pop: #161b27;
+  --pop-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 0 0 1px rgba(255, 255, 255, 0.06), 0 18px 48px -12px rgba(0, 0, 0, 0.7);
+
+  --surface-1: rgba(255, 255, 255, 0.032);
+  --surface-2: rgba(255, 255, 255, 0.055);
+  --surface-3: rgba(255, 255, 255, 0.085);
+  --line: rgba(255, 255, 255, 0.065);
+  --line-2: rgba(255, 255, 255, 0.11);
+  --line-3: rgba(255, 255, 255, 0.18);
+
+  --ink-1: #e9ecf4;
+  --ink-2: #a6aec2;
+  --ink-3: #6c748b;
+  --ink-4: #4a5168;
+  --on-aurora: #07131a;
+
+  /* the aurora: live activity + the primary action, nothing else */
+  --aurora-a: #3ee6c9;
+  --aurora-m: #62b6f7;
+  --aurora-b: #9a86ff;
+  --aurora: linear-gradient(100deg, var(--aurora-a) 0%, var(--aurora-m) 48%, var(--aurora-b) 100%);
+  --live: #5fe0d0;          /* aurora as a single ink, for small text and dots */
+  --live-soft: rgba(62, 230, 201, 0.12);
+
+  --amber: #f4b860;          /* needs you */
+  --amber-ink: #f7c983;
+  --amber-soft: rgba(244, 184, 96, 0.12);
+  --ok: #92d8a0;
+  --ok-soft: rgba(146, 216, 160, 0.12);
+  --bad: #f38a80;
+  --bad-soft: rgba(243, 138, 128, 0.12);
+  --focus: #8fc3ff;
+
+  /* agent identity: 8 equal-weight hues, tuned for night */
+  --id-1: oklch(0.78 0.12 22);  --id-2: oklch(0.80 0.12 65);  --id-3: oklch(0.82 0.12 108);
+  --id-4: oklch(0.78 0.12 152); --id-5: oklch(0.78 0.10 200); --id-6: oklch(0.76 0.12 245);
+  --id-7: oklch(0.76 0.13 288); --id-8: oklch(0.76 0.13 335);
+
+  --scrim: rgba(4, 6, 10, 0.55);
+  --world-focus: rgba(8, 11, 17, 0.62);
+  --code-bg: rgba(0, 0, 0, 0.28);
+  --diff-add: rgba(146, 216, 160, 0.09);
+  --diff-add-strong: rgba(146, 216, 160, 0.2);
+  --diff-del: rgba(243, 138, 128, 0.09);
+  --diff-del-strong: rgba(243, 138, 128, 0.2);
+}
+
+/* ===================== DAY (warm paper) ===================== */
+[data-theme="light"] {
+  color-scheme: light;
+  --night: #f5f2ec;
+  --night-2: #efebe3;
+  --night-glow: #e6e1f2;
+  --glass: rgba(253, 251, 247, 0.78);
+  --glass-strong: rgba(252, 250, 246, 0.94);
+  --glass-solid: #fbf9f5;
+  --glass-blur: blur(22px) saturate(130%);
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 0 0 1px rgba(70, 52, 30, 0.07);
+  --glass-shadow: 0 28px 70px -34px rgba(70, 50, 25, 0.32), 0 2px 6px -2px rgba(70, 50, 25, 0.08);
+  --pop: #fdfbf8;
+  --pop-shadow: inset 0 0 0 1px rgba(70, 52, 30, 0.09), 0 16px 40px -14px rgba(70, 50, 25, 0.28);
+
+  --surface-1: rgba(80, 60, 30, 0.035);
+  --surface-2: rgba(80, 60, 30, 0.06);
+  --surface-3: rgba(80, 60, 30, 0.095);
+  --line: rgba(80, 60, 30, 0.085);
+  --line-2: rgba(80, 60, 30, 0.14);
+  --line-3: rgba(80, 60, 30, 0.22);
+
+  --ink-1: #1b1d25;
+  --ink-2: #545969;
+  --ink-3: #868a97;
+  --ink-4: #b0b2ba;
+  --on-aurora: #ffffff;
+
+  --aurora-a: #078a7c;
+  --aurora-m: #2f7fd6;
+  --aurora-b: #6a52e6;
+  --live: #0b8f80;
+  --live-soft: rgba(11, 158, 141, 0.1);
+
+  --amber: #e29b2e;
+  --amber-ink: #a8650c;
+  --amber-soft: rgba(226, 155, 46, 0.13);
+  --ok: #2e8a4f;
+  --ok-soft: rgba(46, 138, 79, 0.1);
+  --bad: #c7453a;
+  --bad-soft: rgba(199, 69, 58, 0.09);
+  --focus: #2f6fd6;
+
+  --id-1: oklch(0.57 0.15 22);  --id-2: oklch(0.6 0.13 62);   --id-3: oklch(0.6 0.12 108);
+  --id-4: oklch(0.56 0.12 152); --id-5: oklch(0.56 0.1 200);  --id-6: oklch(0.55 0.13 250);
+  --id-7: oklch(0.54 0.15 290); --id-8: oklch(0.56 0.15 338);
+
+  --scrim: rgba(60, 45, 25, 0.22);
+  --world-focus: rgba(245, 242, 236, 0.66);
+  --code-bg: rgba(80, 60, 30, 0.05);
+  --diff-add: rgba(46, 138, 79, 0.08);
+  --diff-add-strong: rgba(46, 138, 79, 0.17);
+  --diff-del: rgba(199, 69, 58, 0.07);
+  --diff-del-strong: rgba(199, 69, 58, 0.15);
+}
+
+/* ---------- semantic aliases ---------- */
+:root {
+  --st-live: var(--live);
+  --st-wait: var(--amber);
+  --st-blocked: var(--bad);
+  --st-idle: var(--ink-3);
+  --st-done: var(--ok);
+  --pv-observed: var(--ok);
+  --pv-inferred: var(--amber);
+  --pv-provided: var(--aurora-m);
+  --pv-model: var(--id-7);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --d-1: 0ms; --d-2: 0ms; --d-3: 90ms; --d-4: 90ms; --d-5: 90ms; --spring: var(--ease-out); }
+}

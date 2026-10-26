@@ -1,0 +1,37 @@
+[package]
+name = "codly"
+version = "0.1.0"
+description = "Codly desktop app"
+authors = ["Codly"]
+license = ""
+repository = ""
+edition = "2024"
+rust-version = "1.90"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "codly_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2.12.5", features = [] }
+codly-core = { version = "0.1.0", path = "../crates/codly-core" }
+tauri-plugin-single-instance = "2.5.4"
+tauri-plugin-window-state = "2.5.0"
+tauri-plugin-dialog = "2.8.3"
+tauri-plugin-opener = "2.7.2"
+tauri-plugin-notification = "2.7.0"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+tauri = { version = "2.12.5", features = ["test"] }
+tempfile = "3.27.0"

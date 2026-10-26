@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-task-diff"
+description = "Enables the task_diff command without any pre-configured scope."
+commands.allow = ["task_diff"]
+
+[[permission]]
+identifier = "deny-task-diff"
+description = "Denies the task_diff command without any pre-configured scope."
+commands.deny = ["task_diff"]

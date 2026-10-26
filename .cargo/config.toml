@@ -1,0 +1,4 @@
+[env]
+# ts-rs: generated TypeScript bindings land in the Svelte app; 64-bit ints are plain numbers (serde emits JSON numbers).
+TS_RS_EXPORT_DIR = { value = "src/lib/gen", relative = true }
+TS_RS_LARGE_INT = "number"

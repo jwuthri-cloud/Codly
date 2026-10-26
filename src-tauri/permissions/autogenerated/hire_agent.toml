@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hire-agent"
+description = "Enables the hire_agent command without any pre-configured scope."
+commands.allow = ["hire_agent"]
+
+[[permission]]
+identifier = "deny-hire-agent"
+description = "Denies the hire_agent command without any pre-configured scope."
+commands.deny = ["hire_agent"]

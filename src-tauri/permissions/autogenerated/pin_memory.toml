@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pin-memory"
+description = "Enables the pin_memory command without any pre-configured scope."
+commands.allow = ["pin_memory"]
+
+[[permission]]
+identifier = "deny-pin-memory"
+description = "Denies the pin_memory command without any pre-configured scope."
+commands.deny = ["pin_memory"]
