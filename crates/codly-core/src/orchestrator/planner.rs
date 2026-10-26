@@ -89,6 +89,10 @@ pub struct TaskInput {
     /// "any" or a provider name.
     #[serde(default)]
     pub agent_hint: Option<String>,
+    /// An account id from the board's Accounts line: pins the task to that sign-in.
+    /// Checked against the registry when the plan is stored (plans.rs).
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 impl TaskInput {
@@ -213,6 +217,7 @@ pub fn validate(input: PlanInput) -> Result<ValidPlan, String> {
                 }
             },
         }
+        t.account = t.account.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(String::from);
     }
     if !errors.is_empty() {
         return Err(reject(&errors));
@@ -427,6 +432,8 @@ fn collapse_if_small(plan: &mut PlanInput) -> Option<Fix> {
     merged.risk = tasks.iter().map(|t| &t.risk).max_by_key(|r| rank(r)).cloned().flatten();
     let hints: HashSet<&Option<String>> = tasks.iter().map(|t| &t.agent_hint).collect();
     merged.agent_hint = if hints.len() == 1 { tasks[0].agent_hint.clone() } else { None };
+    let pins: HashSet<&Option<String>> = tasks.iter().map(|t| &t.account).collect();
+    merged.account = if pins.len() == 1 { tasks[0].account.clone() } else { None };
 
     let why = if chain { "a chain of small tasks" } else { "small tasks writing at most 3 files" };
     let fix = Fix {

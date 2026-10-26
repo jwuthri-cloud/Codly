@@ -125,7 +125,8 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
                     "verify": str_array(),
                     "size": { "type": "string", "enum": ["S", "M", "L"] },
                     "risk": { "type": "string", "enum": ["low", "medium", "high"] },
-                    "agent_hint": { "type": "string", "enum": ["any", "claude", "codex", "gemini", "opencode"] }
+                    "agent_hint": { "type": "string", "enum": ["any", "claude", "codex", "gemini", "opencode"] },
+                    "account": { "type": "string", "description": "Only when the user asks for a specific account: an id from the board's Accounts line." }
                 }, "required": ["id", "title", "goal", "acceptance_criteria", "write_scope", "depends_on", "verify"] } }
             }, "required": ["summary", "tasks"], "additionalProperties": false }),
         )),

@@ -100,6 +100,14 @@ follow-ups and workers' questions stay in their request's thread; every Lead's b
 shows the other requests' live plans and files so they don't plan conflicting changes. Write
 scopes are leased globally, so parallel plans never edit the same files at once.
 
+**Several accounts per CLI.** Each sign-in is its own config dir (`CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `GEMINI_CLI_HOME`; Codex gets one app-server per `CODEX_HOME`), listed in
+Settings → Accounts. Agents' `RateLimit` events feed each account's usage windows (persisted).
+Slots are per account; an account at ≥ 85% of a window is parked. The scheduler sends a task
+to the account the Lead pinned it to (`account` in the plan, only when the user names one,
+from the Accounts line of its board), else by strategy: Spread (most quota left) or In order.
+The route decision names the chosen account, why, and every account it passed over.
+
 ## 5. Memory and knowledge
 
 | Kind | Scope | Written by | Read by |

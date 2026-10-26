@@ -376,6 +376,8 @@ fn disabled_signed_out_and_parked_accounts_are_skipped() {
     assert_eq!(start_accounts(&a), [("t1".into(), "claude:ok".into()), ("t2".into(), "claude:ok".into())]);
     let s = summary_of(&a, "t1");
     assert!(s.starts_with("Claude Code · ok · new agent") && s.contains("most quota left"), "{s}");
+    // The parked account it passed over is named, with why.
+    assert!(s.ends_with("; Claude Code · hot parked (90% of 5h used, resets in 1h)"), "{s}");
 
     // Nothing usable left: the task waits and says why, account by account.
     w.accounts[3].parked = Some("86% of 7d used".into());

@@ -437,6 +437,7 @@ impl Inner {
             agents: &agents,
             approvals: &approvals,
             notes: &notes,
+            accounts: &self.accounts(),
         }))
     }
 

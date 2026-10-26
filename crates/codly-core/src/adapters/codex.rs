@@ -1456,6 +1456,20 @@ mod tests {
         assert!(matches!(&ev[0], EventKind::Retrying { attempt: 1, .. }));
         let ev = norm.on_notification("error", &json!({ "error": { "message": "limit", "codexErrorInfo": "usageLimitExceeded" }, "willRetry": false }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::StatusChanged { status: AgentStatus::RateLimited })));
+        assert!(ev.iter().any(|e| matches!(e, EventKind::RateLimit { window, status: Some(s), .. } if window == "usage" && s == "rejected")));
+        // Only the full window counts as reached: a spent 5h window must not park the account for its 7d one.
+        let windows = |ev: Vec<EventKind>| -> Vec<(String, Option<String>)> {
+            ev.into_iter().filter_map(|e| match e { EventKind::RateLimit { window, status, .. } => Some((window, status)), _ => None }).collect()
+        };
+        let rl = |five: f64, seven: f64| json!({ "rateLimits": { "limitId": "codex", "rateLimitReachedType": "rate_limit_reached",
+            "primary": { "usedPercent": five, "windowDurationMins": 300, "resetsAt": 1 },
+            "secondary": { "usedPercent": seven, "windowDurationMins": 10080, "resetsAt": 2 } } });
+        let (rejected, allowed) = (Some("rejected".to_string()), Some("allowed".to_string()));
+        assert_eq!(windows(norm.on_notification("account/rateLimits/updated", &rl(100.0, 40.0))),
+            [("five_hour".into(), rejected.clone()), ("seven_day".into(), allowed)]);
+        // Reached with neither full (credits depleted): both windows.
+        assert_eq!(windows(norm.on_notification("account/rateLimits/updated", &rl(60.0, 40.0))),
+            [("five_hour".into(), rejected.clone()), ("seven_day".into(), rejected)]);
         // resumed thread: totals before this run are a baseline
         let tu = json!({ "total": { "inputTokens": 1000, "cachedInputTokens": 400, "outputTokens": 50, "totalTokens": 1050 },
                          "last": { "inputTokens": 100, "cachedInputTokens": 40, "outputTokens": 5, "totalTokens": 105 }, "modelContextWindow": 1000 });

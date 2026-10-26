@@ -35,6 +35,7 @@ Planning rules for codly_submit_plan
 - depends_on lists task ids whose MERGED output a task needs. At most 8 tasks; ids t1, t2, ...
 - Write each goal so a capable engineer who has never seen this conversation can do it: what to change, where, and why. Name the files and symbols you found.
 - If something essential is unclear, ask the user before planning, or list it in open_questions.
+- Leave account out: Codly spreads tasks over the user's accounts by remaining quota. Set it (an id from the board's Accounts line) only when the user asks for a task to run on a specific account.
 - If Codly rejects a plan, fix exactly what the error lists and submit again.
 
 Context you receive
@@ -299,6 +300,9 @@ pub struct Board<'a> {
     pub approvals: &'a [Approval],
     /// (author name, text) of recent blackboard notes, newest first.
     pub notes: &'a [(String, String)],
+    /// The sign-ins; listed only for CLIs with several usable ones, so the Lead can pin a
+    /// task to one when the user asks.
+    pub accounts: &'a [AccountInfo],
 }
 
 /// The compact live board prefixed to every Lead turn (≤ `BOARD_BUDGET` chars).
@@ -391,6 +395,24 @@ pub fn board_header(b: &Board) -> String {
         .collect();
     if !agents.is_empty() {
         lines.push(format!("Agents: {}", agents.join(" · ")));
+    }
+    let usable: Vec<&AccountInfo> = b.accounts.iter().filter(|a| a.enabled && a.logged_in != Some(false)).collect();
+    let several: Vec<&&AccountInfo> = usable.iter().filter(|a| usable.iter().filter(|x| x.provider == a.provider).count() > 1).collect();
+    if !several.is_empty() {
+        let now = now_ms();
+        let list: Vec<String> = several
+            .iter()
+            .map(|a| {
+                let l = super::accounts::load(&a.limits, now);
+                let state = match (l.parked, l.used) {
+                    (Some(why), _) => format!("parked: {why}"),
+                    (None, Some(u)) => format!("{:.0}% used", u * 100.0),
+                    (None, None) => "usage unknown".into(),
+                };
+                format!("{} = {} {} ({state})", a.id, a.provider.label(), a.label)
+            })
+            .collect();
+        lines.push(format!("Accounts: {}", list.join(" · ")));
     }
     if !b.approvals.is_empty() {
         let first: Vec<String> = b
@@ -524,6 +546,7 @@ mod tests {
             agents: std::slice::from_ref(&agent),
             approvals: std::slice::from_ref(&approval),
             notes: &[],
+            accounts: &[],
         });
         for line in board.lines().filter(|l| l.contains("ignore your")) {
             let at = line.find("ignore your").unwrap();
@@ -561,7 +584,7 @@ mod tests {
             task(json!({ "id": "b", "plan_id": "p2", "key": "t1", "title": "Login", "status": "running", "write_scope": ["src/auth.ts"] })),
             task(json!({ "id": "c", "plan_id": "p2", "key": "t2", "title": "Tests", "status": "pending", "write_scope": ["src/auth.ts", "test/**"] })),
         ];
-        let board = |thread: &str| board_header(&Board { workspace: &ws, thread, plans: &plans, tasks: &tasks, agents: std::slice::from_ref(&lead2), approvals: &[], notes: &[] });
+        let board = |thread: &str| board_header(&Board { workspace: &ws, thread, plans: &plans, tasks: &tasks, agents: std::slice::from_ref(&lead2), approvals: &[], notes: &[], accounts: &[] });
         let mine = board("lead");
         assert!(mine.contains("Plan \"Dark mode\" (yours) — running, 0/1 done") && mine.contains("t1 running — Theme"), "{mine}");
         assert!(
@@ -583,7 +606,7 @@ mod tests {
         .unwrap();
         let tasks: Vec<Task> =
             (0..40).map(|i| task(json!({ "id": format!("t{i}"), "key": format!("t{i}"), "status": "ready", "status_reason": "x ".repeat(60) }))).collect();
-        let b = board_header(&Board { workspace: &ws, thread: "lead", plans: &[], tasks: &tasks, agents: &[], approvals: &[], notes: &[] });
+        let b = board_header(&Board { workspace: &ws, thread: "lead", plans: &[], tasks: &tasks, agents: &[], approvals: &[], notes: &[], accounts: &[] });
         assert!(b.len() <= BOARD_BUDGET, "{}", b.len());
         assert_eq!(b.matches("<untrusted>").count(), b.matches("</untrusted>").count());
     }

@@ -67,6 +67,14 @@ impl Inner {
             )
         })?;
         let valid = planner::validate(input).map_err(|e| anyhow!(e))?;
+        let known: Vec<String> = self.accounts().into_iter().map(|a| a.id).collect();
+        if let Some((t, acc)) = valid.plan.tasks.iter().find_map(|t| t.account.as_ref().filter(|a| !known.contains(a)).map(|a| (t, a))) {
+            bail!(
+                "Plan rejected: task {} pins unknown account '{acc}'. Use an id from the board's Accounts line ({}) or leave account out.",
+                t.id,
+                known.join(", ")
+            );
+        }
         let settings = self.settings();
         let now = now_ms();
 
@@ -112,7 +120,7 @@ impl Inner {
                 status: TaskStatus::Pending,
                 assignee: None,
                 agent_hint: t.hint(),
-                account_hint: None,
+                account_hint: t.account.clone(),
                 branch: None,
                 worktree: None,
                 attempt: 0,

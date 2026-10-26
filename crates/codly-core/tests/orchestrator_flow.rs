@@ -1437,6 +1437,61 @@ async fn parallel_tasks_spread_over_two_claude_accounts_and_skip_a_hot_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_lead_pins_a_task_to_the_account_the_user_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let (work, perso) = (claude_home(dir.path(), ".claude-work"), claude_home(dir.path(), ".claude-perso"));
+    let perso_id = format!("claude:{perso}");
+    seed_limits(&dir.path().join("data"), &perso_id, 0.6); // Spread alone would pick work
+    let log = Arc::new(Mutex::new(Log::default()));
+    let pin = perso_id.clone();
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        let pin = pin.clone();
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                turn.say("Noted.");
+                return;
+            }
+            // The board lists both sign-ins with their ids and usage.
+            assert!(turn.prompt.contains(&format!("{pin} = Claude Code perso (60% used)")), "{}", turn.prompt);
+            let plan = |account: &str| {
+                json!({ "summary": "Add a hello file", "tasks": [{
+                    "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt containing hello",
+                    "acceptance_criteria": ["hello.txt contains hello"], "write_scope": ["hello.txt"],
+                    "depends_on": [], "verify": ["grep -q hello hello.txt"], "account": account }] })
+            };
+            let reply = turn.tool("codly_submit_plan", plan("claude:nope")).await;
+            assert_eq!(reply["ok"], false, "{reply}");
+            assert!(reply["error"].as_str().unwrap().contains("unknown account 'claude:nope'"), "{reply}");
+            let reply = turn.tool("codly_submit_plan", plan(&pin)).await;
+            assert_eq!(reply["ok"], true, "{reply}");
+            turn.say("Planned on perso.");
+        })
+    });
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created hello.txt." })).await;
+        })
+    });
+    let core = start_signed_in(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    let accounts = vec![claude_account(&work), claude_account(&perso)];
+    let settings = Settings { auto_run_plans: true, lead_followups: false, worker_providers: vec![Provider::Claude], accounts, ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Add hello.txt, on my perso account").await.unwrap();
+    let (task, _) = wait_for("the plan to finish", 30, async || {
+        task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)
+    })
+    .await;
+
+    assert_eq!(task.account_hint.as_deref(), Some(perso_id.as_str()));
+    let worker_dir = log.lock().unwrap().envs.iter().find(|e| e.0 == Role::Worker).unwrap().2.clone();
+    assert_eq!(worker_dir, Some(perso.clone()), "the pinned account, not the emptier one");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_resumed_run_keeps_its_account() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());

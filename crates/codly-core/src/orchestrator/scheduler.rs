@@ -298,11 +298,13 @@ struct RouteCtx<'a> {
     accounts: &'a Accounts,
 }
 
-/// The account a run goes on, with its running count and (with several accounts) why.
+/// The account a run goes on, with its running count, (with several accounts) why, and the
+/// accounts of that provider it passed over (parked or full).
 struct AccountPick<'a> {
     account: &'a AccountState,
     n: usize,
     why: Option<String>,
+    skipped: Vec<String>,
 }
 
 struct Route {
@@ -344,7 +346,7 @@ impl RouteCtx<'_> {
         }
         let multi = self.accounts.multi(p);
         if let Some(&(a, n)) = prefer.iter().find_map(|id| open.iter().find(|(a, _)| a.id == *id)) {
-            return Ok(AccountPick { account: a, n, why: None });
+            return Ok(AccountPick { account: a, n, why: None, skipped });
         }
         let (a, n, why) = match self.settings.account_strategy {
             AccountStrategy::InOrder => (open[0].0, open[0].1, "first account in your order with room".to_string()),
@@ -364,7 +366,7 @@ impl RouteCtx<'_> {
                 (a, n, why)
             }
         };
-        Ok(AccountPick { account: a, n, why: multi.then_some(why) })
+        Ok(AccountPick { account: a, n, why: multi.then_some(why), skipped })
     }
 }
 
@@ -389,9 +391,13 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
         if let Some(why) = &acc.why {
             summary.push_str(&format!(", {why}"));
         }
+        if !acc.skipped.is_empty() {
+            summary.push_str(&format!("; {}", acc.skipped.join(", ")));
+        }
         let detail = json!({
             "task": t.key, "plan_id": t.plan_id, "provider": a.provider, "agent": a.name, "rule": "assignee",
             "account": acc.account.id, "account_label": acc.account.label, "pinned_account": t.account_hint,
+            "skipped": acc.skipped,
         });
         return Ok(Route {
             provider: a.provider,
@@ -416,6 +422,7 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
         match ctx.account_for(p, &prefer) {
             Err(e) => skipped.extend(e),
             Ok(acc) => {
+                skipped.extend(acc.skipped.iter().cloned());
                 chosen = Some((p, acc));
                 break;
             }
