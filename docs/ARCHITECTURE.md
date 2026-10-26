@@ -136,7 +136,7 @@ untrusted") and can never change approvals or policy.
 |---|---|
 | Embeddings (model2vec / MiniLM) for memory and code search | the built-in commit-replay benchmark shows lexical recall is the bottleneck |
 | Tree-sitter symbol tables | regex symbols miss too much on the benchmark |
-| Deep Agents + OpenRouter sidecar (API-key backend) | after the CLI path is solid; BYOK env for the same CLIs comes first |
+| ~~Deep Agents + OpenRouter sidecar (API-key backend)~~ | dropped (2026-10-26): OpenCode with its OpenRouter provider covers API-key models |
 | Launchd daemon so agents survive app restarts | resume-by-session-id proves insufficient |
 | PTY "take over" of a headless agent | users ask to drive an agent by hand mid-task |
 | Voice, Slack/webhook triggers, schedules | after the core loop is loved |
