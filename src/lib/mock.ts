@@ -140,6 +140,9 @@ export class MockTransport implements Transport {
       case 'cancel_plan':
         story.cancelPlan(String(a.planId));
         return null;
+      case 'close_thread':
+        story.closeThread(String(a.thread));
+        return null;
       case 'merge_plan':
         return story.mergePlan(String(a.planId));
       case 'keep_plan':

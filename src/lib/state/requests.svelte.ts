@@ -42,8 +42,9 @@ class Requests {
     };
     for (const c of store.chats) if (isRequestThread(c.thread)) note(c.thread, c.ts, c.author === 'user' ? c.text : null);
     for (const o of store.outbox) if (isRequestThread(o.thread)) note(o.thread, o.ts, o.text);
-    for (const p of store.plans) note(p.thread || 'lead', p.created_at, p.request || null);
-    for (const a of store.leads) note(a.thread ?? 'lead', a.created_at);
+    // A closed request's plans and Lead moved to "closed:…": not a tab any more.
+    for (const p of store.plans) if (isRequestThread(p.thread || 'lead')) note(p.thread || 'lead', p.created_at, p.request || null);
+    for (const a of store.leads) if (isRequestThread(a.thread ?? 'lead')) note(a.thread ?? 'lead', a.created_at);
     for (const d of ui.draftRequests) note(d.thread, d.ts);
 
     const approvalsBy = new Map<string, number>();

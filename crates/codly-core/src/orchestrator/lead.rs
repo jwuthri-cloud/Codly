@@ -268,10 +268,18 @@ impl Inner {
     /// header is built now, so a turn that waited sees the current board. Caller holds `lead_lock`.
     async fn deliver(self: &Arc<Self>, ws: &Workspace, thread: &str, body: &str, forward_to: Option<&Id>) -> Result<Delivery> {
         let lead = self.thread_lead(ws, thread)?;
-        let stopping = lock(&self.live).get(&lead.id).map(|l| l.stopping);
-        match stopping {
-            Some(true) => return Ok(Delivery::Exiting),
-            Some(false) => {}
+        let live = lock(&self.live).get(&lead.id).map(|l| (l.stopping, l.provider, l.model.clone()));
+        match live {
+            Some((true, ..)) => return Ok(Delivery::Exiting),
+            // Its CLI or model changed in Settings: an idle Lead restarts on it (same session).
+            Some((false, provider, model))
+                if (model != self.settings().lead_model || self.lead_provider().is_ok_and(|p| p != provider))
+                    && self.is_quiet(&lead.id)
+                    && self.stop_run(&lead.id) =>
+            {
+                return Ok(Delivery::Exiting);
+            }
+            Some(_) => {}
             None => {
                 self.lead_provider()?; // before pausing another Lead for a spawn that cannot happen
                 if !self.make_room(ws, &lead)? {
@@ -387,6 +395,46 @@ impl Inner {
             None => format!("\n{text}"),
         };
         self.send_to_lead(&ws, thread, body, None).await
+    }
+
+    /// Close a request: stop and archive its Lead, cancel its unfinished plans, and move its
+    /// messages and plans to an archive thread ("closed:<thread>:<ms>") so it leaves the tabs.
+    /// Nothing is deleted: history, branches and worktrees stay. The same thread id can be
+    /// used again ("lead" always is); it then gets a fresh Lead.
+    pub(super) async fn close_thread(self: &Arc<Self>, thread: &str) -> Result<()> {
+        if !is_lead_thread(thread) {
+            bail!("{thread} is not a request");
+        }
+        let ws = self.require_ws()?;
+        let archive = format!("closed:{thread}:{}", now_ms());
+        let drop_waiting = || lock(&self.leads).waiting.retain(|m| m.ws_id != ws.id || m.thread != thread);
+        drop_waiting();
+        // The Lead goes first, so no follow-up about the cancelled plan reaches it.
+        if let Some(lead) = self.find_lead(&ws.id, thread) {
+            if !self.stop_and_wait(&lead.id).await {
+                bail!("{} did not stop in time; try again", lead.name);
+            }
+            lock(&self.leads).forget(&lead.id);
+            self.update_agent(&lead.id, |a| {
+                a.status = AgentStatus::Offline;
+                a.activity = None;
+                a.activity_label = None;
+                a.thread = Some(archive.clone());
+            })?;
+            self.store.archive_agent(&lead.id)?;
+        }
+        for plan in self.store.plans(&ws.id, i64::MAX)?.into_iter().filter(|p| p.thread == thread) {
+            self.cancel_plan_inner(&plan, "cancelled: its request was closed").await?;
+            self.update_plan(&plan.id, |p| {
+                p.thread = archive.clone();
+                Ok(())
+            })?;
+        }
+        drop_waiting();
+        self.store.move_chats(&ws.id, thread, &archive)?;
+        self.kick();
+        self.pump_leads(); // its Lead's slot is free
+        Ok(())
     }
 
     /// A status turn for the Lead of `thread` (task blocked/failed, plan done), if the user

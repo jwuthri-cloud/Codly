@@ -280,7 +280,7 @@ impl Inner {
         Ok(())
     }
 
-    async fn cancel_plan_inner(&self, plan: &Plan, why: &str) -> Result<()> {
+    pub(super) async fn cancel_plan_inner(&self, plan: &Plan, why: &str) -> Result<()> {
         if matches!(plan.status, PlanStatus::Done | PlanStatus::Cancelled) {
             return Ok(());
         }

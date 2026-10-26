@@ -14,6 +14,7 @@ import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { accounts } from './accounts.svelte';
 import { diffstats } from './diffstats.svelte';
+import { requests } from './requests.svelte';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
 import { ui, wallNow } from './ui.svelte';
@@ -125,6 +126,22 @@ export async function runPlan(planId: string) {
 
 export async function cancelPlan(planId: string) {
   await attempt('cancel the plan', () => api.cancelPlan(planId));
+}
+
+/** Close a request's tab: its Lead stops and its unfinished plans are cancelled (branches and
+ *  history stay). You land on the tab beside it. */
+export async function closeRequest(thread: string): Promise<boolean> {
+  const list = requests.list;
+  const i = list.findIndex((r) => r.thread === thread);
+  const ok = await attempt('close the request', async () => {
+    await api.closeThread(thread);
+    return true;
+  });
+  if (!ok) return false;
+  ui.draftRequests = ui.draftRequests.filter((d) => d.thread !== thread);
+  if (ui.request === thread) ui.openRequest((list[i + 1] ?? list[i - 1])?.thread ?? 'lead');
+  await store.resync(); // its messages moved out of the thread without events
+  return true;
 }
 
 export async function mergePlan(planId: string) {

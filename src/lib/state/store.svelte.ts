@@ -189,9 +189,12 @@ const pathsOf = (t: Target): string[] => {
 
 class CodlyStore {
   // connection
+  /** The first snapshot arrived. Later resyncs keep the current screen until theirs lands. */
   ready = $state(false);
   error = $state<string | null>(null);
   private gen = 0;
+  /** Waiting for a snapshot: live events are buffered until it is applied. */
+  private syncing = false;
   private lastId = 0;
   private buffered: EventRow[] = [];
 
@@ -245,7 +248,7 @@ class CodlyStore {
 
   async connect(): Promise<void> {
     const gen = ++this.gen;
-    this.ready = false;
+    this.syncing = true;
     this.buffered = [];
     try {
       const t = await getTransport();
@@ -254,11 +257,14 @@ class CodlyStore {
       this.applySnapshot(snap);
       const early = this.buffered;
       this.buffered = [];
+      this.syncing = false;
       this.ready = true;
       this.error = null;
       if (early.length) this.applyEvents(early);
     } catch (e) {
+      if (gen !== this.gen) return; // a newer resync owns the state
       this.error = e instanceof Error ? e.message : String(e);
+      this.syncing = false;
       this.ready = true;
     }
   }
@@ -268,7 +274,7 @@ class CodlyStore {
 
   private onBatch(gen: number, b: UiBatch) {
     if (gen !== this.gen) return;
-    if (!this.ready) {
+    if (this.syncing) {
       this.buffered.push(...b.events);
       return;
     }

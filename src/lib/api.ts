@@ -78,6 +78,8 @@ export const api = {
   sendChat: (thread: string, text: string) => call<void>('send_chat', { thread, text }),
   runPlan: (planId: string) => call<void>('run_plan', { planId }),
   cancelPlan: (planId: string) => call<void>('cancel_plan', { planId }),
+  /** Close a request: its Lead stops, its unfinished plans are cancelled, it leaves the tabs. */
+  closeThread: (thread: string) => call<void>('close_thread', { thread }),
   resolveApproval: (approvalId: string, decision: ApprovalDecision) =>
     call<void>('resolve_approval', { approvalId, decision }),
   interruptAgent: (agentId: string) => call<void>('interrupt_agent', { agentId }),

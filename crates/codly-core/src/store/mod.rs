@@ -494,13 +494,22 @@ impl Store {
         self.json_rows("SELECT json FROM approval WHERE status = 'pending' AND run_id = ?1 ORDER BY created_at", run_id)
     }
 
-    /// The last `per_thread` messages of every thread, in chronological order.
+    /// Move a thread's messages to another one (a closed request's go to its archive thread).
+    pub fn move_chats(&self, workspace_id: &str, from: &str, to: &str) -> Result<usize> {
+        Ok(self.conn().execute(
+            "UPDATE chat SET thread = ?3, json = json_set(json, '$.thread', ?3) WHERE workspace_id = ?1 AND thread = ?2",
+            params![workspace_id, from, to],
+        )?)
+    }
+
+    /// The last `per_thread` messages of every open thread (closed requests' are left out), in
+    /// chronological order.
     pub fn recent_chats(&self, workspace_id: Option<&str>, per_thread: i64) -> Result<Vec<ChatMessage>> {
         let conn = self.conn();
         let mut st = conn.prepare_cached(
             "SELECT json FROM (
                SELECT json, ts, ROW_NUMBER() OVER (PARTITION BY thread ORDER BY ts DESC, rowid DESC) AS rn
-               FROM chat WHERE workspace_id IS ?1)
+               FROM chat WHERE workspace_id IS ?1 AND thread NOT LIKE 'closed:%')
              WHERE rn <= ?2 ORDER BY ts, rn DESC",
         )?;
         let rows = st.query_map(params![workspace_id, per_thread], |r| r.get::<_, String>(0))?;

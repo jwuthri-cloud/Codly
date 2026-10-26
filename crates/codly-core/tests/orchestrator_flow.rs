@@ -146,6 +146,8 @@ struct Log {
     shutdowns: Vec<String>,
     /// (role, agent id, CLAUDE_CONFIG_DIR) of every run, in spawn order.
     envs: Vec<(Role, String, Option<String>)>,
+    /// (agent id, model) of every run, in spawn order.
+    models: Vec<(String, Option<String>)>,
 }
 
 struct FakeSpawner {
@@ -173,6 +175,7 @@ impl Spawner for FakeSpawner {
                 l.spawns.push((spec.role, spec.cwd.to_string_lossy().into_owned(), spec.session.clone()));
                 l.runs.push((spec.agent_id.clone(), spec.session.clone()));
                 l.envs.push((spec.role, spec.agent_id.clone(), spec.env.get("CLAUDE_CONFIG_DIR").cloned()));
+                l.models.push((spec.agent_id.clone(), spec.model.clone()));
             }
             let (tx, rx) = mpsc::unbounded_channel::<AgentCmd>();
             let spec = Arc::new(spec);
@@ -996,6 +999,67 @@ async fn wait_chat(core: &Core, thread: &str, text: &str) -> Snapshot {
         chats(&s, thread).iter().any(|c| c.text == text).then(|| s.clone())
     })
     .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_a_request_cancels_its_plan_and_frees_the_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let idle: Behavior = Arc::new(|_turn: FakeTurn| Box::pin(async {}));
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: request_lead(), worker: idle }).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead:b", "Add a bye file").await.unwrap();
+    let s = wait_chat(&core, "lead:b", "Planned bye.txt.").await;
+    let plan = s.plans.iter().find(|p| p.thread == "lead:b").unwrap().clone();
+    let old = lead_of(&s, "lead:b").unwrap().clone();
+
+    core.close_thread("lead:b").await.unwrap();
+    let s = core.snapshot().await.unwrap();
+    assert!(chats(&s, "lead:b").is_empty(), "its messages left the thread");
+    assert!(s.chats.iter().all(|c| !c.thread.starts_with("closed:")), "closed threads stay out of the snapshot");
+    let p = s.plans.iter().find(|p| p.id == plan.id).unwrap();
+    assert_eq!(p.status, PlanStatus::Cancelled);
+    assert!(p.thread.starts_with("closed:lead:b:"), "{}", p.thread);
+    assert!(s.agents.iter().all(|a| a.id != old.id), "its Lead is archived");
+    assert!(log.lock().unwrap().shutdowns.contains(&old.id), "and stopped");
+
+    // The thread id works again, with a fresh Lead in a new session.
+    core.send_chat("lead:b", "Add a bye file").await.unwrap();
+    let s = wait_chat(&core, "lead:b", "Planned bye.txt.").await;
+    let new = lead_of(&s, "lead:b").unwrap();
+    assert_ne!(new.id, old.id);
+    assert!(log.lock().unwrap().runs.iter().any(|(a, m)| a == &new.id && matches!(m, SessionMode::New { .. })));
+    assert!(core.close_thread("agent:x").await.is_err(), "only requests close");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_lead_model_restarts_an_idle_lead_on_its_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let hold = Arc::new(AtomicBool::new(false));
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: echo_lead(hold.clone()), worker: echo_lead(hold) }).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "one").await.unwrap();
+    wait_chat(&core, "lead", "ok: one").await;
+
+    let settings = Settings { lead_model: Some("opus:high".into()), ..core.snapshot().await.unwrap().settings };
+    core.update_settings(settings).await.unwrap();
+    core.send_chat("lead", "two").await.unwrap();
+    wait_chat(&core, "lead", "ok: two").await;
+    core.send_chat("lead", "three").await.unwrap(); // unchanged: no restart
+    let s = wait_chat(&core, "lead", "ok: three").await;
+
+    let lead = lead_of(&s, "lead").unwrap();
+    let l = log.lock().unwrap();
+    let models: Vec<Option<String>> = l.models.iter().filter(|m| m.0 == lead.id).map(|m| m.1.clone()).collect();
+    assert_eq!(models, [None, Some("opus:high".to_string())], "restarted once, on the new model");
+    let runs: Vec<&SessionMode> = l.runs.iter().filter(|r| r.0 == lead.id).map(|r| &r.1).collect();
+    assert!(matches!(runs[1], SessionMode::Resume { .. }), "same conversation: {runs:?}");
+    drop(l);
+    core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

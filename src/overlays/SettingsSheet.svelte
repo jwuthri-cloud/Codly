@@ -7,6 +7,7 @@
   import type { ApprovalMode } from '../lib/gen/ApprovalMode';
   import type { Provider } from '../lib/gen/Provider';
   import type { Settings } from '../lib/gen/Settings';
+  import { api } from '../lib/api';
   import { updateSettings } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { usable as accountUsable } from '../lib/util/accounts';
@@ -33,11 +34,36 @@
   function set(patch: Partial<Settings>) {
     updateSettings(patch);
   }
-  /** A Lead pinned to a sign-in decides its CLI, so picking another CLI unpins it. */
+  /** A Lead pinned to a sign-in decides its CLI, so picking another CLI unpins it. Its model
+   *  belongs to the old CLI, so it goes back to the new one's default. */
   function pickLead(p: Provider) {
     const pinned = s.lead_account ? accounts.byId.get(s.lead_account)?.provider ?? s.lead_account.split(':')[0] : null;
-    set(pinned && pinned !== p ? { lead_provider: p, lead_account: null } : { lead_provider: p });
+    const model = p === leadCli ? {} : { lead_model: null };
+    set(pinned && pinned !== p ? { lead_provider: p, lead_account: null, ...model } : { lead_provider: p, ...model });
   }
+
+  // The Lead's model and thinking effort, stored as one string: "opus:high" (the core's format).
+  // ponytail: each CLI's levels today, by hand; Gemini and OpenCode take none through Codly.
+  const EFFORTS: Partial<Record<Provider, string[]>> = {
+    claude: ['low', 'medium', 'high', 'xhigh', 'max'],
+    codex: ['low', 'medium', 'high', 'xhigh'],
+  };
+  const ALL_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+  const leadModel = $derived.by(() => {
+    const m = s.lead_model ?? '';
+    const i = m.lastIndexOf(':');
+    return i >= 0 && ALL_EFFORTS.includes(m.slice(i + 1)) ? { name: m.slice(0, i), effort: m.slice(i + 1) } : { name: m, effort: '' };
+  });
+  function setLeadModel(name: string, effort: string) {
+    const n = name.trim();
+    set({ lead_model: n || effort ? `${n}${effort ? `:${effort}` : ''}` : null });
+  }
+  let leadModels = $state<string[]>([]);
+  $effect(() => {
+    const p = leadCli;
+    leadModels = [];
+    api.listModels(p).then((l) => p === leadCli && (leadModels = l)).catch(() => {}); // typing a name still works
+  });
   function move(p: Provider, d: number) {
     const list = [...s.worker_providers];
     const i = list.indexOf(p);
@@ -86,6 +112,26 @@
             </button>
           {/each}
         </div>
+        <div class="row">
+          <div class="r-text">
+            <span class="r-title">Model</span>
+            <span class="desc">Empty uses {PROVIDER_LABEL[leadCli]}’s default. Leads switch on their next message and keep their conversation.</span>
+          </div>
+          <input class="field" list="lead-models" value={leadModel.name} placeholder="Default" spellcheck="false" autocomplete="off" aria-label="Lead model" onchange={(e) => setLeadModel(e.currentTarget.value, leadModel.effort)} />
+          <datalist id="lead-models">{#each leadModels as m (m)}<option value={m}></option>{/each}</datalist>
+        </div>
+        {#if EFFORTS[leadCli]}
+          <div class="row">
+            <div class="r-text">
+              <span class="r-title">Thinking effort</span>
+              <span class="desc">How long it reasons before answering. Higher plans better, slower, and uses more of your quota.</span>
+            </div>
+            <select class="field" value={leadModel.effort} aria-label="Lead thinking effort" onchange={(e) => setLeadModel(leadModel.name, e.currentTarget.value)}>
+              <option value="">Default</option>
+              {#each EFFORTS[leadCli] ?? [] as e (e)}<option value={e}>{e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1)}</option>{/each}
+            </select>
+          </div>
+        {/if}
       </section>
 
       <section>
@@ -189,6 +235,8 @@
   .row { display: flex; align-items: center; gap: 16px; min-height: 42px; }
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .r-title { font-weight: var(--w-med); }
+  .field { width: 180px; height: 32px; padding: 0 10px; border-radius: var(--r-md); background: var(--surface-1); color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line); font: inherit; font-size: var(--t-sm); outline: none; }
+  .field:focus { box-shadow: inset 0 0 0 1px var(--ink-3); }
   .stepper { display: inline-flex; align-items: center; gap: 4px; padding: 2px; border-radius: var(--r-full); background: var(--surface-1); }
   .stepper .num { min-width: 22px; text-align: center; font-weight: var(--w-semi); }
   .modes { display: flex; flex-direction: column; gap: 6px; }

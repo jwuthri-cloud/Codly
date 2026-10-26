@@ -70,6 +70,7 @@ pub fn run() {
             commands::send_chat,
             commands::run_plan,
             commands::cancel_plan,
+            commands::close_thread,
             commands::resolve_approval,
             commands::interrupt_agent,
             commands::stop_agent,

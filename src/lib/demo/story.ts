@@ -983,6 +983,18 @@ export class Story {
     });
   }
 
+  /** Like the core: live plans cancelled, the thread's messages, plans and Lead leave it. */
+  closeThread(thread: string) {
+    const sim = this.sim;
+    const archive = `closed:${thread}:${sim.now()}`;
+    for (const p of [...sim.plans.values()].filter((p) => (p.thread || 'lead') === thread)) {
+      if (p.status !== 'done' && p.status !== 'cancelled' && p.status !== 'failed') this.cancelPlan(p.id);
+      sim.patchPlan(p.id, { thread: archive });
+    }
+    for (const a of [...sim.agents.values()]) if (a.role === 'lead' && (a.thread ?? 'lead') === thread) sim.agents.delete(a.id);
+    sim.chats = sim.chats.filter((c) => c.thread !== thread);
+  }
+
   cancelPlan(planId: string) {
     const sim = this.sim;
     const plan = sim.plans.get(planId);

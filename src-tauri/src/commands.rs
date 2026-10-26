@@ -106,6 +106,11 @@ pub async fn cancel_plan(state: State<'_, AppState>, plan_id: String) -> R<()> {
 }
 
 #[tauri::command]
+pub async fn close_thread(state: State<'_, AppState>, thread: String) -> R<()> {
+    state.core().await?.close_thread(&thread).await.map_err(err)
+}
+
+#[tauri::command]
 pub async fn resolve_approval(state: State<'_, AppState>, approval_id: String, decision: ApprovalDecision) -> R<()> {
     state.core().await?.resolve_approval(&approval_id, decision).await.map_err(err)
 }

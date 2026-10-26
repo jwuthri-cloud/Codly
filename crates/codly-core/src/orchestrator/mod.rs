@@ -101,6 +101,8 @@ struct Live {
     run_id: Id,
     role: Role,
     provider: Provider,
+    /// The model it was started with (the agent row holds the one the CLI reports).
+    model: Option<String>,
     /// `AccountInfo::id` it runs on (None = no account detected for its CLI).
     account: Option<String>,
     task_id: Option<Id>,
@@ -438,6 +440,12 @@ impl Core {
 
     pub async fn cancel_plan(&self, plan_id: &str) -> anyhow::Result<()> {
         self.inner.cancel_plan(plan_id).await
+    }
+
+    /// Close a request thread: its Lead stops, its unfinished plans are cancelled and it leaves
+    /// the tabs (archived as "closed:<thread>:<ms>", nothing deleted). Reload the snapshot after.
+    pub async fn close_thread(&self, thread: &str) -> anyhow::Result<()> {
+        self.inner.close_thread(thread).await
     }
 
     pub async fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision) -> anyhow::Result<()> {

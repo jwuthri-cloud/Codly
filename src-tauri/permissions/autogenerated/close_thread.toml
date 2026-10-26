@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-close-thread"
+description = "Enables the close_thread command without any pre-configured scope."
+commands.allow = ["close_thread"]
+
+[[permission]]
+identifier = "deny-close-thread"
+description = "Denies the close_thread command without any pre-configured scope."
+commands.deny = ["close_thread"]

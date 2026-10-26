@@ -141,6 +141,7 @@ impl Inner {
                 run_id: run_id.clone(),
                 role: req.role,
                 provider,
+                model: req.agent.model.clone(),
                 account,
                 task_id: req.task_id,
                 workspace_id: req.workspace_id,
@@ -219,19 +220,24 @@ impl Inner {
         if lock(&self.live).get(agent_id).is_some_and(|l| l.turn_active) {
             bail!("{} is still working: stop its turn first", agent.name);
         }
+        // The old process must be gone before the next message, or it would reach the old model.
+        if !self.stop_and_wait(agent_id).await {
+            bail!("{} did not stop in time; try again", agent.name);
+        }
+        self.update_agent(agent_id, |a| a.model = model)
+    }
+
+    /// Stop an agent's live run and wait (≤ 5 s) for its process to exit. False = still running.
+    pub(super) async fn stop_and_wait(&self, agent_id: &str) -> bool {
         if self.stop_run(agent_id) {
-            // The old process must be gone before the next message, or it would reach the old model.
             for _ in 0..100 {
                 if !self.is_live(agent_id) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            if self.is_live(agent_id) {
-                bail!("{} did not stop in time; try again", agent.name);
-            }
         }
-        self.update_agent(agent_id, |a| a.model = model)
+        !self.is_live(agent_id)
     }
 
     /// A live agent that is between turns with nothing queued.
