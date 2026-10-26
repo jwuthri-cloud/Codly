@@ -1,6 +1,7 @@
 // User intents → core commands. Every action reports failure as a toast that says how to get
 // out, and applies command results the core does not echo as events (workspace, settings).
 import { api, isTauriApp } from '../api';
+import type { Agent } from '../gen/Agent';
 import type { AccountConfig } from '../gen/AccountConfig';
 import type { ApprovalChoice } from '../gen/ApprovalChoice';
 import type { MemoryKind } from '../gen/MemoryKind';
@@ -164,13 +165,24 @@ export async function createTask(title: string, goal = '') {
   return t;
 }
 
-export async function hireAgent(provider: Provider) {
-  const a = await attempt(`start ${PROVIDER_LABEL[provider]}`, () => api.hireAgent(provider), 'Check that the CLI is installed and signed in.');
-  if (a) {
-    store.upsertAgent(a);
-    ui.selectAgent(a.id);
-    toast({ kind: 'success', title: `${a.name} joined`, body: `${PROVIDER_LABEL[a.provider]} · 1:1 chat is ready` });
-  }
+/** Returns whether the agent started, so the dialog that asked can close. */
+export async function hireAgent(provider: Provider, model: string | null = null): Promise<boolean> {
+  const a = await attempt(`start ${PROVIDER_LABEL[provider]}`, () => api.hireAgent(provider, model), 'Check that the CLI is installed and signed in.');
+  if (!a) return false;
+  store.upsertAgent(a);
+  ui.selectAgent(a.id);
+  toast({ kind: 'success', title: `${a.name} joined`, body: `${PROVIDER_LABEL[a.provider]} · 1:1 chat is ready` });
+  return true;
+}
+
+/** Returns whether the switch happened. The next message resumes the conversation on the new model. */
+export async function setAgentModel(agent: Agent, model: string | null): Promise<boolean> {
+  const label = model ?? 'the default model';
+  const a = await attempt(`switch ${agent.name} to ${label}`, () => api.setAgentModel(agent.id, model), 'Stop its current turn first, then try again.');
+  if (!a) return false;
+  store.upsertAgent(a);
+  toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${label}` });
+  return true;
 }
 
 export async function interruptAgent(agentId: string) {

@@ -693,6 +693,23 @@ async fn board_moves_follow_the_rules() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn solo_model_switches_and_ignores_no_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(dir.path(), FakeSpawner { log, lead: idle.clone(), worker: idle }).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let solo = core.hire_agent(Provider::Claude, None).await.unwrap();
+    let opus = core.set_agent_model(&solo.id, Some("opus".into())).await.unwrap();
+    assert_eq!(opus.model.as_deref(), Some("opus"));
+    let same = core.set_agent_model(&solo.id, Some("opus".into())).await.unwrap();
+    assert_eq!(same.model.as_deref(), Some("opus"));
+    assert!(core.set_agent_model("nobody", None).await.is_err());
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelling_mid_gate_stays_cancelled_and_merges_nothing() {
     let dir = tempfile::tempdir().unwrap();

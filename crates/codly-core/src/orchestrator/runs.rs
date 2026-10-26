@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 
@@ -203,6 +204,34 @@ impl Inner {
             }
             None => false,
         }
+    }
+
+    /// Switch a 1:1 agent's model. Its session resumes on the next message with the new model,
+    /// so a live process is stopped first; a turn in progress must finish or be stopped.
+    pub(super) async fn set_agent_model(&self, agent_id: &str, model: Option<String>) -> Result<Agent> {
+        let agent = self.agent(agent_id)?;
+        if agent.role != Role::Solo {
+            bail!("only a 1:1 agent's model can be changed");
+        }
+        if agent.model == model {
+            return Ok(agent);
+        }
+        if lock(&self.live).get(agent_id).is_some_and(|l| l.turn_active) {
+            bail!("{} is still working: stop its turn first", agent.name);
+        }
+        if self.stop_run(agent_id) {
+            // The old process must be gone before the next message, or it would reach the old model.
+            for _ in 0..100 {
+                if !self.is_live(agent_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if self.is_live(agent_id) {
+                bail!("{} did not stop in time; try again", agent.name);
+            }
+        }
+        self.update_agent(agent_id, |a| a.model = model)
     }
 
     /// A live agent that is between turns with nothing queued.

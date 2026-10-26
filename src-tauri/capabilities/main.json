@@ -14,7 +14,7 @@
     "window-state:default",
     "allow-ui-subscribe", "allow-ui-set-visible", "allow-detect-clis", "allow-list-accounts", "allow-recent-workspaces",
     "allow-open-workspace", "allow-update-settings", "allow-send-chat", "allow-run-plan", "allow-cancel-plan",
-    "allow-resolve-approval", "allow-interrupt-agent", "allow-stop-agent", "allow-hire-agent", "allow-create-task",
+    "allow-resolve-approval", "allow-interrupt-agent", "allow-stop-agent", "allow-hire-agent", "allow-list-models", "allow-set-agent-model", "allow-create-task",
     "allow-move-task", "allow-assign-task", "allow-task-diff", "allow-plan-diff", "allow-merge-plan",
     "allow-get-events", "allow-search-code", "allow-list-memories", "allow-add-memory", "allow-delete-memory",
     "allow-list-triples", "allow-repo-map", "allow-read-artifact", "allow-keep-plan", "allow-pin-memory", "allow-pty-open", "allow-pty-attach", "allow-pty-write", "allow-pty-resize", "allow-pty-close"

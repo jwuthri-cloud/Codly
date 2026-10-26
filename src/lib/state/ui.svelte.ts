@@ -3,6 +3,8 @@
 // hover cross-highlights (crew pill ↔ task card ↔ timeline lane ↔ the agent in the office).
 // Small preferences persist in localStorage.
 
+import type { Provider } from '../gen/Provider';
+
 /** Home + four rooms (REDESIGN §2). */
 export type Room = 'home' | 'plan' | 'changes' | 'knowledge' | 'terminal';
 /** blend = office behind the work (default) · office = full office (⌘1) · work = no office (⌘2). */
@@ -80,6 +82,8 @@ class Ui {
   paletteSeed = $state('');
   settingsOpen = $state(false);
   shortcutsOpen = $state(false);
+  /** The model dialog: starts an agent of `provider` (agentId null) or switches `agentId`'s model. */
+  modelDialog = $state<{ provider: Provider; agentId: string | null } | null>(null);
 
   /** Conversation thread on Home: a request thread ("lead" / "lead:<id>") or "agent:<id>" (1:1). */
   thread = $state('lead');

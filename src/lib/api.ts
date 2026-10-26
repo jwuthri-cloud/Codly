@@ -83,6 +83,8 @@ export const api = {
   interruptAgent: (agentId: string) => call<void>('interrupt_agent', { agentId }),
   stopAgent: (agentId: string) => call<void>('stop_agent', { agentId }),
   hireAgent: (provider: Provider, model: string | null = null) => call<Agent>('hire_agent', { provider, model }),
+  listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
+  setAgentModel: (agentId: string, model: string | null) => call<Agent>('set_agent_model', { agentId, model }),
   createTask: (title: string, goal: string) => call<Task>('create_task', { title, goal }),
   moveTask: (taskId: string, status: TaskStatus) => call<Task>('move_task', { taskId, status }),
   assignTask: (taskId: string, agentId: string | null) => call<Task>('assign_task', { taskId, agentId }),

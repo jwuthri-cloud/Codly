@@ -11,7 +11,7 @@
   import type { Provider } from '../lib/gen/Provider';
   import type { SearchResult } from '../lib/gen/SearchResult';
   import {
-    cancelPlan, createTask, hireAgent, interruptAgent, mergePlan, openWorkspace, redetect, resolveApproval, runPlan, sendChat, updateSettings,
+    cancelPlan, createTask, interruptAgent, mergePlan, openWorkspace, redetect, resolveApproval, runPlan, sendChat, updateSettings,
   } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
@@ -121,7 +121,7 @@
     }
     for (const c of store.clis)
       if (c.path && !c.problem)
-        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start a ${PROVIDER_LABEL[c.provider as Provider]} agent`, icon: 'user-plus', run: () => hireAgent(c.provider) });
+        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start a ${PROVIDER_LABEL[c.provider as Provider]} agent`, icon: 'user-plus', run: () => (ui.modelDialog = { provider: c.provider as Provider, agentId: null }) });
     for (const a of store.agents)
       if (narrate(a.id)?.tone === 'live') rows.push({ id: `int:${a.id}`, section: 'Agents', title: `Interrupt ${a.name}`, icon: 'pause', run: () => interruptAgent(a.id) });
     return rows;

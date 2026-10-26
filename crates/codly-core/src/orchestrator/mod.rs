@@ -462,6 +462,16 @@ impl Core {
         self.inner.hire_agent(provider, model).await
     }
 
+    /// Switch a 1:1 agent to another model (None = the CLI's default).
+    pub async fn set_agent_model(&self, agent_id: &str, model: Option<String>) -> anyhow::Result<Agent> {
+        self.inner.set_agent_model(agent_id, model).await
+    }
+
+    /// Models a CLI can run, for the start-agent picker (empty when it takes any name).
+    pub async fn list_models(&self, provider: Provider) -> anyhow::Result<Vec<String>> {
+        crate::env::list_models(provider, &self.inner.base_env).await.map_err(|e| anyhow::anyhow!(e))
+    }
+
     /// Ad-hoc task on the shared board (no plan). Runs when moved to Ready or assigned.
     pub async fn create_task(&self, title: &str, goal: &str) -> anyhow::Result<Task> {
         self.inner.create_task(title, goal)

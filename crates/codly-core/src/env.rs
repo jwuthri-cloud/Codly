@@ -163,6 +163,32 @@ pub fn resolve_bin(provider: Provider, base: &HashMap<String, String>) -> Option
     bin_names(provider).iter().find_map(|n| which::which_in(n, Some(path), &cwd).ok())
 }
 
+/// Models a CLI can run, for the start-agent picker. Codex and OpenCode print their catalog and
+/// Claude takes aliases; the rest return none and take any name typed in.
+pub async fn list_models(provider: Provider, base: &HashMap<String, String>) -> Result<Vec<String>, String> {
+    let args: &[&str] = match provider {
+        Provider::Claude => return Ok(["opus", "sonnet", "haiku"].map(str::to_owned).to_vec()),
+        Provider::Codex => &["debug", "models"],
+        Provider::Opencode => &["models"],
+        _ => return Ok(vec![]),
+    };
+    let bin = resolve_bin(provider, base).ok_or_else(|| format!("{} is not installed", bin_names(provider)[0]))?;
+    let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+    let out = run(&bin, args, &child_env(base, provider), &cwd).await?;
+    if !out.ok {
+        return Err(first_line(&out.text()));
+    }
+    parse_models(provider, &out.stdout)
+}
+
+fn parse_models(provider: Provider, stdout: &str) -> Result<Vec<String>, String> {
+    if provider == Provider::Codex {
+        let v = serde_json::from_str::<Value>(stdout.trim()).map_err(|_| "`codex debug models` printed no JSON".to_string())?;
+        return Ok(v["models"].as_array().into_iter().flatten().filter_map(|m| m["slug"].as_str().map(str::to_owned)).collect());
+    }
+    Ok(stdout.lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains(char::is_whitespace)).map(str::to_owned).collect())
+}
+
 /// Integration path Codly uses for a provider (shown in diagnostics).
 pub fn transport(provider: Provider) -> &'static str {
     match provider {
@@ -690,6 +716,14 @@ async fn accounts_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_model_catalogs() {
+        assert_eq!(parse_models(Provider::Opencode, "opencode/big-pickle\n\nopenrouter/x/y\n").unwrap(), ["opencode/big-pickle", "openrouter/x/y"]);
+        let codex = r#"{"models":[{"slug":"gpt-6-luna"},{"display_name":"no slug"}]}"#;
+        assert_eq!(parse_models(Provider::Codex, codex).unwrap(), ["gpt-6-luna"]);
+        assert!(parse_models(Provider::Codex, "not json").is_err());
+    }
 
     #[test]
     fn parses_env_block_with_multiline_values() {

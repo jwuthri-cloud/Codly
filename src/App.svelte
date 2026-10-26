@@ -5,6 +5,7 @@
   import Palette from './overlays/Palette.svelte';
   import SettingsSheet from './overlays/SettingsSheet.svelte';
   import ShortcutsSheet from './overlays/ShortcutsSheet.svelte';
+  import ModelDialog from './overlays/ModelDialog.svelte';
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
   import DragGhost from './components/DragGhost.svelte';
@@ -52,6 +53,7 @@
 {#if ui.paletteOpen}<Palette />{/if}
 {#if ui.settingsOpen}<SettingsSheet />{/if}
 {#if ui.shortcutsOpen}<ShortcutsSheet />{/if}
+{#if ui.modelDialog}<ModelDialog />{/if}
 <Toasts />
 <TooltipHost />
 <DragGhost />

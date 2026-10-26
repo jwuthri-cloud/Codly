@@ -126,6 +126,16 @@ pub async fn hire_agent(state: State<'_, AppState>, provider: Provider, model: O
 }
 
 #[tauri::command]
+pub async fn list_models(state: State<'_, AppState>, provider: Provider) -> R<Vec<String>> {
+    state.core().await?.list_models(provider).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_agent_model(state: State<'_, AppState>, agent_id: String, model: Option<String>) -> R<Agent> {
+    state.core().await?.set_agent_model(&agent_id, model).await.map_err(err)
+}
+
+#[tauri::command]
 pub async fn create_task(state: State<'_, AppState>, title: String, goal: String) -> R<Task> {
     state.core().await?.create_task(&title, &goal).await.map_err(err)
 }

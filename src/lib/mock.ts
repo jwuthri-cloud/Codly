@@ -158,6 +158,10 @@ export class MockTransport implements Transport {
         return null;
       case 'hire_agent':
         return story.hire(a.provider as Provider);
+      case 'list_models':
+        return [];
+      case 'set_agent_model':
+        return null;
       case 'create_task':
         return story.createTask(String(a.title), String(a.goal ?? ''));
       case 'move_task':
