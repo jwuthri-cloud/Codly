@@ -1,0 +1,4 @@
+{"type":"init","timestamp":"2026-10-25T21:37:16.926Z","session_id":"54576833-3d57-417d-8798-77a759fb4db9","model":"gemini-2.5-flash"}
+{"type":"message","timestamp":"2026-10-25T21:37:16.927Z","role":"user","content":"Reply with exactly: pong"}
+{"type":"message","timestamp":"2026-10-25T21:37:18.435Z","role":"assistant","content":"pong","delta":true}
+{"type":"result","timestamp":"2026-10-25T21:37:18.534Z","status":"success","stats":{"total_tokens":9557,"input_tokens":9533,"output_tokens":0,"cached":0,"input":9533,"duration_ms":1608,"tool_calls":0,"models":{"gemini-2.5-flash":{"total_tokens":9557,"input_tokens":9533,"output_tokens":0,"cached":0,"input":9533}}}}

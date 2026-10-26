@@ -30,3 +30,6 @@ src-tauri/gen/schemas
 
 # Tool artifacts
 .playwright-mcp/
+
+# Overrides a global "research/" ignore: these docs and the adapter test fixtures belong in the repo
+!docs/research/
