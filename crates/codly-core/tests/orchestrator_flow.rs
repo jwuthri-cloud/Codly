@@ -594,6 +594,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
                 report: None,
                 started_at: now_ms(),
                 ended_at: None,
+                account: None,
             })
             .unwrap();
         let approval = Approval {
@@ -837,6 +838,61 @@ async fn cross_vendor_review_requests_changes_then_approves() {
     let fix = log.lock().unwrap().prompts.iter().find(|p| p.0 == Role::Worker && p.1.contains("requested changes")).unwrap().1.clone();
     assert!(fix.contains("[major] hello.txt:1 should greet the world"), "{fix}");
     assert!(fix.contains("<untrusted from=\"reviewer\">"), "reviewer text is quoted as data");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_at_its_usage_limit_hands_the_task_to_the_next_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.spec.provider == Provider::Claude {
+                // Half the work, then the usage limit (no RateLimit event, like Codex errors).
+                turn.write("hello.txt", "hel");
+                turn.emit(EventKind::StatusChanged { status: AgentStatus::RateLimited });
+                return;
+            }
+            assert!(turn.prompt.contains("Claude Code hit its usage limit"), "{}", turn.prompt);
+            assert_eq!(std::fs::read_to_string(turn.spec.cwd.join("hello.txt")).unwrap(), "hel", "same worktree");
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Finished the greeting." })).await;
+        })
+    });
+    let codex = CliInfo { provider: Provider::Codex, ..claude() };
+    let core = start_with_clis(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }, vec![claude(), codex]).await;
+    let settings = Settings {
+        auto_run_plans: true,
+        lead_followups: false,
+        worker_providers: vec![Provider::Claude, Provider::Codex],
+        ..Default::default()
+    };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, plan) = wait_for("the plan to finish", 30, async || {
+        task_status(&core).await.filter(|(_, p)| matches!(p.status, PlanStatus::Done | PlanStatus::Failed))
+    })
+    .await;
+    assert_eq!(plan.status, PlanStatus::Done);
+    assert_eq!(task.status, TaskStatus::Done);
+
+    let snap = core.snapshot().await.unwrap();
+    let workers: Vec<Provider> = snap.agents.iter().filter(|a| a.role == Role::Worker).map(|a| a.provider).collect();
+    assert!(workers.contains(&Provider::Claude) && workers.contains(&Provider::Codex), "{workers:?}");
+    let events = core.events(None, None, 3000).await.unwrap();
+    let verifies: Vec<bool> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Verified { ok, .. } => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(verifies, vec![true], "no gate on the limited turn");
+    assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Decision { decision_type, summary, .. }
+        if decision_type == "retry" && summary.contains("Claude Code hit its usage limit"))));
+    assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("fix round"))));
     core.shutdown().await;
 }
 

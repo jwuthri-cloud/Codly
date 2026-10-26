@@ -293,14 +293,21 @@ impl Inner {
                 let reply = last.or_else(|| result_text.clone());
                 self.on_turn_completed(ctx, *status, reply);
             }
+            EventKind::StatusChanged { status: AgentStatus::RateLimited } => {
+                // Codex usage errors and Claude's rate_limit result report only this: park the
+                // provider until a reading says otherwise (no reset time: 30 minutes).
+                if let Some(p) = self.provider_of(&ctx.agent_id) {
+                    let now = now_ms();
+                    let mut quota = lock(&self.quota);
+                    if !quota.get(&p).is_some_and(|q| q.used >= 1.0 && q.resets_at.is_some_and(|r| r > now)) {
+                        quota.insert(p, super::Quota { window: "limit".into(), used: 1.0, resets_at: None, seen_at: now });
+                    }
+                }
+            }
             EventKind::RateLimit { window, used_fraction, resets_at, status } => {
                 let rejected = status.as_deref().is_some_and(|s| matches!(s, "rejected" | "limited" | "exceeded"));
                 let used = if rejected { 1.0 } else { used_fraction.unwrap_or(0.0) };
-                let provider = lock(&self.live)
-                    .get(&ctx.agent_id)
-                    .map(|l| l.provider)
-                    .or_else(|| self.store.agent(&ctx.agent_id).ok().flatten().map(|a| a.provider));
-                if let Some(p) = provider {
+                if let Some(p) = self.provider_of(&ctx.agent_id) {
                     lock(&self.quota).insert(p, super::Quota { window: window.clone(), used, resets_at: *resets_at, seen_at: now_ms() });
                     if used < scheduler::PARK_AT {
                         self.kick(); // a provider may have come back
@@ -327,6 +334,7 @@ impl Inner {
                 }
                 self.pump_leads(); // an idle Lead can make room for a request that waits
             }
+            Role::Worker if ctx.task_id.is_some() && self.hit_limit(&ctx.agent_id) => self.hand_off(ctx),
             Role::Worker if ctx.task_id.is_some() => {
                 // Gate only when the worker is really done: not interrupted, and no queued
                 // prompt (a user steer, a fix round) is about to start another turn.
@@ -351,6 +359,51 @@ impl Inner {
             }
             _ => {}
         }
+    }
+
+    fn provider_of(&self, agent_id: &str) -> Option<Provider> {
+        lock(&self.live).get(agent_id).map(|l| l.provider).or_else(|| self.store.agent(agent_id).ok().flatten().map(|a| a.provider))
+    }
+
+    /// The agent is rate limited, or its provider is parked on a full (100%) window.
+    fn hit_limit(&self, agent_id: &str) -> bool {
+        if self.agent(agent_id).is_ok_and(|a| a.status == AgentStatus::RateLimited) {
+            return true;
+        }
+        let Some(p) = self.provider_of(agent_id) else { return false };
+        let full = lock(&self.quota).get(&p).is_some_and(|q| q.used >= 1.0);
+        full && self.parked().contains_key(&p)
+    }
+
+    /// A worker hit its usage limit mid-task: no gate on half-done work. Stop it and put the
+    /// task back to Ready, unassigned, so the next free provider continues in the same worktree.
+    fn hand_off(self: &Arc<Self>, ctx: &Ctx) {
+        let task_id = ctx.task_id.clone().unwrap_or_default();
+        let Ok(t) = self.task(&task_id) else { return };
+        if !matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) {
+            return;
+        }
+        self.stop_run(&ctx.agent_id); // stopping: on_exit will not call task_run_lost
+        let provider = self.provider_of(&ctx.agent_id).map_or("The provider", |p| p.label());
+        let reason = format!(
+            "{provider} hit its usage limit; handing off to the next free provider. Continue from the work already in this worktree."
+        );
+        // status_reason reaches a resumed session; a fresh one (another provider) gets this.
+        lock(&self.pending_feedback).entry(task_id.clone()).or_insert_with(|| format!("[Codly] {reason}"));
+        let _ = self.update_task(&task_id, |t| {
+            t.status = TaskStatus::Ready;
+            t.assignee = None;
+            t.status_reason = Some(reason.clone());
+            Ok(())
+        });
+        let _ = self.update_agent(&ctx.agent_id, |a| {
+            if a.task_id.as_deref() == Some(task_id.as_str()) {
+                a.task_id = None;
+            }
+        });
+        let ws = self.store.task_workspace(&task_id).ok().flatten();
+        let _ = self.decide(ws.as_deref(), Some(&task_id), "retry", reason, json!({ "plan_id": t.plan_id, "provider": provider }));
+        self.kick();
     }
 
     /// Codly commits a solo agent's worktree after each turn (C7: agents never commit).
