@@ -5,8 +5,10 @@
   interface Props {
     text: string;
     streaming?: boolean;
+    /** A task brief: takes the surrounding font size; headings become small labels. */
+    brief?: boolean;
   }
-  let { text, streaming = false }: Props = $props();
+  let { text, streaming = false, brief = false }: Props = $props();
   // The caret rides inline at the end of the streamed text (a private-use marker survives
   // markdown + sanitizing and is swapped for a span afterwards).
   const CARET = '\uE000';
@@ -25,7 +27,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="md selectable" class:streaming onclick={click}>{@html html}</div>
+<div class="md selectable" class:streaming class:brief onclick={click}>{@html html}</div>
 
 <style>
   .md { font-size: var(--t-lg); line-height: var(--lh-lg); color: var(--ink-1); overflow-wrap: anywhere; }
@@ -51,5 +53,8 @@
   .md :global(table) { border-collapse: collapse; margin: 8px 0 12px; font-size: var(--t-md); }
   .md :global(th), .md :global(td) { padding: 6px 10px; box-shadow: inset 0 -1px 0 var(--line); text-align: left; }
   .md :global(th) { color: var(--ink-2); font-weight: var(--w-med); }
+  .md.brief { font-size: inherit; line-height: inherit; color: inherit; }
+  .md.brief :global(h1), .md.brief :global(h2), .md.brief :global(h3) { font-family: inherit; font-size: var(--t-xs); font-weight: var(--w-semi); line-height: inherit; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); margin: 14px 0 4px; }
+  .md.brief :global(p), .md.brief :global(li) { overflow-wrap: anywhere; }
   .md :global(.caret) { display: inline-block; width: 8px; height: 15px; margin-left: 2px; vertical-align: -2px; border-radius: 2px; background: var(--aurora); animation: caret 1.1s steps(1) infinite; }
 </style>

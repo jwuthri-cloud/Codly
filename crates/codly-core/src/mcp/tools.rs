@@ -25,6 +25,10 @@ pub const QUICK_TASK: &str = "codly_quick_task";
 pub const REASSIGN: &str = "codly_reassign";
 pub const ASK_USER: &str = "codly_ask_user";
 
+/// The goal field of a task: a markdown brief the worker reads and the task card renders.
+const BRIEF_DOC: &str = "Markdown brief: one plain goal sentence, then ### Scope, ### Steps, ### Acceptance and \
+     ### Out of scope bullet lists. Write it in ASD-STE100 style.";
+
 fn tool(name: &str, description: &str, schema: Value) -> Value {
     json!({ "name": name, "description": description, "inputSchema": schema })
 }
@@ -153,7 +157,7 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
                 "tasks": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "object", "properties": with_staffing(json!({
                     "id": { "type": "string", "description": "Short key: t1, t2…" },
                     "title": { "type": "string" },
-                    "goal": { "type": "string" },
+                    "goal": { "type": "string", "description": BRIEF_DOC },
                     "acceptance_criteria": str_array(),
                     "write_scope": str_array(),
                     "read_scope": str_array(),
@@ -181,7 +185,7 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
              plan the user starts (or that runs at once when they auto-run plans). Does not replace your pending plan.",
             json!({ "type": "object", "properties": with_staffing(json!({
                 "title": { "type": "string" },
-                "goal": { "type": "string" },
+                "goal": { "type": "string", "description": BRIEF_DOC },
                 "acceptance_criteria": str_array(),
                 "verify": str_array(),
                 "write_scope": str_array()
@@ -204,7 +208,7 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
                  re-runs the verify commands and merges your work. Do not commit yourself.",
                 json!({ "type": "object", "properties": {
                     "status": { "type": "string", "enum": ["done", "blocked", "failed"] },
-                    "summary": { "type": "string", "description": "What you changed and why, 1-5 sentences." },
+                    "summary": { "type": "string", "description": "What you changed and why, in 1-5 short sentences (ASD-STE100: one instruction or fact per sentence)." },
                     "files_changed": str_array(),
                     "checks_run": { "type": "array", "items": { "type": "object", "properties": {
                         "command": { "type": "string" }, "passed": { "type": "boolean" } },

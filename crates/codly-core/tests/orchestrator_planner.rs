@@ -6,7 +6,7 @@ fn task(id: &str, scope: &[&str], deps: &[&str]) -> TaskInput {
     TaskInput {
         id: id.into(),
         title: format!("task {id}"),
-        goal: format!("do {id}"),
+        goal: format!("Do {id}.\n\n### Steps\n- Change the files in its scope."),
         acceptance_criteria: vec![format!("{id} works")],
         write_scope: scope.iter().map(|s| s.to_string()).collect(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
@@ -52,6 +52,18 @@ fn reports_every_problem_at_once() {
     assert!(validate(plan(vec![])).unwrap_err().contains("at least one task"));
     let nine: Vec<TaskInput> = (1..=9).map(|i| task(&format!("t{i}"), &[&format!("d{i}/**")], &[])).collect();
     assert!(validate(plan(nine)).unwrap_err().contains("max 8"));
+}
+
+#[test]
+fn flags_a_flat_brief_and_accepts_a_sectioned_one() {
+    let mut flat = task("t1", &["a/**"], &[]);
+    flat.goal = "Change the parser to skip blank lines.".into();
+    let mut sectioned = task("t2", &["b/**"], &[]);
+    sectioned.goal = "Change the parser.\n\n### Scope\n- `b/parse.rs`\n\n### Steps\n1. Skip blank lines.".into();
+    let v = validate(plan(vec![flat, sectioned])).unwrap();
+    let flags: Vec<&str> = v.fixes.iter().filter(|f| f.detail["rule"] == "brief_shape").map(|f| f.summary.as_str()).collect();
+    assert_eq!(flags.len(), 1, "{flags:?}");
+    assert!(flags[0].starts_with("t1:"), "{}", flags[0]);
 }
 
 #[test]

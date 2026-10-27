@@ -248,7 +248,7 @@ impl Inner {
             read_only: true,
             task_id: None,
             session,
-            system_prompt: prompts::LEAD_SYSTEM.to_string(),
+            system_prompt: prompts::lead_system(),
             workspace_id: Some(ws.id.clone()),
             account: account.clone(),
         };
