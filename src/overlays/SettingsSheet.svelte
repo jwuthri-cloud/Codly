@@ -17,6 +17,7 @@
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
   import AccountsSection from './AccountsSection.svelte';
   import FreeFlowSection from './FreeFlowSection.svelte';
+  import BreakerSection from './BreakerSection.svelte';
   import TeamSection from './TeamSection.svelte';
   import TriggersSection from './TriggersSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -187,6 +188,8 @@
           {/each}
         </div>
       </section>
+
+      <BreakerSection />
 
       <section>
         <h3 class="eyebrow">Plans</h3>

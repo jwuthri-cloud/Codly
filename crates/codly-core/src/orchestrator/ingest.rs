@@ -74,6 +74,7 @@ impl Inner {
         }
         self.publish(ctx.ws.as_deref(), &r);
         self.track_live(&ctx, &r.kind);
+        self.breaker_observe(&ctx.agent_id, &r.kind);
         if let Err(e) = self.project_agent(&ctx, &r.kind) {
             tracing::debug!("agent projection: {e}");
         }

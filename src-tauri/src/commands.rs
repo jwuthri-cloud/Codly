@@ -7,6 +7,8 @@ use std::sync::atomic::Ordering;
 
 use codly_core::Core;
 use codly_core::model::*;
+use codly_core::orchestrator::breaker::BreakerConfig;
+use codly_core::orchestrator::BreakerStatus;
 use codly_core::pty::PtyManager;
 use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -328,4 +330,24 @@ pub async fn memory_file(state: State<'_, AppState>, agent_id: String) -> R<codl
 #[tauri::command]
 pub async fn save_memory_file(state: State<'_, AppState>, agent_id: String, text: String) -> R<codly_core::memory::panel::MemoryFile> {
     state.core().await?.save_memory_file(&agent_id, &text).await.map_err(err)
+// ── circuit breaker (Settings → Autonomy & Budgets) ──
+
+#[tauri::command]
+pub async fn breaker_config(state: State<'_, AppState>) -> R<BreakerConfig> {
+    state.core().await?.breaker_config().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_breaker_config(state: State<'_, AppState>, config: BreakerConfig) -> R<BreakerConfig> {
+    state.core().await?.set_breaker_config(config).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn breaker_status(state: State<'_, AppState>) -> R<BreakerStatus> {
+    state.core().await?.breaker_status().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn reset_breaker(state: State<'_, AppState>) -> R<()> {
+    state.core().await?.reset_breaker().await.map_err(err)
 }
