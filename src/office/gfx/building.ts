@@ -54,6 +54,7 @@ export class BuildingGfx {
   private skyMat = new MeshBasicMaterial({ toneMapped: false });
   private shadeMat = new MeshStandardMaterial({ color: color(lin(MAT.shade)), roughness: 0.6, emissive: new Color(0, 0, 0) });
   private deskShadeMat = new MeshBasicMaterial({ color: 0xffffff });
+  private screenMat = new MeshBasicMaterial({ vertexColors: true });
   private poolMat: MeshBasicMaterial;
   private textures: Texture[] = [];
   private geos: BufferGeometry[] = [];
@@ -222,6 +223,7 @@ export class BuildingGfx {
 
   private buildFurniture() {
     const merged = new Builder();
+    const screens = new Builder();
     const protos = new Map<string, Proto>();
     for (const it of this.L.items) {
       const inst = INSTANCED[it.type];
@@ -327,12 +329,24 @@ export class BuildingGfx {
         case 'credenza':
           F.credenza(merged);
           break;
+        case 'tvStand':
+          screens.frame(it.x, 0, it.z, it.rot);
+          F.tvStand(merged, screens);
+          break;
+        case 'foosball':
+          F.foosball(merged);
+          break;
+        case 'poolTable':
+          F.poolTable(merged);
+          break;
         default:
           break;
       }
     }
     merged.frame();
     this.mesh(merged.build(), this.matte, true, true);
+    // Static screens (the games TV): unlit so they read as glowing.
+    this.mesh(screens.build(), this.screenMat, false, false);
     const m = new Matrix4();
     const q = new Quaternion();
     const one = new Vector3(1, 1, 1);
@@ -504,6 +518,7 @@ export class BuildingGfx {
     this.skyMat.dispose();
     this.shadeMat.dispose();
     this.deskShadeMat.dispose();
+    this.screenMat.dispose();
     this.poolMat.dispose();
     for (const p of this.staticPools) (p.material as MeshBasicMaterial).dispose();
     for (const m of this.extraMats) m.dispose();
