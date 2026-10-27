@@ -12,6 +12,7 @@ fn main() {
         "dictation_status", "dictation_configure", "dictation_save_key", "dictation_clear_key", "dictation_transcribe",
         "exact_search", "message_graph", "memory_file", "save_memory_file",
         "list_blockers", "answer_blocker", "dismiss_blocker",
+        "inbound_state", "inbound_create_webhook", "inbound_set_webhook", "inbound_revoke_webhook", "inbound_set_settings", "inbound_set_slack",
     ])))
     .expect("tauri-build failed");
 }

@@ -17,6 +17,7 @@
 //! - `triggers`     schedules, context rules, network mode: pure policy (run by `orchestrator/triggers.rs`)
 //! - `skills`       skills manager: scan, catalog, install, uninstall
 //! - `ide`          confined file list/read/write/search for the workspace IDE overlay
+//! - `inbound`      webhooks and Slack: outside messages for the Lead, secrets in the Keychain
 
 pub mod adapters;
 pub mod dictation;
@@ -24,6 +25,7 @@ pub mod blockers;
 pub mod env;
 pub mod git;
 pub mod ide;
+pub mod inbound;
 pub mod index;
 pub mod mcp;
 pub mod memory;

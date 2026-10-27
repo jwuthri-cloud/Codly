@@ -19,9 +19,11 @@ import type { IdeEntry } from './gen/IdeEntry';
 import type { IdeFile } from './gen/IdeFile';
 import type { IdeInfo } from './gen/IdeInfo';
 import type { IdeSearch } from './gen/IdeSearch';
+import type { InboundState } from './gen/InboundState';
 import type { Memory } from './gen/Memory';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
+import type { NewWebhook } from './gen/NewWebhook';
 import type { Plan } from './gen/Plan';
 import type { Provider } from './gen/Provider';
 import type { RecentWorkspace } from './gen/RecentWorkspace';
@@ -30,6 +32,7 @@ import type { CatalogSkill } from './gen/CatalogSkill';
 import type { Skill } from './gen/Skill';
 import type { SearchResult } from './gen/SearchResult';
 import type { Settings } from './gen/Settings';
+import type { SlackUpdate } from './gen/SlackUpdate';
 import type { Snapshot } from './gen/Snapshot';
 import type { Task } from './gen/Task';
 import type { TaskStatus } from './gen/TaskStatus';
@@ -189,6 +192,15 @@ export const api = {
   /** Respond & unblock: answer a card and resume the agent that waits for it. */
   answerBlocker: (blockerId: string, answer: string) => call<Blocker>('answer_blocker', { blockerId, answer }),
   dismissBlocker: (blockerId: string) => call<Blocker>('dismiss_blocker', { blockerId }),
+  // Inbound work sources (webhooks, Slack). Secrets: only `inboundCreateWebhook` ever returns one.
+  inboundState: () => call<InboundState>('inbound_state'),
+  /** A new endpoint, switched off, with its secret (shown to the user once). */
+  inboundCreateWebhook: (name: string) => call<NewWebhook>('inbound_create_webhook', { name }),
+  inboundSetWebhook: (id: string, enabled: boolean) => call<InboundState>('inbound_set_webhook', { id, enabled }),
+  inboundRevokeWebhook: (id: string) => call<InboundState>('inbound_revoke_webhook', { id }),
+  /** Who answers inbound messages ("lead" or "agent:<id>") and the listener's port. */
+  inboundSetSettings: (answerer: string, port: number) => call<InboundState>('inbound_set_settings', { answerer, port }),
+  inboundSetSlack: (update: SlackUpdate) => call<InboundState>('inbound_set_slack', { update }),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;

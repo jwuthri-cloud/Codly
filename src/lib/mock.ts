@@ -36,6 +36,7 @@ import type { MemoryFile } from './gen/MemoryFile';
 
 /** The demo's per-agent memory files (the core keeps them in <data>/memory/<agent id>.md). */
 const memoryFiles = new Map<string, MemoryFile>();
+import { inboundMock } from './demo/inbound';
 
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
@@ -333,6 +334,13 @@ export class MockTransport implements Transport {
         return this.askMe.close(String(a.blockerId), 'answered', String(a.answer ?? ''));
       case 'dismiss_blocker':
         return this.askMe.close(String(a.blockerId), 'dismissed', null);
+      case 'inbound_state':
+      case 'inbound_create_webhook':
+      case 'inbound_set_webhook':
+      case 'inbound_revoke_webhook':
+      case 'inbound_set_settings':
+      case 'inbound_set_slack':
+        return inboundMock(cmd, a);
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }
