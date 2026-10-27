@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-byok-clear-key"
+description = "Enables the byok_clear_key command without any pre-configured scope."
+commands.allow = ["byok_clear_key"]
+
+[[permission]]
+identifier = "deny-byok-clear-key"
+description = "Denies the byok_clear_key command without any pre-configured scope."
+commands.deny = ["byok_clear_key"]

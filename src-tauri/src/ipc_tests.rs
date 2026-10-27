@@ -64,6 +64,10 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::message_graph,
             commands::memory_file,
             commands::save_memory_file,
+            crate::onboarding_commands::install_cli,
+            crate::onboarding_commands::byok_status,
+            crate::onboarding_commands::byok_configure,
+            crate::onboarding_commands::byok_save_key,
         ])
         .build(tauri::generate_context!(test = true))
         .unwrap();
@@ -107,6 +111,19 @@ fn commands_round_trip_with_frontend_arg_names() {
     let graph = invoke(&wv, "message_graph", json!({})).unwrap();
     assert!(graph["nodes"].is_array() && graph["edges"].is_array(), "{graph}");
     assert!(invoke(&wv, "memory_file", json!({ "agentId": "../../etc/passwd" })).is_err());
+
+    // Onboarding: install_cli takes a provider and a rung name, never a command line.
+    assert!(invoke(&wv, "install_cli", json!({ "provider": "claude", "rung": "npm; rm -rf ~" })).is_err());
+    let e = invoke(&wv, "install_cli", json!({ "provider": "cursor", "rung": "npm" })).unwrap_err();
+    assert!(e.to_string().contains("no npm package"), "{e}");
+    // BYOK: the switch persists in Settings; a bad key is refused before it reaches the Keychain;
+    // the status is two booleans.
+    let on = invoke(&wv, "byok_configure", json!({ "enabled": true })).unwrap();
+    assert_eq!(on["enabled"], true);
+    assert_eq!(invoke(&wv, "byok_status", json!({})).unwrap()["enabled"], true);
+    assert!(invoke(&wv, "byok_save_key", json!({ "key": "two words" })).is_err());
+    assert_eq!(on.as_object().unwrap().len(), 2, "{on}");
+    invoke(&wv, "byok_configure", json!({ "enabled": false })).unwrap();
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

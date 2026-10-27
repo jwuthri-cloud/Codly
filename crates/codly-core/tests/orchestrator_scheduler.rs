@@ -15,6 +15,7 @@ fn cli(p: Provider, signed_in: Option<bool>) -> CliInfo {
         plan: None,
         problem: None,
         transport: "test".into(),
+        install: codly_core::env::install_hint(p),
     }
 }
 

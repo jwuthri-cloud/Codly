@@ -107,6 +107,24 @@ pub struct CliInfo {
     pub problem: Option<String>,
     /// Integration path Codly uses, e.g. "stream-json", "app-server", "acp".
     pub transport: String,
+    /// How to install and sign in this CLI (trusted constants, `install.rs`).
+    pub install: InstallHint,
+}
+
+/// How to get one agent CLI onto this machine. Built from constants in `install.rs`, never from
+/// user input; the UI shows these strings and asks `install_cli` to run them (by provider and
+/// rung, not by text).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct InstallHint {
+    /// Install through npm, if the vendor ships it that way.
+    pub npm: Option<String>,
+    /// The vendor's own installer script (macOS/Linux).
+    pub native: Option<String>,
+    /// The command that signs in (`env::login_command`), if there is one.
+    pub login: Option<String>,
+    /// The vendor's docs or home page.
+    pub docs: String,
 }
 
 // ───────────────────────────── accounts ─────────────────────────────
@@ -1146,6 +1164,10 @@ pub struct Settings {
     /// The standing team, in every repo unless a repo switches a member off.
     #[serde(default)]
     pub team: Vec<TeamMember>,
+    /// Opt in to your own OpenRouter key for OpenCode (the key itself lives in the Keychain).
+    /// Off = subscription-only: every API-key variable is scrubbed from the agents' env.
+    #[serde(default)]
+    pub byok_openrouter: bool,
 }
 
 impl Default for Settings {
@@ -1166,6 +1188,7 @@ impl Default for Settings {
             world_ambient: false,
             theme: "system".into(),
             team: vec![],
+            byok_openrouter: false,
         }
     }
 }

@@ -71,6 +71,7 @@ async fn shutdown_kills_agents_that_outlive_their_ladder() {
         plan: None,
         problem: None,
         transport: "fake".into(),
+        install: codly_core::env::install_hint(Provider::Claude),
     };
     let cfg = CoreConfig { data_dir: root.path().join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {

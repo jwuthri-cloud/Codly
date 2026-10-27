@@ -18,11 +18,14 @@
 //! - `skills`       skills manager: scan, catalog, install, uninstall
 //! - `ide`          confined file list/read/write/search for the workspace IDE overlay
 //! - `inbound`      webhooks and Slack: outside messages for the Lead, secrets in the Keychain
+//! - `install`      onboarding: trusted install commands per CLI, run in a visible terminal
+//! - `byok`         opt-in OpenRouter key for OpenCode only, in the Keychain
 //! - `hire`         hire manifests (the add-agent wizard's import/AI draft): strict validation
 
 pub mod adapters;
 pub mod dictation;
 pub mod blockers;
+pub mod byok;
 pub mod env;
 pub mod git;
 pub mod ide;
@@ -30,6 +33,7 @@ pub mod inbound;
 pub mod hire;
 pub mod housekeeping;
 pub mod index;
+pub mod install;
 pub mod mcp;
 pub mod memory;
 pub mod model;
