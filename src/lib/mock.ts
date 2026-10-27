@@ -27,6 +27,11 @@ import { saveTriggers, seedTriggers } from './demo/triggers';
 import type { TriggersConfig } from './gen/TriggersConfig';
 import { skillsMock } from './demo/skillsMock';
 import { mockIde } from '../ide/mockFs';
+import { buildMessageGraph, exactSearch } from './demo/memgraph';
+import type { MemoryFile } from './gen/MemoryFile';
+
+/** The demo's per-agent memory files (the core keeps them in <data>/memory/<agent id>.md). */
+const memoryFiles = new Map<string, MemoryFile>();
 
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
@@ -228,6 +233,21 @@ export class MockTransport implements Transport {
         const bytes = sim.artifactBytes.get(String(a.artifactId));
         if (!bytes) throw new Error(`Unknown artifact ${String(a.artifactId)}`);
         return bytes.slice(0);
+      }
+      case 'exact_search':
+        return exactSearch(String(a.query ?? ''), [...sim.tasks.values()], [...sim.memories.values()]);
+      case 'message_graph':
+        return buildMessageGraph([...sim.agents.values()], sim.chats, [...sim.memories.values()], [...sim.tasks.values()]);
+      case 'memory_file':
+      case 'save_memory_file': {
+        const agent = sim.agents.get(String(a.agentId));
+        if (!agent || !/^[A-Za-z0-9_-]{1,64}$/.test(String(a.agentId))) throw new Error('unknown agent');
+        const prev = memoryFiles.get(agent.id);
+        if (cmd === 'memory_file' && prev) return prev;
+        const text = cmd === 'save_memory_file' ? String(a.text) : `# ${agent.name}: memory\n\nWhat ${agent.name} should always know. Codly adds this file to ${agent.name}'s brief at the start of every task.\n\n- \n`;
+        const f: MemoryFile = { agent_id: agent.id, path: `memory/${agent.id}.md`, text, exists: cmd === 'save_memory_file', modified_at: cmd === 'save_memory_file' ? sim.now() : null };
+        if (cmd === 'save_memory_file') memoryFiles.set(agent.id, f);
+        return f;
       }
       case 'list_triples': {
         const e = a.entity as string | null;

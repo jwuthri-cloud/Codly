@@ -33,6 +33,7 @@ mod team;
 mod tools;
 mod triggers;
 mod workspace;
+mod memgraph;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

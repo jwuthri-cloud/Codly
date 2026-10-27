@@ -307,4 +307,25 @@ pub async fn uninstall_skill(path: String, project: Option<String>) -> R<()> {
 #[tauri::command]
 pub async fn open_skill_folder(path: String, project: Option<String>) -> R<()> {
     skills_blocking(move |home| codly_core::skills::open_folder(std::path::Path::new(&path), &home, project.as_deref().map(std::path::Path::new))).await
+/// Literal text search across the board, tasks and memories (the Find lens).
+#[tauri::command]
+pub async fn exact_search(state: State<'_, AppState>, query: String) -> R<Vec<codly_core::memory::panel::ExactHit>> {
+    state.core().await?.exact_search(&query).await.map_err(err)
+}
+
+/// Agents, and the messages between them by act (the Messages lens).
+#[tauri::command]
+pub async fn message_graph(state: State<'_, AppState>) -> R<codly_core::memory::panel::MessageGraph> {
+    state.core().await?.message_graph().await.map_err(err)
+}
+
+/// One agent's memory file; the core resolves the path from the agent id, never from the UI.
+#[tauri::command]
+pub async fn memory_file(state: State<'_, AppState>, agent_id: String) -> R<codly_core::memory::panel::MemoryFile> {
+    state.core().await?.memory_file(&agent_id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn save_memory_file(state: State<'_, AppState>, agent_id: String, text: String) -> R<codly_core::memory::panel::MemoryFile> {
+    state.core().await?.save_memory_file(&agent_id, &text).await.map_err(err)
 }

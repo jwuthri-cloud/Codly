@@ -33,6 +33,9 @@ import type { Triple } from './gen/Triple';
 import type { TriggersConfig } from './gen/TriggersConfig';
 import type { Workspace } from './gen/Workspace';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
+import type { ExactHit } from './gen/ExactHit';
+import type { MemoryFile } from './gen/MemoryFile';
+import type { MessageGraph } from './gen/MessageGraph';
 
 export type UiBatch = { events: EventRow[] };
 
@@ -119,6 +122,13 @@ export const api = {
   deleteMemory: (id: string) => call<void>('delete_memory', { id }),
   pinMemory: (id: string, pinned: boolean) => call<void>('pin_memory', { id, pinned }),
   triples: (entity: string | null = null) => call<Triple[]>('list_triples', { entity }),
+  /** Literal, case-insensitive text search across the whiteboard, tasks and memories. */
+  exactSearch: (query: string) => call<ExactHit[]>('exact_search', { query }),
+  /** Agents and the messages between them (edges by act), from the chats and notes Codly recorded. */
+  messageGraph: () => call<MessageGraph>('message_graph'),
+  /** An agent's memory file (a starter template until first saved); the core confines it to its memory folder. */
+  memoryFile: (agentId: string) => call<MemoryFile>('memory_file', { agentId }),
+  saveMemoryFile: (agentId: string, text: string) => call<MemoryFile>('save_memory_file', { agentId, text }),
   /** Files of the open workspace (paths, line counts, languages) for the 3D codebase city. */
   repoMap: () => call<RepoFile[]>('repo_map'),
   /** Bytes of a recorded artifact (`Artifact.id`); its MIME type is `Artifact.mime`. */

@@ -122,6 +122,10 @@ pub fn run() {
             ide_commands::ide_search,
             ide_commands::ide_changes,
             ide_commands::ide_diff,
+            commands::exact_search,
+            commands::message_graph,
+            commands::memory_file,
+            commands::save_memory_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

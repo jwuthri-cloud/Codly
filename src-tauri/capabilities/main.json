@@ -18,6 +18,7 @@
     "allow-move-task", "allow-assign-task", "allow-task-diff", "allow-plan-diff", "allow-merge-plan",
     "allow-get-events", "allow-search-code", "allow-list-memories", "allow-add-memory", "allow-delete-memory",
     "allow-list-triples", "allow-repo-map", "allow-read-artifact", "allow-keep-plan", "allow-pin-memory", "allow-pty-open", "allow-pty-attach", "allow-pty-write", "allow-pty-resize", "allow-pty-close",
-    "allow-dictation-status", "allow-dictation-configure", "allow-dictation-save-key", "allow-dictation-clear-key", "allow-dictation-transcribe"
+    "allow-dictation-status", "allow-dictation-configure", "allow-dictation-save-key", "allow-dictation-clear-key", "allow-dictation-transcribe",
+    "allow-exact-search", "allow-message-graph", "allow-memory-file", "allow-save-memory-file"
   ]
 }
