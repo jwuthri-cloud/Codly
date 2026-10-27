@@ -15,6 +15,7 @@
 //! - `pty`          interactive terminals (portable-pty)
 
 pub mod adapters;
+pub mod blockers;
 pub mod env;
 pub mod git;
 pub mod index;

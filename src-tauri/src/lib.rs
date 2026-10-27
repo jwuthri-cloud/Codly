@@ -1,6 +1,7 @@
 //! Codly desktop shell: window, plugins, commands and the UI bus. All logic lives in
 //! `codly-core`; this crate only wires it to the webview.
 
+mod ask_me;
 mod commands;
 #[cfg(test)]
 mod ipc_tests;
@@ -8,6 +9,7 @@ mod ui_bus;
 
 use std::sync::Arc;
 
+use codly_core::blockers::{BlockerSeverity, BlockerStatus};
 use codly_core::model::{EventKind, PlanStatus, TaskStatus};
 use codly_core::{Core, CoreConfig};
 use tauri::{Manager, RunEvent};
@@ -99,6 +101,9 @@ pub fn run() {
             commands::pty_write,
             commands::pty_resize,
             commands::pty_close,
+            ask_me::list_blockers,
+            ask_me::answer_blocker,
+            ask_me::dismiss_blocker,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
@@ -134,6 +139,13 @@ async fn notify_loop(app: tauri::AppHandle, core: Arc<Core>) {
                     codly_core::model::ApprovalSubject::Permissions { .. } => "get more permissions".into(),
                 };
                 ("An agent needs you".to_string(), format!("It wants to {what}."))
+            }
+            // A new blocking question, or one that has waited for days.
+            EventKind::BlockerChanged { blocker }
+                if blocker.status == BlockerStatus::Open && blocker.severity == BlockerSeverity::Blocking && blocker.updated_at == blocker.reminded_at.unwrap_or(blocker.created_at) =>
+            {
+                let title = if blocker.reminded_at.is_some() { "Still waiting for your answer" } else { "An agent needs a decision" };
+                (title.to_string(), truncate(&blocker.title, 120))
             }
             EventKind::PlanChanged { plan } if plan.status == PlanStatus::Done => {
                 ("Plan done".to_string(), truncate(&plan.summary, 120))

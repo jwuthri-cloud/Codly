@@ -18,6 +18,7 @@ import type { Snapshot } from './gen/Snapshot';
 import type { TaskStatus } from './gen/TaskStatus';
 import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
+import { MockAskMe } from './demo/askme';
 import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
@@ -68,6 +69,7 @@ export class MockTransport implements Transport {
   private story: Story;
   private ptys = new Map<string, FakeShell>();
   private ptySeq = 0;
+  private askMe!: MockAskMe;
 
   constructor() {
     const p = params();
@@ -83,6 +85,7 @@ export class MockTransport implements Transport {
       { ...SETTINGS, theme },
     );
     this.story = new Story(this.sim);
+    this.askMe = new MockAskMe(this.sim);
     const now = this.sim.now();
     this.sim.clis = CLIS;
     this.sim.recent = [
@@ -237,6 +240,12 @@ export class MockTransport implements Transport {
         this.ptys.get(String(a.ptyId))?.close();
         this.ptys.delete(String(a.ptyId));
         return null;
+      case 'list_blockers':
+        return this.askMe.list();
+      case 'answer_blocker':
+        return this.askMe.close(String(a.blockerId), 'answered', String(a.answer ?? ''));
+      case 'dismiss_blocker':
+        return this.askMe.close(String(a.blockerId), 'dismissed', null);
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

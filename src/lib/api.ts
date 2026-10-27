@@ -5,6 +5,7 @@
 // CONTRACT: command names and argument keys match src-tauri/src/commands.rs.
 import type { AccountInfo } from './gen/AccountInfo';
 import type { Agent } from './gen/Agent';
+import type { Blocker } from './gen/Blocker';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { CliInfo } from './gen/CliInfo';
 import type { EventRow } from './gen/EventRow';
@@ -119,6 +120,11 @@ export const api = {
   ptyWrite: (ptyId: string, data: string) => call<void>('pty_write', { ptyId, data }),
   ptyResize: (ptyId: string, cols: number, rows: number) => call<void>('pty_resize', { ptyId, cols, rows }),
   ptyClose: (ptyId: string) => call<void>('pty_close', { ptyId }),
+  /** "Ask me" cards (codly_ask_user) of the open repo; long-waiting ones come back flagged. */
+  listBlockers: () => call<Blocker[]>('list_blockers'),
+  /** Respond & unblock: answer a card and resume the agent that waits for it. */
+  answerBlocker: (blockerId: string, answer: string) => call<Blocker>('answer_blocker', { blockerId, answer }),
+  dismissBlocker: (blockerId: string) => call<Blocker>('dismiss_blocker', { blockerId }),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;

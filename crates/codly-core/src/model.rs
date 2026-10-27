@@ -984,6 +984,10 @@ pub enum EventKind {
     ArtifactAdded {
         artifact: Artifact,
     },
+    /// An "ask me" blocker was raised, answered, dismissed or reminded (codly_ask_user).
+    BlockerChanged {
+        blocker: crate::blockers::Blocker,
+    },
 }
 
 impl EventKind {
@@ -1033,6 +1037,7 @@ impl EventKind {
             EventKind::Reviewed { .. } => "reviewed",
             EventKind::Merged { .. } => "merged",
             EventKind::ArtifactAdded { .. } => "artifact_added",
+            EventKind::BlockerChanged { .. } => "blocker_changed",
         }
     }
 }

@@ -6,6 +6,7 @@ import type { Approval } from "./Approval";
 import type { ApprovalStatus } from "./ApprovalStatus";
 import type { Artifact } from "./Artifact";
 import type { Billing } from "./Billing";
+import type { Blocker } from "./Blocker";
 import type { ChatMessage } from "./ChatMessage";
 import type { Citation } from "./Citation";
 import type { Confidence } from "./Confidence";
@@ -54,4 +55,4 @@ by: string, } | { "type": "usage_updated", usage: Usage, } | { "type": "rate_lim
 /**
  * "rule" | "model" | "human"
  */
-method: string, summary: string, detail: JsonValue, } | { "type": "retrieval", query: string, confidence: Confidence, citations: Array<Citation>, } | { "type": "memory_added", memory: Memory, } | { "type": "triple_added", triple: Triple, } | { "type": "committed", sha: string, files: Array<string>, message: string, } | { "type": "verified", command: string, ok: boolean, exit_code: number | null, tail: string, } | { "type": "reviewed", verdict: string, summary: string, } | { "type": "merged", sha: string, branch: string, } | { "type": "artifact_added", artifact: Artifact, };
+method: string, summary: string, detail: JsonValue, } | { "type": "retrieval", query: string, confidence: Confidence, citations: Array<Citation>, } | { "type": "memory_added", memory: Memory, } | { "type": "triple_added", triple: Triple, } | { "type": "committed", sha: string, files: Array<string>, message: string, } | { "type": "verified", command: string, ok: boolean, exit_code: number | null, tail: string, } | { "type": "reviewed", verdict: string, summary: string, } | { "type": "merged", sha: string, branch: string, } | { "type": "artifact_added", artifact: Artifact, } | { "type": "blocker_changed", blocker: Blocker, };
