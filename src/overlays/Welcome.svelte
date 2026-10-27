@@ -20,6 +20,7 @@
   import Logo from '../components/Logo.svelte';
   import Portrait from '../components/Portrait.svelte';
   import StateMark from '../components/StateMark.svelte';
+  import { quest } from '../onboarding/quest.svelte';
 
   let recent = $state<RecentWorkspace[]>([]);
   let detecting = $state(false);
@@ -129,6 +130,7 @@
     <footer class="foot">
       <span><Kbd keys="⌘K" /> search</span>
       <span><Kbd keys="?" /> shortcuts</span>
+      <button class="btn ghost sm" onclick={() => quest.replay()}><Icon name="sparkle" size={13} />Replay onboarding</button>
       <button class="btn ghost sm" onclick={() => (ui.settingsOpen = true)}><Icon name="settings" size={13} />Settings</button>
     </footer>
   </div>
@@ -176,6 +178,6 @@
   .fine { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); margin-top: 6px; }
   .foot { width: min(1180px, calc(100vw - 64px)); margin: 0 auto; display: flex; align-items: center; gap: 18px; padding: 18px 0 26px; color: var(--ink-3); font-size: var(--t-sm); }
   .foot span { display: inline-flex; gap: 6px; align-items: center; }
-  .foot .btn { margin-left: auto; }
+  .foot .btn:first-of-type { margin-left: auto; }
   @media (max-width: 1100px) { .page { grid-template-columns: 1fr; gap: 28px; } .crew { padding-top: 0; } }
 </style>
