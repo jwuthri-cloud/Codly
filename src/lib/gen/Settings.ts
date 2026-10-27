@@ -46,4 +46,9 @@ theme: string,
 /**
  * The standing team, in every repo unless a repo switches a member off.
  */
-team: Array<TeamMember>, };
+team: Array<TeamMember>, 
+/**
+ * Opt in to your own OpenRouter key for OpenCode (the key itself lives in the Keychain).
+ * Off = subscription-only: every API-key variable is scrubbed from the agents' env.
+ */
+byok_openrouter: boolean, };

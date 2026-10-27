@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-byok-status"
+description = "Enables the byok_status command without any pre-configured scope."
+commands.allow = ["byok_status"]
+
+[[permission]]
+identifier = "deny-byok-status"
+description = "Denies the byok_status command without any pre-configured scope."
+commands.deny = ["byok_status"]

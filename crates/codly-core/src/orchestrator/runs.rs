@@ -54,7 +54,16 @@ impl Inner {
             .flatten()
             .or_else(|| cli.path.as_ref().map(PathBuf::from))
             .ok_or_else(|| anyhow!("{} binary not found", provider.label()))?;
-        let mut env = guard("env::child_env", || Ok(crate::env::child_env(&self.base_env, provider))).unwrap_or_else(|e| {
+        // The opt-in OpenRouter key (byok.rs) reaches OpenCode's env only; the Keychain read is a subprocess.
+        let byok_key = if provider == Provider::Opencode && self.settings().byok_openrouter {
+            tokio::task::spawn_blocking(|| crate::byok::global().active_key(true)).await.ok().flatten()
+        } else {
+            None
+        };
+        let mut env = guard("env::child_env", || {
+            Ok(crate::env::child_env_with(&self.base_env, provider, byok_key.as_ref().map(|k| k.expose())))
+        })
+        .unwrap_or_else(|e| {
             tracing::debug!("{e}; using the base env");
             self.base_env.clone()
         });

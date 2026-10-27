@@ -105,6 +105,11 @@
     "allow-ide-create",
     "allow-ide-search",
     "allow-ide-changes",
-    "allow-ide-diff"
+    "allow-ide-diff",
+    "allow-install-cli",
+    "allow-byok-status",
+    "allow-byok-configure",
+    "allow-byok-save-key",
+    "allow-byok-clear-key"
   ]
 }

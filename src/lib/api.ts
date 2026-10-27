@@ -16,7 +16,10 @@ import type { ArchivePolicy } from './gen/ArchivePolicy';
 import type { Connection } from './gen/Connection';
 import type { ConnectionSecret } from './gen/ConnectionSecret';
 import type { SweepReport } from './gen/SweepReport';
+import type { ByokStatus } from './gen/ByokStatus';
 import type { CliInfo } from './gen/CliInfo';
+import type { InstallRun } from './gen/InstallRun';
+import type { InstallRung } from './gen/InstallRung';
 import type { ControlState } from './gen/ControlState';
 import type { EventRow } from './gen/EventRow';
 import type { IdeChange } from './gen/IdeChange';
@@ -228,6 +231,13 @@ export const api = {
   /** Switch a server and/or store its key (Keychain; `value: null` removes it). Applies to the next spawn. */
   updateConnection: (id: string, enabled: boolean | null, secret: ConnectionSecret | null = null) =>
     call<Connection[]>('update_connection', { id, enabled, secret }),
+  /** Onboarding: run the vendor's install line for a CLI in a visible terminal (attach with `ptyAttach`). The core picks the text from (provider, rung); nothing typed here is ever run. */
+  installCli: (provider: Provider, rung: InstallRung) => call<InstallRun>('install_cli', { provider, rung }),
+  /** OpenRouter key for OpenCode (opt-in). The key goes in once and never comes back: every reply is a status. */
+  byokStatus: () => call<ByokStatus>('byok_status'),
+  byokConfigure: (enabled: boolean) => call<ByokStatus>('byok_configure', { enabled }),
+  byokSaveKey: (key: string) => call<ByokStatus>('byok_save_key', { key }),
+  byokClear: () => call<ByokStatus>('byok_clear_key'),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;

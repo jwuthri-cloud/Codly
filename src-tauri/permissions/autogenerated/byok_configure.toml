@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-byok-configure"
+description = "Enables the byok_configure command without any pre-configured scope."
+commands.allow = ["byok_configure"]
+
+[[permission]]
+identifier = "deny-byok-configure"
+description = "Denies the byok_configure command without any pre-configured scope."
+commands.deny = ["byok_configure"]

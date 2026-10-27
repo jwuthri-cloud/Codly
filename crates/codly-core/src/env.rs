@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::model::{AccountConfig, AccountInfo, Billing, CliInfo, Provider};
+use crate::model::{AccountConfig, AccountInfo, Billing, CliInfo, InstallHint, Provider};
 
 const BEGIN: &[u8] = b"__CODLY_ENV_BEGIN__";
 const END: &[u8] = b"__CODLY_ENV_END__";
@@ -222,6 +222,7 @@ async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
         plan: None,
         problem: None,
         transport: transport(provider).into(),
+        install: install_hint(provider),
     };
     let Some(bin) = resolve_bin(provider, base) else {
         info.problem = Some(format!(
@@ -436,6 +437,12 @@ fn scrubbed(key: &str, provider: Provider) -> bool {
 /// per repository, shared by every worktree, so parallel workers would race on one
 /// MEMORY.md (memory-knowledge §5.6); Codly's own memory replaces it.
 pub fn child_env(base: &HashMap<String, String>, provider: Provider) -> HashMap<String, String> {
+    child_env_with(base, provider, None)
+}
+
+/// `child_env` plus the opt-in OpenRouter key (`byok.rs`): injected for OpenCode only, whatever
+/// the provider the caller asks about; `None` is the subscription-only default.
+pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, openrouter_key: Option<&str>) -> HashMap<String, String> {
     let mut env: HashMap<String, String> =
         base.iter().filter(|(k, _)| !scrubbed(k, provider)).map(|(k, v)| (k.clone(), v.clone())).collect();
     env.insert("TERM".into(), "dumb".into());
@@ -446,6 +453,11 @@ pub fn child_env(base: &HashMap<String, String>, provider: Provider) -> HashMap<
         }
         Provider::Codex => {
             env.insert("NO_COLOR".into(), "1".into());
+        }
+        Provider::Opencode => {
+            if let Some(key) = openrouter_key {
+                env.insert(crate::byok::ENV_VAR.into(), key.into());
+            }
         }
         _ => {}
     }
@@ -555,6 +567,11 @@ pub fn account_label(provider: Provider, home: Option<&str>) -> String {
         .filter(|r| !r.is_empty())
         .unwrap_or(bare);
     if short.is_empty() { name.to_string() } else { short.to_string() }
+}
+
+/// How to install and sign in `provider`: trusted constants (`install.rs`), never user input.
+pub fn install_hint(provider: Provider) -> InstallHint {
+    crate::install::hint(provider)
 }
 
 /// The command that signs an account in, for the user to run in a terminal.
@@ -889,6 +906,7 @@ esac
                 plan: None,
                 problem: None,
                 transport: "test".into(),
+                install: install_hint(provider),
             };
             let clis = vec![cli(Provider::Claude, script.to_str().unwrap()), cli(Provider::Gemini, "/usr/bin/true"), cli(Provider::Opencode, "/usr/bin/true")];
             Home { dir, base, clis }
