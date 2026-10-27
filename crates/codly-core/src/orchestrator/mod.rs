@@ -436,6 +436,11 @@ impl Core {
         Ok(s)
     }
 
+    /// A request thread's own mode, permissions and Lead model (None fields = Settings defaults).
+    pub async fn set_request_prefs(&self, thread: &str, prefs: RequestPrefs) -> anyhow::Result<RequestPrefs> {
+        self.inner.set_request_prefs(thread, prefs)
+    }
+
     /// The open repo's changes to the global team (switch members off, add its own).
     pub async fn set_workspace_team(&self, team: WorkspaceTeam) -> anyhow::Result<WorkspaceTeam> {
         self.inner.set_workspace_team(team)

@@ -29,6 +29,7 @@ import type { Triple } from '../gen/Triple';
 import type { Usage } from '../gen/Usage';
 import type { Workspace } from '../gen/Workspace';
 import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
+import type { RequestPrefs } from '../gen/RequestPrefs';
 import type { JsonValue } from '../gen/serde_json/JsonValue';
 import { DemoAccounts } from './accounts';
 import { VirtualClock } from './clock';
@@ -81,6 +82,7 @@ export class Sim {
   recent: RecentWorkspace[] = [];
   settings: Settings;
   workspaceTeam: WorkspaceTeam = { off: [], members: [] };
+  requestPrefs: Record<string, RequestPrefs> = {};
   /** The demo machine's sign-ins (two Claude accounts, a signed-out Codex one…). */
   signIns: DemoAccounts;
   workspace: Workspace | null = null;
@@ -153,6 +155,7 @@ export class Sim {
       workspace: this.workspace,
       settings: this.settings,
       workspace_team: this.workspace ? this.workspaceTeam : null,
+      request_prefs: this.requestPrefs,
       agents: [...this.agents.values()],
       plans: [...this.plans.values()],
       tasks: [...this.tasks.values()],

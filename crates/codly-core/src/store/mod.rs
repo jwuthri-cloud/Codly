@@ -244,6 +244,39 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// A request thread's choices (defaults when unset or unreadable).
+    pub fn request_prefs(&self, workspace_id: &str, thread: &str) -> Result<RequestPrefs> {
+        Ok(self.kv_get(&format!("request:{workspace_id}:{thread}"))?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
+    }
+
+    /// None removes them (the thread goes back to the Settings defaults).
+    pub fn save_request_prefs(&self, workspace_id: &str, thread: &str, p: Option<&RequestPrefs>) -> Result<()> {
+        let key = format!("request:{workspace_id}:{thread}");
+        match p {
+            Some(p) => self.kv_set(&key, &serde_json::to_string(p)?),
+            None => {
+                self.conn().execute("DELETE FROM kv WHERE key = ?1", [key])?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Every request thread's choices in a workspace, by thread.
+    pub fn all_request_prefs(&self, workspace_id: &str) -> Result<std::collections::HashMap<String, RequestPrefs>> {
+        let prefix = format!("request:{workspace_id}:");
+        let conn = self.conn();
+        let mut st = conn.prepare_cached("SELECT key, value FROM kv WHERE substr(key, 1, length(?1)) = ?1")?;
+        let rows = st.query_map([&prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            if let Ok(p) = serde_json::from_str(&v) {
+                out.insert(k[prefix.len()..].to_string(), p);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
         Ok(self.conn().query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }

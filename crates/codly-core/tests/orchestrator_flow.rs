@@ -1833,3 +1833,67 @@ async fn a_consultant_is_hired_with_the_leads_model_and_let_go() {
     assert!(log.lock().unwrap().models.iter().any(|(a, m)| a == &c.id && m.as_deref() == Some("haiku")), "spawned with the Lead's model");
     core.shutdown().await;
 }
+
+/// A request's own mode and Lead model, picked in the composer: Ask refuses plans, Direct runs
+/// a quick task at once (even with auto-run off), and the Lead runs on the request's model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_requests_mode_and_model_steer_its_lead() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                return;
+            }
+            let task = json!({ "title": "Create hello.txt", "goal": "Create hello.txt", "assignee": "consultant", "consultant": { "title": "Docs" },
+                "acceptance_criteria": ["it exists"], "write_scope": ["hello.txt"], "verify": ["test -f hello.txt"] });
+            if turn.prompt.contains("Mode: Ask") {
+                let r = turn.tool("codly_submit_plan", json!({ "summary": "Add hello", "tasks": [{ "id": "t1", "depends_on": [], "title": "x",
+                    "goal": "x", "acceptance_criteria": ["x"], "write_scope": ["x"], "verify": ["true"] }] })).await;
+                turn.say(&format!("refused: {}", r["error"].as_str().unwrap_or("no")));
+            } else if turn.prompt.contains("Mode: Direct") {
+                let r = turn.tool("codly_quick_task", task).await;
+                assert_eq!(r["ok"], true, "{r}");
+                assert_eq!(r["result"]["status"], "running", "{r}");
+                turn.say("On it.");
+            }
+        })
+    });
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created it." })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    core.update_settings(Settings { auto_run_plans: false, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+
+    core.set_request_prefs("lead", RequestPrefs { mode: Some(LeadMode::Ask), ..Default::default() }).await.unwrap();
+    core.send_chat("lead", "add hello").await.unwrap();
+    let s = wait_for("the refusal", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        chats(&s, "lead").iter().any(|c| c.text.starts_with("refused: Not submitted: this request is in Ask mode")).then_some(s)
+    })
+    .await;
+    assert!(s.plans.is_empty());
+
+    let prefs = RequestPrefs { mode: Some(LeadMode::Direct), model: Some(" opus:high ".into()), ..Default::default() };
+    assert_eq!(core.set_request_prefs("lead", prefs).await.unwrap().model.as_deref(), Some("opus:high"));
+    assert!(core.set_request_prefs("agent:x", RequestPrefs::default()).await.is_err(), "only requests have modes");
+    core.send_chat("lead", "add hello now").await.unwrap();
+    let s = wait_for("the quick task done", 30, async || {
+        let s = core.snapshot().await.unwrap();
+        s.plans.first().is_some_and(|p| p.status == PlanStatus::Done).then_some(s)
+    })
+    .await;
+    assert_eq!(s.request_prefs["lead"].mode, Some(LeadMode::Direct));
+    let lead = lead_of(&s, "lead").unwrap();
+    let models: Vec<Option<String>> = log.lock().unwrap().models.iter().filter(|m| m.0 == lead.id).map(|m| m.1.clone()).collect();
+    assert_eq!(models.last().unwrap().as_deref(), Some("opus:high"), "the Lead restarts on the request's model: {models:?}");
+
+    core.close_thread("lead").await.unwrap();
+    assert!(core.snapshot().await.unwrap().request_prefs.is_empty(), "a closed request forgets its choices");
+    core.shutdown().await;
+}

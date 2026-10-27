@@ -458,8 +458,9 @@ impl Inner {
     /// `codly_quick_task`: a one-task plan (the user starts it unless plans auto-run). It
     /// does not replace the Lead's pending plan.
     pub(super) async fn quick_task(self: &Arc<Self>, lead_id: &str, args: Value) -> Result<Value> {
-        let mut task: TaskInput = serde_json::from_value(args).map_err(|e| anyhow!("Quick task rejected: {e}"))?;
-        task.id = "t1".into();
+        let mut args = args;
+        args["id"] = json!("t1"); // one task: the Lead never names it
+        let task: TaskInput = serde_json::from_value(args).map_err(|e| anyhow!("Quick task rejected: {e}"))?;
         let summary = task.title.clone();
         self.submit_plan_inner(lead_id, PlanInput { summary, tasks: vec![task], ..Default::default() }, false).await
     }

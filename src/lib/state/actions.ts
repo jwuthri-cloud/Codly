@@ -10,6 +10,7 @@ import type { Provider } from '../gen/Provider';
 import type { Settings } from '../gen/Settings';
 import type { TaskStatus } from '../gen/TaskStatus';
 import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
+import type { RequestPrefs } from '../gen/RequestPrefs';
 import { PROVIDER_LABEL, TASK_STATUS_LABEL } from '../util/labels';
 import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
@@ -63,6 +64,15 @@ export async function updateSettings(patch: Partial<Settings>) {
   const saved = await attempt('save settings', () => api.updateSettings(next));
   if (saved) store.setSettings(saved);
   else store.setSettings(prev);
+}
+
+/** Change a request's mode, permissions or Lead model; shown at once, reverted if refused. */
+export async function setRequestPrefs(thread: string, patch: Partial<RequestPrefs>) {
+  const prev = store.requestPrefs[thread] ?? { mode: null, approval_mode: null, model: null };
+  const next = { ...prev, ...patch };
+  store.setRequestPrefs(thread, next);
+  const saved = await attempt('change the request', () => api.setRequestPrefs(thread, next));
+  store.setRequestPrefs(thread, saved ?? prev);
 }
 
 /** Save the open repo's team changes; shown at once, reverted if the core refuses them. */

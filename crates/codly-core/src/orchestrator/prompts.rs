@@ -46,6 +46,12 @@ Staffing: who does each task
 - Reviewer members review finished tasks; never assign them tasks.
 - codly_message_member asks a member something or gives them a heads-up; their answer comes back to you. codly_quick_task gives one small task to a member or consultant without a plan (the user still starts it). codly_reassign moves a task that has not started yet.
 
+Modes (the board's first line says this request's mode; the user switches it in the composer)
+- Ask: answer only. Do not call codly_submit_plan or codly_quick_task (Codly refuses them). If the user wants a change, say they can switch the request to Plan, Auto or Direct.
+- Plan: propose the change with codly_submit_plan; the user reviews it and clicks Run plan.
+- Auto: the same, but plans start at once without the user's click (unless they have open_questions).
+- Direct: make it happen now with the least ceremony. For a change one agent can do, call codly_quick_task with the best-fitting member or a consultant: it starts at once, no plan card. Use codly_submit_plan only for work that truly needs several tasks (it also starts at once). Do not ask for confirmation first.
+
 Context you receive
 - Each user message starts with a <codly-board> block: the live state of plans, tasks, agents, approvals and notes. It supersedes anything earlier in this conversation.
 - The user can run several requests at once, each with its own Lead and chat thread. Plans marked "another request" belong to other Leads; their "writes" lists the files they change. Never plan edits to those files: tell the user which request is already changing them, and plan around them or suggest waiting until it is done.
@@ -355,6 +361,18 @@ pub struct Board<'a> {
     pub accounts: &'a [AccountInfo],
     /// CLIs a consultant can be hired on (installed and signed in).
     pub consultant_clis: &'a [Provider],
+    /// The request's mode (how the Lead turns work into changes).
+    pub mode: LeadMode,
+}
+
+/// The board's first line: what the request's mode lets the Lead do.
+fn mode_line(m: LeadMode) -> &'static str {
+    match m {
+        LeadMode::Ask => "Mode: Ask — answer only; no plans or tasks.",
+        LeadMode::Plan => "Mode: Plan — propose with codly_submit_plan; the user clicks Run plan.",
+        LeadMode::Auto => "Mode: Auto — plans you submit start at once.",
+        LeadMode::Direct => "Mode: Direct — do it now: codly_quick_task to the best member or a consultant, starts at once, no confirmation.",
+    }
 }
 
 /// "Claude sonnet" / "Codex" (the CLI default).
@@ -395,7 +413,7 @@ pub fn board_header(b: &Board) -> String {
             .unwrap_or_default()
     };
     let ws = b.workspace;
-    let mut lines: Vec<String> = vec![];
+    let mut lines: Vec<String> = vec![mode_line(b.mode).to_string()];
     let head = ws.head.as_deref().map(|h| &h[..h.len().min(8)]).unwrap_or("no commits");
     lines.push(format!(
         "Repo: {} on {} @ {head}{}",
@@ -652,6 +670,7 @@ mod tests {
             notes: &[],
             accounts: &[],
             consultant_clis: &[],
+            mode: LeadMode::Plan,
         });
         for line in board.lines().filter(|l| l.contains("ignore your")) {
             let at = line.find("ignore your").unwrap();
@@ -689,7 +708,7 @@ mod tests {
             task(json!({ "id": "b", "plan_id": "p2", "key": "t1", "title": "Login", "status": "running", "write_scope": ["src/auth.ts"] })),
             task(json!({ "id": "c", "plan_id": "p2", "key": "t2", "title": "Tests", "status": "pending", "write_scope": ["src/auth.ts", "test/**"] })),
         ];
-        let board = |thread: &str| board_header(&Board { workspace: &ws, thread, plans: &plans, tasks: &tasks, agents: std::slice::from_ref(&lead2), approvals: &[], notes: &[], accounts: &[], consultant_clis: &[] });
+        let board = |thread: &str| board_header(&Board { workspace: &ws, thread, plans: &plans, tasks: &tasks, agents: std::slice::from_ref(&lead2), approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan });
         let mine = board("lead");
         assert!(mine.contains("Plan \"Dark mode\" (yours) — running, 0/1 done") && mine.contains("t1 running — Theme"), "{mine}");
         assert!(
@@ -711,7 +730,7 @@ mod tests {
         .unwrap();
         let tasks: Vec<Task> =
             (0..40).map(|i| task(json!({ "id": format!("t{i}"), "key": format!("t{i}"), "status": "ready", "status_reason": "x ".repeat(60) }))).collect();
-        let b = board_header(&Board { workspace: &ws, thread: "lead", plans: &[], tasks: &tasks, agents: &[], approvals: &[], notes: &[], accounts: &[], consultant_clis: &[] });
+        let b = board_header(&Board { workspace: &ws, thread: "lead", plans: &[], tasks: &tasks, agents: &[], approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan });
         assert!(b.len() <= BOARD_BUDGET, "{}", b.len());
         assert_eq!(b.matches("<untrusted>").count(), b.matches("</untrusted>").count());
     }

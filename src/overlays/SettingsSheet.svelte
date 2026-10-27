@@ -116,7 +116,7 @@
         <div class="row">
           <div class="r-text">
             <span class="r-title">Model</span>
-            <span class="desc">Empty uses {PROVIDER_LABEL[leadCli]}’s default. Leads switch on their next message and keep their conversation.</span>
+            <span class="desc">Empty uses {PROVIDER_LABEL[leadCli]}’s default. A request can pick its own under the composer. Leads switch on their next message and keep their conversation.</span>
           </div>
           <input class="field" list="lead-models" value={leadModel.name} placeholder="Default" spellcheck="false" autocomplete="off" aria-label="Lead model" onchange={(e) => setLeadModel(e.currentTarget.value, leadModel.effort)} />
           <datalist id="lead-models">{#each leadModels as m (m)}<option value={m}></option>{/each}</datalist>
@@ -172,6 +172,7 @@
 
       <section>
         <h3 class="eyebrow">Approvals</h3>
+        <p class="desc">The default; a request can choose its own under the composer.</p>
         <div class="modes">
           {#each MODES as m (m.id)}
             <button class="mode" class:on={s.approval_mode === m.id} onclick={() => set({ approval_mode: m.id })} aria-pressed={s.approval_mode === m.id}>
@@ -185,7 +186,7 @@
       <section>
         <h3 class="eyebrow">Plans</h3>
         {#each [
-          ['auto_run_plans', 'Run plans without asking', 'Skip the Run plan click. You can still cancel at any time.'],
+          ['auto_run_plans', 'Run plans without asking', 'New requests start in Auto instead of Plan (switch per request under the composer, or ⇧⇥). You can still cancel at any time.'],
           ['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.'],
           ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
         ] as [k, title, body] (k)}

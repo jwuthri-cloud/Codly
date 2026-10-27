@@ -11,6 +11,7 @@
 import { api, getTransport, type UiBatch } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
+import type { RequestPrefs } from '../gen/RequestPrefs';
 import type { Approval } from '../gen/Approval';
 import type { Artifact } from '../gen/Artifact';
 import type { ChatMessage } from '../gen/ChatMessage';
@@ -206,6 +207,8 @@ class CodlyStore {
   settings = $state.raw<Settings>(DEFAULT_SETTINGS);
   /** The open repo's changes to the global team. */
   workspaceTeam = $state.raw<WorkspaceTeam>({ off: [], members: [] });
+  /** Per request thread: its own mode, permissions and Lead model (unset = Settings). */
+  requestPrefs = $state.raw<Record<string, RequestPrefs>>({});
   agents = $state.raw<Agent[]>([]);
   plans = $state.raw<Plan[]>([]);
   tasks = $state.raw<Task[]>([]);
@@ -298,6 +301,7 @@ class CodlyStore {
     this.workspace = s.workspace;
     this.settings = s.settings ?? DEFAULT_SETTINGS;
     this.workspaceTeam = s.workspace_team ?? { off: [], members: [] };
+    this.requestPrefs = (s.request_prefs ?? {}) as Record<string, RequestPrefs>;
     this.agents = s.agents;
     this.plans = s.plans;
     this.tasks = s.tasks;
@@ -742,6 +746,9 @@ class CodlyStore {
   }
   setWorkspaceTeam(t: WorkspaceTeam) {
     this.workspaceTeam = t;
+  }
+  setRequestPrefs(thread: string, p: RequestPrefs) {
+    this.requestPrefs = { ...this.requestPrefs, [thread]: p };
   }
   upsertTask(t: Task) {
     this.tasks = upsert(this.tasks, t);

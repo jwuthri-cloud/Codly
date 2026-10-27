@@ -71,6 +71,10 @@ impl Inner {
             None => self.require_ws()?,
         };
         let thread = self.agent(lead_id).map_or_else(|_| default_lead_thread(), |a| lead::thread_of(&a).to_string());
+        let mode = self.lead_mode(&ws.id, &thread);
+        if mode == LeadMode::Ask {
+            bail!("Not submitted: this request is in Ask mode (answers only). Answer the user, and tell them to switch the request to Plan, Auto or Direct if they want the change made.");
+        }
         let mut valid = planner::validate(input).map_err(|e| anyhow!(e))?;
         let staffing = self.check_team(&ws, &mut valid.plan.tasks)?;
         let known: Vec<String> = self.accounts().into_iter().map(|a| a.id).collect();
@@ -81,7 +85,6 @@ impl Inner {
                 known.join(", ")
             );
         }
-        let settings = self.settings();
         let now = now_ms();
 
         // A request's new plan replaces its own unstarted one, never another request's.
@@ -139,7 +142,9 @@ impl Inner {
                 updated_at: now + i as i64,
             })
             .collect();
-        let auto = settings.auto_run_plans && valid.plan.open_questions.is_empty();
+        // Auto and Direct requests run at once (unless the plan has questions for the user).
+        let runs_at_once = matches!(mode, LeadMode::Auto | LeadMode::Direct);
+        let auto = runs_at_once && valid.plan.open_questions.is_empty();
         let plan_json = serde_json::to_value(&valid.plan)?;
         let rows = self.store.tx(|tx| {
             let mut out = vec![];
@@ -164,7 +169,7 @@ impl Inner {
                 ),
                 json!({ "rule": "validated", "tasks": tasks.iter().map(|t| &t.key).collect::<Vec<_>>(), "fixes": valid.fixes.len() }),
             ));
-            if settings.auto_run_plans && !auto {
+            if runs_at_once && !auto {
                 decisions.push(("not auto-running: the plan has open questions for you".into(), json!({ "rule": "open_questions" })));
             }
             for (summary, mut detail) in decisions {

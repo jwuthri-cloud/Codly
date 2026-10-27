@@ -132,6 +132,7 @@ impl Inner {
             workspace: ws,
             settings: self.settings(),
             workspace_team: id.map(|w| self.store.workspace_team(w)).transpose()?,
+            request_prefs: id.map(|w| self.store.all_request_prefs(w)).transpose()?.unwrap_or_default(),
             agents,
             plans,
             tasks,

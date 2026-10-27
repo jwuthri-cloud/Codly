@@ -388,8 +388,15 @@ impl Inner {
     fn broker(&self, ctx: &Ctx, approval: &Approval) {
         let ws = ctx.ws.as_deref();
         let (cwd, read_only) = lock(&self.live).get(&ctx.agent_id).map_or((None, true), |l| (Some(l.cwd.clone()), l.read_only));
-        let verify = ctx.task_id.as_deref().and_then(|t| self.store.task(t).ok().flatten()).map(|t| t.verify).unwrap_or_default();
-        let mode = self.settings().approval_mode;
+        let task = ctx.task_id.as_deref().and_then(|t| self.store.task(t).ok().flatten());
+        // The request the run works for (a Lead's own, a task's plan's) may set its own permissions.
+        let thread = match (&task, ctx.role) {
+            (Some(t), _) => Some(self.task_thread(t)),
+            (None, Role::Lead) => self.agent(&ctx.agent_id).ok().map(|a| lead::thread_of(&a).to_string()),
+            _ => None,
+        };
+        let verify = task.map(|t| t.verify).unwrap_or_default();
+        let mode = self.approval_mode_for(ws, thread.as_deref());
         let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only };
         let verdict = approvals::evaluate(approval, &pctx);
         let subject = serde_json::to_value(&approval.subject).unwrap_or_default();

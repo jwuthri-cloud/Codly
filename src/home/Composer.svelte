@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { tick } from 'svelte';
-  import { sendChat } from '../lib/state/actions';
+  import { sendChat, setRequestPrefs } from '../lib/state/actions';
   import { busy } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
   import { isRequestThread, ui } from '../lib/state/ui.svelte';
@@ -14,6 +14,7 @@
   import { idVar, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
   import Icon from '../components/Icon.svelte';
   import Portrait from '../components/Portrait.svelte';
+  import LeadControls, { MODES } from './LeadControls.svelte';
 
   interface Props {
     thread: string;
@@ -142,6 +143,13 @@
       if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pick(options[mi]); return; }
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); mention = null; return; }
     }
+    // ⇧⇥ cycles the request's mode, like Claude Code.
+    if (e.key === 'Tab' && e.shiftKey && !oneToOne) {
+      e.preventDefault();
+      const now = store.requestPrefs[thread]?.mode ?? (store.settings.auto_run_plans ? 'auto' : 'plan');
+      setRequestPrefs(thread, { mode: MODES[(MODES.findIndex((m) => m.id === now) + 1) % MODES.length].id });
+      return;
+    }
     if (e.key === 'Backspace' && !text && oneToOne) {
       e.preventDefault();
       ui.openRequest(ui.request);
@@ -192,6 +200,7 @@
       <Icon name="send" size={15} stroke={1.8} />
     </button>
   </div>
+  {#if !oneToOne}<LeadControls {thread} />{/if}
 </div>
 
 <style>

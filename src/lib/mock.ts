@@ -18,6 +18,7 @@ import type { Snapshot } from './gen/Snapshot';
 import type { TaskStatus } from './gen/TaskStatus';
 import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
+import type { RequestPrefs } from './gen/RequestPrefs';
 import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
@@ -139,6 +140,9 @@ export class MockTransport implements Transport {
         story.syncTeam();
         return sim.settings;
       }
+      case 'set_request_prefs':
+        sim.requestPrefs[String(a.thread)] = a.prefs as RequestPrefs;
+        return a.prefs;
       case 'set_workspace_team': {
         const t = a.team as WorkspaceTeam;
         sim.workspaceTeam = { off: t.off, members: withIds(t.members) };

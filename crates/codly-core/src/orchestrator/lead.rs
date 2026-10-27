@@ -94,6 +94,42 @@ enum Delivery {
 }
 
 impl Inner {
+    // ───────────── per-request choices (the composer's pickers) ─────────────
+
+    /// The request's mode; unset = Auto when you auto-run plans, else Plan.
+    pub(super) fn lead_mode(&self, ws_id: &str, thread: &str) -> LeadMode {
+        let p = self.store.request_prefs(ws_id, thread).unwrap_or_default();
+        p.mode.unwrap_or(if self.settings().auto_run_plans { LeadMode::Auto } else { LeadMode::Plan })
+    }
+
+    /// The model of the request's Lead: its own pick, else the Settings one.
+    pub(super) fn lead_model_for(&self, ws_id: &str, thread: &str) -> Option<String> {
+        let p = self.store.request_prefs(ws_id, thread).unwrap_or_default();
+        p.model.or_else(|| self.settings().lead_model)
+    }
+
+    /// How much the agents of a request ask you: its own pick, else the Settings one.
+    pub(super) fn approval_mode_for(&self, ws_id: Option<&str>, thread: Option<&str>) -> ApprovalMode {
+        let own = ws_id.zip(thread).and_then(|(w, t)| self.store.request_prefs(w, t).ok()).and_then(|p| p.approval_mode);
+        own.unwrap_or_else(|| self.settings().approval_mode)
+    }
+
+    /// Save a request's choices. A new model reaches its Lead on the next message (same session).
+    pub(super) fn set_request_prefs(&self, thread: &str, prefs: RequestPrefs) -> Result<RequestPrefs> {
+        if !is_lead_thread(thread) {
+            bail!("{thread} is not a request");
+        }
+        let ws = self.require_ws()?;
+        let mut prefs = prefs;
+        prefs.model = prefs.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+        if let Some(m) = prefs.model.as_deref().filter(|m| !super::planner::valid_model(m)) {
+            bail!("the model '{m}' must be one word (e.g. sonnet, opus:high)");
+        }
+        let empty = prefs == RequestPrefs::default();
+        self.store.save_request_prefs(&ws.id, thread, (!empty).then_some(&prefs))?;
+        Ok(prefs)
+    }
+
     /// The provider of settings.lead_account if that account is usable, else
     /// settings.lead_provider if usable, else the first signed-in of claude, codex, gemini,
     /// opencode (a CLI with unknown sign-in state comes after the known-good ones).
@@ -145,7 +181,7 @@ impl Inner {
         let taken = |n: &str| agents.iter().any(|a| a.name.eq_ignore_ascii_case(n));
         let name = (1..).map(|n| if n == 1 { "Lead".to_string() } else { format!("Lead {n}") }).find(|n| !taken(n)).unwrap_or_default();
         let color = names::next_color(&agents.iter().map(|a| a.color).collect::<Vec<_>>());
-        let mut lead = self.new_agent(&name, provider, Role::Lead, color, self.settings().lead_model);
+        let mut lead = self.new_agent(&name, provider, Role::Lead, color, self.lead_model_for(&ws.id, thread));
         lead.thread = Some(thread.to_string());
         self.insert_agent(&ws.id, lead)
     }
@@ -177,18 +213,18 @@ impl Inner {
     /// Start (or resume by session id) a Lead's run.
     async fn spawn_lead(self: &Arc<Self>, ws: &Workspace, lead: Agent) -> Result<()> {
         let provider = self.lead_provider()?;
-        let settings = self.settings();
+        let model = self.lead_model_for(&ws.id, thread_of(&lead));
         let account = self.lead_account(provider, &lead);
         let mut lead = lead;
         // A session lives in its account's config home: another account starts a new one.
         let moved = lead.provider == provider && lead.session_id.is_some() && account.is_some() && account != self.agent_account(&lead);
-        if lead.provider != provider || lead.model != settings.lead_model || moved {
+        if lead.provider != provider || lead.model != model || moved {
             // Sessions are provider-specific: a new provider (or model) starts a new conversation.
             let billing = self.clis().iter().find(|c| c.provider == provider).map_or(Billing::Unknown, |c| c.billing);
             let switched = lead.provider != provider || moved;
             lead = self.update_agent(&lead.id, |a| {
                 a.provider = provider;
-                a.model = settings.lead_model.clone();
+                a.model = model.clone();
                 a.billing = billing;
                 if switched {
                     a.session_id = None;
@@ -273,7 +309,7 @@ impl Inner {
             Some((true, ..)) => return Ok(Delivery::Exiting),
             // Its CLI or model changed in Settings: an idle Lead restarts on it (same session).
             Some((false, provider, model))
-                if (model != self.settings().lead_model || self.lead_provider().is_ok_and(|p| p != provider))
+                if (model != self.lead_model_for(&ws.id, thread) || self.lead_provider().is_ok_and(|p| p != provider))
                     && self.is_quiet(&lead.id)
                     && self.stop_run(&lead.id) =>
             {
@@ -432,6 +468,7 @@ impl Inner {
         }
         drop_waiting();
         self.store.move_chats(&ws.id, thread, &archive)?;
+        self.store.save_request_prefs(&ws.id, thread, None)?; // a reused thread id starts from the defaults
         self.kick();
         self.pump_leads(); // its Lead's slot is free
         Ok(())
@@ -487,6 +524,7 @@ impl Inner {
             notes: &notes,
             accounts: &self.accounts(),
             consultant_clis: &self.consultant_clis(),
+            mode: self.lead_mode(&ws.id, thread),
         }))
     }
 

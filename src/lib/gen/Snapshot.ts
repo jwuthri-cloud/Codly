@@ -8,6 +8,7 @@ import type { CliInfo } from "./CliInfo";
 import type { EventRow } from "./EventRow";
 import type { Memory } from "./Memory";
 import type { Plan } from "./Plan";
+import type { RequestPrefs } from "./RequestPrefs";
 import type { Settings } from "./Settings";
 import type { Task } from "./Task";
 import type { Triple } from "./Triple";
@@ -21,7 +22,11 @@ export type Snapshot = { as_of: number, clis: Array<CliInfo>, accounts: Array<Ac
 /**
  * The open repo's changes to the global team.
  */
-workspace_team: WorkspaceTeam | null, agents: Array<Agent>, plans: Array<Plan>, tasks: Array<Task>, approvals: Array<Approval>, chats: Array<ChatMessage>, memories: Array<Memory>, triples: Array<Triple>, artifacts: Array<Artifact>, 
+workspace_team: WorkspaceTeam | null, 
+/**
+ * Per request thread of the open repo: its mode, permissions and Lead model.
+ */
+request_prefs: { [key in string]: RequestPrefs }, agents: Array<Agent>, plans: Array<Plan>, tasks: Array<Task>, approvals: Array<Approval>, chats: Array<ChatMessage>, memories: Array<Memory>, triples: Array<Triple>, artifacts: Array<Artifact>, 
 /**
  * Most recent persisted events (for timeline, inspector and world replay).
  */

@@ -131,6 +131,11 @@ pub async fn hire_agent(state: State<'_, AppState>, provider: Provider, model: O
 }
 
 #[tauri::command]
+pub async fn set_request_prefs(state: State<'_, AppState>, thread: String, prefs: RequestPrefs) -> R<RequestPrefs> {
+    state.core().await?.set_request_prefs(&thread, prefs).await.map_err(err)
+}
+
+#[tauri::command]
 pub async fn set_workspace_team(state: State<'_, AppState>, team: WorkspaceTeam) -> R<WorkspaceTeam> {
     state.core().await?.set_workspace_team(team).await.map_err(err)
 }

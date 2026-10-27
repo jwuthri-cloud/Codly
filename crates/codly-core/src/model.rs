@@ -1077,6 +1077,32 @@ pub enum ApprovalMode {
     Autonomous,
 }
 
+/// How a request's Lead turns work into changes (picked per request in the composer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum LeadMode {
+    /// Answers only: no plans, no tasks.
+    Ask,
+    /// Proposes a plan; you start it with Run plan.
+    Plan,
+    /// Plans and runs them at once.
+    Auto,
+    /// No plan card: hands the work straight to a team member or consultant, started at once.
+    Direct,
+}
+
+/// A request's own choices, each None = the Settings default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
+#[ts(export)]
+pub struct RequestPrefs {
+    pub mode: Option<LeadMode>,
+    pub approval_mode: Option<ApprovalMode>,
+    /// The Lead's model, "opus:high" style.
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Settings {
@@ -1145,6 +1171,8 @@ pub struct Snapshot {
     pub settings: Settings,
     /// The open repo's changes to the global team.
     pub workspace_team: Option<WorkspaceTeam>,
+    /// Per request thread of the open repo: its mode, permissions and Lead model.
+    pub request_prefs: std::collections::HashMap<String, RequestPrefs>,
     pub agents: Vec<Agent>,
     pub plans: Vec<Plan>,
     pub tasks: Vec<Task>,
