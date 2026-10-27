@@ -10,6 +10,11 @@ import type { AgentGit } from './gen/AgentGit';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { CliInfo } from './gen/CliInfo';
 import type { EventRow } from './gen/EventRow';
+import type { IdeChange } from './gen/IdeChange';
+import type { IdeEntry } from './gen/IdeEntry';
+import type { IdeFile } from './gen/IdeFile';
+import type { IdeInfo } from './gen/IdeInfo';
+import type { IdeSearch } from './gen/IdeSearch';
 import type { Memory } from './gen/Memory';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
@@ -145,6 +150,15 @@ export const api = {
   installSkill: (id: string) => call<Skill>('install_skill', { id }),
   uninstallSkill: (path: string, project: string | null) => call<void>('uninstall_skill', { path, project }),
   openSkillFolder: (path: string, project: string | null) => call<void>('open_skill_folder', { path, project }),
+  // ── workspace IDE: every path is relative to the agent's worktree and confined to it by the core ──
+  ideInfo: (agentId: string) => call<IdeInfo>('ide_info', { agentId }),
+  ideList: (agentId: string, path: string) => call<IdeEntry[]>('ide_list', { agentId, path }),
+  ideRead: (agentId: string, path: string) => call<IdeFile>('ide_read', { agentId, path }),
+  ideWrite: (agentId: string, path: string, content: string) => call<void>('ide_write', { agentId, path, content }),
+  ideCreate: (agentId: string, path: string) => call<void>('ide_create', { agentId, path }),
+  ideSearch: (agentId: string, query: string) => call<IdeSearch>('ide_search', { agentId, query }),
+  ideChanges: (agentId: string) => call<IdeChange[]>('ide_changes', { agentId }),
+  ideDiff: (agentId: string, path: string) => call<string>('ide_diff', { agentId, path }),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;

@@ -31,6 +31,7 @@
   import TaskChecks from './TaskChecks.svelte';
   import AgentTabs from './AgentTabs.svelte';
   import { agentTitle } from '../lib/util/team';
+  import { ide } from '../ide/ide.svelte';
 
   interface Props {
     agent: Agent;
@@ -234,6 +235,7 @@
   </header>
   <div class="h-actions">
     <button class="btn sm" onclick={() => ui.openThread(store.threadOf(agent.id))}><Icon name="chat" size={13} />{agent.role === 'lead' ? 'Talk to the Lead' : `Talk to ${agent.name}`}</button>
+    <button class="btn sm ghost" onclick={() => ide.open(agent.id)} data-tip="Browse and edit this agent’s worktree"><Icon name="code" size={13} />IDE</button>
     {#if working}<button class="btn sm ghost" onclick={() => interruptAgent(agent.id)}><Icon name="pause" size={13} />Interrupt</button>{/if}
     <button class="icon-btn" bind:this={moreBtn} aria-label="More actions" onclick={() => (moreOpen = !moreOpen)}><Icon name="more" /></button>
   </div>

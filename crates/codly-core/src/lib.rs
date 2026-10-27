@@ -16,11 +16,13 @@
 //! - `dictation`    Free Flow: Groq Whisper transcription, key in the Keychain
 //! - `triggers`     schedules, context rules, network mode: pure policy (run by `orchestrator/triggers.rs`)
 //! - `skills`       skills manager: scan, catalog, install, uninstall
+//! - `ide`          confined file list/read/write/search for the workspace IDE overlay
 
 pub mod adapters;
 pub mod dictation;
 pub mod env;
 pub mod git;
+pub mod ide;
 pub mod index;
 pub mod mcp;
 pub mod memory;

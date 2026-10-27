@@ -26,6 +26,7 @@ import { Story } from './demo/story';
 import { saveTriggers, seedTriggers } from './demo/triggers';
 import type { TriggersConfig } from './gen/TriggersConfig';
 import { skillsMock } from './demo/skillsMock';
+import { mockIde } from '../ide/mockFs';
 
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
@@ -267,6 +268,15 @@ export class MockTransport implements Transport {
         return (this.triggers ??= seedTriggers());
       case 'set_triggers':
         return (this.triggers = saveTriggers((this.triggers ??= seedTriggers()), a.config as TriggersConfig));
+      case 'ide_info':
+      case 'ide_list':
+      case 'ide_read':
+      case 'ide_write':
+      case 'ide_create':
+      case 'ide_search':
+      case 'ide_changes':
+      case 'ide_diff':
+        return mockIde(cmd, a);
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

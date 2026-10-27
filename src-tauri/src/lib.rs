@@ -3,6 +3,7 @@
 
 mod commands;
 mod dictation;
+mod ide_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod ui_bus;
@@ -113,6 +114,14 @@ pub fn run() {
             commands::install_skill,
             commands::uninstall_skill,
             commands::open_skill_folder,
+            ide_commands::ide_info,
+            ide_commands::ide_list,
+            ide_commands::ide_read,
+            ide_commands::ide_write,
+            ide_commands::ide_create,
+            ide_commands::ide_search,
+            ide_commands::ide_changes,
+            ide_commands::ide_diff,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

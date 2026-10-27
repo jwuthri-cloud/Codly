@@ -19,6 +19,7 @@ pub mod accounts;
 pub mod approvals;
 pub mod agent_git;
 mod gate;
+mod ide;
 mod ingest;
 mod lead;
 pub mod names;
