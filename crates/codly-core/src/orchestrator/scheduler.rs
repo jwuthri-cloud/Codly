@@ -75,7 +75,8 @@ impl AccountState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentPick {
     Existing(Id),
-    New { name: String, color: i64 },
+    /// A consultant hired for this task (`model`: the Lead's pick, None = the CLI default).
+    New { name: String, color: i64, model: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +172,8 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
     let mut per: HashMap<String, usize> = HashMap::new();
     let mut leases: Vec<(String, Vec<String>)> = vec![];
     let mut busy: HashSet<Id> = input.busy.clone();
+    // Agent → the active task it works on (why an assigned task waits).
+    let mut doing: HashMap<Id, String> = HashMap::new();
     for t in input.tasks.iter().filter(|t| is_active(t.status)) {
         active += 1;
         leases.push((t.key.clone(), t.write_scope.clone()));
@@ -179,6 +182,7 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
                 *per.entry(acc.id.clone()).or_default() += 1;
             }
             busy.insert(a.id.clone());
+            doing.insert(a.id.clone(), t.key.clone());
         }
     }
     for a in input.agents {
@@ -257,6 +261,7 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
             agents: input.agents,
             agent_by_id: &agent_by_id,
             accounts: &accounts,
+            doing: &doing,
         };
         match route(t, &ctx, &taken_names, &used_colors) {
             Err(reason) => actions.push(wait(reason)),
@@ -268,7 +273,7 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
                     AgentPick::Existing(id) => {
                         busy.insert(id.clone());
                     }
-                    AgentPick::New { name, color } => {
+                    AgentPick::New { name, color, .. } => {
                         taken_names.push(name.clone());
                         used_colors.push(*color);
                     }
@@ -296,6 +301,7 @@ struct RouteCtx<'a> {
     agents: &'a [Agent],
     agent_by_id: &'a HashMap<&'a str, &'a Agent>,
     accounts: &'a Accounts,
+    doing: &'a HashMap<Id, String>,
 }
 
 /// The account a run goes on, with its running count, (with several accounts) why, and the
@@ -370,16 +376,20 @@ impl RouteCtx<'_> {
     }
 }
 
-/// Route one ready task: its assigned agent, else the provider of the account its Lead pinned
-/// it to, its provider hint, then the user's worker order — the first signed-in provider with
-/// an account that has a free slot — preferring an idle existing character of that provider
-/// (on the same account) over hiring a new one.
+/// Route one ready task: its assigned agent (a team member the Lead picked, or the user's
+/// drag), else the consultant the Lead specified, else the provider of the account its Lead
+/// pinned it to, its provider hint, then the user's worker order — the first signed-in provider
+/// with an account that has a free slot. Without an assignee a consultant is hired (legacy
+/// generic workers of that provider are reused first).
 fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<Route, String> {
     let cap = ctx.cap;
     let pin = t.account_hint.as_deref().and_then(|id| ctx.accounts.get(id));
     if let Some(a) = t.assignee.as_deref().and_then(|id| ctx.agent_by_id.get(id)) {
         if ctx.busy.contains(&a.id) {
-            return Err(format!("waiting: {} (assigned) is busy", a.name));
+            return Err(match ctx.doing.get(&a.id) {
+                Some(k) => format!("waiting: {} (assigned) is busy with {k}", a.name),
+                None => format!("waiting: {} (assigned) is busy", a.name),
+            });
         }
         // Its own account first: a retry can resume the task's session there.
         let mut prefer: Vec<&str> = ctx.accounts.of_agent(a).map(|x| x.id.as_str()).into_iter().collect();
@@ -387,7 +397,8 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
             prefer.insert(0, pa.id.as_str());
         }
         let acc = ctx.account_for(a.provider, &prefer).map_err(|e| format!("waiting: {} (assigned): {}", a.name, e.join(", ")))?;
-        let mut summary = format!("{} · {}: assigned by you", ctx.accounts.name(acc.account), a.name);
+        let by = if a.member.is_some() { "team member" } else { "assigned by you" };
+        let mut summary = format!("{} · {}: {by}", ctx.accounts.name(acc.account), a.name);
         if let Some(why) = &acc.why {
             summary.push_str(&format!(", {why}"));
         }
@@ -403,6 +414,29 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
             provider: a.provider,
             account: acc.account.id.clone(),
             pick: AgentPick::Existing(a.id.clone()),
+            summary,
+            detail,
+        });
+    }
+
+    if let Some(spec) = &t.consultant {
+        // The Lead chose the harness: wait for it rather than hire another (it can reassign).
+        let prefer: Vec<&str> = pin.filter(|a| a.provider == spec.provider).map(|a| a.id.as_str()).into_iter().collect();
+        let acc = ctx.account_for(spec.provider, &prefer).map_err(|e| format!("waiting: consultant on {}: {}", spec.provider.label(), e.join(", ")))?;
+        let name = names::next_name(taken);
+        let model = spec.model.as_deref().map(|m| format!(" {m}")).unwrap_or_default();
+        let mut summary = format!("{}{model} · new consultant {name}: the Lead's pick", ctx.accounts.name(acc.account));
+        if let Some(why) = &acc.why {
+            summary.push_str(&format!(", {why}"));
+        }
+        let detail = json!({
+            "task": t.key, "plan_id": t.plan_id, "provider": spec.provider, "model": spec.model, "agent": name, "new_agent": true,
+            "rule": "consultant", "account": acc.account.id, "account_label": acc.account.label, "skipped": acc.skipped,
+        });
+        return Ok(Route {
+            provider: spec.provider,
+            account: acc.account.id.clone(),
+            pick: AgentPick::New { name, color: names::next_color(colors), model: spec.model.clone() },
             summary,
             detail,
         });
@@ -447,20 +481,28 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
         reason.push_str(&format!(", {why}"));
     }
 
-    // An idle character of that provider, one whose session is on that account first.
+    // An idle generic worker of that provider (from before consultants), one whose session is
+    // on that account first. Team members only take tasks assigned to them.
     let idle = ctx
         .agents
         .iter()
-        .filter(|a| a.role == Role::Worker && a.provider == p && a.status != AgentStatus::Offline && !ctx.busy.contains(&a.id))
+        .filter(|a| {
+            a.role == Role::Worker
+                && a.member.is_none()
+                && !a.consultant
+                && a.provider == p
+                && a.status != AgentStatus::Offline
+                && !ctx.busy.contains(&a.id)
+        })
         .min_by_key(|a| (ctx.accounts.of_agent(a).is_none_or(|x| x.id != acc.account.id), a.created_at, a.id.clone()));
     let (pick, name, new) = match idle {
         Some(a) => (AgentPick::Existing(a.id.clone()), a.name.clone(), false),
         None => {
             let name = names::next_name(taken);
-            (AgentPick::New { name: name.clone(), color: names::next_color(colors) }, name, true)
+            (AgentPick::New { name: name.clone(), color: names::next_color(colors), model: None }, name, true)
         }
     };
-    let mut summary = format!("{} · {}{}: {reason}", ctx.accounts.name(acc.account), if new { "new agent " } else { "" }, name);
+    let mut summary = format!("{} · {}{}: {reason}", ctx.accounts.name(acc.account), if new { "new consultant " } else { "" }, name);
     if !skipped.is_empty() {
         summary.push_str(&format!("; {}", skipped.join(", ")));
     }

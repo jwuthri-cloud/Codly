@@ -10,14 +10,14 @@ const T0 = 1_760_000_000_000;
 
 const agent = (o: Partial<Agent> = {}): Agent => ({
   id: 'a1', name: 'Ada', provider: 'claude', model: 'claude-sonnet-5-5', role: 'worker', status: 'working', activity: null, activity_label: null,
-  task_id: 't1', run_id: 'r1', session_id: null, worktree: '/wt/t1-ada', billing: 'subscription', color: 7, look_seed: 'ada', thread: null, account: null,
+  task_id: 't1', run_id: 'r1', session_id: null, worktree: '/wt/t1-ada', billing: 'subscription', color: 7, look_seed: 'ada', thread: null, account: null, member: null, title: null, consultant: false, archived: false,
   usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, context_used: null, context_window: null, cost_usd: null },
   created_at: T0, updated_at: T0, ...o,
 });
 
 const task = (o: Partial<Task> = {}): Task => ({
   id: 't1', plan_id: 'p1', key: 't1', title: 'Theme provider', goal: '', acceptance: [], write_scope: [], verify: [], depends_on: [], status: 'running',
-  assignee: 'a1', agent_hint: null, account_hint: null, branch: null, worktree: null, attempt: 1, status_reason: null, summary: null, created_at: T0, updated_at: T0, ...o,
+  assignee: 'a1', agent_hint: null, account_hint: null, consultant: null, fresh_session: false, branch: null, worktree: null, attempt: 1, status_reason: null, summary: null, created_at: T0, updated_at: T0, ...o,
 });
 
 const seg = (o: Partial<Seg>): Seg => ({

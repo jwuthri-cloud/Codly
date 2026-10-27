@@ -3,6 +3,7 @@ import type { AccountConfig } from "./AccountConfig";
 import type { AccountStrategy } from "./AccountStrategy";
 import type { ApprovalMode } from "./ApprovalMode";
 import type { Provider } from "./Provider";
+import type { TeamMember } from "./TeamMember";
 
 export type Settings = { lead_provider: Provider | null, lead_model: string | null, 
 /**
@@ -41,4 +42,8 @@ world_ambient: boolean,
 /**
  * "system" | "dark" | "light"
  */
-theme: string, };
+theme: string, 
+/**
+ * The standing team, in every repo unless a repo switches a member off.
+ */
+team: Array<TeamMember>, };

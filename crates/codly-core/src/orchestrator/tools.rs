@@ -100,6 +100,13 @@ impl Inner {
                 )
             }
             t::ASK_LEAD => self.tool_ask_lead(&ctx, ws, &args),
+            t::MESSAGE_MEMBER => {
+                let to = s(&args, "to").ok_or_else(|| anyhow!("to is required: a team member's name"))?;
+                let text = s(&args, "text").ok_or_else(|| anyhow!("text is required"))?;
+                self.message_member(&ctx.agent_id, to, text).await
+            }
+            t::QUICK_TASK => self.quick_task(&ctx.agent_id, args).await,
+            t::REASSIGN => self.reassign(&ctx.agent_id, &args),
             t::SUBMIT_REVIEW => {
                 let verdict = s(&args, "verdict").ok_or_else(|| anyhow!("verdict is required"))?;
                 if !matches!(verdict, "approve" | "request_changes" | "reject") {
@@ -162,7 +169,7 @@ impl Inner {
             .filter(|t| t.plan_id.as_ref().is_none_or(|p| plans.iter().any(|x| &x.id == p)))
             .filter(|t| t.plan_id.is_some() || !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
             .collect();
-        Ok(json!({
+        let mut out = json!({
             "plans": plans.iter().map(|p| {
                 let mut v = json!({ "id": p.id, "summary": p.summary, "status": p.status, "integration_branch": p.integration_branch, "request_thread": p.thread });
                 if let Some(t) = &mine {
@@ -178,7 +185,12 @@ impl Inner {
                 "name": a.name, "provider": a.provider, "role": a.role, "status": a.status, "doing": a.activity_label,
                 "task": a.task_id.as_deref().and_then(|t| tasks.iter().find(|x| x.id == t)).map(|t| t.key.clone()),
             })).collect::<Vec<_>>(),
-        }))
+        });
+        if ctx.role == Role::Lead {
+            out["team"] = json!(self.team_view(ws, &agents, &tasks));
+            out["consultant_options"] = json!(self.consultant_options());
+        }
+        Ok(out)
     }
 
     fn tool_memory_search(&self, ctx: &ToolCtx, ws: Option<&str>, args: &Value) -> Result<Value> {

@@ -129,7 +129,8 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     let (ready_tx, ready_rx) = oneshot::channel();
     let actor = Actor {
         norm: AcpNormalizer::new(spec.provider, &spec.agent_id, &spec.run_id, spec.cwd.clone()),
-        system_prompt: Some(spec.system_prompt.clone()).filter(|s| !s.trim().is_empty() && matches!(spec.session, SessionMode::New { .. })),
+        // Kept for a resume too: dropped once the session is resumed, sent if it falls back to new.
+        system_prompt: Some(spec.system_prompt.clone()).filter(|s| !s.trim().is_empty()),
         spec,
         events,
         stdin: Some(stdin),
@@ -264,6 +265,9 @@ impl Actor {
         let session = match self.spec.session.clone() {
             SessionMode::Resume { session_id } if !caps["sessionCapabilities"]["resume"].is_null() => {
                 let r = self.call("session/resume", json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp }), lines).await?;
+                if r.is_ok() {
+                    self.system_prompt = None; // the resumed conversation already has it
+                }
                 r.map(|mut v| {
                     v["sessionId"] = json!(session_id);
                     v
@@ -273,6 +277,9 @@ impl Actor {
                 self.replaying = true;
                 let r = self.call("session/load", json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp }), lines).await?;
                 self.replaying = false;
+                if r.is_ok() {
+                    self.system_prompt = None;
+                }
                 r.map(|mut v| {
                     v["sessionId"] = json!(session_id);
                     v

@@ -420,8 +420,8 @@ impl Inner {
                 a.activity = None;
                 a.activity_label = None;
                 a.thread = Some(archive.clone());
+                a.archived = true;
             })?;
-            self.store.archive_agent(&lead.id)?;
         }
         for plan in self.store.plans(&ws.id, i64::MAX)?.into_iter().filter(|p| p.thread == thread) {
             self.cancel_plan_inner(&plan, "cancelled: its request was closed").await?;
@@ -486,6 +486,7 @@ impl Inner {
             approvals: &approvals,
             notes: &notes,
             accounts: &self.accounts(),
+            consultant_clis: &self.consultant_clis(),
         }))
     }
 
@@ -544,6 +545,11 @@ impl Inner {
         };
         if !self.cli_usable(agent.provider) {
             bail!("{} is not available on this Mac", agent.provider.label());
+        }
+        // A team member talks in its own worktree, in its own conversation.
+        if agent.member.is_some() {
+            self.spawn_member_chat(&ws, &agent).await?;
+            return self.send_prompt(agent_id, prompt);
         }
         let session = match &agent.session_id {
             Some(s) => SessionMode::Resume { session_id: s.clone() },

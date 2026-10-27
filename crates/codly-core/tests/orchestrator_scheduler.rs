@@ -53,6 +53,8 @@ fn task(id: &str, plan: &str, status: TaskStatus, scope: &[&str], deps: &[&str])
         assignee: None,
         agent_hint: None,
         account_hint: None,
+        consultant: None,
+        fresh_session: false,
         branch: None,
         worktree: None,
         attempt: 0,
@@ -82,6 +84,10 @@ fn agent(id: &str, name: &str, p: Provider, role: Role) -> Agent {
         color: 0,
         look_seed: id.into(),
         thread: None,
+        member: None,
+        title: None,
+        consultant: false,
+        archived: false,
         usage: Usage::default(),
         created_at: 1,
         updated_at: 1,
@@ -337,7 +343,7 @@ fn spread_sends_parallel_tasks_to_the_account_with_the_most_quota_left() {
     let a = w.run();
     let on: Vec<String> = start_accounts(&a).into_iter().map(|s| s.1).collect();
     assert_eq!(on, ["claude:default", "claude:work", "claude:default"], "equal headroom: the less busy account, then your order");
-    assert!(summary_of(&a, "t1").starts_with("Claude Code · default · new agent"), "{}", summary_of(&a, "t1"));
+    assert!(summary_of(&a, "t1").starts_with("Claude Code · default · new consultant"), "{}", summary_of(&a, "t1"));
 
     // Known usage wins over unknown (0.5): both slots of the emptier account first.
     w.accounts = vec![acct("default", 0.5), acct("work", 0.31)];
@@ -375,7 +381,7 @@ fn disabled_signed_out_and_parked_accounts_are_skipped() {
     let a = w.run();
     assert_eq!(start_accounts(&a), [("t1".into(), "claude:ok".into()), ("t2".into(), "claude:ok".into())]);
     let s = summary_of(&a, "t1");
-    assert!(s.starts_with("Claude Code · ok · new agent") && s.contains("most quota left"), "{s}");
+    assert!(s.starts_with("Claude Code · ok · new consultant") && s.contains("most quota left"), "{s}");
     // The parked account it passed over is named, with why.
     assert!(s.ends_with("; Claude Code · hot parked (90% of 5h used, resets in 1h)"), "{s}");
 
@@ -457,4 +463,60 @@ fn an_assigned_task_resumes_on_its_agents_account() {
     // Its account turned off: it continues on another one.
     w.accounts[1].enabled = false;
     assert_eq!(start_accounts(&w.run())[0].1, "claude:default");
+}
+
+#[test]
+fn members_queue_their_tasks_and_say_what_they_are_busy_with() {
+    let mut running = task("t1", "p", TaskStatus::Running, &["a/**"], &[]);
+    running.assignee = Some("m1".into());
+    let mut queued = task("t2", "p", TaskStatus::Ready, &["b/**"], &[]);
+    queued.assignee = Some("m1".into());
+    let mut w = World::new(vec![running, queued]);
+    let mut ana = agent("m1", "Ana", Provider::Claude, Role::Worker);
+    ana.member = Some("ana-1".into());
+    ana.task_id = Some("t1".into());
+    w.agents = vec![ana];
+    assert_eq!(waits(&w.run()), [("t2".into(), "waiting: Ana (assigned) is busy with t1".into())]);
+}
+
+#[test]
+fn unassigned_tasks_hire_consultants_never_idle_members() {
+    let mut w = World::new(vec![task("t1", "p", TaskStatus::Ready, &["a/**"], &[])]);
+    let mut ana = agent("m1", "Ana", Provider::Claude, Role::Worker);
+    ana.member = Some("ana-1".into());
+    let mut old = agent("c1", "Bo", Provider::Claude, Role::Worker);
+    old.consultant = true;
+    w.agents = vec![ana, old];
+    let s = starts(&w.run());
+    assert!(matches!(&s[0].2, AgentPick::New { name, model: None, .. } if name != "Ana" && name != "Bo"), "{:?}", s[0].2);
+}
+
+#[test]
+fn the_leads_consultant_spec_picks_harness_and_model_or_waits() {
+    let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    t.consultant = Some(ConsultantSpec { provider: Provider::Codex, model: Some("gpt-5-codex:high".into()) });
+    let mut w = World::new(vec![t]);
+    let a = w.run();
+    let s = starts(&a);
+    assert_eq!(s[0].1, Provider::Codex);
+    assert!(matches!(&s[0].2, AgentPick::New { model: Some(m), .. } if m == "gpt-5-codex:high"), "{:?}", s[0].2);
+    assert!(summary_of(&a, "t1").contains("new consultant") && summary_of(&a, "t1").contains("the Lead's pick"), "{}", summary_of(&a, "t1"));
+
+    // The Lead chose Codex: no fallback to another harness.
+    w.clis = vec![cli(Provider::Claude, Some(true)), cli(Provider::Codex, Some(false))];
+    assert_eq!(waits(&w.run())[0].1, "waiting: consultant on Codex: Codex not signed in");
+}
+
+#[test]
+fn idle_members_hold_no_slot() {
+    let mut w = World::new(vec![task("t1", "p", TaskStatus::Ready, &["a/**"], &[]), task("t2", "p", TaskStatus::Ready, &["b/**"], &[])]);
+    w.settings.max_parallel = 2;
+    w.agents = (0..3)
+        .map(|i| {
+            let mut m = agent(&format!("m{i}"), &format!("M{i}"), Provider::Claude, Role::Worker);
+            m.member = Some(format!("m-{i}"));
+            m
+        })
+        .collect();
+    assert_eq!(starts(&w.run()).len(), 2);
 }

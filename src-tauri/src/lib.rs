@@ -76,6 +76,7 @@ pub fn run() {
             commands::stop_agent,
             commands::hire_agent,
             commands::list_models,
+            commands::set_workspace_team,
             commands::set_agent_model,
             commands::create_task,
             commands::move_task,

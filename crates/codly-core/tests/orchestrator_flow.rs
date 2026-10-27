@@ -387,7 +387,7 @@ async fn single_task_plan_runs_end_to_end() {
     for t in ["plan_validate", "route", "gate", "merge", "context"] {
         assert!(decisions.iter().any(|d| d.0 == t), "no {t} decision in {decisions:?}");
     }
-    assert!(decisions.iter().any(|d| d.0 == "route" && d.1.starts_with("Claude Code · new agent Ada")), "{decisions:?}");
+    assert!(decisions.iter().any(|d| d.0 == "route" && d.1.starts_with("Claude Code · new consultant Ada")), "{decisions:?}");
 
     // Chat: the user's words, the Lead's reply, the plan card and the summary.
     let lead_thread: Vec<(String, String)> =
@@ -417,7 +417,7 @@ async fn single_task_plan_runs_end_to_end() {
     }
 
     // Agents: the Lead and one worker, back to idle with no task.
-    let worker = snap.agents.iter().find(|a| a.role == Role::Worker).unwrap();
+    let worker = &agents_ever(&snap).into_iter().find(|a| a.role == Role::Worker).unwrap();
     assert_eq!(worker.name, "Ada");
     assert_eq!(worker.task_id, None);
     assert_eq!(worker.session_id.as_deref().map(|s| s.len()), Some(36), "a pre-assigned Claude session id");
@@ -556,6 +556,10 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             color: 0,
             look_seed: agent_id.clone(),
             thread: None,
+            member: None,
+            title: None,
+            consultant: false,
+            archived: false,
             usage: Usage::default(),
             created_at: now_ms(),
             updated_at: now_ms(),
@@ -576,6 +580,8 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             assignee: Some(agent_id.clone()),
             agent_hint: None,
             account_hint: None,
+            consultant: None,
+            fresh_session: false,
             branch: None,
             worktree: None,
             attempt: 1,
@@ -883,6 +889,7 @@ fn core_futures_are_send(core: Arc<Core>, d: ApprovalDecision, s: Settings) {
     send(core.interrupt_agent("a"));
     send(core.stop_agent("a"));
     send(core.hire_agent(Provider::Claude, None));
+    send(core.set_workspace_team(WorkspaceTeam::default()));
     send(core.create_task("t", "g"));
     send(core.move_task("t", TaskStatus::Ready));
     send(core.assign_task("t", None));
@@ -983,6 +990,19 @@ fn echo_lead(hold: Arc<AtomicBool>) -> Behavior {
 
 fn chats<'a>(s: &'a Snapshot, thread: &str) -> Vec<&'a ChatMessage> {
     s.chats.iter().filter(|c| c.thread == thread).collect()
+}
+
+/// Every agent the snapshot knows of, let-go consultants too (their last AgentChanged).
+fn agents_ever(s: &Snapshot) -> Vec<Agent> {
+    let mut out: Vec<Agent> = s.agents.clone();
+    for e in s.events.iter().rev() {
+        if let EventKind::AgentChanged { agent } = &e.kind
+            && !out.iter().any(|a| a.id == agent.id)
+        {
+            out.push(agent.clone());
+        }
+    }
+    out
 }
 
 fn lead_of<'a>(s: &'a Snapshot, thread: &str) -> Option<&'a Agent> {
@@ -1199,12 +1219,12 @@ async fn a_workers_question_goes_to_its_plans_lead() {
     core.send_chat("lead:2", "Please add a bye file").await.unwrap();
     let snap = wait_for("the forwarded answer and the plan", 30, async || {
         let s = core.snapshot().await.unwrap();
-        let worker = s.agents.iter().find(|a| a.role == Role::Worker)?;
+        let worker = agents_ever(&s).into_iter().find(|a| a.role == Role::Worker)?;
         let forwarded = turns_of(&log, &worker.id).iter().any(|t| t.contains("Answer from the lead"));
         (forwarded && s.plans.first().is_some_and(|p| p.status == PlanStatus::Done)).then(|| s.clone())
     })
     .await;
-    let worker = snap.agents.iter().find(|a| a.role == Role::Worker).unwrap();
+    let worker = &agents_ever(&snap).into_iter().find(|a| a.role == Role::Worker).unwrap();
     let (lead1, lead2) = (lead_of(&snap, "lead").unwrap(), lead_of(&snap, "lead:2").unwrap());
 
     // The question and the answer live in the plan's thread; the answer links to the asker.
@@ -1485,7 +1505,8 @@ async fn parallel_tasks_spread_over_two_claude_accounts_and_skip_a_hot_one() {
     let dirs: std::collections::HashSet<Option<String>> = workers.iter().map(|w| w.1.clone()).collect();
     assert_eq!(dirs, [Some(work.clone()), Some(perso.clone())].into_iter().collect(), "never the account at 90%");
     for (agent, dir) in &workers {
-        let a = snap.agents.iter().find(|a| a.id == *agent).unwrap();
+        let a = agents_ever(&snap).into_iter().find(|a| a.id == *agent).unwrap();
+        assert!(a.consultant && a.archived, "a consultant is let go after its task");
         assert_eq!(a.account, dir.as_deref().map(id), "the agent records its account");
         assert_eq!(a.billing, Billing::Subscription);
     }
@@ -1506,8 +1527,8 @@ async fn parallel_tasks_spread_over_two_claude_accounts_and_skip_a_hot_one() {
             _ => None,
         })
         .collect();
-    assert!(routes.iter().any(|s| s.starts_with("Claude Code · work · new agent")), "{routes:?}");
-    assert!(routes.iter().any(|s| s.starts_with("Claude Code · perso · new agent")), "{routes:?}");
+    assert!(routes.iter().any(|s| s.starts_with("Claude Code · work · new consultant")), "{routes:?}");
+    assert!(routes.iter().any(|s| s.starts_with("Claude Code · perso · new consultant")), "{routes:?}");
     core.shutdown().await;
     drop(core);
 
@@ -1661,5 +1682,146 @@ async fn a_resumed_run_keeps_its_account() {
     let store = Store::open(&data.join("codly.sqlite")).unwrap();
     let resumed = store.latest_task_run(&task_id, Some(Role::Worker)).unwrap().unwrap();
     assert_eq!(resumed.account.as_deref(), Some(work_id.as_str()), "the run records its account");
+    core.shutdown().await;
+}
+
+/// A team member works task after task in its own worktree, continuing its own conversation;
+/// the Lead can message it and gets its answer back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_team_member_keeps_its_session_and_worktree_across_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("answers your message") {
+                turn.say("Noted.");
+                return;
+            }
+            if turn.prompt.contains("[Codly]") {
+                return;
+            }
+            if turn.prompt.ends_with("ask Ana") {
+                let r = turn.tool("codly_message_member", json!({ "to": "ana", "text": "What did you change?" })).await;
+                assert_eq!(r["ok"], true, "{r}");
+                turn.say("Asked Ana.");
+                return;
+            }
+            let file = if turn.prompt.ends_with("first") { "a.txt" } else { "b.txt" };
+            let plan = json!({ "summary": format!("Add {file}"), "tasks": [{
+                "id": "t1", "title": format!("Create {file}"), "goal": format!("Create {file}"), "assignee": "Ana",
+                "acceptance_criteria": [format!("{file} exists")], "write_scope": [file], "depends_on": [], "verify": [format!("test -f {file}")],
+            }] });
+            let r = turn.tool("codly_submit_plan", plan).await;
+            assert_eq!(r["ok"], true, "{r}");
+            turn.say("Planned.");
+        })
+    });
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.starts_with("[Lead]") {
+                turn.say("I created a.txt and b.txt.");
+                return;
+            }
+            let file = if turn.prompt.contains("Task t1: Create a.txt") { "a.txt" } else { "b.txt" };
+            turn.write(file, "x\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": format!("Created {file}.") })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    let ana = TeamMember { name: "Ana".into(), role: "Backend dev: owns the text files".into(), ..Default::default() };
+    let s = core.update_settings(Settings { auto_run_plans: true, lead_followups: false, team: vec![ana], ..Default::default() }).await.unwrap();
+    assert!(s.team[0].id.starts_with("ana-"), "Codly gives a member an id: {:?}", s.team[0].id);
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let done = |n: usize| {
+        let core = core.clone();
+        async move {
+            wait_for(&format!("{n} plan(s) done"), 30, async || {
+                let s = core.snapshot().await.unwrap();
+                (s.plans.iter().filter(|p| p.status == PlanStatus::Done).count() == n).then_some(s)
+            })
+            .await
+        }
+    };
+    core.send_chat("lead", "first").await.unwrap();
+    let snap = done(1).await;
+    let ana = snap.agents.iter().find(|a| a.member.is_some()).expect("Ana is on the board").clone();
+    assert_eq!((ana.name.as_str(), ana.title.as_deref(), ana.archived), ("Ana", Some("Backend dev"), false));
+    core.send_chat("lead", "second").await.unwrap();
+    let snap = done(2).await;
+    assert!(snap.agents.iter().any(|a| a.id == ana.id), "a member stays after its tasks");
+
+    let l = log.lock().unwrap();
+    let runs: Vec<(String, SessionMode)> = l.runs.iter().filter(|r| r.0 == ana.id).cloned().collect();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    let SessionMode::New { session_id: Some(first) } = &runs[0].1 else { panic!("{runs:?}") };
+    assert!(matches!(&runs[1].1, SessionMode::Resume { session_id } if session_id == first), "the second task continues the conversation: {runs:?}");
+    let cwds: Vec<&String> = l.spawns.iter().filter(|s| s.0 == Role::Worker).map(|s| &s.1).collect();
+    assert!(cwds.len() == 2 && cwds[0] == cwds[1] && cwds[0].contains("/team/ana-"), "one stable worktree: {cwds:?}");
+    let second = l.turns.iter().filter(|t| t.0 == ana.id).nth(1).unwrap().1.clone();
+    assert!(second.starts_with("[Codly] New task.") && second.contains("Your role: Backend dev"), "{second}");
+    drop(l);
+    assert!(Path::new(cwds_first(&log)).exists(), "the member's worktree is kept after the merge");
+
+    core.send_chat("lead", "ask Ana").await.unwrap();
+    wait_for("Ana's answer at the Lead", 20, async || {
+        turns_of(&log, &lead_of(&core.snapshot().await.unwrap(), "lead")?.id)
+            .iter()
+            .any(|t| t.contains("Ana answers your message") && t.contains("I created a.txt and b.txt."))
+            .then_some(())
+    })
+    .await;
+    let l = log.lock().unwrap();
+    let chat = l.spawns.iter().filter(|s| s.0 == Role::Worker).nth(2).expect("a chat run for the message");
+    assert!(chat.1.contains("/team/ana-") && matches!(&chat.2, SessionMode::Resume { session_id } if session_id == first), "{chat:?}");
+    drop(l);
+    wait_for("the answer-only run to stop", 10, async || log.lock().unwrap().shutdowns.iter().any(|a| a == &ana.id).then_some(())).await;
+    core.shutdown().await;
+}
+
+fn cwds_first(log: &Mutex<Log>) -> &'static str {
+    let l = log.lock().unwrap();
+    Box::leak(l.spawns.iter().find(|s| s.0 == Role::Worker).unwrap().1.clone().into_boxed_str())
+}
+
+/// A consultant hired with the Lead's harness and model is let go once its task is merged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_consultant_is_hired_with_the_leads_model_and_let_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                return;
+            }
+            let plan = json!({ "summary": "Add hello", "tasks": [{
+                "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt", "assignee": "consultant",
+                "consultant": { "provider": "claude", "model": "haiku" },
+                "acceptance_criteria": ["it exists"], "write_scope": ["hello.txt"], "depends_on": [], "verify": ["test -f hello.txt"],
+            }] });
+            let r = turn.tool("codly_submit_plan", plan).await;
+            assert_eq!(r["ok"], true, "{r}");
+        })
+    });
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created it." })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "add hello").await.unwrap();
+    let snap = wait_for("the consultant let go", 30, async || {
+        let s = core.snapshot().await.unwrap();
+        let done = s.plans.first().is_some_and(|p| p.status == PlanStatus::Done);
+        (done && !s.agents.iter().any(|a| a.role == Role::Worker)).then_some(s)
+    })
+    .await;
+    let c = agents_ever(&snap).into_iter().find(|a| a.role == Role::Worker).unwrap();
+    assert!(c.consultant && c.archived);
+    assert!(log.lock().unwrap().models.iter().any(|(a, m)| a == &c.id && m.as_deref() == Some("haiku")), "spawned with the Lead's model");
     core.shutdown().await;
 }

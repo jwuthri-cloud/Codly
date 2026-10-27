@@ -207,7 +207,8 @@ impl Inner {
                     if let Some(s) = session_id {
                         a.session_id = Some(s.clone());
                     }
-                    if model.is_some() {
+                    // A member keeps its configured model (with its effort suffix) for the next run.
+                    if model.is_some() && a.member.is_none() {
                         a.model = model.clone();
                     }
                     if a.status == AgentStatus::Starting {
@@ -309,6 +310,9 @@ impl Inner {
     }
 
     fn on_turn_completed(self: &Arc<Self>, ctx: &Ctx, status: TurnStatus, reply: Option<String>) {
+        if ctx.role != Role::Lead {
+            self.forward_answers(&ctx.agent_id, &ctx.run_id, reply.as_deref());
+        }
         match ctx.role {
             Role::Lead => {
                 let targets = lock(&self.leads).turn_done(&ctx.agent_id);
@@ -476,6 +480,9 @@ impl Inner {
                 }
             }
         });
+        if let Some(l) = &removed {
+            self.answers_lost(&ctx.agent_id, &l.answers);
+        }
         if ctx.role == Role::Lead {
             if removed.is_some() {
                 lock(&self.leads).forget(&ctx.agent_id);

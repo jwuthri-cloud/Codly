@@ -226,7 +226,7 @@
     {#if n}<Orbit size={64} progress={n.progress} tone={n.tone} stroke={2.5}><Portrait {agent} size={50} /></Orbit>{/if}
     <div class="h-text">
       <h2 class="serif">{agent.name}</h2>
-      <p class="h-sub">{agent.role === 'lead' ? 'Lead · ' : agent.role === 'reviewer' ? 'Reviewer · ' : ''}{PROVIDER_LABEL[agent.provider]} ({COMPANY_LABEL[agent.provider]}){#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{agent.model ? ` · ${prettyModel(agent.model)}` : ''}</p>
+      <p class="h-sub">{agent.role === 'lead' ? 'Lead · ' : agent.consultant ? 'Consultant · ' : agent.member && agent.title ? `${agent.title} · ` : agent.role === 'reviewer' ? 'Reviewer · ' : ''}{PROVIDER_LABEL[agent.provider]} ({COMPANY_LABEL[agent.provider]}){#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{agent.model ? ` · ${prettyModel(agent.model)}` : ''}</p>
       <div class="h-tags"><BillingBadge billing={agent.billing} plan={account?.plan ?? cli?.plan} /></div>
     </div>
   </header>

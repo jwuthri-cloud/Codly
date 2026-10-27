@@ -15,7 +15,10 @@
 
   const leads = $derived(store.leads.filter((a) => a.status !== 'offline'));
   const crew = $derived(
-    store.agents.filter((a) => a.role !== 'lead' && a.status !== 'offline').sort((a, b) => a.created_at - b.created_at),
+    // The team first (always there, even idle), then everyone else by arrival.
+    store.agents
+      .filter((a) => a.role !== 'lead' && (a.status !== 'offline' || a.member))
+      .sort((a, b) => Number(!a.member) - Number(!b.member) || a.created_at - b.created_at),
   );
 
   // aria-live: announce sentence changes (timer excluded), at most one per agent per change.

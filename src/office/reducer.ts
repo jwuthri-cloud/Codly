@@ -40,6 +40,7 @@ function placeholder(id: string, ts: number): AgentState {
     name: 'Agent',
     provider: 'claude',
     role: 'worker',
+    badge: null,
     color: hash(id) % 8,
     seed: id,
     thread: null,
@@ -85,6 +86,7 @@ function copyAgent(a: AgentState, ag: Agent) {
   a.name = clean(ag.name, 32) || 'Agent';
   a.provider = ag.provider;
   a.role = ag.role;
+  a.badge = ag.consultant ? 'Consultant' : ag.member ? clean(ag.title ?? '', 24) || null : null;
   a.color = ag.color;
   a.seed = ag.look_seed || ag.id;
   a.thread = ag.thread ?? (ag.role === 'lead' ? 'lead' : null);

@@ -353,9 +353,20 @@ impl Inner {
         let agents = self.store.agents(ws_id)?;
         let worker_provider = task.assignee.as_deref().and_then(|a| agents.iter().find(|x| x.id == a)).map(|a| a.provider);
         let settings = self.settings();
+        let tasks = self.store.tasks(ws_id)?;
+        let idle = |a: &Agent| {
+            a.status != AgentStatus::Offline
+                && !self.is_live(&a.id)
+                && a.task_id.as_deref().and_then(|t| tasks.iter().find(|x| x.id == t)).is_none_or(|t| !scheduler::is_active(t.status))
+        };
+        // A reviewer on the team first (another vendor than the author's if possible).
+        let members: Vec<&Agent> =
+            agents.iter().filter(|a| a.role == Role::Reviewer && a.member.is_some() && self.cli_usable(a.provider) && idle(a)).collect();
+        let member = members.iter().find(|a| Some(a.provider) != worker_provider).or_else(|| members.first()).copied();
         let order: Vec<Provider> = settings.worker_providers.iter().copied().chain(Provider::ALL).collect();
         let other = order.iter().copied().find(|p| Some(*p) != worker_provider && self.cli_usable(*p));
         let (provider, why) = match (other, worker_provider) {
+            _ if member.is_some() => (member.map_or(Provider::Claude, |m| m.provider), "on the team".to_string()),
             (Some(p), Some(w)) => (p, format!("another vendor than {}", w.label())),
             (Some(p), None) => (p, "first available".to_string()),
             (None, Some(w)) if self.cli_usable(w) => (w, "no second vendor is signed in: same vendor, clean context".to_string()),
@@ -370,15 +381,8 @@ impl Inner {
                 return self.merge_task(&task.id, 0).await;
             }
         };
-        let tasks = self.store.tasks(ws_id)?;
-        let free = |a: &&Agent| {
-            a.role == Role::Reviewer
-                && a.provider == provider
-                && a.status != AgentStatus::Offline
-                && !self.is_live(&a.id)
-                && a.task_id.as_deref().and_then(|t| tasks.iter().find(|x| x.id == t)).is_none_or(|t| !scheduler::is_active(t.status))
-        };
-        let reviewer = match agents.iter().find(free) {
+        let free = |a: &&Agent| a.role == Role::Reviewer && a.member.is_none() && a.provider == provider && idle(a);
+        let reviewer = match member.or_else(|| agents.iter().find(free)) {
             Some(a) => a.clone(),
             None => {
                 let name = names::next_name(&agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
@@ -407,8 +411,12 @@ impl Inner {
             cwd: wt,
             read_only: true,
             task_id: Some(task.id.clone()),
+            // Reviewers run in the author's worktree, so even a team member starts fresh.
             session: new_session(provider),
-            system_prompt: prompts::REVIEWER_SYSTEM.to_string(),
+            system_prompt: match self.team_member(&reviewer) {
+                Some(m) => prompts::member_system(prompts::REVIEWER_SYSTEM, &m),
+                None => prompts::REVIEWER_SYSTEM.to_string(),
+            },
             workspace_id: Some(ws_id.to_string()),
             account: None, // a new session: the account with the most quota left
         };
@@ -634,6 +642,7 @@ impl Inner {
             && let (Some(wt), Some(plan_id)) = (task.worktree.as_deref(), task.plan_id.as_deref())
             && let Ok(plan) = self.plan(plan_id)
             && let (Some(integ), Some(ws)) = (plan.integration_branch.as_deref(), ws.and_then(|w| self.store.workspace(w).ok().flatten()))
+            && !self.is_member_worktree(&ws, Path::new(wt))
         {
             let _g = self.repo_lock.lock().await;
             if let Err(e) = self.git.worktree_remove(Path::new(&ws.repo_path), Path::new(wt), Some(integ), false).await {

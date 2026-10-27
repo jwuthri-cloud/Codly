@@ -155,6 +155,8 @@ impl Inner {
                 last_text: None,
                 turn_messages: 0,
                 last_prompt: None,
+                answers: vec![],
+                answer_only: false,
             },
         );
         self.store.set_run_status(&run_id, "running")?;

@@ -31,4 +31,20 @@ look_seed: string,
 /**
  * Lead agents only: the request thread this Lead serves ("lead" or "lead:<id>").
  */
-thread: string | null, usage: Usage, created_at: number, updated_at: number, };
+thread: string | null, 
+/**
+ * Team members only: `TeamMember::id`.
+ */
+member: string | null, 
+/**
+ * Team members only: the badge title ("Backend dev").
+ */
+title: string | null, 
+/**
+ * Hired for one task; let go when it ends.
+ */
+consultant: boolean, 
+/**
+ * Let go (fired consultant, removed member, closed Lead): gone from the team.
+ */
+archived: boolean, usage: Usage, created_at: number, updated_at: number, };

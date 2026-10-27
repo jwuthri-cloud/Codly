@@ -1,6 +1,6 @@
 //! Plan validation: rejections the Lead can act on, and the mechanical repairs Codly makes.
 
-use codly_core::orchestrator::planner::{PlanInput, TaskInput, find_cycle, validate};
+use codly_core::orchestrator::planner::{ConsultantInput, PlanInput, TaskInput, find_cycle, validate};
 
 fn task(id: &str, scope: &[&str], deps: &[&str]) -> TaskInput {
     TaskInput {
@@ -133,4 +133,45 @@ fn normalizes_fields() {
     assert_eq!(deps_of(&v.plan, "t2"), ["t1"]);
     assert!(v.fixes.iter().any(|f| f.summary.contains("unknown agent_hint 'chatgpt'")));
     assert_eq!(v.plan.tasks[1].hint(), None);
+}
+
+#[test]
+fn staffing_is_normalized_and_contradictions_rejected() {
+    let mut a = task("t1", &["a/**"], &[]);
+    a.consultant = Some(ConsultantInput { provider: "Claude-Code".into(), model: Some(" opus:high ".into()) });
+    let mut b = task("t2", &["b/**"], &[]);
+    b.assignee = Some(" Ana ".into());
+    b.session = Some("Fresh".into());
+    let mut c = task("t3", &["c/**"], &[]);
+    c.assignee = Some("CONSULTANT".into());
+    c.session = Some("later".into());
+    let v = validate(plan(vec![a, b, c])).unwrap();
+    let t = |id: &str| v.plan.tasks.iter().find(|t| t.id == id).unwrap().clone();
+    assert_eq!(t("t1").assignee.as_deref(), Some("consultant"), "a spec implies a consultant");
+    let spec = t("t1").consultant_spec().unwrap();
+    assert_eq!((spec.provider.as_str(), spec.model.as_deref()), ("claude", Some("opus:high")));
+    assert_eq!(t("t2").member(), Some("Ana"));
+    assert!(t("t2").fresh_session());
+    assert_eq!((t("t3").member(), t("t3").session.as_deref()), (None, None));
+    assert!(v.fixes.iter().any(|f| f.summary.contains("unknown session 'later'")));
+
+    let mut bad = task("t1", &["a/**"], &[]);
+    bad.assignee = Some("Ana".into());
+    bad.consultant = Some(ConsultantInput { provider: "cobol".into(), model: Some("two words".into()) });
+    let err = validate(plan(vec![bad])).unwrap_err();
+    assert!(err.contains("'cobol' is not one of") && err.contains("must be one word") && err.contains("pick one"), "{err}");
+}
+
+#[test]
+fn small_tasks_staffed_differently_are_not_collapsed() {
+    let small = |id: &str, scope: &str, who: &str| {
+        let mut t = task(id, &[scope], &[]);
+        t.size = Some("S".into());
+        t.assignee = Some(who.into());
+        t
+    };
+    assert_eq!(validate(plan(vec![small("t1", "README.md", "Ana"), small("t2", "docs/a.md", "Rex")])).unwrap().plan.tasks.len(), 2);
+    let v = validate(plan(vec![small("t1", "README.md", "Ana"), small("t2", "docs/a.md", "Ana")])).unwrap();
+    assert_eq!(v.plan.tasks.len(), 1);
+    assert_eq!(v.plan.tasks[0].member(), Some("Ana"), "the merged task keeps its assignee");
 }

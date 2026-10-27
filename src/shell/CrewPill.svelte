@@ -92,7 +92,7 @@
     <span class="ln">{agent.name}</span>
   {:else if !compact}
     <span class="txt">
-      <span class="who"><span class="name">{agent.name}</span><span class="prov">{PROVIDER_LABEL[agent.provider]}</span></span>
+      <span class="who"><span class="name">{agent.name}</span><span class="prov">{agent.consultant ? 'Consultant · ' : agent.member && agent.title ? `${agent.title} · ` : ''}{PROVIDER_LABEL[agent.provider]}</span></span>
       <span class="say truncate">{#if n}<Say parts={n.parts} />{/if}</span>
     </span>
   {/if}

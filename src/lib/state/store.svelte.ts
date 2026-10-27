@@ -10,6 +10,7 @@
 // - The event log is a plain capped array versioned by `rev`.
 import { api, getTransport, type UiBatch } from '../api';
 import type { Agent } from '../gen/Agent';
+import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
 import type { Approval } from '../gen/Approval';
 import type { Artifact } from '../gen/Artifact';
 import type { ChatMessage } from '../gen/ChatMessage';
@@ -53,6 +54,7 @@ export const DEFAULT_SETTINGS: Settings = {
   lead_followups: true,
   world_ambient: false,
   theme: 'system',
+  team: [],
 };
 
 // ───────────── derived record types ─────────────
@@ -202,6 +204,8 @@ class CodlyStore {
   clis = $state.raw<CliInfo[]>([]);
   workspace = $state.raw<Workspace | null>(null);
   settings = $state.raw<Settings>(DEFAULT_SETTINGS);
+  /** The open repo's changes to the global team. */
+  workspaceTeam = $state.raw<WorkspaceTeam>({ off: [], members: [] });
   agents = $state.raw<Agent[]>([]);
   plans = $state.raw<Plan[]>([]);
   tasks = $state.raw<Task[]>([]);
@@ -293,6 +297,7 @@ class CodlyStore {
     accounts.set(s.accounts ?? []);
     this.workspace = s.workspace;
     this.settings = s.settings ?? DEFAULT_SETTINGS;
+    this.workspaceTeam = s.workspace_team ?? { off: [], members: [] };
     this.agents = s.agents;
     this.plans = s.plans;
     this.tasks = s.tasks;
@@ -360,7 +365,8 @@ class CodlyStore {
     const k = ev.kind;
     switch (k.type) {
       case 'agent_changed':
-        this.agents = upsert(this.agents, k.agent);
+        // A let-go consultant or a member who left the team leaves the board.
+        this.agents = k.agent.archived ? this.agents.filter((a) => a.id !== k.agent.id) : upsert(this.agents, k.agent);
         break;
       case 'plan_changed':
         this.plans = upsert(this.plans, k.plan);
@@ -733,6 +739,9 @@ class CodlyStore {
   }
   setSettings(s: Settings) {
     this.settings = s;
+  }
+  setWorkspaceTeam(t: WorkspaceTeam) {
+    this.workspaceTeam = t;
   }
   upsertTask(t: Task) {
     this.tasks = upsert(this.tasks, t);

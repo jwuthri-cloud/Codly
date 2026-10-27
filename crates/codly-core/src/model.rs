@@ -178,6 +178,86 @@ pub struct AccountInfo {
     pub limits: Vec<UsageWindow>,
 }
 
+// ───────────────────────────── team ─────────────────────────────
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MemberKind {
+    #[default]
+    Worker,
+    Reviewer,
+}
+
+/// A standing teammate: the Lead delegates to it by name, and it keeps its own session,
+/// worktree and memory per repo. Every field defaults, so one bad entry never resets
+/// all of `Settings` (an unreadable settings blob falls back to the defaults).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
+#[ts(export)]
+pub struct TeamMember {
+    /// Stable id ("ana-3f2a"), filled in by Codly. Names the member's worktree and links its
+    /// per-workspace agent, so it survives renames.
+    pub id: String,
+    pub name: String,
+    pub provider: Provider,
+    /// "sonnet", "opus:high"; None = the CLI's default.
+    pub model: Option<String>,
+    pub kind: MemberKind,
+    /// System-prompt addendum, e.g. "Backend dev: owns crates/, prefers small PRs".
+    pub role: String,
+    pub enabled: bool,
+}
+
+impl Default for TeamMember {
+    fn default() -> Self {
+        TeamMember {
+            id: String::new(),
+            name: String::new(),
+            provider: Provider::Claude,
+            model: None,
+            kind: MemberKind::Worker,
+            role: String::new(),
+            enabled: true,
+        }
+    }
+}
+
+impl TeamMember {
+    /// Short badge title: the role text before its first ':' / '—' / " - ", else the kind.
+    pub fn title(&self) -> String {
+        let head = self.role.split([':', '—', '\n']).next().unwrap_or("");
+        let head = head.split(" - ").next().unwrap_or("").trim();
+        if head.is_empty() || head.chars().count() > 24 {
+            return match self.kind {
+                MemberKind::Worker => "Teammate".into(),
+                MemberKind::Reviewer => "Reviewer".into(),
+            };
+        }
+        head.to_string()
+    }
+}
+
+/// A repo's changes to the global team.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
+#[ts(export)]
+pub struct WorkspaceTeam {
+    /// Global members switched off in this repo (`TeamMember::id`).
+    pub off: Vec<String>,
+    /// Members of this repo only.
+    pub members: Vec<TeamMember>,
+}
+
+/// The harness and model the Lead picked for a consultant (a worker hired for one task).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConsultantSpec {
+    pub provider: Provider,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 // ───────────────────────────── agents ─────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -299,6 +379,18 @@ pub struct Agent {
     /// Lead agents only: the request thread this Lead serves ("lead" or "lead:<id>").
     #[serde(default)]
     pub thread: Option<String>,
+    /// Team members only: `TeamMember::id`.
+    #[serde(default)]
+    pub member: Option<String>,
+    /// Team members only: the badge title ("Backend dev").
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Hired for one task; let go when it ends.
+    #[serde(default)]
+    pub consultant: bool,
+    /// Let go (fired consultant, removed member, closed Lead): gone from the team.
+    #[serde(default)]
+    pub archived: bool,
     pub usage: Usage,
     pub created_at: i64,
     pub updated_at: i64,
@@ -389,6 +481,12 @@ pub struct Task {
     /// Account the Lead pinned this task to (`AccountInfo::id`); None = Codly balances.
     #[serde(default)]
     pub account_hint: Option<String>,
+    /// The Lead hires a consultant with this harness and model for the task.
+    #[serde(default)]
+    pub consultant: Option<ConsultantSpec>,
+    /// Team members only: start a new session instead of continuing the member's own.
+    #[serde(default)]
+    pub fresh_session: bool,
     pub branch: Option<String>,
     pub worktree: Option<String>,
     pub attempt: i64,
@@ -988,6 +1086,9 @@ pub struct Settings {
     pub world_ambient: bool,
     /// "system" | "dark" | "light"
     pub theme: String,
+    /// The standing team, in every repo unless a repo switches a member off.
+    #[serde(default)]
+    pub team: Vec<TeamMember>,
 }
 
 impl Default for Settings {
@@ -1007,6 +1108,7 @@ impl Default for Settings {
             lead_followups: true,
             world_ambient: false,
             theme: "system".into(),
+            team: vec![],
         }
     }
 }
@@ -1020,6 +1122,8 @@ pub struct Snapshot {
     pub accounts: Vec<AccountInfo>,
     pub workspace: Option<Workspace>,
     pub settings: Settings,
+    /// The open repo's changes to the global team.
+    pub workspace_team: Option<WorkspaceTeam>,
     pub agents: Vec<Agent>,
     pub plans: Vec<Plan>,
     pub tasks: Vec<Task>,

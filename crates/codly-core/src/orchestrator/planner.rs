@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::scope;
-use crate::model::Provider;
+use crate::model::{ConsultantSpec, Provider};
 
 pub const MAX_TASKS: usize = 8;
 
@@ -93,11 +93,89 @@ pub struct TaskInput {
     /// Checked against the registry when the plan is stored (plans.rs).
     #[serde(default)]
     pub account: Option<String>,
+    /// A worker team member's name, or "consultant". Checked against the team when the plan
+    /// is stored (plans.rs).
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// The harness and model of the consultant to hire.
+    #[serde(default)]
+    pub consultant: Option<ConsultantInput>,
+    /// Team members only: "continue" (default) or "fresh".
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ConsultantInput {
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl TaskInput {
     pub fn hint(&self) -> Option<Provider> {
         self.agent_hint.as_deref().and_then(parse_provider)
+    }
+
+    /// The named team member, if the task is assigned to one (not "consultant").
+    pub fn member(&self) -> Option<&str> {
+        self.assignee.as_deref().filter(|a| !a.eq_ignore_ascii_case(CONSULTANT))
+    }
+
+    pub fn consultant_spec(&self) -> Option<ConsultantSpec> {
+        let c = self.consultant.as_ref()?;
+        Some(ConsultantSpec { provider: parse_provider(&c.provider)?, model: c.model.clone() })
+    }
+
+    pub fn fresh_session(&self) -> bool {
+        self.session.as_deref() == Some("fresh")
+    }
+}
+
+/// The `assignee` value that asks for a consultant.
+pub const CONSULTANT: &str = "consultant";
+
+/// Model names travel to CLI flags: one token, no spaces.
+pub fn valid_model(m: &str) -> bool {
+    !m.is_empty() && m.len() <= 64 && !m.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Normalize a task's staffing fields; errors and fixes are pushed for the caller.
+pub fn check_staffing(t: &mut TaskInput, errors: &mut Vec<String>, fixes: &mut Vec<Fix>) {
+    let id = t.id.clone();
+    t.assignee = t.assignee.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(|a| {
+        if a.eq_ignore_ascii_case(CONSULTANT) { CONSULTANT.to_string() } else { a.to_string() }
+    });
+    if let Some(c) = &mut t.consultant {
+        c.model = c.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(String::from);
+        if parse_provider(&c.provider).is_none() {
+            errors.push(format!("task {id}: consultant.provider '{}' is not one of claude, codex, gemini, opencode", c.provider));
+        } else {
+            c.provider = parse_provider(&c.provider).map(|p| p.as_str().to_string()).unwrap_or_default();
+        }
+        if let Some(m) = c.model.as_deref().filter(|m| !valid_model(m)) {
+            errors.push(format!("task {id}: consultant.model '{m}' must be one word (e.g. sonnet, opus:high)"));
+        }
+        if t.assignee.is_none() {
+            t.assignee = Some(CONSULTANT.into());
+        }
+    }
+    if let Some(m) = t.member()
+        && t.consultant.is_some()
+    {
+        errors.push(format!("task {id}: assigned to {m} and to a consultant; pick one"));
+    }
+    match t.session.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+        None => {}
+        Some(s) if s.is_empty() || s == "continue" => t.session = None,
+        Some(s) if s == "fresh" => t.session = Some(s),
+        Some(s) => {
+            fixes.push(Fix {
+                summary: format!("{id}: ignored unknown session '{s}' (continue or fresh)"),
+                detail: json!({ "rule": "session", "task": id, "session": s }),
+            });
+            t.session = None;
+        }
     }
 }
 
@@ -218,6 +296,7 @@ pub fn validate(input: PlanInput) -> Result<ValidPlan, String> {
             },
         }
         t.account = t.account.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(String::from);
+        check_staffing(t, &mut errors, &mut fixes);
     }
     if !errors.is_empty() {
         return Err(reject(&errors));
@@ -397,6 +476,11 @@ fn collapse_if_small(plan: &mut PlanInput) -> Option<Fix> {
     if !(chain || (concrete && files.len() <= 3)) {
         return None;
     }
+    // Tasks the Lead staffed differently are a deliberate split.
+    let staffing: HashSet<String> = tasks.iter().map(|t| format!("{:?}|{:?}|{:?}", t.assignee, t.consultant, t.session)).collect();
+    if staffing.len() > 1 {
+        return None;
+    }
 
     let order = topo_order(tasks);
     let ids: Vec<String> = order.iter().map(|&i| tasks[i].id.clone()).collect();
@@ -434,6 +518,9 @@ fn collapse_if_small(plan: &mut PlanInput) -> Option<Fix> {
     merged.agent_hint = if hints.len() == 1 { tasks[0].agent_hint.clone() } else { None };
     let pins: HashSet<&Option<String>> = tasks.iter().map(|t| &t.account).collect();
     merged.account = if pins.len() == 1 { tasks[0].account.clone() } else { None };
+    merged.assignee = tasks[0].assignee.clone();
+    merged.consultant = tasks[0].consultant.clone();
+    merged.session = tasks[0].session.clone();
 
     let why = if chain { "a chain of small tasks" } else { "small tasks writing at most 3 files" };
     let fix = Fix {

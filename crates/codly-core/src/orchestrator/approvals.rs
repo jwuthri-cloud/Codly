@@ -119,6 +119,9 @@ pub fn is_codly_tool(name: &str) -> bool {
         tools::SUBMIT_REPORT,
         tools::ASK_LEAD,
         tools::SUBMIT_REVIEW,
+        tools::MESSAGE_MEMBER,
+        tools::QUICK_TASK,
+        tools::REASSIGN,
     ]
     .contains(&n)
 }

@@ -320,6 +320,32 @@ impl Git {
 
     // ───────────── writes ─────────────
 
+    /// A worktree on no branch (detached at `rev`): a team member's home between tasks.
+    pub async fn worktree_add_detached(&self, repo: &Path, path: &Path, rev: &str) -> Result<()> {
+        self.ok(repo, &["worktree", "prune"], false).await?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        self.ok(repo, &["worktree", "add", "--detach", &path.to_string_lossy(), rev], false).await.map(drop)
+    }
+
+    /// Check out `branch` in a worktree, creating it at `start` when it does not exist.
+    pub async fn switch(&self, wt: &Path, branch: &str, start: &str) -> Result<()> {
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        if self.branch_exists(wt, branch).await? {
+            self.ok(wt, &[c1, hooks, c2, fsmonitor, "switch", branch], false).await.map(drop)
+        } else {
+            self.ok(wt, &[c1, hooks, c2, fsmonitor, "switch", "-c", branch, start], false).await.map(drop)
+        }
+    }
+
+    /// Leave the worktree's branch (HEAD detached at the same commit), so another worktree
+    /// can check that branch out.
+    pub async fn detach(&self, wt: &Path) -> Result<()> {
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        self.ok(wt, &[c1, hooks, c2, fsmonitor, "switch", "--detach"], false).await.map(drop)
+    }
+
     pub async fn create_branch(&self, repo: &Path, branch: &str, start: &str) -> Result<()> {
         self.ok(repo, &["branch", branch, start], false).await.map(drop)
     }

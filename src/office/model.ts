@@ -37,6 +37,8 @@ export interface AgentState {
   name: string;
   provider: Provider;
   role: Role;
+  /** Team title ("Backend dev") or "Consultant"; null for the rest. */
+  badge: string | null;
   color: number;
   seed: string;
   /** Lead agents: the request thread they serve. */

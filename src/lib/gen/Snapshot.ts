@@ -12,11 +12,16 @@ import type { Settings } from "./Settings";
 import type { Task } from "./Task";
 import type { Triple } from "./Triple";
 import type { Workspace } from "./Workspace";
+import type { WorkspaceTeam } from "./WorkspaceTeam";
 
 /**
  * Everything the UI needs on (re)connect. Deltas with `id <= as_of` are dropped.
  */
-export type Snapshot = { as_of: number, clis: Array<CliInfo>, accounts: Array<AccountInfo>, workspace: Workspace | null, settings: Settings, agents: Array<Agent>, plans: Array<Plan>, tasks: Array<Task>, approvals: Array<Approval>, chats: Array<ChatMessage>, memories: Array<Memory>, triples: Array<Triple>, artifacts: Array<Artifact>, 
+export type Snapshot = { as_of: number, clis: Array<CliInfo>, accounts: Array<AccountInfo>, workspace: Workspace | null, settings: Settings, 
+/**
+ * The open repo's changes to the global team.
+ */
+workspace_team: WorkspaceTeam | null, agents: Array<Agent>, plans: Array<Plan>, tasks: Array<Task>, approvals: Array<Approval>, chats: Array<ChatMessage>, memories: Array<Memory>, triples: Array<Triple>, artifacts: Array<Artifact>, 
 /**
  * Most recent persisted events (for timeline, inspector and world replay).
  */

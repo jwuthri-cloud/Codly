@@ -20,6 +20,9 @@ pub const SUBMIT_PLAN: &str = "codly_submit_plan";
 pub const SUBMIT_REPORT: &str = "codly_submit_report";
 pub const ASK_LEAD: &str = "codly_ask_lead";
 pub const SUBMIT_REVIEW: &str = "codly_submit_review";
+pub const MESSAGE_MEMBER: &str = "codly_message_member";
+pub const QUICK_TASK: &str = "codly_quick_task";
+pub const REASSIGN: &str = "codly_reassign";
 
 fn tool(name: &str, description: &str, schema: Value) -> Value {
     json!({ "name": name, "description": description, "inputSchema": schema })
@@ -27,6 +30,36 @@ fn tool(name: &str, description: &str, schema: Value) -> Value {
 
 fn str_array() -> Value {
     json!({ "type": "array", "items": { "type": "string" } })
+}
+
+/// Who does a task: the staffing properties of plan tasks, quick tasks and reassignments.
+fn staffing() -> [(&'static str, Value); 3] {
+    [
+        (
+            "assignee",
+            json!({ "type": "string", "description": "A worker team member's name from the board's Team line (they queue if busy), \
+                    or \"consultant\" to hire one for this task only. Omit: Codly hires a consultant by the user's worker order." }),
+        ),
+        (
+            "consultant",
+            json!({ "type": "object", "description": "With assignee \"consultant\": the harness and model, sized to the task.", "properties": {
+                "provider": { "type": "string", "enum": ["claude", "codex", "gemini", "opencode"] },
+                "model": { "type": "string", "description": "Optional, e.g. sonnet, opus:high, haiku. Omit for the CLI default." }
+            }, "required": ["provider"], "additionalProperties": false }),
+        ),
+        (
+            "session",
+            json!({ "type": "string", "enum": ["continue", "fresh"], "description": "Team members only. continue (default) resumes \
+                    the member's own conversation; fresh starts a new one (unrelated work, or its context is above ~70%)." }),
+        ),
+    ]
+}
+
+fn with_staffing(mut props: Value) -> Value {
+    for (k, v) in staffing() {
+        props[k] = v;
+    }
+    props
 }
 
 /// `tools/list` content for an agent role.
@@ -102,7 +135,7 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
     ];
 
     match role {
-        Role::Lead => tools.push(tool(
+        Role::Lead => tools.extend([tool(
             SUBMIT_PLAN,
             "Submit a plan for the user's request as a small task DAG. Codly validates it, shows it on the board and \
              runs it with worker agents in isolated git worktrees. Prefer FEWER tasks: one task is right for small or \
@@ -114,7 +147,7 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
                 "assumptions": str_array(),
                 "open_questions": str_array(),
                 "integration_checks": str_array(),
-                "tasks": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "object", "properties": {
+                "tasks": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "object", "properties": with_staffing(json!({
                     "id": { "type": "string", "description": "Short key: t1, t2…" },
                     "title": { "type": "string" },
                     "goal": { "type": "string" },
@@ -127,9 +160,40 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
                     "risk": { "type": "string", "enum": ["low", "medium", "high"] },
                     "agent_hint": { "type": "string", "enum": ["any", "claude", "codex", "gemini", "opencode"] },
                     "account": { "type": "string", "description": "Only when the user asks for a specific account: an id from the board's Accounts line." }
-                }, "required": ["id", "title", "goal", "acceptance_criteria", "write_scope", "depends_on", "verify"] } }
+                })), "required": ["id", "title", "goal", "acceptance_criteria", "write_scope", "depends_on", "verify"] } }
             }, "required": ["summary", "tasks"], "additionalProperties": false }),
-        )),
+        ),
+        tool(
+            MESSAGE_MEMBER,
+            "Ask a team member (or a working consultant) something, or give them a heads-up. A working member reads it \
+             mid-task; an idle one answers in a read-only chat. Their answer comes back to you as a [Codly] message.",
+            json!({ "type": "object", "properties": {
+                "to": { "type": "string", "description": "The member's or consultant's name." },
+                "text": { "type": "string", "maxLength": 4000 }
+            }, "required": ["to", "text"], "additionalProperties": false }),
+        ),
+        tool(
+            QUICK_TASK,
+            "Give one small task straight to a team member or a consultant, without a full plan. It shows as a one-task \
+             plan the user starts (or that runs at once when they auto-run plans). Does not replace your pending plan.",
+            json!({ "type": "object", "properties": with_staffing(json!({
+                "title": { "type": "string" },
+                "goal": { "type": "string" },
+                "acceptance_criteria": str_array(),
+                "verify": str_array(),
+                "write_scope": str_array()
+            })), "required": ["title", "goal", "acceptance_criteria", "verify", "assignee"], "additionalProperties": false }),
+        ),
+        tool(
+            REASSIGN,
+            "Move a task of yours that has not started (pending or ready) to another team member or to a consultant, \
+             e.g. when its assignee is busy and the task is simple.",
+            json!({ "type": "object", "properties": with_staffing(json!({
+                "task": { "type": "string", "description": "Task id from your plan: t1, t2…" },
+                "plan_id": { "type": "string", "description": "Only when two of your plans have that task id." }
+            })), "required": ["task", "assignee"], "additionalProperties": false }),
+        ),
+        ]),
         Role::Worker => {
             tools.push(tool(
                 SUBMIT_REPORT,
@@ -185,6 +249,10 @@ mod tests {
     fn roles_get_their_tools() {
         let names = |r| tool_specs(r).into_iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert!(names(Role::Lead).contains(&SUBMIT_PLAN.to_string()));
+        for t in [MESSAGE_MEMBER, QUICK_TASK, REASSIGN] {
+            assert!(names(Role::Lead).contains(&t.to_string()));
+            assert!(!names(Role::Worker).contains(&t.to_string()));
+        }
         assert!(!names(Role::Worker).contains(&SUBMIT_PLAN.to_string()));
         assert!(names(Role::Worker).contains(&SUBMIT_REPORT.to_string()));
         assert!(names(Role::Reviewer).contains(&SUBMIT_REVIEW.to_string()));

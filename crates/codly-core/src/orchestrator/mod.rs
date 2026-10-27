@@ -11,6 +11,7 @@
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
 //! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
+//! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
@@ -25,6 +26,7 @@ pub mod prompts;
 mod runs;
 pub mod scheduler;
 pub mod scope;
+mod team;
 mod tools;
 mod workspace;
 
@@ -124,6 +126,17 @@ struct Live {
     turn_messages: u32,
     /// First line of the latest user message (solo commit messages).
     last_prompt: Option<String>,
+    /// Lead messages (codly_message_member) whose answer goes back to that Lead.
+    answers: Vec<Answer>,
+    /// Started only to answer the Lead: shut down once every answer went out.
+    answer_only: bool,
+}
+
+/// A member's reply the Lead of `thread` waits for: the reply of turn number `due`.
+struct Answer {
+    due: u64,
+    ws_id: Id,
+    thread: String,
 }
 
 struct Inner {
@@ -173,6 +186,8 @@ struct Inner {
     quota: Mutex<HashMap<String, Vec<UsageWindow>>>,
     /// Artifact files already announced (absolute path + size), so rewrites re-announce.
     artifacts_seen: Mutex<HashSet<String>>,
+    /// Model names per CLI (`env::list_models`), for the Lead's consultant choices.
+    models: Mutex<HashMap<Provider, Vec<String>>>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -339,6 +354,7 @@ impl Core {
             accounts: RwLock::new(accounts),
             quota: Mutex::new(quota),
             artifacts_seen: Mutex::new(HashSet::new()),
+            models: Mutex::new(HashMap::new()),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);
@@ -404,14 +420,25 @@ impl Core {
         s.worker_providers.retain(|p| seen.insert(*p));
         s.accounts = normalize_accounts(std::mem::take(&mut s.accounts), &self.inner.base_env)?;
         s.lead_account = s.lead_account.filter(|a| !a.trim().is_empty());
+        let repo_members = self.inner.workspace().map(|w| self.inner.store.workspace_team(&w.id)).transpose()?.unwrap_or_default().members;
+        s.team = team::normalize_team(std::mem::take(&mut s.team), &repo_members)?;
         let accounts_changed = self.inner.settings().accounts != s.accounts;
+        let team_changed = self.inner.settings().team != s.team;
         self.inner.store.save_settings(&s)?;
         *write(&self.inner.settings) = s.clone();
         if accounts_changed {
             self.inner.redetect_accounts(true).await; // only a newly listed home is probed
         }
+        if team_changed && let Some(ws) = self.inner.workspace() {
+            self.inner.sync_team(&ws)?;
+        }
         self.inner.kick();
         Ok(s)
+    }
+
+    /// The open repo's changes to the global team (switch members off, add its own).
+    pub async fn set_workspace_team(&self, team: WorkspaceTeam) -> anyhow::Result<WorkspaceTeam> {
+        self.inner.set_workspace_team(team)
     }
 
     /// thread = "lead" or "lead:<id>" → a turn for that request thread's own Lead (spawned
@@ -793,6 +820,10 @@ impl Inner {
             color,
             look_seed: id.clone(),
             thread: None,
+            member: None,
+            title: None,
+            consultant: false,
+            archived: false,
             usage: Usage::default(),
             created_at: now_ms(),
             updated_at: now_ms(),

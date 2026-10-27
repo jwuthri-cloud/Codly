@@ -28,6 +28,7 @@ import type { Task } from '../gen/Task';
 import type { Triple } from '../gen/Triple';
 import type { Usage } from '../gen/Usage';
 import type { Workspace } from '../gen/Workspace';
+import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
 import type { JsonValue } from '../gen/serde_json/JsonValue';
 import { DemoAccounts } from './accounts';
 import { VirtualClock } from './clock';
@@ -79,6 +80,7 @@ export class Sim {
   clis: CliInfo[] = [];
   recent: RecentWorkspace[] = [];
   settings: Settings;
+  workspaceTeam: WorkspaceTeam = { off: [], members: [] };
   /** The demo machine's sign-ins (two Claude accounts, a signed-out Codex one…). */
   signIns: DemoAccounts;
   workspace: Workspace | null = null;
@@ -150,6 +152,7 @@ export class Sim {
       accounts: this.signIns.list(this.settings, this.clis),
       workspace: this.workspace,
       settings: this.settings,
+      workspace_team: this.workspace ? this.workspaceTeam : null,
       agents: [...this.agents.values()],
       plans: [...this.plans.values()],
       tasks: [...this.tasks.values()],
@@ -329,6 +332,10 @@ export class Sim {
       billing: o.billing,
       color: o.color,
       look_seed: o.name.toLowerCase(),
+      member: null,
+      title: null,
+      consultant: false,
+      archived: false,
       usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, context_used: null, context_window: (o.model && WINDOWS[o.model]) || null, cost_usd: null },
       created_at: now,
       updated_at: now,

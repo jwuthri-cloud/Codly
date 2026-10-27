@@ -19,6 +19,7 @@ import type { Workspace } from '../gen/Workspace';
 import { bytesOf, contrastCsv, contrastSvg, ILLUSTRATION_PROMPT, illustrationPng, SETTINGS_API_MD, TOGGLE_PREVIEW_HTML } from './artifacts';
 import { diffOf, INDEX, INDEX_AFTER, NEXT_BUMP, TASK_FILES, type RepoFile } from './repo';
 import { Actor, Cancelled, REPO, Sim, WORKTREES, sha, uid } from './sim';
+import { memberTitle } from '../util/team';
 
 export const REQUEST =
   'Add a dark mode toggle to Settings. Persist the choice per user, follow the system by default, and cover it with tests.';
@@ -98,7 +99,7 @@ export class Story {
     // The repo's existing board, memory and knowledge (silent: they arrive in the snapshot).
     const mk = (key: string, title: string, goal: string, status: TaskStatus, extra: Partial<Task>, ageH: number): Task => ({
       id: uid('t-'), plan_id: null, key, title, goal, acceptance: [], write_scope: [], verify: [], depends_on: [], status,
-      assignee: null, agent_hint: null, account_hint: null, branch: null, worktree: null, attempt: 0, status_reason: null, summary: null,
+      assignee: null, agent_hint: null, account_hint: null, consultant: null, fresh_session: false, branch: null, worktree: null, attempt: 0, status_reason: null, summary: null,
       created_at: now - ageH * HOUR, updated_at: now - ageH * HOUR * 0.5, ...extra,
     });
     const a1 = mk('a1', 'Upgrade ESLint to v10', 'Move to ESLint 10 and fail CI on lint warnings.', 'pending', {
@@ -112,6 +113,7 @@ export class Story {
       summary: 'Bumped next to 16.1.2; replaced `next lint` with `eslint .`. Build and tests green.', attempt: 1, verify: ['npm run build', 'npm test'],
     }, 52);
     for (const t of [a1, a2, a3]) sim.tasks.set(t.id, t);
+    this.syncTeam();
 
     sim.memory('Prefer small, reviewable changes: one concern per task.', 'global', 'preference', 'user', { pinned: true, importance: 0.9, emit: false });
     sim.memory('Unit tests run with `npm test` (vitest); e2e with `npx playwright test`.', 'project', 'fact', 'codly', { importance: 0.8, emit: false });
@@ -263,7 +265,7 @@ export class Story {
     const now = sim.now();
     const t = sim.putTask({
       id: uid('t-'), plan_id: plan.id, key, title, goal, acceptance: [], write_scope: [], verify: [], depends_on: [], status: 'pending',
-      assignee: null, agent_hint: null, account_hint: null, branch: null, worktree: null, attempt: 0, status_reason: 'Plan awaiting your go', summary: null,
+      assignee: null, agent_hint: null, account_hint: null, consultant: null, fresh_session: false, branch: null, worktree: null, attempt: 0, status_reason: 'Plan awaiting your go', summary: null,
       created_at: now, updated_at: now, ...o,
     });
     this.fileKeys.set(t.id, FILES[spec][key]);
@@ -1027,7 +1029,7 @@ export class Story {
     const now = sim.now();
     return sim.putTask({
       id: uid('t-'), plan_id: null, key: `a${this.nextAdhoc++}`, title, goal, acceptance: [], write_scope: [], verify: ['npm test'], depends_on: [],
-      status: 'pending', assignee: null, agent_hint: null, account_hint: null, branch: null, worktree: null, attempt: 0, status_reason: null, summary: null,
+      status: 'pending', assignee: null, agent_hint: null, account_hint: null, consultant: null, fresh_session: false, branch: null, worktree: null, attempt: 0, status_reason: null, summary: null,
       created_at: now, updated_at: now,
     });
   }
@@ -1125,6 +1127,35 @@ export class Story {
   }
 
   // ───────────── agents ─────────────
+
+  /** The team members of the open repo as idle agents (like the core's sync_team). */
+  syncTeam() {
+    const sim = this.sim;
+    if (!sim.workspace) return;
+    const repo = sim.workspaceTeam;
+    const team = [...sim.settings.team.filter((m) => !repo.off.includes(m.id)), ...repo.members].filter((m) => m.enabled);
+    const members = [...sim.agents.values()].filter((a) => a.member);
+    for (const m of team) {
+      const title = memberTitle(m);
+      const a = members.find((x) => x.member === m.id);
+      if (a) {
+        if (a.name !== m.name || a.title !== title || a.model !== m.model || a.provider !== m.provider)
+          sim.patchAgent(a.id, { name: m.name, title, model: m.model, provider: m.provider, role: m.kind === 'reviewer' ? 'reviewer' : 'worker' });
+        continue;
+      }
+      const used = new Set([...sim.agents.values()].map((x) => x.color));
+      const color = [0, 1, 3, 5, 2, 4, 7, 6].find((c) => !used.has(c)) ?? sim.agents.size % 8;
+      const agent = sim.newAgent({
+        name: m.name, provider: m.provider, model: m.model, role: m.kind === 'reviewer' ? 'reviewer' : 'worker', color,
+        billing: m.provider === 'opencode' ? 'third_party' : 'subscription', status: 'idle',
+      });
+      sim.putAgent({ ...agent, member: m.id, title, run_id: null });
+    }
+    for (const a of members.filter((x) => !team.some((m) => m.id === x.member))) {
+      sim.putAgent({ ...a, archived: true, status: 'offline', updated_at: sim.now() });
+      sim.agents.delete(a.id);
+    }
+  }
 
   hire(provider: Provider): Agent {
     const sim = this.sim;

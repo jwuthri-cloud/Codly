@@ -55,18 +55,24 @@ impl Inner {
     /// plan card in the calling Lead's request thread, and auto-run when the user allows it.
     /// Errors go back to the Lead verbatim.
     pub(super) async fn submit_plan(self: &Arc<Self>, lead_id: &str, args: Value) -> Result<Value> {
-        let ws = match self.store.agent_workspace(lead_id)? {
-            Some(id) => self.store.workspace(&id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
-            None => self.require_ws()?,
-        };
-        let thread = self.agent(lead_id).map_or_else(|_| default_lead_thread(), |a| lead::thread_of(&a).to_string());
         let input: PlanInput = serde_json::from_value(args).map_err(|e| {
             anyhow!(
                 "Plan rejected: the arguments do not match the schema ({e}). Send {{summary, tasks: [{{id, title, goal, \
                  acceptance_criteria, write_scope, depends_on, verify}}]}}."
             )
         })?;
-        let valid = planner::validate(input).map_err(|e| anyhow!(e))?;
+        self.submit_plan_inner(lead_id, input, true).await
+    }
+
+    /// A plan (or a quick task, `supersede` = false: it leaves the request's pending plan be).
+    pub(super) async fn submit_plan_inner(self: &Arc<Self>, lead_id: &str, input: PlanInput, supersede: bool) -> Result<Value> {
+        let ws = match self.store.agent_workspace(lead_id)? {
+            Some(id) => self.store.workspace(&id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
+            None => self.require_ws()?,
+        };
+        let thread = self.agent(lead_id).map_or_else(|_| default_lead_thread(), |a| lead::thread_of(&a).to_string());
+        let mut valid = planner::validate(input).map_err(|e| anyhow!(e))?;
+        let staffing = self.check_team(&ws, &mut valid.plan.tasks)?;
         let known: Vec<String> = self.accounts().into_iter().map(|a| a.id).collect();
         if let Some((t, acc)) = valid.plan.tasks.iter().find_map(|t| t.account.as_ref().filter(|a| !known.contains(a)).map(|a| (t, a))) {
             bail!(
@@ -79,7 +85,8 @@ impl Inner {
         let now = now_ms();
 
         // A request's new plan replaces its own unstarted one, never another request's.
-        for old in self.store.plans(&ws.id, 50)?.into_iter().filter(|p| p.status == PlanStatus::AwaitingApproval && p.thread == thread) {
+        let olds = if supersede { self.store.plans(&ws.id, 50)? } else { vec![] };
+        for old in olds.into_iter().filter(|p| p.status == PlanStatus::AwaitingApproval && p.thread == thread) {
             self.cancel_plan_inner(&old, "superseded by a newer plan from the Lead").await?;
         }
 
@@ -118,9 +125,11 @@ impl Inner {
                 verify: t.verify.clone(),
                 depends_on: t.depends_on.iter().filter_map(|d| ids.get(d).cloned()).collect(),
                 status: TaskStatus::Pending,
-                assignee: None,
+                assignee: t.member().and_then(|n| self.member_by_name(&ws.id, n)).map(|a| a.id),
                 agent_hint: t.hint(),
                 account_hint: t.account.clone(),
+                consultant: t.consultant_spec(),
+                fresh_session: t.fresh_session() && t.member().is_some(),
                 branch: None,
                 worktree: None,
                 attempt: 0,
@@ -199,7 +208,7 @@ impl Inner {
                 "id": t.key, "title": t.title,
                 "depends_on": t.depends_on.iter().filter_map(|d| key_of.get(d)).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
-            "codly_adjustments": valid.fixes.iter().map(|f| &f.summary).collect::<Vec<_>>(),
+            "codly_adjustments": valid.fixes.iter().map(|f| &f.summary).chain(&staffing).collect::<Vec<_>>(),
             "next": if auto { "Codly is running the plan. Tell the user briefly what it will do." }
                     else { "Tell the user briefly what the plan does; they start it with Run plan." },
         }))
@@ -329,12 +338,15 @@ impl Inner {
     async fn schedule_pass(self: &Arc<Self>) -> Result<()> {
         let Some(ws) = self.workspace() else { return Ok(()) };
         let _g = self.sched_lock.lock().await;
+        self.sync_team(&ws)?;
         let tasks = self.store.tasks(&ws.id)?;
+        self.sweep_staff(&ws, &tasks, &self.store.agents(&ws.id)?)?;
         let plans = self.store.plans(&ws.id, 100)?;
         let agents = self.store.agents(&ws.id)?;
         let clis = self.clis();
         let settings = self.settings();
-        let busy: HashSet<Id> = lock(&self.live).keys().cloned().collect();
+        // A quiet 1:1 chat does not keep an agent from its task (it is stopped for it).
+        let busy: HashSet<Id> = self.busy_agents();
         let accounts = self.account_states();
         let actions = scheduler::schedule(&SchedInput {
             tasks: &tasks,
@@ -398,7 +410,11 @@ impl Inner {
     ) -> Result<()> {
         let agent = match pick {
             AgentPick::Existing(id) => self.agent(&id)?,
-            AgentPick::New { name, color } => self.create_agent(&ws.id, &name, provider, Role::Worker, color, None)?,
+            AgentPick::New { name, color, model } => {
+                let mut a = self.new_agent(&name, provider, Role::Worker, color, model);
+                a.consultant = true;
+                self.insert_agent(&ws.id, a)?
+            }
         };
         let mut why = None; // why it was not running: tells a resumed session what happened
         self.update_task(task_id, |t| {
@@ -457,14 +473,25 @@ impl Inner {
             }
             None => (format!("codly/adhoc/{}", task.key), self.worktree_root(&ws).join("adhoc").join(&task.key), "HEAD".to_string()),
         };
-        let fresh = !wt.exists();
-        {
-            let _g = self.repo_lock.lock().await;
-            self.git.worktree_add(&repo, &wt, &branch, &start).await?;
+        // An idle 1:1 chat gives way to the task (the scheduler does not count it as busy).
+        if self.preemptible(agent_id) && !self.stop_and_wait(agent_id).await {
+            bail!("{} did not leave its chat in time", agent.name);
         }
-        if fresh {
-            self.bootstrap_worktree(&ws, &repo, &wt, Some(task_id)).await;
-        }
+        let member = agent.member.is_some().then(|| self.team_member(&agent)).flatten();
+        // A team member works in its own stable worktree, switched to the task's branch.
+        let (wt, switch_note) = if agent.member.is_some() {
+            self.switch_member_worktree(&ws, &agent, &task.key, &branch, &start).await?
+        } else {
+            let fresh = !wt.exists();
+            {
+                let _g = self.repo_lock.lock().await;
+                self.git.worktree_add(&repo, &wt, &branch, &start).await?;
+            }
+            if fresh {
+                self.bootstrap_worktree(&ws, &repo, &wt, Some(task_id)).await;
+            }
+            (wt, None)
+        };
         if self.store.task_commits(task_id)?.0.is_none() {
             let base = self.git.rev_parse(&repo, &start).await?;
             self.store.set_task_commits(task_id, base.as_deref(), None)?;
@@ -486,6 +513,28 @@ impl Inner {
                 && r.account.clone().or_else(|| primary.clone()).as_deref().is_none_or(|a| a == account)
         });
         let feedback = lock(&self.pending_feedback).remove(task_id);
+        // A member continues its own conversation on a new task (unless the Lead asked for a
+        // fresh one), when that conversation lives on this account.
+        let own = match (&member, &agent.session_id) {
+            (Some(_), Some(s)) if prev.is_none() && !task.fresh_session && self.agent_account(&agent).is_none_or(|a| a == account) => {
+                Some(s.clone())
+            }
+            (Some(_), Some(_)) if prev.is_none() && !task.fresh_session => {
+                let summary = format!("{} starts {} in a new session: its conversation lives on another account", agent.name, task.key);
+                self.decide(Some(&ws.id), Some(task_id), "route", summary, json!({ "account": account }))?;
+                None
+            }
+            _ => None,
+        };
+        let system_prompt = match &member {
+            Some(m) => prompts::member_system(prompts::WORKER_SYSTEM, m),
+            None => prompts::WORKER_SYSTEM.to_string(),
+        };
+        let agent = match &member {
+            // The configured model, effort included (the CLI reports a resolved name).
+            Some(m) if agent.model != m.model => self.update_agent(agent_id, |a| a.model = m.model.clone())?,
+            _ => agent,
+        };
         let req = |session: SessionMode| RunReq {
             agent: agent.clone(),
             role: Role::Worker,
@@ -493,29 +542,43 @@ impl Inner {
             read_only: false,
             task_id: Some(task_id.to_string()),
             session,
-            system_prompt: prompts::WORKER_SYSTEM.to_string(),
+            system_prompt: system_prompt.clone(),
             workspace_id: Some(ws.id.clone()),
             account: Some(account.to_string()),
         };
-        let resumed = match prev.and_then(|r| r.session_id) {
-            Some(session_id) => match self.spawn_run(req(SessionMode::Resume { session_id })).await {
-                Ok(_) => true,
+        enum Start {
+            SameTask,
+            OwnSession,
+            New,
+        }
+        let resume = prev.and_then(|r| r.session_id).map(|s| (s, Start::SameTask)).or(own.map(|s| (s, Start::OwnSession)));
+        let started = match resume {
+            Some((session_id, how)) => match self.spawn_run(req(SessionMode::Resume { session_id })).await {
+                Ok(_) => how,
                 Err(e) => {
                     tracing::warn!("resuming {} on {} failed ({e}); starting a new session", agent.name, task.key);
                     self.spawn_run(req(new_session(agent.provider))).await?;
-                    false
+                    Start::New
                 }
             },
             None => {
                 self.spawn_run(req(new_session(agent.provider))).await?;
-                false
+                Start::New
             }
         };
-        let prompt = match (resumed, feedback) {
-            (true, Some(f)) => f,
-            (true, None) => prompts::continuation(&task, why),
-            (false, f) => {
-                let brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent).await;
+        let prompt = match (started, feedback) {
+            (Start::SameTask, Some(f)) => f,
+            (Start::SameTask, None) => prompts::continuation(&task, why),
+            (Start::OwnSession, f) => {
+                let brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), false).await;
+                let next = prompts::member_next_task(&brief, &branch, switch_note.as_deref());
+                match f {
+                    Some(f) => format!("{next}\n\n{f}"),
+                    None => next,
+                }
+            }
+            (Start::New, f) => {
+                let brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), true).await;
                 match f {
                     Some(f) => format!("{brief}\n\n{f}"),
                     None => brief,
@@ -529,7 +592,7 @@ impl Inner {
     /// dependencies and local env files, as APFS clones (`cp -c`: copy-on-write, near-free).
     /// Only paths the repo ignores are copied, so none of them can end up in a Codly commit.
     /// ponytail: a fixed list; per-repo setup scripts and port blocks come when users ask.
-    async fn bootstrap_worktree(&self, ws: &Workspace, repo: &Path, wt: &Path, task_id: Option<&str>) {
+    pub(super) async fn bootstrap_worktree(&self, ws: &Workspace, repo: &Path, wt: &Path, task_id: Option<&str>) {
         const SEED: &[&str] = &["node_modules", ".venv", "venv", ".env", ".env.local", ".env.development.local", ".env.test.local"];
         let mut copied = vec![];
         for rel in SEED {
@@ -560,7 +623,8 @@ impl Inner {
 
     /// Task brief + pointer pack (logged as a Retrieval event) + memory pack + what the
     /// dependencies did.
-    async fn worker_brief(&self, ws: &Workspace, task: &Task, plan: Option<&Plan>, agent: &Agent) -> String {
+    /// A member gets its role, and in a new session (`history`) a log of its recent tasks.
+    async fn worker_brief(&self, ws: &Workspace, task: &Task, plan: Option<&Plan>, agent: &Agent, member: Option<&TeamMember>, history: bool) -> String {
         let agents = self.store.agents(&ws.id).unwrap_or_default();
         let deps: Vec<(String, String, String, Option<String>)> = task
             .depends_on
@@ -605,7 +669,9 @@ impl Inner {
                 self.notes_fallback(ws, &task.depends_on, &agents)
             }
         };
-        prompts::task_brief(&prompts::Brief { task, plan, deps, pointer_pack, memory_pack })
+        let history = if history && member.is_some() { self.member_history(&ws.id, &agent.id) } else { vec![] };
+        let role = member.map(|m| m.role.clone());
+        prompts::task_brief(&prompts::Brief { task, plan, deps, pointer_pack, memory_pack, role, history })
     }
 
     /// Blackboard notes of the dependency tasks, read from events (used while the memory
@@ -650,6 +716,8 @@ impl Inner {
             assignee: None,
             agent_hint: None,
             account_hint: None,
+            consultant: None,
+            fresh_session: false,
             branch: None,
             worktree: None,
             attempt: 0,

@@ -15,6 +15,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
   import AccountsSection from './AccountsSection.svelte';
+  import TeamSection from './TeamSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
   import Icon from '../components/Icon.svelte';
 
@@ -135,8 +136,8 @@
       </section>
 
       <section>
-        <h3 class="eyebrow">Workers</h3>
-        <p class="desc">Providers workers may use, in preference order. The planner’s hint wins when it names one.</p>
+        <h3 class="eyebrow">Consultants</h3>
+        <p class="desc">Workers hired for one task when no team member takes it. They use these providers in preference order, unless the Lead picks one.</p>
         <ul class="order">
           {#each [...s.worker_providers, ...ALL.filter((p) => !s.worker_providers.includes(p))] as p (p)}
             {@const on = s.worker_providers.includes(p)}
@@ -164,6 +165,8 @@
           </div>
         </div>
       </section>
+
+      <TeamSection />
 
       <AccountsSection />
 

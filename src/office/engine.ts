@@ -1448,7 +1448,7 @@ export class OfficeEngine {
         post: s?.post ?? '',
         tone: s?.tone ?? (a.status === 'idle' || a.status === 'offline' ? 'muted' : 'normal'),
         color: id.ink,
-        badge: a.role === 'lead' ? 'Lead' : a.role === 'reviewer' ? 'Review' : a.subagents.size ? `+${a.subagents.size}` : null,
+        badge: a.role === 'lead' ? 'Lead' : a.badge ?? (a.role === 'reviewer' ? 'Review' : a.subagents.size ? `+${a.subagents.size}` : null),
         icon: act.shown?.icon ?? null,
         selected,
         hovered,

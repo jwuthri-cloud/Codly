@@ -9,6 +9,7 @@ import type { MemoryScope } from '../gen/MemoryScope';
 import type { Provider } from '../gen/Provider';
 import type { Settings } from '../gen/Settings';
 import type { TaskStatus } from '../gen/TaskStatus';
+import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
 import { PROVIDER_LABEL, TASK_STATUS_LABEL } from '../util/labels';
 import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
@@ -62,6 +63,14 @@ export async function updateSettings(patch: Partial<Settings>) {
   const saved = await attempt('save settings', () => api.updateSettings(next));
   if (saved) store.setSettings(saved);
   else store.setSettings(prev);
+}
+
+/** Save the open repo's team changes; shown at once, reverted if the core refuses them. */
+export async function saveWorkspaceTeam(next: WorkspaceTeam) {
+  const prev = store.workspaceTeam;
+  store.setWorkspaceTeam(next);
+  const saved = await attempt('save the team', () => api.setWorkspaceTeam(next));
+  store.setWorkspaceTeam(saved ?? prev);
 }
 
 /** Re-read every CLI's sign-ins and quota. `probe` re-checks who is signed in (a few seconds). */

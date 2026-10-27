@@ -291,9 +291,28 @@ impl Store {
             .flatten())
     }
 
-    pub fn archive_agent(&self, id: &str) -> Result<()> {
-        self.conn().execute("UPDATE agent SET archived = 1 WHERE id = ?1", [id])?;
-        Ok(())
+    /// A workspace's team-member agents, archived ones included (a member switched back on
+    /// gets its old agent, session and memory back).
+    pub fn member_agents(&self, workspace_id: &str) -> Result<Vec<Agent>> {
+        self.json_rows(
+            "SELECT json FROM agent WHERE workspace_id = ?1 AND json_extract(json, '$.member') IS NOT NULL ORDER BY created_at, id",
+            workspace_id,
+        )
+    }
+
+    /// A repo's changes to the global team (none when unset or unreadable).
+    pub fn workspace_team(&self, workspace_id: &str) -> Result<WorkspaceTeam> {
+        Ok(match self.kv_get(&format!("team:{workspace_id}"))? {
+            Some(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+                tracing::warn!("team of {workspace_id} unreadable, using the global team: {e}");
+                WorkspaceTeam::default()
+            }),
+            None => WorkspaceTeam::default(),
+        })
+    }
+
+    pub fn save_workspace_team(&self, workspace_id: &str, t: &WorkspaceTeam) -> Result<()> {
+        self.kv_set(&format!("team:{workspace_id}"), &serde_json::to_string(t)?)
     }
 
     // ───────────── plans & tasks ─────────────
@@ -578,10 +597,10 @@ fn project(db: &Connection, ws: Option<&str>, row: &EventRow) -> Result<()> {
     match &row.kind {
         EventKind::AgentChanged { agent } => {
             db.prepare_cached(
-                "INSERT INTO agent (id, workspace_id, name, provider, role, json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO agent (id, workspace_id, name, provider, role, json, archived, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, json = excluded.json, updated_at = excluded.updated_at,
-                   workspace_id = COALESCE(agent.workspace_id, excluded.workspace_id)",
+                   archived = excluded.archived, workspace_id = COALESCE(agent.workspace_id, excluded.workspace_id)",
             )?
             .execute(params![
                 agent.id,
@@ -590,6 +609,7 @@ fn project(db: &Connection, ws: Option<&str>, row: &EventRow) -> Result<()> {
                 agent.provider.as_str(),
                 enum_str(&agent.role),
                 serde_json::to_string(agent)?,
+                agent.archived,
                 agent.created_at,
                 agent.updated_at,
             ])?;

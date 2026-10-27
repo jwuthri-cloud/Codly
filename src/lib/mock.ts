@@ -16,6 +16,8 @@ import type { SearchResult } from './gen/SearchResult';
 import type { Settings } from './gen/Settings';
 import type { Snapshot } from './gen/Snapshot';
 import type { TaskStatus } from './gen/TaskStatus';
+import type { TeamMember } from './gen/TeamMember';
+import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
@@ -51,7 +53,12 @@ const SETTINGS: Settings = {
   lead_followups: true,
   world_ambient: false,
   theme: 'system',
+  team: [],
 };
+
+/** Like the core: a member without an id gets "<slug>-<4 hex>". */
+const withIds = (team: TeamMember[]): TeamMember[] =>
+  team.map((m) => (m.id ? m : { ...m, id: `${m.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 12)}-${Math.random().toString(16).slice(2, 6)}` }));
 
 const params = () => new URLSearchParams(typeof location !== 'undefined' ? location.search : '');
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -127,8 +134,16 @@ export class MockTransport implements Transport {
         const next = sim.signIns.normalize(a.settings as Settings);
         next.max_parallel = Math.min(8, Math.max(1, next.max_parallel));
         next.max_per_provider = Math.min(next.max_parallel, Math.max(1, next.max_per_provider));
+        next.team = withIds(next.team ?? []);
         sim.settings = next;
+        story.syncTeam();
         return sim.settings;
+      }
+      case 'set_workspace_team': {
+        const t = a.team as WorkspaceTeam;
+        sim.workspaceTeam = { off: t.off, members: withIds(t.members) };
+        story.syncTeam();
+        return sim.workspaceTeam;
       }
       case 'send_chat': {
         if (!sim.workspace) throw new Error('Open a repository first.');

@@ -175,6 +175,8 @@ fn task(key: &str, status: TaskStatus, assignee: Option<&str>, deps: &[&str]) ->
         assignee: assignee.map(String::from),
         agent_hint: None,
         account_hint: None,
+        consultant: None,
+        fresh_session: false,
         branch: None,
         worktree: None,
         attempt: 1,

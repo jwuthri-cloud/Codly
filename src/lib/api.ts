@@ -22,6 +22,7 @@ import type { Task } from './gen/Task';
 import type { TaskStatus } from './gen/TaskStatus';
 import type { Triple } from './gen/Triple';
 import type { Workspace } from './gen/Workspace';
+import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 
 export type UiBatch = { events: EventRow[] };
 
@@ -89,6 +90,8 @@ export const api = {
   stopAgent: (agentId: string) => call<void>('stop_agent', { agentId }),
   hireAgent: (provider: Provider, model: string | null = null) => call<Agent>('hire_agent', { provider, model }),
   listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
+  /** The open repo's changes to the global team (members switched off, its own members). */
+  setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   setAgentModel: (agentId: string, model: string | null) => call<Agent>('set_agent_model', { agentId, model }),
   createTask: (title: string, goal: string) => call<Task>('create_task', { title, goal }),
   moveTask: (taskId: string, status: TaskStatus) => call<Task>('move_task', { taskId, status }),

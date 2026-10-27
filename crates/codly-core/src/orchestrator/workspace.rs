@@ -47,6 +47,10 @@ impl Inner {
         if changed && self.use_index {
             self.open_index(&ws);
         }
+        if let Err(e) = self.sync_team(&ws) {
+            tracing::warn!("team sync failed: {e}");
+        }
+        self.warm_models();
         self.kick();
         Ok(ws)
     }
@@ -127,6 +131,7 @@ impl Inner {
             clis: self.clis(),
             workspace: ws,
             settings: self.settings(),
+            workspace_team: id.map(|w| self.store.workspace_team(w)).transpose()?,
             agents,
             plans,
             tasks,
