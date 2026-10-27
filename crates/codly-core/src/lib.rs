@@ -15,6 +15,7 @@
 //! - `pty`          interactive terminals (portable-pty)
 //! - `dictation`    Free Flow: Groq Whisper transcription, key in the Keychain
 //! - `triggers`     schedules, context rules, network mode: pure policy (run by `orchestrator/triggers.rs`)
+//! - `skills`       skills manager: scan, catalog, install, uninstall
 
 pub mod adapters;
 pub mod dictation;
@@ -27,6 +28,7 @@ pub mod model;
 pub mod orchestrator;
 pub mod proc;
 pub mod pty;
+pub mod skills;
 pub mod store;
 pub mod triggers;
 

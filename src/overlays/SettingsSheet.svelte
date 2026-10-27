@@ -11,6 +11,7 @@
   import { updateSettings } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { usable as accountUsable } from '../lib/util/accounts';
+  import { skillsUi } from '../lib/state/skills.svelte';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
@@ -199,6 +200,14 @@
             <input type="checkbox" class="switch" checked={s[k as 'auto_run_plans']} onchange={(e) => set({ [k]: (e.currentTarget as HTMLInputElement).checked })} />
           </label>
         {/each}
+      </section>
+
+      <section>
+        <h3 class="eyebrow">Skills</h3>
+        <div class="row">
+          <div class="r-text"><span class="r-title">Agent skills</span><span class="desc">See what Claude Code and Codex can load, and install more from a catalog.</span></div>
+          <button class="btn sm" onclick={() => { ui.settingsOpen = false; skillsUi.show(); }}>Manage skills</button>
+        </div>
       </section>
 
       <section>

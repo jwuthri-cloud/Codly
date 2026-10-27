@@ -108,6 +108,11 @@ pub fn run() {
             commands::agent_git,
             commands::get_triggers,
             commands::set_triggers,
+            commands::list_skills,
+            commands::skill_catalog,
+            commands::install_skill,
+            commands::uninstall_skill,
+            commands::open_skill_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
