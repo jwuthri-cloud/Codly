@@ -12,11 +12,13 @@
 //! - `mcp`          Codly's MCP server (UDS) + stdio bridge (`codly mcp`) + tool specs
 //! - `index`        code retrieval: FTS5 over paths/symbols/chunks, RRF, citations, pointer packs
 //! - `memory`       shared/private memories, knowledge triples, memory packs
-//! - `pty`          interactive terminals (portable-pty)
+//! - `hire`         hire manifests (the add-agent wizard's import/AI draft): strict validation
+//! - `pty`         interactive terminals (portable-pty)
 
 pub mod adapters;
 pub mod env;
 pub mod git;
+pub mod hire;
 pub mod index;
 pub mod mcp;
 pub mod memory;

@@ -2,6 +2,7 @@
 //! `codly-core`; this crate only wires it to the webview.
 
 mod commands;
+mod hire_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod ui_bus;
@@ -99,6 +100,10 @@ pub fn run() {
             commands::pty_write,
             commands::pty_resize,
             commands::pty_close,
+            hire_commands::hire_review,
+            hire_commands::hire_launch_preview,
+            hire_commands::hire_draft_prompt,
+            hire_commands::hire_from_manifest,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

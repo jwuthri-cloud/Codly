@@ -178,6 +178,7 @@ impl Inner {
     /// Send a user turn to a live agent. Claude and ACP adapters queue it behind a running
     /// turn (it gets its own TurnStarted/TurnCompleted); Codex steers it into the running turn.
     pub(super) fn send_prompt(&self, agent_id: &str, text: String) -> Result<()> {
+        let wrapped = self.with_briefing(agent_id, &text); // a hired agent's standing goal, on every prompt
         let mut live = lock(&self.live);
         let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
         let steer = l.provider == Provider::Codex && l.turn_active;
@@ -185,7 +186,7 @@ impl Inner {
             l.queued += 1;
         }
         l.last_prompt = text.lines().find(|s| !s.trim().is_empty()).map(|s| s.trim().to_string());
-        if !l.handle.send(AgentCmd::Prompt(text)) {
+        if !l.handle.send(AgentCmd::Prompt(wrapped)) {
             l.queued = l.queued.saturating_sub(1);
             bail!("that agent's process is gone");
         }

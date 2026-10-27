@@ -5,6 +5,7 @@
   import Palette from './overlays/Palette.svelte';
   import SettingsSheet from './overlays/SettingsSheet.svelte';
   import ShortcutsSheet from './overlays/ShortcutsSheet.svelte';
+  import AddAgentWizard from './overlays/AddAgentWizard.svelte';
   import ModelDialog from './overlays/ModelDialog.svelte';
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
@@ -53,7 +54,7 @@
 {#if ui.paletteOpen}<Palette />{/if}
 {#if ui.settingsOpen}<SettingsSheet />{/if}
 {#if ui.shortcutsOpen}<ShortcutsSheet />{/if}
-{#if ui.modelDialog}<ModelDialog />{/if}
+{#if ui.modelDialog}{#if ui.modelDialog.agentId}<ModelDialog />{:else}<AddAgentWizard />{/if}{/if}
 <Toasts />
 <TooltipHost />
 <DragGhost />
