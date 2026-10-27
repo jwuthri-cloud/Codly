@@ -211,7 +211,7 @@
   .item + .item { box-shadow: inset 0 1px 0 var(--line); }
   .item.off :is(.input, .name, .rule, .muted) { opacity: 0.6; }
   .top { display: flex; align-items: center; gap: 8px; min-height: 26px; min-width: 0; }
-  .name { min-width: 8ch; max-width: 28ch; field-sizing: content; height: 26px; padding: 0 6px; margin-left: -6px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: var(--w-semi); font-size: var(--t-md); outline: none; color: var(--ink-1); }
+  .name { box-shadow: none; min-width: 8ch; max-width: 28ch; field-sizing: content; height: 26px; padding: 0 6px; margin-left: -6px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: var(--w-semi); font-size: var(--t-md); outline: none; color: var(--ink-1); }
   .name:hover, .name:focus { background: var(--surface-2); }
   .name:focus { box-shadow: inset 0 0 0 1px var(--focus); }
   .every { display: inline-flex; align-items: center; gap: 6px; }

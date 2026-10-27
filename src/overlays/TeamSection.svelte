@@ -210,7 +210,7 @@
   .member.off :is(.m-grid, .field, .m-name, .muted) { opacity: 0.55; }
   .m-top { display: flex; align-items: center; gap: 8px; min-height: 26px; min-width: 0; }
   .m-name { font-weight: var(--w-semi); }
-  .m-name-in { min-width: 4ch; max-width: 22ch; field-sizing: content; height: 26px; padding: 0 6px; margin-left: -6px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: var(--w-semi); font-size: var(--t-md); outline: none; }
+  .m-name-in { box-shadow: none; min-width: 4ch; max-width: 22ch; field-sizing: content; height: 26px; padding: 0 6px; margin-left: -6px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: var(--w-semi); font-size: var(--t-md); outline: none; }
   .m-name-in:hover { background: var(--surface-2); }
   .m-name-in:focus { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--focus); }
   .badge { font-size: var(--t-xs); padding: 1px 7px; border-radius: var(--r-full); background: var(--surface-3); color: var(--ink-2); white-space: nowrap; }

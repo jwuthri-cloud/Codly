@@ -106,6 +106,5 @@
   .key { display: flex; align-items: center; gap: 10px; }
   .klabel { width: 150px; flex-shrink: 0; font-size: var(--t-sm); color: var(--ink-2); }
   .grow { flex: 1; min-width: 0; }
-  .field { height: 30px; padding: 0 10px; border-radius: var(--r-md); background: var(--surface-2); color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line); font: inherit; font-size: var(--t-sm); outline: none; }
-  .field:focus { box-shadow: inset 0 0 0 1px var(--ink-3); }
+  .field { font-size: var(--t-sm); }
 </style>

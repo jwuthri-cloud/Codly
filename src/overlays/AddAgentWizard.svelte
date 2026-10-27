@@ -442,11 +442,8 @@
   .bad { color: var(--bad); }
   .mono { font-family: var(--font-mono); font-size: var(--t-sm); }
   .count { align-self: flex-end; }
-  input:not([type='checkbox']):not([type='file']), select, textarea { padding: 0 12px; border-radius: var(--r-md); background: var(--surface-2); color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line); font: inherit; font-size: var(--t-md); outline: none; }
-  input:not([type='checkbox']):not([type='file']), select { height: 36px; }
   input.mono { font-family: var(--font-mono); font-size: var(--t-sm); }
   textarea { padding: 9px 12px; resize: vertical; line-height: 1.45; }
-  input:focus, select:focus, textarea:focus { box-shadow: inset 0 0 0 1px var(--ink-3); }
   input[readonly] { color: var(--ink-2); }
   footer { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 26px 22px; flex-shrink: 0; box-shadow: inset 0 1px 0 var(--line); }
   .save { margin-right: auto; }

@@ -357,7 +357,7 @@
   .grip { display: grid; place-items: center; width: 20px; height: 26px; border-radius: var(--r-sm); color: var(--ink-4); cursor: grab; touch-action: none; flex-shrink: 0; }
   .grip:hover { color: var(--ink-2); background: var(--surface-2); }
   .dragging .grip { cursor: grabbing; }
-  .a-label { min-width: 4ch; max-width: 22ch; field-sizing: content; height: 26px; padding: 0 6px; margin-left: -2px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: var(--w-semi); font-size: var(--t-md); outline: none; }
+  .a-label { box-shadow: none; min-width: 4ch; max-width: 22ch; field-sizing: content; height: 26px; padding: 0 6px; margin-left: -2px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: var(--w-semi); font-size: var(--t-md); outline: none; }
   .a-label:hover { background: var(--surface-2); }
   .a-label:focus { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--focus); }
   .prim { color: var(--ink-3); }

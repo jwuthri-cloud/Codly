@@ -139,8 +139,7 @@
   .r-title { font-weight: var(--w-med); }
   .limits { display: flex; flex-direction: column; gap: 4px; }
   .limits.off { opacity: 0.55; }
-  .field { width: 84px; height: 32px; padding: 0 10px; text-align: right; border-radius: var(--r-md); background: var(--surface-1); color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line); font: inherit; font-size: var(--t-sm); outline: none; }
-  .field:focus { box-shadow: inset 0 0 0 1px var(--ink-3); }
+  .field { width: 84px; text-align: right; font-size: var(--t-sm); }
   .unit { width: 64px; font-size: var(--t-sm); color: var(--ink-3); }
   .foot { display: flex; align-items: center; gap: 12px; }
   .btn { height: 28px; padding: 0 12px; border-radius: var(--r-full); background: var(--surface-1); font-size: var(--t-sm); font-weight: var(--w-med); }

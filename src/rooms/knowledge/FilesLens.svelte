@@ -146,7 +146,7 @@
   header h2 { font-size: var(--d-sm); color: var(--ink-1); }
   .path { font-size: 12px; color: var(--ink-3); }
   .state { margin-left: auto; font-size: var(--t-xs); color: var(--ink-3); }
-  .text { flex: 1; min-height: 160px; resize: none; padding: 14px 16px; border: 0; outline: none; border-radius: var(--r-lg); background: var(--surface-1); font-family: var(--font-mono); font-size: var(--mono); line-height: var(--lh-mono); color: var(--ink-1); }
+  .text { flex: 1; min-height: 160px; box-shadow: none; resize: none; padding: 14px 16px; border: 0; outline: none; border-radius: var(--r-lg); background: var(--surface-1); font-family: var(--font-mono); font-size: var(--mono); line-height: var(--lh-mono); color: var(--ink-1); }
   .text:focus-visible { box-shadow: 0 0 0 2px var(--focus); }
   footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .grow { flex: 1; }

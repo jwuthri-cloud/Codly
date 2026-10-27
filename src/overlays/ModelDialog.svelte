@@ -139,7 +139,5 @@
   .on .radio { box-shadow: inset 0 0 0 4px var(--ink-1); }
   .link { color: var(--ink-1); font-weight: var(--w-med); text-decoration: underline; text-decoration-color: var(--line-3); text-underline-offset: 3px; }
   .muted { color: var(--ink-3); font-weight: var(--w-reg); }
-  input, select { height: 36px; padding: 0 12px; border-radius: var(--r-md); background: var(--surface-2); color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line); font: inherit; font-size: var(--t-md); outline: none; }
-  input:focus, select:focus { box-shadow: inset 0 0 0 1px var(--ink-3); }
   footer { display: flex; justify-content: flex-end; gap: 8px; padding: 0 26px 22px; }
 </style>

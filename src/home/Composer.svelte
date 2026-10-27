@@ -227,7 +227,7 @@
   .composer.one { padding-left: 8px; }
   .to { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px 0 7px; margin-bottom: 1px; border-radius: var(--r-full); background: color-mix(in srgb, var(--hue) 18%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hue) 45%, transparent); font-size: var(--t-sm); font-weight: var(--w-semi); white-space: nowrap; flex-shrink: 0; }
   .to :global(svg:last-child) { color: var(--ink-3); }
-  textarea { flex: 1; resize: none; border: 0; outline: none; background: transparent; padding: 7px 0 6px; min-height: 34px; max-height: 200px; font-size: var(--t-lg); line-height: 21px; color: var(--ink-1); user-select: text; -webkit-user-select: text; }
+  textarea { flex: 1; resize: none; border: 0; outline: none; box-shadow: none; background: transparent; padding: 7px 0 6px; min-height: 34px; max-height: 200px; font-size: var(--t-lg); line-height: 21px; color: var(--ink-1); user-select: text; -webkit-user-select: text; }
   .send { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: var(--ink-3); background: var(--surface-2); flex-shrink: 0; transition: background var(--d-2), color var(--d-2), transform var(--d-2) var(--spring); }
   .send:disabled { opacity: 1; }
   .has .send { background: var(--aurora); color: var(--on-aurora); transform: scale(1.04); }

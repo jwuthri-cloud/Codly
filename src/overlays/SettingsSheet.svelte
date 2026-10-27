@@ -263,8 +263,7 @@
   .row { display: flex; align-items: center; gap: 16px; min-height: 42px; }
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .r-title { font-weight: var(--w-med); }
-  .field { width: 180px; height: 32px; padding: 0 10px; border-radius: var(--r-md); background: var(--surface-1); color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line); font: inherit; font-size: var(--t-sm); outline: none; }
-  .field:focus { box-shadow: inset 0 0 0 1px var(--ink-3); }
+  .field { width: 180px; font-size: var(--t-sm); }
   .stepper { display: inline-flex; align-items: center; gap: 4px; padding: 2px; border-radius: var(--r-full); background: var(--surface-1); }
   .stepper .num { min-width: 22px; text-align: center; font-weight: var(--w-semi); }
   .modes { display: flex; flex-direction: column; gap: 6px; }

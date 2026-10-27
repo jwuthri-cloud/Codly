@@ -92,7 +92,7 @@
   .frame { flex: 1; min-height: 0; display: flex; background: var(--code-bg); }
   .gutter, .text { margin: 0; font-family: var(--font-mono); font-size: var(--mono); line-height: var(--lh-mono); padding: 10px 0; }
   .gutter { width: 52px; flex: none; overflow: hidden; text-align: right; padding-right: 12px; color: var(--ink-4); user-select: none; box-shadow: inset -1px 0 0 var(--line); }
-  .text { flex: 1; min-width: 0; border: 0; outline: 0; resize: none; background: transparent; padding-left: 14px; padding-right: 14px; tab-size: 2; white-space: pre; overflow: auto; }
+  .text { flex: 1; min-width: 0; box-shadow: none; border: 0; outline: 0; resize: none; background: transparent; padding-left: 14px; padding-right: 14px; tab-size: 2; white-space: pre; overflow: auto; }
   footer { display: flex; align-items: center; gap: 14px; height: 32px; padding: 0 14px; font-size: var(--t-sm); color: var(--ink-3); box-shadow: inset 0 1px 0 var(--line); }
   .grow { flex: 1; }
   .unsaved { color: var(--amber-ink); }

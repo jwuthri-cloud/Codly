@@ -83,9 +83,8 @@
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .r-title { font-weight: var(--w-med); }
   .saved { color: var(--ink-1); font-weight: var(--w-med); }
-  .field { width: 180px; height: 32px; padding: 0 10px; border-radius: var(--r-md); background: var(--surface-1); color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line); font: inherit; font-size: var(--t-sm); outline: none; }
+  .field { width: 180px; font-size: var(--t-sm); }
   .field.wide { flex: 1; width: auto; }
-  .field:focus { box-shadow: inset 0 0 0 1px var(--ink-3); }
   .btn { height: 32px; padding: 0 14px; border-radius: var(--r-full); background: var(--surface-2); font-weight: var(--w-med); font-size: var(--t-sm); }
   .btn:hover:not(:disabled) { background: var(--surface-3); }
   .btn:disabled { opacity: 0.5; }

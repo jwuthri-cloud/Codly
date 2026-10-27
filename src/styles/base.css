@@ -106,6 +106,27 @@ button:disabled { opacity: 0.42; pointer-events: none; }
 
 /* ---------- inputs ---------- */
 input, textarea, select { font: inherit; color: var(--ink-1); margin: 0; }
+/* One field look for every text input, textarea and select, so no component paints its own (or
+   inherits WebKit's inset bezel plus the global focus ring, which doubled every box). It is all
+   :where(), so a component can still restyle a field it wraps (search boxes: transparent, no
+   ring, focus shown on the wrapper with :focus-within). `.input` below is the same look by class. */
+:where(input:not([type='checkbox'], [type='radio'], [type='file'], [type='range'], [type='color'], .switch), select, textarea) {
+  -webkit-appearance: none; appearance: none; height: 32px; padding: 0 12px; min-width: 0; border: 0; border-radius: var(--r-md);
+  background-color: var(--surface-1); box-shadow: inset 0 0 0 1px var(--line-2); font-size: var(--t-md);
+  transition: box-shadow var(--d-2) var(--ease-out), background-color var(--d-2);
+}
+:where(textarea) { height: auto; padding: 8px 12px; resize: vertical; }
+:where(select) { padding-right: 26px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%), linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 14px, calc(100% - 10px) 14px; background-size: 4px 4px; background-repeat: no-repeat; }
+:where(input:not([type='checkbox'], [type='radio'], [type='file'], [type='range'], [type='color'], .switch), select, textarea):hover { box-shadow: inset 0 0 0 1px var(--line-3); }
+:where(input:not([type='checkbox'], [type='radio'], [type='file'], [type='range'], [type='color'], .switch), select, textarea):focus-visible { box-shadow: inset 0 0 0 1px var(--focus), 0 0 0 3px color-mix(in srgb, var(--focus) 20%, transparent); }
+:where(input:disabled, select:disabled, textarea:disabled) { opacity: 0.55; }
+input:not([type='checkbox'], [type='radio'], [type='file'], [type='range'], [type='color']):focus-visible, textarea:focus-visible, select:focus-visible { outline: none; }
+input[type='search']::-webkit-search-decoration, input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
+/* a field that lives inside a styled wrapper (search box, composer, inline name): no box of its own */
+.bare, :where(.q, .find, .input-row) input, textarea.bare { height: auto; padding: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.bare:focus-visible, :where(.q, .find, .input-row) input:focus-visible { box-shadow: none; }
 input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .input {
   height: 32px; padding: 0 12px; border-radius: var(--r-md); border: 0; outline: none; min-width: 0;
