@@ -1,57 +1,132 @@
 # Codly
 
-A team of coding agents, one living office.
+**A team of coding agents, one living office.**
 
-Codly runs the agent CLIs you already use — **Claude Code, Codex, Gemini CLI, OpenCode** — as a
-team under a supervisor, each in its own git worktree, on your existing subscriptions. You get two
-synchronized views of the same real events:
+Codly turns the coding CLIs you already pay for (Claude Code, Codex, Gemini CLI and OpenCode) into one
+team on your Mac. A Lead agent plans the work, each agent builds in its own git worktree, and nothing
+lands on your branch until you merge it. It is a macOS app built with Tauri, Svelte and Rust.
 
-- **Workspace** — chat with the Lead (and 1:1 with any agent), per-agent timeline, shared board and
-  each agent's own todo list, task dependency graph, diffs, terminal, approvals inbox, and an
-  inspector that explains *what* each agent is doing and *why* (with provenance on every fact).
-- **World** — an animated pixel office where agents walk to the library to search, the server room
-  to run tests, raise a hand when they need you, and celebrate when tests pass. Nothing in it is
-  fake: every motion is an event.
+![Codly's World view: coding agents at work in a pixel office](site/shots/office.jpg)
+
+## Why
+
+Running several coding agents in one repo gets messy fast. They step on each other's files, you lose
+track of who is doing what, and every approval is a prompt in a separate terminal. Codly puts them
+under one supervisor and shows the same events in two synchronized views:
+
+- **Workspace**: chat with the Lead or talk 1:1 with any agent. Per-agent timeline, shared board, task
+  dependency graph, diffs, terminals, and an approvals inbox.
+- **World**: an animated pixel office. Agents walk to the library to search, to the server room to run
+  tests, and raise a hand when they need you. Every motion comes from a real event.
+
+## Screenshots
+
+These come from the built-in demo: a fake `acme/web` repo with a scripted team.
+
+### The Lead proposes a plan
+
+Describe the goal to the Lead. It reads the repo read-only and either answers or proposes a small plan:
+tasks, dependencies, the agent for each task, and any assumptions it made. You run it, change it or
+cancel it.
+
+![The Lead proposes a plan with three tasks and assumptions to confirm](site/shots/plan.jpg)
+
+### Follow the plan as it runs
+
+The plan room lists every task with its checks and the files it may write. A task that depends on
+another waits until that one is merged.
+
+![Plan room showing tasks in progress and tasks waiting on them](site/shots/planroom.jpg)
+
+### Review finished work
+
+Each finished task shows the verify command that ran, the size of the diff, and the integration branch it
+merged into. Agents can ask the Lead a question mid-task, and the answer comes back into the thread.
+
+![A finished task with its test result, diff size and merge target](site/shots/done.jpg)
+
+### Approve what matters
+
+Commands an agent wants to run arrive in one approvals inbox. Codly checks each request against its rules
+first (here: it deletes files, stays inside the agent's worktree, and makes no network calls), then asks
+you. Approve once, allow for the session, or deny.
+
+![Approval request for a shell command, with Approve once, Allow for this session and Deny](site/shots/approval.jpg)
 
 ## How it works
 
-1. You describe what you want to the **Lead**. It reads the repo (read-only) and either answers or
-   submits a small task plan.
-2. Codly validates the plan (no cycles, no two tasks writing the same files at once), you click
-   **Run plan**, and workers start in isolated worktrees, each with a pointer pack of relevant code
-   and the team's memory.
-3. When a worker finishes, Codly commits, re-runs the verify commands, checks the write scope,
-   optionally asks a reviewer from another vendor, and merges into the plan's integration branch.
-4. When the plan is done you review the diff and merge it into your branch. Codly never pushes.
+1. **Ask the Lead.** It reads the repo read-only and either answers or submits a task plan.
+2. **Validate and run.** Codly checks the plan for cycles and for two tasks writing the same files at once.
+   You click **Run plan**.
+3. **Work in isolation.** Each task runs in its own git worktree and branch. The worker gets a pointer pack
+   of the relevant code and the team's memory.
+4. **Land the work.** When a worker finishes, Codly commits, re-runs the verify commands, checks the write
+   scope, optionally asks a reviewer from another vendor, and merges into the plan's integration branch.
+   Agents never commit on their own.
+5. **You merge.** Review the diff and merge it into your branch. Codly never pushes.
 
-Agents coordinate through Codly's MCP tools (`codly_board`, `codly_search`, `codly_memory_*`,
-`codly_kg_*`, `codly_post_note`, `codly_submit_plan`, `codly_submit_report`, …), so every exchange is
-typed, validated and visible.
+Agents coordinate through Codly's MCP tools (`codly_board`, `codly_search`, `codly_memory_*`, `codly_kg_*`,
+`codly_post_note`, `codly_submit_plan`, `codly_submit_report`), so every exchange is typed, validated and
+visible.
+
+## Supported agents
+
+| Agent       | How Codly talks to it                                                                  |
+| ----------- | -------------------------------------------------------------------------------------- |
+| Claude Code | `claude` in stream-JSON mode, with the stdin control protocol for approvals and interrupts |
+| Codex       | One `codex app-server` per agent (JSON-RPC over stdio): live command output, real approvals |
+| Gemini CLI  | ACP (`gemini --acp`)                                                                   |
+| OpenCode    | ACP (`opencode acp`)                                                                   |
+
+Cursor and Copilot use the same ACP adapter, but they are less tested.
 
 ## Requirements
 
-- macOS 14+
-- At least one agent CLI installed and signed in (`claude`, `codex`, `gemini`, `opencode`)
-- For development: Rust 1.90+, Node 22+, pnpm
+- macOS 14 or later
+- At least one agent CLI, installed and signed in
+- To build from source: Rust 1.90+, Node 22+ and pnpm
 
-## Develop
+## Getting started
 
 ```bash
 pnpm install
-pnpm tauri dev          # the app
-pnpm dev                # the UI alone in a browser, on a scripted mock session
-cargo test --workspace  # core tests (adapters replay real CLI fixtures)
+pnpm tauri dev              # run the desktop app
 ```
+
+Other useful commands:
+
+```bash
+pnpm dev                    # the UI alone in a browser, on a scripted demo session
+pnpm test                   # frontend tests (Vitest)
+pnpm check                  # svelte-check and TypeScript
+cargo test --workspace      # core tests; adapters replay captured CLI transcripts
+pnpm tauri build            # build the macOS app and .dmg
+```
+
+## Project layout
+
+- `crates/codly-core/`: the engine, with no Tauri dependency. Orchestrator (Lead, planner, scheduler, merge
+  queue, approval broker), agent adapters, SQLite store, code index, memory and the MCP server.
+- `src-tauri/`: the macOS shell (Tauri 2) that hosts the engine.
+- `src/`: the Svelte 5 UI, including the Workspace and the World.
+- `site/`: the landing page and the live demo build.
+- `docs/`: architecture, design notes and the research behind them.
+
+## Subscriptions and safety
+
+- Codly spawns the unmodified CLIs you installed and signed in to. It never reads, stores or proxies your
+  credentials.
+- Each agent shows a billing badge (subscription, API key or third party). API-key variables that would
+  silently switch billing are removed from agent environments.
+- Codly never pushes, and it merges only into integration branches you review.
+- Provider terms change. Check them before heavy parallel use.
 
 ## Docs
 
-- [Architecture](docs/ARCHITECTURE.md) — decisions, processes, event model, orchestration, memory.
-- [Research](docs/research/) — the reports behind every decision, the consolidated
-  [critique](docs/research/CRITIQUE.md), and a source-level teardown of Munder Difflin.
+- [Architecture](docs/ARCHITECTURE.md): decisions, processes, event model, orchestration and memory.
+- [Research](docs/research/): the reports behind each decision, and the consolidated
+  [critique](docs/research/CRITIQUE.md).
 
-## Notes on subscriptions
+## Status
 
-Codly spawns the unmodified CLIs that you installed and signed in to; it never reads, stores or
-proxies credentials. Each agent shows a billing badge (subscription, API key, third party), and API-key
-variables that would silently switch billing are removed from agent environments. Provider terms
-change; check them for heavy parallel use.
+Early: this is the v0.1 vertical slice. Expect rough edges.
