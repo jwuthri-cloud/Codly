@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-triggers"
+description = "Enables the get_triggers command without any pre-configured scope."
+commands.allow = ["get_triggers"]
+
+[[permission]]
+identifier = "deny-get-triggers"
+description = "Denies the get_triggers command without any pre-configured scope."
+commands.deny = ["get_triggers"]

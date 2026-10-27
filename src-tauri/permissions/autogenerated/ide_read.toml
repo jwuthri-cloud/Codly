@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ide-read"
+description = "Enables the ide_read command without any pre-configured scope."
+commands.allow = ["ide_read"]
+
+[[permission]]
+identifier = "deny-ide-read"
+description = "Denies the ide_read command without any pre-configured scope."
+commands.deny = ["ide_read"]

@@ -1,13 +1,20 @@
 //! Codly desktop shell: window, plugins, commands and the UI bus. All logic lives in
 //! `codly-core`; this crate only wires it to the webview.
 
+mod agent_controls;
+mod ask_me;
 mod commands;
+mod dictation;
+mod ide_commands;
+mod inbound;
+mod hire_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod ui_bus;
 
 use std::sync::Arc;
 
+use codly_core::blockers::{BlockerSeverity, BlockerStatus};
 use codly_core::model::{EventKind, PlanStatus, TaskStatus};
 use codly_core::{Core, CoreConfig};
 use tauri::{Manager, RunEvent};
@@ -24,6 +31,7 @@ pub fn run() {
         .init();
 
     let (core_tx, core_rx) = watch::channel(None);
+    let (hub_tx, hub_rx) = watch::channel(None);
     let bus = UiBus::new();
 
     let app = tauri::Builder::default()
@@ -43,8 +51,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(AppState { core: core_rx, bus: bus.clone(), pty: Default::default(), shell_env: OnceCell::new() })
+        .manage(inbound::InboundHandle { hub: hub_rx })
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
+            let inbound_dir = data_dir.clone();
             let app_exe = std::env::current_exe()?;
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -52,6 +62,7 @@ pub fn run() {
                 if let Ok(core) = &started {
                     tauri::async_runtime::spawn(bus.clone().pump(core.subscribe()));
                     tauri::async_runtime::spawn(notify_loop(handle, core.clone()));
+                    let _ = hub_tx.send(inbound::start(core.clone(), inbound_dir).await);
                 } else if let Err(e) = &started {
                     tracing::error!("core failed to start: {e}");
                 }
@@ -72,7 +83,16 @@ pub fn run() {
             commands::cancel_plan,
             commands::close_thread,
             commands::resolve_approval,
+            commands::breaker_config,
+            commands::set_breaker_config,
+            commands::breaker_status,
+            commands::reset_breaker,
             commands::interrupt_agent,
+            agent_controls::agent_control,
+            agent_controls::set_agent_block_tools,
+            agent_controls::stop_agent_after_step,
+            agent_controls::resume_agent,
+            agent_controls::steer_agent,
             commands::stop_agent,
             commands::hire_agent,
             commands::list_models,
@@ -100,6 +120,49 @@ pub fn run() {
             commands::pty_write,
             commands::pty_resize,
             commands::pty_close,
+            dictation::dictation_status,
+            dictation::dictation_configure,
+            dictation::dictation_save_key,
+            dictation::dictation_clear_key,
+            dictation::dictation_transcribe,
+            commands::agent_git,
+            commands::get_triggers,
+            commands::set_triggers,
+            commands::list_skills,
+            commands::skill_catalog,
+            commands::install_skill,
+            commands::uninstall_skill,
+            commands::open_skill_folder,
+            ide_commands::ide_info,
+            ide_commands::ide_list,
+            ide_commands::ide_read,
+            ide_commands::ide_write,
+            ide_commands::ide_create,
+            ide_commands::ide_search,
+            ide_commands::ide_changes,
+            ide_commands::ide_diff,
+            commands::exact_search,
+            commands::message_graph,
+            commands::memory_file,
+            commands::save_memory_file,
+            ask_me::list_blockers,
+            ask_me::answer_blocker,
+            ask_me::dismiss_blocker,
+            inbound::inbound_state,
+            inbound::inbound_create_webhook,
+            inbound::inbound_set_webhook,
+            inbound::inbound_revoke_webhook,
+            inbound::inbound_set_settings,
+            inbound::inbound_set_slack,
+            hire_commands::hire_review,
+            hire_commands::hire_launch_preview,
+            hire_commands::hire_draft_prompt,
+            hire_commands::hire_from_manifest,
+            commands::board_policy,
+            commands::board_sweep,
+            commands::board_archive,
+            commands::list_connections,
+            commands::update_connection,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
@@ -135,6 +198,13 @@ async fn notify_loop(app: tauri::AppHandle, core: Arc<Core>) {
                     codly_core::model::ApprovalSubject::Permissions { .. } => "get more permissions".into(),
                 };
                 ("An agent needs you".to_string(), format!("It wants to {what}."))
+            }
+            // A new blocking question, or one that has waited for days.
+            EventKind::BlockerChanged { blocker }
+                if blocker.status == BlockerStatus::Open && blocker.severity == BlockerSeverity::Blocking && blocker.updated_at == blocker.reminded_at.unwrap_or(blocker.created_at) =>
+            {
+                let title = if blocker.reminded_at.is_some() { "Still waiting for your answer" } else { "An agent needs a decision" };
+                (title.to_string(), truncate(&blocker.title, 120))
             }
             EventKind::PlanChanged { plan } if plan.status == PlanStatus::Done => {
                 ("Plan done".to_string(), truncate(&plan.summary, 120))

@@ -100,6 +100,7 @@ impl Inner {
                 )
             }
             t::ASK_LEAD => self.tool_ask_lead(&ctx, ws, &args),
+            t::ASK_USER => self.tool_ask_user(&ctx, ws, &args),
             t::MESSAGE_MEMBER => {
                 let to = s(&args, "to").ok_or_else(|| anyhow!("to is required: a team member's name"))?;
                 let text = s(&args, "text").ok_or_else(|| anyhow!("text is required"))?;

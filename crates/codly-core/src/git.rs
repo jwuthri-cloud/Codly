@@ -177,6 +177,14 @@ impl Git {
 
     // ───────────── reads ─────────────
 
+    /// A read-only git command (no index lock, fsmonitor off) for views that only display
+    /// repository state. Callers pass fixed argv; nothing here is built from user text.
+    pub async fn read(&self, dir: &Path, args: &[&str]) -> Result<String> {
+        let mut full = vec!["-c", "core.fsmonitor=false"];
+        full.extend_from_slice(args);
+        self.ok(dir, &full, true).await
+    }
+
     pub async fn is_repo(&self, path: &Path) -> bool {
         matches!(self.run(path, &["rev-parse", "--is-inside-work-tree"], true).await, Ok(o) if o.ok && o.stdout.trim() == "true")
     }
@@ -554,6 +562,28 @@ fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Reads for the workspace IDE's Source tab (uncommitted work in a worktree).
+impl Git {
+    /// `status --porcelain=v1 -z -uall`, raw (parsed by `ide::parse_status`).
+    pub async fn status_z(&self, wt: &Path) -> Result<String> {
+        self.ok(wt, &["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "-uall", "--no-renames"], true).await
+    }
+
+    /// Unified diff of one file's working-tree state against HEAD; an untracked file (or a
+    /// repository without commits) diffs against nothing. `rel` must already be confined.
+    pub async fn diff_file(&self, wt: &Path, rel: &str, untracked: bool) -> Result<String> {
+        if !untracked {
+            let out = self.run(wt, &["-c", "core.fsmonitor=false", "diff", "HEAD", "--no-color", "--no-ext-diff", "--no-textconv", "-U3", "--", rel], true).await?;
+            if out.ok {
+                return Ok(out.stdout);
+            }
+        }
+        // `--no-index` exits 1 when the files differ, which is the normal case here.
+        let out = self.run(wt, &["-c", "core.fsmonitor=false", "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U3", "--", "/dev/null", rel], true).await?;
+        Ok(out.stdout)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,6 +638,21 @@ mod tests {
         assert!(git.check_worktree(&repo, &wt).await.is_err(), "another worktree's admin dir");
         std::fs::write(wt.join(".git"), real).unwrap();
         git.check_worktree(&repo, &wt).await.unwrap();
+    }
+
+    /// The IDE's Source tab: status lists uncommitted work, diffs cover tracked and untracked files.
+    #[tokio::test]
+    async fn status_and_file_diffs_for_the_ide() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        assert_eq!(git.status_z(&repo).await.unwrap(), "");
+        std::fs::write(repo.join("a.txt"), "a\nb\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "hello\n").unwrap();
+        assert_eq!(git.status_z(&repo).await.unwrap(), " M a.txt\0?? new.txt\0");
+        let tracked = git.diff_file(&repo, "a.txt", false).await.unwrap();
+        assert!(tracked.contains("+b") && tracked.contains("a/a.txt"), "{tracked}");
+        let fresh = git.diff_file(&repo, "new.txt", true).await.unwrap();
+        assert!(fresh.contains("+hello") && fresh.contains("new file mode"), "{fresh}");
     }
 
     /// Codly's own commits never run a configured fsmonitor program.

@@ -34,6 +34,7 @@ import type { JsonValue } from '../gen/serde_json/JsonValue';
 import type { Provider } from '../gen/Provider';
 import { targetLabel, type Provenance } from '../util/labels';
 import { accounts } from './accounts.svelte';
+import { controls } from './control.svelte';
 
 export const LOG_CAP = 5000;
 const SEG_CAP = 1500;
@@ -480,6 +481,9 @@ class CodlyStore {
         break;
       case 'status_changed':
         if (l) l.statusSince = ev.ts;
+        break;
+      case 'control_changed':
+        if (aid) controls.set(aid, k.control);
         break;
       case 'text_delta':
       case 'reasoning_delta': {

@@ -13,6 +13,8 @@
   import { fuzzy } from '../lib/util/fuzzy';
   import { idVar, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
   import Icon from '../components/Icon.svelte';
+  import DictationButton from './DictationButton.svelte';
+  import { appendTranscript } from '../lib/util/freeflow';
   import Portrait from '../components/Portrait.svelte';
   import LeadControls, { MODES } from './LeadControls.svelte';
 
@@ -135,6 +137,20 @@
     tick().then(resize);
   }
 
+  /** A transcript from Free Flow joins the draft for review. It is never sent for you. */
+  function dictated(forThread: string, transcript: string) {
+    if (forThread !== thread) {
+      drafts[forThread] = appendTranscript(drafts[forThread] ?? '', transcript);
+      return;
+    }
+    text = appendTranscript(text, transcript);
+    tick().then(() => {
+      resize();
+      ta?.focus();
+      ta?.setSelectionRange(text.length, text.length);
+    });
+  }
+
   function key(e: KeyboardEvent) {
     if (e.isComposing) return; // IME: Enter confirms the composition, it doesn't send
     if (mention && options.length) {
@@ -196,6 +212,7 @@
       onclick={detect}
       onblur={() => setTimeout(() => (mention = null), 120)}
     ></textarea>
+    <DictationButton target={ta} {thread} onText={dictated} />
     <button class="send" disabled={!text.trim()} onclick={send} aria-label={isBusy ? 'Queue' : 'Send'} data-tip={isBusy ? 'Send — it queues until the turn ends' : 'Send'} data-tip-kbd="↵">
       <Icon name="send" size={15} stroke={1.8} />
     </button>

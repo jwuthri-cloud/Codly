@@ -11,12 +11,24 @@
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
 //! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
+//! - `triggers` schedules and context rules run on a clock (policy: `crate::triggers`)
+//! - `housekeeping` board archiving sweep, default MCP servers for new agents
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
+//! - `breaker_run` circuit breaker enforcement (policy in `breaker`): steer, constrain, stop
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
 pub mod approvals;
+pub mod agent_git;
+pub mod breaker;
+mod breaker_run;
+pub use breaker_run::{AgentBreaker, BreakerStatus};
+mod controls;
+mod ask_me;
 mod gate;
+mod ide;
+mod hires;
+pub mod housekeeping;
 mod ingest;
 mod lead;
 pub mod names;
@@ -28,7 +40,9 @@ pub mod scheduler;
 pub mod scope;
 mod team;
 mod tools;
+mod triggers;
 mod workspace;
+mod memgraph;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -155,6 +169,8 @@ struct Inner {
     index: RwLock<Option<SharedIndex>>,
     use_index: bool,
     live: Mutex<HashMap<Id, Live>>,
+    /// Per-agent live controls (block tools, stop after this step, held notes); see controls.rs.
+    controls: Mutex<HashMap<Id, controls::AgentControl>>,
     /// Serializes git mutations of the repository (worktrees, refs, commits, merges).
     repo_lock: tokio::sync::Mutex<()>,
     /// The merge queue: one merge into an integration branch at a time.
@@ -188,6 +204,8 @@ struct Inner {
     artifacts_seen: Mutex<HashSet<String>>,
     /// Model names per CLI (`env::list_models`), for the Lead's consultant choices.
     models: Mutex<HashMap<Provider, Vec<String>>>,
+    /// Circuit breaker: its settings and the per-agent signals.
+    breaker: Mutex<breaker_run::Runtime>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -320,6 +338,7 @@ impl Core {
         // Fixed CLIs (tests) are not probed: every account takes its CLI's state.
         let accounts = accounts::detect(&base_env, &clis, &settings.accounts, !fixed_clis, None).await.unwrap_or_default();
         let quota = accounts::stored_limits(&store);
+        let breaker = Mutex::new(breaker_run::Runtime::load(&store));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (bus, _) = broadcast::channel(4096);
         let inner = Arc::new(Inner {
@@ -338,6 +357,7 @@ impl Core {
             index: RwLock::new(None),
             use_index: opts.index,
             live: Mutex::new(HashMap::new()),
+            controls: Mutex::new(HashMap::new()),
             repo_lock: tokio::sync::Mutex::new(()),
             merge_lock: tokio::sync::Mutex::new(()),
             sched_lock: tokio::sync::Mutex::new(()),
@@ -355,12 +375,16 @@ impl Core {
             quota: Mutex::new(quota),
             artifacts_seen: Mutex::new(HashSet::new()),
             models: Mutex::new(HashMap::new()),
+            breaker,
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);
         inner.recover().await;
         tokio::spawn(ingest::run(inner.clone(), events_rx));
         tokio::spawn(plans::scheduler_loop(inner.clone()));
+        tokio::spawn(triggers::run(inner.clone()));
+        tokio::spawn(breaker_run::beat_loop(inner.clone()));
+        tokio::spawn(housekeeping::sweeper(inner.clone()));
         match inner.store.last_workspace() {
             Ok(Some(ws)) => {
                 if let Err(e) = inner.open_workspace(&ws.repo_path).await {
@@ -501,6 +525,12 @@ impl Core {
     /// `title`: one of `ROLE_TITLES` (its badge), or None.
     pub async fn hire_agent(&self, provider: Provider, model: Option<String>, title: Option<String>) -> anyhow::Result<Agent> {
         self.inner.hire_agent(provider, model, title).await
+    }
+
+    /// Start the 1:1 agent a reviewed hire manifest describes (the add-agent wizard's last step).
+    /// Re-validates everything; `confirm_shell` = the person accepted shell metacharacters in a custom command.
+    pub async fn hire_from_manifest(&self, manifest: crate::hire::HireManifest, confirm_shell: bool) -> anyhow::Result<Agent> {
+        self.inner.hire_from_manifest(manifest, confirm_shell).await
     }
 
     /// Switch a 1:1 agent to another model (None = the CLI's default).

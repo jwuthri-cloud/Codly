@@ -19,7 +19,7 @@ export type DiffTarget = { kind: 'plan' | 'task'; id: string } | null;
 /** List (default): the plan's tasks grouped by status · Flow: the DAG · Timeline: agent lanes. */
 export type PlanLens = 'list' | 'flow' | 'timeline';
 export type ChangesLens = 'diffs' | 'artifacts';
-export type KnowledgeLens = 'memory' | 'graph' | 'search';
+export type KnowledgeLens = 'memory' | 'graph' | 'search' | 'find' | 'files' | 'messages';
 
 export const ROOMS: { id: Room; label: string; icon: string; key: string; hint: string }[] = [
   { id: 'home', label: 'Home', icon: 'home', key: 'H', hint: 'Your requests, the crew and the office' },

@@ -13,6 +13,7 @@
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
   import CrewStrip from './CrewStrip.svelte';
+  import AskMe from '../home/AskMe.svelte';
 
   interface Props {
     narrow?: boolean;
@@ -55,6 +56,7 @@
         <span class="dot" aria-hidden="true"></span>{narrow ? 'Demo' : 'Live demo'}
       </a>
     {/if}
+    <AskMe />
     <button class="search" onclick={() => ui.openPalette()} aria-label="Search and commands" data-tip="Agents, tasks, files, commands — or ask the Lead">
       <Icon name="search" size={14} />{#if !narrow}<span>Search</span>{/if}<kbd>⌘K</kbd>
     </button>

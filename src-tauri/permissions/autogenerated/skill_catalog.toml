@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-skill-catalog"
+description = "Enables the skill_catalog command without any pre-configured scope."
+commands.allow = ["skill_catalog"]
+
+[[permission]]
+identifier = "deny-skill-catalog"
+description = "Denies the skill_catalog command without any pre-configured scope."
+commands.deny = ["skill_catalog"]

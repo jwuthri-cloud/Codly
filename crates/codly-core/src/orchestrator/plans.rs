@@ -680,6 +680,7 @@ impl Inner {
                 self.notes_fallback(ws, &task.depends_on, &agents)
             }
         };
+        let memory_pack = memory::panel::with_memory_file(memory_pack, &self.data("memory"), &agent.id);
         let history = if history && member.is_some() { self.member_history(&ws.id, &agent.id) } else { vec![] };
         let role = member.map(|m| m.role.clone());
         prompts::task_brief(&prompts::Brief { task, plan, deps, pointer_pack, memory_pack, role, history })

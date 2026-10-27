@@ -23,6 +23,8 @@ export interface LabelSpec {
   color?: string;
   badge?: string | null;
   icon?: string | null;
+  /** Short action bubble ("using Bash"), shown when the full sentence is not. */
+  chip?: string | null;
   selected?: boolean;
   hovered?: boolean;
   /** Prefer the compact form (name + icon). */
@@ -40,6 +42,7 @@ interface El {
   dot: HTMLSpanElement | null;
   icon: HTMLSpanElement | null;
   badge: HTMLSpanElement | null;
+  chip: HTMLSpanElement | null;
   line: HTMLDivElement | null;
   pre: Text | null;
   code: HTMLElement | null;
@@ -150,6 +153,12 @@ export class Overlay {
       icon.className = 'of-icon';
       head.appendChild(icon);
     }
+    let chip: HTMLSpanElement | null = null;
+    if (spec.kind === 'agent') {
+      chip = document.createElement('span');
+      chip.className = 'of-chip';
+      head.appendChild(chip);
+    }
     root.appendChild(head);
     let line: HTMLDivElement | null = null;
     let pre: Text | null = null;
@@ -167,11 +176,11 @@ export class Overlay {
     if (spec.agentId) root.dataset.agent = spec.agentId;
     if (spec.taskId) root.dataset.task = spec.taskId;
     this.root.appendChild(root);
-    return { root, title, dot, icon, badge, line, pre, code, post, sig: '', iconKey: '', w: 0, wc: 0, h: 0, hc: 0, measured: false, shown: false, compact: false, x: -1e6, y: -1e6, used: true };
+    return { root, title, dot, icon, badge, chip, line, pre, code, post, sig: '', iconKey: '', w: 0, wc: 0, h: 0, hc: 0, measured: false, shown: false, compact: false, x: -1e6, y: -1e6, used: true };
   }
 
   private fill(e: El, s: LabelSpec) {
-    const sig = [s.title, s.pre, s.code, s.post, s.tone, s.color, s.badge, s.selected, s.hovered, s.icon, s.dim].join('\u0001');
+    const sig = [s.title, s.pre, s.code, s.post, s.tone, s.color, s.badge, s.chip, s.selected, s.hovered, s.icon, s.dim].join('\u0001');
     if (sig === e.sig) return;
     e.sig = sig;
     e.title.textContent = s.title;
@@ -179,6 +188,10 @@ export class Overlay {
     if (e.badge) {
       e.badge.textContent = s.badge ?? '';
       e.badge.style.display = s.badge ? '' : 'none';
+    }
+    if (e.chip) {
+      e.chip.textContent = s.chip ?? '';
+      e.chip.style.display = s.chip ? '' : 'none';
     }
     if (e.icon && (s.icon ?? '') !== e.iconKey) {
       e.iconKey = s.icon ?? '';

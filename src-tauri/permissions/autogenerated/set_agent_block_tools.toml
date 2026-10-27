@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-agent-block-tools"
+description = "Enables the set_agent_block_tools command without any pre-configured scope."
+commands.allow = ["set_agent_block_tools"]
+
+[[permission]]
+identifier = "deny-set-agent-block-tools"
+description = "Denies the set_agent_block_tools command without any pre-configured scope."
+commands.deny = ["set_agent_block_tools"]

@@ -88,6 +88,7 @@ const CODLY_TOOLS: &[(&str, ActivityKind)] = &[
     ("codly_kg_query", ActivityKind::Search),
     ("codly_search", ActivityKind::Search),
     ("codly_ask_lead", ActivityKind::Message),
+    ("codly_ask_user", ActivityKind::Message),
     ("codly_submit_review", ActivityKind::Review),
     ("codly_submit_report", ActivityKind::Done),
     ("codly_get_task", ActivityKind::Read),

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-breaker-status"
+description = "Enables the breaker_status command without any pre-configured scope."
+commands.allow = ["breaker_status"]
+
+[[permission]]
+identifier = "deny-breaker-status"
+description = "Denies the breaker_status command without any pre-configured scope."
+commands.deny = ["breaker_status"]

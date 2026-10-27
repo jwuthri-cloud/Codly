@@ -984,6 +984,14 @@ pub enum EventKind {
     ArtifactAdded {
         artifact: Artifact,
     },
+    /// An agent's live controls changed (block tools, stop after this step, held notes).
+    ControlChanged {
+        control: ControlState,
+    },
+    /// An "ask me" blocker was raised, answered, dismissed or reminded (codly_ask_user).
+    BlockerChanged {
+        blocker: crate::blockers::Blocker,
+    },
 }
 
 impl EventKind {
@@ -1033,6 +1041,8 @@ impl EventKind {
             EventKind::Reviewed { .. } => "reviewed",
             EventKind::Merged { .. } => "merged",
             EventKind::ArtifactAdded { .. } => "artifact_added",
+            EventKind::ControlChanged { .. } => "control_changed",
+            EventKind::BlockerChanged { .. } => "blocker_changed",
         }
     }
 }
@@ -1192,4 +1202,26 @@ pub struct RecentWorkspace {
     pub repo_path: String,
     pub name: String,
     pub opened_at: i64,
+}
+
+// ───────────────────────────── per-agent live controls ─────────────────────────────
+
+/// What the agent panel shows: the controls an agent runs under right now.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ControlState {
+    /// The agent may think and answer, not run tools.
+    pub block_tools: bool,
+    /// "Stop after this step" asked; the current turn is still finishing.
+    pub stop_requested: bool,
+    /// Paused: no new turn starts until you resume.
+    pub paused: bool,
+    /// Prompts and steer notes waiting for the resume.
+    pub held: u32,
+}
+
+impl ControlState {
+    pub fn is_default(&self) -> bool {
+        *self == ControlState::default()
+    }
 }

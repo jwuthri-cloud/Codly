@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ide-info"
+description = "Enables the ide_info command without any pre-configured scope."
+commands.allow = ["ide_info"]
+
+[[permission]]
+identifier = "deny-ide-info"
+description = "Denies the ide_info command without any pre-configured scope."
+commands.deny = ["ide_info"]

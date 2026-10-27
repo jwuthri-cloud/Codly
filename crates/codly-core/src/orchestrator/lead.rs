@@ -609,7 +609,7 @@ impl Inner {
                     read_only: false,
                     task_id: None,
                     session,
-                    system_prompt: prompts::solo_system(&agent.name, &branch),
+                    system_prompt: self.solo_system(&agent, &branch),
                     workspace_id: Some(ws.id.clone()),
                     account: None,
                 }
@@ -646,7 +646,7 @@ impl Inner {
         let (cwd, role, read_only, system_prompt) = match agent.role {
             Role::Solo => {
                 let (branch, wt) = self.solo_worktree(&ws, &agent);
-                (wt, Role::Solo, false, prompts::solo_system(&agent.name, &branch))
+                (wt, Role::Solo, false, self.solo_system(&agent, &branch))
             }
             role => (PathBuf::from(&ws.repo_path), role, true, prompts::CHAT_SYSTEM.to_string()),
         };

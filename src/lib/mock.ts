@@ -8,6 +8,7 @@
 // the public site demo).
 // Also answers `repo_map` (a ~300-file acme/web) and `read_artifact` (the bytes agents produced).
 import { isSiteDemo, type Transport, type UiBatch } from './api';
+import type { BreakerConfig } from './gen/BreakerConfig';
 import type { CliInfo } from './gen/CliInfo';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
@@ -19,10 +20,27 @@ import type { TaskStatus } from './gen/TaskStatus';
 import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 import type { RequestPrefs } from './gen/RequestPrefs';
+import { mockAgentGit } from './demo/agentgit';
+import { MockAskMe } from './demo/askme';
+import type { HireManifest } from './gen/HireManifest';
+import { draftPrompt, draftReply, hireFromManifest, isDraftRequest, launchPreview, reviewHire } from './demo/hire';
+import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
+import { MockBreaker } from './demo/breaker';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
+import { MockControls } from './demo/controls';
 import { Story } from './demo/story';
+import { saveTriggers, seedTriggers } from './demo/triggers';
+import type { TriggersConfig } from './gen/TriggersConfig';
+import { skillsMock } from './demo/skillsMock';
+import { mockIde } from '../ide/mockFs';
+import { buildMessageGraph, exactSearch } from './demo/memgraph';
+import type { MemoryFile } from './gen/MemoryFile';
+
+/** The demo's per-agent memory files (the core keeps them in <data>/memory/<agent id>.md). */
+const memoryFiles = new Map<string, MemoryFile>();
+import { inboundMock } from './demo/inbound';
 
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
@@ -67,8 +85,15 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export class MockTransport implements Transport {
   private sim: Sim;
   private story: Story;
+  private ctl: MockControls;
   private ptys = new Map<string, FakeShell>();
   private ptySeq = 0;
+  /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
+  private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
+  private triggers: TriggersConfig | null = null;
+  private breaker: MockBreaker;
+  private askMe!: MockAskMe;
+  private hk: HousekeepingDemo | undefined;
 
   constructor() {
     const p = params();
@@ -84,6 +109,9 @@ export class MockTransport implements Transport {
       { ...SETTINGS, theme },
     );
     this.story = new Story(this.sim);
+    this.breaker = new MockBreaker(this.sim);
+    this.ctl = new MockControls(this.sim);
+    this.askMe = new MockAskMe(this.sim);
     const now = this.sim.now();
     this.sim.clis = CLIS;
     this.sim.recent = [
@@ -114,6 +142,8 @@ export class MockTransport implements Transport {
     if (!cmd.startsWith('pty_')) await wait(60 + Math.random() * 80);
     // Re-probing sign-ins runs each CLI's status command: it takes a moment.
     if (cmd === 'list_accounts' && args.refresh) await wait(900);
+    const skills = await skillsMock(cmd, args);
+    if (skills !== undefined) return skills as T;
     return this.dispatch(cmd, args) as T;
   }
 
@@ -151,6 +181,7 @@ export class MockTransport implements Transport {
       }
       case 'send_chat': {
         if (!sim.workspace) throw new Error('Open a repository first.');
+        if (isDraftRequest(String(a.text))) { draftReply(sim, String(a.thread), String(a.text)); return null; } // wizard: "Generate with AI"
         story.userChat(String(a.thread), String(a.text));
         return null;
       }
@@ -173,16 +204,44 @@ export class MockTransport implements Transport {
         story.resolveApproval(String(a.approvalId), d.choice, d.message, d.answers);
         return null;
       }
+      case 'breaker_config':
+        return this.breaker.cfg;
+      case 'set_breaker_config':
+        return this.breaker.set(a.config as BreakerConfig);
+      case 'breaker_status':
+        return this.breaker.status();
+      case 'reset_breaker':
+        this.breaker.reset();
+        return null;
       case 'interrupt_agent':
         story.interrupt(String(a.agentId));
         return null;
       case 'stop_agent':
         story.interrupt(String(a.agentId), true);
+        this.ctl.clear(String(a.agentId));
         return null;
+      case 'agent_control':
+        return this.ctl.state(String(a.agentId));
+      case 'set_agent_block_tools':
+        return this.ctl.setBlockTools(String(a.agentId), !!a.on);
+      case 'stop_agent_after_step':
+        return this.ctl.stopAfterStep(String(a.agentId));
+      case 'resume_agent':
+        return this.ctl.resume(String(a.agentId));
+      case 'steer_agent':
+        return this.ctl.steer(String(a.agentId), String(a.text ?? ''));
       case 'hire_agent':
         return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':
-        return [];
+        return a.provider === 'claude' ? ['sonnet', 'opus', 'haiku'] : a.provider === 'codex' ? ['gpt-5.5-codex', 'gpt-5.5-mini'] : [];
+      case 'hire_review':
+        return reviewHire(String(a.raw));
+      case 'hire_launch_preview':
+        return launchPreview(String(a.provider), (a.model as string | null) ?? null, (a.command as string | null) ?? null);
+      case 'hire_draft_prompt':
+        return draftPrompt(String(a.brief));
+      case 'hire_from_manifest':
+        return hireFromManifest(sim, story, a.manifest as HireManifest, Boolean(a.confirmShell));
       case 'set_agent_model':
         return null;
       case 'create_task':
@@ -223,6 +282,21 @@ export class MockTransport implements Transport {
         if (!bytes) throw new Error(`Unknown artifact ${String(a.artifactId)}`);
         return bytes.slice(0);
       }
+      case 'exact_search':
+        return exactSearch(String(a.query ?? ''), [...sim.tasks.values()], [...sim.memories.values()]);
+      case 'message_graph':
+        return buildMessageGraph([...sim.agents.values()], sim.chats, [...sim.memories.values()], [...sim.tasks.values()]);
+      case 'memory_file':
+      case 'save_memory_file': {
+        const agent = sim.agents.get(String(a.agentId));
+        if (!agent || !/^[A-Za-z0-9_-]{1,64}$/.test(String(a.agentId))) throw new Error('unknown agent');
+        const prev = memoryFiles.get(agent.id);
+        if (cmd === 'memory_file' && prev) return prev;
+        const text = cmd === 'save_memory_file' ? String(a.text) : `# ${agent.name}: memory\n\nWhat ${agent.name} should always know. Codly adds this file to ${agent.name}'s brief at the start of every task.\n\n- \n`;
+        const f: MemoryFile = { agent_id: agent.id, path: `memory/${agent.id}.md`, text, exists: cmd === 'save_memory_file', modified_at: cmd === 'save_memory_file' ? sim.now() : null };
+        if (cmd === 'save_memory_file') memoryFiles.set(agent.id, f);
+        return f;
+      }
       case 'list_triples': {
         const e = a.entity as string | null;
         return sim.triples.filter((t) => !e || t.subject === e || t.object === e);
@@ -241,6 +315,55 @@ export class MockTransport implements Transport {
         this.ptys.get(String(a.ptyId))?.close();
         this.ptys.delete(String(a.ptyId));
         return null;
+      case 'dictation_status':
+        return { ...this.dictation };
+      case 'dictation_configure':
+        if (typeof a.enabled === 'boolean') this.dictation.enabled = a.enabled;
+        if (typeof a.model === 'string') this.dictation.model = a.model;
+        return { ...this.dictation };
+      case 'dictation_save_key':
+        if (!/^gsk_[\w-]{8,}$/.test(String(a.key).trim())) throw new Error('that does not look like a Groq API key (it starts with gsk_)');
+        this.dictation.key_saved = true;
+        return { ...this.dictation };
+      case 'dictation_clear_key':
+        this.dictation.key_saved = false;
+        return { ...this.dictation };
+      case 'dictation_transcribe':
+        return 'Add retry with backoff to the sync worker, and cover it with a test.';
+      case 'agent_git':
+        return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now());
+      case 'get_triggers':
+        return (this.triggers ??= seedTriggers());
+      case 'set_triggers':
+        return (this.triggers = saveTriggers((this.triggers ??= seedTriggers()), a.config as TriggersConfig));
+      case 'ide_info':
+      case 'ide_list':
+      case 'ide_read':
+      case 'ide_write':
+      case 'ide_create':
+      case 'ide_search':
+      case 'ide_changes':
+      case 'ide_diff':
+        return mockIde(cmd, a);
+      case 'list_blockers':
+        return this.askMe.list();
+      case 'answer_blocker':
+        return this.askMe.close(String(a.blockerId), 'answered', String(a.answer ?? ''));
+      case 'dismiss_blocker':
+        return this.askMe.close(String(a.blockerId), 'dismissed', null);
+      case 'inbound_state':
+      case 'inbound_create_webhook':
+      case 'inbound_set_webhook':
+      case 'inbound_revoke_webhook':
+      case 'inbound_set_settings':
+      case 'inbound_set_slack':
+        return inboundMock(cmd, a);
+      case 'board_policy':
+      case 'board_sweep':
+      case 'board_archive':
+      case 'list_connections':
+      case 'update_connection':
+        return (this.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

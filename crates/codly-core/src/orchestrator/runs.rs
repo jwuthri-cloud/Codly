@@ -68,6 +68,7 @@ impl Inner {
         // Owner-only: the run dir holds the MCP config with this run's token and the raw log.
         std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700).create(&dir)?;
         let raw_log = dir.join("raw.ndjson");
+        self.prepare_default_mcp(&raw_log, &req.cwd);
         let token =
             mcp.register(ToolCtx { agent_id: req.agent.id.clone(), run_id: run_id.clone(), task_id: req.task_id.clone(), role: req.role });
         let session_id = match &req.session {
@@ -178,6 +179,9 @@ impl Inner {
     /// Send a user turn to a live agent. Claude and ACP adapters queue it behind a running
     /// turn (it gets its own TurnStarted/TurnCompleted); Codex steers it into the running turn.
     pub(super) fn send_prompt(&self, agent_id: &str, text: String) -> Result<()> {
+        // A pending "stop after this step" or a pause holds every prompt until the resume.
+        let Some(text) = self.route_prompt(agent_id, text) else { return Ok(()) };
+        let wrapped = self.with_briefing(agent_id, &text); // a hired agent's standing goal, on every prompt
         let mut live = lock(&self.live);
         let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
         let steer = l.provider == Provider::Codex && l.turn_active;
@@ -185,7 +189,7 @@ impl Inner {
             l.queued += 1;
         }
         l.last_prompt = text.lines().find(|s| !s.trim().is_empty()).map(|s| s.trim().to_string());
-        if !l.handle.send(AgentCmd::Prompt(text)) {
+        if !l.handle.send(AgentCmd::Prompt(wrapped)) {
             l.queued = l.queued.saturating_sub(1);
             bail!("that agent's process is gone");
         }
