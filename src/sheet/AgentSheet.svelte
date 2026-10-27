@@ -29,6 +29,7 @@
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
   import TaskChecks from './TaskChecks.svelte';
+  import AgentTabs from './AgentTabs.svelte';
   import { agentTitle } from '../lib/util/team';
 
   interface Props {
@@ -380,6 +381,8 @@
         {/each}
       </div>
     </Section>
+
+    <AgentTabs {agent} />
   </div>
 </div>
 

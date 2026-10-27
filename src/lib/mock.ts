@@ -18,6 +18,7 @@ import type { Snapshot } from './gen/Snapshot';
 import type { TaskStatus } from './gen/TaskStatus';
 import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
+import { mockAgentGit } from './demo/agentgit';
 import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
@@ -254,6 +255,8 @@ export class MockTransport implements Transport {
         return { ...this.dictation };
       case 'dictation_transcribe':
         return 'Add retry with backoff to the sync worker, and cover it with a test.';
+      case 'agent_git':
+        return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now());
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

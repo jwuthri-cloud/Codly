@@ -105,6 +105,7 @@ pub fn run() {
             dictation::dictation_save_key,
             dictation::dictation_clear_key,
             dictation::dictation_transcribe,
+            commands::agent_git,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
