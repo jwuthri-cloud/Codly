@@ -31,6 +31,9 @@ export const ROOMS: { id: Room; label: string; icon: string; key: string; hint: 
 
 const PREFS_KEY = 'codly.ui.v2';
 
+/** `?onboard=1` in the browser demo: a fresh machine and a fresh quest, whatever was saved. */
+export const ONBOARD_DEMO = typeof location !== 'undefined' && new URLSearchParams(location.search).get('onboard') === '1';
+
 /** Request threads: "lead" (the first) and "lead:<id>" (parallel requests, each with its own Lead). */
 export const isRequestThread = (thread: string | null | undefined): thread is string => thread === 'lead' || !!thread?.startsWith('lead:');
 
@@ -47,6 +50,10 @@ type Prefs = {
   focus: boolean;
   /** The left rail shows labels next to its icons. */
   rail: boolean;
+  /** First-run quest: finished once (or skipped), the levels done, sound on. */
+  onboarded: boolean;
+  quest: string[];
+  questSound: boolean;
   sections: Record<string, boolean>;
   /** v2: the list lens became the default (older `planLens` values are ignored on purpose). */
   planView: PlanLens;
@@ -80,6 +87,11 @@ class Ui {
   /** The rail's icons-only (52) and labelled (184) widths; everything that sits beside it reads railW. */
   railOpen = $state(this.prefs.rail ?? false);
   railW = $derived(this.railOpen ? 184 : 52);
+  /** The first-run quest overlay: shown until finished or skipped, and again from Settings or the palette. */
+  onboarded = $state(!ONBOARD_DEMO && (this.prefs.onboarded ?? false));
+  onboardingOpen = $state(false);
+  quest = $state<string[]>(ONBOARD_DEMO ? [] : (this.prefs.quest ?? []));
+  questSound = $state(this.prefs.questSound ?? true);
   selection = $state<Selection>(null);
   hover = $state<Hover>({ agentId: null, taskId: null, path: null });
 
@@ -161,6 +173,9 @@ class Ui {
       mode: this.mode,
       focus: this.focus,
       rail: this.railOpen,
+      onboarded: this.onboarded,
+      quest: this.quest,
+      questSound: this.questSound,
       sections: this.sections,
       planView: this.planLens,
       changesLens: this.changesLens,

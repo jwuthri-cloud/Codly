@@ -194,6 +194,14 @@
       </section>
 
       <section>
+        <h3 class="eyebrow">Getting started</h3>
+        <div class="row">
+          <div class="r-text"><span class="r-title">The quest</span><span class="desc">Install and sign in to your agents, add more models, and learn which model to use for images, voice and video.</span></div>
+          <button class="btn sm" onclick={() => { ui.settingsOpen = false; ui.onboardingOpen = true; }}>Replay</button>
+        </div>
+      </section>
+
+      <section>
         <h3 class="eyebrow">Appearance</h3>
         <div class="row">
           <div class="r-text"><span class="r-title">Theme</span><span class="desc">Night is deep blue-black glass over the office; day is warm paper.</span></div>

@@ -104,6 +104,7 @@
       { id: 'repo:open', section: 'Work', title: 'Open repository…', icon: 'folder', kbd: '⌘O', run: () => openWorkspace() },
       { id: 'settings', section: 'App', title: 'Settings', icon: 'settings', kbd: '⌘,', run: () => (ui.settingsOpen = true) },
       { id: 'skills', section: 'App', title: 'Skills', sub: 'Installed skills, and a catalog to install from', icon: 'bolt', run: () => skillsUi.show() },
+      { id: 'onboarding', section: 'App', title: 'Replay the quest', sub: 'Install agents, add models, images, voice and video', icon: 'flag', run: () => (ui.onboardingOpen = true) },
       { id: 'shortcuts', section: 'App', title: 'Keyboard shortcuts', icon: 'keyboard', kbd: '?', run: () => (ui.shortcutsOpen = true) },
       { id: 'theme:system', section: 'App', title: 'Theme: follow the system', icon: 'monitor', run: () => updateSettings({ theme: 'system' }) },
       { id: 'theme:dark', section: 'App', title: 'Theme: dark', icon: 'moon', run: () => updateSettings({ theme: 'dark' }) },

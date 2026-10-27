@@ -32,7 +32,7 @@ impl AppState {
         ready.clone().expect("checked is_some")
     }
 
-    async fn shell_env(&self) -> &HashMap<String, String> {
+    pub(crate) async fn shell_env(&self) -> &HashMap<String, String> {
         self.shell_env
             .get_or_init(|| async {
                 tokio::task::spawn_blocking(|| {

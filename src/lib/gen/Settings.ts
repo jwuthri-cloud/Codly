@@ -48,6 +48,11 @@ theme: string,
  */
 team: Array<TeamMember>, 
 /**
+ * Opt in to your own OpenRouter key for OpenCode (the key itself lives in the Keychain).
+ * Off = subscription-only: every API-key variable is scrubbed from the agents' env.
+ */
+byok_openrouter: boolean, 
+/**
  * Claude agents also load your own Claude Code setup: your MCP servers, plugins, skills
  * and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
  */

@@ -1,0 +1,53 @@
+{
+  "note": "Model advice for the Level up step. One place to correct names and versions: entries marked verify were written from the product owner's wording and not checked against the vendors.",
+  "capabilities": [
+    {
+      "id": "images",
+      "title": "Images",
+      "icon": "image",
+      "blurb": "Codex can generate images and they land in Changes as artifacts. For the fastest loop, ask a text model for SVG.",
+      "picks": [
+        { "tier": "best", "provider": "codex", "name": "OpenAI's newest image model (\"2.5 flare\")", "why": "Best quality today. Reached through a Codex agent signed in with OpenAI.", "needs": "Codex sign-in", "verify": true },
+        { "tier": "fast", "provider": "codex", "name": "OpenAI's default text model, SVG only", "why": "Near-realtime: the SVG streams in and you watch the picture draw itself. Great for logos, icons, diagrams.", "needs": "Codex sign-in", "tip": "Draw a minimalist fox logo as a single SVG. Output SVG code only, no commentary." },
+        { "tier": "good", "provider": "gemini", "name": "Gemini image generation", "why": "Good, not as strong as OpenAI's.", "needs": "Gemini sign-in", "verify": true },
+        { "tier": "good", "provider": "opencode", "name": "Grok images (via OpenRouter)", "why": "Good, not as strong as OpenAI's.", "needs": "OpenRouter key", "verify": true },
+        { "tier": "none", "provider": "claude", "name": "Claude", "why": "Claude does not generate images. It can still write SVG and code, so use it for those." }
+      ]
+    },
+    {
+      "id": "voice",
+      "title": "Voice",
+      "icon": "chat",
+      "blurb": "Codly's own dictation uses Groq Whisper (set it up in Settings). For live voice conversations, use a realtime model.",
+      "picks": [
+        { "tier": "best", "provider": "codex", "name": "OpenAI Realtime 2.1", "why": "The best realtime voice: speech in, speech out over a live connection.", "needs": "OpenAI API key", "verify": true },
+        { "tier": "good", "provider": "gemini", "name": "Gemini realtime voice", "why": "Google has a realtime version too.", "needs": "Gemini API key", "verify": true },
+        { "tier": "good", "provider": "opencode", "name": "Grok realtime voice", "why": "xAI has a realtime version too.", "needs": "xAI API key", "verify": true },
+        { "tier": "fast", "provider": "codex", "name": "Groq Whisper dictation (built into Codly)", "why": "Hold ⌥ in the composer and talk; the text lands in your draft. Free key at console.groq.com.", "needs": "Groq API key" }
+      ]
+    },
+    {
+      "id": "video",
+      "title": "Video",
+      "icon": "play",
+      "blurb": "Video models run on their vendors' sites and APIs; agents can script them. Pick by look and price.",
+      "picks": [
+        { "tier": "best", "provider": "gemini", "name": "Google Veo (or its newest successor)", "why": "Excellent quality, strong prompt following.", "needs": "Google account or API", "verify": true },
+        { "tier": "good", "provider": "codex", "name": "OpenAI Sora", "why": "Good, with a polished editor.", "needs": "OpenAI account", "verify": true },
+        { "tier": "good", "provider": "opencode", "name": "Grok video", "why": "Good, fast to try.", "needs": "xAI account", "verify": true }
+      ]
+    }
+  ],
+  "brains": {
+    "steps": [
+      { "title": "Install OpenCode", "body": "OpenCode is the CLI that talks to hundreds of models. Install it from the crew step, or run `npm install -g opencode-ai@latest`." },
+      { "title": "Get an OpenRouter key", "body": "OpenRouter is one account and one key for almost every model (Claude, GPT, Gemini, Grok, DeepSeek, Qwen, Kimi…). Create one at openrouter.ai/keys and add a few dollars of credit.", "url": "https://openrouter.ai/keys" },
+      { "title": "Paste it here", "body": "Codly keeps it in your Mac's Keychain and hands it to OpenCode only. Claude Code, Codex and Gemini never see it." }
+    ],
+    "local": "Prefer to run models on your own machine? Install Ollama or LM Studio, pull a model (for example `ollama pull qwen3-coder`), and point OpenCode at it with its base URL."
+  },
+  "missions": [
+    { "id": "tour", "title": "Tour this repo", "text": "Read this repository and give me a short tour: what it does, how it is organised, and the three files I should read first. Don't change anything." },
+    { "id": "logo", "title": "Draw a logo (SVG)", "text": "Draw a simple, memorable logo for this project as a single SVG. Output SVG code only, save it as logo.svg, and show it to me." }
+  ]
+}

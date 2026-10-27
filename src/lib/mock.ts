@@ -10,6 +10,9 @@
 import { isSiteDemo, type Transport, type UiBatch } from './api';
 import type { BreakerConfig } from './gen/BreakerConfig';
 import type { CliInfo } from './gen/CliInfo';
+import type { InstallHint } from './gen/InstallHint';
+import type { InstallRung } from './gen/InstallRung';
+import type { ByokStatus } from './gen/ByokStatus';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
 import type { Provider } from './gen/Provider';
@@ -42,13 +45,26 @@ import type { MemoryFile } from './gen/MemoryFile';
 const memoryFiles = new Map<string, MemoryFile>();
 import { inboundMock } from './demo/inbound';
 
+/** The core's trusted install table (crates/codly-core/src/install.rs), for the browser demo. */
+const INSTALL: Record<Provider, InstallHint> = {
+  claude: { npm: 'npm install -g @anthropic-ai/claude-code', native: 'curl -fsSL https://claude.ai/install.sh | bash', login: 'claude auth login', docs: 'https://docs.claude.com/en/docs/claude-code/setup' },
+  codex: { npm: 'npm install -g @openai/codex', native: null, login: 'codex login', docs: 'https://github.com/openai/codex' },
+  gemini: { npm: 'npm install -g @google/gemini-cli', native: null, login: 'gemini', docs: 'https://github.com/google-gemini/gemini-cli' },
+  opencode: { npm: 'npm install -g opencode-ai@latest', native: 'curl -fsSL https://opencode.ai/install | bash', login: null, docs: 'https://opencode.ai/docs' },
+  cursor: { npm: null, native: 'curl https://cursor.com/install -fsS | bash', login: null, docs: 'https://cursor.com/cli' },
+  copilot: { npm: 'npm install -g @github/copilot', native: null, login: null, docs: 'https://github.com/github/copilot-cli' },
+};
+
+/** `?onboard=1`: a machine with none of the CLIs installed, so the quest has something to do. */
+const fresh = (c: CliInfo): CliInfo => ({ ...c, path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: `Not found on PATH: install \`${c.provider}\`.` });
+
 const CLIS: CliInfo[] = [
-  { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
-  { provider: 'codex', path: '/opt/homebrew/bin/codex', version: '0.161.0', logged_in: true, billing: 'subscription', plan: 'Plus', problem: null, transport: 'app-server' },
-  { provider: 'gemini', path: '/opt/homebrew/bin/gemini', version: '0.62.0', logged_in: true, billing: 'subscription', plan: 'Google AI Pro', problem: null, transport: 'acp' },
-  { provider: 'opencode', path: `${HOME}/.opencode/bin/opencode`, version: '1.18.31', logged_in: null, billing: 'third_party', plan: 'OpenRouter', problem: null, transport: 'acp' },
-  { provider: 'copilot', path: '/opt/homebrew/bin/copilot', version: '1.4.2', logged_in: false, billing: 'unknown', plan: null, problem: 'Not signed in: run `copilot` once and use /login.', transport: 'acp' },
-  { provider: 'cursor', path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: 'Not found on PATH. Install Cursor’s CLI (`cursor-agent`) to use it here.', transport: 'acp' },
+  { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json', install: INSTALL.claude },
+  { provider: 'codex', path: '/opt/homebrew/bin/codex', version: '0.161.0', logged_in: true, billing: 'subscription', plan: 'Plus', problem: null, transport: 'app-server', install: INSTALL.codex },
+  { provider: 'gemini', path: '/opt/homebrew/bin/gemini', version: '0.62.0', logged_in: true, billing: 'subscription', plan: 'Google AI Pro', problem: null, transport: 'acp', install: INSTALL.gemini },
+  { provider: 'opencode', path: `${HOME}/.opencode/bin/opencode`, version: '1.18.31', logged_in: null, billing: 'third_party', plan: 'OpenRouter', problem: null, transport: 'acp', install: INSTALL.opencode },
+  { provider: 'copilot', path: '/opt/homebrew/bin/copilot', version: '1.4.2', logged_in: false, billing: 'unknown', plan: null, problem: 'Not signed in: run `copilot` once and use /login.', transport: 'acp', install: INSTALL.copilot },
+  { provider: 'cursor', path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: 'Not found on PATH. Install Cursor’s CLI (`cursor-agent`) to use it here.', transport: 'acp', install: INSTALL.cursor },
 ];
 
 const SETTINGS: Settings = {
@@ -74,6 +90,7 @@ const SETTINGS: Settings = {
   world_ambient: false,
   theme: 'system',
   team: [],
+  byok_openrouter: false,
 };
 
 /** Like the core: a member without an id gets "<slug>-<4 hex>". */
@@ -94,6 +111,8 @@ export class MockTransport implements Transport {
   private ptySeq = 0;
   /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
   private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
+  /** BYOK demo state. The key is never stored, only whether one was "saved". */
+  private byok = { key_saved: false };
   private triggers: TriggersConfig | null = null;
   private breaker: MockBreaker;
   private askMe!: MockAskMe;
@@ -117,7 +136,7 @@ export class MockTransport implements Transport {
     this.ctl = new MockControls(this.sim);
     this.askMe = new MockAskMe(this.sim);
     const now = this.sim.now();
-    this.sim.clis = CLIS;
+    this.sim.clis = p.get('onboard') === '1' ? CLIS.map(fresh) : CLIS;
     this.sim.recent = [
       { repo_path: REPO, name: 'acme/web', opened_at: now - 2 * 3_600_000 },
       { repo_path: `${HOME}/Code/billing-service`, name: 'billing-service', opened_at: now - 26 * 3_600_000 },
@@ -151,6 +170,10 @@ export class MockTransport implements Transport {
     return this.dispatch(cmd, args) as T;
   }
 
+  private byokStatus(): ByokStatus {
+    return { enabled: this.sim.settings.byok_openrouter, key_saved: this.byok.key_saved };
+  }
+
   private dispatch(cmd: string, a: Record<string, unknown>): unknown {
     const sim = this.sim;
     const story = this.story;
@@ -158,7 +181,8 @@ export class MockTransport implements Transport {
       case 'ui_set_visible':
         return null;
       case 'detect_clis':
-        return sim.clis;
+        // Like the core: OpenCode's badge says so while your own OpenRouter key is in use.
+        return sim.clis.map((c) => (c.provider === 'opencode' && sim.settings.byok_openrouter && this.byok.key_saved ? { ...c, billing: 'third_party' as const, plan: 'OpenRouter · your key' } : c));
       case 'list_accounts':
         return sim.signIns.list(sim.settings, sim.clis);
       case 'recent_workspaces':
@@ -334,6 +358,35 @@ export class MockTransport implements Transport {
         return { ...this.dictation };
       case 'dictation_transcribe':
         return 'Add retry with backoff to the sync worker, and cover it with a test.';
+      case 'install_cli': {
+        // Only the table's constants run, chosen by (provider, rung), as in the core.
+        const hint = INSTALL[a.provider as Provider];
+        const rung = a.rung as InstallRung;
+        const command = rung === 'npm' || rung === 'native' ? hint?.[rung] : undefined;
+        if (!command) throw new Error(`there is no ${String(a.rung)} installer for ${String(a.provider)}`);
+        const id = `pty-${++this.ptySeq}`;
+        this.ptys.set(id, new FakeShell(HOME, sim));
+        // The demo "finishes" the install after a moment, then the sign-in a little later.
+        const real = CLIS.find((c) => c.provider === a.provider);
+        const idx = sim.clis.findIndex((c) => c.provider === a.provider);
+        if (real && idx >= 0 && !sim.clis[idx].path) {
+          setTimeout(() => (sim.clis = sim.clis.map((c) => (c.provider === a.provider ? { ...real, logged_in: false, billing: 'unknown', plan: null, problem: `Not signed in: run \`${a.provider}\` and sign in.` } : c))), 2500);
+          setTimeout(() => (sim.clis = sim.clis.map((c) => (c.provider === a.provider ? real : c))), 8000);
+        }
+        return { pty_id: id, command };
+      }
+      case 'byok_status':
+        return this.byokStatus();
+      case 'byok_configure':
+        sim.settings = { ...sim.settings, byok_openrouter: a.enabled === true };
+        return this.byokStatus();
+      case 'byok_save_key':
+        if (!/^[\w.-]{1,256}$/.test(String(a.key).trim())) throw new Error('the key may only contain letters, digits, - _ and .');
+        this.byok.key_saved = true;
+        return this.byokStatus();
+      case 'byok_clear_key':
+        this.byok.key_saved = false;
+        return this.byokStatus();
       case 'agent_git':
         return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now());
       case 'get_triggers':

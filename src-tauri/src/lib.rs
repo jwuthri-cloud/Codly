@@ -8,6 +8,7 @@ mod dictation;
 mod ide_commands;
 mod inbound;
 mod hire_commands;
+mod onboarding_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod ui_bus;
@@ -164,6 +165,11 @@ pub fn run() {
             commands::board_archive,
             commands::list_connections,
             commands::update_connection,
+            onboarding_commands::install_cli,
+            onboarding_commands::byok_status,
+            onboarding_commands::byok_configure,
+            onboarding_commands::byok_save_key,
+            onboarding_commands::byok_clear_key,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

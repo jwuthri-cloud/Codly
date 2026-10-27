@@ -414,7 +414,7 @@ impl Core {
             *write(&i.clis) = clis;
         }
         i.redetect_accounts(false).await;
-        Ok(read(&i.clis).clone())
+        Ok(i.clis())
     }
 
     /// Every sign-in of every installed CLI, in your order, with the usage windows its agents
@@ -434,6 +434,11 @@ impl Core {
     /// first chat; indexes the repo in the background.
     pub async fn open_workspace(&self, repo_path: &str) -> anyhow::Result<Workspace> {
         self.inner.open_workspace(repo_path).await
+    }
+
+    /// The current settings (what `update_settings` last saved).
+    pub fn settings(&self) -> Settings {
+        self.inner.settings()
     }
 
     pub async fn update_settings(&self, settings: Settings) -> anyhow::Result<Settings> {
@@ -676,8 +681,12 @@ impl Inner {
         read(&self.settings).clone()
     }
 
+    /// The detected CLIs, with OpenCode's badge showing "OpenRouter · your key" while BYOK is on.
     fn clis(&self) -> Vec<CliInfo> {
-        read(&self.clis).clone()
+        let mut clis = read(&self.clis).clone();
+        let byok_on = self.settings().byok_openrouter && crate::byok::global().key().is_some();
+        crate::byok::decorate(&mut clis, byok_on);
+        clis
     }
 
     fn workspace(&self) -> Option<Workspace> {

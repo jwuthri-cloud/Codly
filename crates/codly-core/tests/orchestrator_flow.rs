@@ -53,6 +53,7 @@ fn claude() -> CliInfo {
         plan: None,
         problem: None,
         transport: "fake".into(),
+        install: codly_core::env::install_hint(Provider::Claude),
     }
 }
 
