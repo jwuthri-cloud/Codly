@@ -53,6 +53,9 @@ class TauriTransport implements Transport {
 export const isTauriApp = (): boolean =>
   typeof window !== 'undefined' && !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 
+/** The public web demo (`pnpm build:site` → /demo/): the scripted fake repo, opened at once. */
+export const isSiteDemo = (): boolean => import.meta.env.VITE_SITE_DEMO === '1' && !isTauriApp();
+
 let transport: Transport | null = null;
 
 export async function getTransport(): Promise<Transport> {

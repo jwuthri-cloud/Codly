@@ -3,7 +3,7 @@
   It is also the window's drag region.
 -->
 <script lang="ts">
-  import { api, isTauriApp } from '../lib/api';
+  import { api, isSiteDemo, isTauriApp } from '../lib/api';
   import type { RecentWorkspace } from '../lib/gen/RecentWorkspace';
   import { openWorkspace } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
@@ -20,6 +20,7 @@
   let { narrow = false }: Props = $props();
 
   const tauri = isTauriApp();
+  const siteDemo = isSiteDemo();
   let wsBtn: HTMLButtonElement | undefined = $state();
   let wsMenu = $state(false);
   let recent = $state<RecentWorkspace[]>([]);
@@ -49,6 +50,11 @@
   </div>
   <div class="crew"><CrewStrip compact={narrow} /></div>
   <div class="actions">
+    {#if siteDemo}
+      <a class="demo" href="/" data-tip="A fake repo and a scripted team: nothing runs on your machine. Back to the Codly site.">
+        <span class="dot" aria-hidden="true"></span>{narrow ? 'Demo' : 'Live demo'}
+      </a>
+    {/if}
     <button class="search" onclick={() => ui.openPalette()} aria-label="Search and commands" data-tip="Agents, tasks, files, commands — or ask the Lead">
       <Icon name="search" size={14} />{#if !narrow}<span>Search</span>{/if}<kbd>⌘K</kbd>
     </button>
@@ -66,7 +72,10 @@
   /* centred on the stage (and so on the conversation column), whatever sits left and right */
   .crew { position: absolute; left: 50%; top: 0; height: 100%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 2 * 200px); display: flex; align-items: center; }
   .crew > :global(.strip) { min-width: 0; }
-  .actions { display: flex; justify-content: flex-end; }
+  .actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+  .demo { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px; border-radius: var(--r-full); color: var(--ink-2); font-size: var(--t-sm); font-weight: var(--w-med); background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-edge); }
+  .demo:hover { color: var(--ink-1); }
+  .demo .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--live); box-shadow: 0 0 0 3px var(--live-soft); }
   .search { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px 0 13px; border-radius: var(--r-full); color: var(--ink-3); font-size: var(--t-md); background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-edge); transition: color var(--d-2) var(--ease-out); }
   .search:hover { color: var(--ink-1); }
   .search span { margin-right: 6px; }

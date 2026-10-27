@@ -4,9 +4,10 @@
 //
 // ponytail: one scripted story (dark-mode toggle on acme/web); any repo path replays it.
 // URL knobs (dev only): ?speed=2 (script speed), ?skip=90 (fast-forward N seconds of script),
-// ?autoplay=1 (auto "Run plan" and auto-approve), ?ws=1 (open acme/web immediately).
+// ?autoplay=1 (auto "Run plan" and auto-approve), ?ws=1 (open acme/web immediately; always on in
+// the public site demo).
 // Also answers `repo_map` (a ~300-file acme/web) and `read_artifact` (the bytes agents produced).
-import type { Transport, UiBatch } from './api';
+import { isSiteDemo, type Transport, type UiBatch } from './api';
 import type { CliInfo } from './gen/CliInfo';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
@@ -84,7 +85,7 @@ export class MockTransport implements Transport {
     ];
     // Let the UI's relative times follow the virtual clock (dev only).
     (globalThis as { __codlyNow?: () => number }).__codlyNow = () => this.sim.now();
-    if (p.get('ws') === '1' || p.get('skip')) this.story.openWorkspace(REPO);
+    if (p.get('ws') === '1' || p.get('skip') || isSiteDemo()) this.story.openWorkspace(REPO);
   }
 
   async subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot> {

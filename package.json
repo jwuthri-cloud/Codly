@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "build:site": "vite build --config vite.site.config.ts && VITE_SITE_DEMO=1 vite build --base /demo/ --outDir dist-site/demo",
+    "preview:site": "vite preview --config vite.site.config.ts",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "test": "vitest run"
   },

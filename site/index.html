@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Codly — your coding agents, working in plain sight</title>
+    <meta name="description" content="Codly runs Claude Code, Codex, Gemini CLI and OpenCode as one team on your Mac. A Lead plans, each agent works in its own git worktree, and nothing lands on your branch until you merge it." />
+    <meta property="og:title" content="Codly — your coding agents, working in plain sight" />
+    <meta property="og:description" content="The coding CLIs you already pay for, as one team on your Mac. Try the live demo on a fake repo." />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./site.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="nav">
+      <a class="brand" href="/" aria-label="Codly home">
+        <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">
+          <defs><linearGradient id="dome" x1="0" y1="0" x2="1" y2=".4"><stop offset="0" stop-color="#3ee6c9" /><stop offset=".5" stop-color="#62b6f7" /><stop offset="1" stop-color="#9a86ff" /></linearGradient></defs>
+          <path d="M3 17.5a9 9 0 0 1 18 0z" fill="#e9ecf4" />
+          <path d="M10.6 8.6h2.8l1.5 8.9H9.1z" fill="url(#dome)" />
+          <rect x="2" y="18.6" width="20" height="2.2" rx="1.1" fill="#e9ecf4" opacity=".55" />
+        </svg>
+        <span>Codly</span>
+      </a>
+      <nav aria-label="Sections">
+        <a href="#how">How it works</a>
+        <a href="#control">Control</a>
+        <a class="btn small" href="/demo/">Try the live demo</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero">
+        <p class="eyebrow">For macOS · runs Claude Code, Codex, Gemini CLI and OpenCode</p>
+        <h1>Your coding agents,<br /><em>working in plain sight.</em></h1>
+        <p class="lede">
+          Codly turns the coding CLIs you already pay for into one team. A Lead plans the work, each agent builds on its own
+          branch, and nothing lands on yours until you merge it.
+        </p>
+        <div class="ctas">
+          <a class="btn" href="/demo/">Try the live demo <span aria-hidden="true">→</span></a>
+          <span class="note">No install. A fake repo and a scripted team, in your browser.<span class="phone"> Best on a laptop or bigger screen.</span></span>
+        </div>
+
+        <figure class="graph" aria-labelledby="graph-cap">
+          <svg viewBox="0 0 1200 236" role="img" aria-labelledby="graph-cap">
+            <defs>
+              <linearGradient id="aurora" x1="0" x2="1"><stop offset="0" stop-color="#3ee6c9" /><stop offset=".5" stop-color="#62b6f7" /><stop offset="1" stop-color="#9a86ff" /></linearGradient>
+            </defs>
+            <!-- your branch -->
+            <text class="lbl" x="0" y="26">main</text>
+            <path class="ln main" pathLength="1" d="M0 40H1200" style="--d: 0s" />
+            <!-- the plan's integration branch -->
+            <path class="ln integ" pathLength="1" d="M60 40C92 40 92 100 124 100H1060" style="--d: .25s; --t: 2.3s" />
+            <text class="lbl long" x="1030" y="88" text-anchor="end" style="--d: 1.9s">codly/dark-mode/integration</text>
+            <!-- t1 and t2 run side by side -->
+            <path class="ln a1" pathLength="1" d="M150 100C176 100 176 156 202 156H520C546 156 546 100 572 100" style="--d: .55s" />
+            <path class="ln a2" pathLength="1" d="M150 100C176 100 176 212 202 212H688C714 212 714 100 740 100" style="--d: .65s" />
+            <text class="lbl a1" x="214" y="146" style="--d: .9s">t1 · Ada · Claude Code</text>
+            <text class="lbl a2" x="214" y="202" style="--d: 1s">t2 · Bo · Codex</text>
+            <!-- t3 waits for both -->
+            <path class="ln a3" pathLength="1" d="M772 100C798 100 798 156 824 156H996C1018 156 1018 100 1040 100" style="--d: 1.75s" />
+            <text class="lbl a3" x="836" y="146" style="--d: 2s">t3 · Cy · Gemini CLI</text>
+            <!-- commits -->
+            <g class="dots">
+              <circle class="a1" cx="284" cy="156" r="5" style="--d: .95s" />
+              <circle class="a1" cx="392" cy="156" r="5" style="--d: 1.1s" />
+              <circle class="a1" cx="476" cy="156" r="5" style="--d: 1.25s" />
+              <circle class="a2" cx="330" cy="212" r="5" style="--d: 1.05s" />
+              <circle class="a2" cx="512" cy="212" r="5" style="--d: 1.3s" />
+              <circle class="a2" cx="640" cy="212" r="5" style="--d: 1.5s" />
+              <circle class="a3" cx="950" cy="156" r="5" style="--d: 2.15s" />
+              <circle class="mg" cx="572" cy="100" r="6" style="--d: 1.5s" />
+              <circle class="mg" cx="740" cy="100" r="6" style="--d: 1.7s" />
+              <circle class="mg" cx="1040" cy="100" r="6" style="--d: 2.4s" />
+            </g>
+            <!-- the merge only you make -->
+            <path class="pending" d="M1060 100C1090 100 1090 40 1120 40" style="--d: 2.6s" />
+            <circle class="you-ring" cx="1120" cy="40" r="13" style="--d: 2.9s" />
+            <circle class="you" cx="1120" cy="40" r="7.5" style="--d: 2.6s" />
+            <text class="lbl you-lbl" x="1120" y="14" text-anchor="middle" style="--d: 2.7s">you merge</text>
+          </svg>
+          <figcaption id="graph-cap">
+            A request becomes a plan. Ada and Bo work at the same time, each on their own branch. Cy starts when both are
+            merged into the plan's integration branch. Your <code>main</code> only moves when you merge.
+          </figcaption>
+        </figure>
+      </section>
+
+      <figure class="shot shot-hero">
+        <a href="/demo/" aria-label="Open the live demo">
+          <img src="./shots/office.jpg" width="2880" height="1800" alt="Codly's office view: a 3D office where each character is a coding agent. Ada, Bo and Fay work at desks while the Leads sit in their glass office, with their status shown in a strip along the top." />
+        </a>
+        <figcaption>
+          <span class="mono">The office</span> Every character is a real agent: Ada on Claude Code, Bo and Fay on Codex.
+          They only move when something happens: a file read, a command run, a question for you.
+        </figcaption>
+      </figure>
+
+      <section class="how" id="how" aria-labelledby="how-title">
+        <h2 id="how-title">How a request runs</h2>
+
+        <article class="step">
+          <div class="step-text">
+            <p class="num" aria-hidden="true">1</p>
+            <h3>The Lead turns your request into a plan</h3>
+            <p>
+              Ask in plain words. The Lead reads the repo and proposes a small plan: the tasks, the files each one may touch,
+              the checks that prove it works, and the agent best suited to each. Run it, change it or cancel it.
+            </p>
+          </div>
+          <figure class="shot">
+            <img src="./shots/plan.jpg" width="2880" height="1800" loading="lazy" decoding="async" alt="A plan card in the conversation: three tasks for a dark mode toggle, assigned to Claude Code, Codex and Gemini CLI, with an assumption flagged and a Run plan button." />
+          </figure>
+        </article>
+
+        <article class="step">
+          <div class="step-text">
+            <p class="num" aria-hidden="true">2</p>
+            <h3>Agents work side by side</h3>
+            <p>
+              Each task gets its own agent in its own git worktree, so two agents never edit the same file at once. Ask for
+              something else while they work: every request gets its own Lead, and the Leads plan around each other.
+            </p>
+          </div>
+          <figure class="shot">
+            <img src="./shots/planroom.jpg" width="2880" height="1800" loading="lazy" decoding="async" alt="The plan room: two tasks in progress with their agents and live checks, a third waiting on both, and a second request running in parallel." />
+          </figure>
+        </article>
+
+        <article class="step">
+          <div class="step-text">
+            <p class="num" aria-hidden="true">3</p>
+            <h3>Every change is checked before it merges</h3>
+            <p>
+              When an agent finishes, Codly runs the task's checks, makes sure only the allowed files changed, can ask a
+              reviewer from another vendor, and merges into the plan's branch. Agents' questions go to the Lead, and you see
+              the answers.
+            </p>
+          </div>
+          <figure class="shot">
+            <img src="./shots/done.jpg" width="2880" height="1800" loading="lazy" decoding="async" alt="Finished task cards: each shows its diff size, the tests that passed, the branch it merged into and the files it produced, followed by an agent's question and the Lead's answer." />
+          </figure>
+        </article>
+      </section>
+
+      <section class="control" id="control" aria-labelledby="control-title">
+        <div class="control-text">
+          <h2 id="control-title">You stay in charge</h2>
+          <p>
+            Agents ask before anything risky. You see the exact command, why the agent wants it, and what it could affect,
+            then approve it once, for the session, or say no.
+          </p>
+          <dl class="modes">
+            <div><dt>Balanced</dt><dd>Codly settles the obvious cases. Anything risky, like <code>rm -rf</code>, <code>git push</code>, network installs or leaving the worktree, asks you.</dd></div>
+            <div><dt>Strict</dt><dd>Every command and edit the CLI would ask about comes to you.</dd></div>
+            <div><dt>Autonomous</dt><dd>Anything inside the agent's worktree is allowed. Risky commands still ask.</dd></div>
+          </dl>
+        </div>
+        <figure class="shot">
+          <img src="./shots/approval.jpg" width="1392" height="708" loading="lazy" decoding="async" alt="An approval card: Bo wants to run rm -rf dist && npm run build, with its reason, the risks Codly inferred, and buttons to approve once, allow for the session, or deny." />
+        </figure>
+      </section>
+
+      <section class="facts" aria-labelledby="facts-title">
+        <h2 id="facts-title">Built on what you already have</h2>
+        <ul>
+          <li>
+            <h3>Your subscriptions</h3>
+            <p>Codly drives Claude Code, Codex, Gemini CLI and OpenCode with the sign-ins you already use. Bring API-key models, OpenRouter included, through OpenCode.</p>
+          </li>
+          <li>
+            <h3>Several accounts</h3>
+            <p>Add a second Claude or Codex login. Codly sends each task to the account with the most quota left and stops using one near its limit.</p>
+          </li>
+          <li>
+            <h3>A memory that carries over</h3>
+            <p>Decisions and conventions you state are remembered across tasks, alongside a map of who changed what and why.</p>
+          </li>
+          <li>
+            <h3>Answers to “why?”</h3>
+            <p>Click any agent to see its task, its reasoning, the files it touched, what it cost and its terminal.</p>
+          </li>
+          <li>
+            <h3>No Codly servers</h3>
+            <p>No account to create and nothing to sync. Your code stays on your Mac; the only network calls are the ones your CLIs already make.</p>
+          </li>
+          <li>
+            <h3>Never pushes</h3>
+            <p>Work lands on Codly's own branches. Merging into yours is a button you press, and pushing stays with you.</p>
+          </li>
+        </ul>
+      </section>
+
+      <section class="final" aria-labelledby="final-title">
+        <h2 id="final-title">Watch a team work on <em>acme/web</em></h2>
+        <p>
+          The real interface, a fake repository and a scripted team adding a dark mode toggle. Approve their commands, open the
+          plan, read the diffs. Nothing runs on your machine.
+        </p>
+        <a class="btn big" href="/demo/">Open the live demo <span aria-hidden="true">→</span></a>
+        <p class="soon">The macOS app is coming soon.</p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span>Codly</span>
+      <span>For macOS 14 and later</span>
+      <span>© 2026</span>
+    </footer>
+  </body>
+</html>
