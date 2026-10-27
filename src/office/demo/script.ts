@@ -141,7 +141,7 @@ export function buildScript(): Step[] {
   const chat = (t: number, author: string, thread: string, text: string) =>
     at(t, author === 'user' ? null : author, { type: 'chat', message: { id: `m${t}`, thread, author, text, attachment: null, ts: 0 } });
   const memory = (t: number, agent: string, kind: 'note' | 'decision' | 'fact' | 'lesson', text: string, taskId: string | null) =>
-    at(t, agent, { type: 'memory_added', memory: { id: `mem-${t}`, workspace_id: 'w1', scope: kind === 'note' ? 'task' : 'project', scope_id: taskId, kind, text, author: agent, source_event: null, importance: 0.7, pinned: false, superseded_by: null, created_at: 0, accessed_at: 0 } }, taskId);
+    at(t, agent, { type: 'memory_added', memory: { id: `mem-${t}`, workspace_id: 'w1', scope: kind === 'note' ? 'task' : 'project', scope_id: taskId, kind, text, title: '', tags: [], refs: [], author: agent, source_event: null, importance: 0.7, pinned: false, superseded_by: null, created_at: 0, accessed_at: 0 } }, taskId);
   const todo = (t: number, agent: string, items: [string, 'pending' | 'in_progress' | 'completed'][]) => at(t, agent, { type: 'plan_updated', steps: items.map(([text, s]) => ({ text, status: s })) });
 
   const MIRA = 'a-mira';

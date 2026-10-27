@@ -236,7 +236,7 @@ export class Sim {
     this.emit({ type: 'decision', id: uid('d-'), decision_type: type, method, summary, detail }, meta);
   }
 
-  memory(text: string, scope: MemoryScope, kind: MemoryKind, author: string, opts: { scopeId?: string | null; importance?: number; pinned?: boolean; sourceEvent?: number | null; emit?: boolean } = {}) {
+  memory(text: string, scope: MemoryScope, kind: MemoryKind, author: string, opts: { scopeId?: string | null; title?: string; refs?: string[]; importance?: number; pinned?: boolean; sourceEvent?: number | null; emit?: boolean } = {}) {
     const m: Memory = {
       id: uid('mem-'),
       workspace_id: scope === 'global' ? null : (this.workspace?.id ?? null),
@@ -244,6 +244,9 @@ export class Sim {
       scope_id: opts.scopeId ?? null,
       kind,
       text,
+      title: opts.title ?? '',
+      tags: [],
+      refs: opts.refs ?? [],
       author,
       source_event: opts.sourceEvent ?? null,
       importance: opts.importance ?? 0.6,

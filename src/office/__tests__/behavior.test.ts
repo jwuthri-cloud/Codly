@@ -227,7 +227,7 @@ describe('events → behaviour', () => {
   it('notes become sticky notes; memories light a drawer; a memory right after its tool needs no extra trip', () => {
     const m = fresh();
     const mem = (t: number, kind: 'note' | 'decision', text: string) =>
-      row(t, 'a-ada', { type: 'memory_added', memory: { id: `m${t}`, workspace_id: null, scope: 'task', scope_id: null, kind, text, author: 'a-ada', source_event: null, importance: 0.5, pinned: false, superseded_by: null, created_at: 0, accessed_at: 0 } });
+      row(t, 'a-ada', { type: 'memory_added', memory: { id: `m${t}`, workspace_id: null, scope: 'task', scope_id: null, kind, text, title: '', tags: [], refs: [], author: 'a-ada', source_event: null, importance: 0.5, pinned: false, superseded_by: null, created_at: 0, accessed_at: 0 } });
     expect(kinds(reduce(m, mem(0, 'note', 'Tokens rotate on use'), live))).toEqual(['sticky', 'errand:note']);
     expect(m.notes.map((n) => n.text)).toEqual(['Tokens rotate on use']);
     reduce(m, row(1000, 'a-ada', started('c1', 'memory', { tool: 'codly_memory_write' })), live);

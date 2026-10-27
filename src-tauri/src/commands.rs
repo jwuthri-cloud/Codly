@@ -198,8 +198,16 @@ pub async fn list_memories(state: State<'_, AppState>, query: Option<String>, sc
 }
 
 #[tauri::command]
-pub async fn add_memory(state: State<'_, AppState>, text: String, scope: MemoryScope, kind: MemoryKind) -> R<Memory> {
-    state.core().await?.add_memory(&text, scope, kind).await.map_err(err)
+pub async fn add_memory(
+    state: State<'_, AppState>,
+    text: String,
+    scope: MemoryScope,
+    kind: MemoryKind,
+    title: Option<String>,
+    tags: Option<Vec<String>>,
+) -> R<Memory> {
+    let meta = MemoryMeta { title: title.unwrap_or_default(), tags: tags.unwrap_or_default(), refs: Vec::new() };
+    state.core().await?.add_memory(&text, scope, kind, meta).await.map_err(err)
 }
 
 #[tauri::command]
@@ -232,6 +240,35 @@ pub async fn repo_map(state: State<'_, AppState>) -> R<Vec<RepoFile>> {
 pub async fn read_artifact(state: State<'_, AppState>, artifact_id: String) -> R<tauri::ipc::Response> {
     let (bytes, _mime) = state.core().await?.read_artifact(&artifact_id).await.map_err(err)?;
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// A pasted or dropped file: the raw bytes are the request body, its name an `x-name`
+/// header (URI-encoded). Returns the saved absolute path.
+#[tauri::command]
+pub async fn save_attachment(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> R<String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("expected the file's bytes".into()) };
+    let name = request.headers().get("x-name").and_then(|v| v.to_str().ok()).map(uri_decode).unwrap_or_default();
+    state.core().await?.save_attachment(&name, bytes.clone()).await.map_err(err)
+}
+
+/// Percent-decoding for the `x-name` header (lossy on malformed input).
+fn uri_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match (b[i], b.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[tauri::command]

@@ -1242,6 +1242,7 @@ mod tests {
             system_prompt: String::new(),
             read_only: false,
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "t".into())] }),
+            use_user_setup: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
         };
         let (a, env) = launch(&spec, Some(Path::new("/tmp/r/gemini-policy.toml")));

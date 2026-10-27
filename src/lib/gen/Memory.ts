@@ -6,7 +6,20 @@ export type Memory = { id: string, workspace_id: string | null, scope: MemorySco
 /**
  * agent id / task id for Agent / Task scopes.
  */
-scope_id: string | null, kind: MemoryKind, text: string, 
+scope_id: string | null, kind: MemoryKind, 
+/**
+ * The body: what is searched and what agents read.
+ */
+text: string, 
+/**
+ * Short headline. Empty = the UI derives one from `text`.
+ */
+title: string, tags: Array<string>, 
+/**
+ * Knowledge-graph entity ids this memory is about ("task:<id>", "file:<path>",
+ * "concept:<name>", "agent:<id>"), the link between memories and `Triple`s.
+ */
+refs: Array<string>, 
 /**
  * "user" | "codly" | agent id
  */

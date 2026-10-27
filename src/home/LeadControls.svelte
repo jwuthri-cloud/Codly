@@ -86,8 +86,8 @@
     {model.name || 'Default model'}{#if model.effort}<span class="sub">· {model.effort === 'xhigh' ? 'extra high' : model.effort}</span>{/if}<Icon name="chevron-down" size={12} />
   </button>
 </div>
-{#if open === 'mode' && modeBtn}<Menu anchor={modeBtn} items={modeItems} onclose={() => (open = null)} width={300} />{/if}
-{#if open === 'model' && modelBtn}<Menu anchor={modelBtn} items={modelItems} onclose={() => (open = null)} width={220} />{/if}
+{#if open === 'mode' && modeBtn}<Menu anchor={modeBtn} items={modeItems} onclose={() => (open = null)} width={340} />{/if}
+{#if open === 'model' && modelBtn}<Menu anchor={modelBtn} items={modelItems} onclose={() => (open = null)} width={240} />{/if}
 
 <style>
   .controls { display: flex; gap: 4px; padding: 6px 10px 0; }

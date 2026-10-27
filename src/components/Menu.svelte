@@ -70,6 +70,11 @@
   }
 
   onMount(() => {
+    // Rendered under <body>: a transformed or filtered ancestor would otherwise become the
+    // containing block of `position: fixed` and clip the menu at its own edge.
+    // Svelte only removes nodes where it put them, so the menu removes itself on teardown.
+    const node = el;
+    if (node) document.body.appendChild(node);
     place();
     tick().then(() => {
       place();
@@ -80,6 +85,7 @@
     return () => {
       window.removeEventListener('pointerdown', outside, true);
       window.removeEventListener('resize', onclose);
+      node?.remove();
     };
   });
 </script>

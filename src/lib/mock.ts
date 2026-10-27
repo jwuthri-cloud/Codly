@@ -70,6 +70,7 @@ const SETTINGS: Settings = {
   auto_run_plans: false,
   review_gate: false,
   lead_followups: true,
+  use_my_claude_setup: true,
   world_ambient: false,
   theme: 'system',
   team: [],
@@ -83,6 +84,9 @@ const params = () => new URLSearchParams(typeof location !== 'undefined' ? locat
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export class MockTransport implements Transport {
+  async upload(_cmd: string, name: string): Promise<string> {
+    return `/demo/acme-web/.codly/attachments/${Math.random().toString(36).slice(2, 8)}/${name}`;
+  }
   private sim: Sim;
   private story: Story;
   private ctl: MockControls;
@@ -271,7 +275,7 @@ export class MockTransport implements Transport {
         return [...sim.memories.values()].filter((m) => (!scope || m.scope === scope) && (!q || m.text.toLowerCase().includes(q)));
       }
       case 'add_memory':
-        return sim.memory(String(a.text), a.scope as MemoryScope, a.kind as MemoryKind, 'user', { importance: 0.7 });
+        return Object.assign(sim.memory(String(a.text), a.scope as MemoryScope, a.kind as MemoryKind, 'user', { importance: 0.7 }), { title: String(a.title ?? ''), tags: (a.tags as string[] | null) ?? [] });
       case 'delete_memory':
         sim.memories.delete(String(a.id));
         return null;

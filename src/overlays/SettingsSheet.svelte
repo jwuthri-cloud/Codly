@@ -1,6 +1,6 @@
 <!--
   Settings sheet. Changes apply immediately (optimistic, reverted with a toast if the core
-  refuses). One screen, grouped; every option says what it does in a sentence.
+  refuses). Tabs by topic; every option says what it does in a sentence.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -91,6 +91,20 @@
     { id: 'autonomous', title: 'Autonomous', body: 'Anything that stays inside the agent’s worktree is allowed. Risky commands still ask.' },
   ];
 
+  const TABS = [
+    { id: 'general', label: 'General', icon: 'settings' },
+    { id: 'team', label: 'Team', icon: 'users' },
+    { id: 'safety', label: 'Safety', icon: 'lock' },
+    { id: 'automation', label: 'Automation', icon: 'bolt' },
+  ];
+  let tab = $state('general');
+  const PLAN_TOGGLES = [
+    ['auto_run_plans', 'Run plans without asking', 'New requests start in Auto instead of Plan (switch per request under the composer, or ⇧⇥). You can still cancel at any time.'],
+    ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
+    ['use_my_claude_setup', 'Use my Claude Code setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings. Applies to agents started after the change; approvals still go through Codly.'],
+  ];
+  const REVIEW_TOGGLES = [['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.']];
+
   let sheet: HTMLDivElement | undefined = $state();
   function key(e: KeyboardEvent) {
     if (e.key === 'Escape') {
@@ -108,7 +122,23 @@
       <h2>Settings</h2>
       <button class="icon-btn" aria-label="Close settings" onclick={() => (ui.settingsOpen = false)}><Icon name="x" /></button>
     </header>
-    <div class="body">
+    <div class="main">
+      <nav class="tabs" role="tablist" aria-label="Settings sections">
+        {#each TABS as t (t.id)}
+          <button role="tab" aria-selected={tab === t.id} class:on={tab === t.id} onclick={() => (tab = t.id)}><Icon name={t.icon} size={15} />{t.label}</button>
+        {/each}
+      </nav>
+      <div class="body" role="tabpanel">
+      {#snippet toggles(list: string[][])}
+        {#each list as [k, title, body] (k)}
+          <label class="row toggle">
+            <div class="r-text"><span class="r-title">{title}</span><span class="desc">{body}</span></div>
+            <input type="checkbox" class="switch" checked={s[k as 'auto_run_plans']} onchange={(e) => set({ [k]: (e.currentTarget as HTMLInputElement).checked })} />
+          </label>
+        {/each}
+      {/snippet}
+
+      {#if tab === 'general'}
       <section>
         <h3 class="eyebrow">The Lead</h3>
         <p class="desc">The supervisor you chat with. It reads the repo, proposes plans, routes tasks, and never edits files.</p>
@@ -143,6 +173,36 @@
       </section>
 
       <section>
+        <h3 class="eyebrow">Plans</h3>
+        {@render toggles(PLAN_TOGGLES)}
+      </section>
+
+      <section>
+        <h3 class="eyebrow">Skills</h3>
+        <div class="row">
+          <div class="r-text"><span class="r-title">Agent skills</span><span class="desc">See what Claude Code and Codex can load, and install more from a catalog.</span></div>
+          <button class="btn sm" onclick={() => { ui.settingsOpen = false; skillsUi.show(); }}>Manage skills</button>
+        </div>
+      </section>
+
+      <section>
+        <h3 class="eyebrow">Appearance</h3>
+        <div class="row">
+          <div class="r-text"><span class="r-title">Theme</span><span class="desc">Night is deep blue-black glass over the office; day is warm paper.</span></div>
+          <div class="seg lenses" role="radiogroup" aria-label="Theme">
+            {#each [['system', 'System', 'monitor'], ['light', 'Day', 'sun'], ['dark', 'Night', 'moon']] as [id, label, icon] (id)}
+              <button role="radio" aria-checked={s.theme === id} onclick={() => set({ theme: id })}><Icon name={icon} size={13} />{label}</button>
+            {/each}
+          </div>
+        </div>
+        <p class="desc">Motion follows your system’s “Reduce motion” setting.</p>
+      </section>
+
+      <HousekeepingSection />
+      {:else if tab === 'team'}
+      <TeamSection />
+
+      <section>
         <h3 class="eyebrow">Consultants</h3>
         <p class="desc">Workers hired for one task when no team member takes it. They use these providers in preference order, unless the Lead picks one.</p>
         <ul class="order">
@@ -173,17 +233,8 @@
         </div>
       </section>
 
-      <TeamSection />
-
       <AccountsSection />
-
-      <FreeFlowSection />
-      <TriggersSection />
-      <InboundSection />
-      <ConnectionsSection />
-
-      <HousekeepingSection />
-
+      {:else if tab === 'safety'}
       <section>
         <h3 class="eyebrow">Approvals</h3>
         <p class="desc">The default; a request can choose its own under the composer.</p>
@@ -197,54 +248,36 @@
         </div>
       </section>
 
+      <section>
+        <h3 class="eyebrow">Review</h3>
+        {@render toggles(REVIEW_TOGGLES)}
+      </section>
+
       <BreakerSection />
-
-      <section>
-        <h3 class="eyebrow">Plans</h3>
-        {#each [
-          ['auto_run_plans', 'Run plans without asking', 'New requests start in Auto instead of Plan (switch per request under the composer, or ⇧⇥). You can still cancel at any time.'],
-          ['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.'],
-          ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
-        ] as [k, title, body] (k)}
-          <label class="row toggle">
-            <div class="r-text"><span class="r-title">{title}</span><span class="desc">{body}</span></div>
-            <input type="checkbox" class="switch" checked={s[k as 'auto_run_plans']} onchange={(e) => set({ [k]: (e.currentTarget as HTMLInputElement).checked })} />
-          </label>
-        {/each}
-      </section>
-
-      <section>
-        <h3 class="eyebrow">Skills</h3>
-        <div class="row">
-          <div class="r-text"><span class="r-title">Agent skills</span><span class="desc">See what Claude Code and Codex can load, and install more from a catalog.</span></div>
-          <button class="btn sm" onclick={() => { ui.settingsOpen = false; skillsUi.show(); }}>Manage skills</button>
-        </div>
-      </section>
-
-      <section>
-        <h3 class="eyebrow">Appearance</h3>
-        <div class="row">
-          <div class="r-text"><span class="r-title">Theme</span><span class="desc">Night is deep blue-black glass over the office; day is warm paper.</span></div>
-          <div class="seg lenses" role="radiogroup" aria-label="Theme">
-            {#each [['system', 'System', 'monitor'], ['light', 'Day', 'sun'], ['dark', 'Night', 'moon']] as [id, label, icon] (id)}
-              <button role="radio" aria-checked={s.theme === id} onclick={() => set({ theme: id })}><Icon name={icon} size={13} />{label}</button>
-            {/each}
-          </div>
-        </div>
-        <p class="desc">Motion follows your system’s “Reduce motion” setting.</p>
-      </section>
+      {:else if tab === 'automation'}
+      <FreeFlowSection />
+      <TriggersSection />
+      <InboundSection />
+      <ConnectionsSection />
+      {/if}
+      </div>
     </div>
   </div>
 </div>
 
 <style>
   .scrim { position: fixed; inset: 0; z-index: var(--z-modal); background: var(--scrim); animation: fade-in var(--d-3) var(--ease-out); display: grid; place-items: center; }
-  .sheet { width: min(620px, calc(100vw - 32px)); max-height: min(800px, calc(100vh - 64px)); display: flex; flex-direction: column; border-radius: var(--r-xl); background: var(--pop); box-shadow: var(--pop-shadow), 0 40px 100px -30px rgba(0, 0, 0, 0.6); outline: none; animation: pop-in var(--d-4) var(--spring); }
+  .sheet { width: min(820px, calc(100vw - 32px)); height: min(760px, calc(100vh - 64px)); display: flex; flex-direction: column; border-radius: var(--r-xl); background: var(--pop); box-shadow: var(--pop-shadow), 0 40px 100px -30px rgba(0, 0, 0, 0.6); outline: none; animation: pop-in var(--d-4) var(--spring); }
   header { display: flex; align-items: center; justify-content: space-between; height: 64px; flex-shrink: 0; padding: 0 14px 0 26px; box-shadow: inset 0 -1px 0 var(--line); }
   h2 { font-family: var(--font-display); font-weight: 400; font-size: var(--d-sm); }
-  .body { overflow-y: auto; padding: 4px 26px 24px; }
+  .main { flex: 1; min-height: 0; display: flex; }
+  .tabs { width: 168px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; padding: 14px 10px; box-shadow: inset -1px 0 var(--line); }
+  .tabs button { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 12px; border-radius: var(--r-md); color: var(--ink-3); font-weight: var(--w-med); text-align: left; }
+  .tabs button:hover { background: var(--surface-1); color: var(--ink-1); }
+  .tabs button.on { background: var(--surface-3); color: var(--ink-1); }
+  .body { flex: 1; min-width: 0; overflow-y: auto; padding: 4px 26px 24px; }
+  @media (max-width: 640px) { .main { flex-direction: column; } .tabs { width: auto; flex-direction: row; overflow-x: auto; box-shadow: inset 0 -1px 0 var(--line); } }
   section { padding: 20px 0; box-shadow: inset 0 -1px 0 var(--line); display: flex; flex-direction: column; gap: 12px; }
-  section:last-child { box-shadow: none; }
   .desc { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .small { font-size: var(--t-sm); }
   .choices { display: flex; flex-wrap: wrap; gap: 6px; }

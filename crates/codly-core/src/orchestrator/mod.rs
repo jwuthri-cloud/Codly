@@ -609,9 +609,9 @@ impl Core {
         })
     }
 
-    pub async fn add_memory(&self, text: &str, scope: MemoryScope, kind: MemoryKind) -> anyhow::Result<Memory> {
+    pub async fn add_memory(&self, text: &str, scope: MemoryScope, kind: MemoryKind, meta: MemoryMeta) -> anyhow::Result<Memory> {
         let ws = self.inner.workspace().map(|w| w.id);
-        self.inner.add_memory(ws.as_deref(), scope, None, kind, text, "user", None, 0.7)
+        self.inner.add_memory_meta(ws.as_deref(), scope, None, kind, text, "user", None, 0.7, meta)
     }
 
     pub async fn delete_memory(&self, id: &str) -> anyhow::Result<()> {
@@ -638,6 +638,27 @@ impl Core {
         let a = self.inner.store.artifact(id)?.ok_or_else(|| anyhow!("unknown artifact {id}"))?;
         let bytes = tokio::fs::read(&a.abs_path).await.with_context(|| format!("reading {}", a.path))?;
         Ok((bytes, a.mime))
+    }
+
+    /// Save a pasted or dropped file where the Lead can read it and return its absolute path:
+    /// `<repo>/.codly/attachments/<id>/<name>`. Inside the repo because agents may not read
+    /// Codly's data dir; `.codly/` ignores itself, so git never sees it.
+    pub async fn save_attachment(&self, name: &str, bytes: Vec<u8>) -> anyhow::Result<String> {
+        const MAX: usize = 25 * 1024 * 1024;
+        if bytes.is_empty() {
+            bail!("that file is empty");
+        }
+        if bytes.len() > MAX {
+            bail!("that file is over {} MB", MAX >> 20);
+        }
+        let root = PathBuf::from(self.inner.require_ws()?.repo_path).join(".codly");
+        let dir = root.join("attachments").join(new_id());
+        tokio::fs::create_dir_all(&dir).await.context("create the attachments folder")?;
+        // ponytail: never pruned; add a sweep when .codly/attachments grows past a few hundred MB.
+        tokio::fs::write(root.join(".gitignore"), "*\n").await.context("write .codly/.gitignore")?;
+        let path = dir.join(attachment_name(name));
+        tokio::fs::write(&path, bytes).await.context("save the file")?;
+        Ok(path.to_string_lossy().into_owned())
     }
 
     /// Stop every agent (shutdown ladder) and flush the store. Called on app exit.
@@ -880,6 +901,22 @@ impl Inner {
         source_event: Option<i64>,
         importance: f64,
     ) -> anyhow::Result<Memory> {
+        self.add_memory_meta(ws, scope, scope_id, kind, text, author, source_event, importance, MemoryMeta::default())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_memory_meta(
+        &self,
+        ws: Option<&str>,
+        scope: MemoryScope,
+        scope_id: Option<&str>,
+        kind: MemoryKind,
+        text: &str,
+        author: &str,
+        source_event: Option<i64>,
+        importance: f64,
+        meta: MemoryMeta,
+    ) -> anyhow::Result<Memory> {
         let text = text.trim();
         if text.is_empty() {
             bail!("memory text is empty");
@@ -891,6 +928,9 @@ impl Inner {
             scope_id: scope_id.map(String::from),
             kind,
             text: prompts::clip(text, 2000),
+            title: prompts::clip(meta.title.trim(), 120),
+            tags: meta.tags,
+            refs: meta.refs,
             author: author.into(),
             source_event,
             importance,
@@ -938,5 +978,27 @@ impl Inner {
             self.publish(ws, &ev);
             t
         }))
+    }
+}
+
+/// A safe file name for an attachment: no directories, no odd characters, at most 80 chars.
+fn attachment_name(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let clean: String = base.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') { c } else { '_' }).collect();
+    let clean = clean.trim().trim_start_matches('.');
+    if clean.is_empty() { "file".into() } else { clean.chars().take(80).collect() }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::attachment_name;
+
+    #[test]
+    fn names_are_safe() {
+        assert_eq!(attachment_name("../../etc/passwd"), "passwd");
+        assert_eq!(attachment_name("C:\\tmp\\shot 1.png"), "shot 1.png");
+        assert_eq!(attachment_name(".env"), "env");
+        assert_eq!(attachment_name(""), "file");
+        assert_eq!(attachment_name("a$b`c.txt"), "a_b_c.txt");
     }
 }

@@ -229,8 +229,8 @@ export async function stopAgent(agentId: string) {
   await attempt('stop the agent', () => api.stopAgent(agentId));
 }
 
-export async function addMemory(text: string, scope: MemoryScope, kind: MemoryKind) {
-  const m = await attempt('save the memory', () => api.addMemory(text, scope, kind));
+export async function addMemory(text: string, scope: MemoryScope, kind: MemoryKind, title: string | null = null, tags: string[] | null = null) {
+  const m = await attempt('save the memory', () => api.addMemory(text, scope, kind, title, tags));
   if (m) store.upsertMemory(m);
   return m;
 }

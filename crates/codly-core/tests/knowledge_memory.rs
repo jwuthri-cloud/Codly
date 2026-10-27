@@ -10,6 +10,7 @@ const SCHEMA: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/stor
 fn db() -> Connection {
     let c = Connection::open_in_memory().unwrap();
     c.execute_batch(SCHEMA).unwrap();
+    c.execute_batch(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/store/m3_memory_data.sql"))).unwrap();
     c
 }
 
@@ -21,6 +22,9 @@ fn mem(ws: Option<&str>, scope: MemoryScope, scope_id: Option<&str>, kind: Memor
         scope_id: scope_id.map(String::from),
         kind,
         text: text.into(),
+        title: String::new(),
+        tags: Vec::new(),
+        refs: Vec::new(),
         author: author.into(),
         source_event: None,
         importance: 0.5,

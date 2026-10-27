@@ -77,6 +77,9 @@ pub struct SpawnSpec {
     /// `--tools` list; Codex: sandbox read-only; ACP: deny edit permissions.
     pub read_only: bool,
     pub mcp: Option<McpLaunch>,
+    /// Claude only: load the user's own Claude Code setup (their MCP servers, plugins, skills,
+    /// project settings) beside Codly's, instead of Codly's servers alone.
+    pub use_user_setup: bool,
     /// `<data>/runs/<run_id>/raw.ndjson`, append-only.
     pub raw_log: PathBuf,
 }

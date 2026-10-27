@@ -124,6 +124,7 @@ impl Inner {
             system_prompt: req.system_prompt,
             read_only: req.read_only,
             mcp: Some(mcp.launch(&self.cfg.app_exe, &token)),
+            use_user_setup: self.settings().use_my_claude_setup,
             raw_log,
         };
         // A panicking adapter (or a stub) must fail this run, not the caller's task.

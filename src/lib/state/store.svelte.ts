@@ -54,6 +54,7 @@ export const DEFAULT_SETTINGS: Settings = {
   auto_run_plans: false,
   review_gate: false,
   lead_followups: true,
+  use_my_claude_setup: true,
   world_ambient: false,
   theme: 'system',
   team: [],

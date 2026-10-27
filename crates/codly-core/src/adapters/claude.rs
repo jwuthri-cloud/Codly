@@ -33,18 +33,33 @@ use crate::model::{
 use crate::proc::{self, Inbound, RawLog, StderrTail};
 
 /// Explicit worker tool list (CRITIQUE D5/G5): the default `-p` set includes cross-session
-/// messaging, cron, remote triggers and worktree tools that fight Codly. Grep/Glob and the
-/// Task* plan tools exist only when named. ToolSearch is left out on purpose: with it,
-/// Claude defers MCP tools and the Task* tools behind a search step (free probe, §10).
-pub const WORKER_TOOLS: &[&str] =
-    &["Bash", "Read", "Edit", "Write", "Grep", "Glob", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "WebFetch", "WebSearch", "Agent"];
+/// messaging, cron, remote triggers and worktree tools that fight Codly, so they stay out:
+/// recurring work is Codly's Schedules, plans are `codly_submit_plan`, questions are
+/// `codly_ask_user`. Grep/Glob and the Task* plan tools exist only when named. Monitor and
+/// TaskStop are how a background command is watched and stopped; Skill and LSP are the
+/// user's skills and code navigation. ToolSearch joins only with the user's own setup
+/// (`TOOL_SEARCH`): with it Claude defers MCP tools and the Task* tools behind a search step
+/// (free probe, §10), which Codly's own tools avoid with `alwaysLoad`.
+pub const WORKER_TOOLS: &[&str] = &[
+    "Bash", "Read", "Edit", "Write", "Grep", "Glob", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "WebFetch", "WebSearch", "Agent", "Monitor",
+    "TaskStop", "Skill", "LSP",
+];
 /// Lead, reviewers and other read-only roles: no Bash, no edits.
-pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "WebFetch", "WebSearch"];
+pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Skill", "LSP"];
+/// Tools whose presence depends on the CLI's version or the user's setup (LSP needs a language
+/// server, Skill needs skills): asked for, but never reported as "not enabled".
+const OPTIONAL_TOOLS: &[&str] = &["Monitor", "TaskStop", "Skill", "LSP", TOOL_SEARCH];
+/// Needed to reach the user's own MCP servers when there are many of them.
+const TOOL_SEARCH: &str = "ToolSearch";
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(90);
 
-pub fn tools_for(spec: &SpawnSpec) -> &'static [&'static str] {
-    if spec.read_only { READ_ONLY_TOOLS } else { WORKER_TOOLS }
+pub fn tools_for(spec: &SpawnSpec) -> Vec<&'static str> {
+    let mut t = if spec.read_only { READ_ONLY_TOOLS } else { WORKER_TOOLS }.to_vec();
+    if spec.use_user_setup {
+        t.push(TOOL_SEARCH);
+    }
+    t
 }
 
 /// Workers edit freely inside their own worktree (Bash still asks). Solo agents work in the
@@ -98,14 +113,18 @@ pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&P
         SessionMode::New { .. } => a.extend(["--session-id".into(), session_id.to_string()]),
     }
     a.extend(["--tools".into(), tools_for(spec).join(",")]);
-    a.push("--strict-mcp-config".into());
+    // Strict = only Codly's server and the Connections; the user's own setup adds their MCP
+    // servers, plugins and project settings, as in their own Claude Code.
+    if !spec.use_user_setup {
+        a.push("--strict-mcp-config".into());
+    }
     if let Some(p) = mcp_config_path {
         a.extend(["--mcp-config".into(), p.to_string_lossy().into_owned()]);
         let mut allowed = vec!["mcp__codly__*".to_string()];
         allowed.extend(default_mcp_allowed(spec));
         a.extend(["--allowedTools".into(), allowed.join(",")]);
     }
-    a.extend(["--setting-sources".into(), "user,local".into()]);
+    a.extend(["--setting-sources".into(), if spec.use_user_setup { "user,project,local" } else { "user,local" }.into()]);
     if !spec.system_prompt.trim().is_empty() {
         a.extend(["--append-system-prompt".into(), spec.system_prompt.clone()]);
     }
@@ -647,7 +666,7 @@ impl ClaudeNormalizer {
         // Unknown --tools names are dropped silently (CRITIQUE G5): say which ones.
         // `Agent` is listed under its alias `Task`
         let has = |t: &str| tools.iter().any(|x| x == t || (t == "Agent" && x == "Task"));
-        let missing: Vec<&str> = self.requested_tools.iter().map(String::as_str).filter(|t| !has(t)).collect();
+        let missing: Vec<&str> = self.requested_tools.iter().map(String::as_str).filter(|t| !has(t) && !OPTIONAL_TOOLS.contains(t)).collect();
         if !tools.is_empty() && !missing.is_empty() {
             out.push(EventKind::Error { message: format!("Claude did not enable requested tools: {}", missing.join(", ")), fatal: false });
         }
@@ -1032,7 +1051,7 @@ impl ClaudeNormalizer {
         let cwd = self.cwd.clone();
         let mut risks: Vec<String> = Vec::new();
         let subject = match tool.as_str() {
-            "Bash" => {
+            "Bash" | "Monitor" => {
                 let command = input["command"].as_str().unwrap_or("").to_string();
                 risks = classify::risk_hints(&command, Some(&cwd), &cwd);
                 ApprovalSubject::Command { command, cwd: Some(cwd.to_string_lossy().into_owned()) }
@@ -1200,6 +1219,7 @@ mod tests {
             system_prompt: "You are a Codly worker.".into(),
             read_only,
             mcp: Some(McpLaunch { command: "/Applications/Codly.app/Contents/MacOS/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "t".into())] }),
+            use_user_setup: false,
             raw_log: PathBuf::from("/tmp/x/raw.ndjson"),
         }
     }
@@ -1251,7 +1271,7 @@ mod tests {
         let joined = build_args(&s, "abc", None).join(" ");
         assert!(joined.contains("--permission-mode manual"));
         assert!(joined.contains("--resume abc") && !joined.contains("--session-id"));
-        assert!(joined.contains("--tools Read,Grep,Glob,WebFetch,WebSearch "));
+        assert!(joined.contains("--tools Read,Grep,Glob,WebFetch,WebSearch,Skill,LSP "));
         assert!(!joined.contains("--mcp-config") && !joined.contains("mcp__codly"));
         assert!(joined.contains("--strict-mcp-config"));
         assert_eq!(permission_mode(&spec(Role::Solo, false)), "manual");
@@ -1554,6 +1574,21 @@ mod tests {
         let mut ev = norm.on_message(&tool_use("e2", "Write", json!({ "file_path": "/w/b.rs", "content": "x" })));
         ev.extend(norm.on_message(&tool_result("e2", "The user doesn't want to proceed", Value::Null, true)));
         assert!(!ev.iter().any(|e| matches!(e, EventKind::FilesChanged { .. })));
+    }
+
+    #[test]
+    fn tools_and_user_setup() {
+        let mut sp = spec(Role::Worker, false);
+        let joined = |s: &SpawnSpec| build_args(s, "sid", None).join(" ");
+        let a = joined(&sp);
+        assert!(a.contains("Monitor,TaskStop,Skill,LSP") && a.contains("--strict-mcp-config") && a.contains("user,local"));
+        assert!(!a.contains("ToolSearch") && !a.contains("Cron") && !a.contains("ScheduleWakeup") && !a.contains("RemoteTrigger"));
+        sp.use_user_setup = true;
+        let a = joined(&sp);
+        assert!(!a.contains("--strict-mcp-config") && a.contains("user,project,local") && a.contains("ToolSearch"));
+        // the Lead stays read-only either way
+        let lead = joined(&SpawnSpec { use_user_setup: true, ..spec(Role::Lead, true) });
+        assert!(lead.contains("Skill,LSP") && !lead.contains("Bash") && !lead.contains("Monitor"));
     }
 
     #[test]

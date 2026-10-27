@@ -676,7 +676,8 @@ impl Inner {
     fn learn(&self, ws: Option<&str>, task: &Task, worker: &str, summary: &str, source: Option<i64>) {
         let author = if worker.is_empty() { "codly" } else { worker };
         let text = format!("{} {}: {summary}", task.key, task.title);
-        if let Err(e) = self.add_memory(ws, MemoryScope::Project, None, MemoryKind::Summary, &text, author, source, 0.5) {
+        let meta = MemoryMeta { title: task.title.clone(), tags: vec![task.key.clone()], refs: vec![format!("task:{}", task.id)] };
+        if let Err(e) = self.add_memory_meta(ws, MemoryScope::Project, None, MemoryKind::Summary, &text, author, source, 0.5, meta) {
             tracing::debug!("summary memory: {e}");
         }
         let verified = self.store.task_events(&task.id, "verified").unwrap_or_default();
@@ -686,7 +687,8 @@ impl Inner {
         });
         if let Some((event_id, cmd, err)) = failed {
             let text = format!("{}: `{cmd}` failed first ({err}); fixed by: {}", task.key, prompts::clip(summary, 400));
-            if let Err(e) = self.add_memory(ws, MemoryScope::Project, None, MemoryKind::Lesson, &text, author, Some(event_id), 0.6) {
+            let meta = MemoryMeta { title: format!("`{cmd}` failed first"), tags: vec![task.key.clone(), "verify".into()], refs: vec![format!("task:{}", task.id)] };
+            if let Err(e) = self.add_memory_meta(ws, MemoryScope::Project, None, MemoryKind::Lesson, &text, author, Some(event_id), 0.6, meta) {
                 tracing::debug!("lesson memory: {e}");
             }
         }

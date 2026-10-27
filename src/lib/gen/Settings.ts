@@ -46,4 +46,9 @@ theme: string,
 /**
  * The standing team, in every repo unless a repo switches a member off.
  */
-team: Array<TeamMember>, };
+team: Array<TeamMember>, 
+/**
+ * Claude agents also load your own Claude Code setup: your MCP servers, plugins, skills
+ * and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
+ */
+use_my_claude_setup: boolean, };

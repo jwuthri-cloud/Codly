@@ -602,7 +602,7 @@ export class Story {
       sim.emit({ type: 'merged', sha: sha(), branch }, { agent: act.id, task: task.id });
     }
     sim.patchTask(task.id, { status: 'done', status_reason: null, summary: o.summary });
-    sim.memory(o.summary, 'task', 'summary', 'codly', { scopeId: task.id, importance: 0.5 });
+    sim.memory(o.summary, 'task', 'summary', 'codly', { scopeId: task.id, importance: 0.5, title: task.title, refs: [`task:${task.id}`] });
     await sim.sleep(2200);
     if (!this.running.has(act.id) || act.a.task_id === task.id) act.set({ status: 'idle', activity: null, activity_label: null, task_id: null });
   }
@@ -766,7 +766,7 @@ export class Story {
       ]);
       await ada.say(keep === 'Remove it' ? 'Removing the localStorage fallback; the provider will read the server value only.' : 'Keeping the localStorage fallback; the server value wins once it loads.', { phase: 'commentary' });
       await ada.tool({ name: 'mcp__codly__codly_memory_write', activity: 'memory', target: { server: 'codly', tool: 'codly_memory_write' }, ms: 500 });
-      sim.memory('Theme tokens key on `[data-theme]` on <html>. Use `setTheme()` from `useTheme()`; never toggle a `.dark` class.', 'project', 'lesson', ada.id, { importance: 0.75, sourceEvent: sim.lastId });
+      sim.memory('Theme tokens key on `[data-theme]` on <html>. Use `setTheme()` from `useTheme()`; never toggle a `.dark` class.', 'project', 'lesson', ada.id, { importance: 0.75, sourceEvent: sim.lastId, title: 'Theme tokens key on data-theme', refs: ['concept:theming'] });
       sim.triple(`agent:${ada.id}`, 'created', `file:${files[0]}`, 'observed', { agent: ada.id });
       await ada.say('Added `ThemeProvider` and `useTheme()`. Tokens now key on `[data-theme]`, the root layout wraps the app, and an explicit choice persists until t2’s API lands. 12 tests pass.');
     });
@@ -812,7 +812,7 @@ export class Story {
       });
       bo.plan([['Add a theme column and migration', 'completed'], ['Expose theme in GET/PATCH /api/settings', 'completed'], ['Build and run the API tests', 'completed']]);
       await bo.tool({ name: 'codly.codly_post_note', activity: 'note', target: { server: 'codly', tool: 'codly_post_note' }, ms: 500 });
-      sim.memory('Settings API: `theme` is `system | light | dark` (default `system`). PATCH /api/settings accepts `{ theme }` and returns the full settings object.', 'task', 'note', bo.id, { scopeId: task.id, importance: 0.8, sourceEvent: sim.lastId });
+      sim.memory('Settings API: `theme` is `system | light | dark` (default `system`). PATCH /api/settings accepts `{ theme }` and returns the full settings object.', 'task', 'note', bo.id, { scopeId: task.id, importance: 0.8, sourceEvent: sim.lastId, title: 'Settings API contract', refs: [`task:${task.id}`, 'concept:theming'] });
       await bo.tool({ name: 'fileChange', activity: 'create', target: { path: 'docs/api/settings.md' }, ms: 900 });
       sim.artifact({ kind: 'markdown', mime: 'text/markdown', path: 'docs/api/settings.md', title: 'Settings API', bytes: bytesOf(SETTINGS_API_MD), agent: bo.a, caption: 'GET and PATCH /api/settings, with the new theme field' });
       await bo.say('Added a `Theme` enum and a `theme` column (default `system`) with a migration; `PATCH /api/settings` validates it with zod and both handlers return it. Build is clean, 8 API tests pass.');

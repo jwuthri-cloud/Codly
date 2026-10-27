@@ -899,7 +899,7 @@ fn core_futures_are_send(core: Arc<Core>, d: ApprovalDecision, s: Settings) {
     send(core.events(None, None, 10));
     send(core.search("q"));
     send(core.memories(None, None));
-    send(core.add_memory("m", MemoryScope::Project, MemoryKind::Fact));
+    send(core.add_memory("m", MemoryScope::Project, MemoryKind::Fact, MemoryMeta::default()));
     send(core.delete_memory("m"));
     send(core.triples(None));
     send(core.shutdown());

@@ -59,6 +59,8 @@ export interface Transport {
   /** Install the batch sink first, then resolve with a snapshot. Drop events with id <= snapshot.as_of (id 0 = ephemeral, always apply). */
   subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot>;
   call<T>(cmd: string, args?: Record<string, unknown>): Promise<T>;
+  /** Send raw bytes (a pasted or dropped file); resolves with the command's string result. */
+  upload(cmd: string, name: string, bytes: ArrayBuffer): Promise<string>;
   /** Raw PTY bytes for one terminal. */
   attachPty(ptyId: string, onData: (bytes: Uint8Array) => void): Promise<void>;
 }
@@ -72,6 +74,10 @@ class TauriTransport implements Transport {
   async call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const { invoke } = await import('@tauri-apps/api/core');
     return invoke<T>(cmd, args);
+  }
+  async upload(cmd: string, name: string, bytes: ArrayBuffer): Promise<string> {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke<string>(cmd, new Uint8Array(bytes), { headers: { 'x-name': encodeURIComponent(name) } });
   }
   async attachPty(ptyId: string, onData: (bytes: Uint8Array) => void): Promise<void> {
     const { Channel, invoke } = await import('@tauri-apps/api/core');
@@ -108,6 +114,8 @@ export const api = {
   openWorkspace: (repoPath: string) => call<Workspace>('open_workspace', { repoPath }),
   updateSettings: (settings: Settings) => call<Settings>('update_settings', { settings }),
   /** thread: "lead" or "agent:<id>" */
+  /** Save a pasted or dropped file in the repo for the agents to read; resolves with its path. */
+  saveAttachment: async (file: File) => (await getTransport()).upload('save_attachment', file.name, await file.arrayBuffer()),
   sendChat: (thread: string, text: string) => call<void>('send_chat', { thread, text }),
   runPlan: (planId: string) => call<void>('run_plan', { planId }),
   cancelPlan: (planId: string) => call<void>('cancel_plan', { planId }),
@@ -152,7 +160,8 @@ export const api = {
   search: (query: string) => call<SearchResult>('search_code', { query }),
   memories: (query: string | null = null, scope: MemoryScope | null = null) =>
     call<Memory[]>('list_memories', { query, scope }),
-  addMemory: (text: string, scope: MemoryScope, kind: MemoryKind) => call<Memory>('add_memory', { text, scope, kind }),
+  addMemory: (text: string, scope: MemoryScope, kind: MemoryKind, title: string | null = null, tags: string[] | null = null) =>
+    call<Memory>('add_memory', { text, scope, kind, title, tags }),
   deleteMemory: (id: string) => call<void>('delete_memory', { id }),
   pinMemory: (id: string, pinned: boolean) => call<void>('pin_memory', { id, pinned }),
   triples: (entity: string | null = null) => call<Triple[]>('list_triples', { entity }),

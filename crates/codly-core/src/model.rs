@@ -649,7 +649,17 @@ pub struct Memory {
     /// agent id / task id for Agent / Task scopes.
     pub scope_id: Option<Id>,
     pub kind: MemoryKind,
+    /// The body: what is searched and what agents read.
     pub text: String,
+    /// Short headline. Empty = the UI derives one from `text`.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Knowledge-graph entity ids this memory is about ("task:<id>", "file:<path>",
+    /// "concept:<name>", "agent:<id>"), the link between memories and `Triple`s.
+    #[serde(default)]
+    pub refs: Vec<String>,
     /// "user" | "codly" | agent id
     pub author: String,
     /// Event that produced it (provenance), when any.
@@ -659,6 +669,14 @@ pub struct Memory {
     pub superseded_by: Option<Id>,
     pub created_at: i64,
     pub accessed_at: i64,
+}
+
+/// The structured extras a caller can attach to a new memory.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryMeta {
+    pub title: String,
+    pub tags: Vec<String>,
+    pub refs: Vec<String>,
 }
 
 /// A subject–predicate–object fact in the knowledge graph, with time validity.
@@ -1146,6 +1164,14 @@ pub struct Settings {
     /// The standing team, in every repo unless a repo switches a member off.
     #[serde(default)]
     pub team: Vec<TeamMember>,
+    /// Claude agents also load your own Claude Code setup: your MCP servers, plugins, skills
+    /// and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
+    #[serde(default = "yes")]
+    pub use_my_claude_setup: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -1166,6 +1192,7 @@ impl Default for Settings {
             world_ambient: false,
             theme: "system".into(),
             team: vec![],
+            use_my_claude_setup: true,
         }
     }
 }

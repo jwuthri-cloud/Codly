@@ -203,6 +203,7 @@ async fn main() {
         system_prompt: "You are a Codly smoke-test agent. Follow the user's instructions exactly and keep replies short.".into(),
         read_only: false,
         mcp,
+        use_user_setup: false,
         raw_log: raw_log.clone(),
     };
     println!("spawning {} ({:?}, model {:?}) in {}", spec.bin.display(), spec.role, spec.model, repo.display());

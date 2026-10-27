@@ -1513,6 +1513,7 @@ mod tests {
             system_prompt: "rules".into(),
             read_only: false,
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "tok".into())] }),
+            use_user_setup: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
         };
         let (model, effort) = classify::split_model_effort(spec.model.as_deref());

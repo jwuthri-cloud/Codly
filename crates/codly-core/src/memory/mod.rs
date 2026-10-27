@@ -43,7 +43,7 @@ pub struct MemoryView<'a> {
 
 // ───────────────────────────── memories ─────────────────────────────
 
-const MEMORY_COLS: &str = "m.id, m.workspace_id, m.scope, m.scope_id, m.kind, m.text, m.author, m.source_event, m.importance, m.pinned, m.superseded_by, m.created_at, m.accessed_at";
+const MEMORY_COLS: &str = "m.id, m.workspace_id, m.scope, m.scope_id, m.kind, m.text, m.author, m.source_event, m.importance, m.pinned, m.superseded_by, m.created_at, m.accessed_at, m.data";
 
 fn scope_str(s: MemoryScope) -> &'static str {
     match s {
@@ -85,8 +85,23 @@ fn parse_kind(s: &str) -> MemoryKind {
     }
 }
 
+/// The structured part of a memory as stored in `memory.data`.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Data {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    refs: Vec<String>,
+}
+
 fn row_memory(r: &rusqlite::Row) -> rusqlite::Result<Memory> {
+    let data: Data = r.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     Ok(Memory {
+        title: data.title,
+        tags: data.tags,
+        refs: data.refs,
         id: r.get(0)?,
         workspace_id: r.get(1)?,
         scope: parse_scope(&r.get::<_, String>(2)?),
@@ -140,9 +155,9 @@ pub fn add_memory(db: &Connection, m: &Memory) -> anyhow::Result<()> {
     let created = if m.created_at > 0 { m.created_at } else { now };
     let accessed = if m.accessed_at > 0 { m.accessed_at } else { created };
     db.execute(
-        "INSERT INTO memory(id, workspace_id, scope, scope_id, kind, text, author, source_event, importance, pinned, superseded_by, created_at, accessed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-         ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, text = excluded.text, importance = excluded.importance,
+        "INSERT INTO memory(id, workspace_id, scope, scope_id, kind, text, author, source_event, importance, pinned, superseded_by, created_at, accessed_at, data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, text = excluded.text, data = excluded.data, importance = excluded.importance,
            pinned = excluded.pinned, superseded_by = excluded.superseded_by, accessed_at = excluded.accessed_at",
         params![
             id,
@@ -157,7 +172,8 @@ pub fn add_memory(db: &Connection, m: &Memory) -> anyhow::Result<()> {
             m.pinned as i64,
             m.superseded_by,
             created,
-            accessed
+            accessed,
+            serde_json::to_string(&Data { title: m.title.clone(), tags: m.tags.clone(), refs: m.refs.clone() })?
         ],
     )
     .context("insert memory")?;
@@ -227,7 +243,7 @@ fn ranked(db: &Connection, view: &MemoryView, query: &str, scopes: &[MemoryScope
                 p.len()
             );
             let mut stmt = db.prepare(&sql)?;
-            let rows = stmt.query_map(params_from_iter(p.iter()), |r| Ok((row_memory(r)?, r.get::<_, f64>(13)?)))?;
+            let rows = stmt.query_map(params_from_iter(p.iter()), |r| Ok((row_memory(r)?, r.get::<_, f64>(14)?)))?;
             let hits: Vec<(Memory, f64)> = rows.collect::<Result<_, _>>()?;
             // bm25() is negative (better = lower). Tiny corpora give ~0 for every row; then the
             // match itself is the only relevance we have.

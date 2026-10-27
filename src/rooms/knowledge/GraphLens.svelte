@@ -4,7 +4,6 @@
   double-click an agent or task to open it; a file highlights wherever it shows.
 -->
 <script lang="ts">
-  import type { Triple } from '../../lib/gen/Triple';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { idVar } from '../../lib/util/labels';
@@ -12,13 +11,25 @@
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import Provenance from '../../components/Provenance.svelte';
+  import { memoryView } from '../../lib/util/memory';
   import { forceLayout } from './forceLayout';
 
-  const triples = $derived(store.triples.filter((t) => t.valid_to == null));
+  interface Edge { id: string; subject: string; predicate: string; object: string; source: string; memory?: boolean }
+  const live = $derived(store.memories.filter((m) => !m.superseded_by && m.refs.length));
+  /** Current triples, plus one `memory:<id> —about→ ref` edge per ref of every linked memory. */
+  const triples = $derived<Edge[]>([
+    ...store.triples.filter((t) => t.valid_to == null),
+    ...live.flatMap((m) => m.refs.map((r) => ({ id: `${m.id}>${r}`, subject: `memory:${m.id}`, predicate: 'about', object: r, source: m.author === 'user' ? 'user' : m.author === 'codly' ? 'observed' : 'agent', memory: true }))),
+  ]);
   const type = (e: string) => e.split(':')[0];
   function label(e: string): string {
     const [t, ...rest] = e.split(':');
     const v = rest.join(':');
+    if (t === 'memory') {
+      const m = store.memories.find((x) => x.id === v);
+      const title = m ? memoryView(m).title : 'memory';
+      return title.length > 24 ? `${title.slice(0, 23)}…` : title;
+    }
     if (t === 'agent') return store.agentMap.get(v)?.name ?? 'agent';
     if (t === 'task') return store.taskMap.get(v)?.key ?? 'task';
     if (t === 'file') return basename(v);
@@ -29,6 +40,7 @@
     if (t === 'agent') return idVar(store.agentMap.get(e.slice(6))?.color ?? 0);
     if (t === 'task') return 'var(--ink-2)';
     if (t === 'file') return 'var(--aurora-m)';
+    if (t === 'memory') return 'var(--id-4)';
     return 'var(--pv-model)';
   }
   let box: HTMLDivElement | undefined = $state();
@@ -58,7 +70,7 @@
     return s;
   });
   const listed = $derived(ui.memoryEntity ? triples.filter((t) => t.subject === ui.memoryEntity || t.object === ui.memoryEntity) : triples);
-  const prov = (t: Triple) => (t.source === 'observed' ? 'observed' : t.source === 'user' ? 'provided' : 'model') as 'observed' | 'provided' | 'model';
+  const prov = (t: Edge) => (t.source === 'observed' ? 'observed' : t.source === 'user' ? 'provided' : 'model') as 'observed' | 'provided' | 'model';
   function enter(id: string) {
     hover = id;
     const [t, ...rest] = id.split(':');
@@ -75,6 +87,7 @@
     if (t === 'agent' && store.agentMap.has(v)) ui.selectAgent(v);
     else if (t === 'task' && store.taskMap.has(v)) ui.selectTask(v);
     else if (t === 'file') ui.selectFile(v);
+    else if (t === 'memory') ui.knowledgeLens = 'memory';
   }
 </script>
 
@@ -100,13 +113,13 @@
               role="button" tabindex="0" aria-label={label(id)}
               onpointerenter={() => enter(id)} onpointerleave={leave}
               onclick={() => (ui.memoryEntity = ui.memoryEntity === id ? null : id)} ondblclick={() => open(id)} onkeydown={(e) => e.key === 'Enter' && open(id)}>
-              {#if type(id) === 'agent'}<circle r="9" class="shape" />{:else if type(id) === 'task'}<rect x="-8" y="-8" width="16" height="16" rx="4" class="shape" />{:else if type(id) === 'file'}<circle r="5.5" class="shape" />{:else}<path d="M0 -8 L8 0 L0 8 L-8 0Z" class="shape" />{/if}
+              {#if type(id) === 'agent'}<circle r="9" class="shape" />{:else if type(id) === 'task'}<rect x="-8" y="-8" width="16" height="16" rx="4" class="shape" />{:else if type(id) === 'file'}<circle r="5.5" class="shape" />{:else if type(id) === 'memory'}<rect x="-9" y="-6" width="18" height="12" rx="3" class="shape" />{:else}<path d="M0 -8 L8 0 L0 8 L-8 0Z" class="shape" />{/if}
               <text y="22" text-anchor="middle" class="nl">{label(id)}</text>
             </g>
           {/if}
         {/each}
       </svg>
-      <p class="legend"><span><i class="lg-a"></i>agent</span><span><i class="lg-t"></i>task</span><span><i class="lg-f"></i>file</span><span><i class="lg-c"></i>idea</span><span class="hint">Double-click to open</span></p>
+      <p class="legend"><span><i class="lg-a"></i>agent</span><span><i class="lg-t"></i>task</span><span><i class="lg-f"></i>file</span><span><i class="lg-m"></i>memory</span><span><i class="lg-c"></i>idea</span><span class="hint">Double-click to open · memories link to what they’re about</span></p>
     </div>
     <aside class="facts">
       <p class="eyebrow">{listed.length} facts{#if ui.memoryEntity} about <button class="chip" onclick={() => (ui.memoryEntity = null)}>{label(ui.memoryEntity)} <Icon name="x" size={10} /></button>{/if}</p>
@@ -141,6 +154,7 @@
   .lg-a { background: var(--id-7); }
   .lg-t { background: var(--ink-2); border-radius: 2px !important; }
   .lg-f { background: var(--aurora-m); }
+  .lg-m { background: var(--id-4); border-radius: 3px !important; width: 11px !important; height: 8px !important; }
   .lg-c { background: var(--pv-model); transform: rotate(45deg); border-radius: 1px !important; }
   .hint { color: var(--ink-4); }
   .facts { width: 300px; flex-shrink: 0; overflow-y: auto; padding: 4px 8px; }

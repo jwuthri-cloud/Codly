@@ -23,7 +23,7 @@ use serde_json::Value;
 use crate::model::*;
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql"))])
+    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql")), M::up(include_str!("m3_memory_data.sql"))])
 }
 
 /// One agent process lifetime (`run` table). Not a UI type: the UI sees runs through events.

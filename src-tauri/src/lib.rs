@@ -115,6 +115,7 @@ pub fn run() {
             commands::pin_memory,
             commands::repo_map,
             commands::read_artifact,
+            commands::save_attachment,
             commands::pty_open,
             commands::pty_attach,
             commands::pty_write,
