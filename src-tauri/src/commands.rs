@@ -267,6 +267,8 @@ pub async fn pty_close(state: State<'_, AppState>, pty_id: String) -> R<()> {
 #[tauri::command]
 pub async fn agent_git(state: State<'_, AppState>, agent_id: String) -> R<codly_core::orchestrator::agent_git::AgentGit> {
     state.core().await?.agent_git(&agent_id).await.map_err(err)
+}
+
 /// Triggers: schedules, context rules and network mode, with the log of what they did.
 #[tauri::command]
 pub async fn get_triggers(state: State<'_, AppState>) -> R<codly_core::triggers::TriggersConfig> {
@@ -276,6 +278,8 @@ pub async fn get_triggers(state: State<'_, AppState>) -> R<codly_core::triggers:
 #[tauri::command]
 pub async fn set_triggers(state: State<'_, AppState>, config: codly_core::triggers::TriggersConfig) -> R<codly_core::triggers::TriggersConfig> {
     state.core().await?.set_triggers(config).await.map_err(err)
+}
+
 // ───────────────────────────── skills manager ─────────────────────────────
 // Blocking filesystem/git work, so each runs on the blocking pool. `project` is the open repo.
 
@@ -309,6 +313,8 @@ pub async fn uninstall_skill(path: String, project: Option<String>) -> R<()> {
 #[tauri::command]
 pub async fn open_skill_folder(path: String, project: Option<String>) -> R<()> {
     skills_blocking(move |home| codly_core::skills::open_folder(std::path::Path::new(&path), &home, project.as_deref().map(std::path::Path::new))).await
+}
+
 /// Literal text search across the board, tasks and memories (the Find lens).
 #[tauri::command]
 pub async fn exact_search(state: State<'_, AppState>, query: String) -> R<Vec<codly_core::memory::panel::ExactHit>> {
@@ -330,6 +336,8 @@ pub async fn memory_file(state: State<'_, AppState>, agent_id: String) -> R<codl
 #[tauri::command]
 pub async fn save_memory_file(state: State<'_, AppState>, agent_id: String, text: String) -> R<codly_core::memory::panel::MemoryFile> {
     state.core().await?.save_memory_file(&agent_id, &text).await.map_err(err)
+}
+
 // ── circuit breaker (Settings → Autonomy & Budgets) ──
 
 #[tauri::command]
@@ -350,6 +358,8 @@ pub async fn breaker_status(state: State<'_, AppState>) -> R<BreakerStatus> {
 #[tauri::command]
 pub async fn reset_breaker(state: State<'_, AppState>) -> R<()> {
     state.core().await?.reset_breaker().await.map_err(err)
+}
+
 // ───────────── housekeeping: board archive, default MCP servers ─────────────
 
 /// The board's archiving thresholds; pass `policy` to change them.

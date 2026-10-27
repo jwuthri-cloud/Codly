@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ide-changes"
+description = "Enables the ide_changes command without any pre-configured scope."
+commands.allow = ["ide_changes"]
+
+[[permission]]
+identifier = "deny-ide-changes"
+description = "Denies the ide_changes command without any pre-configured scope."
+commands.deny = ["ide_changes"]

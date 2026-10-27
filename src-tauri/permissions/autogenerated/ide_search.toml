@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ide-search"
+description = "Enables the ide_search command without any pre-configured scope."
+commands.allow = ["ide_search"]
+
+[[permission]]
+identifier = "deny-ide-search"
+description = "Denies the ide_search command without any pre-configured scope."
+commands.deny = ["ide_search"]
