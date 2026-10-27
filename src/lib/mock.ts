@@ -22,6 +22,7 @@ import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { Story } from './demo/story';
+import { inboundMock } from './demo/inbound';
 
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
@@ -237,6 +238,13 @@ export class MockTransport implements Transport {
         this.ptys.get(String(a.ptyId))?.close();
         this.ptys.delete(String(a.ptyId));
         return null;
+      case 'inbound_state':
+      case 'inbound_create_webhook':
+      case 'inbound_set_webhook':
+      case 'inbound_revoke_webhook':
+      case 'inbound_set_settings':
+      case 'inbound_set_slack':
+        return inboundMock(cmd, a);
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

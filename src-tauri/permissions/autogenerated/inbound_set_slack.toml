@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-inbound-set-slack"
+description = "Enables the inbound_set_slack command without any pre-configured scope."
+commands.allow = ["inbound_set_slack"]
+
+[[permission]]
+identifier = "deny-inbound-set-slack"
+description = "Denies the inbound_set_slack command without any pre-configured scope."
+commands.deny = ["inbound_set_slack"]

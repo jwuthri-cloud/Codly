@@ -13,10 +13,12 @@
 //! - `index`        code retrieval: FTS5 over paths/symbols/chunks, RRF, citations, pointer packs
 //! - `memory`       shared/private memories, knowledge triples, memory packs
 //! - `pty`          interactive terminals (portable-pty)
+//! - `inbound`      webhooks and Slack: outside messages for the Lead, secrets in the Keychain
 
 pub mod adapters;
 pub mod env;
 pub mod git;
+pub mod inbound;
 pub mod index;
 pub mod mcp;
 pub mod memory;

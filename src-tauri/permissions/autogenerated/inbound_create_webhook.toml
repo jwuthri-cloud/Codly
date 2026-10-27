@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-inbound-create-webhook"
+description = "Enables the inbound_create_webhook command without any pre-configured scope."
+commands.allow = ["inbound_create_webhook"]
+
+[[permission]]
+identifier = "deny-inbound-create-webhook"
+description = "Denies the inbound_create_webhook command without any pre-configured scope."
+commands.deny = ["inbound_create_webhook"]

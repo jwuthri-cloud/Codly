@@ -2,6 +2,7 @@
 //! `codly-core`; this crate only wires it to the webview.
 
 mod commands;
+mod inbound;
 #[cfg(test)]
 mod ipc_tests;
 mod ui_bus;
@@ -24,6 +25,7 @@ pub fn run() {
         .init();
 
     let (core_tx, core_rx) = watch::channel(None);
+    let (hub_tx, hub_rx) = watch::channel(None);
     let bus = UiBus::new();
 
     let app = tauri::Builder::default()
@@ -43,8 +45,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(AppState { core: core_rx, bus: bus.clone(), pty: Default::default(), shell_env: OnceCell::new() })
+        .manage(inbound::InboundHandle { hub: hub_rx })
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
+            let inbound_dir = data_dir.clone();
             let app_exe = std::env::current_exe()?;
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -52,6 +56,7 @@ pub fn run() {
                 if let Ok(core) = &started {
                     tauri::async_runtime::spawn(bus.clone().pump(core.subscribe()));
                     tauri::async_runtime::spawn(notify_loop(handle, core.clone()));
+                    let _ = hub_tx.send(inbound::start(core.clone(), inbound_dir).await);
                 } else if let Err(e) = &started {
                     tracing::error!("core failed to start: {e}");
                 }
@@ -99,6 +104,12 @@ pub fn run() {
             commands::pty_write,
             commands::pty_resize,
             commands::pty_close,
+            inbound::inbound_state,
+            inbound::inbound_create_webhook,
+            inbound::inbound_set_webhook,
+            inbound::inbound_revoke_webhook,
+            inbound::inbound_set_settings,
+            inbound::inbound_set_slack,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
