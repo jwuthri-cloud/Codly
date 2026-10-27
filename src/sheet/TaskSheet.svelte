@@ -18,6 +18,7 @@
   import ArtifactThumb from '../components/ArtifactThumb.svelte';
   import Icon from '../components/Icon.svelte';
   import InlineText from '../components/InlineText.svelte';
+  import Markdown from '../components/Markdown.svelte';
   import Portrait from '../components/Portrait.svelte';
   import Provenance from '../components/Provenance.svelte';
   import Say from '../components/Say.svelte';
@@ -81,7 +82,7 @@
     </Section>
 
     <Section id="t-goal" title="Goal & checks">
-      <p class="goal selectable"><InlineText text={task.goal} /></p>
+      <div class="goal selectable"><Markdown text={task.goal} brief /></div>
       <TaskChecks {task} />
     </Section>
 

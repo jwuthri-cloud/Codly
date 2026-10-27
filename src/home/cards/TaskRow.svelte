@@ -15,6 +15,7 @@
   import { idVar, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import Icon from '../../components/Icon.svelte';
   import InlineText from '../../components/InlineText.svelte';
+  import Markdown from '../../components/Markdown.svelte';
   import Portrait from '../../components/Portrait.svelte';
   import Say from '../../components/Say.svelte';
   import StateMark from '../../components/StateMark.svelte';
@@ -83,7 +84,7 @@
   <span class="key">{task.key}</span>
   <span class="main">
     <span class="title">{task.title}</span>
-    {#if goal || detail}<span class="goal" class:clamp={!detail}><InlineText text={task.goal} /></span>{/if}
+    {#if detail}<div class="goal"><Markdown text={task.goal} brief /></div>{:else if goal}<span class="goal clamp"><InlineText text={task.goal} /></span>{/if}
     <span class="line">
       {#if task.status === 'pending' && deps.length}<Icon name="branch" size={11} />{/if}
       {#if n && (task.status === 'running' || n.tone === 'wait')}<Say parts={n.parts} />{:else}<span class="truncate">{line}</span>{/if}

@@ -238,6 +238,16 @@ fn clean_list(v: &mut Vec<String>) {
     });
 }
 
+/// A brief is markdown: a goal line, then headings or list items. A lone paragraph is a flat
+/// blob the worker has to read as one wall.
+fn is_structured(goal: &str) -> bool {
+    goal.lines().skip(1).any(|l| {
+        let l = l.trim_start();
+        let numbered = l.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        l.starts_with('#') || l.starts_with("- ") || l.starts_with("* ") || numbered
+    })
+}
+
 pub fn validate(input: PlanInput) -> Result<ValidPlan, String> {
     let mut plan = input;
     let mut errors: Vec<String> = vec![];
@@ -273,6 +283,11 @@ pub fn validate(input: PlanInput) -> Result<ValidPlan, String> {
         }
         if t.goal.is_empty() {
             errors.push(format!("task {id}: goal is empty: say what to change, where and why"));
+        } else if !is_structured(&t.goal) {
+            fixes.push(Fix {
+                summary: format!("{id}: brief is one flat paragraph: write a goal line, then ### Scope, ### Steps, ### Acceptance and ### Out of scope bullets"),
+                detail: json!({ "rule": "brief_shape", "task": id }),
+            });
         }
         clean_list(&mut t.acceptance_criteria);
         if t.acceptance_criteria.is_empty() {
@@ -512,7 +527,9 @@ fn collapse_if_small(plan: &mut PlanInput) -> Option<Fix> {
     let unrestricted = tasks.iter().any(|t| t.write_scope.is_empty());
     for (n, &i) in order.iter().enumerate() {
         let t = &tasks[i];
-        merged.goal.push_str(&format!("{}. {}: {}\n", n + 1, t.title, t.goal));
+        // Indent the brief under its number so its headings and bullets stay inside the item.
+        let brief = t.goal.lines().enumerate().map(|(i, l)| if i == 0 { l.to_string() } else { format!("   {l}") }).collect::<Vec<_>>().join("\n");
+        merged.goal.push_str(&format!("{}. {}: {brief}\n", n + 1, t.title));
         merged.acceptance_criteria.extend(t.acceptance_criteria.iter().cloned());
         merged.verify.extend(t.verify.iter().cloned());
         merged.read_scope.extend(t.read_scope.iter().cloned());

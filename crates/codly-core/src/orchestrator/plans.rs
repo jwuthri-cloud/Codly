@@ -538,8 +538,8 @@ impl Inner {
             _ => None,
         };
         let system_prompt = match &member {
-            Some(m) => prompts::member_system(prompts::WORKER_SYSTEM, m),
-            None => prompts::WORKER_SYSTEM.to_string(),
+            Some(m) => prompts::member_system(&prompts::worker_system(), m),
+            None => prompts::worker_system(),
         };
         let agent = match &member {
             // The configured model, effort included (the CLI reports a resolved name).
