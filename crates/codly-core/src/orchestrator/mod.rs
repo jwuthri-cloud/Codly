@@ -12,6 +12,7 @@
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
 //! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
 //! - `triggers` schedules and context rules run on a clock (policy: `crate::triggers`)
+//! - `housekeeping` board archiving sweep, default MCP servers for new agents
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - `breaker_run` circuit breaker enforcement (policy in `breaker`): steer, constrain, stop
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
@@ -27,6 +28,7 @@ mod ask_me;
 mod gate;
 mod ide;
 mod hires;
+pub mod housekeeping;
 mod ingest;
 mod lead;
 pub mod names;
@@ -382,6 +384,7 @@ impl Core {
         tokio::spawn(plans::scheduler_loop(inner.clone()));
         tokio::spawn(triggers::run(inner.clone()));
         tokio::spawn(breaker_run::beat_loop(inner.clone()));
+        tokio::spawn(housekeeping::sweeper(inner.clone()));
         match inner.store.last_workspace() {
             Ok(Some(ws)) => {
                 if let Err(e) = inner.open_workspace(&ws.repo_path).await {

@@ -14,6 +14,7 @@ fn main() {
         "list_blockers", "answer_blocker", "dismiss_blocker",
         "inbound_state", "inbound_create_webhook", "inbound_set_webhook", "inbound_revoke_webhook", "inbound_set_settings", "inbound_set_slack",
         "hire_review", "hire_launch_preview", "hire_draft_prompt", "hire_from_manifest",
+        "board_policy", "board_sweep", "board_archive", "list_connections", "update_connection",
     ])))
     .expect("tauri-build failed");
 }

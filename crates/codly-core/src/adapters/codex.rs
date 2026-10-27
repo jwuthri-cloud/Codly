@@ -313,6 +313,16 @@ pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str
         let env: serde_json::Map<String, Value> = m.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
         // Codly validates every call server-side, so its tools need no extra approval prompt.
         config["mcp_servers"] = json!({ "codly": { "command": m.command, "args": m.args, "env": env, "default_tools_approval_mode": "approve" } });
+        // The user's default servers (Settings → Connections), as enabled when this run started.
+        // Read-only ones run without asking; the others use Codex's own approval prompt.
+        for x in crate::housekeeping::connections::load_ready(&spec.raw_log) {
+            let env: serde_json::Map<String, Value> = x.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
+            let mut server = json!({ "command": x.command, "args": x.args, "env": env });
+            if x.read_only {
+                server["default_tools_approval_mode"] = json!("approve");
+            }
+            config["mcp_servers"][&x.name] = server;
+        }
     }
     let mut p = json!({
         "cwd": spec.cwd,

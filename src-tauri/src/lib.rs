@@ -157,6 +157,11 @@ pub fn run() {
             hire_commands::hire_launch_preview,
             hire_commands::hire_draft_prompt,
             hire_commands::hire_from_manifest,
+            commands::board_policy,
+            commands::board_sweep,
+            commands::board_archive,
+            commands::list_connections,
+            commands::update_connection,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

@@ -11,6 +11,11 @@ import type { Blocker } from './gen/Blocker';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { BreakerConfig } from './gen/BreakerConfig';
 import type { BreakerStatus } from './gen/BreakerStatus';
+import type { ArchivedItem } from './gen/ArchivedItem';
+import type { ArchivePolicy } from './gen/ArchivePolicy';
+import type { Connection } from './gen/Connection';
+import type { ConnectionSecret } from './gen/ConnectionSecret';
+import type { SweepReport } from './gen/SweepReport';
 import type { CliInfo } from './gen/CliInfo';
 import type { ControlState } from './gen/ControlState';
 import type { EventRow } from './gen/EventRow';
@@ -209,6 +214,17 @@ export const api = {
   /** Who answers inbound messages ("lead" or "agent:<id>") and the listener's port. */
   inboundSetSettings: (answerer: string, port: number) => call<InboundState>('inbound_set_settings', { answerer, port }),
   inboundSetSlack: (update: SlackUpdate) => call<InboundState>('inbound_set_slack', { update }),
+  /** Board archiving thresholds (days); pass `policy` to change them. */
+  boardPolicy: (policy: ArchivePolicy | null = null) => call<ArchivePolicy>('board_policy', { policy }),
+  /** Archive what is due; reports what is flagged and which tasks are archived. */
+  boardSweep: () => call<SweepReport>('board_sweep'),
+  /** Archived tasks whose text matches `query` (all when empty). */
+  boardArchive: (query: string | null = null) => call<ArchivedItem[]>('board_archive', { query }),
+  /** Default MCP servers for new agents, with their switches and whether each key is stored. */
+  listConnections: () => call<Connection[]>('list_connections'),
+  /** Switch a server and/or store its key (Keychain; `value: null` removes it). Applies to the next spawn. */
+  updateConnection: (id: string, enabled: boolean | null, secret: ConnectionSecret | null = null) =>
+    call<Connection[]>('update_connection', { id, enabled, secret }),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;

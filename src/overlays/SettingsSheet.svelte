@@ -19,6 +19,8 @@
   import FreeFlowSection from './FreeFlowSection.svelte';
   import BreakerSection from './BreakerSection.svelte';
   import InboundSection from './InboundSection.svelte';
+  import ConnectionsSection from './ConnectionsSection.svelte';
+  import HousekeepingSection from './HousekeepingSection.svelte';
   import TeamSection from './TeamSection.svelte';
   import TriggersSection from './TriggersSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -178,6 +180,9 @@
       <FreeFlowSection />
       <TriggersSection />
       <InboundSection />
+      <ConnectionsSection />
+
+      <HousekeepingSection />
 
       <section>
         <h3 class="eyebrow">Approvals</h3>

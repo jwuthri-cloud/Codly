@@ -28,6 +28,7 @@ pub mod git;
 pub mod ide;
 pub mod inbound;
 pub mod hire;
+pub mod housekeeping;
 pub mod index;
 pub mod mcp;
 pub mod memory;

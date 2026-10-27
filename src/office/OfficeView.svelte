@@ -355,6 +355,20 @@
     color: var(--of-id);
     background: color-mix(in oklch, var(--of-id) 18%, transparent);
   }
+  .of-office :global(.of-chip) {
+    font-size: 10px;
+    font-weight: 550;
+    line-height: 13px;
+    padding: 0 5px;
+    border-radius: 6px;
+    white-space: nowrap;
+    color: rgba(243, 236, 226, 0.78);
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .of-office[data-theme='light'] :global(.of-chip) {
+    color: rgba(50, 40, 34, 0.72);
+    background: rgba(60, 40, 20, 0.07);
+  }
   .of-office :global(.of-line) {
     margin-top: 1px;
     max-width: 260px;

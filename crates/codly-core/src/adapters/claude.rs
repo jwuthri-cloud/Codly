@@ -57,11 +57,22 @@ pub fn permission_mode(spec: &SpawnSpec) -> &'static str {
 pub fn mcp_config(spec: &SpawnSpec) -> Option<Value> {
     let m = spec.mcp.as_ref()?;
     let env: serde_json::Map<String, Value> = m.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
-    Some(json!({ "mcpServers": { "codly": {
+    let mut doc = json!({ "mcpServers": { "codly": {
         "type": "stdio", "command": m.command, "args": m.args, "env": env,
         // keep codly tools loaded even if a future default defers MCP tools
         "alwaysLoad": true
-    }}}))
+    }}});
+    // The user's default servers (Settings → Connections), as enabled when this run started.
+    for x in crate::housekeeping::connections::load_ready(&spec.raw_log) {
+        let env: serde_json::Map<String, Value> = x.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
+        doc["mcpServers"][&x.name] = json!({ "type": "stdio", "command": x.command, "args": x.args, "env": env });
+    }
+    Some(doc)
+}
+
+/// `--allowedTools` patterns for the default servers that only read; the others ask first.
+fn default_mcp_allowed(spec: &SpawnSpec) -> Vec<String> {
+    crate::housekeeping::connections::load_ready(&spec.raw_log).into_iter().filter(|x| x.read_only).map(|x| format!("mcp__{}__*", x.name)).collect()
 }
 
 /// The full `claude` argv. `mcp_config_path` is a 0600 file holding [`mcp_config`] (a file,
@@ -90,7 +101,9 @@ pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&P
     a.push("--strict-mcp-config".into());
     if let Some(p) = mcp_config_path {
         a.extend(["--mcp-config".into(), p.to_string_lossy().into_owned()]);
-        a.extend(["--allowedTools".into(), "mcp__codly__*".into()]);
+        let mut allowed = vec!["mcp__codly__*".to_string()];
+        allowed.extend(default_mcp_allowed(spec));
+        a.extend(["--allowedTools".into(), allowed.join(",")]);
     }
     a.extend(["--setting-sources".into(), "user,local".into()]);
     if !spec.system_prompt.trim().is_empty() {

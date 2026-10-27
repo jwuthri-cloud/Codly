@@ -23,6 +23,7 @@ import { mockAgentGit } from './demo/agentgit';
 import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { draftPrompt, draftReply, hireFromManifest, isDraftRequest, launchPreview, reviewHire } from './demo/hire';
+import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
 import { repoMap } from './demo/repomap';
@@ -91,6 +92,7 @@ export class MockTransport implements Transport {
   private triggers: TriggersConfig | null = null;
   private breaker: MockBreaker;
   private askMe!: MockAskMe;
+  private hk: HousekeepingDemo | undefined;
 
   constructor() {
     const p = params();
@@ -352,6 +354,12 @@ export class MockTransport implements Transport {
       case 'inbound_set_settings':
       case 'inbound_set_slack':
         return inboundMock(cmd, a);
+      case 'board_policy':
+      case 'board_sweep':
+      case 'board_archive':
+      case 'list_connections':
+      case 'update_connection':
+        return (this.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }
