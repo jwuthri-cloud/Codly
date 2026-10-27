@@ -22,6 +22,7 @@ import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { Story } from './demo/story';
+import { mockIde } from '../ide/mockFs';
 
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
@@ -237,6 +238,15 @@ export class MockTransport implements Transport {
         this.ptys.get(String(a.ptyId))?.close();
         this.ptys.delete(String(a.ptyId));
         return null;
+      case 'ide_info':
+      case 'ide_list':
+      case 'ide_read':
+      case 'ide_write':
+      case 'ide_create':
+      case 'ide_search':
+      case 'ide_changes':
+      case 'ide_diff':
+        return mockIde(cmd, a);
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

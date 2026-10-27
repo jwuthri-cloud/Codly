@@ -17,6 +17,7 @@
 pub mod accounts;
 pub mod approvals;
 mod gate;
+mod ide;
 mod ingest;
 mod lead;
 pub mod names;

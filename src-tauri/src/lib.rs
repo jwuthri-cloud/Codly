@@ -2,6 +2,7 @@
 //! `codly-core`; this crate only wires it to the webview.
 
 mod commands;
+mod ide_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod ui_bus;
@@ -99,6 +100,14 @@ pub fn run() {
             commands::pty_write,
             commands::pty_resize,
             commands::pty_close,
+            ide_commands::ide_info,
+            ide_commands::ide_list,
+            ide_commands::ide_read,
+            ide_commands::ide_write,
+            ide_commands::ide_create,
+            ide_commands::ide_search,
+            ide_commands::ide_changes,
+            ide_commands::ide_diff,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

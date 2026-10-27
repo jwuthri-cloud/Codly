@@ -13,10 +13,12 @@
 //! - `index`        code retrieval: FTS5 over paths/symbols/chunks, RRF, citations, pointer packs
 //! - `memory`       shared/private memories, knowledge triples, memory packs
 //! - `pty`          interactive terminals (portable-pty)
+//! - `ide`          confined file list/read/write/search for the workspace IDE overlay
 
 pub mod adapters;
 pub mod env;
 pub mod git;
+pub mod ide;
 pub mod index;
 pub mod mcp;
 pub mod memory;
