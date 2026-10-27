@@ -13,6 +13,7 @@ fn main() {
         "exact_search", "message_graph", "memory_file", "save_memory_file",
         "list_blockers", "answer_blocker", "dismiss_blocker",
         "inbound_state", "inbound_create_webhook", "inbound_set_webhook", "inbound_revoke_webhook", "inbound_set_settings", "inbound_set_slack",
+        "hire_review", "hire_launch_preview", "hire_draft_prompt", "hire_from_manifest",
     ])))
     .expect("tauri-build failed");
 }

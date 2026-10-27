@@ -7,6 +7,7 @@ mod commands;
 mod dictation;
 mod ide_commands;
 mod inbound;
+mod hire_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod ui_bus;
@@ -152,6 +153,10 @@ pub fn run() {
             inbound::inbound_revoke_webhook,
             inbound::inbound_set_settings,
             inbound::inbound_set_slack,
+            hire_commands::hire_review,
+            hire_commands::hire_launch_preview,
+            hire_commands::hire_draft_prompt,
+            hire_commands::hire_from_manifest,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

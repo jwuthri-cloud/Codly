@@ -179,6 +179,10 @@ impl Inner {
     }
 
     pub(super) fn solo_worktree(&self, ws: &Workspace, agent: &Agent) -> (String, PathBuf) {
+        // A hired agent that works in the project folder itself (no worktree to create or commit).
+        if self.agent_brief(&agent.id).is_some_and(|b| !b.isolate) {
+            return ("(the checked-out branch)".into(), PathBuf::from(&ws.repo_path));
+        }
         let slug = format!("{}-{}", names::slug(&agent.name, 16), &agent.id[agent.id.len().saturating_sub(4)..]);
         (format!("codly/solo/{slug}"), self.worktree_root(ws).join("solo").join(slug))
     }

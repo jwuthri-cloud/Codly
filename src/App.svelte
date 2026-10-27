@@ -5,6 +5,7 @@
   import Palette from './overlays/Palette.svelte';
   import SettingsSheet from './overlays/SettingsSheet.svelte';
   import ShortcutsSheet from './overlays/ShortcutsSheet.svelte';
+  import AddAgentWizard from './overlays/AddAgentWizard.svelte';
   import ModelDialog from './overlays/ModelDialog.svelte';
   import SkillsManager from './overlays/SkillsManager.svelte';
   import { skillsUi } from './lib/state/skills.svelte';
@@ -56,7 +57,7 @@
 {#if ui.paletteOpen}<Palette />{/if}
 {#if ui.settingsOpen}<SettingsSheet />{/if}
 {#if ui.shortcutsOpen}<ShortcutsSheet />{/if}
-{#if ui.modelDialog}<ModelDialog />{/if}
+{#if ui.modelDialog}{#if ui.modelDialog.agentId}<ModelDialog />{:else}<AddAgentWizard />{/if}{/if}
 {#if skillsUi.open}<SkillsManager />{/if}
 <IdeOverlay />
 <Toasts />

@@ -26,6 +26,7 @@ mod controls;
 mod ask_me;
 mod gate;
 mod ide;
+mod hires;
 mod ingest;
 mod lead;
 pub mod names;
@@ -516,6 +517,12 @@ impl Core {
     /// `title`: one of `ROLE_TITLES` (its badge), or None.
     pub async fn hire_agent(&self, provider: Provider, model: Option<String>, title: Option<String>) -> anyhow::Result<Agent> {
         self.inner.hire_agent(provider, model, title).await
+    }
+
+    /// Start the 1:1 agent a reviewed hire manifest describes (the add-agent wizard's last step).
+    /// Re-validates everything; `confirm_shell` = the person accepted shell metacharacters in a custom command.
+    pub async fn hire_from_manifest(&self, manifest: crate::hire::HireManifest, confirm_shell: bool) -> anyhow::Result<Agent> {
+        self.inner.hire_from_manifest(manifest, confirm_shell).await
     }
 
     /// Switch a 1:1 agent to another model (None = the CLI's default).

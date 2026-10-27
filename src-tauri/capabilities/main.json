@@ -23,6 +23,7 @@
     "allow-dictation-status", "allow-dictation-configure", "allow-dictation-save-key", "allow-dictation-clear-key", "allow-dictation-transcribe",
     "allow-exact-search", "allow-message-graph", "allow-memory-file", "allow-save-memory-file",
     "allow-list-blockers", "allow-answer-blocker", "allow-dismiss-blocker",
-    "allow-inbound-state", "allow-inbound-create-webhook", "allow-inbound-set-webhook", "allow-inbound-revoke-webhook", "allow-inbound-set-settings", "allow-inbound-set-slack"
+    "allow-inbound-state", "allow-inbound-create-webhook", "allow-inbound-set-webhook", "allow-inbound-revoke-webhook", "allow-inbound-set-settings", "allow-inbound-set-slack",
+    "allow-hire-review", "allow-hire-launch-preview", "allow-hire-draft-prompt", "allow-hire-from-manifest"
   ]
 }

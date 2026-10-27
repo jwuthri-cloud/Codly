@@ -21,6 +21,8 @@ import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 import { mockAgentGit } from './demo/agentgit';
 import { MockAskMe } from './demo/askme';
+import type { HireManifest } from './gen/HireManifest';
+import { draftPrompt, draftReply, hireFromManifest, isDraftRequest, launchPreview, reviewHire } from './demo/hire';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
 import { repoMap } from './demo/repomap';
@@ -173,6 +175,7 @@ export class MockTransport implements Transport {
       }
       case 'send_chat': {
         if (!sim.workspace) throw new Error('Open a repository first.');
+        if (isDraftRequest(String(a.text))) { draftReply(sim, String(a.thread), String(a.text)); return null; } // wizard: "Generate with AI"
         story.userChat(String(a.thread), String(a.text));
         return null;
       }
@@ -224,7 +227,15 @@ export class MockTransport implements Transport {
       case 'hire_agent':
         return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':
-        return [];
+        return a.provider === 'claude' ? ['sonnet', 'opus', 'haiku'] : a.provider === 'codex' ? ['gpt-5.5-codex', 'gpt-5.5-mini'] : [];
+      case 'hire_review':
+        return reviewHire(String(a.raw));
+      case 'hire_launch_preview':
+        return launchPreview(String(a.provider), (a.model as string | null) ?? null, (a.command as string | null) ?? null);
+      case 'hire_draft_prompt':
+        return draftPrompt(String(a.brief));
+      case 'hire_from_manifest':
+        return hireFromManifest(sim, story, a.manifest as HireManifest, Boolean(a.confirmShell));
       case 'set_agent_model':
         return null;
       case 'create_task':

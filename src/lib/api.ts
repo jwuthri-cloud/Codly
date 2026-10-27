@@ -20,6 +20,9 @@ import type { IdeFile } from './gen/IdeFile';
 import type { IdeInfo } from './gen/IdeInfo';
 import type { IdeSearch } from './gen/IdeSearch';
 import type { InboundState } from './gen/InboundState';
+import type { HireManifest } from './gen/HireManifest';
+import type { HireReview } from './gen/HireReview';
+import type { LaunchPreview } from './gen/LaunchPreview';
 import type { Memory } from './gen/Memory';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
@@ -121,6 +124,11 @@ export const api = {
   steerAgent: (agentId: string, text: string) => call<ControlState>('steer_agent', { agentId, text }),
   hireAgent: (provider: Provider, model: string | null = null, title: string | null = null) => call<Agent>('hire_agent', { provider, model, title }),
   listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
+  // Add-agent wizard: the core judges hire manifests (import, AI draft) and starts the confirmed one.
+  hireReview: (raw: string) => call<HireReview>('hire_review', { raw }),
+  hireLaunchPreview: (provider: string, model: string | null, command: string | null) => call<LaunchPreview>('hire_launch_preview', { provider, model, command }),
+  hireDraftPrompt: (brief: string) => call<string>('hire_draft_prompt', { brief }),
+  hireFromManifest: (manifest: HireManifest, confirmShell: boolean) => call<Agent>('hire_from_manifest', { manifest, confirmShell }),
   /** The open repo's changes to the global team (members switched off, its own members). */
   setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   setAgentModel: (agentId: string, model: string | null) => call<Agent>('set_agent_model', { agentId, model }),

@@ -18,6 +18,7 @@
 //! - `skills`       skills manager: scan, catalog, install, uninstall
 //! - `ide`          confined file list/read/write/search for the workspace IDE overlay
 //! - `inbound`      webhooks and Slack: outside messages for the Lead, secrets in the Keychain
+//! - `hire`         hire manifests (the add-agent wizard's import/AI draft): strict validation
 
 pub mod adapters;
 pub mod dictation;
@@ -26,6 +27,7 @@ pub mod env;
 pub mod git;
 pub mod ide;
 pub mod inbound;
+pub mod hire;
 pub mod index;
 pub mod mcp;
 pub mod memory;
