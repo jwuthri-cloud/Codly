@@ -493,8 +493,9 @@ impl Core {
     }
 
     /// Create a Solo agent for 1:1 chat ("hire").
-    pub async fn hire_agent(&self, provider: Provider, model: Option<String>) -> anyhow::Result<Agent> {
-        self.inner.hire_agent(provider, model).await
+    /// `title`: one of `ROLE_TITLES` (its badge), or None.
+    pub async fn hire_agent(&self, provider: Provider, model: Option<String>, title: Option<String>) -> anyhow::Result<Agent> {
+        self.inner.hire_agent(provider, model, title).await
     }
 
     /// Switch a 1:1 agent to another model (None = the CLI's default).

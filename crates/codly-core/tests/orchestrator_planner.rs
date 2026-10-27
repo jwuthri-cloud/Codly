@@ -138,7 +138,7 @@ fn normalizes_fields() {
 #[test]
 fn staffing_is_normalized_and_contradictions_rejected() {
     let mut a = task("t1", &["a/**"], &[]);
-    a.consultant = Some(ConsultantInput { provider: "Claude-Code".into(), model: Some(" opus:high ".into()) });
+    a.consultant = Some(ConsultantInput { title: Some("product MANAGER".into()), provider: Some("Claude-Code".into()), model: Some(" opus:high ".into()) });
     let mut b = task("t2", &["b/**"], &[]);
     b.assignee = Some(" Ana ".into());
     b.session = Some("Fresh".into());
@@ -149,7 +149,7 @@ fn staffing_is_normalized_and_contradictions_rejected() {
     let t = |id: &str| v.plan.tasks.iter().find(|t| t.id == id).unwrap().clone();
     assert_eq!(t("t1").assignee.as_deref(), Some("consultant"), "a spec implies a consultant");
     let spec = t("t1").consultant_spec().unwrap();
-    assert_eq!((spec.provider.as_str(), spec.model.as_deref()), ("claude", Some("opus:high")));
+    assert_eq!((spec.provider, spec.model.as_deref(), spec.title.as_deref()), (Some(codly_core::model::Provider::Claude), Some("opus:high"), Some("Product manager")));
     assert_eq!(t("t2").member(), Some("Ana"));
     assert!(t("t2").fresh_session());
     assert_eq!((t("t3").member(), t("t3").session.as_deref()), (None, None));
@@ -157,9 +157,13 @@ fn staffing_is_normalized_and_contradictions_rejected() {
 
     let mut bad = task("t1", &["a/**"], &[]);
     bad.assignee = Some("Ana".into());
-    bad.consultant = Some(ConsultantInput { provider: "cobol".into(), model: Some("two words".into()) });
+    bad.consultant = Some(ConsultantInput { title: Some("Wizard".into()), provider: Some("cobol".into()), model: Some("two words".into()) });
     let err = validate(plan(vec![bad])).unwrap_err();
     assert!(err.contains("'cobol' is not one of") && err.contains("must be one word") && err.contains("pick one"), "{err}");
+    assert!(err.contains("consultant.title 'Wizard' is not one of: Backend, Frontend"), "{err}");
+    let mut no_harness = task("t1", &["a/**"], &[]);
+    no_harness.consultant = Some(ConsultantInput { title: Some("QA".into()), model: Some("haiku".into()), ..Default::default() });
+    assert!(validate(plan(vec![no_harness])).unwrap_err().contains("needs consultant.provider"));
 }
 
 #[test]

@@ -147,8 +147,12 @@ impl Inner {
 
     // ───────────── agents ─────────────
 
-    pub(super) async fn hire_agent(self: &Arc<Self>, provider: Provider, model: Option<String>) -> anyhow::Result<Agent> {
+    pub(super) async fn hire_agent(self: &Arc<Self>, provider: Provider, model: Option<String>, title: Option<String>) -> anyhow::Result<Agent> {
         let ws = self.require_ws()?;
+        let title = match title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            None => None,
+            Some(t) => Some(role_title(t).ok_or_else(|| anyhow!("'{t}' is not a known title ({})", ROLE_TITLES.join(", ")))?.to_string()),
+        };
         let cli = self.clis().into_iter().find(|c| c.provider == provider);
         if !self.provider_usable(provider, false) {
             let why = match cli.filter(|c| c.path.is_some()) {
@@ -168,7 +172,10 @@ impl Inner {
             let _g = self.repo_lock.lock().await;
             self.git.worktree_add(&repo, &wt, &branch, &start).await?;
         }
-        self.update_agent(&agent.id, |a| a.worktree = Some(wt.to_string_lossy().into_owned()))
+        self.update_agent(&agent.id, |a| {
+            a.worktree = Some(wt.to_string_lossy().into_owned());
+            a.title = title;
+        })
     }
 
     pub(super) fn solo_worktree(&self, ws: &Workspace, agent: &Agent) -> (String, PathBuf) {

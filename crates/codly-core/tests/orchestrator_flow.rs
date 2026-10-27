@@ -236,7 +236,7 @@ fn planning_lead_with(scope: &[&str], verify: &str) -> Behavior {
         "summary": "Add a hello file",
         "tasks": [{
             "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt containing hello",
-            "acceptance_criteria": ["hello.txt contains hello"], "write_scope": scope,
+            "consultant": { "title": "Backend" }, "acceptance_criteria": ["hello.txt contains hello"], "write_scope": scope,
             "depends_on": [], "verify": [verify], "size": "M",
         }],
     });
@@ -693,10 +693,10 @@ async fn board_moves_follow_the_rules() {
     let c = core.move_task(&t.id, TaskStatus::Cancelled).await.unwrap();
     assert_eq!(c.status, TaskStatus::Cancelled);
     assert!(core.move_task(&t.id, TaskStatus::Running).await.is_err());
-    let solo = core.hire_agent(Provider::Claude, None).await.unwrap();
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
     assert_eq!(solo.role, Role::Solo);
     assert!(solo.worktree.as_deref().unwrap().contains("/solo/"));
-    assert!(core.hire_agent(Provider::Codex, None).await.is_err(), "Codex is not installed here");
+    assert!(core.hire_agent(Provider::Codex, None, None).await.is_err(), "Codex is not installed here");
     let e = core.send_chat("nowhere", "hi").await.unwrap_err().to_string();
     assert!(e.contains("unknown thread"), "{e}");
     core.shutdown().await;
@@ -710,7 +710,7 @@ async fn solo_model_switches_and_ignores_no_change() {
     let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
     let core = start(dir.path(), FakeSpawner { log, lead: idle.clone(), worker: idle }).await;
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
-    let solo = core.hire_agent(Provider::Claude, None).await.unwrap();
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
     let opus = core.set_agent_model(&solo.id, Some("opus".into())).await.unwrap();
     assert_eq!(opus.model.as_deref(), Some("opus"));
     let same = core.set_agent_model(&solo.id, Some("opus".into())).await.unwrap();
@@ -888,7 +888,7 @@ fn core_futures_are_send(core: Arc<Core>, d: ApprovalDecision, s: Settings) {
     send(core.resolve_approval("a", d));
     send(core.interrupt_agent("a"));
     send(core.stop_agent("a"));
-    send(core.hire_agent(Provider::Claude, None));
+    send(core.hire_agent(Provider::Claude, None, None));
     send(core.set_workspace_team(WorkspaceTeam::default()));
     send(core.create_task("t", "g"));
     send(core.move_task("t", TaskStatus::Ready));
@@ -959,7 +959,7 @@ fn request_lead() -> Behavior {
                 "summary": format!("Add a {file} file"),
                 "tasks": [{
                     "id": "t1", "title": format!("Create {file}.txt"), "goal": format!("Create {file}.txt containing {file}"),
-                    "acceptance_criteria": [format!("{file}.txt contains {file}")], "write_scope": [format!("{file}.txt")],
+                    "consultant": { "title": "Backend" }, "acceptance_criteria": [format!("{file}.txt contains {file}")], "write_scope": [format!("{file}.txt")],
                     "depends_on": [], "verify": [format!("grep -q {file} {file}.txt")], "size": "M",
                 }],
             });
@@ -1434,7 +1434,7 @@ fn seed_limits(data: &Path, account: &str, used: f64) {
 fn two_task_lead() -> Behavior {
     let task = |id: &str, file: &str| {
         json!({ "id": id, "title": format!("Create {file}.txt"), "goal": format!("Create {file}.txt"),
-                "acceptance_criteria": [format!("{file}.txt exists")], "write_scope": [format!("{file}.txt")],
+                "consultant": { "title": "Backend" }, "acceptance_criteria": [format!("{file}.txt exists")], "write_scope": [format!("{file}.txt")],
                 "depends_on": [], "verify": [format!("test -f {file}.txt")], "size": "M" })
     };
     let plan = json!({ "summary": "Add two files", "tasks": [task("t1", "a"), task("t2", "b")] });
@@ -1559,7 +1559,7 @@ async fn the_lead_pins_a_task_to_the_account_the_user_names() {
             let plan = |account: &str| {
                 json!({ "summary": "Add a hello file", "tasks": [{
                     "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt containing hello",
-                    "acceptance_criteria": ["hello.txt contains hello"], "write_scope": ["hello.txt"],
+                    "consultant": { "title": "Backend" }, "acceptance_criteria": ["hello.txt contains hello"], "write_scope": ["hello.txt"],
                     "depends_on": [], "verify": ["grep -q hello hello.txt"], "account": account }] })
             };
             let reply = turn.tool("codly_submit_plan", plan("claude:nope")).await;
@@ -1795,9 +1795,16 @@ async fn a_consultant_is_hired_with_the_leads_model_and_let_go() {
             if turn.prompt.contains("[Codly]") {
                 return;
             }
+            // Without a job title the plan is refused, telling the Lead the titles.
+            let untitled = json!({ "summary": "Add hello", "tasks": [{
+                "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt",
+                "acceptance_criteria": ["it exists"], "write_scope": ["hello.txt"], "depends_on": [], "verify": ["test -f hello.txt"],
+            }] });
+            let r = turn.tool("codly_submit_plan", untitled).await;
+            assert!(r["ok"] == false && r["error"].as_str().unwrap().contains("needs consultant.title, one of: Backend"), "{r}");
             let plan = json!({ "summary": "Add hello", "tasks": [{
                 "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt", "assignee": "consultant",
-                "consultant": { "provider": "claude", "model": "haiku" },
+                "consultant": { "title": "Frontend", "provider": "claude", "model": "haiku" },
                 "acceptance_criteria": ["it exists"], "write_scope": ["hello.txt"], "depends_on": [], "verify": ["test -f hello.txt"],
             }] });
             let r = turn.tool("codly_submit_plan", plan).await;
@@ -1822,6 +1829,7 @@ async fn a_consultant_is_hired_with_the_leads_model_and_let_go() {
     .await;
     let c = agents_ever(&snap).into_iter().find(|a| a.role == Role::Worker).unwrap();
     assert!(c.consultant && c.archived);
+    assert_eq!(c.title.as_deref(), Some("Frontend"), "a consultant wears the Lead's title");
     assert!(log.lock().unwrap().models.iter().any(|(a, m)| a == &c.id && m.as_deref() == Some("haiku")), "spawned with the Lead's model");
     core.shutdown().await;
 }

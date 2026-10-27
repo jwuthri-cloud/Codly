@@ -13,7 +13,7 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { moveItem } from '../lib/util/accounts';
   import { PROVIDER_LABEL } from '../lib/util/labels';
-  import { EFFORTS, PRESETS, fromPreset, joinModel, memberTitle, splitModel, teamProblem } from '../lib/util/team';
+  import { EFFORTS, PRESETS, ROLE_TITLES, fromPreset, joinModel, memberTitle, splitModel, teamProblem } from '../lib/util/team';
   import Icon from '../components/Icon.svelte';
 
   const HARNESSES: Provider[] = ['claude', 'codex', 'gemini', 'opencode'];
@@ -125,6 +125,13 @@
           </div>
           <div class="m-grid">
             <label class="field">
+              <span class="f-label">Title</span>
+              <select class="input" value={memberTitle(m)} onchange={(e) => patch(i, { title: e.currentTarget.value })}>
+                {#if !ROLE_TITLES.includes(memberTitle(m))}<option value="">{memberTitle(m)}</option>{/if}
+                {#each ROLE_TITLES as t (t)}<option value={t}>{t}</option>{/each}
+              </select>
+            </label>
+            <label class="field">
               <span class="f-label">Harness</span>
               <select class="input" value={m.provider} onchange={(e) => patch(i, { provider: e.currentTarget.value as Provider, model: null })}>
                 {#each installed.includes(m.provider) ? installed : [m.provider, ...installed] as p (p)}
@@ -155,8 +162,8 @@
             </label>
           </div>
           <label class="field">
-            <span class="f-label">Role <span class="muted">(what they do; the text before “:” is their badge)</span></span>
-            <textarea class="input role" rows="2" maxlength="400" value={m.role} placeholder="Backend dev: owns crates/, prefers small PRs" onchange={(e) => patch(i, { role: e.currentTarget.value })}></textarea>
+            <span class="f-label">What they do <span class="muted">(added to their instructions)</span></span>
+            <textarea class="input role" rows="2" maxlength="400" value={m.role} placeholder="Owns crates/, prefers small PRs" onchange={(e) => patch(i, { role: e.currentTarget.value })}></textarea>
           </label>
           <div class="m-foot">
             {#if agent?.usage.context_used && agent.usage.context_window}

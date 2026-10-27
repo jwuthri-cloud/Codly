@@ -18,6 +18,10 @@ id: string, name: string, provider: Provider,
  */
 model: string | null, kind: MemberKind, 
 /**
- * System-prompt addendum, e.g. "Backend dev: owns crates/, prefers small PRs".
+ * Job title, one of `ROLE_TITLES` (its badge). Empty = derived from `role`.
+ */
+title: string, 
+/**
+ * System-prompt addendum, e.g. "Owns crates/, prefers small PRs".
  */
 role: string, enabled: boolean, };

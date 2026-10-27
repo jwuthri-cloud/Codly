@@ -408,11 +408,17 @@ impl Inner {
         summary: String,
         detail: Value,
     ) -> Result<()> {
+        // A consultant wears the job title the Lead gave it.
+        let title = self.task(task_id)?.consultant.and_then(|c| c.title);
         let agent = match pick {
-            AgentPick::Existing(id) => self.agent(&id)?,
+            AgentPick::Existing(id) => match &title {
+                Some(t) if self.agent(&id)?.member.is_none() => self.update_agent(&id, |a| a.title = Some(t.clone()))?,
+                _ => self.agent(&id)?,
+            },
             AgentPick::New { name, color, model } => {
                 let mut a = self.new_agent(&name, provider, Role::Worker, color, model);
                 a.consultant = true;
+                a.title = title;
                 self.insert_agent(&ws.id, a)?
             }
         };

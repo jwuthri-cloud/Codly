@@ -494,7 +494,7 @@ fn unassigned_tasks_hire_consultants_never_idle_members() {
 #[test]
 fn the_leads_consultant_spec_picks_harness_and_model_or_waits() {
     let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
-    t.consultant = Some(ConsultantSpec { provider: Provider::Codex, model: Some("gpt-5-codex:high".into()) });
+    t.consultant = Some(ConsultantSpec { provider: Some(Provider::Codex), model: Some("gpt-5-codex:high".into()), title: Some("Backend".into()) });
     let mut w = World::new(vec![t]);
     let a = w.run();
     let s = starts(&a);
@@ -519,4 +519,14 @@ fn idle_members_hold_no_slot() {
         })
         .collect();
     assert_eq!(starts(&w.run()).len(), 2);
+}
+
+#[test]
+fn a_consultant_without_a_harness_follows_the_worker_order() {
+    let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    t.consultant = Some(ConsultantSpec { provider: None, model: None, title: Some("QA".into()) });
+    let mut w = World::new(vec![t]);
+    w.settings.worker_providers = vec![Provider::Codex, Provider::Claude];
+    let s = starts(&w.run());
+    assert!(s[0].1 == Provider::Codex && matches!(&s[0].2, AgentPick::New { model: None, .. }), "{s:?}");
 }

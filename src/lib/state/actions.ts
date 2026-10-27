@@ -192,8 +192,8 @@ export async function createTask(title: string, goal = '') {
 }
 
 /** Returns whether the agent started, so the dialog that asked can close. */
-export async function hireAgent(provider: Provider, model: string | null = null): Promise<boolean> {
-  const a = await attempt(`start ${PROVIDER_LABEL[provider]}`, () => api.hireAgent(provider, model), 'Check that the CLI is installed and signed in.');
+export async function hireAgent(provider: Provider, model: string | null = null, title: string | null = null): Promise<boolean> {
+  const a = await attempt(`start ${PROVIDER_LABEL[provider]}`, () => api.hireAgent(provider, model, title), 'Check that the CLI is installed and signed in.');
   if (!a) return false;
   store.upsertAgent(a);
   ui.selectAgent(a.id);

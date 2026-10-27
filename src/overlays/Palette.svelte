@@ -121,7 +121,7 @@
     }
     for (const c of store.clis)
       if (c.path && !c.problem)
-        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start a ${PROVIDER_LABEL[c.provider as Provider]} agent`, icon: 'user-plus', run: () => (ui.modelDialog = { provider: c.provider as Provider, agentId: null }) });
+        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start a ${PROVIDER_LABEL[c.provider as Provider]} agent (1:1)`, icon: 'user-plus', run: () => (ui.modelDialog = { provider: c.provider as Provider, agentId: null }) });
     for (const a of store.agents)
       if (narrate(a.id)?.tone === 'live') rows.push({ id: `int:${a.id}`, section: 'Agents', title: `Interrupt ${a.name}`, icon: 'pause', run: () => interruptAgent(a.id) });
     return rows;

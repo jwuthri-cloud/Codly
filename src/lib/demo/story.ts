@@ -1157,16 +1157,16 @@ export class Story {
     }
   }
 
-  hire(provider: Provider): Agent {
+  hire(provider: Provider, model: string | null = null, title: string | null = null): Agent {
     const sim = this.sim;
     const names = new Set([...sim.agents.values()].map((a) => a.name));
     let name = WORKER_NAMES[provider];
     for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
     const used = new Set([...sim.agents.values()].map((a) => a.color));
     const color = [0, 1, 3, 5, 2, 4, 7, 6].find((c) => !used.has(c)) ?? sim.agents.size % 8;
-    const act = this.spawnWorker(provider, name, color, null);
+    const act = this.spawnWorker(provider, name, color, null, model);
     act.status('idle');
-    return act.a;
+    return title ? sim.patchAgent(act.a.id, { title }) : act.a;
   }
 
   /** Interrupt the agent's turn (Send now): its next queued message runs right after. */

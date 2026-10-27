@@ -126,8 +126,8 @@ pub async fn stop_agent(state: State<'_, AppState>, agent_id: String) -> R<()> {
 }
 
 #[tauri::command]
-pub async fn hire_agent(state: State<'_, AppState>, provider: Provider, model: Option<String>) -> R<Agent> {
-    state.core().await?.hire_agent(provider, model).await.map_err(err)
+pub async fn hire_agent(state: State<'_, AppState>, provider: Provider, model: Option<String>, title: Option<String>) -> R<Agent> {
+    state.core().await?.hire_agent(provider, model, title).await.map_err(err)
 }
 
 #[tauri::command]

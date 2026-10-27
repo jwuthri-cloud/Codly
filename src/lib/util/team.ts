@@ -1,5 +1,6 @@
 // Team members: presets, badge titles and the "model:effort" format shared with the core.
 
+import type { Agent } from '../gen/Agent';
 import type { Provider } from '../gen/Provider';
 import type { TeamMember } from '../gen/TeamMember';
 
@@ -22,8 +23,13 @@ export function joinModel(name: string, effort: string): string | null {
   return n || effort ? `${n}${effort ? `:${effort}` : ''}` : null;
 }
 
-/** Mirrors `TeamMember::title` in the core: the role text before its first ':' / '—' / ' - '. */
-export function memberTitle(m: Pick<TeamMember, 'role' | 'kind'>): string {
+/** The job titles an agent can have (its badge). Mirrors `ROLE_TITLES` in the core. */
+export const ROLE_TITLES = ['Backend', 'Frontend', 'Full-stack', 'Mobile', 'Product manager', 'Designer', 'QA', 'DevOps', 'Data', 'Security', 'Docs', 'Reviewer'];
+
+/** Mirrors `TeamMember::title` in the core: its job title, else the role text before its first ':' / '—' / ' - '. */
+export function memberTitle(m: Pick<TeamMember, 'role' | 'kind' | 'title'>): string {
+  const t = ROLE_TITLES.find((x) => x.toLowerCase() === m.title.trim().toLowerCase());
+  if (t) return t;
   const head = (m.role.split(/[:—\n]/)[0] ?? '').split(' - ')[0].trim();
   return head && head.length <= 24 ? head : m.kind === 'reviewer' ? 'Reviewer' : 'Teammate';
 }
@@ -47,9 +53,10 @@ type Preset = Omit<TeamMember, 'id' | 'enabled' | 'provider'> & { provider: Prov
 
 /** One-click starting points (provider null = the first usable CLI). */
 export const PRESETS: Preset[] = [
-  { name: 'Ana', provider: 'claude', model: 'sonnet', kind: 'worker', role: 'Backend dev: APIs, data and server code. Small, tested changes.' },
-  { name: 'Leo', provider: 'claude', model: 'sonnet', kind: 'worker', role: 'Frontend dev: UI components, styles and accessibility.' },
-  { name: 'Rex', provider: 'codex', model: null, kind: 'reviewer', role: 'Reviewer: checks every change against its acceptance criteria.' },
+  { name: 'Ana', provider: 'claude', model: 'sonnet', kind: 'worker', title: 'Backend', role: 'APIs, data and server code. Small, tested changes.' },
+  { name: 'Leo', provider: 'claude', model: 'sonnet', kind: 'worker', title: 'Frontend', role: 'UI components, styles and accessibility.' },
+  { name: 'Pam', provider: 'claude', model: 'opus', kind: 'worker', title: 'Product manager', role: 'Specs, acceptance criteria and docs for features.' },
+  { name: 'Rex', provider: 'codex', model: null, kind: 'reviewer', title: 'Reviewer', role: 'Checks every change against its acceptance criteria.' },
 ];
 
 /** A preset as a new member on a CLI you can run (its own if usable). */
@@ -59,5 +66,12 @@ export function fromPreset(p: Preset, usable: Provider[], taken: string[]): Team
   let name = p.name;
   for (let i = 2; taken.some((t) => t.toLowerCase() === name.toLowerCase()); i++) name = `${p.name} ${i}`;
   // A preset's model belongs to its own CLI; another CLI starts on its default.
-  return { id: '', name, provider, model: provider === p.provider ? p.model : null, kind: p.kind, role: p.role, enabled: true };
+  return { id: '', name, provider, model: provider === p.provider ? p.model : null, kind: p.kind, title: p.title, role: p.role, enabled: true };
+}
+
+/** What an agent is, for labels: "Lead", "Backend", "Frontend consultant", "Consultant", "Reviewer"; null for a plain worker. */
+export function agentTitle(a: Pick<Agent, 'role' | 'title' | 'consultant'>): string | null {
+  if (a.role === 'lead') return 'Lead';
+  if (a.consultant) return a.title ? `${a.title} consultant` : 'Consultant';
+  return a.title || (a.role === 'reviewer' ? 'Reviewer' : null);
 }

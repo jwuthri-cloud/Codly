@@ -180,6 +180,15 @@ pub struct AccountInfo {
 
 // ───────────────────────────── team ─────────────────────────────
 
+/// The job titles an agent can have (its badge). Mirrored in `src/lib/util/team.ts`.
+pub const ROLE_TITLES: [&str; 12] =
+    ["Backend", "Frontend", "Full-stack", "Mobile", "Product manager", "Designer", "QA", "DevOps", "Data", "Security", "Docs", "Reviewer"];
+
+/// `s` as one of `ROLE_TITLES` (any case), if it is one.
+pub fn role_title(s: &str) -> Option<&'static str> {
+    ROLE_TITLES.iter().copied().find(|t| t.eq_ignore_ascii_case(s.trim()))
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -204,7 +213,9 @@ pub struct TeamMember {
     /// "sonnet", "opus:high"; None = the CLI's default.
     pub model: Option<String>,
     pub kind: MemberKind,
-    /// System-prompt addendum, e.g. "Backend dev: owns crates/, prefers small PRs".
+    /// Job title, one of `ROLE_TITLES` (its badge). Empty = derived from `role`.
+    pub title: String,
+    /// System-prompt addendum, e.g. "Owns crates/, prefers small PRs".
     pub role: String,
     pub enabled: bool,
 }
@@ -217,6 +228,7 @@ impl Default for TeamMember {
             provider: Provider::Claude,
             model: None,
             kind: MemberKind::Worker,
+            title: String::new(),
             role: String::new(),
             enabled: true,
         }
@@ -224,8 +236,12 @@ impl Default for TeamMember {
 }
 
 impl TeamMember {
-    /// Short badge title: the role text before its first ':' / '—' / " - ", else the kind.
+    /// Badge title: its job title, else the role text before its first ':' / '—' / " - ",
+    /// else the kind.
     pub fn title(&self) -> String {
+        if let Some(t) = role_title(&self.title) {
+            return t.to_string();
+        }
         let head = self.role.split([':', '—', '\n']).next().unwrap_or("");
         let head = head.split(" - ").next().unwrap_or("").trim();
         if head.is_empty() || head.chars().count() > 24 {
@@ -249,13 +265,18 @@ pub struct WorkspaceTeam {
     pub members: Vec<TeamMember>,
 }
 
-/// The harness and model the Lead picked for a consultant (a worker hired for one task).
+/// What the Lead picked for a consultant (a worker hired for one task): its job title, and
+/// optionally its harness and model (None = the user's worker order, the CLI's default).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ConsultantSpec {
-    pub provider: Provider,
+    #[serde(default)]
+    pub provider: Option<Provider>,
     #[serde(default)]
     pub model: Option<String>,
+    /// One of `ROLE_TITLES`.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 // ───────────────────────────── agents ─────────────────────────────
@@ -382,7 +403,7 @@ pub struct Agent {
     /// Team members only: `TeamMember::id`.
     #[serde(default)]
     pub member: Option<String>,
-    /// Team members only: the badge title ("Backend dev").
+    /// Job title (badge): a team member's, a consultant's (the Lead's pick) or a 1:1 agent's.
     #[serde(default)]
     pub title: Option<String>,
     /// Hired for one task; let go when it ends.

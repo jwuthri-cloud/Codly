@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 
-use crate::model::Role;
+use crate::model::{ROLE_TITLES, Role};
 
 pub const GET_TASK: &str = "codly_get_task";
 pub const BOARD: &str = "codly_board";
@@ -38,14 +38,16 @@ fn staffing() -> [(&'static str, Value); 3] {
         (
             "assignee",
             json!({ "type": "string", "description": "A worker team member's name from the board's Team line (they queue if busy), \
-                    or \"consultant\" to hire one for this task only. Omit: Codly hires a consultant by the user's worker order." }),
+                    or \"consultant\" to hire one for this task only (then set consultant.title)." }),
         ),
         (
             "consultant",
-            json!({ "type": "object", "description": "With assignee \"consultant\": the harness and model, sized to the task.", "properties": {
-                "provider": { "type": "string", "enum": ["claude", "codex", "gemini", "opencode"] },
-                "model": { "type": "string", "description": "Optional, e.g. sonnet, opus:high, haiku. Omit for the CLI default." }
-            }, "required": ["provider"], "additionalProperties": false }),
+            json!({ "type": "object", "description": "Required for every task not assigned to a team member: the consultant's job \
+                    title, and optionally the harness and model sized to the task.", "properties": {
+                "title": { "type": "string", "enum": ROLE_TITLES },
+                "provider": { "type": "string", "enum": ["claude", "codex", "gemini", "opencode"], "description": "Omit: the user's worker order." },
+                "model": { "type": "string", "description": "Optional (with provider), e.g. sonnet, opus:high, haiku. Omit for the CLI default." }
+            }, "required": ["title"], "additionalProperties": false }),
         ),
         (
             "session",

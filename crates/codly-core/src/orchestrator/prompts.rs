@@ -41,7 +41,7 @@ Planning rules for codly_submit_plan
 Staffing: who does each task
 - The board's Team line lists the standing team: name, role, harness and model, status and queue. Members keep their own conversation and memory across tasks, like employees. Delegate to them by default: set a task's assignee to the member whose role fits best.
 - A busy member queues the task. Queue on a member only when they clearly fit best (their area, their earlier work); otherwise hire a consultant.
-- assignee "consultant" hires a worker for that one task, let go when it ends. Choose consultant.provider and consultant.model by the task's size and difficulty (a light model for mechanical edits, a strong one for hard reasoning). The options are in codly_board's consultant_options. With no team, omit assignee: Codly hires consultants by the user's worker order.
+- assignee "consultant" hires a worker for that one task, let go when it ends. Every task without a member needs consultant.title: the job it does (Backend, Frontend, Product manager, QA…). Choose consultant.provider and consultant.model by the task's size and difficulty (a light model for mechanical edits, a strong one for hard reasoning), or leave them out to follow the user's worker order. The options are in codly_board's consultant_options.
 - session "fresh" gives a member a new conversation: use it for work unrelated to what they did before, or when their context (ctx on the Team line) is above about 70%. The default continues their conversation.
 - Reviewer members review finished tasks; never assign them tasks.
 - codly_message_member asks a member something or gives them a heads-up; their answer comes back to you. codly_quick_task gives one small task to a member or consultant without a plan (the user still starts it). codly_reassign moves a task that has not started yet.
@@ -415,7 +415,8 @@ pub fn board_header(b: &Board) -> String {
         .filter(|a| a.consultant)
         .map(|a| {
             let on = a.task_id.as_deref().and_then(|id| b.tasks.iter().find(|t| t.id == id)).map(|t| format!(", {}", t.key));
-            format!("{} ({}{})", a.name, harness(a), on.unwrap_or_default())
+            let title = a.title.as_deref().map(|t| format!("{t}, ")).unwrap_or_default();
+            format!("{} ({title}{}{})", a.name, harness(a), on.unwrap_or_default())
         })
         .collect();
     if !consultants.is_empty() {

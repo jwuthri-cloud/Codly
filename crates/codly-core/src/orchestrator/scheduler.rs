@@ -419,10 +419,12 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
         });
     }
 
-    if let Some(spec) = &t.consultant {
+    if let Some(spec) = &t.consultant
+        && let Some(provider) = spec.provider
+    {
         // The Lead chose the harness: wait for it rather than hire another (it can reassign).
-        let prefer: Vec<&str> = pin.filter(|a| a.provider == spec.provider).map(|a| a.id.as_str()).into_iter().collect();
-        let acc = ctx.account_for(spec.provider, &prefer).map_err(|e| format!("waiting: consultant on {}: {}", spec.provider.label(), e.join(", ")))?;
+        let prefer: Vec<&str> = pin.filter(|a| a.provider == provider).map(|a| a.id.as_str()).into_iter().collect();
+        let acc = ctx.account_for(provider, &prefer).map_err(|e| format!("waiting: consultant on {}: {}", provider.label(), e.join(", ")))?;
         let name = names::next_name(taken);
         let model = spec.model.as_deref().map(|m| format!(" {m}")).unwrap_or_default();
         let mut summary = format!("{}{model} · new consultant {name}: the Lead's pick", ctx.accounts.name(acc.account));
@@ -430,11 +432,11 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
             summary.push_str(&format!(", {why}"));
         }
         let detail = json!({
-            "task": t.key, "plan_id": t.plan_id, "provider": spec.provider, "model": spec.model, "agent": name, "new_agent": true,
+            "task": t.key, "plan_id": t.plan_id, "provider": provider, "model": spec.model, "title": spec.title, "agent": name, "new_agent": true,
             "rule": "consultant", "account": acc.account.id, "account_label": acc.account.label, "skipped": acc.skipped,
         });
         return Ok(Route {
-            provider: spec.provider,
+            provider,
             account: acc.account.id.clone(),
             pick: AgentPick::New { name, color: names::next_color(colors), model: spec.model.clone() },
             summary,

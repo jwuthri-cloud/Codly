@@ -2,6 +2,11 @@
 import type { Provider } from "./Provider";
 
 /**
- * The harness and model the Lead picked for a consultant (a worker hired for one task).
+ * What the Lead picked for a consultant (a worker hired for one task): its job title, and
+ * optionally its harness and model (None = the user's worker order, the CLI's default).
  */
-export type ConsultantSpec = { provider: Provider, model: string | null, };
+export type ConsultantSpec = { provider: Provider | null, model: string | null, 
+/**
+ * One of `ROLE_TITLES`.
+ */
+title: string | null, };

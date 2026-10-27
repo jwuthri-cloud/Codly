@@ -37,7 +37,7 @@ thread: string | null,
  */
 member: string | null, 
 /**
- * Team members only: the badge title ("Backend dev").
+ * Job title (badge): a team member's, a consultant's (the Lead's pick) or a 1:1 agent's.
  */
 title: string | null, 
 /**

@@ -61,6 +61,10 @@ pub fn normalize_team(list: Vec<TeamMember>, others: &[TeamMember]) -> Result<Ve
             bail!("{}'s model '{model}' must be one word (e.g. sonnet, opus:high)", m.name);
         }
         m.role = prompts::clip(m.role.trim(), 400);
+        m.title = match m.title.trim() {
+            "" => String::new(),
+            t => role_title(t).ok_or_else(|| anyhow!("{}'s title '{t}' is not one of: {}", m.name, ROLE_TITLES.join(", ")))?.into(),
+        };
         let id = m.id.trim().to_string();
         m.id = if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             let uid = new_id();
@@ -359,7 +363,7 @@ impl Inner {
                 };
                 json!({
                     "name": a.name, "consultant": a.consultant, "kind": if a.role == Role::Reviewer { "reviewer" } else { "worker" },
-                    "provider": a.provider, "model": a.model, "role": m.map(|m| prompts::untrusted_inline(&m.role, 400)),
+                    "title": a.title, "provider": a.provider, "model": a.model, "role": m.map(|m| prompts::untrusted_inline(&m.role, 400)),
                     "status": a.status, "task": key(&a.task_id), "queue": queue,
                     "session": { "resumable": a.session_id.is_some(), "context_pct": ctx },
                     "cli_ready": self.cli_usable(a.provider),
@@ -396,20 +400,28 @@ impl Inner {
                         }
                     }
                 }
-            } else if t.session.is_some() {
-                t.session = None;
-                notes.push(format!("{}: session only applies to team members; ignored", t.id));
+            } else {
+                if t.session.is_some() {
+                    t.session = None;
+                    notes.push(format!("{}: session only applies to team members; ignored", t.id));
+                }
+                // Every consultant the Lead hires has a job title (its badge).
+                if t.consultant_spec().is_none_or(|c| c.title.is_none()) {
+                    errors.push(format!("task {}: a consultant needs consultant.title, one of: {}", t.id, ROLE_TITLES.join(", ")));
+                }
             }
-            if let Some(spec) = t.consultant_spec() {
-                if !self.cli_usable(spec.provider) {
+            if let Some(spec) = t.consultant_spec()
+                && let Some(provider) = spec.provider
+            {
+                if !self.cli_usable(provider) {
                     let ok: Vec<&str> = self.consultant_clis().iter().map(|p| p.as_str()).collect();
-                    errors.push(format!("task {}: {} is not available for a consultant (available: {})", t.id, spec.provider.label(), ok.join(", ")));
+                    errors.push(format!("task {}: {} is not available for a consultant (available: {})", t.id, provider.label(), ok.join(", ")));
                 } else if let Some(m) = spec.model.as_deref() {
-                    let known = self.models_of(spec.provider);
+                    let known = self.models_of(provider);
                     let base = m.split(':').next().unwrap_or(m);
-                    let claude_id = spec.provider == Provider::Claude && base.starts_with("claude-");
+                    let claude_id = provider == Provider::Claude && base.starts_with("claude-");
                     if !known.is_empty() && !claude_id && !known.iter().any(|k| k == base || k == m) {
-                        notes.push(format!("{}: {} has no model '{m}'; the consultant uses its default (known: {})", t.id, spec.provider.label(), known.join(", ")));
+                        notes.push(format!("{}: {} has no model '{m}'; the consultant uses its default (known: {})", t.id, provider.label(), known.join(", ")));
                         if let Some(c) = t.consultant.as_mut() {
                             c.model = None;
                         }
@@ -492,7 +504,10 @@ impl Inner {
         let from = task.assignee.as_deref().and_then(|a| self.agent(a).ok()).map_or_else(|| "nobody".into(), |a| a.name);
         let to = match (&member, input.consultant_spec()) {
             (Some(m), _) => m.name.clone(),
-            (None, Some(c)) => format!("a consultant ({}{})", c.provider.label(), c.model.as_deref().map(|m| format!(" {m}")).unwrap_or_default()),
+            (None, Some(c)) => {
+                let on = c.provider.map(|p| format!(" on {}{}", p.label(), c.model.as_deref().map(|m| format!(" {m}")).unwrap_or_default()));
+                format!("a {} consultant{}", c.title.as_deref().unwrap_or("new"), on.unwrap_or_default())
+            }
             (None, None) => "a consultant".into(),
         };
         let t = self.update_task(&task.id, |t| {

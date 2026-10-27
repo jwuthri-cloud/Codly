@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { PRESETS, fromPreset, joinModel, memberTitle, splitModel, teamProblem } from '../util/team';
 import type { TeamMember } from '../gen/TeamMember';
 
-const m = (name: string, o: Partial<TeamMember> = {}): TeamMember => ({ id: '', name, provider: 'claude', model: null, kind: 'worker', role: '', enabled: true, ...o });
+const m = (name: string, o: Partial<TeamMember> = {}): TeamMember => ({ id: '', name, provider: 'claude', model: null, kind: 'worker', title: '', role: '', enabled: true, ...o });
 
 describe('team', () => {
   it('titles a member like the core does', () => {
+    expect(memberTitle(m('Ana', { title: 'product manager', role: 'Backend dev: owns crates/' }))).toBe('Product manager');
     expect(memberTitle(m('Ana', { role: 'Backend dev: owns crates/' }))).toBe('Backend dev');
     expect(memberTitle(m('Ana', { role: 'Docs — guides' }))).toBe('Docs');
     expect(memberTitle(m('Rex', { kind: 'reviewer' }))).toBe('Reviewer');

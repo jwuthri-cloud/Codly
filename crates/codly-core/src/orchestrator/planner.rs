@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::scope;
-use crate::model::{ConsultantSpec, Provider};
+use crate::model::{ConsultantSpec, Provider, ROLE_TITLES, role_title};
 
 pub const MAX_TASKS: usize = 8;
 
@@ -97,7 +97,7 @@ pub struct TaskInput {
     /// is stored (plans.rs).
     #[serde(default)]
     pub assignee: Option<String>,
-    /// The harness and model of the consultant to hire.
+    /// The consultant to hire: its job title, and optionally its harness and model.
     #[serde(default)]
     pub consultant: Option<ConsultantInput>,
     /// Team members only: "continue" (default) or "fresh".
@@ -107,7 +107,10 @@ pub struct TaskInput {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConsultantInput {
-    pub provider: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -124,7 +127,11 @@ impl TaskInput {
 
     pub fn consultant_spec(&self) -> Option<ConsultantSpec> {
         let c = self.consultant.as_ref()?;
-        Some(ConsultantSpec { provider: parse_provider(&c.provider)?, model: c.model.clone() })
+        Some(ConsultantSpec {
+            provider: c.provider.as_deref().and_then(parse_provider),
+            model: c.model.clone(),
+            title: c.title.as_deref().and_then(role_title).map(String::from),
+        })
     }
 
     pub fn fresh_session(&self) -> bool {
@@ -148,13 +155,24 @@ pub fn check_staffing(t: &mut TaskInput, errors: &mut Vec<String>, fixes: &mut V
     });
     if let Some(c) = &mut t.consultant {
         c.model = c.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(String::from);
-        if parse_provider(&c.provider).is_none() {
-            errors.push(format!("task {id}: consultant.provider '{}' is not one of claude, codex, gemini, opencode", c.provider));
-        } else {
-            c.provider = parse_provider(&c.provider).map(|p| p.as_str().to_string()).unwrap_or_default();
+        c.provider = c.provider.as_deref().map(str::trim).filter(|p| !p.is_empty() && *p != "any").map(String::from);
+        match c.provider.as_deref().map(|p| (p, parse_provider(p))) {
+            Some((p, None)) => errors.push(format!("task {id}: consultant.provider '{p}' is not one of claude, codex, gemini, opencode")),
+            Some((_, Some(p))) => c.provider = Some(p.as_str().into()),
+            None => {}
         }
         if let Some(m) = c.model.as_deref().filter(|m| !valid_model(m)) {
             errors.push(format!("task {id}: consultant.model '{m}' must be one word (e.g. sonnet, opus:high)"));
+        }
+        if c.model.is_some() && c.provider.is_none() {
+            errors.push(format!("task {id}: consultant.model needs consultant.provider (a model belongs to one harness)"));
+        }
+        match c.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            None => c.title = None,
+            Some(t) => match role_title(t) {
+                Some(canon) => c.title = Some(canon.into()),
+                None => errors.push(format!("task {id}: consultant.title '{t}' is not one of: {}", ROLE_TITLES.join(", "))),
+            },
         }
         if t.assignee.is_none() {
             t.assignee = Some(CONSULTANT.into());

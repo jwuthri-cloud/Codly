@@ -176,7 +176,7 @@ export class MockTransport implements Transport {
         story.interrupt(String(a.agentId), true);
         return null;
       case 'hire_agent':
-        return story.hire(a.provider as Provider);
+        return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':
         return [];
       case 'set_agent_model':
