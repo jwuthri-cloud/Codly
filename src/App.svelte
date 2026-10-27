@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Shell from './shell/Shell.svelte';
+  import Onboarding from './onboarding/Onboarding.svelte';
   import Welcome from './overlays/Welcome.svelte';
   import Palette from './overlays/Palette.svelte';
   import SettingsSheet from './overlays/SettingsSheet.svelte';
@@ -41,7 +42,7 @@
 
   // Persist small UI preferences.
   $effect(() => {
-    void [ui.room, ui.mode, ui.focus, ui.railOpen, ui.sections, ui.planLens, ui.changesLens, ui.knowledgeLens, ui.timelineZoom, ui.pinned, ui.keptPlans];
+    void [ui.room, ui.mode, ui.focus, ui.railOpen, ui.onboarded, ui.quest, ui.questSound, ui.sections, ui.planLens, ui.changesLens, ui.knowledgeLens, ui.timelineZoom, ui.pinned, ui.keptPlans];
     ui.persist();
   });
 </script>
@@ -50,9 +51,12 @@
   <div class="boot" data-tauri-drag-region></div>
 {:else if store.workspace}
   <Shell {theme} />
-{:else}
+{:else if ui.onboarded}
   <Welcome />
+{:else}
+  <Onboarding />
 {/if}
+{#if ui.onboardingOpen && (store.workspace || ui.onboarded)}<Onboarding />{/if}
 
 {#if ui.paletteOpen}<Palette />{/if}
 {#if ui.settingsOpen}<SettingsSheet />{/if}

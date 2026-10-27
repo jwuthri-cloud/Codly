@@ -47,6 +47,10 @@ type Prefs = {
   focus: boolean;
   /** The left rail shows labels next to its icons. */
   rail: boolean;
+  /** First-run quest: finished once (or skipped), the levels done, sound on. */
+  onboarded: boolean;
+  quest: string[];
+  questSound: boolean;
   sections: Record<string, boolean>;
   /** v2: the list lens became the default (older `planLens` values are ignored on purpose). */
   planView: PlanLens;
@@ -80,6 +84,11 @@ class Ui {
   /** The rail's icons-only (52) and labelled (184) widths; everything that sits beside it reads railW. */
   railOpen = $state(this.prefs.rail ?? false);
   railW = $derived(this.railOpen ? 184 : 52);
+  /** The first-run quest overlay: shown until finished or skipped, and again from Settings or the palette. */
+  onboarded = $state(this.prefs.onboarded ?? false);
+  onboardingOpen = $state(false);
+  quest = $state<string[]>(this.prefs.quest ?? []);
+  questSound = $state(this.prefs.questSound ?? true);
   selection = $state<Selection>(null);
   hover = $state<Hover>({ agentId: null, taskId: null, path: null });
 
@@ -161,6 +170,9 @@ class Ui {
       mode: this.mode,
       focus: this.focus,
       rail: this.railOpen,
+      onboarded: this.onboarded,
+      quest: this.quest,
+      questSound: this.questSound,
       sections: this.sections,
       planView: this.planLens,
       changesLens: this.changesLens,

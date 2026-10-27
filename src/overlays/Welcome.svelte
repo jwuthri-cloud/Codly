@@ -6,12 +6,12 @@
   import { onMount } from 'svelte';
   import { api, isTauriApp } from '../lib/api';
   import type { CliInfo } from '../lib/gen/CliInfo';
-  import type { Provider } from '../lib/gen/Provider';
   import type { RecentWorkspace } from '../lib/gen/RecentWorkspace';
   import { openWorkspace, redetect } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { ago } from '../lib/util/format';
+  import { cliOk, cliRank, cliState, codeParts, drone } from '../lib/util/cli';
   import { PROVIDER_LABEL } from '../lib/util/labels';
   import { tildify } from '../lib/util/sanitize';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -28,21 +28,9 @@
     api.recentWorkspaces().then((r) => (recent = r)).catch(() => {});
   });
 
-  const ok = (c: CliInfo) => !!c.path && c.logged_in !== false && !c.problem;
+  const ok = cliOk;
   const ready = $derived(store.clis.filter(ok));
-  const sorted = $derived([...store.clis].sort((a, b) => rank(a) - rank(b)));
-  function rank(c: CliInfo) {
-    return ok(c) ? 0 : c.path ? 1 : 2;
-  }
-  function cliState(c: CliInfo): { tone: 'done' | 'wait' | 'idle' | 'blocked'; text: string } {
-    if (!c.path) return { tone: 'idle', text: 'Not installed' };
-    if (c.logged_in === false) return { tone: 'wait', text: 'Not signed in' };
-    if (c.problem) return { tone: 'blocked', text: 'Needs attention' };
-    if (c.logged_in == null) return { tone: 'done', text: 'Installed · sign-in not checked' };
-    return { tone: 'done', text: 'Signed in' };
-  }
-  const HUE: Record<Provider, number> = { claude: 1, codex: 4, gemini: 5, opencode: 6, cursor: 7, copilot: 3 };
-  const drone = (p: Provider) => ({ id: `cli-${p}`, name: PROVIDER_LABEL[p], color: HUE[p], look_seed: p, provider: p, role: 'worker' as const });
+  const sorted = $derived([...store.clis].sort((a, b) => cliRank(a) - cliRank(b)));
   const TRANSPORT: Record<string, string> = {
     'stream-json': 'Codly talks to Claude Code over its stream-json protocol, with real approvals.',
     'app-server': 'Codly runs one private Codex app-server and gives each agent its own thread.',
@@ -58,7 +46,7 @@
     await openWorkspace(path);
     opening = null;
   }
-  const parts = (s: string) => s.split(/(`[^`]+`)/g).map((p) => ({ code: p.startsWith('`'), t: p.replace(/`/g, '') }));
+  const parts = codeParts;
 </script>
 
 <div class="welcome">
