@@ -177,6 +177,14 @@ impl Git {
 
     // ───────────── reads ─────────────
 
+    /// A read-only git command (no index lock, fsmonitor off) for views that only display
+    /// repository state. Callers pass fixed argv; nothing here is built from user text.
+    pub async fn read(&self, dir: &Path, args: &[&str]) -> Result<String> {
+        let mut full = vec!["-c", "core.fsmonitor=false"];
+        full.extend_from_slice(args);
+        self.ok(dir, &full, true).await
+    }
+
     pub async fn is_repo(&self, path: &Path) -> bool {
         matches!(self.run(path, &["rev-parse", "--is-inside-work-tree"], true).await, Ok(o) if o.ok && o.stdout.trim() == "true")
     }

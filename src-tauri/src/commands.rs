@@ -260,3 +260,9 @@ pub async fn pty_close(state: State<'_, AppState>, pty_id: String) -> R<()> {
     state.pty.close(&pty_id);
     Ok(())
 }
+
+/// Read-only git state (status, branches, log) of an agent's worktree: the Git tab.
+#[tauri::command]
+pub async fn agent_git(state: State<'_, AppState>, agent_id: String) -> R<codly_core::orchestrator::agent_git::AgentGit> {
+    state.core().await?.agent_git(&agent_id).await.map_err(err)
+}

@@ -5,6 +5,7 @@
 // CONTRACT: command names and argument keys match src-tauri/src/commands.rs.
 import type { AccountInfo } from './gen/AccountInfo';
 import type { Agent } from './gen/Agent';
+import type { AgentGit } from './gen/AgentGit';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { CliInfo } from './gen/CliInfo';
 import type { EventRow } from './gen/EventRow';
@@ -119,6 +120,8 @@ export const api = {
   ptyWrite: (ptyId: string, data: string) => call<void>('pty_write', { ptyId, data }),
   ptyResize: (ptyId: string, cols: number, rows: number) => call<void>('pty_resize', { ptyId, cols, rows }),
   ptyClose: (ptyId: string) => call<void>('pty_close', { ptyId }),
+  /** Read-only git state (status, branches, recent log) of an agent's worktree. */
+  agentGit: (agentId: string) => call<AgentGit>('agent_git', { agentId }),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;
