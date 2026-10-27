@@ -7,6 +7,7 @@ fn main() {
         "create_task", "move_task", "assign_task", "task_diff", "plan_diff", "merge_plan", "get_events", "search_code",
         "list_memories", "add_memory", "delete_memory", "list_triples", "repo_map", "read_artifact", "keep_plan", "pin_memory", "pty_open", "pty_attach", "pty_write",
         "pty_resize", "pty_close",
+        "dictation_status", "dictation_configure", "dictation_save_key", "dictation_clear_key", "dictation_transcribe",
     ])))
     .expect("tauri-build failed");
 }

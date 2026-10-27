@@ -5,6 +5,7 @@
 // CONTRACT: command names and argument keys match src-tauri/src/commands.rs.
 import type { AccountInfo } from './gen/AccountInfo';
 import type { Agent } from './gen/Agent';
+import type { DictationStatus } from './gen/DictationStatus';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { CliInfo } from './gen/CliInfo';
 import type { EventRow } from './gen/EventRow';
@@ -119,6 +120,13 @@ export const api = {
   ptyWrite: (ptyId: string, data: string) => call<void>('pty_write', { ptyId, data }),
   ptyResize: (ptyId: string, cols: number, rows: number) => call<void>('pty_resize', { ptyId, cols, rows }),
   ptyClose: (ptyId: string) => call<void>('pty_close', { ptyId }),
+  // Free Flow dictation. The key goes in once and never comes back: every reply is a status.
+  dictationStatus: () => call<DictationStatus>('dictation_status'),
+  dictationConfigure: (enabled: boolean | null, model: string | null) => call<DictationStatus>('dictation_configure', { enabled, model }),
+  dictationSaveKey: (key: string) => call<DictationStatus>('dictation_save_key', { key }),
+  dictationClearKey: () => call<DictationStatus>('dictation_clear_key'),
+  /** One recording (base64 + MIME type) → its transcript. Sent to Groq by the core, only now. */
+  dictationTranscribe: (audio: string, mime: string) => call<string>('dictation_transcribe', { audio, mime }),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;
