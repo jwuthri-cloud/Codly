@@ -12,6 +12,7 @@
     "opener:default",
     "notification:default",
     "window-state:default",
+    "allow-agent-control", "allow-set-agent-block-tools", "allow-stop-agent-after-step", "allow-resume-agent", "allow-steer-agent",
     "allow-ui-subscribe", "allow-ui-set-visible", "allow-detect-clis", "allow-list-accounts", "allow-recent-workspaces",
     "allow-open-workspace", "allow-update-settings", "allow-send-chat", "allow-run-plan", "allow-cancel-plan", "allow-close-thread",
     "allow-resolve-approval", "allow-interrupt-agent", "allow-stop-agent", "allow-hire-agent", "allow-list-models", "allow-set-agent-model", "allow-set-workspace-team", "allow-create-task",

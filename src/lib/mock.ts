@@ -24,6 +24,7 @@ import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
+import { MockControls } from './demo/controls';
 import { Story } from './demo/story';
 import { saveTriggers, seedTriggers } from './demo/triggers';
 import type { TriggersConfig } from './gen/TriggersConfig';
@@ -78,6 +79,7 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export class MockTransport implements Transport {
   private sim: Sim;
   private story: Story;
+  private ctl: MockControls;
   private ptys = new Map<string, FakeShell>();
   private ptySeq = 0;
   /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
@@ -100,6 +102,7 @@ export class MockTransport implements Transport {
     );
     this.story = new Story(this.sim);
     this.breaker = new MockBreaker(this.sim);
+    this.ctl = new MockControls(this.sim);
     const now = this.sim.now();
     this.sim.clis = CLIS;
     this.sim.recent = [
@@ -202,7 +205,18 @@ export class MockTransport implements Transport {
         return null;
       case 'stop_agent':
         story.interrupt(String(a.agentId), true);
+        this.ctl.clear(String(a.agentId));
         return null;
+      case 'agent_control':
+        return this.ctl.state(String(a.agentId));
+      case 'set_agent_block_tools':
+        return this.ctl.setBlockTools(String(a.agentId), !!a.on);
+      case 'stop_agent_after_step':
+        return this.ctl.stopAfterStep(String(a.agentId));
+      case 'resume_agent':
+        return this.ctl.resume(String(a.agentId));
+      case 'steer_agent':
+        return this.ctl.steer(String(a.agentId), String(a.text ?? ''));
       case 'hire_agent':
         return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':

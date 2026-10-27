@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-stop-agent-after-step"
+description = "Enables the stop_agent_after_step command without any pre-configured scope."
+commands.allow = ["stop_agent_after_step"]
+
+[[permission]]
+identifier = "deny-stop-agent-after-step"
+description = "Denies the stop_agent_after_step command without any pre-configured scope."
+commands.deny = ["stop_agent_after_step"]

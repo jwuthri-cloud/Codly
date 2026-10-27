@@ -1,6 +1,7 @@
 //! Codly desktop shell: window, plugins, commands and the UI bus. All logic lives in
 //! `codly-core`; this crate only wires it to the webview.
 
+mod agent_controls;
 mod commands;
 mod dictation;
 mod ide_commands;
@@ -79,6 +80,11 @@ pub fn run() {
             commands::breaker_status,
             commands::reset_breaker,
             commands::interrupt_agent,
+            agent_controls::agent_control,
+            agent_controls::set_agent_block_tools,
+            agent_controls::stop_agent_after_step,
+            agent_controls::resume_agent,
+            agent_controls::steer_agent,
             commands::stop_agent,
             commands::hire_agent,
             commands::list_models,

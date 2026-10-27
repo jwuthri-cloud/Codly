@@ -75,6 +75,11 @@ impl Inner {
         self.publish(ctx.ws.as_deref(), &r);
         self.track_live(&ctx, &r.kind);
         self.breaker_observe(&ctx.agent_id, &r.kind);
+        match &r.kind {
+            EventKind::TurnCompleted { .. } => self.control_turn_done(&ctx.agent_id),
+            EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
+            _ => {}
+        }
         if let Err(e) = self.project_agent(&ctx, &r.kind) {
             tracing::debug!("agent projection: {e}");
         }
@@ -330,7 +335,7 @@ impl Inner {
             Role::Worker if ctx.task_id.is_some() => {
                 // Gate only when the worker is really done: not interrupted, and no queued
                 // prompt (a user steer, a fix round) is about to start another turn.
-                if status != TurnStatus::Interrupted && self.is_quiet(&ctx.agent_id) {
+                if status != TurnStatus::Interrupted && self.is_quiet(&ctx.agent_id) && !self.control_holding(&ctx.agent_id) {
                     let me = self.clone();
                     let task = ctx.task_id.clone().unwrap_or_default();
                     tokio::spawn(async move { me.gate(task).await });
@@ -388,6 +393,9 @@ impl Inner {
     /// The approval broker: L0 rules first; every automatic outcome is a decision.
     fn broker(&self, ctx: &Ctx, approval: &Approval) {
         let ws = ctx.ws.as_deref();
+        if self.control_deny(&ctx.run_id, ctx.task_id.as_deref(), ws, &ctx.agent_id, approval) {
+            return; // tools are blocked for this agent
+        }
         let (cwd, read_only) = lock(&self.live).get(&ctx.agent_id).map_or((None, true), |l| (Some(l.cwd.clone()), l.read_only));
         let verify = ctx.task_id.as_deref().and_then(|t| self.store.task(t).ok().flatten()).map(|t| t.verify).unwrap_or_default();
         let mode = self.settings().approval_mode;
@@ -443,6 +451,9 @@ impl Inner {
         };
         if let (Some(l), Some(m)) = (&removed, self.mcp.get()) {
             m.revoke(&l.token);
+        }
+        if removed.is_some() {
+            self.control_clear(&ctx.agent_id); // controls do not outlive the process
         }
         let stopping = removed.as_ref().is_none_or(|l| l.stopping);
         let shutting = self.shutting_down.load(Ordering::SeqCst);
