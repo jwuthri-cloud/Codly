@@ -25,7 +25,7 @@
   const tauri = isTauriApp();
 
   const SHEET = 404;
-  const frameW = $derived(ui.width - (52 + 28) - 14 - (ui.sheetOpen ? SHEET + 14 : 0));
+  const frameW = $derived(ui.width - (ui.railW + 28) - 14 - (ui.sheetOpen ? SHEET + 14 : 0));
   const narrow = $derived(frameW < 960);
 
   // Keep diffstats warm for finished work: narration, cards and Changes read the same numbers.
@@ -43,7 +43,7 @@
   });
 </script>
 
-<div class="shell mode-{ui.mode} room-{ui.room}" class:focus={ui.focus} class:sheet={ui.sheetOpen} class:tauri>
+<div class="shell mode-{ui.mode} room-{ui.room}" class:focus={ui.focus} class:sheet={ui.sheetOpen} class:tauri style:--rail-w="{ui.railW}px">
   <div class="world-wrap" class:hidden={ui.mode === 'work'}><OfficeLayer {theme} /></div>
   <div class="veil" aria-hidden="true"></div>
   <Rail />
@@ -81,7 +81,7 @@
   .shell:not(.room-home) .veil { background: color-mix(in srgb, var(--night) 35%, transparent); }
   .shell.mode-work .veil { background: var(--night); }
 
-  .frame { position: absolute; z-index: var(--z-ui); top: 0; bottom: 0; left: calc(var(--rail-w) + var(--gutter) * 2); right: var(--gutter); display: flex; flex-direction: column; pointer-events: none; transition: right var(--d-4) var(--spring); }
+  .frame { position: absolute; z-index: var(--z-ui); top: 0; bottom: 0; left: calc(var(--rail-w) + var(--gutter) * 2); right: var(--gutter); display: flex; flex-direction: column; pointer-events: none; transition: right var(--d-4) var(--spring), left var(--d-4) var(--spring); }
   .sheet .frame { right: calc(var(--sheet-w) + var(--gutter) * 2); }
   .frame > :global(*) { pointer-events: auto; }
   .tauri .frame :global(.top) { padding-left: 10px; }

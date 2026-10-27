@@ -99,7 +99,7 @@
     void urlRev;
     return store.artifacts.slice();
   });
-  const insets = $derived({ top: 64, left: 52 + 28, right: ui.sheetOpen ? 404 + 28 : 14, bottom: 14 });
+  const insets = $derived({ top: 64, left: ui.railW + 28, right: ui.sheetOpen ? 404 + 28 : 14, bottom: 14 });
 
   const subscribe = (cb: (ev: EventRow) => void) => store.onEvent(cb);
   const onselect = (sel: Sel | null) => {

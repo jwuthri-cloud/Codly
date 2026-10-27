@@ -41,7 +41,7 @@
 
   // Persist small UI preferences.
   $effect(() => {
-    void [ui.room, ui.mode, ui.focus, ui.sections, ui.planLens, ui.changesLens, ui.knowledgeLens, ui.timelineZoom, ui.pinned, ui.keptPlans];
+    void [ui.room, ui.mode, ui.focus, ui.railOpen, ui.sections, ui.planLens, ui.changesLens, ui.knowledgeLens, ui.timelineZoom, ui.pinned, ui.keptPlans];
     ui.persist();
   });
 </script>

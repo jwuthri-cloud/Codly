@@ -1,5 +1,5 @@
 <!--
-  The slim icon rail: Home and four rooms, then the view controls (full office ⌘1, focus ⌘.) and
+  The slim icon rail (labelled when expanded, via the chevron at the bottom): Home and four rooms, then the view controls (full office ⌘1, focus ⌘.) and
   Settings. Badges say only what needs saying: amber when something waits for you, an orbit on
   Plan while it runs, a dot on Changes when new artifacts arrive.
 -->
@@ -34,7 +34,7 @@
   const C = 2 * Math.PI * 7;
 </script>
 
-<nav class="rail glass" class:tauri aria-label="Rooms">
+<nav class="rail glass" class:tauri class:open={ui.railOpen} aria-label="Rooms">
   <div class="mark" data-tauri-drag-region><Logo size={24} /></div>
   <ul class="rooms">
     {#each ROOMS as r (r.id)}
@@ -50,6 +50,7 @@
           onclick={() => ui.go(r.id)}
         >
           <Icon name={r.icon} size={18} />
+          {#if ui.railOpen}<span class="label">{r.label}</span>{/if}
           {#if b === 'wait'}<span class="b-wait" aria-label="{waiting} waiting for you">{waiting}</span>
           {:else if b === 'plan'}
             <svg class="b-plan" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
@@ -66,16 +67,25 @@
     <li>
       <button class="room" aria-pressed={ui.mode === 'office'} class:on={ui.mode === 'office'} aria-label="Full office" data-tip={ui.mode === 'office' ? 'Back to work' : 'Full office: hide the panels'} data-tip-kbd="⌘1" onclick={() => ui.toggleMode('office')}>
         <Icon name="office" size={18} />
+        {#if ui.railOpen}<span class="label">Full office</span>{/if}
       </button>
     </li>
     <li>
       <button class="room" aria-pressed={ui.focus} class:on={ui.focus} aria-label="Focus" data-tip={ui.focus ? 'Bring the office back' : 'Focus: dim the office'} data-tip-kbd="⌘." onclick={() => (ui.focus = !ui.focus)}>
         <Icon name="focus" size={18} />
+        {#if ui.railOpen}<span class="label">Focus</span>{/if}
       </button>
     </li>
     <li>
       <button class="room" aria-label="Settings" data-tip="Settings" data-tip-kbd="⌘," onclick={() => (ui.settingsOpen = true)}>
         <Icon name="settings" size={18} />
+        {#if ui.railOpen}<span class="label">Settings</span>{/if}
+      </button>
+    </li>
+    <li>
+      <button class="room" aria-label={ui.railOpen ? 'Collapse sidebar' : 'Expand sidebar'} aria-expanded={ui.railOpen} data-tip={ui.railOpen ? 'Collapse the sidebar' : 'Show labels'} onclick={() => (ui.railOpen = !ui.railOpen)}>
+        <Icon name={ui.railOpen ? 'chevron-left' : 'chevron-right'} size={18} />
+        {#if ui.railOpen}<span class="label">Collapse</span>{/if}
       </button>
     </li>
   </ul>
@@ -84,6 +94,15 @@
 <style>
   .rail { position: fixed; z-index: var(--z-ui); left: var(--gutter); top: var(--gutter); bottom: var(--gutter); width: var(--rail-w); display: flex; flex-direction: column; align-items: center; padding: 14px 0 10px; border-radius: var(--r-xl); }
   .rail.tauri { top: 48px; }
+  .rail { transition: width var(--d-4) var(--spring); }
+  .rail.open { align-items: stretch; padding-left: 7px; padding-right: 7px; }
+  .rail.open .mark { width: auto; justify-content: start; padding-left: 7px; }
+  .rail.open .room { width: auto; grid-auto-flow: column; justify-content: start; justify-items: start; gap: 11px; padding: 0 10px; }
+  .rail.open .room.on::before { left: -7px; }
+  .label { font-size: 13px; font-weight: 500; white-space: nowrap; }
+  .rail.open .b-wait { top: 50%; right: 8px; transform: translateY(-50%); }
+  .rail.open .b-plan { top: 50%; right: 8px; margin-top: -7px; }
+  .rail.open .b-dot { top: 50%; right: 11px; margin-top: -3px; }
   .mark { width: 36px; height: 36px; display: grid; place-items: center; margin-bottom: 14px; }
   .rooms, .views { display: flex; flex-direction: column; gap: 4px; }
   .grow { flex: 1; width: 100%; }

@@ -45,6 +45,8 @@ type Prefs = {
   room: Room;
   mode: Mode | 'city';
   focus: boolean;
+  /** The left rail shows labels next to its icons. */
+  rail: boolean;
   sections: Record<string, boolean>;
   /** v2: the list lens became the default (older `planLens` values are ignored on purpose). */
   planView: PlanLens;
@@ -75,6 +77,9 @@ class Ui {
   mode = $state<Mode>(this.prefs.mode === 'city' ? 'office' : (this.prefs.mode ?? 'blend'));
   /** ⌘. — dim and blur the office for reading. */
   focus = $state(this.prefs.focus ?? false);
+  /** The rail's icons-only (52) and labelled (184) widths; everything that sits beside it reads railW. */
+  railOpen = $state(this.prefs.rail ?? false);
+  railW = $derived(this.railOpen ? 184 : 52);
   selection = $state<Selection>(null);
   hover = $state<Hover>({ agentId: null, taskId: null, path: null });
 
@@ -155,6 +160,7 @@ class Ui {
       room: this.room,
       mode: this.mode,
       focus: this.focus,
+      rail: this.railOpen,
       sections: this.sections,
       planView: this.planLens,
       changesLens: this.changesLens,
