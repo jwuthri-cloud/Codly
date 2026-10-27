@@ -25,6 +25,7 @@
   import Kbd from '../components/Kbd.svelte';
   import Portrait from '../components/Portrait.svelte';
   import StateMark from '../components/StateMark.svelte';
+  import { skillsUi } from '../lib/state/skills.svelte';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
   type Row = {
@@ -102,6 +103,7 @@
       { id: 'task:new', section: 'Work', title: 'New task…', icon: 'plus', kbd: '⇧⌘N', keep: true, run: () => setScope('+') },
       { id: 'repo:open', section: 'Work', title: 'Open repository…', icon: 'folder', kbd: '⌘O', run: () => openWorkspace() },
       { id: 'settings', section: 'App', title: 'Settings', icon: 'settings', kbd: '⌘,', run: () => (ui.settingsOpen = true) },
+      { id: 'skills', section: 'App', title: 'Skills', sub: 'Installed skills, and a catalog to install from', icon: 'bolt', run: () => skillsUi.show() },
       { id: 'shortcuts', section: 'App', title: 'Keyboard shortcuts', icon: 'keyboard', kbd: '?', run: () => (ui.shortcutsOpen = true) },
       { id: 'theme:system', section: 'App', title: 'Theme: follow the system', icon: 'monitor', run: () => updateSettings({ theme: 'system' }) },
       { id: 'theme:dark', section: 'App', title: 'Theme: dark', icon: 'moon', run: () => updateSettings({ theme: 'dark' }) },

@@ -15,6 +15,8 @@ import type { Plan } from './gen/Plan';
 import type { Provider } from './gen/Provider';
 import type { RecentWorkspace } from './gen/RecentWorkspace';
 import type { RepoFile } from './gen/RepoFile';
+import type { CatalogSkill } from './gen/CatalogSkill';
+import type { Skill } from './gen/Skill';
 import type { SearchResult } from './gen/SearchResult';
 import type { Settings } from './gen/Settings';
 import type { Snapshot } from './gen/Snapshot';
@@ -119,6 +121,14 @@ export const api = {
   ptyWrite: (ptyId: string, data: string) => call<void>('pty_write', { ptyId, data }),
   ptyResize: (ptyId: string, cols: number, rows: number) => call<void>('pty_resize', { ptyId, cols, rows }),
   ptyClose: (ptyId: string) => call<void>('pty_close', { ptyId }),
+  /** Skills the agent CLIs can load: project, user, plugins, Codex and Codly's own. */
+  listSkills: (project: string | null) => call<Skill[]>('list_skills', { project }),
+  /** The bundled catalog of public skills, each marked installed or not. */
+  skillCatalog: () => call<CatalogSkill[]>('skill_catalog'),
+  /** `git clone --depth 1` a catalog skill into ~/.claude/skills/<id>. */
+  installSkill: (id: string) => call<Skill>('install_skill', { id }),
+  uninstallSkill: (path: string, project: string | null) => call<void>('uninstall_skill', { path, project }),
+  openSkillFolder: (path: string, project: string | null) => call<void>('open_skill_folder', { path, project }),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;

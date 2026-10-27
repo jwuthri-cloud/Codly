@@ -22,6 +22,7 @@ import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { Story } from './demo/story';
+import { skillsMock } from './demo/skillsMock';
 
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
@@ -113,6 +114,8 @@ export class MockTransport implements Transport {
     if (!cmd.startsWith('pty_')) await wait(60 + Math.random() * 80);
     // Re-probing sign-ins runs each CLI's status command: it takes a moment.
     if (cmd === 'list_accounts' && args.refresh) await wait(900);
+    const skills = await skillsMock(cmd, args);
+    if (skills !== undefined) return skills as T;
     return this.dispatch(cmd, args) as T;
   }
 

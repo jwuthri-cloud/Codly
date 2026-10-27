@@ -260,3 +260,38 @@ pub async fn pty_close(state: State<'_, AppState>, pty_id: String) -> R<()> {
     state.pty.close(&pty_id);
     Ok(())
 }
+
+// ───────────────────────────── skills manager ─────────────────────────────
+// Blocking filesystem/git work, so each runs on the blocking pool. `project` is the open repo.
+
+async fn skills_blocking<T: Send + 'static>(f: impl FnOnce(std::path::PathBuf) -> anyhow::Result<T> + Send + 'static) -> R<T> {
+    tokio::task::spawn_blocking(move || f(codly_core::skills::home_dir()?))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_skills(project: Option<String>) -> R<Vec<codly_core::skills::Skill>> {
+    skills_blocking(move |home| Ok(codly_core::skills::list(&home, project.as_deref().map(std::path::Path::new)))).await
+}
+
+#[tauri::command]
+pub async fn skill_catalog() -> R<Vec<codly_core::skills::CatalogSkill>> {
+    skills_blocking(|home| Ok(codly_core::skills::catalog(&home))).await
+}
+
+#[tauri::command]
+pub async fn install_skill(id: String) -> R<codly_core::skills::Skill> {
+    skills_blocking(move |home| codly_core::skills::install(&id, &home)).await
+}
+
+#[tauri::command]
+pub async fn uninstall_skill(path: String, project: Option<String>) -> R<()> {
+    skills_blocking(move |home| codly_core::skills::uninstall(std::path::Path::new(&path), &home, project.as_deref().map(std::path::Path::new))).await
+}
+
+#[tauri::command]
+pub async fn open_skill_folder(path: String, project: Option<String>) -> R<()> {
+    skills_blocking(move |home| codly_core::skills::open_folder(std::path::Path::new(&path), &home, project.as_deref().map(std::path::Path::new))).await
+}

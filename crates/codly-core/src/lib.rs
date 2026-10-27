@@ -13,6 +13,7 @@
 //! - `index`        code retrieval: FTS5 over paths/symbols/chunks, RRF, citations, pointer packs
 //! - `memory`       shared/private memories, knowledge triples, memory packs
 //! - `pty`          interactive terminals (portable-pty)
+//! - `skills`       skills manager: scan, catalog, install, uninstall
 
 pub mod adapters;
 pub mod env;
@@ -24,6 +25,7 @@ pub mod model;
 pub mod orchestrator;
 pub mod proc;
 pub mod pty;
+pub mod skills;
 pub mod store;
 
 pub use orchestrator::{Core, CoreConfig};
