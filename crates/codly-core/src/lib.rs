@@ -13,8 +13,10 @@
 //! - `index`        code retrieval: FTS5 over paths/symbols/chunks, RRF, citations, pointer packs
 //! - `memory`       shared/private memories, knowledge triples, memory packs
 //! - `pty`          interactive terminals (portable-pty)
+//! - `dictation`    Free Flow: Groq Whisper transcription, key in the Keychain
 
 pub mod adapters;
+pub mod dictation;
 pub mod env;
 pub mod git;
 pub mod index;

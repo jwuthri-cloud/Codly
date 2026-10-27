@@ -68,6 +68,8 @@ export class MockTransport implements Transport {
   private story: Story;
   private ptys = new Map<string, FakeShell>();
   private ptySeq = 0;
+  /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
+  private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
 
   constructor() {
     const p = params();
@@ -237,6 +239,21 @@ export class MockTransport implements Transport {
         this.ptys.get(String(a.ptyId))?.close();
         this.ptys.delete(String(a.ptyId));
         return null;
+      case 'dictation_status':
+        return { ...this.dictation };
+      case 'dictation_configure':
+        if (typeof a.enabled === 'boolean') this.dictation.enabled = a.enabled;
+        if (typeof a.model === 'string') this.dictation.model = a.model;
+        return { ...this.dictation };
+      case 'dictation_save_key':
+        if (!/^gsk_[\w-]{8,}$/.test(String(a.key).trim())) throw new Error('that does not look like a Groq API key (it starts with gsk_)');
+        this.dictation.key_saved = true;
+        return { ...this.dictation };
+      case 'dictation_clear_key':
+        this.dictation.key_saved = false;
+        return { ...this.dictation };
+      case 'dictation_transcribe':
+        return 'Add retry with backoff to the sync worker, and cover it with a test.';
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

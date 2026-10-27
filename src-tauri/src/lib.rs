@@ -2,6 +2,7 @@
 //! `codly-core`; this crate only wires it to the webview.
 
 mod commands;
+mod dictation;
 #[cfg(test)]
 mod ipc_tests;
 mod ui_bus;
@@ -99,6 +100,11 @@ pub fn run() {
             commands::pty_write,
             commands::pty_resize,
             commands::pty_close,
+            dictation::dictation_status,
+            dictation::dictation_configure,
+            dictation::dictation_save_key,
+            dictation::dictation_clear_key,
+            dictation::dictation_transcribe,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
