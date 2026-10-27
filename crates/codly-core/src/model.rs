@@ -1054,6 +1054,9 @@ pub enum ApprovalMode {
     Strict,
     /// Allow everything that stays inside the agent's worktree.
     Autonomous,
+    /// Auto-approve everything, risky commands included, except the hard floors: questions,
+    /// permission changes, writes by read-only agents and Codly's own data dir still ask.
+    Full,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
