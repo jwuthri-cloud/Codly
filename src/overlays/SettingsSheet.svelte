@@ -16,6 +16,7 @@
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
   import AccountsSection from './AccountsSection.svelte';
   import TeamSection from './TeamSection.svelte';
+  import TriggersSection from './TriggersSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
   import Icon from '../components/Icon.svelte';
 
@@ -169,6 +170,8 @@
       <TeamSection />
 
       <AccountsSection />
+
+      <TriggersSection />
 
       <section>
         <h3 class="eyebrow">Approvals</h3>

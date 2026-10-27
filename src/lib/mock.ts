@@ -22,6 +22,8 @@ import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { Story } from './demo/story';
+import { saveTriggers, seedTriggers } from './demo/triggers';
+import type { TriggersConfig } from './gen/TriggersConfig';
 
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
@@ -68,6 +70,7 @@ export class MockTransport implements Transport {
   private story: Story;
   private ptys = new Map<string, FakeShell>();
   private ptySeq = 0;
+  private triggers: TriggersConfig | null = null;
 
   constructor() {
     const p = params();
@@ -237,6 +240,10 @@ export class MockTransport implements Transport {
         this.ptys.get(String(a.ptyId))?.close();
         this.ptys.delete(String(a.ptyId));
         return null;
+      case 'get_triggers':
+        return (this.triggers ??= seedTriggers());
+      case 'set_triggers':
+        return (this.triggers = saveTriggers((this.triggers ??= seedTriggers()), a.config as TriggersConfig));
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

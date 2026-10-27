@@ -13,6 +13,7 @@
 //! - `index`        code retrieval: FTS5 over paths/symbols/chunks, RRF, citations, pointer packs
 //! - `memory`       shared/private memories, knowledge triples, memory packs
 //! - `pty`          interactive terminals (portable-pty)
+//! - `triggers`     schedules, context rules, network mode: pure policy (run by `orchestrator/triggers.rs`)
 
 pub mod adapters;
 pub mod env;
@@ -25,6 +26,7 @@ pub mod orchestrator;
 pub mod proc;
 pub mod pty;
 pub mod store;
+pub mod triggers;
 
 pub use orchestrator::{Core, CoreConfig};
 

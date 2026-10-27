@@ -260,3 +260,14 @@ pub async fn pty_close(state: State<'_, AppState>, pty_id: String) -> R<()> {
     state.pty.close(&pty_id);
     Ok(())
 }
+
+/// Triggers: schedules, context rules and network mode, with the log of what they did.
+#[tauri::command]
+pub async fn get_triggers(state: State<'_, AppState>) -> R<codly_core::triggers::TriggersConfig> {
+    state.core().await?.triggers().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_triggers(state: State<'_, AppState>, config: codly_core::triggers::TriggersConfig) -> R<codly_core::triggers::TriggersConfig> {
+    state.core().await?.set_triggers(config).await.map_err(err)
+}

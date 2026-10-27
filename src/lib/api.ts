@@ -21,6 +21,7 @@ import type { Snapshot } from './gen/Snapshot';
 import type { Task } from './gen/Task';
 import type { TaskStatus } from './gen/TaskStatus';
 import type { Triple } from './gen/Triple';
+import type { TriggersConfig } from './gen/TriggersConfig';
 import type { Workspace } from './gen/Workspace';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 
@@ -119,6 +120,10 @@ export const api = {
   ptyWrite: (ptyId: string, data: string) => call<void>('pty_write', { ptyId, data }),
   ptyResize: (ptyId: string, cols: number, rows: number) => call<void>('pty_resize', { ptyId, cols, rows }),
   ptyClose: (ptyId: string) => call<void>('pty_close', { ptyId }),
+  /** Schedules, context rules and network mode, with the log of what triggers did. */
+  triggers: () => call<TriggersConfig>('get_triggers'),
+  /** Save them; the core keeps its own clocks and log, and returns what it stored. */
+  setTriggers: (config: TriggersConfig) => call<TriggersConfig>('set_triggers', { config }),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;
