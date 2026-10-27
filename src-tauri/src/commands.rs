@@ -265,4 +265,13 @@ pub async fn pty_close(state: State<'_, AppState>, pty_id: String) -> R<()> {
 #[tauri::command]
 pub async fn agent_git(state: State<'_, AppState>, agent_id: String) -> R<codly_core::orchestrator::agent_git::AgentGit> {
     state.core().await?.agent_git(&agent_id).await.map_err(err)
+/// Triggers: schedules, context rules and network mode, with the log of what they did.
+#[tauri::command]
+pub async fn get_triggers(state: State<'_, AppState>) -> R<codly_core::triggers::TriggersConfig> {
+    state.core().await?.triggers().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_triggers(state: State<'_, AppState>, config: codly_core::triggers::TriggersConfig) -> R<codly_core::triggers::TriggersConfig> {
+    state.core().await?.set_triggers(config).await.map_err(err)
 }

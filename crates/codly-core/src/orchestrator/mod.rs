@@ -11,6 +11,7 @@
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
 //! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
+//! - `triggers` schedules and context rules run on a clock (policy: `crate::triggers`)
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
@@ -29,6 +30,7 @@ pub mod scheduler;
 pub mod scope;
 mod team;
 mod tools;
+mod triggers;
 mod workspace;
 
 use std::collections::{HashMap, HashSet};
@@ -362,6 +364,7 @@ impl Core {
         inner.recover().await;
         tokio::spawn(ingest::run(inner.clone(), events_rx));
         tokio::spawn(plans::scheduler_loop(inner.clone()));
+        tokio::spawn(triggers::run(inner.clone()));
         match inner.store.last_workspace() {
             Ok(Some(ws)) => {
                 if let Err(e) = inner.open_workspace(&ws.repo_path).await {

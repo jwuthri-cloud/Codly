@@ -14,6 +14,7 @@
 //! - `memory`       shared/private memories, knowledge triples, memory packs
 //! - `pty`          interactive terminals (portable-pty)
 //! - `dictation`    Free Flow: Groq Whisper transcription, key in the Keychain
+//! - `triggers`     schedules, context rules, network mode: pure policy (run by `orchestrator/triggers.rs`)
 
 pub mod adapters;
 pub mod dictation;
@@ -27,6 +28,7 @@ pub mod orchestrator;
 pub mod proc;
 pub mod pty;
 pub mod store;
+pub mod triggers;
 
 pub use orchestrator::{Core, CoreConfig};
 

@@ -23,6 +23,8 @@ import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { Story } from './demo/story';
+import { saveTriggers, seedTriggers } from './demo/triggers';
+import type { TriggersConfig } from './gen/TriggersConfig';
 
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json' },
@@ -71,6 +73,7 @@ export class MockTransport implements Transport {
   private ptySeq = 0;
   /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
   private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
+  private triggers: TriggersConfig | null = null;
 
   constructor() {
     const p = params();
@@ -257,6 +260,10 @@ export class MockTransport implements Transport {
         return 'Add retry with backoff to the sync worker, and cover it with a test.';
       case 'agent_git':
         return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now());
+      case 'get_triggers':
+        return (this.triggers ??= seedTriggers());
+      case 'set_triggers':
+        return (this.triggers = saveTriggers((this.triggers ??= seedTriggers()), a.config as TriggersConfig));
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }
