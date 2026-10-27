@@ -31,7 +31,7 @@
       <span class="tier">{TIER[p.tier]}</span>
       <div class="p-body">
         <p class="p-name"><b>{p.name}</b><span class="via">{PROVIDER_LABEL[p.provider]}</span>{#if p.verify}<span class="vf" data-tip="Named from memory: double-check the current model name before relying on it.">verify</span>{/if}</p>
-        <p class="why">{p.why}{#if p.needs}<span class="needs"> Needs: {p.needs}.</span>{/if}</p>
+        <p class="why">{p.why}{#if p.needs}{" "}<span class="needs">Needs: {p.needs}.</span>{/if}</p>
         {#if p.tip}
           <div class="tip"><code class="selectable">{p.tip}</code><button class="btn sm ghost" onclick={() => copy(p.tip!)}><Icon name="copy" size={12} />Copy</button></div>
         {/if}

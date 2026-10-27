@@ -55,6 +55,9 @@ const INSTALL: Record<Provider, InstallHint> = {
   copilot: { npm: 'npm install -g @github/copilot', native: null, login: null, docs: 'https://github.com/github/copilot-cli' },
 };
 
+/** `?onboard=1`: a machine with none of the CLIs installed, so the quest has something to do. */
+const fresh = (c: CliInfo): CliInfo => ({ ...c, path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: `Not found on PATH: install \`${c.provider}\`.` });
+
 const CLIS: CliInfo[] = [
   { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json', install: INSTALL.claude },
   { provider: 'codex', path: '/opt/homebrew/bin/codex', version: '0.161.0', logged_in: true, billing: 'subscription', plan: 'Plus', problem: null, transport: 'app-server', install: INSTALL.codex },
@@ -129,7 +132,7 @@ export class MockTransport implements Transport {
     this.ctl = new MockControls(this.sim);
     this.askMe = new MockAskMe(this.sim);
     const now = this.sim.now();
-    this.sim.clis = CLIS;
+    this.sim.clis = p.get('onboard') === '1' ? CLIS.map(fresh) : CLIS;
     this.sim.recent = [
       { repo_path: REPO, name: 'acme/web', opened_at: now - 2 * 3_600_000 },
       { repo_path: `${HOME}/Code/billing-service`, name: 'billing-service', opened_at: now - 26 * 3_600_000 },
@@ -359,6 +362,13 @@ export class MockTransport implements Transport {
         if (!command) throw new Error(`there is no ${String(a.rung)} installer for ${String(a.provider)}`);
         const id = `pty-${++this.ptySeq}`;
         this.ptys.set(id, new FakeShell(HOME, sim));
+        // The demo "finishes" the install after a moment, then the sign-in a little later.
+        const real = CLIS.find((c) => c.provider === a.provider);
+        const idx = sim.clis.findIndex((c) => c.provider === a.provider);
+        if (real && idx >= 0 && !sim.clis[idx].path) {
+          setTimeout(() => (sim.clis = sim.clis.map((c) => (c.provider === a.provider ? { ...real, logged_in: false, billing: 'unknown', plan: null, problem: `Not signed in: run \`${a.provider}\` and sign in.` } : c))), 2500);
+          setTimeout(() => (sim.clis = sim.clis.map((c) => (c.provider === a.provider ? real : c))), 8000);
+        }
         return { pty_id: id, command };
       }
       case 'byok_status':

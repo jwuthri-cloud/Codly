@@ -31,6 +31,9 @@ export const ROOMS: { id: Room; label: string; icon: string; key: string; hint: 
 
 const PREFS_KEY = 'codly.ui.v2';
 
+/** `?onboard=1` in the browser demo: a fresh machine and a fresh quest, whatever was saved. */
+export const ONBOARD_DEMO = typeof location !== 'undefined' && new URLSearchParams(location.search).get('onboard') === '1';
+
 /** Request threads: "lead" (the first) and "lead:<id>" (parallel requests, each with its own Lead). */
 export const isRequestThread = (thread: string | null | undefined): thread is string => thread === 'lead' || !!thread?.startsWith('lead:');
 
@@ -85,9 +88,9 @@ class Ui {
   railOpen = $state(this.prefs.rail ?? false);
   railW = $derived(this.railOpen ? 184 : 52);
   /** The first-run quest overlay: shown until finished or skipped, and again from Settings or the palette. */
-  onboarded = $state(this.prefs.onboarded ?? false);
+  onboarded = $state(!ONBOARD_DEMO && (this.prefs.onboarded ?? false));
   onboardingOpen = $state(false);
-  quest = $state<string[]>(this.prefs.quest ?? []);
+  quest = $state<string[]>(ONBOARD_DEMO ? [] : (this.prefs.quest ?? []));
   questSound = $state(this.prefs.questSound ?? true);
   selection = $state<Selection>(null);
   hover = $state<Hover>({ agentId: null, taskId: null, path: null });
