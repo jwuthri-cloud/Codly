@@ -178,6 +178,8 @@ impl Inner {
     /// Send a user turn to a live agent. Claude and ACP adapters queue it behind a running
     /// turn (it gets its own TurnStarted/TurnCompleted); Codex steers it into the running turn.
     pub(super) fn send_prompt(&self, agent_id: &str, text: String) -> Result<()> {
+        // A pending "stop after this step" or a pause holds every prompt until the resume.
+        let Some(text) = self.route_prompt(agent_id, text) else { return Ok(()) };
         let mut live = lock(&self.live);
         let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
         let steer = l.provider == Provider::Codex && l.turn_active;

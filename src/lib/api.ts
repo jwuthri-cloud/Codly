@@ -7,6 +7,7 @@ import type { AccountInfo } from './gen/AccountInfo';
 import type { Agent } from './gen/Agent';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { CliInfo } from './gen/CliInfo';
+import type { ControlState } from './gen/ControlState';
 import type { EventRow } from './gen/EventRow';
 import type { Memory } from './gen/Memory';
 import type { MemoryKind } from './gen/MemoryKind';
@@ -88,6 +89,12 @@ export const api = {
     call<void>('resolve_approval', { approvalId, decision }),
   interruptAgent: (agentId: string) => call<void>('interrupt_agent', { agentId }),
   stopAgent: (agentId: string) => call<void>('stop_agent', { agentId }),
+  /** Live controls (agent panel). Each returns the agent's controls after the change. */
+  agentControl: (agentId: string) => call<ControlState>('agent_control', { agentId }),
+  setAgentBlockTools: (agentId: string, on: boolean) => call<ControlState>('set_agent_block_tools', { agentId, on }),
+  stopAgentAfterStep: (agentId: string) => call<ControlState>('stop_agent_after_step', { agentId }),
+  resumeAgent: (agentId: string) => call<ControlState>('resume_agent', { agentId }),
+  steerAgent: (agentId: string, text: string) => call<ControlState>('steer_agent', { agentId, text }),
   hireAgent: (provider: Provider, model: string | null = null, title: string | null = null) => call<Agent>('hire_agent', { provider, model, title }),
   listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
   /** The open repo's changes to the global team (members switched off, its own members). */

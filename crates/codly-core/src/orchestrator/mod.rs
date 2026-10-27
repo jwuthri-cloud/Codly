@@ -16,6 +16,7 @@
 
 pub mod accounts;
 pub mod approvals;
+mod controls;
 mod gate;
 mod ingest;
 mod lead;
@@ -155,6 +156,8 @@ struct Inner {
     index: RwLock<Option<SharedIndex>>,
     use_index: bool,
     live: Mutex<HashMap<Id, Live>>,
+    /// Per-agent live controls (block tools, stop after this step, held notes); see controls.rs.
+    controls: Mutex<HashMap<Id, controls::AgentControl>>,
     /// Serializes git mutations of the repository (worktrees, refs, commits, merges).
     repo_lock: tokio::sync::Mutex<()>,
     /// The merge queue: one merge into an integration branch at a time.
@@ -338,6 +341,7 @@ impl Core {
             index: RwLock::new(None),
             use_index: opts.index,
             live: Mutex::new(HashMap::new()),
+            controls: Mutex::new(HashMap::new()),
             repo_lock: tokio::sync::Mutex::new(()),
             merge_lock: tokio::sync::Mutex::new(()),
             sched_lock: tokio::sync::Mutex::new(()),

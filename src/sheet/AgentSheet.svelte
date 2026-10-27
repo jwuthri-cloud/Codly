@@ -28,6 +28,7 @@
   import Section from '../components/Section.svelte';
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
+  import AgentControls from './AgentControls.svelte';
   import TaskChecks from './TaskChecks.svelte';
   import { agentTitle } from '../lib/util/team';
 
@@ -148,7 +149,7 @@
       const e = store.events[i];
       if (e.agent_id !== agent.id && !(task && e.task_id === task.id && e.kind.type === 'decision')) continue;
       const t = e.kind.type;
-      if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed') continue;
+      if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed' || t === 'control_changed') continue;
       if (filter === 'tools' && t !== 'tool_started' && t !== 'tool_completed') continue;
       if (filter === 'files' && t !== 'files_changed' && !(t === 'tool_started' && ['read', 'edit', 'create', 'delete'].includes((e.kind as { activity: string }).activity))) continue;
       if (filter === 'decisions' && t !== 'decision') continue;
@@ -263,6 +264,8 @@
         {/if}
       </Section>
     {/if}
+
+    <AgentControls {agent} />
 
     <Section id="task" title="Task" summary={task ? `${task.key} · ${task.title}` : 'None'}>
       {#if task}
