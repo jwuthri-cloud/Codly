@@ -7,13 +7,17 @@
 //  1. ≤ 250 ms to truth: emotes, icons and the desk screen follow the model immediately.
 //  2. Minimum dwell of 600 ms per pose (Dwell below): rapid events coalesce.
 //  3. Excursions: walk to a station only if the activity is still live after its threshold.
-//  4. No phantom work: idle agents sit still (or sleep after 10 minutes without events).
+//  4. No phantom work: idle agents sit still; after a minute without events a worker wanders off
+//     to the games corner (console, foosball or pool — one per agent, a full game keeps it at
+//     its desk), any real event brings it straight back, and after 10 minutes it sleeps at
+//     its desk. Leads stay at their desks.
 //  5. Errands only for real instant events (a commit, a memory, a card changing column).
 
 import type { ActivityKind } from '../lib/gen/ActivityKind';
 import type { StationId } from './layout';
 import type { AgentState, ErrandKind, OfficeModel, ToolCall } from './model';
 import { EXCURSION_MS } from './reducer';
+import { hash } from './text';
 
 export type Pose =
   | 'sit'
@@ -32,9 +36,11 @@ export type Pose =
   | 'drop'
   | 'talk'
   | 'review'
-  | 'wave';
+  | 'wave'
+  | 'gamepad'
+  | 'play';
 
-export type Prop = 'paper' | 'book' | 'card' | 'envelope' | 'folder' | 'phone' | 'marker' | 'note' | 'mug' | null;
+export type Prop = 'paper' | 'book' | 'card' | 'envelope' | 'folder' | 'phone' | 'marker' | 'note' | 'mug' | 'gamepad' | 'cue' | null;
 export type Emote = 'alert' | 'question' | 'rain' | 'zz' | 'think' | 'check' | null;
 export type Screen = 'off' | 'idle' | 'code' | 'doc' | 'terminal' | 'chat' | 'alert' | 'error' | 'think' | 'search';
 
@@ -54,6 +60,7 @@ export interface Intent {
 }
 
 export const LONG_IDLE_MS = 10 * 60_000;
+export const PLAY_AFTER_MS = 60_000;
 export const DONE_CHECK_MS = 2000;
 export const CHEER_MS = 1700;
 export const ACT_MS = 1500;
@@ -179,6 +186,19 @@ function make(place: Place, pose: Pose, icon: string, extra: Partial<Intent> = {
 }
 
 const DESK: Place = { kind: 'desk' };
+
+/** The game an idle agent plays: fixed per agent id so it doesn't flicker. */
+function game(a: AgentState): Intent {
+  const extra = { screen: 'off', emote: null } as const;
+  switch (hash(a.id) % 3) {
+    case 0:
+      return make({ kind: 'station', id: 'games.console' }, 'gamepad', 'idle', { ...extra, prop: 'gamepad' });
+    case 1:
+      return make({ kind: 'station', id: 'games.foosball' }, 'play', 'idle', extra);
+    default:
+      return make({ kind: 'station', id: 'games.pool' }, 'play', 'idle', { ...extra, prop: 'cue' });
+  }
+}
 
 /** The in-place (desk) version of a tool's activity. */
 function atDesk(t: ToolCall, a: AgentState): Intent {
@@ -382,6 +402,10 @@ export function deriveIntent(a: AgentState, m: OfficeModel, now: number, errand:
   const quiet = a.status === 'idle' || a.status === 'done' || a.status === 'starting';
   if (quiet && now - a.lastEventAt >= LONG_IDLE_MS) return { intent: make(DESK, 'sleep', 'sleep', { emote: 'zz', screen: 'off' }), nextAt };
   if (quiet) soon(a.lastEventAt + LONG_IDLE_MS);
+  if (quiet && a.status !== 'starting' && a.role !== 'lead') {
+    if (now - a.lastEventAt >= PLAY_AFTER_MS) return { intent: game(a), nextAt };
+    soon(a.lastEventAt + PLAY_AFTER_MS);
+  }
   if (a.status === 'working') return { intent: make(DESK, 'type', 'working', { screen: 'code' }), nextAt };
   return { intent: make(DESK, 'sit', a.status === 'done' ? 'done' : 'idle', { screen: a.status === 'starting' ? 'idle' : 'idle' }), nextAt };
 }

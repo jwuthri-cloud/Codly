@@ -368,6 +368,8 @@ export class PropKit {
     this.geos.set('marker', mk((b) => b.cyl(0, -0.02, 0.02, 0.012, 0.13, lin('#2f6fd6'), 6)));
     this.geos.set('note', mk((b) => b.box(0, 0, 0.04, 0.08, 0.004, 0.08, lin('#ffd75e'))));
     this.geos.set('mug', mk((b) => b.cyl(0, -0.04, 0.03, 0.035, 0.08, lin('#e9e2d6'), 10)));
+    this.geos.set('gamepad', mk((b) => b.box(0.05, 0, 0.03, 0.15, 0.03, 0.07, lin('#f1f1f4')).ball(-0.02, -0.01, 0.05, 0.035, 0.025, 0.04, lin('#26272c'), 8, 6).ball(0.12, -0.01, 0.05, 0.035, 0.025, 0.04, lin('#26272c'), 8, 6)));
+    this.geos.set('cue', mk((b) => b.cyl(0, -0.45, 0.02, 0.016, 1.1, lin('#c9a46a'), 6, 0.008).cyl(0, -0.45, 0.02, 0.018, 0.3, lin('#3a2a20'), 6)));
   }
   dispose() {
     for (const g of this.geos.values()) g.dispose();
@@ -384,10 +386,12 @@ function loopPeriod(pose: Pose): number {
     case 'type':
       return TICK;
     case 'write':
+    case 'gamepad':
       return TICK * 2;
     case 'browse':
     case 'raise':
     case 'talk':
+    case 'play':
       return TICK * 3;
     case 'read':
     case 'review':
@@ -398,7 +402,7 @@ function loopPeriod(pose: Pose): number {
   }
 }
 
-const SIT_POSES = new Set<Pose>(['sit', 'type', 'read', 'think', 'phone', 'sleep', 'review']);
+const SIT_POSES = new Set<Pose>(['sit', 'type', 'read', 'think', 'phone', 'sleep', 'review', 'gamepad']);
 
 function targets(out: Joints, pose: Pose, seated: boolean, step: number) {
   out.fill(0);
@@ -526,6 +530,24 @@ function targets(out: Joints, pose: Pose, seated: boolean, step: number) {
       out[8] = -1.2;
       out[10] = -0.25;
       out[2] = 0.18;
+      break;
+    case 'gamepad':
+      // Both hands forward on a pad, thumbs tapping.
+      out[1] = 0.1;
+      out[5] = out[8] = -0.75;
+      out[6] = out[9] = -0.3;
+      out[7] = -1.0 + (s % 2 ? 0.06 : 0);
+      out[10] = -1.0 + (s % 3 === 1 ? 0.06 : 0);
+      out[2] = 0.08;
+      break;
+    case 'play':
+      // Leaning over the table, both arms out, twisting the rods (or lining up a shot).
+      out[1] = 0.32;
+      out[5] = out[8] = -1.2;
+      out[6] = out[9] = -0.1;
+      out[7] = out[10] = -0.35;
+      out[13] = s % 2 ? 0.14 : -0.14;
+      out[2] = -0.25;
       break;
     case 'talk':
       out[8] = s % 2 ? -0.7 : -0.95;
@@ -967,7 +989,7 @@ export class Character {
     if (this.propMesh.visible) {
       // Hold flat things up towards the face when reading; level otherwise.
       const reading = !this.walking && (this.pose === 'read' || this.pose === 'review');
-      this.propMesh.rotation.set(reading ? 0.9 : this.prop === 'phone' ? 0 : 1.2, 0, 0);
+      this.propMesh.rotation.set(reading ? 0.9 : this.prop === 'phone' ? 0 : this.prop === 'cue' ? 1.45 : 1.2, 0, 0);
     }
   }
 
