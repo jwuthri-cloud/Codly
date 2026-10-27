@@ -4,11 +4,13 @@
 //! Order of the rules:
 //! 1. questions and permission changes always go to you;
 //! 2. any risk — a provider hint, or one Codly detects (outside the worktree, deletes,
-//!    network, push, sudo, git writes, unparseable shell) — always goes to you;
+//!    network, push, sudo, git writes, unparseable shell) — goes to you, except in full mode
+//!    for an agent that is not read-only, where only touching Codly's own data dir still asks;
 //! 3. Codly's own MCP tools are allowed in every mode;
-//! 4. then the mode: strict asks for everything else; balanced allows read-only actions,
-//!    the task's own verify commands and test runners; autonomous allows anything that stays
-//!    inside the agent's worktree.
+//! 4. then the mode: strict asks for everything else; read-only agents get only reads in
+//!    every other mode; balanced allows read-only actions, the task's own verify commands and
+//!    test runners; autonomous allows anything that stays inside the agent's worktree; full
+//!    allows everything.
 //!
 //! Only `allow_once` is ever chosen automatically, never a session or permanent grant.
 //!
@@ -54,7 +56,8 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
             risks.push(r);
         }
     }
-    if !risks.is_empty() {
+    let full = ctx.mode == ApprovalMode::Full && !ctx.read_only;
+    if !risks.is_empty() && !(full && !risks.iter().any(|r| r == CODLY_DATA)) {
         return ask(format!("risk: {}", risks.join(", ")));
     }
     let allow = |rule: String| {
@@ -91,6 +94,8 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
             Some(_) => allow("autonomous: stays inside the worktree".into()),
             None => ask("autonomous mode needs a worktree to contain the agent".into()),
         },
+        ApprovalMode::Full if risks.is_empty() => allow("full access".into()),
+        ApprovalMode::Full => allow(format!("full access, despite risk: {}", risks.join(", "))),
     }
 }
 
@@ -168,6 +173,9 @@ pub fn detect_risks(subject: &ApprovalSubject, worktree: Option<&Path>) -> Vec<S
             {
                 add("outside worktree");
             }
+            if cwd.as_deref().is_some_and(|c| private_path(c, None, worktree)) {
+                add(CODLY_DATA);
+            }
             for r in command_risks(command, base.as_deref(), worktree, 0) {
                 add(&r);
             }
@@ -176,6 +184,9 @@ pub fn detect_risks(subject: &ApprovalSubject, worktree: Option<&Path>) -> Vec<S
             for p in paths {
                 if worktree.is_some_and(|w| escapes(&resolve(w, p), w)) {
                     add("outside worktree");
+                }
+                if private_path(p, worktree, worktree) {
+                    add(CODLY_DATA);
                 }
                 if p.split('/').any(|s| s == ".git") {
                     add("git internals");
@@ -193,11 +204,12 @@ pub fn detect_risks(subject: &ApprovalSubject, worktree: Option<&Path>) -> Vec<S
             if lname.contains("delete") || lname.contains("remove") {
                 add("deletes files");
             }
-            if let Some(w) = worktree {
-                for p in input_paths(input) {
-                    if escapes(&resolve(w, &p), w) {
-                        add("outside worktree");
-                    }
+            for p in input_paths(input) {
+                if worktree.is_some_and(|w| escapes(&resolve(w, &p), w)) {
+                    add("outside worktree");
+                }
+                if private_path(&p, worktree, worktree) {
+                    add(CODLY_DATA);
                 }
             }
         }
@@ -261,10 +273,38 @@ pub fn protect_dir(dir: &Path) {
     }
 }
 
+/// The risk label for touching one of Codly's private dirs: the one floor full mode keeps.
+pub const CODLY_DATA: &str = "Codly data";
+
 /// Is `p` outside `root`, or inside one of Codly's private dirs that `root` is not inside?
 fn escapes(p: &Path, root: &Path) -> bool {
-    let (p, root) = (lexical(p), lexical(root));
-    !p.starts_with(&root) || PRIVATE_DIRS.read().unwrap_or_else(|e| e.into_inner()).iter().any(|d| p.starts_with(d) && !root.starts_with(d))
+    !lexical(p).starts_with(lexical(root)) || private(p, Some(root))
+}
+
+/// Is `p` inside one of Codly's private dirs, and not inside `root` when `root` (the agent's
+/// own worktree) lives in that dir?
+fn private(p: &Path, root: Option<&Path>) -> bool {
+    let (p, root) = (lexical(p), root.map(lexical));
+    PRIVATE_DIRS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|d| p.starts_with(d) && !root.as_ref().is_some_and(|r| r.starts_with(d) && p.starts_with(r)))
+}
+
+/// `private` for a path as written, relative to `base`, with `~/` and `$HOME/` expanded from
+/// the environment (`resolve` treats them as merely "outside").
+/// ponytail: other `$VAR`s and `~user` stay unknown and pass in full mode; resolve them if an
+/// agent is ever seen reaching the data dir that way.
+fn private_path(v: &str, base: Option<&Path>, root: Option<&Path>) -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let v = ["~/", "$HOME/", "${HOME}/"].iter().find_map(|p| v.strip_prefix(p)).map_or_else(|| v.to_string(), |r| format!("{home}/{r}"));
+    let p = Path::new(&v);
+    match base {
+        _ if p.is_absolute() => private(p, root),
+        Some(b) => private(&b.join(p), root),
+        None => false,
+    }
 }
 
 /// One shell word, with what the shell would do to it that the text alone does not show.
@@ -583,9 +623,13 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
         add("command substitution or shell expansion (cannot be checked)");
     }
     let base = cwd.or(worktree);
+    let codly_data = |w: &Word| path_candidates(&w.text).into_iter().any(|v| private_path(v, base, worktree));
     for w in &p.writes {
         if word_outside(w, base, worktree) {
             add("outside worktree");
+        }
+        if codly_data(w) {
+            add(CODLY_DATA);
         }
     }
     for seg in &p.segments {
@@ -596,6 +640,9 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
             let command_word = k == at || (k < at && classify::is_wrapper(&w.text));
             if if command_word { program_outside(w, base, worktree) } else { word_outside(w, base, worktree) } {
                 add("outside worktree");
+            }
+            if codly_data(w) {
+                add(CODLY_DATA);
             }
         }
         if texts[..at].iter().any(|w| matches!(basename(w), "sudo" | "doas")) {
@@ -1333,6 +1380,53 @@ mod tests {
             assert!(parse(c).complex, "{c}");
             assert!(risks(c).iter().any(|r| r.contains("cannot be checked")), "{c}");
         }
+    }
+
+    #[test]
+    fn full_mode_allows_everything_but_the_floors() {
+        protect_dir(Path::new("/full/data"));
+        let wt = "/full/data/worktrees/repo/p/t1";
+        let approval = |subject| Approval {
+            id: "ap".into(),
+            agent_id: "a".into(),
+            run_id: "r".into(),
+            task_id: None,
+            call_id: None,
+            subject,
+            reason: None,
+            choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny],
+            risks: vec![],
+            status: ApprovalStatus::Pending,
+            decided_by: None,
+            created_at: 0,
+        };
+        let cmd = |c: &str, cwd: &str| approval(ApprovalSubject::Command { command: c.into(), cwd: Some(cwd.into()) });
+        let eval = |a: &Approval, read_only| {
+            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only })
+        };
+        let allowed = |v: Verdict| matches!(v, Verdict::Allow { choice: ApprovalChoice::AllowOnce, .. });
+
+        assert!(allowed(eval(&cmd("git push", wt), false)));
+        assert!(allowed(eval(&cmd("rm -rf build", wt), false)));
+        assert!(allowed(eval(&cmd("ls", "/tmp/elsewhere"), false)), "a cwd outside the worktree");
+
+        let q = approval(ApprovalSubject::Question { questions: serde_json::json!([{ "question": "Which DB?" }]) });
+        assert!(!allowed(eval(&q, false)));
+        let p = approval(ApprovalSubject::Permissions { detail: serde_json::json!({}) });
+        assert!(!allowed(eval(&p, false)));
+        assert!(!allowed(eval(&cmd("npm install", wt), true)), "read-only agents never get writes");
+        assert!(!allowed(eval(&cmd("touch a", wt), true)));
+        assert!(allowed(eval(&cmd("git log -5", wt), true)));
+        let v = eval(&cmd("cat /full/data/runs/r1/claude-mcp.json", wt), false);
+        assert!(matches!(&v, Verdict::Ask { reason } if reason.contains(CODLY_DATA)), "{v:?}");
+        assert!(!allowed(eval(&cmd("cat ../../../../runs/r1/claude-mcp.json", wt), false)));
+        assert!(!allowed(eval(&cmd("cat ../t2/.env", wt), false)), "another task's worktree is Codly data too");
+        assert!(allowed(eval(&cmd("cat src/a.rs", wt), false)));
+        assert!(!allowed(eval(&cmd("ls", "/full/data/runs"), false)));
+
+        let mut a = cmd("git push", wt);
+        a.choices = vec![ApprovalChoice::AllowAlways, ApprovalChoice::Deny];
+        assert!(matches!(eval(&a, false), Verdict::Ask { .. }), "no allow_once offered");
     }
 
     #[test]
