@@ -17,6 +17,7 @@
 pub mod adapters;
 pub mod env;
 pub mod git;
+pub mod housekeeping;
 pub mod index;
 pub mod mcp;
 pub mod memory;

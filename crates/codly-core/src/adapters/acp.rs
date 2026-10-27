@@ -91,10 +91,20 @@ pub fn launch(spec: &SpawnSpec, policy_path: Option<&Path>) -> (Vec<String>, Vec
 /// The codly stdio MCP server in ACP's shape (env as `[{name, value}]`).
 pub fn mcp_servers(spec: &SpawnSpec) -> Value {
     match &spec.mcp {
-        Some(m) => json!([{
-            "name": "codly", "command": m.command, "args": m.args,
-            "env": m.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
-        }]),
+        Some(m) => {
+            let mut servers = vec![json!({
+                "name": "codly", "command": m.command, "args": m.args,
+                "env": m.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
+            })];
+            // The user's default servers (Settings → Connections), as enabled when this run started.
+            for x in crate::housekeeping::connections::load_ready(&spec.raw_log) {
+                servers.push(json!({
+                    "name": x.name, "command": x.command, "args": x.args,
+                    "env": x.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
+                }));
+            }
+            Value::Array(servers)
+        }
         None => json!([]),
     }
 }

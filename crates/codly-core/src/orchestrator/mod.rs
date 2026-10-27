@@ -11,12 +11,14 @@
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
 //! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
+//! - `housekeeping` board archiving sweep, default MCP servers for new agents
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
 pub mod approvals;
 mod gate;
+pub mod housekeeping;
 mod ingest;
 mod lead;
 pub mod names;
@@ -361,6 +363,7 @@ impl Core {
         inner.recover().await;
         tokio::spawn(ingest::run(inner.clone(), events_rx));
         tokio::spawn(plans::scheduler_loop(inner.clone()));
+        tokio::spawn(housekeeping::sweeper(inner.clone()));
         match inner.store.last_workspace() {
             Ok(Some(ws)) => {
                 if let Err(e) = inner.open_workspace(&ws.repo_path).await {

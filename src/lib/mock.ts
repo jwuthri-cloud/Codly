@@ -18,6 +18,7 @@ import type { Snapshot } from './gen/Snapshot';
 import type { TaskStatus } from './gen/TaskStatus';
 import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
+import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
@@ -68,6 +69,7 @@ export class MockTransport implements Transport {
   private story: Story;
   private ptys = new Map<string, FakeShell>();
   private ptySeq = 0;
+  private hk: HousekeepingDemo | undefined;
 
   constructor() {
     const p = params();
@@ -237,6 +239,12 @@ export class MockTransport implements Transport {
         this.ptys.get(String(a.ptyId))?.close();
         this.ptys.delete(String(a.ptyId));
         return null;
+      case 'board_policy':
+      case 'board_sweep':
+      case 'board_archive':
+      case 'list_connections':
+      case 'update_connection':
+        return (this.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

@@ -99,6 +99,11 @@ pub fn run() {
             commands::pty_write,
             commands::pty_resize,
             commands::pty_close,
+            commands::board_policy,
+            commands::board_sweep,
+            commands::board_archive,
+            commands::list_connections,
+            commands::update_connection,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

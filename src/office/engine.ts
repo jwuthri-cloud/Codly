@@ -38,6 +38,7 @@ import { Archive, DeskFrames, DeskScreens, MailRoom, ServerRoom, TaskBoard, Whit
 import { emoteTexture, glowTexture, ringTexture, type EmoteKind } from './gfx/textures';
 import { cellCenter, cellOf, COLS, D, officeLayout, passableFn, ROWS, W, type Desk, type OfficeLayout, type Slot, type StationId } from './layout';
 import { emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type WorldSelection } from './model';
+import { chipFor } from './bubble';
 import { OUTCOME_MS, sentence, type Sentence } from './narrate';
 import { identity, lin, THEMES, type OfficeTheme, type ThemeName } from './palette';
 import { reduce, syncAgents, syncTasks } from './reducer';
@@ -1450,6 +1451,7 @@ export class OfficeEngine {
         color: id.ink,
         badge: a.role === 'lead' ? 'Lead' : a.badge ?? (a.role === 'reviewer' ? 'Review' : a.subagents.size ? `+${a.subagents.size}` : null),
         icon: act.shown?.icon ?? null,
+        chip: s ? null : (chipFor(a)?.text ?? null),
         selected,
         hovered,
         agentId: a.id,

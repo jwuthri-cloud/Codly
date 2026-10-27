@@ -260,3 +260,39 @@ pub async fn pty_close(state: State<'_, AppState>, pty_id: String) -> R<()> {
     state.pty.close(&pty_id);
     Ok(())
 }
+
+// ───────────── housekeeping: board archive, default MCP servers ─────────────
+
+/// The board's archiving thresholds; pass `policy` to change them.
+#[tauri::command]
+pub async fn board_policy(state: State<'_, AppState>, policy: Option<codly_core::housekeeping::archive::ArchivePolicy>) -> R<codly_core::housekeeping::archive::ArchivePolicy> {
+    state.core().await?.board_policy(policy).await.map_err(err)
+}
+
+/// Archive what is due; returns what is flagged and which tasks are archived.
+#[tauri::command]
+pub async fn board_sweep(state: State<'_, AppState>) -> R<codly_core::orchestrator::housekeeping::SweepReport> {
+    state.core().await?.board_sweep().await.map_err(err)
+}
+
+/// Archived tasks matching `query` (all when empty).
+#[tauri::command]
+pub async fn board_archive(state: State<'_, AppState>, query: Option<String>) -> R<Vec<codly_core::housekeeping::archive::ArchivedItem>> {
+    state.core().await?.board_archive(query.as_deref()).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_connections(state: State<'_, AppState>) -> R<Vec<codly_core::housekeeping::connections::Connection>> {
+    state.core().await?.connections().await.map_err(err)
+}
+
+/// Switch a default MCP server and/or store its key (Keychain). Applies to the next spawn.
+#[tauri::command]
+pub async fn update_connection(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: Option<bool>,
+    secret: Option<codly_core::orchestrator::housekeeping::ConnectionSecret>,
+) -> R<Vec<codly_core::housekeeping::connections::Connection>> {
+    state.core().await?.update_connection(&id, enabled, secret).await.map_err(err)
+}

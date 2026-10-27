@@ -7,11 +7,14 @@
   import type { Plan } from '../../lib/gen/Plan';
   import type { Task } from '../../lib/gen/Task';
   import { registerListNav } from '../../lib/state/keys';
+  import { housekeeping as hk } from '../../lib/state/housekeeping.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import TaskRow from '../../home/cards/TaskRow.svelte';
+  import ArchivedList from './ArchivedList.svelte';
+  import BoardBar from './BoardBar.svelte';
 
   interface Props {
     plan: Plan | null;
@@ -19,6 +22,8 @@
   }
   let { plan, tasks }: Props = $props();
 
+  /** The plan's tasks that have not been archived. */
+  const board = $derived(hk.live(tasks));
   type Group = { id: string; title: string; hint: string; tasks: Task[] };
   const waitingAgents = $derived(new Set(store.pendingApprovals.map((a) => a.agent_id)));
   const groupOf = (t: Task): string => {
@@ -34,7 +39,7 @@
   const order = (a: Task, b: Task) => a.key.localeCompare(b.key, undefined, { numeric: true });
   const groups = $derived.by((): Group[] => {
     const by: Record<string, Task[]> = { you: [], now: [], next: [], done: [], cancelled: [] };
-    for (const t of tasks) by[groupOf(t)].push(t);
+    for (const t of board) by[groupOf(t)].push(t);
     const out: Group[] = [
       { id: 'you', title: 'Needs you', hint: 'Waiting for your answer, or stuck', tasks: by.you.sort(order) },
       { id: 'now', title: 'In progress', hint: 'An agent is on it', tasks: by.now.sort(order) },
@@ -44,7 +49,7 @@
     ];
     return out.filter((g) => g.tasks.length);
   });
-  const adhoc = $derived(store.tasks.filter((t) => !t.plan_id).sort((a, b) => b.updated_at - a.updated_at));
+  const adhoc = $derived(hk.live(store.tasks).filter((t) => !t.plan_id).sort((a, b) => b.updated_at - a.updated_at));
   let showAdhoc = $state(false);
 
   const flat = $derived([...groups.flatMap((g) => g.tasks), ...(showAdhoc ? adhoc : [])]);
@@ -60,7 +65,11 @@
 
 <div class="list">
   <div class="col">
-    {#if !tasks.length}
+    <BoardBar />
+    {#if hk.showArchived}
+      <ArchivedList />
+    {:else}
+    {#if !board.length}
       <EmptyState compact title="No plan yet." body="Ask the Lead for something on Home. Its plan lands here as a checklist: who does what, in which order." />
     {/if}
     {#each groups as g (g.id)}
@@ -76,6 +85,7 @@
         </button>
         {#if showAdhoc}<ol>{#each adhoc as t (t.id)}<TaskRow task={t} plan={null} detail />{/each}</ol>{/if}
       </section>
+    {/if}
     {/if}
   </div>
 </div>

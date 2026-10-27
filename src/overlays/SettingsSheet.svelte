@@ -15,6 +15,8 @@
   import { ui } from '../lib/state/ui.svelte';
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
   import AccountsSection from './AccountsSection.svelte';
+  import ConnectionsSection from './ConnectionsSection.svelte';
+  import HousekeepingSection from './HousekeepingSection.svelte';
   import TeamSection from './TeamSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
   import Icon from '../components/Icon.svelte';
@@ -169,6 +171,10 @@
       <TeamSection />
 
       <AccountsSection />
+
+      <ConnectionsSection />
+
+      <HousekeepingSection />
 
       <section>
         <h3 class="eyebrow">Approvals</h3>
