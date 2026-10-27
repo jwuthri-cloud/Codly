@@ -29,6 +29,7 @@ pub mod scope;
 mod team;
 mod tools;
 mod workspace;
+mod memgraph;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

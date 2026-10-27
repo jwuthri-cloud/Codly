@@ -29,6 +29,8 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use crate::index::terms;
 use crate::model::*;
 
+pub mod panel;
+
 /// Which memories a caller may see.
 #[derive(Debug, Clone)]
 pub struct MemoryView<'a> {
