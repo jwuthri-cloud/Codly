@@ -6,6 +6,8 @@
 import type { AccountInfo } from './gen/AccountInfo';
 import type { Agent } from './gen/Agent';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
+import type { BreakerConfig } from './gen/BreakerConfig';
+import type { BreakerStatus } from './gen/BreakerStatus';
 import type { CliInfo } from './gen/CliInfo';
 import type { EventRow } from './gen/EventRow';
 import type { Memory } from './gen/Memory';
@@ -86,6 +88,11 @@ export const api = {
   closeThread: (thread: string) => call<void>('close_thread', { thread }),
   resolveApproval: (approvalId: string, decision: ApprovalDecision) =>
     call<void>('resolve_approval', { approvalId, decision }),
+  /** Circuit breaker (Settings → Autonomy & Budgets): limits, live levels, and a fresh start. */
+  breakerConfig: () => call<BreakerConfig>('breaker_config'),
+  setBreakerConfig: (config: BreakerConfig) => call<BreakerConfig>('set_breaker_config', { config }),
+  breakerStatus: () => call<BreakerStatus>('breaker_status'),
+  resetBreaker: () => call<void>('reset_breaker'),
   interruptAgent: (agentId: string) => call<void>('interrupt_agent', { agentId }),
   stopAgent: (agentId: string) => call<void>('stop_agent', { agentId }),
   hireAgent: (provider: Provider, model: string | null = null, title: string | null = null) => call<Agent>('hire_agent', { provider, model, title }),

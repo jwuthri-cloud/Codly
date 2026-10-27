@@ -8,6 +8,7 @@
 // the public site demo).
 // Also answers `repo_map` (a ~300-file acme/web) and `read_artifact` (the bytes agents produced).
 import { isSiteDemo, type Transport, type UiBatch } from './api';
+import type { BreakerConfig } from './gen/BreakerConfig';
 import type { CliInfo } from './gen/CliInfo';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
@@ -19,6 +20,7 @@ import type { TaskStatus } from './gen/TaskStatus';
 import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 import { REPO_LS } from './demo/repo';
+import { MockBreaker } from './demo/breaker';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { Story } from './demo/story';
@@ -68,6 +70,7 @@ export class MockTransport implements Transport {
   private story: Story;
   private ptys = new Map<string, FakeShell>();
   private ptySeq = 0;
+  private breaker: MockBreaker;
 
   constructor() {
     const p = params();
@@ -83,6 +86,7 @@ export class MockTransport implements Transport {
       { ...SETTINGS, theme },
     );
     this.story = new Story(this.sim);
+    this.breaker = new MockBreaker(this.sim);
     const now = this.sim.now();
     this.sim.clis = CLIS;
     this.sim.recent = [
@@ -169,6 +173,15 @@ export class MockTransport implements Transport {
         story.resolveApproval(String(a.approvalId), d.choice, d.message, d.answers);
         return null;
       }
+      case 'breaker_config':
+        return this.breaker.cfg;
+      case 'set_breaker_config':
+        return this.breaker.set(a.config as BreakerConfig);
+      case 'breaker_status':
+        return this.breaker.status();
+      case 'reset_breaker':
+        this.breaker.reset();
+        return null;
       case 'interrupt_agent':
         story.interrupt(String(a.agentId));
         return null;

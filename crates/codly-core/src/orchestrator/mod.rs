@@ -12,10 +12,14 @@
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
 //! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
+//! - `breaker_run` circuit breaker enforcement (policy in `breaker`): steer, constrain, stop
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
 pub mod approvals;
+pub mod breaker;
+mod breaker_run;
+pub use breaker_run::{AgentBreaker, BreakerStatus};
 mod gate;
 mod ingest;
 mod lead;
@@ -188,6 +192,8 @@ struct Inner {
     artifacts_seen: Mutex<HashSet<String>>,
     /// Model names per CLI (`env::list_models`), for the Lead's consultant choices.
     models: Mutex<HashMap<Provider, Vec<String>>>,
+    /// Circuit breaker: its settings and the per-agent signals.
+    breaker: Mutex<breaker_run::Runtime>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -320,6 +326,7 @@ impl Core {
         // Fixed CLIs (tests) are not probed: every account takes its CLI's state.
         let accounts = accounts::detect(&base_env, &clis, &settings.accounts, !fixed_clis, None).await.unwrap_or_default();
         let quota = accounts::stored_limits(&store);
+        let breaker = Mutex::new(breaker_run::Runtime::load(&store));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (bus, _) = broadcast::channel(4096);
         let inner = Arc::new(Inner {
@@ -355,12 +362,14 @@ impl Core {
             quota: Mutex::new(quota),
             artifacts_seen: Mutex::new(HashSet::new()),
             models: Mutex::new(HashMap::new()),
+            breaker,
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);
         inner.recover().await;
         tokio::spawn(ingest::run(inner.clone(), events_rx));
         tokio::spawn(plans::scheduler_loop(inner.clone()));
+        tokio::spawn(breaker_run::beat_loop(inner.clone()));
         match inner.store.last_workspace() {
             Ok(Some(ws)) => {
                 if let Err(e) = inner.open_workspace(&ws.repo_path).await {

@@ -7,6 +7,8 @@ use std::sync::atomic::Ordering;
 
 use codly_core::Core;
 use codly_core::model::*;
+use codly_core::orchestrator::breaker::BreakerConfig;
+use codly_core::orchestrator::BreakerStatus;
 use codly_core::pty::PtyManager;
 use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -259,4 +261,26 @@ pub async fn pty_resize(state: State<'_, AppState>, pty_id: String, cols: u16, r
 pub async fn pty_close(state: State<'_, AppState>, pty_id: String) -> R<()> {
     state.pty.close(&pty_id);
     Ok(())
+}
+
+// ── circuit breaker (Settings → Autonomy & Budgets) ──
+
+#[tauri::command]
+pub async fn breaker_config(state: State<'_, AppState>) -> R<BreakerConfig> {
+    state.core().await?.breaker_config().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_breaker_config(state: State<'_, AppState>, config: BreakerConfig) -> R<BreakerConfig> {
+    state.core().await?.set_breaker_config(config).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn breaker_status(state: State<'_, AppState>) -> R<BreakerStatus> {
+    state.core().await?.breaker_status().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn reset_breaker(state: State<'_, AppState>) -> R<()> {
+    state.core().await?.reset_breaker().await.map_err(err)
 }
