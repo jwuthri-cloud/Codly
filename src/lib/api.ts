@@ -7,6 +7,7 @@ import type { AccountInfo } from './gen/AccountInfo';
 import type { Agent } from './gen/Agent';
 import type { DictationStatus } from './gen/DictationStatus';
 import type { AgentGit } from './gen/AgentGit';
+import type { Blocker } from './gen/Blocker';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { BreakerConfig } from './gen/BreakerConfig';
 import type { BreakerStatus } from './gen/BreakerStatus';
@@ -183,6 +184,11 @@ export const api = {
   ideSearch: (agentId: string, query: string) => call<IdeSearch>('ide_search', { agentId, query }),
   ideChanges: (agentId: string) => call<IdeChange[]>('ide_changes', { agentId }),
   ideDiff: (agentId: string, path: string) => call<string>('ide_diff', { agentId, path }),
+  /** "Ask me" cards (codly_ask_user) of the open repo; long-waiting ones come back flagged. */
+  listBlockers: () => call<Blocker[]>('list_blockers'),
+  /** Respond & unblock: answer a card and resume the agent that waits for it. */
+  answerBlocker: (blockerId: string, answer: string) => call<Blocker>('answer_blocker', { blockerId, answer }),
+  dismissBlocker: (blockerId: string) => call<Blocker>('dismiss_blocker', { blockerId }),
   /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
   pickFolder: async (): Promise<string | null> => {
     if (!isTauriApp()) return window.prompt('Repository path') || null;

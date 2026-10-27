@@ -987,6 +987,9 @@ pub enum EventKind {
     /// An agent's live controls changed (block tools, stop after this step, held notes).
     ControlChanged {
         control: ControlState,
+    /// An "ask me" blocker was raised, answered, dismissed or reminded (codly_ask_user).
+    BlockerChanged {
+        blocker: crate::blockers::Blocker,
     },
 }
 
@@ -1038,6 +1041,7 @@ impl EventKind {
             EventKind::Merged { .. } => "merged",
             EventKind::ArtifactAdded { .. } => "artifact_added",
             EventKind::ControlChanged { .. } => "control_changed",
+            EventKind::BlockerChanged { .. } => "blocker_changed",
         }
     }
 }

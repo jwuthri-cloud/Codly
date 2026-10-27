@@ -11,6 +11,7 @@ fn main() {
         "pty_resize", "pty_close",
         "dictation_status", "dictation_configure", "dictation_save_key", "dictation_clear_key", "dictation_transcribe",
         "exact_search", "message_graph", "memory_file", "save_memory_file",
+        "list_blockers", "answer_blocker", "dismiss_blocker",
     ])))
     .expect("tauri-build failed");
 }

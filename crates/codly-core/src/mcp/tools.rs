@@ -23,6 +23,7 @@ pub const SUBMIT_REVIEW: &str = "codly_submit_review";
 pub const MESSAGE_MEMBER: &str = "codly_message_member";
 pub const QUICK_TASK: &str = "codly_quick_task";
 pub const REASSIGN: &str = "codly_reassign";
+pub const ASK_USER: &str = "codly_ask_user";
 
 fn tool(name: &str, description: &str, schema: Value) -> Value {
     json!({ "name": name, "description": description, "inputSchema": schema })
@@ -240,7 +241,28 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
         )),
         Role::Solo => {}
     }
+    if matches!(role, Role::Lead | Role::Worker) {
+        tools.push(ask_user_spec());
+    }
     tools
+}
+
+/// `codly_ask_user`: raise an "ask me" card for the human (Lead and workers).
+fn ask_user_spec() -> Value {
+    tool(
+        ASK_USER,
+        "Ask the human a decision only they can make: a product choice, a credential or account you cannot get, a \
+         trade-off with a cost. Write it for a busy person who has not followed your work: say what you need, why, and \
+         what each answer changes. severity \"blocking\" (default) pauses your task until they reply: after calling it, \
+         stop working on that and end your turn; the answer arrives as a later message. severity \"heads_up\" is for \
+         something they should know that needs no action today: you carry on. Do not use it for questions the Lead or \
+         the code can answer, nor for permission to run commands.",
+        json!({ "type": "object", "properties": {
+            "title": { "type": "string", "description": "One line, e.g. \"Which payment provider?\"" },
+            "question": { "type": "string", "description": "The explanation in plain language, and the options if there are any." },
+            "severity": { "type": "string", "enum": ["blocking", "heads_up"] }
+        }, "required": ["title", "question"], "additionalProperties": false }),
+    )
 }
 
 #[cfg(test)]

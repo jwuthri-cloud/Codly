@@ -23,6 +23,7 @@ pub mod breaker;
 mod breaker_run;
 pub use breaker_run::{AgentBreaker, BreakerStatus};
 mod controls;
+mod ask_me;
 mod gate;
 mod ide;
 mod ingest;

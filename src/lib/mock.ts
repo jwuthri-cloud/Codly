@@ -20,6 +20,7 @@ import type { TaskStatus } from './gen/TaskStatus';
 import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 import { mockAgentGit } from './demo/agentgit';
+import { MockAskMe } from './demo/askme';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
 import { repoMap } from './demo/repomap';
@@ -86,6 +87,7 @@ export class MockTransport implements Transport {
   private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
   private triggers: TriggersConfig | null = null;
   private breaker: MockBreaker;
+  private askMe!: MockAskMe;
 
   constructor() {
     const p = params();
@@ -103,6 +105,7 @@ export class MockTransport implements Transport {
     this.story = new Story(this.sim);
     this.breaker = new MockBreaker(this.sim);
     this.ctl = new MockControls(this.sim);
+    this.askMe = new MockAskMe(this.sim);
     const now = this.sim.now();
     this.sim.clis = CLIS;
     this.sim.recent = [
@@ -324,6 +327,12 @@ export class MockTransport implements Transport {
       case 'ide_changes':
       case 'ide_diff':
         return mockIde(cmd, a);
+      case 'list_blockers':
+        return this.askMe.list();
+      case 'answer_blocker':
+        return this.askMe.close(String(a.blockerId), 'answered', String(a.answer ?? ''));
+      case 'dismiss_blocker':
+        return this.askMe.close(String(a.blockerId), 'dismissed', null);
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }

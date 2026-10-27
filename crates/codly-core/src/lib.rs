@@ -20,6 +20,7 @@
 
 pub mod adapters;
 pub mod dictation;
+pub mod blockers;
 pub mod env;
 pub mod git;
 pub mod ide;

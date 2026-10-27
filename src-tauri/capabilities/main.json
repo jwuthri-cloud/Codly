@@ -21,6 +21,7 @@
     "allow-get-events", "allow-search-code", "allow-list-memories", "allow-add-memory", "allow-delete-memory",
     "allow-list-triples", "allow-repo-map", "allow-read-artifact", "allow-keep-plan", "allow-pin-memory", "allow-pty-open", "allow-pty-attach", "allow-pty-write", "allow-pty-resize", "allow-pty-close",
     "allow-dictation-status", "allow-dictation-configure", "allow-dictation-save-key", "allow-dictation-clear-key", "allow-dictation-transcribe",
-    "allow-exact-search", "allow-message-graph", "allow-memory-file", "allow-save-memory-file"
+    "allow-exact-search", "allow-message-graph", "allow-memory-file", "allow-save-memory-file",
+    "allow-list-blockers", "allow-answer-blocker", "allow-dismiss-blocker"
   ]
 }
