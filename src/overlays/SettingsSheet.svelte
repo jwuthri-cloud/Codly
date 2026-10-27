@@ -18,6 +18,8 @@
   import TeamSection from './TeamSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
   import Icon from '../components/Icon.svelte';
+  import FullAccessConfirm from '../onboarding/FullAccessConfirm.svelte';
+  import { quest } from '../onboarding/quest.svelte';
 
   const s = $derived(store.settings);
   const installed = $derived(store.clis.filter((c) => c.path));
@@ -82,7 +84,13 @@
     { id: 'balanced', title: 'Balanced', body: 'Codly’s rules settle the obvious cases; anything risky (rm -rf, git push, outside the worktree, network installs) asks you.' },
     { id: 'strict', title: 'Strict', body: 'Every command and edit the CLI would ask about comes to you.' },
     { id: 'autonomous', title: 'Autonomous', body: 'Anything that stays inside the agent’s worktree is allowed. Risky commands still ask.' },
+    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, Codly’s private data and read-only agents still ask.' },
   ];
+  let confirmFull = $state(false);
+  function pickMode(m: ApprovalMode) {
+    confirmFull = m === 'full' && s.approval_mode !== 'full';
+    if (!confirmFull) set({ approval_mode: m });
+  }
 
   let sheet: HTMLDivElement | undefined = $state();
   function key(e: KeyboardEvent) {
@@ -174,11 +182,20 @@
         <h3 class="eyebrow">Approvals</h3>
         <div class="modes">
           {#each MODES as m (m.id)}
-            <button class="mode" class:on={s.approval_mode === m.id} onclick={() => set({ approval_mode: m.id })} aria-pressed={s.approval_mode === m.id}>
+            <button class="mode" class:on={s.approval_mode === m.id} onclick={() => pickMode(m.id)} aria-pressed={s.approval_mode === m.id}>
               <span class="m-title"><span class="radio"></span>{m.title}</span>
               <span class="desc">{m.body}</span>
             </button>
           {/each}
+        </div>
+        {#if confirmFull}<FullAccessConfirm onconfirm={() => ((confirmFull = false), set({ approval_mode: 'full' }))} oncancel={() => (confirmFull = false)} />{/if}
+      </section>
+
+      <section>
+        <h3 class="eyebrow">Onboarding</h3>
+        <div class="row">
+          <div class="r-text"><span class="r-title">Quest line</span><span class="desc">Start the first-run quests over: crew, rules, folder access, your first request and ship.</span></div>
+          <button class="btn sm" onclick={() => (quest.replay(), (ui.settingsOpen = false))}>Replay onboarding</button>
         </div>
       </section>
 
