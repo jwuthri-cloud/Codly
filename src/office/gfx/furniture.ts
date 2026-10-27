@@ -453,6 +453,64 @@ export function sofa(b: Builder, leather = false) {
   for (const sx of [-W / 2 + 0.12, W / 2 - 0.12]) for (const sz of [-0.33, 0.33]) b.cyl(sx, 0, sz, 0.03, 0.06, c(MAT.walnutDark), 6);
 }
 
+// ───────────── games corner ─────────────
+
+/** A low TV cabinet with a console on top; the screen goes into `screen` (an unlit mesh). */
+export function tvStand(b: Builder, screen: Builder) {
+  const wood = c(MAT.walnut);
+  b.box(0, 0.22, 0, 1.6, 0.4, 0.42, wood);
+  b.box(0, 0.43, 0, 1.64, 0.03, 0.44, c(MAT.walnutDark));
+  for (const sx of [-0.4, 0.4]) b.box(sx, 0.22, 0.212, 0.74, 0.32, 0.012, mix(wood, [1, 1, 1], 0.08));
+  for (const sx of [-0.4, 0.4]) b.cyl(sx, 0, 0, 0.03, 0.04, c(MAT.walnutDark), 6);
+  // The console: a white tower with a black core, and a pad beside it.
+  b.box(0.6, 0.57, 0.02, 0.09, 0.26, 0.24, c('#f1f1f4'));
+  b.box(0.6, 0.57, 0.02, 0.1, 0.22, 0.1, c('#1f2026'));
+  b.box(0.42, 0.455, 0.1, 0.14, 0.025, 0.07, c('#26272c'));
+  // The TV on a little foot.
+  b.box(0, 0.46, -0.05, 0.36, 0.03, 0.2, c('#1f2026'));
+  b.box(0, 0.58, -0.08, 0.05, 0.22, 0.03, c('#1f2026'));
+  b.box(0, 1.0, -0.08, 1.3, 0.74, 0.05, c('#16171b'));
+  screen.box(0, 1.0, -0.05, 1.22, 0.66, 0.01, c('#4b8bf5'));
+  screen.box(-0.2, 0.92, -0.044, 0.5, 0.3, 0.004, c('#f2c14e'));
+  screen.box(0.32, 1.12, -0.044, 0.28, 0.18, 0.004, c('#5ee08f'));
+}
+
+/** Foosball: the rods run along x with handles at both ends, goals at ±z. */
+export function foosball(b: Builder) {
+  const wood = c(MAT.oakDark);
+  for (const sx of [-0.42, 0.42]) for (const sz of [-0.24, 0.24]) b.box(sx, 0.26, sz, 0.07, 0.52, 0.07, c(MAT.charcoal));
+  b.box(0, 0.64, 0, 0.96, 0.24, 0.62, wood);
+  b.box(0, 0.765, 0, 0.88, 0.01, 0.54, c('#3f9a5a'));
+  b.box(0, 0.772, 0, 0.88, 0.004, 0.02, c('#e8efe4'));
+  for (const sz of [-0.31, 0.31]) b.box(0, 0.68, sz, 0.22, 0.12, 0.02, c('#1f2026'));
+  const men = [c('#d64b3b'), c('#2f6fd6')];
+  [-0.2, -0.07, 0.07, 0.2].forEach((z, i) => {
+    b.box(0, 0.84, z, 1.2, 0.018, 0.018, c(MAT.metal));
+    for (const sx of [-0.6, 0.6]) b.box(sx, 0.84, z, 0.08, 0.035, 0.035, c('#26272c'));
+    for (const x of [-0.24, 0, 0.24]) b.box(x, 0.8, z, 0.04, 0.1, 0.04, men[i % 2]);
+  });
+}
+
+/** A pool table: walnut body, green felt, six pockets and a few balls. */
+export function poolTable(b: Builder) {
+  const wood = c(MAT.walnut);
+  for (const sx of [-0.85, 0.85]) for (const sz of [-0.42, 0.42]) b.box(sx, 0.28, sz, 0.12, 0.56, 0.12, c(MAT.walnutDark));
+  b.box(0, 0.62, 0, 2.0, 0.16, 1.1, wood);
+  b.box(0, 0.705, 0, 1.8, 0.01, 0.9, c('#2f8a57'));
+  for (const sz of [-0.5, 0.5]) b.box(0, 0.72, sz, 2.0, 0.05, 0.1, mix(wood, [0, 0, 0], 0.15));
+  for (const sx of [-0.95, 0.95]) b.box(sx, 0.72, 0, 0.1, 0.05, 1.1, mix(wood, [0, 0, 0], 0.15));
+  for (const sx of [-0.9, 0, 0.9]) for (const sz of [-0.45, 0.45]) b.cyl(sx, 0.705, sz, 0.05, 0.02, c('#141414'), 10);
+  for (const [x, z, col] of [
+    [-0.5, 0, '#f4efe3'],
+    [0.45, 0, '#f2c14e'],
+    [0.53, -0.05, '#d64b3b'],
+    [0.53, 0.05, '#2f6fd6'],
+    [0.61, 0, '#1f2026'],
+    [0.2, 0.25, '#8f4bd6'],
+  ] as const)
+    b.ball(x, 0.735, z, 0.03, 0.03, 0.03, c(col), 8, 6);
+}
+
 // ───────────── greenery & misc ─────────────
 
 export function plant(b: Builder, variant: number, seed: number) {

@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EventKind } from '../../lib/gen/EventKind';
 import type { EventRow } from '../../lib/gen/EventRow';
-import { ACT_MS, CHEER_MS, deriveIntent, Dwell, DWELL_MS, Errands, intentKey, LONG_IDLE_MS, placeKey, THINK_HOLD_MS, type Intent } from '../behavior';
+import { ACT_MS, CHEER_MS, deriveIntent, Dwell, DWELL_MS, Errands, intentKey, LONG_IDLE_MS, placeKey, PLAY_AFTER_MS, THINK_HOLD_MS, type Intent } from '../behavior';
 import { AGENTS, TASKS } from '../demo/script';
 import type { Fx, OfficeModel } from '../model';
 import { sentence } from '../narrate';
@@ -147,9 +147,61 @@ describe('events → behaviour', () => {
     const m2 = fresh();
     reduce(m2, row(0, 'a-ada', { type: 'status_changed', status: 'idle' }), live);
     const before = intent(m2, LONG_IDLE_MS - 1);
-    expect(before.intent.pose).toBe('sit');
+    expect(before.intent.place).toEqual({ kind: 'station', id: expect.stringMatching(/^games\./) });
     expect(before.nextAt).toBe(T0 + LONG_IDLE_MS);
     expect(intent(m2, LONG_IDLE_MS + 1).intent).toMatchObject({ pose: 'sleep', emote: 'zz' });
+  });
+
+  it('idle workers play a game after a minute (always the same one), sleep at the desk after 10; Leads never play', () => {
+    const m = fresh();
+    reduce(m, row(0, 'a-ada', { type: 'status_changed', status: 'idle' }), live);
+    const before = intent(m, PLAY_AFTER_MS - 1);
+    expect([placeKey(before.intent.place), before.intent.pose]).toEqual(['desk', 'sit']);
+    expect(before.nextAt).toBe(T0 + PLAY_AFTER_MS);
+    const play = intent(m, PLAY_AFTER_MS);
+    const key = placeKey(play.intent.place);
+    expect(['st:games.console', 'st:games.foosball', 'st:games.pool']).toContain(key);
+    expect(['gamepad', 'play']).toContain(play.intent.pose);
+    expect([play.intent.icon, play.intent.screen]).toEqual(['idle', 'off']);
+    expect(play.nextAt).toBe(T0 + LONG_IDLE_MS);
+    for (const t of [PLAY_AFTER_MS + 5000, LONG_IDLE_MS / 2, LONG_IDLE_MS - 1]) expect(placeKey(intent(m, t).intent.place)).toBe(key);
+    const sleep = intent(m, LONG_IDLE_MS).intent;
+    expect([placeKey(sleep.place), sleep.pose, sleep.emote]).toEqual(['desk', 'sleep', 'zz']);
+    // Each game is somebody's.
+    const games = new Set<string>();
+    for (const a of m.agents.values()) {
+      if (a.role === 'lead') continue;
+      a.status = 'idle';
+      a.lastEventAt = T0;
+      games.add(placeKey(deriveIntent(a, m, T0 + PLAY_AFTER_MS, null).intent.place));
+    }
+    expect(games.size).toBeGreaterThan(1);
+    const lead = m.agents.get('a-mira')!;
+    expect(lead.role).toBe('lead');
+    lead.status = 'idle';
+    lead.lastEventAt = T0;
+    for (const t of [PLAY_AFTER_MS, LONG_IDLE_MS - 1]) expect(placeKey(deriveIntent(lead, m, T0 + t, null).intent.place)).toBe('desk');
+  });
+
+  it('a tool call or an approval brings a player straight back to the desk', () => {
+    const m = fresh();
+    reduce(m, row(0, 'a-ada', { type: 'status_changed', status: 'idle' }), live);
+    expect(placeKey(intent(m, PLAY_AFTER_MS + 10).intent.place)).toMatch(/^st:games\./);
+    reduce(m, row(PLAY_AFTER_MS + 20, 'a-ada', started('c1', 'edit', { path: 'a.ts' })), live);
+    expect([placeKey(intent(m, PLAY_AFTER_MS + 30).intent.place), intent(m, PLAY_AFTER_MS + 30).intent.pose]).toEqual(['desk', 'type']);
+
+    const m2 = fresh();
+    reduce(m2, row(0, 'a-ada', { type: 'status_changed', status: 'idle' }), live);
+    expect(placeKey(intent(m2, PLAY_AFTER_MS + 10).intent.place)).toMatch(/^st:games\./);
+    reduce(
+      m2,
+      row(PLAY_AFTER_MS + 20, 'a-ada', {
+        type: 'approval_requested',
+        approval: { id: 'ap', agent_id: 'a-ada', run_id: 'r', task_id: null, call_id: 'c1', subject: { kind: 'command', command: 'ls', cwd: null }, reason: null, choices: ['allow_once', 'deny'], risks: [], status: 'pending', decided_by: null, created_at: 0 },
+      }),
+      live,
+    );
+    expect(intent(m2, PLAY_AFTER_MS + 30).intent.place).toEqual({ kind: 'desk', stand: true });
   });
 
   it('a short think between two calls holds the last pose (no flicker); a long one shows the thought cloud', () => {

@@ -694,7 +694,7 @@ export class OfficeEngine {
     c.setProp(this.board.heldBy(a.id) ? null : shown.prop);
     // Pose on arrival (and right away when already there).
     if (!c.walking && c.destKey === res.key && !c.arrivedKey) {
-      const sit = res.slot.pose === 'sit' && (shown.pose === 'sit' || shown.pose === 'type' || shown.pose === 'read' || shown.pose === 'think' || shown.pose === 'phone' || shown.pose === 'sleep' || shown.pose === 'slump' || shown.pose === 'review');
+      const sit = res.slot.pose === 'sit' && (shown.pose === 'sit' || shown.pose === 'type' || shown.pose === 'read' || shown.pose === 'think' || shown.pose === 'phone' || shown.pose === 'sleep' || shown.pose === 'slump' || shown.pose === 'review' || shown.pose === 'gamepad');
       c.setPose(shown.pose === 'stand' && res.slot.pose === 'sit' ? 'sit' : shown.pose, now, sit || res.slot.pose === 'sit' ? (res.slot.seat ?? 0.33) : undefined);
     }
   }

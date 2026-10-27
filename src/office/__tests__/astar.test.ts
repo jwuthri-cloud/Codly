@@ -72,6 +72,16 @@ describe('the office floor plan', () => {
     }
   });
 
+  it('the games corner: console, foosball and pool slots are all reachable from the door', () => {
+    for (const id of ['games.console', 'games.foosball', 'games.pool'] as const) {
+      expect(L.stations[id].slots).toHaveLength(2);
+      for (const s of L.stations[id].slots) {
+        const [gx, gz] = cellOf(s.x, s.z);
+        expect(aStar(COLS, ROWS, door[0], door[1], gx, gz, pass), `${id} ${s.x},${s.z}`).not.toBeNull();
+      }
+    }
+  });
+
   it('has one desk per Lead in the corner office and stable pods for everyone else', () => {
     expect(L.desks.filter((d) => d.lead)).toHaveLength(3);
     expect(L.desks.filter((d) => !d.lead).length).toBeGreaterThanOrEqual(16);

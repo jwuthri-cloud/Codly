@@ -17,6 +17,8 @@
 //   16.5 ├─────open──┬──door──┬────(open)────────┼──────────┤
 //        │ LOUNGE    │ MAIL   │  LOBBY           │ ARCHIVE  │
 //        │ kitchen   │ outbox │       ▼ entrance │ cabinets │
+//        │ foosball  │        │                  │          │
+//        │ TV ▸ sofa │        │ pool    (door)   │          │
 //   24   └───────────┴────────┴───────door───────┴──────────┘
 
 export const W = 28;
@@ -105,7 +107,10 @@ export type ItemType =
   | 'sideTable'
   | 'door'
   | 'poster'
-  | 'credenza';
+  | 'credenza'
+  | 'tvStand'
+  | 'foosball'
+  | 'poolTable';
 
 export interface Item {
   type: ItemType;
@@ -145,6 +150,9 @@ export type StationId =
   | 'archive'
   | 'lead.visit'
   | 'kitchen'
+  | 'games.console'
+  | 'games.foosball'
+  | 'games.pool'
   | 'door';
 
 export interface Station {
@@ -399,17 +407,20 @@ function build(): OfficeLayout {
   put('counter', 'lounge', 0.4, 20.2, RIGHT, 4.4, 0.7, true);
   put('fridge', 'lounge', 0.45, 23.2, RIGHT, 0.8, 0.75, true);
   put('coffee', 'lounge', 0.35, 18.6, RIGHT, 0.4, 0.4, false);
-  put('roundTable', 'lounge', 3.6, 20.4, 0, 1.1, 1.1, true);
+  put('roundTable', 'lounge', 2.9, 18.4, 0, 1.1, 1.1, true);
   for (const [dx, dz] of [
     [-0.85, 0],
     [0.85, 0],
     [0, -0.85],
     [0, 0.85],
   ])
-    put('stool', 'lounge', 3.6 + dx, 20.4 + dz, 0, 0.35, 0.35, false);
+    put('stool', 'lounge', 2.9 + dx, 18.4 + dz, 0, 0.35, 0.35, false);
+  // Games corner: the TV faces the sofa; foosball by the studio door (the pool table is in the lobby).
   put('sofa', 'lounge', 6.3, 21.4, LEFT, 2.2, 0.9, true);
-  put('rug', 'lounge', 5.2, 21.4, 0, 2.2, 2.6, false, 2);
-  put('tallPlant', 'lounge', 7.4, 17.2, 0, 0.5, 0.5, true, 0);
+  put('tvStand', 'lounge', 3.2, 21.4, RIGHT, 1.6, 0.45, true);
+  put('rug', 'lounge', 4.75, 21.4, 0, 3.0, 2.6, false, 2);
+  put('foosball', 'lounge', 6.7, 18.7, 0, 1.2, 0.7, true);
+  put('tallPlant', 'lounge', 0.55, 17.0, 0, 0.5, 0.5, true, 0);
   put('floorLamp', 'lounge', 7.45, 23.3, 0, 0.35, 0.35, true);
 
   // ── mail room ──
@@ -429,6 +440,7 @@ function build(): OfficeLayout {
   put('sideTable', 'lobby', 16.2, 19.1, 0, 0.5, 0.5, true);
   put('floorLamp', 'lobby', 14.1, 18.4, 0, 0.35, 0.35, true);
   put('plant', 'lobby', 20.9, 17.1, 0, 0.45, 0.45, true, 0);
+  put('poolTable', 'lobby', 15.6, 22.4, 0, 2.0, 1.1, true);
   put('door', 'lobby', DOOR_X, D, DOWN, 1.5, 0.1, false);
 
   // ── archive ──
@@ -465,7 +477,10 @@ function build(): OfficeLayout {
       room: 'lead',
       slots: leadDesks.flatMap((d) => [slot(d.x - 0.45, d.z + 1.25, UP), slot(d.x + 0.45, d.z + 1.25, UP)]),
     },
-    kitchen: { id: 'kitchen', room: 'lounge', slots: [slot(1.0, 18.6, LEFT), slot(6.15, 20.9, LEFT, 'sit', 0.38), slot(6.15, 21.9, LEFT, 'sit', 0.38)] },
+    kitchen: { id: 'kitchen', room: 'lounge', slots: [slot(1.0, 18.6, LEFT), slot(1.15, 21.0, LEFT)] },
+    'games.console': { id: 'games.console', room: 'lounge', slots: [slot(6.15, 20.9, LEFT, 'sit', 0.38), slot(6.15, 21.9, LEFT, 'sit', 0.38)] },
+    'games.foosball': { id: 'games.foosball', room: 'lounge', slots: [slot(5.85, 18.7, RIGHT), slot(7.55, 18.7, LEFT)] },
+    'games.pool': { id: 'games.pool', room: 'lobby', slots: [slot(15.1, 21.25, DOWN), slot(16.1, 23.5, UP)] },
     door: { id: 'door', room: 'lobby', slots: [slot(DOOR_X, 23.55, UP)] },
   };
 
