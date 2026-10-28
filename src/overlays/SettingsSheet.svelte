@@ -26,7 +26,6 @@
   import BillingBadge from '../components/BillingBadge.svelte';
   import Icon from '../components/Icon.svelte';
   import FullAccessConfirm from '../onboarding/FullAccessConfirm.svelte';
-  import { quest } from '../onboarding/quest.svelte';
 
   const s = $derived(store.settings);
   const installed = $derived(store.clis.filter((c) => c.path));
@@ -263,14 +262,6 @@
           {/each}
         </div>
         {#if confirmFull}<FullAccessConfirm onconfirm={() => ((confirmFull = false), set({ approval_mode: 'full' }))} oncancel={() => (confirmFull = false)} />{/if}
-      </section>
-
-      <section>
-        <h3 class="eyebrow">Onboarding</h3>
-        <div class="row">
-          <div class="r-text"><span class="r-title">Quest line</span><span class="desc">Start the first-run quests over: crew, rules, folder access, your first request and ship.</span></div>
-          <button class="btn sm" onclick={() => (quest.replay(), (ui.settingsOpen = false))}>Replay onboarding</button>
-        </div>
       </section>
 
       <section>

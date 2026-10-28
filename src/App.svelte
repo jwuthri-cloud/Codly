@@ -14,9 +14,6 @@
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
   import DragGhost from './components/DragGhost.svelte';
-  import QuestFlow from './onboarding/QuestFlow.svelte';
-  import Celebration from './onboarding/Celebration.svelte';
-  import { quest } from './onboarding/quest.svelte';
   import { store, installVisibility } from './lib/state/store.svelte';
   import { ui } from './lib/state/ui.svelte';
   import { installKeys } from './lib/state/keys';
@@ -48,26 +45,17 @@
     void [ui.room, ui.mode, ui.focus, ui.railOpen, ui.onboarded, ui.quest, ui.questSound, ui.sections, ui.planLens, ui.changesLens, ui.knowledgeLens, ui.timelineZoom, ui.pinned, ui.keptPlans];
     ui.persist();
   });
-
-  // Onboarding quests complete from live state, whichever screen is up.
-  $effect(() => {
-    void quest.done;
-    if (store.ready) quest.sync();
-  });
 </script>
 
 {#if !store.ready}
   <div class="boot" data-tauri-drag-region></div>
 {:else if store.workspace}
   <Shell {theme} />
-{:else if quest.showFlow}
-  <QuestFlow />
 {:else if ui.onboarded}
   <Welcome />
 {:else}
   <Onboarding />
 {/if}
-<Celebration />
 {#if ui.onboardingOpen && (store.workspace || ui.onboarded)}<Onboarding />{/if}
 
 {#if ui.paletteOpen}<Palette />{/if}

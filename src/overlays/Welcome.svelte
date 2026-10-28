@@ -20,7 +20,6 @@
   import Logo from '../components/Logo.svelte';
   import Portrait from '../components/Portrait.svelte';
   import StateMark from '../components/StateMark.svelte';
-  import { quest } from '../onboarding/quest.svelte';
 
   let recent = $state<RecentWorkspace[]>([]);
   let detecting = $state(false);
@@ -118,7 +117,7 @@
     <footer class="foot">
       <span><Kbd keys="⌘K" /> search</span>
       <span><Kbd keys="?" /> shortcuts</span>
-      <button class="btn ghost sm" onclick={() => quest.replay()}><Icon name="sparkle" size={13} />Replay onboarding</button>
+      <button class="btn ghost sm" onclick={() => (ui.onboardingOpen = true)}><Icon name="sparkle" size={13} />Replay onboarding</button>
       <button class="btn ghost sm" onclick={() => (ui.settingsOpen = true)}><Icon name="settings" size={13} />Settings</button>
     </footer>
   </div>

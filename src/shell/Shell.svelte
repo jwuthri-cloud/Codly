@@ -17,8 +17,6 @@
   import OfficeLayer from './OfficeLayer.svelte';
   import Rail from './Rail.svelte';
   import TopBar from './TopBar.svelte';
-  import QuestTracker from '../onboarding/QuestTracker.svelte';
-  import { quest } from '../onboarding/quest.svelte';
 
   interface Props {
     theme: 'dark' | 'light';
@@ -67,7 +65,6 @@
     </main>
   </div>
   <Sheet />
-  {#if quest.showTracker}<QuestTracker />{/if}
 </div>
 
 <style>

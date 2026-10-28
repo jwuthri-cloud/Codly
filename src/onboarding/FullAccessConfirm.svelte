@@ -1,10 +1,25 @@
 <!--
-  The warning Full access shows before it can be turned on (onboarding and Settings): what it lets
+  The warning Full access shows before it can be turned on (Settings): what it lets
   through, what still asks, and an explicit confirm.
 -->
+<script lang="ts" module>
+  /** What Full access lets through, and what still asks: shown before it can be turned on. */
+  export const FULL_ACCESS = {
+    allows: [
+      'Any command or edit a worker asks about, including risky ones: rm -rf, git push, network installs, files outside its worktree.',
+      'Approved once per request, automatically: nothing waits for you.',
+    ],
+    stillAsks: [
+      'Questions an agent asks you',
+      'Changes to an agent’s permissions',
+      'Anything touching Codly’s private data',
+      'Read-only agents: the Lead and reviewers',
+    ],
+  };
+</script>
+
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { FULL_ACCESS } from '../lib/onboarding';
   import Icon from '../components/Icon.svelte';
 
   interface Props {
