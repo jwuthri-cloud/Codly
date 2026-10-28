@@ -140,8 +140,6 @@ export class OfficeEngine {
   private whiteboard: Whiteboard;
   private server: ServerRoom;
   private games: GamesCorner;
-  /** The window has focus: the office is "live" (continuous motion at a frame budget). */
-  private focused = typeof document === 'undefined' || document.hasFocus();
   private gazeBufs = new Map<string, Vector3>();
   private breakRoom = new BreakRoom({ prefer: leisure.prefer });
   /** The Sims' plumbob over the selected agent, coloured by its state (sims.ts). */
@@ -673,7 +671,7 @@ export class OfficeEngine {
         act.c.fadeTo(1, now, 200);
       }
       act.desk = this.deskFor(a.id);
-      if (act.c.look.shirt !== identity(a.color, 'light').shirt || act.c.look.role !== a.role) {
+      if (String(act.c.look.shirt) !== String(identity(a.color, 'light').shirt) || act.c.look.role !== a.role) {
         // Identity or role changed: rebuild the character in place.
         const pos = act.c.position.clone();
         const rot = act.c.root.rotation.y;
@@ -1284,16 +1282,6 @@ export class OfficeEngine {
       this.wake();
     };
     const onVis = () => this.loop.setVisible(document.visibilityState !== 'hidden' && !this.lost);
-    const onFocus = () => {
-      this.focused = document.hasFocus();
-      this.wake();
-    };
-    window.addEventListener('focus', onFocus);
-    window.addEventListener('blur', onFocus);
-    this.cleanups.push(() => {
-      window.removeEventListener('focus', onFocus);
-      window.removeEventListener('blur', onFocus);
-    });
 
     canvas.addEventListener('pointerdown', onDown);
     canvas.addEventListener('pointermove', onMove);
@@ -1364,8 +1352,9 @@ export class OfficeEngine {
     const rm = this.opts.reducedMotion;
     const camDist = this.rig.cur.dist;
     const emoteScale = Math.min(2.4, Math.max(1, camDist / 20));
-    // Live: continuous motion (breathing, glances, games) while the window has focus.
-    const lively = this.focused && !rm;
+    // Live: continuous motion (breathing, glances, games) while the office is on screen.
+    // Live whenever the office is drawn at all (hidden = 0 frames); stepped only for reduced motion.
+    const lively = !rm;
     if (lively) busy = this.lifeStep(now, dt) || busy;
     for (const [id, act] of this.actors) {
       act.c.emoteScale = emoteScale;

@@ -145,7 +145,7 @@ per-agent desks that fill up with things from their history (a trophy per merged
 
 | Phase | Built | Not yet |
 |---|---|---|
-| 0 | Continuous life (breathing, blinks, glances, fidgets), smooth per-agent loops, real foosball / pool / PS5 simulations, 30 fps while focused | Shadows don't follow breathing or rolling balls |
+| 0 | Continuous life (breathing, blinks, glances, fidgets), smooth per-agent loops, real foosball / pool / PS5 simulations, 30 fps while on screen (focused or not) | Shadows don't follow breathing or rolling balls |
 | Break room | `breakroom.ts`: pairs for pool and foosball, PS5 solo or two-player, stable pairs, a lonely player moves on after 6 s; library and coffee spots; demo `?play=` and `?playAfter=` | |
 | 1 | Skeleton: pelvis sway, thighs, knees, ankles, wrists, seat height as a joint; real gait; sitting down and getting up through a crouch | CC0 clip import (KayKit / Quaternius) — clips are authored in code for now; downloading the packs needs your go |
 | 2 | Plumbob, action queue (✕ interrupts), click menu (chat, task, details, model, stop, send home), Needs / Mood / Skills / Friends panel, speech bubbles, estimated cost counter, walls up/down, **Pause** (core: no new task starts) | Replay at 1×/2×/3×; skills and friendships reset when the app restarts (not saved yet) |

@@ -40,7 +40,7 @@ function office() {
   const fx = new FxSystem();
   const rig = new CameraRig(16 / 10);
   rig.set({ x: 0, z: 0, dist: 40 });
-  // `live` mirrors the engine: continuous motion at a ~30 fps budget while the window has focus.
+  // `live` mirrors the engine: continuous motion at a ~30 fps budget while the office is on screen.
   const step = (now: number, dt: number, live = false): StepResult => {
     let busy = rig.update(dt);
     let wakeAt = Infinity;
@@ -124,7 +124,7 @@ describe('render on demand', () => {
     expect(loop.active.raf).toBe(false);
   });
 
-  it('live: everyone breathes at about 30 frames a second, and it stops when the window loses focus', () => {
+  it('live: everyone breathes at about 30 frames a second, and stepped mode (reduced motion) costs nothing when still', () => {
     const { step } = office();
     const h = fakeHost();
     let live = true;
@@ -140,7 +140,7 @@ describe('render on demand', () => {
     const perSecond = (frames - f0) / 3;
     expect(perSecond).toBeGreaterThan(24);
     expect(perSecond).toBeLessThan(34);
-    live = false; // window blurred: back to stepped, still sitters cost nothing
+    live = false; // reduced motion: stepped, still sitters cost nothing
     vi.advanceTimersByTime(2000);
     const f1 = frames;
     vi.advanceTimersByTime(5000);

@@ -109,7 +109,7 @@ export function gazeWeight(pose: Pose): number {
 }
 
 const TICK = 150;
-/** Stepped-loop period (ms) when the office is not live (unfocused, reduced motion); 0 = still. */
+/** Stepped-loop period (ms) when the office is not live (reduced motion); 0 = still. */
 export function loopPeriod(pose: Pose): number {
   switch (pose) {
     case 'type':

@@ -6,7 +6,7 @@
 //
 // Animation is procedural: a few joints (hips, torso lean, head, shoulders, elbows, legs), a walk
 // cycle while moving, pose blends on change, and each pose's own motion as continuous curves
-// (gfx/motion.ts). While the office is live (on screen, window focused, motion allowed) every
+// (gfx/motion.ts). While the office is live (on screen, motion allowed) every
 // character also breathes, blinks, shifts its weight and glances around (or at what the engine
 // points it to: a ball, the TV, someone walking by). Otherwise poses tick in steps on a shared
 // clock and a character standing or sitting still costs nothing.
