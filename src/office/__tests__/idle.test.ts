@@ -40,16 +40,17 @@ function office() {
   const fx = new FxSystem();
   const rig = new CameraRig(16 / 10);
   rig.set({ x: 0, z: 0, dist: 40 });
-  const step = (now: number, dt: number): StepResult => {
+  // `live` mirrors the engine: continuous motion at a ~30 fps budget while the window has focus.
+  const step = (now: number, dt: number, live = false): StepResult => {
     let busy = rig.update(dt);
     let wakeAt = Infinity;
     for (const c of people) {
-      const r = c.update(now, dt, false);
+      const r = c.update(now, dt, false, live);
       busy = r.moving || busy;
       wakeAt = Math.min(wakeAt, r.nextAt);
     }
     busy = fx.update(now) || busy;
-    return { animating: busy, wakeAt };
+    return { animating: busy, wakeAt, interval: live && busy ? 33 : 0 };
   };
   return { step, people };
 }
@@ -121,6 +122,30 @@ describe('render on demand', () => {
     vi.advanceTimersByTime(10_000);
     expect(h.rafs()).toBe(after);
     expect(loop.active.raf).toBe(false);
+  });
+
+  it('live: everyone breathes at about 30 frames a second, and it stops when the window loses focus', () => {
+    const { step } = office();
+    const h = fakeHost();
+    let live = true;
+    let frames = 0;
+    const loop = new FrameLoop((now, dt) => {
+      frames++;
+      return step(now, dt, live);
+    }, h.host);
+    loop.wake();
+    vi.advanceTimersByTime(1000);
+    const f0 = frames;
+    vi.advanceTimersByTime(3000);
+    const perSecond = (frames - f0) / 3;
+    expect(perSecond).toBeGreaterThan(24);
+    expect(perSecond).toBeLessThan(34);
+    live = false; // window blurred: back to stepped, still sitters cost nothing
+    vi.advanceTimersByTime(2000);
+    const f1 = frames;
+    vi.advanceTimersByTime(5000);
+    expect(frames).toBe(f1);
+    loop.dispose();
   });
 
   it('hidden or off-screen: nothing runs, and waking does nothing until visible', () => {

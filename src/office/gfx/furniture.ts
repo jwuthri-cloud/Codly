@@ -475,7 +475,8 @@ export function tvStand(b: Builder, screen: Builder) {
   screen.box(0.32, 1.12, -0.044, 0.28, 0.18, 0.004, c('#5ee08f'));
 }
 
-/** Foosball: the rods run along x with handles at both ends, goals at ±z. */
+/** Foosball: the rods run along x with handles at both ends, goals at ±z. The rods move, so
+ *  they are built separately (`foosballRod`, gfx/games.ts). */
 export function foosball(b: Builder) {
   const wood = c(MAT.oakDark);
   for (const sx of [-0.42, 0.42]) for (const sz of [-0.24, 0.24]) b.box(sx, 0.26, sz, 0.07, 0.52, 0.07, c(MAT.charcoal));
@@ -483,12 +484,18 @@ export function foosball(b: Builder) {
   b.box(0, 0.765, 0, 0.88, 0.01, 0.54, c('#3f9a5a'));
   b.box(0, 0.772, 0, 0.88, 0.004, 0.02, c('#e8efe4'));
   for (const sz of [-0.31, 0.31]) b.box(0, 0.68, sz, 0.22, 0.12, 0.02, c('#1f2026'));
-  const men = [c('#d64b3b'), c('#2f6fd6')];
-  [-0.2, -0.07, 0.07, 0.2].forEach((z, i) => {
-    b.box(0, 0.84, z, 1.2, 0.018, 0.018, c(MAT.metal));
-    for (const sx of [-0.6, 0.6]) b.box(sx, 0.84, z, 0.08, 0.035, 0.035, c('#26272c'));
-    for (const x of [-0.24, 0, 0.24]) b.box(x, 0.8, z, 0.04, 0.1, 0.04, men[i % 2]);
-  });
+}
+
+/** Rod z positions on the foosball table; rod i belongs to team i % 2 (0 red, 1 blue). */
+export const FOOSBALL_RODS = [-0.2, -0.07, 0.07, 0.2];
+/** The men's x positions along a rod (before it slides). */
+export const FOOSBALL_MEN = [-0.24, 0, 0.24];
+
+/** One rod with its handles and men, around its own axis (y = 0 is the rod). */
+export function foosballRod(b: Builder, team: number) {
+  b.box(0, 0, 0, 1.2, 0.018, 0.018, c(MAT.metal));
+  for (const sx of [-0.6, 0.6]) b.box(sx, 0, 0, 0.08, 0.035, 0.035, c('#26272c'));
+  for (const x of FOOSBALL_MEN) b.box(x, -0.04, 0, 0.04, 0.1, 0.04, c(team ? '#2f6fd6' : '#d64b3b'));
 }
 
 /** A pool table: walnut body, green felt, six pockets and a few balls. */
@@ -499,16 +506,23 @@ export function poolTable(b: Builder) {
   b.box(0, 0.705, 0, 1.8, 0.01, 0.9, c('#2f8a57'));
   for (const sz of [-0.5, 0.5]) b.box(0, 0.72, sz, 2.0, 0.05, 0.1, mix(wood, [0, 0, 0], 0.15));
   for (const sx of [-0.95, 0.95]) b.box(sx, 0.72, 0, 0.1, 0.05, 1.1, mix(wood, [0, 0, 0], 0.15));
-  for (const sx of [-0.9, 0, 0.9]) for (const sz of [-0.45, 0.45]) b.cyl(sx, 0.705, sz, 0.05, 0.02, c('#141414'), 10);
-  for (const [x, z, col] of [
-    [-0.5, 0, '#f4efe3'],
-    [0.45, 0, '#f2c14e'],
-    [0.53, -0.05, '#d64b3b'],
-    [0.53, 0.05, '#2f6fd6'],
-    [0.61, 0, '#1f2026'],
-    [0.2, 0.25, '#8f4bd6'],
-  ] as const)
-    b.ball(x, 0.735, z, 0.03, 0.03, 0.03, c(col), 8, 6);
+  for (const [x, z] of POOL_POCKETS) b.cyl(x, 0.705, z, 0.05, 0.02, c('#141414'), 10);
+}
+
+/** Pocket centres on the pool table (x, z). */
+export const POOL_POCKETS: [number, number][] = [-0.9, 0, 0.9].flatMap((x) => [-0.45, 0.45].map((z) => [x, z] as [number, number]));
+/** The rack: the cue ball first. The balls roll, so gfx/games.ts builds them. */
+export const POOL_BALLS: [number, number, string][] = [
+  [-0.5, 0, '#f4efe3'],
+  [0.45, 0, '#f2c14e'],
+  [0.53, -0.05, '#d64b3b'],
+  [0.53, 0.05, '#2f6fd6'],
+  [0.61, 0, '#1f2026'],
+  [0.61, -0.1, '#8f4bd6'],
+];
+/** A pool ball (radius 0.03) centred on the origin. */
+export function poolBall(b: Builder, color: string) {
+  b.ball(0, 0, 0, 0.03, 0.03, 0.03, c(color), 8, 6);
 }
 
 // ───────────── greenery & misc ─────────────

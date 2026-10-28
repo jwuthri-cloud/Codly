@@ -56,4 +56,8 @@ byok_openrouter: boolean,
  * Claude agents also load your own Claude Code setup: your MCP servers, plugins, skills
  * and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
  */
-use_my_claude_setup: boolean, };
+use_my_claude_setup: boolean, 
+/**
+ * Pause (the office's speed control): no new task starts; running ones finish.
+ */
+paused: boolean, };

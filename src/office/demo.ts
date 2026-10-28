@@ -6,9 +6,12 @@
 //   ?backdrop=1    backdrop mode, with a mock conversation column on top
 //   ?rm=1          reduced motion
 //   ?select=a-ada  start with an agent selected
+//   ?playAfter=5   idle workers go on a break after 5 s instead of 60
+//   ?play=pool     breaks go to this game first (pool, foosball or ps5)
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
 import { mount } from 'svelte';
+import { leisure } from './behavior';
 import Harness from './demo/Harness.svelte';
 
 // Count animation frames and timers requested by anything on the page (idle verification).
@@ -29,5 +32,10 @@ window.setTimeout = ((cb: TimerHandler, ms?: number, ...args: unknown[]) => {
 
 const params = new URLSearchParams(location.search);
 document.documentElement.dataset.theme = params.get('theme') === 'light' ? 'light' : 'dark';
+const playAfter = Number(params.get('playAfter'));
+if (playAfter > 0) leisure.playAfterMs = playAfter * 1000;
+const play = params.get('play');
+if (play === 'pool' || play === 'foosball') leisure.prefer = play;
+else if (play === 'ps5' || play === 'console') leisure.prefer = 'console';
 
 mount(Harness, { target: document.getElementById('office')! });

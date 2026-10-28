@@ -67,6 +67,7 @@ export class BuildingGfx {
   private theme: OfficeTheme | null = null;
   /** Desk index → instance id in the lamp meshes. */
   private lampIndex = new Map<number, number>();
+  private wallMeshes: Mesh[] = [];
 
   constructor(private L: OfficeLayout) {
     const floorTex = floorTexture(L);
@@ -174,9 +175,18 @@ export class BuildingGfx {
     b.frame(this.L.door.x, 0, D, 0);
     F.doorFrame(b);
     b.frame();
-    this.mesh(b.build(), this.matte, true, true);
+    const wm = this.mesh(b.build(), this.matte, true, true);
     const gm = this.mesh(glass.build(), this.glassMat, false, false);
     gm.renderOrder = 2;
+    this.wallMeshes = [wm, gm];
+  }
+
+  /** Walls up, or down to knee-high stubs (The Sims' "walls down") to see into every room. */
+  setWalls(up: boolean) {
+    for (const m of this.wallMeshes) {
+      m.scale.y = up ? 1 : 0.16;
+      m.updateMatrix();
+    }
   }
 
   private window(b: Builder, w: Wall, a: number, z: number, frame: RGB) {

@@ -141,6 +141,19 @@ the agent it works with most), walk there, and come back the instant real work a
 Build mode (rearrange and decorate the office), more rooms and objects (kitchen, plants),
 per-agent desks that fill up with things from their history (a trophy per merged plan).
 
+## Status (2026-10-28)
+
+| Phase | Built | Not yet |
+|---|---|---|
+| 0 | Continuous life (breathing, blinks, glances, fidgets), smooth per-agent loops, real foosball / pool / PS5 simulations, 30 fps while focused | Shadows don't follow breathing or rolling balls |
+| Break room | `breakroom.ts`: pairs for pool and foosball, PS5 solo or two-player, stable pairs, a lonely player moves on after 6 s; library and coffee spots; demo `?play=` and `?playAfter=` | |
+| 1 | Skeleton: pelvis sway, thighs, knees, ankles, wrists, seat height as a joint; real gait; sitting down and getting up through a crouch | CC0 clip import (KayKit / Quaternius) — clips are authored in code for now; downloading the packs needs your go |
+| 2 | Plumbob, action queue (✕ interrupts), click menu (chat, task, details, model, stop, send home), Needs / Mood / Skills / Friends panel, speech bubbles, estimated cost counter, walls up/down, **Pause** (core: no new task starts) | Replay at 1×/2×/3×; skills and friendships reset when the app restarts (not saved yet) |
+| 3 | Traits (`traits.ts`), break timing and choices by traits and needs (tired → coffee, down → couch, bookworm → library), personal reactions to real check results, lazy fidgets, pool skill | |
+
+Next for the vision (agents that level up and travel): save each agent's skills and history in the core,
+then export/import an agent profile into another repo.
+
 ## 8. Decisions
 
 1. **Rig**: upgrade the procedural characters to a skinned humanoid rig (recommended: keeps

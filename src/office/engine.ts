@@ -14,7 +14,9 @@ import {
   HemisphereLight,
   Mesh,
   MeshBasicMaterial,
+  MeshStandardMaterial,
   NeutralToneMapping,
+  OctahedronGeometry,
   PCFShadowMap,
   PlaneGeometry,
   Scene,
@@ -29,13 +31,17 @@ import type { EventRow } from '../lib/gen/EventRow';
 import type { RepoFile } from '../lib/gen/RepoFile';
 import type { Task } from '../lib/gen/Task';
 import { aStar, smooth } from './astar';
-import { DWELL_MS, Dwell, Errands, deriveIntent, errandAllowedFor, errandPlace, intentKey, isBlocked, placeKey, type Errand, type Intent, type Place } from './behavior';
+import { BreakRoom } from './breakroom';
+import { plumbobOf } from './sims';
+import { breakPreference, reactionTo, traitsOf } from './traits';
+import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, leisure, errandPlace, intentKey, isBlocked, placeKey, type Errand, type Intent, type Place } from './behavior';
 import { CameraRig, DEFAULT_PITCH, DEFAULT_YAW } from './camera';
 import { BuildingGfx } from './gfx/building';
 import { Character, lookFor, PropKit } from './gfx/character';
 import { CONFETTI, Confetti, FloorRing, FxSystem, Glow, PaperPlane, Puff, Sparkles } from './gfx/fx';
+import { GamesCorner, type GamePlayers } from './gfx/games';
 import { Archive, DeskFrames, DeskScreens, MailRoom, ServerRoom, TaskBoard, Whiteboard, type CardWhere, type TestState, type TodoList } from './gfx/props';
-import { emoteTexture, glowTexture, ringTexture, type EmoteKind } from './gfx/textures';
+import { canvas as makeCanvas, emoteTexture, glowTexture, ringTexture, tex, type EmoteKind } from './gfx/textures';
 import { cellCenter, cellOf, COLS, D, officeLayout, passableFn, ROWS, W, type Desk, type OfficeLayout, type Slot, type StationId } from './layout';
 import { emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type WorldSelection } from './model';
 import { chipFor } from './bubble';
@@ -86,6 +92,8 @@ export interface EngineOptions {
 }
 
 const HELLO_MS = 1800;
+/** How long a speech bubble stays up. */
+const SAY_MS = 4500;
 const OX = -W / 2;
 const OZ = -D / 2;
 
@@ -101,6 +109,8 @@ interface Actor {
   leaving: boolean;
   bornAt: number;
   hello: boolean;
+  /** The last check result it reacted to (traits.ts). */
+  cheerAt?: number;
 }
 
 interface Intern {
@@ -129,6 +139,17 @@ export class OfficeEngine {
   private board: TaskBoard;
   private whiteboard: Whiteboard;
   private server: ServerRoom;
+  private games: GamesCorner;
+  /** The window has focus: the office is "live" (continuous motion at a frame budget). */
+  private focused = typeof document === 'undefined' || document.hasFocus();
+  private gazeBufs = new Map<string, Vector3>();
+  private breakRoom = new BreakRoom({ prefer: leisure.prefer });
+  /** The Sims' plumbob over the selected agent, coloured by its state (sims.ts). */
+  private plumbob = new Mesh(new OctahedronGeometry(0.11, 0).scale(1, 1.7, 1), new MeshStandardMaterial({ roughness: 0.25, metalness: 0.1, transparent: true, opacity: 0.92 }));
+  /** What an agent last said (a chat message), shown as a speech bubble for a few seconds. */
+  private said = new Map<string, { text: string; at: number }>();
+  /** An agent's needs (sims.ts), so a tired agent goes for coffee on its break. */
+  private needsOf: ((id: string) => { energy: number | null; morale: number } | null) | null = null;
   private mail: MailRoom;
   private archive: Archive;
   private frames: DeskFrames;
@@ -209,6 +230,7 @@ export class OfficeEngine {
     this.board.handOf = (id) => this.actors.get(id)?.c.hand ?? null;
     this.whiteboard = new Whiteboard(this.L);
     this.server = new ServerRoom(this.L);
+    this.games = new GamesCorner(this.L, { x: OX, z: OZ }, makeCanvas, tex);
     this.mail = new MailRoom(this.L);
     this.archive = new Archive(this.L);
     this.frames = new DeskFrames(() => this.wake());
@@ -219,9 +241,12 @@ export class OfficeEngine {
     this.hovRing = new Mesh(ringGeo, new MeshBasicMaterial({ map: this.ringTex, transparent: true, depthWrite: false, opacity: 0.55, blending: AdditiveBlending, toneMapped: false }));
     this.selRing.visible = this.hovRing.visible = false;
     this.selRing.renderOrder = this.hovRing.renderOrder = 3;
-    this.world.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, this.server.group, this.mail.group, this.archive.group, this.frames.group, this.fx.group, this.selRing, this.hovRing);
+    this.world.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, this.server.group, this.games.group, this.mail.group, this.archive.group, this.frames.group, this.fx.group, this.selRing, this.hovRing);
     // Characters live in world coordinates (the office frame is offset to center it).
     this.scene.add(this.actorsGroup);
+    this.plumbob.visible = false;
+    this.plumbob.renderOrder = 4;
+    this.scene.add(this.plumbob);
 
     this.errands = new Errands((agentId, e, phase) => this.onErrand(agentId, e, phase));
     this.loop = new FrameLoop((now, dt) => this.step(now, dt), browserHost());
@@ -355,11 +380,38 @@ export class OfficeEngine {
     if (ev.id > 0 && ev.id <= this.model.lastEventId) return;
     const fxs = reduce(this.model, ev, { replay: false });
     if (ev.kind.type === 'agent_changed' || ev.kind.type === 'status_changed') this.assignDesks();
+    if (ev.kind.type === 'chat' && this.model.agents.has(ev.kind.message.author)) {
+      this.said.set(ev.kind.message.author, { text: clean(ev.kind.message.text, 72), at: performance.now() });
+    }
     const now = performance.now();
     const wall = Date.now();
     for (const f of fxs) this.play(f, now, wall);
     this.sync();
     if (fxs.some((f) => f.t === 'ticker')) this.emitTicker();
+  }
+
+  /** The office's live view of an agent (for the Sims panel). */
+  agentState(id: string): AgentState | null {
+    return this.model.agents.get(id) ?? null;
+  }
+
+  /** Where an agent's head is on screen (px from the canvas' top-left), for the click menu. */
+  screenOf(id: string): { x: number; y: number } | null {
+    const act = this.actors.get(id);
+    if (!act) return null;
+    const v = act.c.headTop(new Vector3()).project(this.rig.camera);
+    if (v.z > 1) return null;
+    return { x: ((v.x + 1) / 2) * this.width, y: ((1 - v.y) / 2) * this.height };
+  }
+
+  setNeeds(fn: ((id: string) => { energy: number | null; morale: number } | null) | null) {
+    this.needsOf = fn;
+  }
+
+  setWalls(up: boolean) {
+    this.building.setWalls(up);
+    this.shadowDirty = true;
+    this.wake();
   }
 
   get frameCount() {
@@ -386,6 +438,7 @@ export class OfficeEngine {
     this.board.dispose();
     this.whiteboard.dispose();
     this.server.dispose();
+    this.games.dispose();
     this.mail.dispose();
     this.archive.dispose();
     this.frames.dispose();
@@ -532,7 +585,9 @@ export class OfficeEngine {
       case 'door':
         return { slot: this.L.door.outside, key: 'door' };
       case 'station':
-        return this.claim(a, place.id, placeKey(place)) ?? deskSlot(false);
+        return this.claim(a, place.id, placeKey(place), place.slot) ?? deskSlot(false);
+      case 'break':
+        return deskSlot(false); // matched in sync(); unmatched breaks stay at the desk
       case 'lead': {
         const ld = this.deskFor(place.leadId);
         if (!ld) return deskSlot(false);
@@ -551,8 +606,17 @@ export class OfficeEngine {
     }
   }
 
-  private claim(a: Actor, station: StationId, key: string): { slot: Slot; key: string } | null {
+  private claim(a: Actor, station: StationId, key: string, want?: number): { slot: Slot; key: string } | null {
     const st = this.L.stations[station];
+    if (want != null && st.slots[want]) {
+      // A seat the break room gave it (its partner has the other one).
+      const id = `${station}:${want}`;
+      const owner = this.slotOwner.get(id);
+      if (!owner || owner === a.agentId) {
+        this.take(a, id);
+        return { slot: st.slots[want], key };
+      }
+    }
     if (a.slot?.startsWith(station + ':')) {
       const k = +a.slot.slice(station.length + 1);
       return { slot: st.slots[k], key };
@@ -597,6 +661,8 @@ export class OfficeEngine {
     const wall = Date.now();
     let wakeAt = Infinity;
     const seen = new Set<string>();
+    // Pass 1: every agent's intent. Breaks are matched together (pairs for pool and foosball).
+    const pending: { a: AgentState; act: Actor; intent: Intent }[] = [];
     for (const a of this.model.agents.values()) {
       if (!a.present) continue;
       seen.add(a.id);
@@ -621,6 +687,24 @@ export class OfficeEngine {
       const errand = this.errands.current(a.id, wall, allowed);
       const { intent, nextAt } = deriveIntent(a, this.model, wall, errand);
       wakeAt = Math.min(wakeAt, nextAt);
+      pending.push({ a, act, intent });
+    }
+    const onBreak = pending.filter((p) => p.intent.place.kind === 'break').sort((x, y) => x.a.lastEventAt - y.a.lastEventAt || (x.a.id < y.a.id ? -1 : 1));
+    const seats = this.breakRoom.update(
+      onBreak.map((p) => ({ id: p.a.id, prefer: breakPreference(traitsOf(p.a.id), this.needsOf?.(p.a.id) ?? null) })),
+      wall,
+    );
+    wakeAt = Math.min(wakeAt, this.breakRoom.nextAt());
+    // Pass 2: show them.
+    for (const { a, act, intent: raw } of pending) {
+      const intent = raw.place.kind === 'break' ? breakIntent(seats.get(a.id) ?? null) : raw;
+      // Personality: its own reaction to a fresh check result (a thump, a fist pump…).
+      const ch = a.cheer;
+      if (ch && ch.at !== act.cheerAt) {
+        act.cheerAt = ch.at;
+        const r = reactionTo(traitsOf(a.id), ch.ok);
+        if (r && !instant && !this.opts.reducedMotion && wall - ch.at < 5000) act.c.react(r, now);
+      }
       const shown = instant ? this.dwell.request(a.id, intent, wall, true) : this.dwell.request(a.id, intent, wall);
       this.apply(act, a, intent, shown, now, instant);
     }
@@ -1200,6 +1284,16 @@ export class OfficeEngine {
       this.wake();
     };
     const onVis = () => this.loop.setVisible(document.visibilityState !== 'hidden' && !this.lost);
+    const onFocus = () => {
+      this.focused = document.hasFocus();
+      this.wake();
+    };
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onFocus);
+    this.cleanups.push(() => {
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onFocus);
+    });
 
     canvas.addEventListener('pointerdown', onDown);
     canvas.addEventListener('pointermove', onMove);
@@ -1270,9 +1364,12 @@ export class OfficeEngine {
     const rm = this.opts.reducedMotion;
     const camDist = this.rig.cur.dist;
     const emoteScale = Math.min(2.4, Math.max(1, camDist / 20));
+    // Live: continuous motion (breathing, glances, games) while the window has focus.
+    const lively = this.focused && !rm;
+    if (lively) busy = this.lifeStep(now, dt) || busy;
     for (const [id, act] of this.actors) {
       act.c.emoteScale = emoteScale;
-      const r = act.c.update(now, dt, rm);
+      const r = act.c.update(now, dt, rm, lively);
       if (r.moving) busy = true;
       if (act.c.walking) this.shadowDirty = true;
       nextAt = Math.min(nextAt, r.nextAt);
@@ -1328,7 +1425,7 @@ export class OfficeEngine {
         i.c.root.scale.setScalar(Math.max(0.01, s) * i.c.look.scale);
         busy = true;
       } else i.c.root.scale.setScalar(i.c.look.scale);
-      const r = i.c.update(now, dt, rm);
+      const r = i.c.update(now, dt, rm, lively);
       if (r.moving) busy = true;
       nextAt = Math.min(nextAt, r.nextAt);
     }
@@ -1348,6 +1445,7 @@ export class OfficeEngine {
     const ts = this.testState();
     nextAt = Math.min(nextAt, this.server.update(ts.state, ts.busy, now, rm));
     this.placeRings();
+    if (this.placePlumbob(now, dt)) busy = true;
 
     if (this.shadowDirty) {
       this.renderer.shadowMap.needsUpdate = true;
@@ -1368,8 +1466,69 @@ export class OfficeEngine {
       if (a.outcome && wall - a.outcome.at < OUTCOME_MS) wakeAt = Math.min(wakeAt, toPerf(a.outcome.at + OUTCOME_MS + 20));
     }
     for (const act of this.actors.values()) if (act.hello && now - act.bornAt < HELLO_MS) wakeAt = Math.min(wakeAt, act.bornAt + HELLO_MS + 20);
-    const interval = this.opts.backdrop && busy ? 33 : 0;
+    // Frame budget: ~30 fps while live (20 behind the blurred conversation), full rate for a
+    // walk otherwise; nothing when still and not live.
+    const interval = !busy ? 0 : lively ? (this.opts.backdrop ? 50 : 33) : this.opts.backdrop ? 33 : 0;
     return { animating: busy, wakeAt, interval };
+  }
+
+  /** Who plays which game (they get its cues), and everyone else glances at people walking by. */
+  private lifeStep(now: number, dt: number): boolean {
+    const players: GamePlayers = { foosball: [], pool: [], console: [] };
+    const playing = new Set<string>();
+    for (const act of this.actors.values()) {
+      const [station, idx] = act.slot?.split(':') ?? [];
+      const game = station?.startsWith('games.') ? (station.slice(6) as keyof GamePlayers) : null;
+      const there = !!game && act.placeKey === 'st:' + station && act.c.destKey === act.placeKey && !act.leaving;
+      if (game && there && (game === 'pool' || !act.c.walking) && players[game]) {
+        players[game].push({ slot: Number(idx) || 0, c: act.c });
+        playing.add(act.agentId);
+      }
+    }
+    const moving = this.games.update(now, dt, players);
+    const walkers = [...this.actors.values()].filter((a) => a.c.walking && a.c.opacity > 0.5);
+    for (const act of this.actors.values()) {
+      if (playing.has(act.agentId)) continue;
+      act.c.cue = null;
+      let best: Actor | null = null;
+      let bd = 2.6;
+      if (!act.c.walking) {
+        for (const w of walkers) {
+          if (w === act) continue;
+          const d = w.c.position.distanceTo(act.c.position);
+          if (d < bd) {
+            bd = d;
+            best = w;
+          }
+        }
+      }
+      if (best) {
+        let v = this.gazeBufs.get(act.agentId);
+        if (!v) this.gazeBufs.set(act.agentId, (v = new Vector3()));
+        act.c.gaze = best.c.headTop(v);
+      } else act.c.gaze = null;
+    }
+    return moving;
+  }
+
+  private placePlumbob(now: number, dt: number): boolean {
+    const id = this.selection?.agentId;
+    const act = id ? this.actors.get(id) : null;
+    if (!act || act.leaving || this.opts.backdrop) {
+      this.plumbob.visible = false;
+      return false;
+    }
+    const color = { green: 0x4fdc7b, amber: 0xffbf3c, red: 0xff6b5b, blue: 0x62a8ff, grey: 0xb9c0cc }[plumbobOf(this.model.agents.get(act.agentId) ?? null)];
+    const m = this.plumbob.material as MeshStandardMaterial;
+    m.color.setHex(color);
+    m.emissive.setHex(color).multiplyScalar(0.35);
+    const head = act.c.headTop(new Vector3());
+    const still = this.opts.reducedMotion;
+    this.plumbob.visible = true;
+    this.plumbob.position.set(head.x, head.y + 0.42 + (still ? 0 : Math.sin(now / 520) * 0.03), head.z);
+    if (!still) this.plumbob.rotation.y += dt * 1.6;
+    this.plumbob.scale.setScalar(act.c.look.scale);
+    return !still;
   }
 
   private placeRings() {
@@ -1427,16 +1586,23 @@ export class OfficeEngine {
       const hovered = hov?.agentId === a.id;
       const urgent = !!a.approval || isBlocked(a);
       const fresh = !!a.outcome && wall - a.outcome.at < OUTCOME_MS;
+      const said = this.said.get(a.id);
+      const saying = !!said && now - said.at < SAY_MS;
+      if (saying) live = true;
       const hello = act.hello && now - act.bornAt < HELLO_MS;
       let s: Sentence | null = null;
-      if (selected || hovered || urgent || fresh || hello) {
+      if (saying && !urgent) {
+        // A speech bubble: what it just said in the chat.
+        s = { text: said!.text, pre: `“${said!.text}”`, code: null, post: '', tone: 'normal', live: false };
+      } else if (selected || hovered || urgent || fresh || hello) {
         s = hello && !selected && !hovered ? { text: `Hi, I’m ${a.name}`, pre: `Hi, I’m ${a.name}`, code: null, post: '', tone: 'normal', live: false } : this.sentenceOf(a, wall);
         if (s.live && (selected || hovered)) live = true;
       }
       act.c.root.updateWorldMatrix(true, true);
       act.c.headTop(head);
-      const extra = act.c.look.scale * (act.shown?.emote === "rain" ? 0.62 : act.shown?.emote ? 0.58 : 0.12);
-      const pri = (selected ? 1000 : 0) + (hovered ? 900 : 0) + (a.approval ? 500 : 0) + (isBlocked(a) ? 300 : 0) + (fresh ? 150 : 0) + (a.role === 'lead' ? 120 : 0) + 100;
+      // The selected agent's plumbob floats between its head and its label.
+      const extra = act.c.look.scale * ((act.shown?.emote === 'rain' ? 0.62 : act.shown?.emote ? 0.58 : 0.12) + (selected && !this.opts.backdrop ? 0.5 : 0));
+      const pri = (selected ? 1000 : 0) + (hovered ? 900 : 0) + (a.approval ? 500 : 0) + (isBlocked(a) ? 300 : 0) + (fresh || saying ? 150 : 0) + (a.role === 'lead' ? 120 : 0) + 100;
       specs.push({
         key: 'a:' + a.id,
         kind: 'agent',

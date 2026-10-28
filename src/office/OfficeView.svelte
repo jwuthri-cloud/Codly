@@ -21,7 +21,10 @@
   import type { EventRow } from '../lib/gen/EventRow';
   import type { RepoFile } from '../lib/gen/RepoFile';
   import type { Task } from '../lib/gen/Task';
+  import type { AccountInfo } from '../lib/gen/AccountInfo';
   import { OfficeEngine, type AgentListItem, type TickerItem } from './engine';
+  import SimsHud, { type AgentAction } from './SimsHud.svelte';
+  import { SimsTracker } from './sims';
 
   interface Props {
     files?: RepoFile[];
@@ -43,6 +46,11 @@
     artifactUrl?: (artifact: Artifact) => string | null;
     ticker?: boolean;
     insets?: { top?: number; right?: number; bottom?: number; left?: number };
+    /** The Sims layer: accounts (Energy = quota left), actions from the click menu, Pause. */
+    accounts?: AccountInfo[];
+    onaction?: (agentId: string, action: AgentAction) => void;
+    paused?: boolean;
+    onpause?: (paused: boolean) => void;
   }
 
   let {
@@ -64,7 +72,15 @@
     artifactUrl,
     ticker = true,
     insets,
+    accounts = [],
+    onaction,
+    paused = false,
+    onpause,
   }: Props = $props();
+
+  const sims = new SimsTracker();
+  let menuAt = $state<{ id: string; x: number; y: number } | null>(null);
+  const hudInsets = $derived({ top: insets?.top ?? 0, right: insets?.right ?? 0, bottom: insets?.bottom ?? 0, left: insets?.left ?? 0 });
 
   let el: HTMLDivElement;
   let engine = $state<OfficeEngine | null>(null);
@@ -101,7 +117,12 @@
       theme,
       reducedMotion,
       backdrop,
-      onselect: (s) => onselect(s),
+      onselect: (s) => {
+        onselect(s);
+        // A click on an agent in the office opens its click menu (The Sims' pie menu).
+        const p = s?.agentId ? e.screenOf(s.agentId) : null;
+        menuAt = p && s?.agentId ? { id: s.agentId, ...p } : null;
+      },
       onhover: (s) => onhover(s),
       onticker: (list) => {
         items = list.slice(-4);
@@ -119,6 +140,14 @@
     e.setTasks($state.snapshot(tasks) as Task[]);
     e.setArtifacts($state.snapshot(artifacts) as Artifact[]);
     e.replay(history);
+    sims.setAgents($state.snapshot(agents) as Agent[]);
+    // Needs drive what an agent does on its break (a tired one goes for coffee).
+    e.setNeeds((id) => {
+      const s = sims.stats(id, Date.now(), e.agentState(id), accounts);
+      return { energy: s.needs.energy, morale: s.needs.morale };
+    });
+    sims.setTasks($state.snapshot(tasks) as Task[]);
+    for (const ev of history) sims.ingest(ev);
     e.setApprovals($state.snapshot(approvals) as Approval[]);
     e.setSelection(selection);
     e.setHover(hover);
@@ -135,7 +164,10 @@
     const e = engine;
     const sub = subscribe;
     if (!e) return;
-    return sub((ev) => e.push(ev));
+    return sub((ev) => {
+      e.push(ev);
+      sims.ingest(ev);
+    });
   });
 
   $effect(() => {
@@ -145,6 +177,7 @@
   $effect(() => {
     const snap = $state.snapshot(agents) as Agent[];
     engine?.setAgents(snap);
+    sims.setAgents(snap);
   });
   $effect(() => {
     const snap = $state.snapshot(tasks) as Task[];
@@ -199,6 +232,22 @@
   aria-describedby="of-roster"
 >
   <div class="of-vignette" aria-hidden="true"></div>
+  {#if engine && !backdrop}
+    <SimsHud
+      {engine}
+      {sims}
+      {agents}
+      {accounts}
+      selectedId={selection?.agentId ?? null}
+      {menuAt}
+      insets={hudInsets}
+      {narrate}
+      {onaction}
+      onclosemenu={() => (menuAt = null)}
+      {paused}
+      {onpause}
+    />
+  {/if}
   {#if ticker && !backdrop && items.length}
     <ol class="of-ticker" aria-hidden="true">
       {#each items as t, i (t.id)}

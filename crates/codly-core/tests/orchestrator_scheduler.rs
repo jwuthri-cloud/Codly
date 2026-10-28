@@ -531,3 +531,14 @@ fn a_consultant_without_a_harness_follows_the_worker_order() {
     let s = starts(&w.run());
     assert!(s[0].1 == Provider::Codex && matches!(&s[0].2, AgentPick::New { model: None, .. }), "{s:?}");
 }
+
+#[test]
+fn paused_starts_nothing_and_says_why() {
+    let mut w = World::new(ready(2));
+    w.settings.paused = true;
+    let a = w.run();
+    assert!(starts(&a).is_empty(), "{a:?}");
+    assert!(waits(&a).iter().all(|(_, why)| why.starts_with("paused")), "{:?}", waits(&a));
+    w.settings.paused = false;
+    assert_eq!(starts(&w.run()).len(), 2);
+}

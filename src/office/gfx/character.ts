@@ -4,10 +4,12 @@
 // wears a cardigan and round glasses, workers wear a tee with a hood or headphones, a helper
 // ("intern", a subagent) is small and wears a cap in its parent's color.
 //
-// Animation is procedural and cheap: a few joints (hips, torso lean, head, shoulders, elbows,
-// legs), a walk cycle while moving, pose blends on change, and stepped loops (typing, page
-// flips, writing, waving) that tick on a shared clock so a busy office wakes a few times a
-// second instead of every frame. A character standing or sitting still costs nothing.
+// Animation is procedural: a few joints (hips, torso lean, head, shoulders, elbows, legs), a walk
+// cycle while moving, pose blends on change, and each pose's own motion as continuous curves
+// (gfx/motion.ts). While the office is live (on screen, window focused, motion allowed) every
+// character also breathes, blinks, shifts its weight and glances around (or at what the engine
+// points it to: a ball, the TV, someone walking by). Otherwise poses tick in steps on a shared
+// clock and a character standing or sitting still costs nothing.
 
 import {
   BufferGeometry,
@@ -25,8 +27,10 @@ import {
 import type { Provider } from '../../lib/gen/Provider';
 import type { Role } from '../../lib/gen/Role';
 import type { Emote, Pose, Prop } from '../behavior';
+import { addLife, gazeWeight, J, type Joints, loopPeriod, type PlayCue, REACT_S, reactPose, type ReactKind, SIT_POSES, targets } from './motion';
 import { HAIR, HAIR_WEIGHTS, identity, lin, mix, PANTS, PROVIDER, SKIN, type RGB } from '../palette';
 import { hash, rng } from '../text';
+import { traitsOf } from '../traits';
 import { Builder } from './builder';
 import type { EmoteKind } from './textures';
 
@@ -95,10 +99,11 @@ const HEAD_Y = 0.24;
 const UPPER = 0.14;
 const FORE = 0.15;
 const LEG_X = 0.085;
+/** Leg segments: thigh (hip → knee) and shin (knee → ankle); the shoe hangs at the ankle. */
+const THIGH = 0.17;
+const SHIN = HIP - THIGH - 0.03;
 
-/** Joint vector: y, lean, headPitch, headYaw, headRoll, armLx, armLz, elbowL, armRx, armRz, elbowR, legL, legR, twist */
-const J = 14;
-type Joints = Float32Array;
+/** Joint vector (gfx/motion.ts): y, lean, headPitch, headYaw, headRoll, armLx, armLz, elbowL, armRx, armRz, elbowR, legL, legR, twist */
 
 const WHITE: RGB = [1, 1, 1];
 const DARK_EYE: RGB = lin('#2a2026');
@@ -259,13 +264,29 @@ function buildParts(look: Look) {
     fore.cyl(0, -FORE + 0.03, 0, 0.044, FORE - 0.02, sleeve, 10, 0.05);
     fore.cyl(0, -FORE + 0.02, 0, 0.047, 0.03, L.role === 'lead' ? lin('#f6f2ea') : L.shirtDark, 10);
   } else fore.cyl(0, -FORE + 0.02, 0, 0.038, FORE - 0.01, L.skin, 10, 0.042);
-  fore.ball(0, -FORE - 0.005, 0.005, 0.05, 0.052, 0.045, L.skin, 10, 8);
+  // The hand hangs at the wrist, so it can bend (a pad, a cue, a rod handle).
+  const hand = new Builder();
+  hand.ball(0, -0.005, 0.005, 0.05, 0.052, 0.045, L.skin, 10, 8);
 
-  // Legs (with shoes).
-  const leg = new Builder();
-  leg.cyl(0, -HIP + 0.055, 0, 0.06, HIP - 0.05, L.pants, 10, 0.07);
-  leg.ball(0, -HIP + 0.035, 0.03, 0.065, 0.04, 0.095, L.shoes, 10, 6);
-  return { torso: torso.build(), badge: badge.build(), heads, upper: upper.build(), fore: fore.build(), leg: leg.build() };
+  // Legs: thigh and shin (the knee bends) and the shoe at the ankle.
+  const thigh = new Builder();
+  thigh.cyl(0, -THIGH, 0, 0.062, THIGH + 0.01, L.pants, 10, 0.07);
+  const shin = new Builder();
+  shin.cyl(0, -SHIN, 0, 0.056, SHIN + 0.01, L.pants, 10, 0.062);
+  shin.ball(0, 0, 0, 0.062, 0.05, 0.062, L.pants, 10, 6);
+  const shoe = new Builder();
+  shoe.ball(0, 0.005, 0.03, 0.065, 0.04, 0.095, L.shoes, 10, 6);
+  return {
+    torso: torso.build(),
+    badge: badge.build(),
+    heads,
+    upper: upper.build(),
+    fore: fore.build(),
+    hand: hand.build(),
+    thigh: thigh.build(),
+    shin: shin.build(),
+    shoe: shoe.build(),
+  };
 }
 
 function hair(h: Builder, L: Look) {
@@ -376,193 +397,10 @@ export class PropKit {
   }
 }
 
-// ───────────── poses ─────────────
-
-const TICK = 150;
-
-/** Stepped-loop period (ms) per pose; 0 = static. */
-function loopPeriod(pose: Pose): number {
-  switch (pose) {
-    case 'type':
-      return TICK;
-    case 'write':
-    case 'gamepad':
-      return TICK * 2;
-    case 'browse':
-    case 'raise':
-    case 'talk':
-    case 'play':
-      return TICK * 3;
-    case 'read':
-    case 'review':
-    case 'phone':
-      return TICK * 4;
-    default:
-      return 0;
-  }
-}
-
-const SIT_POSES = new Set<Pose>(['sit', 'type', 'read', 'think', 'phone', 'sleep', 'review', 'gamepad']);
-
-function targets(out: Joints, pose: Pose, seated: boolean, step: number) {
-  out.fill(0);
-  const legs = seated ? -1.5 : 0;
-  out[11] = legs;
-  out[12] = legs;
-  // Relaxed arms by default.
-  out[5] = 0.02;
-  out[6] = 0.08;
-  out[7] = -0.12;
-  out[8] = 0.02;
-  out[9] = 0.08;
-  out[10] = -0.12;
-  const s = step;
-  switch (pose) {
-    case 'sit':
-      out[1] = 0.02;
-      out[5] = out[8] = -0.35;
-      out[7] = out[10] = -0.85;
-      out[6] = out[9] = 0.05;
-      out[2] = 0.05;
-      break;
-    case 'type':
-      out[1] = 0.12;
-      out[5] = out[8] = -0.5;
-      out[6] = out[9] = -0.06;
-      out[7] = -1.05 + (s % 2 ? 0.1 : -0.04);
-      out[10] = -1.05 + (s % 2 ? -0.04 : 0.1);
-      out[2] = 0.2;
-      out[3] = ((s >> 3) % 3) * 0.06 - 0.06;
-      break;
-    case 'read':
-    case 'review':
-      out[1] = 0.06;
-      out[5] = out[8] = -0.62;
-      out[6] = out[9] = -0.2;
-      out[7] = out[10] = -1.15;
-      out[10] += s % 2 ? -0.08 : 0;
-      out[2] = 0.32;
-      out[4] = s % 4 === 3 ? 0.05 : 0;
-      break;
-    case 'think':
-      out[1] = -0.03;
-      out[8] = -0.95;
-      out[9] = -0.32;
-      out[10] = -2.25;
-      out[5] = -0.55;
-      out[6] = -0.25;
-      out[7] = -1.25;
-      out[2] = -0.1;
-      out[4] = 0.12;
-      break;
-    case 'phone':
-      out[8] = -0.3;
-      out[9] = 0.22;
-      out[10] = -2.6;
-      out[5] = -0.4;
-      out[7] = -0.9;
-      out[2] = s % 2 ? 0.08 : -0.02;
-      out[4] = 0.16;
-      break;
-    case 'sleep':
-      out[1] = 0.6;
-      out[5] = out[8] = -1.05;
-      out[6] = out[9] = -0.3;
-      out[7] = out[10] = -1.25;
-      out[2] = 0.5;
-      out[4] = 0.25;
-      break;
-    case 'slump':
-      out[1] = 0.24;
-      out[2] = 0.5;
-      out[5] = out[8] = seated ? -0.25 : -0.05;
-      out[7] = out[10] = seated ? -0.5 : -0.05;
-      out[6] = out[9] = 0.02;
-      out[0] = seated ? 0 : -0.02;
-      break;
-    case 'stand':
-      break;
-    case 'browse':
-      out[8] = s % 2 ? -2.0 : -2.3;
-      out[9] = 0.08;
-      out[10] = -0.25;
-      out[5] = -0.55;
-      out[6] = -0.12;
-      out[7] = -1.2;
-      out[2] = -0.18;
-      out[3] = s % 4 < 2 ? 0.08 : -0.06;
-      break;
-    case 'write':
-      out[8] = -2.0;
-      out[9] = s % 2 ? 0.26 : 0.06;
-      out[10] = -0.5;
-      out[5] = -0.15;
-      out[2] = -0.12;
-      out[3] = s % 2 ? 0.05 : -0.03;
-      break;
-    case 'watch':
-      out[5] = out[8] = -0.45;
-      out[6] = out[9] = -0.38;
-      out[7] = out[10] = -1.75;
-      out[2] = -0.14;
-      break;
-    case 'raise':
-      out[8] = -2.95;
-      out[9] = s % 2 ? 0.32 : 0.1;
-      out[10] = -0.15;
-      out[2] = -0.08;
-      out[5] = -0.05;
-      break;
-    case 'wave':
-      out[8] = -2.7;
-      out[9] = s % 2 ? 0.4 : 0.1;
-      out[10] = -0.5;
-      out[2] = -0.05;
-      break;
-    case 'celebrate':
-      out[5] = out[8] = -2.85;
-      out[6] = out[9] = 0.38;
-      out[7] = out[10] = -0.12;
-      out[2] = -0.15;
-      break;
-    case 'drop':
-      out[1] = 0.14;
-      out[8] = -1.2;
-      out[10] = -0.25;
-      out[2] = 0.18;
-      break;
-    case 'gamepad':
-      // Both hands forward on a pad, thumbs tapping.
-      out[1] = 0.1;
-      out[5] = out[8] = -0.75;
-      out[6] = out[9] = -0.3;
-      out[7] = -1.0 + (s % 2 ? 0.06 : 0);
-      out[10] = -1.0 + (s % 3 === 1 ? 0.06 : 0);
-      out[2] = 0.08;
-      break;
-    case 'play':
-      // Leaning over the table, both arms out, twisting the rods (or lining up a shot).
-      out[1] = 0.32;
-      out[5] = out[8] = -1.2;
-      out[6] = out[9] = -0.1;
-      out[7] = out[10] = -0.35;
-      out[13] = s % 2 ? 0.14 : -0.14;
-      out[2] = -0.25;
-      break;
-    case 'talk':
-      out[8] = s % 2 ? -0.7 : -0.95;
-      out[9] = 0.2;
-      out[10] = -0.95;
-      out[5] = -0.2;
-      out[7] = -0.5;
-      out[3] = s % 2 ? 0.08 : -0.05;
-      break;
-  }
-}
-
 // ───────────── the character ─────────────
 
 const ease = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 const BLEND_MS = 240;
 const WALK_SPEED = 2.1;
 const STRIDE = 0.62;
@@ -584,6 +422,14 @@ export class Character {
   private foreR = new Group();
   private legL = new Group();
   private legR = new Group();
+  private kneeL = new Group();
+  private kneeR = new Group();
+  private ankleL = new Group();
+  private ankleR = new Group();
+  private wristL = new Group();
+  private wristR = new Group();
+  /** Sitting down or getting up: through a crouch, not a straight blend. */
+  private transit: { mid: Joints; at: number; ms: number } | null = null;
   readonly hand = new Object3D();
   private propMesh: Mesh;
   private mat: MeshStandardMaterial;
@@ -625,15 +471,43 @@ export class Character {
   arrivedKey: string | null = null;
   destKey: string | null = null;
   emoteScale = 1;
+  /** Where to look (world), set by the engine; null = its own glances. */
+  gaze: Vector3 | null = null;
+  /** Its game's cue (gfx/games.ts); null when not playing. */
+  cue: PlayCue | null = null;
+  /** A personal reaction playing over its pose (traits.ts), started at `at`. */
+  private reacting: { kind: ReactKind; at: number } | null = null;
+
+  // its own rhythm: two characters never move in sync
+  private readonly seed: number;
+  private readonly tempo: number;
+  private readonly offset: number;
+  private readonly breathPeriod: number;
+  private readonly lazy: boolean;
+  private readonly rand: () => number;
+  private gazeYaw = 0;
+  private gazePitch = 0;
+  private wanderAt = 0;
+  private wanderYaw = 0;
+  private wanderPitch = 0;
+  private blinkAt = -1;
+  private blinkUntil = 0;
 
   constructor(id: string, look: Look, env: CharacterEnv) {
     this.id = id;
     this.look = look;
     this.env = env;
+    const h = hash(id);
+    this.seed = h & 0x7fffffff;
+    this.rand = rng(h ^ 0x9e3779b9);
+    this.tempo = 0.88 + this.rand() * 0.28;
+    this.offset = this.rand() * 1000;
+    this.breathPeriod = 3.6 + this.rand() * 1.4;
+    this.lazy = traitsOf(id).includes('lazy');
     this.mat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, transparent: false });
     const parts = buildParts(look);
     this.heads = parts.heads;
-    this.geos.push(parts.torso, parts.badge, ...parts.heads, parts.upper, parts.fore, parts.leg);
+    this.geos.push(parts.torso, parts.badge, ...parts.heads, parts.upper, parts.fore, parts.hand, parts.thigh, parts.shin, parts.shoe);
     const mesh = (g: BufferGeometry, parent: Object3D) => {
       const m = new Mesh(g, this.mat);
       m.castShadow = true;
@@ -651,9 +525,9 @@ export class Character {
     this.body.add(this.head);
     this.head.position.y = NECK;
     this.headMesh = mesh(this.heads[0], this.head);
-    for (const [arm, fore, sx] of [
-      [this.armL, this.foreL, 1],
-      [this.armR, this.foreR, -1],
+    for (const [arm, fore, wrist, sx] of [
+      [this.armL, this.foreL, this.wristL, 1],
+      [this.armR, this.foreR, this.wristR, -1],
     ] as const) {
       arm.position.set(sx * SHOULDER_X, SHOULDER_Y, 0);
       this.body.add(arm);
@@ -661,17 +535,26 @@ export class Character {
       fore.position.y = -UPPER;
       arm.add(fore);
       mesh(parts.fore, fore);
+      wrist.position.y = -FORE;
+      fore.add(wrist);
+      mesh(parts.hand, wrist);
     }
-    for (const [leg, sx] of [
-      [this.legL, 1],
-      [this.legR, -1],
+    for (const [leg, knee, ankle, sx] of [
+      [this.legL, this.kneeL, this.ankleL, 1],
+      [this.legR, this.kneeR, this.ankleR, -1],
     ] as const) {
       leg.position.set(sx * LEG_X, HIP, 0);
       this.root.add(leg);
-      mesh(parts.leg, leg);
+      mesh(parts.thigh, leg);
+      knee.position.y = -THIGH;
+      leg.add(knee);
+      mesh(parts.shin, knee);
+      ankle.position.y = -SHIN;
+      knee.add(ankle);
+      mesh(parts.shoe, ankle);
     }
-    this.hand.position.set(0, -FORE - 0.02, 0.02);
-    this.foreR.add(this.hand);
+    this.hand.position.set(0, -0.02, 0.02);
+    this.wristR.add(this.hand);
     this.propMesh = new Mesh(env.props.geos.get('paper')!, this.mat);
     this.propMesh.castShadow = true;
     this.propMesh.visible = false;
@@ -682,9 +565,13 @@ export class Character {
     this.emoteSprite.renderOrder = 10;
     this.root.add(this.emoteSprite);
     this.root.scale.setScalar(look.scale);
-    targets(this.goal, 'stand', false, 0);
+    targets(this.goal, 'stand', false, this.ctx(0, 0, false));
     this.cur.set(this.goal);
     this.apply();
+  }
+
+  private ctx(tMs: number, now: number, live: boolean) {
+    return { t: (tMs / 1000) * this.tempo + this.offset, now, seed: this.seed, cue: this.cue, live, lazy: this.lazy };
   }
 
   private extraMats: (MeshBasicMaterial | MeshStandardMaterial)[] = [];
@@ -745,12 +632,30 @@ export class Character {
   setPose(pose: Pose, now: number, seatY?: number) {
     const seated = SIT_POSES.has(pose) && seatY != null && seatY > 0;
     if (pose === this.pose && seated === this.seated) return;
+    const sitting = seated !== this.seated;
     this.pose = pose;
     this.seated = seated;
     if (seatY != null) this.seatY = seatY;
     this.from.set(this.cur);
     this.blendAt = now;
+    // Sitting down / getting up passes through a crouch: knees bent, leaning forward.
+    if (sitting) {
+      const mid = new Float32Array(this.cur);
+      mid[11] = mid[12] = -0.95;
+      mid[14] = mid[15] = 1.15;
+      mid[16] = mid[17] = -0.2;
+      mid[1] = 0.38;
+      mid[23] = 0.55;
+      mid[5] = mid[8] = -0.55;
+      mid[7] = mid[10] = -0.4;
+      this.transit = { mid, at: now, ms: 560 };
+    }
     if (pose === 'celebrate') this.jumpUntil = now + 1500;
+  }
+
+  /** Play a personal reaction (a thump, a facepalm…) over whatever it is doing. */
+  react(kind: ReactKind, now: number) {
+    this.reacting = { kind, at: now };
   }
 
   setProp(prop: Prop) {
@@ -775,6 +680,7 @@ export class Character {
       this.emoteSprite.visible = true;
     } else this.emoteSprite.visible = false;
     this.eyes = e === 'zz' ? 1 : e === 'check' ? 2 : 0;
+    this.blinkUntil = 0;
     this.headMesh.geometry = this.heads[this.eyes];
     if (e === 'rain') this.makeCloud(now);
     else if (this.cloud) {
@@ -821,10 +727,12 @@ export class Character {
   // ───── frame ─────
 
   /**
-   * Advance by dt. Returns whether it needs continuous frames (walking, blending, fading,
-   * jumping) and when its next stepped loop tick is due (Infinity when static).
+   * Advance by dt. `live` = continuous motion (breathing, glances, smooth loops); otherwise
+   * loops tick in steps. Returns whether it needs continuous frames (live, walking, blending,
+   * fading, jumping) and when its next stepped tick is due (Infinity when static).
    */
-  update(now: number, dt: number, reducedMotion: boolean): { moving: boolean; nextAt: number } {
+  update(now: number, dt: number, reducedMotion: boolean, live = false): { moving: boolean; nextAt: number } {
+    live = live && !reducedMotion;
     let moving = false;
     let nextAt = Infinity;
 
@@ -886,29 +794,54 @@ export class Character {
       moving = true;
     } else this.root.rotation.y = this.yawGoal;
 
-    // Pose targets (stepped loops tick on the shared clock).
-    const period = this.walking ? 0 : loopPeriod(this.pose) * (reducedMotion ? 4 : 1);
+    // Pose targets: continuous while live; otherwise stepped loops tick on the shared clock.
+    const period = this.walking || live ? 0 : loopPeriod(this.pose) * (reducedMotion ? 4 : 1);
+    let tMs = live ? now : 0;
     if (period) {
       this.step = Math.floor(now / period);
       nextAt = (this.step + 1) * period;
+      tMs = this.step * period;
     }
     if (this.walking) {
-      targets(this.goal, 'stand', false, 0);
+      targets(this.goal, 'stand', false, this.ctx(0, now, false)); // no fidgets mid-stride
       const s = Math.sin(this.phase);
+      const c = Math.cos(this.phase);
       this.goal[11] = s * 0.6;
       this.goal[12] = -s * 0.6;
+      // The knee lifts while the leg swings forward, the foot rolls off behind; hips sway.
+      this.goal[14] = 0.08 + Math.max(0, -c) * 0.85;
+      this.goal[15] = 0.08 + Math.max(0, c) * 0.85;
+      this.goal[16] = 0.25 * Math.max(0, s);
+      this.goal[17] = 0.25 * Math.max(0, -s);
+      this.goal[20] = s * 0.035;
       this.goal[5] = -s * 0.5;
       this.goal[8] = s * 0.5;
       this.goal[7] = this.goal[10] = -0.35;
       this.goal[1] = 0.06;
       this.goal[0] = Math.abs(Math.cos(this.phase)) * 0.03;
+      this.goal[13] = -s * 0.06; // the shoulders counter the hips
       if (this.prop) {
         // Carry in front.
         this.goal[8] = -0.55;
         this.goal[10] = -1.1;
         this.goal[9] = -0.1;
       }
-    } else targets(this.goal, this.pose, this.seated, this.step);
+    } else {
+      targets(this.goal, this.pose, this.seated, this.ctx(tMs, now, live));
+      if (live) {
+        addLife(this.goal, this.pose, this.seated, now / 1000, this.seed, this.breathPeriod);
+        this.look_(now, dt);
+      }
+      if (this.reacting) {
+        const age = (now - this.reacting.at) / 1000;
+        const dur = REACT_S[this.reacting.kind];
+        if (age >= dur) this.reacting = null;
+        else {
+          reactPose(this.goal, this.reacting.kind, Math.min(1, age / 0.15) * Math.min(1, (dur - age) / 0.35), now / 1000);
+          moving = true;
+        }
+      }
+    }
     if (this.jumpUntil > now && !reducedMotion) {
       this.goal[0] += Math.abs(Math.sin((now / 1000) * 8.5)) * 0.14;
       moving = true;
@@ -916,7 +849,17 @@ export class Character {
 
     // Blend into a new pose, then follow the goal exactly (no per-frame drift when still).
     const bt = (now - this.blendAt) / BLEND_MS;
-    if (bt < 1 && !this.walking) {
+    const tr = this.transit;
+    const tt = tr ? (now - tr.at) / tr.ms : 1;
+    if (tr && tt < 1 && !this.walking) {
+      // Through the crouch: a quadratic curve from → mid → goal.
+      const k = ease(Math.max(0, tt));
+      const a = (1 - k) * (1 - k);
+      const b = 2 * (1 - k) * k;
+      const g = k * k;
+      for (let i = 0; i < J; i++) this.cur[i] = a * this.from[i] + b * tr.mid[i] + g * this.goal[i];
+      moving = true;
+    } else if (bt < 1 && !this.walking && !tr) {
       const k = ease(Math.max(0, bt));
       for (let i = 0; i < J; i++) this.cur[i] = this.from[i] + (this.goal[i] - this.from[i]) * k;
       moving = true;
@@ -924,7 +867,10 @@ export class Character {
       const k = 1 - Math.exp(-dt * 18);
       for (let i = 0; i < J; i++) this.cur[i] += (this.goal[i] - this.cur[i]) * k;
     } else this.cur.set(this.goal);
+    if (tr && (tt >= 1 || this.walking)) this.transit = null;
     this.apply();
+    this.blink(now, live);
+    if (live) moving = true;
 
     // Emotes: "!" pulses three times, thought dots step at 2 Hz, rain drizzles for 8 s.
     if (this.emoteSprite.visible) {
@@ -949,12 +895,12 @@ export class Character {
         nextAt = Math.min(nextAt, (Math.floor(now / per) + 1) * per);
       }
       this.emoteSprite.scale.set(s, s, 1);
-      const y = NECK + HIP + HEAD_Y + HEAD_R + (this.seated ? this.seatY / this.look.scale + 0.04 - HIP : 0) + 0.26 + this.cur[0];
+      const y = NECK + HIP + HEAD_Y + HEAD_R + this.sitLift() + 0.26 + this.cur[0];
       this.emoteSprite.position.set(this.seated ? 0 : 0, y + (this.pose === 'raise' ? 0.12 : 0), this.seated ? 0.1 : 0);
     }
     if (this.cloud) {
       const t = now - this.cloudAt;
-      const y = NECK + HIP + HEAD_Y + HEAD_R + (this.seated ? this.seatY / this.look.scale + 0.04 - HIP : 0) + 0.3;
+      const y = NECK + HIP + HEAD_Y + HEAD_R + this.sitLift() + 0.3;
       this.cloud.position.y = y;
       const live = t < 8000 && !reducedMotion;
       for (let i = 0; i < this.drops.length; i++) {
@@ -971,25 +917,97 @@ export class Character {
     return { moving, nextAt };
   }
 
+  /** Glances: towards `gaze` when set, else wherever its eyes wander (smoothed like a real head). */
+  private look_(now: number, dt: number) {
+    const w = gazeWeight(this.pose);
+    let yaw: number;
+    let pitch: number;
+    if (this.gaze) {
+      const p = this.root.position;
+      const eye = (this.seated ? this.seatY + 0.6 : 1.0) * this.look.scale;
+      const dx = this.gaze.x - p.x;
+      const dz = this.gaze.z - p.z;
+      const r = this.root.rotation.y;
+      const lx = dx * Math.cos(r) - dz * Math.sin(r);
+      const lz = dx * Math.sin(r) + dz * Math.cos(r);
+      yaw = Math.atan2(lx, lz);
+      pitch = Math.atan2(eye - this.gaze.y, Math.hypot(lx, lz));
+      if (Math.abs(yaw) > 1.7) yaw = 0; // behind it: not worth breaking its neck
+    } else {
+      if (now >= this.wanderAt) {
+        this.wanderYaw = (this.rand() - 0.5) * 0.9;
+        this.wanderPitch = (this.rand() - 0.5) * 0.24;
+        this.wanderAt = now + 2500 + this.rand() * 4500;
+      }
+      yaw = this.wanderYaw;
+      pitch = this.wanderPitch;
+    }
+    const k = 1 - Math.exp(-dt * 6);
+    this.gazeYaw += (clamp(yaw, -1.15, 1.15) - this.gazeYaw) * k;
+    this.gazePitch += (clamp(pitch, -0.45, 0.6) - this.gazePitch) * k;
+    this.goal[3] += this.gazeYaw * w * 0.75;
+    this.goal[13] += this.gazeYaw * w * 0.25;
+    // The head carries the torso's lean: look at a target relative to it.
+    if (this.gaze) this.goal[2] += (this.gazePitch - this.goal[1] - this.goal[2]) * w;
+    else this.goal[2] += this.gazePitch * w * 0.5;
+  }
+
+  /** Blinks every few seconds (sometimes twice), only with open eyes and only while live. */
+  private blink(now: number, live: boolean) {
+    if (!live || this.eyes !== 0 || this.pose === 'sleep') {
+      if (this.blinkUntil) {
+        this.blinkUntil = 0;
+        this.headMesh.geometry = this.heads[this.eyes];
+      }
+      return;
+    }
+    if (this.blinkAt < 0) this.blinkAt = now + this.rand() * 3000;
+    if (this.blinkUntil && now >= this.blinkUntil) {
+      this.blinkUntil = 0;
+      this.headMesh.geometry = this.heads[0];
+    } else if (!this.blinkUntil && now >= this.blinkAt) {
+      this.headMesh.geometry = this.heads[1];
+      this.blinkUntil = now + 110;
+      this.blinkAt = now + (this.rand() < 0.15 ? 280 : 2200 + this.rand() * 3600);
+    }
+  }
+
   /** The joints → the scene graph. */
+  /** How far the hips sit down (joint 23 blends 0 standing → 1 seated). */
+  private sitLift() {
+    return this.cur[23] * (this.seatY / this.look.scale + 0.04 - HIP);
+  }
+
   private apply() {
     const c = this.cur;
-    const sitLift = this.seated ? this.seatY / this.look.scale + 0.04 - HIP : 0;
-    this.body.position.y = HIP + sitLift + c[0];
-    this.body.rotation.set(c[1], c[13], 0);
+    const y = HIP + this.sitLift() + c[0];
+    this.body.position.y = y;
+    this.body.rotation.set(c[1], c[13], c[20]);
     this.head.rotation.set(c[2], c[3], c[4]);
     this.armL.rotation.set(c[5], 0, c[6]);
     this.foreL.rotation.set(c[7], 0, 0);
+    this.wristL.rotation.x = c[18];
     this.armR.rotation.set(c[8], 0, -c[9]);
     this.foreR.rotation.set(c[10], 0, 0);
-    this.legL.position.y = HIP + sitLift + c[0];
-    this.legR.position.y = HIP + sitLift + c[0];
-    this.legL.rotation.x = c[11];
-    this.legR.rotation.x = c[12];
+    this.wristR.rotation.x = c[19];
+    this.legL.position.y = y;
+    this.legR.position.y = y;
+    this.legL.rotation.set(c[11], 0, c[21]);
+    this.legR.rotation.set(c[12], 0, -c[22]);
+    this.kneeL.rotation.x = c[14];
+    this.kneeR.rotation.x = c[15];
+    this.ankleL.rotation.x = c[16];
+    this.ankleR.rotation.x = c[17];
     if (this.propMesh.visible) {
-      // Hold flat things up towards the face when reading; level otherwise.
+      // Hold flat things up towards the face when reading; level otherwise. The pool cue lies
+      // along the table when aiming and stands upright otherwise, whatever the arm does.
       const reading = !this.walking && (this.pose === 'read' || this.pose === 'review');
-      this.propMesh.rotation.set(reading ? 0.9 : this.prop === 'phone' ? 0 : this.prop === 'cue' ? 1.45 : 1.2, 0, 0);
+      let r = reading ? 0.9 : this.prop === 'phone' ? 0 : this.prop === 'cue' ? 1.45 : 1.2;
+      if (this.prop === 'cue' && !this.walking && this.pose === 'pool') {
+        const aiming = this.cue?.phase === 'aim' || this.cue?.phase === 'strike';
+        r = (aiming ? 1.67 : 0.08) - (c[1] + c[8] + c[10] + c[19]);
+      }
+      this.propMesh.rotation.set(r, 0, 0);
     }
   }
 

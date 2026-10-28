@@ -19,6 +19,8 @@
   import type { Artifact } from '../lib/gen/Artifact';
   import type { EventRow } from '../lib/gen/EventRow';
   import { acquireArtifactUrl, releaseArtifactUrl } from '../lib/state/artifacts';
+  import { interruptAgent, stopAgent, updateSettings } from '../lib/state/actions';
+  import { accounts } from '../lib/state/accounts.svelte';
   import { narrate } from '../lib/state/narration';
   import type { RepoFile } from '../lib/gen/RepoFile';
   import { store } from '../lib/state/store.svelte';
@@ -110,6 +112,22 @@
     else ui.select(null);
   };
   const onhover = (sel: Sel | null) => ui.setHover(sel);
+  // The office's click menu (The Sims' pie menu): each item is a real command.
+  const onaction = (id: string, action: 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details') => {
+    const a = store.agentMap.get(id);
+    if (!a) return;
+    if (action === 'chat') ui.openThread(`agent:${id}`);
+    else if (action === 'task') {
+      if (a.task_id) ui.selectTask(a.task_id);
+    } else if (action === 'details') ui.selectAgent(id);
+    else if (action === 'model') {
+      // 1:1 agents switch in place; the Lead's model lives in Settings; workers follow the plan.
+      if (a.role === 'solo') ui.modelDialog = { provider: a.provider, agentId: id };
+      else ui.settingsOpen = true;
+    } else if (action === 'interrupt') interruptAgent(id);
+    else if (action === 'stop') stopAgent(id);
+  };
+  const onpause = (paused: boolean) => updateSettings({ paused });
   // Read once per mount (not reactive): persisted events, oldest first.
   const historyAtMount = () => store.events.slice();
 
@@ -143,6 +161,10 @@
           {artifactUrl}
           {insets}
           ticker={ui.mode === 'office'}
+          accounts={accounts.list}
+          {onaction}
+          paused={store.settings.paused}
+          {onpause}
         />
       {/key}
       {#snippet failed(_error, reset)}

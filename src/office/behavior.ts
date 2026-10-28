@@ -7,10 +7,10 @@
 //  1. ≤ 250 ms to truth: emotes, icons and the desk screen follow the model immediately.
 //  2. Minimum dwell of 600 ms per pose (Dwell below): rapid events coalesce.
 //  3. Excursions: walk to a station only if the activity is still live after its threshold.
-//  4. No phantom work: idle agents sit still; after a minute without events a worker wanders off
-//     to the games corner (console, foosball or pool — one per agent, a full game keeps it at
-//     its desk), any real event brings it straight back, and after 10 minutes it sleeps at
-//     its desk. Leads stay at their desks.
+//  4. No phantom work: idle agents sit still; after a minute without events a worker takes a
+//     break in the games corner (breakroom.ts pairs it up for pool or foosball, or seats it at
+//     the PS5; nothing free keeps it at its desk), any real event brings it straight back, and
+//     after 10 minutes it sleeps at its desk. Leads stay at their desks.
 //  5. Errands only for real instant events (a commit, a memory, a card changing column).
 
 import type { ActivityKind } from '../lib/gen/ActivityKind';
@@ -18,6 +18,7 @@ import type { StationId } from './layout';
 import type { AgentState, ErrandKind, OfficeModel, ToolCall } from './model';
 import { EXCURSION_MS } from './reducer';
 import { hash } from './text';
+import { breakDelay, traitsOf } from './traits';
 
 export type Pose =
   | 'sit'
@@ -38,13 +39,21 @@ export type Pose =
   | 'review'
   | 'wave'
   | 'gamepad'
-  | 'play';
+  | 'foosball'
+  | 'pool'
+  | 'drink';
 
 export type Prop = 'paper' | 'book' | 'card' | 'envelope' | 'folder' | 'phone' | 'marker' | 'note' | 'mug' | 'gamepad' | 'cue' | null;
 export type Emote = 'alert' | 'question' | 'rain' | 'zz' | 'think' | 'check' | null;
 export type Screen = 'off' | 'idle' | 'code' | 'doc' | 'terminal' | 'chat' | 'alert' | 'error' | 'think' | 'search';
 
-export type Place = { kind: 'desk'; stand?: boolean } | { kind: 'station'; id: StationId } | { kind: 'lead'; leadId: string } | { kind: 'door' };
+export type Place =
+  | { kind: 'desk'; stand?: boolean }
+  | { kind: 'station'; id: StationId; slot?: number }
+  | { kind: 'lead'; leadId: string }
+  | { kind: 'door' }
+  /** On a break: the break room (breakroom.ts) decides which game and seat, or the desk. */
+  | { kind: 'break' };
 
 export interface Intent {
   place: Place;
@@ -61,6 +70,8 @@ export interface Intent {
 
 export const LONG_IDLE_MS = 10 * 60_000;
 export const PLAY_AFTER_MS = 60_000;
+/** Tunable for testing (the office demo's ?playAfter=5). */
+export const leisure = { playAfterMs: PLAY_AFTER_MS, prefer: null as 'pool' | 'foosball' | 'console' | null };
 export const DONE_CHECK_MS = 2000;
 export const CHEER_MS = 1700;
 export const ACT_MS = 1500;
@@ -79,6 +90,8 @@ export function placeKey(p: Place): string {
       return 'lead:' + p.leadId;
     case 'door':
       return 'door';
+    case 'break':
+      return 'break';
   }
 }
 
@@ -187,16 +200,26 @@ function make(place: Place, pose: Pose, icon: string, extra: Partial<Intent> = {
 
 const DESK: Place = { kind: 'desk' };
 
-/** The game an idle agent plays: fixed per agent id so it doesn't flicker. */
-function game(a: AgentState): Intent {
+/** An idle agent wants a break; which game (with whom) is the break room's call. */
+function game(): Intent {
+  return make({ kind: 'break' }, 'sit', 'idle', { screen: 'off', emote: null });
+}
+
+/** The concrete intent for a break-room seat (null: no seat free, it stays at its desk). */
+export function breakIntent(seat: { game: 'pool' | 'foosball' | 'console' | 'library' | 'coffee'; slot: number } | null): Intent {
   const extra = { screen: 'off', emote: null } as const;
-  switch (hash(a.id) % 3) {
-    case 0:
-      return make({ kind: 'station', id: 'games.console' }, 'gamepad', 'idle', { ...extra, prop: 'gamepad' });
-    case 1:
-      return make({ kind: 'station', id: 'games.foosball' }, 'play', 'idle', extra);
-    default:
-      return make({ kind: 'station', id: 'games.pool' }, 'play', 'idle', { ...extra, prop: 'cue' });
+  if (!seat) return make({ kind: 'desk' }, 'sit', 'idle', extra);
+  switch (seat.game) {
+    case 'console':
+      return make({ kind: 'station', id: 'games.console', slot: seat.slot }, 'gamepad', 'idle', { ...extra, prop: 'gamepad' });
+    case 'foosball':
+      return make({ kind: 'station', id: 'games.foosball', slot: seat.slot }, 'foosball', 'idle', extra);
+    case 'pool':
+      return make({ kind: 'station', id: 'games.pool', slot: seat.slot }, 'pool', 'idle', { ...extra, prop: 'cue' });
+    case 'library':
+      return make({ kind: 'station', id: 'library.chair', slot: seat.slot }, 'read', 'idle', { ...extra, prop: 'book' });
+    case 'coffee':
+      return make({ kind: 'station', id: 'kitchen', slot: seat.slot }, 'drink', 'idle', { ...extra, prop: 'mug' });
   }
 }
 
@@ -403,8 +426,9 @@ export function deriveIntent(a: AgentState, m: OfficeModel, now: number, errand:
   if (quiet && now - a.lastEventAt >= LONG_IDLE_MS) return { intent: make(DESK, 'sleep', 'sleep', { emote: 'zz', screen: 'off' }), nextAt };
   if (quiet) soon(a.lastEventAt + LONG_IDLE_MS);
   if (quiet && a.status !== 'starting' && a.role !== 'lead') {
-    if (now - a.lastEventAt >= PLAY_AFTER_MS) return { intent: game(a), nextAt };
-    soon(a.lastEventAt + PLAY_AFTER_MS);
+    const after = leisure.playAfterMs * breakDelay(traitsOf(a.id), new Date(now).getHours());
+    if (now - a.lastEventAt >= after) return { intent: game(), nextAt };
+    soon(a.lastEventAt + after);
   }
   if (a.status === 'working') return { intent: make(DESK, 'type', 'working', { screen: 'code' }), nextAt };
   return { intent: make(DESK, 'sit', a.status === 'done' ? 'done' : 'idle', { screen: a.status === 'starting' ? 'idle' : 'idle' }), nextAt };

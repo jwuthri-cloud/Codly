@@ -244,6 +244,10 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
             detail: json!({ "task": t.key, "plan_id": t.plan_id, "reason": reason }),
             reason,
         };
+        if settings.paused {
+            actions.push(wait("paused: no new tasks start until you resume".into()));
+            continue;
+        }
         if free == 0 {
             actions.push(wait(format!("waiting: all {max_parallel} worker slots are busy")));
             continue;

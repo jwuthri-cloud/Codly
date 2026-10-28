@@ -1193,6 +1193,9 @@ pub struct Settings {
     /// and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
     #[serde(default = "yes")]
     pub use_my_claude_setup: bool,
+    /// Pause (the office's speed control): no new task starts; running ones finish.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 fn yes() -> bool {
@@ -1219,6 +1222,7 @@ impl Default for Settings {
             team: vec![],
             byok_openrouter: false,
             use_my_claude_setup: true,
+            paused: false,
         }
     }
 }
