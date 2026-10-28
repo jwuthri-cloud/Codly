@@ -103,6 +103,11 @@
 
   // ── subagents ──
   const subs = $derived(live?.subagents ?? []);
+  const subsRunning = $derived(subs.filter((s) => s.status === 'running'));
+  const subsDone = $derived(subs.filter((s) => s.status !== 'running'));
+  let moreSubs = $state(false);
+  let moreFiles = $state(false);
+  const SHOW = 4;
 
   // ── cost & context ──
   const u = $derived(agent.usage);
@@ -255,6 +260,18 @@
       <div class="why"><Why lines={why} /></div>
     </Section>
 
+    <Section id="env" title="Environment">
+      <ul class="env">
+        <li><Icon name="sparkle" size={15} /><span class="truncate">{PROVIDER_LABEL[agent.provider]}{agent.model ? ` · ${prettyModel(agent.model)}` : ''}</span></li>
+        {#if agent.worktree}
+          <li><Icon name="folder" size={15} /><button class="env-btn truncate" data-tip="Copy worktree path" onclick={() => copyText(agent.worktree ?? '', 'Path copied')}>{tildify(agent.worktree)}</button></li>
+          {#if task?.branch}<li><Icon name="branch" size={15} /><code class="truncate">{task.branch}</code></li>{/if}
+        {:else}
+          <li class="dim"><Icon name="folder" size={15} /><span>No worktree</span></li>
+        {/if}
+      </ul>
+    </Section>
+
     {#if approvals.length}
       <Section id="needs" title="Needs you" tone="attention" collapsible={false}>
         {#if inConversation}
@@ -295,11 +312,11 @@
       </Section>
     {/if}
 
-    <Section id="files" title="Files" summary={fileSummary}>
+    <Section id="files" title="Changes" summary={fileSummary}>
       {#snippet aside()}<span class="count">{fileSummary}</span>{/snippet}
       {#if files.length}
         <ul class="files">
-          {#each files as f (f.path)}
+          {#each moreFiles ? files : files.slice(0, SHOW + 1) as f (f.path)}
             <li>
               <button class="file f-{fileState(f)}" onpointerenter={() => ui.setHover({ path: f.path, agentId: agent.id })} onpointerleave={() => ui.setHover(null)} onclick={() => ui.selectFile(f.path)}>
                 <span class="f-path truncate"><span class="f-dir">{dirname(f.path) ? dirname(f.path) + '/' : ''}</span>{basename(f.path)}</span>
@@ -309,22 +326,39 @@
             </li>
           {/each}
         </ul>
+        {#if files.length > SHOW + 1}<button class="more" onclick={() => (moreFiles = !moreFiles)}>{moreFiles ? 'Show less' : 'Show more'}</button>{/if}
       {:else}
         <p class="small">No files touched yet.</p>
       {/if}
     </Section>
 
     {#if subs.length}
-      <Section id="subagents" title="Helpers" summary={String(subs.length)}>
+      <Section id="subagents" title="Background tasks" summary={subsRunning.length ? `${subsRunning.length} running` : `${subs.length} finished`}>
         <ul class="subs">
-          {#each subs as s (s.callId)}
+          {#each moreSubs ? subsRunning : subsRunning.slice(0, SHOW) as s (s.callId)}
             <li>
-              <span class="s-dot" class:on={s.status === 'running'}></span>
-              <div class="s-txt"><p class="selectable">{s.description}</p><p class="s-meta num">{s.status === 'running' ? `working · ${timer(ui.now - s.startedAt)}` : `${s.status} · ${dur(s.ts - s.startedAt)}`}</p></div>
-              <Provenance kind="observed" compact />
+              <Icon name="crew" size={15} />
+              <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
+              <span class="s-meta num">{timer(ui.now - s.startedAt)}</span>
+              <span class="s-dot on"></span>
             </li>
           {/each}
         </ul>
+        {#if subsRunning.length > SHOW}<button class="more" onclick={() => (moreSubs = !moreSubs)}>{moreSubs ? 'Show less' : 'Show more'}</button>{/if}
+        {#if subsDone.length}
+          <button class="more done" onclick={() => (moreSubs = !moreSubs)}><Icon name="crew" size={15} />{subsDone.length} finished</button>
+          {#if moreSubs}
+            <ul class="subs">
+              {#each subsDone as s (s.callId)}
+                <li class="fin">
+                  <Icon name={s.status === 'completed' ? 'check' : 'x-circle'} size={15} />
+                  <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
+                  <span class="s-meta num">{dur(s.ts - s.startedAt)}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
       </Section>
     {/if}
 
@@ -337,7 +371,8 @@
       {/if}
     </Section>
 
-    <Section id="cost" title="Cost & context" summary="{tokens(u.input_tokens + u.output_tokens)} tokens{ctxFrac != null ? ` · ${pct(ctxFrac)} of context` : ''}">
+    <Section id="cost" title="Context" summary="{tokens(u.input_tokens + u.output_tokens)} tokens">
+      {#snippet aside()}{#if ctxFrac != null}<span class="ctx-mini num">{pct(ctxFrac)}<span class="g-bar"><i style:width="{Math.min(100, ctxFrac * 100)}%" class:near={ctxFrac >= 0.8}></i></span></span>{/if}{/snippet}
       <div class="cost">
         <p class="price">{costLine}</p>
         <div class="kv">
@@ -394,6 +429,7 @@
 {#if moreOpen && moreBtn}<Menu anchor={moreBtn} items={moreItems} onclose={() => (moreOpen = false)} align="end" width={250} />{/if}
 
 <style>
+  .sections { padding-bottom: 16px; }
   .as { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow-y: auto; }
   .head { display: flex; gap: 16px; align-items: center; padding: 24px 22px 10px; background: radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--hue) 14%, transparent), transparent 60%); }
   .h-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-right: 30px; }
@@ -437,11 +473,23 @@
   .f-state { font-size: var(--t-xs); color: var(--ink-3); }
   .f-changed .f-state, .f-created .f-state { color: var(--hue); }
   .f-why { display: flex; align-items: center; gap: 5px; font-size: var(--t-xs); color: var(--ink-3); }
-  .subs { display: flex; flex-direction: column; gap: 10px; }
-  .subs li { display: flex; gap: 10px; align-items: flex-start; }
-  .s-dot { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: var(--ink-4); flex-shrink: 0; }
+  .env, .subs { display: flex; flex-direction: column; gap: 9px; }
+  .env li, .subs li { display: flex; gap: 10px; align-items: center; min-width: 0; color: var(--ink-2); }
+  .env li > :global(svg), .subs li > :global(svg) { flex-shrink: 0; color: var(--ink-3); }
+  .env li > span, .env li > code, .env-btn { min-width: 0; font-size: var(--t-md); }
+  .env code { font-size: 12.5px; }
+  .env .dim { color: var(--ink-3); }
+  .env-btn { text-align: left; color: inherit; }
+  .env-btn:hover { color: var(--ink-1); }
+  .more { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: var(--t-md); color: var(--ink-3); }
+  .more:hover { color: var(--ink-1); }
+  .more.done { margin-top: 12px; color: var(--ink-2); }
+  .fin { color: var(--ink-3); }
+  .ctx-mini { display: inline-flex; align-items: center; gap: 8px; font-size: var(--t-sm); color: var(--ink-3); }
+  .ctx-mini .g-bar { width: 38px; }
+  .s-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-4); flex-shrink: 0; }
   .s-dot.on { background: color-mix(in srgb, var(--hue) 75%, white); box-shadow: 0 0 8px var(--hue); }
-  .s-txt { flex: 1; min-width: 0; font-size: var(--t-md); line-height: var(--lh-md); }
+  .s-txt { flex: 1; min-width: 0; font-size: var(--t-md); }
   .s-meta { font-size: var(--t-xs); color: var(--ink-3); }
   .out-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: var(--t-sm); color: var(--ink-3); }
   .out-head code { font-size: 11.5px; color: var(--ink-2); }

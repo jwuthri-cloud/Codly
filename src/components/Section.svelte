@@ -1,4 +1,4 @@
-<!-- Collapsible inspector section. Open state is remembered per section id (not per agent). -->
+<!-- Collapsible inspector card. Open state is remembered per section id (not per agent). -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { ui } from '../lib/state/ui.svelte';
@@ -21,12 +21,12 @@
   <header>
     {#if collapsible}
       <button class="toggle" aria-expanded={open} onclick={() => ui.toggleSection(id)}>
+        <span class="title">{title}</span>
         <span class="chev" class:open><Icon name="chevron-right" size={12} stroke={2} /></span>
-        <span class="eyebrow">{title}</span>
         {#if summary && !open && !aside}<span class="summary truncate">{summary}</span>{/if}
       </button>
     {:else}
-      <span class="toggle static"><span class="eyebrow">{title}</span></span>
+      <span class="toggle static"><span class="title">{title}</span></span>
     {/if}
     {#if aside}<div class="aside">{@render aside()}</div>{/if}
   </header>
@@ -36,13 +36,13 @@
 </section>
 
 <style>
-  .sec { padding: 14px 22px 16px; }
-  .sec + :global(.sec) { box-shadow: inset 0 1px 0 var(--line); }
+  .sec { margin: 0 16px 10px; padding: 12px 16px 14px; border-radius: var(--r-lg); box-shadow: inset 0 0 0 1px var(--line); }
   .sec.attention { background: linear-gradient(180deg, var(--amber-soft), transparent 80%); }
   header { display: flex; align-items: center; gap: 8px; min-height: 22px; }
-  .toggle { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 22px; text-align: left; }
+  .toggle { display: flex; align-items: center; gap: 8px; min-width: 0; height: 22px; text-align: left; }
+  header > .aside { margin-left: auto; }
+  .title { font-weight: var(--w-med); color: var(--ink-1); }
   .toggle.static { cursor: default; }
-  .toggle:hover :global(.eyebrow) { color: var(--ink-1); }
   .chev { display: grid; place-items: center; color: var(--ink-3); transition: transform var(--d-2) var(--ease-out); }
   .chev.open { transform: rotate(90deg); }
   .summary { color: var(--ink-3); font-size: var(--t-sm); margin-left: 4px; }
