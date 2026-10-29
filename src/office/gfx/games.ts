@@ -690,8 +690,8 @@ export class GamesCorner {
 
   private updateTv(now: number, dt: number, players: GamePlayer[]) {
     const T = this.tv!;
-    T.screen.visible = players.length > 0;
-    if (!players.length) return false;
+    // The TV is always on: the match runs whether or not anyone is on the PS5.
+    T.screen.visible = true;
     T.sim.step(now, dt);
     const tv = this.world(T.it, 0, 0, 1.0, new Vector3());
     for (const pl of players) {

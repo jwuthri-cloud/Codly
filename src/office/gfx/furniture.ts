@@ -470,9 +470,7 @@ export function tvStand(b: Builder, screen: Builder) {
   b.box(0, 0.46, -0.05, 0.36, 0.03, 0.2, c('#1f2026'));
   b.box(0, 0.58, -0.08, 0.05, 0.22, 0.03, c('#1f2026'));
   b.box(0, 1.0, -0.08, 1.3, 0.74, 0.05, c('#16171b'));
-  screen.box(0, 1.0, -0.05, 1.22, 0.66, 0.01, c('#4b8bf5'));
-  screen.box(-0.2, 0.92, -0.044, 0.5, 0.3, 0.004, c('#f2c14e'));
-  screen.box(0.32, 1.12, -0.044, 0.28, 0.18, 0.004, c('#5ee08f'));
+  // The picture is the canvas plane in games.ts; no placeholder blocks here.
 }
 
 /** Foosball: the rods run along x with handles at both ends, goals at ±z. The rods move, so
