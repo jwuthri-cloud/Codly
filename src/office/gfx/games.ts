@@ -408,6 +408,12 @@ export function aroundTable(a: [number, number], b: [number, number], hx: number
 
 // ───────────── console ─────────────
 
+/** The two sides on the TV: seat 0 is the home side. Kits are the teams' home colours. */
+const TV_TEAMS = [
+  { code: 'BRA', shirt: '#FFDF00', shorts: '#002776', ink: '#0b1b4a' },
+  { code: 'ARG', shirt: '#75AADB', shorts: '#1c1c1c', ink: '#0b1b2e' },
+];
+
 /** A football match on the TV: about 75 s from kick-off to full time, chances every few seconds. */
 export class ConsoleSim {
   score = [0, 0];
@@ -565,7 +571,7 @@ export class GamesCorner {
     const ti = find('tvStand');
     if (ti && canvas && texture) {
       const g = frame(ti);
-      const [cv, ctx] = canvas(256, 144);
+      const [cv, ctx] = canvas(512, 288);
       const t = texture(cv);
       const screen = new Mesh(new PlaneGeometry(1.22, 0.66), new MeshBasicMaterial({ map: t, toneMapped: false }));
       screen.position.set(0, 1.0, -0.043);
@@ -693,61 +699,117 @@ export class GamesCorner {
       pl.c.gaze = (pl.c.gaze ?? new Vector3()).copy(tv);
     }
     if (now - T.drawnAt > 80) {
-      this.drawTv(T.g, T.sim, players);
+      this.drawTv(T.g, T.sim, now);
       T.tex.needsUpdate = true;
       T.drawnAt = now;
     }
     return true;
   }
 
-  /** The match on the TV: a pitch, two teams, the ball, the score and the clock. */
-  private drawTv(g: CanvasRenderingContext2D, sim: ConsoleSim, players: GamePlayer[]) {
-    const W = 256;
-    const H = 144;
-    g.fillStyle = '#2f8f4e';
-    g.fillRect(0, 0, W, H);
-    for (let i = 0; i < 8; i++) {
+  /** The match on the TV, broadcast style: striped pitch, numbered players, a score bar, a goal banner. */
+  private drawTv(g: CanvasRenderingContext2D, sim: ConsoleSim, now: number) {
+    const W = 512;
+    const H = 288;
+    const TOP = 36;
+    const BOT = 26;
+    const PH = H - TOP - BOT;
+    // Pitch: mown stripes, then the lines.
+    for (let i = 0; i < 12; i++) {
       g.fillStyle = i % 2 ? '#2b8649' : '#33975a';
-      g.fillRect((i * W) / 8, 18, W / 8, H - 18);
+      g.fillRect((i * W) / 12, TOP, W / 12, PH);
     }
-    g.strokeStyle = 'rgba(255,255,255,0.75)';
-    g.lineWidth = 1.5;
-    g.strokeRect(8, 24, W - 16, H - 32);
+    g.strokeStyle = 'rgba(255,255,255,0.8)';
+    g.lineWidth = 2;
+    g.strokeRect(14, TOP + 8, W - 28, PH - 16);
     g.beginPath();
-    g.moveTo(W / 2, 24);
-    g.lineTo(W / 2, H - 8);
+    g.moveTo(W / 2, TOP + 8);
+    g.lineTo(W / 2, H - BOT - 8);
     g.stroke();
     g.beginPath();
-    g.arc(W / 2, 24 + (H - 32) / 2, 16, 0, Math.PI * 2);
+    g.arc(W / 2, TOP + PH / 2, 34, 0, Math.PI * 2);
     g.stroke();
-    const cx = (x: number) => W / 2 + x * (W / 2 - 16);
-    const cy = (y: number) => 24 + (H - 32) / 2 + y * ((H - 32) / 2 - 8);
+    for (const side of [-1, 1]) {
+      const x0 = side < 0 ? 14 : W - 14 - 70;
+      g.strokeRect(x0, TOP + PH / 2 - 50, 70, 100);
+    }
+    const cx = (x: number) => W / 2 + x * (W / 2 - 26);
+    const cy = (y: number) => TOP + PH / 2 + y * (PH / 2 - 14);
     const t = performance.now() / 1000;
+    // Players: a shadow, the kit, and a shirt number.
     for (let side = 0; side < 2; side++) {
-      g.fillStyle = side ? '#2f6fd6' : '#d64b3b';
       for (let k = 0; k < 5; k++) {
         const home = (side ? 1 : -1) * (0.15 + (k % 3) * 0.25);
         const x = home * 0.9 + sim.ball.x * 0.35 + noise(t * 0.6 + k, side * 10 + k) * 0.08;
         const y = (k - 2) * 0.35 + sim.ball.y * 0.3 + noise(t * 0.5 + k, side * 20 + k) * 0.1;
+        const px = cx(x);
+        const py = cy(y);
+        g.fillStyle = 'rgba(0,0,0,0.25)';
         g.beginPath();
-        g.arc(cx(x), cy(y), 4, 0, Math.PI * 2);
+        g.ellipse(px, py + 6, 8, 3, 0, 0, Math.PI * 2);
         g.fill();
+        const team = TV_TEAMS[side];
+        g.fillStyle = team.shorts;
+        g.fillRect(px - 5, py + 2, 10, 6);
+        g.fillStyle = team.shirt;
+        g.beginPath();
+        g.arc(px, py, 8, 0, Math.PI * 2);
+        g.fill();
+        g.strokeStyle = '#fff';
+        g.lineWidth = 1.5;
+        g.stroke();
+        g.fillStyle = team.ink;
+        g.font = '700 9px Inter, system-ui, sans-serif';
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.fillText(String(side * 5 + k + 1), px, py + 0.5);
       }
     }
+    // Ball with a soft shadow.
+    const bx = cx(sim.ball.x);
+    const by = cy(sim.ball.y);
+    g.fillStyle = 'rgba(0,0,0,0.3)';
+    g.beginPath();
+    g.ellipse(bx, by + 4, 5, 2, 0, 0, Math.PI * 2);
+    g.fill();
     g.fillStyle = '#fff';
     g.beginPath();
-    g.arc(cx(sim.ball.x), cy(sim.ball.y), 3, 0, Math.PI * 2);
+    g.arc(bx, by, 4.5, 0, Math.PI * 2);
     g.fill();
-    g.fillStyle = 'rgba(10,13,20,0.85)';
-    g.fillRect(0, 0, W, 18);
+    // Score bar: team colours, score, clock.
+    g.fillStyle = 'rgba(10,13,20,0.9)';
+    g.fillRect(0, 0, W, TOP);
+    g.fillStyle = TV_TEAMS[0].shirt;
+    g.fillRect(0, 0, 6, TOP);
+    g.fillStyle = TV_TEAMS[1].shirt;
+    g.fillRect(W - 6, 0, 6, TOP);
     g.fillStyle = '#fff';
-    g.font = '600 12px Inter, system-ui, sans-serif';
     g.textBaseline = 'middle';
-    const name = (seat: number) => (players.some((p) => (p.slot === 0 ? 0 : 1) === seat) ? (seat ? 'BLU' : 'RED') : 'CPU');
-    g.textAlign = 'center';
-    g.fillText(`${name(0)} ${sim.score[0]} – ${sim.score[1]} ${name(1)}`, W / 2, 9);
+    g.font = '700 18px Inter, system-ui, sans-serif';
     g.textAlign = 'right';
-    g.fillText(sim.fullTime ? 'FT' : `${Math.min(90, Math.floor(sim.clock * 90))}'`, W - 6, 9);
+    g.fillText(TV_TEAMS[0].code, W / 2 - 60, TOP / 2 + 1);
+    g.textAlign = 'left';
+    g.fillText(TV_TEAMS[1].code, W / 2 + 60, TOP / 2 + 1);
+    g.font = '800 22px Inter, system-ui, sans-serif';
+    g.textAlign = 'center';
+    g.fillText(`${sim.score[0]} – ${sim.score[1]}`, W / 2, TOP / 2 + 1);
+    // Lower third: the clock, and a banner after a goal.
+    g.fillStyle = 'rgba(10,13,20,0.9)';
+    g.fillRect(0, H - BOT, W, BOT);
+    g.fillStyle = '#fff';
+    g.font = '600 13px Inter, system-ui, sans-serif';
+    g.textAlign = 'left';
+    g.fillText('MUNDIAL', 10, H - BOT / 2 + 1);
+    g.textAlign = 'right';
+    g.fillText(sim.fullTime ? 'FULL TIME' : `${Math.min(90, Math.floor(sim.clock * 90))}'`, W - 10, H - BOT / 2 + 1);
+    if (sim.lastGoal && now - sim.lastGoal.at < 2500) {
+      const scorer = TV_TEAMS[sim.lastGoal.side];
+      g.fillStyle = scorer.shirt;
+      g.fillRect(W / 2 - 110, H / 2 - 24, 220, 48);
+      g.fillStyle = scorer.ink;
+      g.font = '900 30px Inter, system-ui, sans-serif';
+      g.textAlign = 'center';
+      g.fillText('GOAL!', W / 2, H / 2 + 1);
+    }
   }
 
   dispose() {
