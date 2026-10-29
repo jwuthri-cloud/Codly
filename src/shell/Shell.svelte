@@ -55,10 +55,13 @@
       {:else}
         {#key ui.room}
           <section class="room glass" aria-label={ui.room}>
-            {#if ui.room === 'plan'}<PlanRoom />
-            {:else if ui.room === 'changes'}<ChangesRoom />
-            {:else if ui.room === 'knowledge'}<KnowledgeRoom />
-            {:else}<TerminalRoom />{/if}
+            <svelte:boundary>
+              {#if ui.room === 'plan'}<PlanRoom />
+              {:else if ui.room === 'changes'}<ChangesRoom />
+              {:else if ui.room === 'knowledge'}<KnowledgeRoom />
+              {:else}<TerminalRoom />{/if}
+              {#snippet failed(error)}<p style="padding:28px;color:var(--bad)">This room failed to open: {error instanceof Error ? error.message : String(error)}</p>{/snippet}
+            </svelte:boundary>
           </section>
         {/key}
       {/if}

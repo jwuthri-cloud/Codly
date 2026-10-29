@@ -19,7 +19,13 @@
   const places = $derived.by((): Place[] => {
     const repo = store.workspace?.repo_path ?? null;
     const list: Place[] = [{ key: repo ?? '(repo)', cwd: repo, label: store.workspace?.name ?? 'Repository', agentId: null }];
-    for (const a of store.agents) if (a.worktree) list.push({ key: a.worktree, cwd: a.worktree, label: `${a.name}’s worktree`, agentId: a.id });
+    // Agents can share a worktree (or sit in the repo itself): one tab per path, keys must be unique.
+    const seen = new Set(list.map((p) => p.key));
+    for (const a of store.agents) {
+      if (!a.worktree || seen.has(a.worktree)) continue;
+      seen.add(a.worktree);
+      list.push({ key: a.worktree, cwd: a.worktree, label: `${a.name}’s worktree`, agentId: a.id });
+    }
     return list;
   });
   const current = $derived(places.find((p) => p.cwd === ui.terminalCwd) ?? places[0]);
