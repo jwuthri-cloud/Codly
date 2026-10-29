@@ -119,7 +119,8 @@
     if (agent.billing === 'third_party') return `${usd(u.cost_usd)} · billed by the provider`;
     return `≈ ${usd(u.cost_usd)}`;
   });
-  const limits = $derived(store.rateLimits.filter((r) => r.provider === agent.provider));
+  // Quota is per sign-in: only this agent's account, never the provider's other sign-ins.
+  const limits = $derived(store.rateLimits.filter((r) => r.provider === agent.provider && r.account === accounts.idOf(agent)));
   // Its sign-in: the quota it draws from (labelled only when the CLI has several in use).
   const account = $derived(accounts.of(agent));
   const acctTag = $derived(accounts.tag(agent));
