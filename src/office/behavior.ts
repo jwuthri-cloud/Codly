@@ -207,7 +207,7 @@ function game(): Intent {
 }
 
 /** The concrete intent for a break-room seat (null: no seat free, it stays at its desk). */
-export function breakIntent(seat: { game: 'pool' | 'foosball' | 'console' | 'library' | 'coffee'; slot: number } | null): Intent {
+export function breakIntent(seat: { game: 'pool' | 'foosball' | 'console' | 'library' | 'coffee' | 'nap'; slot: number } | null): Intent {
   const extra = { screen: 'off', emote: null } as const;
   if (!seat) return make({ kind: 'desk' }, 'sit', 'idle', extra);
   switch (seat.game) {
@@ -221,6 +221,8 @@ export function breakIntent(seat: { game: 'pool' | 'foosball' | 'console' | 'lib
       return make({ kind: 'station', id: 'library.chair', slot: seat.slot }, 'read', 'idle', { ...extra, prop: 'book' });
     case 'coffee':
       return make({ kind: 'station', id: 'kitchen', slot: seat.slot }, 'drink', 'idle', { ...extra, prop: 'mug' });
+    case 'nap':
+      return make({ kind: 'station', id: 'nap.armchair', slot: seat.slot }, 'sleep', 'sleep', { screen: 'off', emote: 'zz' });
   }
 }
 

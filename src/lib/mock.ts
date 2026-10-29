@@ -26,7 +26,7 @@ import type { RequestPrefs } from './gen/RequestPrefs';
 import { mockAgentGit } from './demo/agentgit';
 import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
-import { draftPrompt, draftReply, exportDemoAgent, hireFromManifest, isDraftRequest, launchPreview, reviewHire } from './demo/hire';
+import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
 import { makeApplicants } from './util/career';
 import { demoBringBack, demoGhosts, demoShop, demoTrade } from './demo/office';
 import { HousekeepingDemo } from './demo/housekeeping';
@@ -212,7 +212,6 @@ export class MockTransport implements Transport {
       }
       case 'send_chat': {
         if (!sim.workspace) throw new Error('Open a repository first.');
-        if (isDraftRequest(String(a.text))) { draftReply(sim, String(a.thread), String(a.text)); return null; } // wizard: "Generate with AI"
         story.userChat(String(a.thread), String(a.text));
         return null;
       }
@@ -269,8 +268,8 @@ export class MockTransport implements Transport {
         return reviewHire(String(a.raw));
       case 'hire_launch_preview':
         return launchPreview(String(a.provider), (a.model as string | null) ?? null, (a.command as string | null) ?? null);
-      case 'hire_draft_prompt':
-        return draftPrompt(String(a.brief));
+      case 'hire_draft':
+        return reviewHire(demoDraft(String(a.brief)));
       case 'hire_from_manifest':
         return hireFromManifest(sim, story, a.manifest as HireManifest, Boolean(a.confirmShell));
       case 'hire_applicants': {

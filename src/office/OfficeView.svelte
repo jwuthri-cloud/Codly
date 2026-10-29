@@ -51,7 +51,7 @@
     artifactUrl?: (artifact: Artifact) => string | null;
     ticker?: boolean;
     insets?: { top?: number; right?: number; bottom?: number; left?: number };
-    /** The Sims layer: accounts (Energy = quota left), actions from the click menu, Pause. */
+    /** The Sims layer: accounts (quota, for the Out of quota moodlet), actions from the click menu, Pause. */
     accounts?: AccountInfo[];
     onaction?: (agentId: string, action: AgentAction) => void;
     paused?: boolean;
@@ -104,7 +104,7 @@
     const now = Date.now();
     if (o.hired == null && o.closes_at < now) return; // from history, long gone
     offers = [...offers.filter((x) => x.id !== o.id), o];
-    if (o.hired != null) setTimeout(() => (offers = offers.filter((x) => x.id !== o.id)), 5000);
+    if (o.hired != null) setTimeout(() => (offers = offers.filter((x) => x.id !== o.id)), 3000);
   }
 
   const sims = new SimsTracker();
@@ -170,11 +170,12 @@
     e.setArtifacts($state.snapshot(artifacts) as Artifact[]);
     e.replay(history);
     sims.setAgents($state.snapshot(agents) as Agent[]);
-    // Needs drive what an agent does on its break (a tired one goes for coffee).
+    // Needs drive what an agent does on its break (a tired one naps); what it does refills them.
     e.setNeeds((id) => {
-      const s = sims.stats(id, Date.now(), e.agentState(id), accounts);
+      const s = sims.stats(id, Date.now(), e.agentState(id));
       return { energy: s.needs.energy, morale: s.needs.morale };
     });
+    e.setActivity((id, now, act) => sims.setActivity(id, now, act));
     sims.setTasks($state.snapshot(tasks) as Task[]);
     for (const ev of history) {
       sims.ingest(ev);
@@ -288,7 +289,7 @@
     />
   {/if}
   {#if engine && offers.length}
-    <JobBoard {offers} {engine} insets={hudInsets} onpick={onpickapplicant} />
+    <JobBoard {offers} insets={hudInsets} onpick={onpickapplicant} />
   {/if}
   {#if engine && !backdrop && ghosts.length}
     <GhostBoard {ghosts} {engine} insets={hudInsets} {onbringback} />

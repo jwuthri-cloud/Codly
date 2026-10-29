@@ -160,7 +160,7 @@ pub fn run() {
             inbound::inbound_set_slack,
             hire_commands::hire_review,
             hire_commands::hire_launch_preview,
-            hire_commands::hire_draft_prompt,
+            hire_commands::hire_draft,
             hire_commands::hire_from_manifest,
             hire_commands::hire_applicants,
             hire_commands::pick_applicant,

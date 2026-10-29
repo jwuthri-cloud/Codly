@@ -1,9 +1,10 @@
 // The break room: who plays what when agents are idle. Pool and foosball need two players, the
-// PS5 takes one or two. Agents are matched in the order they became free:
+// PS5 takes one or two, the armchair is for one napper. Agents are matched in the order they became free:
 //   1. someone waits alone at a table → join them;
 //   2. another free agent has no game yet → pair up at a free table (pool or foosball);
 //   3. otherwise a PS5 seat: solo against the CPU, or the second controller;
 //   4. everything taken → stay at the desk.
+// A tired agent (wish 'nap') takes the armchair first, when it is free.
 // Pairs are stable: a newcomer never splits a game. When real work calls a player back, the
 // partner waits a few seconds (someone may join), then moves to the PS5 or back to its desk.
 //
@@ -12,8 +13,8 @@
 import { hash } from './text';
 import type { Activity } from './traits';
 
-/** Two-player tables, the PS5, and the solo spots: a library chair, the coffee counter. */
-export type Game = 'pool' | 'foosball' | 'console' | 'library' | 'coffee';
+/** Two-player tables, the PS5, and the solo spots: a library chair, the coffee counter, the nap armchair. */
+export type Game = 'pool' | 'foosball' | 'console' | 'library' | 'coffee' | 'nap';
 export interface Seat {
   game: Game;
   /** Slot index at the game's station (games.pool:0 / :1 …). */
@@ -21,7 +22,7 @@ export interface Seat {
 }
 
 const TABLES: Game[] = ['pool', 'foosball'];
-const SEATS: Record<Game, number> = { pool: 2, foosball: 2, console: 2, library: 2, coffee: 2 };
+const SEATS: Record<Game, number> = { pool: 2, foosball: 2, console: 2, library: 2, coffee: 2, nap: 1 };
 /** How long a player left alone at a table waits for someone before giving up. */
 export const LONELY_MS = 6000;
 
@@ -96,7 +97,7 @@ export class BreakRoom {
       if (this.seats.has(id)) continue;
       // Its own wish first when nothing forces a game (a solo spot, or straight to the couch).
       const wish = prefer ? 'any' : (wants.get(id) ?? 'any');
-      const solo: Game | null = wish === 'library' ? 'library' : wish === 'coffee' ? 'coffee' : wish === 'console' ? 'console' : null;
+      const solo: Game | null = wish === 'library' ? 'library' : wish === 'coffee' ? 'coffee' : wish === 'console' ? 'console' : wish === 'nap' ? 'nap' : null;
       if (solo && this.free(solo) >= 0) {
         this.seats.set(id, { game: solo, slot: this.free(solo) });
         continue;

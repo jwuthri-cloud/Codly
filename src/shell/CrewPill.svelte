@@ -49,7 +49,7 @@
   const tip = $derived(
     isLead ? `${agent.name}${acct ? ` (${acct})` : ''} · ${req?.title ?? 'New request'} — ${req?.status ?? n?.text ?? ''}`
     : compact ? `${agent.name}${acct ? ` · ${accounts.who(agent)}` : ''}: ${n?.text ?? ''}`
-    : [acct && accounts.who(agent), many && agent.task_id && req && `For: ${req.title}`].filter(Boolean).join(' — ') || undefined,
+    : [PROVIDER_LABEL[agent.provider], acct && accounts.who(agent), many && agent.task_id && req && `For: ${req.title}`].filter(Boolean).join(' — ') || undefined,
   );
   const here = $derived(isLead && ui.room === 'home' && ui.thread === (agent.thread ?? 'lead'));
   const amber = $derived(isLead && !!req?.needsYou);
@@ -93,7 +93,7 @@
     <span class="ln">{agent.name}</span>
   {:else if !compact}
     <span class="txt">
-      <span class="who"><span class="name">{agent.name}</span><span class="prov">{agentTitle(agent) ? `${agentTitle(agent)} · ` : ''}{PROVIDER_LABEL[agent.provider]}</span></span>
+      <span class="who"><span class="name">{agent.name}</span>{#if agentTitle(agent)}<span class="prov truncate">{agentTitle(agent)}</span>{/if}</span>
       <span class="say truncate">{#if n}<Say parts={n.parts} />{/if}</span>
     </span>
   {/if}
@@ -111,9 +111,9 @@
   .hit:focus-visible { outline-offset: 1px; border-radius: var(--r-full); }
   .face { position: relative; z-index: 1; pointer-events: none; }
   .txt { position: relative; z-index: 1; pointer-events: none; display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
-  .who { display: flex; align-items: baseline; gap: 6px; line-height: 16px; }
-  .name { font-weight: var(--w-semi); font-size: var(--t-md); color: var(--ink-1); }
-  .prov { font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
+  .who { display: flex; align-items: baseline; gap: 6px; line-height: 16px; min-width: 0; }
+  .name { flex: none; font-weight: var(--w-semi); font-size: var(--t-md); color: var(--ink-1); }
+  .prov { min-width: 0; font-size: var(--t-xs); color: var(--ink-3); }
   .say { display: block; font-size: var(--t-sm); line-height: 17px; color: var(--ink-2); }
   .pill:hover, .pill.lit { box-shadow: var(--glass-edge), inset 0 0 0 1px color-mix(in srgb, var(--hue) 55%, transparent), 0 10px 30px -18px rgba(0, 0, 0, 0.6); }
   .pill.selected { background: color-mix(in srgb, var(--hue) 14%, var(--glass)); box-shadow: var(--glass-edge), inset 0 0 0 1.5px color-mix(in srgb, var(--hue) 75%, transparent); }

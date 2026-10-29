@@ -595,6 +595,11 @@ impl Core {
         self.inner.hire_agent(provider, model, title).await
     }
 
+    /// "Generate with AI": a manifest draft from Claude, forced into the hire schema (nothing is started).
+    pub async fn hire_draft(&self, brief: &str) -> anyhow::Result<crate::hire::HireReview> {
+        self.inner.hire_draft(brief).await
+    }
+
     /// Start the 1:1 agent a reviewed hire manifest describes (the add-agent wizard's last step).
     /// Re-validates everything; `confirm_shell` = the person accepted shell metacharacters in a custom command.
     pub async fn hire_from_manifest(&self, manifest: crate::hire::HireManifest, confirm_shell: bool) -> anyhow::Result<Agent> {

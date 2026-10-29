@@ -13,10 +13,11 @@
 //!   metacharacter is either a mistake or an attempt at something the review should show.
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use ts_rs::TS;
 
 use crate::adapters::classify;
-use crate::model::{Provider, role_title};
+use crate::model::{Provider, ROLE_TITLES, role_title};
 
 /// The `schema` value of this manifest version.
 pub const SCHEMA: &str = "codly/hire@1";
@@ -319,23 +320,51 @@ pub fn launch_preview(provider: &str, model: Option<&str>, command: Option<&str>
     }
 }
 
-/// The request the wizard's "Generate with AI" sends to the Lead. The reply is read by the
-/// wizard and goes through [`review`] like an imported file.
+/// The instruction for "Generate with AI". The reply's shape is enforced by [`draft_schema`], not by this text.
 pub fn draft_prompt(brief: &str) -> String {
     let brief: String = brief.trim().chars().take(1000).collect();
-    let providers: Vec<&str> = Provider::ALL.iter().map(|p| p.as_str()).collect();
     format!(
-        "Draft a hire manifest for a new 1:1 coding agent. This is a one-off drafting request: do not submit a plan, \
-         do not hire or delegate to anyone, do not use tools. Reply with ONLY one JSON object in a ```json block, using exactly these \
-         fields and no others:\n\
-         {{\"schema\": \"{SCHEMA}\", \"name\": \"<short first name>\", \"avatar\": one of {avatars:?}, \"color\": 0-7, \
-         \"title\": <optional job title>, \"provider\": one of {providers:?}, \"model\": <optional>, \"isolate\": true, \
-         \"description\": \"<role in 1-3 sentences, at most {MAX_DESCRIPTION} characters>\", \
-         \"goal\": \"<the standing goal, at most {MAX_GOAL} characters>\"}}\n\
-         Leave out `command` and `resume_session`. The user reviews the draft before anything starts.\n\
-         What the agent is for: {brief}",
-        avatars = AVATARS,
+        "Draft a hire manifest for a new 1:1 coding agent. This is a one-off drafting request: do not plan, hire or delegate, \
+         and do not use tools. Fill in every field of the schema for this agent. The user reviews the draft before anything starts.\n\
+         What the agent is for: {brief}"
     )
+}
+
+/// The JSON Schema a draft must match, enforced by `claude --json-schema`. [`review`] still judges the result.
+pub fn draft_schema() -> serde_json::Value {
+    let providers: Vec<&str> = Provider::ALL.iter().map(|p| p.as_str()).collect();
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema", "name", "provider", "isolate", "description", "goal"],
+        "properties": {
+            "schema": { "const": SCHEMA },
+            "name": { "type": "string", "minLength": 1, "maxLength": MAX_NAME },
+            "avatar": { "enum": AVATARS },
+            "color": { "type": "integer", "minimum": 0, "maximum": 7 },
+            "title": { "enum": ROLE_TITLES },
+            "provider": { "enum": providers },
+            "model": { "type": "string", "maxLength": MAX_MODEL },
+            "isolate": { "type": "boolean" },
+            "description": { "type": "string", "maxLength": MAX_DESCRIPTION },
+            "goal": { "type": "string", "maxLength": MAX_GOAL }
+        }
+    })
+}
+
+/// The review of a `claude -p --output-format json` reply made with [`draft_schema`].
+pub fn draft_from_output(stdout: &str) -> HireReview {
+    let env: serde_json::Value = match serde_json::from_str(stdout) {
+        Ok(v) => v,
+        Err(e) => return HireReview { problems: vec![format!("the reply was not JSON: {e}")], ..Default::default() },
+    };
+    match env.get("structured_output").filter(|v| !v.is_null()) {
+        Some(draft) => review(&draft.to_string()),
+        None => {
+            let text: String = env["result"].as_str().unwrap_or("(empty)").chars().take(200).collect();
+            HireReview { problems: vec![format!("no draft in the reply: {text}")], ..Default::default() }
+        }
+    }
 }
 
 /// A hired agent's briefing, put in front of each prompt it receives.
@@ -485,11 +514,13 @@ mod tests {
     }
 
     #[test]
-    fn the_draft_request_names_the_schema_and_the_brief() {
-        let p = draft_prompt("  triage bugs from the issue tracker ");
-        assert!(p.contains(SCHEMA) && p.contains("triage bugs") && p.contains("\"claude\"") && p.contains("do not submit a plan"));
-        // A draft that follows the request passes review.
-        let reply = r#"{"schema":"codly/hire@1","name":"Tri","avatar":"moss","color":2,"title":"QA","provider":"codex","isolate":true,"description":"d","goal":"g"}"#;
-        assert!(review(reply).manifest.is_some());
+    fn a_schema_enforced_draft_is_reviewed() {
+        let ok = r#"{"type":"result","result":"","structured_output":{"schema":"codly/hire@1","name":"Tri","avatar":"moss","color":2,"title":"QA","provider":"codex","isolate":true,"description":"d","goal":"g"}}"#;
+        assert!(draft_from_output(ok).manifest.is_some());
+        // The title is the badge list, not free text: the old "Backend engineer" fails.
+        let free = ok.replace("\"QA\"", "\"Backend engineer\"");
+        assert!(draft_from_output(&free).manifest.is_none());
+        assert!(draft_from_output(r#"{"result":"sorry"}"#).problems[0].contains("sorry"));
+        assert!(draft_schema()["properties"]["title"]["enum"].as_array().unwrap().len() == ROLE_TITLES.len());
     }
 }

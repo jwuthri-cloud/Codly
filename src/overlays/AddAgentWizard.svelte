@@ -13,7 +13,7 @@
   import type { LaunchPreview } from '../lib/gen/LaunchPreview';
   import type { Provider } from '../lib/gen/Provider';
   import { api } from '../lib/api';
-  import { askLeadForHire, startHire } from '../lib/state/hireWizard';
+  import { askForHire, startHire } from '../lib/state/hireWizard';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { ui } from '../lib/state/ui.svelte';
@@ -178,7 +178,7 @@
     asking = ctl;
     notice = [];
     try {
-      apply(await askLeadForHire(brief, ctl.signal), 'the Lead’s draft');
+      apply(await askForHire(brief, ctl.signal), 'the AI draft');
     } catch (err) {
       if (!ctl.signal.aborted) notice = [err instanceof Error ? err.message : String(err)];
     } finally {

@@ -63,34 +63,6 @@ export const TEMPLATES: HireTemplate[] = [
   },
 ];
 
-/**
- * The manifest in a Lead reply: the first fenced block that holds the schema marker, else the first
- * balanced `{…}` that does. The core's review then judges it like an imported file.
- */
-export function extractManifest(text: string): string | null {
-  for (const m of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
-    if (m[1].includes(HIRE_SCHEMA)) return m[1].trim();
-  }
-  for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
-    let depth = 0;
-    let inStr = false;
-    for (let i = start; i < text.length; i++) {
-      const c = text[i];
-      if (inStr) {
-        if (c === '\\') i++;
-        else if (c === '"') inStr = false;
-      } else if (c === '"') inStr = true;
-      else if (c === '{') depth++;
-      else if (c === '}' && --depth === 0) {
-        const s = text.slice(start, i + 1);
-        if (s.includes(HIRE_SCHEMA)) return s;
-        break;
-      }
-    }
-  }
-  return null;
-}
-
 /** A manifest as the pretty JSON a person would share (null optionals left out). */
 export function manifestJson(m: HireManifest): string {
   const out: Record<string, unknown> = {};

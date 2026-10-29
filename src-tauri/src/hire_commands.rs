@@ -1,5 +1,5 @@
 //! Tauri commands for the add-agent wizard (one per `api.hire*` call in src/lib/api.ts). The
-//! three that only judge text (`hire_review`, `hire_launch_preview`, `hire_draft_prompt`) are
+//! three that only judge text (`hire_review`, `hire_launch_preview`) are
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
@@ -20,10 +20,10 @@ pub async fn hire_launch_preview(provider: String, model: Option<String>, comman
     Ok(hire::launch_preview(&provider, model.as_deref(), command.as_deref()))
 }
 
-/// The message "Generate with AI" sends to the Lead.
+/// "Generate with AI": a schema-enforced manifest draft (nothing is started).
 #[tauri::command]
-pub async fn hire_draft_prompt(brief: String) -> Result<String, String> {
-    Ok(hire::draft_prompt(&brief))
+pub async fn hire_draft(state: State<'_, AppState>, brief: String) -> Result<HireReview, String> {
+    state.core().await?.hire_draft(&brief).await.map_err(|e| format!("{e:#}"))
 }
 
 /// Start the agent the person reviewed and confirmed.

@@ -32,7 +32,7 @@ import type { RepoFile } from '../lib/gen/RepoFile';
 import type { Task } from '../lib/gen/Task';
 import { aStar, smooth } from './astar';
 import { BreakRoom } from './breakroom';
-import { plumbobOf } from './sims';
+import { activityFor, plumbobOf, type RestActivity } from './sims';
 import { breakPreference, reactionTo, traitsOf } from './traits';
 import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, leisure, errandPlace, intentKey, isBlocked, placeKey, type Errand, type Intent, type Place } from './behavior';
 import { CameraRig, DEFAULT_PITCH, DEFAULT_YAW } from './camera';
@@ -158,6 +158,8 @@ export class OfficeEngine {
   private said = new Map<string, { text: string; at: number }>();
   /** An agent's needs (sims.ts), so a tired agent goes for coffee on its break. */
   private needsOf: ((id: string) => { energy: number | null; morale: number } | null) | null = null;
+  /** What each agent is doing, so its energy and morale move with it (sims.ts). */
+  private onActivity: ((id: string, now: number, act: RestActivity) => void) | null = null;
   private mail: MailRoom;
   private archive: Archive;
   private frames: DeskFrames;
@@ -460,6 +462,10 @@ export class OfficeEngine {
     this.needsOf = fn;
   }
 
+  setActivity(fn: ((id: string, now: number, act: RestActivity) => void) | null) {
+    this.onActivity = fn;
+  }
+
   setWalls(up: boolean) {
     this.building.setWalls(up);
     this.shadowDirty = true;
@@ -751,6 +757,7 @@ export class OfficeEngine {
     // Pass 2: show them.
     for (const { a, act, intent: raw } of pending) {
       const intent = raw.place.kind === 'break' ? breakIntent(seats.get(a.id) ?? null) : raw;
+      this.onActivity?.(a.id, wall, activityFor(intent.place.kind === 'station' ? intent.place.id : null, intent.pose));
       // Personality: its own reaction to a fresh check result (a thump, a fist pump…).
       const ch = a.cheer;
       if (ch && ch.at !== act.cheerAt) {

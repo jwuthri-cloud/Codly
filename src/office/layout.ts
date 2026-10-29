@@ -141,6 +141,7 @@ export interface Slot {
 export type StationId =
   | 'library.shelf'
   | 'library.chair'
+  | 'nap.armchair'
   | 'meeting.board'
   | 'meeting.table'
   | 'board'
@@ -481,6 +482,7 @@ function build(): OfficeLayout {
   const stations: Record<StationId, Station> = {
     'library.shelf': { id: 'library.shelf', room: 'library', slots: [slot(1.5, 1.05, UP), slot(3.6, 1.05, UP), slot(5.7, 1.05, UP), slot(1.05, 2.6, LEFT)] },
     'library.chair': { id: 'library.chair', room: 'library', slots: [slot(2.7, 4.6, 2.2, 'sit', 0.36), slot(5.0, 4.7, -2.3, 'sit', 0.36)] },
+    'nap.armchair': { id: 'nap.armchair', room: 'archive', slots: [slot(23.0, 22.9, UP, 'sit', 0.36)] },
     'meeting.board': { id: 'meeting.board', room: 'meeting', slots: [slot(10.0, 1.0, UP), slot(12.0, 1.0, UP)] },
     'meeting.table': { id: 'meeting.table', room: 'meeting', slots: tableSeats },
     board: { id: 'board', room: 'studio', slots: [slot(7.4, 8.3, UP), slot(9.3, 8.3, UP), slot(11.2, 8.3, UP)] },

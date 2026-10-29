@@ -135,19 +135,7 @@ export function launchPreview(provider: string, model: string | null, command: s
   return { command: '', editable: false, shell_risks: [], problems: [`unknown provider "${provider}"`] };
 }
 
-export function draftPrompt(brief: string): string {
-  return (
-    'Draft a hire manifest for a new 1:1 coding agent. This is a one-off drafting request: do not submit a plan, do not hire or delegate ' +
-    'to anyone, do not use tools. Reply with ONLY one JSON object in a ```json block, using exactly these fields and no others:\n' +
-    `{"schema": "${HIRE_SCHEMA}", "name": "<short first name>", "avatar": one of ${JSON.stringify(AVATARS)}, "color": 0-7, "title": <optional job title>, ` +
-    `"provider": one of ${JSON.stringify(PROVIDERS)}, "model": <optional>, "isolate": true, "description": "<role in 1-3 sentences, at most ${MAX_DESCRIPTION} characters>", ` +
-    `"goal": "<the standing goal, at most ${MAX_GOAL} characters>"}\n` +
-    'Leave out `command` and `resume_session`. The user reviews the draft before anything starts.\n' +
-    `What the agent is for: ${brief.trim().slice(0, 1000)}`
-  );
-}
-
-/** What the demo's Lead answers to a drafting request: a plausible manifest built from the brief. */
+/** The stand-in for `hire_draft`: the manifest JSON a schema-enforced draft would carry. */
 export function demoDraft(brief: string): string {
   const b = brief.toLowerCase();
   const pick = (re: RegExp) => re.test(b);
@@ -157,19 +145,7 @@ export function demoDraft(brief: string): string {
     description: `Works on: ${brief.trim().slice(0, 200)}`,
     goal: `${brief.trim().slice(0, 300)} Keep changes small, explain what you did, and ask before anything risky.`,
   };
-  return `Here is a draft. Nothing starts until you review and confirm it.\n\n\`\`\`json\n${JSON.stringify(m, null, 2)}\n\`\`\``;
-}
-
-/** A "Generate with AI" request in the demo: answered by the Lead, a moment later, with a draft. */
-export const isDraftRequest = (text: string): boolean => text.startsWith('Draft a hire manifest') && text.includes(HIRE_SCHEMA);
-
-export function draftReply(sim: Sim, thread: string, text: string): void {
-  sim.chat(thread, 'user', text);
-  const brief = text.slice(text.lastIndexOf('What the agent is for:') + 'What the agent is for:'.length);
-  void sim.sleep(1400).then(() => {
-    const lead = [...sim.agents.values()].find((a) => a.role === 'lead' && (a.thread ?? 'lead') === thread);
-    sim.chat(thread, lead?.id ?? 'codly', demoDraft(brief));
-  });
+  return JSON.stringify(m);
 }
 
 /** The confirmed hire: the same checks as the core, then a 1:1 agent with the manifest's identity. */

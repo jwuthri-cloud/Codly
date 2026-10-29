@@ -80,6 +80,30 @@ impl Inner {
         prompts::solo_system(&agent.name, branch)
     }
 
+    /// "Generate with AI": one non-interactive Claude call whose reply is forced into [`hire::draft_schema`].
+    /// Nothing is started; the caller reviews the result like an imported file.
+    pub(super) async fn hire_draft(&self, brief: &str) -> anyhow::Result<hire::HireReview> {
+        let bin = crate::env::resolve_bin(Provider::Claude, &self.base_env).ok_or_else(|| anyhow!("Claude is not installed"))?;
+        let env = crate::env::child_env_with(&self.base_env, Provider::Claude, None);
+        let args: Vec<String> = vec![
+            "-p".into(),
+            hire::draft_prompt(brief),
+            "--output-format".into(),
+            "json".into(),
+            "--json-schema".into(),
+            hire::draft_schema().to_string(),
+            "--tools".into(),
+            String::new(),
+            "--no-session-persistence".into(),
+        ];
+        let mut cmd = crate::proc::command(&bin, &args, &std::env::temp_dir(), &env);
+        cmd.stdin(std::process::Stdio::null());
+        let out = tokio::time::timeout(std::time::Duration::from_secs(240), cmd.output())
+            .await
+            .map_err(|_| anyhow!("the draft took too long; try again or write the briefing yourself"))??;
+        Ok(hire::draft_from_output(&String::from_utf8_lossy(&out.stdout)))
+    }
+
     /// Start the agent a reviewed manifest describes. Everything is checked again here: the
     /// wizard is a convenience, not a gate.
     pub(super) async fn hire_from_manifest(self: &Arc<Self>, m: HireManifest, confirm_shell: bool) -> anyhow::Result<Agent> {

@@ -51,7 +51,7 @@
   const sheet = $derived.by((): SimSheet | null => {
     void tick;
     if (!agent) return null;
-    return sims.stats(agent.id, Date.now(), engine.agentState(agent.id), accounts);
+    return sims.stats(agent.id, Date.now(), engine.agentState(agent.id));
   });
   const nameOf = (id: string) => agents.find((a) => a.id === id)?.name ?? 'someone';
   const career = $derived(agent?.career ?? null);

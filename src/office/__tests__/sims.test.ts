@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { Agent } from '../../lib/gen/Agent';
 import type { EventRow } from '../../lib/gen/EventRow';
 import type { Task } from '../../lib/gen/Task';
-import { levelOf, SimsTracker, skillFor } from '../sims';
+import { activityFor, levelOf, SimsTracker, skillFor } from '../sims';
 import { breakDelay, breakPreference, reactionTo, traitsOf } from '../traits';
 import { BreakRoom } from '../breakroom';
 
@@ -12,20 +12,42 @@ const agent = (id: string, o: Partial<Agent> = {}): Agent =>
 const ev = (agent_id: string, kind: EventRow['kind'], ts = 1000, task_id: string | null = null): EventRow => ({ id: 1, ts, agent_id, task_id, run_id: null, kind });
 
 describe('sims', () => {
-  it('Focus is the context window left; Energy is unknown without account data; morale starts fine', () => {
+  it('Focus is the context window left; Energy and morale start full-ish', () => {
     const s = new SimsTracker();
     s.setAgents([agent('ada')]);
     const sh = s.stats('ada', 2000, null);
     expect(sh.needs.focus).toBeCloseTo(0.75);
-    expect(sh.needs.energy).toBeNull();
+    expect(sh.needs.energy).toBe(1);
     expect(sh.mood).toBe('Fine');
   });
 
-  it('Energy is the quota left on its account', () => {
+  it('working drains energy; a nap refills it and a PS5 session lifts morale', () => {
     const s = new SimsTracker();
-    s.setAgents([agent('ada', { account: 'claude' })]);
-    const acc = { id: 'claude', provider: 'claude', limits: [{ window: 'five_hour', used_fraction: 0.8, resets_at: null, status: 'allowed', seen_at: 0 }] } as never;
-    expect(s.stats('ada', 0, null, [acc]).needs.energy).toBeCloseTo(0.2);
+    s.setAgents([agent('ada')]);
+    s.setActivity('ada', 0, 'work');
+    expect(s.stats('ada', 30 * 60_000, null).needs.energy).toBeCloseTo(0.4, 2);
+    s.setActivity('ada', 30 * 60_000, 'nap');
+    expect(s.stats('ada', 35 * 60_000, null).needs.energy).toBeGreaterThan(0.7);
+    s.setActivity('ada', 35 * 60_000, 'console');
+    s.setActivity('ada', 35 * 60_000, 'console');
+    expect(s.stats('ada', 45 * 60_000, null).needs.morale).toBeGreaterThan(0.8);
+  });
+
+  it('a tired agent shows the Tired moodlet', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada')]);
+    s.setActivity('ada', 0, 'work');
+    const sh = s.stats('ada', 45 * 60_000, null);
+    expect(sh.needs.energy).toBeLessThan(0.2);
+    expect(sh.moodlets.some((m) => m.label === 'Tired')).toBe(true);
+  });
+
+  it('activityFor maps the office spots and poses to what the agent is doing', () => {
+    expect(activityFor('nap.armchair', 'sleep')).toBe('nap');
+    expect(activityFor('kitchen', 'drink')).toBe('coffee');
+    expect(activityFor('games.console', 'gamepad')).toBe('console');
+    expect(activityFor(null, 'type')).toBe('work');
+    expect(activityFor(null, 'sit')).toBe('idle');
   });
 
   it('passing tests lift morale with a moodlet and grow Testing; failing ones do the opposite; morale drifts back', () => {
@@ -73,7 +95,8 @@ describe('traits', () => {
   });
 
   it('needs come first, then personality; reactions and break timing follow traits', () => {
-    expect(breakPreference(['bookworm', 'clumsy'], { energy: 0.1, morale: 0.7 })).toBe('coffee');
+    expect(breakPreference(['bookworm', 'clumsy'], { energy: 0.1, morale: 0.7 })).toBe('nap');
+    expect(breakPreference(['bookworm', 'clumsy'], { energy: 0.4, morale: 0.7 })).toBe('coffee');
     expect(breakPreference(['bookworm', 'clumsy'], { energy: 0.9, morale: 0.2 })).toBe('console');
     expect(breakPreference(['bookworm', 'clumsy'], null)).toBe('library');
     expect(reactionTo(['hotheaded', 'social'], false)).toBe('thump');

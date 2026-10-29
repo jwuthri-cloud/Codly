@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { draftPrompt, demoDraft, launchPreview, reviewHire, shellRisks, splitCommand, validateHire } from '../demo/hire';
-import { HIRE_SCHEMA, MAX_DESCRIPTION, MAX_GOAL, TEMPLATES, blankManifest, extractManifest, manifestFileName, manifestJson } from '../util/hire';
+import { HIRE_SCHEMA, MAX_DESCRIPTION, MAX_GOAL, TEMPLATES, blankManifest, manifestFileName, manifestJson } from '../util/hire';
 import { ROLE_TITLES } from '../util/team';
 
 const OK = `{"schema":"${HIRE_SCHEMA}","name":"Mina","provider":"claude","goal":"Keep the repo tidy"}`;
@@ -68,14 +68,9 @@ describe('hire manifests (demo mirror of the core)', () => {
     expect(launchPreview('nope', null, null).problems).toHaveLength(1);
   });
 
-  it('the draft request names the schema, and a draft that follows it passes review', () => {
-    const p = draftPrompt(' triage bugs ');
-    expect(p).toContain(HIRE_SCHEMA);
-    expect(p).toContain('triage bugs');
-    const reply = demoDraft('triage bugs from the issue tracker');
-    const raw = extractManifest(reply);
-    expect(raw).not.toBeNull();
-    expect(reviewHire(raw!).manifest).toMatchObject({ title: 'QA' });
+  it('a draft that follows the schema passes review', () => {
+    const review = reviewHire(demoDraft('triage bugs from the issue tracker'));
+    expect(review.manifest).toMatchObject({ title: 'QA' });
   });
 });
 
@@ -87,14 +82,6 @@ describe('hire helpers', () => {
       expect(ROLE_TITLES).toContain(t.title);
       expect(reviewHire(JSON.stringify(m)).problems, t.label).toEqual([]);
     }
-  });
-
-  it('finds the manifest in a Lead reply', () => {
-    const json = `{"schema":"${HIRE_SCHEMA}","name":"A","provider":"codex","goal":"has } and {"}`;
-    expect(extractManifest(`Sure!\n\`\`\`json\n${json}\n\`\`\`\nAnything else?`)).toBe(json);
-    expect(extractManifest(`Draft: ${json} Thanks`)).toBe(json);
-    expect(extractManifest('```json\n{"other": 1}\n```')).toBeNull();
-    expect(extractManifest('no manifest here')).toBeNull();
   });
 
   it('saves a manifest that loads back unchanged', () => {

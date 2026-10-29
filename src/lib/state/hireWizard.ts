@@ -1,10 +1,9 @@
-// The add-agent wizard's intents: start the reviewed hire, and "Generate with AI" (ask the Lead
-// for a manifest draft). Neither skips the review: a draft only pre-fills the wizard.
+// The add-agent wizard's intents: start the reviewed hire, and "Generate with AI" (ask Claude
+// for a schema-enforced manifest draft). Neither skips the review: a draft only pre-fills the wizard.
 import { api } from '../api';
 import type { HireManifest } from '../gen/HireManifest';
 import type { HireReview } from '../gen/HireReview';
 import { PROVIDER_LABEL } from '../util/labels';
-import { HIRE_SCHEMA, extractManifest } from '../util/hire';
 import { store } from './store.svelte';
 import { toast } from './toasts.svelte';
 import { ui } from './ui.svelte';
@@ -26,23 +25,11 @@ export async function startHire(m: HireManifest, confirmShell: boolean): Promise
 }
 
 /**
- * Ask the Lead to draft a manifest for `brief` and wait for its reply (a new Lead message that
- * carries the manifest). The request shows in the Lead's conversation like any message.
- * Rejects on timeout or when `signal` aborts; resolves with the core's review of the draft.
+ * Ask Claude for a manifest draft for `brief`, forced into the hire schema by the core. Nothing
+ * starts; resolves with the core's review of the draft. Rejects when `signal` aborts first.
  */
-export async function askLeadForHire(brief: string, signal: AbortSignal, timeoutMs = 240_000): Promise<HireReview> {
-  const thread = ui.request || 'lead';
-  const seen = new Set(store.chats.map((c) => c.id));
-  const prompt = await api.hireDraftPrompt(brief);
-  await api.sendChat(thread, prompt);
-  const deadline = Date.now() + timeoutMs;
-  while (!signal.aborted) {
-    const reply = store.chats.find((c) => !seen.has(c.id) && c.thread === thread && c.author !== 'user' && c.text.includes(HIRE_SCHEMA));
-    const raw = reply && extractManifest(reply.text);
-    if (raw) return api.hireReview(raw);
-    if (reply) seen.add(reply.id); // mentions the schema but carries no manifest: keep waiting for the real one
-    if (Date.now() > deadline) throw new Error('The Lead did not answer in time. Check its conversation, or write the briefing yourself.');
-    await new Promise((r) => setTimeout(r, 400));
-  }
-  throw new Error('cancelled');
+export async function askForHire(brief: string, signal: AbortSignal): Promise<HireReview> {
+  const review = await api.hireDraft(brief);
+  if (signal.aborted) throw new Error('cancelled');
+  return review;
 }

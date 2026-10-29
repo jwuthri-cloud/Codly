@@ -146,7 +146,7 @@ export const api = {
   // Add-agent wizard: the core judges hire manifests (import, AI draft) and starts the confirmed one.
   hireReview: (raw: string) => call<HireReview>('hire_review', { raw }),
   hireLaunchPreview: (provider: string, model: string | null, command: string | null) => call<LaunchPreview>('hire_launch_preview', { provider, model, command }),
-  hireDraftPrompt: (brief: string) => call<string>('hire_draft_prompt', { brief }),
+  hireDraft: (brief: string) => call<HireReview>('hire_draft', { brief }),
   hireFromManifest: (manifest: HireManifest, confirmShell: boolean) => call<Agent>('hire_from_manifest', { manifest, confirmShell }),
   /** Applicants for the wizard to pick from (nothing is started). */
   hireApplicants: (n = 3) => call<Applicant[]>('hire_applicants', { n }),
