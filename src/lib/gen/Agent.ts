@@ -2,6 +2,7 @@
 import type { ActivityKind } from "./ActivityKind";
 import type { AgentStatus } from "./AgentStatus";
 import type { Billing } from "./Billing";
+import type { Career } from "./Career";
 import type { Provider } from "./Provider";
 import type { Role } from "./Role";
 import type { Usage } from "./Usage";
@@ -47,4 +48,8 @@ consultant: boolean,
 /**
  * Let go (fired consultant, removed member, closed Lead): gone from the team.
  */
-archived: boolean, usage: Usage, created_at: number, updated_at: number, };
+archived: boolean, usage: Usage, 
+/**
+ * Track record, rank and traits; kept for good and carried along when exported.
+ */
+career: Career, created_at: number, updated_at: number, };

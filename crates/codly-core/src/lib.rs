@@ -26,6 +26,7 @@ pub mod adapters;
 pub mod dictation;
 pub mod blockers;
 pub mod byok;
+pub mod career;
 pub mod env;
 pub mod git;
 pub mod ide;

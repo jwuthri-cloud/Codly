@@ -11,6 +11,7 @@ import type { ChatMessage } from "./ChatMessage";
 import type { Citation } from "./Citation";
 import type { Confidence } from "./Confidence";
 import type { ControlState } from "./ControlState";
+import type { JobOffer } from "./JobOffer";
 import type { Memory } from "./Memory";
 import type { MessagePhase } from "./MessagePhase";
 import type { Plan } from "./Plan";
@@ -56,4 +57,4 @@ by: string, } | { "type": "usage_updated", usage: Usage, } | { "type": "rate_lim
 /**
  * "rule" | "model" | "human"
  */
-method: string, summary: string, detail: JsonValue, } | { "type": "retrieval", query: string, confidence: Confidence, citations: Array<Citation>, } | { "type": "memory_added", memory: Memory, } | { "type": "triple_added", triple: Triple, } | { "type": "committed", sha: string, files: Array<string>, message: string, } | { "type": "verified", command: string, ok: boolean, exit_code: number | null, tail: string, } | { "type": "reviewed", verdict: string, summary: string, } | { "type": "merged", sha: string, branch: string, } | { "type": "artifact_added", artifact: Artifact, } | { "type": "control_changed", control: ControlState, } | { "type": "blocker_changed", blocker: Blocker, };
+method: string, summary: string, detail: JsonValue, } | { "type": "retrieval", query: string, confidence: Confidence, citations: Array<Citation>, } | { "type": "memory_added", memory: Memory, } | { "type": "triple_added", triple: Triple, } | { "type": "committed", sha: string, files: Array<string>, message: string, } | { "type": "verified", command: string, ok: boolean, exit_code: number | null, tail: string, } | { "type": "reviewed", verdict: string, summary: string, } | { "type": "merged", sha: string, branch: string, } | { "type": "artifact_added", artifact: Artifact, } | { "type": "job_offer", offer: JobOffer, } | { "type": "control_changed", control: ControlState, } | { "type": "blocker_changed", blocker: Blocker, };

@@ -9,10 +9,12 @@ import type { Provider } from '../gen/Provider';
 import { ROLE_TITLES } from '../util/team';
 import type { Sim } from './sim';
 import type { Story } from './story';
-import { AVATARS, CUSTOM, HIRE_SCHEMA, MAX_BYTES, MAX_DESCRIPTION, MAX_GOAL, MAX_NAME } from '../util/hire';
+import { AVATARS, AGENT_SCHEMA, CUSTOM, HIRE_SCHEMA, MAX_BYTES, MAX_DESCRIPTION, MAX_GOAL, MAX_NAME } from '../util/hire';
+import { TRAITS, emptyCareer } from '../util/career';
+import type { Career } from '../gen/Career';
 
 const PROVIDERS: Provider[] = ['claude', 'codex', 'gemini', 'opencode', 'cursor', 'copilot'];
-const FIELDS = ['schema', 'name', 'avatar', 'color', 'title', 'provider', 'model', 'command', 'isolate', 'resume_session', 'description', 'goal'];
+const FIELDS = ['schema', 'name', 'avatar', 'color', 'title', 'provider', 'model', 'command', 'isolate', 'resume_session', 'description', 'goal', 'traits', 'career', 'memory'];
 const SHELL_META = ';&|<>$`(){}\\!#';
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -52,7 +54,8 @@ const charsetOk = (s: string, extra: string) => !s.startsWith('-') && [...s].eve
 
 export function problems(m: HireManifest): string[] {
   const p: string[] = [];
-  if (m.schema !== HIRE_SCHEMA) p.push(`schema must be "${HIRE_SCHEMA}"`);
+  if (m.schema !== HIRE_SCHEMA && m.schema !== AGENT_SCHEMA) p.push(`schema must be "${HIRE_SCHEMA}" or "${AGENT_SCHEMA}"`);
+  if (m.traits.length > 3 || m.traits.some((t) => !TRAITS.some((x) => x.id === t))) p.push(`traits: at most 3 of ${TRAITS.map((t) => t.id).join(', ')}`);
   const name = m.name.trim();
   if (!name) p.push('the agent needs a name');
   else if ([...name].length > MAX_NAME || /[\x00-\x1f\x7f]/.test(name)) p.push(`the name must be one line of at most ${MAX_NAME} characters`);
@@ -96,6 +99,8 @@ export function reviewHire(raw: string): HireReview {
     schema: str('schema')!, name: str('name')!, avatar: str('avatar'), color: typeof o.color === 'number' ? o.color : null, title: str('title'),
     provider: str('provider')!, model: str('model'), command: str('command'), isolate: o.isolate === false ? false : true,
     resume_session: str('resume_session'), description: str('description') ?? '', goal: str('goal') ?? '',
+    traits: Array.isArray(o.traits) ? o.traits.filter((t): t is string => typeof t === 'string') : [],
+    career: o.career && typeof o.career === 'object' ? (o.career as Career) : undefined, memory: str('memory') ?? undefined,
   };
   const p = problems(m);
   return { manifest: p.length ? null : m, problems: p, shell_risks: m.command ? shellRisks(m.command) : [] };
@@ -178,5 +183,18 @@ export function hireFromManifest(sim: Sim, story: Story, m: HireManifest, confir
   return sim.patchAgent(a.id, {
     name, color: m.color ?? a.color, look_seed: m.avatar ?? a.look_seed, session_id: m.resume_session ?? a.session_id,
     worktree: m.isolate ? a.worktree : (sim.workspace?.repo_path ?? a.worktree),
+    career: { ...(m.career ?? emptyCareer()), traits: m.traits.filter((t) => TRAITS.some((x) => x.id === t)).slice(0, 3) },
   });
+}
+
+/** An agent as a `codly/agent@1` file (the demo has no memory file to include). */
+export function exportDemoAgent(sim: Sim, agentId: string): string {
+  const a = sim.agents.get(agentId);
+  if (!a) throw new Error('unknown agent');
+  const m: HireManifest = {
+    schema: AGENT_SCHEMA, name: a.name, avatar: (AVATARS as readonly string[]).includes(a.look_seed) ? a.look_seed : null, color: a.color,
+    title: a.title, provider: a.provider, model: a.model, command: null, isolate: true, resume_session: null, description: '', goal: '',
+    traits: a.career.traits, career: a.career,
+  };
+  return JSON.stringify(m, null, 2);
 }

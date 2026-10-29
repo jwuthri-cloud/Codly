@@ -26,7 +26,8 @@ import type { RequestPrefs } from './gen/RequestPrefs';
 import { mockAgentGit } from './demo/agentgit';
 import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
-import { draftPrompt, draftReply, hireFromManifest, isDraftRequest, launchPreview, reviewHire } from './demo/hire';
+import { draftPrompt, draftReply, exportDemoAgent, hireFromManifest, isDraftRequest, launchPreview, reviewHire } from './demo/hire';
+import { makeApplicants } from './util/career';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
@@ -271,6 +272,14 @@ export class MockTransport implements Transport {
         return draftPrompt(String(a.brief));
       case 'hire_from_manifest':
         return hireFromManifest(sim, story, a.manifest as HireManifest, Boolean(a.confirmShell));
+      case 'hire_applicants': {
+        const all = [...sim.agents.values()].filter((x) => !x.archived);
+        return makeApplicants(Number(a.n ?? 3), all.map((x) => x.name), all.map((x) => x.color));
+      }
+      case 'pick_applicant':
+        return null;
+      case 'export_agent':
+        return exportDemoAgent(sim, String(a.agentId));
       case 'set_agent_model':
         return null;
       case 'create_task':

@@ -431,8 +431,92 @@ pub struct Agent {
     #[serde(default)]
     pub archived: bool,
     pub usage: Usage,
+    /// Track record, rank and traits; kept for good and carried along when exported.
+    #[serde(default)]
+    pub career: Career,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+// ───────────────────────────── careers & hiring ─────────────────────────────
+
+/// Seniority, earned from real work (`career.rs` has the XP rules).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum Rank {
+    #[default]
+    Intern,
+    Junior,
+    Senior,
+    Staff,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CareerStats {
+    pub commits: i64,
+    pub checks_passed: i64,
+    pub checks_failed: i64,
+    pub approved: i64,
+    pub changes_requested: i64,
+    pub reviews_done: i64,
+    pub merged: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Milestone {
+    pub at: i64,
+    pub text: String,
+}
+
+/// An agent's track record. Everything here comes from its real events, except `traits`
+/// (picked at hiring); it survives restarts and travels with an exported agent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Career {
+    pub xp: i64,
+    pub rank: Rank,
+    pub stats: CareerStats,
+    /// XP per area ("Rust", "Testing"…), from the files it changed.
+    pub skills: std::collections::BTreeMap<String, i64>,
+    /// Newest last, capped.
+    pub milestones: Vec<Milestone>,
+    /// Personality (`career::TRAITS` ids). Some change how it works; see `career::TRAITS`.
+    pub traits: Vec<String>,
+}
+
+/// Someone answering a job offer: who would walk in if hired.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Applicant {
+    pub name: String,
+    pub color: i64,
+    /// One of `hire::AVATARS`.
+    pub avatar: String,
+    pub traits: Vec<String>,
+    /// One line in its own words.
+    pub pitch: String,
+}
+
+/// A job offer posted in the office before a new consultant is hired. You can pick one of the
+/// applicants; otherwise the first (the Lead's pick) is hired when it closes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct JobOffer {
+    pub id: Id,
+    pub task_id: Id,
+    pub title: Option<String>,
+    pub provider: Provider,
+    pub model: Option<String>,
+    pub applicants: Vec<Applicant>,
+    pub posted_at: i64,
+    pub closes_at: i64,
+    /// Index of the applicant hired; None while open.
+    pub hired: Option<i64>,
+    /// Picked by you (false: the Lead's pick at closing time).
+    pub by_you: bool,
 }
 
 // ───────────────────────────── plans & tasks ─────────────────────────────
@@ -1020,6 +1104,10 @@ pub enum EventKind {
     ArtifactAdded {
         artifact: Artifact,
     },
+    /// A job offer was posted, or closed with someone hired.
+    JobOffer {
+        offer: JobOffer,
+    },
     /// An agent's live controls changed (block tools, stop after this step, held notes).
     ControlChanged {
         control: ControlState,
@@ -1077,6 +1165,7 @@ impl EventKind {
             EventKind::Reviewed { .. } => "reviewed",
             EventKind::Merged { .. } => "merged",
             EventKind::ArtifactAdded { .. } => "artifact_added",
+            EventKind::JobOffer { .. } => "job_offer",
             EventKind::ControlChanged { .. } => "control_changed",
             EventKind::BlockerChanged { .. } => "blocker_changed",
         }

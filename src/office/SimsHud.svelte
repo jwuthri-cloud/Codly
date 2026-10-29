@@ -1,13 +1,14 @@
 <!--
   The Sims layer over the office (sims.ts for the numbers, all from real data):
   - top-left: the selected agent's action queue (what it does now, ✕ to interrupt; its to-dos queued)
-  - bottom-left: its panel: portrait, mood, and tabs for Needs / Mood / Skills / Friends
+  - bottom-left: its panel: portrait, rank, mood, and tabs for Needs / Mood / Skills / Friends / Career
+  - top-center: a promotion (its real track record), with the offer of a stronger model
   - around a clicked agent: the click menu (chat, task, model, stop, details)
   - bottom-right: the estimated cost so far, Pause new work, walls up/down
   Shown only in the full office (not as the backdrop), inside the app's insets.
 -->
 <script lang="ts" module>
-  export type AgentAction = 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details';
+  export type AgentAction = 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export';
 </script>
 
 <script lang="ts">
@@ -16,8 +17,9 @@
   import type { OfficeEngine } from './engine';
   import type { NarrateFn } from './OfficeView.svelte';
   import { agentPortrait } from './portrait';
-  import type { SimSheet, SimsTracker } from './sims';
+  import { levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
+  import { rankLabel, rankProgress, TRAITS as WORK_TRAITS } from '../lib/util/career';
 
   interface Props {
     engine: OfficeEngine;
@@ -36,7 +38,7 @@
   }
   let { engine, sims, agents, accounts, selectedId, menuAt, insets, narrate, onaction, onclosemenu, paused = false, onpause }: Props = $props();
 
-  let tab = $state<'needs' | 'mood' | 'skills' | 'friends'>('needs');
+  let tab = $state<'needs' | 'mood' | 'skills' | 'friends' | 'career'>('needs');
   let walls = $state(true);
   let tick = $state(0);
   $effect(() => {
@@ -51,6 +53,34 @@
     return sims.stats(agent.id, Date.now(), engine.agentState(agent.id), accounts);
   });
   const nameOf = (id: string) => agents.find((a) => a.id === id)?.name ?? 'someone';
+  const career = $derived(agent?.career ?? null);
+  const climb = $derived(career ? rankProgress(career) : null);
+  /** Skills from its saved record (they survive restarts and travel with it). */
+  const skills = $derived(
+    Object.entries(career?.skills ?? {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([name, xp]) => ({ name, ...levelOf(xp) })),
+  );
+  const workRule = (t: string) => WORK_TRAITS.find((x) => x.id === t)?.rule ?? null;
+
+  // Promotions: a rank above the one seen before (not on first sight).
+  let ranks = new Map<string, string>();
+  let promo = $state<{ id: string; name: string; rank: string } | null>(null);
+  let promoTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    for (const a of agents) {
+      const r = a.career?.rank ?? 'intern';
+      const before = ranks.get(a.id);
+      if (before && before !== r && ORDER.indexOf(r) > ORDER.indexOf(before)) {
+        promo = { id: a.id, name: a.name, rank: rankLabel(r) };
+        clearTimeout(promoTimer);
+        promoTimer = setTimeout(() => (promo = null), 15_000);
+      }
+      ranks.set(a.id, r);
+    }
+  });
+  const ORDER = ['intern', 'junior', 'senior', 'staff'];
   const portrait = $derived(agent ? agentPortrait(agent, 96) : '');
 
   // The action queue: now, then what's next on its own to-do list.
@@ -80,6 +110,7 @@
     { a: 'task', label: 'Show task', when: (a) => !!a.task_id },
     { a: 'details', label: 'Details' },
     { a: 'model', label: 'Change model' },
+    { a: 'export', label: 'Export agent', when: (a) => a.role !== 'lead' },
     { a: 'interrupt', label: 'Stop its turn', when: (a) => a.status === 'working' || a.status === 'thinking' },
     { a: 'stop', label: 'Send home', when: (a) => a.status !== 'offline' },
   ];
@@ -117,11 +148,21 @@
       <div>
         <div class="p-name"><span class="p-gem" style:background={PLUMB[sheet.plumbob]}></span>{agent.name}</div>
         <div class="p-sub">{agent.role} · {agent.provider} · <b>{sheet.mood}</b></div>
-        <div class="p-traits">{#each traitsOf(agent.id) as t (t)}<span title={TRAITS[t].about}>{TRAITS[t].label}</span>{/each}</div>
+        <div class="p-traits">
+          {#each traitsOf(agent.id) as t (t)}
+            {@const rule = workRule(t)}
+            <span class:work={rule} title={rule ? `Changes how it works: ${rule}` : TRAITS[t].about}>{TRAITS[t].label}</span>
+          {/each}
+        </div>
+        {#if career && climb}
+          <div class="p-rank" title={climb.next ? `${climb.toGo} XP to ${climb.next}` : 'Top rank'}>
+            <b>{rankLabel(career.rank)}</b><span class="bar"><span class="fill xp" style:width="{Math.round(climb.progress * 100)}%"></span></span><span>{career.xp} XP</span>
+          </div>
+        {/if}
       </div>
     </header>
     <div class="tabs" role="tablist">
-      {#each [['needs', 'Needs'], ['mood', 'Mood'], ['skills', 'Skills'], ['friends', 'Friends']] as [k, l] (k)}
+      {#each [['needs', 'Needs'], ['mood', 'Mood'], ['skills', 'Skills'], ['friends', 'Friends'], ['career', 'Career']] as [k, l] (k)}
         <button role="tab" aria-selected={tab === k} class:on={tab === k} onclick={() => (tab = k as typeof tab)}>{l}</button>
       {/each}
     </div>
@@ -141,7 +182,7 @@
           <p class="empty">No strong feelings right now.</p>
         {/each}
       {:else if tab === 'skills'}
-        {#each sheet.skills as s (s.name)}
+        {#each skills as s (s.name)}
           <div class="skill">
             <span class="n-l">{s.name}</span>
             <span class="pips">{#each Array(10) as _, i (i)}<span class="pip" class:on={i < s.level} class:part={i === s.level} style:--p={i === s.level ? s.progress : 0}></span>{/each}</span>
@@ -149,6 +190,15 @@
           </div>
         {:else}
           <p class="empty">Skills grow with the files it changes and the checks it passes.</p>
+        {/each}
+      {:else if tab === 'career' && career}
+        <div class="stats">
+          <span><b>{career.stats.merged}</b> merged</span><span><b>{career.stats.checks_passed}</b> checks passed</span><span><b>{career.stats.approved}</b> approved</span><span><b>{career.stats.commits}</b> commits</span>
+        </div>
+        {#each career.milestones.slice(-5).reverse() as m (m.at + m.text)}
+          <div class="moodlet" data-tone="good"><b>{m.text}</b><span>{new Date(Number(m.at)).toLocaleDateString()}</span></div>
+        {:else}
+          <p class="empty">Its first commit, merges and promotions will show up here.</p>
         {/each}
       {:else}
         {#each sheet.relations as r (r.agentId)}
@@ -168,6 +218,14 @@
       <button role="menuitem" style:transform="translate({Math.cos(ang) * 92}px, {Math.sin(ang) * 70}px) translate(-50%, -50%)" onclick={() => act(m.a, menuAgent.id)}>{m.label}</button>
     {/each}
     <span class="pie-name">{menuAgent.name}</span>
+  </div>
+{/if}
+
+{#if promo}
+  <div class="promo" style:top="{insets.top + 12}px" role="status">
+    <span>🎉 <b>{promo.name}</b> was promoted to <b>{promo.rank}</b></span>
+    {#if onaction}<button onclick={() => { if (promo) onaction?.(promo.id, 'model'); promo = null; }}>Give a stronger model</button>{/if}
+    <button class="x" aria-label="Dismiss" onclick={() => (promo = null)}>✕</button>
   </div>
 {/if}
 
@@ -203,6 +261,15 @@
   .p-sub b { color: #eef1f7; font-weight: 600; }
   .p-traits { display: flex; gap: 4px; margin-top: 5px; }
   .p-traits span { padding: 1px 7px; border-radius: 999px; background: rgba(98, 182, 247, 0.14); color: #9fcbf5; font-size: 11px; }
+  .p-traits span.work { box-shadow: inset 0 0 0 1px rgba(123, 228, 149, 0.55); color: #a9efbd; background: rgba(79, 220, 123, 0.12); }
+  .p-rank { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center; margin-top: 6px; color: #9aa2b6; font-size: 11px; }
+  .p-rank b { color: #ffd27a; font-weight: 600; }
+  .fill.xp { background: linear-gradient(90deg, #e9b03a, #ffd27a); }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; color: #9aa2b6; }
+  .stats b { color: #eef1f7; }
+  .promo { position: absolute; left: 50%; transform: translateX(-50%); z-index: 8; display: flex; gap: 10px; align-items: center; padding: 8px 8px 8px 14px; border-radius: 999px; background: rgba(18, 22, 32, 0.92); box-shadow: inset 0 0 0 1.5px #ffd27a, 0 16px 40px -16px rgba(0, 0, 0, 0.7); color: #eef1f7; font: 500 13px 'Inter Variable', Inter, system-ui, sans-serif; pointer-events: auto; animation: pop 0.25s ease-out both; }
+  .promo button { height: 26px; padding: 0 12px; border: 0; border-radius: 999px; background: #e9b03a; color: #1b1405; font: 600 12px inherit; cursor: pointer; }
+  .promo button.x { background: none; color: #9aa2b6; padding: 0 6px; }
   .tabs { display: flex; gap: 2px; padding: 0 8px; }
   .tabs button { flex: 1; height: 28px; border: 0; border-radius: 8px; background: none; color: #9aa2b6; font: inherit; cursor: pointer; }
   .tabs button.on { background: rgba(255, 255, 255, 0.08); color: #eef1f7; }

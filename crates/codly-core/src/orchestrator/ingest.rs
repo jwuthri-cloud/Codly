@@ -92,6 +92,7 @@ impl Inner {
         if r.id > 0 {
             self.derive_triples(ws, r);
             self.detect_artifacts(ws, r);
+            self.track_career(r);
         }
     }
 

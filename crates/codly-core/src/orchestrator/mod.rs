@@ -22,6 +22,7 @@ pub mod approvals;
 pub mod agent_git;
 pub mod breaker;
 mod breaker_run;
+mod careers;
 pub use breaker_run::{AgentBreaker, BreakerStatus};
 mod controls;
 mod ask_me;
@@ -202,6 +203,10 @@ struct Inner {
     quota: Mutex<HashMap<String, Vec<UsageWindow>>>,
     /// Artifact files already announced (absolute path + size), so rewrites re-announce.
     artifacts_seen: Mutex<HashSet<String>>,
+    /// Open (and just-closed) job offers, by task.
+    offers: Mutex<HashMap<Id, JobOffer>>,
+    /// How long a job offer stays up (ms); 0 = hire at once (the default, and in tests).
+    hiring_window_ms: std::sync::atomic::AtomicU64,
     /// Model names per CLI (`env::list_models`), for the Lead's consultant choices.
     models: Mutex<HashMap<Provider, Vec<String>>>,
     /// Circuit breaker: its settings and the per-agent signals.
@@ -374,6 +379,8 @@ impl Core {
             accounts: RwLock::new(accounts),
             quota: Mutex::new(quota),
             artifacts_seen: Mutex::new(HashSet::new()),
+            offers: Mutex::new(HashMap::new()),
+            hiring_window_ms: std::sync::atomic::AtomicU64::new(0),
             models: Mutex::new(HashMap::new()),
             breaker,
         });
@@ -524,6 +531,35 @@ impl Core {
 
     pub async fn stop_agent(&self, agent_id: &str) -> anyhow::Result<()> {
         self.inner.stop_agent(agent_id).await
+    }
+
+    /// How long a job offer stays up in the office before the Lead's pick is hired
+    /// (the app sets 30 s; 0, the default, hires at once).
+    pub fn set_hiring_window(&self, d: std::time::Duration) {
+        self.inner.set_hiring_window(d);
+    }
+
+    /// You pick who gets the job (an index into the offer's applicants).
+    pub fn pick_applicant(&self, offer_id: &str, index: usize) -> anyhow::Result<()> {
+        let ws = self.inner.require_ws()?;
+        if !self.inner.close_offer(&ws.id, offer_id, Some(index)) {
+            bail!("that job offer is closed");
+        }
+        Ok(())
+    }
+
+    /// Applicants for the add-agent wizard (names and colors free in the open repo).
+    pub fn applicants(&self, n: usize) -> anyhow::Result<Vec<Applicant>> {
+        let ws = self.inner.require_ws()?;
+        let agents = self.inner.store.agents(&ws.id)?;
+        let names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+        let colors: Vec<i64> = agents.iter().map(|a| a.color).collect();
+        Ok(crate::career::applicants(n.min(5), now_ms() as u64, &names, &colors))
+    }
+
+    /// An agent as a `codly/agent@1` file (see `hires.rs`).
+    pub fn export_agent(&self, agent_id: &str) -> anyhow::Result<String> {
+        self.inner.export_agent(agent_id)
     }
 
     /// Create a Solo agent for 1:1 chat ("hire").
@@ -891,6 +927,7 @@ impl Inner {
             consultant: false,
             archived: false,
             usage: Usage::default(),
+            career: Career::default(),
             created_at: now_ms(),
             updated_at: now_ms(),
         }

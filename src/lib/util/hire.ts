@@ -6,6 +6,8 @@ import type { HireManifest } from '../gen/HireManifest';
 import type { Provider } from '../gen/Provider';
 
 export const HIRE_SCHEMA = 'codly/hire@1';
+/** An exported agent: a hire manifest plus its traits, career and memory. */
+export const AGENT_SCHEMA = 'codly/agent@1';
 export const MAX_BYTES = 64 * 1024;
 export const MAX_NAME = 40;
 export const MAX_DESCRIPTION = 600;
@@ -20,7 +22,7 @@ export type Engine = Provider | typeof CUSTOM;
 export function blankManifest(provider: Provider = 'claude'): HireManifest {
   return {
     schema: HIRE_SCHEMA, name: '', avatar: AVATARS[0], color: 0, title: null, provider, model: null, command: null,
-    isolate: true, resume_session: null, description: '', goal: '',
+    isolate: true, resume_session: null, description: '', goal: '', traits: [],
   };
 }
 

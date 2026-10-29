@@ -26,7 +26,18 @@ const CLASH: [Trait, Trait][] = [
   ['bookworm', 'social'],
 ];
 
+/** Traits picked at hiring (the agent's career), by agent id; they win over the seeded ones. */
+const chosen = new Map<string, Trait[]>();
+
+export function setChosenTraits(id: string, traits: string[]) {
+  const ts = traits.filter((t): t is Trait => t in TRAITS);
+  if (ts.length) chosen.set(id, ts);
+  else chosen.delete(id);
+}
+
 export function traitsOf(id: string): Trait[] {
+  const picked = chosen.get(id);
+  if (picked) return picked;
   const h = hash(id + ':traits');
   const a = ALL[h % ALL.length];
   for (let k = 1; k < ALL.length; k++) {

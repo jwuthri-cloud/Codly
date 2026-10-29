@@ -33,6 +33,7 @@ import type { RequestPrefs } from '../gen/RequestPrefs';
 import type { JsonValue } from '../gen/serde_json/JsonValue';
 import { DemoAccounts } from './accounts';
 import { VirtualClock } from './clock';
+import { emptyCareer } from '../util/career';
 
 export class Cancelled extends Error {
   constructor() {
@@ -343,6 +344,7 @@ export class Sim {
       consultant: false,
       archived: false,
       usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, context_used: null, context_window: (o.model && WINDOWS[o.model]) || null, cost_usd: null },
+      career: emptyCareer(),
       created_at: now,
       updated_at: now,
     };

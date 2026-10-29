@@ -25,6 +25,8 @@
   import { OfficeEngine, type AgentListItem, type TickerItem } from './engine';
   import SimsHud, { type AgentAction } from './SimsHud.svelte';
   import { SimsTracker } from './sims';
+  import JobBoard from './JobBoard.svelte';
+  import type { JobOffer } from '../lib/gen/JobOffer';
 
   interface Props {
     files?: RepoFile[];
@@ -51,6 +53,8 @@
     onaction?: (agentId: string, action: AgentAction) => void;
     paused?: boolean;
     onpause?: (paused: boolean) => void;
+    /** Pick who gets a job offer's job (the office pins open offers by the door). */
+    onpickapplicant?: (offerId: string, index: number) => void;
   }
 
   let {
@@ -76,7 +80,19 @@
     onaction,
     paused = false,
     onpause,
+    onpickapplicant,
   }: Props = $props();
+
+  // Job offers from the event stream: open ones, then a few seconds of "Hired" once closed.
+  let offers = $state<JobOffer[]>([]);
+  function seeOffer(ev: EventRow) {
+    if (ev.kind.type !== 'job_offer') return;
+    const o = ev.kind.offer;
+    const now = Date.now();
+    if (o.hired == null && o.closes_at < now) return; // from history, long gone
+    offers = [...offers.filter((x) => x.id !== o.id), o];
+    if (o.hired != null) setTimeout(() => (offers = offers.filter((x) => x.id !== o.id)), 5000);
+  }
 
   const sims = new SimsTracker();
   let menuAt = $state<{ id: string; x: number; y: number } | null>(null);
@@ -147,7 +163,10 @@
       return { energy: s.needs.energy, morale: s.needs.morale };
     });
     sims.setTasks($state.snapshot(tasks) as Task[]);
-    for (const ev of history) sims.ingest(ev);
+    for (const ev of history) {
+      sims.ingest(ev);
+      seeOffer(ev);
+    }
     e.setApprovals($state.snapshot(approvals) as Approval[]);
     e.setSelection(selection);
     e.setHover(hover);
@@ -167,6 +186,7 @@
     return sub((ev) => {
       e.push(ev);
       sims.ingest(ev);
+      seeOffer(ev);
     });
   });
 
@@ -247,6 +267,9 @@
       {paused}
       {onpause}
     />
+  {/if}
+  {#if engine && offers.length}
+    <JobBoard {offers} {engine} insets={hudInsets} onpick={onpickapplicant} />
   {/if}
   {#if ticker && !backdrop && items.length}
     <ol class="of-ticker" aria-hidden="true">

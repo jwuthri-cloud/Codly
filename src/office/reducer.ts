@@ -11,6 +11,7 @@ import type { EventRow } from '../lib/gen/EventRow';
 import type { Task } from '../lib/gen/Task';
 import { columnOf, emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type ToolCall } from './model';
 import { basename, clean, commandHead, hash, host } from './text';
+import { setChosenTraits } from './traits';
 
 /** Excursion thresholds (design-world §9.4 rule 3): walk to a station only if still live after this. */
 export const EXCURSION_MS: Partial<Record<string, number>> = {
@@ -91,6 +92,7 @@ function copyAgent(a: AgentState, ag: Agent) {
   a.seed = ag.look_seed || ag.id;
   a.thread = ag.thread ?? (ag.role === 'lead' ? 'lead' : null);
   a.taskId = ag.task_id;
+  setChosenTraits(ag.id, ag.career?.traits ?? []);
 }
 
 /** Merge the app's roster (the `agents` prop) into the model. */

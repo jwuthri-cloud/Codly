@@ -25,6 +25,7 @@
   import type { RepoFile } from '../lib/gen/RepoFile';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
+  import { toast } from '../lib/state/toasts.svelte';
 
   interface Props {
     theme: 'dark' | 'light';
@@ -113,7 +114,7 @@
   };
   const onhover = (sel: Sel | null) => ui.setHover(sel);
   // The office's click menu (The Sims' pie menu): each item is a real command.
-  const onaction = (id: string, action: 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details') => {
+  const onaction = (id: string, action: 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export') => {
     const a = store.agentMap.get(id);
     if (!a) return;
     if (action === 'chat') ui.openThread(`agent:${id}`);
@@ -126,7 +127,21 @@
       else ui.settingsOpen = true;
     } else if (action === 'interrupt') interruptAgent(id);
     else if (action === 'stop') stopAgent(id);
+    else if (action === 'export') exportAgent(id, a.name);
   };
+  /** Save an agent (career, traits, memory) as a file to import into another repo. */
+  async function exportAgent(id: string, name: string) {
+    try {
+      const json = await api.exportAgent(id);
+      const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+      const a = Object.assign(document.createElement('a'), { href: url, download: `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.codly-agent.json` });
+      a.click();
+      URL.revokeObjectURL(url);
+      toast({ kind: 'success', title: `${name} exported`, body: `Import ${a.download} from the add-agent dialog in any repo.` });
+    } catch (e) {
+      toast({ kind: 'error', title: 'Export failed', body: String(e) });
+    }
+  }
   const onpause = (paused: boolean) => updateSettings({ paused });
   // Read once per mount (not reactive): persisted events, oldest first.
   const historyAtMount = () => store.events.slice();
@@ -165,6 +180,7 @@
           {onaction}
           paused={store.settings.paused}
           {onpause}
+          onpickapplicant={(offerId, i) => api.pickApplicant(offerId, i).catch((e) => toast({ kind: 'error', title: 'Could not pick', body: String(e) }))}
         />
       {/key}
       {#snippet failed(_error, reset)}

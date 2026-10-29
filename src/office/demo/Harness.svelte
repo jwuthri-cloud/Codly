@@ -8,6 +8,8 @@
   import type { Task } from '../../lib/gen/Task';
   import { agentPortrait } from '../portrait';
   import { AGENTS, TASKS, buildScript, themePreviewImage } from './script';
+  import type { JobOffer } from '../../lib/gen/JobOffer';
+  import { makeApplicants } from '../../lib/util/career';
 
   // Options from the URL (see demo.ts).
   const params = new URLSearchParams(location.search);
@@ -89,6 +91,27 @@
   }
   onDestroy(() => timers.forEach((t) => clearTimeout(t)));
 
+  // ?offer: a job offer goes up by the door after 2 s (pick one, or the first is hired at 30 s).
+  let offer: JobOffer | null = null;
+  const send = (o: JobOffer) => {
+    const ev: EventRow = { id: ++id, ts: Date.now(), agent_id: null, task_id: o.task_id, run_id: null, kind: { type: 'job_offer', offer: o } };
+    for (const l of listeners) l(ev);
+  };
+  const closeOffer = (i: number, byYou: boolean) => {
+    if (!offer || offer.hired != null) return;
+    offer = { ...offer, hired: i, by_you: byYou };
+    send(offer);
+  };
+  if (params.has('offer'))
+    timers.push(
+      window.setTimeout(() => {
+        const taken = agents.map((a) => a.name);
+        offer = { id: 'offer-1', task_id: 'demo-task', title: 'Backend', provider: 'claude', model: 'sonnet', applicants: makeApplicants(3, taken, agents.map((a) => a.color)), posted_at: Date.now(), closes_at: Date.now() + 30_000, hired: null, by_you: false };
+        send(offer);
+        timers.push(window.setTimeout(() => closeOffer(0, false), 30_000));
+      }, 2000),
+    );
+
   function measureIdle() {
     const w = window as unknown as { __raf: number; __timeouts: number };
     const start = w.__raf;
@@ -127,6 +150,7 @@
     {history}
     onselect={(s) => (selection = s)}
     onhover={(h) => (hover = h)}
+    onpickapplicant={(_, i) => closeOffer(i, true)}
     artifactUrl={(a) => (a.id === 'art-1' ? preview : null)}
   />
   {#if backdrop}

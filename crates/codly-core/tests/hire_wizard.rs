@@ -116,6 +116,9 @@ fn manifest(name: &str) -> HireManifest {
         resume_session: None,
         description: "Keeps the docs true.".into(),
         goal: "Never let the README drift from the code.".into(),
+        traits: vec![],
+        career: None,
+        memory: None,
     }
 }
 
@@ -214,4 +217,42 @@ async fn the_core_checks_again_whatever_the_wizard_said() {
     // Nothing half-made was left behind by the refusals.
     assert_eq!(core.snapshot().await.unwrap().agents.iter().filter(|a| a.role == Role::Solo).count(), 1);
     core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exported_agent_comes_back_with_its_career_traits_and_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let (core, log) = start(dir.path()).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+
+    let mut m = manifest("Mina");
+    m.traits = vec!["perfectionist".into(), "nightowl".into()];
+    let a = core.hire_from_manifest(m, false).await.unwrap();
+    assert_eq!(a.career.traits, vec!["perfectionist".to_string(), "nightowl".to_string()]);
+    core.save_memory_file(&a.id, "# Mina\n- The docs build with `make docs`.\n").await.unwrap();
+
+    // A behaviour trait reaches the prompt; a personality-only one does not.
+    core.send_chat(&format!("agent:{}", a.id), "check the docs").await.unwrap();
+    wait_until("the prompt", || !log.lock().unwrap().prompts.is_empty()).await;
+    let p = log.lock().unwrap().prompts[0].clone();
+    assert!(p.contains("Perfectionist: Before you say you are done") && !p.contains("Night owl"), "{p}");
+
+    // Export, then import into another repo: same colleague, same record.
+    let json = core.export_agent(&a.id).unwrap();
+    let mut back: HireManifest = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.schema, codly_core::hire::AGENT_SCHEMA);
+    let mut career = back.career.clone().unwrap();
+    career.xp = 300; // as if it had worked a while
+    back.career = Some(career);
+    core.shutdown().await;
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let repo2 = temp_repo(dir2.path());
+    let (core2, _log2) = start(dir2.path()).await;
+    core2.open_workspace(repo2.to_str().unwrap()).await.unwrap();
+    let b = core2.hire_from_manifest(back, false).await.unwrap();
+    assert_eq!((b.name.as_str(), b.career.rank, b.career.traits.len()), ("Mina", Rank::Senior, 2));
+    assert!(core2.memory_file(&b.id).await.unwrap().text.contains("make docs"));
+    core2.shutdown().await;
 }

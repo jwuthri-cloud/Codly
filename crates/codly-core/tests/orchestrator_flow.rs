@@ -562,6 +562,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             consultant: false,
             archived: false,
             usage: Usage::default(),
+            career: Default::default(),
             created_at: now_ms(),
             updated_at: now_ms(),
         };
@@ -1957,5 +1958,63 @@ async fn a_requests_mode_and_model_steer_its_lead() {
 
     core.close_thread("lead").await.unwrap();
     assert!(core.snapshot().await.unwrap().request_prefs.is_empty(), "a closed request forgets its choices");
+    core.shutdown().await;
+}
+
+/// A new consultant is hired through a job offer: it stays up until you pick an applicant
+/// (or it closes on the Lead's pick); the one you pick walks in with its own name and traits,
+/// and earns XP for the work it does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_offer_hires_the_applicant_you_pick() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            let r = turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote hello.", "files_changed": ["hello.txt"] })).await;
+            assert_eq!(r["ok"], true, "{r}");
+            turn.say("Done.");
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;
+    core.set_hiring_window(Duration::from_secs(60));
+    let mut settings = Settings { auto_run_plans: true, lead_followups: false, ..Default::default() };
+    settings.worker_providers = vec![Provider::Claude];
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+
+    let offer = wait_for("the job offer", 15, async || {
+        core.events(None, None, 500).await.unwrap().into_iter().find_map(|e| match e.kind {
+            EventKind::JobOffer { offer } => Some(offer),
+            _ => None,
+        })
+    })
+    .await;
+    assert_eq!((offer.applicants.len(), offer.title.as_deref(), offer.hired), (3, Some("Backend"), None));
+    let task = core.snapshot().await.unwrap().tasks[0].clone();
+    assert_eq!(task.status_reason.as_deref(), Some("waiting: hiring (the job offer is up in the office)"));
+    assert!(core.snapshot().await.unwrap().agents.iter().all(|a| a.role != Role::Worker), "nobody is hired while the offer is up");
+
+    let pick = offer.applicants[2].clone();
+    core.pick_applicant(&offer.id, 2).unwrap();
+    assert!(core.pick_applicant(&offer.id, 1).is_err(), "a closed offer can't be picked again");
+    let snap = wait_for("the plan to finish", 30, async || {
+        let s = core.snapshot().await.unwrap();
+        s.plans.first().is_some_and(|p| p.status == PlanStatus::Done).then_some(s)
+    })
+    .await;
+    // Newest first: the worker's last AgentChanged (it may have been let go since).
+    let hired = core.events(None, None, 2000).await.unwrap().into_iter().find_map(|e| match e.kind {
+        EventKind::AgentChanged { agent } if agent.role == Role::Worker => Some(agent),
+        _ => None,
+    });
+    let hired = hired.unwrap();
+    assert_eq!((hired.name.as_str(), hired.color, hired.look_seed.as_str()), (pick.name.as_str(), pick.color, pick.avatar.as_str()));
+    assert_eq!(hired.career.traits, pick.traits);
+    assert!(hired.career.xp >= 15 + 10 + 30, "commit, passing check and merge all count: {:?}", hired.career);
+    assert_eq!(hired.career.stats.merged, 1);
+    assert_eq!(snap.tasks[0].status, TaskStatus::Done);
     core.shutdown().await;
 }

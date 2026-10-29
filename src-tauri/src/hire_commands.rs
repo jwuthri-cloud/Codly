@@ -3,7 +3,7 @@
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
-use codly_core::model::Agent;
+use codly_core::model::{Agent, Applicant};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -30,4 +30,22 @@ pub async fn hire_draft_prompt(brief: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn hire_from_manifest(state: State<'_, AppState>, manifest: HireManifest, confirm_shell: bool) -> Result<Agent, String> {
     state.core().await?.hire_from_manifest(manifest, confirm_shell).await.map_err(|e| format!("{e:#}"))
+}
+
+/// Applicants for the add-agent wizard to pick from (nothing is started).
+#[tauri::command]
+pub async fn hire_applicants(state: State<'_, AppState>, n: usize) -> Result<Vec<Applicant>, String> {
+    state.core().await?.applicants(n).map_err(|e| format!("{e:#}"))
+}
+
+/// You pick who gets the job a new consultant's offer is for.
+#[tauri::command]
+pub async fn pick_applicant(state: State<'_, AppState>, offer_id: String, index: usize) -> Result<(), String> {
+    state.core().await?.pick_applicant(&offer_id, index).map_err(|e| format!("{e:#}"))
+}
+
+/// An agent as a `codly/agent@1` file (career, traits and memory included), for another repo.
+#[tauri::command]
+pub async fn export_agent(state: State<'_, AppState>, agent_id: String) -> Result<String, String> {
+    state.core().await?.export_agent(&agent_id).map_err(|e| format!("{e:#}"))
 }

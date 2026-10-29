@@ -61,6 +61,8 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let started = Core::start(CoreConfig { data_dir, app_exe }).await.map_err(|e| format!("{e:#}"));
                 if let Ok(core) = &started {
+                    // A new consultant's job offer stays up in the office this long (you may pick).
+                    core.set_hiring_window(std::time::Duration::from_secs(30));
                     tauri::async_runtime::spawn(bus.clone().pump(core.subscribe()));
                     tauri::async_runtime::spawn(notify_loop(handle, core.clone()));
                     let _ = hub_tx.send(inbound::start(core.clone(), inbound_dir).await);
@@ -160,6 +162,9 @@ pub fn run() {
             hire_commands::hire_launch_preview,
             hire_commands::hire_draft_prompt,
             hire_commands::hire_from_manifest,
+            hire_commands::hire_applicants,
+            hire_commands::pick_applicant,
+            hire_commands::export_agent,
             commands::board_policy,
             commands::board_sweep,
             commands::board_archive,

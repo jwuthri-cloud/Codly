@@ -402,6 +402,14 @@ export class OfficeEngine {
     return { x: ((v.x + 1) / 2) * this.width, y: ((1 - v.y) / 2) * this.height };
   }
 
+  /** Screen point of the front door (where job offers are pinned and new hires walk in). */
+  doorScreen(): { x: number; y: number } | null {
+    const d = this.L.door.inside;
+    const v = new Vector3(d.x + OX, 2.2, d.z + OZ).project(this.rig.camera);
+    if (v.z > 1 || Math.abs(v.x) > 1.1 || Math.abs(v.y) > 1.1) return null;
+    return { x: ((v.x + 1) / 2) * this.width, y: ((1 - v.y) / 2) * this.height };
+  }
+
   setNeeds(fn: ((id: string) => { energy: number | null; morale: number } | null) | null) {
     this.needsOf = fn;
   }

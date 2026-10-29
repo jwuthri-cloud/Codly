@@ -14,6 +14,7 @@ import type { Provider } from '../../lib/gen/Provider';
 import type { Role } from '../../lib/gen/Role';
 import type { Task } from '../../lib/gen/Task';
 import type { TaskStatus } from '../../lib/gen/TaskStatus';
+import { emptyCareer } from '../../lib/util/career';
 
 export interface Step {
   t: number;
@@ -48,6 +49,7 @@ export function mkAgent(id: string, name: string, provider: Provider, role: Role
     consultant: false,
     archived: false,
     usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, context_used: null, context_window: null, cost_usd: null },
+    career: emptyCareer(),
     created_at: 0,
     updated_at: 0,
   };

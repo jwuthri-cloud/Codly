@@ -29,6 +29,7 @@ import type { IdeInfo } from './gen/IdeInfo';
 import type { IdeSearch } from './gen/IdeSearch';
 import type { InboundState } from './gen/InboundState';
 import type { HireManifest } from './gen/HireManifest';
+import type { Applicant } from './gen/Applicant';
 import type { HireReview } from './gen/HireReview';
 import type { LaunchPreview } from './gen/LaunchPreview';
 import type { Memory } from './gen/Memory';
@@ -146,6 +147,12 @@ export const api = {
   hireLaunchPreview: (provider: string, model: string | null, command: string | null) => call<LaunchPreview>('hire_launch_preview', { provider, model, command }),
   hireDraftPrompt: (brief: string) => call<string>('hire_draft_prompt', { brief }),
   hireFromManifest: (manifest: HireManifest, confirmShell: boolean) => call<Agent>('hire_from_manifest', { manifest, confirmShell }),
+  /** Applicants for the wizard to pick from (nothing is started). */
+  hireApplicants: (n = 3) => call<Applicant[]>('hire_applicants', { n }),
+  /** Pick who gets the job a new consultant's offer (in the office) is for. */
+  pickApplicant: (offerId: string, index: number) => call<void>('pick_applicant', { offerId, index }),
+  /** An agent as a `codly/agent@1` file: manifest, traits, career and memory. */
+  exportAgent: (agentId: string) => call<string>('export_agent', { agentId }),
   /** The open repo's changes to the global team (members switched off, its own members). */
   setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   /** A request's own mode, permissions and Lead model (null fields = the Settings defaults). */

@@ -151,8 +151,9 @@ per-agent desks that fill up with things from their history (a trophy per merged
 | 2 | Plumbob, action queue (✕ interrupts), click menu (chat, task, details, model, stop, send home), Needs / Mood / Skills / Friends panel, speech bubbles, estimated cost counter, walls up/down, **Pause** (core: no new task starts) | Replay at 1×/2×/3×; skills and friendships reset when the app restarts (not saved yet) |
 | 3 | Traits (`traits.ts`), break timing and choices by traits and needs (tired → coffee, down → couch, bookworm → library), personal reactions to real check results, lazy fidgets, pool skill | |
 
-Next for the vision (agents that level up and travel): save each agent's skills and history in the core,
-then export/import an agent profile into another repo.
+| Careers | `career.rs`: XP from real commits, passing checks, approved reviews and merges; Intern → Junior → Senior → Staff; skills per area; milestones; saved on the agent and shown in its panel (rank, XP, Career tab); a promotion offers a stronger model | Rank doesn't change autonomy yet |
+| Hiring | A new consultant's job offer is pinned by the front door for 30 s with 3 applicants; you pick one or the Lead's pick is hired. The add-agent dialog starts with applicants and a trait picker (Create-a-Sim). Four traits change how an agent works (their rule rides on its prompts) | Applicants don't walk into the office yet |
+| Export | "Export agent" saves `codly/agent@1` (manifest, traits, career, memory file); importing it in any repo brings the same colleague back | Solo agents don't get their memory file in their prompts yet |
 
 ## 8. Decisions
 

@@ -52,9 +52,15 @@ impl Inner {
 
     /// `text` with the agent's standing briefing in front, if it has one.
     pub(super) fn with_briefing(&self, agent_id: &str, text: &str) -> String {
-        match self.agent_brief(agent_id) {
+        let text = match self.agent_brief(agent_id) {
             Some(b) => hire::wrap_prompt(&b.description, &b.goal, b.isolate, text),
             None => text.to_string(),
+        };
+        // The traits you picked and its track record (career.rs), for workers and 1:1 agents.
+        let career = self.agent(agent_id).ok().filter(|a| matches!(a.role, Role::Worker | Role::Solo)).map(|a| crate::career::briefing(&a.career));
+        match career.filter(|c| !c.is_empty()) {
+            Some(c) => format!("{text}\n\n[Who you are at work]\n{c}"),
+            None => text,
         }
     }
 
@@ -119,6 +125,47 @@ impl Inner {
             if let Some(seed) = m.avatar.as_deref() {
                 a.look_seed = seed.to_string();
             }
+            // An exported agent comes back with its track record (bounded again here).
+            a.career = m.career.clone().map(crate::career::sanitize).unwrap_or_default();
+            a.career.traits = crate::career::clean_traits(&m.traits);
         })
+        .and_then(|a| {
+            if let Some(mem) = m.memory.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                crate::memory::panel::write_memory_file(&self.data("memory"), &a.id, &a.name, mem)?;
+            }
+            Ok(a)
+        })
+    }
+
+    /// An agent as a `codly/agent@1` file: its manifest, traits, career and memory. Importing it
+    /// (in another repo, on another machine) brings the same colleague back.
+    pub(super) fn export_agent(&self, agent_id: &str) -> anyhow::Result<String> {
+        let a = self.agent(agent_id)?;
+        if a.role == Role::Lead {
+            bail!("the Lead is not exported; export one of its agents");
+        }
+        let brief = self.agent_brief(&a.id);
+        let memory = crate::memory::panel::read_memory_file(&self.data("memory"), &a.id, &a.name)
+            .ok()
+            .filter(|f| f.exists)
+            .map(|f| f.text.chars().take(hire::MAX_MEMORY).collect::<String>());
+        let m = HireManifest {
+            schema: hire::AGENT_SCHEMA.into(),
+            name: a.name.clone(),
+            avatar: hire::AVATARS.contains(&a.look_seed.as_str()).then(|| a.look_seed.clone()),
+            color: Some(a.color),
+            title: a.title.clone().filter(|t| role_title(t).is_some()),
+            provider: a.provider.as_str().into(),
+            model: a.model.clone(),
+            command: None,
+            isolate: brief.as_ref().is_none_or(|b| b.isolate),
+            resume_session: None,
+            description: brief.as_ref().map(|b| b.description.clone()).unwrap_or_default(),
+            goal: brief.as_ref().map(|b| b.goal.clone()).unwrap_or_default(),
+            traits: a.career.traits.clone(),
+            career: Some(a.career.clone()),
+            memory,
+        };
+        Ok(serde_json::to_string_pretty(&m)?)
     }
 }

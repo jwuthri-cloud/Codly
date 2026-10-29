@@ -20,6 +20,10 @@ use crate::model::{Provider, role_title};
 
 /// The `schema` value of this manifest version.
 pub const SCHEMA: &str = "codly/hire@1";
+/// An exported agent: a hire manifest plus its traits, career and memory.
+pub const AGENT_SCHEMA: &str = "codly/agent@1";
+/// An exported agent's memory file rides on its prompts: keep it bounded.
+pub const MAX_MEMORY: usize = 16 * 1024;
 /// A manifest file or pasted text above this is refused before it is parsed.
 pub const MAX_BYTES: usize = 64 * 1024;
 pub const MAX_NAME: usize = 40;
@@ -76,6 +80,17 @@ pub struct HireManifest {
     /// A standing goal, put in front of every prompt this agent gets.
     #[serde(default)]
     pub goal: String,
+    /// Personality (`career::TRAITS` ids, at most 3). Some change how it works.
+    #[serde(default)]
+    pub traits: Vec<String>,
+    /// `codly/agent@1` only: its track record, carried over.
+    #[serde(default)]
+    #[ts(optional)]
+    pub career: Option<crate::model::Career>,
+    /// `codly/agent@1` only: its memory file (lessons it wrote down).
+    #[serde(default)]
+    #[ts(optional)]
+    pub memory: Option<String>,
 }
 
 /// What reviewing a manifest found. `manifest` is set when it parsed and passed the field rules.
@@ -131,8 +146,19 @@ fn charset_ok(s: &str, extra: &str) -> bool {
 /// Every reason the manifest's fields are unusable (empty = fine). Does not judge shell metacharacters.
 pub fn problems(m: &HireManifest) -> Vec<String> {
     let mut p = Vec::new();
-    if m.schema != SCHEMA {
-        p.push(format!("schema must be \"{SCHEMA}\" (got \"{}\")", m.schema.chars().take(40).collect::<String>()));
+    if m.schema != SCHEMA && m.schema != AGENT_SCHEMA {
+        p.push(format!("schema must be \"{SCHEMA}\" or \"{AGENT_SCHEMA}\" (got \"{}\")", m.schema.chars().take(40).collect::<String>()));
+    }
+    if m.traits.len() > 3 || crate::career::clean_traits(&m.traits).len() != m.traits.len() {
+        p.push(format!("traits: at most 3 of {}", crate::career::TRAITS.map(|t| t.0).join(", ")));
+    }
+    if m.schema == SCHEMA && (m.career.is_some() || m.memory.is_some()) {
+        p.push(format!("career and memory come with an exported agent (\"{AGENT_SCHEMA}\")"));
+    }
+    if let Some(mem) = m.memory.as_deref()
+        && (mem.len() > MAX_MEMORY || mem.chars().any(|c| c.is_control() && c != '\n' && c != '\t'))
+    {
+        p.push(format!("the memory must be plain text of at most {} KB", MAX_MEMORY / 1024));
     }
     let name = m.name.trim();
     if name.is_empty() {

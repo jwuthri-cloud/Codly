@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::planner::{self, PlanInput};
 use super::runs::{RunReq, new_session};
 use super::scheduler::{self, Action, AgentPick, SchedInput};
-use super::{Inner, guard, lead, lock, names, prompts, row};
+use super::{Inner, careers, guard, lead, lock, names, prompts, row};
 use crate::adapters::SessionMode;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
@@ -421,9 +421,28 @@ impl Inner {
                 _ => self.agent(&id)?,
             },
             AgentPick::New { name, color, model } => {
+                // A job offer goes up in the office first; you may pick who gets the job.
+                let hired = match self.hiring(&ws.id, &self.task(task_id)?, provider, model.clone(), &name, color) {
+                    careers::Hiring::Wait => {
+                        let why = "waiting: hiring (the job offer is up in the office)".to_string();
+                        if self.task(task_id)?.status_reason.as_deref() != Some(why.as_str()) {
+                            self.update_task(task_id, |t| {
+                                t.status_reason = Some(why.clone());
+                                Ok(())
+                            })?;
+                        }
+                        return Ok(());
+                    }
+                    careers::Hiring::Now(a) => a,
+                };
+                let (name, color) = hired.as_ref().map_or((name, color), |h| (h.name.clone(), h.color));
                 let mut a = self.new_agent(&name, provider, Role::Worker, color, model);
                 a.consultant = true;
                 a.title = title;
+                if let Some(h) = hired {
+                    a.look_seed = h.avatar;
+                    a.career.traits = h.traits;
+                }
                 self.insert_agent(&ws.id, a)?
             }
         };

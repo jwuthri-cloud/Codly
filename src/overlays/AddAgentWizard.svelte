@@ -3,6 +3,8 @@
   "Import hire…" (a .json manifest) and "Generate with AI" (the Lead drafts one) only pre-fill the
   steps for review — nothing starts until "Start agent" (hire manifests never auto-spawn). The core
   judges every manifest and re-checks it at the end; this dialog is a convenience, not a gate.
+  Identity starts like Create-a-Sim: three applicants to pick from, then name, look and traits
+  (green traits change how the agent works). An exported agent (codly/agent@1) keeps its career.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -23,6 +25,9 @@
   import { ROLE_TITLES } from '../lib/util/team';
   import Icon from '../components/Icon.svelte';
   import Portrait from '../components/Portrait.svelte';
+  import ApplicantPicker from '../office/ApplicantPicker.svelte';
+  import type { Applicant } from '../lib/gen/Applicant';
+  import { TRAITS, clashes, rankLabel } from '../lib/util/career';
 
   const STEPS = ['Identity', 'Workspace', 'Engine', 'Briefing'] as const;
   const PROVIDERS: Provider[] = ['claude', 'codex', 'gemini', 'opencode', 'cursor', 'copilot'];
@@ -74,7 +79,25 @@
     return null;
   });
 
-  onMount(() => el?.focus());
+  let applicants = $state<Applicant[]>([]);
+  let pickedApplicant = $state<number | null>(null);
+  onMount(() => {
+    el?.focus();
+    api.hireApplicants(3).then((a) => (applicants = a)).catch(() => {});
+  });
+  function takeApplicant(i: number) {
+    const a = applicants[i];
+    if (!a) return;
+    pickedApplicant = i;
+    m.name = a.name;
+    m.color = a.color;
+    m.avatar = a.avatar;
+    m.traits = [...a.traits];
+  }
+  function toggleTrait(id: string) {
+    if (m.traits.includes(id)) m.traits = m.traits.filter((t) => t !== id);
+    else if (m.traits.length < 3 && !m.traits.some((t) => clashes(t, id))) m.traits = [...m.traits, id];
+  }
 
   // The core judges the form as it stands (its rules are the only copy of the rules).
   $effect(() => {
@@ -212,7 +235,7 @@
     <header>
       <h2>Add an agent</h2>
       <div class="starts">
-        <button type="button" class="btn sm ghost" onclick={() => fileInput?.click()}><Icon name="reveal" size={13} />Import hire…</button>
+        <button type="button" class="btn sm ghost" onclick={() => fileInput?.click()}><Icon name="reveal" size={13} />Import agent…</button>
         <button type="button" class="btn sm ghost" aria-expanded={aiOpen} onclick={() => (aiOpen = !aiOpen)}><Icon name="sparkle" size={13} />Generate with AI</button>
         <button type="button" class="icon-btn" aria-label="Close" onclick={close}><Icon name="x" /></button>
       </div>
@@ -260,6 +283,17 @@
       {/if}
 
       {#if step === 0}
+        {#if applicants.length && !m.career}
+          <div class="field">
+            <span class="eyebrow">Applicants</span>
+            <ApplicantPicker {applicants} provider={(custom ? 'claude' : m.provider) as Provider} role="solo" picked={pickedApplicant} onpick={takeApplicant} />
+          </div>
+        {/if}
+        {#if m.career}
+          <div class="callout info">
+            <b>{rankLabel(m.career.rank)} · {m.career.xp} XP</b> — {m.career.stats.merged} merged, {m.career.stats.checks_passed} checks passed{m.memory ? ', brings its memory file' : ''}. Its track record carries over.
+          </div>
+        {/if}
         <label class="field">
           <span class="eyebrow">Name</span>
           <input bind:value={m.name} maxlength={MAX_NAME} placeholder="e.g. Mina" spellcheck="false" autocomplete="off" onkeydown={(e) => e.key === 'Enter' && (e.preventDefault(), !stepBlocked && next())} />
@@ -281,6 +315,18 @@
               <button type="button" class="swatch" role="radio" aria-checked={m.color === c} aria-label={`Colour ${c + 1}`} class:on={m.color === c} style:--hue={idVar(c)} onclick={() => (m.color = c)}></button>
             {/each}
           </div>
+        </div>
+        <div class="field">
+          <span class="eyebrow">Traits <span class="muted small">up to 3 · green ones change how it works</span></span>
+          <div class="traits" role="group" aria-label="Traits">
+            {#each TRAITS as t (t.id)}
+              {@const on = m.traits.includes(t.id)}
+              <button type="button" class="trait" class:on class:work={t.rule} aria-pressed={on} title={t.rule ?? 'Personality only (how it lives in the office)'} disabled={!on && (m.traits.length >= 3 || m.traits.some((x) => clashes(x, t.id)))} onclick={() => toggleTrait(t.id)}>{t.label}</button>
+            {/each}
+          </div>
+          {#each m.traits.map((id) => TRAITS.find((t) => t.id === id)).filter((t) => t?.rule) as t (t?.id)}
+            <span class="muted small">{t?.label}: {t?.rule}</span>
+          {/each}
         </div>
         <label class="field">
           <span class="eyebrow">Title</span>
@@ -404,6 +450,12 @@
   h2 { font-family: var(--font-display); font-weight: 400; font-size: var(--d-sm); }
   .starts { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
   .steps { display: flex; gap: 4px; list-style: none; margin: 0; padding: 0 22px 12px; box-shadow: inset 0 -1px 0 var(--line); flex-shrink: 0; }
+  .traits { display: flex; flex-wrap: wrap; gap: 6px; }
+  .trait { height: 26px; padding: 0 11px; border-radius: var(--r-full); background: var(--surface-2); color: var(--ink-2); font-size: var(--t-sm); }
+  .trait.work { box-shadow: inset 0 0 0 1px color-mix(in oklab, #3fcf72 55%, transparent); }
+  .trait.on { background: var(--surface-3); color: var(--ink-1); box-shadow: inset 0 0 0 2px var(--accent, #2d6bd8); }
+  .trait.work.on { box-shadow: inset 0 0 0 2px #3fcf72; }
+  .trait:disabled { opacity: 0.4; }
   .step { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 12px 0 6px; border-radius: var(--r-full); color: var(--ink-3); font-size: var(--t-sm); font-weight: var(--w-med); }
   .step:hover { background: var(--surface-2); color: var(--ink-1); }
   .step.on { background: var(--surface-3); color: var(--ink-1); }
