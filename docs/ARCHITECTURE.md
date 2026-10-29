@@ -4,7 +4,7 @@ Codly is a local-first macOS app that runs a team of coding agents — the Claud
 Gemini CLI and OpenCode you already have installed and signed in to — under one supervisor,
 in isolated git worktrees, with two synchronized views of the same truth: a **Workspace**
 (chat, timeline, board, dependency graph, diffs, terminal, inspector) and a **World** (an
-animated pixel office where every motion is a real event).
+animated three.js office where every motion is a real event).
 
 Research behind every decision: `docs/research/` (7 reports + `CRITIQUE.md`, the
 consolidated decision list) and `docs/research/munder/` (a source-level teardown of
@@ -26,8 +26,8 @@ Munder Difflin). Fixtures captured from the real CLIs: `docs/research/fixtures/`
 | Storage | one SQLite (rusqlite bundled, WAL); `event` table is the source of truth; raw provider lines in `runs/<id>/raw.ndjson` | replayable timeline and world |
 | Retrieval | per-repo FTS5 over paths, regex symbols and contextual 60-line chunks (path + enclosing symbols prefixed) → RRF → agreement confidence → **pointer pack** (≤ 1.2k tokens) + `codly_search` | commit-replay Hit@5 0.66–0.84 on 4 real repos vs 0.25–0.32 naive grep on 3 of them (0.69 on pi-mono); `examples/bench_localize.rs` |
 | Memory | scoped memories (global / project = shared, agent = private, task), FTS5; temporal knowledge triples, many derived from real events | the user's "shared + single memory, triplets, RAG" |
-| World | Canvas 2D, procedural pixel art (zero third-party assets), A*, DOM text overlay, render-on-change (0 % CPU idle) | design-world §9; Munder's PixiJS floor never idles and ships non-redistributable LimeZu tiles |
-| Approvals | one broker: Codly rules first (balanced / strict / autonomous), then you; choices are exactly what the provider offered | CRITIQUE D6 |
+| World | three.js (`src/office/`: engine, reducer, sims, traits, breakroom), procedural art (zero third-party assets), A*, DOM text overlay, render-on-change (0 % CPU idle) | design-world §9; Munder's PixiJS floor never idles and ships non-redistributable LimeZu tiles |
+| Approvals | one broker: Codly rules first (balanced / strict / autonomous / full access), then you; choices are exactly what the provider offered | CRITIQUE D6 |
 
 ## 2. Processes
 
@@ -60,7 +60,9 @@ decision, commit, verify, merge, memory, triple). Each event is persisted with a
 
 - **Workspace**: chat threads (Lead + 1:1 per agent), per-agent timeline lanes, shared board +
   each agent's own todo list, task DAG, diffs, terminal, approvals inbox, inspector.
-- **World**: a pure reducer over the same events → per-agent activity → locomotion and poses.
+- **World** (`src/office/`): a pure reducer (`reducer.ts`) over the same events → per-agent activity →
+  locomotion and poses in the three.js engine (`engine.ts`), plus `sims.ts` (needs, matchmaking),
+  `traits.ts` and the break room.
   Honesty contract: ≤ 250 ms from event to visible state, no random wandering by default,
   provenance on every bubble.
 - **Inspector** (both views): what it's doing now and **why** — every fact carries a badge:
@@ -108,6 +110,31 @@ to the account the Lead pinned it to (`account` in the plan, only when the user 
 from the Accounts line of its board), else by strategy: Spread (most quota left) or In order.
 The route decision names the chosen account, why, and every account it passed over.
 
+**Standing team and consultants.** Team members are set globally in Settings (a repo can switch one
+off or add its own): each gets one persistent agent per repo with its own model, role, private memory,
+CLI session and a stable worktree, and resumes its conversation task after task. A *consultant*
+(`ConsultantSpec` in `model.rs`: title, optional harness and model) is hired by the Lead for one task
+and archived when it ends. Hire manifests (`hire.rs`) only pre-fill the add-agent wizard; they can
+never start an agent. See `orchestrator/team.rs`.
+
+**Request modes.** Picked per request in the composer (`LeadMode`): **Ask** (answers only), **Plan**
+(proposes a plan, you press Run plan), **Auto** (plans and runs at once), **Direct** (no plan card:
+hands the work to a team member or consultant at once).
+
+**Approval modes** (`orchestrator/approvals.rs`): balanced (rules decide the obvious, else ask you),
+strict (ask for everything), autonomous (allow what stays in the agent's worktree) and **Full access**
+(auto-approve everything, risky commands included, except the hard floors: questions, permission
+changes, writes by read-only agents and Codly's own data dir still ask).
+
+**Triggers and inbound** (Settings → Triggers / Inbound). `triggers.rs` holds the pure policy and
+`orchestrator/triggers.rs` the loop: schedules that send a prompt to the Lead on a repeating clock,
+context rules that compact or clear an agent's conversation, and a network mode that gates every
+inbound path. `inbound/` has the sources: a loopback webhook listener (one secret per endpoint,
+created switched off) and Slack over Socket Mode (config and gating exist; the socket is not
+connected yet). Inbound text reaches the Lead wrapped as untrusted outside input. Secrets live in the
+Keychain. `dictation.rs` is opt-in voice input: a clip goes to Groq Whisper with your own key and the
+transcript lands in the composer draft, never auto-sent.
+
 ## 5. Memory and knowledge
 
 | Kind | Scope | Written by | Read by |
@@ -139,7 +166,7 @@ untrusted") and can never change approvals or policy.
 | ~~Deep Agents + OpenRouter sidecar (API-key backend)~~ | dropped (2026-10-26): OpenCode with its OpenRouter provider covers API-key models |
 | Launchd daemon so agents survive app restarts | resume-by-session-id proves insufficient |
 | PTY "take over" of a headless agent | users ask to drive an agent by hand mid-task |
-| Voice, Slack/webhook triggers, schedules | after the core loop is loved |
+| Slack Socket Mode connection (the source and its gates exist, the socket does not) | a user asks for Slack as an inbound path |
 | Windows/Linux | after macOS ships |
 
 ## 8. Code map
@@ -154,8 +181,15 @@ crates/codly-core/src/
   mcp/            server.rs (UDS), bridge.rs (`codly mcp`), tools.rs (tool specs)
   index/          retrieval                            memory/  memories, triples, packs
   pty.rs          terminals
+  byok.rs         opt-in OpenRouter key for OpenCode (Keychain)   skills.rs   skills scan/install
+  ide.rs          confined file ops for the workspace IDE         install.rs  CLI install terminal
+  blockers.rs     "ask me" cards (codly_ask_user)                 hire.rs     hire manifests
+  triggers.rs     schedules, context rules, network gate          dictation.rs  Groq Whisper dictation
+  inbound/        webhook + Slack sources, Keychain secrets       career.rs   XP, ranks, traits
 src-tauri/        commands, UI bus (coalescing Channel), plugins, window
-src/              Svelte app: lib/api.ts (transport), lib/state, panels/, world/
+src/              Svelte app: lib/api.ts (transport), lib/state, rooms/, ide/
+  office/         the World (three.js): engine, reducer, sims, traits, breakroom
+  onboarding/     first-run quest line     shell/   top bar, rail, crew strip, office layer
 ```
 
 ## 9. Verified so far (2026-10-25)
