@@ -305,7 +305,7 @@ impl Inner {
         let Some(branch) = t.branch.as_deref() else { return Ok(String::new()) };
         let ws_id = self.store.task_workspace(task_id)?.ok_or_else(|| anyhow!("task without workspace"))?;
         let ws = self.store.workspace(&ws_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
-        let (base, _) = self.store.task_commits(task_id)?;
+        let (base, head) = self.store.task_commits(task_id)?;
         let base = match base {
             Some(b) => b,
             None => match t.plan_id.as_deref().map(|p| self.plan(p)).transpose()?.and_then(|p| p.base_commit) {
@@ -313,7 +313,8 @@ impl Inner {
                 None => return Ok(String::new()),
             },
         };
-        self.git.diff(Path::new(&ws.repo_path), &base, branch).await
+        // ponytail: prefer the recorded head sha; the task branch is deleted once its work is merged.
+        self.git.diff(Path::new(&ws.repo_path), &base, head.as_deref().unwrap_or(branch)).await
     }
 
     pub(super) async fn plan_diff(&self, plan_id: &str) -> anyhow::Result<String> {
