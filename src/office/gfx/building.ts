@@ -381,24 +381,6 @@ export class BuildingGfx {
     }
   }
 
-  private decor: Mesh | null = null;
-
-  /** Build/Buy: the furniture bought for the office (layout.ts DECOR), replacing the last set. */
-  setDecor(items: Item[]) {
-    if (this.decor) {
-      this.decor.removeFromParent();
-      this.decor.geometry.dispose();
-      this.decor = null;
-    }
-    if (!items.length) return;
-    const b = new Builder();
-    for (const it of items) this.piece(b, b, it);
-    b.frame();
-    this.decor = new Mesh(b.build(), this.matte);
-    this.decor.castShadow = this.decor.receiveShadow = true;
-    this.group.add(this.decor);
-  }
-
   private buildLamps() {
     // Desk lamp shades: instanced, colored per desk (off / warm / amber).
     const lamps = this.L.items.filter((it) => it.type === 'lamp');
@@ -542,7 +524,6 @@ export class BuildingGfx {
   private extraMats: MeshBasicMaterial[] = [];
 
   dispose() {
-    this.setDecor([]);
     for (const g of this.geos) g.dispose();
     for (const t of this.textures) t.dispose();
     for (const p of this.windowPlanes) p.dispose();

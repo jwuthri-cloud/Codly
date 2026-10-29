@@ -37,13 +37,16 @@ import { breakPreference, reactionTo, traitsOf } from './traits';
 import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, leisure, errandPlace, intentKey, isBlocked, placeKey, type Errand, type Intent, type Place } from './behavior';
 import { CameraRig, DEFAULT_PITCH, DEFAULT_YAW } from './camera';
 import { BuildingGfx } from './gfx/building';
+import { DecorLayer, model } from './gfx/decor';
+import { applyDecor, blocker, BY_ID, onTop, snap, surfaceAt, type Piece } from './buy';
+import type { Placed } from '../lib/gen/Placed';
 import type { Provider } from '../lib/gen/Provider';
 import { Character, lookFor, PropKit } from './gfx/character';
 import { CONFETTI, Confetti, FloorRing, FxSystem, Glow, PaperPlane, Puff, Sparkles } from './gfx/fx';
 import { GamesCorner, type GamePlayers } from './gfx/games';
 import { Archive, DeskFrames, DeskScreens, MailRoom, ServerRoom, TaskBoard, Whiteboard, type CardWhere, type TestState, type TodoList } from './gfx/props';
 import { canvas as makeCanvas, emoteTexture, glowTexture, ringTexture, tex, type EmoteKind } from './gfx/textures';
-import { cellCenter, cellOf, COLS, D, DECOR, officeLayout, passableFn, ROWS, W, type Desk, type OfficeLayout, type Slot, type StationId } from './layout';
+import { cellCenter, cellOf, COLS, D, officeLayout, passableFn, ROWS, W, type Desk, type OfficeLayout, type Slot, type StationId } from './layout';
 import { emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type WorldSelection } from './model';
 import { chipFor } from './bubble';
 import { OUTCOME_MS, sentence, type Sentence } from './narrate';
@@ -97,6 +100,22 @@ const HELLO_MS = 1800;
 const SAY_MS = 4500;
 const OX = -W / 2;
 const OZ = -D / 2;
+
+/** Build/Buy: the piece following the cursor. */
+interface Carry {
+  item: string;
+  /** A piece already in the office, being moved; null for a new one. */
+  uid: string | null;
+  rot: number;
+  /** Where it would go (floor plan), once the cursor is over the floor. */
+  at: { x: number; y: number; z: number } | null;
+  /** Why it can't go there, or null. */
+  why: string | null;
+  onplace: (p: Placed) => void;
+  onsell: (uid: string) => void;
+  onstate: (why: string | null) => void;
+  onend: () => void;
+}
 
 interface Actor {
   c: Character;
@@ -170,6 +189,10 @@ export class OfficeEngine {
   private interns = new Map<string, Intern>();
   /** Agents let go, haunting the memory archive (see-through, floating). */
   private ghosts: Character[] = [];
+  private decor = new DecorLayer();
+  private pieces: Piece[] = [];
+  /** Build/Buy mode: clicks pick up furniture; `carry` is the piece following the cursor. */
+  private build: { onpick: (uid: string) => void; carry: Carry | null } | null = null;
   private ghostKey = '';
   private emotes = new Map<EmoteKind, Texture>();
   private glowTex: Texture;
@@ -254,7 +277,7 @@ export class OfficeEngine {
     this.hovRing = new Mesh(ringGeo, new MeshBasicMaterial({ map: this.ringTex, transparent: true, depthWrite: false, opacity: 0.55, blending: AdditiveBlending, toneMapped: false }));
     this.selRing.visible = this.hovRing.visible = false;
     this.selRing.renderOrder = this.hovRing.renderOrder = 3;
-    this.world.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, this.server.group, this.games.group, this.mail.group, this.archive.group, this.frames.group, this.fx.group, this.selRing, this.hovRing);
+    this.world.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, this.server.group, this.games.group, this.mail.group, this.archive.group, this.frames.group, this.decor.group, this.fx.group, this.selRing, this.hovRing);
     // Characters live in world coordinates (the office frame is offset to center it).
     this.scene.add(this.actorsGroup);
     this.plumbob.visible = false;
@@ -432,11 +455,87 @@ export class OfficeEngine {
     return { x: ((v.x + 1) / 2) * this.width, y: ((1 - v.y) / 2) * this.height };
   }
 
-  /** Build/Buy: the furniture bought for the office (ids: layout.ts DECOR). */
-  setDecor(owned: string[]) {
-    this.building.setDecor(owned.flatMap((id) => (DECOR[id] ? [DECOR[id]] : [])));
-    this.shadowDirty = true;
+  /** Build/Buy: the furniture placed in the office; agents walk around what blocks. */
+  setDecor(placed: Placed[]) {
+    void this.decor.set(placed).then((pieces) => {
+      if (!pieces || this.disposed) return;
+      this.pieces = pieces;
+      // ponytail: agents already walking keep their path (through a new piece); the next one avoids it.
+      applyDecor(this.L, pieces);
+      this.shadowDirty = true;
+      this.wake();
+    });
+  }
+
+  /** Build/Buy mode on (`onpick`: a placed piece was clicked) or off. */
+  setBuildMode(onpick: ((uid: string) => void) | null) {
+    if (!onpick) this.endCarry();
+    this.build = onpick ? { onpick, carry: null } : null;
+  }
+
+  /** Whether a piece can be moved or sold (nothing sits on it). */
+  movable(uid: string): boolean {
+    const p = this.pieces.find((x) => x.uid === uid);
+    return !p || !onTop(this.pieces, p).length;
+  }
+
+  /**
+   * Carry a piece around until a click puts it down (`onplace`): a new one, or one already in the
+   * office (`uid`, hidden meanwhile). R turns it, Esc puts it back, Delete sells it.
+   */
+  carry(item: string, cb: Omit<Carry, 'item' | 'uid' | 'rot' | 'at' | 'why'>, uid: string | null = null) {
+    const f = BY_ID.get(item);
+    if (!this.build || !f) return;
+    this.endCarry();
+    const cur = uid ? this.pieces.find((p) => p.uid === uid) : undefined;
+    this.build.carry = { item, uid, rot: cur?.rot ?? 0, at: null, why: null, ...cb };
+    this.decor.hide(uid);
+    void model(f).then(() => cur && this.moveCarry(cur.x, cur.z));
     this.wake();
+  }
+
+  rotateCarry() {
+    const c = this.build?.carry;
+    if (!c) return;
+    c.rot += Math.PI / 2;
+    if (c.at) this.moveCarry(c.at.x, c.at.z);
+  }
+
+  endCarry() {
+    const c = this.build?.carry;
+    if (!c) return;
+    this.build!.carry = null;
+    this.decor.hideGhost();
+    this.decor.hide(null);
+    c.onend();
+    this.wake();
+  }
+
+  /** The carried piece to (x, z) on the floor plan: snapped, on a table if it's small. */
+  private moveCarry(x: number, z: number) {
+    const c = this.build?.carry;
+    const f = c && BY_ID.get(c.item);
+    if (!c || !f) return;
+    void model(f).then(({ dims }) => {
+      if (this.build?.carry !== c) return;
+      const top = f.small ? surfaceAt(this.pieces, x, z, c.uid ?? undefined) : null;
+      const at = top ? { x, z, rot: c.rot } : snap(x, z, c.rot, dims);
+      const y = top ? top.y + top.dims.h : 0;
+      const why = blocker(this.L, this.pieces, { uid: c.uid ?? '', item: c.item, x: at.x, y, z: at.z, rot: at.rot, dims });
+      c.at = { x: at.x, y, z: at.z };
+      c.why = why;
+      c.onstate(why);
+      void this.decor.showGhost(c.item, at.x, y, at.z, at.rot, !why).then(() => this.wake());
+    });
+  }
+
+  private dropCarry() {
+    const c = this.build?.carry;
+    if (!c?.at || c.why) return;
+    const p: Placed = { uid: c.uid ?? crypto.randomUUID(), item: c.item, x: c.at.x, y: c.at.y, z: c.at.z, rot: snap(0, 0, c.rot, { w: 1, d: 1, h: 1 }).rot };
+    c.onplace(p);
+    this.endCarry();
+    this.setDecor([...this.pieces.filter((x) => x.uid !== p.uid), p]); // shown now; the core's answer follows
   }
 
   /** Agents let go (the core's ghosts): up to three float by the memory archive. */
@@ -499,6 +598,8 @@ export class OfficeEngine {
     this.games.dispose();
     this.mail.dispose();
     for (const c of this.ghosts) c.dispose();
+    this.decor.dispose();
+    applyDecor(this.L, []);
     this.archive.dispose();
     this.frames.dispose();
     this.props.dispose();
@@ -1085,7 +1186,7 @@ export class OfficeEngine {
         return;
       }
       case 'shelf': {
-        const s = this.L.shelves[(wall >>> 4) % this.L.shelves.length];
+        const s = this.L.shelves[(wall >>> 4) % this.L.shelves.length]; // >>> keeps it positive (Date.now() overflows >> )
         this.fx.add(new Glow(this.local(s.x + Math.sin(s.rot) * 0.4, 1.1, s.z + Math.cos(s.rot) * 0.4), lin('#ffe1a8'), 2.4, now, this.glowTex, 1400));
         return;
       }
@@ -1191,6 +1292,16 @@ export class OfficeEngine {
     this.wake();
   }
 
+  private rayAt(clientX: number, clientY: number) {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    return this.rig.raycaster(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+  }
+
+  private groundOf(clientX: number, clientY: number) {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    return this.rig.groundAt(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+  }
+
   private pick(clientX: number, clientY: number): WorldSelection | null {
     const r = this.renderer.domElement.getBoundingClientRect();
     const x = clientX - r.left;
@@ -1259,6 +1370,11 @@ export class OfficeEngine {
         requestAnimationFrame(() => {
           hoverQueued = false;
           if (this.disposed) return;
+          if (this.build) {
+            const g = this.build.carry && this.groundOf(hoverAt.x, hoverAt.y);
+            if (g) this.moveCarry(g.x - OX, g.z - OZ);
+            return;
+          }
           this.setLocalHover(this.pick(hoverAt.x, hoverAt.y));
         });
       }
@@ -1268,7 +1384,13 @@ export class OfficeEngine {
       const wasClick = !down.moved && down.button === 0;
       canvas.releasePointerCapture?.(down.id);
       down = null;
-      if (wasClick) this.opts.onselect(this.pick(e.clientX, e.clientY));
+      if (wasClick && this.build) {
+        if (this.build.carry) this.dropCarry();
+        else {
+          const uid = this.decor.pick(this.rayAt(e.clientX, e.clientY));
+          if (uid) this.build.onpick(uid);
+        }
+      } else if (wasClick) this.opts.onselect(this.pick(e.clientX, e.clientY));
     };
     const onLeave = () => this.setLocalHover(null);
     const onWheel = (e: WheelEvent) => {
@@ -1293,6 +1415,14 @@ export class OfficeEngine {
     const onKey = (e: KeyboardEvent) => {
       if (!interactive() || e.metaKey || e.ctrlKey || e.altKey) return;
       if ((e.target as HTMLElement)?.closest?.('.of-sr')) return;
+      const c = this.build?.carry;
+      if (c && (e.key === 'r' || e.key === 'R' || e.key === 'Escape' || ((e.key === 'Delete' || e.key === 'Backspace') && c.uid))) {
+        e.preventDefault();
+        if (e.key === 'Escape') this.endCarry();
+        else if (e.key === 'r' || e.key === 'R') this.rotateCarry();
+        else if (c.uid) c.onsell(c.uid);
+        return;
+      }
       const step = e.shiftKey ? 180 : 70;
       let handled = true;
       switch (e.key) {

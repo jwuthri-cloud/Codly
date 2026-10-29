@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-office-place"
+description = "Enables the office_place command without any pre-configured scope."
+commands.allow = ["office_place"]
+
+[[permission]]
+identifier = "deny-office-place"
+description = "Denies the office_place command without any pre-configured scope."
+commands.deny = ["office_place"]

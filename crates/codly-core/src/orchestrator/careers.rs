@@ -147,35 +147,46 @@ impl Inner {
         })
     }
 
+    // (`shop:{ws}`, the first fixed-spot catalog, is no longer read: those buys are refunded.)
     pub(super) fn shop(&self, ws: &str) -> Result<Shop> {
-        let owned: Vec<String> = self.store.kv_get(&format!("shop:{ws}"))?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+        let placed: Vec<Placed> = self.store.kv_get(&format!("decor:{ws}"))?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+        let placed: Vec<Placed> = placed.into_iter().filter(|p| career::price(&p.item).is_some()).collect();
         let earned = self.store.agents(ws)?.iter().chain(self.store.archived_agents(ws)?.iter()).map(|a| a.career.xp).sum();
-        let items: Vec<ShopItem> = career::CATALOG.iter().map(|&(id, label, price)| ShopItem { id: id.into(), label: label.into(), price }).collect();
-        let owned: Vec<String> = owned.into_iter().filter(|o| items.iter().any(|i| &i.id == o)).collect();
-        let spent = items.iter().filter(|i| owned.contains(&i.id)).map(|i| i.price).sum();
-        Ok(Shop { earned, spent, items, owned })
+        let spent = placed.iter().filter_map(|p| career::price(&p.item)).sum();
+        Ok(Shop { earned, spent, placed })
     }
 
-    /// Buy (or sell back, for the full price) one piece of furniture.
-    pub(super) fn trade(&self, ws: &str, item: &str, buy: bool) -> Result<Shop> {
+    /// Buy a piece of furniture and put it down, or move one already bought (same `uid`).
+    pub(super) fn place(&self, ws: &str, piece: Placed) -> Result<Shop> {
         let mut shop = self.shop(ws)?;
-        let Some(price) = shop.items.iter().find(|i| i.id == item).map(|i| i.price) else { bail!("no such item") };
-        let has = shop.owned.iter().any(|o| o == item);
-        if buy {
-            if has {
-                bail!("already in the office");
+        if let Some(p) = shop.placed.iter_mut().find(|p| p.uid == piece.uid) {
+            if p.item != piece.item {
+                bail!("that piece is a {}", p.item);
             }
+            *p = piece;
+        } else {
+            let Some(price) = career::price(&piece.item) else { bail!("no such item") };
             if shop.earned - shop.spent < price {
                 bail!("not enough XP yet ({} of {price})", shop.earned - shop.spent);
             }
-            shop.owned.push(item.into());
-        } else {
-            if !has {
-                bail!("not in the office");
-            }
-            shop.owned.retain(|o| o != item);
+            shop.placed.push(piece);
         }
-        self.store.kv_set(&format!("shop:{ws}"), &serde_json::to_string(&shop.owned)?)?;
+        self.save_decor(ws, &shop.placed)
+    }
+
+    /// Sell a piece back, for the full price.
+    pub(super) fn sell(&self, ws: &str, uid: &str) -> Result<Shop> {
+        let mut shop = self.shop(ws)?;
+        let n = shop.placed.len();
+        shop.placed.retain(|p| p.uid != uid);
+        if shop.placed.len() == n {
+            bail!("not in the office");
+        }
+        self.save_decor(ws, &shop.placed)
+    }
+
+    fn save_decor(&self, ws: &str, placed: &[Placed]) -> Result<Shop> {
+        self.store.kv_set(&format!("decor:{ws}"), &serde_json::to_string(placed)?)?;
         self.shop(ws)
     }
 }

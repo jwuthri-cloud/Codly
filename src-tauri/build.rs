@@ -13,7 +13,7 @@ fn main() {
         "exact_search", "message_graph", "memory_file", "save_memory_file",
         "list_blockers", "answer_blocker", "dismiss_blocker",
         "inbound_state", "inbound_create_webhook", "inbound_set_webhook", "inbound_revoke_webhook", "inbound_set_settings", "inbound_set_slack",
-        "hire_review", "hire_launch_preview", "hire_draft_prompt", "hire_from_manifest", "hire_applicants", "pick_applicant", "export_agent", "ghosts", "bring_back", "office_shop", "office_trade",
+        "hire_review", "hire_launch_preview", "hire_draft_prompt", "hire_from_manifest", "hire_applicants", "pick_applicant", "export_agent", "ghosts", "bring_back", "office_shop", "office_place", "office_sell",
         "agent_git", "get_triggers", "set_triggers", "list_skills", "skill_catalog", "install_skill", "uninstall_skill", "open_skill_folder", "ide_info", "ide_list", "ide_read", "ide_write", "ide_create", "ide_search", "ide_changes", "ide_diff",
         "board_policy", "board_sweep", "board_archive", "list_connections", "update_connection",
         "install_cli", "byok_status", "byok_configure", "byok_save_key", "byok_clear_key",

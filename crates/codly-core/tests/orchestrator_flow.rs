@@ -2029,12 +2029,26 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
 
     // What it earned buys furniture (Build/Buy); the price comes back when you sell.
     let shop = core.shop().unwrap();
-    assert!(shop.earned >= 55 && shop.spent == 0 && shop.owned.is_empty(), "{shop:?}");
-    let shop = core.trade("poster", true).unwrap();
-    assert_eq!((shop.spent, shop.owned.as_slice()), (40, &["poster".to_string()][..]));
-    assert!(core.trade("poster", true).is_err(), "one of each");
-    assert!(core.trade("sofa", true).is_err(), "not enough XP");
-    assert!(core.trade("throne", true).is_err());
-    assert_eq!(core.trade("poster", false).unwrap().spent, 0);
+    assert!(shop.earned >= 55 && shop.spent == 0 && shop.placed.is_empty(), "{shop:?}");
+    let piece = |uid: &str, item: &str, x: f64| Placed { uid: uid.into(), item: item.into(), x, y: 0.0, z: 10.0, rot: 0.0 };
+    core.place(piece("a", "kenney.chair", 3.0)).unwrap();
+    let shop = core.place(piece("b", "kenney.chair", 4.0)).unwrap();
+    assert_eq!((shop.spent, shop.placed.len()), (50, 2), "two of the same");
+    let shop = core.place(piece("a", "kenney.chair", 5.0)).unwrap();
+    assert_eq!((shop.spent, shop.placed[0].x), (50, 5.0), "moving is free");
+    assert!(core.place(piece("a", "kenney.desk", 5.0)).is_err(), "a move keeps the piece");
+    assert!(core.place(piece("c", "throne", 1.0)).is_err());
+    let mut n = 0;
+    let err = loop {
+        n += 1;
+        match core.place(piece(&format!("s{n}"), "kenney.loungeDesignSofa", 1.0)) {
+            Ok(s) => assert!(s.spent <= s.earned),
+            Err(e) => break e,
+        }
+    };
+    assert!(err.to_string().contains("not enough XP"), "{err}");
+    let shop = core.sell("a").unwrap();
+    assert_eq!(shop.spent, 25 + 340 * (n - 1) as i64);
+    assert!(core.sell("a").is_err());
     core.shutdown().await;
 }

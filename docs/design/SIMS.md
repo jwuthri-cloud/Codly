@@ -156,7 +156,7 @@ per-agent desks that fill up with things from their history (a trophy per merged
 | Export | "Export agent" saves `codly/agent@1` (manifest, traits, career, memory file); importing it in any repo brings the same colleague back | Solo agents don't get their memory file in their prompts yet |
 | Ghosts | Consultants let go keep their career and float, see-through, by the memory archive (up to 3); the tag there lists them with their record and scrapbook; Bring back makes one a regular worker again (the scheduler reuses it, you can assign it) | Team members and Leads come back their own way (Settings, threads), so they are not ghosts |
 | Scrapbook | Every milestone (joined, first commit, first merge, every 10th merge, promotions, moved from another repo, came back) by day in the Career tab and for ghosts | |
-| Build/Buy | The XP every agent earned in the repo (ghosts too) is the office budget; 8 pieces of furniture, each with its own spot (`layout.ts` DECOR, checked clear of furniture and use-spots by a test); sell back for the full price; saved per repo | Fixed spots, no free placement; agents may walk through bought pieces (the nav grid is built once) |
+| Build/Buy | The XP every agent earned in the repo (ghosts too) is the office budget. A catalog of 126 pieces in 9 categories (`src/office/furniture.json`, CC0 models in `public/furniture`) with thumbnails; carry a piece, turn it (R) and put it down anywhere it fits: it snaps to the walking grid, may not cover walls, furniture, seats or the door, nor cut a seat off from the door (`buy.ts`). Lamps, plants and screens go on a table you bought. Click a piece to move or sell it (full price). Agents path around what you place; saved per repo | No wall-hung pieces (posters, upper cabinets); small things go only on bought tables, not built-in desks; an agent already walking keeps its path for that walk |
 
 ## 8. Decisions
 
@@ -170,6 +170,7 @@ per-agent desks that fill up with things from their history (a trophy per merged
 ## Sources
 
 - KayKit Character Animations 1.2 by Kay Lousberg (CC0), [opengameart.org](https://opengameart.org/content/kaykit-character-animations): the Cheer, Dance and Wave clips
+- Furniture Kit 2.0 by Kenney (CC0), [kenney.nl](https://kenney.nl/assets/furniture-kit), and KayKit Furniture Bits 1.0 by Kay Lousberg (CC0), [GitHub](https://github.com/KayKit-Game-Assets/KayKit-Furniture-Bits-1.0): the Build/Buy catalog
 
 - [KayKit Character Animations (CC0)](https://kaylousberg.itch.io/kaykit-character-animations)
 - [Quaternius Universal Animation Library (CC0)](https://quaternius.com/packs/universalanimationlibrary.html)

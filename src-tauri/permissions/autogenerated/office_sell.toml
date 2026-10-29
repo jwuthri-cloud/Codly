@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-office-sell"
+description = "Enables the office_sell command without any pre-configured scope."
+commands.allow = ["office_sell"]
+
+[[permission]]
+identifier = "deny-office-sell"
+description = "Denies the office_sell command without any pre-configured scope."
+commands.deny = ["office_sell"]

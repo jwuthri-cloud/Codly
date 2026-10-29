@@ -52,18 +52,6 @@ export function rankProgress(c: Career): { next: string | null; progress: number
 
 export const clashes = (a: string, b: string) => CLASH.some(([x, y]) => (x === a && y === b) || (x === b && y === a));
 
-/** Build/Buy (mirror of career.rs CATALOG): price in XP; where each goes is layout.ts. */
-export const CATALOG: { id: string; label: string; price: number }[] = [
-  { id: 'poster', label: 'Framed print', price: 40 },
-  { id: 'ficus', label: 'Ficus', price: 60 },
-  { id: 'floor-lamp', label: 'Reading lamp', price: 80 },
-  { id: 'cooler', label: 'Water cooler', price: 100 },
-  { id: 'armchair', label: 'Armchair', price: 150 },
-  { id: 'bookshelf', label: 'Bookshelf', price: 200 },
-  { id: 'bench', label: 'Lobby bench', price: 250 },
-  { id: 'sofa', label: 'Big sofa', price: 400 },
-];
-
 const NAMES = ['Ada', 'Bo', 'Cleo', 'Dax', 'Eli', 'Fern', 'Gus', 'Hana', 'Ivo', 'Juno', 'Kai', 'Lark', 'Milo', 'Nia', 'Otto', 'Pia', 'Quin', 'Remy', 'Sol', 'Tess', 'Uma', 'Vik', 'Wren', 'Yara', 'Zeno'];
 const PITCHES = [
   'I read the whole codebase before I touch anything.',

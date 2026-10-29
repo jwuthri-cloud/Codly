@@ -3,7 +3,7 @@
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
-use codly_core::model::{Agent, Applicant, Shop};
+use codly_core::model::{Agent, Applicant, Placed, Shop};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -68,8 +68,14 @@ pub async fn office_shop(state: State<'_, AppState>) -> Result<Shop, String> {
     state.core().await?.shop().map_err(|e| format!("{e:#}"))
 }
 
-/// Buy a piece of furniture, or sell it back.
+/// Buy a piece of furniture and put it down, or move one already bought.
 #[tauri::command]
-pub async fn office_trade(state: State<'_, AppState>, item: String, buy: bool) -> Result<Shop, String> {
-    state.core().await?.trade(&item, buy).map_err(|e| format!("{e:#}"))
+pub async fn office_place(state: State<'_, AppState>, piece: Placed) -> Result<Shop, String> {
+    state.core().await?.place(piece).map_err(|e| format!("{e:#}"))
+}
+
+/// Sell a piece of furniture back.
+#[tauri::command]
+pub async fn office_sell(state: State<'_, AppState>, uid: String) -> Result<Shop, String> {
+    state.core().await?.sell(&uid).map_err(|e| format!("{e:#}"))
 }

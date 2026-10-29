@@ -490,10 +490,16 @@ pub struct Career {
 /// Furniture for the office (Build/Buy), paid with what the agents earned (XP).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
-pub struct ShopItem {
-    pub id: String,
-    pub label: String,
-    pub price: i64,
+pub struct Placed {
+    /// One per piece bought (the same item can be bought twice).
+    pub uid: String,
+    /// A `src/office/furniture.json` id.
+    pub item: String,
+    /// Office floor coordinates (layout.ts); `y` is above the floor (on a table, say).
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub rot: f64,
 }
 
 /// The office's budget: every agent's XP in this repo (retired ones too), less what was bought.
@@ -502,8 +508,7 @@ pub struct ShopItem {
 pub struct Shop {
     pub earned: i64,
     pub spent: i64,
-    pub items: Vec<ShopItem>,
-    pub owned: Vec<String>,
+    pub placed: Vec<Placed>,
 }
 
 /// Someone answering a job offer: who would walk in if hired.

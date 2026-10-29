@@ -2,12 +2,14 @@
 // Build/Buy budget: same rules as crates/codly-core/src/orchestrator/careers.rs.
 
 import type { Agent } from '../gen/Agent';
+import type { Placed } from '../gen/Placed';
 import type { Shop } from '../gen/Shop';
-import { CATALOG, emptyCareer } from '../util/career';
+import { BY_ID } from '../../office/buy';
+import { emptyCareer } from '../util/career';
 import type { Sim } from './sim';
 
 let ghosts: Agent[] | null = null;
-let owned: string[] = [];
+let placed: Placed[] = [];
 
 function seeded(sim: Sim): Agent[] {
   if (ghosts) return ghosts;
@@ -51,19 +53,25 @@ export function demoBringBack(sim: Sim, id: string): Agent {
 
 export function demoShop(sim: Sim): Shop {
   const earned = [...sim.agents.values(), ...seeded(sim)].reduce((n, a) => n + a.career.xp, 0);
-  const items = CATALOG.map(({ id, label, price }) => ({ id, label, price }));
-  const spent = items.filter((i) => owned.includes(i.id)).reduce((n, i) => n + i.price, 0);
-  return { earned, spent, items, owned: [...owned] };
+  const spent = placed.reduce((n, p) => n + (BY_ID.get(p.item)?.price ?? 0), 0);
+  return { earned, spent, placed: [...placed] };
 }
 
-export function demoTrade(sim: Sim, item: string, buy: boolean): Shop {
-  const shop = demoShop(sim);
-  const it = shop.items.find((i) => i.id === item);
-  if (!it) throw new Error('no such item');
-  const has = owned.includes(item);
-  if (buy && has) throw new Error('already in the office');
-  if (buy && shop.earned - shop.spent < it.price) throw new Error(`not enough XP yet (${shop.earned - shop.spent} of ${it.price})`);
-  if (!buy && !has) throw new Error('not in the office');
-  owned = buy ? [...owned, item] : owned.filter((o) => o !== item);
+export function demoPlace(sim: Sim, piece: Placed): Shop {
+  const old = placed.find((p) => p.uid === piece.uid);
+  if (old && old.item !== piece.item) throw new Error(`that piece is a ${old.item}`);
+  if (!old) {
+    const price = BY_ID.get(piece.item)?.price;
+    if (price === undefined) throw new Error('no such item');
+    const shop = demoShop(sim);
+    if (shop.earned - shop.spent < price) throw new Error(`not enough XP yet (${shop.earned - shop.spent} of ${price})`);
+  }
+  placed = [...placed.filter((p) => p.uid !== piece.uid), piece];
+  return demoShop(sim);
+}
+
+export function demoSell(sim: Sim, uid: string): Shop {
+  if (!placed.some((p) => p.uid === uid)) throw new Error('not in the office');
+  placed = placed.filter((p) => p.uid !== uid);
   return demoShop(sim);
 }

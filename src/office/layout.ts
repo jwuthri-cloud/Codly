@@ -237,22 +237,6 @@ export function footprint(it: Pick<Item, 'x' | 'z' | 'w' | 'd' | 'rot'>): Rect {
 
 let cached: OfficeLayout | null = null;
 
-/**
- * Build/Buy: where each piece bought for the office goes (ids: career.rs CATALOG), corners and
- * walls off the walking paths.
- */
-// ponytail: fixed spots and walkable (the nav grid is built once); free placement needs a grid rebuild.
-export const DECOR: Record<string, Item> = {
-  poster: { type: 'poster', room: 'studio', x: 0.1, z: 14.6, rot: RIGHT, w: 1.1, d: 0.04, block: false, variant: 2 },
-  ficus: { type: 'tallPlant', room: 'server', x: 22.0, z: 7.6, rot: 0, w: 0.5, d: 0.5, block: false, variant: 1 },
-  'floor-lamp': { type: 'floorLamp', room: 'library', x: 6.55, z: 3.0, rot: 0, w: 0.35, d: 0.35, block: false },
-  cooler: { type: 'cooler', room: 'lobby', x: 13.45, z: 17.0, rot: RIGHT, w: 0.45, d: 0.45, block: false },
-  armchair: { type: 'armchair', room: 'mail', x: 12.4, z: 17.4, rot: 0, w: 0.85, d: 0.8, block: false, variant: 1 },
-  bookshelf: { type: 'shelf', room: 'meeting', x: 7.3, z: 3.4, rot: RIGHT, w: 1.8, d: 0.4, block: false },
-  bench: { type: 'bench', room: 'lounge', x: 4.75, z: 23.5, rot: UP, w: 1.6, d: 0.5, block: false },
-  sofa: { type: 'sofa', room: 'library', x: 3.6, z: 6.45, rot: UP, w: 2.2, d: 0.9, block: false },
-};
-
 export function officeLayout(): OfficeLayout {
   return (cached ??= build());
 }
@@ -529,7 +513,7 @@ function build(): OfficeLayout {
 const INFLATE = 0.14;
 const WALL_T = 0.16;
 
-function markRect(b: Uint8Array, r: Rect, inflate: number) {
+export function markRect(b: Uint8Array, r: Rect, inflate: number) {
   const x0 = Math.max(0, Math.floor((r.x - inflate) / CELL + 1e-6));
   const z0 = Math.max(0, Math.floor((r.z - inflate) / CELL + 1e-6));
   const x1 = Math.min(COLS - 1, Math.ceil((r.x + r.w + inflate) / CELL - 1e-6) - 1);
@@ -574,8 +558,13 @@ function rasterize(L: OfficeLayout) {
   }
   for (const w of L.walls) for (const r of wallPieces(w)) markRect(b, r, INFLATE * 0.6);
   for (const it of L.items) if (it.block) markRect(b, footprint(it), INFLATE);
-  // Use-slots, seats and the door are always reachable cells.
-  const keep = (x: number, z: number) => clearRect(b, { x: x - 0.12, z: z - 0.12, w: 0.24, d: 0.24 });
+  for (const r of keepRects(L)) clearRect(b, r);
+}
+
+/** Cells that are always walkable: use-slots, seats, the door (Build/Buy can't cover them). */
+export function keepRects(L: OfficeLayout): Rect[] {
+  const out: Rect[] = [];
+  const keep = (x: number, z: number) => out.push({ x: x - 0.12, z: z - 0.12, w: 0.24, d: 0.24 });
   for (const st of Object.values(L.stations))
     for (const s of st.slots) {
       keep(s.x, s.z);
@@ -589,7 +578,8 @@ function rasterize(L: OfficeLayout) {
   }
   keep(L.door.inside.x, L.door.inside.z);
   // The doorway itself (the front wall's gap) down to the threshold.
-  clearRect(b, { x: L.door.x - 0.5, z: D - 1.2, w: 1.0, d: 1.2 - CELL });
+  out.push({ x: L.door.x - 0.5, z: D - 1.2, w: 1.0, d: 1.2 - CELL });
+  return out;
 }
 
 export function cellOf(x: number, z: number): [number, number] {

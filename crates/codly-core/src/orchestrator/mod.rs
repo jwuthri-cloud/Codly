@@ -578,10 +578,16 @@ impl Core {
         self.inner.shop(&ws.id)
     }
 
-    /// Buy a piece of furniture (`buy`) or sell it back for the full price.
-    pub fn trade(&self, item: &str, buy: bool) -> anyhow::Result<Shop> {
+    /// Buy a piece of furniture and put it down, or move one already bought (same `uid`).
+    pub fn place(&self, piece: Placed) -> anyhow::Result<Shop> {
         let ws = self.inner.require_ws()?;
-        self.inner.trade(&ws.id, item, buy)
+        self.inner.place(&ws.id, piece)
+    }
+
+    /// Sell a piece of furniture back for the full price.
+    pub fn sell(&self, uid: &str) -> anyhow::Result<Shop> {
+        let ws = self.inner.require_ws()?;
+        self.inner.sell(&ws.id, uid)
     }
 
     /// An agent as a `codly/agent@1` file (see `hires.rs`).

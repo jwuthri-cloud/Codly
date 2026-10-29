@@ -27,6 +27,7 @@
   import { SimsTracker } from './sims';
   import JobBoard from './JobBoard.svelte';
   import type { JobOffer } from '../lib/gen/JobOffer';
+  import type { Placed } from '../lib/gen/Placed';
   import type { Shop } from '../lib/gen/Shop';
   import GhostBoard from './GhostBoard.svelte';
   import BuyMode from './BuyMode.svelte';
@@ -63,7 +64,8 @@
     onbringback?: (agentId: string) => void;
     /** Build/Buy: the budget and furniture (null: not available). */
     shop?: Shop | null;
-    ontrade?: (item: string, buy: boolean) => void;
+    onplace?: (piece: Placed) => void;
+    onsell?: (uid: string) => void;
   }
 
   let {
@@ -93,7 +95,8 @@
     ghosts = [],
     onbringback,
     shop = null,
-    ontrade,
+    onplace,
+    onsell,
   }: Props = $props();
 
   // Job offers from the event stream: open ones, then a few seconds of "Hired" once closed.
@@ -256,7 +259,7 @@
     engine?.setGhosts(ghosts.map((g) => ({ id: g.id, color: g.color, seed: g.look_seed || g.id, provider: g.provider })));
   });
   $effect(() => {
-    engine?.setDecor(shop?.owned ?? []);
+    engine?.setDecor(shop?.placed ?? []);
   });
 </script>
 
@@ -294,8 +297,8 @@
   {#if engine && !backdrop && ghosts.length}
     <GhostBoard {ghosts} {engine} insets={hudInsets} {onbringback} />
   {/if}
-  {#if engine && !backdrop && shop && ontrade}
-    <BuyMode {shop} insets={hudInsets} {ontrade} />
+  {#if engine && !backdrop && shop && onplace && onsell}
+    <BuyMode {engine} {shop} insets={hudInsets} {onplace} {onsell} />
   {/if}
   {#if ticker && !backdrop && items.length}
     <ol class="of-ticker" aria-hidden="true">

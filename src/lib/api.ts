@@ -30,6 +30,7 @@ import type { IdeSearch } from './gen/IdeSearch';
 import type { InboundState } from './gen/InboundState';
 import type { HireManifest } from './gen/HireManifest';
 import type { Applicant } from './gen/Applicant';
+import type { Placed } from './gen/Placed';
 import type { Shop } from './gen/Shop';
 import type { HireReview } from './gen/HireReview';
 import type { LaunchPreview } from './gen/LaunchPreview';
@@ -160,8 +161,10 @@ export const api = {
   bringBack: (agentId: string) => call<Agent>('bring_back', { agentId }),
   /** Build/Buy: the budget (XP the agents earned here), catalog and furniture owned. */
   officeShop: () => call<Shop>('office_shop', {}),
-  /** Buy a piece of furniture, or sell it back for the full price. */
-  officeTrade: (item: string, buy: boolean) => call<Shop>('office_trade', { item, buy }),
+  /** Buy a piece of furniture and put it down, or move one already bought (same uid). */
+  officePlace: (piece: Placed) => call<Shop>('office_place', { piece }),
+  /** Sell a piece of furniture back for the full price. */
+  officeSell: (uid: string) => call<Shop>('office_sell', { uid }),
   /** The open repo's changes to the global team (members switched off, its own members). */
   setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   /** A request's own mode, permissions and Lead model (null fields = the Settings defaults). */

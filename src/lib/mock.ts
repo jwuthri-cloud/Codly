@@ -10,6 +10,7 @@
 import { isSiteDemo, type Transport, type UiBatch } from './api';
 import type { BreakerConfig } from './gen/BreakerConfig';
 import type { CliInfo } from './gen/CliInfo';
+import type { Placed } from './gen/Placed';
 import type { InstallHint } from './gen/InstallHint';
 import type { InstallRung } from './gen/InstallRung';
 import type { ByokStatus } from './gen/ByokStatus';
@@ -28,7 +29,7 @@ import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
 import { makeApplicants } from './util/career';
-import { demoBringBack, demoGhosts, demoShop, demoTrade } from './demo/office';
+import { demoBringBack, demoGhosts, demoPlace, demoSell, demoShop } from './demo/office';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
@@ -286,8 +287,10 @@ export class MockTransport implements Transport {
         return demoBringBack(sim, String(a.agentId));
       case 'office_shop':
         return demoShop(sim);
-      case 'office_trade':
-        return demoTrade(sim, String(a.item), !!a.buy);
+      case 'office_place':
+        return demoPlace(sim, a.piece as Placed);
+      case 'office_sell':
+        return demoSell(sim, String(a.uid));
       case 'set_agent_model':
         return null;
       case 'create_task':

@@ -18,6 +18,7 @@
   import { api } from '../lib/api';
   import type { Agent } from '../lib/gen/Agent';
   import type { Artifact } from '../lib/gen/Artifact';
+  import type { Placed } from '../lib/gen/Placed';
   import type { Shop } from '../lib/gen/Shop';
   import type { EventRow } from '../lib/gen/EventRow';
   import { acquireArtifactUrl, releaseArtifactUrl } from '../lib/state/artifacts';
@@ -91,9 +92,13 @@
       refetchOffice();
     }, fail('Could not bring them back'));
   }
-  function trade(item: string, buy: boolean) {
-    api.officeTrade(item, buy).then((s) => (shop = s), fail(buy ? 'Could not buy it' : 'Could not sell it'));
-  }
+  // On a failure, the office goes back to the furniture the core has (it shows a drop at once).
+  const undo = (title: string) => (e: unknown) => {
+    shop = shop && { ...shop };
+    fail(title)(e);
+  };
+  const place = (p: Placed) => api.officePlace(p).then((s) => (shop = s), undo('Could not put it there'));
+  const sell = (uid: string) => api.officeSell(uid).then((s) => (shop = s), undo('Could not sell it'));
 
   type Sel = { agentId?: string | null; taskId?: string | null; path?: string | null };
   const selection = $derived.by((): Sel | null => {
@@ -222,7 +227,8 @@
           {ghosts}
           onbringback={bringBack}
           {shop}
-          ontrade={trade}
+          onplace={place}
+          onsell={sell}
         />
       {/key}
       {#snippet failed(_error, reset)}

@@ -199,17 +199,18 @@ pub fn random_traits(seed: u64) -> Vec<String> {
     vec![a.into()]
 }
 
-/// Build/Buy: (id, label, price in XP). Cosmetic: where each goes is the office's (layout.ts).
-pub const CATALOG: [(&str, &str, i64); 8] = [
-    ("poster", "Framed print", 40),
-    ("ficus", "Ficus", 60),
-    ("floor-lamp", "Reading lamp", 80),
-    ("cooler", "Water cooler", 100),
-    ("armchair", "Armchair", 150),
-    ("bookshelf", "Bookshelf", 200),
-    ("bench", "Lobby bench", 250),
-    ("sofa", "Big sofa", 400),
-];
+/// Build/Buy: the price in XP of a piece of furniture (the catalog is the office's, shared with
+/// the frontend), or None for no such piece.
+pub fn price(item: &str) -> Option<i64> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        id: String,
+        price: i64,
+    }
+    static CATALOG: std::sync::OnceLock<Vec<Entry>> = std::sync::OnceLock::new();
+    let all = CATALOG.get_or_init(|| serde_json::from_str(include_str!("../../../src/office/furniture.json")).expect("furniture.json is valid"));
+    all.iter().find(|e| e.id == item).map(|e| e.price)
+}
 
 const PITCHES: [&str; 8] = [
     "I read the whole codebase before I touch anything.",
