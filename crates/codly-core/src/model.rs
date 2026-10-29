@@ -487,6 +487,25 @@ pub struct Career {
     pub traits: Vec<String>,
 }
 
+/// Furniture for the office (Build/Buy), paid with what the agents earned (XP).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ShopItem {
+    pub id: String,
+    pub label: String,
+    pub price: i64,
+}
+
+/// The office's budget: every agent's XP in this repo (retired ones too), less what was bought.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Shop {
+    pub earned: i64,
+    pub spent: i64,
+    pub items: Vec<ShopItem>,
+    pub owned: Vec<String>,
+}
+
 /// Someone answering a job offer: who would walk in if hired.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

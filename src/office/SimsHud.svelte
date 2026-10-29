@@ -17,6 +17,7 @@
   import type { OfficeEngine } from './engine';
   import type { NarrateFn } from './OfficeView.svelte';
   import { agentPortrait } from './portrait';
+  import Scrapbook from './Scrapbook.svelte';
   import { levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
   import { rankLabel, rankProgress, TRAITS as WORK_TRAITS } from '../lib/util/career';
@@ -195,11 +196,7 @@
         <div class="stats">
           <span><b>{career.stats.merged}</b> merged</span><span><b>{career.stats.checks_passed}</b> checks passed</span><span><b>{career.stats.approved}</b> approved</span><span><b>{career.stats.commits}</b> commits</span>
         </div>
-        {#each career.milestones.slice(-5).reverse() as m (m.at + m.text)}
-          <div class="moodlet" data-tone="good"><b>{m.text}</b><span>{new Date(Number(m.at)).toLocaleDateString()}</span></div>
-        {:else}
-          <p class="empty">Its first commit, merges and promotions will show up here.</p>
-        {/each}
+        <Scrapbook milestones={career.milestones} />
       {:else}
         {#each sheet.relations as r (r.agentId)}
           <div class="friend" title={r.why}><span class="n-l">{nameOf(r.agentId)}</span><span class="bar"><span class="fill" style:width="{r.score}%"></span></span></div>

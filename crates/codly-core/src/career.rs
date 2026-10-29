@@ -125,7 +125,7 @@ pub fn credit(c: &mut Career, what: Credit, now: i64) -> Option<Rank> {
     })
 }
 
-fn note(c: &mut Career, at: i64, text: String) {
+pub fn note(c: &mut Career, at: i64, text: String) {
     c.milestones.push(Milestone { at, text });
     let over = c.milestones.len().saturating_sub(MAX_MILESTONES);
     c.milestones.drain(..over);
@@ -198,6 +198,18 @@ pub fn random_traits(seed: u64) -> Vec<String> {
     }
     vec![a.into()]
 }
+
+/// Build/Buy: (id, label, price in XP). Cosmetic: where each goes is the office's (layout.ts).
+pub const CATALOG: [(&str, &str, i64); 8] = [
+    ("poster", "Framed print", 40),
+    ("ficus", "Ficus", 60),
+    ("floor-lamp", "Reading lamp", 80),
+    ("cooler", "Water cooler", 100),
+    ("armchair", "Armchair", 150),
+    ("bookshelf", "Bookshelf", 200),
+    ("bench", "Lobby bench", 250),
+    ("sofa", "Big sofa", 400),
+];
 
 const PITCHES: [&str; 8] = [
     "I read the whole codebase before I touch anything.",

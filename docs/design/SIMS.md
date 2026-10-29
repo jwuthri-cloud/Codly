@@ -147,13 +147,16 @@ per-agent desks that fill up with things from their history (a trophy per merged
 |---|---|---|
 | 0 | Continuous life (breathing, blinks, glances, fidgets), smooth per-agent loops, real foosball / pool / PS5 simulations, 30 fps while on screen (focused or not) | Shadows don't follow breathing or rolling balls |
 | Break room | `breakroom.ts`: pairs for pool and foosball, PS5 solo or two-player, stable pairs, a lonely player moves on after 6 s; library and coffee spots; demo `?play=` and `?playAfter=` | |
-| 1 | Skeleton: pelvis sway, thighs, knees, ankles, wrists, seat height as a joint; real gait; sitting down and getting up through a crouch | CC0 clip import (KayKit / Quaternius) — clips are authored in code for now; downloading the packs needs your go |
+| 1 | Skeleton: pelvis sway, thighs, knees, ankles, wrists, seat height as a joint; real gait; sitting down and getting up through a crouch. KayKit Character Animations (CC0) clips, converted to our joints by `scripts/kaykit-clips.py` into `gfx/clips.json`: Cheer (celebrate after passing checks), Dance (a merge, a promotion), Wave (hello at the door, the social trait's reaction) | KayKit's rig has no legs (legs keep our own motion); Quaternius not imported; more clips (Interact, PickUp) are one line in the script |
 | 2 | Plumbob, action queue (✕ interrupts), click menu (chat, task, details, model, stop, send home), Needs / Mood / Skills / Friends panel, speech bubbles, estimated cost counter, walls up/down, **Pause** (core: no new task starts) | Replay at 1×/2×/3×; skills and friendships reset when the app restarts (not saved yet) |
 | 3 | Traits (`traits.ts`), break timing and choices by traits and needs (tired → coffee, down → couch, bookworm → library), personal reactions to real check results, lazy fidgets, pool skill | |
 
 | Careers | `career.rs`: XP from real commits, passing checks, approved reviews and merges; Intern → Junior → Senior → Staff; skills per area; milestones; saved on the agent and shown in its panel (rank, XP, Career tab); a promotion offers a stronger model | Rank doesn't change autonomy yet |
 | Hiring | A new consultant's job offer is pinned by the front door for 30 s with 3 applicants; you pick one or the Lead's pick is hired. The add-agent dialog starts with applicants and a trait picker (Create-a-Sim). Four traits change how an agent works (their rule rides on its prompts) | Applicants don't walk into the office yet |
 | Export | "Export agent" saves `codly/agent@1` (manifest, traits, career, memory file); importing it in any repo brings the same colleague back | Solo agents don't get their memory file in their prompts yet |
+| Ghosts | Consultants let go keep their career and float, see-through, by the memory archive (up to 3); the tag there lists them with their record and scrapbook; Bring back makes one a regular worker again (the scheduler reuses it, you can assign it) | Team members and Leads come back their own way (Settings, threads), so they are not ghosts |
+| Scrapbook | Every milestone (joined, first commit, first merge, every 10th merge, promotions, moved from another repo, came back) by day in the Career tab and for ghosts | |
+| Build/Buy | The XP every agent earned in the repo (ghosts too) is the office budget; 8 pieces of furniture, each with its own spot (`layout.ts` DECOR, checked clear of furniture and use-spots by a test); sell back for the full price; saved per repo | Fixed spots, no free placement; agents may walk through bought pieces (the nav grid is built once) |
 
 ## 8. Decisions
 
@@ -165,6 +168,8 @@ per-agent desks that fill up with things from their history (a trophy per merged
 3. **Flaws**: confirm they stay cosmetic and in leisure and reactions, never in the work itself.
 
 ## Sources
+
+- KayKit Character Animations 1.2 by Kay Lousberg (CC0), [opengameart.org](https://opengameart.org/content/kaykit-character-animations): the Cheer, Dance and Wave clips
 
 - [KayKit Character Animations (CC0)](https://kaylousberg.itch.io/kaykit-character-animations)
 - [Quaternius Universal Animation Library (CC0)](https://quaternius.com/packs/universalanimationlibrary.html)

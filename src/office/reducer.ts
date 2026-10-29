@@ -48,6 +48,8 @@ function placeholder(id: string, ts: number): AgentState {
     status: 'idle',
     statusAt: 0,
     taskId: null,
+    rank: -1,
+    promotedAt: null,
     present: true,
     tools: new Map(),
     focus: null,
@@ -83,7 +85,9 @@ export function ensureAgent(m: OfficeModel, id: string, ts: number): AgentState 
   return a;
 }
 
-function copyAgent(a: AgentState, ag: Agent) {
+const RANK_ORDER = ['intern', 'junior', 'senior', 'staff'];
+
+function copyAgent(a: AgentState, ag: Agent, now: number) {
   a.name = clean(ag.name, 32) || 'Agent';
   a.provider = ag.provider;
   a.role = ag.role;
@@ -93,6 +97,9 @@ function copyAgent(a: AgentState, ag: Agent) {
   a.thread = ag.thread ?? (ag.role === 'lead' ? 'lead' : null);
   a.taskId = ag.task_id;
   setChosenTraits(ag.id, ag.career?.traits ?? []);
+  const rank = RANK_ORDER.indexOf(ag.career?.rank ?? 'intern');
+  if (a.rank >= 0 && rank > a.rank) a.promotedAt = now;
+  a.rank = rank;
 }
 
 /** Merge the app's roster (the `agents` prop) into the model. */
@@ -102,7 +109,7 @@ export function syncAgents(m: OfficeModel, agents: Agent[], now: number) {
     seen.add(ag.id);
     const known = m.agents.has(ag.id);
     const a = ensureAgent(m, ag.id, now);
-    copyAgent(a, ag);
+    copyAgent(a, ag, now);
     // The roster may lag the event stream: never let an older record undo a newer status.
     const stale = ag.updated_at > 0 && ag.updated_at < a.statusAt;
     if ((ag.status !== a.status || !known) && !stale) applyStatus(a, ag.status, ag.updated_at > 0 ? ag.updated_at : now);
@@ -500,7 +507,7 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
       break;
     case 'agent_changed': {
       const ag = ensureAgent(m, k.agent.id, at);
-      copyAgent(ag, k.agent);
+      copyAgent(ag, k.agent, at);
       if (k.agent.status !== ag.status) applyStatus(ag, k.agent.status, at);
       break;
     }

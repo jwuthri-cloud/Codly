@@ -37,12 +37,13 @@ import { breakPreference, reactionTo, traitsOf } from './traits';
 import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, leisure, errandPlace, intentKey, isBlocked, placeKey, type Errand, type Intent, type Place } from './behavior';
 import { CameraRig, DEFAULT_PITCH, DEFAULT_YAW } from './camera';
 import { BuildingGfx } from './gfx/building';
+import type { Provider } from '../lib/gen/Provider';
 import { Character, lookFor, PropKit } from './gfx/character';
 import { CONFETTI, Confetti, FloorRing, FxSystem, Glow, PaperPlane, Puff, Sparkles } from './gfx/fx';
 import { GamesCorner, type GamePlayers } from './gfx/games';
 import { Archive, DeskFrames, DeskScreens, MailRoom, ServerRoom, TaskBoard, Whiteboard, type CardWhere, type TestState, type TodoList } from './gfx/props';
 import { canvas as makeCanvas, emoteTexture, glowTexture, ringTexture, tex, type EmoteKind } from './gfx/textures';
-import { cellCenter, cellOf, COLS, D, officeLayout, passableFn, ROWS, W, type Desk, type OfficeLayout, type Slot, type StationId } from './layout';
+import { cellCenter, cellOf, COLS, D, DECOR, officeLayout, passableFn, ROWS, W, type Desk, type OfficeLayout, type Slot, type StationId } from './layout';
 import { emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type WorldSelection } from './model';
 import { chipFor } from './bubble';
 import { OUTCOME_MS, sentence, type Sentence } from './narrate';
@@ -111,7 +112,16 @@ interface Actor {
   hello: boolean;
   /** The last check result it reacted to (traits.ts). */
   cheerAt?: number;
+  /** The last promotion it danced for. */
+  promotedAt?: number | null;
 }
+
+/** Where ghosts float in the memory archive (layout x, z, facing). */
+const GHOST_SPOTS: [number, number, number][] = [
+  [25.9, 22.6, 0],
+  [22.7, 19.6, 0.5],
+  [26.4, 19.7, -0.4],
+];
 
 interface Intern {
   c: Character;
@@ -156,6 +166,9 @@ export class OfficeEngine {
   private actorsGroup = new Group();
   private actors = new Map<string, Actor>();
   private interns = new Map<string, Intern>();
+  /** Agents let go, haunting the memory archive (see-through, floating). */
+  private ghosts: Character[] = [];
+  private ghostKey = '';
   private emotes = new Map<EmoteKind, Texture>();
   private glowTex: Texture;
   private ringTex: Texture;
@@ -410,6 +423,39 @@ export class OfficeEngine {
     return { x: ((v.x + 1) / 2) * this.width, y: ((1 - v.y) / 2) * this.height };
   }
 
+  /** The memory archive on screen (where the ghosts are), or null when off screen. */
+  archiveScreen(): { x: number; y: number } | null {
+    const v = new Vector3(24.8 + OX, 2.3, 18.6 + OZ).project(this.rig.camera); // over its back cabinets
+    if (v.z > 1 || Math.abs(v.x) > 1.1 || Math.abs(v.y) > 1.1) return null;
+    return { x: ((v.x + 1) / 2) * this.width, y: ((1 - v.y) / 2) * this.height };
+  }
+
+  /** Build/Buy: the furniture bought for the office (ids: layout.ts DECOR). */
+  setDecor(owned: string[]) {
+    this.building.setDecor(owned.flatMap((id) => (DECOR[id] ? [DECOR[id]] : [])));
+    this.shadowDirty = true;
+    this.wake();
+  }
+
+  /** Agents let go (the core's ghosts): up to three float by the memory archive. */
+  setGhosts(list: { id: string; color: number; seed: string; provider: Provider }[]) {
+    const shown = list.slice(0, GHOST_SPOTS.length);
+    const key = shown.map((g) => g.id).join();
+    if (key === this.ghostKey) return;
+    this.ghostKey = key;
+    for (const c of this.ghosts) c.dispose();
+    const now = performance.now();
+    this.ghosts = shown.map((g, i) => {
+      const c = new Character(`ghost:${g.id}`, lookFor(g.seed, g.color, 'worker', g.provider), { emotes: this.emote, props: this.props });
+      const [x, z, face] = GHOST_SPOTS[i];
+      c.teleport({ x: x + OX, z: z + OZ, face }, 'ghost', now, false);
+      c.haunt(now);
+      this.actorsGroup.add(c.root);
+      return c;
+    });
+    this.wake();
+  }
+
   setNeeds(fn: ((id: string) => { energy: number | null; morale: number } | null) | null) {
     this.needsOf = fn;
   }
@@ -446,6 +492,7 @@ export class OfficeEngine {
     this.server.dispose();
     this.games.dispose();
     this.mail.dispose();
+    for (const c of this.ghosts) c.dispose();
     this.archive.dispose();
     this.frames.dispose();
     this.props.dispose();
@@ -711,6 +758,10 @@ export class OfficeEngine {
         const r = reactionTo(traitsOf(a.id), ch.ok);
         if (r && !instant && !this.opts.reducedMotion && wall - ch.at < 5000) act.c.react(r, now);
       }
+      if (a.promotedAt !== (act.promotedAt ?? null)) {
+        act.promotedAt = a.promotedAt;
+        if (a.promotedAt && !instant && !this.opts.reducedMotion && wall - a.promotedAt < 5000) act.c.react('dance', now);
+      }
       const shown = instant ? this.dwell.request(a.id, intent, wall, true) : this.dwell.request(a.id, intent, wall);
       this.apply(act, a, intent, shown, now, instant);
     }
@@ -742,6 +793,8 @@ export class OfficeEngine {
       c.opacity = 0;
       c.fadeTo(1, now, 350);
       if (!this.opts.reducedMotion) this.fx.add(new FloorRing(new Vector3(d.x, 0, d.z - 0.4), identity(a.color, this.theme.name).glow, now, this.ringTex));
+      // A wave hello at the door (KayKit clip).
+      if (!this.opts.reducedMotion) c.react('wave', now + 250);
     }
     return act;
   }
@@ -1426,6 +1479,11 @@ export class OfficeEngine {
       if (r.moving) busy = true;
       nextAt = Math.min(nextAt, r.nextAt);
     }
+    this.ghosts.forEach((g, i) => {
+      const r = g.update(now, dt, rm, lively);
+      if (!rm) g.root.position.y = 0.14 + 0.06 * Math.sin(now / 950 + i * 2.1);
+      if (r.moving || (lively && !rm)) busy = true;
+    });
     // Cards in flight, and held cards following hands.
     if (this.board.update(now)) busy = true;
     if (this.surfacesDirty) {

@@ -249,109 +249,7 @@ export class BuildingGfx {
         p.items.push(it);
         continue;
       }
-      merged.frame(it.x, 0, it.z, it.rot);
-      const seed = hash(`${it.type}:${it.x}:${it.z}`);
-      switch (it.type) {
-        case 'shelf':
-          F.shelf(merged, it.w, seed);
-          break;
-        case 'armchair':
-          F.armchair(merged, it.variant ?? 0);
-          break;
-        case 'sideTable':
-          F.sideTable(merged);
-          break;
-        case 'floorLamp':
-          F.floorLamp(merged);
-          break;
-        case 'readingTable':
-          F.readingTable(merged);
-          break;
-        case 'meetingTable':
-          F.meetingTable(merged);
-          break;
-        case 'whiteboard':
-          F.whiteboardFrame(merged);
-          break;
-        case 'taskBoard':
-          F.taskBoardFrame(merged);
-          break;
-        case 'testMonitor':
-          F.testMonitorBody(merged);
-          break;
-        case 'pigeonholes':
-          F.pigeonholes(merged, this.L.pigeonholes.cols, this.L.pigeonholes.rows);
-          break;
-        case 'mailbox':
-          F.mailbox(merged);
-          break;
-        case 'sortingTable':
-          F.sortingTable(merged);
-          break;
-        case 'catalog':
-          F.catalog(merged);
-          break;
-        case 'counter':
-          F.counter(merged);
-          break;
-        case 'fridge':
-          F.fridge(merged);
-          break;
-        case 'coffee':
-          F.coffee(merged);
-          break;
-        case 'roundTable':
-          F.roundTable(merged);
-          break;
-        case 'stool':
-          F.stool(merged);
-          break;
-        case 'sofa':
-          F.sofa(merged);
-          break;
-        case 'couch':
-          F.sofa(merged, true);
-          break;
-        case 'plant':
-          F.plant(merged, it.variant ?? 0, seed);
-          break;
-        case 'tallPlant':
-          F.tallPlant(merged, it.variant ?? 0, seed);
-          break;
-        case 'coatRack':
-          F.coatRack(merged);
-          break;
-        case 'doormat':
-          F.doormat(merged);
-          break;
-        case 'bench':
-          F.bench(merged);
-          break;
-        case 'cooler':
-          F.cooler(merged);
-          break;
-        case 'printer':
-          F.printer(merged);
-          break;
-        case 'poster':
-          F.poster(merged, it.variant ?? 0);
-          break;
-        case 'credenza':
-          F.credenza(merged);
-          break;
-        case 'tvStand':
-          screens.frame(it.x, 0, it.z, it.rot);
-          F.tvStand(merged, screens);
-          break;
-        case 'foosball':
-          F.foosball(merged);
-          break;
-        case 'poolTable':
-          F.poolTable(merged);
-          break;
-        default:
-          break;
-      }
+      this.piece(merged, screens, it);
     }
     merged.frame();
     this.mesh(merged.build(), this.matte, true, true);
@@ -374,6 +272,131 @@ export class BuildingGfx {
       im.computeBoundingSphere();
       this.group.add(im);
     }
+  }
+
+  /** One merged (not instanced) piece of furniture. */
+  private piece(merged: Builder, screens: Builder, it: Item) {
+    merged.frame(it.x, 0, it.z, it.rot);
+    const seed = hash(`${it.type}:${it.x}:${it.z}`);
+    switch (it.type) {
+      case 'shelf':
+        F.shelf(merged, it.w, seed);
+        break;
+      case 'armchair':
+        F.armchair(merged, it.variant ?? 0);
+        break;
+      case 'sideTable':
+        F.sideTable(merged);
+        break;
+      case 'floorLamp':
+        F.floorLamp(merged);
+        break;
+      case 'readingTable':
+        F.readingTable(merged);
+        break;
+      case 'meetingTable':
+        F.meetingTable(merged);
+        break;
+      case 'whiteboard':
+        F.whiteboardFrame(merged);
+        break;
+      case 'taskBoard':
+        F.taskBoardFrame(merged);
+        break;
+      case 'testMonitor':
+        F.testMonitorBody(merged);
+        break;
+      case 'pigeonholes':
+        F.pigeonholes(merged, this.L.pigeonholes.cols, this.L.pigeonholes.rows);
+        break;
+      case 'mailbox':
+        F.mailbox(merged);
+        break;
+      case 'sortingTable':
+        F.sortingTable(merged);
+        break;
+      case 'catalog':
+        F.catalog(merged);
+        break;
+      case 'counter':
+        F.counter(merged);
+        break;
+      case 'fridge':
+        F.fridge(merged);
+        break;
+      case 'coffee':
+        F.coffee(merged);
+        break;
+      case 'roundTable':
+        F.roundTable(merged);
+        break;
+      case 'stool':
+        F.stool(merged);
+        break;
+      case 'sofa':
+        F.sofa(merged);
+        break;
+      case 'couch':
+        F.sofa(merged, true);
+        break;
+      case 'plant':
+        F.plant(merged, it.variant ?? 0, seed);
+        break;
+      case 'tallPlant':
+        F.tallPlant(merged, it.variant ?? 0, seed);
+        break;
+      case 'coatRack':
+        F.coatRack(merged);
+        break;
+      case 'doormat':
+        F.doormat(merged);
+        break;
+      case 'bench':
+        F.bench(merged);
+        break;
+      case 'cooler':
+        F.cooler(merged);
+        break;
+      case 'printer':
+        F.printer(merged);
+        break;
+      case 'poster':
+        F.poster(merged, it.variant ?? 0);
+        break;
+      case 'credenza':
+        F.credenza(merged);
+        break;
+      case 'tvStand':
+        screens.frame(it.x, 0, it.z, it.rot);
+        F.tvStand(merged, screens);
+        break;
+      case 'foosball':
+        F.foosball(merged);
+        break;
+      case 'poolTable':
+        F.poolTable(merged);
+        break;
+      default:
+        break;
+    }
+  }
+
+  private decor: Mesh | null = null;
+
+  /** Build/Buy: the furniture bought for the office (layout.ts DECOR), replacing the last set. */
+  setDecor(items: Item[]) {
+    if (this.decor) {
+      this.decor.removeFromParent();
+      this.decor.geometry.dispose();
+      this.decor = null;
+    }
+    if (!items.length) return;
+    const b = new Builder();
+    for (const it of items) this.piece(b, b, it);
+    b.frame();
+    this.decor = new Mesh(b.build(), this.matte);
+    this.decor.castShadow = this.decor.receiveShadow = true;
+    this.group.add(this.decor);
   }
 
   private buildLamps() {
@@ -519,6 +542,7 @@ export class BuildingGfx {
   private extraMats: MeshBasicMaterial[] = [];
 
   dispose() {
+    this.setDecor([]);
     for (const g of this.geos) g.dispose();
     for (const t of this.textures) t.dispose();
     for (const p of this.windowPlanes) p.dispose();

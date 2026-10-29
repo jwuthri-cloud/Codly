@@ -28,6 +28,7 @@ import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { draftPrompt, draftReply, exportDemoAgent, hireFromManifest, isDraftRequest, launchPreview, reviewHire } from './demo/hire';
 import { makeApplicants } from './util/career';
+import { demoBringBack, demoGhosts, demoShop, demoTrade } from './demo/office';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
@@ -280,6 +281,14 @@ export class MockTransport implements Transport {
         return null;
       case 'export_agent':
         return exportDemoAgent(sim, String(a.agentId));
+      case 'ghosts':
+        return demoGhosts(sim);
+      case 'bring_back':
+        return demoBringBack(sim, String(a.agentId));
+      case 'office_shop':
+        return demoShop(sim);
+      case 'office_trade':
+        return demoTrade(sim, String(a.item), !!a.buy);
       case 'set_agent_model':
         return null;
       case 'create_task':

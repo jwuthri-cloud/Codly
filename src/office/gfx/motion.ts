@@ -13,6 +13,7 @@
 //  21 left leg out 22 right leg out   23 seated (0 standing → 1 hips on the seat)
 
 import type { Pose } from '../behavior';
+import CLIPS from './clips.json';
 
 export const J = 24;
 export type Joints = Float32Array;
@@ -124,6 +125,7 @@ export function loopPeriod(pose: Pose): number {
     case 'pool':
     case 'wave':
     case 'celebrate':
+    case 'dance':
       return TICK * 3;
     case 'read':
     case 'review':
@@ -270,16 +272,13 @@ export function targets(out: Joints, pose: Pose, seated: boolean, x: MotionCtx) 
       out[5] = -0.05;
       break;
     case 'wave':
-      out[8] = -2.7;
-      out[9] = 0.25 + 0.16 * osc(t, 2.2);
-      out[10] = -0.5 + 0.1 * osc(t, 2.2, 0.25);
-      out[2] = -0.05;
+      clip(out, 'wave', t, 1, seated);
       break;
     case 'celebrate':
-      out[5] = out[8] = -2.85 + 0.18 * osc(t, 2.6);
-      out[6] = out[9] = 0.38;
-      out[7] = out[10] = -0.12;
-      out[2] = -0.15;
+      clip(out, 'cheer', t, 1, seated);
+      break;
+    case 'dance':
+      clip(out, 'dance', t, 1, seated);
       break;
     case 'drop':
       out[1] = 0.14;
@@ -507,11 +506,33 @@ export function addLife(out: Joints, pose: Pose, seated: boolean, tSec: number, 
   }
 }
 
-export type ReactKind = 'thump' | 'facepalm' | 'startle' | 'fistpump' | 'wave';
+export type ReactKind = 'thump' | 'facepalm' | 'startle' | 'fistpump' | 'wave' | 'dance';
 /** How long each personal reaction plays (s). */
-export const REACT_S: Record<ReactKind, number> = { thump: 1.4, facepalm: 2.0, startle: 1.1, fistpump: 1.3, wave: 1.8 };
+export const REACT_S: Record<ReactKind, number> = { thump: 1.4, facepalm: 2.0, startle: 1.1, fistpump: 1.3, wave: 1.55, dance: 3.3 };
 
-/** A personal reaction (traits.ts) laid over whatever it is doing, at weight w (0 … 1). */
+export type ClipName = keyof typeof CLIPS;
+
+/**
+ * A clip from KayKit Character Animations (CC0, Kay Lousberg; converted by
+ * scripts/kaykit-clips.py) at weight w. A pose loops its middle (`t` its own clock); `once`
+ * plays it all from the start (`t` seconds in), raise to lower. Seated: arms and head only.
+ */
+export function clip(out: Joints, name: ClipName, t: number, w: number, seated = false, once = false) {
+  const c = CLIPS[name];
+  const n = c.j['0'].length - 1;
+  const [a, b] = c.loop;
+  const f = once ? Math.min(n, Math.max(0, t * c.fps)) : a + ((((t * c.fps) % (b - a)) + (b - a)) % (b - a));
+  const i = Math.floor(f);
+  const k = f - i;
+  for (const [key, vs] of Object.entries(c.j)) {
+    const j = +key;
+    if (seated && (j === 0 || j === 1 || j === 13 || j === 20)) continue;
+    const v = vs[i] + (vs[Math.min(i + 1, n)] - vs[i]) * k;
+    if (j === 0) out[0] += v * w;
+    else towards(out, j, j === 6 || j === 9 ? v + 0.08 : v, w);
+  }
+}
+
 export function reactPose(out: Joints, kind: ReactKind, w: number, t: number) {
   if (w <= 0) return;
   switch (kind) {
@@ -541,9 +562,10 @@ export function reactPose(out: Joints, kind: ReactKind, w: number, t: number) {
       towards(out, 9, 0.15, w);
       break;
     case 'wave':
-      towards(out, 8, -2.7, w);
-      towards(out, 9, 0.25 + 0.16 * osc(t, 2.2), w);
-      towards(out, 10, -0.5, w);
+      clip(out, 'wave', t, w, false, true);
+      break;
+    case 'dance': // a promotion: the loop twice, then down
+      clip(out, 'dance', t, w);
       break;
   }
 }

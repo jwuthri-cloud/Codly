@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { Pose } from '../behavior';
 import { J, targets, type MotionCtx, type PlayCue } from '../gfx/motion';
 
-const POSES: Pose[] = ['sit', 'type', 'read', 'think', 'phone', 'sleep', 'slump', 'stand', 'browse', 'write', 'watch', 'raise', 'celebrate', 'drop', 'talk', 'review', 'wave', 'gamepad', 'foosball', 'pool'];
+const POSES: Pose[] = ['sit', 'type', 'read', 'think', 'phone', 'sleep', 'slump', 'stand', 'browse', 'write', 'watch', 'raise', 'celebrate', 'dance', 'drop', 'talk', 'review', 'wave', 'gamepad', 'foosball', 'pool'];
 const at = (pose: Pose, t: number, seed: number, cue: PlayCue | null = null) => {
   const out = new Float32Array(J);
   const x: MotionCtx = { t, now: t * 1000, seed, cue, live: true };

@@ -837,7 +837,7 @@ export class Character {
         const dur = REACT_S[this.reacting.kind];
         if (age >= dur) this.reacting = null;
         else {
-          reactPose(this.goal, this.reacting.kind, Math.min(1, age / 0.15) * Math.min(1, (dur - age) / 0.35), now / 1000);
+          reactPose(this.goal, this.reacting.kind, Math.min(1, age / 0.15) * Math.min(1, (dur - age) / 0.35), age);
           moving = true;
         }
       }
@@ -1009,6 +1009,14 @@ export class Character {
       }
       this.propMesh.rotation.set(r, 0, 0);
     }
+  }
+
+  /** A ghost (an agent let go, by the memory archive): see-through, cold, no shadow. */
+  haunt(now: number) {
+    this.mat.emissive.setRGB(0.1, 0.18, 0.32);
+    this.mat.depthWrite = false;
+    this.root.traverse((o) => (o.castShadow = false));
+    this.fadeTo(0.34, now, 900);
   }
 
   setHighlight(on: boolean) {

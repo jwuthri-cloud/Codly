@@ -316,6 +316,11 @@ impl Store {
         self.json_rows("SELECT json FROM agent WHERE workspace_id = ?1 AND archived = 0 ORDER BY created_at, id", workspace_id)
     }
 
+    /// A workspace's archived agents (let go), newest first: the office's ghosts.
+    pub fn archived_agents(&self, workspace_id: &str) -> Result<Vec<Agent>> {
+        self.json_rows("SELECT json FROM agent WHERE workspace_id = ?1 AND archived = 1 ORDER BY updated_at DESC, id", workspace_id)
+    }
+
     pub fn agent_workspace(&self, id: &str) -> Result<Option<String>> {
         Ok(self
             .conn()

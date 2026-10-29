@@ -34,6 +34,7 @@ export type Pose =
   | 'watch'
   | 'raise'
   | 'celebrate'
+  | 'dance'
   | 'drop'
   | 'talk'
   | 'review'
@@ -277,7 +278,7 @@ function atStation(t: ToolCall, place: Place): Intent {
     case 'commit':
       return make(place, 'drop', 'commit', { prop: 'envelope' });
     case 'merge':
-      return make(place, 'celebrate', 'merge');
+      return make(place, 'dance', 'merge');
     case 'memory':
       return make(place, 'browse', 'memory', { prop: 'folder' });
     case 'message':
@@ -320,7 +321,7 @@ function errandIntent(e: Errand, place: Place): Intent {
     case 'commit':
       return make(place, 'drop', 'commit', { prop: acting ? null : 'envelope', errand: e.kind });
     case 'merge':
-      return make(place, 'celebrate', 'merge', { errand: e.kind });
+      return make(place, 'dance', 'merge', { errand: e.kind });
     case 'memory':
       return make(place, 'browse', 'memory', { prop: acting ? null : 'folder', errand: e.kind });
     case 'note':

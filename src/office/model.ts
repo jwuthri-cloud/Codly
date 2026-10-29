@@ -78,6 +78,9 @@ export interface AgentState {
   lastToolEnd: number;
   /** The end of a test run (tool or verify): celebrate or slump where it ran. */
   cheer: { ok: boolean; at: number; atMonitor: boolean } | null;
+  /** Its career rank (saved on the agent) and when it last went up (it dances). */
+  rank: number;
+  promotedAt: number | null;
 }
 
 export type Column = 'todo' | 'doing' | 'review' | 'done';

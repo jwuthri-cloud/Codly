@@ -3,7 +3,7 @@
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
-use codly_core::model::{Agent, Applicant};
+use codly_core::model::{Agent, Applicant, Shop};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -48,4 +48,28 @@ pub async fn pick_applicant(state: State<'_, AppState>, offer_id: String, index:
 #[tauri::command]
 pub async fn export_agent(state: State<'_, AppState>, agent_id: String) -> Result<String, String> {
     state.core().await?.export_agent(&agent_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Workers let go in the open repo, who keep their career (the office's ghosts).
+#[tauri::command]
+pub async fn ghosts(state: State<'_, AppState>) -> Result<Vec<Agent>, String> {
+    state.core().await?.ghosts().map_err(|e| format!("{e:#}"))
+}
+
+/// Bring a ghost back as a regular worker.
+#[tauri::command]
+pub async fn bring_back(state: State<'_, AppState>, agent_id: String) -> Result<Agent, String> {
+    state.core().await?.bring_back(&agent_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Build/Buy: budget (XP earned), catalog and what the office owns.
+#[tauri::command]
+pub async fn office_shop(state: State<'_, AppState>) -> Result<Shop, String> {
+    state.core().await?.shop().map_err(|e| format!("{e:#}"))
+}
+
+/// Buy a piece of furniture, or sell it back.
+#[tauri::command]
+pub async fn office_trade(state: State<'_, AppState>, item: String, buy: bool) -> Result<Shop, String> {
+    state.core().await?.trade(&item, buy).map_err(|e| format!("{e:#}"))
 }

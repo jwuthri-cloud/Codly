@@ -557,6 +557,33 @@ impl Core {
         Ok(crate::career::applicants(n.min(5), now_ms() as u64, &names, &colors))
     }
 
+    /// Workers let go in the open repo, who keep their career: the office's ghosts.
+    pub fn ghosts(&self) -> anyhow::Result<Vec<Agent>> {
+        let ws = self.inner.require_ws()?;
+        self.inner.ghosts(&ws.id)
+    }
+
+    /// Bring a ghost back as a regular worker (same name, look, career and memory).
+    pub fn bring_back(&self, agent_id: &str) -> anyhow::Result<Agent> {
+        let ws = self.inner.require_ws()?;
+        let a = self.inner.bring_back(&ws.id, agent_id)?;
+        self.inner.decide(Some(&ws.id), None, "staff", format!("brought {} back", a.name), serde_json::json!({ "agent": a.id }))?;
+        self.inner.kick();
+        Ok(a)
+    }
+
+    /// Build/Buy: the office's budget (XP earned in this repo), catalog and furniture owned.
+    pub fn shop(&self) -> anyhow::Result<Shop> {
+        let ws = self.inner.require_ws()?;
+        self.inner.shop(&ws.id)
+    }
+
+    /// Buy a piece of furniture (`buy`) or sell it back for the full price.
+    pub fn trade(&self, item: &str, buy: bool) -> anyhow::Result<Shop> {
+        let ws = self.inner.require_ws()?;
+        self.inner.trade(&ws.id, item, buy)
+    }
+
     /// An agent as a `codly/agent@1` file (see `hires.rs`).
     pub fn export_agent(&self, agent_id: &str) -> anyhow::Result<String> {
         self.inner.export_agent(agent_id)
@@ -904,6 +931,11 @@ impl Inner {
     fn new_agent(&self, name: &str, provider: Provider, role: Role, color: i64, model: Option<String>) -> Agent {
         let billing = self.clis().iter().find(|c| c.provider == provider).map_or(Billing::Unknown, |c| c.billing);
         let id = new_id();
+        let now = now_ms();
+        let mut career = Career::default();
+        if role != Role::Lead {
+            crate::career::note(&mut career, now, "Joined the team".into());
+        }
         Agent {
             id: id.clone(),
             name: name.into(),
@@ -927,9 +959,9 @@ impl Inner {
             consultant: false,
             archived: false,
             usage: Usage::default(),
-            career: Career::default(),
-            created_at: now_ms(),
-            updated_at: now_ms(),
+            career,
+            created_at: now,
+            updated_at: now,
         }
     }
 

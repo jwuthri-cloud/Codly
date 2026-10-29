@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-office-shop"
+description = "Enables the office_shop command without any pre-configured scope."
+commands.allow = ["office_shop"]
+
+[[permission]]
+identifier = "deny-office-shop"
+description = "Denies the office_shop command without any pre-configured scope."
+commands.deny = ["office_shop"]

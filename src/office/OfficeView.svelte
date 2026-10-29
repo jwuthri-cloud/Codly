@@ -27,6 +27,9 @@
   import { SimsTracker } from './sims';
   import JobBoard from './JobBoard.svelte';
   import type { JobOffer } from '../lib/gen/JobOffer';
+  import type { Shop } from '../lib/gen/Shop';
+  import GhostBoard from './GhostBoard.svelte';
+  import BuyMode from './BuyMode.svelte';
 
   interface Props {
     files?: RepoFile[];
@@ -55,6 +58,12 @@
     onpause?: (paused: boolean) => void;
     /** Pick who gets a job offer's job (the office pins open offers by the door). */
     onpickapplicant?: (offerId: string, index: number) => void;
+    /** Agents let go (ghosts by the memory archive), and bringing one back. */
+    ghosts?: Agent[];
+    onbringback?: (agentId: string) => void;
+    /** Build/Buy: the budget and furniture (null: not available). */
+    shop?: Shop | null;
+    ontrade?: (item: string, buy: boolean) => void;
   }
 
   let {
@@ -81,6 +90,10 @@
     paused = false,
     onpause,
     onpickapplicant,
+    ghosts = [],
+    onbringback,
+    shop = null,
+    ontrade,
   }: Props = $props();
 
   // Job offers from the event stream: open ones, then a few seconds of "Hired" once closed.
@@ -238,6 +251,12 @@
   $effect(() => {
     engine?.setArtifactUrl(artifactUrl);
   });
+  $effect(() => {
+    engine?.setGhosts(ghosts.map((g) => ({ id: g.id, color: g.color, seed: g.look_seed || g.id, provider: g.provider })));
+  });
+  $effect(() => {
+    engine?.setDecor(shop?.owned ?? []);
+  });
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex (the office takes arrow keys, +/−, F and Esc) -->
@@ -270,6 +289,12 @@
   {/if}
   {#if engine && offers.length}
     <JobBoard {offers} {engine} insets={hudInsets} onpick={onpickapplicant} />
+  {/if}
+  {#if engine && !backdrop && ghosts.length}
+    <GhostBoard {ghosts} {engine} insets={hudInsets} {onbringback} />
+  {/if}
+  {#if engine && !backdrop && shop && ontrade}
+    <BuyMode {shop} insets={hudInsets} {ontrade} />
   {/if}
   {#if ticker && !backdrop && items.length}
     <ol class="of-ticker" aria-hidden="true">

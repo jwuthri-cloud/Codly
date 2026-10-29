@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ghosts"
+description = "Enables the ghosts command without any pre-configured scope."
+commands.allow = ["ghosts"]
+
+[[permission]]
+identifier = "deny-ghosts"
+description = "Denies the ghosts command without any pre-configured scope."
+commands.deny = ["ghosts"]

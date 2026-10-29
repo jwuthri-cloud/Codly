@@ -126,7 +126,11 @@ impl Inner {
                 a.look_seed = seed.to_string();
             }
             // An exported agent comes back with its track record (bounded again here).
-            a.career = m.career.clone().map(crate::career::sanitize).unwrap_or_default();
+            if let Some(c) = m.career.clone() {
+                let joined = std::mem::take(&mut a.career.milestones);
+                a.career = crate::career::sanitize(c);
+                a.career.milestones.extend(joined.into_iter().map(|j| Milestone { text: "Moved here from another repo".into(), ..j }));
+            }
             a.career.traits = crate::career::clean_traits(&m.traits);
         })
         .and_then(|a| {

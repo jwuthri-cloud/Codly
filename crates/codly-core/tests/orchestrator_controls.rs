@@ -233,7 +233,11 @@ async fn idle_agent_pauses_at_once_and_kill_clears_the_controls() {
     core.stop_agent(&id).await.unwrap();
     wait_for("the controls to clear", async || core.agent_control(&id).await.unwrap().is_default().then_some(())).await;
     assert!(core.steer_agent(&id, "too late").await.is_err(), "a stopped agent takes no steer note");
-    let events = core.events(Some(&id), None, 200).await.unwrap();
-    assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ControlChanged { control } if control.is_default())));
+    // The controls clear before their event is written: wait for it.
+    wait_for("the cleared controls' event", async || {
+        let events = core.events(Some(&id), None, 200).await.unwrap();
+        events.iter().any(|e| matches!(&e.kind, EventKind::ControlChanged { control } if control.is_default())).then_some(())
+    })
+    .await;
     core.shutdown().await;
 }

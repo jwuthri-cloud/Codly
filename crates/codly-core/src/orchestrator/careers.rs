@@ -1,9 +1,13 @@
 //! Careers and job offers: crediting agents for what their events say they did (rules in
-//! `crate::career`), and the job offer posted in the office before a new consultant is hired.
+//! `crate::career`), the job offer posted in the office before a new consultant is hired, and
+//! ghosts: workers let go, who keep their career and can be brought back, and Build/Buy: the
+//! XP they earned buys furniture for the office.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+
+use anyhow::{Result, bail};
 
 use super::{Inner, lock};
 use crate::career::{self, Credit};
@@ -116,5 +120,62 @@ impl Inner {
         let _ = self.emit(Some(ws), super::row(None, Some(&closed.task_id), None, EventKind::JobOffer { offer: closed.clone() }));
         self.kick();
         true
+    }
+
+    /// Workers let go in this repo (consultants after their task), newest first. Team members
+    /// come back through Settings and Leads through their thread, so they are not ghosts.
+    pub(super) fn ghosts(&self, ws: &str) -> Result<Vec<Agent>> {
+        Ok(self.store.archived_agents(ws)?.into_iter().filter(|a| a.role == Role::Worker && a.member.is_none()).collect())
+    }
+
+    /// Bring a ghost back as a regular worker: the scheduler reuses it for tasks of its
+    /// provider and you can assign it work. Its career, memory and look are the same.
+    pub(super) fn bring_back(&self, ws: &str, id: &str) -> Result<Agent> {
+        let Some(g) = self.ghosts(ws)?.into_iter().find(|a| a.id == id) else { bail!("no such ghost in this repo") };
+        if self.store.agents(ws)?.iter().any(|a| a.name.eq_ignore_ascii_case(&g.name)) {
+            bail!("someone called {} already works here", g.name);
+        }
+        let now = now_ms();
+        self.update_agent(id, |a| {
+            a.archived = false;
+            a.consultant = false;
+            a.status = AgentStatus::Idle;
+            a.task_id = None;
+            a.activity = None;
+            a.activity_label = None;
+            career::note(&mut a.career, now, "Came back".into());
+        })
+    }
+
+    pub(super) fn shop(&self, ws: &str) -> Result<Shop> {
+        let owned: Vec<String> = self.store.kv_get(&format!("shop:{ws}"))?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+        let earned = self.store.agents(ws)?.iter().chain(self.store.archived_agents(ws)?.iter()).map(|a| a.career.xp).sum();
+        let items: Vec<ShopItem> = career::CATALOG.iter().map(|&(id, label, price)| ShopItem { id: id.into(), label: label.into(), price }).collect();
+        let owned: Vec<String> = owned.into_iter().filter(|o| items.iter().any(|i| &i.id == o)).collect();
+        let spent = items.iter().filter(|i| owned.contains(&i.id)).map(|i| i.price).sum();
+        Ok(Shop { earned, spent, items, owned })
+    }
+
+    /// Buy (or sell back, for the full price) one piece of furniture.
+    pub(super) fn trade(&self, ws: &str, item: &str, buy: bool) -> Result<Shop> {
+        let mut shop = self.shop(ws)?;
+        let Some(price) = shop.items.iter().find(|i| i.id == item).map(|i| i.price) else { bail!("no such item") };
+        let has = shop.owned.iter().any(|o| o == item);
+        if buy {
+            if has {
+                bail!("already in the office");
+            }
+            if shop.earned - shop.spent < price {
+                bail!("not enough XP yet ({} of {price})", shop.earned - shop.spent);
+            }
+            shop.owned.push(item.into());
+        } else {
+            if !has {
+                bail!("not in the office");
+            }
+            shop.owned.retain(|o| o != item);
+        }
+        self.store.kv_set(&format!("shop:{ws}"), &serde_json::to_string(&shop.owned)?)?;
+        self.shop(ws)
     }
 }

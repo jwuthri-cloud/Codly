@@ -30,6 +30,7 @@ import type { IdeSearch } from './gen/IdeSearch';
 import type { InboundState } from './gen/InboundState';
 import type { HireManifest } from './gen/HireManifest';
 import type { Applicant } from './gen/Applicant';
+import type { Shop } from './gen/Shop';
 import type { HireReview } from './gen/HireReview';
 import type { LaunchPreview } from './gen/LaunchPreview';
 import type { Memory } from './gen/Memory';
@@ -153,6 +154,14 @@ export const api = {
   pickApplicant: (offerId: string, index: number) => call<void>('pick_applicant', { offerId, index }),
   /** An agent as a `codly/agent@1` file: manifest, traits, career and memory. */
   exportAgent: (agentId: string) => call<string>('export_agent', { agentId }),
+  /** Workers let go in the open repo, who keep their career (the office's ghosts). */
+  ghosts: () => call<Agent[]>('ghosts', {}),
+  /** Bring a ghost back as a regular worker (same name, look, career and memory). */
+  bringBack: (agentId: string) => call<Agent>('bring_back', { agentId }),
+  /** Build/Buy: the budget (XP the agents earned here), catalog and furniture owned. */
+  officeShop: () => call<Shop>('office_shop', {}),
+  /** Buy a piece of furniture, or sell it back for the full price. */
+  officeTrade: (item: string, buy: boolean) => call<Shop>('office_trade', { item, buy }),
   /** The open repo's changes to the global team (members switched off, its own members). */
   setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   /** A request's own mode, permissions and Lead model (null fields = the Settings defaults). */

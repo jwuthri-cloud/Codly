@@ -2016,5 +2016,25 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     assert!(hired.career.xp >= 15 + 10 + 30, "commit, passing check and merge all count: {:?}", hired.career);
     assert_eq!(hired.career.stats.merged, 1);
     assert_eq!(snap.tasks[0].status, TaskStatus::Done);
+
+    // Let go after its task, it haunts the archive with its career, and can come back.
+    let ghost = wait_for("the consultant to be let go", 30, async || core.ghosts().unwrap().into_iter().find(|g| g.id == hired.id)).await;
+    assert_eq!(ghost.career.stats.merged, 1);
+    let back = core.bring_back(&ghost.id).unwrap();
+    assert!(!back.archived && !back.consultant && back.status == AgentStatus::Idle);
+    assert_eq!(back.career.milestones.last().map(|m| m.text.as_str()), Some("Came back"));
+    assert!(core.ghosts().unwrap().is_empty());
+    assert!(core.snapshot().await.unwrap().agents.iter().any(|a| a.id == ghost.id), "back on the team");
+    assert!(core.bring_back(&ghost.id).is_err(), "only ghosts come back");
+
+    // What it earned buys furniture (Build/Buy); the price comes back when you sell.
+    let shop = core.shop().unwrap();
+    assert!(shop.earned >= 55 && shop.spent == 0 && shop.owned.is_empty(), "{shop:?}");
+    let shop = core.trade("poster", true).unwrap();
+    assert_eq!((shop.spent, shop.owned.as_slice()), (40, &["poster".to_string()][..]));
+    assert!(core.trade("poster", true).is_err(), "one of each");
+    assert!(core.trade("sofa", true).is_err(), "not enough XP");
+    assert!(core.trade("throne", true).is_err());
+    assert_eq!(core.trade("poster", false).unwrap().spent, 0);
     core.shutdown().await;
 }

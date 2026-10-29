@@ -16,7 +16,9 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { api } from '../lib/api';
+  import type { Agent } from '../lib/gen/Agent';
   import type { Artifact } from '../lib/gen/Artifact';
+  import type { Shop } from '../lib/gen/Shop';
   import type { EventRow } from '../lib/gen/EventRow';
   import { acquireArtifactUrl, releaseArtifactUrl } from '../lib/state/artifacts';
   import { interruptAgent, stopAgent, updateSettings } from '../lib/state/actions';
@@ -56,6 +58,42 @@
       clearTimeout(t);
     };
   });
+
+  // Ghosts (agents let go) and the Build/Buy budget: both move with agent changes (XP, let go).
+  let ghosts = $state.raw<Agent[]>([]);
+  let shop = $state.raw<Shop | null>(null);
+  function refetchOffice() {
+    api.ghosts().then((g) => (ghosts = g)).catch(() => {});
+    api.officeShop().then((s) => (shop = s)).catch(() => {});
+  }
+  $effect(() => {
+    void store.workspace?.id;
+    void store.epoch;
+    if (store.workspace) refetchOffice();
+    else (ghosts = []), (shop = null);
+  });
+  $effect(() => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const off = store.onEvent((ev) => {
+      if (ev.kind.type !== 'agent_changed') return;
+      clearTimeout(t);
+      t = setTimeout(refetchOffice, 1500);
+    });
+    return () => {
+      off();
+      clearTimeout(t);
+    };
+  });
+  const fail = (title: string) => (e: unknown) => toast({ kind: 'error', title, body: String(e) });
+  function bringBack(id: string) {
+    api.bringBack(id).then((a) => {
+      toast({ kind: 'success', title: `${a.name} is back`, body: 'A regular worker again, with the same career and memory.' });
+      refetchOffice();
+    }, fail('Could not bring them back'));
+  }
+  function trade(item: string, buy: boolean) {
+    api.officeTrade(item, buy).then((s) => (shop = s), fail(buy ? 'Could not buy it' : 'Could not sell it'));
+  }
 
   type Sel = { agentId?: string | null; taskId?: string | null; path?: string | null };
   const selection = $derived.by((): Sel | null => {
@@ -180,7 +218,11 @@
           {onaction}
           paused={store.settings.paused}
           {onpause}
-          onpickapplicant={(offerId, i) => api.pickApplicant(offerId, i).catch((e) => toast({ kind: 'error', title: 'Could not pick', body: String(e) }))}
+          onpickapplicant={(offerId, i) => api.pickApplicant(offerId, i).catch(fail('Could not pick'))}
+          {ghosts}
+          onbringback={bringBack}
+          {shop}
+          ontrade={trade}
         />
       {/key}
       {#snippet failed(_error, reset)}
