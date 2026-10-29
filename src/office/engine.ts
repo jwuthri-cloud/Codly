@@ -1085,7 +1085,7 @@ export class OfficeEngine {
         return;
       }
       case 'shelf': {
-        const s = this.L.shelves[(wall >> 4) % this.L.shelves.length];
+        const s = this.L.shelves[(wall >>> 4) % this.L.shelves.length];
         this.fx.add(new Glow(this.local(s.x + Math.sin(s.rot) * 0.4, 1.1, s.z + Math.cos(s.rot) * 0.4), lin('#ffe1a8'), 2.4, now, this.glowTex, 1400));
         return;
       }
