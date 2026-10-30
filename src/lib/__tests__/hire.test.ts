@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { draftPrompt, demoDraft, launchPreview, reviewHire, shellRisks, splitCommand, validateHire } from '../demo/hire';
+import { demoDraft, launchPreview, reviewHire, shellRisks, splitCommand, validateHire } from '../demo/hire';
 import { HIRE_SCHEMA, MAX_DESCRIPTION, MAX_GOAL, TEMPLATES, blankManifest, manifestFileName, manifestJson } from '../util/hire';
 import { ROLE_TITLES } from '../util/team';
 
