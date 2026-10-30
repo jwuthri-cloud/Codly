@@ -173,6 +173,7 @@ per-agent desks that fill up with things from their history (a trophy per merged
 
 - KayKit Character Animations 1.2 by Kay Lousberg (CC0), [opengameart.org](https://opengameart.org/content/kaykit-character-animations): the Cheer, Dance and Wave clips
 - Furniture Kit 2.0 by Kenney (CC0), [kenney.nl](https://kenney.nl/assets/furniture-kit), and KayKit Furniture Bits 1.0 by Kay Lousberg (CC0), [GitHub](https://github.com/KayKit-Game-Assets/KayKit-Furniture-Bits-1.0): the Build/Buy catalog
+- From [Poly Pizza](https://poly.pizza): "Bookcase with Books" by Quaternius (CC0, the library), "PostBox RoyalMail" by Shivansh Singh, "Pool Table" by Evol-Love, "Water Cooler" by J-Toastie and "Coffee Machine" by Zsky (all [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/); credits in `public/furniture/polypizza/CREDITS.txt`)
 
 - [KayKit Character Animations (CC0)](https://kaylousberg.itch.io/kaykit-character-animations)
 - [Quaternius Universal Animation Library (CC0)](https://quaternius.com/packs/universalanimationlibrary.html)

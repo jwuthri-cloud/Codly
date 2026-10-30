@@ -6,9 +6,9 @@ import type { Pose, Prop } from './behavior';
 import type { Piece } from './buy';
 import type { Slot } from './layout';
 
-export type Use = 'sit' | 'nap' | 'read' | 'coffee' | 'watch' | 'dance';
+export type Use = 'sit' | 'nap' | 'read' | 'coffee' | 'water' | 'drink' | 'watch' | 'dance';
 
-export const USE_LABEL: Record<Use, string> = { sit: 'Sit', nap: 'Nap', read: 'Read', coffee: 'Get a coffee', watch: 'Watch TV', dance: 'Dance' };
+export const USE_LABEL: Record<Use, string> = { sit: 'Sit', nap: 'Nap', read: 'Read', coffee: 'Make a coffee', water: 'Get water', drink: 'Grab a drink', watch: 'Watch TV', dance: 'Dance' };
 
 /** What the character does there. */
 export const USE_POSE: Record<Use, { pose: Pose; prop: Prop }> = {
@@ -16,6 +16,8 @@ export const USE_POSE: Record<Use, { pose: Pose; prop: Prop }> = {
   nap: { pose: 'sleep', prop: null },
   read: { pose: 'browse', prop: 'book' },
   coffee: { pose: 'drink', prop: 'mug' },
+  water: { pose: 'drink', prop: 'mug' },
+  drink: { pose: 'drink', prop: 'mug' },
   watch: { pose: 'watch', prop: null },
   dance: { pose: 'dance', prop: null },
 };
@@ -24,7 +26,9 @@ const RULES: [RegExp, Use[]][] = [
   [/sofa|couch|recliner|relax|armchair|loungeChair|loungeDesignChair/i, ['sit', 'nap']],
   [/chair|stool|bench|ottoman/i, ['sit']],
   [/bookcase|shelf|book_set|books/i, ['read']],
-  [/coffee|fridge|kitchenSink|microwave|kitchenBar|cooler/i, ['coffee']],
+  [/coffee|espresso/i, ['coffee']],
+  [/cooler/i, ['water']],
+  [/fridge|microwave/i, ['drink']],
   [/television/i, ['watch']],
   [/radio|speaker/i, ['dance']],
 ];

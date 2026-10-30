@@ -28,10 +28,11 @@ export function model(f: Furniture): Promise<Model> {
     m = loader.loadAsync(BASE + f.src).then((gltf) => {
       const pack = PACKS[f.src.split('/')[0]] ?? { scale: 1, yaw: 0 };
       const inner = gltf.scene;
-      inner.scale.setScalar(pack.scale);
-      inner.rotation.y = pack.yaw;
+      inner.rotation.y = pack.yaw + (f.yaw ?? 0);
       const root = new Group();
       root.add(inner);
+      // A set height (f.h) wins over the pack's scale.
+      inner.scale.setScalar(f.h ? f.h / new Box3().setFromObject(root).getSize(new Vector3()).y : pack.scale);
       const box = new Box3().setFromObject(root);
       const c = box.getCenter(new Vector3());
       inner.position.set(-c.x, -box.min.y + (f.rug ? 0.004 : 0), -c.z);
@@ -121,6 +122,11 @@ export class DecorLayer {
         this.objs.delete(uid);
       }
     return out;
+  }
+
+  /** A piece's 3D object (to animate a part: a fridge door). */
+  object(uid: string): Object3D | null {
+    return this.objs.get(uid)?.obj ?? null;
   }
 
   /** The piece under a ray, if any. */

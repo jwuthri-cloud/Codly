@@ -23,11 +23,19 @@ export interface Furniture {
   small?: boolean;
   /** Flat on the floor; never blocks. */
   rug?: boolean;
+  /** Its height in the office (packs without one office scale: Poly Pizza models). */
+  h?: number;
+  /** Not sold (a built-in piece's model, like the pool table: it only plays where it is). */
+  hidden?: boolean;
+  /** The turn that makes the model face +z, when its pack's default doesn't. */
+  yaw?: number;
 }
 
 export const FURNITURE: Furniture[] = RAW;
 export const BY_ID = new Map(FURNITURE.map((f) => [f.id, f]));
 export const CATEGORIES = [...new Set(FURNITURE.map((f) => f.cat))];
+/** What the Buy catalog sells. */
+export const FOR_SALE = FURNITURE.filter((f) => !f.hidden);
 
 /** A model's size once scaled (w along x, d along z, before rotation; h = its top). */
 export interface Dims {

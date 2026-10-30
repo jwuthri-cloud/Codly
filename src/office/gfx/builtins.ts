@@ -28,15 +28,16 @@ const BY_TYPE: Partial<Record<ItemType, (it: Item) => Spec>> = {
   desk: () => ({ id: 'kenney.desk', fit: 'stretch', h: DESK_H }),
   leadDesk: () => ({ id: 'kenney.desk', fit: 'stretch', h: DESK_H + 0.02 }),
   chair: (it) => ({ id: it.variant === 2 ? 'kenney.chairCushion' : 'kenney.chairDesk', tint: ['#3f8077', '#3a3c43', '#8c8a4e'][it.variant ?? 0] }),
-  shelf: () => ({ id: 'kaykit.shelf_B_large_decorated', tile: true, fit: 'stretch', h: 1.9 }),
-  armchair: (it) => ({ id: it.variant ? 'kaykit.armchair_pillows' : 'kenney.loungeChair', tint: '#c8682f' }),
+  shelf: () => ({ id: 'polypizza.bookcase', tile: true, fit: 'stretch', h: 2.0 }),
+  armchair: (it) => ({ id: it.variant ? 'kaykit.armchair_pillows' : 'kaykit.armchair' }),
   sideTable: () => ({ id: 'kenney.sideTable' }),
   floorLamp: () => ({ id: 'kenney.lampRoundFloor', h: 1.45 }),
   readingTable: () => ({ id: 'kenney.table', fit: 'stretch', h: 0.5 }),
   meetingTable: () => ({ id: 'kaykit.table_medium_long', fit: 'stretch', h: 0.5 }),
   counter: () => ({ id: 'kenney.kitchenCabinetDrawer', tile: true, mid: 'kenney.kitchenSink', fit: 'stretch', h: 0.62 }),
   fridge: () => ({ id: 'kenney.kitchenFridgeLarge', h: 1.56 }),
-  coffee: () => ({ id: 'kenney.kitchenCoffeeMachine', y: 0.62 }),
+  coffee: () => ({ id: 'polypizza.espresso', y: 0.62, h: 0.4 }),
+  cooler: () => ({ id: 'polypizza.waterCooler', h: 1.35 }),
   roundTable: () => ({ id: 'kenney.tableRound', fit: 'stretch', h: 0.5 }),
   stool: () => ({ id: 'kaykit.chair_stool' }),
   sofa: () => ({ id: 'kenney.loungeSofa', fit: 'stretch', h: 0.75, tint: '#d6a23c' }),
@@ -48,10 +49,13 @@ const BY_TYPE: Partial<Record<ItemType, (it: Item) => Spec>> = {
   bench: () => ({ id: 'kenney.benchCushion', fit: 'stretch', h: 0.5, tint: '#3f8077' }),
   credenza: () => ({ id: 'kaykit.cabinet_medium_decorated', tile: true, fit: 'stretch', h: 0.62 }),
   tvStand: () => ({ id: 'kenney.cabinetTelevision', fit: 'stretch', h: 0.43 }),
+  mailbox: () => ({ id: 'polypizza.postbox', h: 1.15 }),
+  // The felt at 0.705 like the ball simulation (gfx/games.ts) expects.
+  poolTable: () => ({ id: 'polypizza.poolTable', fit: 'stretch', h: 0.755 }),
 };
 
 /** Built-in pieces anyone may use on a break like bought ones (the rest belong to a station). */
-export const freeToUse = (it: Item) => ['couch', 'bench', 'stool'].includes(it.type) || (it.type === 'armchair' && it.room === 'lobby');
+export const freeToUse = (it: Item) => ['couch', 'bench', 'stool', 'cooler'].includes(it.type) || (it.type === 'armchair' && it.room === 'lobby');
 
 /** What the click menu offers on a built-in piece that is part of a station (the PS5 sofa…). */
 export function stationActions(L: OfficeLayout, it: Item): { label: string; intent: Intent }[] {
@@ -71,21 +75,25 @@ export function stationActions(L: OfficeLayout, it: Item): { label: string; inte
       return [];
     case 'shelf':
       return [{ label: 'Browse the shelves', intent: stationBreak('library.shelf', 'browse', 'book') }];
+    // The kitchen's first spot is at the espresso machine, the second at the fridge.
     case 'counter':
     case 'coffee':
+      return [{ label: 'Make a coffee', intent: breakIntent({ game: 'coffee', slot: 0 }) }];
     case 'fridge':
-      return [{ label: 'Get a coffee', intent: breakIntent({ game: 'coffee', slot: 0 }) }];
+      return [{ label: 'Grab a drink', intent: breakIntent({ game: 'coffee', slot: 1 }) }];
     case 'foosball':
       return [{ label: 'Play foosball', intent: breakIntent({ game: 'foosball', slot: 0 }) }];
     case 'poolTable':
       return [{ label: 'Play pool', intent: breakIntent({ game: 'pool', slot: 0 }) }];
+    case 'mailbox':
+      return [{ label: 'Post a letter', intent: stationBreak('mail', 'stand', 'envelope') }];
     default:
       return [];
   }
 }
 
 /** Click-menu names where the model's catalog name doesn't fit (and the code-built pieces). */
-export const BUILT_LABEL: Partial<Record<ItemType, string>> = { foosball: 'Foosball table', poolTable: 'Pool table', counter: 'Kitchen counter', tvStand: 'TV', shelf: 'Bookshelf', coffee: 'Coffee machine' };
+export const BUILT_LABEL: Partial<Record<ItemType, string>> = { foosball: 'Foosball table', poolTable: 'Pool table', counter: 'Kitchen counter', tvStand: 'TV', shelf: 'Bookshelf', coffee: 'Coffee machine', mailbox: 'Post box' };
 
 /** Whether the building leaves this piece to a model (the TV stand keeps its code-built TV). */
 export const modeled = (t: ItemType) => t in BY_TYPE;

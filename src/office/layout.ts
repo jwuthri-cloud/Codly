@@ -479,7 +479,8 @@ function build(): OfficeLayout {
       room: 'lead',
       slots: leadDesks.flatMap((d) => [slot(d.x - 0.45, d.z + 1.25, UP), slot(d.x + 0.45, d.z + 1.25, UP)]),
     },
-    kitchen: { id: 'kitchen', room: 'lounge', slots: [slot(1.0, 18.6, LEFT), slot(1.15, 21.0, LEFT)] },
+    // At the espresso machine, and at the fridge.
+    kitchen: { id: 'kitchen', room: 'lounge', slots: [slot(1.0, 18.6, LEFT), slot(1.35, 23.2, LEFT)] },
     'games.console': { id: 'games.console', room: 'lounge', slots: [slot(6.15, 20.9, LEFT, 'sit', 0.38), slot(6.15, 21.9, LEFT, 'sit', 0.38)] },
     'games.foosball': { id: 'games.foosball', room: 'lounge', slots: [slot(5.85, 18.7, RIGHT), slot(7.55, 18.7, LEFT)] },
     'games.pool': { id: 'games.pool', room: 'lobby', slots: [slot(15.1, 21.25, DOWN), slot(16.1, 23.5, UP)] },

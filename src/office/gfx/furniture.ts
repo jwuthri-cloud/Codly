@@ -293,7 +293,7 @@ export function rack(b: Builder) {
   const H = 1.72;
   const Dp = 0.75;
   b.box(0, H / 2, 0, W, H, Dp, c(MAT.rack));
-  b.box(0, H - 0.02, 0, W + 0.02, 0.04, Dp + 0.02, c('#3a3f4b'));
+  b.box(0, H + 0.01, 0, W + 0.02, 0.04, Dp + 0.02, c('#3a3f4b')); // the cap stands proud of the body (no z-fighting)
   // Two cabinet doors with grilles.
   for (const sx of [-W / 4, W / 4]) {
     b.box(sx, H / 2, Dp / 2 + 0.006, W / 2 - 0.04, H - 0.14, 0.012, c(MAT.rackFront));
@@ -357,7 +357,7 @@ export function cabinet(b: Builder) {
   const H = 1.15;
   const Dp = 0.6;
   b.box(0, H / 2, 0, W, H, Dp, c(MAT.cabinet));
-  b.box(0, H - 0.01, 0, W + 0.02, 0.02, Dp + 0.02, c(MAT.cabinetDark));
+  b.box(0, H + 0.005, 0, W + 0.02, 0.02, Dp + 0.02, c(MAT.cabinetDark)); // above the body's top (no z-fighting)
   for (let k = 0; k < 3; k++) {
     const y = 0.2 + k * 0.36;
     b.box(0, y, Dp / 2 + 0.008, W - 0.08, 0.32, 0.016, c(MAT.cabinetDark));

@@ -7,7 +7,7 @@
 <script lang="ts">
   import type { Placed } from '../lib/gen/Placed';
   import type { Shop } from '../lib/gen/Shop';
-  import { BY_ID, CATEGORIES, FURNITURE, type Furniture } from './buy';
+  import { BY_ID, CATEGORIES, FOR_SALE, type Furniture } from './buy';
   import type { OfficeEngine } from './engine';
   import { thumbnail } from './gfx/decor';
 
@@ -26,7 +26,7 @@
   let carrying = $state<{ f: Furniture; uid: string | null; why: string | null } | null>(null);
   let note = $state<string | null>(null);
   const left = $derived(shop.earned - shop.spent);
-  const items = $derived(FURNITURE.filter((f) => f.cat === cat));
+  const items = $derived(FOR_SALE.filter((f) => f.cat === cat));
 
   $effect(() => {
     engine.setBuildMode(open ? pick : null);

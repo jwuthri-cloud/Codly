@@ -9,6 +9,7 @@
 import {
   AdditiveBlending,
   Color,
+  CylinderGeometry,
   DirectionalLight,
   Group,
   HemisphereLight,
@@ -22,6 +23,7 @@ import {
   Scene,
   Vector3,
   WebGLRenderer,
+  type Object3D,
   type Texture,
 } from 'three';
 import type { Agent } from '../lib/gen/Agent';
@@ -34,7 +36,7 @@ import { aStar, smooth } from './astar';
 import { BreakRoom } from './breakroom';
 import { activityFor, plumbobOf, type RestActivity } from './sims';
 import { breakPreference, reactionTo, traitsOf } from './traits';
-import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, idleIntent, leisure, errandPlace, intentKey, isBlocked, placeKey, type Errand, type Intent, type Place } from './behavior';
+import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, idleIntent, leisure, errandPlace, intentKey, isBlocked, placeKey, stationBreak, type Errand, type Intent, type Place } from './behavior';
 import type { Spot } from './breakroom';
 import { spotsOf, USE_LABEL, usesOf } from './use';
 import { CameraRig, DEFAULT_PITCH, DEFAULT_YAW } from './camera';
@@ -211,6 +213,10 @@ export class OfficeEngine {
   private forced = new Map<string, Intent>();
   /** Each agent's own intent at the last sync (to tell whether it is free for a break). */
   private lastRaw = new Map<string, Intent>();
+  /** Someone at a coffee machine, water cooler or fridge: since when (the brew plays first). */
+  private brews = new Map<string, { uid: string; kind: 'coffee' | 'water' | 'drink'; since: number; puffAt: number }>();
+  /** The cup filling under an espresso machine's spout. */
+  private cup = new Mesh(new CylinderGeometry(0.035, 0.028, 0.07, 10), new MeshStandardMaterial({ color: '#f4efe6', roughness: 0.6 }));
   private pieces: Piece[] = [];
   /** Build/Buy mode: clicks pick up furniture; `carry` is the piece following the cursor. */
   private build: { onpick: (uid: string) => void; carry: Carry | null } | null = null;
@@ -495,6 +501,75 @@ export class OfficeEngine {
     });
   }
 
+  /** Where drinks come from: espresso machines, water coolers and fridges (built-in or bought). */
+  private drinkSources() {
+    return [...this.builtinList, ...this.pieces].flatMap((p) => {
+      const kind = usesOf(p.item).find((u): u is 'coffee' | 'water' | 'drink' => u === 'coffee' || u === 'water' || u === 'drink');
+      return kind ? [{ p, kind }] : [];
+    });
+  }
+
+  /**
+   * The kitchen, Sims-style: whoever arrives for a drink first makes it. The espresso machine
+   * steams over a cup under its spout, the water cooler bubbles, the fridge door swings open;
+   * then the mug is in hand. Cosmetic.
+   */
+  private kitchenStep(now: number): boolean {
+    let busy = false;
+    const sources = this.drinkSources();
+    const seen = new Set<string>();
+    let cupAt: Vector3 | null = null;
+    for (const [id, act] of this.actors) {
+      if (act.c.walking || act.shown?.pose !== 'drink' || act.c.destKey !== act.placeKey) continue;
+      const x = act.c.position.x - OX;
+      const z = act.c.position.z - OZ;
+      let best: (typeof sources)[number] | null = null;
+      let bd = 1.6;
+      for (const s of sources) {
+        const d = Math.hypot(s.p.x - x, s.p.z - z);
+        if (d < bd) [best, bd] = [s, d];
+      }
+      if (!best) continue;
+      seen.add(id);
+      let b = this.brews.get(id);
+      if (!b || b.uid !== best.p.uid) this.brews.set(id, (b = { uid: best.p.uid, kind: best.kind, since: now, puffAt: 0 }));
+      const { p } = best;
+      const brewing = now - b.since < (b.kind === 'drink' ? 1800 : 2600);
+      act.c.setProp(brewing ? null : 'mug');
+      if (!brewing) continue;
+      busy = true;
+      // The spout: the front of the machine, a little under its top.
+      const fx = Math.sin(p.rot) * (p.dims.d / 2 - 0.06);
+      const fz = Math.cos(p.rot) * (p.dims.d / 2 - 0.06);
+      if (b.kind === 'coffee') cupAt = this.local(p.x + fx, p.y + 0.06, p.z + fz);
+      if (b.kind !== 'drink' && now >= b.puffAt) {
+        b.puffAt = now + 450;
+        const steam = b.kind === 'coffee' ? this.local(p.x + fx, p.y + p.dims.h * 0.75, p.z + fz) : this.local(p.x, p.y + p.dims.h * 0.85, p.z);
+        this.fx.add(new Puff(steam, lin(b.kind === 'coffee' ? '#f4f1ec' : '#8fc8ff'), now, this.glowTex));
+      }
+    }
+    for (const id of [...this.brews.keys()]) if (!seen.has(id)) this.brews.delete(id);
+    if (cupAt) {
+      this.cup.position.copy(cupAt);
+      if (!this.cup.parent) this.world.add(this.cup);
+    } else this.cup.removeFromParent();
+    // Fridge doors: open while someone takes a drink, then shut.
+    for (const s of sources) {
+      if (s.kind !== 'drink') continue;
+      const obj = this.builtins.object(s.p.uid) ?? this.decor.object(s.p.uid);
+      const door: Object3D | undefined = obj?.getObjectByName('doorLeft') ?? obj?.getObjectByName('doorFridge');
+      if (!door) continue;
+      const open = [...this.brews.values()].some((b) => b.uid === s.p.uid && now - b.since < 1700);
+      const goal = open ? -1.7 : 0;
+      if (Math.abs(goal - door.rotation.y) > 0.01) {
+        door.rotation.y += (goal - door.rotation.y) * 0.18;
+        busy = true;
+        this.shadowDirty = true;
+      } else door.rotation.y = goal;
+    }
+    return busy;
+  }
+
   /** Agents free for a break right now (between tasks). */
   freeAgents(): string[] {
     return [...this.lastRaw].filter(([, i]) => idleIntent(i)).map(([id]) => id);
@@ -507,6 +582,32 @@ export class OfficeEngine {
     this.forced.set(agentId, intent);
     this.sync();
     return true;
+  }
+
+  /** The morning standup: free agents sit at the meeting table and each says its line in turn,
+   *  then they go back to their day. Real work wins: one called away leaves at once (a forced
+   *  intent yields), and its line is still said wherever it is. Returns who sat down. */
+  standup(lines: { id: string; text: string }[]): string[] {
+    const free = new Set(this.freeAgents());
+    const seated = lines.filter((l) => free.has(l.id)).slice(0, this.L.stations['meeting.table'].slots.length);
+    const sit = stationBreak('meeting.table', 'sit', null);
+    for (const l of seated) this.forced.set(l.id, sit);
+    this.sync();
+    const WALK_MS = this.opts.reducedMotion ? 300 : 12_000; // from the far desks to the meeting room
+    const timers = lines.map((l, i) =>
+      setTimeout(() => {
+        this.said.set(l.id, { text: clean(l.text, 72), at: performance.now() });
+        this.wake();
+      }, WALK_MS + i * SAY_MS),
+    );
+    timers.push(
+      setTimeout(() => {
+        for (const l of seated) if (this.forced.get(l.id) === sit) this.forced.delete(l.id);
+        this.sync();
+      }, WALK_MS + lines.length * SAY_MS + 1500),
+    );
+    this.cleanups.push(() => timers.forEach(clearTimeout));
+    return seated.map((l) => l.id);
   }
 
   private pieceByUid(uid: string): Piece | undefined {
@@ -1047,6 +1148,12 @@ export class OfficeEngine {
     let res = this.resolve(act, shown.place);
     if (!res) res = act.desk ? { slot: act.desk.seat, key: 'desk' } : null;
     if (!res) return;
+    // A break spot that was taken (a full pool table): it sits at its desk, not holding a cue there.
+    if (res.key === 'desk' && shown.place.kind !== 'desk' && (shown.icon === 'idle' || shown.icon === 'sleep')) {
+      shown = { ...shown, pose: 'sit', prop: null, emote: null };
+      act.shown = shown;
+      this.forced.delete(a.id);
+    }
     if (shown.place.kind !== 'station' && shown.place.kind !== 'lead') this.release(act);
     if (res.key !== act.placeKey) {
       act.placeKey = res.key;
@@ -1673,6 +1780,7 @@ export class OfficeEngine {
     // Live whenever the office is drawn at all (hidden = 0 frames); stepped only for reduced motion.
     const lively = !rm;
     if (lively) busy = this.lifeStep(now, dt) || busy;
+    if (lively) busy = this.kitchenStep(now) || busy;
     for (const [id, act] of this.actors) {
       act.c.emoteScale = emoteScale;
       const r = act.c.update(now, dt, rm, lively);
