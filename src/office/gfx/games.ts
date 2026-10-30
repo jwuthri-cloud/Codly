@@ -28,6 +28,12 @@ const FZ = 0.265;
 const GOAL_W = 0.11;
 
 /** Team 0 (red, rods 0 and 2) attacks +z; team 1 (blue, rods 1 and 3) attacks −z. Player slot = team. */
+/** A sound a game makes: a sample name (sound.ts) or a made-up one (crowd, whistle). */
+export interface GameSound {
+  name: string;
+  gain: number;
+}
+
 export class FoosballSim {
   ball = { x: 0, z: 0, vx: 0, vz: 0 };
   slide = [0, 0, 0, 0];
@@ -37,6 +43,8 @@ export class FoosballSim {
   lastShot: { team: number; at: number } | null = null;
   /** The ball is out (a goal): it comes back at this time. */
   outUntil = 0;
+  /** Sounds since the last frame (the games corner plays them at the table). */
+  events: GameSound[] = [];
   private kickAt = [-1e9, -1e9, -1e9, -1e9];
   private r: () => number;
 
@@ -81,6 +89,7 @@ export class FoosballSim {
         this.score[team]++;
         this.lastGoal = { team, at: now };
         this.outUntil = now + 1500;
+        this.events.push({ name: 'pool-pocket', gain: 0.8 });
         return;
       }
       b.z = Math.sign(b.z) * FZ;
@@ -113,6 +122,7 @@ export class FoosballSim {
       b.z = rz + Math.sign(dz) * 0.024;
       this.kickAt[i] = now;
       this.lastShot = { team, at: now };
+      this.events.push({ name: 'foos-kick', gain: 0.35 + s * 0.2 });
     }
   }
 
@@ -168,6 +178,8 @@ export class PoolSim {
   turn = 0;
   shot: PoolShot | null = null;
   result: { player: number; kind: 'cheer' | 'groan'; at: number } | null = null;
+  /** Sounds since the last frame (the games corner plays them at the table). */
+  events: GameSound[] = [];
   private potted = false;
   private rackAt = 0;
   private r: () => number;
@@ -267,6 +279,7 @@ export class PoolSim {
         if (age >= this.phaseLen && this.shot) {
           this.balls[0].vx = this.shot.vx;
           this.balls[0].vz = this.shot.vz;
+          this.events.push({ name: 'pool-cue', gain: 0.7 });
           this.potted = false;
           this.set('roll', now, 4);
         }
@@ -304,6 +317,7 @@ export class PoolSim {
       }
       for (const [px, pz] of POOL_POCKETS) {
         if (Math.hypot(b.x - px, b.z - pz) < 0.06) {
+          this.events.push({ name: 'pool-pocket', gain: 0.6 });
           b.in = true;
           b.vx = b.vz = 0;
           if (b !== this.balls[0]) this.potted = true;
@@ -338,6 +352,8 @@ export class PoolSim {
         b.x += nx * push;
         b.z += nz * push;
         if (rel <= 0) continue;
+        // The clack: louder the harder they meet.
+        if (rel > 0.05) this.events.push({ name: 'pool-ball', gain: Math.min(1, 0.25 + rel * 0.7) });
         a.vx -= rel * nx;
         a.vz -= rel * nz;
         b.vx += rel * nx;
@@ -424,6 +440,8 @@ export class ConsoleSim {
   lastGoal: { side: number; at: number } | null = null;
   lastMiss: { side: number; at: number } | null = null;
   fullTime: number | null = null;
+  /** Sounds since the last frame: the crowd and the referee, from the TV. */
+  events: GameSound[] = [];
   ball = { x: 0, y: 0 };
   private nextChance = 0;
   private r: () => number;
@@ -438,6 +456,7 @@ export class ConsoleSim {
         this.score = [0, 0];
         this.clock = 0;
         this.fullTime = null;
+        this.events.push({ name: 'whistle', gain: 0.6 }); // kick-off
       }
       return;
     }
@@ -445,16 +464,24 @@ export class ConsoleSim {
     if (this.clock >= 1) {
       this.fullTime = now;
       this.chance = null;
+      this.events.push({ name: 'whistle-end', gain: 0.6 });
       return;
     }
     if (!this.nextChance) this.nextChance = now + 3000 + this.r() * 6000;
-    if (!this.chance && now >= this.nextChance) this.chance = { side: this.r() < 0.5 ? 0 : 1, at: now };
+    if (!this.chance && now >= this.nextChance) {
+      this.chance = { side: this.r() < 0.5 ? 0 : 1, at: now };
+      this.events.push({ name: 'crowd', gain: 0.5 });
+    }
     if (this.chance && now - this.chance.at > 1700) {
       const side = this.chance.side;
       if (this.r() < 0.36) {
         this.score[side]++;
         this.lastGoal = { side, at: now };
-      } else this.lastMiss = { side, at: now };
+        this.events.push({ name: 'crowd-goal', gain: 0.7 });
+      } else {
+        this.lastMiss = { side, at: now };
+        this.events.push({ name: 'crowd-ooh', gain: 0.5 });
+      }
       this.chance = null;
       this.nextChance = now + 4500 + this.r() * 8000;
     }
@@ -593,12 +620,21 @@ export class GamesCorner {
     return out.set(lx + this.origin.x, y, lz + this.origin.z);
   }
 
+  /** Where each game's sounds come from (the engine plays them; floor plan x, z). */
+  onSound: ((s: GameSound, at: [number, number]) => void) | null = null;
+
   /** Advance the games and steer their players (cue, gaze; the pool shooter walks). */
   update(now: number, dt: number, p: GamePlayers): boolean {
     let moving = false;
     if (this.foos) moving = this.updateFoosball(now, dt, p.foosball) || moving;
     if (this.pool) moving = this.updatePool(now, dt, p.pool) || moving;
     if (this.tv) moving = this.updateTv(now, dt, p.console) || moving;
+    for (const g of [this.foos, this.pool, this.tv]) {
+      if (!g) continue;
+      for (const e of g.sim.events.splice(0)) this.onSound?.(e, [g.it.x, g.it.z]);
+    }
+    // Pad clicks while someone plays on the PS5.
+    if (this.tv && p.console.length && Math.random() < dt * 1.6 * p.console.length) this.onSound?.({ name: 'pad', gain: 0.25 }, [this.tv.it.x + 2.6, this.tv.it.z]);
     return moving;
   }
 

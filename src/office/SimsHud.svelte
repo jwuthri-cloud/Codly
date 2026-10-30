@@ -19,6 +19,7 @@
   import type { NarrateFn } from './OfficeView.svelte';
   import { agentPortrait } from './portrait';
   import Scrapbook from './Scrapbook.svelte';
+  import { sound } from './sound';
   import { levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
   import { atLeast, MENTORED_XP, PERKS, rankLabel, rankProgress, TRAITS as WORK_TRAITS } from '../lib/util/career';
@@ -42,6 +43,7 @@
 
   let tab = $state<'needs' | 'mood' | 'skills' | 'friends' | 'career'>('needs');
   let walls = $state(true);
+  let muted = $state(sound.muted);
   let tick = $state(0);
   $effect(() => {
     const t = setInterval(() => tick++, 1000);
@@ -261,6 +263,7 @@
     <button class:on={paused} onclick={() => onpause?.(!paused)} title={paused ? 'Resume: start new tasks again' : 'Pause: no new tasks start (running ones finish)'}>{paused ? '▶ Resume' : '⏸ Pause'}</button>
   {/if}
   <button onclick={() => { walls = !walls; engine.setWalls(walls); }} title="Walls up or down">{walls ? 'Walls down' : 'Walls up'}</button>
+  <button onclick={() => { muted = !muted; sound.setMuted(muted); }} title={muted ? 'Sound off: turn it on' : 'Sound on: mute the office'} aria-label={muted ? 'Unmute the office' : 'Mute the office'} aria-pressed={muted}>{muted ? '🔇' : '🔊'}</button>
 </div>
 
 <style>

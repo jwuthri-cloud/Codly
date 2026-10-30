@@ -10,6 +10,7 @@
   import { BY_ID, CATEGORIES, FOR_SALE, type Furniture } from './buy';
   import type { OfficeEngine } from './engine';
   import { thumbnail } from './gfx/decor';
+  import { sound } from './sound';
 
   interface Props {
     engine: OfficeEngine;
@@ -28,19 +29,28 @@
   const left = $derived(shop.earned - shop.spent);
   const items = $derived(FOR_SALE.filter((f) => f.cat === cat));
 
+  // Build/Buy has its own music, like the Sims.
   $effect(() => {
     engine.setBuildMode(open ? pick : null);
-    return () => engine.setBuildMode(null);
+    sound.music(open ? 'music-buy' : null);
+    return () => {
+      engine.setBuildMode(null);
+      sound.music(null);
+    };
   });
 
   let seq = 0;
   function carry(f: Furniture, uid: string | null = null) {
     note = null;
+    sound.play('ui-click', { gain: 0.6 });
     const n = ++seq; // ending the last carry (below) must not clear this one
     engine.carry(
       f.id,
       {
-        onplace,
+        onplace: (p) => {
+          if (!uid) sound.play('ui-buy', { gain: 0.8 });
+          onplace(p);
+        },
         onsell: sell,
         onstate: (why) => n === seq && carrying && (carrying.why = why),
         onend: () => n === seq && (carrying = null),
@@ -66,12 +76,16 @@
     const p = shop.placed.find((x) => x.uid === uid);
     const f = p && BY_ID.get(p.item);
     if (!f) return;
-    if (!engine.movable(uid)) note = `Clear the top of the ${f.label.toLowerCase()} first.`;
+    if (!engine.movable(uid)) {
+      note = `Clear the top of the ${f.label.toLowerCase()} first.`;
+      sound.play('ui-error', { gain: 0.6 });
+    }
     else carry(f, uid);
   }
 
   function sell(uid: string) {
     engine.endCarry();
+    sound.play('ui-sell', { gain: 0.8 });
     onsell(uid);
   }
 
@@ -83,13 +97,14 @@
 
   const close = () => {
     engine.endCarry();
+    sound.play('ui-close', { gain: 0.5 });
     open = false;
   };
 </script>
 
 <svelte:window onkeydown={onkey} />
 
-<button class="buy" class:on={open} style:bottom="{insets.bottom + 46}px" style:right="{insets.right + 10}px" onclick={() => (open ? close() : (open = true))} aria-expanded={open} aria-label="Build/Buy: {left} XP to spend on furniture">
+<button class="buy" class:on={open} style:bottom="{insets.bottom + 46}px" style:right="{insets.right + 10}px" onclick={() => (open ? close() : (sound.play('ui-open', { gain: 0.5 }), (open = true)))} aria-expanded={open} aria-label="Build/Buy: {left} XP to spend on furniture">
   🛋 Buy · <b>{left}</b> XP
 </button>
 

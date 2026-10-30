@@ -39,6 +39,7 @@ import { breakPreference, reactionTo, traitsOf } from './traits';
 import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, idleIntent, leisure, errandPlace, intentKey, isBlocked, placeKey, stationBreak, type Errand, type Intent, type Place } from './behavior';
 import type { Spot } from './breakroom';
 import { spotsOf, USE_LABEL, usesOf } from './use';
+import { sound, type Sfx } from './sound';
 import { CameraRig, DEFAULT_PITCH } from './camera';
 import { BuildingGfx } from './gfx/building';
 import { DecorLayer, model } from './gfx/decor';
@@ -103,6 +104,8 @@ export interface EngineOptions {
 }
 
 const HELLO_MS = 1800;
+/** Game sounds made in code (sound.ts synth), not samples. */
+const MADE = new Set(['crowd', 'crowd-goal', 'crowd-ooh', 'whistle', 'whistle-end']);
 const PINS_KEY = 'codly.office.desks';
 /** How long a speech bubble stays up. */
 const SAY_MS = 4500;
@@ -216,6 +219,8 @@ export class OfficeEngine {
   private forced = new Map<string, Intent>();
   /** Each agent's own intent at the last sync (to tell whether it is free for a break). */
   private lastRaw = new Map<string, Intent>();
+  /** When each typing agent's next key sound is due. */
+  private keyAt = new Map<string, number>();
   /** Someone at a coffee machine, water cooler or fridge: since when (the brew plays first). */
   private brews = new Map<string, { uid: string; kind: 'coffee' | 'water' | 'drink'; since: number; puffAt: number }>();
   /** The cup filling under an espresso machine's spout. */
@@ -305,6 +310,17 @@ export class OfficeEngine {
     this.whiteboard = new Whiteboard(this.L);
     this.server = new ServerRoom(this.L);
     this.games = new GamesCorner(this.L, { x: OX, z: OZ }, makeCanvas, tex);
+    this.games.onSound = (e, at) => (MADE.has(e.name) ? sound.synth(e.name as never, { at, gain: e.gain }) : sound.play(e.name as Sfx, { at, gain: e.gain }));
+    // The office hears around the camera's focus: louder close up, panned by where it is on screen.
+    sound.hearing = (x, z) => {
+      const c = this.rig.cur;
+      const d = Math.hypot(x + OX - c.x, z + OZ - c.z);
+      const near = Math.max(0, 1 - d / (6 + c.dist * 0.35));
+      const zoom = Math.min(1, Math.max(0.15, 14 / c.dist));
+      const v = this.v.set(x + OX, 0.8, z + OZ).project(this.rig.camera);
+      // Behind the chat (backdrop), the office is quieter.
+      return { gain: near * zoom * (this.opts.backdrop ? 0.35 : 1), pan: Math.max(-1, Math.min(1, v.x)) * 0.8 };
+    };
     this.mail = new MailRoom(this.L);
     this.archive = new Archive(this.L);
     this.frames = new DeskFrames(() => this.wake());
@@ -543,7 +559,13 @@ export class OfficeEngine {
       if (!best) continue;
       seen.add(id);
       let b = this.brews.get(id);
-      if (!b || b.uid !== best.p.uid) this.brews.set(id, (b = { uid: best.p.uid, kind: best.kind, since: now, puffAt: 0 }));
+      if (!b || b.uid !== best.p.uid) {
+        this.brews.set(id, (b = { uid: best.p.uid, kind: best.kind, since: now, puffAt: 0 }));
+        const at: [number, number] = [best.p.x, best.p.z];
+        if (b.kind === 'coffee') sound.synth('hiss', { at });
+        else if (b.kind === 'water') sound.synth('glug', { at });
+        else sound.play('fridge-open', { at, gain: 0.7 });
+      }
       const { p } = best;
       const brewing = now - b.since < (b.kind === 'drink' ? 1800 : 2600);
       act.c.setProp(brewing ? null : 'mug');
@@ -572,6 +594,8 @@ export class OfficeEngine {
       if (!door) continue;
       const open = [...this.brews.values()].some((b) => b.uid === s.p.uid && now - b.since < 1700);
       const goal = open ? -1.7 : 0;
+      if (!open && door.userData.open) sound.play('fridge-close', { at: [s.p.x, s.p.z], gain: 0.7 });
+      door.userData.open = open;
       if (Math.abs(goal - door.rotation.y) > 0.01) {
         door.rotation.y += (goal - door.rotation.y) * 0.18;
         busy = true;
@@ -579,6 +603,23 @@ export class OfficeEngine {
       } else door.rotation.y = goal;
     }
     return busy;
+  }
+
+  /** Keyboard clatter from whoever types at a desk: bursts of keys with short pauses. */
+  private typingStep(now: number) {
+    for (const [id, act] of this.actors) {
+      if (act.c.walking || act.shown?.pose !== 'type') {
+        this.keyAt.delete(id);
+        continue;
+      }
+      const next = this.keyAt.get(id) ?? now + Math.random() * 300;
+      if (now < next) {
+        this.keyAt.set(id, next);
+        continue;
+      }
+      sound.play('key', { at: [act.c.position.x - OX, act.c.position.z - OZ], gain: 0.3 });
+      this.keyAt.set(id, now + (Math.random() < 0.08 ? 500 + Math.random() * 900 : 70 + Math.random() * 150));
+    }
   }
 
   /** Agents free for a break right now (between tasks). */
@@ -746,6 +787,7 @@ export class OfficeEngine {
     const c = this.build?.carry;
     if (!c) return;
     c.rot += Math.PI / 2;
+    sound.play('ui-rotate', { gain: 0.5 });
     if (c.at) this.moveCarry(c.at.x, c.at.z);
   }
 
@@ -779,7 +821,11 @@ export class OfficeEngine {
 
   private dropCarry() {
     const c = this.build?.carry;
-    if (!c?.at || c.why) return;
+    if (!c?.at || c.why) {
+      if (c) sound.play('ui-error', { gain: 0.5 });
+      return;
+    }
+    sound.play('ui-place', { at: [c.at.x, c.at.z], gain: 1 });
     const p: Placed = { uid: c.uid ?? crypto.randomUUID(), item: c.item, x: c.at.x, y: c.at.y, z: c.at.z, rot: snap(0, 0, c.rot, { w: 1, d: 1, h: 1 }).rot };
     c.onplace(p);
     this.endCarry();
@@ -849,6 +895,8 @@ export class OfficeEngine {
     this.decor.dispose();
     this.builtins.dispose();
     applyDecor(this.L, []);
+    sound.hearing = null;
+    sound.music(null);
     this.archive.dispose();
     this.frames.dispose();
     this.props.dispose();
@@ -1142,6 +1190,7 @@ export class OfficeEngine {
       if (a.promotedAt !== (act.promotedAt ?? null)) {
         act.promotedAt = a.promotedAt;
         if (a.promotedAt && !instant && !this.opts.reducedMotion && wall - a.promotedAt < 5000) act.c.react('dance', now);
+        if (a.promotedAt && !instant && wall - a.promotedAt < 5000) sound.play('jingle-promote', { gain: 0.6 });
       }
       const shown = instant ? this.dwell.request(a.id, intent, wall, true) : this.dwell.request(a.id, intent, wall);
       this.apply(act, a, intent, shown, now, instant);
@@ -1450,6 +1499,7 @@ export class OfficeEngine {
       }
       case 'merge': {
         const mb = this.L.mailbox;
+        sound.play('jingle-merge', { gain: 0.6 });
         const at = this.local(mb.x + 0.5, 1.0, mb.z);
         this.mail.raise(now, 4000);
         if (!rm) this.fx.add(new Confetti(at, CONFETTI, now, (wall & 0xffff) ^ 7, 80, 1800, this.glowTex));
@@ -1848,6 +1898,7 @@ export class OfficeEngine {
     const lively = !rm;
     if (lively) busy = this.lifeStep(now, dt) || busy;
     if (lively) busy = this.kitchenStep(now) || busy;
+    this.typingStep(now);
     for (const [id, act] of this.actors) {
       act.c.emoteScale = emoteScale;
       const r = act.c.update(now, dt, rm, lively);

@@ -8,6 +8,7 @@
   import type { Agent } from '../lib/gen/Agent';
   import type { FurnitureMenu, OfficeEngine } from './engine';
   import { agentPortrait } from './portrait';
+  import { sound } from './sound';
 
   interface Props {
     engine: OfficeEngine;
@@ -39,6 +40,7 @@
   });
 
   function send(a: Agent, intent: FurnitureMenu['actions'][number]['intent']) {
+    sound.play('ui-click', { gain: 0.6 });
     engine.sendTo(a.id, intent);
     onclose();
   }

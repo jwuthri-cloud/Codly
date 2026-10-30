@@ -1,0 +1,8 @@
+Sounds, all CC0 (public domain):
+
+ui-*, fridge-*, pool-*, foos-*, pad-*, jingle-*   Kenney (kenney.nl): Interface Sounds, Impact Sounds,
+                                                  Casino Audio, Music Jingles, RPG Audio
+key-*        "Keyboard Soundpack #1" by unicaegames (opengameart.org)
+music-buy    "Buy Something!" (Shop Theme) by Cleyton Kauffman (opengameart.org)
+
+The crowd, referee whistle, espresso hiss and water-cooler glug are synthesized in code (src/office/sound.ts).
