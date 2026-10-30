@@ -125,7 +125,7 @@
 {"id": "kaykit.rug_rectangle_B", "label": "Rug B", "cat": "Rugs", "price": 50, "src": "kaykit/rug_rectangle_B.gltf", "rug": true},
 {"id": "kaykit.rug_rectangle_stripes_A", "label": "Rug striped A", "cat": "Rugs", "price": 55, "src": "kaykit/rug_rectangle_stripes_A.gltf", "rug": true},
 {"id": "kaykit.rug_rectangle_stripes_B", "label": "Rug striped B", "cat": "Rugs", "price": 55, "src": "kaykit/rug_rectangle_stripes_B.gltf", "rug": true},
-{"id": "polypizza.bookcase", "label": "Bookcase with books", "cat": "Storage", "price": 160, "src": "polypizza/bookcase.glb", "h": 2.0},
+{"id": "polypizza.bookcase", "label": "Bookcase with books", "cat": "Storage", "price": 160, "src": "polypizza/bookcase.glb", "h": 2.0, "yaw": 3.1416},
 {"id": "polypizza.postbox", "label": "Post box", "cat": "Decor", "price": 70, "src": "polypizza/postbox.glb", "h": 1.15},
 {"id": "polypizza.poolTable", "label": "Pool table", "cat": "Tables", "price": 300, "src": "polypizza/pool-table.glb", "h": 0.755, "hidden": true},
 {"id": "polypizza.waterCooler", "label": "Water cooler", "cat": "Kitchen", "price": 90, "src": "polypizza/water-cooler.glb", "h": 1.35},

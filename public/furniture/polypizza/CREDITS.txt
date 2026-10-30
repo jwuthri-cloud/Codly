@@ -1,7 +1,7 @@
 Models from Poly Pizza (poly.pizza)
 
-bookcase.glb    "Bookcase with Books" by Quaternius, CC0 (public domain)
-                https://poly.pizza/m/tACDGJ4CGW
+bookcase.glb    "Bookshelf" by Wanja Pflüger, CC BY 3.0
+                https://poly.pizza/m/15B0ihXkg3C   https://creativecommons.org/licenses/by/3.0/
 postbox.glb     "PostBox RoyalMail" by Shivansh Singh, CC BY 3.0
                 https://poly.pizza/m/5Ge8y6ZERKV   https://creativecommons.org/licenses/by/3.0/
 pool-table.glb  "Pool Table" by Evol-Love, CC BY 3.0 (balls removed, felt and body recolored)
