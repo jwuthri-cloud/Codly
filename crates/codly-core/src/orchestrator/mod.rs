@@ -572,6 +572,17 @@ impl Core {
         Ok(a)
     }
 
+    /// Trust an agent up to a rank's perks (`career::PERKS`, capped at its rank); Intern takes
+    /// them back. You grant it; a promotion only offers it.
+    pub fn trust_agent(&self, agent_id: &str, rank: Rank) -> anyhow::Result<Agent> {
+        let ws = self.inner.require_ws()?;
+        let mut set = Rank::Intern;
+        let a = self.inner.update_agent(agent_id, |a| set = crate::career::grant(&mut a.career, rank, now_ms()))?;
+        let what = if set == Rank::Intern { format!("took back trust in {}", a.name) } else { format!("trusted {} as {}", a.name, crate::career::rank_label(set)) };
+        self.inner.decide(Some(&ws.id), None, "staff", what, serde_json::json!({ "agent": a.id, "trust": set }))?;
+        Ok(a)
+    }
+
     /// Build/Buy: the office's budget (XP earned in this repo), catalog and furniture owned.
     pub fn shop(&self) -> anyhow::Result<Shop> {
         let ws = self.inner.require_ws()?;

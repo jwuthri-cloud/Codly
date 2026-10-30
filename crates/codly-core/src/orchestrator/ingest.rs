@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use super::approvals::{self, PolicyCtx, Verdict};
 use super::{Inner, guard, is_stub, lead, lock, prompts, row, scheduler};
 use crate::adapters::{AdapterEvent, AgentCmd};
-use crate::memory;
+use crate::{career, memory};
 use crate::model::*;
 
 pub(super) async fn run(inner: Arc<Inner>, mut rx: mpsc::UnboundedReceiver<AdapterEvent>) {
@@ -459,9 +459,15 @@ impl Inner {
             _ => None,
         };
         let verify = task.map(|t| t.verify).unwrap_or_default();
-        let mode = self.approval_mode_for(ws, thread.as_deref());
+        let base = self.approval_mode_for(ws, thread.as_deref());
+        let trusted = !read_only
+            && self.agent(&ctx.agent_id).is_ok_and(|a| matches!(a.role, Role::Worker | Role::Solo) && career::trusts(&a.career, Rank::Senior));
+        let mode = approvals::with_trust(base, trusted);
         let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only };
-        let verdict = approvals::evaluate(approval, &pctx);
+        let verdict = match approvals::evaluate(approval, &pctx) {
+            Verdict::Allow { choice, rule } if mode != base => Verdict::Allow { choice, rule: format!("{rule} (trusted Senior)") },
+            v => v,
+        };
         let subject = serde_json::to_value(&approval.subject).unwrap_or_default();
         let detail =
             |rule: &str| json!({ "approval_id": approval.id, "mode": mode, "rule": rule, "subject": subject, "read_only": read_only });

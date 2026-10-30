@@ -37,7 +37,17 @@ export const emptyCareer = (): Career => ({
   skills: {},
   milestones: [],
   traits: [],
+  trust: 'intern',
 });
+
+/** What trusting a rank gives an agent (mirror of `career::PERKS`); you grant it, a promotion offers it. */
+export const PERKS: { rank: Rank; perk: string }[] = [
+  { rank: 'senior', perk: 'Works inside its own worktree without asking; risky actions still ask' },
+  { rank: 'staff', perk: 'Its work merges without the cross-vendor review' },
+];
+const order = (r: Rank) => RANKS.findIndex((x) => x.rank === r);
+/** At or above (mirror of `Rank`'s order). */
+export const atLeast = (r: Rank, min: Rank) => order(r) >= order(min);
 
 export const rankLabel = (r: Rank) => RANKS.find((x) => x.rank === r)?.label ?? 'Intern';
 

@@ -2,13 +2,14 @@
   The Sims layer over the office (sims.ts for the numbers, all from real data):
   - top-left: the selected agent's action queue (what it does now, ✕ to interrupt; its to-dos queued)
   - bottom-left: its panel: portrait, rank, mood, and tabs for Needs / Mood / Skills / Friends / Career
-  - top-center: a promotion (its real track record), with the offer of a stronger model
+  - top-center: a promotion (its real track record), with the offer of trust (Senior and Staff
+    perks) and of a stronger model
   - around a clicked agent: the click menu (chat, task, model, stop, details)
   - bottom-right: the estimated cost so far, Pause new work, walls up/down
   Shown only in the full office (not as the backdrop), inside the app's insets.
 -->
 <script lang="ts" module>
-  export type AgentAction = 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export';
+  export type AgentAction = 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export' | 'trust' | 'untrust';
 </script>
 
 <script lang="ts">
@@ -20,7 +21,7 @@
   import Scrapbook from './Scrapbook.svelte';
   import { levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
-  import { rankLabel, rankProgress, TRAITS as WORK_TRAITS } from '../lib/util/career';
+  import { atLeast, PERKS, rankLabel, rankProgress, TRAITS as WORK_TRAITS } from '../lib/util/career';
 
   interface Props {
     engine: OfficeEngine;
@@ -67,14 +68,14 @@
 
   // Promotions: a rank above the one seen before (not on first sight).
   let ranks = new Map<string, string>();
-  let promo = $state<{ id: string; name: string; rank: string } | null>(null);
+  let promo = $state<{ id: string; name: string; rank: string; perk: boolean } | null>(null);
   let promoTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     for (const a of agents) {
       const r = a.career?.rank ?? 'intern';
       const before = ranks.get(a.id);
       if (before && before !== r && ORDER.indexOf(r) > ORDER.indexOf(before)) {
-        promo = { id: a.id, name: a.name, rank: rankLabel(r) };
+        promo = { id: a.id, name: a.name, rank: rankLabel(r), perk: PERKS.some((p) => p.rank === r) };
         clearTimeout(promoTimer);
         promoTimer = setTimeout(() => (promo = null), 15_000);
       }
@@ -196,6 +197,18 @@
         <div class="stats">
           <span><b>{career.stats.merged}</b> merged</span><span><b>{career.stats.checks_passed}</b> checks passed</span><span><b>{career.stats.approved}</b> approved</span><span><b>{career.stats.commits}</b> commits</span>
         </div>
+        <div class="trust">
+          {#each PERKS as p (p.rank)}
+            {@const on = atLeast(career.trust, p.rank) && atLeast(career.rank, p.rank)}
+            <div class="perk" class:on class:locked={!atLeast(career.rank, p.rank)}>
+              <span><b>{rankLabel(p.rank)}</b> {p.perk}</span>
+              {#if on}<span class="tag">Trusted</span>
+              {:else if atLeast(career.rank, p.rank) && onaction}<button onclick={() => onaction?.(agent.id, 'trust')}>Trust</button>
+              {:else}<span class="tag">at {rankLabel(p.rank)}</span>{/if}
+            </div>
+          {/each}
+          {#if atLeast(career.trust, 'senior') && onaction}<button class="link" onclick={() => onaction?.(agent.id, 'untrust')}>Take trust back</button>{/if}
+        </div>
         <Scrapbook milestones={career.milestones} />
       {:else}
         {#each sheet.relations as r (r.agentId)}
@@ -221,6 +234,7 @@
 {#if promo}
   <div class="promo" style:top="{insets.top + 12}px" role="status">
     <span>🎉 <b>{promo.name}</b> was promoted to <b>{promo.rank}</b></span>
+    {#if onaction && promo.perk}<button onclick={() => { if (promo) onaction?.(promo.id, 'trust'); promo = null; }}>Trust it more</button>{/if}
     {#if onaction}<button onclick={() => { if (promo) onaction?.(promo.id, 'model'); promo = null; }}>Give a stronger model</button>{/if}
     <button class="x" aria-label="Dismiss" onclick={() => (promo = null)}>✕</button>
   </div>
@@ -266,6 +280,15 @@
   .stats b { color: #eef1f7; }
   .promo { position: absolute; left: 50%; transform: translateX(-50%); z-index: 8; display: flex; gap: 10px; align-items: center; padding: 8px 8px 8px 14px; border-radius: 999px; background: rgba(18, 22, 32, 0.92); box-shadow: inset 0 0 0 1.5px #ffd27a, 0 16px 40px -16px rgba(0, 0, 0, 0.7); color: #eef1f7; font: 500 13px 'Inter Variable', Inter, system-ui, sans-serif; pointer-events: auto; animation: pop 0.25s ease-out both; }
   .promo button { height: 26px; padding: 0 12px; border: 0; border-radius: 999px; background: #e9b03a; color: #1b1405; font: 600 12px inherit; cursor: pointer; }
+  .trust { display: grid; gap: 6px; margin-bottom: 10px; }
+  .perk { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); color: #c9cfdc; font-size: 11.5px; }
+  .perk b { color: #ffd27a; font-weight: 600; margin-right: 4px; }
+  .perk.on { box-shadow: inset 0 0 0 1px rgba(255, 210, 122, 0.5); }
+  .perk.locked { opacity: 0.55; }
+  .perk .tag { flex: none; color: #9aa2b6; font-size: 10.5px; }
+  .perk.on .tag { color: #ffd27a; }
+  .perk button { flex: none; height: 22px; padding: 0 10px; border: 0; border-radius: 999px; background: #e9b03a; color: #1b1405; font: 600 11px inherit; cursor: pointer; }
+  .trust .link { justify-self: start; border: 0; background: none; padding: 0; color: #9aa2b6; font: 500 11px inherit; text-decoration: underline; cursor: pointer; }
   .promo button.x { background: none; color: #9aa2b6; padding: 0 6px; }
   .tabs { display: flex; gap: 2px; padding: 0 8px; }
   .tabs button { flex: 1; height: 28px; border: 0; border-radius: 8px; background: none; color: #9aa2b6; font: inherit; cursor: pointer; }

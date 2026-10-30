@@ -165,6 +165,7 @@ pub fn run() {
             hire_commands::hire_applicants,
             hire_commands::pick_applicant,
             hire_commands::export_agent,
+            hire_commands::trust_agent,
             hire_commands::ghosts,
             hire_commands::bring_back,
             hire_commands::office_shop,

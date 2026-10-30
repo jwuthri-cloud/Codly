@@ -5,7 +5,8 @@ import type { Agent } from '../gen/Agent';
 import type { Placed } from '../gen/Placed';
 import type { Shop } from '../gen/Shop';
 import { BY_ID } from '../../office/buy';
-import { emptyCareer } from '../util/career';
+import { atLeast, emptyCareer, rankLabel } from '../util/career';
+import type { Rank } from '../gen/Rank';
 import type { Sim } from './sim';
 
 let ghosts: Agent[] | null = null;
@@ -49,6 +50,16 @@ export function demoBringBack(sim: Sim, id: string): Agent {
   const back: Agent = { ...g, archived: false, consultant: false, status: 'idle', task_id: null, updated_at: sim.now(), career: { ...g.career, milestones: [...g.career.milestones, { at: sim.now(), text: 'Came back' }] } };
   sim.putAgent(back);
   return back;
+}
+
+export function demoTrust(sim: Sim, id: string, rank: Rank): Agent {
+  const a = sim.agents.get(id);
+  if (!a) throw new Error('no such agent');
+  const trust = atLeast(rank, a.career.rank) ? a.career.rank : rank;
+  const milestones = atLeast(trust, 'senior') && !atLeast(a.career.trust, trust) ? [...a.career.milestones, { at: sim.now(), text: `Trusted as ${rankLabel(trust)}` }] : a.career.milestones;
+  const next: Agent = { ...a, updated_at: sim.now(), career: { ...a.career, trust, milestones } };
+  sim.putAgent(next);
+  return next;
 }
 
 export function demoShop(sim: Sim): Shop {

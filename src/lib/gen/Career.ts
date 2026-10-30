@@ -19,4 +19,9 @@ milestones: Array<Milestone>,
 /**
  * Personality (`career::TRAITS` ids). Some change how it works; see `career::TRAITS`.
  */
-traits: Array<string>, };
+traits: Array<string>, 
+/**
+ * The rank whose perks you granted (`career::PERKS`), never above `rank`. A promotion only
+ * offers it; it stays in this repo (an imported agent starts with none).
+ */
+trust: Rank, };

@@ -30,6 +30,27 @@ pub fn rank_for(xp: i64) -> Rank {
     RANKS.iter().rev().find(|(_, need)| xp >= *need).map_or(Rank::Intern, |(r, _)| *r)
 }
 
+/// What trusting a rank gives an agent, as you grant it (a promotion only offers it).
+pub const PERKS: [(Rank, &str); 2] = [
+    (Rank::Senior, "Works inside its own worktree without asking; risky actions still ask"),
+    (Rank::Staff, "Its work merges without the cross-vendor review"),
+];
+
+/// Whether this rank's perk is on: you granted it and it still holds the rank.
+pub fn trusts(c: &Career, r: Rank) -> bool {
+    c.trust >= r && c.rank >= r
+}
+
+/// Grant trust up to `r` (capped at its rank; Intern takes it all back). Returns the trust set.
+pub fn grant(c: &mut Career, r: Rank, now: i64) -> Rank {
+    let r = r.min(c.rank);
+    if r > c.trust && PERKS.iter().any(|(p, _)| *p == r) {
+        note(c, now, format!("Trusted as {}", rank_label(r)));
+    }
+    c.trust = r;
+    r
+}
+
 pub fn rank_label(r: Rank) -> &'static str {
     match r {
         Rank::Intern => "Intern",
@@ -171,6 +192,7 @@ pub fn clean_traits(ts: &[String]) -> Vec<String> {
 pub fn sanitize(mut c: Career) -> Career {
     c.xp = c.xp.clamp(0, 1_000_000);
     c.rank = rank_for(c.xp);
+    c.trust = Rank::Intern; // trust is earned in each repo, from you
     c.traits = clean_traits(&c.traits);
     c.skills.retain(|k, v| skill_names().contains(&k.as_str()) && *v >= 0);
     c.milestones.retain(|m| !m.text.is_empty() && m.text.len() <= 120 && !m.text.chars().any(char::is_control));
@@ -281,8 +303,21 @@ mod tests {
         c.milestones.push(Milestone { at: 1, text: "ok\u{1b}[2J".into() });
         let c = sanitize(c);
         assert_eq!(c.rank, Rank::Senior, "rank follows XP, not the file");
+        assert_eq!(c.trust, Rank::Intern, "an import is not trusted here yet");
         assert_eq!(c.traits, vec!["lazy".to_string()]);
         assert!(c.skills.is_empty() && c.milestones.is_empty());
+    }
+
+    #[test]
+    fn trust_is_granted_never_above_rank() {
+        let mut c = Career { xp: 300, rank: Rank::Senior, ..Default::default() };
+        assert!(!trusts(&c, Rank::Senior), "a promotion alone grants nothing");
+        assert_eq!(grant(&mut c, Rank::Staff, 1), Rank::Senior, "capped at its rank");
+        assert!(trusts(&c, Rank::Senior) && !trusts(&c, Rank::Staff));
+        assert_eq!(c.milestones.last().unwrap().text, "Trusted as Senior");
+        grant(&mut c, Rank::Intern, 2);
+        assert!(!trusts(&c, Rank::Senior), "taken back");
+        assert_eq!(c.milestones.len(), 1, "taking trust back is not a milestone");
     }
 
     #[test]

@@ -99,6 +99,12 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
     }
 }
 
+/// A worker you trust as Senior (`career::trusts`) works autonomously where you chose balanced.
+/// Strict and full are explicit choices and stay as they are.
+pub fn with_trust(mode: ApprovalMode, trusted: bool) -> ApprovalMode {
+    if trusted && mode == ApprovalMode::Balanced { ApprovalMode::Autonomous } else { mode }
+}
+
 fn short(s: &str) -> String {
     let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if one.chars().count() > 60 { format!("{}…", one.chars().take(59).collect::<String>()) } else { one }

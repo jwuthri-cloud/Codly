@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use codly_core::model::*;
-use codly_core::orchestrator::approvals::{PolicyCtx, Verdict, classify_command, evaluate};
+use codly_core::orchestrator::approvals::{PolicyCtx, Verdict, classify_command, evaluate, with_trust};
 use serde_json::json;
 
 const WT: &str = "/data/worktrees/repo/p/t1";
@@ -161,4 +161,14 @@ fn read_only_agents_get_reads_only() {
     assert!(allowed(&evaluate(&r, &ctx(ApprovalMode::Autonomous))));
     let e = approval(ApprovalSubject::FileChange { paths: vec!["/repo/a.ts".into()], diff: None });
     assert!(!allowed(&evaluate(&e, &ctx(ApprovalMode::Autonomous))));
+}
+
+#[test]
+fn a_trusted_senior_works_alone_in_its_worktree() {
+    let build = cmd("node scripts/gen.js && npm run build");
+    assert!(!allowed(&eval(&build, with_trust(ApprovalMode::Balanced, false))));
+    assert!(allowed(&eval(&build, with_trust(ApprovalMode::Balanced, true))));
+    let push = cmd("git push origin main");
+    assert!(reason(eval(&push, with_trust(ApprovalMode::Balanced, true))).contains("risk"), "risks still ask");
+    assert_eq!(with_trust(ApprovalMode::Strict, true), ApprovalMode::Strict, "strict is your explicit choice");
 }

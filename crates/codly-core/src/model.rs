@@ -485,6 +485,10 @@ pub struct Career {
     pub milestones: Vec<Milestone>,
     /// Personality (`career::TRAITS` ids). Some change how it works; see `career::TRAITS`.
     pub traits: Vec<String>,
+    /// The rank whose perks you granted (`career::PERKS`), never above `rank`. A promotion only
+    /// offers it; it stays in this repo (an imported agent starts with none).
+    #[serde(default)]
+    pub trust: Rank,
 }
 
 /// Furniture for the office (Build/Buy), paid with what the agents earned (XP).

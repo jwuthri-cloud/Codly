@@ -3,7 +3,7 @@
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
-use codly_core::model::{Agent, Applicant, Placed, Shop};
+use codly_core::model::{Agent, Applicant, Placed, Rank, Shop};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -60,6 +60,12 @@ pub async fn ghosts(state: State<'_, AppState>) -> Result<Vec<Agent>, String> {
 #[tauri::command]
 pub async fn bring_back(state: State<'_, AppState>, agent_id: String) -> Result<Agent, String> {
     state.core().await?.bring_back(&agent_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Trust an agent up to a rank's perks (Intern takes them back).
+#[tauri::command]
+pub async fn trust_agent(state: State<'_, AppState>, agent_id: String, rank: Rank) -> Result<Agent, String> {
+    state.core().await?.trust_agent(&agent_id, rank).map_err(|e| format!("{e:#}"))
 }
 
 /// Build/Buy: budget (XP earned), catalog and what the office owns.
