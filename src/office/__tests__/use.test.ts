@@ -53,3 +53,26 @@ describe('furniture uses', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 });
+
+describe('break activities end, like Sims actions', () => {
+  it('drinks the coffee, then does something else', () => {
+    const room = new BreakRoom();
+    const t0 = 1_000_000;
+    expect(room.update([{ id: 'a', prefer: 'coffee' }], t0).get('a')?.game).toBe('coffee');
+    expect(room.update([{ id: 'a', prefer: 'coffee' }], t0 + 20_000).get('a')?.game).toBe('coffee');
+    // The coffee is drunk: not the kitchen again for a while, even though it likes coffee.
+    const next = room.update([{ id: 'a', prefer: 'coffee' }], t0 + 26_000).get('a');
+    expect(next?.game).toBe('console');
+    expect(room.nextAt()).toBeLessThan(Infinity);
+  });
+
+  it('plays a game for a while, then the pair moves on to another one', () => {
+    const room = new BreakRoom({ prefer: 'pool' });
+    const t0 = 2_000_000;
+    const first = room.update(['a', 'b'], t0);
+    expect([first.get('a')?.game, first.get('b')?.game]).toEqual(['pool', 'pool']);
+    const later = room.update(['a', 'b'], t0 + 151_000);
+    expect(later.get('a')?.game).not.toBe('pool');
+    expect(later.get('b')?.game).not.toBe('pool');
+  });
+});

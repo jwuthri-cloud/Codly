@@ -8,6 +8,8 @@
 // Furniture you bought (use.ts spots) joins in: a bookcase for a reader when the library is full,
 // a coffee machine, a sofa to nap on; and half the time an idle agent picks a sofa, a TV or a
 // radio over the PS5.
+// Like a Sims action, each lasts a while (a coffee ~25 s, a game a couple of minutes); then the
+// agent moves on to something else, not the same thing again for a while.
 // Pairs are stable: a newcomer never splits a game. When real work calls a player back, the
 // partner waits a few seconds (someone may join), then moves to the PS5 or back to its desk.
 //
@@ -42,6 +44,13 @@ const WISH_USE: Partial<Record<Activity, Use>> = { library: 'read', coffee: 'cof
 const LOUNGING: Use[] = ['sit', 'watch', 'dance'];
 /** How long a player left alone at a table waits for someone before giving up. */
 export const LONELY_MS = 6000;
+/** How long an activity lasts before the agent moves on (ms). */
+const STAY: Record<Game, number> = { pool: 150_000, foosball: 120_000, console: 150_000, library: 90_000, coffee: 25_000, nap: 120_000, piece: 90_000 };
+const PIECE_STAY: Partial<Record<Use, number>> = { coffee: 25_000, water: 25_000, drink: 25_000, nap: 120_000, dance: 45_000 };
+/** After an activity, the agent picks something else for this long. */
+export const AGAIN_MS = 120_000;
+const keyOf = (s: Seat) => (s.game === 'piece' ? `piece:${s.piece}:${s.use}` : s.game);
+export const stayOf = (s: Seat) => (s.game === 'piece' ? (PIECE_STAY[s.use ?? 'sit'] ?? STAY.piece) : STAY[s.game]);
 
 export interface BreakRoomOptions {
   /** Testing: send everyone to this game when it has room. */
@@ -52,6 +61,10 @@ export class BreakRoom {
   private seats = new Map<string, Seat>();
   /** Alone at a two-player table since (ms). */
   private alone = new Map<string, number>();
+  /** When each agent started its activity. */
+  private since = new Map<string, number>();
+  /** What each agent just finished (it does something else until `until`). */
+  private done = new Map<string, { key: string; until: number }>();
 
   constructor(private opts: BreakRoomOptions = {}) {}
 
@@ -59,7 +72,19 @@ export class BreakRoom {
   nextAt(): number {
     let t = Infinity;
     for (const since of this.alone.values()) t = Math.min(t, since + LONELY_MS);
+    for (const [id, s] of this.seats) t = Math.min(t, (this.since.get(id) ?? 0) + stayOf(s));
     return t;
+  }
+
+  private put(id: string, seat: Seat, now: number) {
+    this.seats.set(id, seat);
+    this.since.set(id, now);
+  }
+
+  /** It just did this: something else for now. */
+  private tired(id: string, key: string, now: number) {
+    const d = this.done.get(id);
+    return !!d && d.key === key && now < d.until;
   }
 
   get(agentId: string): Seat | null {
@@ -77,9 +102,9 @@ export class BreakRoom {
   }
 
   /** A free spot on a piece for one of `uses` (one person per spot; sit and nap share seats). */
-  private piece(spots: Spot[], uses: Use[], id: string): Seat | null {
+  private piece(spots: Spot[], uses: Use[], id: string, now: number): Seat | null {
     const taken = new Set([...this.seats.values()].filter((s) => s.game === 'piece').map((s) => `${s.piece}:${s.slot}`));
-    const fit = spots.filter((s) => uses.includes(s.use));
+    const fit = spots.filter((s) => uses.includes(s.use) && !this.tired(id, `piece:${s.uid}:${s.use}`, now));
     for (let k = 0; k < fit.length; k++) {
       const s = fit[(k + hash(id)) % fit.length];
       for (let i = 0; i < s.n; i++) if (!taken.has(`${s.uid}:${i}`)) return { game: 'piece', slot: i, piece: s.uid, use: s.use };
@@ -99,6 +124,13 @@ export class BreakRoom {
       if (!want.has(id) || (s.game === 'piece' && !there.has(`${s.piece}:${s.use}`))) {
         this.seats.delete(id);
         this.alone.delete(id);
+        this.since.delete(id);
+      } else if (now - (this.since.get(id) ?? now) >= stayOf(s)) {
+        // Done with it (the coffee is drunk, the game is over): on to something else.
+        this.seats.delete(id);
+        this.alone.delete(id);
+        this.since.delete(id);
+        this.done.set(id, { key: keyOf(s), until: now + AGAIN_MS });
       }
     }
     // Players left alone at a table: wait a little, then give up.
@@ -116,7 +148,7 @@ export class BreakRoom {
       this.alone.delete(id);
       this.seats.delete(id);
       const seat = this.free('console');
-      if (seat >= 0) this.seats.set(id, { game: 'console', slot: seat });
+      if (seat >= 0) this.put(id, { game: 'console', slot: seat }, now);
     }
     // Someone who gave up and found no PS5 seat is simply matched again later (a newcomer).
     const pending = eligible.filter((id) => !this.seats.has(id));
@@ -128,44 +160,45 @@ export class BreakRoom {
       // Its own wish first when nothing forces a game (a solo spot, or straight to the couch).
       const wish = prefer ? 'any' : (wants.get(id) ?? 'any');
       const solo: Game | null = wish === 'library' ? 'library' : wish === 'coffee' ? 'coffee' : wish === 'console' ? 'console' : wish === 'nap' ? 'nap' : null;
-      if (solo && this.free(solo) >= 0) {
-        this.seats.set(id, { game: solo, slot: this.free(solo) });
+      if (solo && this.free(solo) >= 0 && !this.tired(id, solo, now)) {
+        this.put(id, { game: solo, slot: this.free(solo) }, now);
         continue;
       }
       const wishUse = WISH_USE[wish];
-      const own = wishUse ? this.piece(spots, [wishUse], id) : null;
+      const own = wishUse ? this.piece(spots, [wishUse], id, now) : null;
       if (own) {
-        this.seats.set(id, own);
+        this.put(id, own, now);
         continue;
       }
       // Half the agents would rather lounge on furniture you bought than play.
-      const lounge = !prefer && wish === 'any' && hash(id) % 2 === 0 ? this.piece(spots, LOUNGING, id) : null;
+      const lounge = !prefer && wish === 'any' && hash(id) % 2 === 0 ? this.piece(spots, LOUNGING, id, now) : null;
       if (lounge) {
-        this.seats.set(id, lounge);
+        this.put(id, lounge, now);
         continue;
       }
       if (prefer !== 'console') {
+        const mine = tables.filter((g) => !this.tired(id, g, now));
         // 1. Join someone waiting alone.
-        const waiting = tables.find((g) => this.occupants(g).filter(Boolean).length === 1);
+        const waiting = mine.find((g) => this.occupants(g).filter(Boolean).length === 1);
         if (waiting) {
-          this.seats.set(id, { game: waiting, slot: this.free(waiting) });
+          this.put(id, { game: waiting, slot: this.free(waiting) }, now);
           continue;
         }
-        // 2. Pair with the next free agent at a free table.
+        // 2. Pair with the next free agent at a free table (one neither just played).
         const partner = pending.slice(i + 1).find((p) => !this.seats.has(p) && (prefer || ['any', 'table'].includes(wants.get(p) ?? 'any')));
-        const open = tables.filter((g) => this.occupants(g).every((x) => x == null));
+        const open = mine.filter((g) => this.occupants(g).every((x) => x == null) && !(partner && this.tired(partner, g, now)));
         if (partner && open.length) {
           const game = prefer && open.includes(prefer) ? prefer : open[hash(id + partner) % open.length];
-          this.seats.set(id, { game, slot: 0 });
-          this.seats.set(partner, { game, slot: 1 });
+          this.put(id, { game, slot: 0 }, now);
+          this.put(partner, { game, slot: 1 }, now);
           continue;
         }
       }
       // 3. A PS5 controller, else any free piece of furniture.
-      const seat = this.free('console');
-      const any = seat < 0 && !prefer ? this.piece(spots, LOUNGING, id) : null;
-      if (seat >= 0) this.seats.set(id, { game: 'console', slot: seat });
-      else if (any) this.seats.set(id, any);
+      const seat = this.tired(id, 'console', now) ? -1 : this.free('console');
+      const any = seat < 0 && !prefer ? this.piece(spots, LOUNGING, id, now) : null;
+      if (seat >= 0) this.put(id, { game: 'console', slot: seat }, now);
+      else if (any) this.put(id, any, now);
       // 4. Otherwise: the desk.
     }
     return new Map(this.seats);

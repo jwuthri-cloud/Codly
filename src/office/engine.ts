@@ -104,6 +104,8 @@ export interface EngineOptions {
 }
 
 const HELLO_MS = 1800;
+/** How long a sent activity lasts, by its pose (ms): then the agent picks its next thing. */
+const USE_MS: Partial<Record<string, number>> = { drink: 25_000, sleep: 90_000, gamepad: 120_000, foosball: 120_000, pool: 150_000, browse: 60_000, read: 60_000, watch: 60_000, dance: 30_000, sit: 60_000 };
 /** Game sounds made in code (sound.ts synth), not samples. */
 const MADE = new Set(['crowd', 'crowd-goal', 'crowd-ooh', 'whistle', 'whistle-end']);
 const PINS_KEY = 'codly.office.desks';
@@ -217,6 +219,8 @@ export class OfficeEngine {
   private builtinList: Piece[] = [];
   /** Agents sent to use something from a click menu (until real work calls them back). */
   private forced = new Map<string, Intent>();
+  /** When a sent activity ends (wall ms): a coffee is drunk, a game played, then its own day goes on. */
+  private forcedUntil = new Map<string, number>();
   /** Each agent's own intent at the last sync (to tell whether it is free for a break). */
   private lastRaw = new Map<string, Intent>();
   /** When each typing agent's next key sound is due. */
@@ -632,6 +636,9 @@ export class OfficeEngine {
     const raw = this.lastRaw.get(agentId);
     if (!raw || !idleIntent(raw)) return false;
     this.forced.set(agentId, intent);
+    // Back to the desk holds until work comes; anything else lasts a while, like a Sims action.
+    if (intent.place.kind === 'desk') this.forcedUntil.delete(agentId);
+    else this.forcedUntil.set(agentId, Date.now() + (USE_MS[intent.pose] ?? 60_000));
     this.sync();
     return true;
   }
@@ -1167,6 +1174,11 @@ export class OfficeEngine {
       this.lastRaw.set(a.id, intent);
       // Sent to use something: until real work calls it back.
       if (this.forced.has(a.id) && !idleIntent(intent)) this.forced.delete(a.id);
+      const until = this.forcedUntil.get(a.id);
+      if (until != null && (!this.forced.has(a.id) || wall >= until)) {
+        this.forced.delete(a.id);
+        this.forcedUntil.delete(a.id);
+      } else if (until != null) wakeAt = Math.min(wakeAt, until);
       pending.push({ a, act, intent: this.forced.get(a.id) ?? intent });
     }
     const onBreak = pending.filter((p) => p.intent.place.kind === 'break').sort((x, y) => x.a.lastEventAt - y.a.lastEventAt || (x.a.id < y.a.id ? -1 : 1));
