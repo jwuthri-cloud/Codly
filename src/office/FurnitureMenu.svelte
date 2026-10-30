@@ -23,8 +23,8 @@
 
   const desk = $derived(menu.desk ?? null);
   const owner = $derived(desk?.owner ? (agents.find((a) => a.id === desk.owner) ?? null) : null);
-  // A Lead's desk goes to a Lead, a pod desk to anyone else.
-  const takers = $derived(desk ? agents.filter((a) => a.id !== desk.owner && (a.role === 'lead') === desk.lead) : []);
+  // A Lead's desk goes to a Lead, a pod desk to anyone else in the office.
+  const takers = $derived(desk ? agents.filter((a) => a.id !== desk.owner && engine.isPresent(a.id) && (a.role === 'lead') === desk.lead) : []);
 
   function callBack(a: Agent) {
     if (engine.callBack(a.id)) onclose();

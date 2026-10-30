@@ -702,11 +702,16 @@ export class OfficeEngine {
     return out;
   }
 
+  /** In the office now (not offline). */
+  isPresent(agentId: string): boolean {
+    return !!this.model.agents.get(agentId)?.present;
+  }
+
   /** Give an agent a desk (a Lead's desk to a Lead); whoever sat there takes its old desk. */
   moveToDesk(agentId: string, index: number): boolean {
     const a = this.model.agents.get(agentId);
     const d = this.L.desks[index];
-    if (!a || !d || d.lead !== (a.role === 'lead')) return false;
+    if (!a?.present || !d || d.lead !== (a.role === 'lead')) return false;
     const old = this.deskOf.get(agentId);
     const other = [...this.deskOf].find(([id, k]) => k === index && id !== agentId)?.[0];
     this.deskOf.set(agentId, index);
