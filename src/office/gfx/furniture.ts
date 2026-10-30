@@ -456,12 +456,14 @@ export function sofa(b: Builder, leather = false) {
 // ───────────── games corner ─────────────
 
 /** A low TV cabinet with a console on top; the screen goes into `screen` (an unlit mesh). */
-export function tvStand(b: Builder, screen: Builder) {
+export function tvStand(b: Builder, screen: Builder, cabinet = true) {
   const wood = c(MAT.walnut);
-  b.box(0, 0.22, 0, 1.6, 0.4, 0.42, wood);
-  b.box(0, 0.43, 0, 1.64, 0.03, 0.44, c(MAT.walnutDark));
-  for (const sx of [-0.4, 0.4]) b.box(sx, 0.22, 0.212, 0.74, 0.32, 0.012, mix(wood, [1, 1, 1], 0.08));
-  for (const sx of [-0.4, 0.4]) b.cyl(sx, 0, 0, 0.03, 0.04, c(MAT.walnutDark), 6);
+  if (cabinet) {
+    b.box(0, 0.22, 0, 1.6, 0.4, 0.42, wood);
+    b.box(0, 0.43, 0, 1.64, 0.03, 0.44, c(MAT.walnutDark));
+    for (const sx of [-0.4, 0.4]) b.box(sx, 0.22, 0.212, 0.74, 0.32, 0.012, mix(wood, [1, 1, 1], 0.08));
+    for (const sx of [-0.4, 0.4]) b.cyl(sx, 0, 0, 0.03, 0.04, c(MAT.walnutDark), 6);
+  }
   // The console: a white tower with a black core, and a pad beside it.
   b.box(0.6, 0.57, 0.02, 0.09, 0.26, 0.24, c('#f1f1f4'));
   b.box(0.6, 0.57, 0.02, 0.1, 0.22, 0.1, c('#1f2026'));

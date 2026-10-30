@@ -8,7 +8,7 @@
 
 import type { Placed } from '../lib/gen/Placed';
 import RAW from './furniture.json';
-import { cellOf, CELL, COLS, footprint, keepRects, markRect, ROWS, roomAt, type OfficeLayout, type Rect } from './layout';
+import { cellOf, CELL, COLS, footprint, keepRects, markRect, ROWS, roomAt, type OfficeLayout, type Rect, type Slot } from './layout';
 
 export interface Furniture {
   id: string;
@@ -92,11 +92,17 @@ function baseOf(L: OfficeLayout) {
   return b;
 }
 
-/** Re-block the walking grid for the furniture placed (call before the first change too). */
-export function applyDecor(L: OfficeLayout, pieces: Piece[]) {
+/** Re-block the walking grid for the furniture placed (call before the first change too).
+ *  `seats`: spots on furniture to keep reachable (the seat and the way in from the front). */
+export function applyDecor(L: OfficeLayout, pieces: Piece[], seats: Slot[] = []) {
   const b = baseOf(L);
   L.blocked.set(b.grid);
   for (const p of pieces) if (blocks(p)) markRect(L.blocked, rect(p), 0);
+  for (const s of seats)
+    for (let d = 0; d <= 0.75; d += 0.25) {
+      const [cx, cz] = cellOf(s.x + Math.sin(s.face) * d, s.z + Math.cos(s.face) * d);
+      L.blocked[cz * COLS + cx] = 0;
+    }
 }
 
 /** The surface under (x, z) a small thing would sit on: its top, or null for the floor. */

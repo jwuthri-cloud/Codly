@@ -34,10 +34,13 @@ import { aStar, smooth } from './astar';
 import { BreakRoom } from './breakroom';
 import { activityFor, plumbobOf, type RestActivity } from './sims';
 import { breakPreference, reactionTo, traitsOf } from './traits';
-import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, leisure, errandPlace, intentKey, isBlocked, placeKey, type Errand, type Intent, type Place } from './behavior';
+import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, idleIntent, leisure, errandPlace, intentKey, isBlocked, placeKey, type Errand, type Intent, type Place } from './behavior';
+import type { Spot } from './breakroom';
+import { spotsOf, USE_LABEL, usesOf } from './use';
 import { CameraRig, DEFAULT_PITCH, DEFAULT_YAW } from './camera';
 import { BuildingGfx } from './gfx/building';
 import { DecorLayer, model } from './gfx/decor';
+import { BUILT_LABEL, builtinPieces, freeToUse, modeled, stationActions } from './gfx/builtins';
 import { applyDecor, blocker, BY_ID, onTop, snap, surfaceAt, type Piece } from './buy';
 import type { Placed } from '../lib/gen/Placed';
 import type { Provider } from '../lib/gen/Provider';
@@ -91,6 +94,8 @@ export interface EngineOptions {
   onagents?: (items: AgentListItem[]) => void;
   /** Announce something important right away (approvals) to assistive tech. */
   onannounce?: (text: string) => void;
+  /** A piece of furniture was clicked (its click menu), or the click went elsewhere (null). */
+  onfurniture?: (f: FurnitureMenu | null) => void;
   artifactUrl?: (a: Artifact) => string | null;
   narrate?: NarrateFn;
 }
@@ -100,6 +105,15 @@ const HELLO_MS = 1800;
 const SAY_MS = 4500;
 const OX = -W / 2;
 const OZ = -D / 2;
+
+/** A clicked piece of furniture and what it can be used for (The Sims' click menu). */
+export interface FurnitureMenu {
+  label: string;
+  actions: { label: string; intent: Intent }[];
+  /** Where to show the menu (container pixels). */
+  x: number;
+  y: number;
+}
 
 /** Build/Buy: the piece following the cursor. */
 interface Carry {
@@ -190,6 +204,13 @@ export class OfficeEngine {
   /** Agents let go, haunting the memory archive (see-through, floating). */
   private ghosts: Character[] = [];
   private decor = new DecorLayer();
+  /** The office's own furniture, as models (gfx/builtins.ts). */
+  private builtins = new DecorLayer();
+  private builtinList: Piece[] = [];
+  /** Agents sent to use something from a click menu (until real work calls them back). */
+  private forced = new Map<string, Intent>();
+  /** Each agent's own intent at the last sync (to tell whether it is free for a break). */
+  private lastRaw = new Map<string, Intent>();
   private pieces: Piece[] = [];
   /** Build/Buy mode: clicks pick up furniture; `carry` is the piece following the cursor. */
   private build: { onpick: (uid: string) => void; carry: Carry | null } | null = null;
@@ -277,7 +298,15 @@ export class OfficeEngine {
     this.hovRing = new Mesh(ringGeo, new MeshBasicMaterial({ map: this.ringTex, transparent: true, depthWrite: false, opacity: 0.55, blending: AdditiveBlending, toneMapped: false }));
     this.selRing.visible = this.hovRing.visible = false;
     this.selRing.renderOrder = this.hovRing.renderOrder = 3;
-    this.world.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, this.server.group, this.games.group, this.mail.group, this.archive.group, this.frames.group, this.decor.group, this.fx.group, this.selRing, this.hovRing);
+    this.world.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, this.server.group, this.games.group, this.mail.group, this.archive.group, this.frames.group, this.builtins.group, this.decor.group, this.fx.group, this.selRing, this.hovRing);
+    void builtinPieces(this.L)
+      .then((p) => this.builtins.set(p))
+      .then((list) => {
+        this.builtinList = list ?? [];
+        this.regrid();
+        this.shadowDirty = true;
+        this.wake();
+      });
     // Characters live in world coordinates (the office frame is offset to center it).
     this.scene.add(this.actorsGroup);
     this.plumbob.visible = false;
@@ -460,11 +489,79 @@ export class OfficeEngine {
     void this.decor.set(placed).then((pieces) => {
       if (!pieces || this.disposed) return;
       this.pieces = pieces;
-      // ponytail: agents already walking keep their path (through a new piece); the next one avoids it.
-      applyDecor(this.L, pieces);
+      this.regrid();
       this.shadowDirty = true;
       this.wake();
     });
+  }
+
+  /** Agents free for a break right now (between tasks). */
+  freeAgents(): string[] {
+    return [...this.lastRaw].filter(([, i]) => idleIntent(i)).map(([id]) => id);
+  }
+
+  /** Send an idle agent to use something (a click menu action); false when it is busy. */
+  sendTo(agentId: string, intent: Intent): boolean {
+    const raw = this.lastRaw.get(agentId);
+    if (!raw || !idleIntent(raw)) return false;
+    this.forced.set(agentId, intent);
+    this.sync();
+    return true;
+  }
+
+  private pieceByUid(uid: string): Piece | undefined {
+    return this.pieces.find((p) => p.uid === uid) ?? this.builtinList.find((p) => p.uid === uid);
+  }
+
+  private usable(): Piece[] {
+    return [...this.pieces, ...this.builtinList.filter((p) => freeToUse(this.L.items[+p.uid.split(':')[1]]))];
+  }
+
+  /** The walking grid with the furniture placed, seats on furniture kept reachable.
+   *  ponytail: agents already walking keep their path (through a new piece); the next walk avoids it. */
+  private regrid() {
+    const seats = this.usable().flatMap((p) => usesOf(p.item).flatMap((use) => spotsOf(p, use).filter((s) => s.pose === 'sit')));
+    applyDecor(this.L, this.pieces, seats);
+  }
+
+  /** What agents may use on their own during breaks: bought pieces, and a few built-in ones. */
+  private spots(): Spot[] {
+    const out: Spot[] = [];
+    for (const p of this.usable())
+      for (const use of usesOf(p.item)) {
+        // A spot to stand in front must be on free floor (another piece may be there).
+        const n = spotsOf(p, use).filter((s) => s.pose === 'sit' || this.passable(...cellOf(s.x, s.z))).length;
+        if (n) out.push({ uid: p.uid, use, n });
+      }
+    return out;
+  }
+
+  /** The piece of furniture under a click, with its menu; null when there is none. */
+  private furnitureAt(clientX: number, clientY: number): FurnitureMenu | null {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const where = { x: clientX - r.left, y: clientY - r.top };
+    const ray = this.rayAt(clientX, clientY);
+    const uid = this.decor.pick(ray) ?? this.builtins.pick(ray);
+    if (uid?.startsWith('item:')) {
+      const it = this.L.items[+uid.split(':')[1]];
+      const p = this.pieceByUid(uid);
+      const own = stationActions(this.L, it);
+      const free = freeToUse(it) && p ? usesOf(p.item).map((use) => ({ label: USE_LABEL[use], intent: breakIntent({ game: 'piece', slot: 0, piece: uid, use }) })) : [];
+      return { label: BUILT_LABEL[it.type] ?? (p && BY_ID.get(p.item)?.label) ?? 'Furniture', actions: [...own, ...free], ...where };
+    }
+    if (uid) {
+      const p = this.pieceByUid(uid);
+      if (!p) return null;
+      const actions = usesOf(p.item).map((use) => ({ label: USE_LABEL[use], intent: breakIntent({ game: 'piece', slot: 0, piece: uid, use }) }));
+      return { label: BY_ID.get(p.item)?.label ?? 'Furniture', actions, ...where };
+    }
+    // Code-built pieces with a use (foosball, pool): where the ray crosses their top (~0.7 up).
+    const { origin: o, direction: d } = ray.ray;
+    if (d.y >= 0) return null;
+    const t = (0.7 - o.y) / d.y;
+    const [x, z] = [o.x + d.x * t - OX, o.z + d.z * t - OZ];
+    const it = this.L.items.find((i) => !modeled(i.type) && BUILT_LABEL[i.type] && Math.abs(x - i.x) < i.w / 2 + 0.1 && Math.abs(z - i.z) < i.d / 2 + 0.1);
+    return it ? { label: BUILT_LABEL[it.type]!, actions: stationActions(this.L, it), ...where } : null;
   }
 
   /** Build/Buy mode on (`onpick`: a placed piece was clicked) or off. */
@@ -599,6 +696,7 @@ export class OfficeEngine {
     this.mail.dispose();
     for (const c of this.ghosts) c.dispose();
     this.decor.dispose();
+    this.builtins.dispose();
     applyDecor(this.L, []);
     this.archive.dispose();
     this.frames.dispose();
@@ -748,6 +846,18 @@ export class OfficeEngine {
         return this.claim(a, place.id, placeKey(place), place.slot) ?? deskSlot(false);
       case 'break':
         return deskSlot(false); // matched in sync(); unmatched breaks stay at the desk
+      case 'piece': {
+        const p = this.pieceByUid(place.uid);
+        const slots = p ? spotsOf(p, place.use) : [];
+        for (const k of [place.slot, ...slots.keys()]) {
+          const id = `piece:${place.uid}:${k}`;
+          const owner = this.slotOwner.get(id);
+          if (!slots[k] || (owner && owner !== a.agentId)) continue;
+          this.take(a, id);
+          return { slot: slots[k], key: placeKey(place) };
+        }
+        return deskSlot(false);
+      }
       case 'lead': {
         const ld = this.deskFor(place.leadId);
         if (!ld) return deskSlot(false);
@@ -847,12 +957,16 @@ export class OfficeEngine {
       const errand = this.errands.current(a.id, wall, allowed);
       const { intent, nextAt } = deriveIntent(a, this.model, wall, errand);
       wakeAt = Math.min(wakeAt, nextAt);
-      pending.push({ a, act, intent });
+      this.lastRaw.set(a.id, intent);
+      // Sent to use something: until real work calls it back.
+      if (this.forced.has(a.id) && !idleIntent(intent)) this.forced.delete(a.id);
+      pending.push({ a, act, intent: this.forced.get(a.id) ?? intent });
     }
     const onBreak = pending.filter((p) => p.intent.place.kind === 'break').sort((x, y) => x.a.lastEventAt - y.a.lastEventAt || (x.a.id < y.a.id ? -1 : 1));
     const seats = this.breakRoom.update(
       onBreak.map((p) => ({ id: p.a.id, prefer: breakPreference(traitsOf(p.a.id), this.needsOf?.(p.a.id) ?? null) })),
       wall,
+      this.spots(),
     );
     wakeAt = Math.min(wakeAt, this.breakRoom.nextAt());
     // Pass 2: show them.
@@ -1390,7 +1504,12 @@ export class OfficeEngine {
           const uid = this.decor.pick(this.rayAt(e.clientX, e.clientY));
           if (uid) this.build.onpick(uid);
         }
-      } else if (wasClick) this.opts.onselect(this.pick(e.clientX, e.clientY));
+      } else if (wasClick) {
+        const sel = this.pick(e.clientX, e.clientY);
+        const f = sel ? null : this.furnitureAt(e.clientX, e.clientY);
+        this.opts.onfurniture?.(f);
+        if (!f) this.opts.onselect(sel);
+      }
     };
     const onLeave = () => this.setLocalHover(null);
     const onWheel = (e: WheelEvent) => {

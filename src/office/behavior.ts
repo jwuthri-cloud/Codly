@@ -14,11 +14,13 @@
 //  5. Errands only for real instant events (a commit, a memory, a card changing column).
 
 import type { ActivityKind } from '../lib/gen/ActivityKind';
+import type { Seat } from './breakroom';
 import type { StationId } from './layout';
 import type { AgentState, ErrandKind, OfficeModel, ToolCall } from './model';
 import { EXCURSION_MS } from './reducer';
 import { hash } from './text';
 import { breakDelay, traitsOf } from './traits';
+import { USE_POSE, type Use } from './use';
 
 export type Pose =
   | 'sit'
@@ -54,7 +56,9 @@ export type Place =
   | { kind: 'lead'; leadId: string }
   | { kind: 'door' }
   /** On a break: the break room (breakroom.ts) decides which game and seat, or the desk. */
-  | { kind: 'break' };
+  | { kind: 'break' }
+  /** Using a piece of furniture (use.ts): its uid in the office, and which spot. */
+  | { kind: 'piece'; uid: string; use: Use; slot: number };
 
 export interface Intent {
   place: Place;
@@ -93,6 +97,8 @@ export function placeKey(p: Place): string {
       return 'door';
     case 'break':
       return 'break';
+    case 'piece':
+      return `piece:${p.uid}:${p.use}`;
   }
 }
 
@@ -199,6 +205,16 @@ function make(place: Place, pose: Pose, icon: string, extra: Partial<Intent> = {
   return { place, pose, prop: null, emote: null, screen: 'idle', icon, errand: null, ...extra };
 }
 
+/** A break at a station, picked from a piece's click menu (browse the library shelves…). */
+export function stationBreak(id: StationId, pose: Pose, prop: Prop): Intent {
+  return make({ kind: 'station', id }, pose, 'idle', { screen: 'off', emote: null, prop });
+}
+
+/** Whether an agent is free for a break (between tasks: idle, done, or dozing at its desk). */
+export function idleIntent(i: Intent): boolean {
+  return i.place.kind === 'break' || (i.place.kind === 'desk' && !i.place.stand && ['idle', 'done', 'sleep'].includes(i.icon));
+}
+
 const DESK: Place = { kind: 'desk' };
 
 /** An idle agent wants a break; which game (with whom) is the break room's call. */
@@ -207,10 +223,15 @@ function game(): Intent {
 }
 
 /** The concrete intent for a break-room seat (null: no seat free, it stays at its desk). */
-export function breakIntent(seat: { game: 'pool' | 'foosball' | 'console' | 'library' | 'coffee' | 'nap'; slot: number } | null): Intent {
+export function breakIntent(seat: Seat | null): Intent {
   const extra = { screen: 'off', emote: null } as const;
   if (!seat) return make({ kind: 'desk' }, 'sit', 'idle', extra);
   switch (seat.game) {
+    case 'piece': {
+      const use = seat.use ?? 'sit';
+      const { pose, prop } = USE_POSE[use];
+      return make({ kind: 'piece', uid: seat.piece ?? '', use, slot: seat.slot }, pose, use === 'nap' ? 'sleep' : 'idle', { ...extra, prop, emote: use === 'nap' ? 'zz' : null });
+    }
     case 'console':
       return make({ kind: 'station', id: 'games.console', slot: seat.slot }, 'gamepad', 'idle', { ...extra, prop: 'gamepad' });
     case 'foosball':

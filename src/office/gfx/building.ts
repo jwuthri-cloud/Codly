@@ -25,6 +25,7 @@ import { D, DESK_H, GLASS_H, INNER_H, LOW_H, W, WALL_H, type Item, type ItemType
 import { color, lin, MAT, mix, scale, type OfficeTheme, type RGB } from '../palette';
 import { hash } from '../text';
 import { Builder } from './builder';
+import { modeled } from './builtins';
 import * as F from './furniture';
 import { c } from './furniture';
 import { floorTexture, glowTexture, skyTexture } from './textures';
@@ -236,6 +237,8 @@ export class BuildingGfx {
     const screens = new Builder();
     const protos = new Map<string, Proto>();
     for (const it of this.L.items) {
+      // Drawn with a CC0 model instead (gfx/builtins.ts); the TV stand keeps its TV and console.
+      if (modeled(it.type) && it.type !== 'tvStand') continue;
       const inst = INSTANCED[it.type];
       if (inst) {
         const key = `${it.type}:${it.variant ?? 0}`;
@@ -368,7 +371,7 @@ export class BuildingGfx {
         break;
       case 'tvStand':
         screens.frame(it.x, 0, it.z, it.rot);
-        F.tvStand(merged, screens);
+        F.tvStand(merged, screens, false);
         break;
       case 'foosball':
         F.foosball(merged);

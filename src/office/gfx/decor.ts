@@ -50,6 +50,30 @@ export function model(f: Furniture): Promise<Model> {
   return m;
 }
 
+/** A piece to show: `scale` stretches the model (the built-in furniture is fitted to its spot),
+ *  `tint` recolors its fabric (Kenney's `carpet` materials). */
+export type Shown = Placed & { scale?: [number, number, number]; tint?: string };
+
+const FABRIC = new Set(['carpet', 'carpetDarker']);
+const tinted = new Map<string, MeshStandardMaterial>();
+/** The model with its fabric in `tint` (materials shared per color). */
+function recolor(root: Object3D, tint: string) {
+  root.traverse((o) => {
+    if (!(o instanceof Mesh)) return;
+    const m = o.material as MeshStandardMaterial;
+    if (!FABRIC.has(m.name)) return;
+    const key = `${m.name}:${tint}`;
+    let t = tinted.get(key);
+    if (!t) {
+      t = m.clone();
+      t.color.set(tint);
+      if (m.name === 'carpetDarker') t.color.multiplyScalar(0.7);
+      tinted.set(key, t);
+    }
+    o.material = t;
+  });
+}
+
 /** The pieces in the office, as 3D objects (picked by `uid`). */
 export class DecorLayer {
   readonly group = new Group();
@@ -58,7 +82,7 @@ export class DecorLayer {
   private seq = 0;
 
   /** Show `placed` (loading what's new); resolves with each piece's size, or null if outdated. */
-  async set(placed: Placed[]): Promise<Piece[] | null> {
+  async set(placed: Shown[]): Promise<Piece[] | null> {
     const seq = ++this.seq;
     const loaded = await Promise.all(
       placed.map(async (p) => {
@@ -79,14 +103,17 @@ export class DecorLayer {
       }
       if (!o) {
         o = { item: p.item, obj: m.root.clone(true) };
+        if (p.tint) recolor(o.obj, p.tint);
         o.obj.userData.uid = p.uid;
         this.group.add(o.obj);
         this.objs.set(p.uid, o);
       }
+      const [sx, sy, sz] = p.scale ?? [1, 1, 1];
       o.obj.position.set(p.x, p.y, p.z);
       o.obj.rotation.y = p.rot;
+      o.obj.scale.set(sx, sy, sz);
       keep.add(p.uid);
-      out.push({ ...p, dims: m.dims });
+      out.push({ uid: p.uid, item: p.item, x: p.x, y: p.y, z: p.z, rot: p.rot, dims: { w: m.dims.w * sx, d: m.dims.d * sz, h: m.dims.h * sy } });
     }
     for (const [uid, o] of this.objs)
       if (!keep.has(uid)) {

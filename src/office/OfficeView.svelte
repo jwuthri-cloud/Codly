@@ -31,6 +31,7 @@
   import type { Shop } from '../lib/gen/Shop';
   import GhostBoard from './GhostBoard.svelte';
   import BuyMode from './BuyMode.svelte';
+  import FurnitureMenu from './FurnitureMenu.svelte';
 
   interface Props {
     files?: RepoFile[];
@@ -112,6 +113,7 @@
 
   const sims = new SimsTracker();
   let menuAt = $state<{ id: string; x: number; y: number } | null>(null);
+  let furniture = $state<import('./engine').FurnitureMenu | null>(null);
   const hudInsets = $derived({ top: insets?.top ?? 0, right: insets?.right ?? 0, bottom: insets?.bottom ?? 0, left: insets?.left ?? 0 });
 
   let el: HTMLDivElement;
@@ -163,6 +165,10 @@
       },
       onagents: (list) => (roster = list),
       onannounce: (text) => (urgent = text),
+      onfurniture: (f) => {
+        furniture = f;
+        if (f) menuAt = null;
+      },
       artifactUrl,
       narrate,
     });
@@ -296,6 +302,9 @@
   {/if}
   {#if engine && !backdrop && ghosts.length}
     <GhostBoard {ghosts} {engine} insets={hudInsets} {onbringback} />
+  {/if}
+  {#if engine && !backdrop && furniture}
+    <FurnitureMenu {engine} menu={furniture} {agents} onclose={() => (furniture = null)} />
   {/if}
   {#if engine && !backdrop && shop && onplace && onsell}
     <BuyMode {engine} {shop} insets={hudInsets} {onplace} {onsell} />
