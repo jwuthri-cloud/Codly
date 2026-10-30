@@ -346,6 +346,9 @@ impl Inner {
         self.sync_team(&ws)?;
         let tasks = self.store.tasks(&ws.id)?;
         self.sweep_staff(&ws, &tasks, &self.store.agents(&ws.id)?)?;
+        if let Err(e) = self.notice_outside_merges(&ws).await {
+            tracing::debug!("checking for merges outside Codly: {e}");
+        }
         let plans = self.store.plans(&ws.id, 100)?;
         let agents = self.store.agents(&ws.id)?;
         let clis = self.clis();

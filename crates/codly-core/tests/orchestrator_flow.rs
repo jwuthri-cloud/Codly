@@ -2038,11 +2038,20 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     let ghost = wait_for("the consultant to be let go", 30, async || core.ghosts().unwrap().into_iter().find(|g| g.id == hired.id)).await;
     assert_eq!(ghost.career.stats.merged, 1);
     assert_eq!(ghost.worktree, None, "its task's worktree went with the task");
+    // You merge the plan with plain git, not from the app.
+    let integ = snap.plans[0].integration_branch.clone().unwrap();
+    let out = std::process::Command::new("git").args(["merge", "--no-ff", "-m", "by hand", &integ]).current_dir(&repo).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let back = core.bring_back(&ghost.id).unwrap();
     assert!(!back.archived && !back.consultant && back.kept && back.status == AgentStatus::Idle);
     // bring_back runs a scheduling pass: a worker you brought back is not let go again.
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(core.ghosts().unwrap().is_empty(), "kept between tasks");
+    let plan = wait_for("the outside merge to be noticed", 10, async || {
+        core.snapshot().await.unwrap().plans.into_iter().find(|p| p.id == snap.plans[0].id && p.merged_sha.is_some())
+    })
+    .await;
+    assert!(!Path::new(plan.integration_worktree.as_deref().unwrap()).exists(), "its worktree is gone, as after a merge from the app");
     assert_eq!(back.career.milestones.last().map(|m| m.text.as_str()), Some("Came back"));
     assert!(core.ghosts().unwrap().is_empty());
     assert!(core.snapshot().await.unwrap().agents.iter().any(|a| a.id == ghost.id), "back on the team");

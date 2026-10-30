@@ -1018,6 +1018,7 @@ export class Story {
     if (plan.status !== 'done') throw new Error('The plan is still running; merge when every task is done.');
     const head = sha();
     if (sim.workspace) sim.workspace = { ...sim.workspace, head };
+    sim.patchPlan(planId, { merged_sha: head });
     sim.decision('merge_plan', 'human', `You merged ${plan.integration_branch} into ${sim.workspace?.current_branch ?? 'main'} @ ${head.slice(0, 7)}`, { plan_id: planId, sha: head });
     return head;
   }

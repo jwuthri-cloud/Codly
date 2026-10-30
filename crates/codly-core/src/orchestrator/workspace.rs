@@ -324,6 +324,33 @@ impl Inner {
         self.git.diff(Path::new(&ws.repo_path), base, branch).await
     }
 
+    /// Plans you merged without Codly (git on the command line, another tool): a done plan whose
+    /// integration branch is already in your branch counts as merged, and its integration
+    /// worktree goes, as after a merge from the app.
+    pub(super) async fn notice_outside_merges(&self, ws: &Workspace) -> anyhow::Result<()> {
+        let repo = PathBuf::from(&ws.repo_path);
+        let open = self.store.plans(&ws.id, 100)?.into_iter().filter(|p| p.status == PlanStatus::Done && p.merged_sha.is_none() && !p.kept);
+        for p in open {
+            let Some(branch) = p.integration_branch.as_deref() else { continue };
+            if !self.git.is_ancestor(&repo, branch, "HEAD").await.unwrap_or(false) {
+                continue;
+            }
+            let Some(head) = self.git.head(&repo).await? else { continue };
+            self.update_plan(&p.id, |plan| {
+                plan.merged_sha = Some(head.clone());
+                Ok(())
+            })?;
+            self.decide(Some(&ws.id), None, "merge", format!("{branch} is already in your branch: merged outside Codly"), json!({ "plan_id": p.id, "sha": head }))?;
+            if let Some(wt) = p.integration_worktree.as_deref() {
+                let _g = self.repo_lock.lock().await;
+                if let Err(e) = self.git.worktree_remove(&repo, Path::new(wt), Some("HEAD"), false).await {
+                    tracing::info!("keeping {wt}: {e}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<String> {
         let p = self.plan(plan_id)?;
         if matches!(p.status, PlanStatus::Running | PlanStatus::Integrating) {
