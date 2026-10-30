@@ -1650,10 +1650,11 @@ export class OfficeEngine {
     let best: { id: string; d: number } | null = null;
     const pxPerUnit = this.height / (2 * Math.tan((this.rig.camera.fov * Math.PI) / 360) * Math.max(1, this.rig.cur.dist));
     const rad = Math.max(18, 0.55 * pxPerUnit);
-    for (const [id, act] of this.actors) {
-      if (act.leaving) continue;
-      act.c.root.updateWorldMatrix(true, true);
-      this.v.copy(act.c.position).setY(0.65 * act.c.look.scale).project(this.rig.camera);
+    // Agents, and their helpers (a click on a helper picks the agent it works for).
+    const people: [string, Character][] = [...[...this.actors].filter(([, act]) => !act.leaving).map(([id, act]): [string, Character] => [id, act.c]), ...[...this.interns.values()].filter((i) => i.leaving == null).map((i): [string, Character] => [i.parent, i.c])];
+    for (const [id, c] of people) {
+      c.root.updateWorldMatrix(true, true);
+      this.v.copy(c.position).setY(0.65 * c.look.scale).project(this.rig.camera);
       if (this.v.z > 1) continue;
       const sx = (this.v.x * 0.5 + 0.5) * r.width;
       const sy = (-this.v.y * 0.5 + 0.5) * r.height;
@@ -2173,6 +2174,37 @@ export class OfficeEngine {
         compact: !s,
         urgent,
         dim: a.status === 'idle' && !selected && !hovered && !urgent,
+      });
+    }
+    // Helpers (an agent's sub-agents): whose they are, and what they do when you look closer.
+    for (const [key, i] of this.interns) {
+      const a = this.model.agents.get(i.parent);
+      if (!a || i.leaving != null) continue;
+      const sa = a.subagents.get(key.slice(i.parent.length + 1));
+      const close = sel?.agentId === a.id || hov?.agentId === a.id;
+      i.c.root.updateWorldMatrix(true, true);
+      i.c.headTop(head);
+      specs.push({
+        key: 'h:' + key,
+        kind: 'agent',
+        world: head.clone().setY(head.y + 0.12 * i.c.look.scale),
+        dy: -4,
+        priority: close ? 800 : 60,
+        title: `${a.name}’s helper`,
+        pre: close && sa ? sa.description : '',
+        code: null,
+        post: '',
+        tone: 'muted',
+        color: identity(a.color, this.theme.name).ink,
+        badge: 'Helper',
+        icon: null,
+        chip: null,
+        selected: false,
+        hovered: close,
+        agentId: a.id,
+        compact: !close,
+        urgent: false,
+        dim: !close,
       });
     }
     for (const r of this.L.rooms) {
