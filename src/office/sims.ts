@@ -5,8 +5,8 @@
 //             drifting back to normal
 // Energy and Morale also move with what the agent does (`setActivity`): a nap, a PS5 session…
 // Moodlets are short-lived feelings from real events ("Tests passed", "Waiting on you");
-// skills grow with the files it changes and the checks it passes; relationships with the
-// agents it asks, reviews or is reviewed by. Nothing here is invented: no event, no change.
+// relationships are the reviews saved on its career (`career.friends`). Skills are on the
+// career too (SimsHud reads them). Nothing here is invented: no event, no change.
 //
 // Pure and stateful: feed it events (`ingest`), ask for an agent's sheet (`stats`).
 
@@ -29,18 +29,11 @@ export interface Moodlet {
   until: number | null;
 }
 
-export interface Skill {
-  name: string;
-  level: number;
-  /** 0 … 1 towards the next level. */
-  progress: number;
-}
-
 export interface Relation {
   agentId: string;
   /** 0 … 100. */
   score: number;
-  /** "Reviewed 3 of their changes", "Asked them 2 questions". */
+  /** "3 reviews between them". */
   why: string;
 }
 
@@ -49,7 +42,6 @@ export type PlumbobColor = 'green' | 'amber' | 'red' | 'blue' | 'grey';
 export interface SimSheet {
   needs: { energy: number; focus: number | null; morale: number };
   moodlets: Moodlet[];
-  skills: Skill[];
   relations: Relation[];
   plumbob: PlumbobColor;
   /** One word for the overall mood. */
@@ -60,24 +52,6 @@ const BASE_MORALE = 0.65;
 /** Morale drifts back to normal with this time constant (ms). */
 const MORALE_TAU = 10 * 60_000;
 const MOODLET_MS = 6 * 60_000;
-
-const LANG: [RegExp, string][] = [
-  [/\.(test|spec)\.[a-z]+$|_test\.(go|py|rs)$|(^|\/)tests?\//, 'Testing'],
-  [/\.(ts|tsx)$/, 'TypeScript'],
-  [/\.(js|jsx|mjs|cjs)$/, 'JavaScript'],
-  [/\.svelte$|\.vue$/, 'UI'],
-  [/\.(css|scss|less)$/, 'Styling'],
-  [/\.rs$/, 'Rust'],
-  [/\.py$/, 'Python'],
-  [/\.go$/, 'Go'],
-  [/\.(md|mdx|txt)$/, 'Writing'],
-  [/\.(sql|prisma)$|migrations?\//, 'Databases'],
-];
-
-export function skillFor(path: string): string | null {
-  for (const [re, name] of LANG) if (re.test(path)) return name;
-  return null;
-}
 
 /** Skill level from XP: 1, 4, 9, 16 … XP per level, up to 10 (like a Sims skill bar). */
 export function levelOf(xp: number): { level: number; progress: number } {
@@ -127,9 +101,6 @@ interface Mind {
   restAt: number | null;
   activity: RestActivity;
   moodlets: Moodlet[];
-  xp: Map<string, number>;
-  /** other agent → [interactions, why counts]. */
-  rel: Map<string, { asks: number; reviews: number; reviewed: number; together: number }>;
 }
 
 export class SimsTracker {
@@ -150,7 +121,7 @@ export class SimsTracker {
     if (!m)
       this.minds.set(
         id,
-        (m = { morale: BASE_MORALE, moraleAt: 0, energy: 1, restAt: null, activity: 'idle', moodlets: [], xp: new Map(), rel: new Map() }),
+        (m = { morale: BASE_MORALE, moraleAt: 0, energy: 1, restAt: null, activity: 'idle', moodlets: [] }),
       );
     return m;
   }
@@ -193,31 +164,11 @@ export class SimsTracker {
     }
   }
 
-  private xp(id: string, skill: string, n: number) {
-    const m = this.mind(id);
-    m.xp.set(skill, (m.xp.get(skill) ?? 0) + n);
-  }
-
-  private relate(a: string, b: string, kind: 'asks' | 'reviews' | 'reviewed' | 'together') {
-    if (!a || !b || a === b) return;
-    const r = this.mind(a).rel;
-    const cur = r.get(b) ?? { asks: 0, reviews: 0, reviewed: 0, together: 0 };
-    cur[kind]++;
-    r.set(b, cur);
-  }
-
   ingest(ev: EventRow) {
     const id = ev.agent_id;
     const now = ev.ts;
     const k = ev.kind;
     switch (k.type) {
-      case 'files_changed':
-        if (!id) return;
-        for (const p of k.paths) {
-          const s = skillFor(p);
-          if (s) this.xp(id, s, 1);
-        }
-        return;
       case 'tool_completed': {
         if (!id) return;
         const pass = k.tests_passed ?? 0;
@@ -225,7 +176,6 @@ export class SimsTracker {
         if (fail > 0) this.feel(id, now, -0.12, { key: 'tests', label: 'Tests failing', why: `${fail} failing`, tone: 'bad', icon: 'x-circle' });
         else if (pass > 0) {
           this.feel(id, now, 0.1, { key: 'tests', label: 'Tests passed', why: `${pass} passing`, tone: 'good', icon: 'check' });
-          this.xp(id, 'Testing', Math.min(5, Math.ceil(pass / 5)));
         }
         return;
       }
@@ -235,10 +185,8 @@ export class SimsTracker {
         this.tasks.set(t.id, t);
         const who = t.assignee;
         if (!who || prev?.status === t.status) return;
-        if (t.status === 'done') {
-          this.feel(who, now, 0.2, { key: 'task', label: 'Task done', why: t.title, tone: 'good', icon: 'check', ms: 10 * 60_000 });
-          this.xp(who, 'Shipping', 2);
-        } else if (t.status === 'failed') this.feel(who, now, -0.25, { key: 'task', label: 'Task failed', why: t.title, tone: 'bad', icon: 'x-circle' });
+        if (t.status === 'done') this.feel(who, now, 0.2, { key: 'task', label: 'Task done', why: t.title, tone: 'good', icon: 'check', ms: 10 * 60_000 });
+        else if (t.status === 'failed') this.feel(who, now, -0.25, { key: 'task', label: 'Task failed', why: t.title, tone: 'bad', icon: 'x-circle' });
         else if (t.status === 'running' && (t.attempt ?? 0) > 1 && /review|changes/i.test(t.status_reason ?? ''))
           this.feel(who, now, -0.12, { key: 'review', label: 'Changes requested', why: t.title, tone: 'bad', icon: 'message' });
         return;
@@ -246,31 +194,6 @@ export class SimsTracker {
       case 'agent_changed':
         this.agents.set(k.agent.id, k.agent);
         return;
-      case 'approval_resolved':
-        return;
-      case 'chat': {
-        // A worker asking the Lead, the Lead answering: they get to know each other.
-        const author = k.message.author;
-        if (!this.agents.has(author)) return;
-        const lead = [...this.agents.values()].find((a) => a.role === 'lead' && (a.thread ?? 'lead') === k.message.thread);
-        if (lead && lead.id !== author) {
-          this.relate(author, lead.id, 'asks');
-          this.relate(lead.id, author, 'asks');
-        }
-        return;
-      }
-      default:
-        break;
-    }
-    // A reviewer's events on someone's task: reviewer and author get to know each other.
-    if (id && ev.task_id) {
-      const a = this.agents.get(id);
-      const t = this.tasks.get(ev.task_id);
-      if (a?.role === 'reviewer' && t?.assignee && (k.type === 'turn_completed' || k.type === 'message')) {
-        this.relate(id, t.assignee, 'reviews');
-        this.relate(t.assignee, id, 'reviewed');
-        if (k.type === 'turn_completed') this.xp(id, 'Reviewing', 2);
-      }
     }
   }
 
@@ -293,25 +216,12 @@ export class SimsTracker {
     if (focus != null && focus < 0.2) live.push({ key: 'foggy', label: 'Foggy', why: 'Its context window is nearly full', tone: 'bad', icon: 'cloud', at: now, until: null });
     m.moodlets = m.moodlets.filter((x) => x.until == null || x.until > now);
     const moodlets = [...live, ...m.moodlets].sort((a, b) => b.at - a.at);
-    // Skills, best first.
-    const skills = [...m.xp]
-      .map(([name, xp]) => ({ name, ...levelOf(xp) }))
-      .filter((s) => s.level > 0 || s.progress > 0)
-      .sort((a, b) => b.level - a.level || b.progress - a.progress);
-    // Relationships.
-    const relations = [...m.rel]
-      .map(([other, r]) => {
-        const n = r.asks + r.reviews * 2 + r.reviewed * 2 + r.together;
-        const parts = [r.reviews && `reviewed ${r.reviews} of their changes`, r.reviewed && `reviewed by them ${r.reviewed}×`, r.asks && `${r.asks} questions between them`].filter(Boolean);
-        return { agentId: other, score: Math.min(100, Math.round(25 * Math.log2(1 + n))), why: parts.join(', ') || 'worked together' };
-      })
+    // Relationships: the reviews saved on its career (they survive restarts).
+    const relations = Object.entries(agent?.career?.friends ?? {})
+      .filter(([, n]) => n > 0)
+      .map(([other, n]) => ({ agentId: other, score: Math.min(100, Math.round(25 * Math.log2(1 + 2 * n))), why: `${n} review${n === 1 ? '' : 's'} between them` }))
       .sort((a, b) => b.score - a.score);
-    return { needs: { energy, focus, morale }, moodlets, skills, relations, plumbob: plumbobOf(state), mood: moodWord(morale, moodlets) };
-  }
-
-  /** Everything learned, for persistence or an export of the agent (its "save"). */
-  xpOf(agentId: string): Record<string, number> {
-    return Object.fromEntries(this.minds.get(agentId)?.xp ?? []);
+    return { needs: { energy, focus, morale }, moodlets, relations, plumbob: plumbobOf(state), mood: moodWord(morale, moodlets) };
   }
 }
 
