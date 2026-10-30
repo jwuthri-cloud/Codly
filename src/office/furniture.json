@@ -130,6 +130,9 @@
 {"id": "polypizza.poolTable", "label": "Pool table", "cat": "Tables", "price": 300, "src": "polypizza/pool-table.glb", "h": 0.755, "hidden": true},
 {"id": "polypizza.waterCooler", "label": "Water cooler", "cat": "Kitchen", "price": 90, "src": "polypizza/water-cooler.glb", "h": 1.35},
 {"id": "polypizza.espresso", "label": "Espresso machine", "cat": "Kitchen", "price": 80, "src": "polypizza/espresso.glb", "h": 0.4, "small": true, "yaw": 3.1416},
+{"id": "polypizza.fridge", "label": "French-door fridge", "cat": "Kitchen", "price": 260, "src": "polypizza/fridge.glb", "h": 1.56, "yaw": -1.5708},
+{"id": "polypizza.sectionalSofa", "label": "Sectional sofa", "cat": "Seating", "price": 380, "src": "polypizza/sectional-sofa.glb", "h": 0.75},
+{"id": "polypizza.standingDesk", "label": "Standing desk", "cat": "Tables", "price": 140, "src": "polypizza/standing-desk.glb", "top": true},
 {"id": "kenney.computerKeyboard", "label": "Keyboard", "cat": "Electronics", "price": 15, "src": "kenney/computerKeyboard.glb", "small": true},
 {"id": "kenney.computerMouse", "label": "Mouse", "cat": "Electronics", "price": 10, "src": "kenney/computerMouse.glb", "small": true}
 ]

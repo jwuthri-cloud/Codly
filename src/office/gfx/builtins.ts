@@ -25,8 +25,8 @@ interface Spec {
 }
 
 const BY_TYPE: Partial<Record<ItemType, (it: Item) => Spec>> = {
-  desk: () => ({ id: 'kenney.desk', fit: 'stretch', h: DESK_H }),
-  leadDesk: () => ({ id: 'kenney.desk', fit: 'stretch', h: DESK_H + 0.02 }),
+  desk: () => ({ id: 'polypizza.standingDesk', fit: 'stretch', h: DESK_H }),
+  leadDesk: () => ({ id: 'polypizza.standingDesk', fit: 'stretch', h: DESK_H + 0.02 }),
   chair: (it) => ({ id: it.variant === 2 ? 'kenney.chairCushion' : 'kenney.chairDesk', tint: ['#3f8077', '#3a3c43', '#8c8a4e'][it.variant ?? 0] }),
   shelf: () => ({ id: 'polypizza.bookcase', tile: true, fit: 'stretch', h: 2.0 }),
   armchair: (it) => ({ id: it.variant ? 'kaykit.armchair_pillows' : 'kaykit.armchair' }),
@@ -35,13 +35,13 @@ const BY_TYPE: Partial<Record<ItemType, (it: Item) => Spec>> = {
   readingTable: () => ({ id: 'kenney.table', fit: 'stretch', h: 0.5 }),
   meetingTable: () => ({ id: 'kaykit.table_medium_long', fit: 'stretch', h: 0.5 }),
   counter: () => ({ id: 'kenney.kitchenCabinetDrawer', tile: true, mid: 'kenney.kitchenSink', fit: 'stretch', h: 0.62 }),
-  fridge: () => ({ id: 'kenney.kitchenFridgeLarge', h: 1.56 }),
+  fridge: () => ({ id: 'polypizza.fridge', h: 1.56 }),
   coffee: () => ({ id: 'polypizza.espresso', y: 0.62, h: 0.4 }),
   cooler: () => ({ id: 'polypizza.waterCooler', h: 1.35 }),
   roundTable: () => ({ id: 'kenney.tableRound', fit: 'stretch', h: 0.5 }),
   stool: () => ({ id: 'kaykit.chair_stool' }),
-  sofa: () => ({ id: 'kenney.loungeSofa', fit: 'stretch', h: 0.75, tint: '#d6a23c' }),
-  couch: () => ({ id: 'kenney.loungeDesignSofa', fit: 'stretch', h: 0.75, tint: '#7b4a2d' }),
+  sofa: () => ({ id: 'polypizza.sectionalSofa', fit: 'stretch', h: 0.75 }),
+  couch: () => ({ id: 'polypizza.sectionalSofa', fit: 'stretch', h: 0.75 }),
   plant: (it) => ({ id: it.variant === 1 ? 'kaykit.cactus_medium_A' : 'kenney.pottedPlant', h: 0.9 }),
   tallPlant: () => ({ id: 'kenney.pottedPlant', h: 1.55 }),
   coatRack: () => ({ id: 'kenney.coatRackStanding', h: 1.6 }),

@@ -10,3 +10,9 @@ water-cooler.glb "Water Cooler" by J-Toastie, CC BY 3.0
                 https://poly.pizza/m/zWi9p5FSxD   https://creativecommons.org/licenses/by/3.0/
 espresso.glb    "Coffee Machine" by Zsky, CC BY 3.0
                 https://poly.pizza/m/kRpKjpQsEd   https://creativecommons.org/licenses/by/3.0/
+fridge.glb      "Refrigerator" by sirkitree, CC BY 3.0
+                https://poly.pizza/m/1Blv52jDwd1   https://creativecommons.org/licenses/by/3.0/
+sectional-sofa.glb "Sofa" by Quaternius, CC0 1.0
+                https://poly.pizza/m/X5kQPKzAWp   https://creativecommons.org/publicdomain/zero/1.0/
+standing-desk.glb "Adjustable Desk" by jeff cobesign, CC BY 3.0
+                https://poly.pizza/m/7Z0bva7ec1s   https://creativecommons.org/licenses/by/3.0/
