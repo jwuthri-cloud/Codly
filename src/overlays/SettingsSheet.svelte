@@ -26,6 +26,7 @@
   import BillingBadge from '../components/BillingBadge.svelte';
   import Icon from '../components/Icon.svelte';
   import FullAccessConfirm from '../onboarding/FullAccessConfirm.svelte';
+  import { sound } from '../office/sound';
 
   const s = $derived(store.settings);
   const installed = $derived(store.clis.filter((c) => c.path));
@@ -105,6 +106,15 @@
     { id: 'automation', label: 'Automation', icon: 'bolt' },
   ];
   let tab = $state('general');
+  // Office sound (kept on this machine, not in the core's settings).
+  let soundOn = $state(!sound.muted);
+  let volume = $state(sound.volume);
+  $effect(() =>
+    sound.onChange(() => {
+      soundOn = !sound.muted;
+      volume = sound.volume;
+    }),
+  );
   const PLAN_TOGGLES = [
     ['auto_run_plans', 'Run plans without asking', 'New requests start in Auto instead of Plan (switch per request under the composer, or ⇧⇥). You can still cancel at any time.'],
     ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
@@ -211,6 +221,18 @@
           </div>
         </div>
         <p class="desc">Motion follows your system’s “Reduce motion” setting.</p>
+      </section>
+
+      <section>
+        <h3 class="eyebrow">Sound</h3>
+        <label class="row toggle">
+          <div class="r-text"><span class="r-title">Office sounds</span><span class="desc">Pool balls, the PS5 and the TV match, typing, the kitchen, jingles for merges and promotions, and music in Build/Buy. Off by default; quiet when the window is hidden.</span></div>
+          <input type="checkbox" class="switch" checked={soundOn} onchange={(e) => sound.setMuted(!(e.currentTarget as HTMLInputElement).checked)} />
+        </label>
+        <div class="row">
+          <div class="r-text"><span class="r-title">Volume</span><span class="desc">{Math.round(volume * 100)}%</span></div>
+          <input type="range" class="volume" min="0" max="100" step="5" value={Math.round(volume * 100)} disabled={!soundOn} aria-label="Office sound volume" oninput={(e) => sound.setVolume(+(e.currentTarget as HTMLInputElement).value / 100)} />
+        </div>
       </section>
 
       <HousekeepingSection />
@@ -322,4 +344,5 @@
   .m-title { display: inline-flex; align-items: center; gap: 8px; font-weight: var(--w-semi); }
   .mode .desc { padding-left: 21px; }
   input[type='checkbox']:not(.switch) { accent-color: var(--aurora-m); }
+  .volume { width: 160px; accent-color: var(--accent, #7ee0a1); }
 </style>

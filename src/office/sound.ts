@@ -1,7 +1,8 @@
 // The office's sounds: samples in public/audio (CC0, see CREDITS.txt) and a few made here (a
 // crowd, a referee's whistle, an espresso machine's hiss, a water cooler's glug). Sounds in the
 // office are placed: louder near the camera's focus and when zoomed in, panned left or right.
-// One shared instance (one office at a time); muted is remembered on this machine.
+// One shared instance (one office at a time). Off until you turn it on (Settings, or the HUD's
+// speaker); on/off and the volume are remembered on this machine.
 
 export type Sfx =
   | 'ui-click' | 'ui-open' | 'ui-close' | 'ui-buy' | 'ui-sell' | 'ui-place' | 'ui-rotate' | 'ui-error'
@@ -12,6 +13,14 @@ export type Sfx =
 const VARIANTS: Partial<Record<Sfx, number>> = { 'pool-ball': 3, 'foos-kick': 2, pad: 3, key: 8 };
 const BASE = `${import.meta.env?.BASE_URL ?? '/'}audio/`;
 const MUTE_KEY = 'codly.sound';
+const VOLUME_KEY = 'codly.sound.volume';
+const stored = (k: string) => {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+};
 
 /** Where a sound is, as the listener hears it: 0 … 1 loudness and −1 … 1 pan. */
 export type Hearing = (x: number, z: number) => { gain: number; pan: number };
@@ -22,22 +31,26 @@ class Sound {
   private buffers = new Map<string, Promise<AudioBuffer | null>>();
   private noiseBuf: AudioBuffer | null = null;
   private song: { name: string; src: AudioBufferSourceNode | null; gain: GainNode } | null = null;
-  muted = (() => {
-    try {
-      return localStorage.getItem(MUTE_KEY) === 'off';
-    } catch {
-      return false;
-    }
-  })();
+  muted = stored(MUTE_KEY) !== 'on';
+  /** 0 … 1. */
+  volume = Math.min(1, Math.max(0, Number(stored(VOLUME_KEY) ?? 0.7) || 0));
+  private listeners = new Set<() => void>();
   /** How the office hears a point (the engine sets it from its camera). */
   hearing: Hearing | null = null;
 
   constructor() {
     if (typeof window === 'undefined') return;
     // Browsers start audio only after a gesture.
-    const wake = () => void this.audio()?.resume();
+    const wake = () => {
+      if (document.visibilityState === 'visible') void this.audio()?.resume();
+    };
     window.addEventListener('pointerdown', wake, { capture: true });
     window.addEventListener('keydown', wake, { capture: true });
+    // Silent while the window is hidden or minimized (music included).
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') void this.ctx?.suspend();
+      else wake();
+    });
   }
 
   private audio(): AudioContext | null {
@@ -46,19 +59,35 @@ class Sound {
     if (!AC) return null;
     this.ctx = new AC();
     this.out = this.ctx.createGain();
-    this.out.gain.value = this.muted ? 0 : 0.8;
+    this.out.gain.value = this.muted ? 0 : this.volume;
     this.out.connect(this.ctx.destination);
     return this.ctx;
   }
 
   setMuted(m: boolean) {
     this.muted = m;
+    this.save(MUTE_KEY, m ? 'off' : 'on');
+  }
+
+  setVolume(v: number) {
+    this.volume = Math.min(1, Math.max(0, v));
+    this.save(VOLUME_KEY, String(this.volume));
+  }
+
+  /** Called when on/off or the volume changes (the HUD and Settings stay in step). */
+  onChange(fn: () => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  private save(key: string, value: string) {
     try {
-      localStorage.setItem(MUTE_KEY, m ? 'off' : 'on');
+      localStorage.setItem(key, value);
     } catch {
       // Private mode: it holds for this run.
     }
-    if (this.out && this.ctx) this.out.gain.setTargetAtTime(m ? 0 : 0.8, this.ctx.currentTime, 0.05);
+    if (this.out && this.ctx) this.out.gain.setTargetAtTime(this.muted ? 0 : this.volume, this.ctx.currentTime, 0.05);
+    for (const fn of this.listeners) fn();
   }
 
   private load(file: string): Promise<AudioBuffer | null> {
