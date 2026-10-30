@@ -14,6 +14,7 @@ import {
   Matrix4,
   Mesh,
   MeshBasicMaterial,
+  type Object3D,
   MeshStandardMaterial,
   PlaneGeometry,
   PointLight,
@@ -35,6 +36,9 @@ const SILL = 0.78;
 const LINTEL = 1.88;
 
 type Proto = { key: string; geo: BufferGeometry; items: Item[] };
+
+/** Hung on a wall rather than standing on the floor. */
+const HUNG = new Set<ItemType>(['whiteboard', 'poster']);
 
 const INSTANCED: Partial<Record<ItemType, (b: Builder, variant: number) => void>> = {
   desk: (b) => F.desk(b),
@@ -71,6 +75,8 @@ export class BuildingGfx {
   private wallMeshes: Mesh[] = [];
   /** The full-height exterior walls, each with its outward normal: lowered when it faces the camera. */
   private sides: { mesh: Mesh; nx: number; nz: number }[] = [];
+  /** What hangs on an exterior wall (whiteboard, posters): hidden while its wall is down. */
+  private hung: { obj: Object3D; nx: number; nz: number }[] = [];
   private wallsUp = true;
   private camDir: [number, number] = [0, 1];
 
@@ -212,6 +218,24 @@ export class BuildingGfx {
     return true;
   }
 
+  /** Hang something drawn elsewhere (the whiteboard's notes) on the exterior wall at (x, z). */
+  hang(obj: Object3D, x: number, z: number) {
+    const side = this.sideOf(x, z);
+    if (!side) return;
+    this.hung.push({ obj, ...side });
+    this.applyWalls();
+  }
+
+  /** The outward normal of the exterior wall at (x, z), if (x, z) is against one. */
+  private sideOf(x: number, z: number): { nx: number; nz: number } | null {
+    for (const w of this.L.walls) {
+      if (w.kind !== 'exterior') continue;
+      if (w.z0 === w.z1 ? Math.abs(z - w.z0) < 0.5 : Math.abs(x - w.x0) < 0.5)
+        return w.z0 === w.z1 ? { nx: 0, nz: w.z0 < D / 2 ? -1 : 1 } : { nx: w.x0 < W / 2 ? -1 : 1, nz: 0 };
+    }
+    return null;
+  }
+
   private lowered(s: { nx: number; nz: number }) {
     return s.nx * this.camDir[0] + s.nz * this.camDir[1] > 0.25;
   }
@@ -225,6 +249,7 @@ export class BuildingGfx {
       s.mesh.scale.y = !this.wallsUp ? 0.16 : this.lowered(s) ? LOW_H / WALL_H : 1;
       s.mesh.updateMatrix();
     }
+    for (const h of this.hung) h.obj.visible = this.wallsUp && !this.lowered(h);
   }
 
   private window(b: Builder, w: Wall, a: number, z: number, frame: RGB) {
@@ -273,6 +298,7 @@ export class BuildingGfx {
     const merged = new Builder();
     const screens = new Builder();
     const protos = new Map<string, Proto>();
+    const hung = new Map<string, { b: Builder; nx: number; nz: number }>();
     for (const it of this.L.items) {
       // Drawn with a CC0 model instead (gfx/builtins.ts); the TV stand keeps its TV and console.
       if (modeled(it.type) && it.type !== 'tvStand') continue;
@@ -289,10 +315,22 @@ export class BuildingGfx {
         p.items.push(it);
         continue;
       }
+      const side = HUNG.has(it.type) ? this.sideOf(it.x, it.z) : null;
+      if (side) {
+        const key = `${side.nx},${side.nz}`;
+        let hb = hung.get(key);
+        if (!hb) hung.set(key, (hb = { b: new Builder(), ...side }));
+        this.piece(hb.b, screens, it);
+        continue;
+      }
       this.piece(merged, screens, it);
     }
     merged.frame();
     this.mesh(merged.build(), this.matte, true, true);
+    for (const h of hung.values()) {
+      h.b.frame();
+      this.hung.push({ obj: this.mesh(h.b.build(), this.matte, true, true), nx: h.nx, nz: h.nz });
+    }
     // Static screens (the games TV): unlit so they read as glowing.
     this.mesh(screens.build(), this.screenMat, false, false);
     const m = new Matrix4();

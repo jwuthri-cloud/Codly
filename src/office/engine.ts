@@ -312,6 +312,7 @@ export class OfficeEngine {
     this.board = new TaskBoard(this.L);
     this.board.handOf = (id) => this.actors.get(id)?.c.hand ?? null;
     this.whiteboard = new Whiteboard(this.L);
+    this.building.hang(this.whiteboard.mesh, this.whiteboard.mesh.position.x, this.whiteboard.mesh.position.z);
     this.server = new ServerRoom(this.L);
     this.games = new GamesCorner(this.L, { x: OX, z: OZ }, makeCanvas, tex);
     this.games.onSound = (e, at) => (MADE.has(e.name) ? sound.synth(e.name as never, { at, gain: e.gain }) : sound.play(e.name as Sfx, { at, gain: e.gain }));
