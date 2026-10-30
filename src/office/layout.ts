@@ -390,8 +390,9 @@ function build(): OfficeLayout {
   put('tallPlant', 'studio', 0.6, 15.8, 0, 0.5, 0.5, true, 2);
   put('cooler', 'studio', 20.7, 7.7, LEFT, 0.45, 0.45, true);
   put('printer', 'studio', 20.6, 15.6, LEFT, 0.8, 0.6, true);
-  put('plant', 'studio', 18.6, 11.75, 0, 0.45, 0.45, true, 0);
-  put('bench', 'studio', 18.6, 9.8, LEFT, 1.6, 0.5, true);
+  // Against the server room's glass, between the cooler and the printer.
+  put('bench', 'studio', 21.15, 10.3, LEFT, 1.6, 0.5, true);
+  put('plant', 'studio', 21.15, 11.7, 0, 0.45, 0.45, true, 0);
 
   // ── server room ──
   const racks: OfficeLayout['racks'] = [];
@@ -410,12 +411,13 @@ function build(): OfficeLayout {
   put('coffee', 'lounge', 0.35, 18.6, RIGHT, 0.4, 0.4, false);
   put('roundTable', 'lounge', 2.9, 18.4, 0, 1.1, 1.1, true);
   for (const [dx, dz] of [
-    [-0.85, 0],
-    [0.85, 0],
-    [0, -0.85],
-    [0, 0.85],
+    [-0.8, 0],
+    [0.8, 0],
+    [0, -0.8],
+    [0, 0.8],
   ])
-    put('stool', 'lounge', 2.9 + dx, 18.4 + dz, 0, 0.35, 0.35, false);
+    // Café chairs, each turned to face the table.
+    put('stool', 'lounge', 2.9 + dx, 18.4 + dz, Math.atan2(-dx, -dz), 0.45, 0.45, false);
   // Games corner: the TV faces the sofa; foosball by the studio door (the pool table is in the lobby).
   put('sofa', 'lounge', 6.3, 21.4, LEFT, 2.2, 0.9, true);
   put('tvStand', 'lounge', 3.2, 21.4, RIGHT, 1.6, 0.45, true);

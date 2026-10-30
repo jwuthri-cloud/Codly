@@ -1,7 +1,7 @@
 Models from Poly Pizza (poly.pizza)
 
-bookcase.glb    "Bookshelf" by Wanja Pflüger, CC BY 3.0
-                https://poly.pizza/m/15B0ihXkg3C   https://creativecommons.org/licenses/by/3.0/
+bookcase.glb    "Books on Bookshelf" by sirkitree, CC BY 3.0
+                https://poly.pizza/m/8G2I4M-QVEf   https://creativecommons.org/licenses/by/3.0/
 postbox.glb     "PostBox RoyalMail" by Shivansh Singh, CC BY 3.0
                 https://poly.pizza/m/5Ge8y6ZERKV   https://creativecommons.org/licenses/by/3.0/
 pool-table.glb  "Pool Table" by Evol-Love, CC BY 3.0 (balls removed, felt and body recolored)
@@ -14,5 +14,9 @@ fridge.glb      "Refrigerator" by sirkitree, CC BY 3.0
                 https://poly.pizza/m/1Blv52jDwd1   https://creativecommons.org/licenses/by/3.0/
 sectional-sofa.glb "Sofa" by Quaternius, CC0 1.0
                 https://poly.pizza/m/X5kQPKzAWp   https://creativecommons.org/publicdomain/zero/1.0/
-standing-desk.glb "Adjustable Desk" by jeff cobesign, CC BY 3.0
-                https://poly.pizza/m/7Z0bva7ec1s   https://creativecommons.org/licenses/by/3.0/
+desk.glb        "Desk" by CreativeTrio, CC0 1.0
+                https://poly.pizza/m/YJyJam67hJ   https://creativecommons.org/publicdomain/zero/1.0/
+bistro-table.glb "Table" by CMHT Oculus, CC BY 3.0
+                https://poly.pizza/m/cIogKnGAeII   https://creativecommons.org/licenses/by/3.0/
+cafe-chair.glb  "Chair" by CMHT Oculus, CC BY 3.0
+                https://poly.pizza/m/cz0MliYTG8O   https://creativecommons.org/licenses/by/3.0/

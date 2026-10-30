@@ -5,6 +5,7 @@
 import { DESK_H } from '../layout';
 import { BOOKS, lin, MAT, mix, type RGB } from '../palette';
 import { rng } from '../text';
+import { Vector3 } from 'three';
 import type { Builder } from './builder';
 
 const C = new Map<string, RGB>();
@@ -476,14 +477,53 @@ export function tvStand(b: Builder, screen: Builder, cabinet = true) {
 }
 
 /** Foosball: the rods run along x with handles at both ends, goals at ±z. The rods move, so
- *  they are built separately (`foosballRod`, gfx/games.ts). */
+ *  they are built separately (`foosballRod`, gfx/games.ts). The field sits sunk in a wooden
+ *  cabinet (top at 0.77, where the ball rolls) behind side walls the rods pass through. */
 export function foosball(b: Builder) {
-  const wood = c(MAT.oakDark);
-  for (const sx of [-0.42, 0.42]) for (const sz of [-0.24, 0.24]) b.box(sx, 0.26, sz, 0.07, 0.52, 0.07, c(MAT.charcoal));
-  b.box(0, 0.64, 0, 0.96, 0.24, 0.62, wood);
-  b.box(0, 0.765, 0, 0.88, 0.01, 0.54, c('#3f9a5a'));
-  b.box(0, 0.772, 0, 0.88, 0.004, 0.02, c('#e8efe4'));
-  for (const sz of [-0.31, 0.31]) b.box(0, 0.68, sz, 0.22, 0.12, 0.02, c('#1f2026'));
+  const wood = c(MAT.walnut);
+  const trim = c(MAT.walnutDark);
+  const dark = c('#26272c');
+  const white = c('#eef3ea');
+  // Braced legs on wide feet.
+  for (const sx of [-0.4, 0.4]) {
+    for (const sz of [-0.22, 0.22]) {
+      b.box(sx, 0.27, sz, 0.08, 0.5, 0.08, dark);
+      b.box(sx, 0.015, sz, 0.12, 0.03, 0.12, c(MAT.charcoal));
+    }
+    b.box(sx, 0.13, 0, 0.05, 0.05, 0.4, dark);
+  }
+  b.box(0, 0.13, 0, 0.76, 0.05, 0.05, dark);
+  // The cabinet, the field and its markings.
+  b.box(0, 0.645, 0, 0.98, 0.25, 0.64, wood);
+  b.box(0, 0.7705, 0, 0.9, 0.003, 0.58, c('#3f9a5a'));
+  b.box(0, 0.7725, 0, 0.9, 0.002, 0.01, white);
+  for (let k = 0; k < 16; k++) {
+    const a = (k / 16) * Math.PI * 2;
+    b.box(Math.cos(a) * 0.08, 0.7725, Math.sin(a) * 0.08, 0.032, 0.002, 0.008, white, -a - Math.PI / 2);
+  }
+  for (const sz of [-1, 1]) {
+    b.box(0, 0.7725, sz * 0.21, 0.34, 0.002, 0.008, white);
+    for (const sx of [-0.17, 0.17]) b.box(sx, 0.7725, sz * 0.25, 0.008, 0.002, 0.08, white);
+  }
+  // Side walls (the rods go through them, in metal bushings) and end walls with the goals.
+  for (const sx of [-0.475, 0.475]) {
+    b.box(sx, 0.83, 0, 0.03, 0.12, 0.64, wood);
+    b.box(sx, 0.895, 0, 0.05, 0.014, 0.66, trim);
+    for (const z of FOOSBALL_RODS) b.box(sx * 1.04, 0.84, z, 0.012, 0.036, 0.036, c(MAT.metal));
+  }
+  for (const sz of [-0.305, 0.305]) {
+    b.box(0, 0.83, sz, 0.98, 0.12, 0.03, wood);
+    b.box(0, 0.895, sz, 1.0, 0.014, 0.05, trim);
+    b.box(0, 0.8, sz * 1.03, 0.2, 0.055, 0.03, dark);
+  }
+  // Score beads on each end.
+  for (const [sz, team] of [
+    [-0.305, '#d64b3b'],
+    [0.305, '#2f6fd6'],
+  ] as const) {
+    b.box(0.3, 0.915, sz, 0.26, 0.006, 0.006, c(MAT.metal));
+    for (let k = 0; k < 5; k++) b.box(0.19 + k * 0.03, 0.915, sz, 0.018, 0.018, 0.018, c(team));
+  }
 }
 
 /** Rod z positions on the foosball table; rod i belongs to team i % 2 (0 red, 1 blue). */
@@ -491,11 +531,23 @@ export const FOOSBALL_RODS = [-0.2, -0.07, 0.07, 0.2];
 /** The men's x positions along a rod (before it slides). */
 export const FOOSBALL_MEN = [-0.24, 0, 0.24];
 
-/** One rod with its handles and men, around its own axis (y = 0 is the rod). */
+/** One rod with its rubber handles and little players, around its own axis (y = 0 is the rod;
+ *  their feet just clear the field 0.07 below). */
 export function foosballRod(b: Builder, team: number) {
-  b.box(0, 0, 0, 1.2, 0.018, 0.018, c(MAT.metal));
-  for (const sx of [-0.6, 0.6]) b.box(sx, 0, 0, 0.08, 0.035, 0.035, c('#26272c'));
-  for (const x of FOOSBALL_MEN) b.box(x, -0.04, 0, 0.04, 0.1, 0.04, c(team ? '#2f6fd6' : '#d64b3b'));
+  const kit = c(team ? '#2f6fd6' : '#d64b3b');
+  const shorts = c(team ? '#1d3f7a' : '#7a2620');
+  const dark = c('#26272c');
+  b.rod(new Vector3(-0.56, 0, 0), new Vector3(0.56, 0, 0), 0.009, c(MAT.metal), 10);
+  for (const sx of [-1, 1]) {
+    b.rod(new Vector3(sx * 0.56, 0, 0), new Vector3(sx * 0.66, 0, 0), 0.022, dark, 12);
+    b.ball(sx * 0.66, 0, 0, 0.022, 0.022, 0.022, dark, 10, 8);
+  }
+  for (const x of FOOSBALL_MEN) {
+    b.ball(x, 0.036, 0, 0.017, 0.017, 0.017, c('#e8b48a'), 10, 8);
+    b.box(x, -0.004, 0, 0.036, 0.048, 0.026, kit);
+    b.box(x, -0.043, 0, 0.03, 0.03, 0.02, shorts);
+    b.box(x, -0.064, 0.005, 0.032, 0.012, 0.03, dark);
+  }
 }
 
 /** A pool table: walnut body, green felt, six pockets and a few balls. */
