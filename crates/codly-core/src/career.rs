@@ -35,7 +35,8 @@ pub fn rank_for(xp: i64) -> Rank {
 }
 
 /// What trusting a rank gives an agent, as you grant it (a promotion only offers it).
-pub const PERKS: [(Rank, &str); 2] = [
+pub const PERKS: [(Rank, &str); 3] = [
+    (Rank::Junior, "Edits files inside its own worktree without asking; commands still ask"),
     (Rank::Senior, "Works inside its own worktree without asking; risky actions still ask"),
     (Rank::Staff, "Its work merges without the cross-vendor review"),
 ];

@@ -58,7 +58,7 @@ export function demoTrust(sim: Sim, id: string, rank: Rank): Agent {
   const a = sim.agents.get(id);
   if (!a) throw new Error('no such agent');
   const trust = atLeast(rank, a.career.rank) ? a.career.rank : rank;
-  const milestones = atLeast(trust, 'senior') && !atLeast(a.career.trust, trust) ? [...a.career.milestones, { at: sim.now(), text: `Trusted as ${rankLabel(trust)}` }] : a.career.milestones;
+  const milestones = atLeast(trust, 'junior') && !atLeast(a.career.trust, trust) ? [...a.career.milestones, { at: sim.now(), text: `Trusted as ${rankLabel(trust)}` }] : a.career.milestones;
   const next: Agent = { ...a, updated_at: sim.now(), career: { ...a.career, trust, milestones } };
   sim.putAgent(next);
   return next;

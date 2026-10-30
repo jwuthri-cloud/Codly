@@ -31,7 +31,7 @@ fn cmd(c: &str) -> Approval {
 
 fn eval(a: &Approval, mode: ApprovalMode) -> Verdict {
     let verify = vec!["pnpm -F web test".to_string()];
-    evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &verify, read_only: false })
+    evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &verify, read_only: false, edits: false })
 }
 
 fn allowed(v: &Verdict) -> bool {
@@ -154,7 +154,7 @@ fn only_allow_once_is_ever_chosen() {
 
 #[test]
 fn read_only_agents_get_reads_only() {
-    let ctx = |mode| PolicyCtx { mode, worktree: Some(Path::new("/repo")), verify: &[], read_only: true };
+    let ctx = |mode| PolicyCtx { mode, worktree: Some(Path::new("/repo")), verify: &[], read_only: true, edits: false };
     let a = approval(ApprovalSubject::Command { command: "npm test".into(), cwd: Some("/repo".into()) });
     assert!(!allowed(&evaluate(&a, &ctx(ApprovalMode::Autonomous))), "the Lead never runs writes in the user's checkout");
     let r = approval(ApprovalSubject::Command { command: "git log --oneline -5".into(), cwd: Some("/repo".into()) });
@@ -171,4 +171,16 @@ fn a_trusted_senior_works_alone_in_its_worktree() {
     let push = cmd("git push origin main");
     assert!(reason(eval(&push, with_trust(ApprovalMode::Balanced, true))).contains("risk"), "risks still ask");
     assert_eq!(with_trust(ApprovalMode::Strict, true), ApprovalMode::Strict, "strict is your explicit choice");
+}
+
+#[test]
+fn a_trusted_junior_edits_its_worktree_but_commands_still_ask() {
+    let junior = |a: &Approval, mode| evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: true });
+    let edit = approval(ApprovalSubject::FileChange { paths: vec![format!("{WT}/src/a.ts")], diff: None });
+    assert!(!allowed(&eval(&edit, ApprovalMode::Balanced)), "untrusted: balanced asks");
+    assert!(allowed(&junior(&edit, ApprovalMode::Balanced)));
+    let escape = approval(ApprovalSubject::FileChange { paths: vec!["/etc/hosts".into()], diff: None });
+    assert!(reason(junior(&escape, ApprovalMode::Balanced)).contains("outside worktree"));
+    assert!(!allowed(&junior(&cmd("rm -rf build"), ApprovalMode::Balanced)), "commands still ask");
+    assert!(!allowed(&junior(&edit, ApprovalMode::Strict)), "strict stays strict");
 }

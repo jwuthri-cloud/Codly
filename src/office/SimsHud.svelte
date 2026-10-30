@@ -2,7 +2,7 @@
   The Sims layer over the office (sims.ts for the numbers, all from real data):
   - top-left: the selected agent's action queue (what it does now, ✕ to interrupt; its to-dos queued)
   - bottom-left: its panel: portrait, rank, mood, and tabs for Needs / Mood / Skills / Friends / Career
-  - top-center: a promotion (its real track record), with the offer of trust (Senior and Staff
+  - top-center: a promotion (its real track record), with the offer of trust (Junior, Senior and Staff
     perks) and of a stronger model
   - around a clicked agent: the click menu (chat, task, model, stop, details)
   - bottom-right: the estimated cost so far, Pause new work, walls up/down
@@ -222,7 +222,7 @@
               {:else}<span class="tag">at {rankLabel(p.rank)}</span>{/if}
             </div>
           {/each}
-          {#if atLeast(career.trust, 'senior') && onaction}<button class="link" onclick={() => onaction?.(agent.id, 'untrust')}>Take trust back</button>{/if}
+          {#if atLeast(career.trust, 'junior') && onaction}<button class="link" onclick={() => onaction?.(agent.id, 'untrust')}>Take trust back</button>{/if}
         </div>
         <Scrapbook milestones={career.milestones} />
       {:else}

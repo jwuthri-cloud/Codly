@@ -35,6 +35,8 @@ pub struct PolicyCtx<'a> {
     /// Lead, reviewers, between-task chats: only reads are ever auto-allowed, in any mode
     /// (the Lead's working directory is the user's own checkout).
     pub read_only: bool,
+    /// Trusted as Junior (`career::PERKS`): file changes inside the worktree are approved in balanced mode.
+    pub edits: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +90,10 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
             },
             ApprovalSubject::Tool { name, .. } if is_read_only_tool(name) => allow(format!("read-only tool {name}")),
             ApprovalSubject::Tool { name, .. } => ask(format!("tool {name} is not read-only")),
+            // No risk was found above, so every path stays inside the worktree.
+            ApprovalSubject::FileChange { .. } if ctx.edits && ctx.worktree.is_some() => {
+                allow("trusted Junior: edits inside its worktree".into())
+            }
             _ => ask("balanced mode asks before file changes the CLI did not auto-accept".into()),
         },
         ApprovalMode::Autonomous => match ctx.worktree {
@@ -1409,7 +1415,7 @@ mod tests {
         };
         let cmd = |c: &str, cwd: &str| approval(ApprovalSubject::Command { command: c.into(), cwd: Some(cwd.into()) });
         let eval = |a: &Approval, read_only| {
-            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only })
+            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only, edits: false })
         };
         let allowed = |v: Verdict| matches!(v, Verdict::Allow { choice: ApprovalChoice::AllowOnce, .. });
 

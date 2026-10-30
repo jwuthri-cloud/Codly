@@ -44,6 +44,7 @@ export const emptyCareer = (): Career => ({
 
 /** What trusting a rank gives an agent (mirror of `career::PERKS`); you grant it, a promotion offers it. */
 export const PERKS: { rank: Rank; perk: string }[] = [
+  { rank: 'junior', perk: 'Edits files inside its own worktree without asking; commands still ask' },
   { rank: 'senior', perk: 'Works inside its own worktree without asking; risky actions still ask' },
   { rank: 'staff', perk: 'Its work merges without the cross-vendor review' },
 ];

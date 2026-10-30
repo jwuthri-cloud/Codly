@@ -460,10 +460,12 @@ impl Inner {
         };
         let verify = task.map(|t| t.verify).unwrap_or_default();
         let base = self.approval_mode_for(ws, thread.as_deref());
-        let trusted = !read_only
-            && self.agent(&ctx.agent_id).is_ok_and(|a| matches!(a.role, Role::Worker | Role::Solo) && career::trusts(&a.career, Rank::Senior));
-        let mode = approvals::with_trust(base, trusted);
-        let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only };
+        let trusts = |r| {
+            !read_only
+                && self.agent(&ctx.agent_id).is_ok_and(|a| matches!(a.role, Role::Worker | Role::Solo) && career::trusts(&a.career, r))
+        };
+        let mode = approvals::with_trust(base, trusts(Rank::Senior));
+        let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only, edits: trusts(Rank::Junior) };
         let verdict = match approvals::evaluate(approval, &pctx) {
             Verdict::Allow { choice, rule } if mode != base => Verdict::Allow { choice, rule: format!("{rule} (trusted Senior)") },
             v => v,
