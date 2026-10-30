@@ -103,7 +103,7 @@ coffee machine, whiteboard, bookshelves, server racks.
 | Action queue (top-left icons, ✕ to cancel) | the agent's queue: current tool call, queued prompts | live run; ✕ = interrupt or stop |
 | Pie menu on click | Chat 1:1, Show task, Show terminal, Change model, Stop, Send on a break | existing commands |
 | Needs bars | **Energy** = quota left on its account · **Focus** = context window left · **Morale** = recent checks and reviews | `UsageWindow`, `Usage.context_used`, gate results |
-| Moodlets ("Inspired", "Tense") | "Tests passed", "Waiting on you", "Rate-limited", "Merged", with timers | events |
+| Moodlets ("Inspired", "Tense") | "Tests passed", "Waiting on you", "Rate-limited", "Frustrated" (2 failed checks in a row), "Approved" (its review), "Proud" (its work merged), with timers; the strongest shows as an emoji on its name tag | events |
 | Thought bubbles | an icon of what it is thinking about (file, test tube, question) | reasoning / activity |
 | Simlish speech bubbles | agent ↔ Lead messages as bubbles with icons; click to read the real text | `codly_ask_lead`, notes |
 | Skills | TypeScript, Rust, Tests, Reviews… growing with real history | files changed, checks passed |

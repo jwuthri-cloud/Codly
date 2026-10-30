@@ -24,7 +24,7 @@
   import type { AccountInfo } from '../lib/gen/AccountInfo';
   import { OfficeEngine, type AgentListItem, type TickerItem } from './engine';
   import SimsHud, { type AgentAction } from './SimsHud.svelte';
-  import { SimsTracker } from './sims';
+  import { headline, SimsTracker } from './sims';
   import JobBoard from './JobBoard.svelte';
   import type { JobOffer } from '../lib/gen/JobOffer';
   import type { Placed } from '../lib/gen/Placed';
@@ -204,7 +204,8 @@
     // Needs drive what an agent does on its break (a tired one naps); what it does refills them.
     e.setNeeds((id) => {
       const s = sims.stats(id, Date.now(), e.agentState(id));
-      return { energy: s.needs.energy, morale: s.needs.morale };
+      const h = headline(s);
+      return { energy: s.needs.energy, morale: s.needs.morale, mood: h?.emoji ? { emoji: h.emoji, label: `${h.label}: ${h.why}` } : null };
     });
     e.setActivity((id, now, act) => sims.setActivity(id, now, act));
     sims.setTasks($state.snapshot(tasks) as Task[]);
@@ -256,6 +257,7 @@
   $effect(() => {
     const snap = $state.snapshot(tasks) as Task[];
     engine?.setTasks(snap);
+    sims.setTasks(snap);
   });
   $effect(() => {
     const snap = $state.snapshot(approvals) as Approval[];
@@ -300,7 +302,7 @@
   });
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_tabindex (the office takes arrow keys, +/−, F and Esc) -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex (the office takes arrow keys, W/A/S/D, +/−, Q/E, F and Esc) -->
 <div
   class="of-office"
   class:of-backdrop={backdrop}
@@ -497,6 +499,10 @@
   .of-office :global(.of-icon[data-icon='tests-pass']),
   .of-office :global(.of-icon[data-icon='done']) {
     color: #6fe39b;
+  }
+  .of-office :global(.of-mood) {
+    font-size: 12px;
+    line-height: 13px;
   }
   .of-office :global(.of-badge) {
     font-size: 9.5px;

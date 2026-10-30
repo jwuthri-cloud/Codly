@@ -23,6 +23,8 @@ export interface LabelSpec {
   color?: string;
   badge?: string | null;
   icon?: string | null;
+  /** Its headline feeling (sims.ts): an emoji, with the feeling's name on hover. */
+  mood?: { emoji: string; label: string } | null;
   /** Short action bubble ("using Bash"), shown when the full sentence is not. */
   chip?: string | null;
   selected?: boolean;
@@ -41,6 +43,7 @@ interface El {
   title: HTMLSpanElement;
   dot: HTMLSpanElement | null;
   icon: HTMLSpanElement | null;
+  mood: HTMLSpanElement | null;
   badge: HTMLSpanElement | null;
   chip: HTMLSpanElement | null;
   line: HTMLDivElement | null;
@@ -153,8 +156,12 @@ export class Overlay {
       icon.className = 'of-icon';
       head.appendChild(icon);
     }
+    let mood: HTMLSpanElement | null = null;
     let chip: HTMLSpanElement | null = null;
     if (spec.kind === 'agent') {
+      mood = document.createElement('span');
+      mood.className = 'of-mood';
+      head.appendChild(mood);
       chip = document.createElement('span');
       chip.className = 'of-chip';
       head.appendChild(chip);
@@ -176,11 +183,11 @@ export class Overlay {
     if (spec.agentId) root.dataset.agent = spec.agentId;
     if (spec.taskId) root.dataset.task = spec.taskId;
     this.root.appendChild(root);
-    return { root, title, dot, icon, badge, chip, line, pre, code, post, sig: '', iconKey: '', w: 0, wc: 0, h: 0, hc: 0, measured: false, shown: false, compact: false, x: -1e6, y: -1e6, used: true };
+    return { root, title, dot, icon, mood, badge, chip, line, pre, code, post, sig: '', iconKey: '', w: 0, wc: 0, h: 0, hc: 0, measured: false, shown: false, compact: false, x: -1e6, y: -1e6, used: true };
   }
 
   private fill(e: El, s: LabelSpec) {
-    const sig = [s.title, s.pre, s.code, s.post, s.tone, s.color, s.badge, s.chip, s.selected, s.hovered, s.icon, s.dim].join('\u0001');
+    const sig = [s.title, s.pre, s.code, s.post, s.tone, s.color, s.badge, s.chip, s.selected, s.hovered, s.icon, s.mood?.emoji, s.dim].join('\u0001');
     if (sig === e.sig) return;
     e.sig = sig;
     e.title.textContent = s.title;
@@ -188,6 +195,11 @@ export class Overlay {
     if (e.badge) {
       e.badge.textContent = s.badge ?? '';
       e.badge.style.display = s.badge ? '' : 'none';
+    }
+    if (e.mood) {
+      e.mood.textContent = s.mood?.emoji ?? '';
+      e.mood.title = s.mood?.label ?? '';
+      e.mood.style.display = s.mood ? '' : 'none';
     }
     if (e.chip) {
       e.chip.textContent = s.chip ?? '';

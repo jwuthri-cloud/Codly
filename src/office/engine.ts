@@ -200,7 +200,9 @@ export class OfficeEngine {
   /** What an agent last said (a chat message), shown as a speech bubble for a few seconds. */
   private said = new Map<string, { text: string; at: number }>();
   /** An agent's needs (sims.ts), so a tired agent goes for coffee on its break. */
-  private needsOf: ((id: string) => { energy: number | null; morale: number } | null) | null = null;
+  private needsOf: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null } | null) | null = null;
+  /** Each agent's headline feeling for its name tag (sims.ts), refreshed every couple of seconds. */
+  private moods = new Map<string, { at: number; mood: { emoji: string; label: string } | null }>();
   /** What each agent is doing, so its energy and morale move with it (sims.ts). */
   private onActivity: ((id: string, now: number, act: RestActivity) => void) | null = null;
   private mail: MailRoom;
@@ -266,6 +268,9 @@ export class OfficeEngine {
   private width = 1;
   private height = 1;
   private userMoved = false;
+  /** W/A/S/D held down (the camera glides while they are), and whether Shift is. */
+  private held = new Set<string>();
+  private heldFast = false;
   private mounted = false;
   private insets = { top: 0, right: 0, bottom: 0, left: 0 };
   private agentListSig = '';
@@ -859,7 +864,7 @@ export class OfficeEngine {
     this.wake();
   }
 
-  setNeeds(fn: ((id: string) => { energy: number | null; morale: number } | null) | null) {
+  setNeeds(fn: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null } | null) | null) {
     this.needsOf = fn;
   }
 
@@ -1771,27 +1776,28 @@ export class OfficeEngine {
         else if (c.uid) c.onsell(c.uid);
         return;
       }
+      const wasd = e.key.toLowerCase();
+      if (wasd === 'w' || wasd === 'a' || wasd === 's' || wasd === 'd') {
+        e.preventDefault();
+        this.held.add(wasd);
+        this.heldFast = e.shiftKey;
+        this.userMoved = true;
+        this.wake();
+        return;
+      }
       const step = e.shiftKey ? 180 : 70;
       let handled = true;
       switch (e.key) {
         case 'ArrowLeft':
-        case 'a':
-        case 'A':
           this.rig.pan(step, 0, this.height);
           break;
         case 'ArrowRight':
-        case 'd':
-        case 'D':
           this.rig.pan(-step, 0, this.height);
           break;
         case 'ArrowUp':
-        case 'w':
-        case 'W':
           this.rig.pan(0, step, this.height);
           break;
         case 'ArrowDown':
-        case 's':
-        case 'S':
           this.rig.pan(0, -step, this.height);
           break;
         case '+':
@@ -1831,6 +1837,11 @@ export class OfficeEngine {
         this.wake();
       }
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      this.held.delete(e.key.toLowerCase());
+      this.heldFast = e.shiftKey;
+    };
+    const onBlur = () => this.held.clear();
     const onContext = (e: Event) => e.preventDefault();
     const onLost = (e: Event) => {
       e.preventDefault();
@@ -1855,6 +1866,8 @@ export class OfficeEngine {
     canvas.addEventListener('webglcontextlost', onLost);
     canvas.addEventListener('webglcontextrestored', onRestored);
     el.addEventListener('keydown', onKey);
+    el.addEventListener('keyup', onKeyUp);
+    el.addEventListener('blur', onBlur);
     document.addEventListener('visibilitychange', onVis);
     this.cleanups.push(() => {
       canvas.removeEventListener('pointerdown', onDown);
@@ -1867,6 +1880,8 @@ export class OfficeEngine {
       canvas.removeEventListener('webglcontextlost', onLost);
       canvas.removeEventListener('webglcontextrestored', onRestored);
       el.removeEventListener('keydown', onKey);
+      el.removeEventListener('keyup', onKeyUp);
+      el.removeEventListener('blur', onBlur);
       document.removeEventListener('visibilitychange', onVis);
     });
     if (typeof IntersectionObserver !== 'undefined') {
@@ -1908,7 +1923,14 @@ export class OfficeEngine {
       this.sync();
     } else if (this.surfacesDirty) this.syncSurfaces(now, false);
     this.surfacesDirty = false;
-    const camMoving = this.rig.update(dt);
+    // W/A/S/D: glide while held (screen pixels per second, faster with Shift).
+    const held = this.held.size > 0;
+    if (held) {
+      const v = (this.heldFast ? 2200 : 900) * Math.min(dt, 0.1);
+      const h = this.held;
+      this.rig.pan(((h.has('a') ? 1 : 0) - (h.has('d') ? 1 : 0)) * v, ((h.has('w') ? 1 : 0) - (h.has('s') ? 1 : 0)) * v, this.height);
+    }
+    const camMoving = this.rig.update(dt) || held;
     if (camMoving && this.building.faceCamera(this.rig.cur.yaw)) this.shadowDirty = true;
     let busy = camMoving;
     let nextAt = Infinity;
@@ -2130,6 +2152,12 @@ export class OfficeEngine {
     return sentence(a, wall);
   }
 
+  private moodOf(id: string, now: number) {
+    let m = this.moods.get(id);
+    if (!m || now - m.at > 2000) this.moods.set(id, (m = { at: now, mood: this.needsOf?.(id)?.mood ?? null }));
+    return m.mood;
+  }
+
   private updateLabels(wall: number): boolean {
     const specs: LabelSpec[] = [];
     let live = false;
@@ -2176,6 +2204,7 @@ export class OfficeEngine {
         color: id.ink,
         badge: a.role === 'lead' ? 'Lead' : a.badge ?? (a.role === 'reviewer' ? 'Review' : a.subagents.size ? `+${a.subagents.size}` : null),
         icon: act.shown?.icon ?? null,
+        mood: this.moodOf(a.id, now),
         chip: s ? null : (chipFor(a)?.text ?? null),
         selected,
         hovered,

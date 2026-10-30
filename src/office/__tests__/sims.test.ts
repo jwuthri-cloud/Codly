@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Agent } from '../../lib/gen/Agent';
 import type { EventRow } from '../../lib/gen/EventRow';
-import { activityFor, levelOf, SimsTracker } from '../sims';
+import { activityFor, headline, levelOf, SimsTracker } from '../sims';
 import { breakDelay, breakPreference, reactionTo, traitsOf } from '../traits';
 import { BreakRoom } from '../breakroom';
 import { emptyCareer } from '../../lib/util/career';
@@ -61,6 +61,31 @@ describe('sims', () => {
     sh = s.stats('ada', 2000, null);
     expect(sh.moodlets[0].label).toBe('Tests failing');
     expect(s.stats('ada', 2000 + 3_600_000, null).needs.morale).toBeCloseTo(0.65, 1); // an hour later
+  });
+
+  it('two failed checks in a row make it Frustrated; a pass clears it; a merge makes it Proud', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada'), agent('rev')]);
+    s.setTasks([{ id: 't1', assignee: 'ada', status: 'running' } as never]);
+    const check = (ok: boolean, ts: number) => s.ingest(ev('ada', { type: 'verified', command: 'pnpm test', ok, exit_code: ok ? 0 : 1, tail: '' }, ts, 't1'));
+    check(false, 1000);
+    expect(s.stats('ada', 1000, null).moodlets[0].label).toBe('Checks failing');
+    check(false, 2000);
+    let sh = s.stats('ada', 2000, null);
+    expect(sh.moodlets[0]).toMatchObject({ label: 'Frustrated', why: '2 failures in a row' });
+    expect(headline(sh)?.emoji).toBe('😤');
+    check(true, 3000);
+    sh = s.stats('ada', 3000, null);
+    expect(sh.moodlets[0].label).toBe('Checks passed');
+    expect(headline(sh)).toBeNull();
+    // The review is the reviewer's event, but the feeling is the author's.
+    s.ingest(ev('rev', { type: 'reviewed', verdict: 'approve', summary: '' }, 4000, 't1'));
+    expect(headline(s.stats('ada', 4000, null))?.label).toBe('Approved');
+    expect(s.stats('rev', 4000, null).moodlets).toHaveLength(0);
+    s.ingest(ev('lead', { type: 'merged', sha: 'abc', branch: 'main' }, 5000, 't1'));
+    sh = s.stats('ada', 5000, null);
+    expect(headline(sh)).toMatchObject({ label: 'Proud', emoji: '🏆' });
+    expect(headline(s.stats('ada', 5000 + 16 * 60_000, null))?.label).not.toBe('Proud'); // it fades
   });
 
   it('skill levels grow like a Sims skill bar', () => {
