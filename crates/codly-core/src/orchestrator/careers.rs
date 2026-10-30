@@ -21,23 +21,31 @@ pub(super) enum Hiring {
     Wait,
 }
 
+/// What one event credits, and to whom (`worker`: the assignee of the event's task).
+fn credits_of<'a>(kind: &'a EventKind, agent: Option<&Id>, worker: Option<&Id>) -> Vec<(Option<Id>, Credit<'a>)> {
+    let agent = agent.cloned();
+    let worker = worker.cloned();
+    match kind {
+        EventKind::Committed { .. } => vec![(agent, Credit::Commit)],
+        EventKind::FilesChanged { paths, .. } => vec![(agent, Credit::Files(paths))],
+        EventKind::Verified { ok, .. } => vec![(agent.or(worker), Credit::Check { ok: *ok })],
+        EventKind::Reviewed { verdict, .. } => {
+            let reviewer = agent.filter(|a| Some(a) != worker.as_ref());
+            vec![(worker, Credit::Review { approved: verdict == "approve" }), (reviewer, Credit::Reviewed)]
+        }
+        EventKind::Merged { .. } => vec![(worker.or(agent), Credit::Merge)],
+        _ => vec![],
+    }
+}
+
 impl Inner {
     /// Credit agents for one persisted event (every event passes here).
     pub(super) fn track_career(&self, r: &EventRow) {
-        let worker = || r.task_id.as_deref().and_then(|t| self.task(t).ok()).and_then(|t| t.assignee);
-        let credits: Vec<(Option<Id>, Credit)> = match &r.kind {
-            EventKind::Committed { .. } => vec![(r.agent_id.clone(), Credit::Commit)],
-            EventKind::FilesChanged { paths, .. } => vec![(r.agent_id.clone(), Credit::Files(paths))],
-            EventKind::Verified { ok, .. } => vec![(r.agent_id.clone().or_else(worker), Credit::Check { ok: *ok })],
-            EventKind::Reviewed { verdict, .. } => {
-                let w = worker();
-                let reviewer = r.agent_id.clone().filter(|a| Some(a) != w.as_ref());
-                vec![(w, Credit::Review { approved: verdict == "approve" }), (reviewer, Credit::Reviewed)]
-            }
-            EventKind::Merged { .. } => vec![(worker().or_else(|| r.agent_id.clone()), Credit::Merge)],
-            _ => return,
-        };
-        for (id, c) in credits {
+        if !matches!(r.kind, EventKind::Committed { .. } | EventKind::FilesChanged { .. } | EventKind::Verified { .. } | EventKind::Reviewed { .. } | EventKind::Merged { .. }) {
+            return;
+        }
+        let worker = r.task_id.as_deref().and_then(|t| self.task(t).ok()).and_then(|t| t.assignee);
+        for (id, c) in credits_of(&r.kind, r.agent_id.as_ref(), worker.as_ref()) {
             let Some(id) = id else { continue };
             if self.agent(&id).is_ok_and(|a| a.role != Role::Lead) {
                 let _ = self.update_agent(&id, |a| {
@@ -45,6 +53,66 @@ impl Inner {
                 });
             }
         }
+        if let (EventKind::Reviewed { .. }, Some(reviewer), Some(author)) = (&r.kind, r.agent_id.as_ref(), worker.as_ref())
+            && reviewer != author
+        {
+            self.mentorship(reviewer, author, r.ts);
+        }
+    }
+
+    /// A review makes reviewer and author friends; a Senior or Staff reviewing an Intern or
+    /// Junior mentors it (bonus XP, and the first time, its mentor).
+    fn mentorship(&self, reviewer: &Id, author: &Id, now: i64) {
+        let (Ok(rv), Ok(au)) = (self.agent(reviewer), self.agent(author)) else { return };
+        if rv.role == Role::Lead || au.role == Role::Lead {
+            return;
+        }
+        let mentored = career::mentors(rv.career.rank, au.career.rank);
+        let first = mentored && au.career.mentor.is_none();
+        let _ = self.update_agent(author, |a| {
+            career::befriend(&mut a.career, reviewer);
+            if mentored {
+                career::credit(&mut a.career, Credit::Mentored, now);
+            }
+            if first {
+                a.career.mentor = Some(reviewer.clone());
+                career::note(&mut a.career, now, format!("Mentored by {}", rv.name));
+            }
+        });
+        let _ = self.update_agent(reviewer, |a| {
+            career::befriend(&mut a.career, author);
+            if first {
+                career::note(&mut a.career, now, format!("Took {} under its wing", au.name));
+            }
+        });
+    }
+
+    /// What the office did since `since`, from its events (same XP rules as careers).
+    pub(super) fn digest(&self, ws: &str, since: i64) -> Result<Digest> {
+        let tasks = self.store.tasks(ws)?;
+        // Consultants let go since then did that work too.
+        let mut agents = self.store.agents(ws)?;
+        agents.extend(self.store.archived_agents(ws)?);
+        let lead = |id: &Id| agents.iter().any(|a| &a.id == id && a.role == Role::Lead);
+        let mut by: std::collections::BTreeMap<Id, Career> = Default::default();
+        for r in self.store.work_since(ws, since)? {
+            let worker = r.task_id.as_deref().and_then(|t| tasks.iter().find(|x| x.id == t)).and_then(|t| t.assignee.as_ref());
+            for (id, c) in credits_of(&r.kind, r.agent_id.as_ref(), worker) {
+                if let Some(id) = id.filter(|i| !lead(i)) {
+                    career::credit(by.entry(id).or_default(), c, r.ts);
+                }
+            }
+        }
+        let mut reports: Vec<DayReport> = by.into_iter().map(|(agent_id, c)| DayReport { agent_id, stats: c.stats, xp: c.xp }).collect();
+        reports.sort_by(|a, b| b.xp.cmp(&a.xp).then(a.agent_id.cmp(&b.agent_id)));
+        let mut milestones: Vec<(Id, Milestone)> = agents
+            .iter()
+            .filter(|a| a.role != Role::Lead)
+            .flat_map(|a| a.career.milestones.iter().filter(|m| m.at >= since).map(|m| (a.id.clone(), m.clone())))
+            .collect();
+        milestones.sort_by_key(|(_, m)| m.at);
+        let done = tasks.iter().filter(|t| t.status == TaskStatus::Done && t.updated_at >= since).map(|t| t.title.clone()).collect();
+        Ok(Digest { since, reports, milestones, done })
     }
 
     /// How long a job offer stays up before the Lead's pick is hired (0: no offers, hire at once).

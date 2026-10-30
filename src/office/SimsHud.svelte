@@ -21,7 +21,7 @@
   import Scrapbook from './Scrapbook.svelte';
   import { levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
-  import { atLeast, PERKS, rankLabel, rankProgress, TRAITS as WORK_TRAITS } from '../lib/util/career';
+  import { atLeast, MENTORED_XP, PERKS, rankLabel, rankProgress, TRAITS as WORK_TRAITS } from '../lib/util/career';
 
   interface Props {
     engine: OfficeEngine;
@@ -57,6 +57,18 @@
   const nameOf = (id: string) => agents.find((a) => a.id === id)?.name ?? 'someone';
   const career = $derived(agent?.career ?? null);
   const climb = $derived(career ? rankProgress(career) : null);
+  // Friends: what this session saw (sims.ts), and the reviews saved on its career (they
+  // survive restarts). ponytail: the higher of the two scores, since the replayed log overlaps the saved count.
+  const friends = $derived.by(() => {
+    const out = new Map((sheet?.relations ?? []).map((r) => [r.agentId, r]));
+    for (const [id, n] of Object.entries(career?.friends ?? {})) {
+      const score = Math.min(100, Math.round(25 * Math.log2(1 + 2 * n)));
+      const cur = out.get(id);
+      if (!cur || cur.score < score) out.set(id, { agentId: id, score, why: cur?.why ?? `${n} review${n === 1 ? '' : 's'} between them` });
+    }
+    return [...out.values()].filter((r) => agents.some((a) => a.id === r.agentId)).sort((a, b) => b.score - a.score);
+  });
+  const bondOf = (id: string) => (career?.mentor === id ? 'Mentor' : agents.find((a) => a.id === id)?.career.mentor === agent?.id ? 'Mentee' : null);
   /** Skills from its saved record (they survive restarts and travel with it). */
   const skills = $derived(
     Object.entries(career?.skills ?? {})
@@ -211,10 +223,13 @@
         </div>
         <Scrapbook milestones={career.milestones} />
       {:else}
-        {#each sheet.relations as r (r.agentId)}
-          <div class="friend" title={r.why}><span class="n-l">{nameOf(r.agentId)}</span><span class="bar"><span class="fill" style:width="{r.score}%"></span></span></div>
+        {#each friends as r (r.agentId)}
+          {@const bond = bondOf(r.agentId)}
+          <div class="friend" title={bond === 'Mentor' ? `Its mentor: their reviews earn it +${MENTORED_XP} XP while it is an Intern or Junior` : bond === 'Mentee' ? 'It mentors them: its reviews earn them extra XP' : r.why}>
+            <span class="n-l">{nameOf(r.agentId)}{#if bond}<em>{bond}</em>{/if}</span><span class="bar"><span class="fill" style:width="{r.score}%"></span></span>
+          </div>
         {:else}
-          <p class="empty">Gets to know the agents it asks, reviews or is reviewed by.</p>
+          <p class="empty">Gets to know the agents it asks, reviews or is reviewed by. A Senior reviewing an Intern or Junior becomes its mentor.</p>
         {/each}
       {/if}
     </div>
@@ -278,7 +293,7 @@
   .fill.xp { background: linear-gradient(90deg, #e9b03a, #ffd27a); }
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; color: #9aa2b6; }
   .stats b { color: #eef1f7; }
-  .promo { position: absolute; left: 50%; transform: translateX(-50%); z-index: 8; display: flex; gap: 10px; align-items: center; padding: 8px 8px 8px 14px; border-radius: 999px; background: rgba(18, 22, 32, 0.92); box-shadow: inset 0 0 0 1.5px #ffd27a, 0 16px 40px -16px rgba(0, 0, 0, 0.7); color: #eef1f7; font: 500 13px 'Inter Variable', Inter, system-ui, sans-serif; pointer-events: auto; animation: pop 0.25s ease-out both; }
+  .promo { position: absolute; left: 50%; transform: translateX(-50%); z-index: 410; display: flex; gap: 10px; align-items: center; padding: 8px 8px 8px 14px; border-radius: 999px; background: rgba(18, 22, 32, 0.92); box-shadow: inset 0 0 0 1.5px #ffd27a, 0 16px 40px -16px rgba(0, 0, 0, 0.7); color: #eef1f7; font: 500 13px 'Inter Variable', Inter, system-ui, sans-serif; pointer-events: auto; animation: pop 0.25s ease-out both; }
   .promo button { height: 26px; padding: 0 12px; border: 0; border-radius: 999px; background: #e9b03a; color: #1b1405; font: 600 12px inherit; cursor: pointer; }
   .trust { display: grid; gap: 6px; margin-bottom: 10px; }
   .perk { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); color: #c9cfdc; font-size: 11.5px; }
@@ -295,7 +310,8 @@
   .tabs button.on { background: rgba(255, 255, 255, 0.08); color: #eef1f7; }
   .p-body { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px 14px; min-height: 104px; }
   .need, .skill, .friend { display: grid; grid-template-columns: 64px 1fr 34px; align-items: center; gap: 8px; }
-  .friend { grid-template-columns: 90px 1fr; }
+  .friend { grid-template-columns: 110px 1fr; }
+  .friend em { margin-left: 5px; color: #ffd27a; font-style: normal; font-size: 10px; }
   .n-l { color: #cfd5e2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .n-v { text-align: right; color: #9aa2b6; font: 500 11.5px ui-monospace, monospace; }
   .bar { height: 9px; border-radius: 5px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }

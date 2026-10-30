@@ -24,4 +24,13 @@ traits: Array<string>,
  * The rank whose perks you granted (`career::PERKS`), never above `rank`. A promotion only
  * offers it; it stays in this repo (an imported agent starts with none).
  */
-trust: Rank, };
+trust: Rank, 
+/**
+ * Reviews between it and other agents in this repo, by agent id (both ways). Repo-local:
+ * an imported agent starts with none.
+ */
+friends: { [key in string]: number }, 
+/**
+ * The Senior or Staff whose reviews mentored it while it was an Intern or Junior.
+ */
+mentor: string | null, };

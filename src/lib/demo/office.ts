@@ -7,6 +7,8 @@ import type { Shop } from '../gen/Shop';
 import { BY_ID } from '../../office/buy';
 import { atLeast, emptyCareer, rankLabel } from '../util/career';
 import type { Rank } from '../gen/Rank';
+import type { DayReport } from '../gen/DayReport';
+import type { Digest } from '../gen/Digest';
 import type { Sim } from './sim';
 
 let ghosts: Agent[] | null = null;
@@ -60,6 +62,42 @@ export function demoTrust(sim: Sim, id: string, rank: Rank): Agent {
   const next: Agent = { ...a, updated_at: sim.now(), career: { ...a.career, trust, milestones } };
   sim.putAgent(next);
   return next;
+}
+
+/** The digest from the demo's own event log (same counting as the core's careers). */
+export function demoDigest(sim: Sim, since: number): Digest {
+  const by = new Map<string, DayReport>();
+  const rep = (id: string | null | undefined) => {
+    if (!id || sim.agents.get(id)?.role === 'lead') return null;
+    if (!by.has(id)) by.set(id, { agent_id: id, xp: 0, stats: { ...emptyCareer().stats } });
+    return by.get(id)!;
+  };
+  const worker = (t: string | null) => (t ? (sim.tasks.get(t)?.assignee ?? null) : null);
+  for (const e of sim.log) {
+    if (e.ts < since) continue;
+    const k = e.kind;
+    if (k.type === 'committed') {
+      const r = rep(e.agent_id);
+      if (r) (r.stats.commits++, (r.xp += 15));
+    } else if (k.type === 'verified') {
+      const r = rep(e.agent_id ?? worker(e.task_id));
+      if (r && k.ok) (r.stats.checks_passed++, (r.xp += 10));
+      else if (r) r.stats.checks_failed++;
+    } else if (k.type === 'merged') {
+      const r = rep(worker(e.task_id) ?? e.agent_id);
+      if (r) (r.stats.merged++, (r.xp += 30));
+    } else if (k.type === 'reviewed') {
+      const r = rep(e.agent_id);
+      if (r) (r.stats.reviews_done++, (r.xp += 10));
+    }
+  }
+  const all = [...sim.agents.values(), ...seeded(sim)];
+  return {
+    since,
+    reports: [...by.values()].sort((a, b) => b.xp - a.xp),
+    milestones: all.flatMap((a) => a.career.milestones.filter((m) => m.at >= since).map((m) => [a.id, m] as [string, typeof m])),
+    done: [...sim.tasks.values()].filter((t) => t.status === 'done' && t.updated_at >= since).map((t) => t.title),
+  };
 }
 
 export function demoShop(sim: Sim): Shop {

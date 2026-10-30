@@ -21,6 +21,7 @@
   import type { Placed } from '../lib/gen/Placed';
   import type { Rank } from '../lib/gen/Rank';
   import { atLeast, PERKS, rankLabel } from '../lib/util/career';
+  import { editionDue } from '../office/daily';
   import type { Shop } from '../lib/gen/Shop';
   import type { EventRow } from '../lib/gen/EventRow';
   import { acquireArtifactUrl, releaseArtifactUrl } from '../lib/state/artifacts';
@@ -198,6 +199,16 @@
       toast({ kind: 'error', title: 'Export failed', body: String(e) });
     }
   }
+  /** The morning edition, once a day per repo: read once you close it (kept in this browser). */
+  const editionKey = () => `codly.edition.${store.workspace?.id ?? 'demo'}`;
+  async function digest() {
+    let last: number | null = null;
+    try {
+      last = Number(localStorage.getItem(editionKey())) || null;
+    } catch {}
+    const due = editionDue(last, Date.now());
+    return due ? api.officeDigest(due.since) : null;
+  }
   const onpause = (paused: boolean) => updateSettings({ paused });
   // Read once per mount (not reactive): persisted events, oldest first.
   const historyAtMount = () => store.events.slice();
@@ -242,6 +253,12 @@
           {shop}
           onplace={place}
           onsell={sell}
+          {digest}
+          oneditionread={() => {
+            try {
+              localStorage.setItem(editionKey(), String(Date.now()));
+            } catch {}
+          }}
         />
       {/key}
       {#snippet failed(_error, reset)}

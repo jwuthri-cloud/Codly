@@ -489,6 +489,36 @@ pub struct Career {
     /// offers it; it stays in this repo (an imported agent starts with none).
     #[serde(default)]
     pub trust: Rank,
+    /// Reviews between it and other agents in this repo, by agent id (both ways). Repo-local:
+    /// an imported agent starts with none.
+    #[serde(default)]
+    pub friends: std::collections::BTreeMap<String, i64>,
+    /// The Senior or Staff whose reviews mentored it while it was an Intern or Junior.
+    #[serde(default)]
+    pub mentor: Option<Id>,
+}
+
+/// One agent's work in a period (the daily edition and the morning standup).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DayReport {
+    pub agent_id: Id,
+    pub stats: CareerStats,
+    /// XP those events earned (`career::credit`'s rules).
+    pub xp: i64,
+}
+
+/// What the office did since a moment, from its real events: per agent, milestones, tasks done.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Digest {
+    pub since: i64,
+    /// Agents with something to report, most XP first.
+    pub reports: Vec<DayReport>,
+    /// (agent id, milestone) since then: promotions, first merges, trust, mentors.
+    pub milestones: Vec<(Id, Milestone)>,
+    /// Titles of the tasks finished since then.
+    pub done: Vec<String>,
 }
 
 /// Furniture for the office (Build/Buy), paid with what the agents earned (XP).

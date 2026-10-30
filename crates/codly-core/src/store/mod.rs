@@ -115,6 +115,18 @@ impl Store {
         Ok(self.conn().query_row("SELECT COALESCE(MAX(id), 0) FROM event", [], |r| r.get(0))?)
     }
 
+    /// A workspace's career events (commits, checks, reviews, merges) since `ts`, oldest first.
+    pub fn work_since(&self, workspace_id: &str, ts: i64) -> Result<Vec<EventRow>> {
+        let conn = self.conn();
+        let mut st = conn.prepare_cached(
+            "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event
+             WHERE workspace_id = ?1 AND ts >= ?2 AND type IN ('committed', 'verified', 'reviewed', 'merged')
+             ORDER BY id",
+        )?;
+        let rows = st.query_map(params![workspace_id, ts], event_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Newest first, for paging the timeline. Events with no workspace (CLI-level) are included.
     pub fn events(&self, workspace_id: Option<&str>, agent_id: Option<&str>, before: Option<i64>, limit: i64) -> Result<Vec<EventRow>> {
         let conn = self.conn();

@@ -7,6 +7,10 @@
 
 use crate::model::{Applicant, Career, Milestone, Rank};
 
+/// Extra XP for a review by a mentor: feedback from a senior teaches more.
+pub const MENTORED_XP: i64 = 10;
+const MAX_FRIENDS: usize = 24;
+
 /// XP to reach each rank above Intern.
 pub const RANKS: [(Rank, i64); 3] = [(Rank::Junior, 60), (Rank::Senior, 250), (Rank::Staff, 800)];
 const MAX_MILESTONES: usize = 50;
@@ -92,6 +96,8 @@ pub enum Credit<'a> {
     Review { approved: bool },
     /// It reviewed someone else's work.
     Reviewed,
+    /// A Senior or Staff reviewed its work while it was an Intern or Junior (`mentors`).
+    Mentored,
     Merge,
     Files(&'a [String]),
 }
@@ -122,6 +128,7 @@ pub fn credit(c: &mut Career, what: Credit, now: i64) -> Option<Rank> {
             c.stats.reviews_done += 1;
             gain = 10;
         }
+        Credit::Mentored => gain = MENTORED_XP,
         Credit::Merge => {
             c.stats.merged += 1;
             gain = 30;
@@ -144,6 +151,18 @@ pub fn credit(c: &mut Career, what: Credit, now: i64) -> Option<Rank> {
         note(c, now, format!("Promoted to {}", rank_label(c.rank)));
         c.rank
     })
+}
+
+/// Whether a review by `reviewer` mentors the author: a Senior or Staff reviewing an Intern or Junior.
+pub fn mentors(reviewer: Rank, author: Rank) -> bool {
+    reviewer >= Rank::Senior && author <= Rank::Junior
+}
+
+/// One more review between it and another agent.
+pub fn befriend(c: &mut Career, other: &str) {
+    if c.friends.len() < MAX_FRIENDS || c.friends.contains_key(other) {
+        *c.friends.entry(other.to_string()).or_default() += 1;
+    }
 }
 
 pub fn note(c: &mut Career, at: i64, text: String) {
@@ -193,6 +212,8 @@ pub fn sanitize(mut c: Career) -> Career {
     c.xp = c.xp.clamp(0, 1_000_000);
     c.rank = rank_for(c.xp);
     c.trust = Rank::Intern; // trust is earned in each repo, from you
+    c.friends.clear(); // ids of agents in the repo it came from
+    c.mentor = None;
     c.traits = clean_traits(&c.traits);
     c.skills.retain(|k, v| skill_names().contains(&k.as_str()) && *v >= 0);
     c.milestones.retain(|m| !m.text.is_empty() && m.text.len() <= 120 && !m.text.chars().any(char::is_control));
@@ -318,6 +339,21 @@ mod tests {
         grant(&mut c, Rank::Intern, 2);
         assert!(!trusts(&c, Rank::Senior), "taken back");
         assert_eq!(c.milestones.len(), 1, "taking trust back is not a milestone");
+    }
+
+    #[test]
+    fn seniors_mentor_juniors() {
+        assert!(mentors(Rank::Senior, Rank::Junior) && mentors(Rank::Staff, Rank::Intern));
+        assert!(!mentors(Rank::Junior, Rank::Intern) && !mentors(Rank::Staff, Rank::Senior));
+        let mut c = Career::default();
+        credit(&mut c, Credit::Mentored, 1);
+        assert_eq!(c.xp, MENTORED_XP);
+        befriend(&mut c, "a1");
+        befriend(&mut c, "a1");
+        assert_eq!(c.friends.get("a1"), Some(&2));
+        c.mentor = Some("a1".into());
+        let c = sanitize(c);
+        assert!(c.friends.is_empty() && c.mentor.is_none(), "friends are agents of the old repo");
     }
 
     #[test]

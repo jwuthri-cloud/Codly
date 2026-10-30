@@ -583,6 +583,12 @@ impl Core {
         Ok(a)
     }
 
+    /// What the office did since `since` (ms), for the daily edition and the morning standup.
+    pub fn digest(&self, since: i64) -> anyhow::Result<Digest> {
+        let ws = self.inner.require_ws()?;
+        self.inner.digest(&ws.id, since)
+    }
+
     /// Build/Buy: the office's budget (XP earned in this repo), catalog and furniture owned.
     pub fn shop(&self) -> anyhow::Result<Shop> {
         let ws = self.inner.require_ws()?;

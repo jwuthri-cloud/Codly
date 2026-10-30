@@ -6,6 +6,7 @@
 import type { AccountInfo } from './gen/AccountInfo';
 import type { Agent } from './gen/Agent';
 import type { Rank } from './gen/Rank';
+import type { Digest } from './gen/Digest';
 import type { DictationStatus } from './gen/DictationStatus';
 import type { AgentGit } from './gen/AgentGit';
 import type { Blocker } from './gen/Blocker';
@@ -158,6 +159,8 @@ export const api = {
   exportAgent: (agentId: string) => call<string>('export_agent', { agentId }),
   /** Trust an agent up to a rank's perks (capped at its rank); 'intern' takes them back. */
   trustAgent: (agentId: string, rank: Rank) => call<Agent>('trust_agent', { agentId, rank }),
+  /** What the office did since `since` (ms): the daily edition and the morning standup. */
+  officeDigest: (since: number) => call<Digest>('office_digest', { since }),
   /** Workers let go in the open repo, who keep their career (the office's ghosts). */
   ghosts: () => call<Agent[]>('ghosts', {}),
   /** Bring a ghost back as a regular worker (same name, look, career and memory). */

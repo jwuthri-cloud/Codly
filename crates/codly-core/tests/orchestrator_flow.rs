@@ -2017,6 +2017,15 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     assert_eq!(hired.career.stats.merged, 1);
     assert_eq!(snap.tasks[0].status, TaskStatus::Done);
 
+    // The daily edition reports the same work, counted by the same rules.
+    let day = core.digest(0).unwrap();
+    let report = day.reports.iter().find(|r| r.agent_id == hired.id).expect("the hire has a report");
+    assert_eq!((report.stats.commits, report.stats.merged), (hired.career.stats.commits, 1));
+    assert!(report.xp >= 55, "{report:?}");
+    assert_eq!(day.done, vec![snap.tasks[0].title.clone()]);
+    assert!(day.milestones.iter().any(|(id, m)| id == &hired.id && m.text == "First merge"));
+    assert!(core.digest(i64::MAX).unwrap().reports.is_empty(), "nothing since the future");
+
     // Let go after its task, it haunts the archive with its career, and can come back.
     let ghost = wait_for("the consultant to be let go", 30, async || core.ghosts().unwrap().into_iter().find(|g| g.id == hired.id)).await;
     assert_eq!(ghost.career.stats.merged, 1);

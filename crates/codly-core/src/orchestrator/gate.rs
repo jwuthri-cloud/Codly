@@ -385,7 +385,8 @@ impl Inner {
             }
         };
         let free = |a: &&Agent| a.role == Role::Reviewer && a.member.is_none() && a.provider == provider && idle(a);
-        let reviewer = match member.or_else(|| agents.iter().find(free)) {
+        // The most senior free reviewer: a Senior or Staff mentors juniors (career::mentors).
+        let reviewer = match member.or_else(|| agents.iter().filter(free).max_by_key(|a| a.career.rank)) {
             Some(a) => a.clone(),
             None => {
                 let name = names::next_name(&agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>());

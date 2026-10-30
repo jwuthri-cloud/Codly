@@ -38,6 +38,8 @@ export const emptyCareer = (): Career => ({
   milestones: [],
   traits: [],
   trust: 'intern',
+  friends: {},
+  mentor: null,
 });
 
 /** What trusting a rank gives an agent (mirror of `career::PERKS`); you grant it, a promotion offers it. */
@@ -45,6 +47,8 @@ export const PERKS: { rank: Rank; perk: string }[] = [
   { rank: 'senior', perk: 'Works inside its own worktree without asking; risky actions still ask' },
   { rank: 'staff', perk: 'Its work merges without the cross-vendor review' },
 ];
+/** Extra XP an Intern or Junior earns from a review by a Senior or Staff (`career::MENTORED_XP`). */
+export const MENTORED_XP = 10;
 const order = (r: Rank) => RANKS.findIndex((x) => x.rank === r);
 /** At or above (mirror of `Rank`'s order). */
 export const atLeast = (r: Rank, min: Rank) => order(r) >= order(min);

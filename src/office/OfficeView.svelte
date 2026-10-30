@@ -32,6 +32,9 @@
   import GhostBoard from './GhostBoard.svelte';
   import BuyMode from './BuyMode.svelte';
   import FurnitureMenu from './FurnitureMenu.svelte';
+  import DailyEdition from './DailyEdition.svelte';
+  import { edition, standupLine, type Edition } from './daily';
+  import type { Digest } from '../lib/gen/Digest';
 
   interface Props {
     files?: RepoFile[];
@@ -67,6 +70,10 @@
     shop?: Shop | null;
     onplace?: (piece: Placed) => void;
     onsell?: (uid: string) => void;
+    /** The day's edition and standup: the digest since the last one, or null when it is not due. */
+    digest?: () => Promise<Digest | null>;
+    /** The paper was closed: the edition is read (until then it comes back on each mount). */
+    oneditionread?: () => void;
   }
 
   let {
@@ -98,7 +105,22 @@
     shop = null,
     onplace,
     onsell,
+    digest,
+    oneditionread,
   }: Props = $props();
+
+  // The morning edition and standup (daily.ts), once the agents have walked in.
+  let paper = $state<Edition | null>(null);
+  let standup = $state<string[]>([]);
+  const nameOf = (id: string) => agents.find((a) => a.id === id)?.name ?? ghosts.find((a) => a.id === id)?.name ?? 'Someone';
+  async function morning() {
+    const d = await digest?.().catch(() => null);
+    if (!d || !engine) return;
+    paper = edition(d);
+    const period = Date.now() - d.since > 36 * 3_600_000 ? 'Since last time' : 'Yesterday';
+    const here = new Set(agents.filter((a) => !a.archived).map((a) => a.id));
+    standup = engine.standup(d.reports.filter((r) => here.has(r.agent_id)).map((r) => ({ id: r.agent_id, text: standupLine(r, period) })));
+  }
 
   // Job offers from the event stream: open ones, then a few seconds of "Hired" once closed.
   let offers = $state<JobOffer[]>([]);
@@ -201,6 +223,15 @@
     };
   });
 
+  // The morning runs once per mount, when the office is on screen (not behind a panel).
+  let dawned = false;
+  $effect(() => {
+    if (!engine || backdrop || dawned) return;
+    dawned = true;
+    const t = setTimeout(morning, reducedMotion ? 0 : 2500);
+    return () => clearTimeout(t);
+  });
+
   // Live events (re-subscribe if the source changes; events are de-duplicated by id).
   $effect(() => {
     const e = engine;
@@ -296,6 +327,9 @@
       {paused}
       {onpause}
     />
+  {/if}
+  {#if engine && !backdrop && paper}
+    <DailyEdition {paper} {nameOf} {standup} top={hudInsets.top} onclose={() => ((paper = null), oneditionread?.())} />
   {/if}
   {#if engine && offers.length}
     <JobBoard {offers} insets={hudInsets} onpick={onpickapplicant} />
