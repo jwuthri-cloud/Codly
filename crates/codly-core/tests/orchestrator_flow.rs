@@ -2042,6 +2042,14 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     let integ = snap.plans[0].integration_branch.clone().unwrap();
     let out = std::process::Command::new("git").args(["merge", "--no-ff", "-m", "by hand", &integ]).current_dir(&repo).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // …and delete its branch, after removing its worktree: only the tasks' commits remain.
+    let wt = snap.plans[0].integration_worktree.clone().unwrap();
+    for args in [vec!["worktree", "remove", "--force", wt.as_str()], vec!["branch", "-D", integ.as_str()]] {
+        let out = std::process::Command::new("git").args(&args).current_dir(&repo).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let err = core.plan_diff(&snap.plans[0].id).await.unwrap_err().to_string();
+    assert!(err.contains("was deleted"), "a plain reason, not git's: {err}");
     let back = core.bring_back(&ghost.id).unwrap();
     assert!(!back.archived && !back.consultant && back.kept && back.status == AgentStatus::Idle);
     // bring_back runs a scheduling pass: a worker you brought back is not let go again.
@@ -2051,7 +2059,7 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
         core.snapshot().await.unwrap().plans.into_iter().find(|p| p.id == snap.plans[0].id && p.merged_sha.is_some())
     })
     .await;
-    assert!(!Path::new(plan.integration_worktree.as_deref().unwrap()).exists(), "its worktree is gone, as after a merge from the app");
+    assert!(!Path::new(plan.integration_worktree.as_deref().unwrap()).exists());
     assert_eq!(back.career.milestones.last().map(|m| m.text.as_str()), Some("Came back"));
     assert!(core.ghosts().unwrap().is_empty());
     assert!(core.snapshot().await.unwrap().agents.iter().any(|a| a.id == ghost.id), "back on the team");

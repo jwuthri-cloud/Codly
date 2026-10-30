@@ -321,7 +321,11 @@ impl Inner {
         let p = self.plan(plan_id)?;
         let (Some(base), Some(branch)) = (p.base_commit.as_deref(), p.integration_branch.as_deref()) else { return Ok(String::new()) };
         let ws = self.store.workspace(&p.workspace_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
-        self.git.diff(Path::new(&ws.repo_path), base, branch).await
+        let repo = Path::new(&ws.repo_path);
+        if self.git.rev_parse(repo, branch).await?.is_none() {
+            bail!("the plan's branch {branch} was deleted, so its combined diff is gone; each task's diff still works");
+        }
+        self.git.diff(repo, base, branch).await
     }
 
     /// Plans you merged without Codly (git on the command line, another tool): a done plan whose
@@ -332,7 +336,27 @@ impl Inner {
         let open = self.store.plans(&ws.id, 100)?.into_iter().filter(|p| p.status == PlanStatus::Done && p.merged_sha.is_none() && !p.kept);
         for p in open {
             let Some(branch) = p.integration_branch.as_deref() else { continue };
-            if !self.git.is_ancestor(&repo, branch, "HEAD").await.unwrap_or(false) {
+            let merged = if self.git.rev_parse(&repo, branch).await?.is_some() {
+                self.git.is_ancestor(&repo, branch, "HEAD").await.unwrap_or(false)
+            } else {
+                // The branch was deleted: merged if every finished task's commit is in your branch.
+                let heads: Vec<Option<String>> = self
+                    .store
+                    .tasks(&ws.id)?
+                    .iter()
+                    .filter(|t| t.plan_id.as_deref() == Some(&p.id) && t.status == TaskStatus::Done)
+                    .map(|t| self.store.task_commits(&t.id).map(|c| c.1))
+                    .collect::<anyhow::Result<_>>()?;
+                let mut all = !heads.is_empty();
+                for h in &heads {
+                    all = all && match h {
+                        Some(h) => self.git.is_ancestor(&repo, h, "HEAD").await.unwrap_or(false),
+                        None => false,
+                    };
+                }
+                all
+            };
+            if !merged {
                 continue;
             }
             let Some(head) = self.git.head(&repo).await? else { continue };
