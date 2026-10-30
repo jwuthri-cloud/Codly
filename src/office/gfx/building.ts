@@ -173,10 +173,11 @@ export class BuildingGfx {
         seg(a, z, H, H + 0.03, cap, WT + 0.02);
         seg(a, z, 0, 0.09, base, WT + 0.03);
       }
-      // Rounded-off ends at door gaps: a slim jamb in the cap color.
+      // Rounded-off ends at door gaps: a slim jamb in the cap color, standing a hair proud of
+      // the wall's end face (flush, the two faces z-fight into stripes).
       for (const [ga, gz] of gaps) {
-        if (ga > 0) seg(ga - 0.03, ga, 0, H + 0.03, cap, WT + 0.02);
-        if (gz < len) seg(gz, gz + 0.03, 0, H + 0.03, cap, WT + 0.02);
+        if (ga > 0) seg(ga - 0.03, ga + 0.005, 0, H + 0.03, cap, WT + 0.02);
+        if (gz < len) seg(gz - 0.005, gz + 0.03, 0, H + 0.03, cap, WT + 0.02);
       }
       if (side) {
         const mid = horiz ? [0, w.z0 < D / 2 ? -1 : 1] : [w.x0 < W / 2 ? -1 : 1, 0];
