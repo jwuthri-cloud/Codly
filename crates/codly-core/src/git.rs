@@ -246,6 +246,16 @@ impl Git {
         Ok(!out.is_empty())
     }
 
+    /// `diff --name-only <revs>`: ["HEAD"] gives the uncommitted tracked files, [base, branch]
+    /// what a branch changed.
+    pub async fn changed_paths(&self, path: &Path, revs: &[&str]) -> Result<Vec<String>> {
+        let mut args = vec!["-c", "core.fsmonitor=false", "diff", "--name-only", "-z", "--no-renames"];
+        args.extend_from_slice(revs);
+        args.push("--");
+        let out = self.ok(path, &args, true).await?;
+        Ok(out.split('\0').filter(|s| !s.is_empty()).map(String::from).collect())
+    }
+
     pub async fn branch_exists(&self, repo: &Path, branch: &str) -> Result<bool> {
         let r = format!("refs/heads/{branch}");
         Ok(self.run(repo, &["show-ref", "--verify", "--quiet", &r], true).await?.ok)

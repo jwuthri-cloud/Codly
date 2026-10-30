@@ -9,7 +9,7 @@
   import { tick } from 'svelte';
   import type { Agent } from '../lib/gen/Agent';
   import type { EventRow } from '../lib/gen/EventRow';
-  import { copyText, interruptAgent, stopAgent } from '../lib/state/actions';
+  import { copyText, interruptAgent, refreshAccounts, stopAgent } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { narrate } from '../lib/state/narration';
   import { store, type FileTouch } from '../lib/state/store.svelte';
@@ -124,6 +124,11 @@
   // Its sign-in: the quota it draws from (labelled only when the CLI has several in use).
   const account = $derived(accounts.of(agent));
   const acctTag = $derived(accounts.tag(agent));
+  // Who is signed in can change under Codly (`claude auth login`), so ask again on open.
+  $effect(() => {
+    void agent.id;
+    void refreshAccounts(true);
+  });
   const WINDOW: Record<string, string> = { five_hour: '5-hour window', seven_day: '7-day window', weekly: 'Weekly window' };
 
   // ── live output ──

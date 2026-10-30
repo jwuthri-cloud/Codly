@@ -172,7 +172,9 @@ export async function mergePlan(planId: string) {
     store.markPlanMerged(planId, sha);
     toastsUpdate(id, { kind: 'success', title: `Merged into ${target}`, body: `${plan?.summary ?? 'Plan'} · ${shortSha(sha)}` });
   } catch (e) {
-    toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${target}`, body: `${msg(e)} — commit or stash changes in your checkout, then retry.` });
+    // The Lead that planned it explains in the request's chat, instead of a bare error.
+    const asked = !!plan && sendChat(plan.thread, `Merging “${plan.summary}” into ${target} failed: ${msg(e)}\n\nWhy, and what's the safest way to get it merged?`);
+    toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${target}`, body: asked ? `${msg(e)} — the Lead is looking into it in the chat.` : msg(e) });
   }
 }
 

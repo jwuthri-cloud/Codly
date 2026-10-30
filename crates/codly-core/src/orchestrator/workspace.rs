@@ -334,7 +334,17 @@ impl Inner {
         let repo = PathBuf::from(&ws.repo_path);
         let _g = self.repo_lock.lock().await;
         if self.git.dirty(&repo, false).await? {
-            bail!("your checkout has uncommitted changes; commit or stash them, then merge again");
+            let dirty = self.git.changed_paths(&repo, &["HEAD"]).await.unwrap_or_default();
+            let ours = match p.base_commit.as_deref() {
+                Some(base) => self.git.changed_paths(&repo, &[base, &branch]).await.unwrap_or_default(),
+                None => vec![],
+            };
+            let overlap: Vec<&String> = dirty.iter().filter(|f| ours.contains(f)).collect();
+            let mut why = format!("your checkout has uncommitted changes in {}", name_list(&dirty));
+            if !overlap.is_empty() {
+                why += &format!(" ({} also changed by this plan, so stashing may conflict when you restore)", name_list(&overlap));
+            }
+            bail!("{why}; commit or stash them, then merge again");
         }
         let target = self
             .git
@@ -421,6 +431,15 @@ async fn child_groups() -> Vec<i32> {
             }
         })
         .collect()
+}
+
+/// "a.rs, b.rs, c.rs and 9 more".
+fn name_list<S: AsRef<str>>(files: &[S]) -> String {
+    let shown: Vec<&str> = files.iter().take(3).map(AsRef::as_ref).collect();
+    match files.len().saturating_sub(3) {
+        0 => shown.join(", "),
+        more => format!("{} and {more} more", shown.join(", ")),
+    }
 }
 
 fn expand_home(p: &str) -> PathBuf {
