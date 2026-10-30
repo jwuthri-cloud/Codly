@@ -193,7 +193,26 @@ impl Inner {
         if let Some(found) = detect(&self.base_env, &self.clis(), &configs, !self.fixed_clis, known).await {
             *write(&self.accounts) = found;
         }
+        if !reuse && !self.fixed_clis {
+            self.pull_quota().await;
+        }
         self.kick();
+    }
+
+    /// Ask each signed-in Claude account for its quota (what `/usage` shows), so accounts no
+    /// agent has run on yet have it too.
+    async fn pull_quota(&self) {
+        let user_home = self.base_env.get("HOME").cloned().unwrap_or_default();
+        let mut set = tokio::task::JoinSet::new();
+        for a in read(&self.accounts).iter().filter(|a| a.provider == Provider::Claude && a.logged_in != Some(false)) {
+            let (id, home, user_home) = (a.id.clone(), a.home.clone(), user_home.clone());
+            set.spawn(async move { (id, crate::quota::claude(home.as_deref(), &user_home).await) });
+        }
+        for (id, readings) in set.join_all().await {
+            for r in readings.unwrap_or_default() {
+                self.record_usage(&id, &r.window, Some(r.used_fraction), r.resets_at, r.status.as_deref());
+            }
+        }
     }
 
     /// The login shell's sign-in of a provider (None = no account detected for it).

@@ -40,6 +40,7 @@ pub mod memory;
 pub mod model;
 pub mod orchestrator;
 pub mod proc;
+pub mod quota;
 pub mod pty;
 pub mod skills;
 pub mod store;

@@ -36,7 +36,8 @@
     await refreshAccounts(true);
     refreshing = false;
   }
-  onMount(() => void refreshAccounts(false));
+  // Re-checks every sign-in and pulls its quota, so accounts no agent ran on show it too.
+  onMount(() => void refresh());
 
   // ── edits (each one saves the CLI's whole list, in order) ──
   function save(p: Provider, list: AccountInfo[], probe = false) {

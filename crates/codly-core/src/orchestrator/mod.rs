@@ -425,7 +425,8 @@ impl Core {
     }
 
     /// Every sign-in of every installed CLI, in your order, with the usage windows its agents
-    /// last reported (`limits`). `refresh` = ask each CLI again who is signed in (≤ 5 s).
+    /// last reported (`limits`). `refresh` = ask each CLI again who is signed in, and each
+    /// Claude sign-in for its quota (≤ 10 s).
     pub async fn accounts(&self, refresh: bool) -> anyhow::Result<Vec<AccountInfo>> {
         if refresh {
             self.inner.redetect_accounts(false).await;
