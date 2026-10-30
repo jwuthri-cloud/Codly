@@ -439,7 +439,11 @@ async fn single_task_plan_runs_end_to_end() {
     // A dirty checkout is refused.
     std::fs::write(repo.join("README.md"), "changed\n").unwrap();
     let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
-    assert!(err.contains("uncommitted changes"), "{err}");
+    assert!(err.contains("uncommitted changes in README.md;"), "{err}");
+    // ...and one the plan also changed is called out.
+    std::fs::write(repo.join("hello.txt"), "mine\n").unwrap();
+    let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
+    assert!(err.contains("(hello.txt also changed by this plan"), "{err}");
     core.shutdown().await;
 }
 
@@ -560,6 +564,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             member: None,
             title: None,
             consultant: false,
+            kept: false,
             archived: false,
             usage: Usage::default(),
             career: Default::default(),
@@ -672,7 +677,9 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
     assert_eq!(task.assignee.as_deref(), Some(agent_id.as_str()));
     assert_eq!(task.attempt, 2);
     assert_eq!(task.branch.as_deref(), Some("codly/adhoc/a1"), "ad-hoc work stays on its branch");
-    let agent = snap.agents.iter().find(|a| a.id == agent_id).unwrap();
+    // Its task done, the worker is let go (a ghost now).
+    let ghosts = core.ghosts().unwrap();
+    let agent = snap.agents.iter().chain(&ghosts).find(|a| a.id == agent_id).unwrap();
     assert_eq!(agent.task_id, None);
 
     let store = Store::open(&data.join("codly.sqlite")).unwrap();
@@ -1740,7 +1747,8 @@ async fn a_resumed_run_keeps_its_account() {
         assert!(matches!(&log.runs[0], (a, SessionMode::Resume { session_id }) if *a == agent_id && session_id == "sess-work"), "{:?}", log.runs);
         assert_eq!(log.envs[0].2.as_deref(), Some(work.as_str()), "resumed where its session lives, not on the emptier account");
     }
-    let ada = snap.agents.iter().find(|a| a.id == agent_id).unwrap();
+    let ghosts = core.ghosts().unwrap(); // let go once its task is done
+    let ada = snap.agents.iter().chain(&ghosts).find(|a| a.id == agent_id).unwrap();
     assert_eq!(ada.account.as_deref(), Some(work_id.as_str()));
     let store = Store::open(&data.join("codly.sqlite")).unwrap();
     let resumed = store.latest_task_run(&task_id, Some(Role::Worker)).unwrap().unwrap();
@@ -2029,8 +2037,12 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     // Let go after its task, it haunts the archive with its career, and can come back.
     let ghost = wait_for("the consultant to be let go", 30, async || core.ghosts().unwrap().into_iter().find(|g| g.id == hired.id)).await;
     assert_eq!(ghost.career.stats.merged, 1);
+    assert_eq!(ghost.worktree, None, "its task's worktree went with the task");
     let back = core.bring_back(&ghost.id).unwrap();
-    assert!(!back.archived && !back.consultant && back.status == AgentStatus::Idle);
+    assert!(!back.archived && !back.consultant && back.kept && back.status == AgentStatus::Idle);
+    // bring_back runs a scheduling pass: a worker you brought back is not let go again.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(core.ghosts().unwrap().is_empty(), "kept between tasks");
     assert_eq!(back.career.milestones.last().map(|m| m.text.as_str()), Some("Came back"));
     assert!(core.ghosts().unwrap().is_empty());
     assert!(core.snapshot().await.unwrap().agents.iter().any(|a| a.id == ghost.id), "back on the team");

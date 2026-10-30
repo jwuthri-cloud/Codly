@@ -427,6 +427,9 @@ pub struct Agent {
     /// Hired for one task; let go when it ends.
     #[serde(default)]
     pub consultant: bool,
+    /// You brought it back from the ghosts: it stays between tasks until you let it go.
+    #[serde(default)]
+    pub kept: bool,
     /// Let go (fired consultant, removed member, closed Lead): gone from the team.
     #[serde(default)]
     pub archived: bool,

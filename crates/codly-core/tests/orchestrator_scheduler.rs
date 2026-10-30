@@ -88,6 +88,7 @@ fn agent(id: &str, name: &str, p: Provider, role: Role) -> Agent {
         member: None,
         title: None,
         consultant: false,
+        kept: false,
         archived: false,
         usage: Usage::default(),
         career: Default::default(),

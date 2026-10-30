@@ -985,6 +985,7 @@ impl Inner {
             member: None,
             title: None,
             consultant: false,
+            kept: false,
             archived: false,
             usage: Usage::default(),
             career,

@@ -47,6 +47,7 @@ export function mkAgent(id: string, name: string, provider: Provider, role: Role
     member: null,
     title: null,
     consultant: false,
+    kept: false,
     archived: false,
     usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, context_used: null, context_window: null, cost_usd: null },
     career: emptyCareer(),

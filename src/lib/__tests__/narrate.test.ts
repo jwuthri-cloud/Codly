@@ -11,7 +11,7 @@ const T0 = 1_760_000_000_000;
 
 const agent = (o: Partial<Agent> = {}): Agent => ({
   id: 'a1', name: 'Ada', provider: 'claude', model: 'claude-sonnet-5-5', role: 'worker', status: 'working', activity: null, activity_label: null,
-  task_id: 't1', run_id: 'r1', session_id: null, worktree: '/wt/t1-ada', billing: 'subscription', color: 7, look_seed: 'ada', thread: null, account: null, member: null, title: null, consultant: false, archived: false,
+  task_id: 't1', run_id: 'r1', session_id: null, worktree: '/wt/t1-ada', billing: 'subscription', color: 7, look_seed: 'ada', thread: null, account: null, member: null, title: null, consultant: false, kept: false, archived: false,
   usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, context_used: null, context_window: null, cost_usd: null },
   career: emptyCareer(), created_at: T0, updated_at: T0, ...o,
 });

@@ -207,6 +207,7 @@ impl Inner {
         self.update_agent(id, |a| {
             a.archived = false;
             a.consultant = false;
+            a.kept = true;
             a.status = AgentStatus::Idle;
             a.task_id = None;
             a.activity = None;

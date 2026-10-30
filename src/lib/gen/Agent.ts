@@ -46,6 +46,10 @@ title: string | null,
  */
 consultant: boolean, 
 /**
+ * You brought it back from the ghosts: it stays between tasks until you let it go.
+ */
+kept: boolean, 
+/**
  * Let go (fired consultant, removed member, closed Lead): gone from the team.
  */
 archived: boolean, usage: Usage, 

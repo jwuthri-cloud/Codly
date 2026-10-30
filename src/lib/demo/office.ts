@@ -49,7 +49,7 @@ export function demoBringBack(sim: Sim, id: string): Agent {
   if (!g) throw new Error('no such ghost in this repo');
   if ([...sim.agents.values()].some((a) => a.name.toLowerCase() === g.name.toLowerCase())) throw new Error(`someone called ${g.name} already works here`);
   ghosts = seeded(sim).filter((x) => x !== g);
-  const back: Agent = { ...g, archived: false, consultant: false, status: 'idle', task_id: null, updated_at: sim.now(), career: { ...g.career, milestones: [...g.career.milestones, { at: sim.now(), text: 'Came back' }] } };
+  const back: Agent = { ...g, archived: false, consultant: false, kept: true, status: 'idle', task_id: null, updated_at: sim.now(), career: { ...g.career, milestones: [...g.career.milestones, { at: sim.now(), text: 'Came back' }] } };
   sim.putAgent(back);
   return back;
 }

@@ -200,17 +200,26 @@ impl Inner {
             a.task_id = None;
             a.activity = None;
             a.activity_label = None;
+            a.worktree = None; // the task's worktree goes with the plan; a ghost brought back gets a new one
         })?;
         let who = if a.consultant { "consultant " } else { "" };
         self.decide(Some(ws_id), None, "staff", format!("let {who}{} go: {why}", a.name), json!({ "agent": a.id, "consultant": a.consultant }))?;
         Ok(())
     }
 
-    /// Consultants whose tasks are all over (done, failed or cancelled) are let go. A blocked
-    /// task keeps its consultant, so a retry resumes the same session. Caller holds `sched_lock`.
+    /// Workers hired for tasks (consultants, and older workers from before consultants) are let
+    /// go once their tasks are all over (done, failed or cancelled); team members and workers
+    /// you brought back stay. A blocked task keeps its worker, so a retry resumes the same
+    /// session. A worktree that is gone from disk is forgotten. Caller holds `sched_lock`.
     pub(super) fn sweep_staff(&self, ws: &Workspace, tasks: &[Task], agents: &[Agent]) -> Result<()> {
         let live: HashSet<Id> = lock(&self.live).keys().cloned().collect();
-        for a in agents.iter().filter(|a| a.consultant && !live.contains(&a.id) && a.task_id.is_none()) {
+        for a in agents.iter().filter(|a| a.worktree.as_deref().is_some_and(|w| !Path::new(w).exists()) && !live.contains(&a.id)) {
+            self.update_agent(&a.id, |a| a.worktree = None)?;
+        }
+        // ponytail: "Came back" in the scrapbook marks ghosts brought back before `kept` existed.
+        let kept = |a: &Agent| a.kept || a.career.milestones.iter().any(|m| m.text == "Came back");
+        let hired = |a: &Agent| a.role == Role::Worker && a.member.is_none() && (a.consultant || !kept(a));
+        for a in agents.iter().filter(|a| hired(a) && !live.contains(&a.id) && a.task_id.is_none()) {
             let mine: Vec<&Task> = tasks.iter().filter(|t| t.assignee.as_deref() == Some(&a.id)).collect();
             if mine.iter().all(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled)) {
                 let why = match mine.last() {
