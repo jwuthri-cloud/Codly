@@ -1,7 +1,4 @@
-// Characters: one of Kenney's Mini Characters per agent (picked by its seed, shirt in its identity
-// color, glasses on reviewers; gfx/kenney.ts), the Lead a bit taller, a helper ("intern") small.
-// Until the pack has loaded (and in tests) they wear our own procedural build instead: chibi
-// people from the agent's seed — skin,
+// Characters: charming low-poly chibi people built procedurally from the agent's seed — skin,
 // hair style and color, clothes in the agent's identity color, a small provider badge on the
 // chest — with role silhouettes: the Lead wears a blazer and stands a bit taller, a reviewer
 // wears a cardigan and round glasses, workers wear a tee with a hood or headphones, a helper
@@ -37,7 +34,6 @@ import { HAIR, HAIR_WEIGHTS, identity, lin, mix, PANTS, PROVIDER, SKIN, type RGB
 import { hash, rng } from '../text';
 import { traitsOf } from '../traits';
 import { Builder } from './builder';
-import { KENNEY_COUNT, kenneyBody, kenneyReady, type KenneyBody } from './kenney';
 import type { EmoteKind } from './textures';
 
 // ───────────── look ─────────────
@@ -56,8 +52,6 @@ export interface Look {
   intern: boolean;
   scale: number;
   blush: boolean;
-  /** Which Kenney character (gfx/kenney.ts). */
-  model: number;
 }
 
 function pick<T>(r: () => number, list: T[], weights?: number[]): T {
@@ -93,12 +87,10 @@ export function lookFor(seed: string, color: number, role: Role, provider: Provi
     intern,
     scale: (intern ? 0.72 : role === 'lead' ? 1.06 : 1) * 1.2,
     blush: r() < 0.6,
-    model: 0,
   };
   // Later styles (quiff, afro, undercut) draw last, so everyone else keeps the look they had.
   const extra = r();
   if (extra < 0.3) look.style = 8 + Math.floor((extra / 0.3) * 3);
-  look.model = Math.floor(r() * KENNEY_COUNT);
   return look;
 }
 
@@ -498,10 +490,6 @@ const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x
 const BLEND_MS = 240;
 const WALK_SPEED = 2.1;
 const STRIDE = 0.62;
-/** Kenney's rig (its units) scaled to our characters' height; its hips; how far its arms hang. */
-const K = 1.5;
-const K_HIP = 0.17625 * K;
-const ARM_DROP = 1.0;
 
 export interface CharacterEnv {
   emotes: (k: EmoteKind) => Texture;
@@ -513,7 +501,7 @@ export class Character {
   readonly root = new Group();
   private body = new Group();
   private head = new Group();
-  private headMesh!: Mesh;
+  private headMesh: Mesh;
   private armL = new Group();
   private armR = new Group();
   private foreL = new Group();
@@ -532,11 +520,7 @@ export class Character {
   private propMesh: Mesh;
   private mat: MeshStandardMaterial;
   private geos: BufferGeometry[] = [];
-  private heads: BufferGeometry[] = [];
-  /** Our own procedural build, until (or unless) the Kenney pack has loaded. */
-  private own: Mesh[] = [];
-  private ownGeos: BufferGeometry[] = [];
-  private kenney: KenneyBody | null = null;
+  private heads: BufferGeometry[];
   private eyes = 0;
   readonly look: Look;
   private env: CharacterEnv;
@@ -607,20 +591,39 @@ export class Character {
     this.breathPeriod = 3.6 + this.rand() * 1.4;
     this.lazy = traitsOf(id).includes('lazy');
     this.mat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, transparent: false });
+    const parts = buildParts(look);
+    this.heads = parts.heads;
+    this.geos.push(parts.torso, parts.badge, ...parts.heads, parts.upper, parts.fore, parts.hand, parts.thigh, parts.shin, parts.shoe);
+    const mesh = (g: BufferGeometry, parent: Object3D) => {
+      const m = new Mesh(g, this.mat);
+      m.castShadow = true;
+      m.receiveShadow = false;
+      parent.add(m);
+      return m;
+    };
+    const badgeMat = new MeshBasicMaterial({ vertexColors: true });
+    this.extraMats.push(badgeMat);
     this.root.add(this.body);
     this.body.position.y = HIP;
+    mesh(parts.torso, this.body);
+    const badge = new Mesh(parts.badge, badgeMat);
+    this.body.add(badge);
     this.body.add(this.head);
     this.head.position.y = NECK;
+    this.headMesh = mesh(this.heads[0], this.head);
     for (const [arm, fore, wrist, sx] of [
       [this.armL, this.foreL, this.wristL, 1],
       [this.armR, this.foreR, this.wristR, -1],
     ] as const) {
       arm.position.set(sx * SHOULDER_X, SHOULDER_Y, 0);
       this.body.add(arm);
+      mesh(parts.upper, arm);
       fore.position.y = -UPPER;
       arm.add(fore);
+      mesh(parts.fore, fore);
       wrist.position.y = -FORE;
       fore.add(wrist);
+      mesh(parts.hand, wrist);
     }
     for (const [leg, knee, ankle, sx] of [
       [this.legL, this.kneeL, this.ankleL, 1],
@@ -628,10 +631,13 @@ export class Character {
     ] as const) {
       leg.position.set(sx * LEG_X, HIP, 0);
       this.root.add(leg);
+      mesh(parts.thigh, leg);
       knee.position.y = -THIGH;
       leg.add(knee);
+      mesh(parts.shin, knee);
       ankle.position.y = -SHIN;
       knee.add(ankle);
+      mesh(parts.shoe, ankle);
     }
     this.hand.position.set(0, -0.02, 0.02);
     this.wristR.add(this.hand);
@@ -647,67 +653,7 @@ export class Character {
     this.root.scale.setScalar(look.scale);
     targets(this.goal, 'stand', false, this.ctx(0, 0, false));
     this.cur.set(this.goal);
-    if (kenneyReady()) this.useKenney();
-    else this.buildOwn();
     this.apply();
-  }
-
-  /** Our procedural body: shown while the Kenney pack loads (and in tests, which never load it). */
-  private buildOwn() {
-    const parts = buildParts(this.look);
-    this.heads = parts.heads;
-    this.ownGeos.push(parts.torso, parts.badge, ...parts.heads, parts.upper, parts.fore, parts.hand, parts.thigh, parts.shin, parts.shoe);
-    const mesh = (g: BufferGeometry, parent: Object3D) => {
-      const m = new Mesh(g, this.mat);
-      m.castShadow = true;
-      m.receiveShadow = false;
-      parent.add(m);
-      this.own.push(m);
-      return m;
-    };
-    const badgeMat = new MeshBasicMaterial({ vertexColors: true });
-    this.extraMats.push(badgeMat);
-    mesh(parts.torso, this.body);
-    const badge = new Mesh(parts.badge, badgeMat);
-    this.body.add(badge);
-    this.own.push(badge);
-    this.headMesh = mesh(this.heads[this.eyes], this.head);
-    for (const g of [this.armL, this.armR]) mesh(parts.upper, g);
-    for (const g of [this.foreL, this.foreR]) mesh(parts.fore, g);
-    for (const g of [this.wristL, this.wristR]) mesh(parts.hand, g);
-    for (const g of [this.legL, this.legR]) mesh(parts.thigh, g);
-    for (const g of [this.kneeL, this.kneeR]) mesh(parts.shin, g);
-    for (const g of [this.ankleL, this.ankleR]) mesh(parts.shoe, g);
-  }
-
-  /** Swap to the agent's Kenney character (its shirt in the identity color, glasses on reviewers). */
-  private useKenney() {
-    for (const m of this.own) m.removeFromParent();
-    for (const g of this.ownGeos) g.dispose();
-    this.own = [];
-    this.ownGeos = [];
-    const k = kenneyBody(this.look.model, this.look.shirt, this.look.role === 'reviewer');
-    k.scene.scale.setScalar(K);
-    k.mat.transparent = this.mat.transparent;
-    k.mat.opacity = this.mat.opacity;
-    k.mat.depthWrite = this.mat.depthWrite;
-    k.mat.emissive.copy(this.mat.emissive);
-    this.root.add(k.scene);
-    // The hand at the end of the arm (which points along -x at rest), in our hand's frame.
-    this.hand.position.set(-0.25, -0.01, 0.02);
-    this.hand.rotation.set(0, 0, -Math.PI / 2);
-    this.hand.scale.setScalar(1 / K);
-    k.bones['arm-right'].add(this.hand);
-    this.kenney = k;
-  }
-
-  /** Head top above the feet, standing (local units). */
-  private top() {
-    return this.kenney ? 0.67 * K : NECK + HIP + HEAD_Y + HEAD_R;
-  }
-
-  private mats() {
-    return this.kenney ? [this.mat, this.kenney.mat] : [this.mat];
   }
 
   private ctx(tMs: number, now: number, live: boolean) {
@@ -722,7 +668,6 @@ export class Character {
 
   /** Head top in world space (for labels and emotes). */
   headTop(out: Vector3): Vector3 {
-    if (this.kenney) return out.set(0, 0.35, 0).applyMatrix4(this.kenney.bones.head.matrixWorld);
     return out.set(0, HEAD_Y + HEAD_R + 0.04, 0).applyMatrix4(this.head.matrixWorld);
   }
 
@@ -765,7 +710,7 @@ export class Character {
 
   fadeTo(to: number, now: number, ms: number, then?: () => void) {
     this.fade = { from: this.opacity, to, at: now, ms, then };
-    for (const m of this.mats()) m.transparent = true;
+    this.mat.transparent = true;
   }
 
   // ───── pose / props / emotes ─────
@@ -822,7 +767,7 @@ export class Character {
     } else this.emoteSprite.visible = false;
     this.eyes = FACES.indexOf(e === 'zz' ? 'closed' : e === 'check' ? 'happy' : e === 'rain' || e === 'alert' ? 'worried' : e === 'question' || e === 'think' ? 'curious' : 'open');
     this.blinkUntil = 0;
-    if (this.headMesh) this.headMesh.geometry = this.heads[this.eyes];
+    this.headMesh.geometry = this.heads[this.eyes];
     if (e === 'rain') this.makeCloud(now);
     else if (this.cloud) {
       this.root.remove(this.cloud);
@@ -859,7 +804,7 @@ export class Character {
       cloud.add(d);
       this.drops.push(d);
     }
-    cloud.position.set(0, this.top() + 0.32, 0);
+    cloud.position.set(0, NECK + HIP + HEAD_Y + HEAD_R + 0.32, 0);
     this.root.add(cloud);
     this.cloud = cloud;
     this.cloudAt = now;
@@ -876,17 +821,16 @@ export class Character {
     live = live && !reducedMotion;
     let moving = false;
     let nextAt = Infinity;
-    if (!this.kenney && kenneyReady()) this.useKenney();
 
     // Fades.
     if (this.fade) {
       const f = this.fade;
       const t = Math.min(1, (now - f.at) / f.ms);
       this.opacity = f.from + (f.to - f.from) * t;
-      for (const m of this.mats()) m.opacity = this.opacity;
+      this.mat.opacity = this.opacity;
       if (t >= 1) {
         this.fade = null;
-        if (this.opacity >= 1) for (const m of this.mats()) m.transparent = false;
+        if (this.opacity >= 1) this.mat.transparent = false;
         f.then?.();
       }
       moving = true;
@@ -1037,12 +981,12 @@ export class Character {
         nextAt = Math.min(nextAt, (Math.floor(now / per) + 1) * per);
       }
       this.emoteSprite.scale.set(s, s, 1);
-      const y = this.top() + this.sitLift() + 0.26 + this.cur[0];
+      const y = NECK + HIP + HEAD_Y + HEAD_R + this.sitLift() + 0.26 + this.cur[0];
       this.emoteSprite.position.set(this.seated ? 0 : 0, y + (this.pose === 'raise' ? 0.12 : 0), this.seated ? 0.1 : 0);
     }
     if (this.cloud) {
       const t = now - this.cloudAt;
-      const y = this.top() + this.sitLift() + 0.3;
+      const y = NECK + HIP + HEAD_Y + HEAD_R + this.sitLift() + 0.3;
       this.cloud.position.y = y;
       const live = t < 8000 && !reducedMotion;
       for (let i = 0; i < this.drops.length; i++) {
@@ -1096,7 +1040,6 @@ export class Character {
 
   /** Blinks every few seconds (sometimes twice), only with open eyes and only while live. */
   private blink(now: number, live: boolean) {
-    if (this.kenney) return; // Kenney faces are painted on
     if (!live || this.eyes !== 0 || this.pose === 'sleep') {
       if (this.blinkUntil) {
         this.blinkUntil = 0;
@@ -1118,7 +1061,6 @@ export class Character {
   /** The joints → the scene graph. */
   /** How far the hips sit down (joint 23 blends 0 standing → 1 seated). */
   private sitLift() {
-    if (this.kenney) return this.cur[23] * (this.seatY / this.look.scale + 0.03 * K - K_HIP);
     return this.cur[23] * (this.seatY / this.look.scale + 0.04 - HIP);
   }
 
@@ -1142,17 +1084,6 @@ export class Character {
     this.kneeR.rotation.x = c[15];
     this.ankleL.rotation.x = c[16];
     this.ankleR.rotation.x = c[17];
-    if (this.kenney) {
-      // One bone per limb: elbows and knees fold into the shoulder and hip.
-      const b = this.kenney.bones;
-      b.root.position.y = (this.sitLift() + c[0]) / K;
-      b.torso.rotation.set(c[1], c[13], c[20]);
-      b.head.rotation.set(c[2], c[3], c[4]);
-      b['arm-left'].rotation.set(c[5] + c[7] * 0.5, 0, -ARM_DROP + c[6]);
-      b['arm-right'].rotation.set(c[8] + c[10] * 0.5, 0, ARM_DROP - c[9]);
-      b['leg-left'].rotation.set(c[11] + c[14] * 0.15, 0, c[21]);
-      b['leg-right'].rotation.set(c[12] + c[15] * 0.15, 0, -c[22]);
-    }
     if (this.propMesh.visible) {
       // Hold flat things up towards the face when reading; level otherwise. The pool cue lies
       // along the table when aiming and stands upright otherwise, whatever the arm does.
@@ -1168,21 +1099,19 @@ export class Character {
 
   /** A ghost (an agent let go, by the memory archive): see-through, cold, no shadow. */
   haunt(now: number) {
-    for (const m of this.mats()) {
-      m.emissive.setRGB(0.1, 0.18, 0.32);
-      m.depthWrite = false;
-    }
+    this.mat.emissive.setRGB(0.1, 0.18, 0.32);
+    this.mat.depthWrite = false;
     this.root.traverse((o) => (o.castShadow = false));
     this.fadeTo(0.34, now, 900);
   }
 
   setHighlight(on: boolean) {
-    for (const m of this.mats()) m.emissive.setRGB(on ? 0.06 : 0, on ? 0.05 : 0, on ? 0.04 : 0);
+    this.mat.emissive.setRGB(on ? 0.06 : 0, on ? 0.05 : 0, on ? 0.04 : 0);
   }
 
   dispose() {
-    for (const g of [...this.geos, ...this.ownGeos]) g.dispose();
-    for (const m of this.mats()) m.dispose();
+    for (const g of this.geos) g.dispose();
+    this.mat.dispose();
     this.emoteMat.dispose();
     for (const m of this.extraMats) m.dispose();
     this.root.removeFromParent();

@@ -4,12 +4,8 @@
 -->
 <script lang="ts" module>
   import { agentPortrait } from '../office/portrait';
-  import { kenneyReady, loadKenney } from '../office/gfx/kenney';
   import type { Agent } from '../lib/gen/Agent';
   const cache = new Map<string, string>();
-  // Portraits are drawn from the Kenney characters: monograms until they've loaded.
-  let ready = $state(kenneyReady());
-  loadKenney().then(() => (ready = kenneyReady()));
   function portraitOf(a: Pick<Agent, 'id' | 'color' | 'look_seed' | 'provider' | 'role'>, px: number): string {
     const key = `${a.id}:${a.color}:${a.look_seed}:${a.provider}:${a.role}:${px}`;
     let v = cache.get(key);
@@ -19,7 +15,7 @@
       } catch {
         v = '';
       }
-      if (v) cache.set(key, v);
+      cache.set(key, v);
     }
     return v;
   }
@@ -35,7 +31,7 @@
   }
   let { agent, size = 24, dim = false }: Props = $props();
   const uid = $props.id();
-  const src = $derived(agent && ready ? portraitOf(agent, size) : '');
+  const src = $derived(agent ? portraitOf(agent, size) : '');
   const hue = $derived(idVar(agent?.color ?? 0));
   const lead = $derived(agent?.role === 'lead');
 </script>
