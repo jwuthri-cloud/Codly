@@ -338,7 +338,16 @@
     <GhostBoard {ghosts} {engine} insets={hudInsets} {onbringback} />
   {/if}
   {#if engine && !backdrop && furniture}
-    <FurnitureMenu {engine} menu={furniture} {agents} onclose={() => (furniture = null)} />
+    <FurnitureMenu
+      {engine}
+      menu={furniture}
+      {agents}
+      onclose={() => (furniture = null)}
+      onagent={(id) => {
+        const p = engine?.screenOf(id);
+        if (p) menuAt = { id, ...p };
+      }}
+    />
   {/if}
   {#if engine && !backdrop && shop && onplace && onsell}
     <BuyMode {engine} {shop} insets={hudInsets} {onplace} {onsell} />

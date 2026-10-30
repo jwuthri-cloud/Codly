@@ -42,7 +42,7 @@ import { spotsOf, USE_LABEL, usesOf } from './use';
 import { CameraRig, DEFAULT_PITCH } from './camera';
 import { BuildingGfx } from './gfx/building';
 import { DecorLayer, model } from './gfx/decor';
-import { BUILT_LABEL, builtinPieces, freeToUse, modeled, stationActions } from './gfx/builtins';
+import { BUILT_LABEL, builtinPieces, deskOfPiece, freeToUse, modeled, stationActions } from './gfx/builtins';
 import { applyDecor, blocker, BY_ID, onTop, snap, surfaceAt, type Piece } from './buy';
 import type { Placed } from '../lib/gen/Placed';
 import type { Provider } from '../lib/gen/Provider';
@@ -103,6 +103,7 @@ export interface EngineOptions {
 }
 
 const HELLO_MS = 1800;
+const PINS_KEY = 'codly.office.desks';
 /** How long a speech bubble stays up. */
 const SAY_MS = 4500;
 const OX = -W / 2;
@@ -112,6 +113,8 @@ const OZ = -D / 2;
 export interface FurnitureMenu {
   label: string;
   actions: { label: string; intent: Intent }[];
+  /** A desk (its desk, chair, keyboard or mouse was clicked): who works there, whether away. */
+  desk?: { index: number; lead: boolean; owner: string | null; away: boolean };
   /** Where to show the menu (container pixels). */
   x: number;
   y: number;
@@ -231,6 +234,14 @@ export class OfficeEngine {
   private dwell = new Dwell<Intent>(DWELL_MS, intentKey);
   private errands: Errands;
   private deskOf = new Map<string, number>();
+  /** Desks you gave agents (click a desk): kept across restarts, on this machine. */
+  private pins: Record<string, number> = (() => {
+    try {
+      return JSON.parse(localStorage.getItem(PINS_KEY) ?? '{}');
+    } catch {
+      return {};
+    }
+  })();
   private slotOwner = new Map<string, string>();
   private cardOverride = new Map<string, { kind: 'board' } | { kind: 'held'; agentId: string; untilDesk: boolean; at: number }>();
   private agentsProp: Agent[] = [];
@@ -637,12 +648,51 @@ export class OfficeEngine {
     return out;
   }
 
+  /** Give an agent a desk (a Lead's desk to a Lead); whoever sat there takes its old desk. */
+  moveToDesk(agentId: string, index: number): boolean {
+    const a = this.model.agents.get(agentId);
+    const d = this.L.desks[index];
+    if (!a || !d || d.lead !== (a.role === 'lead')) return false;
+    const old = this.deskOf.get(agentId);
+    const other = [...this.deskOf].find(([id, k]) => k === index && id !== agentId)?.[0];
+    this.deskOf.set(agentId, index);
+    this.pins[agentId] = index;
+    if (other) {
+      if (old != null) this.deskOf.set(other, old);
+      else this.deskOf.delete(other);
+      if (old != null) this.pins[other] = old;
+      else delete this.pins[other];
+    }
+    try {
+      localStorage.setItem(PINS_KEY, JSON.stringify(this.pins));
+    } catch {
+      // Private mode: it holds until the app restarts.
+    }
+    this.sync();
+    return true;
+  }
+
+  /** Call an agent back to its desk from a break; it waits there for its next task. */
+  callBack(agentId: string): boolean {
+    return this.sendTo(agentId, breakIntent(null));
+  }
+
+  private deskMenu(index: number, where: { x: number; y: number }): FurnitureMenu {
+    const owner = [...this.deskOf].find(([, k]) => k === index)?.[0] ?? null;
+    const key = owner ? this.actors.get(owner)?.placeKey : null;
+    const away = !!owner && key !== 'desk' && key !== 'desk:stand';
+    const lead = !!this.L.desks[index]?.lead;
+    return { label: lead ? 'Lead desk' : 'Desk', actions: [], desk: { index, lead, owner, away }, ...where };
+  }
+
   /** The piece of furniture under a click, with its menu; null when there is none. */
   private furnitureAt(clientX: number, clientY: number): FurnitureMenu | null {
     const r = this.renderer.domElement.getBoundingClientRect();
     const where = { x: clientX - r.left, y: clientY - r.top };
     const ray = this.rayAt(clientX, clientY);
     const uid = this.decor.pick(ray) ?? this.builtins.pick(ray);
+    const desk = uid ? deskOfPiece(this.L, uid) : null;
+    if (desk != null) return this.deskMenu(desk, where);
     if (uid?.startsWith('item:')) {
       const it = this.L.items[+uid.split(':')[1]];
       const p = this.pieceByUid(uid);
@@ -905,6 +955,14 @@ export class OfficeEngine {
     const leadDesks = this.L.desks.filter((d) => d.lead);
     const podDesks = this.L.desks.filter((d) => !d.lead);
     const taken = new Set(this.deskOf.values());
+    // Desks you gave first.
+    for (const [id, k] of Object.entries(this.pins)) {
+      const a = this.model.agents.get(id);
+      const d = this.L.desks[k];
+      if (!a || !d || this.deskOf.has(id) || taken.has(k) || d.lead !== (a.role === 'lead')) continue;
+      this.deskOf.set(id, k);
+      taken.add(k);
+    }
     for (const a of leads) {
       if (this.deskOf.has(a.id)) continue;
       const d = leadDesks.find((x) => !taken.has(x.index));

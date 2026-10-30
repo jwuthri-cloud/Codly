@@ -128,5 +128,22 @@ export async function builtinPieces(L: OfficeLayout): Promise<Shown[]> {
       }
     }),
   );
+  // A keyboard and a mouse on every desk, in front of its occupant (uid `desk:<index>:…`).
+  for (const d of L.desks) {
+    const [fx, fz] = [Math.sin(d.rot), Math.cos(d.rot)];
+    const [rx, rz] = [Math.cos(d.rot), -Math.sin(d.rot)];
+    const y = d.lead ? DESK_H + 0.02 : DESK_H;
+    const kx = d.x - fx * 0.1;
+    const kz = d.z - fz * 0.1;
+    out.push({ uid: `desk:${d.index}:keyboard`, item: 'kenney.computerKeyboard', x: kx, y, z: kz, rot: d.rot + Math.PI });
+    out.push({ uid: `desk:${d.index}:mouse`, item: 'kenney.computerMouse', x: kx - rx * 0.32, y, z: kz - rz * 0.32, rot: d.rot + Math.PI });
+  }
   return out;
+}
+
+/** The desk a piece belongs to (its desk, chair, keyboard or mouse), or null. */
+export function deskOfPiece(L: OfficeLayout, uid: string): number | null {
+  const [kind, n] = uid.split(':');
+  if (kind === 'desk') return +n;
+  return kind === 'item' ? (L.items[+n]?.desk ?? null) : null;
 }

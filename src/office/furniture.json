@@ -129,5 +129,7 @@
 {"id": "polypizza.postbox", "label": "Post box", "cat": "Decor", "price": 70, "src": "polypizza/postbox.glb", "h": 1.15},
 {"id": "polypizza.poolTable", "label": "Pool table", "cat": "Tables", "price": 300, "src": "polypizza/pool-table.glb", "h": 0.755, "hidden": true},
 {"id": "polypizza.waterCooler", "label": "Water cooler", "cat": "Kitchen", "price": 90, "src": "polypizza/water-cooler.glb", "h": 1.35},
-{"id": "polypizza.espresso", "label": "Espresso machine", "cat": "Kitchen", "price": 80, "src": "polypizza/espresso.glb", "h": 0.4, "small": true, "yaw": 3.1416}
+{"id": "polypizza.espresso", "label": "Espresso machine", "cat": "Kitchen", "price": 80, "src": "polypizza/espresso.glb", "h": 0.4, "small": true, "yaw": 3.1416},
+{"id": "kenney.computerKeyboard", "label": "Keyboard", "cat": "Electronics", "price": 15, "src": "kenney/computerKeyboard.glb", "small": true},
+{"id": "kenney.computerMouse", "label": "Mouse", "cat": "Electronics", "price": 10, "src": "kenney/computerMouse.glb", "small": true}
 ]
