@@ -39,7 +39,7 @@ import { breakPreference, reactionTo, traitsOf } from './traits';
 import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, idleIntent, leisure, errandPlace, intentKey, isBlocked, placeKey, stationBreak, type Errand, type Intent, type Place } from './behavior';
 import type { Spot } from './breakroom';
 import { spotsOf, USE_LABEL, usesOf } from './use';
-import { CameraRig, DEFAULT_PITCH, DEFAULT_YAW } from './camera';
+import { CameraRig, DEFAULT_PITCH } from './camera';
 import { BuildingGfx } from './gfx/building';
 import { DecorLayer, model } from './gfx/decor';
 import { BUILT_LABEL, builtinPieces, freeToUse, modeled, stationActions } from './gfx/builtins';
@@ -1468,7 +1468,7 @@ export class OfficeEngine {
     const ins = this.freeInsets();
     const ax = Math.max(0.3, (this.width - ins.left - ins.right) / Math.max(1, this.width));
     const ay = Math.max(0.3, (this.height - ins.top - ins.bottom) / Math.max(1, this.height));
-    const v = this.rig.fit(pts, DEFAULT_YAW, DEFAULT_PITCH, this.opts.backdrop ? 0.02 : 0.05, this.opts.backdrop ? 1 : ax, ay);
+    const v = this.rig.fit(pts, this.rig.homeYaw, DEFAULT_PITCH, this.opts.backdrop ? 0.02 : 0.05, this.opts.backdrop ? 1 : ax, ay);
     if (instant) this.rig.set(v);
     else this.rig.flyTo(v, this.opts.reducedMotion);
     this.userMoved = false;
@@ -1676,6 +1676,14 @@ export class OfficeEngine {
         case 'F':
           this.toggleFollow();
           break;
+        case 'q':
+        case 'Q':
+          this.rig.turn(-1);
+          break;
+        case 'e':
+        case 'E':
+          this.rig.turn(1);
+          break;
         case 'Escape':
           if (this.selection) this.opts.onselect(null);
           else this.overview(false);
@@ -1771,6 +1779,7 @@ export class OfficeEngine {
     } else if (this.surfacesDirty) this.syncSurfaces(now, false);
     this.surfacesDirty = false;
     const camMoving = this.rig.update(dt);
+    if (camMoving && this.building.faceCamera(this.rig.cur.yaw)) this.shadowDirty = true;
     let busy = camMoving;
     let nextAt = Infinity;
     const rm = this.opts.reducedMotion;

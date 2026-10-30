@@ -69,6 +69,10 @@ export class BuildingGfx {
   /** Desk index → instance id in the lamp meshes. */
   private lampIndex = new Map<number, number>();
   private wallMeshes: Mesh[] = [];
+  /** The full-height exterior walls, each with its outward normal: lowered when it faces the camera. */
+  private sides: { mesh: Mesh; nx: number; nz: number }[] = [];
+  private wallsUp = true;
+  private camDir: [number, number] = [0, 1];
 
   constructor(private L: OfficeLayout) {
     const floorTex = floorTexture(L);
@@ -116,7 +120,7 @@ export class BuildingGfx {
   }
 
   private buildWalls() {
-    const b = new Builder();
+    const walls = new Builder();
     const glass = new Builder();
     const plaster = c(MAT.wall);
     const cap = c(MAT.wallCap);
@@ -125,6 +129,9 @@ export class BuildingGfx {
     for (const w of this.L.walls) {
       const horiz = w.z0 === w.z1;
       const len = horiz ? w.x1 - w.x0 : w.z1 - w.z0;
+      // A full-height outer wall gets its own mesh, to drop it when the camera turns to face it.
+      const side = w.kind === 'exterior';
+      const b = side ? new Builder() : walls;
       // Solid spans between gaps.
       const gaps = [...w.gaps].sort((a, b2) => a[0] - b2[0]);
       const spans: [number, number][] = [];
@@ -171,7 +178,12 @@ export class BuildingGfx {
         if (ga > 0) seg(ga - 0.03, ga, 0, H + 0.03, cap, WT + 0.02);
         if (gz < len) seg(gz, gz + 0.03, 0, H + 0.03, cap, WT + 0.02);
       }
+      if (side) {
+        const mid = horiz ? [0, w.z0 < D / 2 ? -1 : 1] : [w.x0 < W / 2 ? -1 : 1, 0];
+        this.sides.push({ mesh: this.mesh(b.build(), this.matte, true, true), nx: mid[0], nz: mid[1] });
+      }
     }
+    const b = walls;
     // The entrance threshold and frame.
     b.frame(this.L.door.x, 0, D, 0);
     F.doorFrame(b);
@@ -184,9 +196,33 @@ export class BuildingGfx {
 
   /** Walls up, or down to knee-high stubs (The Sims' "walls down") to see into every room. */
   setWalls(up: boolean) {
+    this.wallsUp = up;
+    this.applyWalls();
+  }
+
+  /** Where the camera is, seen from the floor (sin yaw, cos yaw): outer walls facing it drop
+   *  to the low front walls' height. Returns whether anything changed. */
+  faceCamera(yaw: number): boolean {
+    const d: [number, number] = [Math.sin(yaw), Math.cos(yaw)];
+    const was = this.sides.map((s) => this.lowered(s));
+    this.camDir = d;
+    if (this.sides.every((s, i) => this.lowered(s) === was[i])) return false;
+    this.applyWalls();
+    return true;
+  }
+
+  private lowered(s: { nx: number; nz: number }) {
+    return s.nx * this.camDir[0] + s.nz * this.camDir[1] > 0.25;
+  }
+
+  private applyWalls() {
     for (const m of this.wallMeshes) {
-      m.scale.y = up ? 1 : 0.16;
+      m.scale.y = this.wallsUp ? 1 : 0.16;
       m.updateMatrix();
+    }
+    for (const s of this.sides) {
+      s.mesh.scale.y = !this.wallsUp ? 0.16 : this.lowered(s) ? LOW_H / WALL_H : 1;
+      s.mesh.updateMatrix();
     }
   }
 

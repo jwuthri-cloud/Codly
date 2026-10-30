@@ -1,6 +1,8 @@
 // Camera rig: an isometric-ish 3/4 view of the office diorama. Pan, zoom and a constrained
 // orbit (a little yaw, a narrow pitch band — it always reads as "seen from above at an angle")
-// with damping, smooth fly-to and an optional follow target. Frame-rate independent.
+// with damping, smooth fly-to and an optional follow target. Quarter turns (Q/E, like The
+// Sims) rotate around the point in view; the drag orbit stays near the current quarter.
+// Frame-rate independent.
 
 import { PerspectiveCamera, Plane, Raycaster, Vector2, Vector3 } from 'three';
 
@@ -30,8 +32,8 @@ export class CameraRig {
   boundsZ = 14;
   minDist = 7;
   maxDist = 70;
-  yawMin = DEFAULT_YAW - 0.75;
-  yawMax = DEFAULT_YAW + 0.75;
+  /** Quarter turns from the default view (any integer; yaw is never wrapped, so it eases the short way). */
+  turns = 0;
   pitchMin = 0.62;
   pitchMax = 1.22;
   private ground = new Plane(new Vector3(0, 1, 0), 0);
@@ -75,10 +77,24 @@ export class CameraRig {
     }
   }
 
+  /** The yaw of the current quarter turn (the drag orbit stays within ±0.75 rad of it). */
+  get homeYaw() {
+    return DEFAULT_YAW + (this.turns * Math.PI) / 2;
+  }
+
   orbit(dxPx: number, dyPx: number) {
     this.rate = 12;
-    this.goal.yaw = clamp(this.goal.yaw - dxPx * 0.005, this.yawMin, this.yawMax);
-    this.goal.pitch = clamp(this.goal.pitch + dyPx * 0.004, this.pitchMin, this.pitchMax);
+    this.goal.yaw -= dxPx * 0.005;
+    this.goal.pitch += dyPx * 0.004;
+    this.clampGoal();
+  }
+
+  /** A quarter turn around the point in view: +1 counterclockwise seen from above, −1 clockwise. */
+  turn(dir: 1 | -1) {
+    this.rate = 6;
+    this.turns += dir;
+    this.goal.yaw += (dir * Math.PI) / 2;
+    this.clampGoal();
   }
 
   /** Pan by screen pixels (ground-plane motion scaled by distance). */
@@ -114,7 +130,7 @@ export class CameraRig {
     this.goal.z = clamp(this.goal.z, -this.boundsZ, this.boundsZ);
     this.goal.dist = clamp(this.goal.dist, this.minDist, this.maxDist);
     this.goal.pitch = clamp(this.goal.pitch, this.pitchMin, this.pitchMax);
-    this.goal.yaw = clamp(this.goal.yaw, this.yawMin, this.yawMax);
+    this.goal.yaw = clamp(this.goal.yaw, this.homeYaw - 0.75, this.homeYaw + 0.75);
   }
 
   /** Ground point under a screen position (NDC −1..1). */

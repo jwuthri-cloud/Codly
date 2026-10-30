@@ -308,7 +308,7 @@
   bind:this={el}
   tabindex={backdrop ? -1 : 0}
   role="application"
-  aria-label="The office: agents are characters working in rooms. Arrow keys pan, plus and minus zoom, F follows the selected agent, Escape clears the selection."
+  aria-label="The office: agents are characters working in rooms. Arrow keys pan, Q and E rotate, plus and minus zoom, F follows the selected agent, Escape clears the selection."
   aria-describedby="of-roster"
 >
   <div class="of-vignette" aria-hidden="true"></div>
