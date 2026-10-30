@@ -48,6 +48,7 @@ import { applyDecor, blocker, BY_ID, onTop, snap, surfaceAt, type Piece } from '
 import type { Placed } from '../lib/gen/Placed';
 import type { Provider } from '../lib/gen/Provider';
 import { Character, lookFor, PropKit } from './gfx/character';
+import { loadKenney } from './gfx/kenney';
 import { CONFETTI, Confetti, FloorRing, FxSystem, Glow, PaperPlane, Puff, Sparkles } from './gfx/fx';
 import { GamesCorner, type GamePlayers } from './gfx/games';
 import { Archive, DeskFrames, DeskScreens, MailRoom, ServerRoom, TaskBoard, Whiteboard, type CardWhere, type TestState, type TodoList } from './gfx/props';
@@ -294,6 +295,13 @@ export class OfficeEngine {
     canvas.setAttribute('aria-hidden', 'true');
     container.appendChild(canvas);
     this.overlay = new Overlay(container);
+
+    // Characters start as our own build and put on their Kenney body once the pack is in.
+    loadKenney().then(() => {
+      if (this.disposed) return;
+      this.shadowDirty = true;
+      this.wake();
+    });
 
     this.rig = new CameraRig(1);
     this.rig.boundsX = W / 2 + 1;
@@ -1774,15 +1782,23 @@ export class OfficeEngine {
       let handled = true;
       switch (e.key) {
         case 'ArrowLeft':
+        case 'a':
+        case 'A':
           this.rig.pan(step, 0, this.height);
           break;
         case 'ArrowRight':
+        case 'd':
+        case 'D':
           this.rig.pan(-step, 0, this.height);
           break;
         case 'ArrowUp':
+        case 'w':
+        case 'W':
           this.rig.pan(0, step, this.height);
           break;
         case 'ArrowDown':
+        case 's':
+        case 'S':
           this.rig.pan(0, -step, this.height);
           break;
         case '+':
