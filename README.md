@@ -6,7 +6,7 @@ Codly turns the coding CLIs you already pay for (Claude Code, Codex, Gemini CLI 
 team on your Mac. A Lead agent plans the work, each agent builds in its own git worktree, and nothing
 lands on your branch until you merge it. It is a macOS app built with Tauri, Svelte and Rust.
 
-![Codly's World view: coding agents at work in a pixel office](site/shots/office.jpg)
+![Codly's World view: coding agents at work in a 3D office](site/shots/office.jpg)
 
 ## Why
 
@@ -16,8 +16,8 @@ under one supervisor and shows the same events in two synchronized views:
 
 - **Workspace**: chat with the Lead or talk 1:1 with any agent. Per-agent timeline, shared board, task
   dependency graph, diffs, terminals, and an approvals inbox.
-- **World**: an animated pixel office. Agents walk to the library to search, to the server room to run
-  tests, and raise a hand when they need you. Every motion comes from a real event.
+- **World**: a three.js office. Agents walk to the library to search, to the server room to run tests,
+  and raise a hand when they need you. Every motion comes from a real event.
 
 ## Screenshots
 
@@ -55,7 +55,10 @@ you. Approve once, allow for the session, or deny.
 
 ## How it works
 
-1. **Ask the Lead.** It reads the repo read-only and either answers or submits a task plan.
+1. **Ask the Lead.** It reads the repo read-only and either answers or submits a task plan. Each request
+   has a mode: Ask (answers only), Plan (you press Run plan), Auto (plans and runs) or Direct (hands the
+   work straight to a team member or consultant). Tasks go to your standing team or to a consultant the
+   Lead hires for one task.
 2. **Validate and run.** Codly checks the plan for cycles and for two tasks writing the same files at once.
    You click **Run plan**.
 3. **Work in isolation.** Each task runs in its own git worktree and branch. The worker gets a pointer pack
@@ -65,9 +68,12 @@ you. Approve once, allow for the session, or deny.
    Agents never commit on their own.
 5. **You merge.** Review the diff and merge it into your branch. Codly never pushes.
 
-Agents coordinate through Codly's MCP tools (`codly_board`, `codly_search`, `codly_memory_*`, `codly_kg_*`,
-`codly_post_note`, `codly_submit_plan`, `codly_submit_report`), so every exchange is typed, validated and
-visible.
+Agents coordinate through Codly's MCP tools, so every exchange is typed, validated and visible. Every
+agent gets `codly_get_task`, `codly_board`, `codly_search`, `codly_memory_search`, `codly_memory_write`,
+`codly_kg_query`, `codly_kg_add` and `codly_post_note`. The Lead adds `codly_submit_plan`,
+`codly_message_member`, `codly_quick_task` and `codly_reassign`. Workers add `codly_submit_report` and
+`codly_ask_lead`. Reviewers get `codly_submit_review`. The Lead and workers can also raise
+`codly_ask_user` to ask you a decision.
 
 ## Supported agents
 
@@ -79,6 +85,16 @@ visible.
 | OpenCode    | ACP (`opencode acp`)                                                                   |
 
 Cursor and Copilot use the same ACP adapter, but they are less tested.
+
+## First run
+
+A short onboarding quest line checks which agent CLIs are installed, offers a visible "Run it for me"
+install terminal for the missing ones, and walks you through setting up a Lead, a crew and a first
+mission.
+
+Approvals have four modes: balanced, strict, autonomous and Full access (auto-approves everything except
+a few hard floors; off unless you choose it). Settings also holds Triggers (schedules and context rules)
+and Inbound (webhook and Slack sources for the Lead).
 
 ## Requirements
 
@@ -105,10 +121,11 @@ pnpm tauri build            # build the macOS app and .dmg
 
 ## Project layout
 
-- `crates/codly-core/`: the engine, with no Tauri dependency. Orchestrator (Lead, planner, scheduler, merge
-  queue, approval broker), agent adapters, SQLite store, code index, memory and the MCP server.
+- `crates/codly-core/`: the engine, with no Tauri dependency. Orchestrator (Lead, team, planner, scheduler,
+  merge queue, approval broker, triggers), agent adapters, SQLite store, code index, memory, inbound
+  sources and the MCP server.
 - `src-tauri/`: the macOS shell (Tauri 2) that hosts the engine.
-- `src/`: the Svelte 5 UI, including the Workspace and the World.
+- `src/`: the Svelte 5 UI: the Workspace, the World (`src/office/`, three.js) and onboarding.
 - `site/`: the landing page and the live demo build.
 - `docs/`: architecture, design notes and the research behind them.
 
