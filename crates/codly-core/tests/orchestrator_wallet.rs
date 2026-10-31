@@ -63,6 +63,7 @@ fn seed_worker(data: &Path, xp: i64) -> Id {
         title: None,
         consultant: false,
         kept: false,
+        away_until: None,
         archived: false,
         usage: Usage::default(),
         career: Career { xp, ..Default::default() },
