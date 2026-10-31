@@ -51,6 +51,8 @@
     void store.liveRev;
     return store.now(agent.id);
   });
+  /** The model picked for it, else the one its CLI reported at session start, else the CLI's default. */
+  const model = $derived(prettyModel(agent.model ?? live?.session?.model) || 'default model');
   const task = $derived(agent.task_id ? (store.taskMap.get(agent.task_id) ?? null) : null);
   const approvals = $derived(store.pendingApprovals.filter((a) => a.agent_id === agent.id));
   /** The same card is already on screen in the Lead conversation: point at it instead of repeating it. */
@@ -241,7 +243,7 @@
     {#if n}<Orbit size={64} progress={n.progress} tone={n.tone} stroke={2.5}><Portrait {agent} size={50} /></Orbit>{/if}
     <div class="h-text">
       <h2 class="serif">{agent.name}</h2>
-      <p class="h-sub">{agentTitle(agent) ? `${agentTitle(agent)} · ` : ''}{PROVIDER_LABEL[agent.provider]} ({COMPANY_LABEL[agent.provider]}){#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{agent.model ? ` · ${prettyModel(agent.model)}` : ''}</p>
+      <p class="h-sub">{agentTitle(agent) ? `${agentTitle(agent)} · ` : ''}{PROVIDER_LABEL[agent.provider]} ({COMPANY_LABEL[agent.provider]}){#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{` · ${model}`}</p>
       <div class="h-tags"><BillingBadge billing={agent.billing} plan={account?.plan ?? cli?.plan} /></div>
     </div>
   </header>
@@ -268,7 +270,7 @@
 
     <Section id="env" title="Environment">
       <ul class="env">
-        <li><Icon name="sparkle" size={15} /><span class="truncate">{PROVIDER_LABEL[agent.provider]}{agent.model ? ` · ${prettyModel(agent.model)}` : ''}</span></li>
+        <li><Icon name="sparkle" size={15} /><span class="truncate">{PROVIDER_LABEL[agent.provider]} · {model}</span></li>
         {#if agent.worktree}
           <li><Icon name="folder" size={15} /><button class="env-btn truncate" data-tip="Copy worktree path" onclick={() => copyText(agent.worktree ?? '', 'Path copied')}>{tildify(agent.worktree)}</button></li>
           {#if task?.branch}<li><Icon name="branch" size={15} /><code class="truncate">{task.branch}</code></li>{/if}
