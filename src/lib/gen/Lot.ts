@@ -40,4 +40,9 @@ furniture: Array<Placed>,
 /**
  * Ids (walls, doors, windows) and uids (furniture) of what came free: gifts sell for 0.
  */
-gift: Array<string>, };
+gift: Array<string>, 
+/**
+ * Furniture put away: still yours (it sells back as furniture), not standing anywhere.
+ * What didn't fit when the office moved lands here.
+ */
+storage?: Array<Placed>, };

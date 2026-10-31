@@ -1,55 +1,73 @@
 //! The wallet (🪙): one per player, for every repo, separate from XP (docs/design/PROGRESSION.md
 //! §3). Coins come in from real work (every agent's XP, in every repo, let go ones too) and from
-//! grants; they go out on what you own (every repo's furniture). Developer cheats are grants with
-//! reason `CHEAT` and flag the wallet for good. Build/Buy is here too: an office's furniture
-//! (`decor:{ws}`), bought, moved and sold back against the wallet.
+//! grants; they go out on lots, building and furniture, each purchase and refund a line in the
+//! ledger (`wallet:ledger`), so the balance is always derived, never stored. Developer cheats are
+//! grants with reason `CHEAT` and flag the wallet for good. Build/Buy is here too: the open
+//! repo's furniture, which lives on its lot (lots.rs prices and stores it).
+
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Result, bail};
 
-use crate::career;
 use crate::model::*;
 use crate::store::Store;
 
 /// The ledger of grants, a JSON list of `Grant`.
 const GRANTS: &str = "wallet:grants";
+/// What was paid and given back, a JSON list of `Spend`.
+const LEDGER: &str = "wallet:ledger";
 /// Set by the first cheat and never cleared: stored, not derived from a ledger a reset could empty.
 const CHEATED: &str = "wallet:cheated";
 /// The reason the developer panel's grants carry.
 pub const CHEAT: &str = "cheat";
 
-fn decor_key(ws: &str) -> String {
-    format!("decor:{ws}")
-}
-
-/// Catalog pieces only. (`shop:{ws}`, the first fixed-spot catalog, is no longer read: those
-/// buys are refunded.)
-fn pieces(json: &str) -> Vec<Placed> {
-    serde_json::from_str::<Vec<Placed>>(json).unwrap_or_default().into_iter().filter(|p| career::price(&p.item).is_some()).collect()
-}
-
-/// The furniture in one repo's office.
-pub(super) fn placed(store: &Store, ws: &str) -> Result<Vec<Placed>> {
-    Ok(store.kv_get(&decor_key(ws))?.map(|v| pieces(&v)).unwrap_or_default())
+/// Held from reading what you own to paying for the change, so two purchases can't both spend
+/// the same coins.
+pub(super) fn money() -> MutexGuard<'static, ()> {
+    static MONEY: Mutex<()> = Mutex::new(());
+    MONEY.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn grants(store: &Store) -> Result<Vec<Grant>> {
     Ok(store.kv_get(GRANTS)?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default())
 }
 
-/// What you own, at its price, one line per kind; the wallet's `spent` is their sum. Lots and
-/// buildings (PROGRESSION.md §4) add their lines here.
-fn spending(store: &Store) -> Result<Vec<i64>> {
-    let furniture = store.kv_prefixed("decor:")?.iter().flat_map(|(_, v)| pieces(v)).filter_map(|p| career::price(&p.item)).sum();
-    Ok(vec![furniture])
+fn ledger(store: &Store) -> Result<Vec<Spend>> {
+    Ok(store.kv_get(LEDGER)?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default())
+}
+
+/// The kv write that adds a line to the ledger (for a caller's own transaction).
+pub(super) fn ledger_line(store: &Store, amount: i64, what: &str) -> Result<(String, Option<String>)> {
+    let mut all = ledger(store)?;
+    all.push(Spend { amount, what: what.into(), at: now_ms() });
+    Ok((LEDGER.into(), Some(serde_json::to_string(&all)?)))
 }
 
 /// The player's wallet: the one place coins are counted.
 pub fn wallet(store: &Store) -> Result<Wallet> {
+    // Every repo on its plot first: furniture bought before lots joins the ledger there.
+    super::lots::slots(store)?;
     let earned = store.every_agent()?.iter().map(|a| a.career.xp).sum();
     let granted = grants(store)?.iter().map(|g| g.amount).sum();
-    let spent = spending(store)?.iter().sum();
+    let spent = ledger(store)?.iter().map(|s| s.amount).sum();
     let cheated = store.kv_get(CHEATED)?.is_some();
     Ok(Wallet { earned, granted, spent, balance: earned + granted - spent, cheated })
+}
+
+/// Pay `cost` (negative: give it back) for `what`, with the writes it buys, in one transaction.
+/// Refused when the wallet can't pay. The caller holds `money()`.
+pub(super) fn pay(store: &Store, cost: i64, what: &str, mut writes: Vec<(String, Option<String>)>) -> Result<Wallet> {
+    if cost > 0 {
+        let left = wallet(store)?.balance;
+        if left < cost {
+            bail!("not enough coins yet ({left} of {cost})");
+        }
+    }
+    if cost != 0 {
+        writes.push(ledger_line(store, cost, what)?);
+    }
+    store.kv_write(&writes)?;
+    wallet(store)
 }
 
 /// A cheat was used: flag the wallet, for good.
@@ -71,58 +89,66 @@ pub(super) fn grant(store: &Store, amount: i64, reason: &str) -> Result<Wallet> 
     wallet(store)
 }
 
-/// Build/Buy in one repo: the wallet and this office's furniture.
+/// Build/Buy in one repo: the wallet and the furniture bought for this office (what came with
+/// the lot and the office's own stations are drawn from the lot).
 pub(super) fn shop(store: &Store, ws: &str) -> Result<Shop> {
-    Ok(Shop { wallet: wallet(store)?, placed: placed(store, ws)? })
+    let lot = super::lots::lot_of(store, ws)?;
+    let gift: std::collections::HashSet<&String> = lot.gift.iter().collect();
+    let placed = lot.furniture.iter().filter(|p| !gift.contains(&p.uid) && !crate::lot::builtin(&p.item)).cloned().collect();
+    Ok(Shop { wallet: wallet(store)?, placed })
 }
 
-/// Buy a piece of furniture and put it down, or move one already bought (same `uid`, free).
+/// Buy a piece of furniture and put it down, or move one already there (same `uid`, free; one
+/// in storage comes out).
 pub(super) fn place(store: &Store, ws: &str, piece: Placed) -> Result<Shop> {
-    let mut all = placed(store, ws)?;
-    if let Some(p) = all.iter_mut().find(|p| p.uid == piece.uid) {
-        if p.item != piece.item {
-            bail!("that piece is a {}", p.item);
+    super::lots::change(store, ws, "furniture", |lot| {
+        if let Some(p) = lot.furniture.iter_mut().find(|p| p.uid == piece.uid) {
+            if p.item != piece.item {
+                bail!("that piece is a {}", p.item);
+            }
+            *p = piece;
+        } else if let Some(i) = lot.storage.iter().position(|p| p.uid == piece.uid) {
+            if lot.storage[i].item != piece.item {
+                bail!("that piece is a {}", lot.storage[i].item);
+            }
+            lot.storage.remove(i);
+            lot.furniture.push(piece);
+        } else {
+            if crate::career::price(&piece.item).is_none() {
+                bail!("no such item");
+            }
+            lot.furniture.push(piece);
         }
-        *p = piece;
-    } else {
-        let Some(price) = career::price(&piece.item) else { bail!("no such item") };
-        let left = wallet(store)?.balance;
-        if left < price {
-            bail!("not enough coins yet ({left} of {price})");
-        }
-        all.push(piece);
-    }
-    save(store, ws, &all)
+        Ok(())
+    })?;
+    shop(store, ws)
 }
 
-/// Sell a piece back, for the full price.
+/// Sell a piece back, for the full price (a gift for nothing).
 pub(super) fn sell(store: &Store, ws: &str, uid: &str) -> Result<Shop> {
-    let mut all = placed(store, ws)?;
-    let n = all.len();
-    all.retain(|p| p.uid != uid);
-    if all.len() == n {
-        bail!("not in the office");
-    }
-    save(store, ws, &all)
+    super::lots::change(store, ws, "furniture", |lot| {
+        let n = lot.furniture.len() + lot.storage.len();
+        lot.furniture.retain(|p| p.uid != uid);
+        lot.storage.retain(|p| p.uid != uid);
+        if lot.furniture.len() + lot.storage.len() == n {
+            bail!("not in the office");
+        }
+        Ok(())
+    })?;
+    shop(store, ws)
 }
 
-/// The developer panel's "Reset this office": its furniture goes (and what it cost comes back).
+/// The developer panel's "Reset this office": its lot goes back to a gift Garage, and what stood
+/// there sells back at the usual rates.
 pub(super) fn reset_office(store: &Store, ws: &str) -> Result<Shop> {
-    // Phase 2 (PROGRESSION.md §4): also put the lot back to the garage (`lot:{ws}`) here.
-    save(store, ws, &[])
-}
-
-fn save(store: &Store, ws: &str, placed: &[Placed]) -> Result<Shop> {
-    store.kv_set(&decor_key(ws), &serde_json::to_string(placed)?)?;
-    if let Err(e) = super::lots::mirror_decor(store, ws, placed) {
-        tracing::warn!("the lot didn't follow the furniture: {e:#}");
-    }
+    super::lots::reset(store, ws)?;
     shop(store, ws)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::career;
 
     fn workspace(store: &Store, name: &str) -> String {
         let id = new_id();
@@ -226,9 +252,32 @@ mod tests {
         grant(&store, price, CHEAT).unwrap();
         let s = place(&store, &b, chair("c3")).unwrap();
         assert_eq!(s.wallet.balance, price / 2);
-        // Resetting an office empties it, and what it cost comes back.
+        // Resetting an office sells its furniture back (all of it: furniture sells at 100%).
         let s = reset_office(&store, &b).unwrap();
         assert!(s.placed.is_empty(), "{s:?}");
         assert_eq!((s.wallet.spent, s.wallet.balance), (0, 2 * price + price / 2));
+        // Every purchase and refund is a line in the ledger; the balance is their sum.
+        let lines = ledger(&store).unwrap();
+        assert_eq!(lines.iter().map(|l| l.amount).collect::<Vec<_>>(), [price, -price, price, price, -2 * price]);
+    }
+
+    #[test]
+    fn furniture_in_storage_comes_out_free_and_sells() {
+        let store = Store::open_in_memory().unwrap();
+        let a = workspace(&store, "a");
+        grant(&store, 100, "test").unwrap();
+        // Put a bought chair away (as a move of the office would), then take it out again.
+        place(&store, &a, chair("c1")).unwrap();
+        super::super::lots::change(&store, &a, "test", |lot| {
+            let p = lot.furniture.pop().unwrap();
+            lot.storage.push(p);
+            Ok(())
+        })
+        .unwrap();
+        assert!(shop(&store, &a).unwrap().placed.is_empty());
+        let s = place(&store, &a, Placed { x: 4.0, ..chair("c1") }).unwrap();
+        assert_eq!((s.placed.len(), s.wallet.spent), (1, 25), "out of storage: free");
+        assert!(place(&store, &a, Placed { item: "kenney.loungeSofa".into(), ..chair("c1") }).is_err());
+        assert_eq!(sell(&store, &a, "c1").unwrap().wallet.spent, 0);
     }
 }

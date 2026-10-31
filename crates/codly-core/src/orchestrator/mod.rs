@@ -701,7 +701,7 @@ impl Core {
         Ok(a)
     }
 
-    /// Developer panel: empty the open repo's office (its furniture is refunded).
+    /// Developer panel: the open repo's lot back to a gift Garage (what stood there sells back).
     pub fn dev_reset_office(&self) -> anyhow::Result<Shop> {
         self.inner.developer()?;
         let ws = self.inner.require_ws()?;
@@ -717,10 +717,40 @@ impl Core {
         self.inner.lot(&ws.id)
     }
 
-    /// Build mode: check and store the open repo's lot; returns it as stored.
-    pub fn save_lot(&self, lot: Lot) -> anyhow::Result<Lot> {
+    /// Build mode: check, price and store the open repo's lot (refused if the wallet can't pay
+    /// for what changed); returns it as stored, the wallet and the cost.
+    pub fn save_lot(&self, lot: Lot) -> anyhow::Result<LotSaved> {
         let ws = self.inner.require_ws()?;
         self.inner.save_lot(&ws.id, lot)
+    }
+
+    /// The neighbourhood: every plot, yours and for sale, with the repo on each (no repo needs to
+    /// be open).
+    pub fn lots(&self) -> anyhow::Result<Vec<LotSlot>> {
+        lots::list(&self.inner.store)
+    }
+
+    /// A plot's lot, for drawing it from outside (a bare plot if it isn't yours).
+    pub fn lot_on(&self, slot_id: &str) -> anyhow::Result<Lot> {
+        lots::lot_on(&self.inner.store, slot_id)
+    }
+
+    /// Buy a plot, bare or with a ready-made design (`template`) on it, at the plot's price plus
+    /// the design's at build prices; or put a design on a bare plot of yours.
+    pub fn buy_lot(&self, slot_id: &str, template: Option<&str>) -> anyhow::Result<Wallet> {
+        lots::buy(&self.inner.store, slot_id, template)
+    }
+
+    /// Sell a plot (no office on it): 80% of the land, its contents at their sell-back rates,
+    /// gifts for nothing.
+    pub fn sell_lot(&self, slot_id: &str) -> anyhow::Result<Wallet> {
+        lots::sell(&self.inner.store, slot_id)
+    }
+
+    /// Move a repo's office to another plot of yours with none on it: its furniture comes along
+    /// (what doesn't fit goes to storage), the building stays. Returns the neighbourhood.
+    pub fn move_office(&self, workspace_id: &str, slot_id: &str) -> anyhow::Result<Vec<LotSlot>> {
+        lots::move_office(&self.inner.store, workspace_id, slot_id)
     }
 
     /// An agent as a `codly/agent@1` file (see `hires.rs`).

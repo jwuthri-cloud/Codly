@@ -3,7 +3,7 @@
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
-use codly_core::model::{Agent, Applicant, Digest, Lot, ModelOffer, Office, Placed, Rank, Shop, Wallet};
+use codly_core::model::{Agent, Applicant, Digest, Lot, LotSaved, LotSlot, ModelOffer, Office, Placed, Rank, Shop, Wallet};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -146,7 +146,7 @@ pub async fn dev_give_xp(state: State<'_, AppState>, agent_id: String, xp: i64) 
     state.core().await?.dev_give_xp(&agent_id, xp).map_err(|e| format!("{e:#}"))
 }
 
-/// Developer panel (Developer mode only): empty the open repo's office, refunded.
+/// Developer panel (Developer mode only): the open repo's lot back to a gift Garage.
 #[tauri::command]
 pub async fn dev_reset_office(state: State<'_, AppState>) -> Result<Shop, String> {
     state.core().await?.dev_reset_office().map_err(|e| format!("{e:#}"))
@@ -158,8 +158,38 @@ pub async fn office_lot(state: State<'_, AppState>) -> Result<Lot, String> {
     state.core().await?.lot().map_err(|e| format!("{e:#}"))
 }
 
-/// Build mode: check and store the open repo's lot.
+/// Build mode: check, price and store the open repo's lot (refused if the wallet can't pay).
 #[tauri::command]
-pub async fn office_save_lot(state: State<'_, AppState>, lot: Lot) -> Result<Lot, String> {
+pub async fn office_save_lot(state: State<'_, AppState>, lot: Lot) -> Result<LotSaved, String> {
     state.core().await?.save_lot(lot).map_err(|e| format!("{e:#}"))
+}
+
+/// The neighbourhood: every plot, yours and for sale.
+#[tauri::command]
+pub async fn lots(state: State<'_, AppState>) -> Result<Vec<LotSlot>, String> {
+    state.core().await?.lots().map_err(|e| format!("{e:#}"))
+}
+
+/// A plot's lot, for drawing it from outside.
+#[tauri::command]
+pub async fn lot_of(state: State<'_, AppState>, slot_id: String) -> Result<Lot, String> {
+    state.core().await?.lot_on(&slot_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Buy a plot, bare or with a ready-made design on it.
+#[tauri::command]
+pub async fn buy_lot(state: State<'_, AppState>, slot_id: String, template: Option<String>) -> Result<Wallet, String> {
+    state.core().await?.buy_lot(&slot_id, template.as_deref()).map_err(|e| format!("{e:#}"))
+}
+
+/// Sell a plot with no office on it.
+#[tauri::command]
+pub async fn sell_lot(state: State<'_, AppState>, slot_id: String) -> Result<Wallet, String> {
+    state.core().await?.sell_lot(&slot_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Move a repo's office to another plot of yours; returns the neighbourhood.
+#[tauri::command]
+pub async fn move_office(state: State<'_, AppState>, workspace_id: String, slot_id: String) -> Result<Vec<LotSlot>, String> {
+    state.core().await?.move_office(&workspace_id, &slot_id).map_err(|e| format!("{e:#}"))
 }

@@ -2086,7 +2086,7 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     let mut n = 0;
     let err = loop {
         n += 1;
-        match core.place(piece(&format!("s{n}"), "kenney.loungeDesignSofa", 1.0)) {
+        match core.place(piece(&format!("sofa{n}"), "kenney.loungeDesignSofa", 1.0)) {
             Ok(s) => assert!(s.wallet.spent <= s.wallet.earned && s.wallet.balance >= 0),
             Err(e) => break e,
         }
