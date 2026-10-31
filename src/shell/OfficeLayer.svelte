@@ -115,8 +115,10 @@
     shop = shop && { ...shop };
     fail(title)(e);
   };
-  const place = (p: Placed) => api.officePlace(p).then((s) => (shop = s), undo('Could not put it there'));
-  const sell = (uid: string) => api.officeSell(uid).then((s) => (shop = s), undo('Could not sell it'));
+  // The lot too: what came with the office (desks, the server) is drawn from it.
+  const relot = () => api.officeLot().then((l) => (lot = l), () => {});
+  const place = (p: Placed) => api.officePlace(p).then((s) => ((shop = s), relot()), undo('Could not put it there'));
+  const sell = (uid: string) => api.officeSell(uid).then((s) => ((shop = s), relot()), undo('Could not sell it'));
   // Build mode: the core checks the lot and charges the wallet for the change (a refusal throws:
   // build mode puts the office back).
   const saveLot = async (l: Lot) => {

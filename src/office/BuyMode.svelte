@@ -13,6 +13,7 @@
   import { BY_ID, CATEGORIES, FOR_SALE, kitchens, locked, type Furniture } from './buy';
   import type { OfficeEngine } from './engine';
   import { officeLayout } from './layout';
+  import { checklist, guard } from './build/checklist';
   import { thumbnail } from './gfx/decor';
   import { sound } from './sound';
   import { coins } from '../lib/util/format';
@@ -45,6 +46,8 @@
   const items = $derived(FOR_SALE.filter((f) => f.cat === cat));
   const hasKitchen = $derived(kitchens(officeLayout(lot ?? undefined), shop.placed).size > 0);
   const why = (f: Furniture) => locked(f, crew, hasKitchen);
+  /** Pieces that came free with the office: they can go, but sell for nothing. */
+  const gift = $derived(new Set(lot?.gift ?? []));
 
   $effect(() => {
     engine.setBuildMode(open ? pick : null);
@@ -92,8 +95,9 @@
     e.preventDefault();
   }
 
+  // Anything in the office can be picked up: what you bought and what came with it.
   function pick(uid: string) {
-    const p = shop.placed.find((x) => x.uid === uid);
+    const p = shop.placed.find((x) => x.uid === uid) ?? lot?.furniture.find((x) => x.uid === uid);
     const f = p && BY_ID.get(p.item);
     if (!f) return;
     if (!engine.movable(uid)) {
@@ -105,6 +109,14 @@
 
   function sell(uid: string) {
     engine.endCarry();
+    // Not the last Lead's desk, server, bookshelf or mailbox: the work needs them.
+    const left = lot && { ...lot, furniture: lot.furniture.filter((p) => p.uid !== uid) };
+    const no = lot && left && guard(checklist(officeLayout(lot)), checklist(officeLayout(left)));
+    if (no) {
+      note = no;
+      sound.play('ui-error', { gain: 0.6 });
+      return;
+    }
     sound.play('ui-sell', { gain: 0.8 });
     onsell(uid);
   }
@@ -135,7 +147,11 @@
           <button onclick={() => engine.rotateCarry()} title="Turn it (R)">⟳ Turn <kbd>R</kbd></button>
           {#if c.uid}
             {@const uid = c.uid}
-            <button class="sell" onclick={() => sell(uid)} title="Sell it back (Delete)">Sell for {coins(c.f.price)}</button>
+            {#if gift.has(uid)}
+              <button class="sell" onclick={() => sell(uid)} title="It came with the office, so it sells for nothing (Delete)">Get rid of it</button>
+            {:else}
+              <button class="sell" onclick={() => sell(uid)} title="Sell it back (Delete)">Sell for {coins(c.f.price)}</button>
+            {/if}
           {/if}
           <button onclick={() => engine.endCarry()} title={c.uid ? 'Put it back (Esc)' : 'Cancel (Esc)'}>{c.uid ? 'Put back' : 'Cancel'} <kbd>Esc</kbd></button>
         </span>
