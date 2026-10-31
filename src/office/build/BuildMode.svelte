@@ -66,6 +66,7 @@
     type Side,
   } from './tools';
   import { coins } from '../../lib/util/format';
+  import PRICES from '../lots/prices.json';
 
   interface Props {
     engine: OfficeEngine;
@@ -84,32 +85,34 @@
   let { engine, lot, shop, insets, onsave, onplace, onsell, oncopy, onswitch, open = $bindable(false) }: Props = $props();
 
   type ToolId = 'room' | 'wall' | 'door' | 'window' | 'floor' | 'paint' | 'push' | 'move' | 'hammer' | 'dropper' | 'library' | 'storage';
-  const TOOLS: { id: ToolId; icon: string; label: string; hint: string }[] = [
-    { id: 'room', icon: '▭', label: 'Room', hint: 'Drag a rectangle: four walls and a floor' },
-    { id: 'wall', icon: '▬', label: 'Wall', hint: 'Drag along the grid: 1 m steps, 0.5 m with Alt' },
-    { id: 'door', icon: '🚪', label: 'Door', hint: 'Click a wall to put a door in it (or change one)' },
-    { id: 'window', icon: '🪟', label: 'Window', hint: 'Click an outside wall' },
-    { id: 'floor', icon: '▦', label: 'Floor', hint: 'Click a room, or drag over tiles' },
-    { id: 'paint', icon: '🎨', label: 'Paint', hint: 'Click a wall’s side, or a room for all its walls' },
-    { id: 'push', icon: '⇔', label: 'Push/pull', hint: 'Drag a room’s arrow to grow or shrink it' },
-    { id: 'move', icon: '✥', label: 'Move room', hint: 'Click a room to pick it up, R turns it, click to put it down' },
-    { id: 'hammer', icon: '🔨', label: 'Sledgehammer', hint: 'Click a wall, door, window or room to knock it down' },
-    { id: 'dropper', icon: '💧', label: 'Eyedropper', hint: 'Click a floor, wall, door or piece to copy it' },
-    { id: 'library', icon: '📚', label: 'Library', hint: 'Save a room, or put a saved one down' },
-    { id: 'storage', icon: '📦', label: 'Storage', hint: 'What didn’t fit: put it back in a room' },
+  // The everyday tools first, each saying what to do in plain words; the rest under More.
+  const TOOLS: { id: ToolId; icon: string; label: string; hint: string; more?: true }[] = [
+    { id: 'room', icon: '▭', label: 'Room', hint: 'Drag on the floor to draw a room. It gets four walls and the floor you pick below.' },
+    { id: 'wall', icon: '▬', label: 'Wall', hint: 'Drag along the floor to draw a wall. Hold Alt for half-metre steps.' },
+    { id: 'door', icon: '🚪', label: 'Door', hint: 'Pick a door below, then click a wall to put it in.' },
+    { id: 'window', icon: '🪟', label: 'Window', hint: 'Pick a size below, then click a wall to put it in.' },
+    { id: 'floor', icon: '▦', label: 'Floor', hint: 'Pick a floor below, then click a room. Drag instead to cover only some tiles.' },
+    { id: 'paint', icon: '🎨', label: 'Paint', hint: 'Pick a colour below, then click a wall.' },
+    { id: 'hammer', icon: '🔨', label: 'Remove', hint: 'Click a wall, door, window or room to take it out. Building sells back for half.' },
+    { id: 'move', icon: '✥', label: 'Move a room', hint: 'Click a room to pick it up, then click where it goes. R turns it.', more: true },
+    { id: 'push', icon: '⇔', label: 'Resize a room', hint: 'Point at a room, then drag one of its arrows to make it bigger or smaller.', more: true },
+    { id: 'dropper', icon: '💧', label: 'Copy', hint: 'Click a floor, wall, door or piece to pick the same thing.', more: true },
+    { id: 'library', icon: '📚', label: 'Saved rooms', hint: 'Save a room you like, or put a saved one down.', more: true },
+    { id: 'storage', icon: '📦', label: 'Storage', hint: 'Pieces that no longer fit somewhere. Pick one, then click where it goes.', more: true },
   ];
+  const hintOf = (id: ToolId) => TOOLS.find((t) => t.id === id)!.hint;
   const WALL_KINDS: { id: WallKind; label: string }[] = [
-    { id: 'solid', label: 'Solid' },
-    { id: 'glass', label: 'Glass' },
-    { id: 'half', label: 'Half' },
-    { id: 'exterior', label: 'Outside' },
+    { id: 'solid', label: 'Wall' },
+    { id: 'glass', label: 'Glass wall' },
+    { id: 'half', label: 'Half wall' },
+    { id: 'exterior', label: 'Outside wall' },
   ];
-  const DOORS: { id: DoorKind; label: string }[] = [
-    { id: 'single', label: 'Single' },
-    { id: 'double', label: 'Double' },
-    { id: 'glass', label: 'Glass' },
-    { id: 'rollup', label: 'Roll-up' },
-    { id: 'open', label: 'Doorway' },
+  const DOORS: { id: DoorKind; icon: string; label: string }[] = [
+    { id: 'single', icon: '🚪', label: 'Door' },
+    { id: 'double', icon: '🚪🚪', label: 'Double door' },
+    { id: 'glass', icon: '🔲', label: 'Glass door' },
+    { id: 'rollup', icon: '🏭', label: 'Garage door' },
+    { id: 'open', icon: '⬚', label: 'Doorway' },
   ];
 
   let tool = $state<ToolId>('room');
@@ -118,7 +121,6 @@
   let doorKind = $state<DoorKind>('single');
   let windowW = $state(1.6);
   let floorM = $state('oak');
-  let floorWhole = $state(true);
   let paint = $state(COLOURS[2].id);
   let paintWhole = $state(false);
   let wallMode = $state<'up' | 'cutaway' | 'down'>('cutaway');
@@ -137,6 +139,9 @@
   let canRedo = $state(false);
   let pending = $state(0);
   let saving = $state(false);
+  /** Where the pointer is over the office (screen), for the tag beside it; null when it's off. */
+  let cursor = $state<{ x: number; y: number } | null>(null);
+  let more = $state(false);
 
   /** Committed edits (undo/redo), and what the core has. */
   interface Entry {
@@ -363,35 +368,35 @@
     const here = tileUnder(L(), p.x, p.z);
     switch (tool) {
       case 'room': {
-        if (!dragging || !drag) return hint(TOOLS[0].hint, [{ kind: 'floor', x: Math.round(p.x / T) * T - 0.1, z: Math.round(p.z / T) * T - 0.1, w: 0.2, d: 0.2, tone: 'pick' }]);
+        if (!dragging || !drag) return hint(hintOf('room'), [{ kind: 'floor', x: Math.round(p.x / T) * T - 0.1, z: Math.round(p.z / T) * T - 0.1, w: 0.2, d: 0.2, tone: 'pick' }]);
         const [x0, z0, x1, z1] = snapRect(drag.at, [p.x, p.z]);
         const o = drawRoom(lotNow, bought, x0, z0, x1, z1, wallKind, roomFloor);
         const box: Shape[] = failed(o) ? [{ kind: 'floor', x: x0, z: z0, w: x1 - x0, d: z1 - z0, tone: 'bad' }] : [];
         return show(o, `Room ${x1 - x0} × ${z1 - z0} m`, box);
       }
       case 'wall': {
-        if (!dragging || !drag) return hint(TOOLS[1].hint);
+        if (!dragging || !drag) return hint(hintOf('wall'));
         const s = snapWall(drag.at, [p.x, p.z], p.alt ? 0.5 : 1);
-        if (!s) return hint(TOOLS[1].hint);
+        if (!s) return hint(hintOf('wall'));
         const o = drawWall(lotNow, bought, ...s, wallKind);
         return show(o, `Wall ${Math.abs(s[2] - s[0]) + Math.abs(s[3] - s[1])} m`, failed(o) ? [{ kind: 'wall', x0: s[0], z0: s[1], x1: s[2], z1: s[3], h: 0.9, tone: 'bad' }] : []);
       }
       case 'door':
       case 'window': {
         const hit = wallUnder(L(), p, heightOf);
-        if (!hit) return hint(tool === 'door' ? TOOLS[2].hint : TOOLS[3].hint);
+        if (!hit) return hint(tool === 'door' ? hintOf('door') : hintOf('window'));
         const o = placeOpening(lotNow, bought, hit.wall.id, hit.x, hit.z, tool === 'door' ? { door: doorKind } : { window: windowW });
         const label = tool === 'door' ? `${DOORS.find((d) => d.id === doorKind)!.label} door` : `Window ${windowW} m`;
         return show(o, label, failed(o) ? [wallShape(hit, 'bad')] : []);
       }
       case 'floor': {
-        if (here.tile < 0) return hint(TOOLS[4].hint);
-        if (dragging || !floorWhole) {
+        if (here.tile < 0) return hint(hintOf('floor'));
+        if (dragging) {
           if (dragging) brush.add(here.tile);
           const tiles = dragging ? [...brush] : [here.tile];
           return show(paintFloor(lotNow, bought, tiles, floorM), `${floorLabel(floorM)} · ${tiles.length * 0.25} m²`);
         }
-        if (here.room < 0) return hint('Click inside a room (or turn off Whole room to paint tiles)');
+        if (here.room < 0) return hint('Click inside a room, or drag over the floor');
         const tiles = roomTiles(L(), here.room);
         return show(paintFloor(lotNow, bought, tiles, floorM), `${floorLabel(floorM)} in the ${L().rooms[here.room].name.toLowerCase()}`);
       }
@@ -401,7 +406,7 @@
           return show(paintRoom(lotNow, bought, L(), here.room, paint), `${paintLook(paint).label} around the ${L().rooms[here.room].name.toLowerCase()}`, roomShapes(here.room, 'pick'));
         }
         const hit = wallUnder(L(), p, heightOf);
-        if (!hit) return hint(TOOLS[5].hint);
+        if (!hit) return hint(hintOf('paint'));
         return show(paintSide(lotNow, bought, hit.wall.id, hit.side, paint), `${paintLook(paint).label} on this side`, [wallShape(hit, 'hot')]);
       }
       case 'push': {
@@ -414,14 +419,14 @@
         // The room under the cursor, unless it is on one of the last room's arrows.
         const onArrow = pushRoom >= 0 && pushRoom < L().rooms.length && arrows(pushRoom).some((a) => Math.hypot(a.x - p.x, a.z - p.z) < 0.6);
         if (here.room >= 0 && !onArrow) pushRoom = here.room;
-        if (pushRoom < 0 || pushRoom >= L().rooms.length) return hint(TOOLS[6].hint);
+        if (pushRoom < 0 || pushRoom >= L().rooms.length) return hint(hintOf('push'));
         const near = arrows(pushRoom).find((a) => Math.hypot(a.x - p.x, a.z - p.z) < 0.6);
         if (!roomBox(L(), pushRoom).rect) return hint('Push/pull works on rectangular rooms', roomShapes(pushRoom, 'bad'));
-        return hint(near ? 'Drag the arrow' : TOOLS[6].hint, arrowShapes(pushRoom, near?.side));
+        return hint(near ? 'Drag the arrow' : hintOf('push'), arrowShapes(pushRoom, near?.side));
       }
       case 'move': {
         if (!moving) {
-          if (here.room < 0) return hint(TOOLS[7].hint);
+          if (here.room < 0) return hint(hintOf('move'));
           return hint(`Pick up the ${L().rooms[here.room].name.toLowerCase()}`, roomShapes(here.room, 'pick'));
         }
         if (here.tile < 0) return hint('Over the lot');
@@ -441,19 +446,19 @@
           const s = stretchAt(lotNow, hit.wall.id, hit.x, hit.z);
           return show(knockDown(lotNow, bought, hit.wall.id, hit.x, hit.z), `Knock down ${s ? (s[1] - s[0]) * T : 0} m of wall`);
         }
-        if (here.room < 0) return hint(TOOLS[8].hint);
+        if (here.room < 0) return hint(hintOf('hammer'));
         return show(removeRoom(lotNow, bought, L(), here.room), `Knock down the ${L().rooms[here.room].name.toLowerCase()}`, roomShapes(here.room, 'bad'));
       }
       case 'dropper': {
         const s = sample(p, false);
-        return hint(s ? `Copy: ${s}` : TOOLS[9].hint);
+        return hint(s ? `Copy: ${s}` : hintOf('dropper'));
       }
       case 'library': {
         if (pickSave) {
           if (here.room < 0) return hint('Click the room to save');
           return hint(`Save the ${L().rooms[here.room].name.toLowerCase()}`, roomShapes(here.room, 'pick'));
         }
-        if (!placing) return hint(TOOLS[10].hint);
+        if (!placing) return hint(hintOf('library'));
         if (here.tile < 0) return hint('Over the lot');
         const bp = placing.bp;
         const [w, d] = turns % 2 ? [bp.d, bp.w] : [bp.w, bp.d];
@@ -554,6 +559,7 @@
   const handler: BuildTool = {
     down(p) {
       last = p;
+      cursor = { x: p.clientX, y: p.clientY };
       brush = new Set();
       drag = { at: [p.x, p.z] };
       if (tool === 'push' && pushRoom >= 0) {
@@ -564,6 +570,7 @@
     },
     move(p, dragging) {
       last = p;
+      cursor = { x: p.clientX, y: p.clientY };
       if (!queued) requestAnimationFrame(() => {
         const q = queued;
         queued = null;
@@ -576,7 +583,7 @@
       queued = null;
       const moved = drag ? Math.hypot(p.x - drag.at[0], p.z - drag.at[1]) > 0.2 : false;
       // Drag tools commit what was dragged; the others what was clicked.
-      if (tool === 'room' || tool === 'wall' || (tool === 'push' && drag?.side) || (tool === 'floor' && (moved || !floorWhole))) {
+      if (tool === 'room' || tool === 'wall' || (tool === 'push' && drag?.side) || (tool === 'floor' && moved)) {
         preview(p, true);
         commit(outcome);
       } else {
@@ -589,6 +596,7 @@
     },
     leave() {
       if (drag) return;
+      cursor = null;
       pv = null;
       layer.show([]);
       engine.redraw();
@@ -640,6 +648,7 @@
   }
 
   const toolInfo = $derived(TOOLS.find((t) => t.id === tool)!);
+  const missing = $derived(checks.filter((c) => !c.have || !c.reached));
 </script>
 
 <svelte:window onkeydown={onkey} />
@@ -647,152 +656,165 @@
 {#if open}
   <div class="panel" style:bottom="{insets.bottom + 46}px" style:left="{insets.left + 10}px" style:right="{insets.right + 10}px" role="dialog" aria-label="Build mode">
     <header>
-      <div>
-        {#if onswitch}
-          <span class="seg mode" role="tablist"><button role="tab" aria-selected="true" class="on">🔨 Build</button><button role="tab" aria-selected="false" onclick={onswitch}>🛋 Buy</button></span>
-        {:else}<div class="kicker">Build</div>{/if}
-        {#if balance != null}<b>{coins(balance)} to spend</b>{/if}
-        <small>{pending ? `${costLabel(pending)} not saved yet` : saving ? 'Saving…' : 'All saved'}</small>
-      </div>
-      <div class="right">
-        <span class="seg" role="group" aria-label="Walls">
-          {#each [['up', 'Walls up'], ['cutaway', 'Cutaway'], ['down', 'Walls down']] as [m, label] (m)}
-            <button class:on={wallMode === m} onclick={() => setWalls(m as typeof wallMode)}>{label}</button>
-          {/each}
-        </span>
-        <button onclick={undo} disabled={!canUndo} title="Undo (⌘Z)">↶</button>
-        <button onclick={redo} disabled={!canRedo} title="Redo (⇧⌘Z)">↷</button>
-        <button class="x" aria-label="Close build mode" onclick={close}>✕</button>
-      </div>
+      {#if onswitch}
+        <span class="seg mode" role="tablist"><button role="tab" aria-selected="true" class="on">🔨 Build</button><button role="tab" aria-selected="false" onclick={onswitch}>🛋 Buy</button></span>
+      {:else}<b class="title">Build</b>{/if}
+      {#if balance != null}<span class="money">{coins(balance)}</span>{/if}
+      <small>{saving ? 'Saving…' : pending ? `${costLabel(pending)} · saving in a moment` : ''}</small>
+      <span class="grow"></span>
+      <span class="seg" role="group" aria-label="How the walls show">
+        {#each [['up', 'Walls up'], ['cutaway', 'Cut away'], ['down', 'Walls down']] as [m, label] (m)}
+          <button class:on={wallMode === m} onclick={() => setWalls(m as typeof wallMode)}>{label}</button>
+        {/each}
+      </span>
+      <button class="btn" onclick={undo} disabled={!canUndo} title="Undo (⌘Z)">↶ Undo</button>
+      <button class="btn" onclick={redo} disabled={!canRedo} title="Redo (⇧⌘Z)">↷</button>
+      <button class="x" aria-label="Close build mode" onclick={close}>✕</button>
     </header>
 
     <div class="tools" role="toolbar" aria-label="Build tools">
-      {#each TOOLS as t (t.id)}
-        <button class:on={tool === t.id} onclick={() => pick(t.id)} title={t.hint} aria-pressed={tool === t.id}>
+      {#each TOOLS.filter((t) => !t.more || more) as t (t.id)}
+        <button class:on={tool === t.id} class:small={t.more} onclick={() => pick(t.id)} aria-pressed={tool === t.id}>
           <span class="i" aria-hidden="true">{t.icon}</span><span>{t.label}</span>
+          {#if t.id === 'storage' && stored.length}<span class="badge">{stored.length}</span>{/if}
         </button>
       {/each}
+      <button class="more" onclick={() => (more = !more)} aria-expanded={more}>{more ? 'Fewer' : 'More…'}{#if !more && stored.length}<span class="badge">{stored.length}</span>{/if}</button>
     </div>
 
-    <div class="body">
-      <div class="opts">
-        {#if tool === 'room' || tool === 'wall'}
-          <span class="lbl">Walls</span>
-          {#each WALL_KINDS as k (k.id)}<button class="chip" class:on={wallKind === k.id} onclick={() => (wallKind = k.id)}>{k.label}</button>{/each}
-          {#if tool === 'room'}
-            <span class="lbl">Floor</span>
-            <button class="chip" class:on={roomFloor == null} onclick={() => (roomFloor = null)}>Keep</button>
-            {#each FLOORS as f (f.id)}<button class="sw" class:on={roomFloor === f.id} style:background={f.swatch} title={f.label} aria-label={f.label} onclick={() => (roomFloor = f.id)}></button>{/each}
-          {/if}
-        {:else if tool === 'door'}
-          {#each DOORS as d (d.id)}<button class="chip" class:on={doorKind === d.id} onclick={() => (doorKind = d.id)}>{d.label}</button>{/each}
-        {:else if tool === 'window'}
-          {#each WINDOW_WIDTHS as w (w)}<button class="chip" class:on={windowW === w} onclick={() => (windowW = w)}>{w} m</button>{/each}
-        {:else if tool === 'floor'}
-          <button class="chip" class:on={floorWhole} onclick={() => (floorWhole = true)}>Whole room</button>
-          <button class="chip" class:on={!floorWhole} onclick={() => (floorWhole = false)}>Tiles</button>
-          {#each FLOORS as f (f.id)}<button class="sw" class:on={floorM === f.id} style:background={f.swatch} title={f.label} aria-label={f.label} onclick={() => (floorM = f.id)}></button>{/each}
-        {:else if tool === 'paint'}
-          <button class="chip" class:on={!paintWhole} onclick={() => (paintWhole = false)}>One side</button>
-          <button class="chip" class:on={paintWhole} onclick={() => (paintWhole = true)}>Whole room</button>
-          {#each [...COLOURS.map((c) => c.id), ...PAPERS.map((p) => p.id)] as id (id)}
-            {@const look = paintLook(id)}
-            <button class="sw" class:on={paint === id} style:background={look.css} title={look.label} aria-label={look.label} onclick={() => (paint = id)}></button>
-          {/each}
-        {:else if tool === 'move'}
-          <button class="chip" onclick={turn} disabled={!moving}>⟳ Turn <kbd>R</kbd></button>
-          {#if moving}<button class="chip" onclick={cancel}>Put back <kbd>Esc</kbd></button>{/if}
-        {:else if tool === 'library'}
-          {#if naming}
-            <input class="name" bind:value={naming.name} maxlength="40" aria-label="Room name" onkeydown={(e) => e.key === 'Enter' && saveNamed()} />
-            <button class="chip on" onclick={saveNamed}>Save</button>
-            <button class="chip" onclick={() => (naming = null)}>Cancel</button>
-          {:else}
-            <button class="chip" class:on={pickSave} onclick={() => ((placing = null), (pickSave = !pickSave))}>＋ Save a room</button>
-            {#each rooms as r (r.id)}
-              <span class="saved" class:on={placing?.id === r.id}>
-                <button class="chip" class:on={placing?.id === r.id} onclick={() => ((pickSave = false), (turns = 0), (placing = placing?.id === r.id ? null : r))} title="Put it down ({r.bp.w * 0.5} × {r.bp.d * 0.5} m)">{r.name} · {r.bp.w * 0.5}×{r.bp.d * 0.5}</button>
-                <button class="forget" aria-label="Forget {r.name}" onclick={() => (forgetRoom(r.id), (rooms = savedRooms()), placing?.id === r.id && (placing = null))}>✕</button>
-              </span>
-            {:else}
-              <span class="muted">No saved rooms yet (kept on this machine)</span>
-            {/each}
-            {#if placing}<button class="chip" onclick={turn}>⟳ Turn <kbd>R</kbd></button>{/if}
-          {/if}
-        {:else if tool === 'storage'}
-          {#each stored as p (p.uid)}
-            <button class="chip" class:on={carrying?.uid === p.uid} onclick={() => ((turns = 0), (carrying = carrying?.uid === p.uid ? null : p))}>{BY_ID.get(p.item)?.label ?? p.item}</button>
-          {:else}
-            <span class="muted">Storage is empty</span>
-          {/each}
-          {#if carrying}<button class="chip" onclick={turn}>⟳ Turn <kbd>R</kbd></button>{/if}
-        {:else}
-          <span class="muted">{toolInfo.hint}</span>
-        {/if}
-      </div>
+    <p class="how"><b>{toolInfo.label}:</b> {toolInfo.hint}</p>
 
-      <ul class="check" aria-label="What every office needs">
-        {#each checks as c (c.need)}
-          <li class:bad={!c.have || !c.reached} title={!c.have ? 'Missing' : !c.reached ? 'Not reachable from the front door' : 'In reach of the front door'}>{c.have && c.reached ? '✓' : '✕'} {c.label}</li>
+    <div class="cards">
+      {#if tool === 'room' || tool === 'wall'}
+        {#each WALL_KINDS as k (k.id)}
+          <button class="card" class:on={wallKind === k.id} onclick={() => (wallKind = k.id)}>
+            <span class="wall {k.id}"></span><span class="n">{k.label}</span><span class="p">{coins(PRICES.wall_per_m[k.id])} a metre</span>
+          </button>
         {/each}
-        {#if stored.length}<li class="store"><button onclick={() => pick('storage')}>📦 {stored.length} in storage</button></li>{/if}
-      </ul>
-    </div>
-
-    <div class="status" aria-live="polite">
-      {#if toast}
-        <span class="toast {toast.tone}">{toast.text}</span>
-      {:else if pv}
-        <span>{pv.text}</span>
-        {#if pv.bad}<span class="bad">{pv.bad}</span>{:else if pv.cost != null}<span class="cost" class:back={pv.cost < 0}>{costLabel(pv.cost)}</span>{/if}
-      {:else}
-        <span class="muted">{toolInfo.hint}</span>
+        {#if tool === 'room'}
+          <span class="sep">Floor</span>
+          <button class="card" class:on={roomFloor == null} onclick={() => (roomFloor = null)}><span class="sw keep">=</span><span class="n">Keep</span><span class="p">as it is</span></button>
+          {#each FLOORS as f (f.id)}
+            <button class="card" class:on={roomFloor === f.id} onclick={() => (roomFloor = f.id)}><span class="sw" style:background={f.swatch}></span><span class="n">{f.label}</span><span class="p">{coins(PRICES.floor_per_m2)} a m²</span></button>
+          {/each}
+        {/if}
+      {:else if tool === 'door'}
+        {#each DOORS as d (d.id)}
+          <button class="card" class:on={doorKind === d.id} onclick={() => (doorKind = d.id)}><span class="ic">{d.icon}</span><span class="n">{d.label}</span><span class="p">{PRICES.door[d.id] ? coins(PRICES.door[d.id]) : 'free'}</span></button>
+        {/each}
+      {:else if tool === 'window'}
+        {#each WINDOW_WIDTHS as w (w)}
+          <button class="card" class:on={windowW === w} onclick={() => (windowW = w)}><span class="ic">🪟</span><span class="n">{w} m wide</span><span class="p">{coins(PRICES.window.standard)}</span></button>
+        {/each}
+      {:else if tool === 'floor'}
+        {#each FLOORS as f (f.id)}
+          <button class="card" class:on={floorM === f.id} onclick={() => (floorM = f.id)}><span class="sw" style:background={f.swatch}></span><span class="n">{f.label}</span><span class="p">{coins(PRICES.floor_per_m2)} a m²</span></button>
+        {/each}
+      {:else if tool === 'paint'}
+        <button class="card" class:on={!paintWhole} onclick={() => (paintWhole = false)}><span class="ic">▮</span><span class="n">One side</span><span class="p">of the wall you click</span></button>
+        <button class="card" class:on={paintWhole} onclick={() => (paintWhole = true)}><span class="ic">▣</span><span class="n">Whole room</span><span class="p">every wall inside</span></button>
+        <span class="sep">Colour</span>
+        {#each [...COLOURS.map((c) => c.id), ...PAPERS.map((p) => p.id)] as id (id)}
+          {@const look = paintLook(id)}
+          <button class="card" class:on={paint === id} onclick={() => (paint = id)}><span class="sw" style:background={look.css}></span><span class="n">{look.label}</span><span class="p">{coins(PRICES.paint_per_m2)} a m²</span></button>
+        {/each}
+      {:else if tool === 'move' || (tool === 'library' && placing) || (tool === 'storage' && carrying)}
+        {#if tool === 'library'}<span class="muted">Putting down “{placing?.name}”</span>{/if}
+        {#if tool === 'storage'}<span class="muted">Putting back the {BY_ID.get(carrying?.item ?? '')?.label.toLowerCase() ?? 'piece'}</span>{/if}
+        <button class="chip" onclick={turn} disabled={tool === 'move' && !moving}>⟳ Turn it <kbd>R</kbd></button>
+        {#if moving || placing || carrying}<button class="chip" onclick={cancel}>Cancel <kbd>Esc</kbd></button>{/if}
+      {:else if tool === 'library'}
+        {#if naming}
+          <input class="name" bind:value={naming.name} maxlength="40" aria-label="Room name" onkeydown={(e) => e.key === 'Enter' && saveNamed()} />
+          <button class="chip on" onclick={saveNamed}>Save</button>
+          <button class="chip" onclick={() => (naming = null)}>Cancel</button>
+        {:else}
+          <button class="chip" class:on={pickSave} onclick={() => ((placing = null), (pickSave = !pickSave))}>＋ Save a room (then click it)</button>
+          {#each rooms as r (r.id)}
+            <span class="saved">
+              <button class="chip" onclick={() => ((pickSave = false), (turns = 0), (placing = r))} title="Put it down ({r.bp.w * 0.5} × {r.bp.d * 0.5} m)">{r.name} · {r.bp.w * 0.5} × {r.bp.d * 0.5} m</button>
+              <button class="forget" aria-label="Forget {r.name}" onclick={() => (forgetRoom(r.id), (rooms = savedRooms()))}>✕</button>
+            </span>
+          {:else}
+            <span class="muted">No saved rooms yet.</span>
+          {/each}
+        {/if}
+      {:else if tool === 'storage'}
+        {#each stored as p (p.uid)}
+          <button class="chip" onclick={() => ((turns = 0), (carrying = p))}>{BY_ID.get(p.item)?.label ?? p.item}</button>
+        {:else}
+          <span class="muted">Storage is empty.</span>
+        {/each}
       {/if}
     </div>
+
+    {#if toast}
+      <p class="toast {toast.tone}" aria-live="polite">{toast.text}</p>
+    {:else if missing.length}
+      <p class="toast bad">Your office is missing {missing.map((c) => `${c.have ? 'a way to the ' : 'a '}${c.label.toLowerCase()}`).join(', ')}: the crew needs {missing.length > 1 ? 'them' : 'it'} to work.</p>
+    {/if}
   </div>
+
+  <!-- Beside the cursor: what a click here does and costs (not the panel's how-to again). -->
+  {#if cursor && pv && pv.text !== toolInfo.hint}
+    <div class="tag" style:left="{cursor.x + 16}px" style:top="{cursor.y + 18}px" aria-hidden="true">
+      <span>{pv.text}</span>
+      {#if pv.bad}<span class="bad">{pv.bad}</span>{:else if pv.cost != null}<span class="cost" class:back={pv.cost < 0}>{costLabel(pv.cost)}</span>{/if}
+    </div>
+  {/if}
 {/if}
 
 <style>
-  .panel { font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; color: #eef1f7; }
-  .panel { position: absolute; z-index: 401; max-width: 1060px; margin: 0 auto; padding: 12px; border-radius: 16px; background: rgba(22, 26, 36, 0.96); box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
-  header { display: flex; justify-content: space-between; align-items: start; gap: 8px; margin-bottom: 8px; }
-  .kicker { font: 700 10px/1 ui-monospace, monospace; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; margin-bottom: 3px; }
-  small { font-size: 11px; opacity: 0.6; margin-left: 6px; }
-  .right { display: flex; align-items: center; gap: 6px; }
-  .right > button, .seg button { padding: 4px 10px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: inherit; font: inherit; cursor: pointer; }
-  .right > button:disabled { opacity: 0.35; cursor: default; }
+  .panel, .tag { font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; color: #eef1f7; }
+  .panel { position: absolute; z-index: 401; max-width: 1060px; margin: 0 auto; padding: 10px 12px 12px; border-radius: 16px; background: rgba(22, 26, 36, 0.96); box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
+  header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .grow { flex: 1; }
+  .title { font-size: 14px; }
+  .money { font-weight: 600; color: #8ff0b0; }
+  small { font-size: 11px; opacity: 0.6; }
   .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 999px; background: rgba(255, 255, 255, 0.05); }
-  .seg button { background: none; }
-  .mode { margin-bottom: 4px; }
+  .seg button, .btn { padding: 4px 10px; border: 0; border-radius: 999px; background: none; color: inherit; font: inherit; cursor: pointer; }
+  .btn { background: rgba(255, 255, 255, 0.08); }
+  .btn:disabled { opacity: 0.35; cursor: default; }
   .seg button.on { background: rgba(126, 224, 161, 0.22); color: #c8f5d6; }
-  .x { background: none !important; color: #9aa2b6; font-size: 15px; }
-  .tools { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; margin-bottom: 8px; }
-  .tools button { flex: none; display: flex; flex-direction: column; align-items: center; gap: 1px; min-width: 68px; padding: 6px 6px 5px; border: 0; border-radius: 12px; background: rgba(255, 255, 255, 0.05); color: inherit; font: inherit; font-size: 11px; cursor: pointer; }
+  .x { border: 0; background: none; color: #9aa2b6; font-size: 15px; cursor: pointer; }
+  .tools { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  .tools button { position: relative; flex: none; display: flex; align-items: center; gap: 6px; padding: 7px 12px; border: 0; border-radius: 10px; background: rgba(255, 255, 255, 0.06); color: inherit; font: inherit; font-size: 13px; cursor: pointer; }
   .tools button:hover { background: rgba(126, 224, 161, 0.12); }
   .tools button.on { background: #7ee0a1; color: #0f2a1a; font-weight: 600; }
-  .i { font-size: 17px; line-height: 1.2; }
-  .body { display: flex; gap: 12px; align-items: start; }
-  .opts { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-height: 28px; }
-  .lbl { font-size: 11px; opacity: 0.55; margin: 0 2px 0 6px; }
-  .lbl:first-child { margin-left: 0; }
-  .chip { padding: 4px 11px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: inherit; font: inherit; cursor: pointer; }
+  .tools button.small { font-size: 12px; background: rgba(255, 255, 255, 0.03); }
+  .tools .more { background: none; opacity: 0.75; }
+  .i { font-size: 16px; line-height: 1; }
+  .badge { min-width: 16px; padding: 0 4px; border-radius: 999px; background: #f0c27e; color: #2a1e0f; font-size: 10px; font-weight: 700; text-align: center; }
+  .how { margin: 10px 2px 8px; font-size: 13px; color: #d7dceb; }
+  .cards { display: flex; align-items: center; gap: 6px; min-height: 42px; padding-bottom: 2px; overflow-x: auto; scrollbar-width: thin; }
+  .cards > * { flex: none; }
+  .card { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; min-width: 118px; padding: 6px 10px 6px 6px; border: 0; border-radius: 10px; background: rgba(255, 255, 255, 0.05); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .card:hover { background: rgba(126, 224, 161, 0.12); }
+  .card.on { background: rgba(126, 224, 161, 0.2); box-shadow: inset 0 0 0 1.5px #7ee0a1; }
+  .card > :first-child { grid-row: span 2; }
+  .card .n { font-size: 12px; font-weight: 600; }
+  .card .p { font-size: 10.5px; opacity: 0.65; }
+  .sw, .ic, .wall { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25); font-size: 15px; }
+  .ic { box-shadow: none; background: rgba(255, 255, 255, 0.06); }
+  .sw.keep { background: rgba(255, 255, 255, 0.06); font-weight: 700; opacity: 0.7; }
+  .wall { background: linear-gradient(#cfd3dc, #a9aebb); }
+  .wall.glass { background: linear-gradient(rgba(170, 215, 240, 0.7), rgba(120, 170, 200, 0.5)); }
+  .wall.half { background: linear-gradient(transparent 55%, #b9bec9 55%); }
+  .wall.exterior { background: linear-gradient(#c9a58a, #9c7a62); }
+  .sep { margin: 0 2px 0 8px; font-size: 11px; opacity: 0.55; }
+  .chip { padding: 5px 12px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: inherit; font: inherit; cursor: pointer; }
   .chip.on { background: rgba(126, 224, 161, 0.25); color: #c8f5d6; box-shadow: inset 0 0 0 1px rgba(126, 224, 161, 0.6); }
   .chip:disabled { opacity: 0.4; cursor: default; }
-  .sw { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 7px; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25); }
-  .sw.on { box-shadow: 0 0 0 2px #7ee0a1; }
   .saved { display: inline-flex; align-items: center; }
   .forget { border: 0; background: none; color: #9aa2b6; cursor: pointer; font-size: 11px; }
-  .name { padding: 4px 10px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.1); color: inherit; font: inherit; outline: none; box-shadow: inset 0 0 0 1px rgba(126, 224, 161, 0.5); }
+  .name { padding: 5px 10px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.1); color: inherit; font: inherit; outline: none; box-shadow: inset 0 0 0 1px rgba(126, 224, 161, 0.5); }
   .muted { opacity: 0.6; }
-  .check { list-style: none; margin: 0; padding: 6px 10px; display: grid; grid-template-columns: repeat(2, auto); gap: 2px 12px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); font-size: 11.5px; }
-  .check li { color: #9ee7b5; white-space: nowrap; }
-  .check li.bad { color: #ff9b8f; }
-  .check .store button { border: 0; background: none; color: #f0c27e; font: inherit; cursor: pointer; padding: 0; }
-  .status { display: flex; gap: 10px; align-items: center; margin-top: 8px; min-height: 18px; font-size: 12px; }
+  .toast { margin: 8px 2px 0; font-size: 12px; }
+  .toast.ok { color: #8ff0b0; }
+  .toast.bad, .bad { color: #ff9b8f; }
+  .tag { position: fixed; z-index: 402; display: flex; flex-direction: column; gap: 1px; max-width: 260px; padding: 5px 9px; border-radius: 9px; background: rgba(18, 22, 32, 0.92); box-shadow: 0 6px 20px -6px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(255, 255, 255, 0.1); pointer-events: none; }
   .cost { color: #8ff0b0; font-weight: 600; }
   .cost.back { color: #f0c27e; }
-  .bad { color: #ff9b8f; }
-  .toast.ok { color: #8ff0b0; }
-  .toast.bad { color: #ff9b8f; }
   kbd { font: 600 10px ui-monospace, monospace; opacity: 0.6; margin-left: 3px; }
 </style>
