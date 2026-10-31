@@ -176,7 +176,7 @@ export class TownGfx {
   constructor(readonly town: Town) {
     const ground = new Builder();
     for (const q of town.roads) ground.span(q.x0, -0.01, q.z0, q.x1, 0.0, q.z1, ASPHALT);
-    for (const q of town.dashes) ground.span(q.x0, 0.0, q.z0, q.x1, 0.012, q.z1, DASH);
+    for (const q of town.dashes) ground.span(q.x0, 0.0, q.z0, q.x1, 0.03, q.z1, DASH);
     for (const q of town.walks) {
       ground.span(q.x0, 0, q.z0, q.x1, 0.12, q.z1, WALK_C);
     }

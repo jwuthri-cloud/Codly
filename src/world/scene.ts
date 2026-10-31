@@ -124,6 +124,9 @@ export class NeighbourhoodScene {
     this.rig.set({ yaw: this.rig.homeYaw + 0.4 });
     this.rig.minDist = 14;
     this.rig.maxDist = 420;
+    // A near plane well off the camera keeps the depth precise out to the far zoom: the streets
+    // sit centimetres over the grass and flickered against it at 0.3.
+    this.rig.camera.near = 2;
     this.rig.camera.far = 1200;
     this.rig.camera.updateProjectionMatrix();
     this.key.castShadow = true;
