@@ -37,6 +37,8 @@
   import BuildMode, { type LotSave } from './build/BuildMode.svelte';
   import FurnitureMenu from './FurnitureMenu.svelte';
   import DailyEdition from './DailyEdition.svelte';
+  import { sound } from './sound';
+  import { coins } from '../lib/util/format';
   import { edition, standupLine, type Edition } from './daily';
   import type { Digest } from '../lib/gen/Digest';
   import type { Office } from '../lib/gen/Office';
@@ -221,8 +223,14 @@
     } else onaction?.(id, a);
   }
   let menuAt = $state<{ id: string; x: number; y: number } | null>(null);
-  /** Build mode is open (Buy closes meanwhile); the eyedropper hands Buy a piece to carry. */
-  let building = $state(false);
+  /** Build/Buy is open on its Build tab (walls, floors, paint) or its Buy tab (furniture); the
+   *  eyedropper hands Buy a piece to carry. */
+  let mode = $state<'build' | 'buy' | null>(null);
+  // Build/Buy has its own music, like the Sims, on both tabs.
+  $effect(() => {
+    sound.music(mode ? 'music-buy' : null);
+    return () => sound.music(null);
+  });
   let copyPiece = $state<{ item: string; n: number } | null>(null);
   let furniture = $state<import('./engine').FurnitureMenu | null>(null);
   const hudInsets = $derived({ top: insets?.top ?? 0, right: insets?.right ?? 0, bottom: insets?.bottom ?? 0, left: insets?.left ?? 0 });
@@ -464,10 +472,42 @@
     />
   {/if}
   {#if engine && !backdrop && lot && onsavelot}
-    <BuildMode bind:open={building} {engine} {lot} {shop} insets={hudInsets} onsave={onsavelot} {onplace} {onsell} oncopy={(item) => ((building = false), (copyPiece = { item, n: Date.now() }))} />
+    <BuildMode
+      bind:open={() => mode === 'build', (v) => (mode = v ? 'build' : null)}
+      {engine}
+      {lot}
+      {shop}
+      insets={hudInsets}
+      onsave={onsavelot}
+      {onplace}
+      {onsell}
+      oncopy={(item) => ((mode = 'buy'), (copyPiece = { item, n: Date.now() }))}
+      onswitch={shop && onplace && onsell ? () => (mode = 'buy') : undefined}
+    />
   {/if}
-  {#if engine && !backdrop && shop && onplace && onsell && !building}
-    <BuyMode {engine} {shop} lot={officeLot} crew={agents.map((a) => a.career.rank)} insets={hudInsets} {onplace} {onsell} {onexport} copy={copyPiece} />
+  {#if engine && !backdrop && shop && onplace && onsell && mode !== 'build'}
+    <BuyMode
+      bind:open={() => mode === 'buy', (v) => (mode = v ? 'buy' : null)}
+      {engine}
+      {shop}
+      lot={officeLot}
+      crew={agents.map((a) => a.career.rank)}
+      insets={hudInsets}
+      {onplace}
+      {onsell}
+      {onexport}
+      copy={copyPiece}
+      onswitch={lot && onsavelot ? () => (mode = 'build') : undefined}
+    />
+  {/if}
+  {#if engine && !backdrop && !mode && ((lot && onsavelot) || (shop && onplace && onsell))}
+    <button
+      class="of-buildbuy"
+      style:bottom="{hudInsets.bottom + 46}px"
+      style:right="{hudInsets.right + 10}px"
+      onclick={() => (sound.play('ui-open', { gain: 0.5 }), (mode = shop && onplace && onsell ? 'buy' : 'build'))}
+      aria-label="Build/Buy: build rooms and buy furniture"
+    >🔨 Build/Buy{#if shop} · <b>{coins(shop.wallet.balance)}</b>{/if}</button>
   {/if}
   {#if ticker && !backdrop && items.length}
     <ol class="of-ticker" aria-hidden="true">
@@ -789,6 +829,8 @@
   }
 
   /* ───── ticker ───── */
+  .of-buildbuy { position: absolute; z-index: 400; height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: rgba(18, 22, 32, 0.82); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08); color: #eef1f7; font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; cursor: pointer; }
+  .of-buildbuy b { color: #8ff0b0; }
   .of-ticker {
     position: absolute;
     left: 16px;

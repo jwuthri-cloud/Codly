@@ -77,9 +77,11 @@
     onsell?: (uid: string) => void;
     /** The eyedropper picked a piece Buy sells: carry a new one of it there. */
     oncopy?: (item: string) => void;
+    /** Go to the Buy tab (none: no Buy here). */
+    onswitch?: () => void;
     open?: boolean;
   }
-  let { engine, lot, shop, insets, onsave, onplace, onsell, oncopy, open = $bindable(false) }: Props = $props();
+  let { engine, lot, shop, insets, onsave, onplace, onsell, oncopy, onswitch, open = $bindable(false) }: Props = $props();
 
   type ToolId = 'room' | 'wall' | 'door' | 'window' | 'floor' | 'paint' | 'push' | 'move' | 'hammer' | 'dropper' | 'library' | 'storage';
   const TOOLS: { id: ToolId; icon: string; label: string; hint: string }[] = [
@@ -175,7 +177,6 @@
     engine.setBuildTool(handler);
     rooms = savedRooms();
     refresh();
-    sound.music('music-buy');
   }
 
   function stop() {
@@ -183,7 +184,6 @@
     engine.setBuildTool(null);
     engine.buildLayer.remove(layer.group);
     engine.setWallMode('cutaway');
-    sound.music(null);
     cancel();
   }
 
@@ -644,13 +644,13 @@
 
 <svelte:window onkeydown={onkey} />
 
-{#if !open}
-  <button class="build" style:bottom="{insets.bottom + 82}px" style:right="{insets.right + 10}px" onclick={() => (sound.play('ui-open', { gain: 0.5 }), (open = true))} aria-label="Build mode: walls, doors, floors and paint">🔨 Build</button>
-{:else}
+{#if open}
   <div class="panel" style:bottom="{insets.bottom + 46}px" style:left="{insets.left + 10}px" style:right="{insets.right + 10}px" role="dialog" aria-label="Build mode">
     <header>
       <div>
-        <div class="kicker">Build</div>
+        {#if onswitch}
+          <span class="seg mode" role="tablist"><button role="tab" aria-selected="true" class="on">🔨 Build</button><button role="tab" aria-selected="false" onclick={onswitch}>🛋 Buy</button></span>
+        {:else}<div class="kicker">Build</div>{/if}
         {#if balance != null}<b>{coins(balance)} to spend</b>{/if}
         <small>{pending ? `${costLabel(pending)} not saved yet` : saving ? 'Saving…' : 'All saved'}</small>
       </div>
@@ -753,8 +753,7 @@
 {/if}
 
 <style>
-  .build, .panel { font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; color: #eef1f7; }
-  .build { position: absolute; z-index: 400; height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: rgba(18, 22, 32, 0.82); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08); cursor: pointer; }
+  .panel { font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; color: #eef1f7; }
   .panel { position: absolute; z-index: 401; max-width: 1060px; margin: 0 auto; padding: 12px; border-radius: 16px; background: rgba(22, 26, 36, 0.96); box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
   header { display: flex; justify-content: space-between; align-items: start; gap: 8px; margin-bottom: 8px; }
   .kicker { font: 700 10px/1 ui-monospace, monospace; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; margin-bottom: 3px; }
@@ -764,6 +763,7 @@
   .right > button:disabled { opacity: 0.35; cursor: default; }
   .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 999px; background: rgba(255, 255, 255, 0.05); }
   .seg button { background: none; }
+  .mode { margin-bottom: 4px; }
   .seg button.on { background: rgba(126, 224, 161, 0.22); color: #c8f5d6; }
   .x { background: none !important; color: #9aa2b6; font-size: 15px; }
   .tools { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; margin-bottom: 8px; }

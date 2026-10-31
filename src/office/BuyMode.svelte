@@ -31,10 +31,12 @@
     onexport?: () => void;
     /** Open with a new one of this piece in hand (build mode's eyedropper); `n` makes each ask new. */
     copy?: { item: string; n: number } | null;
+    /** Go to the Build tab (none: no Build here). */
+    onswitch?: () => void;
+    open?: boolean;
   }
-  let { engine, shop, lot = null, crew, insets, onplace, onsell, onexport, copy = null }: Props = $props();
+  let { engine, shop, lot = null, crew, insets, onplace, onsell, onexport, copy = null, onswitch, open = $bindable(false) }: Props = $props();
 
-  let open = $state(false);
   let cat = $state(CATEGORIES[0]);
   /** The piece following the cursor: its catalog entry, the placed one when moving, why not here. */
   let carrying = $state<{ f: Furniture; uid: string | null; why: string | null } | null>(null);
@@ -44,14 +46,9 @@
   const hasKitchen = $derived(kitchens(officeLayout(lot ?? undefined), shop.placed).size > 0);
   const why = (f: Furniture) => locked(f, crew, hasKitchen);
 
-  // Build/Buy has its own music, like the Sims.
   $effect(() => {
     engine.setBuildMode(open ? pick : null);
-    sound.music(open ? 'music-buy' : null);
-    return () => {
-      engine.setBuildMode(null);
-      sound.music(null);
-    };
+    return () => engine.setBuildMode(null);
   });
 
   $effect(() => {
@@ -127,12 +124,8 @@
 
 <svelte:window onkeydown={onkey} />
 
-<button class="buy" class:on={open} style:bottom="{insets.bottom + 46}px" style:right="{insets.right + 10}px" onclick={() => (open ? close() : (sound.play('ui-open', { gain: 0.5 }), (open = true)))} aria-expanded={open} aria-label="Build/Buy: {coins(left)} to spend on furniture">
-  🛋 Buy · <b>{coins(left)}</b>
-</button>
-
 {#if open}
-  <div class="panel" style:bottom="{insets.bottom + 84}px" style:left="{insets.left + 10}px" style:right="{insets.right + 10}px" role="dialog" aria-label="Buy furniture">
+  <div class="panel" style:bottom="{insets.bottom + 46}px" style:left="{insets.left + 10}px" style:right="{insets.right + 10}px" role="dialog" aria-label="Buy furniture">
     {#if carrying}
       {@const c = carrying}
       <div class="carry">
@@ -150,7 +143,9 @@
     {:else}
       <header>
         <div>
-          <div class="kicker">Build/Buy</div>
+          {#if onswitch}
+            <span class="seg" role="tablist"><button role="tab" aria-selected="false" onclick={onswitch}>🔨 Build</button><button role="tab" aria-selected="true" class="on">🛋 Buy</button></span>
+          {:else}<div class="kicker">Buy</div>{/if}
           <b>{coins(left)} to spend</b> <small>{coins(shop.wallet.earned)} earned by your agents{shop.wallet.granted ? ` · ${coins(shop.wallet.granted)} given` : ''} · click a piece in the office to move or sell it</small>
         </div>
         <span class="side">
@@ -181,10 +176,10 @@
 {/if}
 
 <style>
-  .buy, .panel { font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; color: #eef1f7; }
-  .buy { position: absolute; z-index: 400; height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: rgba(18, 22, 32, 0.82); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08); cursor: pointer; }
-  .buy.on { box-shadow: inset 0 0 0 1.5px #7ee0a1; }
-  .buy b { color: #8ff0b0; }
+  .panel { font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; color: #eef1f7; }
+  .seg { display: inline-flex; gap: 2px; padding: 2px; margin-bottom: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.05); }
+  .seg button { padding: 4px 10px; border: 0; border-radius: 999px; background: none; color: inherit; font: inherit; cursor: pointer; }
+  .seg button.on { background: rgba(126, 224, 161, 0.22); color: #c8f5d6; }
   .panel { position: absolute; z-index: 401; max-width: 980px; margin: 0 auto; padding: 12px; border-radius: 16px; background: rgba(22, 26, 36, 0.96); box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
   header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px; gap: 8px; }
   .kicker { font: 700 10px/1 ui-monospace, monospace; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; margin-bottom: 3px; }
