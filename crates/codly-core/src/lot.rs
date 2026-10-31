@@ -1,5 +1,6 @@
 //! Build mode's lots: the ready-made designs (`src/office/lots/*.json`, shared with the office
-//! frontend), a repo's first lot, and the checks a saved lot must pass. Pure: the orchestrator
+//! frontend), a repo's first lot, putting a design on a plot, and the checks a saved lot must
+//! pass. Prices are `crate::price`. Pure: the orchestrator
 //! keeps each repo's lot in kv `lot:{ws}` (`orchestrator/lots.rs`), and `src/office/layout.ts`
 //! turns it into rooms, stations and the walking grid.
 
@@ -9,10 +10,10 @@ use anyhow::{Result, bail, ensure};
 
 use crate::model::*;
 
-/// Today's 9-room floor plan (made once from the hand-built studio).
-pub const STUDIO: &str = include_str!("../../../src/office/lots/studio.json");
-/// A new repo's first office: one room, a roll-up door, the Lead's desk and two more.
-pub const GARAGE: &str = include_str!("../../../src/office/lots/garage.json");
+// `TEMPLATES`: every ready-made design in `src/office/lots/` (build.rs): the Studio (today's
+// 9-room floor plan, made once from the hand-built one), the Garage (a new repo's first office:
+// one room, a roll-up door, the Lead's desk and two more), and any added since.
+include!(concat!(env!("OUT_DIR"), "/templates.rs"));
 
 /// Schema version.
 pub const VERSION: u32 = 1;
@@ -23,22 +24,95 @@ pub const MAX_SIDE: f64 = 64.0;
 /// Floor materials (`textures.ts` paints each).
 pub const FLOORS: &[&str] = &["oak", "walnut", "walnut-planks", "carpet-sage", "carpet-blue", "tile-cool", "tile-warm", "terrazzo", "concrete"];
 
-/// A ready-made design by name ("studio", "garage").
+/// The floor of a bare plot, before anything is laid on it.
+pub const BARE: &str = "concrete";
+
+/// A ready-made design by name ("studio", "garage"…).
 pub fn template(name: &str) -> Option<Lot> {
-    let raw = match name {
-        "studio" => STUDIO,
-        "garage" => GARAGE,
-        _ => return None,
-    };
+    let (_, raw) = TEMPLATES.iter().find(|(n, _)| *n == name)?;
     Some(serde_json::from_str(raw).expect("lot templates are valid"))
 }
 
-/// Everything in a lot that can be a gift: walls, doors, windows and furniture.
-pub fn ids(lot: &Lot) -> HashSet<String> {
-    lot.walls.iter().map(|w| w.id.clone()).chain(lot.doors.iter().map(|d| d.id.clone())).chain(lot.windows.iter().map(|w| w.id.clone())).chain(lot.furniture.iter().map(|p| p.uid.clone())).collect()
+/// The names of every ready-made design.
+pub fn template_names() -> Vec<&'static str> {
+    TEMPLATES.iter().map(|(n, _)| *n).collect()
 }
 
-/// A repo's first lot. One that already has a crew or furniture (`existing`) gets the Studio it
+/// A bare plot of `w` × `d` metres: nothing built, a concrete floor.
+pub fn empty(w: f64, d: f64) -> Lot {
+    Lot {
+        v: VERSION,
+        template: String::new(),
+        size: LotSize { w, d },
+        walls: vec![],
+        doors: vec![],
+        windows: vec![],
+        floors: LotFloors { tile: TILE, default: BARE.into(), rects: vec![] },
+        paint: vec![],
+        labels: vec![],
+        furniture: vec![],
+        gift: vec![],
+        storage: vec![],
+    }
+}
+
+/// Nothing stands on it (no walls, doors, windows or furniture, nothing stored).
+pub fn is_empty(lot: &Lot) -> bool {
+    lot.walls.is_empty() && lot.doors.is_empty() && lot.windows.is_empty() && lot.furniture.is_empty() && lot.storage.is_empty()
+}
+
+/// A design put down on a plot of `w` × `d`: centred across, against the south edge (the street,
+/// where its front door is). Its own floor becomes a rect on the bare plot. None if it's too big.
+pub fn fit(mut lot: Lot, w: f64, d: f64) -> Option<Lot> {
+    let (lw, ld) = (lot.size.w, lot.size.d);
+    if lw > w + 1e-6 || ld > d + 1e-6 {
+        return None;
+    }
+    if (lw - w).abs() < 1e-6 && (ld - d).abs() < 1e-6 {
+        return Some(lot);
+    }
+    let dx = (((w - lw) / 2.0) / TILE).floor() * TILE;
+    let dz = d - ld;
+    for wall in &mut lot.walls {
+        (wall.x0, wall.x1, wall.z0, wall.z1) = (wall.x0 + dx, wall.x1 + dx, wall.z0 + dz, wall.z1 + dz);
+    }
+    for p in lot.furniture.iter_mut().chain(lot.storage.iter_mut()) {
+        (p.x, p.z) = (p.x + dx, p.z + dz);
+    }
+    for r in &mut lot.floors.rects {
+        (r.x, r.z) = (r.x + dx, r.z + dz);
+    }
+    for l in &mut lot.labels {
+        (l.x, l.z) = (l.x + dx, l.z + dz);
+    }
+    if lot.floors.default != BARE {
+        let m = std::mem::replace(&mut lot.floors.default, BARE.into());
+        lot.floors.rects.insert(0, FloorRect { x: dx, z: dz, w: lw, d: ld, m });
+    }
+    lot.size = LotSize { w, d };
+    Some(lot)
+}
+
+/// Everything in a lot that can be a gift: walls, doors, windows and furniture (stored too).
+pub fn ids(lot: &Lot) -> HashSet<String> {
+    lot.walls
+        .iter()
+        .map(|w| w.id.clone())
+        .chain(lot.doors.iter().map(|d| d.id.clone()))
+        .chain(lot.windows.iter().map(|w| w.id.clone()))
+        .chain(lot.furniture.iter().chain(&lot.storage).map(|p| p.uid.clone()))
+        .collect()
+}
+
+/// The gift marks a saved lot keeps: what came free and is still there (furniture still the
+/// same piece). Nothing else becomes a gift, so a gift can never be sold for coins.
+pub fn kept_gifts(old: &Lot, new: &Lot) -> Vec<String> {
+    let item = |lot: &Lot, uid: &str| lot.furniture.iter().chain(&lot.storage).find(|p| p.uid == uid).map(|p| p.item.clone());
+    let now = ids(new);
+    old.gift.iter().filter(|id| now.contains(*id) && item(old, id) == item(new, id)).cloned().collect()
+}
+
+/// A repo's first lot.One that already has a crew or furniture (`existing`) gets the Studio it
 /// has always had, all a gift, with the furniture bought for it (`decor`: not a gift); a new
 /// repo gets the Garage, all a gift.
 pub fn first(existing: bool, decor: Vec<Placed>) -> Lot {
@@ -154,11 +228,15 @@ pub fn validate(mut lot: Lot) -> Result<Lot> {
         }
     }
 
-    // Furniture: catalog pieces, inside.
+    // Furniture: catalog pieces, inside (or put away).
     for p in &lot.furniture {
         fresh(&p.uid, "a piece of furniture")?;
         ensure!(crate::career::price(&p.item).is_some(), "no such piece: {}", p.item);
         ensure!(inside(p.x, p.z) && p.rot.is_finite() && p.y.is_finite() && (0.0..=3.0).contains(&p.y), "{} is outside the lot", p.item);
+    }
+    for p in &lot.storage {
+        fresh(&p.uid, "a piece of furniture")?;
+        ensure!(crate::career::price(&p.item).is_some(), "no such piece: {}", p.item);
     }
     Ok(lot)
 }
@@ -173,7 +251,9 @@ mod tests {
 
     #[test]
     fn templates_are_valid_lots() {
-        for name in ["studio", "garage"] {
+        assert!(template_names().contains(&"studio") && template_names().contains(&"garage"));
+        assert!(template("nope").is_none());
+        for name in template_names() {
             let lot = template(name).unwrap();
             assert_eq!(lot.template, name);
             assert_eq!(validate(lot.clone()).unwrap(), lot, "{name} is already tidy");
@@ -205,6 +285,27 @@ mod tests {
         assert_eq!(lot.furniture.iter().filter(|p| p.uid == "s1").count(), 1);
         assert_ne!(lot.furniture.iter().find(|p| p.uid == "s1").unwrap().item, "kenney.chair");
         validate(lot).unwrap();
+    }
+
+    #[test]
+    fn a_design_fits_on_a_bigger_plot() {
+        let studio = template("studio").unwrap();
+        assert_eq!(fit(studio.clone(), 28.0, 24.0).unwrap(), studio, "its own size: as it is");
+        assert!(fit(studio, 16.0, 12.0).is_none(), "too big");
+        let g = fit(template("garage").unwrap(), 16.0, 12.0).unwrap();
+        assert_eq!((g.size.w, g.size.d), (16.0, 12.0));
+        let w3 = g.walls.iter().find(|w| w.id == "w3").unwrap();
+        assert_eq!((w3.x0, w3.z0, w3.x1, w3.z1), (3.0, 12.0, 13.0, 12.0), "centred, its front on the street");
+        assert_eq!(g.furniture[0].x, 8.0);
+        validate(g).unwrap();
+        // A design with its own floor keeps it where it stands.
+        let mut oak = template("garage").unwrap();
+        oak.floors.default = "oak".into();
+        let f = fit(oak, 16.0, 12.0).unwrap();
+        assert_eq!(f.floors.default, BARE);
+        assert_eq!(f.floors.rects[0], FloorRect { x: 3.0, z: 4.0, w: 10.0, d: 8.0, m: "oak".into() });
+        assert!(is_empty(&empty(10.0, 8.0)) && !is_empty(&f));
+        validate(empty(10.0, 8.0)).unwrap();
     }
 
     #[test]

@@ -92,7 +92,7 @@ async fn cheats_need_developer_mode_and_flag_the_wallet() {
 
     let w = core.wallet().unwrap();
     assert_eq!((w.earned, w.balance, w.cheated), (40, 40, false), "another repo's XP is in the wallet");
-    let piece = Placed { uid: "s1".into(), item: "kenney.loungeDesignSofa".into(), x: 1.0, y: 0.0, z: 10.0, rot: 0.0 };
+    let piece = Placed { uid: "s1".into(), item: "kenney.loungeDesignSofa".into(), x: 1.0, y: 0.0, z: 5.0, rot: 0.0 };
     assert!(core.place(piece.clone()).unwrap_err().to_string().contains("not enough coins"));
 
     // Off by default: every cheat is refused.

@@ -602,6 +602,11 @@ pub struct Lot {
     /// Ids (walls, doors, windows) and uids (furniture) of what came free: gifts sell for 0.
     #[serde(default)]
     pub gift: Vec<String>,
+    /// Furniture put away: still yours (it sells back as furniture), not standing anywhere.
+    /// What didn't fit when the office moved lands here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<Placed>>", optional)]
+    pub storage: Vec<Placed>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
@@ -721,6 +726,57 @@ pub struct RoomLabel {
     pub name: Option<String>,
 }
 
+/// The three plot sizes on the neighbourhood (`src/office/lots/prices.json` has their metres and
+/// prices).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum LotSizeName {
+    Small,
+    Medium,
+    Large,
+}
+
+/// A plot on the neighbourhood map (PROGRESSION.md §4, "The map"): yours or for sale, with at
+/// most one repo's office on it. One list per player, not per repo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LotSlot {
+    pub id: String,
+    /// Grid column and row on the neighbourhood.
+    pub x: i64,
+    pub z: i64,
+    pub size: LotSizeName,
+    pub owned: bool,
+    /// The repo whose office this is (one at most).
+    pub workspace_id: Option<Id>,
+    /// That repo's name, for the sign.
+    pub name: Option<String>,
+    /// Agents working there, the Lead aside.
+    pub crew: i64,
+    /// The empty plot's price (what "For sale" shows); a ready-made building on it costs more
+    /// (`price::ready_made`).
+    pub price: i64,
+    /// The ready-made design what stands on it started from ("garage", "studio"…); None when
+    /// nothing did, or the plot isn't yours.
+    pub template: Option<String>,
+    /// The land came free (a repo's first plot): it sells for 0.
+    pub gift: bool,
+    /// What selling it would give back now (80% of the land, the contents at their sell-back
+    /// rates, gifts 0); 0 when it isn't yours.
+    pub sells_for: i64,
+}
+
+/// A lot saved in build mode: as stored, the wallet after, and what the change cost (negative:
+/// what selling gave back).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LotSaved {
+    pub lot: Lot,
+    pub wallet: Wallet,
+    pub cost: i64,
+}
+
 /// The player's coins (🪙): one wallet for every repo, separate from XP (XP is the career, coins
 /// are what the offices spend). `balance = earned + granted - spent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
@@ -730,7 +786,7 @@ pub struct Wallet {
     pub earned: i64,
     /// Coins given outright: developer cheats (later, gifts).
     pub granted: i64,
-    /// What you own, at its price: every repo's furniture (later, lots and buildings too).
+    /// Paid for lots, building and furniture, less what selling gave back (`wallet:ledger`).
     pub spent: i64,
     pub balance: i64,
     /// A developer cheat was used, ever: flagged for good (leaderboards skip it).
@@ -743,6 +799,16 @@ pub struct Grant {
     pub amount: i64,
     /// `wallet::CHEAT` for the developer panel's (they flag the wallet for good).
     pub reason: String,
+    pub at: i64,
+}
+
+/// One purchase (positive) or refund (negative), as the wallet's ledger (`wallet:ledger`) keeps
+/// them: `Wallet::spent` is their sum.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Spend {
+    pub amount: i64,
+    /// What it was for ("build", "lot lot-3", "furniture"…).
+    pub what: String,
     pub at: i64,
 }
 

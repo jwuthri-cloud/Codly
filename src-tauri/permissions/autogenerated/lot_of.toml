@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lot-of"
+description = "Enables the lot_of command without any pre-configured scope."
+commands.allow = ["lot_of"]
+
+[[permission]]
+identifier = "deny-lot-of"
+description = "Denies the lot_of command without any pre-configured scope."
+commands.deny = ["lot_of"]

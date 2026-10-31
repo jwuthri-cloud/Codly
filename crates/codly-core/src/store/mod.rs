@@ -293,7 +293,7 @@ impl Store {
         Ok(self.conn().query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }
 
-    /// Every (key, value) whose key starts with `prefix` ("decor:" for every repo's furniture).
+    /// Every (key, value) whose key starts with `prefix` ("lot:slot:" for every plot's lot).
     pub fn kv_prefixed(&self, prefix: &str) -> Result<Vec<(String, String)>> {
         let conn = self.conn();
         let mut st = conn.prepare_cached("SELECT key, value FROM kv WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key")?;
@@ -307,6 +307,20 @@ impl Store {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Several kv writes in one transaction (None deletes the key): a purchase and what it
+    /// bought land together or not at all.
+    pub fn kv_write(&self, writes: &[(String, Option<String>)]) -> Result<()> {
+        self.tx(|tx| {
+            for (key, value) in writes {
+                match value {
+                    Some(v) => tx.execute("INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, v])?,
+                    None => tx.execute("DELETE FROM kv WHERE key = ?1", [key])?,
+                };
+            }
+            Ok(())
+        })
     }
 
     /// Settings (defaults when unset). A corrupt value falls back to defaults rather than

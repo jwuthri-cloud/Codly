@@ -14,7 +14,7 @@ earned: number,
  */
 granted: number, 
 /**
- * What you own, at its price: every repo's furniture (later, lots and buildings too).
+ * Paid for lots, building and furniture, less what selling gave back (`wallet:ledger`).
  */
 spent: number, balance: number, 
 /**

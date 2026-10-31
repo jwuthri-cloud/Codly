@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-move-office"
+description = "Enables the move_office command without any pre-configured scope."
+commands.allow = ["move_office"]
+
+[[permission]]
+identifier = "deny-move-office"
+description = "Denies the move_office command without any pre-configured scope."
+commands.deny = ["move_office"]

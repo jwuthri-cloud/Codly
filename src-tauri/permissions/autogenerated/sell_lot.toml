@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sell-lot"
+description = "Enables the sell_lot command without any pre-configured scope."
+commands.allow = ["sell_lot"]
+
+[[permission]]
+identifier = "deny-sell-lot"
+description = "Denies the sell_lot command without any pre-configured scope."
+commands.deny = ["sell_lot"]

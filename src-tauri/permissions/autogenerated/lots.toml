@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lots"
+description = "Enables the lots command without any pre-configured scope."
+commands.allow = ["lots"]
+
+[[permission]]
+identifier = "deny-lots"
+description = "Denies the lots command without any pre-configured scope."
+commands.deny = ["lots"]

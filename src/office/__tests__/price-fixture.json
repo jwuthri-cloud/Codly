@@ -1,0 +1,1418 @@
+{
+  "diffs": [
+    {
+      "cost": 290,
+      "name": "build",
+      "new": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          },
+          {
+            "at": 1.5,
+            "id": "d2",
+            "kind": "double",
+            "wall": "w5",
+            "width": 1.0
+          }
+        ],
+        "floors": {
+          "default": "oak",
+          "rects": [
+            {
+              "d": 3.5,
+              "m": "carpet-blue",
+              "w": 4.5,
+              "x": 0.0,
+              "z": 0.0
+            }
+          ],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.leadDesk",
+            "rot": 0.0,
+            "uid": "g1",
+            "x": 5.0,
+            "y": 0.0,
+            "z": 1.75
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          },
+          {
+            "item": "kenney.chair",
+            "rot": 0.0,
+            "uid": "c1",
+            "x": 2.0,
+            "y": 0.0,
+            "z": 2.0
+          }
+        ],
+        "gift": [],
+        "labels": [],
+        "paint": [
+          {
+            "paint": "#ffcc00",
+            "side": -1,
+            "wall": "w5"
+          },
+          {
+            "paint": "#ffcc00",
+            "side": 1,
+            "wall": "w1"
+          }
+        ],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "storage": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          }
+        ],
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "glass",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w2",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 0.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w5",
+            "kind": "half",
+            "x0": 4.5,
+            "x1": 4.5,
+            "z0": 0.0,
+            "z1": 3.5
+          }
+        ],
+        "windows": [
+          {
+            "at": 5.6,
+            "id": "win1",
+            "kind": "standard",
+            "wall": "w2",
+            "width": 1.6
+          }
+        ]
+      },
+      "old": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          }
+        ],
+        "floors": {
+          "default": "concrete",
+          "rects": [],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.leadDesk",
+            "rot": 0.0,
+            "uid": "g1",
+            "x": 5.0,
+            "y": 0.0,
+            "z": 1.75
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          }
+        ],
+        "gift": [],
+        "labels": [],
+        "paint": [],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w2",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 0.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          }
+        ],
+        "windows": [
+          {
+            "at": 5.6,
+            "id": "win1",
+            "kind": "standard",
+            "wall": "w2",
+            "width": 1.6
+          }
+        ]
+      }
+    },
+    {
+      "cost": -349,
+      "name": "rebuild",
+      "new": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          }
+        ],
+        "floors": {
+          "default": "oak",
+          "rects": [
+            {
+              "d": 3.5,
+              "m": "carpet-blue",
+              "w": 4.5,
+              "x": 4.5,
+              "z": 0.0
+            }
+          ],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          },
+          {
+            "item": "kenney.chair",
+            "rot": 0.0,
+            "uid": "c1",
+            "x": 2.0,
+            "y": 0.0,
+            "z": 2.0
+          }
+        ],
+        "gift": [],
+        "labels": [],
+        "paint": [
+          {
+            "paint": "#ffcc00",
+            "side": -1,
+            "wall": "w5"
+          },
+          {
+            "paint": "#ffcc00",
+            "side": 1,
+            "wall": "w1"
+          }
+        ],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "storage": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          }
+        ],
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "glass",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w5",
+            "kind": "half",
+            "x0": 4.5,
+            "x1": 4.5,
+            "z0": 0.0,
+            "z1": 2.0
+          }
+        ],
+        "windows": []
+      },
+      "old": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          },
+          {
+            "at": 1.5,
+            "id": "d2",
+            "kind": "double",
+            "wall": "w5",
+            "width": 1.0
+          }
+        ],
+        "floors": {
+          "default": "oak",
+          "rects": [
+            {
+              "d": 3.5,
+              "m": "carpet-blue",
+              "w": 4.5,
+              "x": 0.0,
+              "z": 0.0
+            }
+          ],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.leadDesk",
+            "rot": 0.0,
+            "uid": "g1",
+            "x": 5.0,
+            "y": 0.0,
+            "z": 1.75
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          },
+          {
+            "item": "kenney.chair",
+            "rot": 0.0,
+            "uid": "c1",
+            "x": 2.0,
+            "y": 0.0,
+            "z": 2.0
+          }
+        ],
+        "gift": [],
+        "labels": [],
+        "paint": [
+          {
+            "paint": "#ffcc00",
+            "side": -1,
+            "wall": "w5"
+          },
+          {
+            "paint": "#ffcc00",
+            "side": 1,
+            "wall": "w1"
+          }
+        ],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "storage": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          }
+        ],
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "glass",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w2",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 0.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w5",
+            "kind": "half",
+            "x0": 4.5,
+            "x1": 4.5,
+            "z0": 0.0,
+            "z1": 3.5
+          }
+        ],
+        "windows": [
+          {
+            "at": 5.6,
+            "id": "win1",
+            "kind": "standard",
+            "wall": "w2",
+            "width": 1.6
+          }
+        ]
+      }
+    },
+    {
+      "cost": 305,
+      "name": "undo",
+      "new": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          }
+        ],
+        "floors": {
+          "default": "concrete",
+          "rects": [],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.leadDesk",
+            "rot": 0.0,
+            "uid": "g1",
+            "x": 5.0,
+            "y": 0.0,
+            "z": 1.75
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          }
+        ],
+        "gift": [],
+        "labels": [],
+        "paint": [],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w2",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 0.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          }
+        ],
+        "windows": [
+          {
+            "at": 5.6,
+            "id": "win1",
+            "kind": "standard",
+            "wall": "w2",
+            "width": 1.6
+          }
+        ]
+      },
+      "old": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          }
+        ],
+        "floors": {
+          "default": "oak",
+          "rects": [
+            {
+              "d": 3.5,
+              "m": "carpet-blue",
+              "w": 4.5,
+              "x": 4.5,
+              "z": 0.0
+            }
+          ],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          },
+          {
+            "item": "kenney.chair",
+            "rot": 0.0,
+            "uid": "c1",
+            "x": 2.0,
+            "y": 0.0,
+            "z": 2.0
+          }
+        ],
+        "gift": [],
+        "labels": [],
+        "paint": [
+          {
+            "paint": "#ffcc00",
+            "side": -1,
+            "wall": "w5"
+          },
+          {
+            "paint": "#ffcc00",
+            "side": 1,
+            "wall": "w1"
+          }
+        ],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "storage": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          }
+        ],
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "glass",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w5",
+            "kind": "half",
+            "x0": 4.5,
+            "x1": 4.5,
+            "z0": 0.0,
+            "z1": 2.0
+          }
+        ],
+        "windows": []
+      }
+    },
+    {
+      "cost": 202,
+      "name": "gift",
+      "new": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          }
+        ],
+        "floors": {
+          "default": "oak",
+          "rects": [
+            {
+              "d": 3.5,
+              "m": "carpet-blue",
+              "w": 4.5,
+              "x": 4.5,
+              "z": 0.0
+            }
+          ],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          },
+          {
+            "item": "kenney.chair",
+            "rot": 0.0,
+            "uid": "c1",
+            "x": 2.0,
+            "y": 0.0,
+            "z": 2.0
+          }
+        ],
+        "gift": [
+          "w1",
+          "w2",
+          "w3",
+          "w4",
+          "d1",
+          "win1",
+          "g1",
+          "g2",
+          "g3",
+          "g4",
+          "g5",
+          "g6"
+        ],
+        "labels": [],
+        "paint": [
+          {
+            "paint": "#ffcc00",
+            "side": -1,
+            "wall": "w5"
+          },
+          {
+            "paint": "#ffcc00",
+            "side": 1,
+            "wall": "w1"
+          }
+        ],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "storage": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          }
+        ],
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "glass",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w5",
+            "kind": "half",
+            "x0": 4.5,
+            "x1": 4.5,
+            "z0": 0.0,
+            "z1": 2.0
+          }
+        ],
+        "windows": []
+      },
+      "old": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          }
+        ],
+        "floors": {
+          "default": "concrete",
+          "rects": [],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.leadDesk",
+            "rot": 0.0,
+            "uid": "g1",
+            "x": 5.0,
+            "y": 0.0,
+            "z": 1.75
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          }
+        ],
+        "gift": [
+          "w1",
+          "w2",
+          "w3",
+          "w4",
+          "d1",
+          "win1",
+          "g1",
+          "g2",
+          "g3",
+          "g4",
+          "g5",
+          "g6"
+        ],
+        "labels": [],
+        "paint": [],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w2",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 0.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          }
+        ],
+        "windows": [
+          {
+            "at": 5.6,
+            "id": "win1",
+            "kind": "standard",
+            "wall": "w2",
+            "width": 1.6
+          }
+        ]
+      }
+    },
+    {
+      "cost": 330,
+      "name": "gift back",
+      "new": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          }
+        ],
+        "floors": {
+          "default": "concrete",
+          "rects": [],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.leadDesk",
+            "rot": 0.0,
+            "uid": "g1",
+            "x": 5.0,
+            "y": 0.0,
+            "z": 1.75
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          }
+        ],
+        "gift": [
+          "w1",
+          "w2",
+          "w3",
+          "w4",
+          "d1",
+          "win1",
+          "g1",
+          "g2",
+          "g3",
+          "g4",
+          "g5",
+          "g6"
+        ],
+        "labels": [],
+        "paint": [],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w2",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 0.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          }
+        ],
+        "windows": [
+          {
+            "at": 5.6,
+            "id": "win1",
+            "kind": "standard",
+            "wall": "w2",
+            "width": 1.6
+          }
+        ]
+      },
+      "old": {
+        "doors": [
+          {
+            "at": 6.5,
+            "id": "d1",
+            "kind": "rollup",
+            "wall": "w3",
+            "width": 2.6
+          }
+        ],
+        "floors": {
+          "default": "oak",
+          "rects": [
+            {
+              "d": 3.5,
+              "m": "carpet-blue",
+              "w": 4.5,
+              "x": 4.5,
+              "z": 0.0
+            }
+          ],
+          "tile": 0.5
+        },
+        "furniture": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g3",
+            "x": 4.65,
+            "y": 0.0,
+            "z": 4.73
+          },
+          {
+            "item": "office.serverMachine",
+            "rot": -1.5707963267948966,
+            "uid": "g4",
+            "x": 9.5,
+            "y": 0.0,
+            "z": 2.2
+          },
+          {
+            "item": "office.shelf",
+            "rot": 1.5707963267948966,
+            "uid": "g5",
+            "x": 0.3,
+            "y": 0.0,
+            "z": 3.3
+          },
+          {
+            "item": "office.mailbox",
+            "rot": -1.5707963267948966,
+            "uid": "g6",
+            "x": 9.4,
+            "y": 0.0,
+            "z": 7.3
+          },
+          {
+            "item": "kenney.chair",
+            "rot": 0.0,
+            "uid": "c1",
+            "x": 2.0,
+            "y": 0.0,
+            "z": 2.0
+          }
+        ],
+        "gift": [
+          "w1",
+          "w2",
+          "w3",
+          "w4",
+          "d1",
+          "win1",
+          "g1",
+          "g2",
+          "g3",
+          "g4",
+          "g5",
+          "g6"
+        ],
+        "labels": [],
+        "paint": [
+          {
+            "paint": "#ffcc00",
+            "side": -1,
+            "wall": "w5"
+          },
+          {
+            "paint": "#ffcc00",
+            "side": 1,
+            "wall": "w1"
+          }
+        ],
+        "size": {
+          "d": 8.0,
+          "w": 10.0
+        },
+        "storage": [
+          {
+            "item": "office.desk",
+            "rot": 3.141592653589793,
+            "uid": "g2",
+            "x": 3.35,
+            "y": 0.0,
+            "z": 4.73
+          }
+        ],
+        "template": "garage",
+        "v": 1,
+        "walls": [
+          {
+            "id": "w1",
+            "kind": "glass",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 0.0
+          },
+          {
+            "id": "w3",
+            "kind": "exterior",
+            "x0": 0.0,
+            "x1": 10.0,
+            "z0": 8.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w4",
+            "kind": "exterior",
+            "x0": 10.0,
+            "x1": 10.0,
+            "z0": 0.0,
+            "z1": 8.0
+          },
+          {
+            "id": "w5",
+            "kind": "half",
+            "x0": 4.5,
+            "x1": 4.5,
+            "z0": 0.0,
+            "z1": 2.0
+          }
+        ],
+        "windows": []
+      }
+    }
+  ],
+  "templates": {
+    "garage": {
+      "ready_made": {
+        "large": 5520,
+        "medium": 2720,
+        "small": 1820
+      },
+      "sell_bought": 1275,
+      "sell_gift": 0,
+      "value": 1520
+    },
+    "studio": {
+      "ready_made": {
+        "large": 23708,
+        "medium": null,
+        "small": null
+      },
+      "sell_bought": 17308,
+      "sell_gift": 0,
+      "value": 19708
+    }
+  }
+}

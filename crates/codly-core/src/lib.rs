@@ -41,6 +41,7 @@ pub mod mcp;
 pub mod memory;
 pub mod model;
 pub mod orchestrator;
+pub mod price;
 pub mod proc;
 pub mod quota;
 pub mod pty;
