@@ -90,11 +90,13 @@ pub(super) fn grant(store: &Store, amount: i64, reason: &str) -> Result<Wallet> 
 }
 
 /// Build/Buy in one repo: the wallet and the furniture bought for this office (what came with
-/// the lot and the office's own stations are drawn from the lot).
+/// the lot and the office's own stations are drawn from the lot; the games the shop sells, like
+/// the foosball, are both: bought, and standing in the lot where they play).
 pub(super) fn shop(store: &Store, ws: &str) -> Result<Shop> {
     let lot = super::lots::lot_of(store, ws)?;
     let gift: std::collections::HashSet<&String> = lot.gift.iter().collect();
-    let placed = lot.furniture.iter().filter(|p| !gift.contains(&p.uid) && !crate::lot::builtin(&p.item)).cloned().collect();
+    let bought = |p: &Placed| !crate::lot::builtin(&p.item) || crate::career::sold_builtin(&p.item);
+    let placed = lot.furniture.iter().filter(|p| !gift.contains(&p.uid) && bought(p)).cloned().collect();
     Ok(Shop { wallet: wallet(store)?, placed })
 }
 
@@ -116,6 +118,11 @@ pub(super) fn place(store: &Store, ws: &str, piece: Placed) -> Result<Shop> {
         } else {
             if crate::career::price(&piece.item).is_none() {
                 bail!("no such item");
+            }
+            // Earned pieces (furniture.json `needs`): a rank on the crew, or a kitchen here.
+            let crew: Vec<Rank> = store.agents(ws)?.iter().map(|a| a.career.rank).collect();
+            if let Some(why) = crate::career::locked(&piece.item, &crew, lot.furniture.iter().map(|p| p.item.as_str())) {
+                bail!("{why}");
             }
             lot.furniture.push(piece);
         }

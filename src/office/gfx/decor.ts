@@ -6,6 +6,7 @@ import { Box3, Color, DirectionalLight, Group, HemisphereLight, Mesh, MeshBasicM
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { Placed } from '../../lib/gen/Placed';
 import { BY_ID, type Dims, type Furniture, type Piece } from '../buy';
+import { builtinModel } from './builtins';
 
 /** Per pack: scale to office units (a desk top at ~0.56) and the turn that makes it face +z. */
 const PACKS: Record<string, { scale: number; yaw: number }> = {
@@ -24,6 +25,11 @@ const models = new Map<string, Promise<Model>>();
 
 export function model(f: Furniture): Promise<Model> {
   let m = models.get(f.id);
+  if (!m && f.builtin) {
+    // One of the office's own pieces, for sale (the foosball…): the catalog shows it as built.
+    m = builtinModel(f);
+    models.set(f.id, m);
+  }
   if (!m) {
     m = loader.loadAsync(BASE + f.src).then((gltf) => {
       const pack = PACKS[f.src.split('/')[0]] ?? { scale: 1, yaw: 0 };

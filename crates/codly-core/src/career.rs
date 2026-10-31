@@ -302,17 +302,57 @@ pub fn random_traits(seed: u64) -> Vec<String> {
     vec![a.into()]
 }
 
+/// A piece in the furniture catalog (`src/office/furniture.json`, shared with the frontend).
+#[derive(serde::Deserialize)]
+struct Piece {
+    id: String,
+    price: i64,
+    /// Earned first: a rank ("senior") someone on the crew must have, or "kitchen".
+    #[serde(default)]
+    needs: Option<String>,
+    /// A counter or a fridge: it makes a kitchen.
+    #[serde(default)]
+    kitchen: bool,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    builtin: Option<String>,
+}
+
+fn catalog(item: &str) -> Option<&'static Piece> {
+    static CATALOG: std::sync::OnceLock<Vec<Piece>> = std::sync::OnceLock::new();
+    let all = CATALOG.get_or_init(|| serde_json::from_str(include_str!("../../../src/office/furniture.json")).expect("furniture.json is valid"));
+    all.iter().find(|e| e.id == item)
+}
+
 /// Build/Buy: the price in XP of a piece of furniture (the catalog is the office's, shared with
 /// the frontend), or None for no such piece.
 pub fn price(item: &str) -> Option<i64> {
-    #[derive(serde::Deserialize)]
-    struct Entry {
-        id: String,
-        price: i64,
+    catalog(item).map(|e| e.price)
+}
+
+/// One of the office's own kind of pieces (furniture.json `builtin`) that the shop sells: the
+/// foosball, the pool table, the PS5. Bought, it stands in the lot like the Studio's own.
+pub fn sold_builtin(item: &str) -> bool {
+    catalog(item).is_some_and(|e| e.builtin.is_some() && !e.hidden)
+}
+
+/// Why a piece can't be bought yet, or None when it can (furniture.json `needs`, mirror of
+/// `locked` in src/office/buy.ts): someone on the `crew` at a rank, or a kitchen among the
+/// pieces already in the `office` (a counter or a fridge). The shop checks it on every buy.
+pub fn locked<'a>(item: &str, crew: &[Rank], office: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let need = catalog(item)?.needs.as_deref()?;
+    if need == "kitchen" {
+        let kitchen = office.into_iter().any(|i| catalog(i).is_some_and(|e| e.kitchen));
+        return (!kitchen).then(|| "Needs a kitchen: a counter or a fridge first".into());
     }
-    static CATALOG: std::sync::OnceLock<Vec<Entry>> = std::sync::OnceLock::new();
-    let all = CATALOG.get_or_init(|| serde_json::from_str(include_str!("../../../src/office/furniture.json")).expect("furniture.json is valid"));
-    all.iter().find(|e| e.id == item).map(|e| e.price)
+    let Ok(rank) = serde_json::from_value::<Rank>(serde_json::Value::String(need.into())) else { return Some(format!("needs {need}")) };
+    let who = match rank {
+        Rank::Staff => "on Staff".to_string(),
+        Rank::Intern => "an Intern".to_string(),
+        r => format!("a {}", rank_label(r)),
+    };
+    (!crew.iter().any(|r| *r >= rank)).then(|| format!("Someone on the crew must be {who}"))
 }
 
 const PITCHES: [&str; 8] = [
@@ -465,6 +505,26 @@ mod tests {
         forged.stamina = 100;
         let forged = sanitize(forged);
         assert!(!forged.legend && forged.stamina == 0, "an import's title and stamina are recomputed, not read");
+    }
+
+    #[test]
+    fn some_pieces_are_earned() {
+        // The PS5 and the pool table: someone at Senior or above.
+        assert_eq!(locked("office.tvStand", &[Rank::Intern, Rank::Junior], []).as_deref(), Some("Someone on the crew must be a Senior"));
+        assert_eq!(locked("office.poolTable", &[Rank::Intern, Rank::Staff], []), None);
+        assert_eq!(locked("office.pingpong", &[], []).as_deref(), Some("Someone on the crew must be a Junior"));
+        assert_eq!(locked("office.foosball", &[], []), None);
+        // Coffee: only where there is a kitchen (the garage has none).
+        let garage = crate::lot::template("garage").unwrap();
+        let items = || garage.furniture.iter().map(|p| p.item.as_str());
+        assert!(locked("polypizza.espresso", &[Rank::Staff], items()).unwrap().contains("kitchen"));
+        assert_eq!(locked("polypizza.espresso", &[], items().chain(["kenney.kitchenCabinet"])), None);
+        let studio = crate::lot::template("studio").unwrap();
+        assert_eq!(locked("kenney.kitchenCoffeeMachine", &[], studio.furniture.iter().map(|p| p.item.as_str())), None);
+        // Plain pieces need nothing; the shop sells the games but not the desks.
+        assert_eq!(locked("kenney.chair", &[], []), None);
+        assert!(sold_builtin("office.foosball") && sold_builtin("office.tvStand"));
+        assert!(!sold_builtin("office.desk") && !sold_builtin("kenney.chair"));
     }
 
     #[test]

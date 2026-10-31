@@ -869,6 +869,19 @@ export class OfficeEngine {
     return it ? { label: BUILT_LABEL[it.type]!, actions: stationActions(this.L, it), ...where } : null;
   }
 
+  /** The lot piece under a ray (a bought foosball or PS5 stands in the lot: Build/Buy moves or
+   *  sells it by this uid), or null. */
+  private lotPieceAt(ray: ReturnType<OfficeEngine['rayAt']>): string | null {
+    const id = this.builtins.pick(ray);
+    if (id?.startsWith('item:')) return this.L.items[+id.split(':')[1]]?.uid ?? null;
+    // Code-built ones (the foosball): where the ray crosses their top (~0.7 up).
+    const { origin: o, direction: d } = ray.ray;
+    if (d.y >= 0) return null;
+    const t = (0.7 - o.y) / d.y;
+    const [x, z] = [o.x + d.x * t - this.ox, o.z + d.z * t - this.oz];
+    return this.L.items.find((i) => !modeled(i.type) && Math.abs(x - i.x) < i.w / 2 + 0.1 && Math.abs(z - i.z) < i.d / 2 + 0.1)?.uid ?? null;
+  }
+
   /** Build/Buy mode on (`onpick`: a placed piece was clicked) or off. */
   setBuildMode(onpick: ((uid: string) => void) | null) {
     if (!onpick) this.endCarry();
@@ -1845,7 +1858,8 @@ export class OfficeEngine {
       if (wasClick && this.build) {
         if (this.build.carry) this.dropCarry();
         else {
-          const uid = this.decor.pick(this.rayAt(e.clientX, e.clientY));
+          const ray = this.rayAt(e.clientX, e.clientY);
+          const uid = this.decor.pick(ray) ?? this.lotPieceAt(ray);
           if (uid) this.build.onpick(uid);
         }
       } else if (wasClick) {

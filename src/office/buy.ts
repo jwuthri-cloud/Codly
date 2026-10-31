@@ -5,10 +5,17 @@
 // floor. Small things (lamps, plants, a laptop) go on top of a table or cabinet you bought, or
 // on the floor. Everything else blocks walking: it may not cover a wall, built-in furniture,
 // another piece, a seat or use-slot, nor cut any of those off from the front door.
+//
+// Some pieces are earned (`needs`): the PS5 or the pool table once someone on the crew is a
+// Senior, a coffee machine once the office has a kitchen (a room with a counter or a fridge),
+// and in it. The core checks the same rule when it sells one (`career::locked`).
 
+import type { Lot } from '../lib/gen/Lot';
 import type { Placed } from '../lib/gen/Placed';
+import type { Rank } from '../lib/gen/Rank';
+import { atLeast, rankLabel } from '../lib/util/career';
 import RAW from './furniture.json';
-import { cellOf, CELL, footprint, keepRects, markRect, roomAt, type ItemType, type Job, type OfficeLayout, type Rect, type Slot } from './layout';
+import { cellOf, CELL, footprint, keepRects, markRect, roomAt, type ItemType, type Job, type OfficeLayout, type Rect, type RoomId, type Slot } from './layout';
 
 export interface Furniture {
   id: string;
@@ -40,6 +47,10 @@ export interface Furniture {
   hung?: boolean;
   /** What it does for the work: a desk is a seat for one agent, a rack runs the tests… */
   job?: Job;
+  /** Earned: someone on the crew at this rank or above, or a kitchen in the office. */
+  needs?: Rank | 'kitchen';
+  /** A counter or a fridge: the room it stands in is a kitchen. */
+  kitchen?: boolean;
 }
 
 export const FURNITURE = RAW as Furniture[];
@@ -47,6 +58,45 @@ export const BY_ID = new Map(FURNITURE.map((f) => [f.id, f]));
 export const CATEGORIES = [...new Set(FURNITURE.map((f) => f.cat))];
 /** What the Buy catalog sells. */
 export const FOR_SALE = FURNITURE.filter((f) => !f.hidden);
+
+/** The rooms with a counter or a fridge (the office's own, or bought). */
+export function kitchens(L: OfficeLayout, pieces: Placed[]): Set<RoomId> {
+  const out = new Set<RoomId>();
+  for (const it of L.items) if ((it.type === 'counter' || it.type === 'fridge') && it.room) out.add(it.room);
+  for (const p of pieces) {
+    const room = BY_ID.get(p.item)?.kitchen ? roomAt(L, p.x, p.z) : null;
+    if (room) out.add(room);
+  }
+  return out;
+}
+
+const article = (r: Rank) => (r === 'staff' ? 'on Staff' : r === 'intern' ? 'an Intern' : `a ${rankLabel(r)}`);
+
+/** Why a piece can't be bought yet (`crew`: the ranks on the crew), or null when it can. */
+export function locked(f: Furniture, crew: Rank[], kitchen: boolean): string | null {
+  if (!f.needs) return null;
+  if (f.needs === 'kitchen') return kitchen ? null : 'Needs a kitchen: a counter or a fridge first';
+  const need = f.needs;
+  return crew.some((r) => atLeast(r, need)) ? null : `Someone on the crew must be ${article(need)}`;
+}
+
+/**
+ * The lot the office is made from, with the office's own kind of pieces that were bought (the
+ * foosball, the PS5…): those play where they stand like the lot's, so they go in its furniture.
+ * The shop has the truth for them (copies of bought pieces the core keeps in the lot are left
+ * out); everything else bought is drawn as a model (`decorOf`).
+ */
+export function withBought(lot: Lot, placed: Placed[]): Lot {
+  const gift = new Set(lot.gift);
+  const sold = (p: Placed) => !!BY_ID.get(p.item)?.builtin && !BY_ID.get(p.item)?.hidden;
+  const bought = placed.filter(sold);
+  const mirrored = lot.furniture.filter((p) => sold(p) && !gift.has(p.uid));
+  if (!bought.length && !mirrored.length) return lot;
+  return { ...lot, furniture: [...lot.furniture.filter((p) => !mirrored.includes(p)), ...bought] };
+}
+
+/** The bought pieces drawn as models (the office's own kind go in the lot: `withBought`). */
+export const decorOf = (placed: Placed[]) => placed.filter((p) => !BY_ID.get(p.item)?.builtin);
 
 /** A model's size once scaled (w along x, d along z, before rotation; h = its top). */
 export interface Dims {
@@ -145,7 +195,9 @@ export const onTop = (pieces: Piece[], s: Piece) => pieces.filter((p) => p.uid !
 export function blocker(L: OfficeLayout, others: Piece[], p: Piece): string | null {
   const it = BY_ID.get(p.item);
   if (!it) return 'Not in the catalog';
-  if (!roomAt(L, p.x, p.z)) return 'Outside the office';
+  const room = roomAt(L, p.x, p.z);
+  if (!room) return 'Outside the office';
+  if (it.needs === 'kitchen' && !kitchens(L, others).has(room)) return 'Put it in the kitchen';
   if (!blocks(p)) return null;
   const b = baseOf(L);
   const grid = b.grid.slice();

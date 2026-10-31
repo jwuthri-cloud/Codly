@@ -2,7 +2,7 @@
 // wallet and Build/Buy, the developer panel's cheats (same rules as
 // crates/codly-core/src/orchestrator/careers.rs and wallet.rs), and its neighbourhood (same
 // rules as orchestrator/lots.rs, priced by office/price.ts): the demo office is the Studio, on a
-// large plot, next to its two other offices and plots for sale.
+// large plot, next to its two other offices and plots for sale. Its export is snapshot.rs's.
 
 import type { Agent } from '../gen/Agent';
 import type { ModelOffer } from '../gen/ModelOffer';
@@ -13,7 +13,7 @@ import type { Lot } from '../gen/Lot';
 import type { LotSaved } from '../gen/LotSaved';
 import type { LotSlot } from '../gen/LotSlot';
 import type { LotSizeName } from '../gen/LotSizeName';
-import { BY_ID } from '../../office/buy';
+import { BY_ID, locked } from '../../office/buy';
 import { bareLot, diff, fit, isBare, keptGifts, landBack, landPrice, lotIds, plotSize, sellValue, TEMPLATES, value } from '../../office/price';
 import { atLeast, emptyCareer, rankFor, rankLabel, staminaOf } from '../util/career';
 import type { Rank } from '../gen/Rank';
@@ -356,11 +356,34 @@ export function demoWallet(sim: Sim): Wallet {
 }
 
 /** Build/Buy: the furniture bought for this office (what came with the lot and the stations
- *  are drawn from the lot). */
+ *  are drawn from the lot; the games for sale are both). */
 export function demoShop(sim: Sim): Shop {
   const lot = lotOn(homeOf(HERE));
   const gift = new Set(lot.gift);
-  return { wallet: demoWallet(sim), placed: lot.furniture.filter((p) => !gift.has(p.uid) && !BY_ID.get(p.item)?.builtin).map((p) => ({ ...p })) };
+  const bought = (item: string) => !BY_ID.get(item)?.builtin || !BY_ID.get(item)?.hidden;
+  return { wallet: demoWallet(sim), placed: lot.furniture.filter((p) => !gift.has(p.uid) && bought(p.item)).map((p) => ({ ...p })) };
+}
+
+/** The office as a `codly/office@1` file (snapshot.rs): the lot and the crew, no work. */
+export function demoExportOffice(sim: Sim): string {
+  const crew = [...sim.agents.values()]
+    .filter((a) => !a.archived)
+    .map((a) => {
+      const s = a.career.stats;
+      return {
+        name: a.name,
+        role: a.role,
+        title: a.title,
+        look: { seed: a.look_seed, color: a.color, provider: a.provider },
+        rank: a.career.rank,
+        legend: a.career.legend,
+        stamina: a.career.stamina,
+        traits: a.career.traits,
+        xp: a.career.xp,
+        stats: { merged: s.merged, commits: s.commits, checks_passed: s.checks_passed, checks_failed: s.checks_failed, reviews_done: s.reviews_done, approved: s.approved, changes_requested: s.changes_requested },
+      };
+    });
+  return JSON.stringify({ schema: 'codly/office@1', exported_at: sim.now(), cheated, lot: demoLot(), crew }, null, 2);
 }
 
 export function demoPlace(sim: Sim, piece: Placed): Shop {
@@ -369,6 +392,10 @@ export function demoPlace(sim: Sim, piece: Placed): Shop {
     const stored = lot.storage?.find((p) => p.uid === piece.uid);
     if ((old ?? stored) && (old ?? stored)!.item !== piece.item) throw new Error(`that piece is a ${(old ?? stored)!.item}`);
     if (!old && !stored && !BY_ID.has(piece.item)) throw new Error('no such item');
+    // Earned pieces, as `career::locked`: a rank on the crew, or a kitchen in the office.
+    const crew = [...sim.agents.values()].filter((a) => !a.archived).map((a) => a.career.rank);
+    const why = !old && !stored && locked(BY_ID.get(piece.item)!, crew, lot.furniture.some((p) => BY_ID.get(p.item)?.kitchen));
+    if (why) throw new Error(why);
     lot.storage = lot.storage?.filter((p) => p.uid !== piece.uid);
     if (!lot.storage?.length) delete lot.storage;
     lot.furniture = [...lot.furniture.filter((p) => p.uid !== piece.uid), piece];

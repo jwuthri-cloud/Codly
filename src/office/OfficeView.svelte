@@ -33,6 +33,7 @@
   import type { Lot } from '../lib/gen/Lot';
   import GhostBoard from './GhostBoard.svelte';
   import BuyMode from './BuyMode.svelte';
+  import { decorOf, withBought } from './buy';
   import FurnitureMenu from './FurnitureMenu.svelte';
   import DailyEdition from './DailyEdition.svelte';
   import { edition, standupLine, type Edition } from './daily';
@@ -78,6 +79,8 @@
     shop?: Shop | null;
     onplace?: (piece: Placed) => void;
     onsell?: (uid: string) => void;
+    /** Save the office as a file (`codly/office@1`: the lot and the crew, no code). */
+    onexport?: () => void;
     /** The day's edition and standup: the digest since the last one, or null when it is not due. */
     digest?: () => Promise<Digest | null>;
     /** The paper was closed: the edition is read (until then it comes back on each mount). */
@@ -129,6 +132,7 @@
     shop = null,
     onplace,
     onsell,
+    onexport,
     digest,
     oneditionread,
     onhome,
@@ -387,11 +391,14 @@
   $effect(() => {
     engine?.setGhosts(ghosts.map((g) => ({ id: g.id, color: g.color, seed: g.look_seed || g.id, provider: g.provider })));
   });
+  // The foosball, the PS5 and the other built-in kinds you bought stand in the lot (they play
+  // there); the rest of what you bought is drawn as models.
+  const officeLot = $derived(lot && withBought(lot, shop?.placed ?? []));
   $effect(() => {
-    if (lot) engine?.setLot(lot);
+    if (officeLot) engine?.setLot(officeLot);
   });
   $effect(() => {
-    engine?.setDecor(shop?.placed ?? []);
+    engine?.setDecor(decorOf(shop?.placed ?? []));
   });
 </script>
 
@@ -450,7 +457,7 @@
     />
   {/if}
   {#if engine && !backdrop && shop && onplace && onsell}
-    <BuyMode {engine} {shop} insets={hudInsets} {onplace} {onsell} />
+    <BuyMode {engine} {shop} lot={officeLot} crew={agents.map((a) => a.career.rank)} insets={hudInsets} {onplace} {onsell} {onexport} />
   {/if}
   {#if ticker && !backdrop && items.length}
     <ol class="of-ticker" aria-hidden="true">

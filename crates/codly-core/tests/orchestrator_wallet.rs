@@ -121,3 +121,34 @@ async fn cheats_need_developer_mode_and_flag_the_wallet() {
     assert!(core.wallet().unwrap().cheated);
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn games_and_coffee_are_earned_and_stand_in_the_lot() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    seed_worker(&dir.path().join("data"), 0);
+    let core = start(dir.path()).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    assert_eq!(core.lot().unwrap().template, "garage");
+    core.update_settings(Settings { developer_mode: true, ..core.settings() }).await.unwrap();
+    core.dev_grant(5000).unwrap();
+    let at = |uid: &str, item: &str| Placed { uid: uid.into(), item: item.into(), x: 7.0, y: 0.0, z: 5.5, rot: 0.0 };
+
+    // The PS5 needs a Senior on this crew (Ada works in another repo); coffee needs a kitchen.
+    let err = core.place(at("tv", "office.tvStand")).unwrap_err().to_string();
+    assert!(err.contains("must be a Senior"), "{err}");
+    let err = core.place(at("cup", "polypizza.espresso")).unwrap_err().to_string();
+    assert!(err.contains("kitchen"), "{err}");
+    core.place(at("fridge", "kenney.kitchenFridge")).unwrap();
+    core.place(at("cup", "polypizza.espresso")).unwrap();
+
+    // A foosball stands in the lot (it plays there); moved or sold, the lot follows.
+    core.place(at("foos", "office.foosball")).unwrap();
+    let foos = |lot: &Lot| lot.furniture.iter().find(|p| p.uid == "foos").map(|p| p.x);
+    assert_eq!(foos(&core.lot().unwrap()), Some(7.0));
+    core.place(Placed { x: 3.0, ..at("foos", "office.foosball") }).unwrap();
+    assert_eq!(foos(&core.lot().unwrap()), Some(3.0));
+    core.sell("foos").unwrap();
+    assert_eq!(foos(&core.lot().unwrap()), None);
+    core.shutdown().await;
+}

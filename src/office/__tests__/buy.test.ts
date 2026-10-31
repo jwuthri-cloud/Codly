@@ -1,7 +1,7 @@
 // Build/Buy: the catalog matches its model files, and placement keeps the office walkable.
 import { describe, expect, it } from 'vitest';
-import { applyDecor, blocker, FURNITURE, snap, surfaceAt, type Piece } from '../buy';
-import { officeLayout, passableFn, cellOf } from '../layout';
+import { applyDecor, blocker, BY_ID, decorOf, FOR_SALE, FURNITURE, kitchens, locked, snap, surfaceAt, withBought, type Piece } from '../buy';
+import { officeLayout, passableFn, cellOf, TEMPLATES } from '../layout';
 
 const piece = (item: string, x: number, z: number, w = 1, d = 0.5, extra: Partial<Piece> = {}): Piece => ({ uid: `${item}@${x},${z}`, item, x, y: 0, z, rot: 0, dims: { w, d, h: 0.5 }, ...extra });
 
@@ -9,11 +9,57 @@ describe('Build/Buy', () => {
   it('has a model file (the office’s own pieces: a footprint) and a price for every piece', () => {
     const files = new Set(Object.keys(import.meta.glob('/public/furniture/*/*.{glb,gltf}')));
     for (const f of FURNITURE) {
-      if (f.builtin) expect(f.hidden && f.w! > 0 && f.d! > 0, f.id).toBe(true);
+      if (f.builtin) expect(f.w! > 0 && f.d! > 0, f.id).toBe(true);
       else expect(files.has(`/public/furniture/${f.src}`), f.src).toBe(true);
       expect(f.price, f.id).toBeGreaterThan(0);
     }
     expect(new Set(FURNITURE.map((f) => f.id)).size).toBe(FURNITURE.length);
+  });
+
+  it('sells the games corner, and keeps the work stations the office’s own', () => {
+    const sold = FOR_SALE.filter((f) => f.builtin).map((f) => f.id);
+    expect(sold.sort()).toEqual(['office.foosball', 'office.pingpong', 'office.poolTable', 'office.sofa', 'office.tvStand']);
+    for (const id of ['office.desk', 'office.rack', 'office.counter', 'office.coffee']) expect(FOR_SALE.some((f) => f.id === id), id).toBe(false);
+    // Comforts were already for sale as models.
+    for (const id of ['kenney.loungeSofa', 'kenney.televisionModern', 'polypizza.espresso', 'polypizza.fridge', 'polypizza.waterCooler']) expect(FOR_SALE.some((f) => f.id === id), id).toBe(true);
+  });
+
+  it('locks what is not earned yet: a rank on the crew, or a kitchen for coffee', () => {
+    const f = (id: string) => BY_ID.get(id)!;
+    expect(locked(f('office.tvStand'), ['intern', 'junior'], true)).toBe('Someone on the crew must be a Senior');
+    expect(locked(f('office.tvStand'), ['intern', 'staff'], false)).toBeNull();
+    expect(locked(f('office.pingpong'), [], false)).toBe('Someone on the crew must be a Junior');
+    expect(locked(f('office.foosball'), [], false)).toBeNull();
+    expect(locked(f('polypizza.espresso'), ['staff'], false)).toMatch(/kitchen/);
+    expect(locked(f('polypizza.espresso'), [], true)).toBeNull();
+    // The Studio's lounge has a counter and a fridge; the garage nothing until one is bought.
+    const studio = officeLayout(TEMPLATES.studio);
+    expect([...kitchens(studio, [])]).toEqual(['lounge']);
+    const G = officeLayout(TEMPLATES.garage);
+    expect(kitchens(G, []).size).toBe(0);
+    const fridge = piece('kenney.kitchenFridge', 8.5, 6.5, 0.7, 0.7);
+    expect([...kitchens(G, [fridge])]).toEqual(['garage']);
+    // Coffee goes in a kitchen.
+    const cup = piece('polypizza.espresso', 7, 4, 0.3, 0.3);
+    expect(blocker(G, [], cup)).toBe('Put it in the kitchen');
+    expect(blocker(G, [fridge], cup)).toBeNull();
+  });
+
+  it('puts the games bought in the lot (they play there), the rest with the models', () => {
+    const lot = TEMPLATES.garage;
+    const foos = { uid: 'foos', item: 'office.foosball', x: 7, y: 0, z: 5.5, rot: 0 };
+    const chair = { uid: 'chair', item: 'kenney.chair', x: 2, y: 0, z: 6, rot: 0 };
+    expect(withBought(lot, [chair])).toBe(lot);
+    const with1 = withBought(lot, [chair, foos]);
+    expect(with1.furniture).toHaveLength(lot.furniture.length + 1);
+    expect(officeLayout(with1).stations['games.foosball'].slots).toHaveLength(2);
+    expect(decorOf([chair, foos])).toEqual([chair]);
+    // The core's copy of a bought piece in the lot is the shop's: sold, it goes.
+    const mirrored = { ...lot, furniture: [...lot.furniture, { ...foos, x: 3 }] };
+    expect(withBought(mirrored, [foos]).furniture.filter((p) => p.uid === 'foos')).toEqual([foos]);
+    expect(withBought(mirrored, []).furniture.some((p) => p.uid === 'foos')).toBe(false);
+    // The Studio's own games are gifts and stay.
+    expect(withBought(TEMPLATES.studio, [])).toBe(TEMPLATES.studio);
   });
 
   it('snaps footprints to whole cells and turns in quarter turns', () => {

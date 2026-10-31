@@ -3,11 +3,14 @@
 // the walking grid stay as layout.ts has them. Pieces that show live data (desk monitors, server
 // racks, the boards, the mail room, foosball, pool, the TV picture) stay code-built.
 
+import { Box3, Group, Mesh, MeshStandardMaterial, Vector3 } from 'three';
 import { breakIntent, stationBreak, type Intent } from '../behavior';
 import type { Item, ItemType, OfficeLayout, StationId } from '../layout';
 import { DESK_H } from '../layout';
-import { BY_ID } from '../buy';
+import { BY_ID, type Dims, type Furniture } from '../buy';
+import { Builder } from './builder';
 import { model, type Shown } from './decor';
+import * as F from './furniture';
 
 interface Spec {
   id: string;
@@ -100,6 +103,40 @@ export const BUILT_LABEL: Partial<Record<ItemType, string>> = { foosball: 'Foosb
 
 /** Whether the building leaves this piece to a model (the TV stand keeps its code-built TV). */
 export const modeled = (t: ItemType) => t in BY_TYPE;
+
+/** Pieces that show live data, drawn in code even in Build/Buy's catalog. */
+const CODE_BUILT: Partial<Record<ItemType, (b: Builder) => void>> = { foosball: F.foosball, tvStand: (b) => F.tvStand(b, b) };
+const codeMat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.6, metalness: 0.05 });
+
+/**
+ * One of the office's own pieces as a single model, as Build/Buy shows it (its catalog
+ * thumbnail and the ghost being carried): its CC0 model fitted to its footprint, or the
+ * code-built piece. Its size is its footprint, as `layout.ts` blocks it.
+ */
+export async function builtinModel(f: Furniture): Promise<{ root: Group; dims: Dims }> {
+  const type = f.builtin!;
+  const [w, d] = [f.w ?? 1, f.d ?? 1];
+  const root = new Group();
+  const code = CODE_BUILT[type];
+  const spec = BY_TYPE[type]?.({ type, x: 0, z: 0, rot: 0, w, d, block: true, variant: f.variant, room: '' });
+  const look = spec && BY_ID.get(spec.id);
+  if (code || !look) {
+    const b = new Builder();
+    (code ?? ((b: Builder) => b.box(0, 0.4, 0, w, 0.8, d, [0.5, 0.45, 0.4])))(b);
+    root.add(new Mesh(b.build(), codeMat));
+  } else {
+    const m = await model(look);
+    const inner = m.root.clone(true);
+    const sx = w / m.dims.w;
+    const sz = d / m.dims.d;
+    if (spec.fit === 'stretch') inner.scale.set(sx, spec.h ? spec.h / m.dims.h : (sx + sz) / 2, sz);
+    else inner.scale.setScalar(spec.h ? spec.h / m.dims.h : Math.min(sx, sz));
+    inner.position.y = spec.y ?? 0;
+    root.add(inner);
+  }
+  root.traverse((o) => o instanceof Mesh && ((o.castShadow = true), (o.receiveShadow = true)));
+  return { root, dims: { w, d, h: new Box3().setFromObject(root).getSize(new Vector3()).y } };
+}
 
 /** The built-in furniture as model pieces (uid `item:<index>`, `item:<index>:<copy>` for tiles). */
 export async function builtinPieces(L: OfficeLayout): Promise<Shown[]> {

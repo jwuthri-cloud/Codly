@@ -2,13 +2,17 @@
   Build/Buy: coins (the wallet: every agent's XP in every repo, plus grants) buy furniture. Pick a piece
   in the catalog and put it down anywhere it fits (buy.ts); click one in the office to move it,
   turn it or sell it back for the full price. Cosmetic: furniture never changes how agents work,
-  only where they walk.
+  only where they walk (and what they do on a break). Pieces not earned yet show greyed out,
+  with what they need (buy.ts `locked`).
 -->
 <script lang="ts">
+  import type { Lot } from '../lib/gen/Lot';
   import type { Placed } from '../lib/gen/Placed';
+  import type { Rank } from '../lib/gen/Rank';
   import type { Shop } from '../lib/gen/Shop';
-  import { BY_ID, CATEGORIES, FOR_SALE, type Furniture } from './buy';
+  import { BY_ID, CATEGORIES, FOR_SALE, kitchens, locked, type Furniture } from './buy';
   import type { OfficeEngine } from './engine';
+  import { officeLayout } from './layout';
   import { thumbnail } from './gfx/decor';
   import { sound } from './sound';
   import { coins } from '../lib/util/format';
@@ -16,11 +20,17 @@
   interface Props {
     engine: OfficeEngine;
     shop: Shop;
+    /** The office's lot (null: the Studio), for its kitchen. */
+    lot?: Lot | null;
+    /** The ranks on the crew: some pieces need someone at a rank. */
+    crew: Rank[];
     insets: { top: number; right: number; bottom: number; left: number };
     onplace: (piece: Placed) => void;
     onsell: (uid: string) => void;
+    /** Save the office (lot and crew, no code) as a file. */
+    onexport?: () => void;
   }
-  let { engine, shop, insets, onplace, onsell }: Props = $props();
+  let { engine, shop, lot = null, crew, insets, onplace, onsell, onexport }: Props = $props();
 
   let open = $state(false);
   let cat = $state(CATEGORIES[0]);
@@ -29,6 +39,8 @@
   let note = $state<string | null>(null);
   const left = $derived(shop.wallet.balance);
   const items = $derived(FOR_SALE.filter((f) => f.cat === cat));
+  const hasKitchen = $derived(kitchens(officeLayout(lot ?? undefined), shop.placed).size > 0);
+  const why = (f: Furniture) => locked(f, crew, hasKitchen);
 
   // Build/Buy has its own music, like the Sims.
   $effect(() => {
@@ -131,7 +143,10 @@
           <div class="kicker">Build/Buy</div>
           <b>{coins(left)} to spend</b> <small>{coins(shop.wallet.earned)} earned by your agents{shop.wallet.granted ? ` · ${coins(shop.wallet.granted)} given` : ''} · click a piece in the office to move or sell it</small>
         </div>
-        <button class="x" aria-label="Close" onclick={close}>✕</button>
+        <span class="side">
+          {#if onexport}<button class="export" onclick={onexport} title="Save this office (its lot and its crew's names, looks and ranks; no code) as a file">⤓ Export office</button>{/if}
+          <button class="x" aria-label="Close" onclick={close}>✕</button>
+        </span>
       </header>
       {#if note}<p class="note bad">{note}</p>{/if}
       <div class="tabs" role="tablist">
@@ -141,11 +156,12 @@
       </div>
       <ul>
         {#each items as f (f.id)}
+          {@const lock = why(f)}
           <li>
-            <button disabled={left < f.price} onclick={() => carry(f)} title={left < f.price ? `${coins(f.price - left)} to go` : `Put a ${f.label.toLowerCase()} in the office`}>
+            <button class:locked={lock} disabled={!!lock || left < f.price} onclick={() => carry(f)} title={lock ?? (left < f.price ? `${coins(f.price - left)} to go` : `Put a ${f.label.toLowerCase()} in the office`)}>
               <img use:thumb={f.id} alt="" width="64" height="64" />
               <span class="n">{f.label}</span>
-              <span class="p">{coins(f.price)}</span>
+              {#if lock}<span class="why">🔒 {lock}</span>{:else}<span class="p">{coins(f.price)}</span>{/if}
             </button>
           </li>
         {/each}
@@ -164,6 +180,9 @@
   .kicker { font: 700 10px/1 ui-monospace, monospace; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; margin-bottom: 3px; }
   small { font-size: 11px; opacity: 0.6; }
   .x { border: 0; background: none; color: #9aa2b6; font-size: 15px; cursor: pointer; }
+  .side { display: flex; align-items: center; gap: 6px; flex: none; }
+  .export { padding: 4px 10px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: inherit; font: inherit; font-size: 11.5px; cursor: pointer; }
+  .export:hover { background: rgba(255, 255, 255, 0.14); }
   .tabs { display: flex; gap: 4px; overflow-x: auto; margin-bottom: 8px; scrollbar-width: none; }
   .tabs button { flex: none; padding: 4px 11px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.06); color: inherit; font: inherit; cursor: pointer; }
   .tabs button.on { background: #7ee0a1; color: #0f2a1a; font-weight: 600; }
@@ -171,6 +190,8 @@
   li button { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; border: 0; border-radius: 12px; background: rgba(255, 255, 255, 0.05); color: inherit; font: inherit; cursor: pointer; }
   li button:hover:not(:disabled) { background: rgba(126, 224, 161, 0.14); }
   li button:disabled { opacity: 0.4; cursor: default; }
+  li button.locked { opacity: 0.5; filter: grayscale(1); }
+  .why { font-size: 10px; line-height: 1.2; text-align: center; color: #f0c27e; }
   img { width: 64px; height: 64px; }
   .n { font-size: 11.5px; line-height: 1.2; text-align: center; min-height: 2.4em; }
   .p { font-size: 11px; color: #8ff0b0; }
