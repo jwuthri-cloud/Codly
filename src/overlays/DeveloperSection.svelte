@@ -1,8 +1,8 @@
 <!--
   Settings → Developer: cheats for testing the game (docs/design/PROGRESSION.md §3), behind the
   "Developer mode" switch; the core refuses them while it is off. Coins and XP from here are not
-  from real work, so the first one flags the wallet for good. Resetting the office only empties
-  it of furniture, refunded.
+  from real work, so the first one flags the wallet for good. Resetting the office puts its lot
+  back to a gift Garage; what stood there sells back at the usual rates, so it never makes coins.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -57,7 +57,7 @@
     confirmReset = false;
     api.devResetOffice().then((s) => {
       wallet = s.wallet;
-      toast({ kind: 'success', title: 'Office reset', body: 'Its furniture is gone and refunded.' });
+      toast({ kind: 'success', title: 'Office reset', body: 'It’s a garage again; what stood there was sold back.' });
     }, fail('Couldn’t reset the office'));
   }
 </script>
@@ -109,7 +109,7 @@
     </div>
 
     <div class="row">
-      <div class="r-text"><span class="r-title">Reset this office</span><span class="desc">Removes every piece of furniture in this repo’s office; what it cost goes back to the wallet.</span></div>
+      <div class="r-text"><span class="r-title">Reset this office</span><span class="desc">Puts this repo’s lot back to the starter garage; what stood there sells back (furniture in full, building at half, gifts for nothing).</span></div>
       {#if confirmReset}
         <button class="btn sm danger" onclick={reset}>Reset</button>
         <button class="btn sm ghost" onclick={() => (confirmReset = false)}>Keep</button>

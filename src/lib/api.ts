@@ -36,6 +36,8 @@ import type { Placed } from './gen/Placed';
 import type { Shop } from './gen/Shop';
 import type { Wallet } from './gen/Wallet';
 import type { Lot } from './gen/Lot';
+import type { LotSaved } from './gen/LotSaved';
+import type { LotSlot } from './gen/LotSlot';
 import type { HireReview } from './gen/HireReview';
 import type { LaunchPreview } from './gen/LaunchPreview';
 import type { Memory } from './gen/Memory';
@@ -197,12 +199,25 @@ export const api = {
   devGrant: (amount: number) => call<Wallet>('dev_grant', { amount }),
   /** Developer mode only: give an agent XP; its rank follows (flags the wallet too). */
   devGiveXp: (agentId: string, xp: number) => call<Agent>('dev_give_xp', { agentId, xp }),
-  /** Developer mode only: empty this repo's office of furniture (refunded). */
+  /** Developer mode only: this repo's lot back to a gift Garage (what stood there sells back). */
   devResetOffice: () => call<Shop>('dev_reset_office', {}),
   /** Build mode: the open repo's lot (walls, floors, furniture), made on the first read. */
   officeLot: () => call<Lot>('office_lot', {}),
-  /** Build mode: save the lot (checked by the core); returns it as stored. */
-  officeSaveLot: (lot: Lot) => call<Lot>('office_save_lot', { lot }),
+  /** Build mode: save the lot, checked and priced by the core (what changed is paid for or sold
+   *  back; refused if the wallet can't pay): the lot as stored, the wallet, and the cost. */
+  officeSaveLot: (lot: Lot) => call<LotSaved>('office_save_lot', { lot }),
+  /** The neighbourhood: every plot, yours and for sale, with the repo on each. */
+  lots: () => call<LotSlot[]>('lots', {}),
+  /** A plot's lot, for drawing it from outside (a bare plot if it isn't yours). */
+  lotOf: (slotId: string) => call<Lot>('lot_of', { slotId }),
+  /** Buy a plot, bare (null) or with a ready-made design on it, at `price.ts::readyMadePrice`;
+   *  or put a design on a bare plot of yours. */
+  buyLot: (slotId: string, template: string | null) => call<Wallet>('buy_lot', { slotId, template }),
+  /** Sell a plot with no office on it: 80% of the land, the contents at their sell-back rates. */
+  sellLot: (slotId: string) => call<Wallet>('sell_lot', { slotId }),
+  /** Move a repo's office to another plot of yours with none on it: the furniture comes along
+   *  (what doesn't fit goes to storage), the building stays. Returns the neighbourhood. */
+  moveOffice: (workspaceId: string, slotId: string) => call<LotSlot[]>('move_office', { workspaceId, slotId }),
   /** The open repo's changes to the global team (members switched off, its own members). */
   setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   /** A request's own mode, permissions and Lead model (null fields = the Settings defaults). */

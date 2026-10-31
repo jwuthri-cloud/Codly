@@ -30,7 +30,7 @@ import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
 import { makeApplicants } from './util/career';
-import { demoBiggerModel, demoBringBack, demoDigest, demoGhosts, demoGiveXp, demoGrant, demoHome, demoLook, demoLot, demoOffices, demoPlace, demoResetOffice, demoRest, demoSaveLot, demoSell, demoShop, demoTired, demoTransfer, demoTrust, demoWallet } from './demo/office';
+import { demoBiggerModel, demoBringBack, demoBuyLot, demoDigest, demoGhosts, demoGiveXp, demoGrant, demoHome, demoLook, demoLot, demoLotOf, demoLots, demoMoveOffice, demoOffices, demoPlace, demoResetOffice, demoRest, demoSaveLot, demoSell, demoSellLot, demoShop, demoTired, demoTransfer, demoTrust, demoWallet } from './demo/office';
 import type { Lot } from './gen/Lot';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
@@ -323,7 +323,17 @@ export class MockTransport implements Transport {
       case 'office_lot':
         return demoLot();
       case 'office_save_lot':
-        return demoSaveLot(a.lot as Lot);
+        return demoSaveLot(sim, a.lot as Lot);
+      case 'lots':
+        return demoLots(sim);
+      case 'lot_of':
+        return demoLotOf(String(a.slotId));
+      case 'buy_lot':
+        return demoBuyLot(sim, String(a.slotId), (a.template as string | null) ?? null);
+      case 'sell_lot':
+        return demoSellLot(sim, String(a.slotId));
+      case 'move_office':
+        return demoMoveOffice(sim, String(a.workspaceId), String(a.slotId));
       case 'set_agent_model':
         return null;
       case 'create_task':

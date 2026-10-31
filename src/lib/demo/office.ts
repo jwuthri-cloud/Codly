@@ -1,6 +1,8 @@
 // The web demo's ghosts (workers let go, kept apart from the live roster as in the core), its
 // wallet and Build/Buy, the developer panel's cheats (same rules as
-// crates/codly-core/src/orchestrator/careers.rs and wallet.rs) and lot: the demo office is the Studio.
+// crates/codly-core/src/orchestrator/careers.rs and wallet.rs), and its neighbourhood (same
+// rules as orchestrator/lots.rs, priced by office/price.ts): the demo office is the Studio, on a
+// large plot, next to its two other offices and plots for sale.
 
 import type { Agent } from '../gen/Agent';
 import type { ModelOffer } from '../gen/ModelOffer';
@@ -8,8 +10,11 @@ import type { Placed } from '../gen/Placed';
 import type { Shop } from '../gen/Shop';
 import type { Wallet } from '../gen/Wallet';
 import type { Lot } from '../gen/Lot';
+import type { LotSaved } from '../gen/LotSaved';
+import type { LotSlot } from '../gen/LotSlot';
+import type { LotSizeName } from '../gen/LotSizeName';
 import { BY_ID } from '../../office/buy';
-import { TEMPLATES } from '../../office/layout';
+import { bareLot, diff, fit, isBare, keptGifts, landBack, landPrice, lotIds, plotSize, sellValue, TEMPLATES, value } from '../../office/price';
 import { atLeast, emptyCareer, rankFor, rankLabel, staminaOf } from '../util/career';
 import type { Rank } from '../gen/Rank';
 import type { DayReport } from '../gen/DayReport';
@@ -19,19 +24,166 @@ import { transferBlock } from '../util/transfer';
 import type { Sim } from './sim';
 
 let ghosts: Agent[] | null = null;
-let placed: Placed[] = [];
 let granted = 0;
+/** The ledger's sum: paid for plots, building and furniture, less what selling gave back. */
+let spent = 0;
 let cheated = false;
 
-let lot: Lot | null = null;
+// The neighbourhood: 4 × 3 plots, row by row (orchestrator/lots.rs's seed). `HERE` stands for
+// the open repo, whatever its id.
+const HERE = '@here';
+type Row = { id: string; x: number; z: number; size: LotSizeName; owned: boolean; workspace: string | null; gift: boolean };
+const SEED: LotSizeName[] = ['small', 'small', 'medium', 'large', 'small', 'medium', 'medium', 'large', 'small', 'small', 'medium', 'large'];
+let rows: Row[] | null = null;
+const lots = new Map<string, Lot>();
 
-export function demoLot(): Lot {
-  return (lot ??= structuredClone(TEMPLATES.studio));
+const allGift = (lot: Lot): Lot => ({ ...structuredClone(lot), gift: [...lotIds(lot)] });
+
+function hood(): Row[] {
+  if (rows) return rows;
+  rows = SEED.map((size, i) => ({ id: `lot-${i + 1}`, x: i % 4, z: Math.floor(i / 4), size, owned: false, workspace: null, gift: false }));
+  const home = (i: number, workspace: string, lot: Lot) => {
+    Object.assign(rows![i], { owned: true, workspace, gift: true });
+    const { w, d } = plotSize(rows![i].size);
+    lots.set(rows![i].id, allGift(fit(lot, w, d)!));
+  };
+  home(3, HERE, TEMPLATES.studio);
+  home(0, OFFICES[0].id, TEMPLATES.garage);
+  home(2, OFFICES[1].id, TEMPLATES.garage);
+  return rows;
 }
 
-export function demoSaveLot(next: Lot): Lot {
+const here = (sim: Sim, ws: string) => (ws === sim.workspace?.id || ws === HERE ? HERE : ws);
+const rowOf = (id: string) => hood().find((r) => r.id === id) ?? fail('no such plot');
+const homeOf = (ws: string) => hood().find((r) => r.workspace === ws) ?? fail('this repo has no plot');
+const lotOn = (r: Row) => lots.get(r.id) ?? bareLot(r.size);
+function fail(why: string): never {
+  throw new Error(why);
+}
+
+function pay(sim: Sim, cost: number) {
+  const left = demoWallet(sim).balance;
+  if (cost > 0 && left < cost) throw new Error(`not enough coins yet (${left} of ${cost})`);
+  spent += cost;
+}
+
+export function demoLot(): Lot {
+  return structuredClone(lotOn(homeOf(HERE)));
+}
+
+/** A priced change to the open office's lot, as the core's `lots::change`. */
+function change(sim: Sim, f: (lot: Lot) => void): LotSaved {
+  const r = homeOf(HERE);
+  const old = lotOn(r);
+  const next = structuredClone(old);
+  f(next);
   if (next.v !== 1) throw new Error('unknown lot version');
-  return (lot = structuredClone(next));
+  const { w, d } = plotSize(r.size);
+  if (next.size.w !== w || next.size.d !== d) throw new Error(`this plot is ${w} × ${d} m: a lot keeps its size`);
+  for (const p of next.furniture) if (!BY_ID.has(p.item)) throw new Error(`no such piece: ${p.item}`);
+  next.template = old.template;
+  next.gift = keptGifts(old, next);
+  const cost = diff(old, next);
+  pay(sim, cost);
+  lots.set(r.id, next);
+  return { lot: structuredClone(next), wallet: demoWallet(sim), cost };
+}
+
+export const demoSaveLot = (sim: Sim, next: Lot): LotSaved =>
+  change(sim, (lot) => {
+    Object.assign(lot, structuredClone(next));
+  });
+
+export function demoLots(sim: Sim): LotSlot[] {
+  return hood().map((r) => {
+    const lot = r.owned ? lotOn(r) : null;
+    const other = OFFICES.find((o) => o.id === r.workspace);
+    const crew = r.workspace === HERE ? [...sim.agents.values()].filter((a) => a.role !== 'lead' && !a.archived).length : (other?.crew.length ?? 0);
+    return {
+      id: r.id,
+      x: r.x,
+      z: r.z,
+      size: r.size,
+      owned: r.owned,
+      workspace_id: r.workspace === HERE ? (sim.workspace?.id ?? null) : r.workspace,
+      name: r.workspace === HERE ? (sim.workspace?.name ?? 'codly') : (other?.name ?? null),
+      crew,
+      price: landPrice(r.size),
+      template: lot?.template || null,
+      gift: r.gift,
+      sells_for: lot ? (r.gift ? 0 : landBack(r.size)) + sellValue(lot) : 0,
+    };
+  });
+}
+
+export const demoLotOf = (slotId: string): Lot => {
+  const r = rowOf(slotId);
+  return structuredClone(r.owned ? lotOn(r) : bareLot(r.size));
+};
+
+export function demoBuyLot(sim: Sim, slotId: string, template: string | null): Wallet {
+  const r = rowOf(slotId);
+  const { w, d } = plotSize(r.size);
+  let made: Lot | null = null;
+  if (template != null) {
+    const t = TEMPLATES[template] ?? fail(`no such design: ${template}`);
+    made = { ...structuredClone(fit(t, w, d) ?? fail(`the ${template} doesn't fit on a ${w} × ${d} m plot`)), gift: [] };
+  }
+  if (!r.owned) {
+    const lot = made ?? bareLot(r.size);
+    pay(sim, landPrice(r.size) + value(lot));
+    Object.assign(r, { owned: true, gift: false });
+    lots.set(r.id, lot);
+    return demoWallet(sim);
+  }
+  if (!made) throw new Error('that plot is already yours');
+  const old = lotOn(r);
+  if (!isBare(old)) throw new Error('something already stands there: knock it down first');
+  pay(sim, diff(old, made));
+  lots.set(r.id, made);
+  return demoWallet(sim);
+}
+
+export function demoSellLot(sim: Sim, slotId: string): Wallet {
+  const r = rowOf(slotId);
+  if (!r.owned) throw new Error("that plot isn't yours");
+  if (r.workspace) throw new Error(`${demoLots(sim).find((s) => s.id === r.id)?.name ?? 'a repo'}'s office is there: move it out first`);
+  pay(sim, -((r.gift ? 0 : landBack(r.size)) + sellValue(lotOn(r))));
+  Object.assign(r, { owned: false, gift: false });
+  lots.delete(r.id);
+  return demoWallet(sim);
+}
+
+/** Move an office to another plot of yours with none on it (orchestrator/lots.rs's rules). */
+export function demoMoveOffice(sim: Sim, workspaceId: string, slotId: string): LotSlot[] {
+  const from = homeOf(here(sim, workspaceId));
+  const to = rowOf(slotId);
+  if (from === to) throw new Error('the office is already there');
+  if (!to.owned) throw new Error('buy that plot first');
+  if (to.workspace) throw new Error('another office is there');
+  const old = structuredClone(lotOn(from));
+  const next = structuredClone(lotOn(to));
+  const gift = new Set(old.gift);
+  const taken = lotIds(next);
+  next.storage ??= [];
+  const moving = [...old.furniture.map((p) => [p, true] as const), ...(old.storage ?? []).map((p) => [p, false] as const)];
+  for (const [piece, up] of moving) {
+    const p = { ...piece, uid: taken.has(piece.uid) ? crypto.randomUUID() : piece.uid };
+    taken.add(p.uid);
+    if (gift.has(piece.uid)) next.gift.push(p.uid);
+    const fits = up && p.x >= 0 && p.x <= next.size.w && p.z >= 0 && p.z <= next.size.d;
+    (fits ? next.furniture : next.storage).push(p);
+  }
+  if (!next.storage.length) delete next.storage;
+  old.furniture = [];
+  delete old.storage;
+  const left = lotIds(old);
+  old.gift = old.gift.filter((id) => left.has(id));
+  lots.set(from.id, old);
+  lots.set(to.id, next);
+  to.workspace = from.workspace;
+  from.workspace = null;
+  return demoLots(sim);
 }
 
 function seeded(sim: Sim): Agent[] {
@@ -196,26 +348,31 @@ export function demoDigest(sim: Sim, since: number): Digest {
   };
 }
 
-/** The wallet (crates/codly-core/src/orchestrator/wallet.rs): the demo has one repo, so its
- *  agents' XP, plus grants, less its furniture. */
+/** The wallet (crates/codly-core/src/orchestrator/wallet.rs): the demo's agents' XP (and those
+ *  it let go or moved), plus grants, less what was paid for plots, building and furniture. */
 export function demoWallet(sim: Sim): Wallet {
   const earned = [...sim.agents.values(), ...seeded(sim), ...transferred].reduce((n, a) => n + a.career.xp, 0);
-  const spent = placed.reduce((n, p) => n + (BY_ID.get(p.item)?.price ?? 0), 0);
   return { earned, granted, spent, balance: earned + granted - spent, cheated };
 }
 
-export const demoShop = (sim: Sim): Shop => ({ wallet: demoWallet(sim), placed: [...placed] });
+/** Build/Buy: the furniture bought for this office (what came with the lot and the stations
+ *  are drawn from the lot). */
+export function demoShop(sim: Sim): Shop {
+  const lot = lotOn(homeOf(HERE));
+  const gift = new Set(lot.gift);
+  return { wallet: demoWallet(sim), placed: lot.furniture.filter((p) => !gift.has(p.uid) && !BY_ID.get(p.item)?.builtin).map((p) => ({ ...p })) };
+}
 
 export function demoPlace(sim: Sim, piece: Placed): Shop {
-  const old = placed.find((p) => p.uid === piece.uid);
-  if (old && old.item !== piece.item) throw new Error(`that piece is a ${old.item}`);
-  if (!old) {
-    const price = BY_ID.get(piece.item)?.price;
-    if (price === undefined) throw new Error('no such item');
-    const left = demoWallet(sim).balance;
-    if (left < price) throw new Error(`not enough coins yet (${left} of ${price})`);
-  }
-  placed = [...placed.filter((p) => p.uid !== piece.uid), piece];
+  change(sim, (lot) => {
+    const old = lot.furniture.find((p) => p.uid === piece.uid);
+    const stored = lot.storage?.find((p) => p.uid === piece.uid);
+    if ((old ?? stored) && (old ?? stored)!.item !== piece.item) throw new Error(`that piece is a ${(old ?? stored)!.item}`);
+    if (!old && !stored && !BY_ID.has(piece.item)) throw new Error('no such item');
+    lot.storage = lot.storage?.filter((p) => p.uid !== piece.uid);
+    if (!lot.storage?.length) delete lot.storage;
+    lot.furniture = [...lot.furniture.filter((p) => p.uid !== piece.uid), piece];
+  });
   return demoShop(sim);
 }
 
@@ -251,15 +408,23 @@ export function demoGiveXp(sim: Sim, id: string, xp: number): Agent {
   return next;
 }
 
+/** The lot back to a gift Garage; what stood there sells back at the usual rates. */
 export function demoResetOffice(sim: Sim): Shop {
   developer(sim);
-  placed = [];
+  const r = homeOf(HERE);
+  const { w, d } = plotSize(r.size);
+  pay(sim, -sellValue(lotOn(r)));
+  lots.set(r.id, allGift(fit(TEMPLATES.garage, w, d)!));
   sim.decision('developer', 'rule', 'reset the office', {});
   return demoShop(sim);
 }
 
 export function demoSell(sim: Sim, uid: string): Shop {
-  if (!placed.some((p) => p.uid === uid)) throw new Error('not in the office');
-  placed = placed.filter((p) => p.uid !== uid);
+  change(sim, (lot) => {
+    const n = lot.furniture.length + (lot.storage?.length ?? 0);
+    lot.furniture = lot.furniture.filter((p) => p.uid !== uid);
+    lot.storage = lot.storage?.filter((p) => p.uid !== uid);
+    if (lot.furniture.length + (lot.storage?.length ?? 0) === n) throw new Error('not in the office');
+  });
   return demoShop(sim);
 }
