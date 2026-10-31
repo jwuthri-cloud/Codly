@@ -1,0 +1,99 @@
+<!--
+  Office tabs, at the top of the rail: one tile per repo you keep at hand, the open one marked,
+  a teal count while its agents are on tasks. Every office with work keeps working; a click only
+  changes where you look. × hides a tab (the office keeps working), + opens another repo.
+-->
+<script lang="ts">
+  import { onMount, untrack } from 'svelte';
+  import { openWorkspace } from '../lib/state/actions';
+  import { offices, type OfficeTab } from '../lib/state/offices.svelte';
+  import { store } from '../lib/state/store.svelte';
+  import { ui } from '../lib/state/ui.svelte';
+  import { tildify } from '../lib/util/sanitize';
+  import Icon from '../components/Icon.svelte';
+
+  const ACTIVE = new Set(['running', 'verifying', 'reviewing', 'changes_requested', 'merging']);
+  const ws = $derived(store.workspace);
+  const here = $derived(store.tasks.filter((t) => ACTIVE.has(t.status)).length);
+
+  // The open repo gets a tab; a switch refreshes the others' counts.
+  $effect(() => {
+    const w = ws;
+    untrack(() => {
+      if (w) offices.add(w);
+      void offices.refresh();
+    });
+  });
+  onMount(() => {
+    const t = setInterval(() => document.hidden || void offices.refresh(), 5000);
+    return () => clearInterval(t);
+  });
+
+  const busy = (t: OfficeTab) => (t.id === ws?.id ? here : (offices.working.get(t.id) ?? 0));
+  function initials(name: string): string {
+    const words = name.replace(/^.*\//, '').split(/[^a-z0-9]+/i).filter(Boolean);
+    const s = words.length > 1 ? words[0][0] + words[1][0] : (words[0] ?? '?').slice(0, 2);
+    return s[0].toUpperCase() + s.slice(1).toLowerCase();
+  }
+  const tasks = (n: number) => `${n} task${n === 1 ? '' : 's'}`;
+
+  function close(t: OfficeTab) {
+    const i = offices.tabs.indexOf(t);
+    offices.close(t.id);
+    if (t.id !== ws?.id) return;
+    const next = offices.tabs[Math.min(i, offices.tabs.length - 1)];
+    if (next) void openWorkspace(next.path);
+  }
+</script>
+
+<ul class="offices" aria-label="Offices">
+  {#each offices.tabs as t (t.id)}
+    {@const n = busy(t)}
+    {@const on = t.id === ws?.id}
+    <li class="tab" class:on>
+      <button
+        class="office"
+        aria-current={on ? 'page' : undefined}
+        aria-label="{t.name}{n ? `, ${tasks(n)} in flight` : ''}"
+        data-tip="{t.name} — {tildify(t.path)}{n ? ` · ${tasks(n)} in flight` : ''}"
+        onclick={() => !on && openWorkspace(t.path)}
+      >
+        <span class="ini">{initials(t.name)}</span>
+        {#if ui.railOpen}<span class="label">{t.name}</span>{/if}
+        {#if n}<span class="n num">{n}</span>{/if}
+      </button>
+      {#if offices.tabs.length > 1}
+        <button
+          class="x"
+          aria-label="Close the {t.name} tab"
+          data-tip={n ? `Close the tab: ${t.name} keeps working on its ${tasks(n)}` : 'Close the tab: the office keeps any work it gets'}
+          onclick={() => close(t)}><Icon name="x" size={10} /></button>
+      {/if}
+    </li>
+  {/each}
+  <li>
+    <button class="office add" aria-label="Open another repository" data-tip="Open another repository: every office keeps working" data-tip-kbd="⌘O" onclick={() => openWorkspace()}>
+      <Icon name="plus" size={16} />
+      {#if ui.railOpen}<span class="label">Open repo…</span>{/if}
+    </button>
+  </li>
+</ul>
+
+<style>
+  .offices { display: flex; flex-direction: column; gap: 4px; max-height: 32vh; overflow-y: auto; scrollbar-width: none; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--line); }
+  .tab { position: relative; }
+  .office { position: relative; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px; color: var(--ink-3); transition: background-color var(--d-2) var(--ease-out), color var(--d-2) var(--ease-out); }
+  .office:hover { color: var(--ink-1); background: var(--surface-2); }
+  .on .office { color: var(--ink-1); background: var(--surface-3); cursor: default; }
+  .ini { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }
+  .on .ini { background: var(--surface-1); box-shadow: inset 0 0 0 1.5px var(--ink-2); }
+  .n { position: absolute; right: 1px; bottom: 1px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px; background: var(--live); color: var(--night); font-size: 9.5px; font-weight: 700; line-height: 14px; text-align: center; box-shadow: 0 0 0 2px var(--glass-solid); }
+  .x { position: absolute; top: 0; left: 0; display: none; place-items: center; width: 15px; height: 15px; border-radius: 50%; color: var(--ink-2); background: var(--glass-solid); box-shadow: 0 0 0 1px var(--line-2); }
+  .x:hover { color: var(--ink-1); }
+  .tab:hover .x, .x:focus-visible { display: grid; }
+  .label { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  :global(.rail.open) .office { width: 100%; grid-template-columns: 26px 1fr auto; justify-items: start; gap: 9px; padding: 0 22px 0 6px; }
+  :global(.rail.open) .add { padding-right: 6px; }
+  :global(.rail.open) .n { position: static; box-shadow: none; }
+  :global(.rail.open) .x { top: 50%; left: auto; right: 4px; margin-top: -7.5px; }
+</style>

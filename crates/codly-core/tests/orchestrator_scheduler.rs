@@ -108,6 +108,7 @@ struct World {
     busy: HashSet<Id>,
     accounts: Vec<AccountState>,
     now: i64,
+    elsewhere: Vec<Agent>,
 }
 
 impl World {
@@ -121,6 +122,7 @@ impl World {
             busy: HashSet::new(),
             accounts: vec![],
             now: 1_000_000,
+            elsewhere: vec![],
         }
     }
     fn run(&self) -> Vec<Action> {
@@ -133,6 +135,7 @@ impl World {
             busy: &self.busy,
             accounts: &self.accounts,
             now: self.now,
+            elsewhere: &self.elsewhere,
         })
     }
 }
@@ -249,6 +252,18 @@ fn slots_and_provider_caps() {
         })
         .collect();
     assert_eq!(names.len(), 3);
+}
+
+#[test]
+fn other_offices_hold_slots_too() {
+    let mut w = World::new(ready(3));
+    w.settings.max_parallel = 2;
+    w.settings.max_per_provider = 1;
+    // Busy in another repo, on Claude: one slot left, and it can't be Claude's.
+    w.elsewhere = vec![agent("x", "Xi", Provider::Claude, Role::Worker)];
+    let s = starts(&w.run());
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].1, Provider::Codex);
 }
 
 #[test]

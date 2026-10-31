@@ -118,7 +118,7 @@ mod tests {
     }
 
     fn put(store: &Store, ws: &str, b: &Blocker) {
-        let ev = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, kind: EventKind::BlockerChanged { blocker: b.clone() } };
+        let ev = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind: EventKind::BlockerChanged { blocker: b.clone() } };
         store.append_event(Some(ws), &ev).unwrap();
     }
 

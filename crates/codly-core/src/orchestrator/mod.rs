@@ -253,6 +253,7 @@ fn row(agent: Option<&str>, task: Option<&str>, run: Option<&str>, kind: EventKi
         agent_id: agent.map(String::from),
         task_id: task.map(String::from),
         run_id: run.map(String::from),
+        workspace_id: None,
         kind,
     }
 }
@@ -863,7 +864,7 @@ impl Core {
 
     /// Code search over the workspace index (the same engine as the codly_search tool).
     pub async fn search(&self, query: &str) -> anyhow::Result<SearchResult> {
-        self.inner.search(query, 12).await
+        self.inner.search(None, query, 12).await
     }
 
     pub async fn memories(&self, query: Option<&str>, scope: Option<MemoryScope>) -> anyhow::Result<Vec<Memory>> {
@@ -988,6 +989,11 @@ impl Inner {
 
     fn index(&self) -> Option<SharedIndex> {
         read(&self.index).clone()
+    }
+
+    /// The code index if it is `ws_id`'s: only the open repo has one loaded.
+    fn index_of(&self, ws_id: Option<&str>) -> Option<SharedIndex> {
+        self.index().filter(|_| ws_id.is_none() || self.workspace().map(|w| w.id).as_deref() == ws_id)
     }
 
     fn is_live(&self, agent_id: &str) -> bool {

@@ -38,7 +38,7 @@ impl Inner {
             t::SEARCH => {
                 let q = s(&args, "query").ok_or_else(|| anyhow!("query is required"))?;
                 let k = args.get("k").and_then(Value::as_u64).unwrap_or(8).clamp(1, 20) as usize;
-                Ok(serde_json::to_value(self.search(q, k).await?)?)
+                Ok(serde_json::to_value(self.search(ws, q, k).await?)?)
             }
             t::MEMORY_SEARCH => self.tool_memory_search(&ctx, ws, &args),
             t::MEMORY_WRITE => self.tool_memory_write(&ctx, ws, &args),

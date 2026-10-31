@@ -540,7 +540,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             created_at: now_ms(),
         };
         store.upsert_workspace(&ws).unwrap();
-        let ev = |kind| EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, kind };
+        let ev = |kind| EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind };
         let agent_id = new_id();
         let run_id = new_id();
         let agent = Agent {
@@ -1697,7 +1697,7 @@ async fn a_resumed_run_keeps_its_account() {
             created_at: now_ms(),
         };
         store.upsert_workspace(&ws).unwrap();
-        let ev = |kind| EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, kind };
+        let ev = |kind| EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind };
         let (agent_id, run_id, task_id) = (new_id(), new_id(), new_id());
         let agent: Agent = serde_json::from_value(json!({
             "id": agent_id, "name": "Ada", "provider": "claude", "model": null, "role": "worker", "status": "working",
@@ -2262,5 +2262,41 @@ async fn the_lead_prefers_rested_members_and_a_queued_task_waits_for_home() {
             if decision_type == "route" && summary.contains("Ana") && summary.ends_with("called in from home: nobody else was free"))),
         "the route decision says why"
     );
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_offices_work_at_once_and_share_the_worker_slots() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));
+    let log = Arc::new(Mutex::new(Log::default()));
+    // Workers stay on their task: each holds a slot until the test ends.
+    let hold: Behavior = Arc::new(|_turn: FakeTurn| Box::pin(std::future::pending::<()>()));
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(dir.path(), FakeSpawner { log, lead: idle, worker: hold }).await;
+    core.update_settings(Settings { paused: true, max_parallel: 1, ..core.settings() }).await.unwrap();
+
+    // A task in each office; "b" is the one left open.
+    core.open_workspace(a.to_str().unwrap()).await.unwrap();
+    let ta = core.create_task("Docs for a", "").await.unwrap();
+    core.move_task(&ta.id, TaskStatus::Ready).await.unwrap();
+    let wa = core.snapshot().await.unwrap().workspace.unwrap().id;
+    core.open_workspace(b.to_str().unwrap()).await.unwrap();
+    let tb = core.create_task("Docs for b", "").await.unwrap();
+    core.move_task(&tb.id, TaskStatus::Ready).await.unwrap();
+
+    let running_b = async || core.snapshot().await.unwrap().tasks.iter().filter(|t| t.id == tb.id && t.status == TaskStatus::Running).count() as i64;
+    let running_a = || core.offices().unwrap().iter().find(|o| o.id == wa).map_or(0, |o| o.working);
+
+    // One worker slot for both offices: exactly one task starts, whichever office it is in.
+    core.update_settings(Settings { paused: false, ..core.settings() }).await.unwrap();
+    wait_for("a task to start", 10, async || (running_b().await + running_a() == 1).then_some(())).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(running_b().await + running_a(), 1, "max_parallel counts every office");
+
+    // Two slots: the other office works too, while "b" stays the open one.
+    core.update_settings(Settings { max_parallel: 2, max_per_provider: 2, ..core.settings() }).await.unwrap();
+    wait_for("both offices to work", 10, async || (running_b().await == 1 && running_a() == 1).then_some(())).await;
+    assert_ne!(core.snapshot().await.unwrap().workspace.unwrap().id, wa);
     core.shutdown().await;
 }

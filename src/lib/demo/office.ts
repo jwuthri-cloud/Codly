@@ -228,14 +228,14 @@ export function demoBringBack(sim: Sim, id: string): Agent {
 
 // Two other offices for the Transfer picker (the demo has one repo), with who works there.
 const OFFICES = [
-  { id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'] },
-  { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'] },
+  { id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'], working: 0 },
+  { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'], working: 2 },
 ];
 
 /** Agents moved to those offices: still yours, so their XP stays in the wallet. */
 const transferred: Agent[] = [];
 
-export const demoOffices = (): Office[] => OFFICES.map((o) => ({ id: o.id, name: o.name, repo_path: o.repo_path, crew: o.crew.length }));
+export const demoOffices = (): Office[] => OFFICES.map((o) => ({ id: o.id, name: o.name, repo_path: o.repo_path, crew: o.crew.length, working: o.working }));
 
 /** Transfer an agent to one of the demo's other offices: same rules as the core's; it leaves this office's crew. */
 export function demoTransfer(sim: Sim, id: string, to: string): Agent {

@@ -82,7 +82,7 @@ impl Inner {
 
     async fn breaker_enforce(&self, t: Transition) {
         let Ok(agent) = self.agent(&t.agent) else { return };
-        let ws = self.workspace().map(|w| w.id);
+        let ws = self.store.agent_workspace(&t.agent).ok().flatten();
         // Send first, record after: a note that could not be delivered is said so in the event.
         let delivered = match (t.action, &t.trip) {
             (Action::Steer, Some(trip)) => self.send_prompt(&t.agent, breaker::note(BreakerLevel::Steering, trip)).is_ok(),

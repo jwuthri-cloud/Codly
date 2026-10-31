@@ -1,5 +1,5 @@
 <!--
-  The slim icon rail (labelled when expanded, via the chevron at the bottom): Home and four rooms, then the view controls (full office ⌘1, focus ⌘.) and
+  The slim icon rail (labelled when expanded, via the chevron at the bottom): your office tabs, Home and four rooms, then the view controls (full office ⌘1, focus ⌘.) and
   Settings. Badges say only what needs saying: amber when something waits for you, an orbit on
   Plan while it runs, a dot on Changes when new artifacts arrive.
 -->
@@ -9,6 +9,7 @@
   import { ROOMS, ui, type Room } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
   import Logo from '../components/Logo.svelte';
+  import OfficeTabs from './OfficeTabs.svelte';
 
   const tauri = isTauriApp();
   const waiting = $derived(store.pendingApprovals.length);
@@ -36,6 +37,7 @@
 
 <nav class="rail glass" class:tauri class:open={ui.railOpen} aria-label="Rooms">
   <div class="mark" data-tauri-drag-region><Logo size={24} /></div>
+  {#if store.workspace}<OfficeTabs />{/if}
   <ul class="rooms">
     {#each ROOMS as r (r.id)}
       {@const b = badge(r.id)}

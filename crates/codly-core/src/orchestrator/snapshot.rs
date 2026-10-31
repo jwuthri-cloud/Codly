@@ -156,7 +156,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        let row = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, kind: EventKind::AgentChanged { agent: ada } };
+        let row = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind: EventKind::AgentChanged { agent: ada } };
         core.inner.store.append_event(Some(&ws.id), &row).unwrap();
         crate::memory::panel::write_memory_file(&core.inner.data("memory"), "ada", "Ada", "# Ada\n\n- the staging password lives in vault\n").unwrap();
 

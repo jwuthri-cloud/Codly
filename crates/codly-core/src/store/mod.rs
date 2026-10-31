@@ -375,15 +375,30 @@ impl Store {
         })
     }
 
-    /// Every workspace with its crew (agents on the team, the Lead aside), most recently opened first.
+    /// Every workspace with its crew (agents on the team, the Lead aside) and its tasks in
+    /// flight, most recently opened first.
     pub fn offices(&self) -> Result<Vec<Office>> {
         let conn = self.conn();
-        let mut st = conn.prepare_cached(
+        let sql = format!(
             "SELECT w.id, w.name, w.repo_path,
-               (SELECT COUNT(*) FROM agent a WHERE a.workspace_id = w.id AND a.archived = 0 AND a.role != 'lead')
-             FROM workspace w ORDER BY w.opened_at DESC",
-        )?;
-        let rows = st.query_map([], |r| Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)? }))?;
+               (SELECT COUNT(*) FROM agent a WHERE a.workspace_id = w.id AND a.archived = 0 AND a.role != 'lead'),
+               (SELECT COUNT(*) FROM task t WHERE t.workspace_id = w.id AND t.status IN ({ACTIVE}))
+             FROM workspace w ORDER BY w.opened_at DESC"
+        );
+        let mut st = conn.prepare_cached(&sql)?;
+        let rows = st.query_map([], |r| Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)?, working: r.get(4)? }))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Workspaces with work in flight: a running plan, or a task that is ready or active.
+    pub fn working_workspaces(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let sql = format!(
+            "SELECT workspace_id FROM plan WHERE status = 'running'
+             UNION SELECT workspace_id FROM task WHERE status IN ('ready', {ACTIVE})"
+        );
+        let mut st = conn.prepare_cached(&sql)?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -828,12 +843,15 @@ fn run_from_row(r: &rusqlite::Row) -> rusqlite::Result<RunRow> {
     })
 }
 
+/// Task statuses that hold a worker (`scheduler::is_active`), as SQL.
+const ACTIVE: &str = "'running', 'verifying', 'reviewing', 'changes_requested', 'merging'";
+
 fn event_from_row(r: &rusqlite::Row) -> rusqlite::Result<EventRow> {
     let ty: String = r.get(5)?;
     let payload: String = r.get(6)?;
     // A row written by an older/newer schema must not break the timeline (G12).
     let kind = serde_json::from_str(&payload).unwrap_or(EventKind::Unknown { raw_type: ty });
-    Ok(EventRow { id: r.get(0)?, ts: r.get(1)?, agent_id: r.get(2)?, task_id: r.get(3)?, run_id: r.get(4)?, kind })
+    Ok(EventRow { id: r.get(0)?, ts: r.get(1)?, agent_id: r.get(2)?, task_id: r.get(3)?, run_id: r.get(4)?, workspace_id: None, kind })
 }
 
 fn decode_all<T: DeserializeOwned>(rows: impl Iterator<Item = rusqlite::Result<String>>) -> Result<Vec<T>> {
@@ -882,7 +900,7 @@ mod tests {
     }
 
     fn row(kind: EventKind) -> EventRow {
-        EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, kind }
+        EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind }
     }
 
     #[test]

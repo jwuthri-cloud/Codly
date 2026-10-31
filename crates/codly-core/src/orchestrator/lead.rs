@@ -642,7 +642,10 @@ impl Inner {
 
     async fn chat_agent_spawn_fresh(self: &Arc<Self>, agent_id: &str, prompt: String) -> Result<()> {
         let agent = self.agent(agent_id)?;
-        let ws = self.require_ws()?;
+        let ws = match self.store.agent_workspace(agent_id)? {
+            Some(id) => self.store.workspace(&id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
+            None => self.require_ws()?,
+        };
         let (cwd, role, read_only, system_prompt) = match agent.role {
             Role::Solo => {
                 let (branch, wt) = self.solo_worktree(&ws, &agent);

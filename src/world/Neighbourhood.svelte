@@ -1,7 +1,8 @@
 <!--
   The neighbourhood (PROGRESSION §4, "The map"): every lot of yours and the ones for sale, on flat
   ground. Each repo's office stands on its lot, seen from outside with a sign (its name and crew);
-  only the open repo is live and lit, the others say "Closed". Click a lot: enter its office, buy
+  the open repo is live and lit, and so is any other whose agents are on tasks (every office with
+  work keeps working); idle ones say "Closed". Click a lot: enter its office, buy
   it (empty or ready-made), move an office onto it, or sell it. The wallet sits in the corner.
   The scene is scene.ts; what a lot offers and what it costs is map.ts (pure, tested).
 -->
@@ -81,7 +82,10 @@
     if (import.meta.env.DEV) (window as unknown as { __nb: unknown }).__nb = scene;
     load().catch(fail('Could not load the neighbourhood'));
     el.focus({ preventScroll: true });
+    // The other offices keep working: their lights follow.
+    const poll = setInterval(() => api.offices().then((o) => (offices = o), () => {}), 10_000);
     return () => {
+      clearInterval(poll);
       scene?.dispose();
       scene = null;
     };
@@ -93,7 +97,7 @@
   });
 
   $effect(() => {
-    scene?.set({ slots, lots, live: ws?.id ?? null, crew: crewHere, working, selected });
+    scene?.set({ slots, lots, live: ws?.id ?? null, crew: crewHere, working, away: new Map(offices.map((o) => [o.id, o.working])), selected });
   });
 
   // ───────────── actions ─────────────

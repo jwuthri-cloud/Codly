@@ -338,11 +338,36 @@ impl Inner {
 
     // ───────────── scheduling ─────────────
 
-    /// ponytail: schedules the open workspace only; tasks already running elsewhere still
-    /// finish their gates. Loop over workspaces with running plans if users juggle repos.
+    /// Every office with work keeps working: the open one, and each other with a running
+    /// plan or a task in flight. One office at a time, so the slots each one takes count
+    /// against the next (worker slots and account caps are for all your offices together).
     async fn schedule_pass(self: &Arc<Self>) -> Result<()> {
-        let Some(ws) = self.workspace() else { return Ok(()) };
         let _g = self.sched_lock.lock().await;
+        let open = self.workspace();
+        let mut spaces: Vec<Workspace> = open.clone().into_iter().collect();
+        for id in self.store.working_workspaces()? {
+            if open.as_ref().is_none_or(|w| w.id != id)
+                && let Some(ws) = self.store.workspace(&id)?.filter(|w| Path::new(&w.repo_path).is_dir())
+            {
+                spaces.push(ws);
+            }
+        }
+        for ws in &spaces {
+            if let Err(e) = self.schedule_office(ws, &spaces).await {
+                tracing::warn!("scheduling {}: {e}", ws.name);
+            }
+        }
+        Ok(())
+    }
+
+    async fn schedule_office(self: &Arc<Self>, ws: &Workspace, spaces: &[Workspace]) -> Result<()> {
+        let mut elsewhere = vec![];
+        for o in spaces.iter().filter(|o| o.id != ws.id) {
+            let agents = self.store.agents(&o.id)?;
+            for t in self.store.tasks(&o.id)?.into_iter().filter(|t| scheduler::is_active(t.status)) {
+                elsewhere.extend(agents.iter().find(|a| t.assignee.as_ref() == Some(&a.id)).cloned());
+            }
+        }
         self.sync_team(&ws)?;
         let tasks = self.store.tasks(&ws.id)?;
         self.sweep_staff(&ws, &tasks, &self.store.agents(&ws.id)?)?;
@@ -365,6 +390,7 @@ impl Inner {
             busy: &busy,
             accounts: &accounts,
             now: now_ms(),
+            elsewhere: &elsewhere,
         });
         let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
         for a in actions {
@@ -680,7 +706,7 @@ impl Inner {
             })
             .collect();
         let query = format!("{} {}", task.title, task.goal);
-        let pointer_pack = match self.pointer_pack(&query).await {
+        let pointer_pack = match self.pointer_pack(&ws.id, &query).await {
             Some((text, result)) => {
                 let _ = self.emit(
                     Some(&ws.id),
