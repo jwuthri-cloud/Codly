@@ -1404,6 +1404,16 @@
       "sell_gift": 0,
       "value": 1520
     },
+    "small-office": {
+      "ready_made": {
+        "large": 7762,
+        "medium": 4962,
+        "small": null
+      },
+      "sell_bought": 3060,
+      "sell_gift": 0,
+      "value": 3762
+    },
     "studio": {
       "ready_made": {
         "large": 23708,
