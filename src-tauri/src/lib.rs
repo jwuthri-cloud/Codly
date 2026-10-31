@@ -173,6 +173,8 @@ pub fn run() {
             hire_commands::office_shop,
             hire_commands::office_place,
             hire_commands::office_sell,
+            hire_commands::office_lot,
+            hire_commands::office_save_lot,
             commands::board_policy,
             commands::board_sweep,
             commands::board_archive,

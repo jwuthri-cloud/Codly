@@ -256,6 +256,9 @@ impl Inner {
 
     fn save_decor(&self, ws: &str, placed: &[Placed]) -> Result<Shop> {
         self.store.kv_set(&format!("decor:{ws}"), &serde_json::to_string(placed)?)?;
+        if let Err(e) = super::lots::mirror_decor(&self.store, ws, placed) {
+            tracing::warn!("the lot didn't follow the furniture: {e:#}");
+        }
         self.shop(ws)
     }
 }

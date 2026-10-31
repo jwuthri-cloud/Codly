@@ -95,6 +95,8 @@
     "allow-office-shop",
     "allow-office-place",
     "allow-office-sell",
+    "allow-office-lot",
+    "allow-office-save-lot",
     "allow-board-policy",
     "allow-board-sweep",
     "allow-board-archive",
