@@ -1,0 +1,13 @@
+{
+  "lots": {
+    "small": { "w": 10, "d": 8, "price": 300 },
+    "medium": { "w": 16, "d": 12, "price": 1200 },
+    "large": { "w": 28, "d": 24, "price": 4000 }
+  },
+  "wall_per_m": { "exterior": 10, "solid": 10, "glass": 15, "half": 5 },
+  "door": { "open": 0, "single": 40, "double": 80, "glass": 120, "rollup": 100 },
+  "window": { "standard": 30 },
+  "floor_per_m2": 1,
+  "paint_per_m2": 1,
+  "sell": { "furniture": 1.0, "build": 0.5, "paint": 0.0, "lot": 0.8 }
+}
