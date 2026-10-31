@@ -20,6 +20,7 @@
   import BreakerSection from './BreakerSection.svelte';
   import InboundSection from './InboundSection.svelte';
   import ConnectionsSection from './ConnectionsSection.svelte';
+  import DeveloperSection from './DeveloperSection.svelte';
   import HousekeepingSection from './HousekeepingSection.svelte';
   import TeamSection from './TeamSection.svelte';
   import TriggersSection from './TriggersSection.svelte';
@@ -104,6 +105,7 @@
     { id: 'team', label: 'Team', icon: 'users' },
     { id: 'safety', label: 'Safety', icon: 'lock' },
     { id: 'automation', label: 'Automation', icon: 'bolt' },
+    { id: 'developer', label: 'Developer', icon: 'code' },
   ];
   let tab = $state('general');
   // Office sound (kept on this machine, not in the core's settings).
@@ -297,6 +299,8 @@
       <TriggersSection />
       <InboundSection />
       <ConnectionsSection />
+      {:else if tab === 'developer'}
+      <DeveloperSection />
       {/if}
       </div>
     </div>
