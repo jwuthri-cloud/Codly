@@ -11,9 +11,10 @@ import { coins } from '../lib/util/format';
 import { plotSize, readyMadePrice, TEMPLATE_NAMES } from '../office/price';
 import { templateLabel } from './price';
 
-/** Metres between plot centres, along x and along z (the large lot is 28 × 24). */
-export const PITCH_X = 34;
-export const PITCH_Z = 30;
+/** Metres between plot centres, along x and along z: the large lot (28 × 24) plus a street with
+ *  its sidewalks (town.ts) and a little verge on each side. */
+export const PITCH_X = 44;
+export const PITCH_Z = 40;
 
 /** Yours with a repo's office · yours with a building and no repo · yours and empty · for sale. */
 export type SlotKind = 'office' | 'building' | 'empty' | 'sale';

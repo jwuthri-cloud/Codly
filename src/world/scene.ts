@@ -28,6 +28,7 @@ import { color, lin, MAT, mix, themeAt, type OfficeTheme, type RGB } from '../of
 import { browserHost, FrameLoop, type StepResult } from '../office/scheduler';
 import { exteriorOf, STOREY, type Box } from './exterior';
 import { buildingOrigin, extent, lightsOf, plotAt, plotsOf, signOf, slotKind, type Plot } from './map';
+import { townOf, TownGfx } from './town';
 
 export interface SceneOptions {
   /** A plot was clicked (null: the ground), at this screen point. */
@@ -79,6 +80,7 @@ export class NeighbourhoodScene {
   private loop: FrameLoop;
   private ro: ResizeObserver;
   private gfx = new Map<string, PlotGfx>();
+  private town: TownGfx | null = null;
   private plots: Plot[] = [];
   private geos: BufferGeometry[] = [];
   private state: SceneState = { slots: [], lots: new Map(), live: null, crew: 0, working: 0, away: new Map(), selected: null };
@@ -230,18 +232,27 @@ export class NeighbourhoodScene {
     // Ground to the horizon, whatever the zoom.
     this.ground.scale.set(e.x1 - e.x0 + pad * 60, 1, e.z1 - e.z0 + pad * 60);
     this.ground.position.set((e.x0 + e.x1) / 2, -0.02, (e.z0 + e.z1) / 2);
-    this.rig.boundsX = Math.max(Math.abs(e.x0), Math.abs(e.x1)) + 8;
-    this.rig.boundsZ = Math.max(Math.abs(e.z0), Math.abs(e.z1)) + 8;
+    // The town around the plots: streets, sidewalks, lamps, trees and the neighbours' houses.
+    if (this.town) {
+      this.world.remove(this.town.group);
+      this.town.dispose();
+    }
+    this.town = new TownGfx(townOf(this.plots));
+    this.town.setNight(this.theme.name === 'dark', this.theme.lamp);
+    this.world.add(this.town.group);
+    const tb = this.town.town.bounds;
+    this.rig.boundsX = Math.max(Math.abs(tb.x0), Math.abs(tb.x1));
+    this.rig.boundsZ = Math.max(Math.abs(tb.z0), Math.abs(tb.z1));
     this.state.slots.forEach((s, i) => this.addPlot(s, this.plots[i]));
     const cam = this.key.shadow.camera;
-    const half = Math.max(e.x1 - e.x0, e.z1 - e.z0) / 2 + 10;
+    const half = Math.max(tb.x1 - tb.x0, tb.z1 - tb.z0) / 2 + 4;
     cam.left = -half;
     cam.right = half;
     cam.top = half;
     cam.bottom = -half;
     cam.far = 400;
     cam.updateProjectionMatrix();
-    this.key.target.position.set((e.x0 + e.x1) / 2, 0, (e.z0 + e.z1) / 2);
+    this.key.target.position.set((tb.x0 + tb.x1) / 2, 0, (tb.z0 + tb.z1) / 2);
     this.placeKey();
     this.restyle();
     this.renderer.shadowMap.needsUpdate = true;
@@ -383,6 +394,7 @@ export class NeighbourhoodScene {
     this.key.intensity = t.keyIntensity;
     this.key.shadow.intensity = t.shadowStrength;
     this.groundMat.color.copy(color(lin(t.name === 'dark' ? GROUND_NIGHT : GROUND)));
+    this.town?.setNight(t.name === 'dark', t.lamp);
     this.placeKey();
     this.restyle();
     this.renderer.shadowMap.needsUpdate = true;
@@ -613,6 +625,7 @@ export class NeighbourhoodScene {
       g.glass?.dispose();
     }
     for (const geo of this.geos) geo.dispose();
+    this.town?.dispose();
     this.ground.geometry.dispose();
     this.groundMat.dispose();
     this.matte.dispose();
