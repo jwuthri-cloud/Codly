@@ -34,6 +34,7 @@ import type { HireManifest } from './gen/HireManifest';
 import type { Applicant } from './gen/Applicant';
 import type { Placed } from './gen/Placed';
 import type { Shop } from './gen/Shop';
+import type { Wallet } from './gen/Wallet';
 import type { HireReview } from './gen/HireReview';
 import type { LaunchPreview } from './gen/LaunchPreview';
 import type { Memory } from './gen/Memory';
@@ -165,12 +166,20 @@ export const api = {
   ghosts: () => call<Agent[]>('ghosts', {}),
   /** Bring a ghost back as a regular worker (same name, look, career and memory). */
   bringBack: (agentId: string) => call<Agent>('bring_back', { agentId }),
-  /** Build/Buy: the budget (XP the agents earned here), catalog and furniture owned. */
+  /** Build/Buy: the wallet (coins, across every repo) and the furniture in this office. */
   officeShop: () => call<Shop>('office_shop', {}),
   /** Buy a piece of furniture and put it down, or move one already bought (same uid). */
   officePlace: (piece: Placed) => call<Shop>('office_place', { piece }),
   /** Sell a piece of furniture back for the full price. */
   officeSell: (uid: string) => call<Shop>('office_sell', { uid }),
+  /** The player's coins (🪙): every repo's XP earned, plus grants, less what is owned. */
+  wallet: () => call<Wallet>('wallet', {}),
+  /** Developer mode only: give coins (flags the wallet as cheated, for good). */
+  devGrant: (amount: number) => call<Wallet>('dev_grant', { amount }),
+  /** Developer mode only: give an agent XP; its rank follows (flags the wallet too). */
+  devGiveXp: (agentId: string, xp: number) => call<Agent>('dev_give_xp', { agentId, xp }),
+  /** Developer mode only: empty this repo's office of furniture (refunded). */
+  devResetOffice: () => call<Shop>('dev_reset_office', {}),
   /** The open repo's changes to the global team (members switched off, its own members). */
   setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   /** A request's own mode, permissions and Lead model (null fields = the Settings defaults). */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clashes, emptyCareer, makeApplicants, rankProgress } from '../util/career';
+import { clashes, emptyCareer, makeApplicants, rankFor, rankProgress } from '../util/career';
 
 describe('careers', () => {
   it('applicants are distinct, free and sensible', () => {
@@ -11,6 +11,10 @@ describe('careers', () => {
       expect(x.traits).toHaveLength(2);
       expect(clashes(x.traits[0], x.traits[1])).toBe(false);
     }
+  });
+
+  it('ranks from XP, as the core', () => {
+    expect([0, 59, 60, 249, 250, 800, 5000].map(rankFor)).toEqual(['intern', 'intern', 'junior', 'junior', 'senior', 'staff', 'staff']);
   });
 
   it('progress to the next rank', () => {

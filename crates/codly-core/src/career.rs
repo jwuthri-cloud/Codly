@@ -89,8 +89,10 @@ pub fn skill_for(path: &str) -> Option<&'static str> {
     })
 }
 
-/// Something it really did.
+/// Something it really did (except `Cheat`: the developer panel's, which says so).
 pub enum Credit<'a> {
+    /// XP given from the developer panel, noted as a "Cheat" milestone.
+    Cheat(i64),
     Commit,
     Check { ok: bool },
     /// Its work was reviewed.
@@ -108,6 +110,10 @@ pub fn credit(c: &mut Career, what: Credit, now: i64) -> Option<Rank> {
     let before = c.rank;
     let mut gain = 0;
     match what {
+        Credit::Cheat(xp) => {
+            gain = xp.max(0);
+            note(c, now, format!("Cheat: +{gain} XP"));
+        }
         Credit::Commit => {
             c.stats.commits += 1;
             gain = 15;

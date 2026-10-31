@@ -30,7 +30,7 @@ import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
 import { makeApplicants } from './util/career';
-import { demoBringBack, demoDigest, demoGhosts, demoLook, demoPlace, demoSell, demoShop, demoTrust } from './demo/office';
+import { demoBringBack, demoDigest, demoGhosts, demoGiveXp, demoGrant, demoLook, demoPlace, demoResetOffice, demoSell, demoShop, demoTrust, demoWallet } from './demo/office';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
@@ -92,6 +92,7 @@ const SETTINGS: Settings = {
   lead_followups: true,
   use_my_claude_setup: true,
   paused: false,
+  developer_mode: false,
   world_ambient: false,
   theme: 'system',
   team: [],
@@ -298,6 +299,14 @@ export class MockTransport implements Transport {
         return demoPlace(sim, a.piece as Placed);
       case 'office_sell':
         return demoSell(sim, String(a.uid));
+      case 'wallet':
+        return demoWallet(sim);
+      case 'dev_grant':
+        return demoGrant(sim, Number(a.amount));
+      case 'dev_give_xp':
+        return demoGiveXp(sim, String(a.agentId), Number(a.xp));
+      case 'dev_reset_office':
+        return demoResetOffice(sim);
       case 'set_agent_model':
         return null;
       case 'create_task':

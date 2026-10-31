@@ -56,6 +56,9 @@ export const atLeast = (r: Rank, min: Rank) => order(r) >= order(min);
 
 export const rankLabel = (r: Rank) => RANKS.find((x) => x.rank === r)?.label ?? 'Intern';
 
+/** The rank this much XP earns (`career::rank_for`). Ranks never go down: take the max with the old one. */
+export const rankFor = (xp: number): Rank => RANKS.findLast((x) => xp >= x.xp)?.rank ?? 'intern';
+
 /** Progress to the next rank (1 at Staff). */
 export function rankProgress(c: Career): { next: string | null; progress: number; toGo: number } {
   const i = RANKS.findIndex((x) => x.rank === c.rank);

@@ -1,11 +1,13 @@
-// The web demo's ghosts (workers let go, kept apart from the live roster as in the core) and
-// Build/Buy budget: same rules as crates/codly-core/src/orchestrator/careers.rs.
+// The web demo's ghosts (workers let go, kept apart from the live roster as in the core), its
+// wallet and Build/Buy, and the developer panel's cheats: same rules as
+// crates/codly-core/src/orchestrator/careers.rs and wallet.rs.
 
 import type { Agent } from '../gen/Agent';
 import type { Placed } from '../gen/Placed';
 import type { Shop } from '../gen/Shop';
+import type { Wallet } from '../gen/Wallet';
 import { BY_ID } from '../../office/buy';
-import { atLeast, emptyCareer, rankLabel } from '../util/career';
+import { atLeast, emptyCareer, rankFor, rankLabel } from '../util/career';
 import type { Rank } from '../gen/Rank';
 import type { DayReport } from '../gen/DayReport';
 import type { Digest } from '../gen/Digest';
@@ -13,6 +15,8 @@ import type { Sim } from './sim';
 
 let ghosts: Agent[] | null = null;
 let placed: Placed[] = [];
+let granted = 0;
+let cheated = false;
 
 function seeded(sim: Sim): Agent[] {
   if (ghosts) return ghosts;
@@ -108,11 +112,15 @@ export function demoDigest(sim: Sim, since: number): Digest {
   };
 }
 
-export function demoShop(sim: Sim): Shop {
+/** The wallet (crates/codly-core/src/orchestrator/wallet.rs): the demo has one repo, so its
+ *  agents' XP, plus grants, less its furniture. */
+export function demoWallet(sim: Sim): Wallet {
   const earned = [...sim.agents.values(), ...seeded(sim)].reduce((n, a) => n + a.career.xp, 0);
   const spent = placed.reduce((n, p) => n + (BY_ID.get(p.item)?.price ?? 0), 0);
-  return { earned, spent, placed: [...placed] };
+  return { earned, granted, spent, balance: earned + granted - spent, cheated };
 }
+
+export const demoShop = (sim: Sim): Shop => ({ wallet: demoWallet(sim), placed: [...placed] });
 
 export function demoPlace(sim: Sim, piece: Placed): Shop {
   const old = placed.find((p) => p.uid === piece.uid);
@@ -120,10 +128,49 @@ export function demoPlace(sim: Sim, piece: Placed): Shop {
   if (!old) {
     const price = BY_ID.get(piece.item)?.price;
     if (price === undefined) throw new Error('no such item');
-    const shop = demoShop(sim);
-    if (shop.earned - shop.spent < price) throw new Error(`not enough XP yet (${shop.earned - shop.spent} of ${price})`);
+    const left = demoWallet(sim).balance;
+    if (left < price) throw new Error(`not enough coins yet (${left} of ${price})`);
   }
   placed = [...placed.filter((p) => p.uid !== piece.uid), piece];
+  return demoShop(sim);
+}
+
+// The developer panel's cheats, refused outside Developer mode as in the core. Each one that
+// adds coins flags the wallet for good.
+function developer(sim: Sim) {
+  if (!sim.settings.developer_mode) throw new Error('turn on Developer mode in Settings first');
+}
+
+export function demoGrant(sim: Sim, amount: number): Wallet {
+  developer(sim);
+  if (!(amount >= 1 && amount <= 1_000_000)) throw new Error('grant between 1 and 1,000,000 coins');
+  cheated = true;
+  granted += amount;
+  sim.decision('developer', 'rule', `cheat: +${amount} coins`, { coins: amount });
+  return demoWallet(sim);
+}
+
+export function demoGiveXp(sim: Sim, id: string, xp: number): Agent {
+  developer(sim);
+  const a = sim.agents.get(id);
+  if (!a) throw new Error('no such agent');
+  if (a.role === 'lead') throw new Error('the Lead has no career');
+  cheated = true;
+  const at = sim.now();
+  const total = a.career.xp + xp;
+  const earned = rankFor(total);
+  const rank = atLeast(earned, a.career.rank) ? earned : a.career.rank;
+  const milestones = [...a.career.milestones, { at, text: `Cheat: +${xp} XP` }, ...(rank !== a.career.rank ? [{ at, text: `Promoted to ${rankLabel(rank)}` }] : [])];
+  const next: Agent = { ...a, updated_at: at, career: { ...a.career, xp: total, rank, milestones } };
+  sim.putAgent(next);
+  sim.decision('developer', 'rule', `cheat: +${xp} XP for ${a.name}`, { agent: a.id, xp });
+  return next;
+}
+
+export function demoResetOffice(sim: Sim): Shop {
+  developer(sim);
+  placed = [];
+  sim.decision('developer', 'rule', 'reset the office', {});
   return demoShop(sim);
 }
 

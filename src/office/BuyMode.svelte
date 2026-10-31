@@ -1,5 +1,5 @@
 <!--
-  Build/Buy: the XP the agents earned in this repo (retired ones too) buys furniture. Pick a piece
+  Build/Buy: coins (the wallet: every agent's XP in every repo, plus grants) buy furniture. Pick a piece
   in the catalog and put it down anywhere it fits (buy.ts); click one in the office to move it,
   turn it or sell it back for the full price. Cosmetic: furniture never changes how agents work,
   only where they walk.
@@ -11,6 +11,7 @@
   import type { OfficeEngine } from './engine';
   import { thumbnail } from './gfx/decor';
   import { sound } from './sound';
+  import { coins } from '../lib/util/format';
 
   interface Props {
     engine: OfficeEngine;
@@ -26,7 +27,7 @@
   /** The piece following the cursor: its catalog entry, the placed one when moving, why not here. */
   let carrying = $state<{ f: Furniture; uid: string | null; why: string | null } | null>(null);
   let note = $state<string | null>(null);
-  const left = $derived(shop.earned - shop.spent);
+  const left = $derived(shop.wallet.balance);
   const items = $derived(FOR_SALE.filter((f) => f.cat === cat));
 
   // Build/Buy has its own music, like the Sims.
@@ -104,8 +105,8 @@
 
 <svelte:window onkeydown={onkey} />
 
-<button class="buy" class:on={open} style:bottom="{insets.bottom + 46}px" style:right="{insets.right + 10}px" onclick={() => (open ? close() : (sound.play('ui-open', { gain: 0.5 }), (open = true)))} aria-expanded={open} aria-label="Build/Buy: {left} XP to spend on furniture">
-  🛋 Buy · <b>{left}</b> XP
+<button class="buy" class:on={open} style:bottom="{insets.bottom + 46}px" style:right="{insets.right + 10}px" onclick={() => (open ? close() : (sound.play('ui-open', { gain: 0.5 }), (open = true)))} aria-expanded={open} aria-label="Build/Buy: {coins(left)} to spend on furniture">
+  🛋 Buy · <b>{coins(left)}</b>
 </button>
 
 {#if open}
@@ -113,13 +114,13 @@
     {#if carrying}
       {@const c = carrying}
       <div class="carry">
-        <span class="what"><b>{c.f.label}</b> {c.uid ? '· moving' : `· ${c.f.price} XP`}</span>
+        <span class="what"><b>{c.f.label}</b> {c.uid ? '· moving' : `· ${coins(c.f.price)}`}</span>
         <span class="hint" class:bad={c.why}>{c.why ?? 'Click the floor to put it down'}</span>
         <span class="keys">
           <button onclick={() => engine.rotateCarry()} title="Turn it (R)">⟳ Turn <kbd>R</kbd></button>
           {#if c.uid}
             {@const uid = c.uid}
-            <button class="sell" onclick={() => sell(uid)} title="Sell it back (Delete)">Sell for {c.f.price} XP</button>
+            <button class="sell" onclick={() => sell(uid)} title="Sell it back (Delete)">Sell for {coins(c.f.price)}</button>
           {/if}
           <button onclick={() => engine.endCarry()} title={c.uid ? 'Put it back (Esc)' : 'Cancel (Esc)'}>{c.uid ? 'Put back' : 'Cancel'} <kbd>Esc</kbd></button>
         </span>
@@ -128,7 +129,7 @@
       <header>
         <div>
           <div class="kicker">Build/Buy</div>
-          <b>{left} XP to spend</b> <small>of {shop.earned} earned by the team · click a piece in the office to move or sell it</small>
+          <b>{coins(left)} to spend</b> <small>{coins(shop.wallet.earned)} earned by your agents{shop.wallet.granted ? ` · ${coins(shop.wallet.granted)} given` : ''} · click a piece in the office to move or sell it</small>
         </div>
         <button class="x" aria-label="Close" onclick={close}>✕</button>
       </header>
@@ -141,10 +142,10 @@
       <ul>
         {#each items as f (f.id)}
           <li>
-            <button disabled={left < f.price} onclick={() => carry(f)} title={left < f.price ? `${f.price - left} XP to go` : `Put a ${f.label.toLowerCase()} in the office`}>
+            <button disabled={left < f.price} onclick={() => carry(f)} title={left < f.price ? `${coins(f.price - left)} to go` : `Put a ${f.label.toLowerCase()} in the office`}>
               <img use:thumb={f.id} alt="" width="64" height="64" />
               <span class="n">{f.label}</span>
-              <span class="p">{f.price} XP</span>
+              <span class="p">{coins(f.price)}</span>
             </button>
           </li>
         {/each}

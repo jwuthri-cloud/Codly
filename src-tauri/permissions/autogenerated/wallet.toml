@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wallet"
+description = "Enables the wallet command without any pre-configured scope."
+commands.allow = ["wallet"]
+
+[[permission]]
+identifier = "deny-wallet"
+description = "Denies the wallet command without any pre-configured scope."
+commands.deny = ["wallet"]

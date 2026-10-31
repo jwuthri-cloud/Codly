@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dev-grant"
+description = "Enables the dev_grant command without any pre-configured scope."
+commands.allow = ["dev_grant"]
+
+[[permission]]
+identifier = "deny-dev-grant"
+description = "Denies the dev_grant command without any pre-configured scope."
+commands.deny = ["dev_grant"]
