@@ -50,10 +50,10 @@ export function traitsOf(id: string): Trait[] {
 /** What it does on a break, by preference (the break room decides what is free). */
 export type Activity = 'any' | 'console' | 'table' | 'library' | 'coffee' | 'nap';
 
-export function breakPreference(traits: Trait[], needs: { energy: number | null; morale: number } | null): Activity {
-  // Needs first, like a Sim: exhausted → nap, tired → coffee, down → the couch.
+export function breakPreference(traits: Trait[], needs: { energy: number | null; morale: number; jittery?: boolean } | null): Activity {
+  // Needs first, like a Sim: exhausted → nap, tired → coffee (not once jittery), down → the couch.
   if (needs?.energy != null && needs.energy < 0.3) return 'nap';
-  if (needs?.energy != null && needs.energy < 0.5) return 'coffee';
+  if (needs?.energy != null && needs.energy < 0.5 && !needs.jittery) return 'coffee';
   if (needs && needs.morale < 0.4) return 'console';
   if (traits.includes('bookworm')) return 'library';
   if (traits.includes('lazy')) return 'console';

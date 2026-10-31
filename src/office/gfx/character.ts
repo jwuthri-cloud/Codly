@@ -607,6 +607,8 @@ export class Character {
   private reacting: { kind: ReactKind; at: number } | null = null;
   /** How it walks, from its needs (set by the engine): tired drags, happy bounces. */
   gait: 'tired' | 'happy' | null = null;
+  /** Too much coffee (set by the engine): it fidgets. */
+  jittery = false;
   /** Its phone is out for a quick look (only while it holds nothing else). */
   private glance = false;
 
@@ -703,7 +705,7 @@ export class Character {
   }
 
   private ctx(tMs: number, now: number, live: boolean) {
-    return { t: (tMs / 1000) * this.tempo + this.offset, now, seed: this.seed, cue: this.cue, live, lazy: this.lazy, tired: this.gait === 'tired' };
+    return { t: (tMs / 1000) * this.tempo + this.offset, now, seed: this.seed, cue: this.cue, live, lazy: this.lazy, tired: this.gait === 'tired', jittery: this.jittery };
   }
 
   private extraMats: (MeshBasicMaterial | MeshStandardMaterial)[] = [];

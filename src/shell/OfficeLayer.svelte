@@ -156,7 +156,7 @@
   };
   const onhover = (sel: Sel | null) => ui.setHover(sel);
   // The office's click menu (The Sims' pie menu): each item is a real command.
-  const onaction = (id: string, action: 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export' | 'trust' | 'untrust') => {
+  const onaction = (id: string, action: 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export' | 'trust' | 'untrust' | 'home' | 'callin') => {
     const a = store.agentMap.get(id);
     if (!a) return;
     if (action === 'chat') ui.openThread(`agent:${id}`);
@@ -253,6 +253,9 @@
           onplace={place}
           onsell={sell}
           {digest}
+          simsKey="codly.sims.{store.workspace?.id ?? 'demo'}"
+          onhome={(id, until) => api.setAgentHome(id, until).catch(() => {})}
+          onrest={(id, sick) => api.noteRest(id, sick).catch(() => {})}
           oneditionread={() => {
             try {
               localStorage.setItem(editionKey(), String(Date.now()));

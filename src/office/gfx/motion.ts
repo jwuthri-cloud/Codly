@@ -45,6 +45,8 @@ export interface MotionCtx {
   lazy?: boolean;
   /** Low on energy (sims.ts needs): yawns a lot. */
   tired?: boolean;
+  /** Too much coffee (sims.ts): a bouncing knee and restless hands. */
+  jittery?: boolean;
 }
 
 const TAU = Math.PI * 2;
@@ -322,6 +324,12 @@ export function targets(out: Joints, pose: Pose, seated: boolean, x: MotionCtx) 
     case 'pingpong':
       pingpong(out, x);
       break;
+  }
+  // Jittery (too much coffee): a knee bounces under the desk, the head never settles.
+  if (x.jittery && x.live) {
+    if (seated) out[15] += 0.07 * osc(t, 5.5);
+    else out[13] += 0.03 * osc(t, 2.1);
+    out[3] += 0.05 * n(9, 1.6);
   }
 }
 

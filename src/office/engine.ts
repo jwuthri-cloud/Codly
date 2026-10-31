@@ -203,9 +203,11 @@ export class OfficeEngine {
   /** What an agent last said (a chat message), shown as a speech bubble for a few seconds. */
   private said = new Map<string, { text: string; at: number }>();
   /** An agent's needs (sims.ts), so a tired agent goes for coffee on its break. */
-  private needsOf: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null } | null) | null = null;
+  private needsOf: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null; jittery?: boolean } | null) | null = null;
   /** Each agent's headline feeling for its name tag (sims.ts), refreshed every couple of seconds. */
-  private moods = new Map<string, { at: number; mood: { emoji: string; label: string } | null; gait: 'tired' | 'happy' | null }>();
+  private moods = new Map<string, { at: number; mood: { emoji: string; label: string } | null; gait: 'tired' | 'happy' | null; jittery: boolean }>();
+  /** Agents gone home (sims.ts): out of the office, their tag by the front door ("Home · back in 6 min"). */
+  private home = new Map<string, string>();
   /** What each agent is doing, so its energy and morale move with it (sims.ts). */
   private onActivity: ((id: string, now: number, act: RestActivity) => void) | null = null;
   private mail: MailRoom;
@@ -890,7 +892,15 @@ export class OfficeEngine {
     this.wake();
   }
 
-  setNeeds(fn: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null } | null) | null) {
+  /** Who is at home, with the tag shown by the front door; they walk out, and back in when gone from the map. */
+  setHome(tags: Map<string, string>) {
+    const moved = tags.size !== this.home.size || [...tags.keys()].some((id) => !this.home.has(id));
+    this.home = new Map(tags);
+    if (moved) this.sync();
+    else this.wake();
+  }
+
+  setNeeds(fn: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null; jittery?: boolean } | null) | null) {
     this.needsOf = fn;
   }
 
@@ -1180,7 +1190,7 @@ export class OfficeEngine {
     // Pass 1: every agent's intent. Breaks are matched together (pairs for pool and foosball).
     const pending: { a: AgentState; act: Actor; intent: Intent }[] = [];
     for (const a of this.model.agents.values()) {
-      if (!a.present) continue;
+      if (!a.present || this.home.has(a.id)) continue;
       seen.add(a.id);
       let act = this.actors.get(a.id);
       if (!act) act = this.spawn(a, instant, now);
@@ -1223,7 +1233,10 @@ export class OfficeEngine {
     // Pass 2: show them.
     for (const { a, act, intent: raw } of pending) {
       const intent = raw.place.kind === 'break' ? breakIntent(seats.get(a.id) ?? null) : raw;
-      this.onActivity?.(a.id, wall, activityFor(intent.place.kind === 'station' ? intent.place.id : null, intent.pose));
+      // Waiting on you doesn't tire it; a coffee is a coffee only where there is a machine.
+      const at = intent.place.kind === 'station' ? intent.place.id : intent.place.kind === 'piece' && intent.place.use === 'coffee' ? 'kitchen' : null;
+      const where = at === 'kitchen' && intent.place.kind === 'station' && !this.L.stations.kitchen?.slots.length ? null : at;
+      this.onActivity?.(a.id, wall, a.approval ? 'wait' : activityFor(where, intent.pose));
       // Personality: its own reaction to a fresh check result (a thump, a fist pump…).
       const ch = a.cheer;
       if (ch && ch.at !== act.cheerAt) {
@@ -1976,6 +1989,7 @@ export class OfficeEngine {
     for (const [id, act] of this.actors) {
       act.c.emoteScale = emoteScale;
       act.c.gait = this.gaitOf(act.agentId, now);
+      act.c.jittery = this.needsNow(act.agentId, now).jittery;
       const r = act.c.update(now, dt, rm, lively);
       if (r.moving) busy = true;
       if (act.c.walking) this.shadowDirty = true;
@@ -2133,7 +2147,9 @@ export class OfficeEngine {
     const color = { green: 0x4fdc7b, amber: 0xffbf3c, red: 0xff6b5b, blue: 0x62a8ff, grey: 0xb9c0cc }[plumbobOf(this.model.agents.get(act.agentId) ?? null)];
     const m = this.plumbob.material as MeshStandardMaterial;
     m.color.setHex(color);
-    m.emissive.setHex(color).multiplyScalar(0.35);
+    // A Legend's plumbob glows gold.
+    if (this.isLegend(act.agentId)) m.emissive.setHex(0xffc94a).multiplyScalar(0.9);
+    else m.emissive.setHex(color).multiplyScalar(0.35);
     const head = act.c.headTop(new Vector3());
     const still = this.opts.reducedMotion;
     this.plumbob.visible = true;
@@ -2188,9 +2204,13 @@ export class OfficeEngine {
     if (!m || now - m.at > 2000) {
       const n = this.needsOf?.(id) ?? null;
       const gait = !n ? null : n.energy != null && n.energy < 0.3 ? 'tired' : n.morale > 0.75 ? 'happy' : null;
-      this.moods.set(id, (m = { at: now, mood: n?.mood ?? null, gait }));
+      this.moods.set(id, (m = { at: now, mood: n?.mood ?? null, gait, jittery: !!n?.jittery }));
     }
     return m;
+  }
+
+  private isLegend(id: string) {
+    return !!this.agentsProp.find((a) => a.id === id)?.career?.legend;
   }
 
   private moodOf(id: string, now: number) {
@@ -2256,6 +2276,31 @@ export class OfficeEngine {
         compact: !s,
         urgent,
         dim: a.status === 'idle' && !selected && !hovered && !urgent,
+        gold: this.isLegend(a.id),
+      });
+    }
+    // Agents at home: their tags wait by the front door (click one to call it in).
+    const door = this.L.door.inside;
+    for (const [id, text] of this.home) {
+      const a = this.model.agents.get(id);
+      if (!a) continue;
+      const selected = sel?.agentId === id;
+      specs.push({
+        key: 'home:' + id,
+        kind: 'agent',
+        world: new Vector3(door.x + OX, 1.7, door.z + OZ),
+        dy: -4,
+        priority: (selected ? 1000 : 0) + 90,
+        title: a.name,
+        color: identity(a.color, this.theme.name).ink,
+        mood: { emoji: '🏠', label: text },
+        chip: text,
+        selected,
+        hovered: hov?.agentId === id,
+        agentId: id,
+        compact: true,
+        dim: !selected,
+        gold: this.isLegend(id),
       });
     }
     // Helpers (an agent's sub-agents): whose they are, and what they do when you look closer.

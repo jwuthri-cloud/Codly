@@ -9,6 +9,8 @@ import { emptyCareer } from '../../lib/util/career';
 
 const agent = (id: string, o: Partial<Agent> = {}): Agent =>
   ({ id, name: id, provider: 'claude', role: 'worker', account: null, thread: null, usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, context_used: 50_000, context_window: 200_000, cost_usd: 0.4 }, ...o }) as Agent;
+const MIN = 60_000;
+const HOUR = 60 * MIN;
 const ev = (agent_id: string, kind: EventRow['kind'], ts = 1000, task_id: string | null = null): EventRow => ({ id: 1, ts, agent_id, task_id, run_id: null, kind });
 
 describe('sims', () => {
@@ -21,25 +23,189 @@ describe('sims', () => {
     expect(sh.mood).toBe('Fine');
   });
 
-  it('working drains energy; a nap refills it and a PS5 session lifts morale', () => {
+  it('working drains energy over a ~4 h shift (3× slower at stamina 100); idle a little, waiting on you not at all', () => {
     const s = new SimsTracker();
-    s.setAgents([agent('ada')]);
+    s.setAgents([agent('ada'), agent('leg', { career: { ...emptyCareer(), stamina: 100 } })], 0);
     s.setActivity('ada', 0, 'work');
-    expect(s.stats('ada', 30 * 60_000, null).needs.energy).toBeCloseTo(0.4, 2);
-    s.setActivity('ada', 30 * 60_000, 'nap');
-    expect(s.stats('ada', 35 * 60_000, null).needs.energy).toBeGreaterThan(0.7);
-    s.setActivity('ada', 35 * 60_000, 'console');
-    s.setActivity('ada', 35 * 60_000, 'console');
-    expect(s.stats('ada', 45 * 60_000, null).needs.morale).toBeGreaterThan(0.8);
+    s.setActivity('leg', 0, 'work');
+    expect(s.stats('ada', 2 * HOUR, null).needs.energy).toBeCloseTo(0.5, 3);
+    expect(s.stats('ada', 4 * HOUR, null).needs.energy).toBe(0);
+    expect(1 - s.stats('leg', 4 * HOUR, null).needs.energy).toBeCloseTo(0.32, 3); // 8% an hour
+    const t = new SimsTracker();
+    t.setAgents([agent('ada'), agent('bo')], 0);
+    t.setActivity('ada', 0, 'idle');
+    t.setActivity('bo', 0, 'wait');
+    expect(t.stats('ada', HOUR, null).needs.energy).toBeCloseTo(0.95, 3);
+    expect(t.stats('bo', HOUR, null).needs.energy).toBe(1);
   });
 
-  it('a tired agent shows the Tired moodlet', () => {
+  it('a nap on a sofa rests at a third of home speed; a PS5 session lifts morale', () => {
     const s = new SimsTracker();
-    s.setAgents([agent('ada')]);
+    s.setAgents([agent('ada')], 0);
     s.setActivity('ada', 0, 'work');
-    const sh = s.stats('ada', 45 * 60_000, null);
-    expect(sh.needs.energy).toBeLessThan(0.2);
-    expect(sh.moodlets.some((m) => m.label === 'Tired')).toBe(true);
+    s.setActivity('ada', 2 * HOUR, 'nap');
+    expect(s.stats('ada', 2 * HOUR + 10 * MIN, null).needs.energy).toBeCloseTo(0.5 + 10 / 30, 3);
+    s.setActivity('ada', 3 * HOUR, 'console');
+    expect(s.stats('ada', 3 * HOUR + 10 * MIN, null).needs.morale).toBeGreaterThan(0.8);
+  });
+
+  it('under 30% it is Tired and morale slides; at 0% Exhausted, it finishes its task, then goes home', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada')], 0);
+    s.setActivity('ada', 0, 'work');
+    let sh = s.stats('ada', 3 * HOUR, null);
+    expect(sh.needs.energy).toBeCloseTo(0.25, 3);
+    expect(headline(sh)).toMatchObject({ label: 'Tired', emoji: '😴' });
+    expect(sh.needs.morale).toBeLessThan(0.62);
+    sh = s.stats('ada', 4 * HOUR, null);
+    expect(headline(sh)).toMatchObject({ label: 'Exhausted', why: 'Goes home once its task is done' });
+    s.tick(4 * HOUR, () => true); // still on its task
+    expect(s.stats('ada', 4 * HOUR, null).rest.home).toBeNull();
+    s.tick(4 * HOUR + 1000, () => false);
+    sh = s.stats('ada', 4 * HOUR + 1000, null);
+    expect(sh.rest.home).toMatchObject({ until: 4 * HOUR + 1000 + 10 * MIN, sick: false });
+    expect(headline(sh)).toMatchObject({ emoji: '🏠', why: 'Back in 10 min' });
+    expect(s.drain()).toEqual({ home: [{ id: 'ada', until: 4 * HOUR + 1000 + 10 * MIN }], rest: [{ id: 'ada', sick: false }] });
+  });
+
+  it('home refills it in ~10 min at stamina 0 and ~3 min at stamina 100; then it walks back in', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada'), agent('leg', { career: { ...emptyCareer(), stamina: 100 } })], 0);
+    for (const id of ['ada', 'leg']) {
+      s.setEnergy(id, 0, 0);
+      expect(s.sendHome(id, 0)).toBe(true);
+    }
+    expect(s.stats('ada', 0, null).rest.home!.until).toBe(10 * MIN);
+    expect(s.stats('leg', 0, null).rest.home!.until).toBe(3 * MIN);
+    s.drain();
+    s.tick(3 * MIN, () => false);
+    expect(s.stats('leg', 3 * MIN, null)).toMatchObject({ needs: { energy: 1 }, rest: { home: null } });
+    expect(s.stats('ada', 3 * MIN, null).rest.home).not.toBeNull();
+    s.tick(10 * MIN, () => false);
+    const sh = s.stats('ada', 10 * MIN, null);
+    expect(sh.needs.energy).toBeCloseTo(1, 5);
+    expect(sh.moodlets.some((m) => m.label === 'Rested')).toBe(true);
+    expect(s.drain().home).toEqual([{ id: 'leg', until: null }, { id: 'ada', until: null }]);
+  });
+
+  it('calling it in early is Overtime: morale −0.15 and half the energy it banked at home', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada')], 0);
+    s.setEnergy('ada', 0, 0);
+    s.sendHome('ada', 0);
+    const before = s.stats('ada', 5 * MIN, null);
+    expect(before.needs.energy).toBeCloseTo(0.5, 3);
+    expect(s.callIn('ada', 5 * MIN)).toBe(true);
+    const sh = s.stats('ada', 5 * MIN, null);
+    expect(sh.needs.energy).toBeCloseTo(0.25, 3);
+    expect(sh.needs.morale).toBeCloseTo(before.needs.morale - 0.15, 2);
+    expect(sh.moodlets.find((m) => m.key === 'rest')).toMatchObject({ label: 'Overtime', emoji: '😩', why: 'Called in early from home' });
+    expect(sh.rest.home).toBeNull();
+    // At home and given work by you: it comes in (on overtime) to do it.
+    s.sendHome('ada', 6 * MIN);
+    s.tick(7 * MIN, () => true);
+    expect(s.stats('ada', 7 * MIN, null).rest.home).toBeNull();
+    expect(s.drain().home.at(-1)).toEqual({ id: 'ada', until: null });
+  });
+
+  it('the Lead never goes home: a tired Lead only looks tired', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('lead', { role: 'lead', away_until: HOUR })], 0);
+    s.setActivity('lead', 0, 'work');
+    expect(s.sendHome('lead', 0)).toBe(false);
+    s.tick(5 * HOUR, () => false);
+    const sh = s.stats('lead', 5 * HOUR, null);
+    expect(sh.rest).toMatchObject({ home: null, canGoHome: false, exhausted: true });
+    expect(headline(sh)).toMatchObject({ label: 'Exhausted', why: 'Running on empty' });
+    expect(s.drain()).toEqual({ home: [], rest: [] });
+  });
+
+  it('coffee: +15% and a cup of caffeine; 3 cups make it jittery, and they wear off in an hour', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada')], 0);
+    s.setEnergy('ada', 0, 0.5);
+    const cup = (t: number) => {
+      s.setActivity('ada', t, 'coffee');
+      s.setActivity('ada', t + 30_000, 'wait');
+    };
+    cup(0);
+    expect(s.stats('ada', 30_000, null).needs.energy).toBeCloseTo(0.65, 3);
+    cup(2 * MIN);
+    expect(s.stats('ada', 3 * MIN, null).rest).toMatchObject({ caffeine: 2, jittery: false });
+    cup(4 * MIN);
+    const sh = s.stats('ada', 5 * MIN, null);
+    expect(sh.rest.jittery).toBe(true);
+    expect(headline(sh)).toMatchObject({ label: 'Jittery', emoji: '⚡' });
+    expect(s.stats('ada', 61 * MIN, null).rest.jittery).toBe(false);
+    // A Legend takes more: jittery at 6 cups.
+    const l = new SimsTracker();
+    l.setAgents([agent('leg', { career: { ...emptyCareer(), stamina: 100 } })], 0);
+    for (let i = 0; i < 5; i++) l.setActivity('leg', i * 2 * MIN, 'coffee'), l.setActivity('leg', i * 2 * MIN + 1000, 'wait');
+    expect(l.stats('leg', 10 * MIN, null).rest).toMatchObject({ caffeine: 5, jittery: false });
+    l.setActivity('leg', 10 * MIN, 'coffee');
+    expect(l.stats('leg', 10 * MIN, null).rest.jittery).toBe(true);
+  });
+
+  it('5 cups since it last went home make it Sick: home for 30 min, then 60% at most for a shift', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada')], 0);
+    for (let i = 0; i < 5; i++) {
+      s.setActivity('ada', i * 20 * MIN, 'coffee');
+      s.setActivity('ada', i * 20 * MIN + 1000, 'wait');
+    }
+    const now = 81 * MIN;
+    let sh = s.stats('ada', now, null);
+    expect(sh.rest.sick).toBe(true);
+    expect(sh.moodlets.find((m) => m.key === 'sick')).toMatchObject({ label: 'Sick', why: 'Too much coffee, not enough sleep', emoji: '🤒' });
+    expect(s.drain().rest).toEqual([{ id: 'ada', sick: true }]);
+    s.tick(now, () => false);
+    expect(s.stats('ada', now, null).rest.home).toEqual({ until: now + 30 * MIN, sick: true });
+    s.tick(now + 30 * MIN, () => false);
+    sh = s.stats('ada', now + 30 * MIN, null);
+    expect(sh.rest).toMatchObject({ home: null, sick: false, cap: 0.6 });
+    expect(sh.needs.energy).toBeCloseTo(0.6, 5);
+    s.setActivity('ada', now + 30 * MIN, 'nap');
+    expect(s.stats('ada', now + 2 * HOUR, null).needs.energy).toBeCloseTo(0.6, 5); // capped this shift
+    s.sendHome('ada', now + 2 * HOUR);
+    s.tick(now + 3 * HOUR, () => false);
+    expect(s.stats('ada', now + 3 * HOUR, null)).toMatchObject({ needs: { energy: 1 }, rest: { cap: 1 } }); // a normal night: the cap is gone
+  });
+
+  it('two shifts in a row without going home make it sick too', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada')], 0);
+    s.setActivity('ada', 0, 'work');
+    s.stats('ada', 4 * HOUR, null);
+    s.setEnergy('ada', 4 * HOUR, 1); // say, naps and coffee kept it going
+    expect(s.stats('ada', 7 * HOUR, null).rest.sick).toBe(false);
+    expect(s.stats('ada', 8 * HOUR, null).rest.sick).toBe(true);
+  });
+
+  it('dev hooks: fill or drain energy, skip time (home timers follow); a reload keeps it all', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada'), agent('bo')], 0);
+    s.setEnergy('ada', 0, 0);
+    expect(s.stats('ada', 0, null).rest.exhausted).toBe(true);
+    s.sendHome('ada', 0);
+    s.drain();
+    s.skip(4, 0);
+    expect(s.drain().home).toEqual([{ id: 'ada', until: 6 * MIN }]);
+    expect(s.stats('ada', 0, null).needs.energy).toBeCloseTo(0.4, 3);
+    s.setActivity('bo', 0, 'work');
+    s.skip(60, 0);
+    expect(s.stats('bo', 0, null).needs.energy).toBeCloseTo(0.75, 3);
+    const saved = s.save();
+    const t = new SimsTracker();
+    t.setAgents([agent('ada'), agent('bo')], 10 * HOUR);
+    t.load(saved, 10 * HOUR);
+    expect(t.stats('bo', 10 * HOUR, null).needs.energy).toBeCloseTo(0.75, 3); // the office was closed: no drain
+    expect(t.stats('ada', 10 * HOUR, null).rest.home).not.toBeNull();
+    t.tick(10 * HOUR, () => false);
+    expect(t.stats('ada', 10 * HOUR, null)).toMatchObject({ needs: { energy: 1 }, rest: { home: null } });
+    // The core's away_until (another window, a restart without saved state) puts it at home too.
+    const u = new SimsTracker();
+    u.setAgents([agent('ada', { away_until: 5 * MIN })], 0);
+    expect(u.stats('ada', 0, null).rest.home).toMatchObject({ until: 5 * MIN });
   });
 
   it('activityFor maps the office spots and poses to what the agent is doing', () => {
@@ -116,6 +282,7 @@ describe('traits', () => {
   it('needs come first, then personality; reactions and break timing follow traits', () => {
     expect(breakPreference(['bookworm', 'clumsy'], { energy: 0.1, morale: 0.7 })).toBe('nap');
     expect(breakPreference(['bookworm', 'clumsy'], { energy: 0.4, morale: 0.7 })).toBe('coffee');
+    expect(breakPreference(['bookworm', 'clumsy'], { energy: 0.4, morale: 0.7, jittery: true })).toBe('library'); // no 4th cup
     expect(breakPreference(['bookworm', 'clumsy'], { energy: 0.9, morale: 0.2 })).toBe('console');
     expect(breakPreference(['bookworm', 'clumsy'], null)).toBe('library');
     expect(reactionTo(['hotheaded', 'social'], false)).toBe('thump');

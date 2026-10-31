@@ -24,7 +24,7 @@
   import type { AccountInfo } from '../lib/gen/AccountInfo';
   import { OfficeEngine, type AgentListItem, type TickerItem } from './engine';
   import SimsHud, { type AgentAction } from './SimsHud.svelte';
-  import { headline, SimsTracker } from './sims';
+  import { headline, plumbobOf, SimsTracker } from './sims';
   import JobBoard from './JobBoard.svelte';
   import type { JobOffer } from '../lib/gen/JobOffer';
   import type { Placed } from '../lib/gen/Placed';
@@ -77,6 +77,12 @@
     digest?: () => Promise<Digest | null>;
     /** The paper was closed: the edition is read (until then it comes back on each mount). */
     oneditionread?: () => void;
+    /** Home and back (sims.ts): tell the core an agent is at home until then (ms), or back (null). */
+    onhome?: (agentId: string, until: number | null) => void;
+    /** A shift worked and rested from, or a sickness (its career's stamina). */
+    onrest?: (agentId: string, sick: boolean) => void;
+    /** Where energy, coffee and home are kept between sessions (localStorage key), e.g. per repo. */
+    simsKey?: string;
   }
 
   let {
@@ -111,6 +117,9 @@
     onsell,
     digest,
     oneditionread,
+    onhome,
+    onrest,
+    simsKey,
   }: Props = $props();
 
   // The morning edition and standup (daily.ts), once the agents have walked in.
@@ -138,6 +147,48 @@
   }
 
   const sims = new SimsTracker();
+  // Home and back: every couple of seconds the exhausted and the sick go home once their task is
+  // done and the rested come back (sims.ts); what changed goes to the core, the tags to the door.
+  function restTick() {
+    const e = engine;
+    if (!e) return;
+    const now = Date.now();
+    const status = new Map(tasks.map((t) => [t.id, t.status]));
+    const busy = (id: string) => {
+      const c = plumbobOf(e.agentState(id));
+      const task = agents.find((a) => a.id === id)?.task_id;
+      return c === 'green' || c === 'amber' || (!!task && status.get(task) === 'running');
+    };
+    sims.tick(now, busy, (id) => e.isPresent(id));
+    flushRest(now);
+  }
+  function flushRest(now = Date.now()) {
+    const o = sims.drain();
+    for (const h of o.home) onhome?.(h.id, h.until);
+    for (const r of o.rest) onrest?.(r.id, r.sick);
+    const tags = new Map<string, string>();
+    for (const a of agents) {
+      const h = a.archived ? null : sims.stats(a.id, now, null).rest.home;
+      if (h) tags.set(a.id, `Home · back in ${Math.max(1, Math.ceil((h.until - now) / 60_000))} min`);
+    }
+    engine?.setHome(tags);
+  }
+  let saves = 0;
+  function saveRest() {
+    if (!simsKey) return;
+    try {
+      localStorage.setItem(simsKey, sims.save());
+    } catch {}
+  }
+  /** The click menu's Send home and Call in are the office's own; the rest go to the app. */
+  function act(id: string, a: AgentAction) {
+    if (a === 'home' || a === 'callin') {
+      if (a === 'home') sims.sendHome(id, Date.now());
+      else sims.callIn(id, Date.now());
+      flushRest();
+      saveRest();
+    } else onaction?.(id, a);
+  }
   let menuAt = $state<{ id: string; x: number; y: number } | null>(null);
   let furniture = $state<import('./engine').FurnitureMenu | null>(null);
   const hudInsets = $derived({ top: insets?.top ?? 0, right: insets?.right ?? 0, bottom: insets?.bottom ?? 0, left: insets?.left ?? 0 });
@@ -208,9 +259,13 @@
     e.setNeeds((id) => {
       const s = sims.stats(id, Date.now(), e.agentState(id));
       const h = headline(s);
-      return { energy: s.needs.energy, morale: s.needs.morale, mood: h?.emoji ? { emoji: h.emoji, label: `${h.label}: ${h.why}` } : null };
+      return { energy: s.needs.energy, morale: s.needs.morale, mood: h?.emoji ? { emoji: h.emoji, label: `${h.label}: ${h.why}` } : null, jittery: s.rest.jittery };
     });
     e.setActivity((id, now, act) => sims.setActivity(id, now, act));
+    if (simsKey)
+      try {
+        sims.load(localStorage.getItem(simsKey), Date.now());
+      } catch {}
     sims.setTasks($state.snapshot(tasks) as Task[]);
     for (const ev of history) {
       sims.ingest(ev);
@@ -220,7 +275,14 @@
     e.setSelection(selection);
     e.setHover(hover);
     engine = e;
+    flushRest();
+    const rest = setInterval(() => {
+      restTick();
+      if (++saves % 5 === 0) saveRest();
+    }, 2000);
     return () => {
+      clearInterval(rest);
+      saveRest();
       engine = null;
       clearTimeout(announceTimer);
       e.dispose();
@@ -326,7 +388,7 @@
       {menuAt}
       insets={hudInsets}
       {narrate}
-      {onaction}
+      onaction={onaction ? act : undefined}
       {onlook}
       onclosemenu={() => (menuAt = null)}
       {paused}
@@ -591,6 +653,17 @@
     box-shadow:
       0 0 0 1px var(--of-id),
       0 6px 18px -8px rgba(0, 0, 0, 0.7);
+  }
+  /* A Legend: a gold tag. */
+  .of-office :global(.of-agent.of-gold) {
+    background: linear-gradient(180deg, rgba(74, 54, 14, 0.94), rgba(44, 32, 8, 0.94));
+    box-shadow:
+      0 0 0 1.5px #e9b03a,
+      0 0 18px -4px rgba(255, 201, 74, 0.6),
+      0 6px 18px -8px rgba(0, 0, 0, 0.7);
+  }
+  .of-office :global(.of-agent.of-gold .of-title) {
+    color: #ffd27a;
   }
   .of-office :global(.of-room) {
     font-size: 9.5px;
