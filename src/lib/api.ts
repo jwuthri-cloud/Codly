@@ -46,6 +46,7 @@ import type { NewWebhook } from './gen/NewWebhook';
 import type { Plan } from './gen/Plan';
 import type { Provider } from './gen/Provider';
 import type { RecentWorkspace } from './gen/RecentWorkspace';
+import type { Office } from './gen/Office';
 import type { RepoFile } from './gen/RepoFile';
 import type { CatalogSkill } from './gen/CatalogSkill';
 import type { Skill } from './gen/Skill';
@@ -179,6 +180,11 @@ export const api = {
   ghosts: () => call<Agent[]>('ghosts', {}),
   /** Bring a ghost back as a regular worker (same name, look, career and memory). */
   bringBack: (agentId: string) => call<Agent>('bring_back', { agentId }),
+  /** Your other offices (repos opened before, the open one aside), with their crews. */
+  offices: () => call<Office[]>('offices', {}),
+  /** Transfer an agent to another of your offices: its career, traits, stamina, look and memory
+   *  go with it; trust, friends, mentor and its session stay. Refused mid-task and for the Lead. */
+  transferAgent: (agentId: string, toWorkspaceId: string) => call<Agent>('transfer_agent', { agentId, toWorkspaceId }),
   /** Build/Buy: the wallet (coins, across every repo) and the furniture in this office. */
   officeShop: () => call<Shop>('office_shop', {}),
   /** Buy a piece of furniture and put it down, or move one already bought (same uid). */

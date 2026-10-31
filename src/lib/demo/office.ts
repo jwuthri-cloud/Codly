@@ -14,6 +14,8 @@ import { atLeast, emptyCareer, rankFor, rankLabel, staminaOf } from '../util/car
 import type { Rank } from '../gen/Rank';
 import type { DayReport } from '../gen/DayReport';
 import type { Digest } from '../gen/Digest';
+import type { Office } from '../gen/Office';
+import { transferBlock } from '../util/transfer';
 import type { Sim } from './sim';
 
 let ghosts: Agent[] | null = null;
@@ -70,6 +72,35 @@ export function demoBringBack(sim: Sim, id: string): Agent {
   const back: Agent = { ...g, archived: false, consultant: false, kept: true, status: 'idle', task_id: null, updated_at: sim.now(), career: { ...g.career, milestones: [...g.career.milestones, { at: sim.now(), text: 'Came back' }] } };
   sim.putAgent(back);
   return back;
+}
+
+// Two other offices for the Transfer picker (the demo has one repo), with who works there.
+const OFFICES = [
+  { id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'] },
+  { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'] },
+];
+
+/** Agents moved to those offices: still yours, so their XP stays in the wallet. */
+const transferred: Agent[] = [];
+
+export const demoOffices = (): Office[] => OFFICES.map((o) => ({ id: o.id, name: o.name, repo_path: o.repo_path, crew: o.crew.length }));
+
+/** Transfer an agent to one of the demo's other offices: same rules as the core's; it leaves this office's crew. */
+export function demoTransfer(sim: Sim, id: string, to: string): Agent {
+  const a = sim.agents.get(id);
+  if (!a) throw new Error('no such agent');
+  const block = transferBlock(a, [...sim.tasks.values()]);
+  if (block) throw new Error(`${a.name}: ${block}`);
+  const o = OFFICES.find((x) => x.id === to);
+  if (!o) throw new Error('no such office');
+  if (o.crew.some((n) => n.toLowerCase() === a.name.toLowerCase())) throw new Error(`someone called ${a.name} already works in ${o.name}`);
+  o.crew.push(a.name);
+  const career = { ...a.career, trust: 'intern' as Rank, friends: {}, mentor: null, milestones: [...a.career.milestones, { at: sim.now(), text: `Moved to ${o.name}` }] };
+  const moved: Agent = { ...a, career, session_id: null, worktree: null, task_id: null, status: 'idle', consultant: false, kept: true, updated_at: sim.now() };
+  transferred.push(moved);
+  sim.agents.delete(id);
+  sim.decision('transfer', 'rule', `${a.name} moved to ${o.name}`, { agent: id, name: a.name, from: sim.workspace?.id ?? null, to: o.id, to_name: o.name });
+  return moved;
 }
 
 export function demoLook(sim: Sim, id: string, lookSeed: string): Agent {
@@ -168,7 +199,7 @@ export function demoDigest(sim: Sim, since: number): Digest {
 /** The wallet (crates/codly-core/src/orchestrator/wallet.rs): the demo has one repo, so its
  *  agents' XP, plus grants, less its furniture. */
 export function demoWallet(sim: Sim): Wallet {
-  const earned = [...sim.agents.values(), ...seeded(sim)].reduce((n, a) => n + a.career.xp, 0);
+  const earned = [...sim.agents.values(), ...seeded(sim), ...transferred].reduce((n, a) => n + a.career.xp, 0);
   const spent = placed.reduce((n, p) => n + (BY_ID.get(p.item)?.price ?? 0), 0);
   return { earned, granted, spent, balance: earned + granted - spent, cheated };
 }

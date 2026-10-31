@@ -1622,6 +1622,17 @@ pub struct RecentWorkspace {
     pub opened_at: i64,
 }
 
+/// Another of your offices (a repo you opened before): where an agent can transfer to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Office {
+    pub id: Id,
+    pub name: String,
+    pub repo_path: String,
+    /// Agents working there, the Lead aside.
+    pub crew: i64,
+}
+
 // ───────────────────────────── per-agent live controls ─────────────────────────────
 
 /// What the agent panel shows: the controls an agent runs under right now.

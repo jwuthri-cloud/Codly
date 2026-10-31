@@ -6,7 +6,8 @@
   - top-center: a promotion (its real track record), with the offer of trust (Junior, Senior and Staff
     perks) and of a stronger model; a new Legend is offered its CLI's biggest context window
     (only when bigger than its own: the core says which, `bigger_model`)
-  - around a clicked agent: the click menu (chat, task, model, send home or call in, stop, details)
+  - around a clicked agent: the click menu (chat, task, model, send home or call in, stop, details,
+    and Transfer to… another of your offices: never mid-task, never the Lead)
   - in its Needs tab: Send home / Call in (sims.ts: home refills its energy; the Lead never goes)
   - bottom-right: the estimated cost so far, Pause new work, walls up/down
   Shown only in the full office (not as the backdrop), inside the app's insets.
@@ -19,6 +20,9 @@
   import type { AccountInfo } from '../lib/gen/AccountInfo';
   import type { Agent } from '../lib/gen/Agent';
   import type { ModelOffer } from '../lib/gen/ModelOffer';
+  import type { Office } from '../lib/gen/Office';
+  import type { Task } from '../lib/gen/Task';
+  import { transferBlock } from '../lib/util/transfer';
   import type { OfficeEngine } from './engine';
   import type { NarrateFn } from './OfficeView.svelte';
   import { agentPortrait } from './portrait';
@@ -49,8 +53,13 @@
     biggerModel?: (agentId: string) => Promise<ModelOffer | null>;
     /** You took the offer: give it that model. */
     ongivemodel?: (agentId: string, model: string) => void;
+    /** The board (an agent on a task can't transfer). */
+    tasks?: Task[];
+    /** Your other offices, for Transfer to…, and the move itself. */
+    offices?: () => Promise<Office[]>;
+    ontransfer?: (agentId: string, office: Office) => void;
   }
-  let { engine, sims, agents, accounts, selectedId, menuAt, insets, narrate, onaction, onlook, onclosemenu, paused = false, onpause, biggerModel, ongivemodel }: Props = $props();
+  let { engine, sims, agents, accounts, selectedId, menuAt, insets, narrate, onaction, onlook, onclosemenu, paused = false, onpause, biggerModel, ongivemodel, tasks = [], offices, ontransfer }: Props = $props();
 
   let tab = $state<'needs' | 'mood' | 'skills' | 'friends' | 'career' | 'look'>('needs');
   let walls = $state(true);
@@ -153,7 +162,8 @@
   const backIn = (until: number) => `${Math.max(1, Math.ceil((until - Date.now()) / 60_000))} min`;
   const menuRest = $derived(menuAt ? sims.stats(menuAt.id, Date.now(), engine.agentState(menuAt.id)).rest : null);
   const menuAgent = $derived(menuAt ? agents.find((a) => a.id === menuAt.id) ?? null : null);
-  const MENU: { a: AgentAction; label: string; when?: (a: Agent) => boolean }[] = [
+  type MenuItem = { a: AgentAction | 'transfer'; label: string; when?: (a: Agent) => boolean; why?: (a: Agent) => string | null };
+  const MENU: MenuItem[] = [
     { a: 'chat', label: 'Chat 1:1' },
     { a: 'task', label: 'Show task', when: (a) => !!a.task_id },
     { a: 'details', label: 'Details' },
@@ -163,11 +173,36 @@
     { a: 'home', label: 'Send home', when: () => !!menuRest?.canGoHome && !menuRest.home },
     { a: 'callin', label: 'Call in', when: () => !!menuRest?.home },
     { a: 'stop', label: 'Stop it', when: (a) => a.status !== 'offline' },
+    // Disabled, with the reason, while it can't go (on a task, mid-turn).
+    { a: 'transfer', label: 'Transfer to…', when: (a) => a.role !== 'lead' && !!ontransfer && !!offices, why: (a) => transferBlock(a, tasks) },
   ];
   const items = $derived(menuAgent ? MENU.filter((m) => !m.when || m.when(menuAgent)) : []);
+  /** A wider ring past seven items, so the pills don't overlap. */
+  const spread = $derived(1 + Math.max(0, items.length - 7) * 0.12);
+
+  // Transfer to…: your other offices, picked where the click menu was.
+  let picker = $state<{ id: string; name: string; x: number; y: number; list: Office[] | null; error: string | null } | null>(null);
+  function choose(m: MenuItem, a: Agent) {
+    if (m.a !== 'transfer') return act(m.a, a.id);
+    if (!menuAt || !offices) return;
+    const p = { id: a.id, name: a.name, x: menuAt.x, y: menuAt.y, list: null, error: null };
+    picker = p;
+    onclosemenu();
+    offices().then(
+      (list) => picker?.id === p.id && (picker = { ...picker, list }),
+      (e) => picker?.id === p.id && (picker = { ...picker, list: [], error: String(e) }),
+    );
+  }
+  function transfer(o: Office) {
+    if (picker) ontransfer?.(picker.id, o);
+    picker = null;
+  }
 
   function onkey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && menuAt) {
+    if (e.key === 'Escape' && picker) {
+      e.stopPropagation();
+      picker = null;
+    } else if (e.key === 'Escape' && menuAt) {
       e.stopPropagation();
       onclosemenu();
     }
@@ -304,9 +339,31 @@
   <div class="pie" style:left="{menuAt.x}px" style:top="{menuAt.y}px" role="menu" aria-label="{menuAgent.name}">
     {#each items as m, i (m.a)}
       {@const ang = (i / items.length) * Math.PI * 2 - Math.PI / 2}
-      <button role="menuitem" style:transform="translate({Math.cos(ang) * 92}px, {Math.sin(ang) * 70}px) translate(-50%, -50%)" onclick={() => act(m.a, menuAgent.id)}>{m.label}</button>
+      {@const why = m.why?.(menuAgent) ?? null}
+      <button role="menuitem" style:transform="translate({Math.cos(ang) * spread * 92}px, {Math.sin(ang) * spread * 70}px) translate(-50%, -50%)" disabled={!!why} aria-disabled={!!why} title={why ?? undefined} onclick={() => choose(m, menuAgent)}>{m.label}</button>
     {/each}
     <span class="pie-name">{menuAgent.name}</span>
+  </div>
+{/if}
+
+{#if picker}
+  <div class="transfer" style:left="{picker.x}px" style:top="{picker.y}px" role="dialog" aria-label="Transfer {picker.name} to another office">
+    <header><b>Transfer {picker.name} to…</b><button class="x" aria-label="Cancel" onclick={() => (picker = null)}>✕</button></header>
+    {#if picker.list === null}
+      <p class="empty">Looking for your other offices…</p>
+    {:else if picker.error}
+      <p class="empty">{picker.error}</p>
+    {:else}
+      {#each picker.list as o (o.id)}
+        <button class="office" onclick={() => transfer(o)} title={o.repo_path}>
+          <span class="o-name">{o.name}</span>
+          <span class="o-crew">{o.crew === 0 ? 'nobody yet' : `${o.crew} on the crew`}</span>
+        </button>
+      {:else}
+        <p class="empty">Open another repo once to get a second office.</p>
+      {/each}
+      {#if picker.list.length}<p class="note">Its career, traits and memory go with it; trust and friendships stay here.</p>{/if}
+    {/if}
   </div>
 {/if}
 
@@ -410,6 +467,19 @@
   .pie { position: absolute; z-index: 7; width: 0; height: 0; pointer-events: none; }
   .pie button { position: absolute; left: 0; top: 0; padding: 7px 12px; border: 0; border-radius: 999px; background: rgba(18, 22, 32, 0.9); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12), 0 8px 20px -8px rgba(0, 0, 0, 0.6); white-space: nowrap; cursor: pointer; pointer-events: auto; animation: pop 0.18s ease-out both; }
   .pie button:hover, .pie button:focus-visible { background: #2d6bd8; outline: none; }
+  .pie button:disabled { color: #7d8597; cursor: not-allowed; }
+  .pie button:disabled:hover { background: rgba(18, 22, 32, 0.9); }
+
+  /* Above the name tags (a selected one is at 1100, overlay.ts), its own agent's included. */
+  .transfer { position: absolute; z-index: 1200; transform: translate(-50%, -50%); width: 250px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 14px; background: rgba(18, 22, 32, 0.92); backdrop-filter: blur(18px); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1), 0 20px 50px -20px rgba(0, 0, 0, 0.7); color: #eef1f7; font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; pointer-events: auto; animation: pop 0.18s ease-out both; }
+  .transfer header { display: flex; justify-content: space-between; align-items: center; padding: 0 0 2px 2px; }
+  .transfer .x { border: 0; background: none; color: #9aa2b6; cursor: pointer; font: inherit; }
+  .transfer .office { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 10px; border: 0; border-radius: 9px; background: rgba(255, 255, 255, 0.06); color: #eef1f7; font: inherit; text-align: left; cursor: pointer; }
+  .transfer .office:hover, .transfer .office:focus-visible { background: #2d6bd8; outline: none; }
+  .o-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .o-crew { flex: none; color: #9aa2b6; font-size: 11px; }
+  .office:hover .o-crew { color: #dfe7ff; }
+  .transfer .note { margin: 2px 2px 0; color: #8a92a6; font-size: 11px; }
   .pie-name { position: absolute; transform: translate(-50%, -50%); font: 600 12px Inter, system-ui, sans-serif; color: #fff; text-shadow: 0 1px 3px #000; }
   @keyframes pop { from { opacity: 0; scale: 0.6; } }
 
@@ -417,5 +487,5 @@
   .hud-live button, .money { height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: rgba(18, 22, 32, 0.82); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08); color: #eef1f7; font: inherit; display: inline-flex; align-items: center; cursor: pointer; }
   .money { cursor: default; color: #7be495; font-family: ui-monospace, monospace; }
   .hud-live button.on { box-shadow: inset 0 0 0 1.5px #ffbf3c; color: #ffd27a; }
-  @media (prefers-reduced-motion: reduce) { .pie button { animation: none; } .fill { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .pie button, .transfer { animation: none; } .fill { transition: none; } }
 </style>

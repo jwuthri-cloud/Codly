@@ -37,6 +37,7 @@
   import DailyEdition from './DailyEdition.svelte';
   import { edition, standupLine, type Edition } from './daily';
   import type { Digest } from '../lib/gen/Digest';
+  import type { Office } from '../lib/gen/Office';
 
   interface Props {
     files?: RepoFile[];
@@ -92,6 +93,9 @@
     ongivemodel?: (agentId: string, model: string) => void;
     /** Where energy, coffee and home are kept between sessions (localStorage key), e.g. per repo. */
     simsKey?: string;
+    /** Transfer to…: your other offices, and moving an agent to one (it walks out once the core says so). */
+    offices?: () => Promise<Office[]>;
+    ontransfer?: (agentId: string, office: Office) => void;
   }
 
   let {
@@ -133,6 +137,8 @@
     biggerModel,
     ongivemodel,
     simsKey,
+    offices,
+    ontransfer,
   }: Props = $props();
 
   // The morning edition and standup (daily.ts), once the agents have walked in.
@@ -417,6 +423,9 @@
       {onpause}
       {biggerModel}
       {ongivemodel}
+      {tasks}
+      {offices}
+      {ontransfer}
     />
   {/if}
   {#if engine && !backdrop && paper}

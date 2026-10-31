@@ -33,6 +33,7 @@ import type { Workspace } from '../gen/Workspace';
 import type { JsonValue } from '../gen/serde_json/JsonValue';
 import type { Provider } from '../gen/Provider';
 import { targetLabel, type Provenance } from '../util/labels';
+import { transferredOut } from '../util/transfer';
 import { accounts } from './accounts.svelte';
 import { controls } from './control.svelte';
 
@@ -377,6 +378,12 @@ class CodlyStore {
         // A let-go consultant or a member who left the team leaves the board.
         this.agents = k.agent.archived ? this.agents.filter((a) => a.id !== k.agent.id) : upsert(this.agents, k.agent);
         break;
+      case 'decision': {
+        // Transferred to another of your offices: it leaves this one's crew (and walks out).
+        const gone = transferredOut(k, this.workspace?.id);
+        if (gone) this.agents = this.agents.filter((a) => a.id !== gone);
+        break;
+      }
       case 'plan_changed':
         this.plans = upsert(this.plans, k.plan);
         break;

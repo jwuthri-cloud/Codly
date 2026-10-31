@@ -3,7 +3,7 @@
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
-use codly_core::model::{Agent, Applicant, Digest, Lot, ModelOffer, Placed, Rank, Shop, Wallet};
+use codly_core::model::{Agent, Applicant, Digest, Lot, ModelOffer, Office, Placed, Rank, Shop, Wallet};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -60,6 +60,18 @@ pub async fn ghosts(state: State<'_, AppState>) -> Result<Vec<Agent>, String> {
 #[tauri::command]
 pub async fn bring_back(state: State<'_, AppState>, agent_id: String) -> Result<Agent, String> {
     state.core().await?.bring_back(&agent_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Your other offices (repos opened before), where an agent can transfer to.
+#[tauri::command]
+pub async fn offices(state: State<'_, AppState>) -> Result<Vec<Office>, String> {
+    state.core().await?.offices().map_err(|e| format!("{e:#}"))
+}
+
+/// Transfer an agent from the open repo to another of your offices.
+#[tauri::command]
+pub async fn transfer_agent(state: State<'_, AppState>, agent_id: String, to_workspace_id: String) -> Result<Agent, String> {
+    state.core().await?.transfer_agent(&agent_id, &to_workspace_id).await.map_err(|e| format!("{e:#}"))
 }
 
 /// Trust an agent up to a rank's perks (Intern takes them back).

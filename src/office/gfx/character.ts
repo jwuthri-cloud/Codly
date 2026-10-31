@@ -226,6 +226,18 @@ function paint(b: Builder, s: Surface, pts: [number, number][], color: RGB, lift
     area += x0 * y1 - x1 * y0;
   }
   if (area < 0) pts = pts.slice().reverse();
+  // Short edges and enough rings, so a big shape bends with the surface instead of cutting into it.
+  const dense: [number, number][] = [];
+  let size = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x0, y0] = pts[i];
+    const [x1, y1] = pts[(i + 1) % pts.length];
+    const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 0.01));
+    for (let k = 0; k < n; k++) dense.push([x0 + ((x1 - x0) * k) / n, y0 + ((y1 - y0) * k) / n]);
+    size = Math.max(size, Math.hypot(x1 - x0, y1 - y0));
+  }
+  pts = dense;
+  rings = Math.max(rings, Math.ceil(size / 0.02));
   let cx = 0;
   let cy = 0;
   for (const [x, y] of pts) {
@@ -270,6 +282,7 @@ function oval(cx: number, cy: number, rx: number, ry: number, rot = 0, n = 18): 
 
 /** A stroke along a path painted on a surface (brows, smiles, lashes), tapered at both ends when `taper`. */
 function stroke(b: Builder, s: Surface, path: [number, number][], width: number, color: RGB, lift = 0.003, taper = 0) {
+  if (path.length === 2) path = curve(path[0][0], path[1][0], (_x, t) => path[0][1] + (path[1][1] - path[0][1]) * t, Math.ceil(Math.hypot(path[1][0] - path[0][0], path[1][1] - path[0][1]) / 0.01));
   const pos: number[] = [];
   const nor: number[] = [];
   const side: number[][] = [];
@@ -362,7 +375,7 @@ const hairline =
  * forehead, the temples and the nape), puffed out where the style has volume. The edge folds in to
  * the scalp so it reads as a thickness, not a sheet.
  */
-function shell(b: Builder, line: Line, t: number, color: RGB, puff: (theta: number, phi: number) => number = () => 0, w = 56, h = 16, gloss = 0.16) {
+function shell(b: Builder, line: Line, t: number, color: RGB, puff: (theta: number, phi: number) => number = () => 0, w = 48, h = 14, gloss = 0.16) {
   const cols = w + 1;
   const rows = h + 2;
   const pos = new Float32Array(cols * rows * 3);
@@ -567,7 +580,8 @@ const PANTS_P: [number, number][] = [
 /** Front to back, the body is a little flatter than wide. */
 const K = 0.86;
 const topR = (y: number) => {
-  for (let i = 1; i < TOP.length; i++)
+  if (y <= TOP[1][1]) return TOP[1][0];
+  for (let i = 2; i < TOP.length; i++)
     if (y <= TOP[i][1]) {
       const [r0, y0] = TOP[i - 1];
       const [r1, y1] = TOP[i];
@@ -650,7 +664,7 @@ function buildParts(look: Look) {
       [0.075, 0.14],
       [-0.075, 0.14],
       [-0.1, 0.075],
-    ], mix(top, trim, 0.45), 0.012);
+    ], mix(top, trim, 0.45), 0.0035);
     ring(torso, 0.045, 0.172, 0.018, trim, K);
   } else {
     // Tee: a crew collar and a hem.
@@ -678,7 +692,7 @@ function buildParts(look: Look) {
   // Head, once per face (gfx swaps the geometry: a blink, a grin, a worried look).
   const heads = FACES.map((f) => {
     const h = new Builder();
-    h.ball(0, HEAD_Y, 0, HX, HY, HZ, L.skin, 32, 24);
+    h.ball(0, HEAD_Y, 0, HX, HY, HZ, L.skin, 28, 20);
     h.ball(0, 0.03, -0.005, 0.06, 0.06, 0.055, L.skin, 12, 8);
     // Ears.
     for (const sx of [-1, 1]) {
@@ -1001,7 +1015,15 @@ export class Character {
     this.offset = this.rand() * 1000;
     this.breathPeriod = 3.6 + this.rand() * 1.4;
     this.lazy = traitsOf(id).includes('lazy');
-    this.mat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, transparent: false });
+    this.mat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.72, metalness: 0, transparent: false });
+    // A soft warm rim (in the surface's own color), so people stand out from the floor like clay.
+    this.mat.onBeforeCompile = (sh) => {
+      sh.fragmentShader = sh.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        '#include <emissivemap_fragment>\n  totalEmissiveRadiance += diffuseColor.rgb * vec3(1.0, 0.93, 0.85) * 0.32 * pow(1.0 - saturate(dot(normalize(vViewPosition), normal)), 2.5);',
+      );
+    };
+    this.mat.customProgramCacheKey = () => 'character-rim';
     const parts = buildParts(look);
     this.heads = parts.heads;
     this.geos.push(parts.torso, parts.badge, ...parts.heads, parts.upper, parts.fore, parts.hand, parts.thigh, parts.shin, parts.shoe);
