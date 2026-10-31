@@ -2359,7 +2359,7 @@ export class OfficeEngine {
       specs.push({
         key: 'home:' + id,
         kind: 'agent',
-        world: new Vector3(door.x + OX, 1.7, door.z + OZ),
+        world: new Vector3(door.x + this.ox, 1.7, door.z + this.oz),
         dy: -4,
         priority: (selected ? 1000 : 0) + 90,
         title: a.name,

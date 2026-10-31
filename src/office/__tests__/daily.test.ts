@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { Digest } from '../../lib/gen/Digest';
 import { edition, editionDue, standupLine } from '../daily';
 
-const stats = (o: Partial<Record<string, number>> = {}) => ({ commits: 0, checks_passed: 0, checks_failed: 0, approved: 0, changes_requested: 0, reviews_done: 0, merged: 0, ...o });
+const stats = (o: Partial<Record<string, number>> = {}) => ({ commits: 0, checks_passed: 0, checks_failed: 0, approved: 0, changes_requested: 0, reviews_done: 0, merged: 0, shifts: 0, sick: 0, ...o });
 
 describe('daily edition', () => {
   it('says only what it really did', () => {
