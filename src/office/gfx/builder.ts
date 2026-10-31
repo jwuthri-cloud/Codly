@@ -55,12 +55,13 @@ export class Builder {
     return this;
   }
 
-  /** Add a (non-indexed) geometry under `local` (then the base frame), in one color. */
+  /** Add a (non-indexed) geometry under `local` (then the base frame), in one color (times its own vertex colors, if any). */
   add(geo: BufferGeometry, color: RGB, local: Matrix4, flat = false, shade = 1): this {
     m4.multiplyMatrices(this.base, local);
     m3.getNormalMatrix(m4);
     const P = geo.getAttribute('position');
     const Nn = geo.getAttribute('normal');
+    const C = geo.getAttribute('color');
     const n = P.count;
     const start = this.pos.length;
     for (let i = 0; i < n; i++) {
@@ -70,7 +71,8 @@ export class Builder {
         v.fromBufferAttribute(Nn, i).applyMatrix3(m3).normalize();
         this.nor.push(v.x, v.y, v.z);
       }
-      this.col.push(color[0] * shade, color[1] * shade, color[2] * shade);
+      const k = C ? C.getX(i) * shade : shade;
+      this.col.push(color[0] * k, color[1] * k, color[2] * k);
     }
     if (flat || !Nn) {
       const a = new Vector3();

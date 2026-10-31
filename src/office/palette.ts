@@ -104,6 +104,7 @@ export const MAT = {
   tileWarm: '#eee3d1',
   tileTerracotta: '#d38c69',
   terrazzo: '#e7dfd3',
+  concrete: '#cbc6bd',
   wall: '#efe7da',
   wallInner: '#ece2d2',
   wallCap: '#5c4738',

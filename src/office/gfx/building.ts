@@ -1,4 +1,4 @@
-// The static studio: a floating floor slab, the floor atlas, cutaway walls (full-height back
+// The static office (from its lot): a floating floor slab, the floor atlas, cutaway walls (full-height back
 // walls with windows, low interior walls with dark caps, glass partitions), all furniture,
 // lamps and the evening lights. Repeated furniture (desks, chairs, monitors, lamps, racks,
 // cabinets) is instanced; one-off pieces are merged into a single vertex-colored mesh.
@@ -22,7 +22,7 @@ import {
   Vector3,
   type Texture,
 } from 'three';
-import { D, DESK_H, GLASS_H, INNER_H, LOW_H, W, WALL_H, type Item, type ItemType, type OfficeLayout, type Wall } from '../layout';
+import { DESK_H, GLASS_H, INNER_H, LOW_H, WALL_H, type Item, type ItemType, type OfficeLayout, type Wall } from '../layout';
 import { color, lin, MAT, mix, scale, type OfficeTheme, type RGB, type SkyKind } from '../palette';
 import { hash } from '../text';
 import { Builder } from './builder';
@@ -91,6 +91,7 @@ export class BuildingGfx {
     this.buildWalls();
     this.buildFurniture();
     this.buildLamps();
+    this.applyWalls();
   }
 
   private mesh(geo: BufferGeometry, mat: MeshStandardMaterial | MeshBasicMaterial, cast = true, receive = true): Mesh {
@@ -107,12 +108,16 @@ export class BuildingGfx {
   private buildSlab() {
     const b = new Builder();
     const slab = c(MAT.slab);
-    // A floating slab with a little porch at the entrance.
+    const { w: W, d: D, door } = this.L;
+    // A floating slab with a little porch at the entrance (in the door's frame: x along the
+    // wall, z out of the lot).
     b.span(-0.3, -0.55, -0.3, W + 0.3, -0.005, D + 0.3, slab);
     b.span(-0.36, -0.6, -0.36, W + 0.36, -0.5, D + 0.36, mix(slab, [0, 0, 0], 0.25));
-    const dx = this.L.door.x;
-    b.span(dx - 1.3, -0.3, D + 0.3, dx + 1.3, -0.02, D + 1.1, c('#d9cfbf'));
-    b.span(dx - 1.1, -0.55, D + 1.1, dx + 1.1, -0.32, D + 1.5, c('#cfc4b2'));
+    const pw = Math.max(1.3, door.width / 2 + 0.5);
+    b.frame(door.x, 0, door.z, door.rot);
+    b.span(-pw, -0.3, 0.3, pw, -0.02, 1.1, c('#d9cfbf'));
+    b.span(-pw + 0.2, -0.55, 1.1, pw - 0.2, -0.32, 1.5, c('#cfc4b2'));
+    b.frame();
     this.mesh(b.build(), this.matte, false, true);
     // Floor.
     const fg = new PlaneGeometry(W, D).rotateX(-Math.PI / 2).translate(W / 2, 0, D / 2);
@@ -161,7 +166,7 @@ export class BuildingGfx {
         }
         continue;
       }
-      const H = w.kind === 'exterior' ? WALL_H : w.kind === 'interior' ? INNER_H : LOW_H;
+      const H = w.kind === 'exterior' ? WALL_H : w.kind === 'solid' ? INNER_H : LOW_H;
       const windows = w.windows ?? [];
       for (const [a, z] of spans) {
         // Split around windows.
@@ -186,14 +191,16 @@ export class BuildingGfx {
         if (gz < len) seg(gz - 0.005, gz + 0.03, 0, H + 0.03, cap, WT + 0.02);
       }
       if (side) {
-        const mid = horiz ? [0, w.z0 < D / 2 ? -1 : 1] : [w.x0 < W / 2 ? -1 : 1, 0];
+        const mid = horiz ? [0, w.z0 < this.L.d / 2 ? -1 : 1] : [w.x0 < this.L.w / 2 ? -1 : 1, 0];
         this.sides.push({ mesh: this.mesh(b.build(), this.matte, true, true), nx: mid[0], nz: mid[1] });
       }
     }
     const b = walls;
-    // The entrance threshold and frame.
-    b.frame(this.L.door.x, 0, D, 0);
-    F.doorFrame(b);
+    // The entrance threshold and frame (a garage: the roll-up door, open).
+    const door = this.L.door;
+    b.frame(door.x, 0, door.z, door.rot);
+    if (door.kind === 'rollup') F.rollupDoor(b, door.width);
+    else F.doorFrame(b);
     b.frame();
     const wm = this.mesh(b.build(), this.matte, true, true);
     const gm = this.mesh(glass.build(), this.glassMat, false, false);
@@ -231,7 +238,7 @@ export class BuildingGfx {
     for (const w of this.L.walls) {
       if (w.kind !== 'exterior') continue;
       if (w.z0 === w.z1 ? Math.abs(z - w.z0) < 0.5 : Math.abs(x - w.x0) < 0.5)
-        return w.z0 === w.z1 ? { nx: 0, nz: w.z0 < D / 2 ? -1 : 1 } : { nx: w.x0 < W / 2 ? -1 : 1, nz: 0 };
+        return w.z0 === w.z1 ? { nx: 0, nz: w.z0 < this.L.d / 2 ? -1 : 1 } : { nx: w.x0 < this.L.w / 2 ? -1 : 1, nz: 0 };
     }
     return null;
   }
@@ -384,8 +391,11 @@ export class BuildingGfx {
       case 'testMonitor':
         F.testMonitorBody(merged);
         break;
+      case 'serverMachine':
+        F.serverMachine(merged);
+        break;
       case 'pigeonholes':
-        F.pigeonholes(merged, this.L.pigeonholes.cols, this.L.pigeonholes.rows);
+        F.pigeonholes(merged, this.L.pigeonholes?.cols ?? 7, this.L.pigeonholes?.rows ?? 4);
         break;
       case 'mailbox':
         F.mailbox(merged);
@@ -500,23 +510,15 @@ export class BuildingGfx {
       fb.cyl(0, 1.3, 0, 0.24, 0.3, [1, 1, 1], 14, 0.16);
       this.pool(it.x, it.z, 3.2);
     }
-    // Wall sconces between the Leads' windows and in the lounge; a pendant over the meeting table.
-    for (const [x, y, z] of [
-      [20.0, 1.55, 0.14],
-      [23.25, 1.55, 0.14],
-      [0.14, 1.55, 17.6],
-    ]) {
-      fb.frame(x, y, z, 0);
+    // Wall lights, each with its warm spill on the floor in front.
+    for (const it of this.L.items) {
+      if (it.type !== 'sconce') continue;
+      fb.frame(it.x, it.y ?? 1.55, it.z, 0);
       fb.ball(0, 0, 0, 0.11, 0.13, 0.11, [1, 1, 1], 12, 8);
+      this.pool(it.x + Math.sin(it.rot) * 1.06, it.z + Math.cos(it.rot) * 1.06, 3.4);
     }
     fb.frame();
     this.mesh(fb.build(), this.shadeMat, false, false);
-    // The sconces' warm spill on the Leads' floor.
-    for (const [x, z, s] of [
-      [20.0, 1.2, 3.4],
-      [23.25, 1.2, 3.4],
-    ] as const)
-      this.pool(x, z, s);
   }
 
   private pool(x: number, z: number, size: number) {
@@ -577,18 +579,7 @@ export class BuildingGfx {
     for (let i = 0; i < this.lampState.length; i++) this.paintLamp(i);
     // Evening: a few warm point lights (no shadows) where the lamps are.
     if (t.points && !this.lights.length) {
-      for (const [x, y, z, hex, inten, dist] of [
-        [21.5, 1.7, 3.2, '#ffc58a', 5, 9],
-        [1.6, 1.6, 4.8, '#ffc07a', 3.5, 7],
-        [4.2, 1.7, 20.2, '#ffc58a', 3.5, 7.5],
-        [7.4, 1.9, 11.75, '#ffcf96', 3.5, 8],
-        [14.2, 1.9, 11.75, '#ffcf96', 3.5, 8],
-        [24.8, 1.5, 11.6, '#8fb8ff', 2.6, 6.5],
-        [16.5, 2.4, 20.0, '#ffc58a', 1.8, 7],
-        [9.3, 2.1, 8.6, '#ffd7a0', 2.4, 5.5],
-        [11, 1.8, 3.6, '#ffd7a0', 3, 7],
-        [24.7, 1.6, 20.4, '#ffc58a', 2.4, 6],
-      ] as const) {
+      for (const [x, y, z, hex, inten, dist] of this.L.lights) {
         const l = new PointLight(new Color(hex), inten, dist, 1.4);
         l.position.set(x, y, z);
         this.lights.push(l);

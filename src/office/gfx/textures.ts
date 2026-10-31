@@ -1,10 +1,10 @@
-// Procedural textures (no image assets): the floor (one atlas for the whole plan: oak planks,
-// walnut herringbone, felt carpet, tiles, terrazzo, rugs and soft contact shading along the
-// walls), the sky behind the windows (day / dusk with a little skyline), soft glows, and the
+// Procedural textures (no image assets): the floor (one atlas for the whole lot: oak planks,
+// walnut herringbone, felt carpet, tiles, terrazzo, concrete, rugs and soft contact shading
+// along the walls), the sky behind the windows (day / dusk with a little skyline), soft glows, and the
 // emote sprites ("!", "?", zZ, thought cloud, check).
 
 import { CanvasTexture, LinearMipmapLinearFilter, SRGBColorSpace, type Texture } from 'three';
-import { D, W, wallPieces, type OfficeLayout, type Rect, type Room } from '../layout';
+import { TILE, wallPieces, type FloorKind, type OfficeLayout, type Rect } from '../layout';
 import { MAT, type SkyKind } from '../palette';
 import { rng } from '../text';
 
@@ -125,6 +125,28 @@ function terrazzo(g: CanvasRenderingContext2D, r: Rect, seed: number) {
   }
 }
 
+function concrete(g: CanvasRenderingContext2D, r: Rect, seed: number) {
+  const rand = rng(seed);
+  g.fillStyle = MAT.concrete;
+  g.fillRect(r.x * PX, r.z * PX, r.w * PX, r.d * PX);
+  // Soft mottling, a few stains, and saw-cut joints every 2 m.
+  const n = Math.round(r.w * r.d * 6);
+  for (let i = 0; i < n; i++) {
+    g.fillStyle = rand() < 0.5 ? 'rgba(255,255,255,0.05)' : 'rgba(60,50,40,0.05)';
+    g.beginPath();
+    g.ellipse((r.x + rand() * r.w) * PX, (r.z + rand() * r.d) * PX, (0.2 + rand() * 0.6) * PX, (0.15 + rand() * 0.4) * PX, rand() * 3, 0, Math.PI * 2);
+    g.fill();
+  }
+  const m = Math.round(r.w * r.d * 90);
+  for (let i = 0; i < m; i++) {
+    g.fillStyle = rand() < 0.5 ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)';
+    g.fillRect((r.x + rand() * r.w) * PX, (r.z + rand() * r.d) * PX, 1.5, 1.5);
+  }
+  g.fillStyle = 'rgba(70,60,50,0.22)';
+  for (let x = Math.ceil(r.x / 2) * 2; x < r.x + r.w; x += 2) if (x > r.x) g.fillRect(x * PX - 0.75, r.z * PX, 1.5, r.d * PX);
+  for (let z = Math.ceil(r.z / 2) * 2; z < r.z + r.d; z += 2) if (z > r.z) g.fillRect(r.x * PX, z * PX - 0.75, r.w * PX, 1.5);
+}
+
 function rug(g: CanvasRenderingContext2D, cx: number, cz: number, w: number, d: number, variant: number) {
   const x = (cx - w / 2) * PX;
   const y = (cz - d / 2) * PX;
@@ -189,9 +211,8 @@ export function roundRect(g: CanvasRenderingContext2D, x: number, y: number, w: 
   g.closePath();
 }
 
-function roomFloor(g: CanvasRenderingContext2D, room: Room, i: number) {
-  const r = room.rect;
-  switch (room.floor) {
+function paintFloor(g: CanvasRenderingContext2D, m: FloorKind, r: Rect, i: number) {
+  switch (m) {
     case 'oak':
       planks(g, r, MAT.oak, 11 + i);
       break;
@@ -216,13 +237,30 @@ function roomFloor(g: CanvasRenderingContext2D, room: Room, i: number) {
     case 'terrazzo':
       terrazzo(g, r, 47 + i);
       break;
+    case 'concrete':
+      concrete(g, r, 53 + i);
+      break;
   }
 }
 
-/** The whole floor: every room's material, rugs, and soft shading along the walls. */
+/** The whole floor: every tile's material, rugs, and soft shading along the walls. */
 export function floorTexture(L: OfficeLayout): CanvasTexture {
-  const [c, g] = canvas(W * PX, D * PX);
-  L.rooms.forEach((room, i) => roomFloor(g, room, i));
+  const [c, g] = canvas(L.w * PX, L.d * PX);
+  // One pattern per area of a material (a room, usually), clipped to its tiles when it isn't
+  // a plain rectangle.
+  L.floors.forEach((f, i) => {
+    const whole = f.tiles.length === Math.round(f.rect.w / TILE) * Math.round(f.rect.d / TILE);
+    if (whole) return paintFloor(g, f.m, f.rect, i);
+    g.save();
+    g.beginPath();
+    for (const t of f.tiles) {
+      const cx = t % L.tiles.cols;
+      g.rect(cx * TILE * PX, ((t - cx) / L.tiles.cols) * TILE * PX, TILE * PX, TILE * PX);
+    }
+    g.clip();
+    paintFloor(g, f.m, f.rect, i);
+    g.restore();
+  });
   for (const it of L.items) if (it.type === 'rug') rug(g, it.x, it.z, it.w, it.d, it.variant ?? 0);
   // Contact shading: walls and tall furniture darken the floor right next to them.
   // (Blurred via an off-canvas shape's shadow: canvas `filter` is missing in older WebKit.)
@@ -233,7 +271,7 @@ export function floorTexture(L: OfficeLayout): CanvasTexture {
   g.shadowBlur = 16;
   g.fillStyle = '#000';
   for (const w of L.walls) {
-    if (w.kind === 'low') continue;
+    if (w.kind === 'half') continue;
     for (const p of wallPieces(w)) g.fillRect(p.x * PX - 4 - OFF, p.z * PX - 4, p.w * PX + 8, p.d * PX + 8);
   }
   g.shadowColor = 'rgba(40,25,10,0.2)';

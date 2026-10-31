@@ -21,6 +21,7 @@
 //! - `install`      onboarding: trusted install commands per CLI, run in a visible terminal
 //! - `byok`         opt-in OpenRouter key for OpenCode only, in the Keychain
 //! - `hire`         hire manifests (the add-agent wizard's import/AI draft): strict validation
+//! - `lot`          build mode's lots: the ready-made Studio and Garage, a repo's first lot, checks
 
 pub mod adapters;
 pub mod dictation;
@@ -35,6 +36,7 @@ pub mod hire;
 pub mod housekeeping;
 pub mod index;
 pub mod install;
+pub mod lot;
 pub mod mcp;
 pub mod memory;
 pub mod model;

@@ -181,6 +181,8 @@ pub fn run() {
             hire_commands::dev_grant,
             hire_commands::dev_give_xp,
             hire_commands::dev_reset_office,
+            hire_commands::office_lot,
+            hire_commands::office_save_lot,
             commands::board_policy,
             commands::board_sweep,
             commands::board_archive,

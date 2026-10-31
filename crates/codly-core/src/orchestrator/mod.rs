@@ -33,6 +33,7 @@ mod hires;
 pub mod housekeeping;
 mod ingest;
 mod lead;
+mod lots;
 pub mod names;
 pub mod planner;
 mod plans;
@@ -689,6 +690,19 @@ impl Core {
         let shop = wallet::reset_office(&self.inner.store, &ws.id)?;
         self.inner.decide(Some(&ws.id), None, "developer", "reset the office", serde_json::json!({}))?;
         Ok(shop)
+    }
+
+    /// Build mode: the open repo's lot, made on the first read (the Studio for a repo with
+    /// history, the Garage for a new one).
+    pub fn lot(&self) -> anyhow::Result<Lot> {
+        let ws = self.inner.require_ws()?;
+        self.inner.lot(&ws.id)
+    }
+
+    /// Build mode: check and store the open repo's lot; returns it as stored.
+    pub fn save_lot(&self, lot: Lot) -> anyhow::Result<Lot> {
+        let ws = self.inner.require_ws()?;
+        self.inner.save_lot(&ws.id, lot)
     }
 
     /// An agent as a `codly/agent@1` file (see `hires.rs`).

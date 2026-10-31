@@ -1,13 +1,15 @@
 // The web demo's ghosts (workers let go, kept apart from the live roster as in the core), its
-// wallet and Build/Buy, and the developer panel's cheats: same rules as
-// crates/codly-core/src/orchestrator/careers.rs and wallet.rs.
+// wallet and Build/Buy, the developer panel's cheats (same rules as
+// crates/codly-core/src/orchestrator/careers.rs and wallet.rs) and lot: the demo office is the Studio.
 
 import type { Agent } from '../gen/Agent';
 import type { ModelOffer } from '../gen/ModelOffer';
 import type { Placed } from '../gen/Placed';
 import type { Shop } from '../gen/Shop';
 import type { Wallet } from '../gen/Wallet';
+import type { Lot } from '../gen/Lot';
 import { BY_ID } from '../../office/buy';
+import { TEMPLATES } from '../../office/layout';
 import { atLeast, emptyCareer, rankFor, rankLabel, staminaOf } from '../util/career';
 import type { Rank } from '../gen/Rank';
 import type { DayReport } from '../gen/DayReport';
@@ -18,6 +20,17 @@ let ghosts: Agent[] | null = null;
 let placed: Placed[] = [];
 let granted = 0;
 let cheated = false;
+
+let lot: Lot | null = null;
+
+export function demoLot(): Lot {
+  return (lot ??= structuredClone(TEMPLATES.studio));
+}
+
+export function demoSaveLot(next: Lot): Lot {
+  if (next.v !== 1) throw new Error('unknown lot version');
+  return (lot = structuredClone(next));
+}
 
 function seeded(sim: Sim): Agent[] {
   if (ghosts) return ghosts;

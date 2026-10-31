@@ -12,17 +12,23 @@
 // clock and a character standing or sitting still costs nothing.
 
 import {
+  BufferAttribute,
   BufferGeometry,
+  ConeGeometry,
   Euler,
+  LatheGeometry,
+  Matrix4,
   Group,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
+  Quaternion,
   SphereGeometry,
   Sprite,
   SpriteMaterial,
   TorusGeometry,
+  Vector2,
   Vector3,
   type Texture,
 } from 'three';
@@ -53,6 +59,9 @@ export interface Look {
   scale: number;
   blush: boolean;
   glasses: boolean;
+  /** The iris, low in the eye. */
+  eye: RGB;
+  lashes: boolean;
   /** The agent's `look_seed` this was made from. */
   seed: string;
 }
@@ -111,11 +120,15 @@ export function lookFor(seed: string, color: number, role: Role, provider: Provi
     scale: (intern ? 0.72 : role === 'lead' ? 1.06 : 1) * 1.2,
     blush: r() < 0.6,
     glasses: role === 'reviewer',
+    eye: lin(EYES[0]),
+    lashes: false,
     seed,
   };
   // Later styles (quiff, afro, undercut) draw last, so everyone else keeps the look they had.
   const extra = r();
   if (extra < 0.3) look.style = 8 + Math.floor((extra / 0.3) * 3);
+  look.eye = lin(pick(r, EYES, [10, 6, 3, 3, 4]));
+  look.lashes = r() < 0.45;
   // The person's picks win over the dice.
   const chosen = (k: LookPick, n: number) => {
     const v = Number(picks.get(k));
@@ -141,6 +154,10 @@ const SHOULDER_X = 0.175;
 const NECK = 0.32;
 const HEAD_R = 0.27;
 const HEAD_Y = 0.24;
+/** The head is a soft, slightly wide ellipsoid (a mochi, not a ball). */
+const HX = 0.282;
+const HY = 0.258;
+const HZ = 0.255;
 const UPPER = 0.14;
 const FORE = 0.15;
 const LEG_X = 0.085;
@@ -151,65 +168,331 @@ const SHIN = HIP - THIGH - 0.03;
 /** Joint vector (gfx/motion.ts): y, lean, headPitch, headYaw, headRoll, armLx, armLz, elbowL, armRx, armRz, elbowR, legL, legR, twist */
 
 const WHITE: RGB = [1, 1, 1];
-const DARK_EYE: RGB = lin('#2a2026');
-const MOUTH: RGB = lin('#7a3b34');
+const DARK_EYE: RGB = lin('#1f1820');
+const MOUTH: RGB = lin('#6e2f2b');
+const TONGUE: RGB = lin('#e77b74');
+const CREAM: RGB = lin('#f6f2ea');
+const EYES = ['#5a3a26', '#6b4a2a', '#3d6a8c', '#4d6e3c', '#2e2a2a'];
+const TAU = Math.PI * 2;
+const PI = Math.PI;
 
 /** The faces a head can wear; `Character.face` indexes this list. */
 const FACES = ['open', 'closed', 'happy', 'worried', 'curious'] as const;
 type Face = (typeof FACES)[number];
 
-/** A thin arc on the face (a smile, a frown), centered at (x, y), rotated `rot` around z. */
-function arc(h: Builder, x: number, y: number, z: number, r: number, tube: number, span: number, rot: number, color: RGB) {
-  const tor = new TorusGeometry(r, tube, 5, 10, span);
-  const g = tor.toNonIndexed();
-  const m = new Object3D();
-  m.position.set(x, y, z);
-  m.rotation.z = rot;
-  m.updateMatrix();
-  h.add(g, color, m.matrix);
-  tor.dispose();
+// ───────────── sculpting: shapes that follow a surface ─────────────
+
+/** A point on a surface (x, y in, z and the outward normal out); faces and clothes are painted on these. */
+type Surface = (x: number, y: number) => [number, number, number, number, number, number];
+
+/** The front of an ellipsoid. */
+function ellipsoid(cx: number, cy: number, cz: number, rx: number, ry: number, rz: number): Surface {
+  return (x, y) => {
+    const u = (x - cx) / rx;
+    const v = (y - cy) / ry;
+    const z = cz + rz * Math.sqrt(Math.max(1e-4, 1 - u * u - v * v));
+    const n = new Vector3((x - cx) / (rx * rx), (y - cy) / (ry * ry), (z - cz) / (rz * rz)).normalize();
+    return [x, y, z, n.x, n.y, n.z];
+  };
+}
+
+/** The front of a lathe (radius `r(y)`, squashed by `k` front to back). */
+function lathed(r: (y: number) => number, k: number): Surface {
+  return (x, y) => {
+    const R = r(y);
+    const z = k * Math.sqrt(Math.max(1e-4, R * R - x * x));
+    const n = new Vector3(x, 0, z / (k * k)).normalize();
+    return [x, y, z, n.x, n.y, n.z];
+  };
+}
+
+const I4 = new Matrix4();
+
+/** Triangles (already placed) into a builder. */
+function tris(b: Builder, pos: number[], nor: number[], color: RGB) {
+  const g = new BufferGeometry();
+  g.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute('normal', new BufferAttribute(new Float32Array(nor), 3));
+  b.add(g, color, I4);
   g.dispose();
 }
 
-/** Eyes, brows and mouth for one face. */
-function face(h: Builder, L: Look, f: Face) {
-  const ey = HEAD_Y - 0.01;
-  const ez = HEAD_R * 0.9;
-  const brow = mix(L.hair, [0, 0, 0], 0.25);
-  for (const sx of [-1, 1]) {
-    if (f === 'closed') h.box(sx * 0.085, ey - 0.008, ez + 0.006, 0.05, 0.009, 0.01, DARK_EYE);
-    else if (f === 'happy') arc(h, sx * 0.085, ey - 0.012, ez + 0.006, 0.024, 0.0075, Math.PI * 0.8, Math.PI * 0.1, DARK_EYE);
-    else {
-      // Open eyes (a touch wider when worried) with a catch-light.
-      const w = f === 'worried' ? 1.1 : 1;
-      h.ball(sx * 0.085, ey, ez, 0.026 * w, 0.038 * w, 0.02, DARK_EYE, 10, 8);
-      h.ball(sx * 0.085 + 0.009, ey + 0.015, ez + 0.013, 0.009, 0.009, 0.004, WHITE, 6, 4);
-      h.ball(sx * 0.085 - 0.007, ey - 0.012, ez + 0.012, 0.004, 0.004, 0.003, WHITE, 4, 3);
-    }
-    // Brows: relaxed, raised and up-tilted inside when worried, one cocked when curious.
-    const up = f === 'worried' ? 0.012 : f === 'curious' && sx > 0 ? 0.018 : f === 'happy' ? 0.006 : 0;
-    const tilt = f === 'worried' ? -sx * 0.35 : f === 'curious' && sx > 0 ? sx * 0.25 : -sx * 0.08;
-    h.ball(sx * 0.088, ey + 0.058 + up, ez - 0.002, 0.03, 0.008, 0.008, brow, 8, 4, new Euler(0, 0, tilt));
-    if (L.blush) h.ball(sx * 0.13, ey - 0.055, ez - 0.03, 0.03, 0.016, 0.01, mix(L.skin, lin('#ff8a7a'), f === 'happy' ? 0.6 : 0.45), 8, 4);
+/** A filled convex shape painted on a surface, `lift` above it: rings that bend with it. */
+function paint(b: Builder, s: Surface, pts: [number, number][], color: RGB, lift = 0.002, rings = 3) {
+  let area = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x0, y0] = pts[i];
+    const [x1, y1] = pts[(i + 1) % pts.length];
+    area += x0 * y1 - x1 * y0;
   }
-  const my = ey - 0.078;
-  const mz = ez + 0.004;
+  if (area < 0) pts = pts.slice().reverse();
+  let cx = 0;
+  let cy = 0;
+  for (const [x, y] of pts) {
+    cx += x / pts.length;
+    cy += y / pts.length;
+  }
+  const at = (i: number, k: number) => {
+    const [x, y] = pts[i % pts.length];
+    const f = k / rings;
+    const p = s(cx + (x - cx) * f, cy + (y - cy) * f);
+    return [p[0] + p[3] * lift, p[1] + p[4] * lift, p[2] + p[5] * lift, p[3], p[4], p[5]];
+  };
+  const pos: number[] = [];
+  const nor: number[] = [];
+  const v = (q: number[]) => {
+    pos.push(q[0], q[1], q[2]);
+    nor.push(q[3], q[4], q[5]);
+  };
+  for (let k = 0; k < rings; k++)
+    for (let i = 0; i < pts.length; i++) {
+      const a = at(i, k);
+      const c = at(i + 1, k + 1);
+      v(a), v(at(i, k + 1)), v(c);
+      if (k) v(a), v(c), v(at(i + 1, k));
+    }
+  tris(b, pos, nor, color);
+}
+
+/** An ellipse's outline points. */
+function oval(cx: number, cy: number, rx: number, ry: number, rot = 0, n = 18): [number, number][] {
+  const out: [number, number][] = [];
+  const c = Math.cos(rot);
+  const s = Math.sin(rot);
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TAU;
+    const x = Math.cos(a) * rx;
+    const y = Math.sin(a) * ry;
+    out.push([cx + x * c - y * s, cy + x * s + y * c]);
+  }
+  return out;
+}
+
+/** A stroke along a path painted on a surface (brows, smiles, lashes), tapered at both ends when `taper`. */
+function stroke(b: Builder, s: Surface, path: [number, number][], width: number, color: RGB, lift = 0.003, taper = 0) {
+  const pos: number[] = [];
+  const nor: number[] = [];
+  const side: number[][] = [];
+  for (let i = 0; i < path.length; i++) {
+    const [x0, y0] = path[Math.max(0, i - 1)];
+    const [x1, y1] = path[Math.min(path.length - 1, i + 1)];
+    const d = Math.hypot(x1 - x0, y1 - y0) || 1;
+    const t = i / (path.length - 1);
+    const w = (width / 2) * (1 - taper + taper * Math.sqrt(Math.sin(PI * t)));
+    const nx = (-(y1 - y0) / d) * w;
+    const ny = ((x1 - x0) / d) * w;
+    for (const sg of [1, -1]) {
+      const p = s(path[i][0] + nx * sg, path[i][1] + ny * sg);
+      side.push([p[0] + p[3] * lift, p[1] + p[4] * lift, p[2] + p[5] * lift, p[3], p[4], p[5]]);
+    }
+  }
+  const v = (q: number[]) => {
+    pos.push(q[0], q[1], q[2]);
+    nor.push(q[3], q[4], q[5]);
+  };
+  for (let i = 0; i < path.length - 1; i++) {
+    const [l0, r0, l1, r1] = [side[i * 2], side[i * 2 + 1], side[i * 2 + 2], side[i * 2 + 3]];
+    v(l0), v(r0), v(r1);
+    v(l0), v(r1), v(l1);
+  }
+  tris(b, pos, nor, color);
+}
+
+/** Points along y = f(x) for x in [x0, x1]. */
+function curve(x0: number, x1: number, f: (x: number, t: number) => number, n = 10): [number, number][] {
+  const out: [number, number][] = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const x = x0 + (x1 - x0) * t;
+    out.push([x, f(x, t)]);
+  }
+  return out;
+}
+
+/** A solid of revolution around y (profile [radius, y] bottom to top), squashed front to back by `k`. */
+function lathe(b: Builder, profile: [number, number][], color: RGB, k = 1, x = 0, y = 0, z = 0, seg = 28) {
+  const g = new LatheGeometry(
+    profile.map(([r, py]) => new Vector2(Math.max(1e-4, r), py)),
+    seg,
+  ).toNonIndexed();
+  b.add(g, color, new Matrix4().compose(new Vector3(x, y, z), new Quaternion(), new Vector3(1, 1, k)));
+  g.dispose();
+}
+
+/** A capsule hanging down from (x, y, z): radius r, `len` from the first cap's center to the last. */
+function limb(b: Builder, y: number, r: number, len: number, color: RGB, rEnd = r) {
+  // Tapered: a lathe of two half-circles joined by a straight side.
+  const prof: [number, number][] = [];
+  const n = 6;
+  for (let i = 0; i <= n; i++) {
+    const a = -PI / 2 + (i / n) * (PI / 2);
+    prof.push([Math.cos(a) * rEnd, y - len + Math.sin(a) * rEnd]);
+  }
+  for (let i = 0; i <= n; i++) {
+    const a = (i / n) * (PI / 2);
+    prof.push([Math.cos(a) * r, y + Math.sin(a) * r]);
+  }
+  lathe(b, prof, color, 1, 0, 0, 0, 16);
+}
+
+/** A ring (cuffs, hems, collars) lying flat at height y. */
+function ring(b: Builder, y: number, r: number, tube: number, color: RGB, k = 1, z = 0, tilt = 0) {
+  const g = new TorusGeometry(r, tube, 8, 28).toNonIndexed();
+  const m = new Matrix4().compose(new Vector3(0, y, z), new Quaternion().setFromEuler(new Euler(PI / 2 + tilt, 0, 0)), new Vector3(1, k, 1));
+  b.add(g, color, m);
+  g.dispose();
+}
+
+/** A hairline: how far down (θ, 0 the crown … π the chin) the hair reaches, all around (φ, 0 the face). */
+type Line = (phi: number) => number;
+/** θ at the front, the sides and the back, smooth in between. */
+const hairline =
+  (front: number, side: number, back: number, burns = 1): Line =>
+  (phi) => {
+    const c = Math.cos(phi);
+    // Around the ear: a sideburn in front of it, the hair lifting over it, a soft wave on the fringe.
+    const a = Math.abs(Math.atan2(Math.sin(phi), c));
+    const ear = burns * (0.1 * PI * Math.exp(-((a - 1.22) ** 2) / 0.012) - 0.05 * PI * Math.exp(-((a - 1.62) ** 2) / 0.03));
+    const wave = 0.018 * PI * Math.max(0, c) ** 3 * Math.cos(phi * 11);
+    return side + ((front - back) / 2) * c + ((front + back) / 2 - side) * c * c + Math.min(ear, 0.9 * PI - side) + wave;
+  };
+
+/**
+ * Hair as one sculpted shell over the head, down to its hairline (so there is a clean edge at the
+ * forehead, the temples and the nape), puffed out where the style has volume. The edge folds in to
+ * the scalp so it reads as a thickness, not a sheet.
+ */
+function shell(b: Builder, line: Line, t: number, color: RGB, puff: (theta: number, phi: number) => number = () => 0, w = 56, h = 16, gloss = 0.16) {
+  const cols = w + 1;
+  const rows = h + 2;
+  const pos = new Float32Array(cols * rows * 3);
+  for (let i = 0; i < cols; i++) {
+    const phi = PI + (i / w) * TAU;
+    const L = line(phi);
+    for (let j = 0; j < rows; j++) {
+      const lip = j === rows - 1;
+      const th = L * (Math.min(j, h) / h);
+      const k = lip ? 0.985 : 1 + puff(th, phi);
+      const d = lip ? 0 : t;
+      const o = (i * rows + j) * 3;
+      pos[o] = (HX + d) * k * Math.sin(th) * Math.sin(phi);
+      pos[o + 1] = HEAD_Y + (HY + d) * k * Math.cos(th);
+      pos[o + 2] = (HZ + d) * k * Math.sin(th) * Math.cos(phi);
+    }
+  }
+  const idx: number[] = [];
+  for (let i = 0; i < w; i++)
+    for (let j = 0; j < rows - 1; j++) {
+      const a = i * rows + j;
+      const c = (i + 1) * rows + j;
+      idx.push(a, a + 1, c + 1, a, c + 1, c);
+    }
+  // Shade: faint strands, a glossy band around the crown, a little darker towards the edge.
+  const shade = new Float32Array(cols * rows * 3);
+  for (let i = 0; i < cols; i++) {
+    const phi = PI + (i / w) * TAU;
+    const L = line(phi);
+    for (let j = 0; j < rows; j++) {
+      const th = L * (Math.min(j, h) / h);
+      const u = th / L;
+      const strand = 0.035 * Math.sin(phi * 26 + th * 4);
+      const sheen = gloss * Math.exp(-((th - 0.26 * PI) ** 2) / 0.012) * (0.55 + 0.45 * Math.cos(phi));
+      shade[(i * rows + j) * 3] = 1 + sheen + strand - 0.14 * u * u - (j === rows - 1 ? 0.2 : 0);
+    }
+  }
+  const g = new BufferGeometry();
+  g.setAttribute('position', new BufferAttribute(pos, 3));
+  g.setAttribute('color', new BufferAttribute(shade, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  const flat = g.toNonIndexed();
+  b.add(flat, color, I4);
+  g.dispose();
+  flat.dispose();
+}
+
+/** Bumps for curly textures (0 … 1). */
+const bumps = (th: number, phi: number, n: number) => 0.5 + 0.5 * Math.sin(th * n * 1.7) * Math.sin(phi * n);
+const smooth = (a: number, b: number, x: number) => {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+/** Lower on one side of the forehead (a side-swept fringe): `dir` +1 its left, −1 its right. */
+const sweep = (phi: number, dir: number, amt: number) => amt * Math.max(0, Math.cos(phi)) ** 2 * smooth(-0.6, 0.9, dir * Math.sin(phi));
+
+/** A cone from `at` towards `dir` (spikes, strands). */
+function spike(b: Builder, at: Vector3, dir: Vector3, len: number, r: number, color: RGB) {
+  const g = new ConeGeometry(1, 1, 8, 1).toNonIndexed();
+  const q = new Quaternion().setFromUnitVectors(new Vector3(0, 1, 0), dir.clone().normalize());
+  b.add(g, color, new Matrix4().compose(at.clone().addScaledVector(dir.clone().normalize(), len / 2), q, new Vector3(r, len, r)));
+  g.dispose();
+}
+
+/** A point on the hair shell's surface (for things that sit on it). */
+function onHead(th: number, phi: number, k: number) {
+  return new Vector3(HX * k * Math.sin(th) * Math.sin(phi), HEAD_Y + HY * k * Math.cos(th), HZ * k * Math.sin(th) * Math.cos(phi));
+}
+
+// ───────────── the face ─────────────
+
+const HEAD = ellipsoid(0, HEAD_Y, 0, HX, HY, HZ);
+/** Eyes sit a little below the middle of the head (that's what makes it cute). */
+const EYE_Y = HEAD_Y - 0.035;
+const EYE_X = 0.092;
+
+/** Eyes, brows, nose, cheeks and mouth for one face, painted on the head. */
+function face(h: Builder, L: Look, f: Face) {
+  const S = HEAD;
+  const brow = mix(L.hair, [0, 0, 0], 0.3);
+  for (const sx of [-1, 1]) {
+    const ex = sx * EYE_X;
+    if (f === 'closed') {
+      // A soft downward lid line.
+      stroke(h, S, curve(ex - 0.03, ex + 0.03, (_x, t) => EYE_Y - 0.006 - 0.012 * Math.sin(PI * t)), 0.011, DARK_EYE, 0.003, 0.6);
+    } else if (f === 'happy') {
+      // ^ ^
+      stroke(h, S, curve(ex - 0.032, ex + 0.032, (_x, t) => EYE_Y - 0.012 + 0.024 * Math.sin(PI * t)), 0.012, DARK_EYE, 0.003, 0.6);
+    } else {
+      // Big glossy eyes: dark, a warm iris low in the eye, two catch-lights (both up and to the
+      // viewer's right, one light).
+      const w = f === 'worried' ? 1.08 : 1;
+      paint(h, S, oval(ex, EYE_Y, 0.031 * w, 0.044 * w), DARK_EYE, 0.002);
+      paint(h, S, oval(ex, EYE_Y - 0.015 * w, 0.023 * w, 0.024 * w), L.eye, 0.0032);
+      paint(h, S, oval(ex + 0.011, EYE_Y + 0.016 * w, 0.0115, 0.013, 0.3, 12), WHITE, 0.0045);
+      paint(h, S, oval(ex - 0.01, EYE_Y - 0.021 * w, 0.0055, 0.0055, 0, 10), WHITE, 0.0045);
+      if (L.lashes) stroke(h, S, curve(ex + sx * 0.022, ex + sx * 0.044, (_x, t) => EYE_Y + 0.03 + 0.016 * t * t), 0.009, DARK_EYE, 0.003, 0.5);
+    }
+    // Brows: arcs in a darker hair color; raised and tilted up inside when worried, one cocked when curious.
+    const up = f === 'worried' ? 0.014 : f === 'curious' && sx > 0 ? 0.02 : f === 'happy' ? 0.008 : 0;
+    const tilt = f === 'worried' ? 0.016 : f === 'curious' && sx > 0 ? -0.01 : -0.003;
+    stroke(h, S, curve(ex - 0.03, ex + 0.03, (x, t) => EYE_Y + 0.066 + up + 0.008 * Math.sin(PI * t) + tilt * (1 - (sx * (x - ex)) / 0.03) * 0.5), 0.013, brow, 0.003, 0.7);
+    // Cheeks.
+    if (L.blush) paint(h, S, oval(sx * 0.158, EYE_Y - 0.058, 0.036, 0.02), mix(L.skin, lin('#ff7f73'), f === 'happy' ? 0.55 : 0.4), 0.0015);
+  }
+  // A little button nose.
+  const n = S(0, EYE_Y - 0.035);
+  h.ball(n[0], n[1], n[2] - 0.004, 0.018, 0.013, 0.014, mix(L.skin, lin('#c0705a'), 0.18), 10, 8);
+  const my = EYE_Y - 0.075;
   if (f === 'happy') {
-    // An open grin: a dark half-moon with a lip line.
+    // An open grin with a tongue.
     const pts: [number, number][] = [];
-    for (let i = 0; i <= 10; i++) pts.push([Math.cos(Math.PI + (i / 10) * Math.PI) * 0.034, my + 0.008 + Math.sin(Math.PI + (i / 10) * Math.PI) * 0.026]);
-    h.poly(pts, mz + 0.006, MOUTH);
-  } else if (f === 'worried') arc(h, 0, my - 0.016, mz, 0.02, 0.006, Math.PI * 0.6, Math.PI * 0.2, MOUTH);
-  else if (f === 'curious') h.ball(0.01, my - 0.002, mz, 0.011, 0.013, 0.008, MOUTH, 8, 6);
-  else arc(h, 0, my + 0.012, mz, 0.022, 0.006, Math.PI * 0.55, Math.PI * 1.225, MOUTH);
+    for (let i = 0; i <= 12; i++) {
+      const a = PI + (i / 12) * PI;
+      pts.push([Math.cos(a) * 0.034, my + 0.008 + Math.sin(a) * 0.028]);
+    }
+    paint(h, S, pts, MOUTH, 0.0025);
+    paint(h, S, oval(0, my - 0.011, 0.017, 0.008), TONGUE, 0.0035);
+  } else if (f === 'worried') stroke(h, S, curve(-0.018, 0.018, (_x, t) => my - 0.004 + 0.009 * Math.sin(PI * t)), 0.008, MOUTH, 0.003, 0.5);
+  else if (f === 'curious') paint(h, S, oval(0.008, my, 0.011, 0.013), MOUTH, 0.0025);
+  else stroke(h, S, curve(-0.022, 0.022, (_x, t) => my + 0.004 - 0.01 * Math.sin(PI * t)), 0.0085, MOUTH, 0.003, 0.5);
 }
 
 function badgeGlyph(b: Builder, provider: Provider, z: number, fg: RGB) {
-  const s = 0.026;
+  const s = 0.024;
   const star = (n: number, r0: number, r1: number, rot = 0) => {
     const pts: [number, number][] = [];
     for (let i = 0; i < n * 2; i++) {
-      const a = rot + (i / (n * 2)) * Math.PI * 2;
+      const a = rot + (i / (n * 2)) * TAU;
       const rr = i % 2 ? r1 : r0;
       pts.push([Math.cos(a) * rr, Math.sin(a) * rr]);
     }
@@ -217,14 +500,14 @@ function badgeGlyph(b: Builder, provider: Provider, z: number, fg: RGB) {
   };
   switch (provider) {
     case 'claude':
-      star(8, s, s * 0.35, Math.PI / 2);
+      star(8, s, s * 0.35, PI / 2);
       break;
     case 'gemini':
-      star(4, s * 1.05, s * 0.28, Math.PI / 2);
+      star(4, s * 1.05, s * 0.28, PI / 2);
       break;
     case 'codex': {
       const pts: [number, number][] = [];
-      for (let i = 0; i < 6; i++) pts.push([Math.cos((i / 6) * Math.PI * 2 + Math.PI / 6) * s, Math.sin((i / 6) * Math.PI * 2 + Math.PI / 6) * s]);
+      for (let i = 0; i < 6; i++) pts.push([Math.cos((i / 6) * TAU + PI / 6) * s, Math.sin((i / 6) * TAU + PI / 6) * s]);
       b.poly(pts, z, fg);
       break;
     }
@@ -252,89 +535,156 @@ function badgeGlyph(b: Builder, provider: Provider, z: number, fg: RGB) {
       );
       break;
     default:
-      star(5, s, s * 0.45, Math.PI / 2);
+      star(5, s, s * 0.45, PI / 2);
   }
 }
+
+// ───────────── the body ─────────────
+
+/** The top's profile [radius, y] (body-local, hips at 0): a soft chest, narrow shoulders under the head. */
+const TOP: [number, number][] = [
+  [0.0, 0.03],
+  [0.168, 0.03],
+  [0.175, 0.05],
+  [0.17, 0.1],
+  [0.164, 0.155],
+  [0.168, 0.21],
+  [0.163, 0.255],
+  [0.148, 0.292],
+  [0.118, 0.32],
+  [0.075, 0.338],
+  [0.0, 0.345],
+];
+const PANTS_P: [number, number][] = [
+  [0.0, -0.105],
+  [0.11, -0.1],
+  [0.15, -0.082],
+  [0.163, -0.04],
+  [0.165, 0.02],
+  [0.16, 0.06],
+  [0.0, 0.06],
+];
+/** Front to back, the body is a little flatter than wide. */
+const K = 0.86;
+const topR = (y: number) => {
+  for (let i = 1; i < TOP.length; i++)
+    if (y <= TOP[i][1]) {
+      const [r0, y0] = TOP[i - 1];
+      const [r1, y1] = TOP[i];
+      return r0 + ((r1 - r0) * (y - y0)) / (y1 - y0);
+    }
+  return 0;
+};
+const CHEST = lathed(topR, K);
 
 /** The merged meshes of one character (in rig-local coordinates). */
 function buildParts(look: Look) {
   const L = look;
   const torso = new Builder();
-  const top = L.role === 'lead' ? L.shirt : L.role === 'reviewer' ? L.shirt : L.shirt;
-  // Pants (hips) and the torso.
-  torso.cyl(0, -0.02, 0, 0.165, 0.11, L.pants, 22, 0.16);
-  torso.cyl(0, 0.07, 0, 0.165, 0.2, top, 22, 0.15);
-  torso.ball(0, 0.265, 0, 0.165, 0.075, 0.15, top, 22, 14);
-  // A belt between the pants and the top (under a blazer it doesn't show).
-  if (L.role !== 'lead') torso.cyl(0, 0.062, 0, 0.168, 0.022, mix(L.pants, [0, 0, 0], 0.35), 22);
+  const top = L.shirt;
+  const trim = L.shirtDark;
+  lathe(torso, PANTS_P, L.pants, K);
+  // A tee hangs loose over the pants; a blazer and a cardigan are a touch longer.
+  lathe(torso, L.role === 'lead' || L.role === 'reviewer' ? TOP.map(([r, y], i) => [r, i < 2 ? y - 0.035 : y] as [number, number]) : TOP, top, K);
   if (L.role === 'lead') {
-    // Blazer lapels over a white shirt and a dark tie.
-    torso.poly(
-      [
-        [0, 0.12],
-        [0.07, 0.3],
-        [-0.07, 0.3],
-      ],
-      0.164,
-      lin('#f6f2ea'),
-    );
-    torso.poly(
-      [
-        [-0.012, 0.15],
-        [0, 0.13],
-        [0.012, 0.15],
-        [0.018, 0.27],
-        [-0.018, 0.27],
-      ],
-      0.166,
-      lin('#2e2a33'),
-    );
-    torso.box(0, 0.075, 0.163, 0.012, 0.11, 0.004, L.shirtDark);
-    torso.ball(0.105, 0.2, 0.135, 0.022, 0.012, 0.01, lin('#f6f2ea'), 6, 4);
+    // Blazer: a white shirt in a V, a dark tie, lapels, two buttons and a pocket square.
+    paint(torso, CHEST, [
+      [0, 0.15],
+      [0.068, 0.33],
+      [-0.068, 0.33],
+    ], CREAM, 0.002);
+    paint(torso, CHEST, [
+      [0, 0.16],
+      [0.016, 0.26],
+      [0.01, 0.3],
+      [-0.01, 0.3],
+      [-0.016, 0.26],
+    ], lin('#2a2631'), 0.0035);
+    for (const sx of [-1, 1]) {
+      paint(torso, CHEST, [
+        [sx * 0.004, 0.14],
+        [sx * 0.07, 0.336],
+        [sx * 0.1, 0.318],
+        [sx * 0.082, 0.27],
+        [sx * 0.098, 0.255],
+        [sx * 0.036, 0.15],
+      ], trim, 0.004);
+    }
+    for (const y of [0.1, 0.05]) paint(torso, CHEST, oval(0, y, 0.011, 0.011, 0, 10), mix(trim, [0, 0, 0], 0.35), 0.003);
+    paint(torso, CHEST, [
+      [-0.12, 0.2],
+      [-0.07, 0.2],
+      [-0.075, 0.225],
+      [-0.1, 0.235],
+      [-0.115, 0.225],
+    ], CREAM, 0.003);
   } else if (L.role === 'reviewer') {
-    // Cardigan: a white collar, buttons down the front.
-    torso.ball(0, 0.3, 0.02, 0.1, 0.035, 0.11, lin('#f6f2ea'), 10, 6);
-    for (let i = 0; i < 3; i++) torso.ball(0, 0.22 - i * 0.06, 0.164, 0.011, 0.011, 0.006, lin('#efe6d4'), 6, 4);
-    torso.box(0, 0.12, 0.162, 0.006, 0.26, 0.004, L.shirtDark);
+    // Cardigan: a shirt collar, a placket and buttons down the front.
+    for (const sx of [-1, 1])
+      paint(torso, CHEST, [
+        [0, 0.31],
+        [sx * 0.085, 0.335],
+        [sx * 0.06, 0.27],
+      ], CREAM, 0.004);
+    stroke(torso, CHEST, [
+      [0, 0.3],
+      [0, 0.0],
+    ], 0.016, trim, 0.002);
+    for (let i = 0; i < 4; i++) paint(torso, CHEST, oval(0, 0.255 - i * 0.065, 0.01, 0.01, 0, 10), CREAM, 0.0045);
+    ring(torso, 0.0, 0.17, 0.014, trim, K);
   } else if (L.accessory === 'hood') {
-    torso.ball(0, 0.3, -0.11, 0.12, 0.07, 0.07, L.shirtDark, 12, 8);
-    torso.box(-0.035, 0.18, 0.161, 0.008, 0.1, 0.006, lin('#f1ede6'));
-    torso.box(0.035, 0.18, 0.161, 0.008, 0.1, 0.006, lin('#f1ede6'));
-    // Ribbed hem and a front pocket.
-    torso.cyl(0, 0.07, 0, 0.168, 0.03, L.shirtDark, 22);
-    torso.box(0, 0.13, 0.163, 0.14, 0.06, 0.006, L.shirtDark);
+    // Hoodie: the hood bunched behind the neck, drawstrings, a kangaroo pocket, a ribbed hem.
+    ring(torso, 0.3, 0.115, 0.05, trim, 1, -0.045, -0.5);
+    for (const sx of [-1, 1]) {
+      stroke(torso, CHEST, [
+        [sx * 0.035, 0.305],
+        [sx * 0.04, 0.2],
+      ], 0.01, CREAM, 0.004);
+      const tip = CHEST(sx * 0.04, 0.195);
+      torso.ball(tip[0], tip[1], tip[2] + 0.005, 0.011, 0.014, 0.011, CREAM, 8, 6);
+    }
+    paint(torso, CHEST, [
+      [-0.095, 0.055],
+      [0.095, 0.055],
+      [0.1, 0.075],
+      [0.075, 0.14],
+      [-0.075, 0.14],
+      [-0.1, 0.075],
+    ], mix(top, trim, 0.45), 0.012);
+    ring(torso, 0.045, 0.172, 0.018, trim, K);
   } else {
-    // A tee: crew collar, a hem band and a little chest pocket on the right.
-    torso.ball(0, 0.305, 0.02, 0.075, 0.025, 0.1, L.shirtDark, 12, 6);
-    torso.cyl(0, 0.07, 0, 0.167, 0.02, L.shirtDark, 22);
-    torso.box(-0.075, 0.2, 0.149, 0.05, 0.05, 0.004, L.shirtDark);
+    // Tee: a crew collar and a hem.
+    ring(torso, 0.33, 0.085, 0.017, trim, K);
+    ring(torso, 0.04, 0.173, 0.012, trim, K);
   }
   if (L.intern) {
-    // A tiny backpack.
-    torso.box(0, 0.15, -0.17, 0.2, 0.2, 0.08, lin('#e0a458'));
+    // A tiny backpack with straps.
+    torso.ball(0, 0.16, -0.17, 0.12, 0.13, 0.07, lin('#e0a458'), 16, 12);
+    torso.ball(0, 0.11, -0.225, 0.08, 0.05, 0.03, lin('#c98b40'), 12, 8);
+    for (const sx of [-1, 1]) stroke(torso, CHEST, [[sx * 0.09, 0.3], [sx * 0.1, 0.12]], 0.022, lin('#c98b40'), 0.004);
   }
-  // Provider badge on the left chest.
+  // Provider pin on the left chest.
   const pv = PROVIDER[L.provider] ?? PROVIDER.claude;
-  const bx = 0.075;
-  const by = 0.205;
-  const bz = 0.143;
+  const bx = 0.078;
+  const by = 0.21;
+  const at = CHEST(bx, by);
+  const rot = Math.atan2(at[3], at[5]);
   const badge = new Builder();
-  badge.frame(bx, by, bz, 0);
-  const disc: [number, number][] = [];
-  for (let i = 0; i < 16; i++) disc.push([Math.cos((i / 16) * Math.PI * 2) * 0.042, Math.sin((i / 16) * Math.PI * 2) * 0.042]);
-  badge.poly(disc, 0, lin(pv.bg));
-  badgeGlyph(badge, L.provider, 0.002, lin(pv.fg));
-  const ring: [number, number][] = [];
-  for (let i = 0; i < 16; i++) ring.push([Math.cos((i / 16) * Math.PI * 2) * 0.05, Math.sin((i / 16) * Math.PI * 2) * 0.05]);
-  torso.frame(bx, by, bz - 0.002, 0).poly(ring, 0, lin('#fbf8f1')).frame();
+  badge.frame(at[0] + at[3] * 0.008, by, at[2] + at[5] * 0.008, rot);
+  badge.poly(oval(0, 0, 0.038, 0.038, 0, 20), 0, lin(pv.bg));
+  badgeGlyph(badge, L.provider, 0.001, lin(pv.fg));
+  torso.frame(at[0] + at[3] * 0.005, by, at[2] + at[5] * 0.005, rot).poly(oval(0, 0, 0.046, 0.046, 0, 20), 0, CREAM).frame();
 
   // Head, once per face (gfx swaps the geometry: a blink, a grin, a worried look).
   const heads = FACES.map((f) => {
     const h = new Builder();
-    h.ball(0, HEAD_Y, 0, HEAD_R, HEAD_R * 0.96, HEAD_R * 0.94, L.skin, 28, 20);
-    h.ball(0, 0.02, 0, 0.055, 0.05, 0.055, L.skin, 12, 8);
+    h.ball(0, HEAD_Y, 0, HX, HY, HZ, L.skin, 32, 24);
+    h.ball(0, 0.03, -0.005, 0.06, 0.06, 0.055, L.skin, 12, 8);
     // Ears.
-    for (const sx of [-1, 1]) h.ball(sx * HEAD_R * 0.97, HEAD_Y - 0.01, -0.01, 0.035, 0.05, 0.03, mix(L.skin, [0, 0, 0], 0.06), 10, 8);
+    for (const sx of [-1, 1]) {
+      h.ball(sx * HX * 0.96, EYE_Y, -0.015, 0.032, 0.046, 0.03, mix(L.skin, [0, 0, 0], 0.04), 12, 8);
+      h.ball(sx * (HX * 0.96 + 0.012), EYE_Y, -0.01, 0.014, 0.026, 0.016, mix(L.skin, lin('#b0604c'), 0.2), 8, 6);
+    }
     face(h, L, f);
     // Big styles (bun, spikes, curls, quiff, afro, swept top) tuck under an intern's cap.
     hair(h, L.intern && [2, 3, 6, 8, 9, 10].includes(L.style) ? { ...L, style: 0 } : L);
@@ -344,38 +694,38 @@ function buildParts(look: Look) {
     return h.build();
   });
 
-  // Arms: upper (sleeve) and forearm (skin + hand), hanging down from their pivots.
-  const sleeve = L.role === 'lead' || L.role === 'reviewer' ? L.shirt : L.shirt;
-  const upper = new Builder();
-  upper.cyl(0, -UPPER - 0.01, 0, 0.052, UPPER + 0.03, sleeve, 14, 0.06);
-  upper.ball(0, 0, 0, 0.062, 0.06, 0.062, sleeve, 14, 8);
-  const fore = new Builder();
+  // Arms: upper (sleeve) and forearm (skin or sleeve), hanging down from their pivots.
   const longSleeve = L.role === 'lead' || L.role === 'reviewer' || L.accessory === 'hood';
+  const upper = new Builder();
+  const fore = new Builder();
   if (longSleeve) {
-    fore.cyl(0, -FORE + 0.03, 0, 0.044, FORE - 0.02, sleeve, 14, 0.05);
-    fore.cyl(0, -FORE + 0.02, 0, 0.047, 0.03, L.role === 'lead' ? lin('#f6f2ea') : L.shirtDark, 14);
+    limb(upper, 0, 0.058, UPPER, top, 0.052);
+    limb(fore, 0, 0.05, FORE - 0.02, top, 0.046);
+    ring(fore, -FORE + 0.03, 0.044, 0.012, L.role === 'lead' ? CREAM : trim);
   } else {
-    fore.cyl(0, -FORE + 0.02, 0, 0.038, FORE - 0.01, L.skin, 14, 0.042);
-    // The short sleeve's trim.
-    upper.cyl(0, -UPPER - 0.012, 0, 0.055, 0.022, L.shirtDark, 14);
+    // A short sleeve, then the bare arm.
+    limb(upper, 0, 0.06, 0.07, top, 0.062);
+    ring(upper, -0.085, 0.056, 0.012, trim);
+    limb(upper, -0.06, 0.04, UPPER - 0.06, L.skin, 0.038);
+    limb(fore, 0, 0.039, FORE - 0.02, L.skin, 0.035);
   }
-  // The hand hangs at the wrist, so it can bend (a pad, a cue, a rod handle).
+  // The hand hangs at the wrist, so it can bend (a pad, a cue, a rod handle): a mitten and a thumb.
   const hand = new Builder();
-  hand.ball(0, -0.005, 0.005, 0.05, 0.052, 0.045, L.skin, 14, 10);
-  // A thumb, so it reads as a hand and not a ball.
-  hand.ball(0.006, 0.002, 0.04, 0.018, 0.026, 0.016, L.skin, 8, 6);
+  hand.ball(0, -0.012, 0.004, 0.044, 0.05, 0.036, L.skin, 14, 10);
+  hand.ball(0.006, -0.004, 0.034, 0.016, 0.026, 0.015, L.skin, 8, 6, new Euler(0.3, 0, 0));
 
   // Legs: thigh and shin (the knee bends) and the shoe at the ankle.
   const thigh = new Builder();
-  thigh.cyl(0, -THIGH, 0, 0.062, THIGH + 0.01, L.pants, 14, 0.07);
+  limb(thigh, 0, 0.07, THIGH, L.pants, 0.062);
   const shin = new Builder();
-  shin.cyl(0, -SHIN, 0, 0.056, SHIN + 0.01, L.pants, 14, 0.062);
-  shin.ball(0, 0, 0, 0.062, 0.05, 0.062, L.pants, 14, 8);
+  limb(shin, 0, 0.062, SHIN - 0.01, L.pants, 0.058);
+  ring(shin, -SHIN + 0.035, 0.058, 0.01, mix(L.pants, [0, 0, 0], 0.25));
   const shoe = new Builder();
-  shoe.ball(0, 0.008, 0.03, 0.065, 0.04, 0.095, L.shoes, 14, 8);
-  // A sole in contrast (light under dark shoes, dark under light ones).
   const light = L.shoes[0] + L.shoes[1] + L.shoes[2] > 1.2;
-  shoe.ball(0, -0.012, 0.032, 0.068, 0.016, 0.098, lin(light ? '#6b625a' : '#ece6dc'), 14, 6);
+  shoe.ball(0, 0.012, 0.028, 0.064, 0.05, 0.098, L.shoes, 18, 12);
+  shoe.ball(0, 0.035, 0.07, 0.04, 0.02, 0.045, mix(L.shoes, light ? [0, 0, 0] : [1, 1, 1], 0.18), 10, 6);
+  // A sole in contrast (light under dark shoes, dark under light ones).
+  shoe.ball(0, -0.016, 0.03, 0.069, 0.02, 0.104, lin(light ? '#6b625a' : '#ece6dc'), 18, 6);
   return {
     torso: torso.build(),
     badge: badge.build(),
@@ -389,110 +739,123 @@ function buildParts(look: Look) {
   };
 }
 
+/** How high the hair rises over the crown (headphones and caps sit on it). */
+function hairTop(style: number) {
+  return style === 9 ? 0.11 : style === 6 ? 0.05 : style === 7 ? 0.01 : 0.03;
+}
+
 function hair(h: Builder, L: Look) {
   const c = L.hair;
-  const style = L.style;
-  if (style === 7 || style === 10) {
-    // Buzz cut; the undercut adds a long top swept to one side.
-    h.ball(0, HEAD_Y + 0.025, -0.02, HEAD_R + 0.008, HEAD_R * 0.9, HEAD_R * 0.92, style === 10 ? mix(c, [0, 0, 0], 0.18) : c, 24, 14);
-    if (style === 10) {
-      h.ball(0.03, HEAD_Y + 0.17, 0.0, 0.2, 0.09, 0.24, c, 20, 12, new Euler(0.15, 0, -0.18));
-      h.ball(0.1, HEAD_Y + 0.15, 0.17, 0.11, 0.06, 0.08, c, 14, 8);
+  const darker = mix(c, [0, 0, 0], 0.22);
+  const crown = (th: number, amt: number) => amt * Math.max(0, Math.cos(th)) ** 2;
+  switch (L.style) {
+    case 0: // short, swept to one side
+      shell(h, (p) => hairline(0.33 * PI, 0.5 * PI, 0.76 * PI)(p) + sweep(p, 1, 0.13 * PI), 0.024, c, (th) => crown(th, 0.07));
+      break;
+    case 1: // bob with straight bangs, flaring out at the bottom
+      shell(h, hairline(0.4 * PI, 0.78 * PI, 0.8 * PI), 0.026, c, (th, p) => crown(th, 0.06) + 0.11 * smooth(0.45 * PI, 0.8 * PI, th) * (1 - Math.max(0, Math.cos(p)) ** 6));
+      break;
+    case 2: // bun, the hair pulled back
+      shell(h, hairline(0.3 * PI, 0.52 * PI, 0.78 * PI), 0.018, c, (th) => crown(th, 0.03));
+      h.ball(0, HEAD_Y + 0.235, -0.12, 0.105, 0.1, 0.1, c, 16, 12);
+      ring(h, HEAD_Y + 0.17, 0.06, 0.016, darker, 1, -0.09, 0.6);
+      break;
+    case 3: {
+      // spiky
+      shell(h, (p) => hairline(0.34 * PI, 0.5 * PI, 0.74 * PI)(p) + 0.05 * PI * Math.max(0, Math.cos(p)) ** 2 * (0.5 + 0.5 * Math.cos(p * 9)), 0.024, c, (th) => crown(th, 0.05));
+      for (const [th, p] of [
+        [0.05, 0],
+        [0.22, 0.25],
+        [0.22, -0.3],
+        [0.24, 0.95],
+        [0.24, -1],
+        [0.28, 1.7],
+        [0.28, -1.75],
+        [0.3, 2.5],
+        [0.3, -2.5],
+        [0.25, PI],
+        [0.14, 0.9 + PI / 2],
+        [0.14, -0.9 - PI / 2],
+      ] as const) {
+        const at = onHead(th * PI, p, 1.03);
+        const dir = at.clone().sub(new Vector3(0, HEAD_Y - 0.05, 0.02)).normalize();
+        dir.y += 0.25;
+        spike(h, at, dir, 0.14, 0.055, c);
+      }
+      break;
     }
-    return;
-  }
-  if (style === 9) {
-    // Afro: one big soft volume, set back and up so the face stays clear.
-    h.ball(0, HEAD_Y + 0.12, -0.06, HEAD_R + 0.065, HEAD_R + 0.03, HEAD_R + 0.04, c, 24, 16);
-    return;
-  }
-  // The cap of hair sits a little back and up, so the face stays clear.
-  h.ball(0, HEAD_Y + 0.05, -0.035, HEAD_R + 0.018, HEAD_R * 0.93, HEAD_R + 0.008, c, 24, 14);
-  if (style === 8) {
-    // Quiff: the front swept up and back.
-    h.ball(0, HEAD_Y + 0.21, 0.09, 0.19, 0.11, 0.16, c, 18, 12, new Euler(-0.4, 0, 0));
-    return;
-  }
-  if (style !== 6) {
-    // Fringe.
-    const side = style % 2 ? 1 : -1;
-    h.ball(side * 0.05, HEAD_Y + 0.13, 0.15, 0.17, 0.07, 0.085, c, 16, 10);
-    h.ball(-side * 0.1, HEAD_Y + 0.12, 0.13, 0.1, 0.06, 0.07, c, 14, 8);
-  }
-  switch (style) {
-    case 1: // bob
-      for (const sx of [-1, 1]) h.ball(sx * 0.19, HEAD_Y - 0.03, -0.03, 0.09, 0.17, 0.16, c, 14, 10);
+    case 4: // long, past the shoulders
+      shell(h, (p) => hairline(0.34 * PI, 0.72 * PI, 0.85 * PI)(p) + sweep(p, -1, 0.1 * PI), 0.024, c, (th, p) => crown(th, 0.05) + 0.05 * smooth(0.5 * PI, 0.8 * PI, th) * (1 - Math.max(0, Math.cos(p)) ** 4));
+      h.ball(0, HEAD_Y - 0.2, -0.13, 0.25, 0.3, 0.13, c, 20, 14, new Euler(0.18, 0, 0));
+      for (const sx of [-1, 1]) h.ball(sx * 0.21, HEAD_Y - 0.17, -0.05, 0.075, 0.21, 0.09, c, 14, 10, new Euler(0.1, 0, sx * 0.12));
       break;
-    case 2: // bun
-      h.ball(0, HEAD_Y + 0.26, -0.1, 0.095, 0.09, 0.095, c, 14, 10);
+    case 5: {
+      // ponytail
+      shell(h, hairline(0.3 * PI, 0.52 * PI, 0.78 * PI), 0.018, c, (th) => crown(th, 0.03));
+      ring(h, HEAD_Y + 0.07, 0.04, 0.017, darker, 1, -HZ - 0.005, -1.2);
+      h.ball(0, HEAD_Y - 0.03, -HZ - 0.065, 0.07, 0.16, 0.07, c, 16, 12, new Euler(0.45, 0, 0));
+      h.ball(0, HEAD_Y - 0.17, -HZ - 0.09, 0.05, 0.09, 0.05, c, 12, 8, new Euler(0.15, 0, 0));
       break;
-    case 3: // spiky
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI * 2;
-        h.cyl(Math.cos(a) * 0.1, HEAD_Y + 0.18, Math.sin(a) * 0.1 - 0.03, 0.06, 0.13, c, 5, 0.01);
-      }
-      break;
-    case 4: // long
-      for (const sx of [-1, 1]) h.ball(sx * 0.18, HEAD_Y - 0.08, -0.06, 0.09, 0.22, 0.15, c, 14, 10);
-      h.ball(0, HEAD_Y - 0.12, -0.15, 0.2, 0.24, 0.11, c, 16, 10);
-      break;
-    case 5: // ponytail
-      h.ball(0, HEAD_Y + 0.06, -0.26, 0.07, 0.07, 0.07, c, 14, 10);
-      h.ball(0, HEAD_Y - 0.08, -0.3, 0.06, 0.15, 0.06, c, 14, 10);
-      break;
+    }
     case 6: // curls
-      for (let i = 0; i < 12; i++) {
-        const a = (i / 12) * Math.PI * 2;
-        const y = HEAD_Y + 0.1 + (i % 3) * 0.05;
-        h.ball(Math.cos(a) * 0.19, y, Math.sin(a) * 0.17 - 0.03, 0.09, 0.09, 0.09, c, 10, 8);
-      }
-      h.ball(0, HEAD_Y + 0.24, -0.02, 0.15, 0.08, 0.14, c, 12, 8);
+      shell(h, hairline(0.34 * PI, 0.56 * PI, 0.82 * PI), 0.03, c, (th, p) => 0.05 + crown(th, 0.08) + 0.05 * bumps(th, p, 7), 64, 20);
+      break;
+    case 7: // buzz cut
+      shell(h, hairline(0.3 * PI, 0.47 * PI, 0.74 * PI), 0.007, mix(c, L.skin, 0.12));
+      break;
+    case 8: // quiff: short sides, the front swept up and back in a wave
+      shell(h, hairline(0.29 * PI, 0.47 * PI, 0.74 * PI), 0.014, c, (th, p) => 0.3 * Math.exp(-((th - 0.22 * PI) ** 2) / 0.022) * Math.max(0, Math.cos(p)) ** 2 + crown(th, 0.07), 64, 20);
+      break;
+    case 9: // afro
+      shell(h, hairline(0.31 * PI, 0.5 * PI, 0.8 * PI), 0.03, c, (th, p) => 0.22 + 0.14 * Math.max(0, Math.cos(th)) + 0.045 * bumps(th, p, 11), 72, 24, 0.08);
+      break;
+    case 10: // undercut: buzzed sides, a long top swept up and over to one side
+      shell(h, hairline(0.3 * PI, 0.47 * PI, 0.74 * PI), 0.007, mix(darker, L.skin, 0.25), () => 0, 56, 16, 0);
+      shell(h, (p) => hairline(0.28 * PI, 0.36 * PI, 0.5 * PI)(p) + sweep(p, 1, 0.1 * PI), 0.03, c, (th, p) => 0.16 * Math.max(0, Math.cos(th)) ** 2 * (1 + 0.5 * Math.max(0, Math.cos(p))) + 0.05 * Math.max(0, Math.sin(p)), 64, 18);
       break;
   }
 }
 
 function glasses(h: Builder) {
   const frame = lin('#3a2a24');
-  const tor = new TorusGeometry(0.048, 0.008, 6, 16);
-  const g = tor.toNonIndexed();
+  const tor = new TorusGeometry(0.05, 0.0075, 6, 22).toNonIndexed();
   for (const sx of [-1, 1]) {
-    const m = new Object3D();
-    m.position.set(sx * 0.085, HEAD_Y - 0.01, HEAD_R * 0.93);
-    m.updateMatrix();
-    h.add(g, frame, m.matrix);
+    const p = HEAD(sx * EYE_X, EYE_Y);
+    const m = new Matrix4().compose(
+      new Vector3(p[0] + p[3] * 0.022, p[1] + p[4] * 0.022, p[2] + p[5] * 0.022),
+      new Quaternion().setFromUnitVectors(new Vector3(0, 0, 1), new Vector3(p[3], 0, p[5]).normalize()),
+      new Vector3(1, 0.9, 1),
+    );
+    h.add(tor, frame, m);
+    // The temple arm back to the ear.
+    h.rod(new Vector3(sx * (EYE_X + 0.048), EYE_Y + 0.01, p[2] + 0.005), new Vector3(sx * HX * 0.98, EYE_Y + 0.01, -0.02), 0.006, frame, 6);
   }
-  h.box(0, HEAD_Y, HEAD_R * 0.95, 0.06, 0.008, 0.008, frame);
+  const mid = HEAD(0, EYE_Y + 0.008);
+  h.box(0, EYE_Y + 0.008, mid[2] + 0.02, 0.05, 0.008, 0.008, frame);
   tor.dispose();
-  g.dispose();
 }
 
 function headphones(h: Builder, L: Look) {
   const band = lin('#2f3138');
-  const tor = new TorusGeometry(HEAD_R + 0.03, 0.016, 6, 20, Math.PI);
-  const g = tor.toNonIndexed();
-  const m = new Object3D();
-  m.position.set(0, HEAD_Y, -0.01);
-  m.updateMatrix();
-  h.add(g, band, m.matrix);
-  for (const sx of [-1, 1]) h.cyl(sx * (HEAD_R + 0.005), HEAD_Y - 0.06, -0.01, 0.06, 0.05, sx < 0 ? L.shirtDark : band, 12);
+  const R = HX + hairTop(L.style) + 0.035;
+  const tor = new TorusGeometry(R, 0.017, 8, 28, PI).toNonIndexed();
+  h.add(tor, band, new Matrix4().makeTranslation(0, EYE_Y + 0.01, -0.015));
   tor.dispose();
-  g.dispose();
+  for (const sx of [-1, 1]) {
+    h.ball(sx * (R - 0.005), EYE_Y, -0.015, 0.035, 0.066, 0.062, band, 14, 10);
+    h.ball(sx * (R + 0.022), EYE_Y, -0.015, 0.012, 0.048, 0.045, sx < 0 ? L.shirt : L.shirtDark, 12, 8);
+  }
 }
 
 function cap(h: Builder, L: Look) {
-  // A dome over the hair (tipped back a little) and a brim over the forehead.
-  const dome = new SphereGeometry(1, 22, 8, 0, Math.PI * 2, 0, Math.PI / 2);
-  const g = dome.toNonIndexed();
-  const m = new Object3D();
-  m.position.set(0, HEAD_Y + 0.07, -0.015);
-  m.rotation.x = -0.12;
-  m.scale.set(HEAD_R + 0.035, HEAD_R * 0.82, HEAD_R + 0.035);
-  m.updateMatrix();
-  h.add(g, L.shirt, m.matrix);
+  // A dome over the hair (tipped back a little), a band and a brim over the forehead.
+  const dome = new SphereGeometry(1, 28, 10, 0, TAU, 0, PI / 2).toNonIndexed();
+  const m = new Matrix4().compose(new Vector3(0, HEAD_Y + 0.06, -0.01), new Quaternion().setFromEuler(new Euler(-0.12, 0, 0)), new Vector3(HX + 0.04, HY * 0.85, HZ + 0.04));
+  h.add(dome, L.shirt, m);
   dome.dispose();
-  g.dispose();
-  h.cyl(0, HEAD_Y + 0.055, -0.015, HEAD_R + 0.038, 0.03, L.shirtDark, 22);
-  h.ball(0, HEAD_Y + 0.075, HEAD_R + 0.03, 0.15, 0.014, 0.1, L.shirtDark, 16, 6, new Euler(0.12, 0, 0));
+  ring(h, HEAD_Y + 0.07, HX + 0.03, 0.016, L.shirtDark, (HZ + 0.03) / (HX + 0.03), -0.01, -0.12);
+  h.ball(0, HEAD_Y + 0.085, HZ + 0.05, 0.16, 0.014, 0.11, L.shirtDark, 18, 6, new Euler(0.14, 0, 0));
+  h.ball(0, HEAD_Y + 0.28, -0.04, 0.025, 0.014, 0.025, L.shirtDark, 8, 4);
 }
 
 // ───────────── shared props ─────────────

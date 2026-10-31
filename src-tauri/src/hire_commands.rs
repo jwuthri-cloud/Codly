@@ -3,7 +3,7 @@
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
-use codly_core::model::{Agent, Applicant, Digest, ModelOffer, Placed, Rank, Shop, Wallet};
+use codly_core::model::{Agent, Applicant, Digest, Lot, ModelOffer, Placed, Rank, Shop, Wallet};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -138,4 +138,16 @@ pub async fn dev_give_xp(state: State<'_, AppState>, agent_id: String, xp: i64) 
 #[tauri::command]
 pub async fn dev_reset_office(state: State<'_, AppState>) -> Result<Shop, String> {
     state.core().await?.dev_reset_office().map_err(|e| format!("{e:#}"))
+}
+
+/// Build mode: the open repo's lot (made on the first read).
+#[tauri::command]
+pub async fn office_lot(state: State<'_, AppState>) -> Result<Lot, String> {
+    state.core().await?.lot().map_err(|e| format!("{e:#}"))
+}
+
+/// Build mode: check and store the open repo's lot.
+#[tauri::command]
+pub async fn office_save_lot(state: State<'_, AppState>, lot: Lot) -> Result<Lot, String> {
+    state.core().await?.save_lot(lot).map_err(|e| format!("{e:#}"))
 }

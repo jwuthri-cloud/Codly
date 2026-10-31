@@ -99,6 +99,8 @@
     "allow-dev-grant",
     "allow-dev-give-xp",
     "allow-dev-reset-office",
+    "allow-office-lot",
+    "allow-office-save-lot",
     "allow-board-policy",
     "allow-board-sweep",
     "allow-board-archive",

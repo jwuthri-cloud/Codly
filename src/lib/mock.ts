@@ -30,7 +30,8 @@ import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
 import { makeApplicants } from './util/career';
-import { demoBiggerModel, demoBringBack, demoDigest, demoGhosts, demoGiveXp, demoGrant, demoHome, demoLook, demoPlace, demoResetOffice, demoRest, demoSell, demoShop, demoTired, demoTrust, demoWallet } from './demo/office';
+import { demoBiggerModel, demoBringBack, demoDigest, demoGhosts, demoGiveXp, demoGrant, demoHome, demoLook, demoLot, demoPlace, demoResetOffice, demoRest, demoSaveLot, demoSell, demoShop, demoTired, demoTrust, demoWallet } from './demo/office';
+import type { Lot } from './gen/Lot';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
@@ -315,6 +316,10 @@ export class MockTransport implements Transport {
         return demoGiveXp(sim, String(a.agentId), Number(a.xp));
       case 'dev_reset_office':
         return demoResetOffice(sim);
+      case 'office_lot':
+        return demoLot();
+      case 'office_save_lot':
+        return demoSaveLot(a.lot as Lot);
       case 'set_agent_model':
         return null;
       case 'create_task':

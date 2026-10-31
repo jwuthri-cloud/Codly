@@ -114,6 +114,9 @@ pub(super) fn reset_office(store: &Store, ws: &str) -> Result<Shop> {
 
 fn save(store: &Store, ws: &str, placed: &[Placed]) -> Result<Shop> {
     store.kv_set(&decor_key(ws), &serde_json::to_string(placed)?)?;
+    if let Err(e) = super::lots::mirror_decor(store, ws, placed) {
+        tracing::warn!("the lot didn't follow the furniture: {e:#}");
+    }
     shop(store, ws)
 }
 

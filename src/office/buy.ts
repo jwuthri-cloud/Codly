@@ -8,14 +8,14 @@
 
 import type { Placed } from '../lib/gen/Placed';
 import RAW from './furniture.json';
-import { cellOf, CELL, COLS, footprint, keepRects, markRect, ROWS, roomAt, type OfficeLayout, type Rect, type Slot } from './layout';
+import { cellOf, CELL, footprint, keepRects, markRect, roomAt, type ItemType, type Job, type OfficeLayout, type Rect, type Slot } from './layout';
 
 export interface Furniture {
   id: string;
   label: string;
   cat: string;
   price: number;
-  /** Model path under public/furniture. */
+  /** Model path under public/furniture (none for the office's own code-built pieces). */
   src: string;
   /** A surface: small things can go on top. */
   top?: boolean;
@@ -29,9 +29,20 @@ export interface Furniture {
   hidden?: boolean;
   /** The turn that makes the model face +z, when its pack's default doesn't. */
   yaw?: number;
+  /** One of the office's own pieces (layout.ts builds it): its type, footprint and look. */
+  builtin?: ItemType;
+  w?: number;
+  d?: number;
+  variant?: number;
+  /** Built-ins: false when it doesn't block walking (a rug, a poster). */
+  block?: boolean;
+  /** Hung on a wall. */
+  hung?: boolean;
+  /** What it does for the work: a desk is a seat for one agent, a rack runs the tests… */
+  job?: Job;
 }
 
-export const FURNITURE: Furniture[] = RAW;
+export const FURNITURE = RAW as Furniture[];
 export const BY_ID = new Map(FURNITURE.map((f) => [f.id, f]));
 export const CATEGORIES = [...new Set(FURNITURE.map((f) => f.cat))];
 /** What the Buy catalog sells. */
@@ -70,8 +81,9 @@ const blocks = (p: Piece) => !BY_ID.get(p.item)?.rug && !(BY_ID.get(p.item)?.sma
 
 /** Cells reachable on foot from the front door. */
 function reach(L: OfficeLayout, grid: Uint8Array): Uint8Array {
-  const [sx, sz] = cellOf(L.door.inside.x, L.door.inside.z);
-  const seen = new Uint8Array(COLS * ROWS);
+  const [sx, sz] = cellOf(L, L.door.inside.x, L.door.inside.z);
+  const COLS = L.cols;
+  const seen = new Uint8Array(L.cols * L.rows);
   const queue = [sz * COLS + sx];
   seen[queue[0]] = 1;
   for (let i = 0; i < queue.length; i++) {
@@ -91,8 +103,8 @@ const base = new WeakMap<OfficeLayout, { grid: Uint8Array; keep: Uint8Array; rea
 function baseOf(L: OfficeLayout) {
   let b = base.get(L);
   if (!b) {
-    const keep = new Uint8Array(COLS * ROWS);
-    for (const r of keepRects(L)) markRect(keep, r, 0);
+    const keep = new Uint8Array(L.cols * L.rows);
+    for (const r of keepRects(L)) markRect(keep, r, 0, L.cols, L.rows);
     const grid = L.blocked.slice();
     b = { grid, keep, reached: reach(L, grid) };
     base.set(L, b);
@@ -105,11 +117,11 @@ function baseOf(L: OfficeLayout) {
 export function applyDecor(L: OfficeLayout, pieces: Piece[], seats: Slot[] = []) {
   const b = baseOf(L);
   L.blocked.set(b.grid);
-  for (const p of pieces) if (blocks(p)) markRect(L.blocked, rect(p), 0);
+  for (const p of pieces) if (blocks(p)) markRect(L.blocked, rect(p), 0, L.cols, L.rows);
   for (const s of seats)
     for (let d = 0; d <= 0.75; d += 0.25) {
-      const [cx, cz] = cellOf(s.x + Math.sin(s.face) * d, s.z + Math.cos(s.face) * d);
-      L.blocked[cz * COLS + cx] = 0;
+      const [cx, cz] = cellOf(L, s.x + Math.sin(s.face) * d, s.z + Math.cos(s.face) * d);
+      L.blocked[cz * L.cols + cx] = 0;
     }
 }
 
@@ -137,16 +149,16 @@ export function blocker(L: OfficeLayout, others: Piece[], p: Piece): string | nu
   if (!blocks(p)) return null;
   const b = baseOf(L);
   const grid = b.grid.slice();
-  for (const o of others) if (o.uid !== p.uid && blocks(o)) markRect(grid, rect(o), 0);
+  for (const o of others) if (o.uid !== p.uid && blocks(o)) markRect(grid, rect(o), 0, L.cols, L.rows);
   const r = rect(p);
-  const [x0, z0] = cellOf(r.x, r.z);
-  const [x1, z1] = cellOf(r.x + r.w, r.z + r.d);
+  const [x0, z0] = cellOf(L, r.x, r.z);
+  const [x1, z1] = cellOf(L, r.x + r.w, r.z + r.d);
   for (let z = z0; z <= z1; z++)
     for (let x = x0; x <= x1; x++) {
-      if (b.keep[z * COLS + x]) return 'In the way of a seat or the door';
-      if (grid[z * COLS + x]) return 'Something is already there';
+      if (b.keep[z * L.cols + x]) return 'In the way of a seat or the door';
+      if (grid[z * L.cols + x]) return 'Something is already there';
     }
-  markRect(grid, r, 0);
+  markRect(grid, r, 0, L.cols, L.rows);
   // Every seat, use-slot and desk the door reaches now must stay reachable.
   const seen = reach(L, grid);
   for (let c = 0; c < seen.length; c++) if (b.keep[c] && b.reached[c] && !seen[c]) return 'It would block the way';
