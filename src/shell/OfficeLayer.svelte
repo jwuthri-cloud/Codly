@@ -25,7 +25,7 @@
   import type { Shop } from '../lib/gen/Shop';
   import type { EventRow } from '../lib/gen/EventRow';
   import { acquireArtifactUrl, releaseArtifactUrl } from '../lib/state/artifacts';
-  import { interruptAgent, stopAgent, updateSettings } from '../lib/state/actions';
+  import { interruptAgent, setAgentLook, stopAgent, updateSettings } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { narrate } from '../lib/state/narration';
   import type { RepoFile } from '../lib/gen/RepoFile';
@@ -245,6 +245,10 @@
           ticker={ui.mode === 'office'}
           accounts={accounts.list}
           {onaction}
+          onlook={(id, seed) => {
+            const a = store.agentMap.get(id);
+            if (a) setAgentLook(a, seed);
+          }}
           paused={store.settings.paused}
           {onpause}
           onpickapplicant={(offerId, i) => api.pickApplicant(offerId, i).catch(fail('Could not pick'))}

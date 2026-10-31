@@ -4,7 +4,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
         "agent_control", "set_agent_block_tools", "stop_agent_after_step", "resume_agent", "steer_agent",
         "ui_subscribe", "ui_set_visible", "detect_clis", "list_accounts", "recent_workspaces", "open_workspace", "update_settings",
-        "send_chat", "run_plan", "cancel_plan", "close_thread", "resolve_approval", "interrupt_agent", "stop_agent", "hire_agent", "list_models", "set_agent_model", "set_workspace_team", "set_request_prefs",
+        "send_chat", "run_plan", "cancel_plan", "close_thread", "resolve_approval", "interrupt_agent", "stop_agent", "hire_agent", "list_models", "set_agent_model", "set_agent_look", "set_workspace_team", "set_request_prefs",
         "breaker_config", "set_breaker_config", "breaker_status", "reset_breaker",
         "create_task", "move_task", "assign_task", "task_diff", "plan_diff", "merge_plan", "get_events", "search_code",
         "list_memories", "add_memory", "delete_memory", "list_triples", "repo_map", "read_artifact", "keep_plan", "pin_memory", "pty_open", "pty_attach", "pty_write",

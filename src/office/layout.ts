@@ -110,6 +110,7 @@ export type ItemType =
   | 'credenza'
   | 'tvStand'
   | 'foosball'
+  | 'pingpong'
   | 'poolTable';
 
 export interface Item {
@@ -153,6 +154,7 @@ export type StationId =
   | 'kitchen'
   | 'games.console'
   | 'games.foosball'
+  | 'games.pingpong'
   | 'games.pool'
   | 'door';
 
@@ -390,6 +392,8 @@ function build(): OfficeLayout {
   put('tallPlant', 'studio', 0.6, 15.8, 0, 0.5, 0.5, true, 2);
   put('cooler', 'studio', 20.7, 7.7, LEFT, 0.45, 0.45, true);
   put('printer', 'studio', 20.6, 15.6, LEFT, 0.8, 0.6, true);
+  // Ping-pong in the open floor by the server room, long side along the walkway.
+  put('pingpong', 'studio', 18.7, 11.6, Math.PI / 2, 1.8, 1.0, true);
   // Against the server room's glass, between the cooler and the printer.
   put('bench', 'studio', 21.15, 10.3, LEFT, 1.6, 0.5, true);
   put('plant', 'studio', 21.15, 11.7, 0, 0.45, 0.45, true, 0);
@@ -485,6 +489,7 @@ function build(): OfficeLayout {
     kitchen: { id: 'kitchen', room: 'lounge', slots: [slot(1.0, 18.6, LEFT), slot(1.35, 23.2, LEFT)] },
     'games.console': { id: 'games.console', room: 'lounge', slots: [slot(6.15, 20.9, LEFT, 'sit', 0.38), slot(6.15, 21.9, LEFT, 'sit', 0.38)] },
     'games.foosball': { id: 'games.foosball', room: 'lounge', slots: [slot(5.85, 18.7, RIGHT), slot(7.55, 18.7, LEFT)] },
+    'games.pingpong': { id: 'games.pingpong', room: 'studio', slots: [slot(18.7, 10.25, DOWN), slot(18.7, 12.95, UP)] },
     'games.pool': { id: 'games.pool', room: 'lobby', slots: [slot(15.1, 21.25, DOWN), slot(16.1, 23.5, UP)] },
     door: { id: 'door', room: 'lobby', slots: [slot(DOOR_X, 23.55, UP)] },
   };

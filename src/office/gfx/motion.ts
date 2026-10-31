@@ -43,6 +43,8 @@ export interface MotionCtx {
   live: boolean;
   /** Lazy (traits.ts): stretches and yawns about twice as often. */
   lazy?: boolean;
+  /** Low on energy (sims.ts needs): yawns a lot. */
+  tired?: boolean;
 }
 
 const TAU = Math.PI * 2;
@@ -123,6 +125,7 @@ export function loopPeriod(pose: Pose): number {
     case 'talk':
     case 'foosball':
     case 'pool':
+    case 'pingpong':
     case 'wave':
     case 'celebrate':
     case 'dance':
@@ -316,8 +319,14 @@ export function targets(out: Joints, pose: Pose, seated: boolean, x: MotionCtx) 
     case 'pool':
       pool(out, x);
       break;
+    case 'pingpong':
+      pingpong(out, x);
+      break;
   }
 }
+
+/** A quick look at its phone (0 … 1), every forty seconds or so; the character shows the phone. */
+export const glancing = (x: MotionCtx) => (x.live ? pulse(x.t + 7, 43, 2.6, x.seed + 25) : 0);
 
 /** Little things people do when nothing happens: stretch, scratch their head, roll their neck. */
 function fidget(out: Joints, x: MotionCtx, seated: boolean) {
@@ -325,6 +334,8 @@ function fidget(out: Joints, x: MotionCtx, seated: boolean) {
   const stretch = pulse(x.t, x.lazy ? 11 : 26, 2.6, x.seed + 21);
   const scratch = pulse(x.t + 9, 19, 1.6, x.seed + 22);
   const neck = pulse(x.t + 4, 31, 1.8, x.seed + 23);
+  const yawn = pulse(x.t + 13, x.tired ? 9 : x.lazy ? 15 : 34, 1.9, x.seed + 24);
+  const glance = glancing(x);
   // Blended, not exclusive: when two overlap one fades into the other instead of snapping.
   if (stretch > 0) {
     towards(out, 5, -2.9, stretch);
@@ -341,6 +352,22 @@ function fidget(out: Joints, x: MotionCtx, seated: boolean) {
     towards(out, 9, 0.5, scratch);
     towards(out, 10, -2.1 + 0.12 * osc(x.t, 4), scratch);
     towards(out, 4, -0.12, scratch);
+  }
+  if (yawn > 0) {
+    // A hand to the mouth, head back.
+    towards(out, 8, -1.45, yawn);
+    towards(out, 9, -0.12, yawn);
+    towards(out, 10, -2.1, yawn);
+    towards(out, 2, -0.32, yawn);
+    towards(out, 1, seated ? -0.08 : -0.04, yawn);
+  }
+  if (glance > 0) {
+    // The phone held low in front, head down to it.
+    towards(out, 8, -0.75, glance);
+    towards(out, 9, -0.1, glance);
+    towards(out, 10, -1.35, glance);
+    towards(out, 19, -0.5, glance);
+    towards(out, 2, 0.4, glance);
   }
   if (neck > 0) {
     out[4] += 0.18 * Math.sin(((x.t + 4) / 1.8) * Math.PI * 2) * neck;
@@ -409,6 +436,12 @@ function foosball(out: Joints, x: MotionCtx) {
     out[13] -= 0.2 * shot;
     out[1] += 0.06 * shot;
   }
+  matchReactions(out, x);
+}
+
+/** A point won (arms up, a hop) or lost (hands on the head), at foosball and ping-pong. */
+function matchReactions(out: Joints, x: MotionCtx) {
+  const { cue, t } = x;
   const cheer = reaction(cue, 'cheer', x.now, 1.9);
   if (cheer) {
     for (const i of [5, 8]) towards(out, i, -2.85 + 0.18 * osc(t, 2.6), cheer);
@@ -426,6 +459,40 @@ function foosball(out: Joints, x: MotionCtx) {
     towards(out, 1, -0.06, groan);
     towards(out, 2, -0.28, groan);
   }
+}
+
+/** Ping-pong: on its toes behind the end line, paddle up; a swing through on each hit. */
+function pingpong(out: Joints, x: MotionCtx) {
+  const cue = x.cue;
+  const I = cue?.intensity ?? 0.4;
+  const lean = cue?.lean ?? 0;
+  const { t } = x;
+  out[0] = -0.03 + 0.012 * Math.abs(osc(t, 2.4)) * (0.5 + I);
+  out[1] = 0.22;
+  out[11] = out[12] = -0.2;
+  out[14] = out[15] = 0.38;
+  out[16] = out[17] = -0.16;
+  out[21] = out[22] = 0.09;
+  // The paddle arm forward and up, the free arm out for balance.
+  out[8] = -0.95;
+  out[9] = 0.15;
+  out[10] = -1.15;
+  out[5] = -0.55;
+  out[6] = 0.25;
+  out[7] = -0.95;
+  out[13] = 0.25 * lean;
+  out[3] = 0.15 * lean;
+  const hit = reaction(cue, 'shot', x.now, 0.45);
+  if (hit) {
+    // Wind back, then through: the shoulders turn with the stroke.
+    const s = hit;
+    out[8] -= 0.55 * s;
+    out[9] += 0.35 * s;
+    out[10] += 0.45 * s;
+    out[13] -= 0.35 * s;
+    out[1] += 0.06 * s;
+  }
+  matchReactions(out, x);
 }
 
 /** Pool: bend and line up with practice strokes, strike, rise and watch; or wait on the cue. */

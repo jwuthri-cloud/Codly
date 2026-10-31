@@ -73,7 +73,7 @@ describe('the office floor plan', () => {
   });
 
   it('the games corner: console, foosball and pool slots are all reachable from the door', () => {
-    for (const id of ['games.console', 'games.foosball', 'games.pool'] as const) {
+    for (const id of ['games.console', 'games.foosball', 'games.pingpong', 'games.pool'] as const) {
       expect(L.stations[id].slots).toHaveLength(2);
       for (const s of L.stations[id].slots) {
         const [gx, gz] = cellOf(s.x, s.z);

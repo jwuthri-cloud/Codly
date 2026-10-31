@@ -102,6 +102,7 @@ pub fn run() {
             commands::set_workspace_team,
             commands::set_request_prefs,
             commands::set_agent_model,
+            commands::set_agent_look,
             commands::create_task,
             commands::move_task,
             commands::assign_task,

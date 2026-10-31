@@ -725,6 +725,11 @@ async fn solo_model_switches_and_ignores_no_change() {
     let same = core.set_agent_model(&solo.id, Some("opus".into())).await.unwrap();
     assert_eq!(same.model.as_deref(), Some("opus"));
     assert!(core.set_agent_model("nobody", None).await.is_err());
+    // Its look in the office: saved as given, junk refused.
+    let looked = core.set_agent_look(&solo.id, "moss#style=3&hair=2").await.unwrap();
+    assert_eq!(looked.look_seed, "moss#style=3&hair=2");
+    assert!(core.set_agent_look(&solo.id, "  ").await.is_err());
+    assert!(core.set_agent_look(&solo.id, "a\nb").await.is_err());
     core.shutdown().await;
 }
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-agent-look"
+description = "Enables the set_agent_look command without any pre-configured scope."
+commands.allow = ["set_agent_look"]
+
+[[permission]]
+identifier = "deny-set-agent-look"
+description = "Denies the set_agent_look command without any pre-configured scope."
+commands.deny = ["set_agent_look"]

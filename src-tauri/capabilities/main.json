@@ -37,6 +37,7 @@
     "allow-hire-agent",
     "allow-list-models",
     "allow-set-agent-model",
+    "allow-set-agent-look",
     "allow-set-workspace-team",
     "allow-set-request-prefs",
     "allow-create-task",

@@ -1,7 +1,7 @@
 // The games are played for real: goals both ways at foosball, turns and potted balls at pool,
 // a whole match on the console. Seeded, so these runs are the same every time.
 import { describe, expect, it } from 'vitest';
-import { aroundTable, ConsoleSim, FoosballSim, PoolSim } from '../gfx/games';
+import { aroundTable, ConsoleSim, FoosballSim, PingPongSim, PoolSim } from '../gfx/games';
 
 const DT = 1 / 60;
 
@@ -88,5 +88,24 @@ describe('console', () => {
     }
     expect(sim.fullTime).toBeNull();
     expect(sim.clock).toBeLessThan(0.02);
+  });
+});
+
+describe('ping-pong', () => {
+  it('rallies end to end, hitters alternate, and misses score points', () => {
+    const sim = new PingPongSim(7);
+    const hitters: number[] = [];
+    for (let now = 0; now < 120_000; now += 33) {
+      sim.step(now);
+      const h = sim.lastHit;
+      if (h && h.at === now) hitters.push(h.team);
+      expect(Math.abs(sim.ball.x)).toBeLessThan(2); // a missed ball flies on past the end
+      expect(sim.ball.y).toBeGreaterThan(0);
+    }
+    expect(hitters.length).toBeGreaterThan(40);
+    expect(sim.score[0] + sim.score[1]).toBeGreaterThan(3);
+    // Within a rally the ball goes back and forth (a serve after a point may repeat a side).
+    const turns = hitters.slice(1).filter((t, i) => t !== hitters[i]).length;
+    expect(turns / (hitters.length - 1)).toBeGreaterThan(0.75);
   });
 });

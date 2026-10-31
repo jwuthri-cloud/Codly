@@ -151,6 +151,7 @@
     onselect={(s) => (selection = s)}
     onhover={(h) => (hover = h)}
     onpickapplicant={(_, i) => closeOffer(i, true)}
+    onlook={(id, seed) => (agents = agents.map((a) => (a.id === id ? { ...a, look_seed: seed } : a)))}
     artifactUrl={(a) => (a.id === 'art-1' ? preview : null)}
   />
   {#if backdrop}

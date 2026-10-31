@@ -47,7 +47,7 @@ import { BUILT_LABEL, builtinPieces, deskOfPiece, freeToUse, modeled, stationAct
 import { applyDecor, blocker, BY_ID, onTop, snap, surfaceAt, type Piece } from './buy';
 import type { Placed } from '../lib/gen/Placed';
 import type { Provider } from '../lib/gen/Provider';
-import { Character, lookFor, PropKit } from './gfx/character';
+import { Character, lookFor, lookPicks, PropKit } from './gfx/character';
 import { CONFETTI, Confetti, FloorRing, FxSystem, Glow, PaperPlane, Puff, Sparkles } from './gfx/fx';
 import { GamesCorner, type GamePlayers } from './gfx/games';
 import { Archive, DeskFrames, DeskScreens, MailRoom, ServerRoom, TaskBoard, Whiteboard, type CardWhere, type TestState, type TodoList } from './gfx/props';
@@ -105,7 +105,7 @@ export interface EngineOptions {
 
 const HELLO_MS = 1800;
 /** How long a sent activity lasts, by its pose (ms): then the agent picks its next thing. */
-const USE_MS: Partial<Record<string, number>> = { drink: 25_000, sleep: 90_000, gamepad: 120_000, foosball: 120_000, pool: 150_000, browse: 60_000, read: 60_000, watch: 60_000, dance: 30_000, sit: 60_000 };
+const USE_MS: Partial<Record<string, number>> = { drink: 25_000, sleep: 90_000, gamepad: 120_000, foosball: 120_000, pingpong: 120_000, pool: 150_000, browse: 60_000, read: 60_000, watch: 60_000, dance: 30_000, sit: 60_000 };
 /** Game sounds made in code (sound.ts synth), not samples. */
 const MADE = new Set(['crowd', 'crowd-goal', 'crowd-ooh', 'whistle', 'whistle-end']);
 const PINS_KEY = 'codly.office.desks';
@@ -202,7 +202,7 @@ export class OfficeEngine {
   /** An agent's needs (sims.ts), so a tired agent goes for coffee on its break. */
   private needsOf: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null } | null) | null = null;
   /** Each agent's headline feeling for its name tag (sims.ts), refreshed every couple of seconds. */
-  private moods = new Map<string, { at: number; mood: { emoji: string; label: string } | null }>();
+  private moods = new Map<string, { at: number; mood: { emoji: string; label: string } | null; gait: 'tired' | 'happy' | null }>();
   /** What each agent is doing, so its energy and morale move with it (sims.ts). */
   private onActivity: ((id: string, now: number, act: RestActivity) => void) | null = null;
   private mail: MailRoom;
@@ -1168,8 +1168,8 @@ export class OfficeEngine {
         act.c.fadeTo(1, now, 200);
       }
       act.desk = this.deskFor(a.id);
-      if (String(act.c.look.shirt) !== String(identity(a.color, 'light').shirt) || act.c.look.role !== a.role) {
-        // Identity or role changed: rebuild the character in place.
+      if (String(act.c.look.shirt) !== String(identity(a.color, 'light').shirt) || act.c.look.role !== a.role || act.c.look.seed !== a.seed) {
+        // Identity, role or look changed: rebuild the character in place.
         const pos = act.c.position.clone();
         const rot = act.c.root.rotation.y;
         act.c.dispose();
@@ -1364,7 +1364,7 @@ export class OfficeEngine {
         const key = `${a.id}:${sa.callId}`;
         want.add(key);
         if (this.interns.has(key)) continue;
-        const c = new Character(key, lookFor(a.seed + ':' + sa.callId, a.color, 'worker', a.provider, true), { emotes: this.emote, props: this.props });
+        const c = new Character(key, lookFor(lookPicks(a.seed).base + ':' + sa.callId, a.color, 'worker', a.provider, true), { emotes: this.emote, props: this.props });
         const off = k === 2 ? 0.45 : 0;
         const fx = Math.sin(d.rot);
         const fz = Math.cos(d.rot);
@@ -1950,6 +1950,7 @@ export class OfficeEngine {
     this.typingStep(now);
     for (const [id, act] of this.actors) {
       act.c.emoteScale = emoteScale;
+      act.c.gait = this.gaitOf(act.agentId, now);
       const r = act.c.update(now, dt, rm, lively);
       if (r.moving) busy = true;
       if (act.c.walking) this.shadowDirty = true;
@@ -2060,7 +2061,7 @@ export class OfficeEngine {
 
   /** Who plays which game (they get its cues), and everyone else glances at people walking by. */
   private lifeStep(now: number, dt: number): boolean {
-    const players: GamePlayers = { foosball: [], pool: [], console: [] };
+    const players: GamePlayers = { foosball: [], pingpong: [], pool: [], console: [] };
     const playing = new Set<string>();
     for (const act of this.actors.values()) {
       const [station, idx] = act.slot?.split(':') ?? [];
@@ -2157,10 +2158,23 @@ export class OfficeEngine {
     return sentence(a, wall);
   }
 
-  private moodOf(id: string, now: number) {
+  private needsNow(id: string, now: number) {
     let m = this.moods.get(id);
-    if (!m || now - m.at > 2000) this.moods.set(id, (m = { at: now, mood: this.needsOf?.(id)?.mood ?? null }));
-    return m.mood;
+    if (!m || now - m.at > 2000) {
+      const n = this.needsOf?.(id) ?? null;
+      const gait = !n ? null : n.energy != null && n.energy < 0.3 ? 'tired' : n.morale > 0.75 ? 'happy' : null;
+      this.moods.set(id, (m = { at: now, mood: n?.mood ?? null, gait }));
+    }
+    return m;
+  }
+
+  private moodOf(id: string, now: number) {
+    return this.needsNow(id, now).mood;
+  }
+
+  /** How it walks: tired when its energy runs low, bouncy when its morale is high. */
+  private gaitOf(id: string, now: number) {
+    return this.needsNow(id, now).gait;
   }
 
   private updateLabels(wall: number): boolean {

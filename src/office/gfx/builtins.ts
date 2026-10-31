@@ -52,6 +52,7 @@ const BY_TYPE: Partial<Record<ItemType, (it: Item) => Spec>> = {
   mailbox: () => ({ id: 'polypizza.postbox', h: 1.15 }),
   // The felt at 0.705 like the ball simulation (gfx/games.ts) expects.
   poolTable: () => ({ id: 'polypizza.poolTable', fit: 'stretch', h: 0.755 }),
+  pingpong: () => ({ id: 'polypizza.pingPong', fit: 'stretch', h: 0.9 }),
 };
 
 /** Built-in pieces anyone may use on a break like bought ones (the rest belong to a station). */
@@ -85,6 +86,8 @@ export function stationActions(L: OfficeLayout, it: Item): { label: string; inte
       return [{ label: 'Play foosball', intent: breakIntent({ game: 'foosball', slot: 0 }) }];
     case 'poolTable':
       return [{ label: 'Play pool', intent: breakIntent({ game: 'pool', slot: 0 }) }];
+    case 'pingpong':
+      return [{ label: 'Play ping-pong', intent: breakIntent({ game: 'pingpong', slot: 0 }) }];
     case 'mailbox':
       return [{ label: 'Post a letter', intent: stationBreak('mail', 'stand', 'envelope') }];
     default:
@@ -93,7 +96,7 @@ export function stationActions(L: OfficeLayout, it: Item): { label: string; inte
 }
 
 /** Click-menu names where the model's catalog name doesn't fit (and the code-built pieces). */
-export const BUILT_LABEL: Partial<Record<ItemType, string>> = { foosball: 'Foosball table', poolTable: 'Pool table', counter: 'Kitchen counter', tvStand: 'TV', shelf: 'Bookshelf', coffee: 'Coffee machine', mailbox: 'Post box' };
+export const BUILT_LABEL: Partial<Record<ItemType, string>> = { foosball: 'Foosball table', poolTable: 'Pool table', pingpong: 'Ping-pong table', counter: 'Kitchen counter', tvStand: 'TV', shelf: 'Bookshelf', coffee: 'Coffee machine', mailbox: 'Post box' };
 
 /** Whether the building leaves this piece to a model (the TV stand keeps its code-built TV). */
 export const modeled = (t: ItemType) => t in BY_TYPE;

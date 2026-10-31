@@ -29,7 +29,7 @@ import {
 import type { Provider } from '../../lib/gen/Provider';
 import type { Role } from '../../lib/gen/Role';
 import type { Emote, Pose, Prop } from '../behavior';
-import { addLife, gazeWeight, J, type Joints, loopPeriod, type PlayCue, REACT_S, reactPose, type ReactKind, SIT_POSES, targets } from './motion';
+import { addLife, gazeWeight, glancing, J, type Joints, loopPeriod, type PlayCue, REACT_S, reactPose, type ReactKind, SIT_POSES, targets } from './motion';
 import { HAIR, HAIR_WEIGHTS, identity, lin, mix, PANTS, PROVIDER, SKIN, type RGB } from '../palette';
 import { hash, rng } from '../text';
 import { traitsOf } from '../traits';
@@ -52,6 +52,28 @@ export interface Look {
   intern: boolean;
   scale: number;
   blush: boolean;
+  glasses: boolean;
+  /** The agent's `look_seed` this was made from. */
+  seed: string;
+}
+
+/** Hairstyles `lookFor` can draw (0 … LOOK_STYLES − 1). */
+export const LOOK_STYLES = 11;
+export type LookPick = 'style' | 'hair' | 'skin' | 'acc' | 'glasses';
+
+/** The person's picks (the look editor) after the `#` of a `look_seed`; the rest is the seed. */
+export function lookPicks(seed: string): { base: string; picks: URLSearchParams } {
+  const i = seed.indexOf('#');
+  return i < 0 ? { base: seed, picks: new URLSearchParams() } : { base: seed.slice(0, i), picks: new URLSearchParams(seed.slice(i + 1)) };
+}
+
+/** `seed` with one pick changed (null drops it, back to what the seed draws). */
+export function withPick(seed: string, key: LookPick, value: string | null): string {
+  const { base, picks } = lookPicks(seed);
+  if (value == null) picks.delete(key);
+  else picks.set(key, value);
+  const rest = picks.toString();
+  return rest ? `${base}#${rest}` : base;
 }
 
 function pick<T>(r: () => number, list: T[], weights?: number[]): T {
@@ -66,7 +88,8 @@ function pick<T>(r: () => number, list: T[], weights?: number[]): T {
 }
 
 export function lookFor(seed: string, color: number, role: Role, provider: Provider, intern = false): Look {
-  const r = rng(hash(seed || 'agent'));
+  const { base, picks } = lookPicks(seed);
+  const r = rng(hash(base || 'agent'));
   const id = identity(color, 'light');
   const skin = lin(pick(r, SKIN));
   const hair = lin(pick(r, HAIR, HAIR_WEIGHTS));
@@ -87,10 +110,26 @@ export function lookFor(seed: string, color: number, role: Role, provider: Provi
     intern,
     scale: (intern ? 0.72 : role === 'lead' ? 1.06 : 1) * 1.2,
     blush: r() < 0.6,
+    glasses: role === 'reviewer',
+    seed,
   };
   // Later styles (quiff, afro, undercut) draw last, so everyone else keeps the look they had.
   const extra = r();
   if (extra < 0.3) look.style = 8 + Math.floor((extra / 0.3) * 3);
+  // The person's picks win over the dice.
+  const chosen = (k: LookPick, n: number) => {
+    const v = Number(picks.get(k));
+    return picks.has(k) && Number.isInteger(v) && v >= 0 && v < n ? v : null;
+  };
+  const myStyle = chosen('style', LOOK_STYLES);
+  if (myStyle != null) look.style = myStyle;
+  const myHair = chosen('hair', HAIR.length);
+  if (myHair != null) look.hair = lin(HAIR[myHair]);
+  const mySkin = chosen('skin', SKIN.length);
+  if (mySkin != null) look.skin = lin(SKIN[mySkin]);
+  const myAcc = picks.get('acc');
+  if ((role === 'worker' || role === 'solo') && (myAcc === 'hood' || myAcc === 'headphones' || myAcc === 'none')) look.accessory = myAcc;
+  if (picks.has('glasses')) look.glasses = picks.get('glasses') === '1';
   return look;
 }
 
@@ -299,7 +338,7 @@ function buildParts(look: Look) {
     face(h, L, f);
     // Big styles (bun, spikes, curls, quiff, afro, swept top) tuck under an intern's cap.
     hair(h, L.intern && [2, 3, 6, 8, 9, 10].includes(L.style) ? { ...L, style: 0 } : L);
-    if (L.role === 'reviewer') glasses(h);
+    if (L.glasses) glasses(h);
     if (L.accessory === 'headphones' && !L.intern) headphones(h, L);
     if (L.intern) cap(h, L);
     return h.build();
@@ -476,6 +515,7 @@ export class PropKit {
     this.geos.set('note', mk((b) => b.box(0, 0, 0.04, 0.08, 0.004, 0.08, lin('#ffd75e'))));
     this.geos.set('mug', mk((b) => b.cyl(0, -0.04, 0.03, 0.035, 0.08, lin('#e9e2d6'), 10)));
     this.geos.set('gamepad', mk((b) => b.box(0.05, 0, 0.03, 0.15, 0.03, 0.07, lin('#f1f1f4')).ball(-0.02, -0.01, 0.05, 0.035, 0.025, 0.04, lin('#26272c'), 8, 6).ball(0.12, -0.01, 0.05, 0.035, 0.025, 0.04, lin('#26272c'), 8, 6)));
+    this.geos.set('paddle', mk((b) => b.cyl(0, -0.07, 0.01, 0.012, 0.07, lin('#7a5234'), 8).ball(0, -0.13, 0.01, 0.065, 0.07, 0.008, lin('#d6403a'), 14, 6)));
     this.geos.set('cue', mk((b) => b.cyl(0, -0.45, 0.02, 0.016, 1.1, lin('#c9a46a'), 6, 0.008).cyl(0, -0.45, 0.02, 0.018, 0.3, lin('#3a2a20'), 6)));
   }
   dispose() {
@@ -488,6 +528,8 @@ export class PropKit {
 const ease = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 const BLEND_MS = 240;
+/** Poses whose idle moments include a look at the phone (gfx/motion.ts `glancing`). */
+const GLANCE_POSES = new Set<Pose>(['sit', 'stand', 'type']);
 const WALK_SPEED = 2.1;
 const STRIDE = 0.62;
 
@@ -563,6 +605,10 @@ export class Character {
   cue: PlayCue | null = null;
   /** A personal reaction playing over its pose (traits.ts), started at `at`. */
   private reacting: { kind: ReactKind; at: number } | null = null;
+  /** How it walks, from its needs (set by the engine): tired drags, happy bounces. */
+  gait: 'tired' | 'happy' | null = null;
+  /** Its phone is out for a quick look (only while it holds nothing else). */
+  private glance = false;
 
   // its own rhythm: two characters never move in sync
   private readonly seed: number;
@@ -657,7 +703,7 @@ export class Character {
   }
 
   private ctx(tMs: number, now: number, live: boolean) {
-    return { t: (tMs / 1000) * this.tempo + this.offset, now, seed: this.seed, cue: this.cue, live, lazy: this.lazy };
+    return { t: (tMs / 1000) * this.tempo + this.offset, now, seed: this.seed, cue: this.cue, live, lazy: this.lazy, tired: this.gait === 'tired' };
   }
 
   private extraMats: (MeshBasicMaterial | MeshStandardMaterial)[] = [];
@@ -754,6 +800,14 @@ export class Character {
     } else this.propMesh.visible = false;
   }
 
+  private showPhone(on: boolean) {
+    if (on === this.glance) return;
+    this.glance = on;
+    if (this.prop) return;
+    this.propMesh.geometry = this.env.props.geos.get('phone')!;
+    this.propMesh.visible = on;
+  }
+
   setEmote(e: Emote, now: number) {
     if (e === this.emote) return;
     this.emote = e;
@@ -839,7 +893,8 @@ export class Character {
     // Walking.
     if (this.walking) {
       moving = true;
-      let remaining = this.speed * dt;
+      const pace = this.gait === 'tired' ? 0.75 : this.gait === 'happy' ? 1.12 : 1;
+      let remaining = this.speed * pace * dt;
       const p = this.root.position;
       while (remaining > 0) {
         const next = this.path[0] ?? (this.final ? [this.final.x, this.final.z] : null);
@@ -868,7 +923,7 @@ export class Character {
           remaining = 0;
         }
       }
-      this.phase += ((this.speed * dt) / STRIDE) * Math.PI * 2;
+      this.phase += ((this.speed * pace * dt) / STRIDE) * Math.PI * 2;
     }
 
     // Turning.
@@ -890,6 +945,7 @@ export class Character {
     }
     if (this.walking) {
       targets(this.goal, 'stand', false, this.ctx(0, now, false)); // no fidgets mid-stride
+      this.showPhone(false);
       const s = Math.sin(this.phase);
       const c = Math.cos(this.phase);
       this.goal[11] = s * 0.6;
@@ -906,6 +962,20 @@ export class Character {
       this.goal[1] = 0.06;
       this.goal[0] = Math.abs(Math.cos(this.phase)) * 0.03;
       this.goal[13] = -s * 0.06; // the shoulders counter the hips
+      if (this.gait === 'tired') {
+        // Slumped, head low, arms barely swinging.
+        this.goal[1] += 0.14;
+        this.goal[2] += 0.22;
+        this.goal[5] *= 0.45;
+        this.goal[8] *= 0.45;
+        this.goal[0] *= 0.4;
+      } else if (this.gait === 'happy') {
+        // A spring in the step, chin up, arms swinging.
+        this.goal[0] *= 2.4;
+        this.goal[5] *= 1.4;
+        this.goal[8] *= 1.4;
+        this.goal[2] -= 0.08;
+      }
       if (this.prop) {
         // Carry in front.
         this.goal[8] = -0.55;
@@ -913,7 +983,9 @@ export class Character {
         this.goal[9] = -0.1;
       }
     } else {
-      targets(this.goal, this.pose, this.seated, this.ctx(tMs, now, live));
+      const cx = this.ctx(tMs, now, live);
+      targets(this.goal, this.pose, this.seated, cx);
+      this.showPhone(!this.prop && GLANCE_POSES.has(this.pose) && glancing(cx) > 0.25);
       if (live) {
         addLife(this.goal, this.pose, this.seated, now / 1000, this.seed, this.breathPeriod);
         this.look_(now, dt);
@@ -1088,7 +1160,7 @@ export class Character {
       // Hold flat things up towards the face when reading; level otherwise. The pool cue lies
       // along the table when aiming and stands upright otherwise, whatever the arm does.
       const reading = !this.walking && (this.pose === 'read' || this.pose === 'review');
-      let r = reading ? 0.9 : this.prop === 'phone' ? 0 : this.prop === 'cue' ? 1.45 : 1.2;
+      let r = reading ? 0.9 : this.prop === 'phone' || this.prop === 'paddle' || (!this.prop && this.glance) ? 0 : this.prop === 'cue' ? 1.45 : 1.2;
       if (this.prop === 'cue' && !this.walking && this.pose === 'pool') {
         const aiming = this.cue?.phase === 'aim' || this.cue?.phase === 'strike';
         r = (aiming ? 1.67 : 0.08) - (c[1] + c[8] + c[10] + c[19]);

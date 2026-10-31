@@ -54,6 +54,14 @@ export function demoBringBack(sim: Sim, id: string): Agent {
   return back;
 }
 
+export function demoLook(sim: Sim, id: string, lookSeed: string): Agent {
+  const a = sim.agents.get(id);
+  if (!a) throw new Error('no such agent');
+  const next: Agent = { ...a, updated_at: sim.now(), look_seed: lookSeed };
+  sim.putAgent(next);
+  return next;
+}
+
 export function demoTrust(sim: Sim, id: string, rank: Rank): Agent {
   const a = sim.agents.get(id);
   if (!a) throw new Error('no such agent');

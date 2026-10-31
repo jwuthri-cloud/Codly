@@ -7,7 +7,7 @@
 //   ?rm=1          reduced motion
 //   ?select=a-ada  start with an agent selected
 //   ?playAfter=5   idle workers go on a break after 5 s instead of 60
-//   ?play=pool     breaks go to this game first (pool, foosball or ps5)
+//   ?play=pool     breaks go to this game first (pool, foosball, pingpong or ps5)
 //   ?offer         a job offer goes up by the front door after 2 s
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
@@ -36,7 +36,7 @@ document.documentElement.dataset.theme = params.get('theme') === 'light' ? 'ligh
 const playAfter = Number(params.get('playAfter'));
 if (playAfter > 0) leisure.playAfterMs = playAfter * 1000;
 const play = params.get('play');
-if (play === 'pool' || play === 'foosball') leisure.prefer = play;
+if (play === 'pool' || play === 'foosball' || play === 'pingpong') leisure.prefer = play;
 else if (play === 'ps5' || play === 'console') leisure.prefer = 'console';
 
 mount(Harness, { target: document.getElementById('office')! });

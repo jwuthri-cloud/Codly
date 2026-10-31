@@ -12,7 +12,7 @@ describe('break room', () => {
     expect(games(r.update(['ada', 'bo'], 1000))).toEqual({ ada: 'console:0', bo: 'console:1' });
   });
 
-  it('two agents free at once pair up at a table; a third goes to the PS5; a fourth and fifth take the other table', () => {
+  it('two agents free at once pair up at a table; a third goes to the PS5; a fourth and fifth take another table', () => {
     const r = new BreakRoom();
     const s = r.update(['ada', 'bo', 'cy'], 0);
     expect(s.get('ada')!.game).not.toBe('console');
@@ -20,8 +20,10 @@ describe('break room', () => {
     expect([s.get('ada')!.slot, s.get('bo')!.slot]).toEqual([0, 1]);
     expect(s.get('cy')!.game).toBe('console');
     const t = r.update(['ada', 'bo', 'cy', 'dee', 'eli'], 1000);
-    const other = s.get('ada')!.game === 'pool' ? 'foosball' : 'pool';
-    expect([t.get('dee')!.game, t.get('eli')!.game]).toEqual([other, other]);
+    const other = t.get('dee')!.game;
+    expect(['pool', 'foosball', 'pingpong']).toContain(other);
+    expect(other).not.toBe(s.get('ada')!.game);
+    expect(t.get('eli')!.game).toBe(other);
     expect(t.get('ada')).toEqual(s.get('ada')); // pairs are stable
   });
 
@@ -38,10 +40,10 @@ describe('break room', () => {
 
   it('everything taken: the rest stay at their desks', () => {
     const r = new BreakRoom();
-    const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
     const s = r.update(ids, 0);
-    expect(s.size).toBe(6); // pool 2 + foosball 2 + PS5 2
-    expect(s.has('g')).toBe(false);
+    expect(s.size).toBe(8); // pool 2 + foosball 2 + ping-pong 2 + PS5 2
+    expect(s.has('i')).toBe(false);
   });
 
   it('a preferred game (demo ?play=) is used first', () => {

@@ -1,7 +1,8 @@
 <!--
   The Sims layer over the office (sims.ts for the numbers, all from real data):
   - top-left: the selected agent's action queue (what it does now, ✕ to interrupt; its to-dos queued)
-  - bottom-left: its panel: portrait, rank, mood, and tabs for Needs / Mood / Skills / Friends / Career
+  - bottom-left: its panel: portrait, rank, mood, and tabs for Needs / Mood / Skills / Friends / Career,
+    and Look (Create-a-Sim: hairstyle, hair and skin color, outfit, glasses; saved in its look_seed)
   - top-center: a promotion (its real track record), with the offer of trust (Junior, Senior and Staff
     perks) and of a stronger model
   - around a clicked agent: the click menu (chat, task, model, stop, details)
@@ -18,6 +19,8 @@
   import type { OfficeEngine } from './engine';
   import type { NarrateFn } from './OfficeView.svelte';
   import { agentPortrait } from './portrait';
+  import { LOOK_STYLES, lookFor, lookPicks, withPick, type LookPick } from './gfx/character';
+  import { HAIR, lin, SKIN } from './palette';
   import Scrapbook from './Scrapbook.svelte';
   import { sound } from './sound';
   import { levelOf, type SimSheet, type SimsTracker } from './sims';
@@ -35,13 +38,14 @@
     insets: { top: number; right: number; bottom: number; left: number };
     narrate?: NarrateFn;
     onaction?: (agentId: string, action: AgentAction) => void;
+    onlook?: (agentId: string, lookSeed: string) => void;
     onclosemenu: () => void;
     paused?: boolean;
     onpause?: (paused: boolean) => void;
   }
-  let { engine, sims, agents, accounts, selectedId, menuAt, insets, narrate, onaction, onclosemenu, paused = false, onpause }: Props = $props();
+  let { engine, sims, agents, accounts, selectedId, menuAt, insets, narrate, onaction, onlook, onclosemenu, paused = false, onpause }: Props = $props();
 
-  let tab = $state<'needs' | 'mood' | 'skills' | 'friends' | 'career'>('needs');
+  let tab = $state<'needs' | 'mood' | 'skills' | 'friends' | 'career' | 'look'>('needs');
   let walls = $state(true);
   let muted = $state(sound.muted);
   $effect(() => sound.onChange(() => (muted = sound.muted)));
@@ -98,6 +102,15 @@
     }
   });
   const ORDER = ['intern', 'junior', 'senior', 'staff'];
+
+  // The look editor: each pick goes into its look_seed after a `#` (gfx/character.ts).
+  const seedOf = (a: Agent) => a.look_seed || a.id;
+  const look = $derived(agent ? lookFor(seedOf(agent), agent.color, agent.role, agent.provider) : null);
+  const same = (rgb: number[], hex: string) => String(lin(hex)) === String(rgb);
+  function pick(k: LookPick, v: string | null) {
+    if (agent) onlook?.(agent.id, withPick(seedOf(agent), k, v));
+  }
+  const OUTFITS = [['hood', 'Hoodie'], ['headphones', 'Headphones'], ['none', 'Tee']] as const;
   const portrait = $derived(agent ? agentPortrait(agent, 96) : '');
 
   // The action queue: now, then what's next on its own to-do list.
@@ -179,7 +192,7 @@
       </div>
     </header>
     <div class="tabs" role="tablist">
-      {#each [['needs', 'Needs'], ['mood', 'Mood'], ['skills', 'Skills'], ['friends', 'Friends'], ['career', 'Career']] as [k, l] (k)}
+      {#each [['needs', 'Needs'], ['mood', 'Mood'], ['skills', 'Skills'], ['friends', 'Friends'], ['career', 'Career'], ...(onlook ? [['look', 'Look']] : [])] as [k, l] (k)}
         <button role="tab" aria-selected={tab === k} class:on={tab === k} onclick={() => (tab = k as typeof tab)}>{l}</button>
       {/each}
     </div>
@@ -208,6 +221,24 @@
         {:else}
           <p class="empty">Skills grow with the files it changes and the checks it passes.</p>
         {/each}
+      {:else if tab === 'look' && look}
+        <div class="look">
+          <div class="lk"><span class="n-l">Hair</span>
+            <button class="step" aria-label="Previous hairstyle" onclick={() => pick('style', String((look.style + LOOK_STYLES - 1) % LOOK_STYLES))}>‹</button>
+            <span class="n-v">{look.style + 1} / {LOOK_STYLES}</span>
+            <button class="step" aria-label="Next hairstyle" onclick={() => pick('style', String((look.style + 1) % LOOK_STYLES))}>›</button>
+          </div>
+          <div class="lk"><span class="n-l">Color</span><span class="sw">{#each HAIR as h, i (h)}<button class="dot" class:on={same(look.hair, h)} style:background={h} aria-label="Hair color {i + 1}" onclick={() => pick('hair', String(i))}></button>{/each}</span></div>
+          <div class="lk"><span class="n-l">Skin</span><span class="sw">{#each SKIN as h, i (h)}<button class="dot" class:on={same(look.skin, h)} style:background={h} aria-label="Skin tone {i + 1}" onclick={() => pick('skin', String(i))}></button>{/each}</span></div>
+          {#if agent.role === 'worker' || agent.role === 'solo'}
+            <div class="lk"><span class="n-l">Outfit</span>{#each OUTFITS as [k, l] (k)}<button class="chip" class:on={look.accessory === k} onclick={() => pick('acc', k)}>{l}</button>{/each}</div>
+          {/if}
+          <div class="lk"><span class="n-l">Glasses</span><button class="chip" class:on={look.glasses} onclick={() => pick('glasses', look.glasses ? '0' : '1')}>{look.glasses ? 'On' : 'Off'}</button></div>
+          <div class="lk">
+            <button class="link" onclick={() => onlook?.(agent.id, Math.random().toString(36).slice(2, 8))}>Shuffle</button>
+            {#if lookPicks(seedOf(agent)).picks.size}<button class="link" onclick={() => onlook?.(agent.id, lookPicks(seedOf(agent)).base)}>Undo my picks</button>{/if}
+          </div>
+        </div>
       {:else if tab === 'career' && career}
         <div class="stats">
           <span><b>{career.stats.merged}</b> merged</span><span><b>{career.stats.checks_passed}</b> checks passed</span><span><b>{career.stats.approved}</b> approved</span><span><b>{career.stats.commits}</b> commits</span>
@@ -310,6 +341,14 @@
   .trust .link { justify-self: start; border: 0; background: none; padding: 0; color: #9aa2b6; font: 500 11px inherit; text-decoration: underline; cursor: pointer; }
   .promo button.x { background: none; color: #9aa2b6; padding: 0 6px; }
   .tabs { display: flex; gap: 2px; padding: 0 8px; }
+  .look { display: flex; flex-direction: column; gap: 7px; }
+  .lk { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .lk .n-l { width: 52px; }
+  .sw { display: flex; gap: 4px; flex-wrap: wrap; }
+  .dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid transparent; padding: 0; cursor: pointer; }
+  .dot.on { border-color: #eef1f7; }
+  .step, .chip { height: 22px; min-width: 22px; padding: 0 8px; border: 0; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: #cfd5e2; font: inherit; cursor: pointer; }
+  .chip.on { background: rgba(255, 255, 255, 0.22); color: #fff; }
   .tabs button { flex: 1; height: 28px; border: 0; border-radius: 8px; background: none; color: #9aa2b6; font: inherit; cursor: pointer; }
   .tabs button.on { background: rgba(255, 255, 255, 0.08); color: #eef1f7; }
   .p-body { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px 14px; min-height: 104px; }

@@ -20,3 +20,5 @@ bistro-table.glb "Table" by CMHT Oculus, CC BY 3.0
                 https://poly.pizza/m/cIogKnGAeII   https://creativecommons.org/licenses/by/3.0/
 cafe-chair.glb  "Chair" by CMHT Oculus, CC BY 3.0
                 https://poly.pizza/m/cz0MliYTG8O   https://creativecommons.org/licenses/by/3.0/
+ping-pong.glb   "Table tennis table" by jeremy, CC BY 3.0
+                https://poly.pizza/m/c_BDr31X5_-   https://creativecommons.org/licenses/by/3.0/

@@ -59,6 +59,8 @@
     /** The Sims layer: accounts (quota, for the Out of quota moodlet), actions from the click menu, Pause. */
     accounts?: AccountInfo[];
     onaction?: (agentId: string, action: AgentAction) => void;
+    /** The look editor saved a new look (the agent's `look_seed`). */
+    onlook?: (agentId: string, lookSeed: string) => void;
     paused?: boolean;
     onpause?: (paused: boolean) => void;
     /** Pick who gets a job offer's job (the office pins open offers by the door). */
@@ -97,6 +99,7 @@
     insets,
     accounts = [],
     onaction,
+    onlook,
     paused = false,
     onpause,
     onpickapplicant,
@@ -325,6 +328,7 @@
       insets={hudInsets}
       {narrate}
       {onaction}
+      {onlook}
       onclosemenu={() => (menuAt = null)}
       {paused}
       {onpause}

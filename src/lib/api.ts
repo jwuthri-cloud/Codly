@@ -176,6 +176,7 @@ export const api = {
   /** A request's own mode, permissions and Lead model (null fields = the Settings defaults). */
   setRequestPrefs: (thread: string, prefs: RequestPrefs) => call<RequestPrefs>('set_request_prefs', { thread, prefs }),
   setAgentModel: (agentId: string, model: string | null) => call<Agent>('set_agent_model', { agentId, model }),
+  setAgentLook: (agentId: string, lookSeed: string) => call<Agent>('set_agent_look', { agentId, lookSeed }),
   createTask: (title: string, goal: string) => call<Task>('create_task', { title, goal }),
   moveTask: (taskId: string, status: TaskStatus) => call<Task>('move_task', { taskId, status }),
   assignTask: (taskId: string, agentId: string | null) => call<Task>('assign_task', { taskId, agentId }),

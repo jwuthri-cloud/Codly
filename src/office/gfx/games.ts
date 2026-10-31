@@ -141,6 +141,95 @@ export class FoosballSim {
   }
 }
 
+// ───────────── ping-pong ─────────────
+
+/** Table-local: the ends are at x = ±PP_X (slot 0 plays the +x end); the top is at PP_TOP. */
+const PP_X = 0.9;
+export const PP_TOP = 0.76;
+const PP_R = 0.02;
+
+/** A rally: the ball flies end to end, bounces once on the far half, and is hit back, until
+ *  someone misses (about one shot in seven). */
+export class PingPongSim {
+  ball = { x: PP_X, y: PP_TOP + 0.2, z: 0 };
+  score = [0, 0];
+  lastPoint: { team: number; at: number } | null = null;
+  lastHit: { team: number; at: number } | null = null;
+  outUntil = 0;
+  events: GameSound[] = [];
+  /** Who hit the ball in flight (0: from the +x end), when, how long it flies and where it goes. */
+  private from = 0;
+  private at = 0;
+  private dur = 0.9;
+  private z0 = 0;
+  private z1 = 0;
+  private miss = false;
+  private bounced = false;
+  private r: () => number;
+
+  constructor(seed: number) {
+    this.r = rng(seed);
+  }
+
+  private hit(team: number, now: number) {
+    this.from = team;
+    this.at = now;
+    this.dur = 0.8 + this.r() * 0.35;
+    this.z0 = this.z1;
+    this.z1 = (this.r() - 0.5) * 0.7;
+    this.miss = this.r() < 0.14;
+    this.bounced = false;
+    this.lastHit = { team, at: now };
+    this.events.push({ name: 'pool-ball', gain: 0.3 });
+  }
+
+  step(now: number) {
+    if (!this.lastHit) this.hit(0, now);
+    if (now < this.outUntil) return;
+    if (this.outUntil) {
+      this.outUntil = 0;
+      this.z1 = 0;
+      this.hit(this.lastPoint?.team ?? 0, now); // the winner serves
+    }
+    const p = (now - this.at) / (this.dur * 1000);
+    const dir = this.from === 0 ? -1 : 1;
+    const b = this.ball;
+    b.x = -dir * (PP_X + 0.1) + dir * 2 * (PP_X + 0.1) * Math.min(p, 1.35);
+    b.z = this.z0 + (this.z1 - this.z0) * Math.min(p, 1.35);
+    const top = PP_TOP + PP_R;
+    const B = 0.72; // where it bounces, 0 … 1 along the flight
+    if (p < B) {
+      const k = p / B;
+      b.y = top + (0.2 - 0.2 * k) + 0.3 * 4 * k * (1 - k);
+    } else if (p < 1 || !this.miss) {
+      const k = (p - B) / (1 - B);
+      b.y = top + 0.2 * k + 0.18 * 4 * k * (1 - k);
+      if (!this.bounced) {
+        this.bounced = true;
+        this.events.push({ name: 'pool-ball', gain: 0.18 });
+      }
+    } else b.y = Math.max(PP_R, top + 0.2 - 2.4 * (p - 1)); // whiffed: past the paddle, down to the floor
+    if (p >= 1 && !this.miss) this.hit(1 - this.from, now);
+    else if (p >= 1.35 && this.miss) {
+      this.score[this.from]++;
+      this.lastPoint = { team: this.from, at: now };
+      this.outUntil = now + 1500;
+    }
+  }
+
+  /** The cue for the player of `team` (0 plays the +x end facing −x: its left is +z). */
+  cue(team: number): PlayCue {
+    const b = this.ball;
+    const end = team === 0 ? PP_X : -PP_X;
+    let react: React = null;
+    const pt = this.lastPoint;
+    const h = this.lastHit;
+    if (pt) react = { kind: pt.team === team ? 'cheer' : 'groan', at: pt.at };
+    if (h && h.team === team && (!pt || h.at > pt.at)) react = { kind: 'shot', at: h.at };
+    return { intensity: clamp(1 - Math.abs(b.x - end) / (2 * PP_X), 0, 1), lean: clamp(((team === 0 ? 1 : -1) * b.z) / 0.45, -1, 1), phase: null, t: 0, react };
+  }
+}
+
 // ───────────── pool ─────────────
 
 const BALL_R = 0.03;
@@ -518,6 +607,7 @@ export interface GamePlayer {
 
 export interface GamePlayers {
   foosball: GamePlayer[];
+  pingpong: GamePlayer[];
   pool: GamePlayer[];
   console: GamePlayer[];
 }
@@ -542,6 +632,7 @@ export class GamesCorner {
   private geos: BufferGeometry[] = [];
   private foos: { it: Item; sim: FoosballSim; rods: Group[]; ball: Mesh } | null = null;
   private pool: { it: Item; sim: PoolSim; balls: Mesh[]; walking: Character | null } | null = null;
+  private pong: { it: Item; sim: PingPongSim; ball: Mesh } | null = null;
   private tv: { it: Item; sim: ConsoleSim; screen: Mesh; tex: CanvasTexture; g: CanvasRenderingContext2D; drawnAt: number } | null = null;
   private v = new Vector3();
 
@@ -582,6 +673,14 @@ export class GamesCorner {
       ball.position.y = 0.795;
       g.add(ball);
       this.foos = { it: fi, sim: new FoosballSim(1), rods, ball };
+    }
+    const ppi = find('pingpong');
+    if (ppi) {
+      const g = frame(ppi);
+      const ball = new Mesh(this.sphere(PP_R), new MeshStandardMaterial({ color: 0xff9a3c, roughness: 0.4 }));
+      ball.castShadow = true;
+      g.add(ball);
+      this.pong = { it: ppi, sim: new PingPongSim(4), ball };
     }
     const pi = find('poolTable');
     if (pi) {
@@ -628,8 +727,9 @@ export class GamesCorner {
     let moving = false;
     if (this.foos) moving = this.updateFoosball(now, dt, p.foosball) || moving;
     if (this.pool) moving = this.updatePool(now, dt, p.pool) || moving;
+    if (this.pong) moving = this.updatePingPong(now, p.pingpong) || moving;
     if (this.tv) moving = this.updateTv(now, dt, p.console) || moving;
-    for (const g of [this.foos, this.pool, this.tv]) {
+    for (const g of [this.foos, this.pool, this.pong, this.tv]) {
       if (!g) continue;
       for (const e of g.sim.events.splice(0)) this.onSound?.(e, [g.it.x, g.it.z]);
     }
@@ -664,6 +764,28 @@ export class GamesCorner {
       // Slot 0 stands on the −x side facing +x: its left is −z. Slot 1 the opposite.
       pl.c.cue = f.sim.cue(team, team === 0 ? -1 : 1);
       pl.c.gaze = (pl.c.gaze ?? new Vector3()).copy(this.world(f.it, b.x, b.z, 0.8));
+    }
+    return true;
+  }
+
+  private updatePingPong(now: number, players: GamePlayer[]) {
+    const P = this.pong!;
+    P.ball.visible = players.length >= 2 && now >= P.sim.outUntil;
+    if (!players.length) return false;
+    if (players.length < 2) {
+      const centre = this.world(P.it, 0, 0, PP_TOP);
+      for (const pl of players) {
+        pl.c.cue = WAITING;
+        pl.c.gaze = (pl.c.gaze ?? new Vector3()).copy(centre);
+      }
+      return true;
+    }
+    P.sim.step(now);
+    const b = P.sim.ball;
+    P.ball.position.set(b.x, b.y, b.z);
+    for (const pl of players) {
+      pl.c.cue = P.sim.cue(pl.slot === 0 ? 0 : 1);
+      pl.c.gaze = (pl.c.gaze ?? new Vector3()).copy(this.world(P.it, b.x, b.z, b.y));
     }
     return true;
   }

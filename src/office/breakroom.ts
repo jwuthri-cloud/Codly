@@ -21,7 +21,7 @@ import type { Use } from './use';
 
 /** Two-player tables, the PS5, the solo spots (a library chair, the coffee counter, the nap
  *  armchair), and pieces of furniture. */
-export type Game = 'pool' | 'foosball' | 'console' | 'library' | 'coffee' | 'nap' | 'piece';
+export type Game = 'pool' | 'foosball' | 'pingpong' | 'console' | 'library' | 'coffee' | 'nap' | 'piece';
 export interface Seat {
   game: Game;
   /** Slot index at the game's station (games.pool:0 / :1 …), or the piece's spot. */
@@ -38,14 +38,14 @@ export interface Spot {
   n: number;
 }
 
-const TABLES: Game[] = ['pool', 'foosball'];
-const SEATS: Record<Game, number> = { pool: 2, foosball: 2, console: 2, library: 2, coffee: 2, nap: 1, piece: 0 };
+const TABLES: Game[] = ['pool', 'foosball', 'pingpong'];
+const SEATS: Record<Game, number> = { pool: 2, foosball: 2, pingpong: 2, console: 2, library: 2, coffee: 2, nap: 1, piece: 0 };
 const WISH_USE: Partial<Record<Activity, Use>> = { library: 'read', coffee: 'coffee', nap: 'nap' };
 const LOUNGING: Use[] = ['sit', 'watch', 'dance'];
 /** How long a player left alone at a table waits for someone before giving up. */
 export const LONELY_MS = 6000;
 /** How long an activity lasts before the agent moves on (ms). */
-const STAY: Record<Game, number> = { pool: 150_000, foosball: 120_000, console: 150_000, library: 90_000, coffee: 25_000, nap: 120_000, piece: 90_000 };
+const STAY: Record<Game, number> = { pool: 150_000, foosball: 120_000, pingpong: 120_000, console: 150_000, library: 90_000, coffee: 25_000, nap: 120_000, piece: 90_000 };
 const PIECE_STAY: Partial<Record<Use, number>> = { coffee: 25_000, water: 25_000, drink: 25_000, nap: 120_000, dance: 45_000 };
 /** After an activity, the agent picks something else for this long. */
 export const AGAIN_MS = 120_000;

@@ -630,6 +630,16 @@ impl Core {
         self.inner.hire_from_manifest(manifest, confirm_shell).await
     }
 
+    /// Change how an agent looks in the office: its `look_seed` (a seed, plus the picks made in
+    /// the office's look editor after a `#`). Only the office reads it.
+    pub async fn set_agent_look(&self, agent_id: &str, look_seed: &str) -> anyhow::Result<Agent> {
+        let s = look_seed.trim();
+        if s.is_empty() || s.len() > 200 || s.chars().any(char::is_control) {
+            anyhow::bail!("not a valid look");
+        }
+        self.inner.update_agent(agent_id, |a| a.look_seed = s.to_string())
+    }
+
     /// Switch a 1:1 agent to another model (None = the CLI's default).
     pub async fn set_agent_model(&self, agent_id: &str, model: Option<String>) -> anyhow::Result<Agent> {
         self.inner.set_agent_model(agent_id, model).await

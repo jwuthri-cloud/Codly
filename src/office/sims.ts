@@ -88,6 +88,7 @@ export function activityFor(stationId: string | null, pose: string): RestActivit
       return 'console';
     case 'games.pool':
     case 'games.foosball':
+    case 'games.pingpong':
       return 'table';
     case 'library.chair':
       return 'library';

@@ -223,6 +223,14 @@ export async function setAgentModel(agent: Agent, model: string | null): Promise
   return true;
 }
 
+/** Save how an agent looks in the office (the look editor's picks in its `look_seed`). */
+export async function setAgentLook(agent: Agent, lookSeed: string): Promise<boolean> {
+  const a = await attempt(`change ${agent.name}'s look`, () => api.setAgentLook(agent.id, lookSeed));
+  if (!a) return false;
+  store.upsertAgent(a);
+  return true;
+}
+
 export async function interruptAgent(agentId: string) {
   await attempt('interrupt the agent', () => api.interruptAgent(agentId));
 }

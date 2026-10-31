@@ -44,9 +44,10 @@ export type Pose =
   | 'gamepad'
   | 'foosball'
   | 'pool'
+  | 'pingpong'
   | 'drink';
 
-export type Prop = 'paper' | 'book' | 'card' | 'envelope' | 'folder' | 'phone' | 'marker' | 'note' | 'mug' | 'gamepad' | 'cue' | null;
+export type Prop = 'paper' | 'book' | 'card' | 'envelope' | 'folder' | 'phone' | 'marker' | 'note' | 'mug' | 'gamepad' | 'cue' | 'paddle' | null;
 export type Emote = 'alert' | 'question' | 'rain' | 'zz' | 'think' | 'check' | null;
 export type Screen = 'off' | 'idle' | 'code' | 'doc' | 'terminal' | 'chat' | 'alert' | 'error' | 'think' | 'search';
 
@@ -76,7 +77,7 @@ export interface Intent {
 export const LONG_IDLE_MS = 10 * 60_000;
 export const PLAY_AFTER_MS = 60_000;
 /** Tunable for testing (the office demo's ?playAfter=5). */
-export const leisure = { playAfterMs: PLAY_AFTER_MS, prefer: null as 'pool' | 'foosball' | 'console' | null };
+export const leisure = { playAfterMs: PLAY_AFTER_MS, prefer: null as 'pool' | 'foosball' | 'pingpong' | 'console' | null };
 export const DONE_CHECK_MS = 2000;
 export const CHEER_MS = 1700;
 export const ACT_MS = 1500;
@@ -238,6 +239,8 @@ export function breakIntent(seat: Seat | null): Intent {
       return make({ kind: 'station', id: 'games.foosball', slot: seat.slot }, 'foosball', 'idle', extra);
     case 'pool':
       return make({ kind: 'station', id: 'games.pool', slot: seat.slot }, 'pool', 'idle', { ...extra, prop: 'cue' });
+    case 'pingpong':
+      return make({ kind: 'station', id: 'games.pingpong', slot: seat.slot }, 'pingpong', 'idle', { ...extra, prop: 'paddle' });
     case 'library':
       return make({ kind: 'station', id: 'library.chair', slot: seat.slot }, 'read', 'idle', { ...extra, prop: 'book' });
     case 'coffee':

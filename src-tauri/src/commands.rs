@@ -153,6 +153,11 @@ pub async fn set_agent_model(state: State<'_, AppState>, agent_id: String, model
 }
 
 #[tauri::command]
+pub async fn set_agent_look(state: State<'_, AppState>, agent_id: String, look_seed: String) -> R<Agent> {
+    state.core().await?.set_agent_look(&agent_id, &look_seed).await.map_err(err)
+}
+
+#[tauri::command]
 pub async fn create_task(state: State<'_, AppState>, title: String, goal: String) -> R<Task> {
     state.core().await?.create_task(&title, &goal).await.map_err(err)
 }
