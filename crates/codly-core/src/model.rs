@@ -539,6 +539,155 @@ pub struct Placed {
     pub rot: f64,
 }
 
+/// Build mode: one repo's office as data (`lot:{ws}`), the plot and everything built on it.
+/// Ready-made buildings are lots too (`src/office/lots/*.json`); `src/office/layout.ts` turns
+/// one into the rooms, walls, stations and walking grid the office runs on (`crate::lot`).
+/// Coordinates are metres on the office floor: x grows east, z grows south, (0, 0) is the
+/// lot's north-west corner.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Lot {
+    /// Schema version (1).
+    pub v: u32,
+    /// The ready-made design it started from ("studio", "garage"), "" for none.
+    #[serde(default)]
+    pub template: String,
+    pub size: LotSize,
+    pub walls: Vec<LotWall>,
+    pub doors: Vec<LotDoor>,
+    pub windows: Vec<LotWindow>,
+    pub floors: LotFloors,
+    /// Each painted wall side; unpainted sides are plaster.
+    #[serde(default)]
+    pub paint: Vec<WallPaint>,
+    /// Where room names sit on the floor (and a name you gave it); unlabelled rooms get one.
+    #[serde(default)]
+    pub labels: Vec<RoomLabel>,
+    /// Everything standing in it: work stations (desks, racks, shelves…), built-ins and what
+    /// was bought.
+    pub furniture: Vec<Placed>,
+    /// Ids (walls, doors, windows) and uids (furniture) of what came free: gifts sell for 0.
+    #[serde(default)]
+    pub gift: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LotSize {
+    pub w: f64,
+    pub d: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WallKind {
+    /// Full height, outside: windows go in it; it drops when the camera faces it.
+    Exterior,
+    /// An inside wall (drawn cut away at waist height).
+    Solid,
+    Glass,
+    /// Knee-high.
+    Half,
+}
+
+/// A straight wall on the 0.5 m grid, from (x0, z0) to (x1, z1) along x or along z.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LotWall {
+    pub id: String,
+    pub x0: f64,
+    pub z0: f64,
+    pub x1: f64,
+    pub z1: f64,
+    pub kind: WallKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum DoorKind {
+    /// A doorway without a door (an archway, or a room opening straight onto another).
+    Open,
+    Single,
+    Double,
+    Glass,
+    /// A garage's roll-up door.
+    Rollup,
+}
+
+/// A door in a wall: centred `at` metres from the wall's (x0, z0), `width` wide. Doors close
+/// rooms (the area on each side is its own room). The front door is the first door in a wall
+/// on the lot's edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LotDoor {
+    pub id: String,
+    pub wall: String,
+    pub at: f64,
+    pub width: f64,
+    pub kind: DoorKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WindowKind {
+    Standard,
+}
+
+/// A window in an exterior wall, placed like a door.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LotWindow {
+    pub id: String,
+    pub wall: String,
+    pub at: f64,
+    pub width: f64,
+    pub kind: WindowKind,
+}
+
+/// Floor paint per tile: `default` everywhere, then each rect on top, in order (later wins).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LotFloors {
+    /// Tile size in metres (0.5): rects are whole tiles.
+    pub tile: f64,
+    pub default: String,
+    pub rects: Vec<FloorRect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FloorRect {
+    pub x: f64,
+    pub z: f64,
+    pub w: f64,
+    pub d: f64,
+    /// The material (`lot::FLOORS`: oak, walnut, carpet-sage, concrete…).
+    pub m: String,
+}
+
+/// One side of a wall painted: `side` 1 faces +z (a wall along x) or +x (along z), −1 the other.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WallPaint {
+    pub wall: String,
+    pub side: i32,
+    /// A colour ("#rrggbb") or a wallpaper id.
+    pub paint: String,
+}
+
+/// A room's floor label: the room under (x, z) is named `name`, or after what's in it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RoomLabel {
+    pub x: f64,
+    pub z: f64,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// The office's budget: every agent's XP in this repo (retired ones too), less what was bought.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

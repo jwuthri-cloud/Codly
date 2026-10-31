@@ -6,10 +6,10 @@ import { officeLayout, passableFn, cellOf } from '../layout';
 const piece = (item: string, x: number, z: number, w = 1, d = 0.5, extra: Partial<Piece> = {}): Piece => ({ uid: `${item}@${x},${z}`, item, x, y: 0, z, rot: 0, dims: { w, d, h: 0.5 }, ...extra });
 
 describe('Build/Buy', () => {
-  it('has a model file and a price for every piece', () => {
+  it('has a model file (the office’s own pieces: none) and a price for every piece', () => {
     const files = new Set(Object.keys(import.meta.glob('/public/furniture/*/*.{glb,gltf}')));
     for (const f of FURNITURE) {
-      expect(files.has(`/public/furniture/${f.src}`), f.src).toBe(true);
+      if (!('builtin' in f)) expect(files.has(`/public/furniture/${f.src}`), f.src).toBe(true);
       expect(f.price, f.id).toBeGreaterThan(0);
     }
     expect(new Set(FURNITURE.map((f) => f.id)).size).toBe(FURNITURE.length);

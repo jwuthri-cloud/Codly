@@ -31,7 +31,7 @@ export interface Furniture {
   yaw?: number;
 }
 
-export const FURNITURE: Furniture[] = RAW;
+export const FURNITURE = RAW as Furniture[];
 export const BY_ID = new Map(FURNITURE.map((f) => [f.id, f]));
 export const CATEGORIES = [...new Set(FURNITURE.map((f) => f.cat))];
 /** What the Buy catalog sells. */
