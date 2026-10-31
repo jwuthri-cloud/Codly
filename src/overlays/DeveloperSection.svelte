@@ -14,6 +14,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import { rankLabel } from '../lib/util/career';
   import { coins } from '../lib/util/format';
+  import { live } from '../office/sims';
 
   const on = $derived(store.settings.developer_mode);
   let wallet = $state.raw<Wallet | null>(null);
@@ -40,6 +41,16 @@
       void load();
       toast({ kind: 'success', title: `${a.name}: +${xp} XP`, body: `${rankLabel(a.career.rank)} · ${a.career.xp} XP` });
     }, fail('Couldn’t give XP'));
+  }
+  // Energy and time live in the open office's tracker (sims.ts), not in the core.
+  function energy(e: number) {
+    if (!agentId || !live.sims) return toast({ kind: 'error', title: 'Open the office first', body: 'Energy is tracked by the office view.' });
+    live.sims.setEnergy(agentId, Date.now(), e);
+  }
+  function skip(minutes: number) {
+    if (!live.sims) return toast({ kind: 'error', title: 'Open the office first', body: 'Time is tracked by the office view.' });
+    live.sims.skip(minutes, Date.now());
+    toast({ kind: 'success', title: `Skipped ${minutes} min`, body: 'Energy, coffee and home timers moved on.' });
   }
   let confirmReset = $state(false);
   function reset() {
@@ -85,8 +96,17 @@
       {/if}
     </div>
 
-    <!-- Energy and time (PROGRESSION.md §3, with the energy work): fill or drain the agent's
-         energy, skip the home and caffeine timers. Their rows go here. -->
+    {#if workers.length}
+      <div class="row">
+        <div class="r-text"><span class="r-title">Energy</span><span class="desc">Of the agent picked above: full, or empty (it goes home after its task).</span></div>
+        <button class="btn sm" onclick={() => energy(1)}>Fill</button>
+        <button class="btn sm" onclick={() => energy(0)}>Drain</button>
+      </div>
+    {/if}
+    <div class="row">
+      <div class="r-text"><span class="r-title">Skip time</span><span class="desc">Moves energy, coffee, home and moodlet timers on, for every agent in the open office.</span></div>
+      {#each [10, 60] as m (m)}<button class="btn sm" onclick={() => skip(m)}>+{m} min</button>{/each}
+    </div>
 
     <div class="row">
       <div class="r-text"><span class="r-title">Reset this office</span><span class="desc">Removes every piece of furniture in this repo’s office; what it cost goes back to the wallet.</span></div>

@@ -191,6 +191,9 @@ const FRUSTRATED_AT = 2;
 
 const clamp = (x: number, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, x));
 
+/** The open office's tracker, for Settings → Developer (null while no office is open). */
+export const live: { sims: SimsTracker | null } = { sims: null };
+
 export class SimsTracker {
   private minds = new Map<string, Mind>();
   private agents = new Map<string, Agent>();

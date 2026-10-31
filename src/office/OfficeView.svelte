@@ -24,7 +24,7 @@
   import type { AccountInfo } from '../lib/gen/AccountInfo';
   import { OfficeEngine, type AgentListItem, type TickerItem } from './engine';
   import SimsHud, { type AgentAction } from './SimsHud.svelte';
-  import { headline, plumbobOf, SimsTracker } from './sims';
+  import { headline, live, plumbobOf, SimsTracker } from './sims';
   import JobBoard from './JobBoard.svelte';
   import type { JobOffer } from '../lib/gen/JobOffer';
   import type { Placed } from '../lib/gen/Placed';
@@ -147,6 +147,7 @@
   }
 
   const sims = new SimsTracker();
+  live.sims = sims;
   // Home and back: every couple of seconds the exhausted and the sick go home once their task is
   // done and the rested come back (sims.ts); what changed goes to the core, the tags to the door.
   function restTick() {
@@ -283,6 +284,7 @@
     return () => {
       clearInterval(rest);
       saveRest();
+      if (live.sims === sims) live.sims = null;
       engine = null;
       clearTimeout(announceTimer);
       e.dispose();
