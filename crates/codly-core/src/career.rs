@@ -172,6 +172,55 @@ pub fn note(c: &mut Career, at: i64, text: String) {
     c.milestones.drain(..over);
 }
 
+const DAY_MS: f64 = 86_400_000.0;
+/// Legendary, the title above Staff: days on the crew, merges and stamina it needs on top of
+/// the rank, so it can't be had from XP alone.
+pub const LEGEND_DAYS: f64 = 90.0;
+pub const LEGEND_MERGES: i64 = 150;
+pub const LEGEND_STAMINA: i64 = 80;
+
+/// When it joined the crew: this repo's row, or its record's first milestone when older (an
+/// imported agent keeps its days).
+pub fn hired_at(c: &Career, created_at: i64) -> i64 {
+    c.milestones.iter().map(|m| m.at).filter(|t| *t > 0).fold(created_at, i64::min)
+}
+
+/// Stamina (0 … 100) from what it really lived through: days on the crew (up to 35), merges
+/// (up to 35) and shifts it worked and rested from (up to 30), each with diminishing returns;
+/// minus 2 each time it got sick.
+pub fn stamina(c: &Career, days: f64) -> i64 {
+    let grow = |x: f64, scale: f64, cap: f64| cap * (1.0 - (-x.max(0.0) / scale).exp());
+    let s = grow(days, 45.0, 35.0) + grow(c.stats.merged as f64, 75.0, 35.0) + grow(c.stats.shifts as f64, 40.0, 30.0) - 2.0 * c.stats.sick as f64;
+    (s.round() as i64).clamp(0, 100)
+}
+
+/// Whether it has earned Legendary: Staff, 90 days on the crew, 150 merges and stamina 80.
+pub fn legend_ok(c: &Career, days: f64) -> bool {
+    c.rank == Rank::Staff && days >= LEGEND_DAYS && c.stats.merged >= LEGEND_MERGES && stamina(c, days) >= LEGEND_STAMINA
+}
+
+/// Bring stamina and the Legend title up to date (the core does it on every save of the
+/// agent). Returns true when it just became a Legend (once: the title stays).
+pub fn refresh(c: &mut Career, hired_at: i64, now: i64) -> bool {
+    let days = (now - hired_at).max(0) as f64 / DAY_MS;
+    c.stamina = stamina(c, days);
+    if c.legend || !legend_ok(c, days) {
+        return false;
+    }
+    c.legend = true;
+    note(c, now, "Legend".into());
+    true
+}
+
+/// The office reports a shift worked and rested from at home, or a sickness.
+pub fn rest(c: &mut Career, sick: bool) {
+    if sick {
+        c.stats.sick += 1;
+    } else {
+        c.stats.shifts += 1;
+    }
+}
+
 /// What its traits and track record add in front of its prompts (empty: nothing to add).
 pub fn briefing(c: &Career) -> String {
     let mut out = String::new();
@@ -220,9 +269,13 @@ pub fn sanitize(mut c: Career) -> Career {
     c.milestones.retain(|m| !m.text.is_empty() && m.text.len() <= 120 && !m.text.chars().any(char::is_control));
     let over = c.milestones.len().saturating_sub(MAX_MILESTONES);
     c.milestones.drain(..over);
-    for v in [&mut c.stats.commits, &mut c.stats.checks_passed, &mut c.stats.checks_failed, &mut c.stats.approved, &mut c.stats.changes_requested, &mut c.stats.reviews_done, &mut c.stats.merged] {
+    let s = &mut c.stats;
+    for v in [&mut s.commits, &mut s.checks_passed, &mut s.checks_failed, &mut s.approved, &mut s.changes_requested, &mut s.reviews_done, &mut s.merged, &mut s.shifts, &mut s.sick] {
         *v = (*v).clamp(0, 1_000_000);
     }
+    // Recomputed here from its record (`refresh`), never taken from the file.
+    c.stamina = 0;
+    c.legend = false;
     c
 }
 
@@ -292,6 +345,7 @@ pub fn applicants(n: usize, seed: u64, taken: &[String], colors: &[i64]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::CareerStats;
 
     #[test]
     fn promotions_follow_real_work() {
@@ -355,6 +409,56 @@ mod tests {
         c.mentor = Some("a1".into());
         let c = sanitize(c);
         assert!(c.friends.is_empty() && c.mentor.is_none(), "friends are agents of the old repo");
+    }
+
+    #[test]
+    fn stamina_grows_with_real_history() {
+        let mut c = Career::default();
+        assert_eq!(stamina(&c, 0.0), 0, "a new hire starts at 0");
+        let a = stamina(&c, 30.0);
+        c.stats.merged = 40;
+        let b = stamina(&c, 30.0);
+        c.stats.shifts = 20;
+        let d = stamina(&c, 30.0);
+        assert!(0 < a && a < b && b < d, "days, merges and shifts each add: {a} {b} {d}");
+        c.stats.sick = 3;
+        assert_eq!(stamina(&c, 30.0), d - 6, "a little lost each time sick");
+        c.stats = CareerStats { merged: 100_000, shifts: 100_000, ..Default::default() };
+        assert_eq!(stamina(&c, 10_000.0), 100, "capped");
+        c.stats.sick = 1_000;
+        assert_eq!(stamina(&c, 0.0), 0, "never below 0");
+        rest(&mut c, false);
+        rest(&mut c, true);
+        assert_eq!((c.stats.shifts, c.stats.sick), (100_001, 1_001));
+    }
+
+    #[test]
+    fn legends_need_rank_days_merges_and_stamina() {
+        let day = 86_400_000;
+        let mut c = Career { xp: 5_000, rank: Rank::Staff, ..Default::default() };
+        c.stats.merged = 150;
+        c.stats.shifts = 45;
+        assert!(legend_ok(&c, 90.0), "stamina {}", stamina(&c, 90.0));
+        assert!(!legend_ok(&c, 89.0), "90 days on the crew");
+        assert!(!legend_ok(&Career { stats: CareerStats { merged: 149, ..c.stats.clone() }, ..c.clone() }, 90.0), "150 merges");
+        assert!(!legend_ok(&Career { stats: CareerStats { shifts: 10, ..c.stats.clone() }, ..c.clone() }, 90.0), "stamina 80");
+        assert!(!legend_ok(&Career { rank: Rank::Senior, ..c.clone() }, 400.0), "Staff first: XP alone is not enough either way");
+        // The core refreshes it on save: once, with a milestone, and the title stays.
+        assert!(!refresh(&mut c, 0, 89 * day));
+        assert!(!c.legend && c.stamina > 0);
+        assert!(refresh(&mut c, 0, 90 * day));
+        assert!(c.legend && c.milestones.last().unwrap().text == "Legend");
+        c.stats.sick = 20;
+        assert!(!refresh(&mut c, 0, 91 * day) && c.legend, "earned for good");
+        assert_eq!(c.milestones.iter().filter(|m| m.text == "Legend").count(), 1);
+        // Days count from its first milestone when older (an imported agent).
+        let old = Career { milestones: vec![Milestone { at: 5, text: "Joined the team".into() }], ..Default::default() };
+        assert_eq!(hired_at(&old, 100), 5);
+        assert_eq!(hired_at(&Career::default(), 100), 100);
+        let mut forged = c.clone();
+        forged.stamina = 100;
+        let forged = sanitize(forged);
+        assert!(!forged.legend && forged.stamina == 0, "an import's title and stamina are recomputed, not read");
     }
 
     #[test]

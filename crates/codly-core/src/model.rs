@@ -437,6 +437,11 @@ pub struct Agent {
     /// Track record, rank and traits; kept for good and carried along when exported.
     #[serde(default)]
     pub career: Career,
+    /// Gone home to rest (the office's energy) until then (ms). The Lead gives it no new work
+    /// meanwhile; you still can. Its conversation and session are untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub away_until: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -465,6 +470,12 @@ pub struct CareerStats {
     pub changes_requested: i64,
     pub reviews_done: i64,
     pub merged: i64,
+    /// Shifts it worked and then went home to rest (reported by the office).
+    #[serde(default)]
+    pub shifts: i64,
+    /// Times it got sick: too much coffee, not enough sleep (reported by the office).
+    #[serde(default)]
+    pub sick: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -499,6 +510,13 @@ pub struct Career {
     /// The Senior or Staff whose reviews mentored it while it was an Intern or Junior.
     #[serde(default)]
     pub mentor: Option<Id>,
+    /// 0 … 100, from its real days on the crew, merges and shifts (`career::stamina`): how
+    /// slowly it tires, how fast it recovers, how much coffee it takes. Kept up to date by the core.
+    #[serde(default)]
+    pub stamina: i64,
+    /// Legendary: the title above Staff (`career::legend_ok`); once earned, it stays.
+    #[serde(default)]
+    pub legend: bool,
 }
 
 /// One agent's work in a period (the daily edition and the morning standup).

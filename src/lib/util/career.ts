@@ -33,14 +33,26 @@ const CLASH: [string, string][] = [
 export const emptyCareer = (): Career => ({
   xp: 0,
   rank: 'intern',
-  stats: { commits: 0, checks_passed: 0, checks_failed: 0, approved: 0, changes_requested: 0, reviews_done: 0, merged: 0 },
+  stats: { commits: 0, checks_passed: 0, checks_failed: 0, approved: 0, changes_requested: 0, reviews_done: 0, merged: 0, shifts: 0, sick: 0 },
   skills: {},
   milestones: [],
   traits: [],
   trust: 'intern',
   friends: {},
   mentor: null,
+  stamina: 0,
+  legend: false,
 });
+
+/** Stamina from its record and days on the crew (mirror of `career::stamina`, for the web demo). */
+export function staminaOf(c: Career, days: number): number {
+  const grow = (x: number, scale: number, cap: number) => cap * (1 - Math.exp(-Math.max(0, x) / scale));
+  const s = grow(days, 45, 35) + grow(c.stats.merged, 75, 35) + grow(c.stats.shifts, 40, 30) - 2 * c.stats.sick;
+  return Math.min(100, Math.max(0, Math.round(s)));
+}
+
+/** "Legend" above Staff (`career.legend`), else the rank. */
+export const titleOf = (c: Career) => (c.legend ? 'Legend' : rankLabel(c.rank));
 
 /** What trusting a rank gives an agent (mirror of `career::PERKS`); you grant it, a promotion offers it. */
 export const PERKS: { rank: Rank; perk: string }[] = [

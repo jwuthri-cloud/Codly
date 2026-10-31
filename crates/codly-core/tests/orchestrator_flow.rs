@@ -568,6 +568,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             archived: false,
             usage: Usage::default(),
             career: Default::default(),
+            away_until: None,
             created_at: now_ms(),
             updated_at: now_ms(),
         };
@@ -2093,5 +2094,85 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     let shop = core.sell("a").unwrap();
     assert_eq!(shop.spent, 25 + 340 * (n - 1) as i64);
     assert!(core.sell("a").is_err());
+    core.shutdown().await;
+}
+
+/// An agent at home (the office's energy) gets no new work from the Lead: its plans, quick
+/// tasks and messages to it are refused with when it is back, and the board says so. You can
+/// still give it work; and when the whole team is home, the Lead may assign it anyway.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_at_home_gets_no_new_work_from_the_lead_but_from_you() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                return;
+            }
+            let plan = json!({ "summary": "Add a.txt", "tasks": [{
+                "id": "t1", "title": "Create a.txt", "goal": "Create a.txt", "assignee": "Ana",
+                "acceptance_criteria": ["a.txt exists"], "write_scope": ["a.txt"], "depends_on": [], "verify": ["test -f a.txt"],
+            }] });
+            let r = turn.tool("codly_submit_plan", plan).await;
+            let plan = r["error"].as_str().map_or_else(|| "ok".to_string(), String::from);
+            let r = turn.tool("codly_message_member", json!({ "to": "Ana", "text": "Hi" })).await;
+            let msg = r["error"].as_str().map_or_else(|| "ok".to_string(), String::from);
+            let r = turn.tool("codly_board", json!({})).await;
+            let team = r["result"]["team"].as_array().cloned().unwrap_or_default();
+            let home = team.iter().find(|m| m["name"] == "Ana").map(|m| !m["at_home_until"].is_null()).unwrap_or(false);
+            turn.say(&format!("plan: {plan} | message: {msg} | board: {home}"));
+        })
+    });
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.say("Hello.");
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    let team = vec![TeamMember { name: "Ana".into(), role: "Backend".into(), ..Default::default() }, TeamMember { name: "Bo".into(), role: "Frontend".into(), ..Default::default() }];
+    core.update_settings(Settings { auto_run_plans: false, lead_followups: false, team, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let members = wait_for("the team's agents", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        let m: Vec<Agent> = s.agents.iter().filter(|a| a.member.is_some()).cloned().collect();
+        (m.len() == 2).then_some(m)
+    })
+    .await;
+    let ana = members.iter().find(|a| a.name == "Ana").unwrap().clone();
+    let bo = members.iter().find(|a| a.name == "Bo").unwrap().clone();
+    let back = now_ms() + 30 * 60_000;
+    assert_eq!(core.set_agent_home(&ana.id, Some(back)).unwrap().away_until, Some(back));
+
+    core.send_chat("lead", "add a").await.unwrap();
+    let s = wait_for("the Lead's report", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        chats(&s, "lead").iter().find(|c| c.text.starts_with("plan: ")).map(|c| c.text.clone())
+    })
+    .await;
+    assert!(s.contains("Ana is at home until ") && s.contains("the user can call it in") && s.contains("assign someone at work (Bo)"), "{s}");
+    assert!(s.contains("message: Ana is at home until "), "{s}");
+    assert!(s.ends_with("board: true"), "{s}");
+    assert!(core.snapshot().await.unwrap().plans.is_empty(), "the plan was refused");
+
+    // You are never refused: a task you give it is its own.
+    let t = core.create_task("Say hello", "Say hello").await.unwrap();
+    let t = core.assign_task(&t.id, Some(&ana.id)).await.unwrap();
+    assert_eq!(t.assignee.as_deref(), Some(ana.id.as_str()));
+
+    // The whole team at home: the game never stops the crew from shipping.
+    core.set_agent_home(&bo.id, Some(back)).unwrap();
+    core.send_chat("lead", "add a again").await.unwrap();
+    let s = wait_for("the Lead's second report", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        chats(&s, "lead").iter().filter(|c| c.text.starts_with("plan: ")).nth(1).map(|c| c.text.clone())
+    })
+    .await;
+    assert!(s.starts_with("plan: ok"), "{s}");
+
+    // The Lead never goes home; called back, Ana is a normal member again.
+    let lead = lead_of(&core.snapshot().await.unwrap(), "lead").unwrap().clone();
+    assert!(core.set_agent_home(&lead.id, Some(back)).is_err());
+    assert_eq!(core.set_agent_home(&ana.id, None).unwrap().away_until, None);
     core.shutdown().await;
 }

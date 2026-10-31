@@ -16,7 +16,7 @@ fn main() {
         "hire_review", "hire_launch_preview", "hire_draft_prompt", "hire_from_manifest", "hire_applicants", "pick_applicant", "export_agent", "ghosts", "bring_back", "office_shop", "office_place", "office_sell",
         "agent_git", "get_triggers", "set_triggers", "list_skills", "skill_catalog", "install_skill", "uninstall_skill", "open_skill_folder", "ide_info", "ide_list", "ide_read", "ide_write", "ide_create", "ide_search", "ide_changes", "ide_diff",
         "board_policy", "board_sweep", "board_archive", "list_connections", "update_connection",
-        "save_attachment", "hire_draft", "trust_agent", "office_digest",
+        "save_attachment", "hire_draft", "trust_agent", "office_digest", "set_agent_home", "note_rest",
         "install_cli", "byok_status", "byok_configure", "byok_save_key", "byok_clear_key",
     ])))
     .expect("tauri-build failed");
