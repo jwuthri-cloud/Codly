@@ -60,4 +60,9 @@ use_my_claude_setup: boolean,
 /**
  * Pause (the office's speed control): no new task starts; running ones finish.
  */
-paused: boolean, };
+paused: boolean, 
+/**
+ * The Settings' Developer panel: cheats for testing the game (coins, XP, a fresh office).
+ * Cheats flag the wallet for good.
+ */
+developer_mode: boolean, };

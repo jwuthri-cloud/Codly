@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dev-reset-office"
+description = "Enables the dev_reset_office command without any pre-configured scope."
+commands.allow = ["dev_reset_office"]
+
+[[permission]]
+identifier = "deny-dev-reset-office"
+description = "Denies the dev_reset_office command without any pre-configured scope."
+commands.deny = ["dev_reset_office"]

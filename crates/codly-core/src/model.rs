@@ -524,7 +524,7 @@ pub struct Digest {
     pub done: Vec<String>,
 }
 
-/// Furniture for the office (Build/Buy), paid with what the agents earned (XP).
+/// Furniture for the office (Build/Buy), paid in coins (`Wallet`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Placed {
@@ -539,12 +539,36 @@ pub struct Placed {
     pub rot: f64,
 }
 
-/// The office's budget: every agent's XP in this repo (retired ones too), less what was bought.
+/// The player's coins (🪙): one wallet for every repo, separate from XP (XP is the career, coins
+/// are what the offices spend). `balance = earned + granted - spent`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Wallet {
+    /// Every agent's XP, in every repo, let go ones too: coins from real work.
+    pub earned: i64,
+    /// Coins given outright: developer cheats (later, gifts).
+    pub granted: i64,
+    /// What you own, at its price: every repo's furniture (later, lots and buildings too).
+    pub spent: i64,
+    pub balance: i64,
+    /// A developer cheat was used, ever: flagged for good (leaderboards skip it).
+    pub cheated: bool,
+}
+
+/// Coins given outright, as the wallet's ledger (`wallet:grants`) keeps them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Grant {
+    pub amount: i64,
+    /// `wallet::CHEAT` for the developer panel's (they flag the wallet for good).
+    pub reason: String,
+    pub at: i64,
+}
+
+/// Build/Buy in the open repo: the player's wallet, and the furniture in this office.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Shop {
-    pub earned: i64,
-    pub spent: i64,
+    pub wallet: Wallet,
     pub placed: Vec<Placed>,
 }
 
@@ -1346,6 +1370,10 @@ pub struct Settings {
     /// Pause (the office's speed control): no new task starts; running ones finish.
     #[serde(default)]
     pub paused: bool,
+    /// The Settings' Developer panel: cheats for testing the game (coins, XP, a fresh office).
+    /// Cheats flag the wallet for good.
+    #[serde(default)]
+    pub developer_mode: bool,
 }
 
 fn yes() -> bool {
@@ -1373,6 +1401,7 @@ impl Default for Settings {
             byok_openrouter: false,
             use_my_claude_setup: true,
             paused: false,
+            developer_mode: false,
         }
     }
 }

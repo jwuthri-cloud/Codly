@@ -15,6 +15,7 @@
 //! - `housekeeping` board archiving sweep, default MCP servers for new agents
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - `breaker_run` circuit breaker enforcement (policy in `breaker`): steer, constrain, stop
+//! - `wallet`   the player's coins (🪙) across every repo, Build/Buy, developer grants
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
@@ -42,6 +43,7 @@ pub mod scope;
 mod team;
 mod tools;
 mod triggers;
+pub mod wallet;
 mod workspace;
 mod memgraph;
 
@@ -590,22 +592,69 @@ impl Core {
         self.inner.digest(&ws.id, since)
     }
 
-    /// Build/Buy: the office's budget (XP earned in this repo), catalog and furniture owned.
-    pub fn shop(&self) -> anyhow::Result<Shop> {
-        let ws = self.inner.require_ws()?;
-        self.inner.shop(&ws.id)
+    /// The player's coins, across every repo (no repo needs to be open).
+    pub fn wallet(&self) -> anyhow::Result<Wallet> {
+        wallet::wallet(&self.inner.store)
     }
 
-    /// Buy a piece of furniture and put it down, or move one already bought (same `uid`).
+    /// Build/Buy: the wallet and the open repo's furniture.
+    pub fn shop(&self) -> anyhow::Result<Shop> {
+        let ws = self.inner.require_ws()?;
+        wallet::shop(&self.inner.store, &ws.id)
+    }
+
+    /// Buy a piece of furniture and put it down (if the wallet has the coins), or move one
+    /// already bought (same `uid`).
     pub fn place(&self, piece: Placed) -> anyhow::Result<Shop> {
         let ws = self.inner.require_ws()?;
-        self.inner.place(&ws.id, piece)
+        wallet::place(&self.inner.store, &ws.id, piece)
     }
 
     /// Sell a piece of furniture back for the full price.
     pub fn sell(&self, uid: &str) -> anyhow::Result<Shop> {
         let ws = self.inner.require_ws()?;
-        self.inner.sell(&ws.id, uid)
+        wallet::sell(&self.inner.store, &ws.id, uid)
+    }
+
+    /// Developer panel: give coins. Flags the wallet for good.
+    pub fn dev_grant(&self, amount: i64) -> anyhow::Result<Wallet> {
+        self.inner.developer()?;
+        if !(1..=1_000_000).contains(&amount) {
+            bail!("grant between 1 and 1,000,000 coins");
+        }
+        let w = wallet::grant(&self.inner.store, amount, wallet::CHEAT)?;
+        let ws = self.inner.workspace();
+        self.inner.decide(ws.as_ref().map(|w| w.id.as_str()), None, "developer", format!("cheat: +{amount} coins"), serde_json::json!({ "coins": amount }))?;
+        Ok(w)
+    }
+
+    /// Developer panel: give an agent XP, through its career (a promotion follows, noted as a
+    /// "Cheat" milestone). Its XP is coins too, so it flags the wallet for good.
+    pub fn dev_give_xp(&self, agent_id: &str, xp: i64) -> anyhow::Result<Agent> {
+        self.inner.developer()?;
+        if !(1..=100_000).contains(&xp) {
+            bail!("give between 1 and 100,000 XP");
+        }
+        if self.inner.agent(agent_id)?.role == Role::Lead {
+            bail!("the Lead has no career");
+        }
+        wallet::mark_cheated(&self.inner.store)?;
+        let now = now_ms();
+        let a = self.inner.update_agent(agent_id, |a| {
+            crate::career::credit(&mut a.career, crate::career::Credit::Cheat(xp), now);
+        })?;
+        let ws = self.inner.workspace();
+        self.inner.decide(ws.as_ref().map(|w| w.id.as_str()), None, "developer", format!("cheat: +{xp} XP for {}", a.name), serde_json::json!({ "agent": a.id, "xp": xp }))?;
+        Ok(a)
+    }
+
+    /// Developer panel: empty the open repo's office (its furniture is refunded).
+    pub fn dev_reset_office(&self) -> anyhow::Result<Shop> {
+        self.inner.developer()?;
+        let ws = self.inner.require_ws()?;
+        let shop = wallet::reset_office(&self.inner.store, &ws.id)?;
+        self.inner.decide(Some(&ws.id), None, "developer", "reset the office", serde_json::json!({}))?;
+        Ok(shop)
     }
 
     /// An agent as a `codly/agent@1` file (see `hires.rs`).
@@ -797,6 +846,14 @@ impl Inner {
 
     fn require_ws(&self) -> anyhow::Result<Workspace> {
         self.workspace().ok_or_else(|| anyhow!("open a repository first"))
+    }
+
+    /// The developer panel's cheats only work in Developer mode.
+    fn developer(&self) -> anyhow::Result<()> {
+        if !self.settings().developer_mode {
+            bail!("turn on Developer mode in Settings first");
+        }
+        Ok(())
     }
 
     fn index(&self) -> Option<SharedIndex> {

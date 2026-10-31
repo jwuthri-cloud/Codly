@@ -293,6 +293,14 @@ impl Store {
         Ok(self.conn().query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }
 
+    /// Every (key, value) whose key starts with `prefix` ("decor:" for every repo's furniture).
+    pub fn kv_prefixed(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let mut st = conn.prepare_cached("SELECT key, value FROM kv WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key")?;
+        let rows = st.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn kv_set(&self, key: &str, value: &str) -> Result<()> {
         self.conn().execute(
             "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -412,6 +420,14 @@ impl Store {
             out.extend(self.json_rows::<Plan>("SELECT json FROM plan WHERE status = ?1 ORDER BY created_at", &enum_str(s))?);
         }
         Ok(out)
+    }
+
+    /// Every agent ever, in every workspace, let go ones too (the wallet's earnings).
+    pub fn every_agent(&self) -> Result<Vec<Agent>> {
+        let conn = self.conn();
+        let mut st = conn.prepare_cached("SELECT json FROM agent ORDER BY created_at, id")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        decode_all(rows)
     }
 
     /// Every non-archived agent of every workspace (crash recovery).

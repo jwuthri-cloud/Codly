@@ -63,6 +63,9 @@ export function usd(n: number | null | undefined): string {
   return '$' + Math.round(n).toLocaleString();
 }
 
+/** The game's coins, 🪙 1,250 (never `$`, which is real API cost). */
+export const coins = (n: number) => `🪙 ${Math.round(n).toLocaleString('en-US')}`;
+
 export const pct = (f: number | null | undefined) => (f == null ? '–' : `${Math.round(f * 100)}%`);
 
 export const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`;

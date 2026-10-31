@@ -3,7 +3,7 @@
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
-use codly_core::model::{Agent, Applicant, Digest, Placed, Rank, Shop};
+use codly_core::model::{Agent, Applicant, Digest, Placed, Rank, Shop, Wallet};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -74,7 +74,7 @@ pub async fn office_digest(state: State<'_, AppState>, since: i64) -> Result<Dig
     state.core().await?.digest(since).map_err(|e| format!("{e:#}"))
 }
 
-/// Build/Buy: budget (XP earned), catalog and what the office owns.
+/// Build/Buy: the wallet and what the office owns.
 #[tauri::command]
 pub async fn office_shop(state: State<'_, AppState>) -> Result<Shop, String> {
     state.core().await?.shop().map_err(|e| format!("{e:#}"))
@@ -90,4 +90,28 @@ pub async fn office_place(state: State<'_, AppState>, piece: Placed) -> Result<S
 #[tauri::command]
 pub async fn office_sell(state: State<'_, AppState>, uid: String) -> Result<Shop, String> {
     state.core().await?.sell(&uid).map_err(|e| format!("{e:#}"))
+}
+
+/// The player's coins (🪙), across every repo.
+#[tauri::command]
+pub async fn wallet(state: State<'_, AppState>) -> Result<Wallet, String> {
+    state.core().await?.wallet().map_err(|e| format!("{e:#}"))
+}
+
+/// Developer panel (Developer mode only): give coins; flags the wallet for good.
+#[tauri::command]
+pub async fn dev_grant(state: State<'_, AppState>, amount: i64) -> Result<Wallet, String> {
+    state.core().await?.dev_grant(amount).map_err(|e| format!("{e:#}"))
+}
+
+/// Developer panel (Developer mode only): give an agent XP; its rank follows.
+#[tauri::command]
+pub async fn dev_give_xp(state: State<'_, AppState>, agent_id: String, xp: i64) -> Result<Agent, String> {
+    state.core().await?.dev_give_xp(&agent_id, xp).map_err(|e| format!("{e:#}"))
+}
+
+/// Developer panel (Developer mode only): empty the open repo's office, refunded.
+#[tauri::command]
+pub async fn dev_reset_office(state: State<'_, AppState>) -> Result<Shop, String> {
+    state.core().await?.dev_reset_office().map_err(|e| format!("{e:#}"))
 }

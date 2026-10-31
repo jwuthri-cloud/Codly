@@ -59,7 +59,8 @@
     };
   });
 
-  // Ghosts (agents let go) and the Build/Buy budget: both move with agent changes (XP, let go).
+  // Ghosts (agents let go) and the Build/Buy wallet: both move with agent changes (XP, let go),
+  // and with the developer panel's cheats.
   let ghosts = $state.raw<Agent[]>([]);
   let shop = $state.raw<Shop | null>(null);
   function refetchOffice() {
@@ -75,7 +76,7 @@
   $effect(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
     const off = store.onEvent((ev) => {
-      if (ev.kind.type !== 'agent_changed') return;
+      if (ev.kind.type !== 'agent_changed' && !(ev.kind.type === 'decision' && ev.kind.decision_type === 'developer')) return;
       clearTimeout(t);
       t = setTimeout(refetchOffice, 1500);
     });
