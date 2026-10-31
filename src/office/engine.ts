@@ -144,6 +144,27 @@ interface Carry {
   onend: () => void;
 }
 
+/** Build mode's pointer, on the floor plan: where the cursor meets the floor, and the ray through it. */
+export interface BuildPointer {
+  x: number;
+  z: number;
+  /** The ray from the camera, in floor-plan coordinates. */
+  o: [number, number, number];
+  d: [number, number, number];
+  alt: boolean;
+  shift: boolean;
+  clientX: number;
+  clientY: number;
+}
+
+/** Build mode's tool (build/BuildMode.svelte): the left button draws with it instead of panning. */
+export interface BuildTool {
+  down(p: BuildPointer): void;
+  move(p: BuildPointer, dragging: boolean): void;
+  up(p: BuildPointer): void;
+  leave?(): void;
+}
+
 interface Actor {
   c: Character;
   agentId: string;
@@ -240,6 +261,9 @@ export class OfficeEngine {
   private pieces: Piece[] = [];
   /** Build/Buy mode: clicks pick up furniture; `carry` is the piece following the cursor. */
   private build: { onpick: (uid: string) => void; carry: Carry | null } | null = null;
+  /** Build mode's tool, and the layer it draws its grid and previews on (floor-plan coordinates). */
+  private tool: BuildTool | null = null;
+  readonly buildLayer = new Group();
   private ghostKey = '';
   private ghostList: { id: string; color: number; seed: string; provider: Provider }[] = [];
   private emotes = new Map<EmoteKind, Texture>();
@@ -334,7 +358,7 @@ export class OfficeEngine {
     this.hovRing = new Mesh(ringGeo, new MeshBasicMaterial({ map: this.ringTex, transparent: true, depthWrite: false, opacity: 0.55, blending: AdditiveBlending, toneMapped: false }));
     this.selRing.visible = this.hovRing.visible = false;
     this.selRing.renderOrder = this.hovRing.renderOrder = 3;
-    this.world.add(this.lotGroup, this.frames.group, this.builtins.group, this.decor.group, this.fx.group, this.selRing, this.hovRing);
+    this.world.add(this.lotGroup, this.frames.group, this.builtins.group, this.decor.group, this.fx.group, this.selRing, this.hovRing, this.buildLayer);
     // Characters live in world coordinates (the office frame is offset to center it).
     this.scene.add(this.actorsGroup);
     this.plumbob.visible = false;
@@ -997,6 +1021,46 @@ export class OfficeEngine {
   setWalls(up: boolean) {
     this.building.setWalls(up);
     this.shadowDirty = true;
+    this.wake();
+  }
+
+  /** Walls up, cutaway (the outer walls facing the camera drop low: the office's default) or down. */
+  setWallMode(mode: 'up' | 'cutaway' | 'down') {
+    this.building.setMode(mode);
+    this.shadowDirty = true;
+    this.wake();
+  }
+
+  /** Build mode: route the left button to a tool (null: back to panning). */
+  setBuildTool(tool: BuildTool | null) {
+    this.tool?.leave?.();
+    this.tool = tool;
+    this.renderer.domElement.style.cursor = tool ? 'crosshair' : '';
+    this.wake();
+  }
+
+  /** The office as it stands (its lot, rooms, walls and walking grid). */
+  get layout(): OfficeLayout {
+    return this.L;
+  }
+
+  /** How tall a wall stands now (cut away, walls down), for picking it. */
+  wallHeight(id: string): number {
+    return this.building.shownHeight(id);
+  }
+
+  /** The piece under a point on screen: one bought through Buy, or one of the office's own. */
+  pieceAt(clientX: number, clientY: number): string | null {
+    const uid = this.decor.pick(this.rayAt(clientX, clientY)) ?? this.builtins.pick(this.rayAt(clientX, clientY));
+    if (uid) return uid;
+    const g = this.groundOf(clientX, clientY);
+    if (!g) return null;
+    const [x, z] = [g.x - this.ox, g.z - this.oz];
+    return this.L.items.find((i) => i.uid && i.desk == null && Math.abs(x - i.x) < i.w / 2 && Math.abs(z - i.z) < i.d / 2)?.uid ?? null;
+  }
+
+  /** Build mode drew something new on its layer. */
+  redraw() {
     this.wake();
   }
 
@@ -1811,8 +1875,34 @@ export class OfficeEngine {
     let hoverAt = { x: 0, y: 0 };
     const interactive = () => !this.opts.backdrop;
 
+    // Build mode's tool: the left button is its (Alt and Shift too: they change how it snaps).
+    let drawing = false;
+    const pointer = (e: PointerEvent | MouseEvent): BuildPointer | null => {
+      const ray = this.rayAt(e.clientX, e.clientY).ray;
+      const g = this.groundOf(e.clientX, e.clientY);
+      if (!g) return null;
+      return {
+        x: g.x - this.ox,
+        z: g.z - this.oz,
+        o: [ray.origin.x - this.ox, ray.origin.y, ray.origin.z - this.oz],
+        d: [ray.direction.x, ray.direction.y, ray.direction.z],
+        alt: e.altKey,
+        shift: e.shiftKey,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      };
+    };
     const onDown = (e: PointerEvent) => {
       if (!interactive()) return;
+      if (this.tool && e.button === 0) {
+        const p = pointer(e);
+        if (!p) return;
+        drawing = true;
+        canvas.setPointerCapture(e.pointerId);
+        el.focus({ preventScroll: true });
+        this.tool.down(p);
+        return;
+      }
       down = { x: e.clientX, y: e.clientY, button: e.button, moved: false, id: e.pointerId, orbit: e.button === 2 || e.button === 1 || e.altKey || e.shiftKey };
       last = { x: e.clientX, y: e.clientY };
       canvas.setPointerCapture(e.pointerId);
@@ -1820,6 +1910,11 @@ export class OfficeEngine {
     };
     const onMove = (e: PointerEvent) => {
       if (!interactive()) return;
+      if (this.tool && !down) {
+        const p = pointer(e);
+        if (p) this.tool.move(p, drawing);
+        return;
+      }
       if (down) {
         const dx = e.clientX - last.x;
         const dy = e.clientY - last.y;
@@ -1851,6 +1946,13 @@ export class OfficeEngine {
       }
     };
     const onUp = (e: PointerEvent) => {
+      if (drawing) {
+        drawing = false;
+        canvas.releasePointerCapture?.(e.pointerId);
+        const p = pointer(e);
+        if (p && this.tool) this.tool.up(p);
+        return;
+      }
       if (!down) return;
       const wasClick = !down.moved && down.button === 0;
       canvas.releasePointerCapture?.(down.id);
@@ -1869,7 +1971,10 @@ export class OfficeEngine {
         if (!f) this.opts.onselect(sel);
       }
     };
-    const onLeave = () => this.setLocalHover(null);
+    const onLeave = () => {
+      this.setLocalHover(null);
+      if (!drawing) this.tool?.leave?.();
+    };
     const onWheel = (e: WheelEvent) => {
       if (!interactive()) return;
       e.preventDefault();

@@ -21,7 +21,9 @@
   const initialBackdrop = params.has('backdrop');
   const initialSelect = params.get('select');
   // ?lot=garage or ?lot=small-office: another ready-made office (the Studio by default).
-  const lot = TEMPLATES[params.get('lot') as keyof typeof TEMPLATES] ?? TEMPLATES.studio;
+  let lot = $state.raw(TEMPLATES[params.get('lot') as keyof typeof TEMPLATES] ?? TEMPLATES.studio);
+  // Build mode saves here (no core, no wallet: building is free in the demo).
+  const savelot = async (l: typeof lot) => ((lot = structuredClone(l)), { lot });
 
   let agents = $state<Agent[]>(AGENTS.map((a) => ({ ...a })));
   let tasks = $state<Task[]>(TASKS.map((t) => ({ ...t })));
@@ -159,6 +161,7 @@
     onhover={(h) => (hover = h)}
     onpickapplicant={(_, i) => closeOffer(i, true)}
     onlook={(id, seed) => (agents = agents.map((a) => (a.id === id ? { ...a, look_seed: seed } : a)))}
+    onsavelot={savelot}
     artifactUrl={(a) => (a.id === 'art-1' ? preview : null)}
   />
   {#if backdrop}

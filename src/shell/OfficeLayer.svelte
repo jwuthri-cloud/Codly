@@ -117,6 +117,14 @@
   };
   const place = (p: Placed) => api.officePlace(p).then((s) => (shop = s), undo('Could not put it there'));
   const sell = (uid: string) => api.officeSell(uid).then((s) => (shop = s), undo('Could not sell it'));
+  // Build mode: the core checks the lot and charges the wallet for the change (a refusal throws:
+  // build mode puts the office back).
+  const saveLot = async (l: Lot) => {
+    const saved = await api.officeSaveLot(l);
+    lot = saved.lot;
+    if (shop) shop = { ...shop, wallet: saved.wallet };
+    return saved;
+  };
 
   type Sel = { agentId?: string | null; taskId?: string | null; path?: string | null };
   const selection = $derived.by((): Sel | null => {
@@ -300,6 +308,7 @@
             onplace={place}
             onsell={sell}
             onexport={exportOffice}
+            onsavelot={saveLot}
             {digest}
             simsKey="codly.sims.{store.workspace?.id ?? 'demo'}"
             onhome={(id, until) => api.setAgentHome(id, until).catch(() => {})}

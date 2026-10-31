@@ -29,8 +29,10 @@
     onsell: (uid: string) => void;
     /** Save the office (lot and crew, no code) as a file. */
     onexport?: () => void;
+    /** Open with a new one of this piece in hand (build mode's eyedropper); `n` makes each ask new. */
+    copy?: { item: string; n: number } | null;
   }
-  let { engine, shop, lot = null, crew, insets, onplace, onsell, onexport }: Props = $props();
+  let { engine, shop, lot = null, crew, insets, onplace, onsell, onexport, copy = null }: Props = $props();
 
   let open = $state(false);
   let cat = $state(CATEGORIES[0]);
@@ -50,6 +52,14 @@
       engine.setBuildMode(null);
       sound.music(null);
     };
+  });
+
+  $effect(() => {
+    const f = copy && BY_ID.get(copy.item);
+    if (!f || f.hidden) return;
+    open = true;
+    // Once Build/Buy mode is on (the effect above), pick it up.
+    setTimeout(() => carry(f));
   });
 
   let seq = 0;

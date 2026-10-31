@@ -25,6 +25,8 @@ import {
 import { DESK_H, GLASS_H, INNER_H, LOW_H, WALL_H, type Item, type ItemType, type OfficeLayout, type Wall } from '../layout';
 import { color, lin, MAT, mix, scale, type OfficeTheme, type RGB, type SkyKind } from '../palette';
 import { hash } from '../text';
+import { paperOf } from '../build/paints';
+import type { DoorKind } from '../../lib/gen/DoorKind';
 import { Builder } from './builder';
 import { modeled } from './builtins';
 import * as F from './furniture';
@@ -78,6 +80,8 @@ export class BuildingGfx {
   /** What hangs on an exterior wall (whiteboard, posters): hidden while its wall is down. */
   private hung: { obj: Object3D; nx: number; nz: number }[] = [];
   private wallsUp = true;
+  /** Cutaway: the outer walls facing the camera drop to the low walls' height. */
+  private cutaway = true;
   private camDir: [number, number] = [0, 1];
 
   constructor(private L: OfficeLayout) {
@@ -156,6 +160,7 @@ export class BuildingGfx {
         if (horiz) b.span(w.x0 + a, y0, w.z0 - t / 2 + inset, w.x0 + z, y1, w.z0 + t / 2 + inset, col);
         else b.span(w.x0 - t / 2 + inset, y0, w.z0 + a, w.x0 + t / 2 + inset, y1, w.z0 + z, col);
       };
+      const doors = this.L.lot.doors.filter((d) => d.wall === w.id);
       if (w.kind === 'glass') {
         for (const [a, z] of spans) this.glassSpan(b, glass, w, a, z);
         // Door posts.
@@ -164,22 +169,29 @@ export class BuildingGfx {
           seg(z - 0.04, z + 0.04, 0, GLASS_H + 0.06, c('#5c4a3d'), 0.1);
           seg(a, z, GLASS_H - 0.02, GLASS_H + 0.06, c('#5c4a3d'), 0.1);
         }
+        w.gaps.forEach(([a, z], i) => doors[i] && this.leaves(b, glass, w, a, z, doors[i].kind, GLASS_H));
         continue;
       }
       const H = w.kind === 'exterior' ? WALL_H : w.kind === 'solid' ? INNER_H : LOW_H;
       const windows = w.windows ?? [];
+      // The faces a side's paint covers: the wall, less its doors and windows.
+      const faces: [number, number, number, number][] = [];
+      const face = (a: number, z: number, y0: number, y1: number) => {
+        seg(a, z, y0, y1, plaster);
+        faces.push([a, z, y0, y1]);
+      };
       for (const [a, z] of spans) {
         // Split around windows.
         let cur = a;
         for (const [wa, wz] of windows) {
           if (wz <= cur || wa >= z) continue;
-          seg(cur, wa, 0, H, plaster);
-          seg(wa, wz, 0, SILL, plaster);
-          seg(wa, wz, LINTEL, H, plaster);
+          face(cur, wa, 0, H);
+          face(wa, wz, 0, SILL);
+          face(wa, wz, LINTEL, H);
           this.window(b, w, wa, wz, frame);
           cur = wz;
         }
-        seg(cur, z, 0, H, plaster);
+        face(cur, z, 0, H);
         // Dark cap where the wall is cut, and a baseboard on both faces.
         seg(a, z, H, H + 0.03, cap, WT + 0.02);
         seg(a, z, 0, 0.09, base, WT + 0.03);
@@ -190,6 +202,13 @@ export class BuildingGfx {
         if (ga > 0) seg(ga - 0.03, ga + 0.005, 0, H + 0.03, cap, WT + 0.02);
         if (gz < len) seg(gz - 0.005, gz + 0.03, 0, H + 0.03, cap, WT + 0.02);
       }
+      // Paint and wallpaper: a thin skin on the painted side, above the baseboard.
+      for (const p of this.L.lot.paint) {
+        if (p.wall !== w.id || (p.side !== 1 && p.side !== -1)) continue;
+        const skin = (a: number, z: number, y0: number, y1: number, col: RGB, t = 0.008) => seg(a, z, Math.max(0.09, y0), y1, col, t, p.side * (WT / 2 + t / 2 - 0.002));
+        for (const [a, z, y0, y1] of faces) this.paint(skin, p.paint, a, z, y0, y1);
+      }
+      w.gaps.forEach(([a, z], i) => doors[i] && this.leaves(b, glass, w, a, z, doors[i].kind, H));
       if (side) {
         const mid = horiz ? [0, w.z0 < this.L.d / 2 ? -1 : 1] : [w.x0 < this.L.w / 2 ? -1 : 1, 0];
         this.sides.push({ mesh: this.mesh(b.build(), this.matte, true, true), nx: mid[0], nz: mid[1] });
@@ -208,10 +227,94 @@ export class BuildingGfx {
     this.wallMeshes = [wm, gm];
   }
 
+  /** One painted face: a colour, or a wallpaper's pattern (stripes and checks line up along the wall). */
+  private paint(skin: (a: number, z: number, y0: number, y1: number, col: RGB, t?: number) => void, id: string, a: number, z: number, y0: number, y1: number) {
+    const p = paperOf(id);
+    if (!p) return skin(a, z, y0, y1, c(/^#[0-9a-f]{6}$/i.test(id) ? id : MAT.wall));
+    if (p.look === 'stripes') {
+      for (let i = Math.floor(a / p.w); i * p.w < z; i++) skin(Math.max(a, i * p.w), Math.min(z, (i + 1) * p.w), y0, y1, c(i % 2 ? p.b : p.a));
+    } else if (p.look === 'dado') {
+      skin(a, z, y0, Math.min(y1, p.rail), c(p.b));
+      if (y1 > p.rail) {
+        skin(a, z, Math.max(y0, p.rail), Math.min(y1, p.rail + 0.05), c('#f4efe6'), 0.016);
+        skin(a, z, Math.max(y0, p.rail + 0.05), y1, c(p.a));
+      }
+    } else {
+      for (let i = Math.floor(a / p.w); i * p.w < z; i++)
+        for (let j = Math.floor(y0 / p.w); j * p.w < y1; j++) skin(Math.max(a, i * p.w), Math.min(z, (i + 1) * p.w), Math.max(y0, j * p.w), Math.min(y1, (j + 1) * p.w), c((i + j) % 2 ? p.b : p.a));
+    }
+  }
+
+  /** A door's leaves in the gap [a, z] along a wall, standing open towards its +z / +x side
+   *  (simple shapes: a wood leaf, two for a double door, a framed pane for glass, a rolled-up
+   *  drum for a roll-up door). As tall as the wall, so a cut-away wall cuts its door too. */
+  private leaves(b: Builder, glass: Builder, w: Wall, a: number, z: number, kind: DoorKind, H: number) {
+    if (kind === 'open') return;
+    const horiz = w.z0 === w.z1;
+    const at = (u: number): [number, number] => (horiz ? [w.x0 + u, w.z0] : [w.x0, w.z0 + u]);
+    const h = H < 1 ? H - 0.03 : Math.min(2.02, H - 0.1);
+    const wood = c('#a87c55');
+    const trim = c('#8a6343');
+    if (kind === 'rollup') {
+      const steel = c('#7d828a');
+      for (const u of [a, z]) {
+        const [x, zz] = at(u);
+        b.box(x, H / 2, zz, horiz ? 0.08 : 0.2, H, horiz ? 0.2 : 0.08, c('#5d6168'));
+      }
+      const [mx, mz] = at((a + z) / 2);
+      const len = z - a;
+      b.box(mx, H - 0.13, mz, horiz ? len : 0.26, 0.22, horiz ? 0.26 : len, steel);
+      b.box(mx, H - 0.26, mz, horiz ? len : 0.05, 0.04, horiz ? 0.05 : len, c('#5d6168'));
+      return;
+    }
+    const open = (70 * Math.PI) / 180;
+    // One leaf hinged at `u`, `lw` wide, closing towards `dir` (+1: along the wall).
+    const leaf = (u: number, lw: number, dir: 1 | -1) => {
+      const [hx, hz] = at(u);
+      const [dx, dz] = horiz ? [dir * Math.cos(open), Math.sin(open)] : [Math.sin(open), dir * Math.cos(open)];
+      const rot = Math.atan2(-dz, dx);
+      b.frame(hx, 0, hz, rot);
+      if (kind === 'glass') {
+        const f = c('#5c4a3d');
+        b.box(lw / 2, 0.05, 0, lw, 0.1, 0.05, f).box(lw / 2, h - 0.03, 0, lw, 0.06, 0.05, f).box(0.025, h / 2, 0, 0.05, h, 0.05, f).box(lw - 0.025, h / 2, 0, 0.05, h, 0.05, f);
+        glass.frame(hx, 0, hz, rot).box(lw / 2, h / 2, 0, lw - 0.08, h - 0.14, 0.015, [1, 1, 1]);
+        glass.frame();
+      } else {
+        b.box(lw / 2, h / 2, 0, lw, h, 0.045, wood);
+        if (h > 0.6) b.box(lw / 2, h / 2, 0, lw * 0.7, h * 0.8, 0.05, trim);
+        b.ball(lw - 0.09, Math.min(h * 0.5, 0.95), 0.04, 0.025, 0.025, 0.025, c('#d9c79a'), 8, 6);
+      }
+      b.frame();
+    };
+    const gap = z - a - 0.04;
+    if (kind === 'double') {
+      leaf(a + 0.02, gap / 2, 1);
+      leaf(z - 0.02, gap / 2, -1);
+    } else leaf(a + 0.02, gap, 1);
+  }
+
   /** Walls up, or down to knee-high stubs (The Sims' "walls down") to see into every room. */
   setWalls(up: boolean) {
-    this.wallsUp = up;
+    this.setMode(up ? 'cutaway' : 'down');
+  }
+
+  /** Walls up (all of them), cutaway (the outer walls facing the camera drop low), or down. */
+  setMode(mode: 'up' | 'cutaway' | 'down') {
+    this.wallsUp = mode !== 'down';
+    this.cutaway = mode === 'cutaway';
     this.applyWalls();
+  }
+
+  /** How tall a wall stands right now (walls down, cut away), for picking it with the mouse. */
+  shownHeight(id: string): number {
+    const w = this.L.walls.find((x) => x.id === id);
+    if (!w) return 0;
+    const H = w.kind === 'exterior' ? WALL_H : w.kind === 'solid' ? INNER_H : w.kind === 'glass' ? GLASS_H : LOW_H;
+    if (!this.wallsUp) return Math.max(0.3, H * 0.16);
+    if (w.kind !== 'exterior') return H;
+    const horiz = w.z0 === w.z1;
+    const n = horiz ? { nx: 0, nz: w.z0 < this.L.d / 2 ? -1 : 1 } : { nx: w.x0 < this.L.w / 2 ? -1 : 1, nz: 0 };
+    return this.lowered(n) ? LOW_H : H;
   }
 
   /** Where the camera is, seen from the floor (sin yaw, cos yaw): outer walls facing it drop
@@ -244,7 +347,7 @@ export class BuildingGfx {
   }
 
   private lowered(s: { nx: number; nz: number }) {
-    return s.nx * this.camDir[0] + s.nz * this.camDir[1] > 0.25;
+    return this.cutaway && s.nx * this.camDir[0] + s.nz * this.camDir[1] > 0.25;
   }
 
   private applyWalls() {

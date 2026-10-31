@@ -34,6 +34,7 @@
   import GhostBoard from './GhostBoard.svelte';
   import BuyMode from './BuyMode.svelte';
   import { decorOf, withBought } from './buy';
+  import BuildMode, { type LotSave } from './build/BuildMode.svelte';
   import FurnitureMenu from './FurnitureMenu.svelte';
   import DailyEdition from './DailyEdition.svelte';
   import { edition, standupLine, type Edition } from './daily';
@@ -81,6 +82,8 @@
     onsell?: (uid: string) => void;
     /** Save the office as a file (`codly/office@1`: the lot and the crew, no code). */
     onexport?: () => void;
+    /** Build mode saves the lot (the core checks and prices it); without it there is no Build. */
+    onsavelot?: (lot: Lot) => Promise<LotSave>;
     /** The day's edition and standup: the digest since the last one, or null when it is not due. */
     digest?: () => Promise<Digest | null>;
     /** The paper was closed: the edition is read (until then it comes back on each mount). */
@@ -133,6 +136,7 @@
     onplace,
     onsell,
     onexport,
+    onsavelot,
     digest,
     oneditionread,
     onhome,
@@ -217,6 +221,9 @@
     } else onaction?.(id, a);
   }
   let menuAt = $state<{ id: string; x: number; y: number } | null>(null);
+  /** Build mode is open (Buy closes meanwhile); the eyedropper hands Buy a piece to carry. */
+  let building = $state(false);
+  let copyPiece = $state<{ item: string; n: number } | null>(null);
   let furniture = $state<import('./engine').FurnitureMenu | null>(null);
   const hudInsets = $derived({ top: insets?.top ?? 0, right: insets?.right ?? 0, bottom: insets?.bottom ?? 0, left: insets?.left ?? 0 });
 
@@ -456,8 +463,11 @@
       }}
     />
   {/if}
-  {#if engine && !backdrop && shop && onplace && onsell}
-    <BuyMode {engine} {shop} lot={officeLot} crew={agents.map((a) => a.career.rank)} insets={hudInsets} {onplace} {onsell} {onexport} />
+  {#if engine && !backdrop && lot && onsavelot}
+    <BuildMode bind:open={building} {engine} {lot} {shop} insets={hudInsets} onsave={onsavelot} {onplace} {onsell} oncopy={(item) => ((building = false), (copyPiece = { item, n: Date.now() }))} />
+  {/if}
+  {#if engine && !backdrop && shop && onplace && onsell && !building}
+    <BuyMode {engine} {shop} lot={officeLot} crew={agents.map((a) => a.career.rank)} insets={hudInsets} {onplace} {onsell} {onexport} copy={copyPiece} />
   {/if}
   {#if ticker && !backdrop && items.length}
     <ol class="of-ticker" aria-hidden="true">
