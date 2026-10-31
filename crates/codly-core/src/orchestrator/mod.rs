@@ -41,6 +41,7 @@ pub mod prompts;
 mod runs;
 pub mod scheduler;
 pub mod scope;
+mod snapshot;
 mod team;
 mod tools;
 mod triggers;
@@ -756,6 +757,12 @@ impl Core {
     /// An agent as a `codly/agent@1` file (see `hires.rs`).
     pub fn export_agent(&self, agent_id: &str) -> anyhow::Result<String> {
         self.inner.export_agent(agent_id)
+    }
+
+    /// The open repo's office as a `codly/office@1` file: its lot and its crew's names, looks,
+    /// ranks and public stats; no code, paths or prompts (see `snapshot.rs`).
+    pub fn export_office(&self) -> anyhow::Result<String> {
+        self.inner.export_office()
     }
 
     /// Create a Solo agent for 1:1 chat ("hire").

@@ -163,6 +163,8 @@ export const api = {
   pickApplicant: (offerId: string, index: number) => call<void>('pick_applicant', { offerId, index }),
   /** An agent as a `codly/agent@1` file: manifest, traits, career and memory. */
   exportAgent: (agentId: string) => call<string>('export_agent', { agentId }),
+  /** The open repo's office as a `codly/office@1` file (the lot and the crew; no code, paths or prompts). */
+  exportOffice: () => call<string>('export_office'),
   /** Trust an agent up to a rank's perks (capped at its rank); 'intern' takes them back. */
   trustAgent: (agentId: string, rank: Rank) => call<Agent>('trust_agent', { agentId, rank }),
   /** The office sends an agent home to rest until `until` (ms), or calls it back (null). The

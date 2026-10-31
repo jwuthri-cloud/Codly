@@ -90,6 +90,7 @@
     "allow-hire-applicants",
     "allow-pick-applicant",
     "allow-export-agent",
+    "allow-export-office",
     "allow-ghosts",
     "allow-bring-back",
     "allow-offices",

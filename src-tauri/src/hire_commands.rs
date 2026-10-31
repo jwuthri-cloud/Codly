@@ -50,6 +50,13 @@ pub async fn export_agent(state: State<'_, AppState>, agent_id: String) -> Resul
     state.core().await?.export_agent(&agent_id).map_err(|e| format!("{e:#}"))
 }
 
+/// The open repo's office as a `codly/office@1` file: its lot and its crew (names, looks,
+/// ranks, public stats); no code, paths or prompts.
+#[tauri::command]
+pub async fn export_office(state: State<'_, AppState>) -> Result<String, String> {
+    state.core().await?.export_office().map_err(|e| format!("{e:#}"))
+}
+
 /// Workers let go in the open repo, who keep their career (the office's ghosts).
 #[tauri::command]
 pub async fn ghosts(state: State<'_, AppState>) -> Result<Vec<Agent>, String> {

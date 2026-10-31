@@ -225,6 +225,21 @@
       toast({ kind: 'error', title: 'Export failed', body: String(e) });
     }
   }
+  /** Save the office (its lot, and its crew's names, looks, ranks and public stats; no code,
+   *  paths or prompts) as a `codly/office@1` file. */
+  async function exportOffice() {
+    try {
+      const json = await api.exportOffice();
+      const name = (store.workspace?.name ?? 'office').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+      const a = Object.assign(document.createElement('a'), { href: url, download: `${name}.codly-office.json` });
+      a.click();
+      URL.revokeObjectURL(url);
+      toast({ kind: 'success', title: 'Office exported', body: `${a.download}: the lot and the crew, without code, paths or prompts.` });
+    } catch (e) {
+      toast({ kind: 'error', title: 'Export failed', body: String(e) });
+    }
+  }
   /** The morning edition, once a day per repo: read once you close it (kept in this browser). */
   const editionKey = () => `codly.edition.${store.workspace?.id ?? 'demo'}`;
   async function digest() {
@@ -284,6 +299,7 @@
             {shop}
             onplace={place}
             onsell={sell}
+            onexport={exportOffice}
             {digest}
             simsKey="codly.sims.{store.workspace?.id ?? 'demo'}"
             onhome={(id, until) => api.setAgentHome(id, until).catch(() => {})}
