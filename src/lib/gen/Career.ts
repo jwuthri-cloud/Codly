@@ -33,4 +33,13 @@ friends: { [key in string]: number },
 /**
  * The Senior or Staff whose reviews mentored it while it was an Intern or Junior.
  */
-mentor: string | null, };
+mentor: string | null, 
+/**
+ * 0 … 100, from its real days on the crew, merges and shifts (`career::stamina`): how
+ * slowly it tires, how fast it recovers, how much coffee it takes. Kept up to date by the core.
+ */
+stamina: number, 
+/**
+ * Legendary: the title above Staff (`career::legend_ok`); once earned, it stays.
+ */
+legend: boolean, };

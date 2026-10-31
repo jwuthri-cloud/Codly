@@ -124,6 +124,8 @@
     "allow-hire-draft",
     "allow-trust-agent",
     "allow-office-digest",
+    "allow-set-agent-home",
+    "allow-note-rest",
     "allow-install-cli",
     "allow-byok-status",
     "allow-byok-configure",

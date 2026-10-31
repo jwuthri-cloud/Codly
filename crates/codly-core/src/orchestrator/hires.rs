@@ -238,6 +238,7 @@ mod tests {
             archived: false,
             usage: Usage::default(),
             career: Career::default(),
+            away_until: None,
             created_at: 0,
             updated_at: 0,
         };

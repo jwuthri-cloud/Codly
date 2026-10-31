@@ -5,12 +5,13 @@
     and Look (Create-a-Sim: hairstyle, hair and skin color, outfit, glasses; saved in its look_seed)
   - top-center: a promotion (its real track record), with the offer of trust (Junior, Senior and Staff
     perks) and of a stronger model
-  - around a clicked agent: the click menu (chat, task, model, stop, details)
+  - around a clicked agent: the click menu (chat, task, model, send home or call in, stop, details)
+  - in its Needs tab: Send home / Call in (sims.ts: home refills its energy; the Lead never goes)
   - bottom-right: the estimated cost so far, Pause new work, walls up/down
   Shown only in the full office (not as the backdrop), inside the app's insets.
 -->
 <script lang="ts" module>
-  export type AgentAction = 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export' | 'trust' | 'untrust';
+  export type AgentAction = 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export' | 'trust' | 'untrust' | 'home' | 'callin';
 </script>
 
 <script lang="ts">
@@ -25,7 +26,7 @@
   import { sound } from './sound';
   import { levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
-  import { atLeast, MENTORED_XP, PERKS, rankLabel, rankProgress, TRAITS as WORK_TRAITS } from '../lib/util/career';
+  import { atLeast, MENTORED_XP, PERKS, rankLabel, rankProgress, titleOf, TRAITS as WORK_TRAITS } from '../lib/util/career';
 
   interface Props {
     engine: OfficeEngine;
@@ -85,23 +86,23 @@
   );
   const workRule = (t: string) => WORK_TRAITS.find((x) => x.id === t)?.rule ?? null;
 
-  // Promotions: a rank above the one seen before (not on first sight).
+  // Promotions: a rank above the one seen before (not on first sight); Legend is the title above Staff.
   let ranks = new Map<string, string>();
   let promo = $state<{ id: string; name: string; rank: string; perk: boolean } | null>(null);
   let promoTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     for (const a of agents) {
-      const r = a.career?.rank ?? 'intern';
+      const r = a.career?.legend ? 'legend' : (a.career?.rank ?? 'intern');
       const before = ranks.get(a.id);
       if (before && before !== r && ORDER.indexOf(r) > ORDER.indexOf(before)) {
-        promo = { id: a.id, name: a.name, rank: rankLabel(r), perk: PERKS.some((p) => p.rank === r) };
+        promo = { id: a.id, name: a.name, rank: a.career ? titleOf(a.career) : 'Intern', perk: PERKS.some((p) => p.rank === r) };
         clearTimeout(promoTimer);
         promoTimer = setTimeout(() => (promo = null), 15_000);
       }
       ranks.set(a.id, r);
     }
   });
-  const ORDER = ['intern', 'junior', 'senior', 'staff'];
+  const ORDER = ['intern', 'junior', 'senior', 'staff', 'legend'];
 
   // The look editor: each pick goes into its look_seed after a `#` (gfx/character.ts).
   const seedOf = (a: Agent) => a.look_seed || a.id;
@@ -120,7 +121,8 @@
     const st = engine.agentState(agent.id);
     if (!st) return null;
     const n = narrate?.(agent.id);
-    const nowText = st.approval ? `Waiting for you: ${st.approval.text}` : n?.parts?.length ? n.parts.map((p) => p.t).join('') : st.status === 'idle' ? 'Taking a break' : st.status;
+    const home = sheet?.rest.home;
+    const nowText = home ? `At home · back in ${backIn(home.until)}` : st.approval ? `Waiting for you: ${st.approval.text}` : n?.parts?.length ? n.parts.map((p) => p.t).join('') : st.status === 'idle' ? 'Taking a break' : st.status;
     const busy = st.status !== 'idle' && st.status !== 'offline' && st.status !== 'done';
     const next = st.todo.filter((t) => !t.done && !t.active).slice(0, 4).map((t) => t.text);
     return { nowText, busy, approval: !!st.approval, next };
@@ -134,6 +136,8 @@
     onclosemenu();
   }
   const pct = (x: number | null) => (x == null ? '—' : `${Math.round(x * 100)}%`);
+  const backIn = (until: number) => `${Math.max(1, Math.ceil((until - Date.now()) / 60_000))} min`;
+  const menuRest = $derived(menuAt ? sims.stats(menuAt.id, Date.now(), engine.agentState(menuAt.id)).rest : null);
   const menuAgent = $derived(menuAt ? agents.find((a) => a.id === menuAt.id) ?? null : null);
   const MENU: { a: AgentAction; label: string; when?: (a: Agent) => boolean }[] = [
     { a: 'chat', label: 'Chat 1:1' },
@@ -142,7 +146,9 @@
     { a: 'model', label: 'Change model' },
     { a: 'export', label: 'Export agent', when: (a) => a.role !== 'lead' },
     { a: 'interrupt', label: 'Stop its turn', when: (a) => a.status === 'working' || a.status === 'thinking' },
-    { a: 'stop', label: 'Send home', when: (a) => a.status !== 'offline' },
+    { a: 'home', label: 'Send home', when: () => !!menuRest?.canGoHome && !menuRest.home },
+    { a: 'callin', label: 'Call in', when: () => !!menuRest?.home },
+    { a: 'stop', label: 'Stop it', when: (a) => a.status !== 'offline' },
   ];
   const items = $derived(menuAgent ? MENU.filter((m) => !m.when || m.when(menuAgent)) : []);
 
@@ -186,7 +192,7 @@
         </div>
         {#if career && climb}
           <div class="p-rank" title={climb.next ? `${climb.toGo} XP to ${climb.next}` : 'Top rank'}>
-            <b>{rankLabel(career.rank)}</b><span class="bar"><span class="fill xp" style:width="{Math.round(climb.progress * 100)}%"></span></span><span>{career.xp} XP</span>
+            <b class:legend={career.legend}>{titleOf(career)}</b><span class="bar"><span class="fill xp" style:width="{Math.round(climb.progress * 100)}%"></span></span><span>{career.xp} XP</span>
           </div>
         {/if}
       </div>
@@ -198,13 +204,22 @@
     </div>
     <div class="p-body">
       {#if tab === 'needs'}
-        {#each [['Energy', sheet.needs.energy, 'Quota left on its account'], ['Focus', sheet.needs.focus, 'Context window left'], ['Morale', sheet.needs.morale, 'How its recent work went']] as [label, v, why] (label)}
+        {#each [['Energy', sheet.needs.energy, `Tires over a shift of real work; going home refills it (stamina ${career?.stamina ?? 0})`], ['Focus', sheet.needs.focus, 'Context window left'], ['Morale', sheet.needs.morale, 'How its recent work went']] as [label, v, why] (label)}
           <div class="need" title={why as string}>
             <span class="n-l">{label}</span>
             <span class="bar"><span class="fill" class:low={v != null && (v as number) < 0.25} class:mid={v != null && (v as number) >= 0.25 && (v as number) < 0.55} style:width={v == null ? '0%' : `${Math.round((v as number) * 100)}%`}></span></span>
             <span class="n-v">{pct(v as number | null)}</span>
           </div>
         {/each}
+        {@const r = sheet.rest}
+        {#if r.home}
+          <div class="rest"><span>🏠 {r.home.sick ? 'Resting off a sickness' : 'At home'} · back in {backIn(r.home.until)}</span>{#if onaction}<button onclick={() => onaction?.(agent.id, 'callin')} title="Overtime: morale −15%, and it keeps only half the energy it got back at home">Call in</button>{/if}</div>
+        {:else if r.canGoHome && onaction}
+          <div class="rest">
+            <span>{r.sick ? '🤒 Sick: goes home after this task' : r.exhausted ? '😵 Goes home after this task' : r.caffeine ? `☕ ${r.caffeine} cup${r.caffeine === 1 ? '' : 's'} of coffee${r.jittery ? ' · jittery' : ''}` : r.cap < 1 ? `Capped at ${Math.round(r.cap * 100)}% this shift` : 'Home refills its energy'}</span>
+            <button onclick={() => onaction?.(agent.id, 'home')} title="It walks out and comes back rested in a few minutes; its conversation stays as it is">Send home</button>
+          </div>
+        {/if}
       {:else if tab === 'mood'}
         {#each sheet.moodlets as m (m.key)}
           <div class="moodlet" data-tone={m.tone}><b>{m.label}</b><span>{m.why}</span></div>
@@ -242,6 +257,7 @@
       {:else if tab === 'career' && career}
         <div class="stats">
           <span><b>{career.stats.merged}</b> merged</span><span><b>{career.stats.checks_passed}</b> checks passed</span><span><b>{career.stats.approved}</b> approved</span><span><b>{career.stats.commits}</b> commits</span>
+          <span title="From its days on the crew, merges and shifts; less each time it got sick"><b>{career.stamina}</b> stamina</span><span><b>{career.stats.shifts}</b> shifts</span>
         </div>
         <div class="trust">
           {#each PERKS as p (p.rank)}
@@ -326,6 +342,10 @@
   .p-rank { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center; margin-top: 6px; color: #9aa2b6; font-size: 11px; }
   .p-rank b { color: #ffd27a; font-weight: 600; }
   .fill.xp { background: linear-gradient(90deg, #e9b03a, #ffd27a); }
+  .p-rank b.legend { text-shadow: 0 0 8px rgba(255, 201, 74, 0.8); }
+  .rest { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; color: #9aa2b6; font-size: 11.5px; }
+  .rest button { flex: none; height: 24px; padding: 0 12px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.1); color: #eef1f7; font: 600 11.5px inherit; cursor: pointer; }
+  .rest button:hover { background: #2d6bd8; }
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; color: #9aa2b6; }
   .stats b { color: #eef1f7; }
   .promo { position: absolute; left: 50%; transform: translateX(-50%); z-index: 410; display: flex; gap: 10px; align-items: center; padding: 8px 8px 8px 14px; border-radius: 999px; background: rgba(18, 22, 32, 0.92); box-shadow: inset 0 0 0 1.5px #ffd27a, 0 16px 40px -16px rgba(0, 0, 0, 0.7); color: #eef1f7; font: 500 13px 'Inter Variable', Inter, system-ui, sans-serif; pointer-events: auto; animation: pop 0.25s ease-out both; }

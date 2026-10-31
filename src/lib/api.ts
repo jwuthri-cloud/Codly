@@ -160,6 +160,11 @@ export const api = {
   exportAgent: (agentId: string) => call<string>('export_agent', { agentId }),
   /** Trust an agent up to a rank's perks (capped at its rank); 'intern' takes them back. */
   trustAgent: (agentId: string, rank: Rank) => call<Agent>('trust_agent', { agentId, rank }),
+  /** The office sends an agent home to rest until `until` (ms), or calls it back (null). The
+   *  Lead gives it no new work meanwhile; its conversation is untouched. */
+  setAgentHome: (agentId: string, until: number | null) => call<Agent>('set_agent_home', { agentId, until }),
+  /** The office reports a shift worked and rested from, or a sickness (its stamina). */
+  noteRest: (agentId: string, sick: boolean) => call<Agent>('note_rest', { agentId, sick }),
   /** What the office did since `since` (ms): the daily edition and the morning standup. */
   officeDigest: (since: number) => call<Digest>('office_digest', { since }),
   /** Workers let go in the open repo, who keep their career (the office's ghosts). */

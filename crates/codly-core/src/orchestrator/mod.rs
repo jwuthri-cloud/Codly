@@ -586,6 +586,22 @@ impl Core {
         Ok(a)
     }
 
+    /// The office sends an agent home to rest until `until` (ms), or calls it back (None). The
+    /// Lead gives an agent at home no new work; nothing else changes (its conversation and
+    /// session stay as they are). The Lead never goes home: you talk to it.
+    pub fn set_agent_home(&self, agent_id: &str, until: Option<i64>) -> anyhow::Result<Agent> {
+        if until.is_some() && self.inner.agent(agent_id)?.role == Role::Lead {
+            anyhow::bail!("the Lead never goes home");
+        }
+        self.inner.update_agent(agent_id, |a| a.away_until = until)
+    }
+
+    /// The office reports a shift the agent worked and rested from, or a sickness (its stamina
+    /// grows with shifts and drops a little with each sickness).
+    pub fn note_rest(&self, agent_id: &str, sick: bool) -> anyhow::Result<Agent> {
+        self.inner.update_agent(agent_id, |a| crate::career::rest(&mut a.career, sick))
+    }
+
     /// What the office did since `since` (ms), for the daily edition and the morning standup.
     pub fn digest(&self, since: i64) -> anyhow::Result<Digest> {
         let ws = self.inner.require_ws()?;
@@ -823,6 +839,19 @@ impl Core {
     }
 }
 
+/// Stamina and the Legend title follow its record and its days on the crew (`career::refresh`).
+fn refresh_career(a: &mut Agent) {
+    let hired = crate::career::hired_at(&a.career, a.created_at);
+    crate::career::refresh(&mut a.career, hired, now_ms());
+}
+
+/// Whether an agent is at home now, and until when ("14:05", your local clock).
+pub(crate) fn at_home(a: &Agent, now: i64) -> Option<String> {
+    let until = a.away_until.filter(|t| *t > now)?;
+    let local = chrono::DateTime::from_timestamp_millis(until)?.with_timezone(&chrono::Local);
+    Some(local.format("%H:%M").to_string())
+}
+
 impl Inner {
     fn kick(&self) {
         self.kick.notify_one();
@@ -975,6 +1004,7 @@ impl Inner {
             id,
             |a| {
                 f(a);
+                refresh_career(a);
                 Ok(())
             },
             |a: &Agent| row(Some(&a.id), a.task_id.as_deref(), a.run_id.as_deref(), EventKind::AgentChanged { agent: a.clone() }),
@@ -1017,7 +1047,8 @@ impl Inner {
         self.insert_agent(ws, self.new_agent(name, provider, role, color, model))
     }
 
-    fn insert_agent(&self, ws: &str, agent: Agent) -> anyhow::Result<Agent> {
+    fn insert_agent(&self, ws: &str, mut agent: Agent) -> anyhow::Result<Agent> {
+        refresh_career(&mut agent);
         self.emit(Some(ws), row(Some(&agent.id), None, None, EventKind::AgentChanged { agent: agent.clone() }))?;
         Ok(agent)
     }
@@ -1057,6 +1088,7 @@ impl Inner {
             archived: false,
             usage: Usage::default(),
             career,
+            away_until: None,
             created_at: now,
             updated_at: now,
         }

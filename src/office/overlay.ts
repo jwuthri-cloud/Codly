@@ -36,6 +36,8 @@ export interface LabelSpec {
   agentId?: string;
   taskId?: string;
   dim?: boolean;
+  /** A Legend's tag: gold. */
+  gold?: boolean;
 }
 
 interface El {
@@ -187,7 +189,7 @@ export class Overlay {
   }
 
   private fill(e: El, s: LabelSpec) {
-    const sig = [s.title, s.pre, s.code, s.post, s.tone, s.color, s.badge, s.chip, s.selected, s.hovered, s.icon, s.mood?.emoji, s.dim].join('\u0001');
+    const sig = [s.title, s.pre, s.code, s.post, s.tone, s.color, s.badge, s.chip, s.selected, s.hovered, s.icon, s.mood?.emoji, s.dim, s.gold].join('\u0001');
     if (sig === e.sig) return;
     e.sig = sig;
     e.title.textContent = s.title;
@@ -224,6 +226,7 @@ export class Overlay {
     e.root.classList.toggle('of-selected', !!s.selected);
     e.root.classList.toggle('of-hovered', !!s.hovered);
     e.root.classList.toggle('of-dim', !!s.dim);
+    e.root.classList.toggle('of-gold', !!s.gold);
     if (s.color) e.root.style.setProperty('--of-id', s.color);
     e.measured = false;
   }

@@ -92,6 +92,7 @@ fn agent(id: &str, name: &str, p: Provider, role: Role) -> Agent {
         archived: false,
         usage: Usage::default(),
         career: Default::default(),
+        away_until: None,
         created_at: 1,
         updated_at: 1,
     }

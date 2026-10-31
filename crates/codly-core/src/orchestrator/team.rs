@@ -376,6 +376,7 @@ impl Inner {
                     "status": a.status, "task": key(&a.task_id), "queue": queue,
                     "session": { "resumable": a.session_id.is_some(), "context_pct": ctx },
                     "cli_ready": self.cli_usable(a.provider),
+                    "at_home_until": super::at_home(a, now_ms()),
                 })
             })
             .collect()
@@ -389,6 +390,10 @@ impl Inner {
         let agents = self.store.agents(&ws.id)?;
         let members: Vec<&Agent> = agents.iter().filter(|a| a.member.is_some() && a.role == Role::Worker).collect();
         let names = || members.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
+        // At home: the Lead gives it no new work (you can call it in), unless the whole team
+        // is home; the game never stops the crew from shipping.
+        let now = now_ms();
+        let at_work: Vec<&str> = members.iter().filter(|a| super::at_home(a, now).is_none()).map(|a| a.name.as_str()).collect();
         let mut errors = vec![];
         let mut notes = vec![];
         for t in tasks.iter_mut() {
@@ -402,6 +407,12 @@ impl Inner {
                     Some(a) if a.role == Role::Reviewer => {
                         errors.push(format!("task {}: {} reviews code; assign one of: {}", t.id, a.name, names()))
                     }
+                    Some(a) if !at_work.is_empty() && super::at_home(a, now).is_some() => errors.push(format!(
+                        "task {}: {}; assign someone at work ({}) or a consultant",
+                        t.id,
+                        away_note(a, now),
+                        at_work.join(", ")
+                    )),
                     Some(a) => {
                         t.assignee = Some(a.name.clone());
                         if !self.cli_usable(a.provider) {
@@ -557,6 +568,9 @@ impl Inner {
                 let names: Vec<&str> = agents.iter().filter(|a| a.member.is_some() || a.consultant).map(|a| a.name.as_str()).collect();
                 anyhow!("no team member or working consultant is called '{to}' (team: {})", if names.is_empty() { "none".into() } else { names.join(", ") })
             })?;
+        if super::at_home(&agent, now_ms()).is_some() {
+            bail!("{}", away_note(&agent, now_ms()));
+        }
         let hands_off = agent
             .task_id
             .as_deref()
@@ -711,4 +725,9 @@ mod tests {
         assert!(e.contains("one word"), "{e}");
         assert_eq!(TeamMember { kind: MemberKind::Reviewer, ..m("Rex") }.title(), "Reviewer");
     }
+}
+
+/// "Ana is at home until 14:05; the user can call it in".
+fn away_note(a: &Agent, now: i64) -> String {
+    format!("{} is at home until {}; the user can call it in", a.name, super::at_home(a, now).unwrap_or_default())
 }

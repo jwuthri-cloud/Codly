@@ -68,6 +68,18 @@ pub async fn trust_agent(state: State<'_, AppState>, agent_id: String, rank: Ran
     state.core().await?.trust_agent(&agent_id, rank).map_err(|e| format!("{e:#}"))
 }
 
+/// The office sends an agent home until `until` (ms), or calls it back (None).
+#[tauri::command]
+pub async fn set_agent_home(state: State<'_, AppState>, agent_id: String, until: Option<i64>) -> Result<Agent, String> {
+    state.core().await?.set_agent_home(&agent_id, until).map_err(|e| format!("{e:#}"))
+}
+
+/// The office reports a shift worked and rested from, or a sickness (stamina).
+#[tauri::command]
+pub async fn note_rest(state: State<'_, AppState>, agent_id: String, sick: bool) -> Result<Agent, String> {
+    state.core().await?.note_rest(&agent_id, sick).map_err(|e| format!("{e:#}"))
+}
+
 /// What the office did since `since` (ms): the daily edition and the morning standup.
 #[tauri::command]
 pub async fn office_digest(state: State<'_, AppState>, since: i64) -> Result<Digest, String> {

@@ -7,7 +7,7 @@ import type { Placed } from '../gen/Placed';
 import type { Shop } from '../gen/Shop';
 import type { Wallet } from '../gen/Wallet';
 import { BY_ID } from '../../office/buy';
-import { atLeast, emptyCareer, rankFor, rankLabel } from '../util/career';
+import { atLeast, emptyCareer, rankFor, rankLabel, staminaOf } from '../util/career';
 import type { Rank } from '../gen/Rank';
 import type { DayReport } from '../gen/DayReport';
 import type { Digest } from '../gen/Digest';
@@ -72,6 +72,27 @@ export function demoTrust(sim: Sim, id: string, rank: Rank): Agent {
   const trust = atLeast(rank, a.career.rank) ? a.career.rank : rank;
   const milestones = atLeast(trust, 'junior') && !atLeast(a.career.trust, trust) ? [...a.career.milestones, { at: sim.now(), text: `Trusted as ${rankLabel(trust)}` }] : a.career.milestones;
   const next: Agent = { ...a, updated_at: sim.now(), career: { ...a.career, trust, milestones } };
+  sim.putAgent(next);
+  return next;
+}
+
+/** Home and back (the office's energy): the demo keeps it on the agent, as the core does. */
+export function demoHome(sim: Sim, id: string, until: number | null): Agent {
+  const a = sim.agents.get(id);
+  if (!a) throw new Error('no such agent');
+  if (until != null && a.role === 'lead') throw new Error('the Lead never goes home');
+  const next: Agent = { ...a, updated_at: sim.now(), away_until: until ?? undefined };
+  sim.putAgent(next);
+  return next;
+}
+
+/** A shift worked and rested from, or a sickness: its stamina moves (same rule as the core). */
+export function demoRest(sim: Sim, id: string, sick: boolean): Agent {
+  const a = sim.agents.get(id);
+  if (!a) throw new Error('no such agent');
+  const stats = { ...a.career.stats, shifts: a.career.stats.shifts + (sick ? 0 : 1), sick: a.career.stats.sick + (sick ? 1 : 0) };
+  const career = { ...a.career, stats };
+  const next: Agent = { ...a, updated_at: sim.now(), career: { ...career, stamina: staminaOf(career, (sim.now() - a.created_at) / 86_400_000) } };
   sim.putAgent(next);
   return next;
 }

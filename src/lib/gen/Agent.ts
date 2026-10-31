@@ -56,4 +56,9 @@ archived: boolean, usage: Usage,
 /**
  * Track record, rank and traits; kept for good and carried along when exported.
  */
-career: Career, created_at: number, updated_at: number, };
+career: Career, 
+/**
+ * Gone home to rest (the office's energy) until then (ms). The Lead gives it no new work
+ * meanwhile; you still can. Its conversation and session are untouched.
+ */
+away_until?: number, created_at: number, updated_at: number, };

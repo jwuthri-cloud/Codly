@@ -168,6 +168,8 @@ pub fn run() {
             hire_commands::export_agent,
             hire_commands::trust_agent,
             hire_commands::office_digest,
+            hire_commands::set_agent_home,
+            hire_commands::note_rest,
             hire_commands::ghosts,
             hire_commands::bring_back,
             hire_commands::office_shop,

@@ -514,6 +514,7 @@ name = "codly-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs",
  "globset",
  "ignore",
