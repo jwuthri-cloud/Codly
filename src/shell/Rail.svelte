@@ -103,7 +103,7 @@
   .rail { transition: width var(--d-4) var(--spring); }
   .rail.open { align-items: stretch; padding-left: 7px; padding-right: 7px; }
   .rail.open .mark { width: auto; justify-content: start; padding-left: 7px; }
-  .rail.open .room { width: auto; grid-auto-flow: column; justify-content: start; justify-items: start; gap: 11px; padding: 0 10px; }
+  .rail.open .room { width: 100%; grid-auto-flow: column; justify-content: start; justify-items: start; gap: 11px; padding: 0 10px; }
   .rail.open .room.on::before { left: -7px; }
   .label { font-size: 13px; font-weight: 500; white-space: nowrap; }
   .rail.open .b-wait { top: 50%; right: 8px; transform: translateY(-50%); }
