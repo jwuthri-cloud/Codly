@@ -97,6 +97,7 @@
       { id: 'go:list', section: 'Go to', title: 'Go to the task list', sub: 'The plan’s tasks by status', icon: 'list', run: () => ((ui.planLens = 'list'), ui.go('plan')) },
       { id: 'go:search', section: 'Go to', title: 'Search the code', icon: 'search', run: () => ((ui.knowledgeLens = 'search'), ui.go('knowledge')) },
       { id: 'view:office', section: 'View', title: ui.mode === 'office' ? 'Back to work' : 'Full office', icon: 'office', kbd: '⌘1', run: () => ui.toggleMode('office') },
+      { id: 'view:map', section: 'View', title: ui.mode === 'map' ? 'Back to work' : 'Neighbourhood (all your lots)', icon: 'map', kbd: '⌘3', run: () => ui.toggleMode('map') },
       { id: 'view:work', section: 'View', title: ui.mode === 'work' ? 'Bring the office back' : 'Full work (hide the office)', icon: 'workspace', kbd: '⌘2', run: () => ui.toggleMode('work') },
       { id: 'view:focus', section: 'View', title: ui.focus ? 'End focus' : 'Focus: dim the office', icon: 'focus', kbd: '⌘.', run: () => (ui.focus = !ui.focus) },
       { id: 'request:new', section: 'Work', title: 'New request', sub: 'Its own Lead plans it, in parallel with the others', icon: 'plus', kbd: '⌘N', run: () => ui.newRequest() },

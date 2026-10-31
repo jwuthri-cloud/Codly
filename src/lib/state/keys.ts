@@ -33,7 +33,7 @@ const isTyping = (t: EventTarget | null) => {
 
 /** Whether an approval is on screen in the conversation you are reading. */
 function inThread(a: Approval): boolean {
-  if (ui.room !== 'home' || ui.mode === 'office') return false;
+  if (ui.room !== 'home' || ui.mode === 'office' || ui.mode === 'map') return false;
   return isRequestThread(ui.thread) ? store.approvalThread(a) === ui.thread : `agent:${a.agent_id}` === ui.thread;
 }
 
@@ -49,7 +49,7 @@ export function keyTargetApproval(): Approval | null {
 
 /** The plan ⌘↵ runs when no approval is waiting: the one of the request you are on. */
 export function keyTargetPlan(): string | null {
-  if (ui.mode === 'office' && ui.room === 'home') return null;
+  if ((ui.mode === 'office' && ui.room === 'home') || ui.mode === 'map') return null;
   if (ui.room !== 'home' && ui.room !== 'plan') return null;
   if (ui.room === 'home' && !isRequestThread(ui.thread)) return null;
   const chosen = ui.room === 'plan' && ui.planId ? store.planMap.get(ui.planId) : null;
@@ -129,9 +129,9 @@ export function installKeys(): () => void {
         else ui.openPalette();
         return;
       }
-      if (k === '1' || k === '2') {
+      if (k === '1' || k === '2' || k === '3') {
         e.preventDefault();
-        ui.toggleMode(k === '1' ? 'office' : 'work');
+        ui.toggleMode(k === '1' ? 'office' : k === '2' ? 'work' : 'map');
         return;
       }
       if (k === '.') {
@@ -159,7 +159,7 @@ export function installKeys(): () => void {
       }
       if (ui.artifactOpen) ui.artifactOpen = null;
       else if (ui.selection) ui.selection = null;
-      else if (ui.mode === 'office') ui.mode = 'blend';
+      else if (ui.mode === 'office' || ui.mode === 'map') ui.mode = 'blend';
       return;
     }
 

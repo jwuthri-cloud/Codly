@@ -26,7 +26,7 @@
   const freshArtifacts = $derived(Math.max(0, store.artifacts.length - seenArtifacts));
 
   function badge(r: Room): 'wait' | 'plan' | 'dot' | null {
-    if (r === 'home' && waiting && (ui.room !== 'home' || ui.mode === 'office')) return 'wait';
+    if (r === 'home' && waiting && (ui.room !== 'home' || ui.mode === 'office' || ui.mode === 'map')) return 'wait';
     if (r === 'plan' && planLive) return 'plan';
     if (r === 'changes' && freshArtifacts && ui.room !== 'changes') return 'dot';
     return null;
@@ -42,7 +42,7 @@
       <li>
         <button
           class="room"
-          class:on={ui.room === r.id && !(r.id === 'home' && ui.mode === 'office')}
+          class:on={ui.room === r.id && !(r.id === 'home' && (ui.mode === 'office' || ui.mode === 'map'))}
           aria-current={ui.room === r.id ? 'page' : undefined}
           aria-label={r.label}
           data-tip="{r.label} — {r.hint}"
@@ -68,6 +68,12 @@
       <button class="room" aria-pressed={ui.mode === 'office'} class:on={ui.mode === 'office'} aria-label="Full office" data-tip={ui.mode === 'office' ? 'Back to work' : 'Full office: hide the panels'} data-tip-kbd="⌘1" onclick={() => ui.toggleMode('office')}>
         <Icon name="office" size={18} />
         {#if ui.railOpen}<span class="label">Full office</span>{/if}
+      </button>
+    </li>
+    <li>
+      <button class="room" aria-pressed={ui.mode === 'map'} class:on={ui.mode === 'map'} aria-label="Neighbourhood" data-tip={ui.mode === 'map' ? 'Back to work' : 'Neighbourhood: all your lots'} data-tip-kbd="⌘3" onclick={() => ui.toggleMode('map')}>
+        <Icon name="map" size={18} />
+        {#if ui.railOpen}<span class="label">Neighbourhood</span>{/if}
       </button>
     </li>
     <li>

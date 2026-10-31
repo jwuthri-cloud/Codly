@@ -7,8 +7,9 @@ import type { Provider } from '../gen/Provider';
 
 /** Home + four rooms (REDESIGN §2). */
 export type Room = 'home' | 'plan' | 'changes' | 'knowledge' | 'terminal';
-/** blend = office behind the work (default) · office = full office (⌘1) · work = no office (⌘2). */
-export type Mode = 'blend' | 'office' | 'work';
+/** blend = office behind the work (default) · office = full office (⌘1) · work = no office (⌘2) ·
+ *  map = the neighbourhood, every lot of yours from outside (⌘3). */
+export type Mode = 'blend' | 'office' | 'work' | 'map';
 export type Selection =
   | { kind: 'agent'; id: string; eventId?: number }
   | { kind: 'task'; id: string; eventId?: number }
@@ -196,13 +197,14 @@ class Ui {
 
   go(room: Room) {
     this.room = room;
-    if (this.mode === 'office' && room !== 'home') this.mode = 'blend';
+    if ((this.mode === 'office' && room !== 'home') || this.mode === 'map') this.mode = 'blend';
   }
 
-  /** ⌘1 / ⌘2: toggle full office / full work; again returns to the blend. */
+  /** ⌘1 / ⌘2 / ⌘3: toggle full office / full work / the neighbourhood; again returns to the blend. */
   toggleMode(m: Exclude<Mode, 'blend'>) {
     this.mode = this.mode === m ? 'blend' : m;
-    if (this.mode === 'office') this.room = 'home';
+    if (this.mode === 'office' || this.mode === 'map') this.room = 'home';
+    if (this.mode === 'map') this.selection = null;
   }
 
   select(sel: Selection) {

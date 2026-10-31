@@ -19,6 +19,8 @@
   import TopBar from './TopBar.svelte';
 
   const tauri = isTauriApp();
+  let mapLoading: Promise<typeof import('../world/Neighbourhood.svelte')> | null = null;
+  const loadMap = () => (mapLoading ??= import('../world/Neighbourhood.svelte'));
 
   const SHEET = 404;
   const frameW = $derived(ui.width - (ui.railW + 28) - 14 - (ui.sheetOpen ? SHEET + 14 : 0));
@@ -40,7 +42,16 @@
 </script>
 
 <div class="shell mode-{ui.mode} room-{ui.room}" class:focus={ui.focus} class:sheet={ui.sheetOpen} class:tauri style:--rail-w="{ui.railW}px">
-  <div class="world-wrap" class:hidden={ui.mode === 'work'}><OfficeLayer /></div>
+  <div class="world-wrap" class:hidden={ui.mode === 'work' || ui.mode === 'map'}><OfficeLayer /></div>
+  {#if ui.mode === 'map'}
+    <!-- The neighbourhood (⌘3): its own three.js scene, loaded on first use. -->
+    <div class="map-wrap">
+      <svelte:boundary>
+        {#await loadMap() then { default: Neighbourhood }}<Neighbourhood />{/await}
+        {#snippet failed(error)}<p style="padding:28px 28px 28px 90px;color:var(--bad)">The neighbourhood failed to open: {error instanceof Error ? error.message : String(error)}</p>{/snippet}
+      </svelte:boundary>
+    </div>
+  {/if}
   <div class="veil" aria-hidden="true"></div>
   <Rail />
   <div class="frame">
@@ -76,6 +87,9 @@
   .mode-work .veil { background: var(--night); }
   .mode-office .world-wrap { filter: none; }
   .mode-office .veil { background: transparent; }
+  .map-wrap { position: absolute; inset: 0; z-index: var(--z-world); }
+  .mode-map .veil, .shell.mode-map:not(.room-home) .veil { background: transparent; }
+  .mode-map .frame { display: none; }
   /* rooms sit on a quieter office than Home */
   .shell:not(.room-home) .veil { background: color-mix(in srgb, var(--night) 35%, transparent); }
   .shell.mode-work .veil { background: var(--night); }

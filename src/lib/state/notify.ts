@@ -7,7 +7,7 @@ import { toast, toasts } from './toasts.svelte';
 import { ui } from './ui.svelte';
 
 /** Whether you are reading that request's conversation right now. */
-const watching = (thread: string) => ui.room === 'home' && ui.mode !== 'office' && ui.thread === thread;
+const watching = (thread: string) => ui.room === 'home' && ui.mode !== 'office' && ui.mode !== 'map' && ui.thread === thread;
 
 export function installNotifications(): () => void {
   const seenPlanStatus = new Map<string, string>();

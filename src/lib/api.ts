@@ -36,6 +36,7 @@ import type { Placed } from './gen/Placed';
 import type { Shop } from './gen/Shop';
 import type { Wallet } from './gen/Wallet';
 import type { Lot } from './gen/Lot';
+import type { LotSlot } from './gen/LotSlot';
 import type { HireReview } from './gen/HireReview';
 import type { LaunchPreview } from './gen/LaunchPreview';
 import type { Memory } from './gen/Memory';
@@ -203,6 +204,16 @@ export const api = {
   officeLot: () => call<Lot>('office_lot', {}),
   /** Build mode: save the lot (checked by the core); returns it as stored. */
   officeSaveLot: (lot: Lot) => call<Lot>('office_save_lot', { lot }),
+  /** The neighbourhood: every lot on the map, yours (with its repo, if one lives there) and for sale. */
+  lots: () => call<LotSlot[]>('lots', {}),
+  /** A lot's building (walls, doors, windows), for drawing it from outside. */
+  lotOf: (slotId: string) => call<Lot>('lot_of', { slotId }),
+  /** Buy a lot, empty (null) or with a ready-made building ("garage", "small-office", "studio"). */
+  buyLot: (slotId: string, template: string | null) => call<Wallet>('buy_lot', { slotId, template }),
+  /** Sell a lot of yours with no repo on it (80% of the lot back, its building at the usual rates). */
+  sellLot: (slotId: string) => call<Wallet>('sell_lot', { slotId }),
+  /** Move a repo's office onto another lot of yours; returns the neighbourhood as it is now. */
+  moveOffice: (workspaceId: string, slotId: string) => call<LotSlot[]>('move_office', { workspaceId, slotId }),
   /** The open repo's changes to the global team (members switched off, its own members). */
   setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   /** A request's own mode, permissions and Lead model (null fields = the Settings defaults). */
