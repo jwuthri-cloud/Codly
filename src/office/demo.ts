@@ -10,7 +10,7 @@
 //   ?playAfter=5   idle workers go on a break after 5 s instead of 60
 //   ?play=pool     breaks go to this game first (pool, foosball, pingpong or ps5)
 //   ?offer         a job offer goes up by the front door after 2 s
-//   ?lot=garage    a new repo's first office instead of the Studio
+//   ?lot=garage    a new repo's first office instead of the Studio (or ?lot=small-office)
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
 import { mount } from 'svelte';

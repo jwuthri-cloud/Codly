@@ -1,0 +1,55 @@
+{
+  "v": 1,
+  "template": "small-office",
+  "size": {"w":16,"d":12},
+  "walls": [
+    {"id":"w1","x0":0,"z0":0,"x1":16,"z1":0,"kind":"exterior"},
+    {"id":"w2","x0":0,"z0":0,"x1":0,"z1":12,"kind":"exterior"},
+    {"id":"w3","x0":0,"z0":12,"x1":16,"z1":12,"kind":"exterior"},
+    {"id":"w4","x0":16,"z0":0,"x1":16,"z1":12,"kind":"exterior"},
+    {"id":"w5","x0":11,"z0":0,"x1":11,"z1":7,"kind":"solid"},
+    {"id":"w6","x0":11,"z0":7,"x1":16,"z1":7,"kind":"solid"}
+  ],
+  "doors": [
+    {"id":"d1","wall":"w3","at":5.5,"width":1.6,"kind":"single"},
+    {"id":"d2","wall":"w5","at":5.8,"width":1.2,"kind":"open"}
+  ],
+  "windows": [
+    {"id":"win1","wall":"w1","at":2.5,"width":2,"kind":"standard"},
+    {"id":"win2","wall":"w1","at":8.5,"width":2,"kind":"standard"},
+    {"id":"win3","wall":"w2","at":3.5,"width":2,"kind":"standard"},
+    {"id":"win4","wall":"w2","at":9.5,"width":2,"kind":"standard"},
+    {"id":"win5","wall":"w4","at":9.5,"width":2,"kind":"standard"},
+    {"id":"win6","wall":"w3","at":13.5,"width":2,"kind":"standard"}
+  ],
+  "floors": {"tile": 0.5, "default": "oak", "rects": [
+      {"x":11,"z":0,"w":5,"d":7,"m":"tile-cool"},
+      {"x":11,"z":7,"w":5,"d":5,"m":"tile-warm"}
+    ]},
+  "paint": [],
+  "labels": [],
+  "furniture": [
+    {"uid":"o1","item":"office.leadDesk","x":5.5,"y":0,"z":1.75,"rot":0},
+    {"uid":"o2","item":"office.desk","x":3.35,"y":0,"z":5.64,"rot":0},
+    {"uid":"o3","item":"office.desk","x":4.65,"y":0,"z":5.64,"rot":0},
+    {"uid":"o4","item":"office.desk","x":3.35,"y":0,"z":6.36,"rot":3.141592653589793},
+    {"uid":"o5","item":"office.desk","x":4.65,"y":0,"z":6.36,"rot":3.141592653589793},
+    {"uid":"o6","item":"office.divider","x":4,"y":0,"z":6,"rot":0},
+    {"uid":"o7","item":"office.desk","x":8,"y":0,"z":5.64,"rot":0},
+    {"uid":"o8","item":"office.desk","x":8,"y":0,"z":6.36,"rot":3.141592653589793},
+    {"uid":"o9","item":"office.rack","x":15.35,"y":0,"z":2.5,"rot":-1.5707963267948966},
+    {"uid":"o10","item":"office.testMonitor","x":13.3,"y":0,"z":0.25,"rot":0},
+    {"uid":"o11","item":"office.shelf","x":11.34,"y":0,"z":1.9,"rot":1.5707963267948966},
+    {"uid":"o12","item":"office.shelf","x":11.34,"y":0,"z":3.9,"rot":1.5707963267948966},
+    {"uid":"o13","item":"office.cabinet","x":13.2,"y":0,"z":6.55,"rot":3.141592653589793},
+    {"uid":"o14","item":"office.mailbox","x":15.55,"y":0,"z":5.4,"rot":-1.5707963267948966},
+    {"uid":"o15","item":"office.doormat","x":5.5,"y":0,"z":11.2,"rot":0},
+    {"uid":"o16","item":"office.coatRack","x":4.2,"y":0,"z":11.5,"rot":0},
+    {"uid":"o17","item":"office.tallPlant","x":0.6,"y":0,"z":0.6,"rot":0},
+    {"uid":"o18","item":"office.tallPlant","x":10.4,"y":0,"z":0.6,"rot":0},
+    {"uid":"o19","item":"office.plant","x":10.5,"y":0,"z":11.4,"rot":0},
+    {"uid":"o20","item":"office.floorLamp","x":0.5,"y":0,"z":11.4,"rot":0},
+    {"uid":"o21","item":"office.clock","x":0.1,"y":1.55,"z":6,"rot":1.5707963267948966}
+  ],
+  "gift": ["w1","w2","w3","w4","w5","w6","d1","d2","win1","win2","win3","win4","win5","win6","o1","o2","o3","o4","o5","o6","o7","o8","o9","o10","o11","o12","o13","o14","o15","o16","o17","o18","o19","o20","o21"]
+}

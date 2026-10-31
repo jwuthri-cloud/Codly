@@ -20,8 +20,8 @@
   const paused = params.has('paused');
   const initialBackdrop = params.has('backdrop');
   const initialSelect = params.get('select');
-  // ?lot=garage: a new repo's first office (the Studio by default).
-  const lot = params.get('lot') === 'garage' ? TEMPLATES.garage : TEMPLATES.studio;
+  // ?lot=garage or ?lot=small-office: another ready-made office (the Studio by default).
+  const lot = TEMPLATES[params.get('lot') as keyof typeof TEMPLATES] ?? TEMPLATES.studio;
 
   let agents = $state<Agent[]>(AGENTS.map((a) => ({ ...a })));
   let tasks = $state<Task[]>(TASKS.map((t) => ({ ...t })));

@@ -1,11 +1,11 @@
-// Lots as data: the Studio from its JSON is the office it always was, the Garage has what the
-// work needs within reach of its door, and rooms are found from walls.
+// Lots as data: the Studio from its JSON is the office it always was, the Garage and the Small
+// office have what the work needs within reach of their door, and rooms are found from walls.
 import { describe, expect, it } from 'vitest';
 import type { Lot } from '../../lib/gen/Lot';
 import type { Placed } from '../../lib/gen/Placed';
 import BEHAVIOR from '../behavior.ts?raw';
 import { aStar } from '../astar';
-import { cellOf, officeLayout, passableFn, roomAt, STATION_IDS, TEMPLATES, type OfficeLayout, type StationId } from '../layout';
+import { cellOf, footprint, officeLayout, passableFn, roomAt, STATION_IDS, TEMPLATES, wallPieces, type OfficeLayout, type StationId } from '../layout';
 
 const reachable = (L: OfficeLayout, x: number, z: number) => {
   const pass = passableFn(L);
@@ -129,6 +129,65 @@ describe('the Garage', () => {
 
   it('has no games, so breaks are spent at the desk', () => {
     for (const id of ['games.console', 'games.foosball', 'games.pingpong', 'games.pool', 'kitchen', 'meeting.table'] as const) expect(L.stations[id].slots, id).toHaveLength(0);
+  });
+});
+
+describe('the Small office', () => {
+  const lot = TEMPLATES['small-office'];
+  const L = officeLayout(lot);
+
+  it('is a work floor and a back room on a medium lot, behind a front door', () => {
+    expect([L.w, L.d]).toEqual([16, 12]);
+    expect(L.rooms.map((r) => r.name)).toEqual(['Studio', 'Server room']);
+    expect(roomAt(L, 13.5, 3)).toBe('server');
+    expect(L.door).toMatchObject({ kind: 'single', x: 5.5, z: 12, nz: -1 });
+    // Windows on the outside walls only; everything came with it.
+    const outside = new Set(lot.walls.filter((w) => w.kind === 'exterior').map((w) => w.id));
+    expect(lot.windows.length).toBeGreaterThan(3);
+    for (const w of lot.windows) expect(outside.has(w.wall), w.id).toBe(true);
+    const ids = [...lot.walls, ...lot.doors, ...lot.windows].map((x) => x.id).concat(lot.furniture.map((p) => p.uid));
+    expect([...lot.gift].sort()).toEqual([...ids].sort());
+  });
+
+  it('has everything the work needs, each reachable from the door', () => {
+    expect(L.desks.filter((d) => d.lead)).toHaveLength(1);
+    expect(L.desks.filter((d) => !d.lead)).toHaveLength(6);
+    const need: [string, { x: number; z: number }[]][] = [
+      ['front door', [L.door.inside, ...L.stations.door.slots]],
+      ['lead desk', L.desks.filter((d) => d.lead).flatMap((d) => [d.seat, d.stand])],
+      ['desks', L.desks.filter((d) => !d.lead).flatMap((d) => [d.seat, d.stand, d.intern])],
+      ['server rack', L.stations['server.rack'].slots],
+      ['test monitor', L.stations['server.monitor'].slots],
+      ['bookshelves', L.stations['library.shelf'].slots],
+      ['mailbox', L.stations.mail.slots],
+      ['archive cabinet', L.stations.archive.slots],
+      ['the Lead’s visitors', L.stations['lead.visit'].slots],
+      ['agents without a desk', L.stations.wait.slots],
+    ];
+    for (const [what, spots] of need) {
+      expect(spots.length, what).toBeGreaterThan(0);
+      for (const s of spots) expect(reachable(L, s.x, s.z), `${what} at ${s.x.toFixed(2)},${s.z.toFixed(2)}`).toBe(true);
+    }
+    expect([L.racks.length, L.shelves.length, L.cabinets.length]).toEqual([1, 2, 1]);
+    expect(L.testMonitor).not.toBeNull();
+    for (const id of ['server.rack', 'server.monitor', 'library.shelf', 'mail', 'archive'] as const) expect(L.stations[id].room, id).toBe('server');
+  });
+
+  it('leaves the kitchen corner empty and has no games: those are bought', () => {
+    expect(L.items.filter((i) => ['counter', 'fridge', 'coffee', 'cooler'].includes(i.type))).toEqual([]);
+    for (const id of ['kitchen', 'games.console', 'games.foosball', 'games.pingpong', 'games.pool'] as const) expect(L.stations[id].slots, id).toHaveLength(0);
+    // The corner (tiles, by the east window) is open floor.
+    expect(L.floors.find((f) => f.m === 'tile-warm')!.rect).toEqual({ x: 11, z: 7, w: 5, d: 5 });
+    for (const [x, z] of [[12, 8], [15, 11], [13.5, 9.5]]) expect(reachable(L, x, z), `${x},${z}`).toBe(true);
+  });
+
+  it('has no furniture over other furniture or a wall', () => {
+    const solid = L.items.filter((i) => i.block).map((i) => ({ i, r: footprint(i) }));
+    const over = (a: { x: number; z: number; w: number; d: number }, b: typeof a) => a.x < b.x + b.w - 1e-6 && b.x < a.x + a.w - 1e-6 && a.z < b.z + b.d - 1e-6 && b.z < a.z + a.d - 1e-6;
+    for (const [k, a] of solid.entries()) {
+      for (const b of solid.slice(k + 1)) expect(over(a.r, b.r), `${a.i.type} ${a.i.uid} and ${b.i.type} ${b.i.uid}`).toBe(false);
+      for (const w of L.walls) for (const p of wallPieces(w)) expect(over(a.r, p), `${a.i.type} ${a.i.uid} and wall ${w.id}`).toBe(false);
+    }
   });
 });
 

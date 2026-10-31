@@ -24,7 +24,9 @@
 //   24   └───────────┴────────┴───────door───────┴──────────┘
 //
 // The Garage (a new repo's first office) is one 10 × 8 room: the Lead's desk, two desks, a
-// server machine, a bookshelf and a mailbox, and a roll-up door.
+// server machine, a bookshelf and a mailbox, and a roll-up door. The Small office (16 × 12) is a
+// work floor (the Lead and six desks, an empty kitchen corner) and a back room (the rack and the
+// test monitor, bookshelves, the mailbox and an archive cabinet).
 
 import type { DoorKind } from '../lib/gen/DoorKind';
 import type { Lot } from '../lib/gen/Lot';
@@ -32,12 +34,13 @@ import type { Placed } from '../lib/gen/Placed';
 import type { WallKind } from '../lib/gen/WallKind';
 import RAW from './furniture.json';
 import GARAGE from './lots/garage.json';
+import SMALL_OFFICE from './lots/small-office.json';
 import STUDIO from './lots/studio.json';
 
 export type { WallKind };
 
 /** The ready-made lots (the core reads the same files). */
-export const TEMPLATES = { studio: STUDIO as unknown as Lot, garage: GARAGE as unknown as Lot };
+export const TEMPLATES = { studio: STUDIO as unknown as Lot, garage: GARAGE as unknown as Lot, 'small-office': SMALL_OFFICE as unknown as Lot };
 
 export const CELL = 0.25;
 /** Floor tiles and rooms: walls run on this grid. */
