@@ -220,7 +220,7 @@ export const api = {
   dictationTranscribe: (audio: string, mime: string) => call<string>('dictation_transcribe', { audio, mime }),
   /** Read-only git state (status, branches, recent log) of an agent's worktree. */
   agentGit: (agentId: string) => call<AgentGit>('agent_git', { agentId }),
-  /** Schedules, context rules and network mode, with the log of what triggers did. */
+  /** Schedules and network mode, with the log of what triggers did. */
   triggers: () => call<TriggersConfig>('get_triggers'),
   /** Save them; the core keeps its own clocks and log, and returns what it stored. */
   setTriggers: (config: TriggersConfig) => call<TriggersConfig>('set_triggers', { config }),

@@ -19,7 +19,7 @@ async fn triggers_persist_and_gate_follows_the_mode() {
     let core = start(dir.path()).await;
 
     let fresh = core.triggers().await.unwrap();
-    assert!(fresh.schedules.is_empty() && fresh.context.compact.enabled && !fresh.context.clear.enabled);
+    assert!(fresh.schedules.is_empty());
     assert_eq!(core.network_gate(NetworkAction::Read, "ana").await, Gate::Deny);
 
     let mut cfg = fresh;

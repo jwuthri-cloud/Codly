@@ -1,19 +1,17 @@
 <!--
   Triggers: everything that can start work without you typing. Schedules (a prompt for the Lead
-  on a clock), context rules (compact or clear an agent's conversation, only when the time gap
-  AND the fill are met) and the network mode (what teammates may do here). Every edit saves at
+  on a clock) and the network mode (what teammates may do here). Every edit saves at
   once; the core returns what it stored (ids, clamped numbers, clocks, the log of what fired).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { ContextRule } from '../lib/gen/ContextRule';
   import type { NetworkMode } from '../lib/gen/NetworkMode';
   import type { Schedule } from '../lib/gen/Schedule';
   import type { TriggersConfig } from '../lib/gen/TriggersConfig';
   import { api } from '../lib/api';
   import { toast } from '../lib/state/toasts.svelte';
   import { ago } from '../lib/util/format';
-  import { INTERVALS, NETWORK_MODES, everyLabel, inLabel, nextRunAt, ruleSentence } from '../lib/util/triggers';
+  import { INTERVALS, NETWORK_MODES, everyLabel, inLabel, nextRunAt } from '../lib/util/triggers';
   import Icon from '../components/Icon.svelte';
 
   let cfg = $state.raw<TriggersConfig | null>(null);
@@ -67,14 +65,6 @@
   }
   const intervals = (m: number) => (INTERVALS.includes(m) ? INTERVALS : [...INTERVALS, m].sort((a, b) => a - b));
 
-  function patchRule(which: 'compact' | 'clear', p: Partial<ContextRule>) {
-    if (cfg) save({ ...cfg, context: { ...cfg.context, [which]: { ...cfg.context[which], ...p } } });
-  }
-  const num = (e: Event & { currentTarget: HTMLInputElement }, fallback: number) => {
-    const n = Number(e.currentTarget.value);
-    return Number.isFinite(n) ? Math.round(n) : fallback;
-  };
-
   function setMode(mode: NetworkMode) {
     if (cfg) save({ ...cfg, network: { ...cfg.network, mode } });
   }
@@ -87,7 +77,7 @@
 
 <section>
   <h3 class="eyebrow">Triggers</h3>
-  <p class="desc">Everything that can start work without you typing: a clock, a full context, a teammate.</p>
+  <p class="desc">Everything that can start work without you typing: a clock or a teammate.</p>
 
   {#if !cfg}
     <p class="desc">Loading…</p>
@@ -124,39 +114,6 @@
     {/if}
     <div><button class="btn sm ghost" onclick={addSchedule}><Icon name="plus" size={13} />Add schedule</button></div>
 
-    <h4 class="r-title">Context rules</h4>
-    <p class="desc">Long conversations get slow and expensive. A rule acts only when both are true: the time since last time has passed, and the agent’s context is at least this full. 0% means the clock alone decides. Agents mid-turn are left alone and tried again later.</p>
-    <ul class="list">
-      {#each [['compact', 'Compact', 'Summarises the conversation in place. Loses little.'], ['clear', 'Clear', 'Starts the conversation over.']] as const as [k, title, body] (k)}
-        {@const r = cfg.context[k]}
-        <li class="item" class:off={!r.enabled}>
-          <div class="top">
-            <span class="r-title">{title}</span>
-            <span class="muted small">{body}</span>
-            <span class="grow"></span>
-            <input type="checkbox" class="switch" checked={r.enabled} aria-label={`${title} on`} onchange={(e) => patchRule(k, { enabled: e.currentTarget.checked })} />
-          </div>
-          <div class="rule">
-            <label class="f"><span class="f-label">Every (hours)</span>
-              <input class="input" type="number" min="1" max="168" value={r.every_hours} onchange={(e) => patchRule(k, { every_hours: num(e, r.every_hours) })} />
-            </label>
-            <label class="f"><span class="f-label">At least (% full)</span>
-              <input class="input" type="number" min="0" max="100" value={r.min_percent} onchange={(e) => patchRule(k, { min_percent: num(e, r.min_percent) })} />
-            </label>
-          </div>
-          <span class="muted small">{ruleSentence(k, r)}</span>
-          {#if k === 'clear'}
-            <p class="warn small">Clearing discards what the agent remembers mid-task, including decisions and half-finished work it has not written down. Agents holding a task are skipped. Off unless you turn it on.</p>
-          {:else}
-            <label class="f"><span class="f-label">Keep in mind when compacting <span class="muted">(optional)</span></span>
-              <input class="input" value={cfg.context.compact_focus} maxlength="300" placeholder="file paths, open questions, the current plan" spellcheck="false" onchange={(e) => cfg && save({ ...cfg, context: { ...cfg.context, compact_focus: e.currentTarget.value } })} />
-            </label>
-            <span class="muted small">Compacting works on Claude agents today; other CLIs are skipped and noted in the activity below.</span>
-          {/if}
-        </li>
-      {/each}
-    </ul>
-
     <h4 class="r-title">Network</h4>
     <p class="desc">What teammates may do on this machine. Each level includes the one before.</p>
     <div class="modes">
@@ -189,7 +146,7 @@
         {#each log as l (l.ts + l.kind + l.label)}
           <li class:bad={!l.ok}>
             <span class="muted small">{ago(l.ts, now)}</span>
-            <span class="small"><b>{l.kind === 'schedule' ? 'Schedule' : l.kind === 'compact' ? 'Compact' : 'Clear'}</b> {l.label}: {l.detail}</span>
+            <span class="small"><b>{l.kind === 'schedule' ? 'Schedule' : l.kind}</b> {l.label}: {l.detail}</span>
           </li>
         {/each}
       </ul>
@@ -202,14 +159,13 @@
   .desc { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .muted { color: var(--ink-3); font-weight: var(--w-reg); }
   .small { font-size: var(--t-sm); }
-  .warn { color: var(--amber-ink); line-height: var(--lh-sm); }
   .grow { flex: 1; }
   .r-title { font-weight: var(--w-med); }
   h4 { margin-top: 6px; }
   .list { display: flex; flex-direction: column; border-radius: var(--r-md); background: var(--surface-1); }
   .item { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; }
   .item + .item { box-shadow: inset 0 1px 0 var(--line); }
-  .item.off :is(.input, .name, .rule, .muted) { opacity: 0.6; }
+  .item.off :is(.input, .name, .muted) { opacity: 0.6; }
   .top { display: flex; align-items: center; gap: 8px; min-height: 26px; min-width: 0; }
   .name { box-shadow: none; min-width: 8ch; max-width: 28ch; field-sizing: content; height: 26px; padding: 0 6px; margin-left: -6px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: var(--w-semi); font-size: var(--t-md); outline: none; color: var(--ink-1); }
   .name:hover, .name:focus { background: var(--surface-2); }
@@ -219,7 +175,6 @@
   .foot { display: flex; align-items: center; gap: 6px; min-height: 26px; }
   .rm { color: var(--ink-3); }
   .rm:hover { color: var(--bad); background: var(--bad-soft); }
-  .rule { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
   .f { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
   .f-label { font-size: var(--t-sm); font-weight: var(--w-med); color: var(--ink-2); }
   .modes { display: flex; flex-direction: column; gap: 6px; }

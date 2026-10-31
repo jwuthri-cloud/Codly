@@ -127,8 +127,8 @@ strict (ask for everything), autonomous (allow what stays in the agent's worktre
 changes, writes by read-only agents and Codly's own data dir still ask).
 
 **Triggers and inbound** (Settings → Triggers / Inbound). `triggers.rs` holds the pure policy and
-`orchestrator/triggers.rs` the loop: schedules that send a prompt to the Lead on a repeating clock,
-context rules that compact or clear an agent's conversation, and a network mode that gates every
+`orchestrator/triggers.rs` the loop: schedules that send a prompt to the Lead on a repeating clock
+and a network mode that gates every
 inbound path. `inbound/` has the sources: a loopback webhook listener (one secret per endpoint,
 created switched off) and Slack over Socket Mode (config and gating exist; the socket is not
 connected yet). Inbound text reaches the Lead wrapped as untrusted outside input. Secrets live in the
@@ -184,7 +184,7 @@ crates/codly-core/src/
   byok.rs         opt-in OpenRouter key for OpenCode (Keychain)   skills.rs   skills scan/install
   ide.rs          confined file ops for the workspace IDE         install.rs  CLI install terminal
   blockers.rs     "ask me" cards (codly_ask_user)                 hire.rs     hire manifests
-  triggers.rs     schedules, context rules, network gate          dictation.rs  Groq Whisper dictation
+  triggers.rs     schedules, network gate                         dictation.rs  Groq Whisper dictation
   inbound/        webhook + Slack sources, Keychain secrets       career.rs   XP, ranks, traits
 src-tauri/        commands, UI bus (coalescing Channel), plugins, window
 src/              Svelte app: lib/api.ts (transport), lib/state, rooms/, ide/

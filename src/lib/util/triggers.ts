@@ -1,7 +1,5 @@
-// Pure helpers for the Triggers panel: when a schedule next runs, how to say an interval, and the
-// plain-language account of what a context rule does. The core owns the real clocks
+// Pure helpers for the Triggers panel: when a schedule next runs and how to say an interval. The core owns the real clocks
 // (crates/codly-core/src/triggers.rs); this only labels them.
-import type { ContextRule } from '../gen/ContextRule';
 import type { NetworkMode } from '../gen/NetworkMode';
 import type { Schedule } from '../gen/Schedule';
 
@@ -26,13 +24,6 @@ export function inLabel(ts: number, now = Date.now()): string {
   if (m < 60) return `in ${m} min`;
   const h = Math.floor(m / 60);
   return h < 24 ? `in ${h} h${m % 60 ? ` ${m % 60} min` : ''}` : `in ${Math.floor(h / 24)} d`;
-}
-
-/** One sentence for the rule, so "what will this do?" never needs the docs. */
-export function ruleSentence(verb: 'compact' | 'clear', r: ContextRule): string {
-  const every = r.every_hours === 1 ? 'hour' : `${r.every_hours} hours`;
-  const when = r.min_percent > 0 ? `once its context is at least ${r.min_percent}% full` : 'whatever its context size (clock only)';
-  return `${verb === 'compact' ? 'Compact' : 'Clear'} an agent’s context every ${every}, ${when}.`;
 }
 
 export const NETWORK_MODES: { id: NetworkMode; title: string; body: string }[] = [

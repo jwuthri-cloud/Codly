@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { everyLabel, inLabel, nextRunAt, ruleSentence } from '../util/triggers';
+import { everyLabel, inLabel, nextRunAt } from '../util/triggers';
 import { saveTriggers, seedTriggers } from '../demo/triggers';
 import type { Schedule } from '../gen/Schedule';
 
@@ -23,23 +23,16 @@ describe('triggers', () => {
     expect(inLabel(150 * MIN, 0)).toBe('in 2 h 30 min');
   });
 
-  it('says what a rule does, clock-only when 0%', () => {
-    expect(ruleSentence('compact', { enabled: true, every_hours: 2, min_percent: 60 })).toBe('Compact an agent’s context every 2 hours, once its context is at least 60% full.');
-    expect(ruleSentence('clear', { enabled: true, every_hours: 1, min_percent: 0 })).toContain('clock only');
-  });
-
   it('the mock keeps the core’s clocks and clamps what the UI sends', () => {
     const old = seedTriggers(1_000 * MIN);
     const next = structuredClone(old);
     next.schedules[0].last_fired_at = 5; // the UI cannot move it
     next.schedules.push(sched({ id: '', name: ' ', prompt: ' standup ', every_minutes: 1 }));
-    next.context.clear.min_percent = 400;
     const out = saveTriggers(old, next, 1_000 * MIN);
     expect(out.schedules[0].last_fired_at).toBe(old.schedules[0].last_fired_at);
     expect(out.schedules[2].id).not.toBe('');
     expect(out.schedules[2].every_minutes).toBe(5);
     expect(out.schedules[2].name).toBe('standup');
-    expect(out.context.clear.min_percent).toBe(100);
     expect(out.state).toBe(old.state);
   });
 });

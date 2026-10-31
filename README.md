@@ -93,7 +93,7 @@ install terminal for the missing ones, and walks you through setting up a Lead, 
 mission.
 
 Approvals have four modes: balanced, strict, autonomous and Full access (auto-approves everything except
-a few hard floors; off unless you choose it). Settings also holds Triggers (schedules and context rules)
+a few hard floors; off unless you choose it). Settings also holds Triggers (schedules and network mode)
 and Inbound (webhook and Slack sources for the Lead).
 
 ## Requirements
