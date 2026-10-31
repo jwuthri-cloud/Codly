@@ -294,7 +294,7 @@
     e.setNeeds((id) => {
       const s = sims.stats(id, Date.now(), e.agentState(id));
       const h = headline(s);
-      return { energy: s.needs.energy, morale: s.needs.morale, mood: h?.emoji ? { emoji: h.emoji, label: `${h.label}: ${h.why}` } : null, jittery: s.rest.jittery };
+      return { energy: s.needs.energy, morale: s.needs.morale, mood: h?.emoji ? { emoji: h.emoji, label: `${h.label}: ${h.why}` } : null, jittery: s.rest.jittery, hunger: s.needs.hunger, thirst: s.needs.thirst };
     });
     e.setActivity((id, now, act) => sims.setActivity(id, now, act));
     if (simsKey)

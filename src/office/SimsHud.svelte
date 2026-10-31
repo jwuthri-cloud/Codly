@@ -253,7 +253,7 @@
     </div>
     <div class="p-body">
       {#if tab === 'needs'}
-        {#each [['Energy', sheet.needs.energy, `Tires over a shift of real work; going home refills it (stamina ${career?.stamina ?? 0})`], ['Focus', sheet.needs.focus, 'Context window left'], ['Morale', sheet.needs.morale, 'How its recent work went']] as [label, v, why] (label)}
+        {#each [['Energy', sheet.needs.energy, `Tires over a shift of real work; going home refills it (stamina ${career?.stamina ?? 0})`], ['Focus', sheet.needs.focus, 'Context window left'], ['Morale', sheet.needs.morale, 'How its recent work went'], ['Hunger', sheet.needs.hunger, 'Work makes it hungry; the fridge or the kitchen counter feeds it, home fills it up'], ['Thirst', sheet.needs.thirst, 'Work makes it thirsty; the water cooler or a coffee fixes it, home fills it up']] as [label, v, why] (label)}
           <div class="need" title={why as string}>
             <span class="n-l">{label}</span>
             <span class="bar"><span class="fill" class:low={v != null && (v as number) < 0.25} class:mid={v != null && (v as number) >= 0.25 && (v as number) < 0.55} style:width={v == null ? '0%' : `${Math.round((v as number) * 100)}%`}></span></span>

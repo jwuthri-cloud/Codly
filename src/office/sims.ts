@@ -6,6 +6,9 @@
 //   Focus   = context window left (its latest turn)
 //   Morale  = how its recent work went (checks, merges, reviews), refilled by games and reading,
 //             drifting back to normal
+//   Hunger, Thirst = 1 fed / watered … 0 starving / parched: work drains them (thirst ~3 h, hunger
+//             ~5 h of real work), the fridge, the water cooler and a coffee refill them, home fills
+//             them up. Under 25% morale slides; a hungry or thirsty agent's break goes to the kitchen.
 // Energy and Morale also move with what the agent does (`setActivity`): a nap, a PS5 session…
 // Moodlets are short-lived feelings from real events ("Tests passed", "Waiting on you");
 // relationships are the reviews saved on its career (`career.friends`). Skills are on the
@@ -68,7 +71,7 @@ export interface RestState {
 }
 
 export interface SimSheet {
-  needs: { energy: number; focus: number | null; morale: number };
+  needs: { energy: number; focus: number | null; morale: number; hunger: number; thirst: number };
   moodlets: Moodlet[];
   relations: Relation[];
   plumbob: PlumbobColor;
@@ -93,6 +96,13 @@ const SICK_CAP = 0.6;
 /** Energy drained since it last went home that counts as a shift worked (stamina). */
 const SHIFT_DONE = 0.5;
 const OVERTIME_MORALE = -0.15;
+/** Hunger and thirst a working hour drains (an idle one less, by LOAD). */
+const HUNGER_PER_HOUR = 0.2;
+const THIRST_PER_HOUR = 0.33;
+/** Under this it is Hungry / Thirsty: morale slides. */
+export const PECKISH = 0.25;
+/** What a visit gives: [hunger, thirst]. */
+const MEAL: Partial<Record<RestActivity, [number, number]>> = { coffee: [0.25, 0.3], water: [0, 0.5], snack: [0.5, 0.2] };
 
 /** Skill level from XP: 1, 4, 9, 16 … XP per level, up to 10 (like a Sims skill bar). */
 export function levelOf(xp: number): { level: number; progress: number } {
@@ -122,12 +132,12 @@ export function shiftOf(stamina: number) {
 }
 
 /** What an agent is doing right now, for its needs. `wait` = waiting on you (no drain). */
-export type RestActivity = 'work' | 'idle' | 'wait' | 'nap' | 'coffee' | 'console' | 'table' | 'library';
+export type RestActivity = 'work' | 'idle' | 'wait' | 'nap' | 'coffee' | 'water' | 'snack' | 'console' | 'table' | 'library';
 
 /** How hard each activity draws on its energy, as a share of working (the rest restores). */
-const LOAD: Record<RestActivity, number> = { work: 1, idle: 0.2, wait: 0, nap: 0, coffee: 0.2, console: 0.5, table: 0.6, library: 0.2 };
+const LOAD: Record<RestActivity, number> = { work: 1, idle: 0.2, wait: 0, nap: 0, coffee: 0.2, water: 0.2, snack: 0.2, console: 0.5, table: 0.6, library: 0.2 };
 /** Morale per minute while doing it (0 … 1). */
-const MORALE: Record<RestActivity, number> = { work: 0, idle: 0, wait: 0, nap: 0.02, coffee: 0.01, console: 0.02, table: 0.02, library: 0.01 };
+const MORALE: Record<RestActivity, number> = { work: 0, idle: 0, wait: 0, nap: 0.02, coffee: 0.01, water: 0.01, snack: 0.01, console: 0.02, table: 0.02, library: 0.01 };
 
 /** The activity for what the office is showing: a station id (or null at the desk) and a pose. */
 export function activityFor(stationId: string | null, pose: string): RestActivity {
@@ -135,6 +145,10 @@ export function activityFor(stationId: string | null, pose: string): RestActivit
   switch (stationId) {
     case 'kitchen':
       return 'coffee';
+    case 'water':
+      return 'water';
+    case 'fridge':
+      return 'snack';
     case 'games.console':
       return 'console';
     case 'games.pool':
@@ -159,6 +173,9 @@ interface Mind {
   morale: number;
   moraleAt: number;
   energy: number;
+  /** 1 fed / watered … 0. */
+  hunger: number;
+  thirst: number;
   /** When energy and morale were last brought up to date (null = never). */
   restAt: number | null;
   activity: RestActivity;
@@ -229,6 +246,8 @@ export class SimsTracker {
           morale: BASE_MORALE,
           moraleAt: 0,
           energy: 1,
+          hunger: 1,
+          thirst: 1,
           restAt: null,
           activity: 'idle',
           moodlets: [],
@@ -290,17 +309,27 @@ export class SimsTracker {
       const min = dt / 60_000;
       t += dt;
       let mood = 0.01;
-      if (m.home) m.energy = Math.min(m.cap, m.energy + min / sh.homeMinutes);
-      else {
+      if (m.home) {
+        m.energy = Math.min(m.cap, m.energy + min / sh.homeMinutes);
+        m.hunger = m.thirst = 1; // ponytail: dinner at home is instant
+      } else {
         const a = m.activity;
         // A nap rests at a third of home speed; the Lead rests at its desk when nothing runs.
         const rests = a === 'nap' || (lead && (a === 'idle' || a === 'wait'));
         const d = rests ? min / (sh.homeMinutes * 3) : (-LOAD[a] * sh.drainPerHour * min) / 60;
         if (d < 0) m.worked += Math.min(m.energy, -d);
+        // The Lead never goes home: it eats at its desk while it rests.
+        if (rests && lead) m.hunger = m.thirst = 1;
+        else {
+          m.hunger = clamp(m.hunger - (LOAD[a] * HUNGER_PER_HOUR * min) / 60);
+          m.thirst = clamp(m.thirst - (LOAD[a] * THIRST_PER_HOUR * min) / 60);
+        }
         m.energy = clamp(m.energy + d, 0, m.cap);
         if (m.energy < 1e-9) m.energy = 0; // empty is empty (no float dust)
         mood = MORALE[a];
         if (m.energy < TIRED) mood -= 0.01;
+        if (m.hunger < PECKISH) mood -= 0.01;
+        if (m.thirst < PECKISH) mood -= 0.01;
         if (this.caffeine(m, t) >= sh.jitteryAt) mood -= 0.015;
       }
       m.morale = clamp(this.moraleNow(m, t) + mood * min);
@@ -315,6 +344,11 @@ export class SimsTracker {
     const m = this.mind(id);
     this.advance(id, m, now);
     if (activity === 'coffee' && m.activity !== 'coffee' && !m.home) this.drink(id, m, now);
+    const meal = MEAL[activity];
+    if (meal && m.activity !== activity && !m.home) {
+      m.hunger = clamp(m.hunger + meal[0]);
+      m.thirst = clamp(m.thirst + meal[1]);
+    }
     m.activity = activity;
   }
 
@@ -473,8 +507,8 @@ export class SimsTracker {
   save(): string {
     const minds: Record<string, unknown> = {};
     for (const [id, m] of this.minds) {
-      const { energy, restAt, cap, cups, cupsSinceHome, worked, sick, home } = m;
-      minds[id] = { energy, restAt, cap, cups, cupsSinceHome, worked, sick, home };
+      const { energy, hunger, thirst, restAt, cap, cups, cupsSinceHome, worked, sick, home } = m;
+      minds[id] = { energy, hunger, thirst, restAt, cap, cups, cupsSinceHome, worked, sick, home };
     }
     return JSON.stringify({ v: 1, minds });
   }
@@ -493,6 +527,8 @@ export class SimsTracker {
       if (!s || typeof s.energy !== 'number') continue;
       const m = this.mind(id);
       m.energy = clamp(s.energy);
+      m.hunger = typeof s.hunger === 'number' ? clamp(s.hunger) : 1;
+      m.thirst = typeof s.thirst === 'number' ? clamp(s.thirst) : 1;
       m.cap = typeof s.cap === 'number' ? clamp(s.cap) : 1;
       m.cups = Array.isArray(s.cups) ? s.cups.filter((t) => typeof t === 'number') : [];
       m.cupsSinceHome = Number(s.cupsSinceHome) || 0;
@@ -597,6 +633,8 @@ export class SimsTracker {
     else if (exhausted) live.push({ key: 'tired', label: 'Exhausted', why: lead ? 'Running on empty' : 'Goes home once its task is done', tone: 'bad', icon: 'battery', emoji: '😵', at: now, until: null });
     else if (energy < TIRED && !m.home) live.push({ key: 'tired', label: 'Tired', why: `${Math.round(energy * 100)}% energy left`, tone: 'bad', icon: 'battery', emoji: '😴', at: now, until: null });
     if (jittery && !m.home) live.push({ key: 'jittery', label: 'Jittery', why: `${caffeine} cups of coffee in the last hour`, tone: 'bad', icon: 'coffee', emoji: '⚡', at: now, until: null });
+    if (m.hunger < PECKISH && !m.home) live.push({ key: 'hungry', label: 'Hungry', why: `${Math.round(m.hunger * 100)}% fed: a snack from the fridge`, tone: 'bad', icon: 'coffee', emoji: '🍔', at: now, until: null });
+    if (m.thirst < PECKISH && !m.home) live.push({ key: 'thirsty', label: 'Thirsty', why: `${Math.round(m.thirst * 100)}% watered: a glass at the cooler`, tone: 'bad', icon: 'coffee', emoji: '💧', at: now, until: null });
     if (focus != null && focus < 0.2) live.push({ key: 'foggy', label: 'Foggy', why: 'Its context window is nearly full', tone: 'bad', icon: 'cloud', emoji: '🌫️', at: now, until: null });
     m.moodlets = m.moodlets.filter((x) => x.until == null || x.until > now);
     const keys = new Set(live.map((x) => x.key));
@@ -607,7 +645,7 @@ export class SimsTracker {
       .map(([other, n]) => ({ agentId: other, score: Math.min(100, Math.round(25 * Math.log2(1 + 2 * n))), why: `${n} review${n === 1 ? '' : 's'} between them` }))
       .sort((a, b) => b.score - a.score);
     const rest: RestState = { home: m.home && { until: m.home.until, sick: m.home.sick }, caffeine, jittery, sick: m.sick, exhausted, cap: m.cap, canGoHome: !lead };
-    return { needs: { energy, focus, morale }, moodlets, relations, plumbob: plumbobOf(state), mood: moodWord(morale, moodlets), rest };
+    return { needs: { energy, focus, morale, hunger: m.hunger, thirst: m.thirst }, moodlets, relations, plumbob: plumbobOf(state), mood: moodWord(morale, moodlets), rest };
   }
 }
 

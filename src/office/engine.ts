@@ -225,7 +225,7 @@ export class OfficeEngine {
   /** What an agent last said (a chat message), shown as a speech bubble for a few seconds. */
   private said = new Map<string, { text: string; at: number }>();
   /** An agent's needs (sims.ts), so a tired agent goes for coffee on its break. */
-  private needsOf: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null; jittery?: boolean } | null) | null = null;
+  private needsOf: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null; jittery?: boolean; hunger?: number; thirst?: number } | null) | null = null;
   /** Each agent's headline feeling for its name tag (sims.ts), refreshed every couple of seconds. */
   private moods = new Map<string, { at: number; mood: { emoji: string; label: string } | null; gait: 'tired' | 'happy' | null; jittery: boolean }>();
   /** Agents gone home (sims.ts): out of the office, their tag by the front door ("Home · back in 6 min"). */
@@ -1010,7 +1010,7 @@ export class OfficeEngine {
     else this.wake();
   }
 
-  setNeeds(fn: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null; jittery?: boolean } | null) | null) {
+  setNeeds(fn: ((id: string) => { energy: number | null; morale: number; mood?: { emoji: string; label: string } | null; jittery?: boolean; hunger?: number; thirst?: number } | null) | null) {
     this.needsOf = fn;
   }
 
@@ -1375,8 +1375,10 @@ export class OfficeEngine {
     // Pass 2: show them.
     for (const { a, act, intent: raw } of pending) {
       const intent = raw.place.kind === 'break' ? breakIntent(seats.get(a.id) ?? null) : raw;
-      // Waiting on you doesn't tire it; a coffee is a coffee only where there is a machine.
-      const at = intent.place.kind === 'station' ? intent.place.id : intent.place.kind === 'piece' && intent.place.use === 'coffee' ? 'kitchen' : null;
+      // Waiting on you doesn't tire it; a coffee is a coffee only where there is a machine; the
+      // water cooler and the fridge feed it.
+      const PIECE_AT: Record<string, string> = { coffee: 'kitchen', water: 'water', drink: 'fridge' };
+      const at = intent.place.kind === 'station' ? intent.place.id : intent.place.kind === 'piece' ? (PIECE_AT[intent.place.use ?? ''] ?? null) : null;
       const where = at === 'kitchen' && intent.place.kind === 'station' && !this.L.stations.kitchen?.slots.length ? null : at;
       this.onActivity?.(a.id, wall, a.approval ? 'wait' : activityFor(where, intent.pose));
       // Personality: its own reaction to a fresh check result (a thump, a fist pump…).

@@ -40,7 +40,7 @@ export interface Spot {
 
 const TABLES: Game[] = ['pool', 'foosball', 'pingpong'];
 const SEATS: Record<Game, number> = { pool: 2, foosball: 2, pingpong: 2, console: 2, library: 2, coffee: 2, nap: 1, piece: 0 };
-const WISH_USE: Partial<Record<Activity, Use>> = { library: 'read', coffee: 'coffee', nap: 'nap' };
+const WISH_USE: Partial<Record<Activity, Use>> = { library: 'read', coffee: 'coffee', water: 'water', snack: 'drink', nap: 'nap' };
 const LOUNGING: Use[] = ['sit', 'watch', 'dance'];
 /** How long a player left alone at a table waits for someone before giving up. */
 export const LONELY_MS = 6000;
@@ -179,6 +179,11 @@ export class BreakRoom {
       const own = wishUse ? this.piece(spots, [wishUse], id, now) : null;
       if (own) {
         this.put(id, own, now);
+        continue;
+      }
+      // Hungry or thirsty and nothing bought for it: the kitchen counter (its coffee and fridge).
+      if ((wish === 'water' || wish === 'snack') && this.free('coffee') >= 0 && !this.tired(id, 'coffee', now)) {
+        this.put(id, { game: 'coffee', slot: this.free('coffee') }, now);
         continue;
       }
       // Half the agents would rather lounge on furniture you bought than play.

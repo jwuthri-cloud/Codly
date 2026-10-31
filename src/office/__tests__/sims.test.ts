@@ -23,6 +23,23 @@ describe('sims', () => {
     expect(sh.mood).toBe('Fine');
   });
 
+  it('work makes it hungry and thirsty; the cooler, the fridge and home refill them; a break goes to eat', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada')], 0);
+    s.setActivity('ada', 0, 'work');
+    const sh = s.stats('ada', 3 * HOUR, null);
+    expect(sh.needs.thirst).toBeCloseTo(0.01, 2);
+    expect(sh.needs.hunger).toBeCloseTo(0.4, 3);
+    expect(sh.moodlets.map((m) => m.key)).toContain('thirsty');
+    expect(breakPreference([], { ...sh.needs, energy: 1, morale: 0.65 })).toBe('water');
+    s.setActivity('ada', 3 * HOUR, activityFor('water', 'drink'));
+    expect(s.stats('ada', 3 * HOUR, null).needs.thirst).toBeCloseTo(0.51, 2);
+    s.setActivity('ada', 3 * HOUR, activityFor('fridge', 'drink'));
+    expect(s.stats('ada', 3 * HOUR, null).needs.hunger).toBeCloseTo(0.9, 3);
+    s.sendHome('ada', 3 * HOUR);
+    expect(s.stats('ada', 3 * HOUR + MIN, null).needs).toMatchObject({ hunger: 1, thirst: 1 });
+  });
+
   it('working drains energy over a ~4 h shift (3× slower at stamina 100); idle a little, waiting on you not at all', () => {
     const s = new SimsTracker();
     s.setAgents([agent('ada'), agent('leg', { career: { ...emptyCareer(), stamina: 100 } })], 0);
