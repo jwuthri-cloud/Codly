@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codly · Character lab</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #e9e1d4;
+        font: 13px -apple-system, system-ui, sans-serif;
+      }
+      #lab {
+        position: fixed;
+        inset: 0;
+      }
+      #ui {
+        position: fixed;
+        left: 12px;
+        top: 12px;
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="lab"></div>
+    <div id="ui"></div>
+    <!-- pnpm dev → http://localhost:1420/character-lab.html  ?view=close|office|side|back  ?pose=walk|sit|type|… ?emote=check -->
+    <script type="module" src="/src/office/demo/lab.ts"></script>
+  </body>
+</html>
