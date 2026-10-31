@@ -119,7 +119,9 @@ export class NeighbourhoodScene {
     this.rig.turns = -1;
     this.rig.set({ yaw: this.rig.homeYaw + 0.4 });
     this.rig.minDist = 14;
-    this.rig.maxDist = 220;
+    this.rig.maxDist = 420;
+    this.rig.camera.far = 1200;
+    this.rig.camera.updateProjectionMatrix();
     this.key.castShadow = true;
     this.key.shadow.mapSize.set(2048, 2048);
     this.key.shadow.radius = 4;
@@ -173,11 +175,16 @@ export class NeighbourhoodScene {
   /** Frame the whole neighbourhood. */
   overview(instant = false) {
     const e = extent(this.plots);
-    const pts = [new Vector3(e.x0, 0, e.z0), new Vector3(e.x1, 0, e.z0), new Vector3(e.x0, 0, e.z1), new Vector3(e.x1, 0, e.z1), new Vector3((e.x0 + e.x1) / 2, STOREY + 2, (e.z0 + e.z1) / 2)];
     const i = this.insets;
     const availX = Math.max(0.3, (this.width - i.left - i.right) / this.width);
     const availY = Math.max(0.3, (this.height - i.top - i.bottom) / this.height);
-    this.rig.flyTo(this.rig.fit(pts, this.rig.homeYaw + 0.4, 0.86, 0.1, availX, availY), instant);
+    // Far enough that the whole grid's circle fits the free part of the view (rig.fit starts
+    // 40 m out, made for one office: from there a big map is partly behind the camera).
+    const r = Math.hypot(e.x1 - e.x0, e.z1 - e.z0) / 2;
+    const half = Math.tan((this.rig.camera.fov * Math.PI) / 360);
+    const fill = Math.min(availY, availX * this.rig.camera.aspect);
+    const dist = (r / (half * fill)) * 0.92;
+    this.rig.flyTo({ x: (e.x0 + e.x1) / 2, y: 0, z: (e.z0 + e.z1) / 2, yaw: this.rig.homeYaw + 0.4, pitch: 0.86, dist }, instant);
     this.userMoved = false;
     this.wake();
   }
@@ -218,7 +225,8 @@ export class NeighbourhoodScene {
     this.plots = plotsOf(this.state.slots);
     const e = extent(this.plots);
     const pad = 40;
-    this.ground.scale.set(e.x1 - e.x0 + pad * 6, 1, e.z1 - e.z0 + pad * 6);
+    // Ground to the horizon, whatever the zoom.
+    this.ground.scale.set(e.x1 - e.x0 + pad * 60, 1, e.z1 - e.z0 + pad * 60);
     this.ground.position.set((e.x0 + e.x1) / 2, -0.02, (e.z0 + e.z1) / 2);
     this.rig.boundsX = Math.max(Math.abs(e.x0), Math.abs(e.x1)) + 8;
     this.rig.boundsZ = Math.max(Math.abs(e.z0), Math.abs(e.z1)) + 8;

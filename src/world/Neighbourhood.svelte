@@ -17,7 +17,6 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { coins } from '../lib/util/format';
-  import { neighbourhood as nb, type Here } from './data';
   import { buyOptions, signOf, sizeLabel, slotActions, slotKind, type ActionId } from './map';
   import { NeighbourhoodScene } from './scene';
 
@@ -39,7 +38,6 @@
   const ws = $derived(store.workspace);
   const crewHere = $derived(store.agents.filter((a) => a.role !== 'lead' && !a.archived).length);
   const working = $derived(store.agents.filter((a) => a.role !== 'lead' && (a.status === 'working' || a.status === 'thinking')).length);
-  const here = (): Here => ({ workspace: ws ? { id: ws.id, name: ws.name } : null, crew: crewHere, offices });
   const slot = $derived(slots.find((s) => s.id === selected) ?? null);
   const balance = $derived(wallet?.balance ?? 0);
 
@@ -55,17 +53,17 @@
   const fail = (title: string) => (e: unknown) => toast({ kind: 'error', title, body: String(e instanceof Error ? e.message : e) });
 
   async function load() {
-    const [o, w] = await Promise.all([api.offices().catch(() => [] as Office[]), nb.wallet().catch(() => null)]);
+    const [o, w] = await Promise.all([api.offices().catch(() => [] as Office[]), api.wallet().catch(() => null)]);
     offices = o;
     wallet = w;
-    await setSlots(await nb.lots(here()));
+    await setSlots(await api.lots());
     loaded = true;
   }
 
   /** New slots, then the buildings on the owned ones (drawn from their lots). */
   async function setSlots(next: LotSlot[]) {
     const built = next.filter((s) => s.owned && (s.template || s.workspace_id));
-    const pairs = await Promise.all(built.map(async (s) => [s.id, await nb.lotOf(s, here()).catch(() => null)] as const));
+    const pairs = await Promise.all(built.map(async (s) => [s.id, await api.lotOf(s.id).catch(() => null)] as const));
     lots = new Map(pairs.filter((p): p is readonly [string, Lot] => !!p[1]));
     slots = [...next];
   }
@@ -118,8 +116,8 @@
     const s = slot;
     if (!s) return;
     void run('buy it', async () => {
-      wallet = await nb.buy(s, template, here());
-      await setSlots(await nb.lots(here()));
+      wallet = await api.buyLot(s.id, template);
+      await setSlots(await api.lots());
       toast({ kind: 'success', title: template ? `A ${label} is yours` : 'The lot is yours', body: `${coins(price)} spent. ${template ? 'Move an office in, or build on it.' : 'Build on it, or move an office here.'}` });
       step = 'main';
     });
@@ -129,8 +127,8 @@
     const s = slot;
     if (!s) return;
     void run('sell it', async () => {
-      wallet = await nb.sell(s, here());
-      await setSlots(await nb.lots(here()));
+      wallet = await api.sellLot(s.id);
+      await setSlots(await api.lots());
       toast({ kind: 'success', title: 'Sold', body: `${coins(s.sells_for)} back in the wallet.` });
       close();
     });
@@ -138,7 +136,7 @@
 
   function move(workspaceId: string, to: LotSlot) {
     void run('move the office', async () => {
-      await setSlots(await nb.move(workspaceId, to, here()));
+      await setSlots(await api.moveOffice(workspaceId, to.id));
       const name = repos.find((r) => r.id === workspaceId)?.name ?? 'The office';
       toast({ kind: 'success', title: `${name} moved`, body: 'The crew carried the boxes over.' });
       selected = to.id;

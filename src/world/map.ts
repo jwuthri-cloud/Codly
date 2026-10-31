@@ -8,7 +8,8 @@
 import type { Lot } from '../lib/gen/Lot';
 import type { LotSlot } from '../lib/gen/LotSlot';
 import { coins } from '../lib/util/format';
-import { LOT_SIZES, readyMadePrice, TEMPLATE_NAMES, templateLabel } from './price';
+import { plotSize, readyMadePrice, TEMPLATE_NAMES } from '../office/price';
+import { templateLabel } from './price';
 
 /** Metres between plot centres, along x and along z (the large lot is 28 × 24). */
 export const PITCH_X = 34;
@@ -54,7 +55,7 @@ export function gridCentre(slots: Pick<LotSlot, 'x' | 'z'>[]): { x: number; z: n
 
 /** Where a slot's plot lies on the ground. */
 export function plotOf(s: Pick<LotSlot, 'id' | 'x' | 'z' | 'size'>, centre: { x: number; z: number }): Plot {
-  const { w, d } = LOT_SIZES[s.size];
+  const { w, d } = plotSize(s.size);
   const cx = (s.x - centre.x) * PITCH_X;
   const cz = (s.z - centre.z) * PITCH_Z;
   return { id: s.id, cx, cz, w, d, x0: cx - w / 2, z0: cz - d / 2, x1: cx + w / 2, z1: cz + d / 2 };
@@ -92,7 +93,7 @@ export function extent(plots: Plot[]): { x0: number; z0: number; x1: number; z1:
 export const agentsLabel = (n: number): string => `${n} agent${n === 1 ? '' : 's'}`;
 
 export const SIZE_LABEL: Record<LotSlot['size'], string> = { small: 'Small', medium: 'Medium', large: 'Large' };
-export const sizeLabel = (s: LotSlot['size']): string => `${SIZE_LABEL[s]} · ${LOT_SIZES[s].w} × ${LOT_SIZES[s].d} m`;
+export const sizeLabel = (s: LotSlot['size']): string => `${SIZE_LABEL[s]} · ${plotSize(s).w} × ${plotSize(s).d} m`;
 
 export interface Sign {
   title: string;

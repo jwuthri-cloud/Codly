@@ -3,7 +3,7 @@ import type { LotSlot } from '../../lib/gen/LotSlot';
 import { TEMPLATES } from '../../office/layout';
 import { exteriorOf, STOREY } from '../exterior';
 import { buildingOrigin, buyOptions, gridCentre, lightsOf, PITCH_X, PITCH_Z, plotAt, plotOf, plotsOf, signOf, slotActions, slotKind } from '../map';
-import { fits, landPrice, lotValue, readyMadePrice } from '../price';
+import { landPrice, readyMadePrice, value } from '../../office/price';
 
 const slot = (extra: Partial<LotSlot> = {}): LotSlot => ({
   id: 'a', x: 0, z: 0, size: 'small', owned: false, workspace_id: null, name: null, crew: 0, price: 300, template: null, gift: false, sells_for: 0, ...extra,
@@ -104,8 +104,8 @@ describe('what a lot offers', () => {
 describe('prices', () => {
   it('a ready-made lot costs the land plus everything on it', () => {
     expect(readyMadePrice('small', null)).toBe(landPrice('small'));
-    expect(readyMadePrice('small', 'garage')).toBe(landPrice('small') + lotValue(TEMPLATES.garage));
-    expect(lotValue(TEMPLATES.garage)).toBeGreaterThan(0);
+    expect(readyMadePrice('small', 'garage')).toBe(landPrice('small') + value(TEMPLATES.garage));
+    expect(value(TEMPLATES.garage)).toBeGreaterThan(0);
     // A design that doesn't fit the plot has no price there.
     expect(readyMadePrice('small', 'studio')).toBeNull();
   });
@@ -118,8 +118,7 @@ describe('prices', () => {
     const large = buyOptions({ size: 'large' }, 1e9, ['garage', 'studio']);
     expect(large.map((o) => o.template)).toEqual([null, 'garage', 'studio']);
     expect(large.every((o) => !o.short)).toBe(true);
-    expect(fits('studio', 'medium')).toBe(false);
-    expect(fits('nope', 'large')).toBe(false);
+    expect(buyOptions({ size: 'medium' }, 1e9, ['studio', 'nope']).map((o) => o.template)).toEqual([null]);
   });
 });
 
