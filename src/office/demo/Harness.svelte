@@ -26,7 +26,10 @@
   let artifacts = $state<Artifact[]>([]);
   let selection = $state<WorldSelection | null>(initialSelect ? { agentId: initialSelect } : null);
   let hover = $state<WorldSelection | null>(null);
-  let theme = $state<'dark' | 'light'>(initialTheme);
+  const theme = initialTheme;
+  // The office follows the real clock; ?hour=21.5 (or the button) pins an hour.
+  const HOURS = [null, 9, 18.5, 23];
+  let hour = $state<number | null>(params.has('hour') ? Number(params.get('hour')) : null);
   let backdrop = $state(initialBackdrop);
   let reducedMotion = $state(params.has('rm'));
   let idleReport = $state('');
@@ -143,7 +146,7 @@
     {artifacts}
     {selection}
     {hover}
-    {theme}
+    {hour}
     {reducedMotion}
     {backdrop}
     {subscribe}
@@ -161,7 +164,7 @@
   {/if}
   <div class="bar glass">
     <strong>Codly · office</strong>
-    <button onclick={() => (theme = theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? 'Evening' : 'Daylight'}</button>
+    <button onclick={() => (hour = HOURS[(HOURS.indexOf(hour) + 1) % HOURS.length])}>{hour == null ? 'Real clock' : `${Math.floor(hour)}:${String(Math.round((hour % 1) * 60)).padStart(2, '0')}`}</button>
     <button aria-pressed={backdrop} onclick={() => (backdrop = !backdrop)}>Backdrop</button>
     <button aria-pressed={reducedMotion} onclick={() => (reducedMotion = !reducedMotion)}>Reduce motion</button>
     <button onclick={measureIdle}>Measure idle</button>

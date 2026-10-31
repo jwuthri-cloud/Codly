@@ -6,6 +6,8 @@
 import { Color } from 'three';
 
 export type ThemeName = 'dark' | 'light';
+/** What the windows show. */
+export type SkyKind = 'day' | 'dusk' | 'night';
 export type RGB = [number, number, number];
 
 /** OKLCH → linear sRGB (clamped). L in 0..1, C ~0..0.37, h in degrees. */
@@ -182,7 +184,7 @@ export interface OfficeTheme {
   /** Point lights (evening only). */
   points: number;
   screenGlow: number;
-  window: { top: string; bottom: string; stars: boolean; glow: number };
+  window: { top: string; bottom: string; stars: boolean; glow: number; sky: SkyKind };
   amber: RGB;
   danger: RGB;
   success: RGB;
@@ -207,7 +209,7 @@ export const THEMES: Record<ThemeName, OfficeTheme> = {
     pool: 0,
     points: 0,
     screenGlow: 0.85,
-    window: { top: '#bfe0f2', bottom: '#eaf5f8', stars: false, glow: 0.9 },
+    window: { top: '#bfe0f2', bottom: '#eaf5f8', stars: false, glow: 0.9, sky: 'day' },
     amber: lin('#f0a23a'),
     danger: lin('#d9534a'),
     success: lin('#3fae6a'),
@@ -229,10 +231,45 @@ export const THEMES: Record<ThemeName, OfficeTheme> = {
     pool: 0.4,
     points: 1,
     screenGlow: 1.25,
-    window: { top: '#1d2150', bottom: '#d9825f', stars: true, glow: 1.1 },
+    window: { top: '#1d2150', bottom: '#d9825f', stars: true, glow: 1.1, sky: 'dusk' },
     amber: lin('#ffb347'),
     danger: lin('#ff6b5e'),
     success: lin('#5ee08f'),
     labelInk: 'rgba(236, 222, 200, 0.5)',
   },
 };
+
+// ───────────── the office's own clock ─────────────
+
+/** How dark it is at this hour (0..24, local): `dark` 0 by day … 1 by evening (lamps on), and
+ *  `night` 0 … 1 deep in the night (dimmer still, no sunset in the windows). */
+export function daylight(hour: number): { dark: number; night: number } {
+  const ramp = (a: number, b: number) => Math.min(1, Math.max(0, (hour - a) / (b - a)));
+  return hour < 12 ? { dark: 1 - ramp(6, 8), night: 1 - ramp(4.5, 6) } : { dark: ramp(17, 19.5), night: ramp(21, 23) };
+}
+
+/** The office lit for this hour: daylight, sunset, lamplit evening, deep night, and dawn. */
+export function themeAt(hour: number): OfficeTheme {
+  const { dark: k, night: n } = daylight(hour);
+  const [a, b] = [THEMES.light, THEMES.dark];
+  const base = k < 0.5 ? a : b;
+  const f = (x: number, y: number) => x + (y - x) * k;
+  // The sun swings across the sky through the day, so the shadows move with it.
+  const sun = Math.max(-1, Math.min(1, (hour - 13) / 6));
+  return {
+    ...base,
+    hemiSky: mix(a.hemiSky, b.hemiSky, k),
+    hemiGround: mix(a.hemiGround, b.hemiGround, k),
+    hemiIntensity: f(a.hemiIntensity, b.hemiIntensity) * (1 - 0.3 * n),
+    key: mix(a.key, b.key, k),
+    keyIntensity: f(a.keyIntensity, b.keyIntensity) * (1 - 0.45 * n),
+    keyDir: [0.5 - 0.35 * sun, 1, f(a.keyDir[2], b.keyDir[2])],
+    shadowStrength: f(a.shadowStrength, b.shadowStrength),
+    exposure: f(a.exposure, b.exposure) * (1 - 0.1 * n),
+    lamp: mix(a.lamp, b.lamp, k),
+    lampGlow: f(a.lampGlow, b.lampGlow),
+    pool: f(a.pool, b.pool),
+    screenGlow: f(a.screenGlow, b.screenGlow),
+    window: { ...base.window, glow: f(a.window.glow, b.window.glow) * (1 - 0.3 * n), sky: n > 0.5 ? 'night' : k > 0.5 ? 'dusk' : 'day' },
+  };
+}

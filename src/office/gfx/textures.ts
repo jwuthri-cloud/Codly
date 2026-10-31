@@ -5,7 +5,7 @@
 
 import { CanvasTexture, LinearMipmapLinearFilter, SRGBColorSpace, type Texture } from 'three';
 import { D, W, wallPieces, type OfficeLayout, type Rect, type Room } from '../layout';
-import { MAT, type ThemeName } from '../palette';
+import { MAT, type SkyKind } from '../palette';
 import { rng } from '../text';
 
 export function canvas(w: number, h = w): [HTMLCanvasElement, CanvasRenderingContext2D] {
@@ -252,12 +252,16 @@ export function floorTexture(L: OfficeLayout): CanvasTexture {
   return t;
 }
 
-/** What you see through the windows: daylight with clouds, or dusk over a little skyline. */
-export function skyTexture(theme: ThemeName): CanvasTexture {
+/** What you see through the windows: daylight with clouds, dusk, or the night over a little skyline. */
+export function skyTexture(kind: SkyKind): CanvasTexture {
   const [c, g] = canvas(512, 256);
-  const night = theme === 'dark';
+  const night = kind !== 'day';
   const grad = g.createLinearGradient(0, 0, 0, 256);
-  if (night) {
+  if (kind === 'night') {
+    grad.addColorStop(0, '#080a1f');
+    grad.addColorStop(0.6, '#141a3c');
+    grad.addColorStop(1, '#262c55');
+  } else if (night) {
     grad.addColorStop(0, '#171a3f');
     grad.addColorStop(0.5, '#3b2f62');
     grad.addColorStop(0.82, '#c4706a');
@@ -279,7 +283,7 @@ export function skyTexture(theme: ThemeName): CanvasTexture {
     g.beginPath();
     g.arc(410, 52, 11, 0, Math.PI * 2);
     g.fill();
-    g.fillStyle = '#3b2f62';
+    g.fillStyle = kind === 'night' ? '#0b0e26' : '#3b2f62';
     g.beginPath();
     g.arc(415, 48, 10, 0, Math.PI * 2);
     g.fill();

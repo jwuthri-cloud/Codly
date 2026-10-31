@@ -56,7 +56,8 @@ import { cellCenter, cellOf, COLS, D, officeLayout, passableFn, ROWS, W, type De
 import { emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type WorldSelection } from './model';
 import { chipFor } from './bubble';
 import { OUTCOME_MS, sentence, type Sentence } from './narrate';
-import { identity, lin, THEMES, type OfficeTheme, type ThemeName } from './palette';
+import { identity, lin, themeAt, type OfficeTheme } from './palette';
+import { WallClock } from './gfx/clock';
 import { reduce, syncAgents, syncTasks } from './reducer';
 import { browserHost, FrameLoop, type StepResult } from './scheduler';
 import { Overlay, type LabelSpec } from './overlay';
@@ -88,7 +89,6 @@ export interface AgentListItem {
 }
 
 export interface EngineOptions {
-  theme: ThemeName;
   reducedMotion: boolean;
   backdrop: boolean;
   onselect: (sel: WorldSelection | null) => void;
@@ -191,6 +191,9 @@ export class OfficeEngine {
   private screens: DeskScreens;
   private board: TaskBoard;
   private whiteboard: Whiteboard;
+  private clock = new WallClock(0.1, 1.55, 11.65, Math.PI / 2);
+  private fixedHour: number | null = null;
+  private minute = Math.floor(Date.now() / 60_000);
   private server: ServerRoom;
   private games: GamesCorner;
   private gazeBufs = new Map<string, Vector3>();
@@ -285,7 +288,7 @@ export class OfficeEngine {
   constructor(container: HTMLElement, opts: EngineOptions) {
     this.container = container;
     this.opts = opts;
-    this.theme = THEMES[opts.theme];
+    this.theme = themeAt(this.hourNow());
     this.L = officeLayout();
     this.passable = passableFn(this.L);
     this.renderer = new WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: false });
@@ -318,6 +321,9 @@ export class OfficeEngine {
     this.board.handOf = (id) => this.actors.get(id)?.c.hand ?? null;
     this.whiteboard = new Whiteboard(this.L);
     this.building.hang(this.whiteboard.mesh, this.whiteboard.mesh.position.x, this.whiteboard.mesh.position.z);
+    // Above the studio credenza, between the two posters.
+    this.building.hang(this.clock.group, 0.1, 11.65);
+    this.clock.set(new Date());
     this.server = new ServerRoom(this.L);
     this.games = new GamesCorner(this.L, { x: OX, z: OZ }, makeCanvas, tex);
     this.games.onSound = (e, at) => (MADE.has(e.name) ? sound.synth(e.name as never, { at, gain: e.gain }) : sound.play(e.name as Sfx, { at, gain: e.gain }));
@@ -341,7 +347,7 @@ export class OfficeEngine {
     this.hovRing = new Mesh(ringGeo, new MeshBasicMaterial({ map: this.ringTex, transparent: true, depthWrite: false, opacity: 0.55, blending: AdditiveBlending, toneMapped: false }));
     this.selRing.visible = this.hovRing.visible = false;
     this.selRing.renderOrder = this.hovRing.renderOrder = 3;
-    this.world.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, this.server.group, this.games.group, this.mail.group, this.archive.group, this.frames.group, this.builtins.group, this.decor.group, this.fx.group, this.selRing, this.hovRing);
+    this.world.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, this.clock.group, this.server.group, this.games.group, this.mail.group, this.archive.group, this.frames.group, this.builtins.group, this.decor.group, this.fx.group, this.selRing, this.hovRing);
     void builtinPieces(this.L)
       .then((p) => this.builtins.set(p))
       .then((list) => {
@@ -430,10 +436,25 @@ export class OfficeEngine {
     this.wake();
   }
 
-  setTheme(t: ThemeName) {
-    if (this.theme.name === t) return;
-    this.theme = THEMES[t];
-    this.opts.theme = t;
+  /** Light the office for a fixed hour (0..24) instead of the real clock (null). */
+  setHour(h: number | null) {
+    if (h === this.fixedHour) return;
+    this.fixedHour = h;
+    this.tickClock();
+  }
+
+  private hourNow(): number {
+    if (this.fixedHour != null) return this.fixedHour;
+    const d = new Date();
+    return d.getHours() + d.getMinutes() / 60;
+  }
+
+  /** Once a minute: move the clock's hands and relight the office for the hour. */
+  private tickClock() {
+    const d = new Date();
+    if (this.fixedHour != null) d.setHours(Math.floor(this.fixedHour), Math.round((this.fixedHour % 1) * 60), 0);
+    this.clock.set(d);
+    this.theme = themeAt(this.hourNow());
     this.applyTheme();
   }
 
@@ -1921,6 +1942,10 @@ export class OfficeEngine {
   private step(now: number, dt: number): StepResult {
     this.stats.frames++;
     const wall = Date.now();
+    if (Math.floor(wall / 60_000) !== this.minute) {
+      this.minute = Math.floor(wall / 60_000);
+      this.tickClock();
+    }
     // Time-driven intent changes (excursion thresholds, dwell ends, errands finishing).
     const dwellDue = this.dwell.flush(wall).length > 0;
     if (dwellDue || this.needSync || wall >= this.intentWakeAt || wall >= this.errands.nextAt()) {
@@ -2046,7 +2071,7 @@ export class OfficeEngine {
 
     // Next scheduled change while still.
     const toPerf = (w: number) => now + (w - wall);
-    let wakeAt = nextAt;
+    let wakeAt = Math.min(nextAt, toPerf((this.minute + 1) * 60_000));
     wakeAt = Math.min(wakeAt, toPerf(this.dwell.nextAt()), toPerf(this.intentWakeAt), toPerf(this.errands.nextAt()));
     if (live) wakeAt = Math.min(wakeAt, now + 1000 - (wall % 1000));
     for (const a of this.model.agents.values()) {

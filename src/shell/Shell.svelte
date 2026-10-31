@@ -18,10 +18,6 @@
   import Rail from './Rail.svelte';
   import TopBar from './TopBar.svelte';
 
-  interface Props {
-    theme: 'dark' | 'light';
-  }
-  let { theme }: Props = $props();
   const tauri = isTauriApp();
 
   const SHEET = 404;
@@ -44,7 +40,7 @@
 </script>
 
 <div class="shell mode-{ui.mode} room-{ui.room}" class:focus={ui.focus} class:sheet={ui.sheetOpen} class:tauri style:--rail-w="{ui.railW}px">
-  <div class="world-wrap" class:hidden={ui.mode === 'work'}><OfficeLayer {theme} /></div>
+  <div class="world-wrap" class:hidden={ui.mode === 'work'}><OfficeLayer /></div>
   <div class="veil" aria-hidden="true"></div>
   <Rail />
   <div class="frame">

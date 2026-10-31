@@ -33,10 +33,6 @@
   import { ui } from '../lib/state/ui.svelte';
   import { toast } from '../lib/state/toasts.svelte';
 
-  interface Props {
-    theme: 'dark' | 'light';
-  }
-  let { theme }: Props = $props();
 
   let files = $state.raw<RepoFile[]>([]);
   let seq = 0;
@@ -232,7 +228,6 @@
           artifacts={officeArtifacts}
           {selection}
           {hover}
-          {theme}
           reducedMotion={ui.reducedMotion}
           {backdrop}
           {onselect}

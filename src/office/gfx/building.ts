@@ -23,7 +23,7 @@ import {
   type Texture,
 } from 'three';
 import { D, DESK_H, GLASS_H, INNER_H, LOW_H, W, WALL_H, type Item, type ItemType, type OfficeLayout, type Wall } from '../layout';
-import { color, lin, MAT, mix, scale, type OfficeTheme, type RGB } from '../palette';
+import { color, lin, MAT, mix, scale, type OfficeTheme, type RGB, type SkyKind } from '../palette';
 import { hash } from '../text';
 import { Builder } from './builder';
 import { modeled } from './builtins';
@@ -63,7 +63,7 @@ export class BuildingGfx {
   private poolMat: MeshBasicMaterial;
   private textures: Texture[] = [];
   private geos: BufferGeometry[] = [];
-  private skies: Partial<Record<'light' | 'dark', Texture>> = {};
+  private skies: Partial<Record<SkyKind, Texture>> = {};
   private deskShades: InstancedMesh | null = null;
   private deskPools: InstancedMesh | null = null;
   private lampState: ('off' | 'on' | 'amber')[] = [];
@@ -553,7 +553,7 @@ export class BuildingGfx {
   applyTheme(t: OfficeTheme) {
     this.theme = t;
     // Window panes: one textured mesh per theme sky.
-    const key = t.name;
+    const key = t.window.sky;
     if (!this.skies[key]) {
       const s = skyTexture(key);
       this.skies[key] = s;

@@ -1,5 +1,6 @@
 // Entry for office-demo.html: `pnpm dev` → http://localhost:1420/office-demo.html
-//   ?theme=light   start in daylight
+//   ?theme=light   light page chrome
+//   ?hour=21.5     light the office for this hour instead of the real clock
 //   ?skip=30       fold the first 30 s of the session into history (replay), play the rest live
 //   ?speed=2       play faster
 //   ?paused=1      history only, no live feed (a still office: zero frames once settled)

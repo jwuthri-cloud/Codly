@@ -50,7 +50,7 @@
 {#if !store.ready}
   <div class="boot" data-tauri-drag-region></div>
 {:else if store.workspace}
-  <Shell {theme} />
+  <Shell />
 {:else if ui.onboarded}
   <Welcome />
 {:else}

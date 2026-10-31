@@ -44,7 +44,8 @@
     artifacts: Artifact[];
     selection: WorldSelection | null;
     hover: WorldSelection | null;
-    theme: 'dark' | 'light';
+    /** Light the office for this hour (0..24) instead of your real clock. */
+    hour?: number | null;
     reducedMotion: boolean;
     /** Backdrop mode: dimmed and non-interactive behind work panels. */
     backdrop: boolean;
@@ -86,7 +87,7 @@
     artifacts,
     selection,
     hover,
-    theme,
+    hour = null,
     reducedMotion,
     backdrop,
     onselect,
@@ -173,7 +174,6 @@
 
   onMount(() => {
     const e = new OfficeEngine(el, {
-      theme,
       reducedMotion,
       backdrop,
       onselect: (s) => {
@@ -279,7 +279,7 @@
     engine?.setHover(h);
   });
   $effect(() => {
-    engine?.setTheme(theme);
+    engine?.setHour(hour);
   });
   $effect(() => {
     engine?.setReducedMotion(reducedMotion);
@@ -309,7 +309,6 @@
 <div
   class="of-office"
   class:of-backdrop={backdrop}
-  data-theme={theme}
   bind:this={el}
   tabindex={backdrop ? -1 : 0}
   role="application"
