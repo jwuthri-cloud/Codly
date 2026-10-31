@@ -162,13 +162,28 @@ export function demoMoveOffice(sim: Sim, workspaceId: string, slotId: string): L
   if (!to.owned) throw new Error('buy that plot first');
   if (to.workspace) throw new Error('another office is there');
   const old = structuredClone(lotOn(from));
-  const next = structuredClone(lotOn(to));
+  let next = structuredClone(lotOn(to));
+  // Onto an empty plot the whole building comes along, as the core does.
+  if (isBare(next)) {
+    const moved = fit(old, next.size.w, next.size.d);
+    if (!moved) throw new Error(`the office is ${old.size.w} × ${old.size.d} m: it doesn't fit on a ${next.size.w} × ${next.size.d} m plot. Pick a bigger one, or build there first`);
+    lots.set(from.id, bareLot(from.size));
+    lots.set(to.id, moved);
+    to.workspace = from.workspace;
+    from.workspace = null;
+    return demoLots(sim);
+  }
+  // Furniture shifts as buildings sit on plots of another size: centred, against the street
+  // (with no building to line up, it stays where it stands).
+  const built = old.walls.length > 0;
+  const dx = built ? Math.floor((next.size.w - old.size.w) / 2 / 0.5) * 0.5 : 0;
+  const dz = built ? next.size.d - old.size.d : 0;
   const gift = new Set(old.gift);
   const taken = lotIds(next);
   next.storage ??= [];
   const moving = [...old.furniture.map((p) => [p, true] as const), ...(old.storage ?? []).map((p) => [p, false] as const)];
   for (const [piece, up] of moving) {
-    const p = { ...piece, uid: taken.has(piece.uid) ? crypto.randomUUID() : piece.uid };
+    const p = { ...piece, uid: taken.has(piece.uid) ? crypto.randomUUID() : piece.uid, x: piece.x + dx, z: piece.z + dz };
     taken.add(p.uid);
     if (gift.has(piece.uid)) next.gift.push(p.uid);
     const fits = up && p.x >= 0 && p.x <= next.size.w && p.z >= 0 && p.z <= next.size.d;

@@ -295,10 +295,11 @@ pub(super) fn sell(store: &Store, slot: &str) -> Result<Wallet> {
     wallet::pay(store, -back, &format!("sold plot {slot}"), vec![(SLOTS.into(), json(&rows)?), (lot_key(slot), None)])
 }
 
-/// Move a repo's office to another plot of yours with no office on it. Its furniture comes
-/// along where it stands, if that's on the new plot (the rest, and what was stored, goes to
-/// storage there); the building stays behind, on the old plot, with no office in it. Nothing is
-/// bought or sold.
+/// Move a repo's office to another plot of yours with no office on it. Onto an empty plot the
+/// whole building comes along (as a design is put down: centred, against the street) and the
+/// old plot is left bare. Onto a building, the furniture moves in where it stands, if that's on
+/// the new plot (the rest, and what was stored, goes to storage there) and the old building stays
+/// behind, empty. Nothing is bought or sold.
 pub(super) fn move_office(store: &Store, ws: &str, to: &str) -> Result<Vec<LotSlot>> {
     let _m = wallet::money();
     let mut rows = slots(store)?;
@@ -307,9 +308,31 @@ pub(super) fn move_office(store: &Store, ws: &str, to: &str) -> Result<Vec<LotSl
     ensure!(rows[to].owned, "buy that plot first");
     ensure!(rows[to].workspace.is_none(), "another office is there");
     let (mut old, mut new) = (read_lot(store, &rows[from])?, read_lot(store, &rows[to])?);
+    if design::is_empty(&new) {
+        let (w, d) = (new.size.w, new.size.d);
+        let (ow, od) = (old.size.w, old.size.d);
+        new = design::fit(old, w, d).ok_or_else(|| anyhow!("the office is {ow} × {od} m: it doesn't fit on a {w} × {d} m plot. Pick a bigger one, or build there first"))?;
+        old = design::empty(ow, od);
+    } else {
+        furnish(&mut old, &mut new);
+    }
+    let new = design::validate(new)?;
+    rows[to].workspace = rows[from].workspace.take();
+    store.kv_write(&[(SLOTS.into(), json(&rows)?), (lot_key(&rows[from].id), json(&old)?), (lot_key(&rows[to].id), json(&new)?)])?;
+    list(store)
+}
+
+/// The furniture (standing and stored) from `old` into the building on `new`, shifted as
+/// buildings sit on plots of another size (centred, against the street); with no building to
+/// line up (an office left on a bare plot), where it stands.
+fn furnish(old: &mut Lot, new: &mut Lot) {
     let gift: HashSet<String> = old.gift.iter().cloned().collect();
-    let mut taken = design::ids(&new);
+    let mut taken = design::ids(new);
     let (w, d) = (new.size.w, new.size.d);
+    let (dx, dz) = match old.walls.is_empty() {
+        true => (0.0, 0.0),
+        false => (((w - old.size.w) / 2.0 / design::TILE).floor() * design::TILE, d - old.size.d),
+    };
     let standing = std::mem::take(&mut old.furniture).into_iter().map(|p| (p, true));
     let stored = std::mem::take(&mut old.storage).into_iter().map(|p| (p, false));
     for (mut p, up) in standing.chain(stored) {
@@ -318,17 +341,14 @@ pub(super) fn move_office(store: &Store, ws: &str, to: &str) -> Result<Vec<LotSl
             p.uid = new_id();
         }
         taken.insert(p.uid.clone());
+        (p.x, p.z) = (p.x + dx, p.z + dz);
         if was_gift {
             new.gift.push(p.uid.clone());
         }
         if up && inside(&p, w, d) { new.furniture.push(p) } else { new.storage.push(p) }
     }
-    let left = design::ids(&old);
+    let left = design::ids(old);
     old.gift.retain(|id| left.contains(id));
-    let new = design::validate(new)?;
-    rows[to].workspace = rows[from].workspace.take();
-    store.kv_write(&[(SLOTS.into(), json(&rows)?), (lot_key(&rows[from].id), json(&old)?), (lot_key(&rows[to].id), json(&new)?)])?;
-    list(store)
 }
 
 /// The developer panel's reset: the repo's lot back to the gift Garage; what stood there sells
@@ -569,12 +589,11 @@ mod tests {
         assert_eq!(coins(&store), paid, "moving is free");
         assert_eq!(slot(&all, &w).id, medium);
         let old = all.iter().find(|s| s.id == from).unwrap();
-        assert!(old.owned && old.workspace_id.is_none() && old.template.as_deref() == Some("garage"));
-        // The building stays; the furniture came along, gifts still gifts.
-        let left = lot_on(&store, &from).unwrap();
-        assert!(left.furniture.is_empty() && left.storage.is_empty() && left.walls.len() == 4);
-        assert!(left.gift.contains(&"w1".to_string()) && !left.gift.contains(&"g1".to_string()));
+        assert!(old.owned && old.workspace_id.is_none() && old.template.is_none());
+        // Onto an empty plot the whole building came along, gifts still gifts; the old plot is bare.
+        assert!(design::is_empty(&lot_on(&store, &from).unwrap()));
         let here = lot_of(&store, &w).unwrap();
+        assert!(here.walls.len() == 4 && here.template == "garage" && here.gift.contains(&"w1".to_string()));
         assert_eq!(here.furniture.len(), 7);
         assert_eq!(here.storage.len(), 1);
         assert!(here.gift.contains(&"g1".to_string()) && !here.gift.contains(&"sofa".to_string()));
@@ -593,7 +612,7 @@ mod tests {
         let here = lot_of(&store, &w).unwrap();
         assert_eq!(here.furniture.len(), 6 + 7, "the garage's own and the office's");
         assert_eq!(here.storage.iter().map(|p| p.uid.as_str()).collect::<Vec<_>>().len(), 2);
-        assert!(here.storage.iter().any(|p| p.item == "kenney.chair" && p.x == 14.0));
+        assert!(here.storage.iter().any(|p| p.item == "kenney.chair" && p.x == 11.0), "shifted as the garage was, and still off the plot");
         design::validate(here).unwrap();
     }
 

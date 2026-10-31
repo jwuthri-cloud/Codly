@@ -36,7 +36,8 @@ describe("the demo's neighbourhood", () => {
     expect(demoShop(sim).placed.map((p) => p.uid)).toEqual(['c1']);
     const moved = demoMoveOffice(sim, 'ws-demo', plot.id);
     expect(moved.find((s) => s.id === plot.id)!.workspace_id).toBe('ws-demo');
-    expect(demoLot().furniture.some((p) => p.uid === 'c1')).toBe(true);
+    // The Studio filled its plot: off the Garage's, so the chair waits in storage there.
+    expect(demoLot().storage?.some((p) => p.uid === 'c1')).toBe(true);
     expect(demoLot().size).toEqual({ w: 16, d: 12 });
 
     // A save is priced; the old plot keeps its (gift) building and sells for nothing.

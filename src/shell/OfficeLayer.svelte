@@ -66,9 +66,12 @@
   // wrong building first.
   let lot = $state.raw<Lot | null>(null);
   let lotFor = $state<string | null>(null);
+  // Read again on the way back from the map, where offices move between plots.
+  const onMap = $derived(ui.mode === 'map');
   $effect(() => {
     const ws = store.workspace?.id ?? null;
     void store.epoch;
+    void onMap;
     if (!ws) return void ((lot = null), (lotFor = null));
     api.officeLot().then(
       (l) => store.workspace?.id === ws && ((lot = l), (lotFor = ws)),
