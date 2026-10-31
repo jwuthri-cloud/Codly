@@ -106,6 +106,8 @@ describe('prices', () => {
     expect(readyMadePrice('small', null)).toBe(landPrice('small'));
     expect(readyMadePrice('small', 'garage')).toBe(landPrice('small') + lotValue(TEMPLATES.garage));
     expect(lotValue(TEMPLATES.garage)).toBeGreaterThan(0);
+    // A design that doesn't fit the plot has no price there.
+    expect(readyMadePrice('small', 'studio')).toBeNull();
   });
 
   it('offers empty, then every design that fits, greyed out past the wallet', () => {

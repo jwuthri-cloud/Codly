@@ -58,6 +58,7 @@ class Local {
     const s = this.get(id);
     if (s.owned) throw new Error('that lot is already yours');
     const price = readyMadePrice(s.size, template);
+    if (price == null) throw new Error(`a ${template} doesn't fit on that lot`);
     if (price > balance) throw new Error(`not enough coins yet (${balance} of ${price})`);
     this.spent += price;
     // What it sells back for: 80% of the land, half of what is built (a rough guess; the core knows).

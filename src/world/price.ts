@@ -59,8 +59,10 @@ export function lotValue(lot: Lot): number {
 /** The land alone. */
 export const landPrice = (size: LotSizeName): number => LOT_SIZES[size].price;
 
-/** A plot's price empty (template null) or with a ready-made design on it. */
-export function readyMadePrice(size: LotSizeName, template: string | null): number {
-  const lot = template ? templateLot(template) : null;
-  return landPrice(size) + (lot ? lotValue(lot) : 0);
+/** A plot's price empty (template null) or with a ready-made design on it; null when the design
+ *  doesn't fit that plot (or isn't shipped). Same contract as src/office/price.ts. */
+export function readyMadePrice(size: LotSizeName, template: string | null): number | null {
+  if (!template) return landPrice(size);
+  const lot = templateLot(template);
+  return lot && fits(template, size) ? landPrice(size) + lotValue(lot) : null;
 }

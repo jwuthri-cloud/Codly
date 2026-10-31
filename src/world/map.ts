@@ -8,7 +8,7 @@
 import type { Lot } from '../lib/gen/Lot';
 import type { LotSlot } from '../lib/gen/LotSlot';
 import { coins } from '../lib/util/format';
-import { fits, LOT_SIZES, readyMadePrice, TEMPLATE_NAMES, templateLabel } from './price';
+import { LOT_SIZES, readyMadePrice, TEMPLATE_NAMES, templateLabel } from './price';
 
 /** Metres between plot centres, along x and along z (the large lot is 28 × 24). */
 export const PITCH_X = 34;
@@ -174,11 +174,12 @@ export interface BuyOption {
   short: boolean;
 }
 
-/** A for-sale plot's offers: empty, or with each ready-made design that fits it. */
+/** A for-sale plot's offers: empty, or with each ready-made design that fits it (smallest first). */
 export function buyOptions(s: Pick<LotSlot, 'size'>, balance: number, templates: string[] = TEMPLATE_NAMES): BuyOption[] {
-  const opt = (template: string | null, label: string): BuyOption => {
+  const opts: BuyOption[] = [];
+  for (const template of [null, ...templates]) {
     const price = readyMadePrice(s.size, template);
-    return { template, label, price, short: price > balance };
-  };
-  return [opt(null, 'Empty lot'), ...templates.filter((t) => fits(t, s.size)).map((t) => opt(t, templateLabel(t)))];
+    if (price != null) opts.push({ template, label: template ? templateLabel(template) : 'Empty lot', price, short: price > balance });
+  }
+  return [opts[0], ...opts.slice(1).sort((a, b) => a.price - b.price)];
 }
