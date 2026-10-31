@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PRESETS, fromPreset, joinModel, memberTitle, splitModel, teamProblem } from '../util/team';
+import { PRESETS, fromPreset, joinModel, memberTitle, splitModel, teamProblem, withModel } from '../util/team';
 import type { TeamMember } from '../gen/TeamMember';
 
 const m = (name: string, o: Partial<TeamMember> = {}): TeamMember => ({ id: '', name, provider: 'claude', model: null, kind: 'worker', title: '', role: '', enabled: true, ...o });
@@ -34,5 +34,13 @@ describe('team', () => {
     expect(onClaude.name).toBe('Rex 2');
     expect(onClaude.model).toBeNull(); // its model was for another CLI
     expect(fromPreset(rex, [], [])).toBeNull();
+  });
+});
+
+describe('another model', () => {
+  it('keeps the thinking effort it had', () => {
+    expect(withModel('sonnet:high', 'opus[1m]')).toBe('opus[1m]:high');
+    expect(withModel(null, 'opus[1m]')).toBe('opus[1m]');
+    expect(withModel('gpt-6-sol', 'gpt-6.1-sol')).toBe('gpt-6.1-sol');
   });
 });

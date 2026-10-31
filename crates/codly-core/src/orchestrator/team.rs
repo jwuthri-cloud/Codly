@@ -377,6 +377,7 @@ impl Inner {
                     "session": { "resumable": a.session_id.is_some(), "context_pct": ctx },
                     "cli_ready": self.cli_usable(a.provider),
                     "at_home_until": super::at_home(a, now_ms()),
+                    "energy": super::tired(a, now_ms()).then_some(TIRED_NOTE),
                 })
             })
             .collect()
@@ -393,7 +394,11 @@ impl Inner {
         // At home: the Lead gives it no new work (you can call it in), unless the whole team
         // is home; the game never stops the crew from shipping.
         let now = now_ms();
-        let at_work: Vec<&str> = members.iter().filter(|a| super::at_home(a, now).is_none()).map(|a| a.name.as_str()).collect();
+        // Rested first: a tired member is only a second choice (never refused).
+        let mut at_work: Vec<&&Agent> = members.iter().filter(|a| super::at_home(a, now).is_none()).collect();
+        at_work.sort_by_key(|a| super::tired(a, now));
+        let at_work: Vec<String> =
+            at_work.iter().map(|a| if super::tired(a, now) { format!("{} (tired)", a.name) } else { a.name.clone() }).collect();
         let mut errors = vec![];
         let mut notes = vec![];
         for t in tasks.iter_mut() {
@@ -726,6 +731,9 @@ mod tests {
         assert_eq!(TeamMember { kind: MemberKind::Reviewer, ..m("Rex") }.title(), "Reviewer");
     }
 }
+
+/// How `codly_board` and the Lead's team lines show a tired member.
+pub(super) const TIRED_NOTE: &str = "tired, prefer someone rested";
 
 /// "Ana is at home until 14:05; the user can call it in".
 fn away_note(a: &Agent, now: i64) -> String {

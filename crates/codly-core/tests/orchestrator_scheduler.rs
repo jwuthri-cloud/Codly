@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use codly_core::model::*;
-use codly_core::orchestrator::scheduler::{AccountState, Action, AgentPick, SchedInput, schedule};
+use codly_core::orchestrator::scheduler::{AccountState, Action, AgentPick, CALLED_IN, SchedInput, schedule};
 
 fn cli(p: Provider, signed_in: Option<bool>) -> CliInfo {
     CliInfo {
@@ -93,6 +93,7 @@ fn agent(id: &str, name: &str, p: Provider, role: Role) -> Agent {
         usage: Usage::default(),
         career: Default::default(),
         away_until: None,
+        tired_since: None,
         created_at: 1,
         updated_at: 1,
     }
@@ -106,6 +107,7 @@ struct World {
     settings: Settings,
     busy: HashSet<Id>,
     accounts: Vec<AccountState>,
+    now: i64,
 }
 
 impl World {
@@ -118,6 +120,7 @@ impl World {
             settings: Settings::default(),
             busy: HashSet::new(),
             accounts: vec![],
+            now: 1_000_000,
         }
     }
     fn run(&self) -> Vec<Action> {
@@ -129,6 +132,7 @@ impl World {
             settings: &self.settings,
             busy: &self.busy,
             accounts: &self.accounts,
+            now: self.now,
         })
     }
 }
@@ -544,4 +548,78 @@ fn paused_starts_nothing_and_says_why() {
     assert!(waits(&a).iter().all(|(_, why)| why.starts_with("paused")), "{:?}", waits(&a));
     w.settings.paused = false;
     assert_eq!(starts(&w.run()).len(), 2);
+}
+
+fn member(id: &str, name: &str) -> Agent {
+    let mut m = agent(id, name, Provider::Claude, Role::Worker);
+    m.member = Some(format!("{id}-member"));
+    m
+}
+
+/// A member at home (the office's energy): its queued task waits until it is back, minutes
+/// later, while someone else is at work; once back it starts.
+#[test]
+fn a_queued_task_waits_for_its_member_at_home_while_others_work() {
+    let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    t.assignee = Some("m1".into());
+    let mut w = World::new(vec![t]);
+    let mut ana = member("m1", "Ana");
+    ana.away_until = Some(w.now + 10 * 60_000);
+    w.agents = vec![ana, member("m2", "Bo")];
+    let wt = waits(&w.run());
+    assert_eq!(wt.len(), 1);
+    assert!(wt[0].1.starts_with("waiting: Ana (assigned) is at home until ") && wt[0].1.ends_with("; it starts when it is back, or call it in"), "{}", wt[0].1);
+    assert!(starts(&w.run()).is_empty());
+
+    // Back (away_until passed): nothing stalls, it starts as usual, with no call-in.
+    w.now += 10 * 60_000;
+    let a = w.run();
+    assert_eq!(starts(&a)[0].2, AgentPick::Existing("m1".into()));
+    assert!(!summary_of(&a, "t1").contains("called in"), "{}", summary_of(&a, "t1"));
+}
+
+/// Nobody else at work (alone on the team, or the others at home too): the game never stops the
+/// crew, so the member is called in and the decision says why.
+#[test]
+fn a_member_at_home_is_called_in_when_nobody_else_is_free() {
+    let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    t.assignee = Some("m1".into());
+    let mut w = World::new(vec![t]);
+    let mut ana = member("m1", "Ana");
+    ana.away_until = Some(w.now + 10 * 60_000);
+    let mut bo = member("m2", "Bo");
+    bo.away_until = Some(w.now + 5 * 60_000);
+    // The Lead and a reviewer do not take workers' tasks; an archived member is gone.
+    let mut gone = member("m3", "Cy");
+    gone.archived = true;
+    let mut rex = member("r1", "Rex");
+    rex.role = Role::Reviewer;
+    w.agents = vec![ana.clone(), bo, gone, rex, agent("lead", "Lead", Provider::Claude, Role::Lead)];
+    let a = w.run();
+    assert_eq!(starts(&a)[0].2, AgentPick::Existing("m1".into()));
+    assert!(summary_of(&a, "t1").ends_with("; called in from home: nobody else was free"), "{}", summary_of(&a, "t1"));
+    assert!(a.iter().any(|x| matches!(x, Action::Start { detail, .. } if detail["called_in"] == true)));
+
+    w.agents = vec![ana];
+    assert!(summary_of(&w.run(), "t1").contains(CALLED_IN), "alone on the team");
+}
+
+/// Tiredness is only a tiebreak: an idle generic worker at work and rested goes first, but a
+/// tired or home one still gets the task when it is the only one.
+#[test]
+fn the_scheduler_prefers_rested_workers_but_never_refuses_a_tired_one() {
+    let mut w = World::new(vec![task("t1", "p", TaskStatus::Ready, &["a/**"], &[])]);
+    let mut old = agent("c1", "Bo", Provider::Claude, Role::Worker);
+    old.tired_since = Some(1);
+    let mut home = agent("c2", "Cy", Provider::Claude, Role::Worker);
+    home.created_at = 0;
+    home.away_until = Some(w.now + 60_000);
+    let mut fresh = agent("c3", "Di", Provider::Claude, Role::Worker);
+    fresh.created_at = 2;
+    w.agents = vec![old.clone(), home.clone(), fresh];
+    assert_eq!(starts(&w.run())[0].2, AgentPick::Existing("c3".into()), "rested beats older");
+    w.agents = vec![old.clone(), home];
+    assert_eq!(starts(&w.run())[0].2, AgentPick::Existing("c1".into()), "tired at work beats at home");
+    w.agents = vec![old];
+    assert_eq!(starts(&w.run())[0].2, AgentPick::Existing("c1".into()), "tired is never refused");
 }

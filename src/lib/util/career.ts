@@ -51,6 +51,12 @@ export function staminaOf(c: Career, days: number): number {
   return Math.min(100, Math.max(0, Math.round(s)));
 }
 
+/** A context window, short: 1000000 → "1M", 272000 → "272k". */
+export function contextLabel(tokens: number): string {
+  if (tokens >= 1_000_000) return `${+(tokens / 1_000_000).toFixed(1)}M`;
+  return `${Math.round(tokens / 1000)}k`;
+}
+
 /** "Legend" above Staff (`career.legend`), else the rank. */
 export const titleOf = (c: Career) => (c.legend ? 'Legend' : rankLabel(c.rank));
 

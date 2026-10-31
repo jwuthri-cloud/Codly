@@ -189,6 +189,52 @@ fn parse_models(provider: Provider, stdout: &str) -> Result<Vec<String>, String>
     Ok(stdout.lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains(char::is_whitespace)).map(str::to_owned).collect())
 }
 
+/// Claude Code's aliases with their context windows: `[1m]` asks for the 1M-token window.
+const CLAUDE_WINDOWS: [(&str, i64); 5] = [("opus[1m]", 1_000_000), ("sonnet[1m]", 1_000_000), ("opus", 200_000), ("sonnet", 200_000), ("haiku", 200_000)];
+
+/// Models a CLI can run with their context window (tokens), in the CLI's own order: Claude's
+/// aliases, Codex's listed catalog (`context_window`). Empty for a CLI that does not say.
+pub async fn model_windows(provider: Provider, base: &HashMap<String, String>) -> Result<Vec<(String, i64)>, String> {
+    match provider {
+        Provider::Claude => Ok(CLAUDE_WINDOWS.iter().map(|(m, w)| (m.to_string(), *w)).collect()),
+        Provider::Codex => {
+            let bin = resolve_bin(provider, base).ok_or_else(|| "codex is not installed".to_string())?;
+            let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+            let out = run(&bin, &["debug", "models"], &child_env(base, provider), &cwd).await?;
+            if !out.ok {
+                return Err(first_line(&out.text()));
+            }
+            parse_codex_windows(&out.stdout)
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+fn parse_codex_windows(stdout: &str) -> Result<Vec<(String, i64)>, String> {
+    let v = serde_json::from_str::<Value>(stdout.trim()).map_err(|_| "`codex debug models` printed no JSON".to_string())?;
+    Ok(v["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"].as_str() != Some("hide"))
+        .filter_map(|m| Some((m["slug"].as_str()?.to_owned(), m["context_window"].as_i64().filter(|w| *w > 0)?)))
+        .collect())
+}
+
+/// The model with the biggest context window of `windows` (the first of equals), when it is
+/// bigger than the agent's own: the window its runs reported, else its model's (`model` may
+/// carry a ":effort"). None = nothing bigger to offer.
+pub fn bigger_window(windows: &[(String, i64)], model: Option<&str>, reported: Option<i64>) -> Option<(String, i64)> {
+    let best = windows.iter().fold(None::<&(String, i64)>, |b, x| if b.is_none_or(|b| x.1 > b.1) { Some(x) } else { b })?;
+    let name = model.map(|m| m.rsplit_once(':').map_or(m, |(n, _)| n));
+    let own = reported.filter(|w| *w > 0).or_else(|| windows.iter().find(|(m, _)| Some(m.as_str()) == name).map(|x| x.1));
+    let bigger = match own {
+        Some(w) => best.1 > w,
+        None => name != Some(best.0.as_str()),
+    };
+    bigger.then(|| best.clone())
+}
+
 /// Integration path Codly uses for a provider (shown in diagnostics).
 pub fn transport(provider: Provider) -> &'static str {
     match provider {
@@ -740,6 +786,27 @@ mod tests {
         let codex = r#"{"models":[{"slug":"gpt-6-luna"},{"display_name":"no slug"}]}"#;
         assert_eq!(parse_models(Provider::Codex, codex).unwrap(), ["gpt-6-luna"]);
         assert!(parse_models(Provider::Codex, "not json").is_err());
+    }
+
+    #[test]
+    fn a_legend_is_offered_the_biggest_context_window() {
+        let codex = r#"{"models":[{"slug":"gpt-6-sol","context_window":272000,"visibility":"list"},{"slug":"gpt-6.1-sol","context_window":500000,"visibility":"list"},
+            {"slug":"secret","context_window":900000,"visibility":"hide"},{"slug":"gpt-6.1-terra","context_window":500000},{"slug":"no-window"}]}"#;
+        let w = parse_codex_windows(codex).unwrap();
+        assert_eq!(w, [("gpt-6-sol".into(), 272_000), ("gpt-6.1-sol".into(), 500_000), ("gpt-6.1-terra".into(), 500_000)], "hidden or windowless models are not offered");
+        let best = Some(("gpt-6.1-sol".to_string(), 500_000));
+        assert_eq!(bigger_window(&w, Some("gpt-6-sol:high"), None), best, "its model's window, effort aside; the first of equals");
+        assert_eq!(bigger_window(&w, Some("gpt-6-sol"), Some(272_000)), best);
+        assert_eq!(bigger_window(&w, Some("gpt-6.1-terra"), None), None, "already as big");
+        assert_eq!(bigger_window(&w, None, Some(500_000)), None, "its runs report as big already");
+        assert_eq!(bigger_window(&w, None, None), best, "the CLI default: unknown, so offered");
+        assert_eq!(bigger_window(&w, Some("gpt-6.1-sol"), None), None);
+        assert_eq!(bigger_window(&[], Some("x"), None), None, "a CLI that says nothing offers nothing");
+
+        let claude: Vec<(String, i64)> = CLAUDE_WINDOWS.iter().map(|(m, w)| (m.to_string(), *w)).collect();
+        assert_eq!(bigger_window(&claude, Some("sonnet"), Some(200_000)), Some(("opus[1m]".into(), 1_000_000)));
+        assert_eq!(bigger_window(&claude, Some("sonnet[1m]:max"), None), None);
+        assert_eq!(bigger_window(&claude, Some("opus"), Some(1_000_000)), None, "a 1M window reported");
     }
 
     #[test]

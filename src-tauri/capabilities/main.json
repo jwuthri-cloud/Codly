@@ -126,6 +126,8 @@
     "allow-office-digest",
     "allow-set-agent-home",
     "allow-note-rest",
+    "allow-set-agent-tired",
+    "allow-bigger-model",
     "allow-install-cli",
     "allow-byok-status",
     "allow-byok-configure",

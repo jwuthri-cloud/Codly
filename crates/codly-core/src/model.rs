@@ -442,11 +442,26 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub away_until: Option<i64>,
+    /// Tired since then (ms): the office's energy fell under 30% (it reports crossing back).
+    /// Only a hint: the Lead and the scheduler prefer someone rested, never refuse it work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tired_since: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 // ───────────────────────────── careers & hiring ─────────────────────────────
+
+/// A model with a bigger context window than an agent's own, on its CLI (offered to a new
+/// Legend; you decide).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelOffer {
+    pub model: String,
+    /// Tokens.
+    pub context_window: i64,
+}
 
 /// Seniority, earned from real work (`career.rs` has the XP rules).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]

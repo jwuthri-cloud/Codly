@@ -3,7 +3,7 @@
 //! pure; `hire_from_manifest` is the confirmed step that actually starts an agent.
 
 use codly_core::hire::{self, HireManifest, HireReview, LaunchPreview};
-use codly_core::model::{Agent, Applicant, Digest, Placed, Rank, Shop, Wallet};
+use codly_core::model::{Agent, Applicant, Digest, ModelOffer, Placed, Rank, Shop, Wallet};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -72,6 +72,18 @@ pub async fn trust_agent(state: State<'_, AppState>, agent_id: String, rank: Ran
 #[tauri::command]
 pub async fn set_agent_home(state: State<'_, AppState>, agent_id: String, until: Option<i64>) -> Result<Agent, String> {
     state.core().await?.set_agent_home(&agent_id, until).map_err(|e| format!("{e:#}"))
+}
+
+/// The office reports an agent tired (energy under 30%) or rested again: a hint for the Lead.
+#[tauri::command]
+pub async fn set_agent_tired(state: State<'_, AppState>, agent_id: String, tired: bool) -> Result<Agent, String> {
+    state.core().await?.set_agent_tired(&agent_id, tired).map_err(|e| format!("{e:#}"))
+}
+
+/// The model of its CLI with the biggest context window, when bigger than its own (a new Legend's offer).
+#[tauri::command]
+pub async fn bigger_model(state: State<'_, AppState>, agent_id: String) -> Result<Option<ModelOffer>, String> {
+    state.core().await?.bigger_model(&agent_id).await.map_err(|e| format!("{e:#}"))
 }
 
 /// The office reports a shift worked and rested from, or a sickness (stamina).

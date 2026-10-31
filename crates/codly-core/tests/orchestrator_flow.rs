@@ -569,6 +569,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             usage: Usage::default(),
             career: Default::default(),
             away_until: None,
+            tired_since: None,
             created_at: now_ms(),
             updated_at: now_ms(),
         };
@@ -2174,5 +2175,92 @@ async fn an_agent_at_home_gets_no_new_work_from_the_lead_but_from_you() {
     let lead = lead_of(&core.snapshot().await.unwrap(), "lead").unwrap().clone();
     assert!(core.set_agent_home(&lead.id, Some(back)).is_err());
     assert_eq!(core.set_agent_home(&ana.id, None).unwrap().away_until, None);
+    core.shutdown().await;
+}
+
+/// The office says who is tired: the Lead's board shows it and its refusals list the rested
+/// first (a hint, never a refusal). A task queued for a member at home waits while someone else
+/// is at work; when nobody else is, it calls the member in and the decision says why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_lead_prefers_rested_members_and_a_queued_task_waits_for_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                return;
+            }
+            let plan = json!({ "summary": "Add a.txt", "tasks": [{
+                "id": "t1", "title": "Create a.txt", "goal": "Create a.txt", "assignee": "Ana",
+                "acceptance_criteria": ["a.txt exists"], "write_scope": ["a.txt"], "depends_on": [], "verify": ["test -f a.txt"],
+            }] });
+            let r = turn.tool("codly_submit_plan", plan).await;
+            let plan = r["error"].as_str().map_or_else(|| "ok".to_string(), String::from);
+            let r = turn.tool("codly_board", json!({})).await;
+            let team = r["result"]["team"].as_array().cloned().unwrap_or_default();
+            let energy = |n: &str| team.iter().find(|m| m["name"] == n).map(|m| m["energy"].to_string()).unwrap_or_default();
+            turn.say(&format!("plan: {plan} | bo: {} | cy: {}", energy("Bo"), energy("Cy")));
+        })
+    });
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.say("Hello.");
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    let team = ["Ana", "Bo", "Cy"].map(|n| TeamMember { name: n.into(), role: "Backend".into(), ..Default::default() }).to_vec();
+    core.update_settings(Settings { auto_run_plans: false, lead_followups: false, team, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let members = wait_for("the team's agents", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        let m: Vec<Agent> = s.agents.iter().filter(|a| a.member.is_some()).cloned().collect();
+        (m.len() == 3).then_some(m)
+    })
+    .await;
+    let id = |n: &str| members.iter().find(|a| a.name == n).unwrap().id.clone();
+    let back = now_ms() + 30 * 60_000;
+    core.set_agent_home(&id("Ana"), Some(back)).unwrap();
+    let bo = core.set_agent_tired(&id("Bo"), true).unwrap();
+    let since = bo.tired_since.expect("tired");
+    assert_eq!(core.set_agent_tired(&id("Bo"), true).unwrap().tired_since, Some(since), "the same tiredness, not a new one");
+
+    core.send_chat("lead", "add a").await.unwrap();
+    let s = wait_for("the Lead's report", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        chats(&s, "lead").iter().find(|c| c.text.starts_with("plan: ")).map(|c| c.text.clone())
+    })
+    .await;
+    assert!(s.contains("assign someone at work (Cy, Bo (tired))"), "rested first: {s}");
+    assert!(s.ends_with("| bo: \"tired, prefer someone rested\" | cy: null"), "{s}");
+
+    // Going home is resting: the hint goes with it.
+    assert_eq!(core.set_agent_home(&id("Bo"), Some(back)).unwrap().tired_since, None);
+
+    // A task you queue for Ana waits while Cy is at work: Ana is back in minutes.
+    let t = core.create_task("Say hello", "Say hello").await.unwrap();
+    core.assign_task(&t.id, Some(&id("Ana"))).await.unwrap();
+    let why = wait_for("the task to wait for Ana", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        s.tasks.iter().find(|x| x.id == t.id).and_then(|x| x.status_reason.clone()).filter(|r| r.contains("is at home until"))
+    })
+    .await;
+    assert!(why.starts_with("waiting: Ana (assigned) is at home until "), "{why}");
+
+    // Cy goes home too: nobody else is free, so Ana is called in for it, and the board says why.
+    core.set_agent_home(&id("Cy"), Some(back)).unwrap();
+    let s = wait_for("Ana called in for the task", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        let ana = s.agents.iter().find(|a| a.name == "Ana")?;
+        (ana.task_id.as_deref() == Some(t.id.as_str()) && ana.away_until.is_none()).then_some(s)
+    })
+    .await;
+    assert!(s.agents.iter().find(|a| a.name == "Bo").unwrap().away_until.is_some(), "only Ana is called in");
+    let events = core.events(None, None, 2000).await.unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.kind, EventKind::Decision { decision_type, summary, .. }
+            if decision_type == "route" && summary.contains("Ana") && summary.ends_with("called in from home: nobody else was free"))),
+        "the route decision says why"
+    );
     core.shutdown().await;
 }

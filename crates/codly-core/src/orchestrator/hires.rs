@@ -239,6 +239,7 @@ mod tests {
             usage: Usage::default(),
             career: Career::default(),
             away_until: None,
+            tired_since: None,
             created_at: 0,
             updated_at: 0,
         };

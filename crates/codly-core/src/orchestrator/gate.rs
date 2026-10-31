@@ -363,8 +363,11 @@ impl Inner {
                 && a.task_id.as_deref().and_then(|t| tasks.iter().find(|x| x.id == t)).is_none_or(|t| !scheduler::is_active(t.status))
         };
         // A reviewer on the team first (another vendor than the author's if possible).
-        let members: Vec<&Agent> =
+        let mut members: Vec<&Agent> =
             agents.iter().filter(|a| a.role == Role::Reviewer && a.member.is_some() && self.cli_usable(a.provider) && idle(a)).collect();
+        // At work and rested first: only a tiebreak (the office's energy), never a refusal.
+        let now = crate::model::now_ms();
+        members.sort_by_key(|a| (super::at_home(a, now).is_some(), super::tired(a, now)));
         let member = members.iter().find(|a| Some(a.provider) != worker_provider).or_else(|| members.first()).copied();
         let order: Vec<Provider> = settings.worker_providers.iter().copied().chain(Provider::ALL).collect();
         let other = order.iter().copied().find(|p| Some(*p) != worker_provider && self.cli_usable(*p));
@@ -385,8 +388,10 @@ impl Inner {
             }
         };
         let free = |a: &&Agent| a.role == Role::Reviewer && a.member.is_none() && a.provider == provider && idle(a);
-        // The most senior free reviewer: a Senior or Staff mentors juniors (career::mentors).
-        let reviewer = match member.or_else(|| agents.iter().filter(free).max_by_key(|a| a.career.rank)) {
+        // The most senior free reviewer: a Senior or Staff mentors juniors (career::mentors);
+        // between equals, one at work and rested (the office's energy; never refused).
+        let rested = |a: &&Agent| (a.career.rank, super::at_home(a, now).is_none(), !super::tired(a, now));
+        let reviewer = match member.or_else(|| agents.iter().filter(free).max_by_key(rested)) {
             Some(a) => a.clone(),
             None => {
                 let name = names::next_name(&agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>());

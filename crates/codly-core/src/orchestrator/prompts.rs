@@ -421,8 +421,10 @@ fn team_line(a: &Agent, tasks: &[Task]) -> String {
     let title = a.title.as_deref().map(|t| format!(" — {}", untrusted_inline(t, 24))).unwrap_or_default();
     let kind = if a.role == Role::Reviewer { "reviewer" } else { "worker" };
     let doing = a.task_id.as_deref().and_then(|id| tasks.iter().find(|t| t.id == id)).map(|t| format!("working {}", t.key));
-    let status = match super::at_home(a, crate::model::now_ms()) {
+    let now = crate::model::now_ms();
+    let status = match super::at_home(a, now) {
         Some(until) => format!("at home until {until} (no new work; the user can call it in)"),
+        None if super::tired(a, now) => format!("{} · {}", doing.unwrap_or_else(|| crate::store::enum_str(&a.status)), super::team::TIRED_NOTE),
         None => doing.unwrap_or_else(|| crate::store::enum_str(&a.status)),
     };
     let mut l = format!("  {}{title} · {} · {kind} · {status}", a.name, harness(a));

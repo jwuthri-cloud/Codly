@@ -162,6 +162,7 @@ mod tests {
             consultant: false,
             kept: false,
             away_until: None,
+            tired_since: None,
             archived,
             usage: Usage::default(),
             career: Career { xp, ..Default::default() },

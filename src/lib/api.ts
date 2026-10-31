@@ -38,6 +38,7 @@ import type { Wallet } from './gen/Wallet';
 import type { HireReview } from './gen/HireReview';
 import type { LaunchPreview } from './gen/LaunchPreview';
 import type { Memory } from './gen/Memory';
+import type { ModelOffer } from './gen/ModelOffer';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
 import type { NewWebhook } from './gen/NewWebhook';
@@ -165,6 +166,12 @@ export const api = {
   setAgentHome: (agentId: string, until: number | null) => call<Agent>('set_agent_home', { agentId, until }),
   /** The office reports a shift worked and rested from, or a sickness (its stamina). */
   noteRest: (agentId: string, sick: boolean) => call<Agent>('note_rest', { agentId, sick }),
+  /** The office reports an agent tired (energy under 30%) or rested again: the Lead and the
+   *  scheduler prefer the rested (a hint, never a refusal). */
+  setAgentTired: (agentId: string, tired: boolean) => call<Agent>('set_agent_tired', { agentId, tired }),
+  /** The model of its CLI with the biggest context window, when bigger than its own (offered
+   *  to a new Legend; null = nothing bigger). */
+  biggerModel: (agentId: string) => call<ModelOffer | null>('bigger_model', { agentId }),
   /** What the office did since `since` (ms): the daily edition and the morning standup. */
   officeDigest: (since: number) => call<Digest>('office_digest', { since }),
   /** Workers let go in the open repo, who keep their career (the office's ghosts). */

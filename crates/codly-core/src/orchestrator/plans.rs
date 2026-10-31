@@ -364,6 +364,7 @@ impl Inner {
             settings: &settings,
             busy: &busy,
             accounts: &accounts,
+            now: now_ms(),
         });
         let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
         for a in actions {
@@ -460,7 +461,13 @@ impl Inner {
             t.attempt += 1;
             Ok(())
         })?;
-        self.update_agent(&agent.id, |a| a.task_id = Some(task_id.to_string()))?;
+        self.update_agent(&agent.id, |a| {
+            a.task_id = Some(task_id.to_string());
+            // Called in from home (the scheduler found nobody else at work): it is back.
+            if super::at_home(a, now_ms()).is_some() {
+                a.away_until = None;
+            }
+        })?;
         self.decide(Some(&ws.id), Some(task_id), "route", summary, detail)?;
         let me = self.clone();
         let (t, a) = (task_id.to_string(), agent.id.clone());

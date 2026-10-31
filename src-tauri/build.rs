@@ -17,7 +17,7 @@ fn main() {
         "wallet", "dev_grant", "dev_give_xp", "dev_reset_office",
         "agent_git", "get_triggers", "set_triggers", "list_skills", "skill_catalog", "install_skill", "uninstall_skill", "open_skill_folder", "ide_info", "ide_list", "ide_read", "ide_write", "ide_create", "ide_search", "ide_changes", "ide_diff",
         "board_policy", "board_sweep", "board_archive", "list_connections", "update_connection",
-        "save_attachment", "hire_draft", "trust_agent", "office_digest", "set_agent_home", "note_rest",
+        "save_attachment", "hire_draft", "trust_agent", "office_digest", "set_agent_home", "note_rest", "set_agent_tired", "bigger_model",
         "install_cli", "byok_status", "byok_configure", "byok_save_key", "byok_clear_key",
     ])))
     .expect("tauri-build failed");

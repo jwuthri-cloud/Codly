@@ -24,11 +24,12 @@
   import type { AccountInfo } from '../lib/gen/AccountInfo';
   import { OfficeEngine, type AgentListItem, type TickerItem } from './engine';
   import SimsHud, { type AgentAction } from './SimsHud.svelte';
-  import { headline, live, plumbobOf, SimsTracker } from './sims';
+  import { headline, live, plumbobOf, SimsTracker, type Busy } from './sims';
   import JobBoard from './JobBoard.svelte';
   import type { JobOffer } from '../lib/gen/JobOffer';
   import type { Placed } from '../lib/gen/Placed';
   import type { Shop } from '../lib/gen/Shop';
+  import type { ModelOffer } from '../lib/gen/ModelOffer';
   import GhostBoard from './GhostBoard.svelte';
   import BuyMode from './BuyMode.svelte';
   import FurnitureMenu from './FurnitureMenu.svelte';
@@ -81,6 +82,11 @@
     onhome?: (agentId: string, until: number | null) => void;
     /** A shift worked and rested from, or a sickness (its career's stamina). */
     onrest?: (agentId: string, sick: boolean) => void;
+    /** Tired (energy under 30%) or rested again: the Lead prefers the rested. */
+    ontired?: (agentId: string, tired: boolean) => void;
+    /** A new Legend's offer (its CLI's biggest context window, if bigger), and taking it. */
+    biggerModel?: (agentId: string) => Promise<ModelOffer | null>;
+    ongivemodel?: (agentId: string, model: string) => void;
     /** Where energy, coffee and home are kept between sessions (localStorage key), e.g. per repo. */
     simsKey?: string;
   }
@@ -119,6 +125,9 @@
     oneditionread,
     onhome,
     onrest,
+    ontired,
+    biggerModel,
+    ongivemodel,
     simsKey,
   }: Props = $props();
 
@@ -155,10 +164,12 @@
     if (!e) return;
     const now = Date.now();
     const status = new Map(tasks.map((t) => [t.id, t.status]));
-    const busy = (id: string) => {
-      const c = plumbobOf(e.agentState(id));
+    // 'task': its queued task started (at home, the core does that only when nobody else was free).
+    const busy = (id: string): Busy => {
       const task = agents.find((a) => a.id === id)?.task_id;
-      return c === 'green' || c === 'amber' || (!!task && status.get(task) === 'running');
+      if (task && status.get(task) === 'running') return 'task';
+      const c = plumbobOf(e.agentState(id));
+      return c === 'green' || c === 'amber';
     };
     sims.tick(now, busy, (id) => e.isPresent(id));
     flushRest(now);
@@ -167,6 +178,7 @@
     const o = sims.drain();
     for (const h of o.home) onhome?.(h.id, h.until);
     for (const r of o.rest) onrest?.(r.id, r.sick);
+    for (const t of o.tired) ontired?.(t.id, t.tired);
     const tags = new Map<string, string>();
     for (const a of agents) {
       const h = a.archived ? null : sims.stats(a.id, now, null).rest.home;
@@ -395,6 +407,8 @@
       onclosemenu={() => (menuAt = null)}
       {paused}
       {onpause}
+      {biggerModel}
+      {ongivemodel}
     />
   {/if}
   {#if engine && !backdrop && paper}

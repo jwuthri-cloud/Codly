@@ -14,6 +14,7 @@ import type { RequestPrefs } from '../gen/RequestPrefs';
 import { PROVIDER_LABEL, TASK_STATUS_LABEL } from '../util/labels';
 import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
+import { withModel } from '../util/team';
 import { accounts } from './accounts.svelte';
 import { diffstats } from './diffstats.svelte';
 import { requests } from './requests.svelte';
@@ -221,6 +222,28 @@ export async function setAgentModel(agent: Agent, model: string | null): Promise
   store.upsertAgent(a);
   toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${label}` });
   return true;
+}
+
+/** Give an agent another model (a new Legend's bigger context window; you clicked it): a 1:1
+ *  agent switches in place, a team member's line in the team changes, its effort kept. */
+export async function giveModel(agent: Agent, model: string): Promise<boolean> {
+  if (agent.role === 'solo') return setAgentModel(agent, model);
+  const id = agent.member;
+  const done = () => toast({ kind: 'success', title: `${agent.name} switched`, body: `${PROVIDER_LABEL[agent.provider]} · ${model}, from its next task` });
+  const global = store.settings.team.find((m) => m.id === id);
+  if (id && global) {
+    await updateSettings({ team: store.settings.team.map((m) => (m.id === id ? { ...m, model: withModel(m.model, model) } : m)) });
+    if (store.settings.team.find((m) => m.id === id)?.model === withModel(global.model, model)) done();
+    return true;
+  }
+  const repo = store.workspaceTeam.members.find((m) => m.id === id);
+  if (id && repo) {
+    await saveWorkspaceTeam({ ...store.workspaceTeam, members: store.workspaceTeam.members.map((m) => (m.id === id ? { ...m, model: withModel(m.model, model) } : m)) });
+    if (store.workspaceTeam.members.find((m) => m.id === id)?.model === withModel(repo.model, model)) done();
+    return true;
+  }
+  toast({ kind: 'info', title: `${agent.name} follows its plan's model`, body: `Pick ${model} for it in Settings.` });
+  return false;
 }
 
 /** Save how an agent looks in the office (the look editor's picks in its `look_seed`). */

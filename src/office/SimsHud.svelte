@@ -4,7 +4,8 @@
   - bottom-left: its panel: portrait, rank, mood, and tabs for Needs / Mood / Skills / Friends / Career,
     and Look (Create-a-Sim: hairstyle, hair and skin color, outfit, glasses; saved in its look_seed)
   - top-center: a promotion (its real track record), with the offer of trust (Junior, Senior and Staff
-    perks) and of a stronger model
+    perks) and of a stronger model; a new Legend is offered its CLI's biggest context window
+    (only when bigger than its own: the core says which, `bigger_model`)
   - around a clicked agent: the click menu (chat, task, model, send home or call in, stop, details)
   - in its Needs tab: Send home / Call in (sims.ts: home refills its energy; the Lead never goes)
   - bottom-right: the estimated cost so far, Pause new work, walls up/down
@@ -17,6 +18,7 @@
 <script lang="ts">
   import type { AccountInfo } from '../lib/gen/AccountInfo';
   import type { Agent } from '../lib/gen/Agent';
+  import type { ModelOffer } from '../lib/gen/ModelOffer';
   import type { OfficeEngine } from './engine';
   import type { NarrateFn } from './OfficeView.svelte';
   import { agentPortrait } from './portrait';
@@ -26,7 +28,7 @@
   import { sound } from './sound';
   import { levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
-  import { atLeast, MENTORED_XP, PERKS, rankLabel, rankProgress, titleOf, TRAITS as WORK_TRAITS } from '../lib/util/career';
+  import { atLeast, contextLabel, MENTORED_XP, PERKS, rankLabel, rankProgress, titleOf, TRAITS as WORK_TRAITS } from '../lib/util/career';
 
   interface Props {
     engine: OfficeEngine;
@@ -43,8 +45,12 @@
     onclosemenu: () => void;
     paused?: boolean;
     onpause?: (paused: boolean) => void;
+    /** A new Legend's offer: its CLI's model with the biggest context window, if bigger than its own. */
+    biggerModel?: (agentId: string) => Promise<ModelOffer | null>;
+    /** You took the offer: give it that model. */
+    ongivemodel?: (agentId: string, model: string) => void;
   }
-  let { engine, sims, agents, accounts, selectedId, menuAt, insets, narrate, onaction, onlook, onclosemenu, paused = false, onpause }: Props = $props();
+  let { engine, sims, agents, accounts, selectedId, menuAt, insets, narrate, onaction, onlook, onclosemenu, paused = false, onpause, biggerModel, ongivemodel }: Props = $props();
 
   let tab = $state<'needs' | 'mood' | 'skills' | 'friends' | 'career' | 'look'>('needs');
   let walls = $state(true);
@@ -88,16 +94,24 @@
 
   // Promotions: a rank above the one seen before (not on first sight); Legend is the title above Staff.
   let ranks = new Map<string, string>();
-  let promo = $state<{ id: string; name: string; rank: string; perk: boolean } | null>(null);
+  let promo = $state<{ id: string; name: string; rank: string; perk: boolean; legend: boolean; offer: ModelOffer | null } | null>(null);
   let promoTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     for (const a of agents) {
       const r = a.career?.legend ? 'legend' : (a.career?.rank ?? 'intern');
       const before = ranks.get(a.id);
       if (before && before !== r && ORDER.indexOf(r) > ORDER.indexOf(before)) {
-        promo = { id: a.id, name: a.name, rank: a.career ? titleOf(a.career) : 'Intern', perk: PERKS.some((p) => p.rank === r) };
+        const legend = r === 'legend';
+        promo = { id: a.id, name: a.name, rank: a.career ? titleOf(a.career) : 'Intern', perk: PERKS.some((p) => p.rank === r), legend, offer: null };
         clearTimeout(promoTimer);
-        promoTimer = setTimeout(() => (promo = null), 15_000);
+        promoTimer = setTimeout(() => (promo = null), legend ? 30_000 : 15_000);
+        // A Legend's focus can grow for real: the biggest context window of its CLI, if bigger.
+        if (legend && biggerModel) {
+          const id = a.id;
+          biggerModel(id)
+            .then((offer) => promo?.id === id && offer && (promo = { ...promo, offer }))
+            .catch(() => {});
+        }
       }
       ranks.set(a.id, r);
     }
@@ -300,7 +314,9 @@
   <div class="promo" style:top="{insets.top + 12}px" role="status">
     <span>🎉 <b>{promo.name}</b> was promoted to <b>{promo.rank}</b></span>
     {#if onaction && promo.perk}<button onclick={() => { if (promo) onaction?.(promo.id, 'trust'); promo = null; }}>Trust it more</button>{/if}
-    {#if onaction}<button onclick={() => { if (promo) onaction?.(promo.id, 'model'); promo = null; }}>Give a stronger model</button>{/if}
+    {#if promo.legend}
+      {#if ongivemodel && promo.offer}{@const o = promo.offer}<button title="Its CLI's biggest context window: more room to focus. Nothing changes unless you click." onclick={() => { if (promo) ongivemodel?.(promo.id, o.model); promo = null; }}>Give it {o.model} · {contextLabel(o.context_window)} context</button>{/if}
+    {:else if onaction}<button onclick={() => { if (promo) onaction?.(promo.id, 'model'); promo = null; }}>Give a stronger model</button>{/if}
     <button class="x" aria-label="Dismiss" onclick={() => (promo = null)}>✕</button>
   </div>
 {/if}

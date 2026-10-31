@@ -178,13 +178,24 @@ interface Mind {
   home: Home | null;
   /** The away_until it came back from (a stale agent row must not send it home again). */
   cleared: number | null;
+  /** Tired or rested, as last told to the core (null: the core's row already agrees). */
+  told: boolean | null;
 }
 
-/** What the office tells the core: home and back (`api.setAgentHome`), shifts and sicknesses (`api.noteRest`). */
+/** What the office tells the core: home and back (`api.setAgentHome`), shifts and sicknesses
+ *  (`api.noteRest`), and tired or rested again (`api.setAgentTired`: the Lead prefers the rested). */
 export interface SimsOutbox {
   home: { id: string; until: number | null }[];
   rest: { id: string; sick: boolean }[];
+  tired: { id: string; tired: boolean }[];
 }
+
+/** What keeps an agent from going home, for `SimsTracker.tick`: false, true (you talk to it), or
+ *  'task': a queued task started while it was at home, which the core does only when nobody
+ *  else on the team was at work (scheduler.rs `CALLED_IN`). */
+export type Busy = boolean | 'task';
+/** The Overtime moodlet's why when a task called it in. */
+export const CALLED_IN = 'Called in: nobody else was free';
 
 /** Failures in a row that make it Frustrated. */
 const FRUSTRATED_AT = 2;
@@ -198,7 +209,7 @@ export class SimsTracker {
   private minds = new Map<string, Mind>();
   private agents = new Map<string, Agent>();
   private tasks = new Map<string, Task>();
-  private out: SimsOutbox = { home: [], rest: [] };
+  private out: SimsOutbox = { home: [], rest: [], tired: [] };
 
   setAgents(list: Agent[], now = Date.now()) {
     this.agents = new Map(list.map((a) => [a.id, a]));
@@ -229,6 +240,7 @@ export class SimsTracker {
           sick: false,
           home: null,
           cleared: null,
+          told: null,
         }),
       );
     return m;
@@ -355,15 +367,16 @@ export class SimsTracker {
     return true;
   }
 
-  /** Call it in early: Overtime, morale −0.15, and it keeps half the energy it banked at home. */
-  callIn(id: string, now: number): boolean {
+  /** Call it in early: Overtime, morale −0.15, and it keeps half the energy it banked at home.
+   *  `why`: you clicked Call in, or (CALLED_IN) a task needed it. */
+  callIn(id: string, now: number, why = 'Called in early from home'): boolean {
     const m = this.mind(id);
     if (!m.home) return false;
     this.advance(id, m, now);
     const h = m.home;
     m.energy = h.from + Math.max(0, m.energy - h.from) / 2;
     this.leaveHome(id, m);
-    this.feel(id, now, OVERTIME_MORALE, { key: 'rest', label: 'Overtime', why: 'Called in early from home', tone: 'bad', icon: 'battery', emoji: '😩', ms: 30 * 60_000 });
+    this.feel(id, now, OVERTIME_MORALE, { key: 'rest', label: 'Overtime', why, tone: 'bad', icon: 'battery', emoji: '😩', ms: 30 * 60_000 });
     return true;
   }
 
@@ -381,15 +394,19 @@ export class SimsTracker {
   }
 
   /** Send the exhausted and the sick home once their task is done, bring them back when rested,
-   *  and call in one that started working at home (you gave it work). The office calls this
-   *  every couple of seconds. `busy`: working on something now; `present`: in the office at all. */
-  tick(now: number, busy: (id: string) => boolean, present: (id: string) => boolean = () => true) {
+   *  call in one that started working at home (you talked to it, or its task needed it: see
+   *  `Busy`), and tell the core who is tired. The office calls this every couple of seconds.
+   *  `busy`: working on something now; `present`: in the office at all. */
+  tick(now: number, busy: (id: string) => Busy, present: (id: string) => boolean = () => true) {
     for (const a of this.agents.values()) {
       if (a.archived || a.role === 'lead') continue;
       const m = this.mind(a.id);
+      this.tellTired(a, m);
       if (m.home) {
-        if (busy(a.id)) this.callIn(a.id, now);
-        else if (now >= m.home.until) this.back(a.id, m, now);
+        // Rested first: a task the core starts as it comes back is no call-in.
+        const b = busy(a.id);
+        if (now >= m.home.until) this.back(a.id, m, now);
+        else if (b) this.callIn(a.id, now, b === 'task' ? CALLED_IN : undefined);
         continue;
       }
       // Not in the office (offline): nothing drains it meanwhile.
@@ -399,13 +416,25 @@ export class SimsTracker {
       }
       this.advance(a.id, m, now);
       if ((m.energy <= 0 || m.sick) && !busy(a.id)) this.sendHome(a.id, now);
+      this.tellTired(a, m);
+    }
+  }
+
+  /** Tired (under 30%, not at home) or rested again, when the core's row says otherwise: once
+   *  per change (the core keeps it on the agent as `tired_since`). */
+  private tellTired(a: Agent, m: Mind) {
+    const tired = !m.home && m.energy < TIRED;
+    if (tired === (a.tired_since != null)) m.told = null;
+    else if (m.told !== tired) {
+      m.told = tired;
+      this.out.tired.push({ id: a.id, tired });
     }
   }
 
   /** What to tell the core since the last call. */
   drain(): SimsOutbox {
     const o = this.out;
-    this.out = { home: [], rest: [] };
+    this.out = { home: [], rest: [], tired: [] };
     return o;
   }
 

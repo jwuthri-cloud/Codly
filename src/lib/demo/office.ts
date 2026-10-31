@@ -3,6 +3,7 @@
 // crates/codly-core/src/orchestrator/careers.rs and wallet.rs.
 
 import type { Agent } from '../gen/Agent';
+import type { ModelOffer } from '../gen/ModelOffer';
 import type { Placed } from '../gen/Placed';
 import type { Shop } from '../gen/Shop';
 import type { Wallet } from '../gen/Wallet';
@@ -81,9 +82,27 @@ export function demoHome(sim: Sim, id: string, until: number | null): Agent {
   const a = sim.agents.get(id);
   if (!a) throw new Error('no such agent');
   if (until != null && a.role === 'lead') throw new Error('the Lead never goes home');
-  const next: Agent = { ...a, updated_at: sim.now(), away_until: until ?? undefined };
+  const next: Agent = { ...a, updated_at: sim.now(), away_until: until ?? undefined, tired_since: until != null ? undefined : a.tired_since };
   sim.putAgent(next);
   return next;
+}
+
+/** Tired or rested again (a hint for the Lead), kept on the agent as the core does. */
+export function demoTired(sim: Sim, id: string, tired: boolean): Agent {
+  const a = sim.agents.get(id);
+  if (!a) throw new Error('no such agent');
+  if ((a.tired_since != null) === tired) return a;
+  const next: Agent = { ...a, updated_at: sim.now(), tired_since: tired ? sim.now() : undefined };
+  sim.putAgent(next);
+  return next;
+}
+
+/** A new Legend's offer: the demo knows Claude's aliases (`env::model_windows`); 1M beats 200k. */
+export function demoBiggerModel(sim: Sim, id: string): ModelOffer | null {
+  const a = sim.agents.get(id);
+  if (!a) throw new Error('no such agent');
+  if (a.provider !== 'claude' || /\[1m\]/.test(a.model ?? '') || (a.usage.context_window ?? 0) >= 1_000_000) return null;
+  return { model: 'opus[1m]', context_window: 1_000_000 };
 }
 
 /** A shift worked and rested from, or a sickness: its stamina moves (same rule as the core). */

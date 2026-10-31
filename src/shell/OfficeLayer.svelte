@@ -25,7 +25,7 @@
   import type { Shop } from '../lib/gen/Shop';
   import type { EventRow } from '../lib/gen/EventRow';
   import { acquireArtifactUrl, releaseArtifactUrl } from '../lib/state/artifacts';
-  import { interruptAgent, setAgentLook, stopAgent, updateSettings } from '../lib/state/actions';
+  import { giveModel, interruptAgent, setAgentLook, stopAgent, updateSettings } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { narrate } from '../lib/state/narration';
   import type { RepoFile } from '../lib/gen/RepoFile';
@@ -257,6 +257,12 @@
           simsKey="codly.sims.{store.workspace?.id ?? 'demo'}"
           onhome={(id, until) => api.setAgentHome(id, until).catch(() => {})}
           onrest={(id, sick) => api.noteRest(id, sick).catch(() => {})}
+          ontired={(id, tired) => api.setAgentTired(id, tired).catch(() => {})}
+          biggerModel={(id) => api.biggerModel(id)}
+          ongivemodel={(id, model) => {
+            const a = store.agentMap.get(id);
+            if (a) giveModel(a, model);
+          }}
           oneditionread={() => {
             try {
               localStorage.setItem(editionKey(), String(Date.now()));

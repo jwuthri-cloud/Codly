@@ -593,7 +593,25 @@ impl Core {
         if until.is_some() && self.inner.agent(agent_id)?.role == Role::Lead {
             anyhow::bail!("the Lead never goes home");
         }
-        self.inner.update_agent(agent_id, |a| a.away_until = until)
+        let a = self.inner.update_agent(agent_id, |a| {
+            a.away_until = until;
+            if until.is_some() {
+                a.tired_since = None; // it rests at home
+            }
+        })?;
+        // Back: a task that waited for it starts now, not at the next tick.
+        self.inner.kick();
+        Ok(a)
+    }
+
+    /// The office reports that an agent is tired (its energy fell under 30%) or rested again.
+    /// Only a hint for the Lead's board and the scheduler's tiebreaks: nobody is refused work.
+    pub fn set_agent_tired(&self, agent_id: &str, tired: bool) -> anyhow::Result<Agent> {
+        let a = self.inner.agent(agent_id)?;
+        if a.tired_since.is_some() == tired {
+            return Ok(a);
+        }
+        self.inner.update_agent(agent_id, |a| a.tired_since = tired.then(now_ms))
     }
 
     /// The office reports a shift the agent worked and rested from, or a sickness (its stamina
@@ -713,6 +731,15 @@ impl Core {
     /// Models a CLI can run, for the start-agent picker (empty when it takes any name).
     pub async fn list_models(&self, provider: Provider) -> anyhow::Result<Vec<String>> {
         crate::env::list_models(provider, &self.inner.base_env).await.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// The model of its CLI with the biggest context window, when bigger than the agent's own
+    /// (what a new Legend is offered). None: nothing bigger, or a CLI that does not say.
+    pub async fn bigger_model(&self, agent_id: &str) -> anyhow::Result<Option<ModelOffer>> {
+        let a = self.inner.agent(agent_id)?;
+        let windows = crate::env::model_windows(a.provider, &self.inner.base_env).await.map_err(|e| anyhow::anyhow!(e))?;
+        let best = crate::env::bigger_window(&windows, a.model.as_deref(), a.usage.context_window);
+        Ok(best.map(|(model, context_window)| ModelOffer { model, context_window }))
     }
 
     /// Ad-hoc task on the shared board (no plan). Runs when moved to Ready or assigned.
@@ -850,6 +877,11 @@ pub(crate) fn at_home(a: &Agent, now: i64) -> Option<String> {
     let until = a.away_until.filter(|t| *t > now)?;
     let local = chrono::DateTime::from_timestamp_millis(until)?.with_timezone(&chrono::Local);
     Some(local.format("%H:%M").to_string())
+}
+
+/// Tired (the office said so) and not at home: the Lead and the scheduler prefer someone rested.
+pub(crate) fn tired(a: &Agent, now: i64) -> bool {
+    a.tired_since.is_some() && at_home(a, now).is_none()
 }
 
 impl Inner {
@@ -1089,6 +1121,7 @@ impl Inner {
             usage: Usage::default(),
             career,
             away_until: None,
+            tired_since: None,
             created_at: now,
             updated_at: now,
         }

@@ -23,6 +23,9 @@ export function joinModel(name: string, effort: string): string | null {
   return n || effort ? `${n}${effort ? `:${effort}` : ''}` : null;
 }
 
+/** Another model, keeping the thinking effort it had ("sonnet:high" + "opus[1m]" → "opus[1m]:high"). */
+export const withModel = (current: string | null, model: string): string | null => joinModel(model, splitModel(current).effort);
+
 /** The job titles an agent can have (its badge). Mirrors `ROLE_TITLES` in the core. */
 export const ROLE_TITLES = ['Backend', 'Frontend', 'Full-stack', 'Mobile', 'Product manager', 'Designer', 'QA', 'DevOps', 'Data', 'Security', 'Docs', 'Reviewer'];
 

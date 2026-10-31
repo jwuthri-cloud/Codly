@@ -28,6 +28,8 @@ pub struct SchedInput<'a> {
     /// Sign-ins with their quota state, in the user's order. An installed CLI with none
     /// listed has one implicit account (its CLI state).
     pub accounts: &'a [AccountState],
+    /// Now (ms): who is at home (`Agent::away_until`).
+    pub now: i64,
 }
 
 /// Park an account once this fraction of one of its usage windows is spent (C17).
@@ -100,6 +102,9 @@ pub enum Action {
         detail: Value,
     },
 }
+
+/// Why a task started for a member at home (the office shows it on its Overtime moodlet).
+pub const CALLED_IN: &str = "called in from home: nobody else was free";
 
 /// Statuses that hold a worker slot and a write-scope lease.
 pub fn is_active(s: TaskStatus) -> bool {
@@ -266,6 +271,7 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
             agent_by_id: &agent_by_id,
             accounts: &accounts,
             doing: &doing,
+            now: input.now,
         };
         match route(t, &ctx, &taken_names, &used_colors) {
             Err(reason) => actions.push(wait(reason)),
@@ -306,6 +312,7 @@ struct RouteCtx<'a> {
     agent_by_id: &'a HashMap<&'a str, &'a Agent>,
     accounts: &'a Accounts,
     doing: &'a HashMap<Id, String>,
+    now: i64,
 }
 
 /// The account a run goes on, with its running count, (with several accounts) why, and the
@@ -395,6 +402,16 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
                 None => format!("waiting: {} (assigned) is busy", a.name),
             });
         }
+        // At home (the office's energy): its task waits until it is back, a few minutes. Unless
+        // nobody else on the team is at work: then it is called in, the crew never stops.
+        let home = super::at_home(a, ctx.now);
+        if let Some(until) = &home
+            && ctx.agents.iter().any(|o| {
+                o.id != a.id && o.member.is_some() && o.role == Role::Worker && !o.archived && super::at_home(o, ctx.now).is_none()
+            })
+        {
+            return Err(format!("waiting: {} (assigned) is at home until {until}; it starts when it is back, or call it in", a.name));
+        }
         // Its own account first: a retry can resume the task's session there.
         let mut prefer: Vec<&str> = ctx.accounts.of_agent(a).map(|x| x.id.as_str()).into_iter().collect();
         if let Some(pa) = pin.filter(|pa| pa.provider == a.provider) {
@@ -409,10 +426,13 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
         if !acc.skipped.is_empty() {
             summary.push_str(&format!("; {}", acc.skipped.join(", ")));
         }
+        if home.is_some() {
+            summary.push_str(&format!("; {CALLED_IN}"));
+        }
         let detail = json!({
             "task": t.key, "plan_id": t.plan_id, "provider": a.provider, "agent": a.name, "rule": "assignee",
             "account": acc.account.id, "account_label": acc.account.label, "pinned_account": t.account_hint,
-            "skipped": acc.skipped,
+            "skipped": acc.skipped, "called_in": home.is_some(),
         });
         return Ok(Route {
             provider: a.provider,
@@ -488,7 +508,8 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
     }
 
     // An idle generic worker of that provider (from before consultants), one whose session is
-    // on that account first. Team members only take tasks assigned to them.
+    // on that account first, then one at work, then a rested one. Team members only take tasks
+    // assigned to them.
     let idle = ctx
         .agents
         .iter()
@@ -500,7 +521,10 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
                 && a.status != AgentStatus::Offline
                 && !ctx.busy.contains(&a.id)
         })
-        .min_by_key(|a| (ctx.accounts.of_agent(a).is_none_or(|x| x.id != acc.account.id), a.created_at, a.id.clone()));
+        .min_by_key(|a| {
+            let other_account = ctx.accounts.of_agent(a).is_none_or(|x| x.id != acc.account.id);
+            (other_account, super::at_home(a, ctx.now).is_some(), super::tired(a, ctx.now), a.created_at, a.id.clone())
+        });
     let (pick, name, new) = match idle {
         Some(a) => (AgentPick::Existing(a.id.clone()), a.name.clone(), false),
         None => {

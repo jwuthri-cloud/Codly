@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Agent } from '../../lib/gen/Agent';
 import type { EventRow } from '../../lib/gen/EventRow';
-import { activityFor, headline, levelOf, SimsTracker } from '../sims';
+import { activityFor, CALLED_IN, headline, levelOf, SimsTracker } from '../sims';
 import { breakDelay, breakPreference, reactionTo, traitsOf } from '../traits';
 import { BreakRoom } from '../breakroom';
 import { emptyCareer } from '../../lib/util/career';
@@ -65,7 +65,7 @@ describe('sims', () => {
     sh = s.stats('ada', 4 * HOUR + 1000, null);
     expect(sh.rest.home).toMatchObject({ until: 4 * HOUR + 1000 + 10 * MIN, sick: false });
     expect(headline(sh)).toMatchObject({ emoji: '🏠', why: 'Back in 10 min' });
-    expect(s.drain()).toEqual({ home: [{ id: 'ada', until: 4 * HOUR + 1000 + 10 * MIN }], rest: [{ id: 'ada', sick: false }] });
+    expect(s.drain()).toEqual({ home: [{ id: 'ada', until: 4 * HOUR + 1000 + 10 * MIN }], rest: [{ id: 'ada', sick: false }], tired: [{ id: 'ada', tired: true }] });
   });
 
   it('home refills it in ~10 min at stamina 0 and ~3 min at stamina 100; then it walks back in', () => {
@@ -108,6 +108,49 @@ describe('sims', () => {
     expect(s.drain().home.at(-1)).toEqual({ id: 'ada', until: null });
   });
 
+  it('a queued task that needs it at home calls it in, and says why; one starting as it comes back does not', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada')], 0);
+    s.setEnergy('ada', 0, 0);
+    s.sendHome('ada', 0);
+    s.tick(4 * MIN, (id) => (id === 'ada' ? 'task' : false));
+    const sh = s.stats('ada', 4 * MIN, null);
+    expect(sh.rest.home).toBeNull();
+    expect(sh.moodlets.find((m) => m.key === 'rest')).toMatchObject({ label: 'Overtime', why: CALLED_IN });
+    expect(CALLED_IN).toBe('Called in: nobody else was free');
+    // Back on time: the task the core starts as it walks in is no Overtime.
+    s.setEnergy('ada', 5 * MIN, 0);
+    s.sendHome('ada', 5 * MIN);
+    s.tick(15 * MIN, () => 'task');
+    expect(s.stats('ada', 15 * MIN, null).moodlets.find((m) => m.key === 'rest')).toMatchObject({ label: 'Rested' });
+  });
+
+  it('tells the core once when it gets tired (under 30%) and once when it is rested again', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada'), agent('lead', { role: 'lead' })], 0);
+    s.setActivity('ada', 0, 'work');
+    s.setActivity('lead', 0, 'work');
+    s.tick(2 * HOUR, () => true);
+    expect(s.drain().tired).toEqual([]);
+    s.tick(3 * HOUR, () => true);
+    s.tick(3 * HOUR + 2000, () => true);
+    expect(s.drain().tired).toEqual([{ id: 'ada', tired: true }]); // once, and never the Lead
+    // The core's row now says so: nothing more to tell, until it is rested again.
+    s.setAgents([agent('ada', { tired_since: 3 * HOUR }), agent('lead', { role: 'lead' })], 3 * HOUR);
+    s.tick(3 * HOUR + 4000, () => true);
+    expect(s.drain().tired).toEqual([]);
+    s.setEnergy('ada', 3 * HOUR + 5000, 1);
+    s.tick(3 * HOUR + 6000, () => true);
+    expect(s.drain().tired).toEqual([{ id: 'ada', tired: false }]);
+    // Going home is resting: a tired agent sent home is told rested.
+    const t = new SimsTracker();
+    t.setAgents([agent('bo', { tired_since: 1 })], 0);
+    t.setEnergy('bo', 0, 0.1);
+    t.sendHome('bo', 0);
+    t.tick(1000, () => false);
+    expect(t.drain().tired).toEqual([{ id: 'bo', tired: false }]);
+  });
+
   it('the Lead never goes home: a tired Lead only looks tired', () => {
     const s = new SimsTracker();
     s.setAgents([agent('lead', { role: 'lead', away_until: HOUR })], 0);
@@ -117,7 +160,7 @@ describe('sims', () => {
     const sh = s.stats('lead', 5 * HOUR, null);
     expect(sh.rest).toMatchObject({ home: null, canGoHome: false, exhausted: true });
     expect(headline(sh)).toMatchObject({ label: 'Exhausted', why: 'Running on empty' });
-    expect(s.drain()).toEqual({ home: [], rest: [] });
+    expect(s.drain()).toEqual({ home: [], rest: [], tired: [] });
   });
 
   it('coffee: +15% and a cup of caffeine; 3 cups make it jittery, and they wear off in an hour', () => {
