@@ -18,6 +18,7 @@
   import { api } from '../lib/api';
   import type { Agent } from '../lib/gen/Agent';
   import type { Artifact } from '../lib/gen/Artifact';
+  import type { Office } from '../lib/gen/Office';
   import type { Placed } from '../lib/gen/Placed';
   import type { Rank } from '../lib/gen/Rank';
   import { atLeast, PERKS, rankLabel } from '../lib/util/career';
@@ -183,6 +184,17 @@
       toast({ kind: 'error', title: 'Could not change trust', body: String(e) });
     }
   }
+  /** Move an agent to another of your offices: once the core has it, it walks out of this one. */
+  async function transferAgent(id: string, office: Office) {
+    const name = store.agentMap.get(id)?.name ?? 'It';
+    try {
+      await api.transferAgent(id, office.id);
+      if (ui.selectedAgentId === id) ui.select(null);
+      toast({ kind: 'success', title: `${name} moved to ${office.name}`, body: 'Its career, traits and memory went along; trust and friendships stay here.' });
+    } catch (e) {
+      toast({ kind: 'error', title: `${name} can't move yet`, body: String(e) });
+    }
+  }
   /** Save an agent (career, traits, memory) as a file to import into another repo. */
   async function exportAgent(id: string, name: string) {
     try {
@@ -257,6 +269,8 @@
           simsKey="codly.sims.{store.workspace?.id ?? 'demo'}"
           onhome={(id, until) => api.setAgentHome(id, until).catch(() => {})}
           onrest={(id, sick) => api.noteRest(id, sick).catch(() => {})}
+          offices={() => api.offices()}
+          ontransfer={transferAgent}
           oneditionread={() => {
             try {
               localStorage.setItem(editionKey(), String(Date.now()));

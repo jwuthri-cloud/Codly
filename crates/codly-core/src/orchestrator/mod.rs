@@ -575,6 +575,24 @@ impl Core {
         Ok(a)
     }
 
+    /// Your other offices (repos opened before, still on disk), with their crews: where an agent
+    /// can transfer to. The open repo is not one of them.
+    pub fn offices(&self) -> anyhow::Result<Vec<Office>> {
+        let ws = self.inner.workspace();
+        self.inner.offices(ws.as_ref().map(|w| w.id.as_str()))
+    }
+
+    /// Transfer an agent from the open repo to another of your offices (`offices`): same id,
+    /// career, traits, stamina, look and memory; trust, friends, mentor and its CLI session stay
+    /// behind. Refused for the Lead, a team member, mid-task or mid-turn, and when someone with
+    /// its name already works there.
+    pub async fn transfer_agent(&self, agent_id: &str, to_workspace_id: &str) -> anyhow::Result<Agent> {
+        let ws = self.inner.require_ws()?;
+        let a = self.inner.transfer_agent(&ws, agent_id, to_workspace_id).await?;
+        self.inner.kick();
+        Ok(a)
+    }
+
     /// Trust an agent up to a rank's perks (`career::PERKS`, capped at its rank); Intern takes
     /// them back. You grant it; a promotion only offers it.
     pub fn trust_agent(&self, agent_id: &str, rank: Rank) -> anyhow::Result<Agent> {

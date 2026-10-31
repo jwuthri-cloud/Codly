@@ -349,6 +349,30 @@ impl Store {
             .flatten())
     }
 
+    /// Move an agent to another workspace (a transfer between offices): its row, same id, and
+    /// the private memories it keeps (scope `agent`). Its events stay in the repo they happened in.
+    pub fn move_agent(&self, id: &str, workspace_id: &str) -> Result<()> {
+        self.tx(|tx| {
+            if tx.execute("UPDATE agent SET workspace_id = ?2 WHERE id = ?1", params![id, workspace_id])? == 0 {
+                return Err(anyhow!("unknown agent {id}"));
+            }
+            tx.execute("UPDATE memory SET workspace_id = ?2 WHERE scope = 'agent' AND scope_id = ?1", params![id, workspace_id])?;
+            Ok(())
+        })
+    }
+
+    /// Every workspace with its crew (agents on the team, the Lead aside), most recently opened first.
+    pub fn offices(&self) -> Result<Vec<Office>> {
+        let conn = self.conn();
+        let mut st = conn.prepare_cached(
+            "SELECT w.id, w.name, w.repo_path,
+               (SELECT COUNT(*) FROM agent a WHERE a.workspace_id = w.id AND a.archived = 0 AND a.role != 'lead')
+             FROM workspace w ORDER BY w.opened_at DESC",
+        )?;
+        let rows = st.query_map([], |r| Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)? }))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// A workspace's team-member agents, archived ones included (a member switched back on
     /// gets its old agent, session and memory back).
     pub fn member_agents(&self, workspace_id: &str) -> Result<Vec<Agent>> {

@@ -30,7 +30,7 @@ import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
 import { makeApplicants } from './util/career';
-import { demoBringBack, demoDigest, demoGhosts, demoGiveXp, demoGrant, demoHome, demoLook, demoPlace, demoResetOffice, demoRest, demoSell, demoShop, demoTrust, demoWallet } from './demo/office';
+import { demoBringBack, demoDigest, demoGhosts, demoGiveXp, demoGrant, demoHome, demoLook, demoOffices, demoPlace, demoResetOffice, demoRest, demoSell, demoShop, demoTransfer, demoTrust, demoWallet } from './demo/office';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
@@ -297,6 +297,10 @@ export class MockTransport implements Transport {
         return demoGhosts(sim);
       case 'bring_back':
         return demoBringBack(sim, String(a.agentId));
+      case 'offices':
+        return demoOffices();
+      case 'transfer_agent':
+        return demoTransfer(sim, String(a.agentId), String(a.toWorkspaceId));
       case 'office_shop':
         return demoShop(sim);
       case 'office_place':

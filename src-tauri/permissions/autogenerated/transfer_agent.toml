@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transfer-agent"
+description = "Enables the transfer_agent command without any pre-configured scope."
+commands.allow = ["transfer_agent"]
+
+[[permission]]
+identifier = "deny-transfer-agent"
+description = "Denies the transfer_agent command without any pre-configured scope."
+commands.deny = ["transfer_agent"]

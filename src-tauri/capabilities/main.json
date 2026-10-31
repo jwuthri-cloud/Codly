@@ -92,6 +92,8 @@
     "allow-export-agent",
     "allow-ghosts",
     "allow-bring-back",
+    "allow-offices",
+    "allow-transfer-agent",
     "allow-office-shop",
     "allow-office-place",
     "allow-office-sell",

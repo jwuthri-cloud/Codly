@@ -1,8 +1,9 @@
 //! Careers and job offers: crediting agents for what their events say they did (rules in
 //! `crate::career`), the job offer posted in the office before a new consultant is hired, and
-//! ghosts: workers let go, who keep their career and can be brought back. The XP they earn is
-//! also the wallet's coins (`wallet.rs`, with Build/Buy).
+//! ghosts: workers let go, who keep their career and can be brought back, and transfers to your
+//! other offices. The XP they earn is also the wallet's coins (`wallet.rs`, with Build/Buy).
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -214,5 +215,74 @@ impl Inner {
             a.activity_label = None;
             career::note(&mut a.career, now, "Came back".into());
         })
+    }
+
+    /// Your other offices (repos opened before, still on disk), for the Transfer picker.
+    pub(super) fn offices(&self, here: Option<&str>) -> Result<Vec<Office>> {
+        Ok(self.store.offices()?.into_iter().filter(|o| Some(o.id.as_str()) != here && Path::new(&o.repo_path).is_dir()).collect())
+    }
+
+    /// Transfer an agent to another of your offices (PROGRESSION.md §4): its row moves there with
+    /// the same id, career, traits, stamina, look and memory. What belongs to this repo stays
+    /// behind, as for an exported agent: trust, friends, mentor, its worktree, and its CLI
+    /// session (a conversation about this repo). Never mid-task; the Lead stays with its repo.
+    pub(super) async fn transfer_agent(&self, from: &Workspace, id: &str, to: &str) -> Result<Agent> {
+        let a = self.agent(id)?;
+        if a.archived || self.store.agent_workspace(id)?.as_deref() != Some(from.id.as_str()) {
+            bail!("{} doesn't work in this office", a.name);
+        }
+        if a.role == Role::Lead {
+            bail!("the Lead stays with its repo");
+        }
+        if a.member.is_some() {
+            bail!("{} is on this repo's team, and team members get an agent of their own in every repo", a.name);
+        }
+        if to == from.id {
+            bail!("{} already works here", a.name);
+        }
+        let Some(dest) = self.store.workspace(to)? else { bail!("no such office") };
+        if !Path::new(&dest.repo_path).is_dir() {
+            bail!("{} is gone from disk", dest.repo_path);
+        }
+        let open = |t: &Task| !matches!(t.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled);
+        let held = self.store.tasks(&from.id)?.into_iter().find(|t| a.task_id.as_ref() == Some(&t.id) || (t.assignee.as_ref() == Some(&a.id) && open(t)));
+        if a.task_id.is_some() || held.is_some() {
+            bail!("{} is on {}: it can't transfer mid-task", a.name, held.map_or("a task".into(), |t| t.key));
+        }
+        if !self.is_quiet(id) {
+            bail!("{} is in the middle of a turn: wait for it, or stop it first", a.name);
+        }
+        if self.store.agents(to)?.iter().any(|x| x.name.eq_ignore_ascii_case(&a.name)) {
+            bail!("someone called {} already works in {}", a.name, dest.name);
+        }
+        // Running idle: its process goes (it was talking about this repo).
+        if !self.stop_and_wait(id).await {
+            bail!("{} did not stop in time; try again", a.name);
+        }
+        self.store.move_agent(id, to)?;
+        let now = now_ms();
+        // Saved in its new office (the row moved first), and broadcast.
+        let moved = self.update_agent(id, |a| {
+            a.career.trust = Rank::Intern;
+            a.career.friends.clear();
+            a.career.mentor = None;
+            a.session_id = None;
+            a.worktree = None;
+            a.run_id = None;
+            a.task_id = None;
+            a.status = AgentStatus::Idle;
+            a.activity = None;
+            a.activity_label = None;
+            a.away_until = None;
+            // Yours now, between tasks too: the new office doesn't let it go as a finished consultant.
+            a.consultant = false;
+            a.kept = true;
+            career::note(&mut a.career, now, format!("Moved to {}", dest.name));
+        })?;
+        // `from` and `to` in both: the office it left drops it from its crew (it walks out).
+        let detail = serde_json::json!({ "agent": id, "name": a.name, "from": from.id, "to": dest.id, "to_name": dest.name });
+        self.decide(Some(&from.id), None, "transfer", format!("{} moved to {}", a.name, dest.name), detail.clone())?;
+        self.decide(Some(&dest.id), None, "transfer", format!("{} moved in from {}", a.name, from.name), detail)?;
+        Ok(moved)
     }
 }
