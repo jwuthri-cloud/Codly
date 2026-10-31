@@ -304,6 +304,26 @@ export function rack(b: Builder) {
   b.box(0, 0.03, 0, W + 0.04, 0.06, Dp + 0.04, c('#33363f'));
 }
 
+/** A garage's server: one tower (left) and a screen on a little table (right). The screen's
+ *  picture is ServerRoom's (props.ts), at the layout's `testMonitor`. */
+export function serverMachine(b: Builder) {
+  const tx = -0.45;
+  b.box(tx, 0.55, 0, 0.42, 1.1, 0.58, c(MAT.rack));
+  b.box(tx, 1.11, 0, 0.44, 0.03, 0.6, c('#3a3f4b'));
+  b.box(tx, 0.55, 0.296, 0.36, 1.0, 0.012, c(MAT.rackFront));
+  for (let k = 0; k < 6; k++) b.box(tx, 0.2 + k * 0.15, 0.304, 0.26, 0.012, 0.006, c('#454b58'));
+  b.box(tx, 0.03, 0, 0.46, 0.06, 0.62, c('#33363f'));
+  // The table, the screen and a keyboard.
+  const sx = 0.3;
+  const top = 0.72;
+  b.box(sx, top - 0.02, 0, 0.8, 0.04, 0.55, c(MAT.birch));
+  for (const lx of [-0.36, 0.36]) for (const lz of [-0.23, 0.23]) b.box(sx + lx, (top - 0.04) / 2, lz, 0.04, top - 0.04, 0.04, c(MAT.charcoal));
+  b.box(sx, top + 0.008, -0.08, 0.22, 0.016, 0.14, c(MAT.monitor));
+  b.box(sx, top + 0.07, -0.08, 0.04, 0.12, 0.03, c(MAT.monitor));
+  b.box(sx, 1.02, -0.03, 0.62, 0.38, 0.03, c(MAT.monitor));
+  b.box(sx, top + 0.008, 0.14, 0.4, 0.016, 0.13, c('#3a3c43'));
+}
+
 export function testMonitorBody(b: Builder) {
   const w = 2.3;
   const h = 1.2;
@@ -643,6 +663,16 @@ export function doorFrame(b: Builder) {
   const fr = c(MAT.doorFrame);
   for (const sx of [-0.82, 0.82]) b.box(sx, 0.19, 0, 0.1, 0.38, 0.22, fr);
   b.box(0, 0.006, 0, 1.6, 0.012, 0.3, c('#bfb3a2'));
+}
+
+/** A garage's roll-up door, rolled up: low posts like the front door's, a threshold with
+ *  hazard stripes. */
+export function rollupDoor(b: Builder, width: number) {
+  const fr = c('#5d6168');
+  for (const sx of [-(width / 2 + 0.05), width / 2 + 0.05]) b.box(sx, 0.19, 0, 0.1, 0.38, 0.22, fr);
+  b.box(0, 0.006, 0, width + 0.2, 0.012, 0.3, c('#9a958c'));
+  const n = Math.max(3, Math.round(width / 0.24));
+  for (let i = 0; i < n; i++) b.box(-width / 2 + ((i + 0.5) * width) / n, 0.014, 0.08, (width / n) * 0.5, 0.004, 0.08, c('#e0b23a'));
 }
 
 export function doormat(b: Builder) {

@@ -1,10 +1,13 @@
-// The web demo's ghosts (workers let go, kept apart from the live roster as in the core) and
-// Build/Buy budget: same rules as crates/codly-core/src/orchestrator/careers.rs.
+// The web demo's ghosts (workers let go, kept apart from the live roster as in the core),
+// Build/Buy budget (same rules as crates/codly-core/src/orchestrator/careers.rs) and lot: the
+// demo office is the Studio.
 
 import type { Agent } from '../gen/Agent';
 import type { Placed } from '../gen/Placed';
 import type { Shop } from '../gen/Shop';
+import type { Lot } from '../gen/Lot';
 import { BY_ID } from '../../office/buy';
+import { TEMPLATES } from '../../office/layout';
 import { atLeast, emptyCareer, rankLabel } from '../util/career';
 import type { Rank } from '../gen/Rank';
 import type { DayReport } from '../gen/DayReport';
@@ -13,6 +16,16 @@ import type { Sim } from './sim';
 
 let ghosts: Agent[] | null = null;
 let placed: Placed[] = [];
+let lot: Lot | null = null;
+
+export function demoLot(): Lot {
+  return (lot ??= structuredClone(TEMPLATES.studio));
+}
+
+export function demoSaveLot(next: Lot): Lot {
+  if (next.v !== 1) throw new Error('unknown lot version');
+  return (lot = structuredClone(next));
+}
 
 function seeded(sim: Sim): Agent[] {
   if (ghosts) return ghosts;

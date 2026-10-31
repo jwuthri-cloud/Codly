@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { aStar, lineOfSight, smooth } from '../astar';
-import { cellOf, COLS, officeLayout, passableFn, ROWS } from '../layout';
+import { cellOf, officeLayout, passableFn } from '../layout';
 
 const grid = (rows: string[]) => {
   const h = rows.length;
@@ -55,7 +55,7 @@ describe('A*', () => {
 describe('the office floor plan', () => {
   const L = officeLayout();
   const pass = passableFn(L);
-  const door = cellOf(L.door.inside.x, L.door.inside.z);
+  const door = cellOf(L, L.door.inside.x, L.door.inside.z);
 
   it('every desk seat, helper spot and station slot is reachable from the front door', () => {
     const targets: [string, number, number][] = [];
@@ -66,8 +66,8 @@ describe('the office floor plan', () => {
     }
     for (const st of Object.values(L.stations)) st.slots.forEach((s, i) => targets.push([`${st.id}:${i}`, s.x, s.z]));
     for (const [name, x, z] of targets) {
-      const [gx, gz] = cellOf(x, z);
-      const p = aStar(COLS, ROWS, door[0], door[1], gx, gz, pass);
+      const [gx, gz] = cellOf(L, x, z);
+      const p = aStar(L.cols, L.rows, door[0], door[1], gx, gz, pass);
       expect(p, name).not.toBeNull();
     }
   });
@@ -76,8 +76,8 @@ describe('the office floor plan', () => {
     for (const id of ['games.console', 'games.foosball', 'games.pingpong', 'games.pool'] as const) {
       expect(L.stations[id].slots).toHaveLength(2);
       for (const s of L.stations[id].slots) {
-        const [gx, gz] = cellOf(s.x, s.z);
-        expect(aStar(COLS, ROWS, door[0], door[1], gx, gz, pass), `${id} ${s.x},${s.z}`).not.toBeNull();
+        const [gx, gz] = cellOf(L, s.x, s.z);
+        expect(aStar(L.cols, L.rows, door[0], door[1], gx, gz, pass), `${id} ${s.x},${s.z}`).not.toBeNull();
       }
     }
   });

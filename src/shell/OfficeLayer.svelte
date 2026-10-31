@@ -23,6 +23,7 @@
   import { atLeast, PERKS, rankLabel } from '../lib/util/career';
   import { editionDue } from '../office/daily';
   import type { Shop } from '../lib/gen/Shop';
+  import type { Lot } from '../lib/gen/Lot';
   import type { EventRow } from '../lib/gen/EventRow';
   import { acquireArtifactUrl, releaseArtifactUrl } from '../lib/state/artifacts';
   import { interruptAgent, setAgentLook, stopAgent, updateSettings } from '../lib/state/actions';
@@ -58,6 +59,22 @@
       clearTimeout(t);
     };
   });
+
+  // The repo's lot (its walls, floors and furniture; created on the first read: a Studio for a
+  // repo with history, a Garage for a new one). The office waits for it, so it never shows the
+  // wrong building first.
+  let lot = $state.raw<Lot | null>(null);
+  let lotFor = $state<string | null>(null);
+  $effect(() => {
+    const ws = store.workspace?.id ?? null;
+    void store.epoch;
+    if (!ws) return void ((lot = null), (lotFor = null));
+    api.officeLot().then(
+      (l) => store.workspace?.id === ws && ((lot = l), (lotFor = ws)),
+      () => store.workspace?.id === ws && (lotFor = ws),
+    );
+  });
+  const lotReady = $derived(!store.workspace || lotFor === store.workspace.id);
 
   // Ghosts (agents let go) and the Build/Buy budget: both move with agent changes (XP, let go).
   let ghosts = $state.raw<Agent[]>([]);
@@ -218,56 +235,59 @@
 <div class="office" aria-label="The office">
   {#await loadOffice() then mod}
     {@const OfficeView = mod.default}
-    <svelte:boundary onerror={(e) => console.error('[codly] office crashed', e)}>
-      {#key store.epoch}
-        <OfficeView
-          {files}
-          agents={store.agents}
-          tasks={store.tasks}
-          approvals={store.approvals}
-          artifacts={officeArtifacts}
-          {selection}
-          {hover}
-          reducedMotion={ui.reducedMotion}
-          {backdrop}
-          {onselect}
-          {onhover}
-          {subscribe}
-          history={historyAtMount()}
-          narrate={officeNarrate}
-          {artifactUrl}
-          {insets}
-          ticker={ui.mode === 'office'}
-          accounts={accounts.list}
-          {onaction}
-          onlook={(id, seed) => {
-            const a = store.agentMap.get(id);
-            if (a) setAgentLook(a, seed);
-          }}
-          paused={store.settings.paused}
-          {onpause}
-          onpickapplicant={(offerId, i) => api.pickApplicant(offerId, i).catch(fail('Could not pick'))}
-          {ghosts}
-          onbringback={bringBack}
-          {shop}
-          onplace={place}
-          onsell={sell}
-          {digest}
-          oneditionread={() => {
-            try {
-              localStorage.setItem(editionKey(), String(Date.now()));
-            } catch {}
-          }}
-        />
-      {/key}
-      {#snippet failed(_error, reset)}
-        <div class="fail">
-          <p class="serif">The office went dark.</p>
-          <p class="muted">Your agents keep working; everything is still in the panels.</p>
-          <button class="btn sm" onclick={() => retry(reset)}>Reopen the office</button>
-        </div>
-      {/snippet}
-    </svelte:boundary>
+    {#if lotReady}
+      <svelte:boundary onerror={(e) => console.error('[codly] office crashed', e)}>
+        {#key store.epoch}
+          <OfficeView
+            {files}
+            agents={store.agents}
+            tasks={store.tasks}
+            approvals={store.approvals}
+            artifacts={officeArtifacts}
+            {selection}
+            {hover}
+            reducedMotion={ui.reducedMotion}
+            {backdrop}
+            {onselect}
+            {onhover}
+            {subscribe}
+            history={historyAtMount()}
+            narrate={officeNarrate}
+            {artifactUrl}
+            {insets}
+            ticker={ui.mode === 'office'}
+            accounts={accounts.list}
+            {onaction}
+            onlook={(id, seed) => {
+              const a = store.agentMap.get(id);
+              if (a) setAgentLook(a, seed);
+            }}
+            paused={store.settings.paused}
+            {onpause}
+            onpickapplicant={(offerId, i) => api.pickApplicant(offerId, i).catch(fail('Could not pick'))}
+            {ghosts}
+            onbringback={bringBack}
+            {lot}
+            {shop}
+            onplace={place}
+            onsell={sell}
+            {digest}
+            oneditionread={() => {
+              try {
+                localStorage.setItem(editionKey(), String(Date.now()));
+              } catch {}
+            }}
+          />
+        {/key}
+        {#snippet failed(_error, reset)}
+          <div class="fail">
+            <p class="serif">The office went dark.</p>
+            <p class="muted">Your agents keep working; everything is still in the panels.</p>
+            <button class="btn sm" onclick={() => retry(reset)}>Reopen the office</button>
+          </div>
+        {/snippet}
+      </svelte:boundary>
+    {/if}
   {:catch}
     <div class="fail"><p class="serif">The office couldn’t load.</p><p class="muted">Your agents keep working; everything is still in the panels.</p></div>
   {/await}

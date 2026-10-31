@@ -319,7 +319,8 @@ export class TaskBoard {
 
   constructor(L: OfficeLayout) {
     this.L = L;
-    const b = L.board;
+    // No board in the lot (a garage): cards only show in hands and on desks.
+    const b = L.board ?? { z: 0, x0: 0, x1: 1, y0: 0, y1: 1 };
     const [c, g] = canvas(1024, 224);
     this.paintBoard(g);
     this.boardTex = tex(c);
@@ -328,6 +329,7 @@ export class TaskBoard {
     this.cork = new Mesh(new PlaneGeometry(w, h), new MeshStandardMaterial({ map: this.boardTex, roughness: 0.95 }));
     this.cork.position.set((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, b.z + 0.012);
     this.cork.receiveShadow = true;
+    this.cork.visible = !!L.board;
     this.group.add(this.cork);
   }
 
@@ -357,8 +359,9 @@ export class TaskBoard {
   }
 
   /** Where a card sits on the board (column, row). */
-  private slot(col: Column, row: number, n: number): { pos: Vector3; quat: Quaternion } {
+  private slot(col: Column, row: number, n: number): { pos: Vector3; quat: Quaternion } | null {
     const b = this.L.board;
+    if (!b) return null;
     const ci = COLUMNS.indexOf(col);
     const colW = (b.x1 - b.x0) / 4;
     const xc = b.x0 + (ci + 0.5) * colW;
@@ -611,13 +614,14 @@ export class Whiteboard {
   private sig = '';
 
   constructor(L: OfficeLayout) {
-    const wb = L.whiteboard;
+    const wb = L.whiteboard ?? { z: 0, x0: 0, x1: 1, y0: 0, y1: 1 };
     const [c, g] = canvas(1280, 352);
     this.g = g;
     this.tex = tex(c);
     this.mesh = new Mesh(new PlaneGeometry(wb.x1 - wb.x0, wb.y1 - wb.y0), new MeshStandardMaterial({ map: this.tex, roughness: 0.5 }));
     this.mesh.position.set((wb.x0 + wb.x1) / 2, (wb.y0 + wb.y1) / 2, wb.z + 0.02);
     this.mesh.receiveShadow = true;
+    this.mesh.visible = !!L.whiteboard;
     this.paint([], [], () => 0, () => '');
   }
 
@@ -751,16 +755,18 @@ export class ServerRoom {
   private theme: ThemeName = 'dark';
 
   constructor(L: OfficeLayout) {
-    const tm = L.testMonitor;
+    const tm = L.testMonitor ?? { x: 0, z: 0, y: 0, w: 1, h: 1, rot: 0 };
     const [c, g] = canvas(512, 256);
     this.g = g;
     this.tex = tex(c);
     this.screen = new Mesh(new PlaneGeometry(tm.w, tm.h), new MeshBasicMaterial({ map: this.tex, toneMapped: false }));
-    this.screen.position.set(tm.x, tm.y, tm.z + 0.05);
+    this.screen.position.set(tm.x + Math.sin(tm.rot) * 0.05, tm.y, tm.z + Math.cos(tm.rot) * 0.05);
+    this.screen.rotation.y = tm.rot;
+    this.screen.visible = !!L.testMonitor;
     this.group.add(this.screen);
-    // LEDs on each rack's doors.
+    // LEDs on each rack's doors (two columns; one on a garage's tower).
     const per = 12;
-    this.leds = new InstancedMesh(this.ledGeo, this.ledMat, L.racks.length * per);
+    this.leds = new InstancedMesh(this.ledGeo, this.ledMat, L.racks.reduce((n, rk) => n + (rk.wide ? per : per / 2), 0));
     const m = new Matrix4();
     const q = new Quaternion();
     const one = new Vector3(1, 1, 1);
@@ -773,12 +779,12 @@ export class ServerRoom {
       const fz = Math.cos(rk.rot);
       const rx = -fz;
       const rz = fx;
-      for (let i = 0; i < per; i++) {
+      for (let i = 0; i < (rk.wide ? per : per / 2); i++) {
         const side = i < per / 2 ? -1 : 1;
         const row = i % (per / 2);
-        const lx = side * 0.3 + (row % 2) * 0.06 - 0.03;
-        const y = 0.35 + row * 0.22;
-        const pos = new Vector3(rk.x + fx * 0.395 + rx * lx, y, rk.z + fz * 0.395 + rz * lx);
+        const lx = (rk.wide ? side * 0.3 : 0.08) + (row % 2) * 0.06 - 0.03;
+        const y = rk.wide ? 0.35 + row * 0.22 : 0.3 + row * 0.13;
+        const pos = new Vector3(rk.x + fx * rk.front + rx * lx, y, rk.z + fz * rk.front + rz * lx);
         this.leds.setMatrixAt(k, m.compose(pos, q, one));
         this.ledBase.push(new Color().setRGB(...palette[Math.floor(r() * palette.length)]));
         k++;
@@ -901,8 +907,9 @@ export class MailRoom {
   private sig = '';
 
   constructor(L: OfficeLayout) {
-    const mb = L.mailbox;
+    const mb = L.mailbox ?? { x: 0, z: 0, rot: 0 };
     this.flag = new Group();
+    this.flag.visible = !!L.mailbox;
     const pole = new Mesh(new BoxGeometry(0.02, 0.26, 0.02), new MeshStandardMaterial({ color: 0x333338 }));
     pole.position.y = 0.13;
     const cloth = new Mesh(new BoxGeometry(0.012, 0.09, 0.13), new MeshStandardMaterial({ color: new Color().setRGB(...lin('#f2c14e')) }));
@@ -915,7 +922,8 @@ export class MailRoom {
     this.flag.rotation.y = mb.rot + Math.PI / 2;
     this.group.add(this.flag);
     // Envelope slots in the pigeonholes (row by row, from the top).
-    const ph = L.pigeonholes;
+    // No pigeonholes (a garage): the mail goes out, none piles up.
+    const ph = L.pigeonholes ?? { x: 0, z: 0, rot: 0, cols: 0, rows: 0 };
     const Wd = 3.0;
     const Hh = 1.05;
     for (let j = ph.rows - 1; j >= 0; j--)
@@ -930,7 +938,7 @@ export class MailRoom {
 
   /** One envelope per commit (agent color); a gold seal when its task merged. */
   set(commits: { agentColor: number; merged: boolean; sha: string }[]) {
-    const shown = commits.slice(-this.slots.length);
+    const shown = this.slots.length ? commits.slice(-this.slots.length) : [];
     const sig = shown.map((c) => `${c.sha}${c.agentColor}${c.merged ? 1 : 0}`).join(',');
     if (sig === this.sig) return;
     this.sig = sig;
@@ -1021,8 +1029,9 @@ export class Archive {
         this.plates.setMatrixAt(k++, m.compose(new Vector3(cb.x + fx * 0.32, y, cb.z + fz * 0.32), q, one));
       }
     }
-    const cat = L.catalog;
+    const cat = L.catalog ?? { x: 0, z: 0, rot: 0 };
     this.catPlates = new InstancedMesh(this.catGeo, this.mat, 24);
+    this.catPlates.visible = !!L.catalog;
     k = 0;
     for (let j = 3; j >= 0; j--)
       for (let i = 0; i < 6; i++) {
@@ -1045,7 +1054,7 @@ export class Archive {
   set(memories: number, triples: number, now: number, flash: boolean) {
     if (flash && memories > this.count) {
       this.flashAt = now;
-      this.flashIdx = (memories - 1) % this.plates.count;
+      this.flashIdx = this.plates.count ? (memories - 1) % this.plates.count : -1;
     }
     if (flash && triples > this.triples) this.catFlashAt = now;
     this.count = memories;

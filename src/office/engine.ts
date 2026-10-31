@@ -52,7 +52,8 @@ import { CONFETTI, Confetti, FloorRing, FxSystem, Glow, PaperPlane, Puff, Sparkl
 import { GamesCorner, type GamePlayers } from './gfx/games';
 import { Archive, DeskFrames, DeskScreens, MailRoom, ServerRoom, TaskBoard, Whiteboard, type CardWhere, type TestState, type TodoList } from './gfx/props';
 import { canvas as makeCanvas, emoteTexture, glowTexture, ringTexture, tex, type EmoteKind } from './gfx/textures';
-import { cellCenter, cellOf, COLS, D, officeLayout, passableFn, ROWS, W, type Desk, type OfficeLayout, type Slot, type StationId } from './layout';
+import { cellCenter, cellOf, officeLayout, passableFn, TEMPLATES, type Desk, type OfficeLayout, type Slot, type StationId } from './layout';
+import type { Lot } from '../lib/gen/Lot';
 import { emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type WorldSelection } from './model';
 import { chipFor } from './bubble';
 import { OUTCOME_MS, sentence, type Sentence } from './narrate';
@@ -101,6 +102,8 @@ export interface EngineOptions {
   onfurniture?: (f: FurnitureMenu | null) => void;
   artifactUrl?: (a: Artifact) => string | null;
   narrate?: NarrateFn;
+  /** The repo's lot (build mode's data); the Studio until it arrives. */
+  lot?: Lot | null;
 }
 
 const HELLO_MS = 1800;
@@ -111,8 +114,8 @@ const MADE = new Set(['crowd', 'crowd-goal', 'crowd-ooh', 'whistle', 'whistle-en
 const PINS_KEY = 'codly.office.desks';
 /** How long a speech bubble stays up. */
 const SAY_MS = 4500;
-const OX = -W / 2;
-const OZ = -D / 2;
+/** Where each break-room game is played (it seats as many as its station has slots). */
+const GAME_STATION = { pool: 'games.pool', foosball: 'games.foosball', pingpong: 'games.pingpong', console: 'games.console', library: 'library.chair', coffee: 'kitchen', nap: 'nap.armchair' } as const;
 
 /** A clicked piece of furniture and what it can be used for (The Sims' click menu). */
 export interface FurnitureMenu {
@@ -159,13 +162,6 @@ interface Actor {
   promotedAt?: number | null;
 }
 
-/** Where ghosts float in the memory archive (layout x, z, facing). */
-const GHOST_SPOTS: [number, number, number][] = [
-  [25.9, 22.6, 0],
-  [22.7, 19.6, 0.5],
-  [26.4, 19.7, -0.4],
-];
-
 interface Intern {
   c: Character;
   parent: string;
@@ -184,18 +180,23 @@ export class OfficeEngine {
   private theme: OfficeTheme;
   private opts: EngineOptions;
   private L: OfficeLayout;
-  private passable: (x: number, y: number) => boolean;
+  /** Where layout (0, 0) is in the world: the office frame is offset to center it. */
+  private ox = 0;
+  private oz = 0;
+  private passable: (x: number, y: number) => boolean = () => false;
   private hemi = new HemisphereLight();
   private key = new DirectionalLight();
-  private building: BuildingGfx;
-  private screens: DeskScreens;
-  private board: TaskBoard;
-  private whiteboard: Whiteboard;
-  private clock = new WallClock(0.1, 1.55, 11.65, Math.PI / 2);
+  /** What the lot is made of (mountLot): the building and the props that live on it. */
+  private lotGroup = new Group();
+  private building!: BuildingGfx;
+  private screens!: DeskScreens;
+  private board!: TaskBoard;
+  private whiteboard!: Whiteboard;
+  private clock: WallClock | null = null;
   private fixedHour: number | null = null;
   private minute = Math.floor(Date.now() / 60_000);
-  private server: ServerRoom;
-  private games: GamesCorner;
+  private server!: ServerRoom;
+  private games!: GamesCorner;
   private gazeBufs = new Map<string, Vector3>();
   private breakRoom = new BreakRoom({ prefer: leisure.prefer });
   /** The Sims' plumbob over the selected agent, coloured by its state (sims.ts). */
@@ -208,8 +209,8 @@ export class OfficeEngine {
   private moods = new Map<string, { at: number; mood: { emoji: string; label: string } | null; gait: 'tired' | 'happy' | null }>();
   /** What each agent is doing, so its energy and morale move with it (sims.ts). */
   private onActivity: ((id: string, now: number, act: RestActivity) => void) | null = null;
-  private mail: MailRoom;
-  private archive: Archive;
+  private mail!: MailRoom;
+  private archive!: Archive;
   private frames: DeskFrames;
   private fx = new FxSystem();
   private props = new PropKit();
@@ -238,6 +239,7 @@ export class OfficeEngine {
   /** Build/Buy mode: clicks pick up furniture; `carry` is the piece following the cursor. */
   private build: { onpick: (uid: string) => void; carry: Carry | null } | null = null;
   private ghostKey = '';
+  private ghostList: { id: string; color: number; seed: string; provider: Provider }[] = [];
   private emotes = new Map<EmoteKind, Texture>();
   private glowTex: Texture;
   private ringTex: Texture;
@@ -289,8 +291,7 @@ export class OfficeEngine {
     this.container = container;
     this.opts = opts;
     this.theme = themeAt(this.hourNow());
-    this.L = officeLayout();
-    this.passable = passableFn(this.L);
+    this.L = officeLayout(opts.lot ?? TEMPLATES.studio);
     this.renderer = new WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: false });
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
     this.renderer.toneMapping = NeutralToneMapping;
@@ -304,8 +305,6 @@ export class OfficeEngine {
     this.overlay = new Overlay(container);
 
     this.rig = new CameraRig(1);
-    this.rig.boundsX = W / 2 + 1;
-    this.rig.boundsZ = D / 2 + 1;
     this.key.castShadow = true;
     this.key.shadow.mapSize.set(2048, 2048);
     this.key.shadow.radius = 4;
@@ -313,32 +312,18 @@ export class OfficeEngine {
     this.key.shadow.normalBias = 0.025;
     this.scene.add(this.hemi, this.key, this.key.target);
 
-    this.world.position.set(OX, 0, OZ);
     this.scene.add(this.world);
-    this.building = new BuildingGfx(this.L);
-    this.screens = new DeskScreens(this.L.desks);
-    this.board = new TaskBoard(this.L);
-    this.board.handOf = (id) => this.actors.get(id)?.c.hand ?? null;
-    this.whiteboard = new Whiteboard(this.L);
-    this.building.hang(this.whiteboard.mesh, this.whiteboard.mesh.position.x, this.whiteboard.mesh.position.z);
-    // Above the studio credenza, between the two posters.
-    this.building.hang(this.clock.group, 0.1, 11.65);
-    this.clock.set(new Date());
-    this.server = new ServerRoom(this.L);
-    this.games = new GamesCorner(this.L, { x: OX, z: OZ }, makeCanvas, tex);
-    this.games.onSound = (e, at) => (MADE.has(e.name) ? sound.synth(e.name as never, { at, gain: e.gain }) : sound.play(e.name as Sfx, { at, gain: e.gain }));
+    this.mountLot();
     // The office hears around the camera's focus: louder close up, panned by where it is on screen.
     sound.hearing = (x, z) => {
       const c = this.rig.cur;
-      const d = Math.hypot(x + OX - c.x, z + OZ - c.z);
+      const d = Math.hypot(x + this.ox - c.x, z + this.oz - c.z);
       const near = Math.max(0, 1 - d / (6 + c.dist * 0.35));
       const zoom = Math.min(1, Math.max(0.15, 14 / c.dist));
-      const v = this.v.set(x + OX, 0.8, z + OZ).project(this.rig.camera);
+      const v = this.v.set(x + this.ox, 0.8, z + this.oz).project(this.rig.camera);
       // Behind the chat (backdrop), the office is quieter.
       return { gain: near * zoom * (this.opts.backdrop ? 0.35 : 1), pan: Math.max(-1, Math.min(1, v.x)) * 0.8 };
     };
-    this.mail = new MailRoom(this.L);
-    this.archive = new Archive(this.L);
     this.frames = new DeskFrames(() => this.wake());
     this.glowTex = glowTexture();
     this.ringTex = ringTexture();
@@ -347,15 +332,7 @@ export class OfficeEngine {
     this.hovRing = new Mesh(ringGeo, new MeshBasicMaterial({ map: this.ringTex, transparent: true, depthWrite: false, opacity: 0.55, blending: AdditiveBlending, toneMapped: false }));
     this.selRing.visible = this.hovRing.visible = false;
     this.selRing.renderOrder = this.hovRing.renderOrder = 3;
-    this.world.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, this.clock.group, this.server.group, this.games.group, this.mail.group, this.archive.group, this.frames.group, this.builtins.group, this.decor.group, this.fx.group, this.selRing, this.hovRing);
-    void builtinPieces(this.L)
-      .then((p) => this.builtins.set(p))
-      .then((list) => {
-        this.builtinList = list ?? [];
-        this.regrid();
-        this.shadowDirty = true;
-        this.wake();
-      });
+    this.world.add(this.lotGroup, this.frames.group, this.builtins.group, this.decor.group, this.fx.group, this.selRing, this.hovRing);
     // Characters live in world coordinates (the office frame is offset to center it).
     this.scene.add(this.actorsGroup);
     this.plumbob.visible = false;
@@ -375,7 +352,100 @@ export class OfficeEngine {
     if (w.__OFFICE_DEBUG) w.__officeEngine = this;
   }
 
+  /** Build everything made from the lot: the building, its props (boards, server room, mail,
+   *  archive, games) and the office's own furniture; the walking grid and the camera bounds. */
+  private mountLot() {
+    const L = this.L;
+    this.ox = -L.w / 2;
+    this.oz = -L.d / 2;
+    this.passable = passableFn(L);
+    this.world.position.set(this.ox, 0, this.oz);
+    this.rig.boundsX = L.w / 2 + 1;
+    this.rig.boundsZ = L.d / 2 + 1;
+    this.building = new BuildingGfx(L);
+    this.building.faceCamera(this.rig.cur.yaw);
+    this.screens = new DeskScreens(L.desks);
+    this.board = new TaskBoard(L);
+    this.board.handOf = (id) => this.actors.get(id)?.c.hand ?? null;
+    this.whiteboard = new Whiteboard(L);
+    if (L.whiteboard) this.building.hang(this.whiteboard.mesh, this.whiteboard.mesh.position.x, this.whiteboard.mesh.position.z);
+    // (The Studio's is above the credenza, between the two posters.)
+    this.clock = L.clock && new WallClock(L.clock.x, L.clock.y, L.clock.z, L.clock.rot);
+    if (this.clock && L.clock) {
+      this.building.hang(this.clock.group, L.clock.x, L.clock.z);
+      this.clock.set(new Date());
+    }
+    this.server = new ServerRoom(L);
+    this.games = new GamesCorner(L, { x: this.ox, z: this.oz }, makeCanvas, tex);
+    this.games.onSound = (e, at) => (MADE.has(e.name) ? sound.synth(e.name as never, { at, gain: e.gain }) : sound.play(e.name as Sfx, { at, gain: e.gain }));
+    this.mail = new MailRoom(L);
+    this.archive = new Archive(L);
+    this.lotGroup.add(this.building.group, this.screens.group, this.board.group, this.whiteboard.mesh, ...(this.clock ? [this.clock.group] : []), this.server.group, this.games.group, this.mail.group, this.archive.group);
+    this.breakRoom.capacity(Object.fromEntries(Object.entries(GAME_STATION).map(([g, st]) => [g, L.stations[st].slots.length])));
+    this.builtinList = [];
+    void builtinPieces(L)
+      .then((p) => (this.L === L ? this.builtins.set([...p, ...L.pieces]) : undefined))
+      .then((list) => {
+        if (this.L !== L || this.disposed) return;
+        this.builtinList = list ?? [];
+        this.regrid();
+        this.shadowDirty = true;
+        this.wake();
+      });
+  }
+
+  private unmountLot() {
+    this.building.dispose();
+    this.screens.dispose();
+    this.board.dispose();
+    this.whiteboard.dispose();
+    this.server.dispose();
+    this.games.dispose();
+    this.mail.dispose();
+    this.archive.dispose();
+    this.lotGroup.clear();
+    applyDecor(this.L, []);
+  }
+
   // ───────────── public API ─────────────
+
+  /**
+   * The repo's lot changed (first load, or build mode saved it): rebuild the office from it.
+   * Agents keep who they are; desks are given again and everyone goes where they belong in
+   * the new office at once.
+   */
+  setLot(lot: Lot) {
+    if (this.disposed || lot === this.L.lot || JSON.stringify(lot) === JSON.stringify(this.L.lot)) return;
+    const L = officeLayout(lot);
+    this.unmountLot();
+    this.L = L;
+    this.mountLot();
+    this.deskOf.clear();
+    this.slotOwner.clear();
+    this.forced.clear();
+    this.forcedUntil.clear();
+    this.cardOverride.clear();
+    for (const i of this.interns.values()) i.c.dispose();
+    this.interns.clear();
+    this.assignDesks();
+    // Everyone to their new desk (or the door) at once; the next sync sends them on.
+    const now = performance.now();
+    for (const a of this.actors.values()) {
+      this.errands.clear(a.agentId);
+      const d = this.deskFor(a.agentId);
+      const s = d?.seat ?? L.door.inside;
+      a.c.teleport({ x: s.x + this.ox, z: s.z + this.oz, face: s.face }, d ? 'desk' : 'door', now, false);
+      (a.slot = null), (a.desk = d), (a.placeKey = null), (a.shown = null);
+    }
+    this.applyTheme();
+    this.setDecor(this.pieces);
+    this.placeFrames(false);
+    this.ghostKey = '';
+    this.setGhosts(this.ghostList);
+    if (!this.userMoved && !this.selection) this.overview(true);
+    this.shadowDirty = true;
+    this.sync(true);
+  }
 
   setFiles(files: RepoFile[] | undefined) {
     this.files = files?.length ?? 0;
@@ -453,7 +523,7 @@ export class OfficeEngine {
   private tickClock() {
     const d = new Date();
     if (this.fixedHour != null) d.setHours(Math.floor(this.fixedHour), Math.round((this.fixedHour % 1) * 60), 0);
-    this.clock.set(d);
+    this.clock?.set(d);
     this.theme = themeAt(this.hourNow());
     this.applyTheme();
   }
@@ -536,14 +606,15 @@ export class OfficeEngine {
   /** Screen point of the front door (where job offers are pinned and new hires walk in). */
   doorScreen(): { x: number; y: number } | null {
     const d = this.L.door.inside;
-    const v = new Vector3(d.x + OX, 2.2, d.z + OZ).project(this.rig.camera);
+    const v = new Vector3(d.x + this.ox, 2.2, d.z + this.oz).project(this.rig.camera);
     if (v.z > 1 || Math.abs(v.x) > 1.1 || Math.abs(v.y) > 1.1) return null;
     return { x: ((v.x + 1) / 2) * this.width, y: ((1 - v.y) / 2) * this.height };
   }
 
   /** The memory archive on screen (where the ghosts are), or null when off screen. */
   archiveScreen(): { x: number; y: number } | null {
-    const v = new Vector3(24.8 + OX, 2.3, 18.6 + OZ).project(this.rig.camera); // over its back cabinets
+    const [ax, az] = this.L.archive; // over its back cabinets
+    const v = new Vector3(ax + this.ox, 2.3, az + this.oz).project(this.rig.camera);
     if (v.z > 1 || Math.abs(v.x) > 1.1 || Math.abs(v.y) > 1.1) return null;
     return { x: ((v.x + 1) / 2) * this.width, y: ((1 - v.y) / 2) * this.height };
   }
@@ -579,8 +650,8 @@ export class OfficeEngine {
     let cupAt: Vector3 | null = null;
     for (const [id, act] of this.actors) {
       if (act.c.walking || act.shown?.pose !== 'drink' || act.c.destKey !== act.placeKey) continue;
-      const x = act.c.position.x - OX;
-      const z = act.c.position.z - OZ;
+      const x = act.c.position.x - this.ox;
+      const z = act.c.position.z - this.oz;
       let best: (typeof sources)[number] | null = null;
       let bd = 1.6;
       for (const s of sources) {
@@ -648,7 +719,7 @@ export class OfficeEngine {
         this.keyAt.set(id, next);
         continue;
       }
-      sound.play('key', { at: [act.c.position.x - OX, act.c.position.z - OZ], gain: 0.3 });
+      sound.play('key', { at: [act.c.position.x - this.ox, act.c.position.z - this.oz], gain: 0.3 });
       this.keyAt.set(id, now + (Math.random() < 0.08 ? 500 + Math.random() * 900 : 70 + Math.random() * 150));
     }
   }
@@ -701,7 +772,8 @@ export class OfficeEngine {
   }
 
   private usable(): Piece[] {
-    return [...this.pieces, ...this.builtinList.filter((p) => freeToUse(this.L.items[+p.uid.split(':')[1]]))];
+    // The office's own pieces: a few built-ins; what came with the lot, like bought pieces.
+    return [...this.pieces, ...this.builtinList.filter((p) => (p.uid.startsWith('item:') ? freeToUse(this.L.items[+p.uid.split(':')[1]]) : !p.uid.startsWith('desk:')))];
   }
 
   /** The walking grid with the furniture placed, seats on furniture kept reachable.
@@ -717,7 +789,7 @@ export class OfficeEngine {
     for (const p of this.usable())
       for (const use of usesOf(p.item)) {
         // A spot to stand in front must be on free floor (another piece may be there).
-        const n = spotsOf(p, use).filter((s) => s.pose === 'sit' || this.passable(...cellOf(s.x, s.z))).length;
+        const n = spotsOf(p, use).filter((s) => s.pose === 'sit' || this.passable(...cellOf(this.L, s.x, s.z))).length;
         if (n) out.push({ uid: p.uid, use, n });
       }
     return out;
@@ -790,7 +862,7 @@ export class OfficeEngine {
     const { origin: o, direction: d } = ray.ray;
     if (d.y >= 0) return null;
     const t = (0.7 - o.y) / d.y;
-    const [x, z] = [o.x + d.x * t - OX, o.z + d.z * t - OZ];
+    const [x, z] = [o.x + d.x * t - this.ox, o.z + d.z * t - this.oz];
     const it = this.L.items.find((i) => !modeled(i.type) && BUILT_LABEL[i.type] && Math.abs(x - i.x) < i.w / 2 + 0.1 && Math.abs(z - i.z) < i.d / 2 + 0.1);
     return it ? { label: BUILT_LABEL[it.type]!, actions: stationActions(this.L, it), ...where } : null;
   }
@@ -873,7 +945,8 @@ export class OfficeEngine {
 
   /** Agents let go (the core's ghosts): up to three float by the memory archive. */
   setGhosts(list: { id: string; color: number; seed: string; provider: Provider }[]) {
-    const shown = list.slice(0, GHOST_SPOTS.length);
+    this.ghostList = list;
+    const shown = list.slice(0, this.L.ghosts.length);
     const key = shown.map((g) => g.id).join();
     if (key === this.ghostKey) return;
     this.ghostKey = key;
@@ -881,8 +954,8 @@ export class OfficeEngine {
     const now = performance.now();
     this.ghosts = shown.map((g, i) => {
       const c = new Character(`ghost:${g.id}`, lookFor(g.seed, g.color, 'worker', g.provider), { emotes: this.emote, props: this.props });
-      const [x, z, face] = GHOST_SPOTS[i];
-      c.teleport({ x: x + OX, z: z + OZ, face }, 'ghost', now, false);
+      const [x, z, face] = this.L.ghosts[i];
+      c.teleport({ x: x + this.ox, z: z + this.oz, face }, 'ghost', now, false);
       c.haunt(now);
       this.actorsGroup.add(c.root);
       return c;
@@ -923,20 +996,12 @@ export class OfficeEngine {
     for (const i of this.interns.values()) i.c.dispose();
     this.actors.clear();
     this.interns.clear();
-    this.building.dispose();
-    this.screens.dispose();
-    this.board.dispose();
-    this.whiteboard.dispose();
-    this.server.dispose();
-    this.games.dispose();
-    this.mail.dispose();
+    this.unmountLot();
     for (const c of this.ghosts) c.dispose();
     this.decor.dispose();
     this.builtins.dispose();
-    applyDecor(this.L, []);
     sound.hearing = null;
     sound.music(null);
-    this.archive.dispose();
     this.frames.dispose();
     this.props.dispose();
     for (const t of this.emotes.values()) t.dispose();
@@ -1085,7 +1150,8 @@ export class OfficeEngine {
     const deskSlot = (stand: boolean) => (desk ? { slot: stand ? desk.stand : desk.seat, key: stand ? 'desk:stand' : 'desk' } : null);
     switch (place.kind) {
       case 'desk':
-        return deskSlot(!!place.stand) ?? this.resolve(a, { kind: 'station', id: 'meeting.table' });
+        // No desk of its own (more agents than desks): the meeting table, else it waits by the door.
+        return deskSlot(!!place.stand) ?? this.resolve(a, { kind: 'station', id: 'meeting.table' }) ?? this.claim(a, 'wait', 'wait');
       case 'door':
         return { slot: this.L.door.outside, key: 'door' };
       case 'station':
@@ -1133,9 +1199,8 @@ export class OfficeEngine {
         return { slot: st.slots[want], key };
       }
     }
-    if (a.slot?.startsWith(station + ':')) {
-      const k = +a.slot.slice(station.length + 1);
-      return { slot: st.slots[k], key };
+    if (a.slot?.startsWith(station + ':') && st.slots[+a.slot.slice(station.length + 1)]) {
+      return { slot: st.slots[+a.slot.slice(station.length + 1)], key };
     }
     // Closest free slot.
     let best = -1;
@@ -1144,7 +1209,7 @@ export class OfficeEngine {
     st.slots.forEach((s, k) => {
       const owner = this.slotOwner.get(`${station}:${k}`);
       if (owner && owner !== a.agentId) return;
-      const d = Math.hypot(s.x + OX - p.x, s.z + OZ - p.z);
+      const d = Math.hypot(s.x + this.ox - p.x, s.z + this.oz - p.z);
       if (d < bd) {
         bd = d;
         best = k;
@@ -1263,7 +1328,7 @@ export class OfficeEngine {
     if (!instant) {
       // Walk in through the front door.
       const d = this.L.door.outside;
-      c.teleport({ x: d.x + OX, z: d.z + OZ, face: Math.PI }, 'door', now, false);
+      c.teleport({ x: d.x + this.ox, z: d.z + this.oz, face: Math.PI }, 'door', now, false);
       c.opacity = 0;
       c.fadeTo(1, now, 350);
       if (!this.opts.reducedMotion) this.fx.add(new FloorRing(new Vector3(d.x, 0, d.z - 0.4), identity(a.color, this.theme.name).glow, now, this.ringTex));
@@ -1297,7 +1362,7 @@ export class OfficeEngine {
     this.paintDesk(act, raw);
     // Place: resolve and walk if it changed.
     let res = this.resolve(act, shown.place);
-    if (!res) res = act.desk ? { slot: act.desk.seat, key: 'desk' } : null;
+    if (!res) res = act.desk ? { slot: act.desk.seat, key: 'desk' } : this.claim(act, 'wait', 'wait');
     if (!res) return;
     // A break spot that was taken (a full pool table): it sits at its desk, not holding a cue there.
     if (res.key === 'desk' && shown.place.kind !== 'desk' && (shown.icon === 'idle' || shown.icon === 'sleep')) {
@@ -1305,11 +1370,11 @@ export class OfficeEngine {
       act.shown = shown;
       this.forced.delete(a.id);
     }
-    if (shown.place.kind !== 'station' && shown.place.kind !== 'lead') this.release(act);
+    if (shown.place.kind !== 'station' && shown.place.kind !== 'lead' && res.key !== 'wait') this.release(act);
     if (res.key !== act.placeKey) {
       act.placeKey = res.key;
       if (instant || !this.mounted) {
-        c.teleport({ x: res.slot.x + OX, z: res.slot.z + OZ, face: res.slot.face }, res.key, now, false);
+        c.teleport({ x: res.slot.x + this.ox, z: res.slot.z + this.oz, face: res.slot.face }, res.key, now, false);
       } else this.walkTo(act, res, now);
     }
     // Card in hand: the real task card rides along; otherwise a prop.
@@ -1324,14 +1389,14 @@ export class OfficeEngine {
 
   private walkTo(act: Actor, res: { slot: Slot; key: string }, now: number) {
     const c = act.c;
-    const final = { x: res.slot.x + OX, z: res.slot.z + OZ, face: res.slot.face };
+    const final = { x: res.slot.x + this.ox, z: res.slot.z + this.oz, face: res.slot.face };
     if (this.opts.reducedMotion) {
       c.teleport(final, res.key, now, true);
       return;
     }
-    const [sx, sz] = cellOf(c.position.x - OX, c.position.z - OZ);
-    const [gx, gz] = cellOf(res.slot.x, res.slot.z);
-    const raw = aStar(COLS, ROWS, sx, sz, gx, gz, this.passable);
+    const [sx, sz] = cellOf(this.L, c.position.x - this.ox, c.position.z - this.oz);
+    const [gx, gz] = cellOf(this.L, res.slot.x, res.slot.z);
+    const raw = aStar(this.L.cols, this.L.rows, sx, sz, gx, gz, this.passable);
     if (!raw) {
       c.teleport(final, res.key, now, true);
       return;
@@ -1339,7 +1404,7 @@ export class OfficeEngine {
     const cells = smooth([sx, sz], raw, this.passable);
     const pts: [number, number][] = cells.slice(0, -1).map(([x, z]) => {
       const [wx, wz] = cellCenter(x, z);
-      return [wx + OX, wz + OZ];
+      return [wx + this.ox, wz + this.oz];
     });
     let len = 0;
     let px = c.position.x;
@@ -1389,7 +1454,7 @@ export class OfficeEngine {
         const off = k === 2 ? 0.45 : 0;
         const fx = Math.sin(d.rot);
         const fz = Math.cos(d.rot);
-        c.teleport({ x: d.intern.x + OX - fx * off, z: d.intern.z + OZ - fz * off, face: d.intern.face }, 'intern', now, false);
+        c.teleport({ x: d.intern.x + this.ox - fx * off, z: d.intern.z + this.oz - fz * off, face: d.intern.face }, 'intern', now, false);
         c.setPose('read', now);
         c.setProp('paper');
         if (!instant && !this.opts.reducedMotion) c.root.scale.setScalar(0.01);
@@ -1493,7 +1558,7 @@ export class OfficeEngine {
     const act = this.actors.get(id);
     if (!act) return null;
     const p = act.c.position;
-    return new Vector3(p.x - OX, dy, p.z - OZ);
+    return new Vector3(p.x - this.ox, dy, p.z - this.oz);
   }
 
   private play(f: Fx, now: number, wall: number) {
@@ -1520,7 +1585,8 @@ export class OfficeEngine {
       case 'plane': {
         const from = this.charLocal(f.agentId, 0.95);
         const lead = f.to ? this.deskFor(f.to) : null;
-        const to = lead ? this.local(lead.x, 0.85, lead.z) : this.local(21.5, 0.9, 3.5);
+        const ld = lead ?? this.L.desks.find((d) => d.lead);
+        const to = ld ? this.local(ld.x, 0.85, ld.z) : this.local(this.L.door.inside.x, 0.9, this.L.door.inside.z);
         if (!from) return;
         if (rm) this.fx.add(new Glow(to, t.lamp, 1.2, now, this.glowTex, 900));
         else this.fx.add(new PaperPlane(from, to, now, () => this.fx.add(new Glow(to, t.lamp, 1.2, performance.now(), this.glowTex, 900))));
@@ -1528,6 +1594,7 @@ export class OfficeEngine {
       }
       case 'sticky': {
         const wb = this.L.whiteboard;
+        if (!wb) return;
         this.fx.add(new Glow(this.local((wb.x0 + wb.x1) / 2 + 1.4, 1.3, wb.z + 0.2), lin('#ffe58a'), 2.6, now, this.glowTex, 1300));
         return;
       }
@@ -1538,11 +1605,12 @@ export class OfficeEngine {
       case 'mail': {
         this.mail.raise(now);
         const mb = this.L.mailbox;
+        if (!mb) return;
         this.fx.add(new Glow(this.local(mb.x, 0.9, mb.z), lin('#ffd98a'), 1.4, now, this.glowTex, 1000));
         return;
       }
       case 'merge': {
-        const mb = this.L.mailbox;
+        const mb = this.L.mailbox ?? { x: this.L.door.inside.x - 0.5, z: this.L.door.inside.z };
         sound.play('jingle-merge', { gain: 0.6 });
         const at = this.local(mb.x + 0.5, 1.0, mb.z);
         this.mail.raise(now, 4000);
@@ -1552,6 +1620,7 @@ export class OfficeEngine {
       }
       case 'tests': {
         const tm = this.L.testMonitor;
+        if (!tm) return;
         const at = this.local(tm.x, tm.y, tm.z + 0.4);
         this.fx.add(new Glow(at, f.ok ? t.success : t.danger, 3.2, now, this.glowTex, 1600));
         if (f.ok && !rm) this.fx.add(new Confetti(this.local(tm.x, tm.y + 0.6, tm.z + 0.6), CONFETTI, now, (wall & 0xffff) ^ 3, 70, 1700, this.glowTex));
@@ -1559,6 +1628,7 @@ export class OfficeEngine {
         return;
       }
       case 'shelf': {
+        if (!this.L.shelves.length) return;
         const s = this.L.shelves[(wall >>> 4) % this.L.shelves.length]; // >>> keeps it positive (Date.now() overflows >> )
         this.fx.add(new Glow(this.local(s.x + Math.sin(s.rot) * 0.4, 1.1, s.z + Math.cos(s.rot) * 0.4), lin('#ffe1a8'), 2.4, now, this.glowTex, 1400));
         return;
@@ -1594,7 +1664,8 @@ export class OfficeEngine {
     if (phase === 'act') {
       const p = this.charLocal(agentId, 0.7);
       if (p && !this.opts.reducedMotion) {
-        if (e.kind === 'commit') this.fx.add(new Puff(this.local(this.L.mailbox.x, 0.85, this.L.mailbox.z), lin('#f3e6cc'), now, this.glowTex));
+        const mb = this.L.mailbox;
+        if (e.kind === 'commit' && mb) this.fx.add(new Puff(this.local(mb.x, 0.85, mb.z), lin('#f3e6cc'), now, this.glowTex));
         if (e.kind === 'memory') this.fx.add(new Glow(p.clone().setY(0.9), lin('#ffd98a'), 1.6, now, this.glowTex, 1100));
       }
     }
@@ -1612,11 +1683,11 @@ export class OfficeEngine {
     const pts: Vector3[] = [];
     for (const [x, z] of [
       [0, 0],
-      [W, 0],
-      [W, D],
-      [0, D],
+      [this.L.w, 0],
+      [this.L.w, this.L.d],
+      [0, this.L.d],
     ])
-      pts.push(new Vector3(x + OX, 0, z + OZ), new Vector3(x + OX, 2.3, z + OZ));
+      pts.push(new Vector3(x + this.ox, 0, z + this.oz), new Vector3(x + this.ox, 2.3, z + this.oz));
     const ins = this.freeInsets();
     const ax = Math.max(0.3, (this.width - ins.left - ins.right) / Math.max(1, this.width));
     const ay = Math.max(0.3, (this.height - ins.top - ins.bottom) / Math.max(1, this.height));
@@ -1640,7 +1711,7 @@ export class OfficeEngine {
     }
     if (sel.taskId) {
       const p = this.board.cardPosition(sel.taskId);
-      if (p) this.rig.flyTo({ x: p.x + OX + 2.5, z: p.z + OZ, y: 0.6, dist: 13, pitch: 0.8 }, rm);
+      if (p) this.rig.flyTo({ x: p.x + this.ox + 2.5, z: p.z + this.oz, y: 0.6, dist: 13, pitch: 0.8 }, rm);
       this.rig.follow = null;
       return;
     }
@@ -1746,7 +1817,7 @@ export class OfficeEngine {
           if (this.disposed) return;
           if (this.build) {
             const g = this.build.carry && this.groundOf(hoverAt.x, hoverAt.y);
-            if (g) this.moveCarry(g.x - OX, g.z - OZ);
+            if (g) this.moveCarry(g.x - this.ox, g.z - this.oz);
             return;
           }
           this.setLocalHover(this.pick(hoverAt.x, hoverAt.y));
@@ -2157,7 +2228,7 @@ export class OfficeEngine {
       }
       ring.visible = true;
       const p = act.c.position;
-      ring.position.set(p.x - OX, 0.025, p.z - OZ);
+      ring.position.set(p.x - this.ox, 0.025, p.z - this.oz);
       ring.scale.setScalar(size * act.c.look.scale);
       const a = this.model.agents.get(act.agentId);
       (ring.material as MeshBasicMaterial).color.setRGB(...identity(a?.color ?? 0, this.theme.name).glow);
@@ -2291,7 +2362,7 @@ export class OfficeEngine {
     }
     for (const r of this.L.rooms) {
       const title = r.id === 'library' && this.files ? `${r.name} · ${this.files.toLocaleString()} files` : r.name;
-      specs.push({ key: 'r:' + r.id, kind: 'room', world: new Vector3(r.label[0] + OX, 0.05, r.label[1] + OZ), dy: 0, priority: 20, title });
+      specs.push({ key: 'r:' + r.id, kind: 'room', world: new Vector3(r.label[0] + this.ox, 0.05, r.label[1] + this.oz), dy: 0, priority: 20, title });
     }
     this.overlay.update(specs, this.rig.camera, this.width, this.height, this.freeInsets());
     return live;

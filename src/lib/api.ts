@@ -34,6 +34,7 @@ import type { HireManifest } from './gen/HireManifest';
 import type { Applicant } from './gen/Applicant';
 import type { Placed } from './gen/Placed';
 import type { Shop } from './gen/Shop';
+import type { Lot } from './gen/Lot';
 import type { HireReview } from './gen/HireReview';
 import type { LaunchPreview } from './gen/LaunchPreview';
 import type { Memory } from './gen/Memory';
@@ -171,6 +172,10 @@ export const api = {
   officePlace: (piece: Placed) => call<Shop>('office_place', { piece }),
   /** Sell a piece of furniture back for the full price. */
   officeSell: (uid: string) => call<Shop>('office_sell', { uid }),
+  /** Build mode: the open repo's lot (walls, floors, furniture), made on the first read. */
+  officeLot: () => call<Lot>('office_lot', {}),
+  /** Build mode: save the lot (checked by the core); returns it as stored. */
+  officeSaveLot: (lot: Lot) => call<Lot>('office_save_lot', { lot }),
   /** The open repo's changes to the global team (members switched off, its own members). */
   setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   /** A request's own mode, permissions and Lead model (null fields = the Settings defaults). */

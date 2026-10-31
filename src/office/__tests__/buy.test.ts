@@ -6,10 +6,11 @@ import { officeLayout, passableFn, cellOf } from '../layout';
 const piece = (item: string, x: number, z: number, w = 1, d = 0.5, extra: Partial<Piece> = {}): Piece => ({ uid: `${item}@${x},${z}`, item, x, y: 0, z, rot: 0, dims: { w, d, h: 0.5 }, ...extra });
 
 describe('Build/Buy', () => {
-  it('has a model file (the office’s own pieces: none) and a price for every piece', () => {
+  it('has a model file (the office’s own pieces: a footprint) and a price for every piece', () => {
     const files = new Set(Object.keys(import.meta.glob('/public/furniture/*/*.{glb,gltf}')));
     for (const f of FURNITURE) {
-      if (!('builtin' in f)) expect(files.has(`/public/furniture/${f.src}`), f.src).toBe(true);
+      if (f.builtin) expect(f.hidden && f.w! > 0 && f.d! > 0, f.id).toBe(true);
+      else expect(files.has(`/public/furniture/${f.src}`), f.src).toBe(true);
       expect(f.price, f.id).toBeGreaterThan(0);
     }
     expect(new Set(FURNITURE.map((f) => f.id)).size).toBe(FURNITURE.length);
@@ -47,7 +48,7 @@ describe('Build/Buy', () => {
   it('blocks the walking grid where pieces stand', () => {
     const L = officeLayout();
     const ok = passableFn(L);
-    const [cx, cz] = cellOf(19.5, 18.75);
+    const [cx, cz] = cellOf(L, 19.5, 18.75);
     applyDecor(L, [piece('kenney.loungeSofa', 19.5, 18.75)]);
     expect(ok(cx, cz)).toBe(false);
     applyDecor(L, []);

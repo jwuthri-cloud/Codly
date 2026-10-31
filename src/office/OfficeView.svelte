@@ -29,6 +29,7 @@
   import type { JobOffer } from '../lib/gen/JobOffer';
   import type { Placed } from '../lib/gen/Placed';
   import type { Shop } from '../lib/gen/Shop';
+  import type { Lot } from '../lib/gen/Lot';
   import GhostBoard from './GhostBoard.svelte';
   import BuyMode from './BuyMode.svelte';
   import FurnitureMenu from './FurnitureMenu.svelte';
@@ -69,6 +70,8 @@
     /** Agents let go (ghosts by the memory archive), and bringing one back. */
     ghosts?: Agent[];
     onbringback?: (agentId: string) => void;
+    /** The repo's lot: its walls, floors and furniture (null: the Studio). */
+    lot?: Lot | null;
     /** Build/Buy: the budget and furniture (null: not available). */
     shop?: Shop | null;
     onplace?: (piece: Placed) => void;
@@ -106,6 +109,7 @@
     onpickapplicant,
     ghosts = [],
     onbringback,
+    lot = null,
     shop = null,
     onplace,
     onsell,
@@ -196,6 +200,7 @@
       },
       artifactUrl,
       narrate,
+      lot,
     });
     el.classList.toggle('of-backdrop', backdrop);
     e.setFiles($state.snapshot(files) as RepoFile[] | undefined);
@@ -299,6 +304,9 @@
   });
   $effect(() => {
     engine?.setGhosts(ghosts.map((g) => ({ id: g.id, color: g.color, seed: g.look_seed || g.id, provider: g.provider })));
+  });
+  $effect(() => {
+    if (lot) engine?.setLot(lot);
   });
   $effect(() => {
     engine?.setDecor(shop?.placed ?? []);

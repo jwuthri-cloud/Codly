@@ -30,7 +30,8 @@ import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
 import { makeApplicants } from './util/career';
-import { demoBringBack, demoDigest, demoGhosts, demoLook, demoPlace, demoSell, demoShop, demoTrust } from './demo/office';
+import { demoBringBack, demoDigest, demoGhosts, demoLook, demoLot, demoPlace, demoSaveLot, demoSell, demoShop, demoTrust } from './demo/office';
+import type { Lot } from './gen/Lot';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
@@ -298,6 +299,10 @@ export class MockTransport implements Transport {
         return demoPlace(sim, a.piece as Placed);
       case 'office_sell':
         return demoSell(sim, String(a.uid));
+      case 'office_lot':
+        return demoLot();
+      case 'office_save_lot':
+        return demoSaveLot(a.lot as Lot);
       case 'set_agent_model':
         return null;
       case 'create_task':

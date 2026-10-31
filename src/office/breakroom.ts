@@ -66,7 +66,18 @@ export class BreakRoom {
   /** What each agent just finished (it does something else until `until`). */
   private done = new Map<string, { key: string; until: number }>();
 
+  /** How many each game seats in this office (a garage has no pool table: 0). */
+  private seatsOf: Record<Game, number> = { ...SEATS };
+
   constructor(private opts: BreakRoomOptions = {}) {}
+
+  /** The office's own seats per game (its stations' slots); the Studio's when not given. */
+  capacity(seats: Partial<Record<Game, number>>) {
+    this.seatsOf = { ...SEATS };
+    for (const [g, n] of Object.entries(seats) as [Game, number][]) this.seatsOf[g] = Math.min(SEATS[g], n);
+    // Seats that are gone free their players.
+    for (const [id, s] of [...this.seats]) if (s.game !== 'piece' && s.slot >= this.seatsOf[s.game]) this.seats.delete(id);
+  }
 
   /** When a lonely player gives up (the engine wakes then), or Infinity. */
   nextAt(): number {
@@ -92,7 +103,7 @@ export class BreakRoom {
   }
 
   private occupants(game: Game): (string | null)[] {
-    const out: (string | null)[] = Array(SEATS[game]).fill(null);
+    const out: (string | null)[] = Array(this.seatsOf[game]).fill(null);
     for (const [id, s] of this.seats) if (s.game === game) out[s.slot] = id;
     return out;
   }
@@ -177,7 +188,7 @@ export class BreakRoom {
         continue;
       }
       if (prefer !== 'console') {
-        const mine = tables.filter((g) => !this.tired(id, g, now));
+        const mine = tables.filter((g) => this.seatsOf[g] >= 2 && !this.tired(id, g, now));
         // 1. Join someone waiting alone.
         const waiting = mine.find((g) => this.occupants(g).filter(Boolean).length === 1);
         if (waiting) {

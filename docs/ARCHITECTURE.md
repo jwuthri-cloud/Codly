@@ -62,7 +62,10 @@ decision, commit, verify, merge, memory, triple). Each event is persisted with a
   each agent's own todo list, task DAG, diffs, terminal, approvals inbox, inspector.
 - **World** (`src/office/`): a pure reducer (`reducer.ts`) over the same events → per-agent activity →
   locomotion and poses in the three.js engine (`engine.ts`), plus `sims.ts` (needs, matchmaking),
-  `traits.ts` and the break room.
+  `traits.ts` and the break room. The building is the repo's **lot** (core `lot:{ws}`, `crate::lot`):
+  walls, doors, windows, floor tiles and furniture as data; `layout.ts` finds the rooms and turns
+  furniture with a job (desks, racks, shelves, the mailbox, archive cabinets) into stations. A
+  repo's first lot is the Studio (`src/office/lots/studio.json`) if it has history, else the Garage.
   Honesty contract: ≤ 250 ms from event to visible state, no random wandering by default,
   provenance on every bubble.
 - **Inspector** (both views): what it's doing now and **why** — every fact carries a badge:
