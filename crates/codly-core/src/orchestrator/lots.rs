@@ -6,7 +6,8 @@
 //! The first read moves what came before lots in: every repo gets a plot of its own, free, with
 //! the lot it had (`lot:{ws}`, or the Studio or Garage it would have got), and the furniture
 //! Build/Buy sold it (`decor:{ws}`) joins that lot and the wallet's ledger. After that, a newly
-//! opened repo gets a small plot, free: the first one with the Garage (a gift), later ones bare.
+//! opened repo gets a small plot with the Garage, both gifts: every office can work from day one,
+//! and gifts sell for nothing, so a free Garage can't be farmed for coins.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -21,8 +22,6 @@ use crate::price;
 use crate::store::Store;
 
 const SLOTS: &str = "lots:slots";
-/// Set once the gift Garage has been given: later repos start on a bare plot.
-const GARAGE_GIVEN: &str = "lots:garage";
 /// The neighbourhood is this many plots wide; more rows are added as needed.
 const COLS: i64 = 4;
 /// The neighbourhood at first: 4 × 3 plots, row by row.
@@ -103,7 +102,6 @@ pub(super) fn slots(store: &Store) -> Result<Vec<Row>> {
     static ENSURE: Mutex<()> = Mutex::new(());
     let _g = ENSURE.lock().unwrap_or_else(|e| e.into_inner());
     let mut writes = vec![];
-    let mut garage = store.kv_get(GARAGE_GIVEN)?.is_some();
     let mut rows = match read_rows(store)? {
         Some(rows) if housed(&rows) => return Ok(rows),
         Some(rows) => rows,
@@ -127,7 +125,6 @@ pub(super) fn slots(store: &Store) -> Result<Vec<Row>> {
                 let size = price::size_for(w, d).unwrap_or(LotSizeName::Large);
                 let (pw, pd) = dims(size);
                 let lot = design::fit(lot.clone(), pw, pd).unwrap_or(lot);
-                garage |= lot.template == "garage" && !lot.gift.is_empty();
                 let i = free_plot(&mut rows, size);
                 (rows[i].owned, rows[i].workspace, rows[i].gift) = (true, Some(o.id.clone()), true);
                 writes.push((lot_key(&rows[i].id), json(&lot)?));
@@ -145,22 +142,18 @@ pub(super) fn slots(store: &Store) -> Result<Vec<Row>> {
             rows
         }
     };
-    // Repos opened since: a small plot, free; the first gets the gift Garage, the rest bare.
+    // Repos opened since: a small plot with the gift Garage.
     for o in offices.iter().rev() {
         if rows.iter().any(|r| r.workspace.as_deref() == Some(o.id.as_str())) {
             continue;
         }
         let i = free_plot(&mut rows, LotSizeName::Small);
         let (w, d) = dims(LotSizeName::Small);
-        let lot = if garage { design::empty(w, d) } else { design::fit(design::first(false, vec![]), w, d).expect("the garage fits a small plot") };
-        garage = true;
+        let lot = design::fit(design::first(false, vec![]), w, d).expect("the garage fits a small plot");
         (rows[i].owned, rows[i].workspace, rows[i].gift) = (true, Some(o.id.clone()), true);
         writes.push((lot_key(&rows[i].id), json(&lot)?));
     }
     writes.push((SLOTS.into(), json(&rows)?));
-    if garage {
-        writes.push((GARAGE_GIVEN.into(), Some(now_ms().to_string())));
-    }
     store.kv_write(&writes)?;
     Ok(rows)
 }
@@ -471,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_repo_gets_a_small_plot_and_only_the_first_a_garage() {
+    fn every_new_repo_gets_a_small_plot_with_a_gift_garage() {
         let store = Store::open_in_memory().unwrap();
         let a = ws(&store, "a");
         let lot = lot_of(&store, &a).unwrap();
@@ -479,7 +472,7 @@ mod tests {
         assert_eq!(lot.gift.len(), design::ids(&lot).len());
         let b = ws(&store, "b");
         let lot = lot_of(&store, &b).unwrap();
-        assert!(design::is_empty(&lot) && lot.template.is_empty(), "the second is a bare plot");
+        assert_eq!(lot.template, "garage", "every repo can work: the second gets one too");
         let all = list(&store).unwrap();
         for w in [&a, &b] {
             let s = slot(&all, w);
@@ -487,14 +480,6 @@ mod tests {
         }
         assert_eq!(coins(&store), 0, "nothing was paid, and nothing sells: {all:?}");
         assert!(all.iter().all(|s| s.sells_for == 0));
-        // Buy a garage for the bare one, at the price of building it.
-        let price = price::value(&design::template("garage").unwrap());
-        assert!(buy(&store, &slot(&all, &b).id, Some("garage")).unwrap_err().to_string().contains("not enough coins"));
-        wallet::grant(&store, price, "test").unwrap();
-        let w = buy(&store, &slot(&all, &b).id, Some("garage")).unwrap();
-        assert_eq!(w.balance, 0);
-        let lot = lot_of(&store, &b).unwrap();
-        assert!(lot.gift.is_empty() && lot.template == "garage");
         assert!(buy(&store, &slot(&all, &b).id, Some("garage")).is_err(), "something stands there");
         assert!(buy(&store, &slot(&all, &b).id, None).is_err(), "already yours");
     }
