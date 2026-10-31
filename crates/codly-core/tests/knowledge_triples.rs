@@ -157,7 +157,7 @@ fn add_triple_nests_inside_the_callers_transaction() {
 // ───────────────────────────── derive_triples ─────────────────────────────
 
 fn ev(kind: EventKind) -> EventRow {
-    EventRow { id: 42, ts: 1_700_000_000_000, agent_id: Some("agent-id-1".into()), task_id: Some("task-id-1".into()), run_id: None, kind }
+    EventRow { id: 42, ts: 1_700_000_000_000, agent_id: Some("agent-id-1".into()), task_id: Some("task-id-1".into()), run_id: None, workspace_id: None, kind }
 }
 
 fn task(key: &str, status: TaskStatus, assignee: Option<&str>, deps: &[&str]) -> Task {

@@ -84,16 +84,17 @@ impl Inner {
         });
     }
 
-    pub(super) async fn search(&self, query: &str, k: usize) -> anyhow::Result<SearchResult> {
-        let idx = self.index().ok_or_else(|| anyhow!("the code index is not ready; use grep/rg instead"))?;
+    /// `ws_id`: the asking agent's office (only the open one has its index loaded).
+    pub(super) async fn search(&self, ws_id: Option<&str>, query: &str, k: usize) -> anyhow::Result<SearchResult> {
+        let idx = self.index_of(ws_id).ok_or_else(|| anyhow!("the code index is not ready; use grep/rg instead"))?;
         let q = query.to_string();
         tokio::task::spawn_blocking(move || guard("code index", || idx.search(&q, k))).await?
     }
 
     /// The pointer pack for a task prompt, bounded in time so a long index refresh never
     /// delays a worker start.
-    pub(super) async fn pointer_pack(&self, query: &str) -> Option<(String, SearchResult)> {
-        let idx = self.index()?;
+    pub(super) async fn pointer_pack(&self, ws_id: &str, query: &str) -> Option<(String, SearchResult)> {
+        let idx = self.index_of(Some(ws_id))?;
         let q = query.to_string();
         let job = tokio::task::spawn_blocking(move || guard("code index", || idx.pointer_pack(&q)));
         match tokio::time::timeout(Duration::from_secs(3), job).await {
@@ -443,7 +444,7 @@ impl Inner {
             tracing::info!("keeping {wt}: {e}");
         }
         drop(_g);
-        if let Some(idx) = self.index().filter(|_| !touched.is_empty()) {
+        if let Some(idx) = self.index_of(Some(&ws.id)).filter(|_| !touched.is_empty()) {
             let paths: Vec<PathBuf> = touched.into_iter().map(PathBuf::from).collect();
             tokio::task::spawn_blocking(move || {
                 if let Err(e) = guard("code index", || idx.update_paths(&paths)) {

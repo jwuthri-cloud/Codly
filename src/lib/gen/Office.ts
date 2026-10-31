@@ -7,4 +7,8 @@ export type Office = { id: string, name: string, repo_path: string,
 /**
  * Agents working there, the Lead aside.
  */
-crew: number, };
+crew: number, 
+/**
+ * Its tasks in flight now (running, in review or merging): each keeps an agent busy.
+ */
+working: number, };

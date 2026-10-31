@@ -44,6 +44,8 @@ export interface SceneState {
   /** The open repo's crew (the Lead aside) and how many of them work right now. */
   crew: number;
   working: number;
+  /** Your other offices' tasks in flight, by workspace id: they keep working, lit. */
+  away: Map<string, number>;
   /** The plot whose panel is open. */
   selected: string | null;
 }
@@ -79,7 +81,7 @@ export class NeighbourhoodScene {
   private gfx = new Map<string, PlotGfx>();
   private plots: Plot[] = [];
   private geos: BufferGeometry[] = [];
-  private state: SceneState = { slots: [], lots: new Map(), live: null, crew: 0, working: 0, selected: null };
+  private state: SceneState = { slots: [], lots: new Map(), live: null, crew: 0, working: 0, away: new Map(), selected: null };
   private hover: string | null = null;
   private theme: OfficeTheme;
   private width = 1;
@@ -322,7 +324,8 @@ export class NeighbourhoodScene {
       g.fill.color.copy(color(hot ? mix(base, [1, 1, 1], 0.18) : sale ? mix(base, [1, 1, 1], 0.06) : base));
       g.edge.color.copy(color(hot ? t.amber : sale ? mix(ink, base, 0.25) : ink));
       g.edge.opacity = hot ? 1 : sale ? 0.55 : 0.85;
-      const lights = lightsOf(s, live, this.state.working);
+      const working = live ? this.state.working : (this.state.away.get(s.workspace_id ?? '') ?? 0);
+      const lights = lightsOf(s, live, working);
       if (g.glass) {
         if (lights === 'off') {
           g.glass.color.copy(color(night ? lin('#2a3046') : lin(MAT.glass)));
@@ -333,7 +336,7 @@ export class NeighbourhoodScene {
           g.glass.emissive.copy(color(t.lamp)).multiplyScalar(k);
         }
       }
-      const sign = signOf(live ? { ...s, crew: this.state.crew } : s, live, this.state.working);
+      const sign = signOf(live ? { ...s, crew: this.state.crew } : s, live, working);
       const key = `${sign.title}|${sign.sub}|${sign.state}|${hot}`;
       if (key !== g.signKey) {
         g.signKey = key;

@@ -405,7 +405,7 @@ mod tests {
             created_at: now_ms(),
             updated_at: now_ms(),
         };
-        let row = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, kind: EventKind::AgentChanged { agent } };
+        let row = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind: EventKind::AgentChanged { agent } };
         store.append_event(Some(ws), &row).unwrap();
     }
 

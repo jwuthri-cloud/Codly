@@ -65,6 +65,7 @@ impl Inner {
             approval.task_id = ctx.task_id.clone(); // adapters do not know Codly's tasks
         }
         if r.kind.is_ephemeral() {
+            r.workspace_id = ctx.ws.clone();
             let _ = self.bus.send(r);
             return;
         }
@@ -88,7 +89,7 @@ impl Inner {
 
     /// Broadcast a persisted (or ephemeral) row and derive knowledge triples from it.
     pub(super) fn publish(&self, ws: Option<&str>, r: &EventRow) {
-        let _ = self.bus.send(r.clone());
+        let _ = self.bus.send(EventRow { workspace_id: ws.map(String::from), ..r.clone() });
         if r.id > 0 {
             self.derive_triples(ws, r);
             self.detect_artifacts(ws, r);
@@ -626,7 +627,7 @@ impl Inner {
         }
         let agent_name = r.agent_id.as_deref().and_then(|id| self.label(id, true));
         let task_key = r.task_id.as_deref().and_then(|id| self.label(id, false));
-        let rel = self.relative_paths(r);
+        let rel = self.relative_paths(ws, r);
         let resolve = |id: &str| self.label(id, true).or_else(|| self.label(id, false));
         let derived = guard("memory::derive_triples", || {
             Ok(memory::derive_triples_with(ws, &rel, agent_name.as_deref(), task_key.as_deref(), &resolve))
@@ -659,7 +660,7 @@ impl Inner {
 
     /// The event with file paths made relative to the agent's worktree (or the repo), so
     /// knowledge-graph file entities are the same across worktrees: `file:src/app.ts`.
-    fn relative_paths(&self, r: &EventRow) -> EventRow {
+    fn relative_paths(&self, ws: Option<&str>, r: &EventRow) -> EventRow {
         let mut roots: Vec<String> = Vec::new();
         if let Some(a) = r.agent_id.as_deref() {
             if let Some(l) = lock(&self.live).get(a) {
@@ -669,7 +670,9 @@ impl Inner {
                 roots.push(wt);
             }
         }
-        if let Some(ws) = self.workspace() {
+        // The event's own repo: another office may be the open one.
+        let open = self.workspace().filter(|w| Some(w.id.as_str()) == ws);
+        if let Some(ws) = open.or_else(|| ws.and_then(|id| self.store.workspace(id).ok().flatten())) {
             roots.push(ws.repo_path);
         }
         let rel = |p: &str| -> String {

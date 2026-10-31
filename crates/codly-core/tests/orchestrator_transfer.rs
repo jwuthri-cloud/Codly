@@ -79,7 +79,7 @@ fn agent(name: &str, role: Role) -> Agent {
 }
 
 fn put(store: &Store, ws: &Workspace, a: &Agent) {
-    let row = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, kind: EventKind::AgentChanged { agent: a.clone() } };
+    let row = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind: EventKind::AgentChanged { agent: a.clone() } };
     store.append_event(Some(&ws.id), &row).unwrap();
 }
 

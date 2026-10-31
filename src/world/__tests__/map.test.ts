@@ -51,7 +51,8 @@ describe('signs', () => {
   it('names the repo and its crew; only the open one is open', () => {
     expect(signOf(office, true, 0)).toEqual({ title: 'codly · 5 agents', sub: 'Open', state: 'open' });
     expect(signOf(office, true, 2).sub).toBe('Open · 2 working');
-    expect(signOf(office, false, 2)).toEqual({ title: 'codly · 5 agents', sub: 'Closed', state: 'closed' });
+    expect(signOf(office, false, 0)).toEqual({ title: 'codly · 5 agents', sub: 'Closed', state: 'closed' });
+    expect(signOf(office, false, 2)).toEqual({ title: 'codly · 5 agents', sub: 'Working · 2', state: 'open' });
     expect(signOf({ ...office, crew: 1 }).title).toBe('codly · 1 agent');
   });
 
@@ -63,7 +64,8 @@ describe('signs', () => {
   });
 
   it('lights only the open repo, brighter while it works', () => {
-    expect(lightsOf(office, false, 3)).toBe('off');
+    expect(lightsOf(office, false, 0)).toBe('off');
+    expect(lightsOf(office, false, 3)).toBe('busy');
     expect(lightsOf(office, true, 0)).toBe('on');
     expect(lightsOf(office, true, 3)).toBe('busy');
     expect(lightsOf(building, true, 3)).toBe('off');

@@ -30,6 +30,9 @@ pub struct SchedInput<'a> {
     pub accounts: &'a [AccountState],
     /// Now (ms): who is at home (`Agent::away_until`).
     pub now: i64,
+    /// Who works on an active task in your other offices: worker slots and account caps
+    /// count every office.
+    pub elsewhere: &'a [Agent],
 }
 
 /// Park an account once this fraction of one of its usage windows is spent (C17).
@@ -172,9 +175,12 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
     let running_plans: HashSet<&str> = input.plans.iter().filter(|p| p.status == PlanStatus::Running).map(|p| p.id.as_str()).collect();
     let plan_created: HashMap<&str, i64> = input.plans.iter().map(|p| (p.id.as_str(), p.created_at)).collect();
 
-    let mut active = 0usize;
+    let mut active = input.elsewhere.len();
     // Active tasks per account.
     let mut per: HashMap<String, usize> = HashMap::new();
+    for acc in input.elsewhere.iter().filter_map(|a| accounts.of_agent(a)) {
+        *per.entry(acc.id.clone()).or_default() += 1;
+    }
     let mut leases: Vec<(String, Vec<String>)> = vec![];
     let mut busy: HashSet<Id> = input.busy.clone();
     // Agent → the active task it works on (why an assigned task waits).

@@ -338,6 +338,8 @@ class CodlyStore {
     let persisted = false;
     let live = false;
     for (const ev of evs) {
+      // Your other offices keep working: their events are not this view's.
+      if (ev.workspace_id && this.workspace && ev.workspace_id !== this.workspace.id) continue;
       if (ev.id !== 0) {
         if (ev.id <= this.lastId) continue;
         this.lastId = ev.id;

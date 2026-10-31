@@ -69,9 +69,10 @@ you buy a bigger lot and move:
 - **Click a lot to enter it**: this opens that repo, as "open workspace" does today. The office
   view is the inside of the lot.
 - **Empty lots** show "For sale · 🪙 N".
-- **Only the open office is live.** The core runs one repo at a time today. The others show
-  "Closed", with their agents asleep. Running several at once is a separate, bigger change; see
-  §10.
+- **Every office with work is live.** The core keeps scheduling each repo with a running plan
+  or a task in flight, whichever one you look at; worker slots and account caps count all of
+  them together. Those lots are lit with "Working · N"; idle ones show "Closed". Office tabs at
+  the top of the rail hop between them (closing a tab only hides it).
 
 ### Lots and build mode
 
@@ -261,9 +262,6 @@ Phases 1–6 are local; Phase 7 needs a backend.
 
 ## 10. Still to think about
 
-- **Several offices live at once.** Today one repo is open at a time, so only one office
-  works. Letting several run together (agents in two repos at once) means the core holds more
-  than one workspace. It's worth doing after the map works, not before.
 - **Lot layout.** A fixed grid of lots (simplest), or free placement on the plain.
 - **Hiring costs.** Hiring is free today. A signing fee in coins, or a daily salary by rank,
   would make each hire a decision and gives coins a steady sink. A salary can't stop work: an

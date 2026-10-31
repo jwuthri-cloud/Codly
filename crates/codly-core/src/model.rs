@@ -1515,6 +1515,10 @@ pub struct EventRow {
     pub agent_id: Option<Id>,
     pub task_id: Option<Id>,
     pub run_id: Option<Id>,
+    /// The office it happened in, on the live stream only (None for app-wide events).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_id: Option<Id>,
     pub kind: EventKind,
 }
 
@@ -1697,6 +1701,8 @@ pub struct Office {
     pub repo_path: String,
     /// Agents working there, the Lead aside.
     pub crew: i64,
+    /// Its tasks in flight now (running, in review or merging): each keeps an agent busy.
+    pub working: i64,
 }
 
 // ───────────────────────────── per-agent live controls ─────────────────────────────

@@ -8,4 +8,8 @@ export type EventRow = {
 /**
  * Global monotonic id (SQLite rowid). 0 for ephemeral events.
  */
-id: number, ts: number, agent_id: string | null, task_id: string | null, run_id: string | null, kind: EventKind, };
+id: number, ts: number, agent_id: string | null, task_id: string | null, run_id: string | null, 
+/**
+ * The office it happened in, on the live stream only (None for app-wide events).
+ */
+workspace_id?: string, kind: EventKind, };
