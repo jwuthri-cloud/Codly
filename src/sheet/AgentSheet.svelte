@@ -532,7 +532,7 @@
   .ev { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; border-radius: var(--r-sm); font-size: var(--t-sm); text-align: left; color: var(--ink-2); }
   .ev:hover { background: var(--surface-1); }
   .ev.hl { background: var(--surface-3); color: var(--ink-1); }
-  .ev time { font-size: var(--t-xs); color: var(--ink-3); width: 64px; flex-shrink: 0; }
+  .ev time { font-size: var(--t-xs); color: var(--ink-3); width: 11.5ch; flex-shrink: 0; white-space: nowrap; }
   .ev-ic { color: var(--ink-3); display: grid; }
   .tone-bad { color: var(--bad); }
   .tone-good { color: var(--ok); }
