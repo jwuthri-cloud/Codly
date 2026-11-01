@@ -49,8 +49,8 @@ Brief format: a task's goal is markdown. Codly renders it on the task card.
 - Omit a section only when it is empty. Keep a brief under about 25 lines.
 
 Staffing: who does each task
-- The board's Team line lists the standing team: name, role, harness and model, status and queue. Members keep their own conversation and memory across tasks, like employees. Delegate to them by default: set a task's assignee to the member whose role fits best.
-- A busy member queues the task. Queue on a member only when they clearly fit best (their area, their earlier work); otherwise hire a consultant.
+- The board's Team line lists the user's staff: name, role, harness and model, status and queue. They are employees the user already pays for, keeping their own conversation and memory across tasks. Delegate to them by default: set a task's assignee to the free one whose role fits best; a free one outside its usual area still beats hiring.
+- A busy member queues the task. Queue on a member only when they clearly fit best (their area, their earlier work); hire a consultant only when nobody on the team is free.
 - assignee "consultant" hires a worker for that one task, let go when it ends. Every task without a member needs consultant.title: the job it does (Backend, Frontend, Product manager, QA…). Choose consultant.provider and consultant.model by the task's size and difficulty (a light model for mechanical edits, a strong one for hard reasoning), or leave them out to follow the user's worker order. The options are in codly_board's consultant_options.
 - session "fresh" gives a member a new conversation: use it for work unrelated to what they did before, or when their context (ctx on the Team line) is above about 70%. The default continues their conversation.
 - Reviewer members review finished tasks; never assign them tasks.
@@ -460,7 +460,7 @@ pub fn board_header(b: &Board) -> String {
         if ws.dirty { ", uncommitted changes (agents do not see them)" } else { "" }
     ));
     // The team comes right after the repo, so a long board never cuts it.
-    let members: Vec<&Agent> = b.agents.iter().filter(|a| a.member.is_some()).collect();
+    let members: Vec<&Agent> = b.agents.iter().filter(|a| a.on_staff()).collect();
     if !members.is_empty() {
         lines.push("Team (assign tasks by name):".into());
         lines.extend(members.iter().map(|a| team_line(a, b.tasks)));
@@ -542,7 +542,7 @@ pub fn board_header(b: &Board) -> String {
     let agents: Vec<String> = b
         .agents
         .iter()
-        .filter(|a| a.role != Role::Lead && a.member.is_none() && !a.consultant)
+        .filter(|a| a.role != Role::Lead && !a.on_staff() && !a.consultant)
         .map(|a| {
             let mut s =
                 format!("{} ({} {}, {}", a.name, a.provider.label(), crate::store::enum_str(&a.role), crate::store::enum_str(&a.status));
@@ -684,7 +684,7 @@ mod tests {
         let ws: Workspace = serde_json::from_value(json!({ "id": "w", "repo_path": "/r", "name": "r", "default_branch": "main",
             "current_branch": "main", "head": "abc", "dirty": false, "created_at": 0 }))
         .unwrap();
-        let agent: Agent = serde_json::from_value(json!({ "id": "a", "name": "Bo", "provider": "claude", "model": null, "role": "worker",
+        let agent: Agent = serde_json::from_value(json!({ "id": "a", "name": "Bo", "provider": "claude", "model": null, "role": "reviewer",
             "status": "working", "activity": "execute", "activity_label": evil, "task_id": null, "run_id": null, "session_id": null,
             "worktree": null, "billing": "subscription", "color": 1, "look_seed": "a", "usage": Usage::default(), "created_at": 0,
             "updated_at": 0 }))

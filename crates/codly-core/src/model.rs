@@ -459,6 +459,14 @@ pub struct Agent {
     pub updated_at: i64,
 }
 
+impl Agent {
+    /// Your staff: a team member, or a worker or solo agent you keep between tasks (not a
+    /// consultant hired for one). The Lead assigns them by name before hiring anyone.
+    pub fn on_staff(&self) -> bool {
+        !self.archived && (self.member.is_some() || (matches!(self.role, Role::Worker | Role::Solo) && !self.consultant))
+    }
+}
+
 // ───────────────────────────── careers & hiring ─────────────────────────────
 
 /// A model with a bigger context window than an agent's own, on its CLI (offered to a new

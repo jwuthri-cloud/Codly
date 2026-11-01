@@ -2007,6 +2007,55 @@ async fn a_request_picks_its_own_lead_cli() {
     core.shutdown().await;
 }
 
+/// Your staff works before anyone is hired: the Lead sees a free agent you keep on its Team
+/// line, and a consultant it asks for on that CLI goes to that agent instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_free_agent_on_staff_takes_the_task_before_a_hire() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let plan = json!({
+        "summary": "Add a hello file",
+        "tasks": [{
+            "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt containing hello",
+            "consultant": { "title": "Backend", "provider": "claude" }, "acceptance_criteria": ["hello.txt contains hello"],
+            "write_scope": ["hello.txt"], "depends_on": [], "verify": ["grep -q hello hello.txt"], "size": "M",
+        }],
+    });
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        let plan = plan.clone();
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                turn.say("Noted.");
+                return;
+            }
+            let reply = turn.tool("codly_submit_plan", plan).await;
+            assert_eq!(reply["ok"], true, "{reply}");
+            turn.say("Planned.");
+        })
+    });
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created it.", "files_changed": ["hello.txt"] })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let ivo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+
+    core.send_chat("lead", "add hello").await.unwrap();
+    let (task, _) = wait_for("the task done", 30, async || task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Done)).await;
+    assert_eq!(task.assignee.as_deref(), Some(ivo.id.as_str()), "the free agent on staff took it");
+    let s = core.snapshot().await.unwrap();
+    assert!(!agents_ever(&s).iter().any(|a| a.consultant), "nobody was hired");
+    let prompts = log.lock().unwrap().prompts.clone();
+    let board = prompts.iter().find(|(r, _)| *r == Role::Lead).map(|(_, p)| p.clone()).unwrap();
+    assert!(board.contains(&format!("Team (assign tasks by name):\n  {}", ivo.name)), "{board}");
+    core.shutdown().await;
+}
+
 /// A new consultant is hired through a job offer: it stays up until you pick an applicant
 /// (or it closes on the Lead's pick); the one you pick walks in with its own name and traits,
 /// and earns XP for the work it does.

@@ -358,7 +358,7 @@ impl Inner {
         let key = |id: &Option<Id>| id.as_deref().and_then(|i| tasks.iter().find(|t| t.id == i)).map(|t| t.key.clone());
         agents
             .iter()
-            .filter(|a| a.member.is_some() || a.consultant)
+            .filter(|a| a.on_staff() || a.consultant)
             .map(|a| {
                 let m = team.iter().find(|m| a.member.as_ref() == Some(&m.id));
                 let queue: Vec<&str> = tasks
@@ -389,7 +389,7 @@ impl Inner {
     /// notes go back to the Lead as adjustments.
     pub(super) fn check_team(&self, ws: &Workspace, tasks: &mut [TaskInput]) -> Result<Vec<String>> {
         let agents = self.store.agents(&ws.id)?;
-        let members: Vec<&Agent> = agents.iter().filter(|a| a.member.is_some() && a.role == Role::Worker).collect();
+        let members: Vec<&Agent> = agents.iter().filter(|a| a.on_staff() && a.role != Role::Reviewer).collect();
         let names = || members.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
         // At home: the Lead gives it no new work (you can call it in), unless the whole team
         // is home; the game never stops the crew from shipping.
@@ -403,7 +403,7 @@ impl Inner {
         let mut notes = vec![];
         for t in tasks.iter_mut() {
             if let Some(name) = t.member() {
-                match agents.iter().find(|a| a.member.is_some() && a.name.eq_ignore_ascii_case(name)) {
+                match agents.iter().find(|a| a.on_staff() && a.name.eq_ignore_ascii_case(name)) {
                     None if members.is_empty() => errors.push(format!(
                         "task {}: there is no team member '{name}' (the team is empty): use assignee \"consultant\" or omit it",
                         t.id
@@ -475,7 +475,7 @@ impl Inner {
 
     /// The member agent a checked assignee names.
     pub(super) fn member_by_name(&self, ws_id: &str, name: &str) -> Option<Agent> {
-        self.store.agents(ws_id).ok()?.into_iter().find(|a| a.member.is_some() && a.name.eq_ignore_ascii_case(name))
+        self.store.agents(ws_id).ok()?.into_iter().find(|a| a.on_staff() && a.name.eq_ignore_ascii_case(name))
     }
 
     // ───────────── the Lead's tools ─────────────

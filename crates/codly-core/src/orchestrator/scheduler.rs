@@ -413,7 +413,7 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
         let home = super::at_home(a, ctx.now);
         if let Some(until) = &home
             && ctx.agents.iter().any(|o| {
-                o.id != a.id && o.member.is_some() && o.role == Role::Worker && !o.archived && super::at_home(o, ctx.now).is_none()
+                o.id != a.id && o.on_staff() && o.role == Role::Worker && super::at_home(o, ctx.now).is_none()
             })
         {
             return Err(format!("waiting: {} (assigned) is at home until {until}; it starts when it is back, or call it in", a.name));
@@ -424,7 +424,7 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
             prefer.insert(0, pa.id.as_str());
         }
         let acc = ctx.account_for(a.provider, &prefer).map_err(|e| format!("waiting: {} (assigned): {}", a.name, e.join(", ")))?;
-        let by = if a.member.is_some() { "team member" } else { "assigned by you" };
+        let by = if a.member.is_some() { "team member" } else if a.on_staff() { "on your staff" } else { "assigned by you" };
         let mut summary = format!("{} · {}: {by}", ctx.accounts.name(acc.account), a.name);
         if let Some(why) = &acc.why {
             summary.push_str(&format!(", {why}"));
@@ -455,6 +455,15 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
         // The Lead chose the harness: wait for it rather than hire another (it can reassign).
         let prefer: Vec<&str> = pin.filter(|a| a.provider == provider).map(|a| a.id.as_str()).into_iter().collect();
         let acc = ctx.account_for(provider, &prefer).map_err(|e| format!("waiting: consultant on {}: {}", provider.label(), e.join(", ")))?;
+        // Someone on your staff on that CLI is free: they take it, nobody is hired.
+        if let Some(a) = idle_staff(ctx, provider, &acc.account.id) {
+            let summary = format!("{} · {}: free on your staff (the Lead asked for a {} consultant)", ctx.accounts.name(acc.account), a.name, provider.label());
+            let detail = json!({
+                "task": t.key, "plan_id": t.plan_id, "provider": provider, "agent": a.name, "new_agent": false,
+                "rule": "staff_first", "account": acc.account.id, "account_label": acc.account.label, "skipped": acc.skipped,
+            });
+            return Ok(Route { provider, account: acc.account.id.clone(), pick: AgentPick::Existing(a.id.clone()), summary, detail });
+        }
         let name = names::next_name(taken);
         let model = spec.model.as_deref().map(|m| format!(" {m}")).unwrap_or_default();
         let mut summary = format!("{}{model} · new consultant {name}: the Lead's pick", ctx.accounts.name(acc.account));
@@ -513,25 +522,7 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
         reason.push_str(&format!(", {why}"));
     }
 
-    // An idle generic worker of that provider (from before consultants), one whose session is
-    // on that account first, then one at work, then a rested one. Team members only take tasks
-    // assigned to them.
-    let idle = ctx
-        .agents
-        .iter()
-        .filter(|a| {
-            a.role == Role::Worker
-                && a.member.is_none()
-                && !a.consultant
-                && a.provider == p
-                && a.status != AgentStatus::Offline
-                && !ctx.busy.contains(&a.id)
-        })
-        .min_by_key(|a| {
-            let other_account = ctx.accounts.of_agent(a).is_none_or(|x| x.id != acc.account.id);
-            (other_account, super::at_home(a, ctx.now).is_some(), super::tired(a, ctx.now), a.created_at, a.id.clone())
-        });
-    let (pick, name, new) = match idle {
+    let (pick, name, new) = match idle_staff(ctx, p, &acc.account.id) {
         Some(a) => (AgentPick::Existing(a.id.clone()), a.name.clone(), false),
         None => {
             let name = names::next_name(taken);
@@ -549,6 +540,19 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
         "strategy": ctx.settings.account_strategy,
     });
     Ok(Route { provider: p, account: acc.account.id.clone(), pick, summary, detail })
+}
+
+/// A free agent on your staff on `provider` (not a team member: those only take tasks assigned
+/// to them): a worker before a solo agent, one whose session is on `account` first, then one at
+/// work, then a rested one.
+fn idle_staff<'a>(ctx: &'a RouteCtx, provider: Provider, account: &str) -> Option<&'a Agent> {
+    ctx.agents
+        .iter()
+        .filter(|a| a.on_staff() && a.member.is_none() && a.provider == provider && a.status != AgentStatus::Offline && !ctx.busy.contains(&a.id))
+        .min_by_key(|a| {
+            let other_account = ctx.accounts.of_agent(a).is_none_or(|x| x.id != account);
+            (a.role != Role::Worker, other_account, super::at_home(a, ctx.now).is_some(), super::tired(a, ctx.now), a.created_at, a.id.clone())
+        })
 }
 
 /// Longest dependent chain (in tasks) starting at each task.
