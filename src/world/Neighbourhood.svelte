@@ -229,8 +229,8 @@
   {#if slot}
     {@const live = slot.workspace_id === ws?.id}
     {@const p = paused.has(slot.workspace_id ?? '')}
-    {@const busy = live ? working : (offices.find((o) => o.id === slot.workspace_id)?.working ?? 0)}
-    {@const sign = signOf(live ? { ...slot, crew: crewHere } : slot, (live || open.has(slot.workspace_id ?? '')) && !p, busy, p)}
+    {@const crewBusy = live ? working : (offices.find((o) => o.id === slot.workspace_id)?.working ?? 0)}
+    {@const sign = signOf(live ? { ...slot, crew: crewHere } : slot, (live || open.has(slot.workspace_id ?? '')) && !p, crewBusy, p)}
     {@const kind = slotKind(slot)}
     <div class="panel glass" role="dialog" aria-label={sign.title} style:left="{panelPos.x}px" style:top="{panelPos.y}px" style:width="{PANEL_W}px">
       <div class="p-head">

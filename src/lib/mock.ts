@@ -64,12 +64,12 @@ const INSTALL: Record<Provider, InstallHint> = {
 const fresh = (c: CliInfo): CliInfo => ({ ...c, path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: `Not found on PATH: install \`${c.provider}\`.` });
 
 const CLIS: CliInfo[] = [
-  { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json', install: INSTALL.claude },
-  { provider: 'codex', path: '/opt/homebrew/bin/codex', version: '0.161.0', logged_in: true, billing: 'subscription', plan: 'Plus', problem: null, transport: 'app-server', install: INSTALL.codex },
-  { provider: 'gemini', path: '/opt/homebrew/bin/gemini', version: '0.62.0', logged_in: true, billing: 'subscription', plan: 'Google AI Pro', problem: null, transport: 'acp', install: INSTALL.gemini },
-  { provider: 'opencode', path: `${HOME}/.opencode/bin/opencode`, version: '1.18.31', logged_in: null, billing: 'third_party', plan: 'OpenRouter', problem: null, transport: 'acp', install: INSTALL.opencode },
-  { provider: 'copilot', path: '/opt/homebrew/bin/copilot', version: '1.4.2', logged_in: false, billing: 'unknown', plan: null, problem: 'Not signed in: run `copilot` once and use /login.', transport: 'acp', install: INSTALL.copilot },
-  { provider: 'cursor', path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: 'Not found on PATH. Install Cursor’s CLI (`cursor-agent`) to use it here.', transport: 'acp', install: INSTALL.cursor },
+  { provider: 'claude', path: '/opt/homebrew/bin/claude', version: '2.1.309', logged_in: true, billing: 'subscription', plan: 'Team', problem: null, transport: 'stream-json', install: INSTALL.claude, default_model: null },
+  { provider: 'codex', path: '/opt/homebrew/bin/codex', version: '0.161.0', logged_in: true, billing: 'subscription', plan: 'Plus', problem: null, transport: 'app-server', install: INSTALL.codex, default_model: null },
+  { provider: 'gemini', path: '/opt/homebrew/bin/gemini', version: '0.62.0', logged_in: true, billing: 'subscription', plan: 'Google AI Pro', problem: null, transport: 'acp', install: INSTALL.gemini, default_model: null },
+  { provider: 'opencode', path: `${HOME}/.opencode/bin/opencode`, version: '1.18.31', logged_in: null, billing: 'third_party', plan: 'OpenRouter', problem: null, transport: 'acp', install: INSTALL.opencode, default_model: null },
+  { provider: 'copilot', path: '/opt/homebrew/bin/copilot', version: '1.4.2', logged_in: false, billing: 'unknown', plan: null, problem: 'Not signed in: run `copilot` once and use /login.', transport: 'acp', install: INSTALL.copilot, default_model: null },
+  { provider: 'cursor', path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: 'Not found on PATH. Install Cursor’s CLI (`cursor-agent`) to use it here.', transport: 'acp', install: INSTALL.cursor, default_model: null },
 ];
 
 const SETTINGS: Settings = {
