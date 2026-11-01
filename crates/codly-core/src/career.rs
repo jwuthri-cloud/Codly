@@ -5,7 +5,7 @@
 //! and memory ride on its prompts, the traits you chose shape how it works, and a promotion
 //! is the moment the app offers you a stronger model (you decide; nothing changes by itself).
 
-use crate::model::{Applicant, Career, Milestone, Rank};
+use crate::model::{Applicant, Career, Milestone, Rank, Want, WantKind};
 
 /// Extra XP for a review by a mentor: feedback from a senior teaches more.
 pub const MENTORED_XP: i64 = 10;
@@ -152,7 +152,7 @@ pub fn credit(c: &mut Career, what: Credit, now: i64) -> Option<Rank> {
             }
         }
     }
-    c.xp += gain;
+    c.xp += gain + fulfil(c, now);
     c.rank = c.rank.max(rank_for(c.xp));
     (c.rank > before).then(|| {
         note(c, now, format!("Promoted to {}", rank_label(c.rank)));
@@ -210,12 +210,89 @@ pub fn legend_ok(c: &Career, days: f64) -> bool {
 pub fn refresh(c: &mut Career, hired_at: i64, now: i64) -> bool {
     let days = (now - hired_at).max(0) as f64 / DAY_MS;
     c.stamina = stamina(c, days);
+    roll_want(c, &day_of(now));
     if c.legend || !legend_ok(c, days) {
         return false;
     }
     c.legend = true;
     note(c, now, "Legend".into());
     true
+}
+
+/// XP a fulfilled want pays (its coins too).
+pub const WANT_XP: i64 = 25;
+
+/// Your local day of a moment ("2026-11-01"): wants last a day.
+fn day_of(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map_or_else(String::new, |d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+}
+
+fn stat(c: &Career, k: WantKind) -> i64 {
+    match k {
+        WantKind::Commit => c.stats.commits,
+        WantKind::Check => c.stats.checks_passed,
+        WantKind::Review => c.stats.reviews_done,
+        WantKind::Approved => c.stats.approved,
+        WantKind::Merge => c.stats.merged,
+    }
+}
+
+/// How far it is into its want (0 … goal).
+pub fn want_progress(c: &Career, w: &Want) -> i64 {
+    (stat(c, w.kind) - w.from).clamp(0, w.goal)
+}
+
+fn want_label(k: WantKind, n: i64) -> String {
+    match (k, n) {
+        (WantKind::Commit, 1) => "Make a commit".into(),
+        (WantKind::Commit, _) => format!("Make {n} commits"),
+        (WantKind::Check, 1) => "Pass the checks".into(),
+        (WantKind::Check, _) => format!("Pass the checks {n} times"),
+        (WantKind::Review, 1) => "Review someone’s work".into(),
+        (WantKind::Review, _) => format!("Review {n} pieces of work"),
+        (WantKind::Approved, 1) => "Get a review approved".into(),
+        (WantKind::Approved, _) => format!("Get {n} reviews approved"),
+        (WantKind::Merge, 1) => "Land a merge".into(),
+        (WantKind::Merge, _) => format!("Land {n} merges"),
+    }
+}
+
+/// A new want once a day (none for an older day: replayed events don't roll back). Half the days
+/// its traits pick (Competitive merges, Perfectionist passes checks, Social reviews), else any;
+/// a Senior aims higher, a Lazy one lower.
+pub fn roll_want(c: &mut Career, today: &str) {
+    if today.is_empty() || c.want.as_ref().is_some_and(|w| w.day.as_str() >= today) {
+        return;
+    }
+    // ponytail: a cheap seed from the day and its record; two agents with the same XP get the same want.
+    let seed = today.bytes().fold(c.xp as u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64));
+    let has = |t: &str| c.traits.iter().any(|x| x == t);
+    let fav = [("competitive", WantKind::Merge), ("perfectionist", WantKind::Check), ("social", WantKind::Review)].into_iter().find(|(t, _)| has(t)).map(|(_, k)| k);
+    const ALL: [WantKind; 5] = [WantKind::Commit, WantKind::Check, WantKind::Review, WantKind::Approved, WantKind::Merge];
+    let kind = fav.filter(|_| seed % 2 == 0).unwrap_or(ALL[(seed / 2 % 5) as usize]);
+    let mut goal = match kind {
+        WantKind::Commit => 3,
+        WantKind::Check => 2,
+        _ => 1,
+    } + if c.rank >= Rank::Senior { if kind == WantKind::Commit { 2 } else { 1 } } else { 0 };
+    if has("lazy") {
+        goal = (goal + 1) / 2;
+    }
+    c.want = Some(Want { kind, goal, from: stat(c, kind), day: today.into(), label: want_label(kind, goal), done_at: None });
+}
+
+/// Its want met just now: noted, and the bonus XP it pays (0 otherwise).
+fn fulfil(c: &mut Career, now: i64) -> i64 {
+    let Some(w) = c.want.as_ref().filter(|w| w.done_at.is_none()) else { return 0 };
+    if want_progress(c, w) < w.goal {
+        return 0;
+    }
+    let label = w.label.clone();
+    if let Some(w) = c.want.as_mut() {
+        w.done_at = Some(now);
+    }
+    note(c, now, format!("Fulfilled a want: {label}"));
+    WANT_XP
 }
 
 /// The office reports a shift worked and rested from at home, or a sickness.
@@ -282,6 +359,7 @@ pub fn sanitize(mut c: Career) -> Career {
     // Recomputed here from its record (`refresh`), never taken from the file.
     c.stamina = 0;
     c.legend = false;
+    c.want = None; // rolled here, today
     c
 }
 
@@ -525,6 +603,62 @@ mod tests {
         assert_eq!(locked("kenney.chair", &[], []), None);
         assert!(sold_builtin("office.foosball") && sold_builtin("office.tvStand"));
         assert!(!sold_builtin("office.desk") && !sold_builtin("kenney.chair"));
+    }
+
+    #[test]
+    fn a_want_a_day_pays_once() {
+        let mut c = Career { traits: vec!["competitive".into()], ..Career::default() };
+        roll_want(&mut c, "2026-11-01");
+        let w = c.want.clone().unwrap();
+        assert!(w.goal >= 1 && w.done_at.is_none() && w.from == 0, "{w:?}");
+        roll_want(&mut c, "2026-11-01");
+        assert_eq!(c.want.as_ref(), Some(&w), "one want a day");
+        roll_want(&mut c, "2026-10-31");
+        assert_eq!(c.want.as_ref(), Some(&w), "an older day doesn't roll back");
+        // Do what it wants, goal times: the last one fulfils it, once.
+        let one = { let mut x = Career::default(); credit(&mut x, what_again(&w), 1); x.xp };
+        for i in 0..w.goal {
+            credit(&mut c, what_again(&w), 10 + i);
+        }
+        assert_eq!(c.xp, one * w.goal + WANT_XP, "{c:?}");
+        assert_eq!(c.want.as_ref().unwrap().done_at, Some(10 + w.goal - 1));
+        assert!(c.milestones.iter().any(|m| m.text == format!("Fulfilled a want: {}", w.label)));
+        credit(&mut c, what_again(&w), 99);
+        assert_eq!(c.xp, one * (w.goal + 1) + WANT_XP, "it pays once");
+        // The next day brings a new one, counted from there.
+        roll_want(&mut c, "2026-11-02");
+        let next = c.want.as_ref().unwrap();
+        assert_eq!((next.day.as_str(), next.done_at, want_progress(&c, next)), ("2026-11-02", None, 0));
+    }
+
+    fn what_again(w: &Want) -> Credit<'static> {
+        match w.kind {
+            WantKind::Commit => Credit::Commit,
+            WantKind::Check => Credit::Check { ok: true },
+            WantKind::Review => Credit::Reviewed,
+            WantKind::Approved => Credit::Review { approved: true },
+            WantKind::Merge => Credit::Merge,
+        }
+    }
+
+    #[test]
+    fn wants_follow_traits_and_rank() {
+        let goal = |traits: &[&str], rank: Rank, day: &str| {
+            let mut c = Career { traits: traits.iter().map(|t| t.to_string()).collect(), rank, ..Career::default() };
+            roll_want(&mut c, day);
+            c.want.unwrap()
+        };
+        let days: Vec<String> = (1..=20).map(|d| format!("2026-12-{d:02}")).collect();
+        assert!(days.iter().any(|d| goal(&["social"], Rank::Intern, d).kind == WantKind::Review), "Social wants to review some days");
+        for d in &days {
+            let (intern, senior, lazy) = (goal(&[], Rank::Intern, d), goal(&[], Rank::Senior, d), goal(&["lazy"], Rank::Intern, d));
+            if intern.kind == senior.kind {
+                assert!(senior.goal > intern.goal, "a Senior aims higher");
+            }
+            if lazy.kind == intern.kind {
+                assert!(lazy.goal <= intern.goal && lazy.goal >= 1);
+            }
+        }
     }
 
     #[test]

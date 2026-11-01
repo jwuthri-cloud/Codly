@@ -294,8 +294,19 @@ export class SimsTracker {
   private out: SimsOutbox = { home: [], rest: [], tired: [], hangouts: [] };
 
   setAgents(list: Agent[], now = Date.now()) {
+    const before = this.agents;
     this.agents = new Map(list.map((a) => [a.id, a]));
-    for (const a of list) this.adopt(a, now);
+    for (const a of list) {
+      this.adopt(a, now);
+      this.wanted(before.get(a.id), a);
+    }
+  }
+
+  /** Its want for the day just fulfilled (the core's career says so, with the bonus XP): a lift. */
+  private wanted(before: Agent | undefined, a: Agent) {
+    const w = a.career?.want;
+    if (!before || !w?.done_at || before.career?.want?.done_at === w.done_at) return;
+    this.feel(a.id, w.done_at, 0.2, { key: 'want', label: 'Want fulfilled', why: w.label, tone: 'good', icon: 'check', emoji: '🌟', ms: 30 * 60_000 });
   }
 
   setTasks(list: Task[]) {
@@ -682,6 +693,7 @@ export class SimsTracker {
         return;
       }
       case 'agent_changed':
+        this.wanted(this.agents.get(k.agent.id), k.agent);
         this.agents.set(k.agent.id, k.agent);
         return;
     }

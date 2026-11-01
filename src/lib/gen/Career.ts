@@ -2,6 +2,7 @@
 import type { CareerStats } from "./CareerStats";
 import type { Milestone } from "./Milestone";
 import type { Rank } from "./Rank";
+import type { Want } from "./Want";
 
 /**
  * An agent's track record. Everything here comes from its real events, except `traits`
@@ -42,4 +43,8 @@ stamina: number,
 /**
  * Legendary: the title above Staff (`career::legend_ok`); once earned, it stays.
  */
-legend: boolean, };
+legend: boolean, 
+/**
+ * Today's want (`career::roll_want`), rolled each day it is saved.
+ */
+want: Want | null, };

@@ -42,7 +42,16 @@ export const emptyCareer = (): Career => ({
   mentor: null,
   stamina: 0,
   legend: false,
+  want: null,
 });
+
+/** How far it is into its want for the day (mirror of `career::want_progress`). */
+export function wantProgress(c: Career): { label: string; done: number; goal: number; met: boolean } | null {
+  const w = c.want;
+  if (!w) return null;
+  const stat = { commit: c.stats.commits, check: c.stats.checks_passed, review: c.stats.reviews_done, approved: c.stats.approved, merge: c.stats.merged }[w.kind];
+  return { label: w.label, done: Math.min(w.goal, Math.max(0, stat - w.from)), goal: w.goal, met: w.done_at != null };
+}
 
 /** Stamina from its record and days on the crew (mirror of `career::stamina`, for the web demo). */
 export function staminaOf(c: Career, days: number): number {
@@ -68,6 +77,8 @@ export const PERKS: { rank: Rank; perk: string }[] = [
 ];
 /** Extra XP an Intern or Junior earns from a review by a Senior or Staff (`career::MENTORED_XP`). */
 export const MENTORED_XP = 10;
+/** XP a fulfilled want pays (mirror of `career::WANT_XP`). */
+export const WANT_XP = 25;
 const order = (r: Rank) => RANKS.findIndex((x) => x.rank === r);
 /** At or above (mirror of `Rank`'s order). */
 export const atLeast = (r: Rank, min: Rank) => order(r) >= order(min);

@@ -32,7 +32,7 @@
   import { sound } from './sound';
   import { bondLabel, friendScore, levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
-  import { atLeast, contextLabel, MENTORED_XP, PERKS, rankLabel, rankProgress, titleOf, TRAITS as WORK_TRAITS } from '../lib/util/career';
+  import { atLeast, contextLabel, MENTORED_XP, PERKS, rankLabel, rankProgress, titleOf, TRAITS as WORK_TRAITS, WANT_XP, wantProgress } from '../lib/util/career';
 
   interface Props {
     engine: OfficeEngine;
@@ -80,6 +80,7 @@
   const nameOf = (id: string) => agents.find((a) => a.id === id)?.name ?? 'someone';
   const career = $derived(agent?.career ?? null);
   const climb = $derived(career ? rankProgress(career) : null);
+  const want = $derived(career && agent?.role !== 'lead' ? wantProgress(career) : null);
   // Friends: what this session saw (sims.ts), and the reviews saved on its career (they
   // survive restarts). ponytail: the higher of the two scores, since the replayed log overlaps the saved count.
   const friends = $derived.by(() => {
@@ -243,6 +244,11 @@
         {#if career && climb}
           <div class="p-rank" title={climb.next ? `${climb.toGo} XP to ${climb.next}` : 'Top rank'}>
             <b class:legend={career.legend}>{titleOf(career)}</b><span class="bar"><span class="fill xp" style:width="{Math.round(climb.progress * 100)}%"></span></span><span>{career.xp} XP</span>
+          </div>
+        {/if}
+        {#if want}
+          <div class="p-want" class:met={want.met} title={want.met ? `Fulfilled: +${WANT_XP} XP and a good mood` : `Today's want, from its real work: +${WANT_XP} XP and a good mood once it's done`}>
+            <span>{want.met ? '🌟' : '🎯'}</span><span class="truncate">{want.label}</span><span>{want.met ? 'Done' : `${want.done}/${want.goal}`}</span>
           </div>
         {/if}
       </div>
@@ -421,6 +427,9 @@
   .p-rank { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center; margin-top: 6px; color: #9aa2b6; font-size: 11px; }
   .p-rank b { color: #ffd27a; font-weight: 600; }
   .fill.xp { background: linear-gradient(90deg, #e9b03a, #ffd27a); }
+  .p-want { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center; margin-top: 5px; color: #9aa2b6; font-size: 11px; }
+  .p-want .truncate { color: #eef1f7; }
+  .p-want.met .truncate { color: #a9efbd; }
   .p-rank b.legend { text-shadow: 0 0 8px rgba(255, 201, 74, 0.8); }
   .rest { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; color: #9aa2b6; font-size: 11.5px; }
   .rest button { flex: none; height: 24px; padding: 0 12px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.1); color: #eef1f7; font: 600 11.5px inherit; cursor: pointer; }

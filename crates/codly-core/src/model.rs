@@ -548,6 +548,36 @@ pub struct Career {
     /// Legendary: the title above Staff (`career::legend_ok`); once earned, it stays.
     #[serde(default)]
     pub legend: bool,
+    /// Today's want (`career::roll_want`), rolled each day it is saved.
+    #[serde(default)]
+    pub want: Option<Want>,
+}
+
+/// One small goal from real work for the day, Sims-style ("Land 2 merges"), picked by its traits
+/// and rank. Met, it pays `career::WANT_XP` and the office shows it fulfilled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Want {
+    pub kind: WantKind,
+    pub goal: i64,
+    /// Its stat when the want was rolled: progress is that stat now minus this.
+    pub from: i64,
+    /// The local day it is for ("2026-11-01").
+    pub day: String,
+    pub label: String,
+    pub done_at: Option<i64>,
+}
+
+/// Which `CareerStats` counter a want counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WantKind {
+    Commit,
+    Check,
+    Review,
+    Approved,
+    Merge,
 }
 
 /// One agent's work in a period (the daily edition and the morning standup).

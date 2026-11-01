@@ -411,3 +411,20 @@ describe('traits', () => {
     expect(s.get('a')!.game).toBe(s.get('b')!.game);
   });
 });
+
+describe('wants', () => {
+  it('a want fulfilled by the core lifts its mood, once', () => {
+    const want = { kind: 'merge' as const, goal: 1, from: 0, day: '2026-11-01', label: 'Land a merge', done_at: null as number | null };
+    const s = new SimsTracker();
+    const a = agent('a', { career: { ...emptyCareer(), want } });
+    s.setAgents([a], 1000);
+    const before = s.stats('a', 2000, null).needs.morale;
+    const met = { ...a, career: { ...a.career, want: { ...want, done_at: 2000 } } };
+    s.ingest(ev('a', { type: 'agent_changed', agent: met }, 2000));
+    const after = s.stats('a', 2000, null);
+    expect(after.needs.morale).toBeGreaterThan(before);
+    expect(after.moodlets.find((m) => m.key === 'want')?.why).toBe('Land a merge');
+    s.setAgents([met], 3000); // the same row again: no second lift
+    expect(s.stats('a', 3000, null).needs.morale).toBeLessThanOrEqual(after.needs.morale);
+  });
+});
