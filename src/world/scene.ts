@@ -27,6 +27,7 @@ import { Builder } from '../office/gfx/builder';
 import { color, lin, MAT, mix, themeAt, type OfficeTheme, type RGB } from '../office/palette';
 import { browserHost, FrameLoop, type StepResult } from '../office/scheduler';
 import { exteriorOf, STOREY, type Box } from './exterior';
+import { homeLine, HomeGfx, homeOf, momentOf, pathOf, streetPath, type Away, type Path } from './home';
 import { buildingOrigin, extent, lightsOf, plotAt, plotsOf, signOf, slotKind, type Plot } from './map';
 import { townOf, TownGfx } from './town';
 
@@ -49,6 +50,28 @@ export interface SceneState {
   away: Map<string, number>;
   /** The plot whose panel is open. */
   selected: string | null;
+  /** Agents at home, by the workspace id of their office (the open one's too). */
+  home: Map<string, Away[]>;
+}
+
+/** An agent at home: its office's plot, its house and the walk between. */
+interface Resident {
+  away: Away;
+  plot: string;
+  house: number;
+  path: Path;
+  tag: HTMLDivElement;
+  tagKey: string;
+  /** Where it walks now (null: not on the street). */
+  at: { x: number; z: number } | null;
+}
+
+interface HomeSign {
+  el: HTMLDivElement;
+  x: number;
+  y: number;
+  z: number;
+  key: string;
 }
 
 interface PlotGfx {
@@ -81,9 +104,14 @@ export class NeighbourhoodScene {
   private ro: ResizeObserver;
   private gfx = new Map<string, PlotGfx>();
   private town: TownGfx | null = null;
+  private homes = new HomeGfx();
+  /** Agents at home by id, and a tag over each house someone is home in (by house index). */
+  private residents = new Map<string, Resident>();
+  private homeSigns = new Map<number, HomeSign>();
+  private walking = false;
   private plots: Plot[] = [];
   private geos: BufferGeometry[] = [];
-  private state: SceneState = { slots: [], lots: new Map(), live: null, crew: 0, working: 0, away: new Map(), selected: null };
+  private state: SceneState = { slots: [], lots: new Map(), live: null, crew: 0, working: 0, away: new Map(), selected: null, home: new Map() };
   private hover: string | null = null;
   private theme: OfficeTheme;
   private width = 1;
@@ -134,7 +162,7 @@ export class NeighbourhoodScene {
     this.key.shadow.radius = 4;
     this.key.shadow.bias = -0.0005;
     this.key.shadow.normalBias = 0.03;
-    this.scene.add(this.hemi, this.key, this.key.target, this.world);
+    this.scene.add(this.hemi, this.key, this.key.target, this.world, this.homes.group);
     this.ground = new Mesh(new PlaneGeometry(1, 1).rotateX(-Math.PI / 2), this.groundMat);
     this.ground.receiveShadow = true;
     this.ground.position.y = -0.02;
@@ -166,9 +194,11 @@ export class NeighbourhoodScene {
   set(next: SceneState) {
     const rebuild =
       next.slots !== this.state.slots || next.lots !== this.state.lots || next.live !== this.state.live;
+    const homes = rebuild || next.home !== this.state.home;
     this.state = next;
     if (rebuild) this.rebuild();
     else this.restyle();
+    if (homes) this.placeResidents();
     this.wake();
   }
 
@@ -241,6 +271,8 @@ export class NeighbourhoodScene {
       this.town.dispose();
     }
     this.town = new TownGfx(townOf(this.plots));
+    // A new town: everyone at home is placed again (placeResidents, after this).
+    this.clearHomes();
     this.town.setNight(this.theme.name === 'dark', this.theme.lamp);
     this.world.add(this.town.group);
     const tb = this.town.town.bounds;
@@ -404,6 +436,113 @@ export class NeighbourhoodScene {
     this.wake();
   }
 
+  // ───────────── agents at home ─────────────
+
+  private clearHomes() {
+    for (const r of this.residents.values()) r.tag.remove();
+    for (const s of this.homeSigns.values()) s.el.remove();
+    this.residents.clear();
+    this.homeSigns.clear();
+    this.homes.setLit([], '', false, this.theme.lamp);
+  }
+
+  /** Who is at home, from which office's plot, in which house (home.ts), and the walk there. */
+  private placeResidents() {
+    const town = this.town?.town;
+    const seen = new Set<string>();
+    if (town)
+      this.state.slots.forEach((s, i) => {
+        const list = s.workspace_id ? this.state.home.get(s.workspace_id) : undefined;
+        const plot = this.plots[i];
+        if (!list || !plot) return;
+        for (const away of list) {
+          const house = homeOf(away.id, town, plot);
+          if (house < 0) continue;
+          seen.add(away.id);
+          const was = this.residents.get(away.id);
+          if (was && was.house === house && was.plot === plot.id) {
+            was.away = away;
+            continue;
+          }
+          was?.tag.remove();
+          const tag = document.createElement('div');
+          tag.className = 'nb-sign nb-walker';
+          tag.style.visibility = 'hidden';
+          this.labels.appendChild(tag);
+          this.residents.set(away.id, { away, plot: plot.id, house, path: pathOf(streetPath(town, plot, town.houses[house])), tag, tagKey: '', at: null });
+        }
+      });
+    for (const [id, r] of this.residents)
+      if (!seen.has(id)) {
+        r.tag.remove();
+        this.residents.delete(id);
+      }
+  }
+
+  /** Walkers, lit houses and their tags at `now` (ms, the core's clock). Whether anyone walks,
+   *  and when the next change is (a walk starting or ending, a tag's minute ticking over). */
+  private updateHomes(now: number): { walking: boolean; next: number } {
+    const town = this.town?.town;
+    const night = this.theme.name === 'dark';
+    const walkers: { at: { x: number; z: number; heading: number }; color: number; bob: number }[] = [];
+    const home = new Map<number, Resident[]>();
+    let next = Infinity;
+    for (const r of this.residents.values()) {
+      const m = momentOf(r.away, r.path, now);
+      const walking = m != null && m.phase !== 'home';
+      if (m) next = Math.min(next, m.next);
+      if (m?.phase === 'home') home.set(r.house, [...(home.get(r.house) ?? []), r]);
+      if (walking) walkers.push({ at: m.at, color: r.away.color, bob: (now / 1000) * 7 + (r.away.id.length % 3) });
+      const text = walking ? `${r.away.name} · ${m.phase === 'out' ? 'going home' : 'on the way back'}` : '';
+      if (text !== r.tagKey) {
+        r.tagKey = text;
+        r.tag.textContent = text;
+        r.tag.style.visibility = text ? '' : 'hidden';
+      }
+      r.at = walking ? m.at : null;
+    }
+    this.homes.setWalkers(walkers, night ? 'dark' : 'light');
+    // The lit houses, and a tag over each: "🏠 Ada · back in 6 min" (one line per agent home there).
+    const houses = [...home.keys()].sort((a, b) => a - b);
+    if (town) this.homes.setLit(houses.map((i) => town.houses[i]), houses.join(','), night, this.theme.lamp);
+    for (const [i, s] of this.homeSigns)
+      if (!home.has(i)) {
+        s.el.remove();
+        this.homeSigns.delete(i);
+      }
+    for (const [i, rs] of home) {
+      const h = town!.houses[i];
+      let s = this.homeSigns.get(i);
+      if (!s) {
+        const el = document.createElement('div');
+        el.className = 'nb-sign nb-home';
+        el.dataset.state = 'open';
+        this.labels.appendChild(el);
+        s = { el, x: h.x, y: h.h + Math.min(h.w, h.d) * 0.42 + 0.6, z: h.z, key: '' };
+        this.homeSigns.set(i, s);
+      }
+      const lines = rs.map((r) => homeLine(r.away.name, r.away.until, now));
+      const key = lines.join('\n');
+      if (key !== s.key) {
+        s.key = key;
+        s.el.replaceChildren(
+          ...lines.map((l) => {
+            const t = document.createElement('span');
+            t.className = 'nb-title';
+            t.textContent = l;
+            return t;
+          }),
+        );
+      }
+      // The minute on the tag ticks over.
+      for (const r of rs) {
+        const left = r.away.until - now;
+        next = Math.min(next, now + (left % 60_000 || 60_000));
+      }
+    }
+    return { walking: walkers.length > 0, next };
+  }
+
   // ───────────── frames ─────────────
 
   private resize() {
@@ -422,7 +561,7 @@ export class NeighbourhoodScene {
     this.wake();
   }
 
-  private step(_now: number, dt: number): StepResult {
+  private step(now: number, dt: number): StepResult {
     const held = this.held.size > 0;
     if (held) {
       const v = (this.heldFast ? 2200 : 900) * Math.min(dt, 0.1);
@@ -430,9 +569,13 @@ export class NeighbourhoodScene {
       this.rig.pan(((h.has('a') ? 1 : 0) - (h.has('d') ? 1 : 0)) * v, ((h.has('w') ? 1 : 0) - (h.has('s') ? 1 : 0)) * v, this.height);
     }
     const moving = this.rig.update(dt) || held;
+    // Agents at home: on the core's clock (`away_until` is wall-clock ms).
+    const wall = Date.now();
+    const h = this.updateHomes(wall);
     this.renderer.render(this.scene, this.rig.camera);
     this.placeSigns();
-    return { animating: moving, wakeAt: Infinity };
+    // Walkers alone need no more than ~20 frames a second; idle, sleep until the next change.
+    return { animating: moving || h.walking, wakeAt: Number.isFinite(h.next) ? now + (h.next - wall) : Infinity, interval: moving ? 0 : 50 };
   }
 
   /** Signs ride above their plot (crisp: whole pixels), hidden when behind the camera or off screen. */
@@ -444,6 +587,19 @@ export class NeighbourhoodScene {
       const off = this.v.z > 1 || x < -200 || x > this.width + 200 || y < -60 || y > this.height + 60;
       g.sign.style.visibility = off ? 'hidden' : '';
       if (!off) g.sign.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%)`;
+    }
+    const place = (el: HTMLElement, x0: number, y0: number, z0: number) => {
+      this.v.set(x0, y0, z0).project(this.rig.camera);
+      const x = Math.round((this.v.x * 0.5 + 0.5) * this.width);
+      const y = Math.round((-this.v.y * 0.5 + 0.5) * this.height);
+      const off = this.v.z > 1 || x < -200 || x > this.width + 200 || y < -60 || y > this.height + 60;
+      el.style.visibility = off ? 'hidden' : '';
+      if (!off) el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%)`;
+    };
+    for (const s of this.homeSigns.values()) place(s.el, s.x, s.y, s.z);
+    for (const r of this.residents.values()) {
+      if (r.at) place(r.tag, r.at.x, 3, r.at.z);
+      else r.tag.style.visibility = 'hidden';
     }
   }
 
@@ -629,6 +785,7 @@ export class NeighbourhoodScene {
     }
     for (const geo of this.geos) geo.dispose();
     this.town?.dispose();
+    this.homes.dispose();
     this.ground.geometry.dispose();
     this.groundMat.dispose();
     this.matte.dispose();

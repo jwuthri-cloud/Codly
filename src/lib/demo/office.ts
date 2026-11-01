@@ -19,6 +19,7 @@ import { atLeast, emptyCareer, rankFor, rankLabel, staminaOf } from '../util/car
 import type { Rank } from '../gen/Rank';
 import type { DayReport } from '../gen/DayReport';
 import type { Digest } from '../gen/Digest';
+import type { AwayAgent } from '../gen/AwayAgent';
 import type { Office } from '../gen/Office';
 import { transferBlock } from '../util/transfer';
 import type { Sim } from './sim';
@@ -250,7 +251,30 @@ const OFFICES = [
 /** Agents moved to those offices: still yours, so their XP stays in the wallet. */
 const transferred: Agent[] = [];
 
-export const demoOffices = (): Office[] => OFFICES.map((o) => ({ id: o.id, name: o.name, repo_path: o.repo_path, crew: o.crew.length, working: o.working }));
+/** Who is at home in those offices, so the map has someone walking down the street: Juno goes
+ *  home for 4 of every 9 minutes (walking out as the demo opens), Pia for 10 of every 14 (home
+ *  already, back in 7 min). Counted from when the demo first lists them, on the wall clock (as
+ *  the core's `away_until`). */
+const STAYS = [
+  { office: 'demo-office-docs', id: 'demo-juno', name: 'Juno', color: 5, every: 9, away: 4, offset: 0 },
+  { office: 'demo-office-billing', id: 'demo-pia', name: 'Pia', color: 1, every: 14, away: 10, offset: 3 },
+];
+let opened = 0;
+
+function demoAway(office: string, now: number): AwayAgent[] {
+  opened ||= now - 15_000;
+  const out: AwayAgent[] = [];
+  for (const s of STAYS) {
+    if (s.office !== office) continue;
+    const every = s.every * 60_000;
+    const since = opened - s.offset * 60_000 + Math.floor((now - opened + s.offset * 60_000) / every) * every;
+    const until = since + s.away * 60_000;
+    if (now < until) out.push({ id: s.id, name: s.name, color: s.color, since, until });
+  }
+  return out;
+}
+
+export const demoOffices = (): Office[] => OFFICES.map((o) => ({ id: o.id, name: o.name, repo_path: o.repo_path, crew: o.crew.length, working: o.working, home: demoAway(o.id, Date.now()) }));
 
 /** Transfer an agent to one of the demo's other offices: same rules as the core's; it leaves this office's crew. */
 export function demoTransfer(sim: Sim, id: string, to: string): Agent {
@@ -293,7 +317,10 @@ export function demoHome(sim: Sim, id: string, until: number | null): Agent {
   const a = sim.agents.get(id);
   if (!a) throw new Error('no such agent');
   if (until != null && a.role === 'lead') throw new Error('the Lead never goes home');
-  const next: Agent = { ...a, updated_at: sim.now(), away_until: until ?? undefined, tired_since: until != null ? undefined : a.tired_since };
+  // When it left (wall clock, as the office's `until`): now, unless it was home already.
+  const home = a.away_until != null && a.away_until > Date.now();
+  const away_since = until == null ? undefined : home ? a.away_since : Date.now();
+  const next: Agent = { ...a, updated_at: sim.now(), away_until: until ?? undefined, away_since, tired_since: until != null ? undefined : a.tired_since };
   sim.putAgent(next);
   return next;
 }

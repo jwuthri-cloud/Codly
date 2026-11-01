@@ -19,6 +19,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import { coins } from '../lib/util/format';
   import { buyOptions, signOf, sizeLabel, slotActions, slotKind, type ActionId } from './map';
+  import type { Away } from './home';
   import { NeighbourhoodScene } from './scene';
 
   let el: HTMLDivElement | undefined = $state();
@@ -39,6 +40,15 @@
   const ws = $derived(store.workspace);
   const crewHere = $derived(store.agents.filter((a) => a.role !== 'lead' && !a.archived).length);
   const working = $derived(store.agents.filter((a) => a.role !== 'lead' && (a.status === 'working' || a.status === 'thinking')).length);
+  /** Who is at home, by office: the open one's from its agents, the others' from the core. The
+   *  scene keeps the ones whose stay is still ahead. */
+  const home = $derived.by(() => {
+    const m = new Map<string, Away[]>();
+    for (const o of offices) if (o.id !== ws?.id && o.home.length) m.set(o.id, o.home.map((a) => ({ id: a.id, name: a.name, color: a.color, since: a.since, until: a.until })));
+    const here = store.agents.filter((a) => a.role !== 'lead' && !a.archived && a.away_until != null);
+    if (ws && here.length) m.set(ws.id, here.map((a) => ({ id: a.id, name: a.name, color: a.color, since: a.away_since ?? null, until: a.away_until! })));
+    return m;
+  });
   const slot = $derived(slots.find((s) => s.id === selected) ?? null);
   const balance = $derived(wallet?.balance ?? 0);
 
@@ -97,7 +107,7 @@
   });
 
   $effect(() => {
-    scene?.set({ slots, lots, live: ws?.id ?? null, crew: crewHere, working, away: new Map(offices.map((o) => [o.id, o.working])), selected });
+    scene?.set({ slots, lots, live: ws?.id ?? null, crew: crewHere, working, away: new Map(offices.map((o) => [o.id, o.working])), selected, home });
   });
 
   // ───────────── actions ─────────────
@@ -305,6 +315,10 @@
   .nb :global(.nb-dot) { width: 6px; height: 6px; border-radius: 50%; background: rgba(243, 237, 228, 0.35); }
   .nb :global(.nb-sign[data-state='open'] .nb-dot) { background: #6fe39b; box-shadow: 0 0 0 3px rgba(111, 227, 155, 0.18); }
   .nb :global(.nb-sign.busy .nb-dot) { animation: nb-pulse 1.6s ease-in-out infinite; }
+  /* an agent at home: a tag over its house, and a smaller one over it while it walks */
+  .nb :global(.nb-sign.nb-home), .nb :global(.nb-sign.nb-walker) { pointer-events: none; cursor: default; }
+  .nb :global(.nb-sign.nb-home .nb-title) { font-size: 11px; line-height: 15px; font-weight: 600; }
+  .nb :global(.nb-sign.nb-walker) { padding: 2px 7px 3px; border-radius: 7px; font-size: 10.5px; line-height: 13px; font-weight: 600; }
   .nb :global(.nb-sign[data-kind='sale']) { background: rgba(24, 20, 30, 0.6); }
   .nb :global(.nb-sign[data-kind='sale'] .nb-title), .nb :global(.nb-sign[data-kind='empty'] .nb-title) { font-weight: 600; }
   :global(.nb[data-theme='light'] .nb-sign) { background: rgba(255, 252, 246, 0.94); color: #2a2420; box-shadow: 0 0 0 1px rgba(60, 40, 20, 0.09), 0 6px 18px -10px rgba(80, 56, 24, 0.4); }

@@ -442,6 +442,10 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub away_until: Option<i64>,
+    /// When it left for home (ms), set with `away_until`: the map walks it down the street then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub away_since: Option<i64>,
     /// Tired since then (ms): the office's energy fell under 30% (it reports crossing back).
     /// Only a hint: the Lead and the scheduler prefer someone rested, never refuse it work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1703,6 +1707,21 @@ pub struct Office {
     pub crew: i64,
     /// Its tasks in flight now (running, in review or merging): each keeps an agent busy.
     pub working: i64,
+    /// Its agents at home now (`Agent::away_until` still ahead): the map walks them home.
+    #[serde(default)]
+    pub home: Vec<AwayAgent>,
+}
+
+/// An agent at home, for the Neighbourhood map: when it left and when it is back (ms).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AwayAgent {
+    pub id: Id,
+    pub name: String,
+    /// Its identity hue (`Agent::color`).
+    pub color: i64,
+    pub since: Option<i64>,
+    pub until: i64,
 }
 
 // ───────────────────────────── per-agent live controls ─────────────────────────────

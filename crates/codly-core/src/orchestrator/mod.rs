@@ -614,7 +614,11 @@ impl Core {
         if until.is_some() && self.inner.agent(agent_id)?.role == Role::Lead {
             anyhow::bail!("the Lead never goes home");
         }
+        let now = now_ms();
         let a = self.inner.update_agent(agent_id, |a| {
+            // It left now, unless it was already at home (its stay only moved).
+            let home = a.away_until.is_some_and(|t| t > now);
+            a.away_since = until.and(if home { a.away_since } else { Some(now) });
             a.away_until = until;
             if until.is_some() {
                 a.tired_since = None; // it rests at home
@@ -1196,6 +1200,7 @@ impl Inner {
             usage: Usage::default(),
             career,
             away_until: None,
+            away_since: None,
             tired_since: None,
             created_at: now,
             updated_at: now,

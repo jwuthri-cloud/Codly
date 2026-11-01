@@ -40,6 +40,8 @@ export interface Town {
   /** Everything the town covers (the camera's bounds, the shadow box). */
   bounds: Rect;
   roads: Rect[];
+  /** Each block inside its four roads (its sidewalks run around the edge). */
+  blocks: Rect[];
   walks: Rect[];
   dashes: Rect[];
   lamps: { x: number; z: number }[];
@@ -76,7 +78,7 @@ export function townOf(plots: Plot[]): Town {
   const bx = (i: number) => ox + (i - 0.5) * PITCH_X; // west boundary of column i
   const bz = (j: number) => oz + (j - 0.5) * PITCH_Z; // north boundary of row j
   const bounds = { x0: bx(i0) - ROAD / 2, z0: bz(j0) - ROAD / 2, x1: bx(i1 + 1) + ROAD / 2, z1: bz(j1 + 1) + ROAD / 2 };
-  const t: Town = { bounds, roads: [], walks: [], dashes: [], lamps: [], trees: [], houses: [], cars: [] };
+  const t: Town = { bounds, roads: [], blocks: [], walks: [], dashes: [], lamps: [], trees: [], houses: [], cars: [] };
   const r = ROAD / 2;
 
   for (let i = i0; i <= i1 + 1; i++) t.roads.push({ x0: bx(i) - r, z0: bounds.z0, x1: bx(i) + r, z1: bounds.z1 });
@@ -87,6 +89,7 @@ export function townOf(plots: Plot[]): Town {
       const rand = rng(((i + 1000) * 73856093) ^ ((j + 1000) * 19349663));
       // The block inside its four roads, and its sidewalks around the edge.
       const b = { x0: bx(i) + r, z0: bz(j) + r, x1: bx(i + 1) - r, z1: bz(j + 1) - r };
+      t.blocks.push(b);
       t.walks.push(
         { x0: b.x0, z0: b.z0, x1: b.x1, z1: b.z0 + WALK },
         { x0: b.x0, z0: b.z1 - WALK, x1: b.x1, z1: b.z1 },
@@ -148,6 +151,34 @@ export function townOf(plots: Plot[]): Town {
   for (const x of xs) for (let z = bounds.z0 + 1; z < bounds.z1 - 2; z += 4) if (!cross(z + 1, zs)) t.dashes.push({ x0: x - 0.08, z0: z, x1: x + 0.08, z1: z + 2 });
   for (const z of zs) for (let x = bounds.x0 + 1; x < bounds.x1 - 2; x += 4) if (!cross(x + 1, xs)) t.dashes.push({ x0: x, z0: z - 0.08, x1: x + 2, z1: z + 0.08 });
   return t;
+}
+
+/** Where a house's front door is, on the ground (the middle of its street side). */
+export function doorOf(h: House): { x: number; z: number } {
+  const sideways = h.face % 2 === 1;
+  const [w, d] = sideways ? [h.d, h.w] : [h.w, h.d];
+  const fx = h.face === 1 ? 1 : h.face === 3 ? -1 : 0;
+  const fz = h.face === 0 ? 1 : h.face === 2 ? -1 : 0;
+  return { x: h.x + fx * (w / 2), z: h.z + fz * (d / 2) };
+}
+
+/** A house's front windows as boxes (x, y, z, w, h, d), `depth` thick off its front wall: the town
+ *  draws them, and the map lights them again, a little proud, while someone is at home. */
+export function houseWindows(h: House, depth = 0.08): [number, number, number, number, number, number][] {
+  const sideways = h.face % 2 === 1;
+  const [w, d] = sideways ? [h.d, h.w] : [h.w, h.d];
+  const fx = h.face === 1 ? 1 : h.face === 3 ? -1 : 0;
+  const fz = h.face === 0 ? 1 : h.face === 2 ? -1 : 0;
+  const len = sideways ? d : w;
+  const out: [number, number, number, number, number, number][] = [];
+  if (h.kind === 'shop') return out;
+  for (let y = 1.5; y < h.h; y += 2.6)
+    for (const a of [-len * 0.3, len * 0.3]) {
+      const x = h.x + fx * (w / 2 + depth / 2) + (sideways ? 0 : a);
+      const z = h.z + fz * (d / 2 + depth / 2) + (sideways ? a : 0);
+      out.push([x, y, z, sideways ? depth : 1.2, 1.1, sideways ? 1.2 : depth]);
+    }
+  return out;
 }
 
 // ───────────── drawing ─────────────
@@ -246,7 +277,7 @@ export class TownGfx {
     const rh = Math.min(w, d) * 0.42;
     solid.add(ROOF, ROOFS[h.roof], new Matrix4().compose(new Vector3(h.x, h.h + rh / 2, h.z), new Quaternion(), new Vector3(w + 0.6, rh, d + 0.6)), true);
     solid.box(...front(0, 1, 1, 2), lin('#6b4a36'));
-    for (let y = 1.5; y < h.h; y += 2.6) for (const a of [-len * 0.3, len * 0.3]) win.box(...front(a, y, 1.2, 1.1), [1, 1, 1]);
+    for (const w of houseWindows(h)) win.box(...w, [1, 1, 1]);
   }
 
   /** Lamps and windows glow at night (the lamp's colour from the theme). */
