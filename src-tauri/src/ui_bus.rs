@@ -16,6 +16,9 @@ use tokio::time::{Instant, sleep_until};
 #[derive(Clone, Serialize)]
 pub struct UiBatch {
     pub events: Vec<EventRow>,
+    /// Events were skipped: the UI must take a fresh snapshot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resync: bool,
 }
 
 #[derive(Default)]
@@ -48,18 +51,16 @@ impl UiBus {
     /// Runs for the app's lifetime.
     pub async fn pump(self: Arc<Self>, mut rx: broadcast::Receiver<EventRow>) {
         let mut buf: Vec<EventRow> = Vec::with_capacity(512);
+        let mut lagged = false;
         loop {
-            let first = match rx.recv().await {
-                Ok(ev) => ev,
-                // ponytail: a lagging UI loses the skipped events until its next snapshot
-                // (window refocus re-subscribes); a resync flag in UiBatch if this shows up.
+            match rx.recv().await {
+                Ok(ev) => self.push(&mut buf, ev),
                 Err(RecvError::Lagged(n)) => {
                     tracing::warn!("ui bus lagged by {n} events");
-                    continue;
+                    lagged = true;
                 }
                 Err(RecvError::Closed) => return,
-            };
-            self.push(&mut buf, first);
+            }
             let deadline = sleep_until(Instant::now() + WINDOW);
             tokio::pin!(deadline);
             loop {
@@ -68,13 +69,13 @@ impl UiBus {
                     _ = &mut deadline => break,
                     ev = rx.recv() => match ev {
                         Ok(ev) => { self.push(&mut buf, ev); if buf.len() >= MAX_BATCH { break } }
-                        Err(RecvError::Lagged(n)) => tracing::warn!("ui bus lagged by {n} events"),
+                        Err(RecvError::Lagged(n)) => { tracing::warn!("ui bus lagged by {n} events"); lagged = true }
                         Err(RecvError::Closed) => break,
                     },
                 }
             }
-            if !buf.is_empty() {
-                self.send(UiBatch { events: std::mem::take(&mut buf) });
+            if !buf.is_empty() || lagged {
+                self.send(UiBatch { events: std::mem::take(&mut buf), resync: std::mem::take(&mut lagged) });
             }
         }
     }
