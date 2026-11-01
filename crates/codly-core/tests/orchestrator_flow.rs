@@ -1978,6 +1978,35 @@ async fn a_requests_mode_and_model_steer_its_lead() {
     core.shutdown().await;
 }
 
+/// A request can pick its own Lead CLI: its Lead runs there on that CLI's default model, while
+/// another request keeps the Settings CLI and model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_picks_its_own_lead_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let codex = CliInfo { provider: Provider::Codex, ..claude() };
+    let spawner = FakeSpawner { log: log.clone(), lead: echo_lead(Arc::new(AtomicBool::new(false))), worker: echo_lead(Arc::new(AtomicBool::new(false))) };
+    let core = start_with_clis(dir.path(), spawner, vec![claude(), codex]).await;
+    let settings = Settings { lead_provider: Some(Provider::Claude), lead_model: Some("opus".into()), lead_followups: false, ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+
+    core.set_request_prefs("lead:2", RequestPrefs { provider: Some(Provider::Codex), ..Default::default() }).await.unwrap();
+    core.send_chat("lead:2", "hi").await.unwrap();
+    core.send_chat("lead", "hi").await.unwrap();
+    let s = wait_for("both Leads", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        (chats(&s, "lead:2").len() > 1 && chats(&s, "lead").len() > 1).then_some(s)
+    })
+    .await;
+    let (own, usual) = (lead_of(&s, "lead:2").unwrap(), lead_of(&s, "lead").unwrap());
+    let model = |id: &str| log.lock().unwrap().models.iter().rfind(|m| m.0 == id).and_then(|m| m.1.clone());
+    assert_eq!((own.provider, model(&own.id)), (Provider::Codex, None), "Codex on its default model, not opus");
+    assert_eq!((usual.provider, model(&usual.id).as_deref()), (Provider::Claude, Some("opus")));
+    core.shutdown().await;
+}
+
 /// A new consultant is hired through a job offer: it stays up until you pick an applicant
 /// (or it closes on the Lead's pick); the one you pick walks in with its own name and traits,
 /// and earns XP for the work it does.

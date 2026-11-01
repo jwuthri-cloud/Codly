@@ -1584,6 +1584,8 @@ pub struct RequestPrefs {
     pub approval_mode: Option<ApprovalMode>,
     /// The Lead's model, "opus:high" style.
     pub model: Option<String>,
+    /// The Lead's CLI for this request (its model belongs to it).
+    pub provider: Option<Provider>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

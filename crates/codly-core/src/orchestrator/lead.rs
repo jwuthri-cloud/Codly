@@ -102,10 +102,21 @@ impl Inner {
         p.mode.unwrap_or(if self.settings().auto_run_plans { LeadMode::Auto } else { LeadMode::Plan })
     }
 
-    /// The model of the request's Lead: its own pick, else the Settings one.
+    /// The model of the request's Lead: its own pick, else the Settings one (unless the request
+    /// picked another CLI than Settings: that CLI's default then).
     pub(super) fn lead_model_for(&self, ws_id: &str, thread: &str) -> Option<String> {
         let p = self.store.request_prefs(ws_id, thread).unwrap_or_default();
-        p.model.or_else(|| self.settings().lead_model)
+        let own_cli = self.lead_provider_for(ws_id, thread).ok() != self.lead_provider().ok();
+        p.model.or_else(|| if own_cli { None } else { self.settings().lead_model })
+    }
+
+    /// The request's own CLI when it picked one and it is usable, else the Settings one.
+    fn lead_provider_for(&self, ws_id: &str, thread: &str) -> Result<Provider> {
+        let own = self.store.request_prefs(ws_id, thread).ok().and_then(|p| p.provider);
+        match own {
+            Some(p) if self.provider_usable(p, false) => Ok(p),
+            _ => self.lead_provider(),
+        }
     }
 
     /// How much the agents of a request ask you: its own pick, else the Settings one.
@@ -177,7 +188,7 @@ impl Inner {
             }
             return Ok(l.clone());
         }
-        let provider = self.lead_provider()?;
+        let provider = self.lead_provider_for(&ws.id, thread)?;
         let taken = |n: &str| agents.iter().any(|a| a.name.eq_ignore_ascii_case(n));
         let name = (1..).map(|n| if n == 1 { "Lead".to_string() } else { format!("Lead {n}") }).find(|n| !taken(n)).unwrap_or_default();
         let color = names::next_color(&agents.iter().map(|a| a.color).collect::<Vec<_>>());
@@ -212,7 +223,7 @@ impl Inner {
 
     /// Start (or resume by session id) a Lead's run.
     async fn spawn_lead(self: &Arc<Self>, ws: &Workspace, lead: Agent) -> Result<()> {
-        let provider = self.lead_provider()?;
+        let provider = self.lead_provider_for(&ws.id, thread_of(&lead))?;
         let model = self.lead_model_for(&ws.id, thread_of(&lead));
         let account = self.lead_account(provider, &lead);
         let mut lead = lead;
@@ -309,7 +320,7 @@ impl Inner {
             Some((true, ..)) => return Ok(Delivery::Exiting),
             // Its CLI or model changed in Settings: an idle Lead restarts on it (same session).
             Some((false, provider, model))
-                if (model != self.lead_model_for(&ws.id, thread) || self.lead_provider().is_ok_and(|p| p != provider))
+                if (model != self.lead_model_for(&ws.id, thread) || self.lead_provider_for(&ws.id, thread).is_ok_and(|p| p != provider))
                     && self.is_quiet(&lead.id)
                     && self.stop_run(&lead.id) =>
             {
@@ -317,7 +328,7 @@ impl Inner {
             }
             Some(_) => {}
             None => {
-                self.lead_provider()?; // before pausing another Lead for a spawn that cannot happen
+                self.lead_provider_for(&ws.id, thread)?; // before pausing another Lead for a spawn that cannot happen
                 if !self.make_room(ws, &lead)? {
                     return Ok(Delivery::NoSlot);
                 }

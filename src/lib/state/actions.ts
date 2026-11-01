@@ -69,7 +69,7 @@ export async function updateSettings(patch: Partial<Settings>) {
 
 /** Change a request's mode, permissions or Lead model; shown at once, reverted if refused. */
 export async function setRequestPrefs(thread: string, patch: Partial<RequestPrefs>) {
-  const prev = store.requestPrefs[thread] ?? { mode: null, approval_mode: null, model: null };
+  const prev = store.requestPrefs[thread] ?? { mode: null, approval_mode: null, model: null, provider: null };
   const next = { ...prev, ...patch };
   store.setRequestPrefs(thread, next);
   const saved = await attempt('change the request', () => api.setRequestPrefs(thread, next));
