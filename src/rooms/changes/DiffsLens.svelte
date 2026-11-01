@@ -19,6 +19,8 @@
   const settled = $derived(new Set(store.plans.filter((p) => p.merged_sha || p.kept).map((p) => p.id)));
   const plans = $derived(allPlans.filter((p) => !settled.has(p.id)));
   const tasks = $derived(allTasks.filter((t) => !t.plan_id || !settled.has(t.plan_id)));
+  // Tasks with no plan shown above them: no plan, or a cancelled one.
+  const loose = $derived(tasks.filter((t) => !plans.some((p) => p.id === t.plan_id)));
   const merged = $derived(allPlans.filter((p) => settled.has(p.id)));
   const target = $derived(
     ui.diffTarget ?? (plans[0] ? { kind: 'plan' as const, id: plans[0].id } : tasks[0] ? { kind: 'task' as const, id: tasks[0].id } : merged[0] ? { kind: 'plan' as const, id: merged[0].id } : null),
@@ -110,12 +112,15 @@
         </button>
       {/snippet}
       {#if plans.length}
-        <p class="eyebrow">Plan</p>
-        {#each plans as p (p.id)}{@render planRow(p)}{/each}
+        <p class="eyebrow">{plans.length > 1 ? 'Plans' : 'Plan'}</p>
+        {#each plans as p (p.id)}
+          {@render planRow(p)}
+          <div class="sub">{#each tasks.filter((t) => t.plan_id === p.id) as t (t.id)}{@render taskRow(t)}{/each}</div>
+        {/each}
       {/if}
-      {#if tasks.length}
-        <p class="eyebrow">Tasks</p>
-        {#each tasks as t (t.id)}{@render taskRow(t)}{/each}
+      {#if loose.length}
+        <p class="eyebrow">{plans.length ? 'Other tasks' : 'Tasks'}</p>
+        {#each loose as t (t.id)}{@render taskRow(t)}{/each}
       {:else if !plans.length}
         <p class="all-in">Everything is in your branch.</p>
       {/if}
