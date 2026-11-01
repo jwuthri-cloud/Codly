@@ -432,10 +432,11 @@
         if (here.tile < 0) return hint('Over the lot');
         const c = here.tile % L().tiles.cols;
         const r = Math.floor(here.tile / L().tiles.cols);
-        const o = moveRoom(lotNow, bought, L(), moving.k, c - moving.c, r - moving.r, turns);
+        const dc = c - moving.c, dr = r - moving.r;
+        const o = moveRoom(lotNow, bought, L(), moving.k, dc, dr, turns);
         // Where it would land, in red when it can't (unturned: near enough to see why).
         const cols = L().tiles.cols;
-        const ghost = failed(o) ? rectsOf(roomTiles(L(), moving.k).map((t) => t + (r - moving.r) * cols + (c - moving.c)), cols).map((x): Shape => ({ kind: 'floor', ...x, tone: 'bad' })) : [];
+        const ghost = failed(o) ? rectsOf(roomTiles(L(), moving.k).map((t) => t + dr * cols + dc), cols).map((x): Shape => ({ kind: 'floor', ...x, tone: 'bad' })) : [];
         return show(o, 'Put it down here · R turns it', ghost);
       }
       case 'hammer': {
