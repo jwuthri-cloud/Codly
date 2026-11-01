@@ -2,7 +2,7 @@
   Timeline: one lane per agent in its hue. Bars are tool calls (writes solid, reads faint,
   commands striped), amber marks are approvals, small ticks are commits, checks and merges.
   The live edge (aurora) follows now until you scroll back. Click a bar → the agent's history
-  at that moment.
+  at that moment. Stopped agents fold under a "Stopped" row below the ones still running.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -18,6 +18,7 @@
   import Say from '../../components/Say.svelte';
 
   const LANE = 56;
+  const FOLD = 36;
   const AXIS = 30;
   const RIGHT = 80;
   const ZOOMS = [0.5, 1, 2, 4, 6, 10, 16, 28];
@@ -26,6 +27,7 @@
   let viewW = $state(800);
   let follow = $state(true);
   let fit = $state(true);
+  let showStopped = $state(false);
   let clockNow = $state(wallNow());
   onMount(() => {
     const id = setInterval(() => document.visibilityState === 'visible' && (clockNow = wallNow()), 250);
@@ -47,6 +49,15 @@
       .sort((a, b) => (a.role === 'lead' ? -1 : b.role === 'lead' ? 1 : a.created_at - b.created_at))
       .map((a) => ({ agent: a, segs: (store.live[a.id]?.segments ?? []).slice(), turns: (store.live[a.id]?.turns ?? []).slice() }));
   });
+  // Running agents first; the stopped ones below a fold (open by itself when nobody runs).
+  const alive = $derived(lanes.filter((l) => l.agent.status !== 'offline'));
+  const stopped = $derived(lanes.filter((l) => l.agent.status === 'offline'));
+  const open = $derived(showStopped || !alive.length);
+  const foldY = $derived(AXIS + alive.length * LANE);
+  const shown = $derived([
+    ...alive.map((l, i) => ({ ...l, y: AXIS + i * LANE, off: false })),
+    ...(open ? stopped.map((l, i) => ({ ...l, y: foldY + (stopped.length ? FOLD : 0) + i * LANE, off: true })) : []),
+  ]);
   type Mark = { agentId: string; ts: number; end: number | null; kind: 'approval' | 'commit' | 'verified' | 'merged' | 'artifact'; ok: boolean; text: string };
   const marks = $derived.by((): Mark[] => {
     void store.rev;
@@ -79,7 +90,7 @@
   const tEnd = $derived(clockNow + (RIGHT / pxs) * 1000);
   const t0 = $derived(Math.min(dataT0, tEnd - (viewW / pxs) * 1000));
   const width = $derived(Math.max(viewW, ((tEnd - t0) / 1000) * pxs));
-  const height = $derived(AXIS + lanes.length * LANE + 8);
+  const height = $derived(foldY + (stopped.length ? FOLD : 0) + (open ? stopped.length * LANE : 0) + 8);
   const x = (ts: number) => ((ts - t0) / 1000) * pxs;
   const ticks = $derived.by(() => {
     const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
@@ -108,18 +119,26 @@
   const segTip = (s: Seg) => `${s.end == null ? phrase(s.activity, s.label) : `${pastVerb(s.activity)} ${s.label}`} · ${clockSec(s.start)}${s.end ? ` · ${dur(s.end - s.start)}` : ''}${s.testsPassed != null ? ` · ${s.testsPassed} passed${s.testsFailed ? `, ${s.testsFailed} failed` : ''}` : ''}`;
 </script>
 
+{#snippet fold()}
+  <button class="fold" style:height="{FOLD}px" aria-expanded={open} disabled={!alive.length} onclick={() => (showStopped = !showStopped)}>
+    {#if alive.length}<Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} />{/if}Stopped · {stopped.length}
+  </button>
+{/snippet}
+
 {#if !lanes.length}
   <EmptyState title="Nothing has happened yet." body="Each agent gets a lane here once it starts working." />
 {:else}
   <div class="tl">
     <div class="lanes-h" style:padding-top="{AXIS}px">
-      {#each lanes as l (l.agent.id)}
+      {#each shown as l, i (l.agent.id)}
         {@const n = narrate(l.agent.id)}
-        <button class="lh" class:lit={ui.hover.agentId === l.agent.id} style:height="{LANE}px" onclick={() => ui.selectAgent(l.agent.id)} onpointerenter={() => ui.setHover({ agentId: l.agent.id })} onpointerleave={() => ui.setHover(null)}>
+        {#if i === alive.length}{@render fold()}{/if}
+        <button class="lh" class:off={l.off} class:lit={ui.hover.agentId === l.agent.id} style:height="{LANE}px" onclick={() => ui.selectAgent(l.agent.id)} onpointerenter={() => ui.setHover({ agentId: l.agent.id })} onpointerleave={() => ui.setHover(null)}>
           <Portrait agent={l.agent} size={24} />
           <span class="lt"><b>{l.agent.name}</b><span class="truncate">{#if n}<Say parts={n.parts} />{/if}</span></span>
         </button>
       {/each}
+      {#if shown.length === alive.length && stopped.length}{@render fold()}{/if}
     </div>
     <div class="scroller" bind:this={scroller} onscroll={onScroll}>
       <svg {width} {height} role="img" aria-label="Agent activity over time">
@@ -127,9 +146,10 @@
           <line class="grid" x1={x(t)} x2={x(t)} y1={AXIS - 6} y2={height} />
           <text class="tick" x={x(t) + 4} y={AXIS - 12}>{ticks.s < 60 ? clockSec(t).replace(/\s?[AP]M$/i, '') : clock(t)}</text>
         {/each}
-        {#each lanes as l, li (l.agent.id)}
-          {@const y = AXIS + li * LANE}
-          <g class="lane" class:lit={ui.hover.agentId === l.agent.id} style:--hue={idVar(l.agent.color)}>
+        {#if stopped.length}<line class="fold-line" x1="0" x2={width} y1={foldY + FOLD / 2} y2={foldY + FOLD / 2} />{/if}
+        {#each shown as l (l.agent.id)}
+          {@const y = l.y}
+          <g class="lane" class:off={l.off} class:lit={ui.hover.agentId === l.agent.id} style:--hue={idVar(l.agent.color)}>
             <rect class="lane-bg" x="0" {y} {width} height={LANE} />
             {#each l.turns as t, ti (ti)}<rect class="turn" x={x(t.start)} y={y + 10} width={Math.max(2, x(t.end ?? clockNow) - x(t.start))} height={LANE - 20} rx="6" />{/each}
             {#each l.segs as s (s.callId)}
@@ -165,6 +185,11 @@
   .lh:hover, .lh.lit { background: var(--surface-1); }
   .lt { display: flex; flex-direction: column; min-width: 0; font-size: var(--t-sm); color: var(--ink-3); line-height: 16px; }
   .lt b { color: var(--ink-1); font-size: var(--t-md); }
+  .lh.off, .lane.off { opacity: 0.55; }
+  .lh.off:hover, .lh.off.lit { opacity: 1; }
+  .fold { display: flex; align-items: center; gap: 6px; padding: 0 12px 0 8px; font-size: var(--t-sm); font-weight: 600; color: var(--ink-3); text-align: left; }
+  .fold:not(:disabled):hover { color: var(--ink-1); }
+  .fold-line { stroke: var(--line); stroke-dasharray: 3 4; }
   .scroller { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; }
   svg { display: block; }
   .grid { stroke: var(--line); }
