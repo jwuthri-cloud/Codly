@@ -67,13 +67,16 @@ export async function updateSettings(patch: Partial<Settings>) {
   else store.setSettings(prev);
 }
 
-/** Change a request's mode, permissions or Lead model; shown at once, reverted if refused. */
+const prefsSeq: Record<string, number> = {};
+/** Change a request's mode, permissions or Lead CLI and model; shown at once, reverted if refused. */
 export async function setRequestPrefs(thread: string, patch: Partial<RequestPrefs>) {
   const prev = store.requestPrefs[thread] ?? { mode: null, approval_mode: null, model: null, provider: null };
   const next = { ...prev, ...patch };
+  const seq = (prefsSeq[thread] = (prefsSeq[thread] ?? 0) + 1);
   store.setRequestPrefs(thread, next);
   const saved = await attempt('change the request', () => api.setRequestPrefs(thread, next));
-  store.setRequestPrefs(thread, saved ?? prev);
+  // Picks in a row (the menu stays open): an older answer never undoes a newer pick.
+  if (seq === prefsSeq[thread]) store.setRequestPrefs(thread, saved ?? prev);
 }
 
 /** Save the open repo's team changes; shown at once, reverted if the core refuses them. */

@@ -47,11 +47,12 @@
   const model = $derived(splitModel(prefs.model ?? (prefs.provider && prefs.provider !== usualCli ? null : s.lead_model)));
   const clis = $derived(store.clis.filter((c) => c.path && !c.problem && c.logged_in !== false).map((c) => c.provider));
 
-  let models = $state<string[]>([]);
+  // Each CLI's models, kept: switching CLI in the open menu shows its list at once.
+  let modelsOf = $state<Record<string, string[]>>({});
+  const models = $derived(modelsOf[cli] ?? []);
   $effect(() => {
     const p = cli;
-    models = [];
-    api.listModels(p).then((l) => p === cli && (models = l)).catch(() => {});
+    if (!modelsOf[p]) api.listModels(p).then((l) => (modelsOf[p] = l)).catch(() => {});
   });
 
   let open = $state<'mode' | 'model' | null>(null);
@@ -72,18 +73,18 @@
     ...(clis.length > 1
       ? [
           { kind: 'header' as const, label: 'Lead CLI' },
-          { label: 'Default', hint: PROVIDER_LABEL[usualCli], checked: !prefs.provider, run: () => setCli(null) },
-          ...clis.map((p) => ({ label: PROVIDER_LABEL[p], checked: prefs.provider === p, run: () => setCli(p) })),
+          { label: 'Default', hint: PROVIDER_LABEL[usualCli], checked: !prefs.provider, stay: true, run: () => setCli(null) },
+          ...clis.map((p) => ({ label: PROVIDER_LABEL[p], checked: prefs.provider === p, stay: true, run: () => setCli(p) })),
         ]
       : []),
     { kind: 'header', label: `${PROVIDER_LABEL[cli]} model` },
-    { label: 'Default', checked: !model.name, run: () => setModel('', model.effort) },
-    ...[...new Set([...models, ...(model.name ? [model.name] : [])])].map((m) => ({ label: m, checked: m === model.name, run: () => setModel(m, model.effort) })),
+    { label: 'Default', checked: !model.name, stay: true, run: () => setModel('', model.effort) },
+    ...[...new Set([...models, ...(model.name ? [model.name] : [])])].map((m) => ({ label: m, checked: m === model.name, stay: true, run: () => setModel(m, model.effort) })),
     ...(efforts.length
       ? [
           { kind: 'header' as const, label: 'Thinking' },
-          { label: 'Default', checked: !model.effort, run: () => setModel(model.name, '') },
-          ...efforts.map((e) => ({ label: e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1), checked: e === model.effort, run: () => setModel(model.name, e) })),
+          { label: 'Default', checked: !model.effort, stay: true, run: () => setModel(model.name, '') },
+          ...efforts.map((e) => ({ label: e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1), checked: e === model.effort, stay: true, run: () => setModel(model.name, e) })),
         ]
       : []),
   ]);

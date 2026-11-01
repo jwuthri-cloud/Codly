@@ -1,10 +1,11 @@
 <!--
-  Anchored menu (popover). Keyboard: ↑/↓ (or J/K), ↵ runs, Esc closes. Positions under the anchor,
+  Anchored menu (popover). Keyboard: ↑/↓ (or J/K), ↵ runs, Esc closes. An item with `stay` keeps
+  the menu open (a picker you may change several times); the menu follows its new items. Positions under the anchor,
   flips above when there's no room. Rendered fixed so it escapes clipping containers.
 -->
 <script lang="ts" module>
   export type MenuItem =
-    | { kind?: 'item'; label: string; icon?: string; kbd?: string; hint?: string; danger?: boolean; disabled?: boolean; checked?: boolean; run: () => void }
+    | { kind?: 'item'; label: string; icon?: string; kbd?: string; hint?: string; danger?: boolean; disabled?: boolean; checked?: boolean; stay?: boolean; run: () => void }
     | { kind: 'header'; label: string }
     | { kind: 'separator' };
 </script>
@@ -40,7 +41,7 @@
   function run(i: number) {
     const it = items[i];
     if (!it || (it.kind && it.kind !== 'item') || (it as { disabled?: boolean }).disabled) return;
-    onclose();
+    if (!(it as { stay?: boolean }).stay) onclose();
     (it as { run: () => void }).run();
   }
 
@@ -68,6 +69,12 @@
     const t = e.target as Node;
     if (el && !el.contains(t) && !anchor.contains(t)) onclose();
   }
+
+  // New items can change its height: an upward menu keeps its bottom on the anchor.
+  $effect(() => {
+    void items;
+    tick().then(place);
+  });
 
   onMount(() => {
     // Rendered under <body>: a transformed or filtered ancestor would otherwise become the
