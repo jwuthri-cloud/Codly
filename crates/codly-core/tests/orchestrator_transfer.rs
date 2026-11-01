@@ -69,6 +69,7 @@ fn agent(name: &str, role: Role) -> Agent {
         // Workers you keep between tasks (a finished consultant would be let go at start).
         kept: true,
         away_until: None,
+        away_since: None,
         tired_since: None,
         archived: false,
         usage: Usage::default(),
@@ -183,5 +184,43 @@ async fn a_transfer_keeps_the_career_and_leaves_the_repo_behind() {
 
     // It's gone from here: transferring it again from this office is refused.
     assert!(no(core.transfer_agent(&dee.id, &b.id).await).contains("doesn't work in this office"));
+    core.shutdown().await;
+}
+
+/// The Neighbourhood map walks agents at home down the street: every other office lists who is
+/// at home now (never the Lead, never one back already), with when it left and when it's back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offices_list_who_is_at_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let (here, there) = (temp_repo(dir.path(), "here"), temp_repo(dir.path(), "there"));
+    std::fs::create_dir_all(dir.path().join("data")).unwrap();
+    let store = Store::open(&dir.path().join("data").join("codly.sqlite")).unwrap();
+    let b = workspace(&store, &there);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let a = workspace(&store, &here);
+    let now = now_ms();
+    let ada = Agent { away_until: Some(now + 600_000), away_since: Some(now - 1_000), ..agent("Ada", Role::Worker) };
+    let back = Agent { away_until: Some(now - 1_000), ..agent("Bo", Role::Worker) };
+    put(&store, &b, &ada);
+    put(&store, &b, &back);
+    put(&store, &b, &agent("Cy", Role::Worker));
+    let dee = agent("Dee", Role::Worker);
+    put(&store, &a, &dee);
+    drop(store);
+
+    let core = start(dir.path()).await;
+    core.open_workspace(here.to_str().unwrap()).await.unwrap();
+    let offices = core.offices().unwrap();
+    assert_eq!(offices.len(), 1);
+    assert_eq!(offices[0].home, [AwayAgent { id: ada.id.clone(), name: "Ada".into(), color: 3, since: Some(now - 1_000), until: now + 600_000 }]);
+
+    // Sent home here: it left now; a longer stay keeps when it left; back home clears it.
+    let gone = core.set_agent_home(&dee.id, Some(now + 300_000)).unwrap();
+    let since = gone.away_since.expect("left now");
+    assert!(since >= now);
+    let longer = core.set_agent_home(&dee.id, Some(now + 900_000)).unwrap();
+    assert_eq!(longer.away_since, Some(since));
+    let in_again = core.set_agent_home(&dee.id, None).unwrap();
+    assert_eq!((in_again.away_until, in_again.away_since), (None, None));
     core.shutdown().await;
 }

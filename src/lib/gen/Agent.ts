@@ -63,6 +63,10 @@ career: Career,
  */
 away_until?: number, 
 /**
+ * When it left for home (ms), set with `away_until`: the map walks it down the street then.
+ */
+away_since?: number, 
+/**
  * Tired since then (ms): the office's energy fell under 30% (it reports crossing back).
  * Only a hint: the Lead and the scheduler prefer someone rested, never refuse it work.
  */

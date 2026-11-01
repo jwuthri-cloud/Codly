@@ -386,8 +386,21 @@ impl Store {
              FROM workspace w ORDER BY w.opened_at DESC"
         );
         let mut st = conn.prepare_cached(&sql)?;
-        let rows = st.query_map([], |r| Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)?, working: r.get(4)? }))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let rows = st.query_map([], |r| Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)?, working: r.get(4)?, home: vec![] }))?;
+        let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        // Who is at home now, in each (the map walks them down the street).
+        let mut st = conn.prepare_cached(
+            "SELECT workspace_id, json FROM agent WHERE archived = 0 AND role != 'lead' AND json_extract(json, '$.away_until') > ?1 ORDER BY created_at, id",
+        )?;
+        let away = st.query_map([now_ms()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in away {
+            let (ws, json) = row?;
+            let Ok(a) = serde_json::from_str::<Agent>(&json) else { continue };
+            if let (Some(o), Some(until)) = (out.iter_mut().find(|o| o.id == ws), a.away_until) {
+                o.home.push(AwayAgent { id: a.id, name: a.name, color: a.color, since: a.away_since, until });
+            }
+        }
+        Ok(out)
     }
 
     /// Workspaces with work in flight: a running plan, or a task that is ready or active.

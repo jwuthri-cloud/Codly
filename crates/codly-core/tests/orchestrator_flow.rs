@@ -569,6 +569,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             usage: Usage::default(),
             career: Default::default(),
             away_until: None,
+            away_since: None,
             tired_since: None,
             created_at: now_ms(),
             updated_at: now_ms(),

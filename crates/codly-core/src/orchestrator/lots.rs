@@ -418,6 +418,7 @@ mod tests {
             consultant: false,
             kept: false,
             away_until: None,
+            away_since: None,
             tired_since: None,
             archived: true,
             usage: Usage::default(),

@@ -152,6 +152,7 @@ mod tests {
             usage: Usage::default(),
             career,
             away_until: None,
+            away_since: None,
             tired_since: None,
             created_at: 0,
             updated_at: 0,

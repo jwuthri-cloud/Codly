@@ -93,6 +93,7 @@ fn agent(id: &str, name: &str, p: Provider, role: Role) -> Agent {
         usage: Usage::default(),
         career: Default::default(),
         away_until: None,
+        away_since: None,
         tired_since: None,
         created_at: 1,
         updated_at: 1,
