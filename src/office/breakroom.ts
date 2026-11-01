@@ -70,6 +70,17 @@ export const stayOf = (s: Seat) => (s.game === 'piece' ? (PIECE_STAY[s.use ?? 's
 
 export type Needs = { hunger: number; thirst: number };
 
+/** Who spends the break together: two or more at the same table, PS5, coffee counter, shelf or
+ *  piece of furniture (napping aside). */
+export function together(seats: Map<string, Seat>): string[][] {
+  const by = new Map<string, string[]>();
+  for (const [id, s] of seats) {
+    if (s.game === 'nap' || s.use === 'nap') continue;
+    by.set(keyOf(s), [...(by.get(keyOf(s)) ?? []), id]);
+  }
+  return [...by.values()].filter((g) => g.length > 1);
+}
+
 export interface BreakRoomOptions {
   /** Testing: send everyone to this game when it has room. */
   prefer?: Game | null;
@@ -88,6 +99,9 @@ export class BreakRoom {
 
   /** How many each game seats in this office (a garage has no pool table: 0). */
   private seatsOf: Record<Game, number> = { ...SEATS };
+
+  /** How close two agents are (their friendship): a free agent picks its closest friend to play. */
+  bond: ((a: string, b: string) => number) | null = null;
 
   constructor(private opts: BreakRoomOptions = {}) {}
 
@@ -233,8 +247,11 @@ export class BreakRoom {
           this.put(id, { game: waiting, slot: this.free(waiting) }, now);
           continue;
         }
-        // 2. Pair with the next free agent at a free table (one neither just played).
-        const partner = pending.slice(i + 1).find((p) => !this.seats.has(p) && (prefer || ['any', 'table'].includes(wants.get(p) ?? 'any')));
+        // 2. Pair with a free agent at a free table (one neither just played): its best friend
+        //    among them, else the next one.
+        const free = pending.slice(i + 1).filter((p) => !this.seats.has(p) && (prefer || ['any', 'table'].includes(wants.get(p) ?? 'any')));
+        const bond = this.bond;
+        const partner = bond && free.length > 1 ? free.reduce((best, p) => (bond(id, p) > bond(id, best) ? p : best)) : free[0];
         const open = mine.filter((g) => this.occupants(g).every((x) => x == null) && !(partner && this.tired(partner, g, now)));
         if (partner && open.length) {
           const game = prefer && open.includes(prefer) ? prefer : open[hash(id + partner) % open.length];

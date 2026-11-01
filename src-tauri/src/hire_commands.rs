@@ -111,6 +111,13 @@ pub async fn note_rest(state: State<'_, AppState>, agent_id: String, sick: bool)
     state.core().await?.note_rest(&agent_id, sick).map_err(|e| format!("{e:#}"))
 }
 
+/// The office reports two agents who spent a break together: they get to know each other.
+#[tauri::command]
+pub async fn note_hangout(state: State<'_, AppState>, a: String, b: String) -> Result<(), String> {
+    state.core().await?.note_hangout(&a, &b);
+    Ok(())
+}
+
 /// What the office did since `since` (ms): the daily edition and the morning standup.
 #[tauri::command]
 pub async fn office_digest(state: State<'_, AppState>, since: i64) -> Result<Digest, String> {

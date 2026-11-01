@@ -33,7 +33,7 @@ import type { EventRow } from '../lib/gen/EventRow';
 import type { RepoFile } from '../lib/gen/RepoFile';
 import type { Task } from '../lib/gen/Task';
 import { aStar, smooth } from './astar';
-import { BreakRoom } from './breakroom';
+import { BreakRoom, together } from './breakroom';
 import { activityFor, plumbobOf, type RestActivity } from './sims';
 import { breakPreference, reactionTo, traitsOf } from './traits';
 import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, idleIntent, leisure, errandPlace, intentKey, isBlocked, placeKey, stationBreak, type Errand, type Intent, type Place } from './behavior';
@@ -237,6 +237,7 @@ export class OfficeEngine {
   private home = new Map<string, string>();
   /** What each agent is doing, so its energy and morale move with it (sims.ts). */
   private onActivity: ((id: string, now: number, act: RestActivity) => void) | null = null;
+  private onTogether: ((groups: string[][], now: number) => void) | null = null;
   private mail!: MailRoom;
   private archive!: Archive;
   private frames: DeskFrames;
@@ -1045,6 +1046,13 @@ export class OfficeEngine {
     this.onActivity = fn;
   }
 
+  /** Who spends the break together after each match (sims.ts makes friends of them), and how
+   *  close two agents are (friends pick each other to play). */
+  setTogether(fn: ((groups: string[][], now: number) => void) | null, bond: ((a: string, b: string) => number) | null = null) {
+    this.onTogether = fn;
+    this.breakRoom.bond = bond;
+  }
+
   setWalls(up: boolean) {
     this.building.setWalls(up);
     this.shadowDirty = true;
@@ -1402,6 +1410,7 @@ export class OfficeEngine {
       this.spots(),
     );
     wakeAt = Math.min(wakeAt, this.breakRoom.nextAt());
+    this.onTogether?.(together(seats), wall);
     // Pass 2: show them.
     for (const { a, act, intent: raw } of pending) {
       const intent = raw.place.kind === 'break' ? breakIntent(seats.get(a.id) ?? null) : raw;

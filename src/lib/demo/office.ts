@@ -354,6 +354,16 @@ export function demoRest(sim: Sim, id: string, sick: boolean): Agent {
   return next;
 }
 
+/** Two agents spent a break together: both remember it (same rule as the core's `together`). */
+export function demoHangout(sim: Sim, a: string, b: string): void {
+  const [x, y] = [sim.agents.get(a), sim.agents.get(b)];
+  if (!x || !y || a === b || x.role === 'lead' || y.role === 'lead') return;
+  for (const [me, other] of [[x, b], [y, a]] as const) {
+    const friends = { ...me.career.friends, [other]: (me.career.friends[other] ?? 0) + 1 };
+    sim.putAgent({ ...me, updated_at: sim.now(), career: { ...me.career, friends } });
+  }
+}
+
 /** The digest from the demo's own event log (same counting as the core's careers). */
 export function demoDigest(sim: Sim, since: number): Digest {
   const by = new Map<string, DayReport>();

@@ -171,6 +171,7 @@ pub fn run() {
             hire_commands::office_digest,
             hire_commands::set_agent_home,
             hire_commands::note_rest,
+            hire_commands::note_hangout,
             hire_commands::set_agent_tired,
             hire_commands::bigger_model,
             hire_commands::ghosts,

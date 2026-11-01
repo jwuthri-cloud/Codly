@@ -96,6 +96,8 @@
     onrest?: (agentId: string, sick: boolean) => void;
     /** Tired (energy under 30%) or rested again: the Lead prefers the rested. */
     ontired?: (agentId: string, tired: boolean) => void;
+    /** Two agents spent a break together (they get to know each other). */
+    onhangout?: (a: string, b: string) => void;
     /** A new Legend's offer (its CLI's biggest context window, if bigger), and taking it. */
     biggerModel?: (agentId: string) => Promise<ModelOffer | null>;
     ongivemodel?: (agentId: string, model: string) => void;
@@ -144,6 +146,7 @@
     onhome,
     onrest,
     ontired,
+    onhangout,
     biggerModel,
     ongivemodel,
     simsKey,
@@ -199,6 +202,7 @@
     for (const h of o.home) onhome?.(h.id, h.until);
     for (const r of o.rest) onrest?.(r.id, r.sick);
     for (const t of o.tired) ontired?.(t.id, t.tired);
+    for (const h of o.hangouts) onhangout?.(h.a, h.b);
     const tags = new Map<string, string>();
     for (const a of agents) {
       const h = a.archived ? null : sims.stats(a.id, now, null).rest.home;
@@ -305,6 +309,8 @@
       return { energy: s.needs.energy, morale: s.needs.morale, mood: h?.emoji ? { emoji: h.emoji, label: `${h.label}: ${h.why}` } : null, jittery: s.rest.jittery, hunger: s.needs.hunger, thirst: s.needs.thirst };
     });
     e.setActivity((id, now, act) => sims.setActivity(id, now, act));
+    // Breaks together make friends; friends pick each other to play.
+    e.setTogether((groups, now) => sims.together(groups, now), (a, b) => sims.bond(a, b));
     if (simsKey)
       try {
         sims.load(localStorage.getItem(simsKey), Date.now());

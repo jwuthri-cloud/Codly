@@ -172,6 +172,7 @@ export const api = {
   setAgentHome: (agentId: string, until: number | null) => call<Agent>('set_agent_home', { agentId, until }),
   /** The office reports a shift worked and rested from, or a sickness (its stamina). */
   noteRest: (agentId: string, sick: boolean) => call<Agent>('note_rest', { agentId, sick }),
+  noteHangout: (a: string, b: string) => call<void>('note_hangout', { a, b }),
   /** The office reports an agent tired (energy under 30%) or rested again: the Lead and the
    *  scheduler prefer the rested (a hint, never a refusal). */
   setAgentTired: (agentId: string, tired: boolean) => call<Agent>('set_agent_tired', { agentId, tired }),

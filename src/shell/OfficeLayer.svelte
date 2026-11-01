@@ -321,6 +321,7 @@
             onhome={(id, until) => api.setAgentHome(id, until).catch(() => {})}
             onrest={(id, sick) => api.noteRest(id, sick).catch(() => {})}
             ontired={(id, tired) => api.setAgentTired(id, tired).catch(() => {})}
+            onhangout={(a, b) => api.noteHangout(a, b).catch(() => {})}
             biggerModel={(id) => api.biggerModel(id)}
             ongivemodel={(id, model) => {
               const a = store.agentMap.get(id);

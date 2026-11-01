@@ -224,3 +224,28 @@ async fn offices_list_who_is_at_home() {
     assert_eq!((in_again.away_until, in_again.away_since), (None, None));
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_break_together_makes_friends_leads_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let here = temp_repo(dir.path(), "here");
+    std::fs::create_dir_all(dir.path().join("data")).unwrap();
+    let store = Store::open(&dir.path().join("data").join("codly.sqlite")).unwrap();
+    let ws = workspace(&store, &here);
+    let (ada, bo, lead) = (agent("Ada", Role::Worker), agent("Bo", Role::Worker), agent("Lea", Role::Lead));
+    for a in [&ada, &bo, &lead] {
+        put(&store, &ws, a);
+    }
+    drop(store);
+
+    let core = start(dir.path()).await;
+    core.open_workspace(here.to_str().unwrap()).await.unwrap();
+    core.note_hangout(&ada.id, &bo.id);
+    core.note_hangout(&bo.id, &ada.id);
+    core.note_hangout(&ada.id, &lead.id);
+    let agents = core.snapshot().await.unwrap().agents;
+    let friends = |id: &str| agents.iter().find(|a| a.id == id).unwrap().career.friends.clone();
+    assert_eq!(friends(&ada.id).get(&bo.id), Some(&2));
+    assert_eq!(friends(&bo.id).get(&ada.id), Some(&2));
+    assert!(!friends(&ada.id).contains_key(&lead.id), "the Lead keeps out of it");
+}

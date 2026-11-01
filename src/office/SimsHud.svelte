@@ -30,7 +30,7 @@
   import { HAIR, lin, SKIN } from './palette';
   import Scrapbook from './Scrapbook.svelte';
   import { sound } from './sound';
-  import { levelOf, type SimSheet, type SimsTracker } from './sims';
+  import { bondLabel, friendScore, levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
   import { atLeast, contextLabel, MENTORED_XP, PERKS, rankLabel, rankProgress, titleOf, TRAITS as WORK_TRAITS } from '../lib/util/career';
 
@@ -85,12 +85,13 @@
   const friends = $derived.by(() => {
     const out = new Map((sheet?.relations ?? []).map((r) => [r.agentId, r]));
     for (const [id, n] of Object.entries(career?.friends ?? {})) {
-      const score = Math.min(100, Math.round(25 * Math.log2(1 + 2 * n)));
+      const score = friendScore(n);
       const cur = out.get(id);
-      if (!cur || cur.score < score) out.set(id, { agentId: id, score, why: cur?.why ?? `${n} review${n === 1 ? '' : 's'} between them` });
+      if (!cur || cur.score < score) out.set(id, { agentId: id, score, label: bondLabel(n), why: `${n} time${n === 1 ? '' : 's'} together: reviews, plans shipped, breaks` });
     }
     return [...out.values()].filter((r) => agents.some((a) => a.id === r.agentId)).sort((a, b) => b.score - a.score);
   });
+  let allFriends = $state(false);
   const bondOf = (id: string) => (career?.mentor === id ? 'Mentor' : agents.find((a) => a.id === id)?.career.mentor === agent?.id ? 'Mentee' : null);
   /** Skills from its saved record (they survive restarts and travel with it). */
   const skills = $derived(
@@ -270,6 +271,11 @@
           </div>
         {/if}
       {:else if tab === 'mood'}
+        {#if sheet.effects.length}
+          <ul class="effects" aria-label="What its mood does">{#each sheet.effects as e (e)}<li>{e}</li>{/each}</ul>
+        {:else if agent.role !== 'lead'}
+          <p class="hint">Above 75% morale its energy lasts longer and it seeks friends on breaks; under 35% it tires faster. Breaks with friends, good meals and passing checks lift it.</p>
+        {/if}
         {#each sheet.moodlets as m (m.key)}
           <div class="moodlet" data-tone={m.tone}><b>{m.label}</b><span>{m.why}</span></div>
         {:else}
@@ -308,28 +314,28 @@
           <span><b>{career.stats.merged}</b> merged</span><span><b>{career.stats.checks_passed}</b> checks passed</span><span><b>{career.stats.approved}</b> approved</span><span><b>{career.stats.commits}</b> commits</span>
           <span title="From its days on the crew, merges and shifts; less each time it got sick"><b>{career.stamina}</b> stamina</span><span><b>{career.stats.shifts}</b> shifts</span>
         </div>
+        {@const trusted = PERKS.filter((p) => atLeast(career.trust, p.rank) && atLeast(career.rank, p.rank)).at(-1)}
+        {@const offer = PERKS.find((p) => !atLeast(career.trust, p.rank) && atLeast(career.rank, p.rank))}
+        {@const next = PERKS.find((p) => !atLeast(career.rank, p.rank))}
         <div class="trust">
-          {#each PERKS as p (p.rank)}
-            {@const on = atLeast(career.trust, p.rank) && atLeast(career.rank, p.rank)}
-            <div class="perk" class:on class:locked={!atLeast(career.rank, p.rank)}>
-              <span><b>{rankLabel(p.rank)}</b> {p.perk}</span>
-              {#if on}<span class="tag">Trusted</span>
-              {:else if atLeast(career.rank, p.rank) && onaction}<button onclick={() => onaction?.(agent.id, 'trust')}>Trust</button>
-              {:else}<span class="tag">at {rankLabel(p.rank)}</span>{/if}
-            </div>
-          {/each}
-          {#if atLeast(career.trust, 'junior') && onaction}<button class="link" onclick={() => onaction?.(agent.id, 'untrust')}>Take trust back</button>{/if}
+          <div class="perk" class:on={!!trusted} title={PERKS.map((p) => `${rankLabel(p.rank)}: ${p.perk}`).join('\n')}>
+            <span>{#if trusted}<b>Trusted</b> {trusted.perk}{:else}<b>Not trusted yet</b> it asks before it acts{/if}</span>
+            {#if offer && onaction}<button onclick={() => onaction?.(agent.id, 'trust')}>Trust as {rankLabel(offer.rank)}</button>
+            {:else if trusted && onaction}<button class="link" onclick={() => onaction?.(agent.id, 'untrust')}>Take back</button>{/if}
+          </div>
+          {#if next}<p class="next">At {rankLabel(next.rank)}: {next.perk.toLowerCase()}</p>{/if}
         </div>
-        <Scrapbook milestones={career.milestones} />
+        <Scrapbook milestones={career.milestones} highlights />
       {:else}
-        {#each friends as r (r.agentId)}
+        {#each friends.slice(0, allFriends ? undefined : 6) as r (r.agentId)}
           {@const bond = bondOf(r.agentId)}
           <div class="friend" title={bond === 'Mentor' ? `Its mentor: their reviews earn it +${MENTORED_XP} XP while it is an Intern or Junior` : bond === 'Mentee' ? 'It mentors them: its reviews earn them extra XP' : r.why}>
-            <span class="n-l">{nameOf(r.agentId)}{#if bond}<em>{bond}</em>{/if}</span><span class="bar"><span class="fill" style:width="{r.score}%"></span></span>
+            <span class="n-l">{nameOf(r.agentId)}<em>{bond ?? r.label}</em></span><span class="bar"><span class="fill" style:width="{r.score}%"></span></span>
           </div>
         {:else}
-          <p class="empty">Gets to know the agents it asks, reviews or is reviewed by. A Senior reviewing an Intern or Junior becomes its mentor.</p>
+          <p class="empty">Gets to know the agents it reviews or is reviewed by, ships a plan with, or spends a break with. A Senior reviewing an Intern or Junior becomes its mentor.</p>
         {/each}
+        {#if friends.length > 6}<button class="link" onclick={() => (allFriends = !allFriends)}>{allFriends ? 'Fewer' : `All ${friends.length}`}</button>{/if}
       {/if}
     </div>
   </section>
@@ -424,6 +430,9 @@
   .promo { position: absolute; left: 50%; transform: translateX(-50%); z-index: 410; display: flex; gap: 10px; align-items: center; padding: 8px 8px 8px 14px; border-radius: 999px; background: rgba(18, 22, 32, 0.92); box-shadow: inset 0 0 0 1.5px #ffd27a, 0 16px 40px -16px rgba(0, 0, 0, 0.7); color: #eef1f7; font: 500 13px 'Inter Variable', Inter, system-ui, sans-serif; pointer-events: auto; animation: pop 0.25s ease-out both; }
   .promo button { height: 26px; padding: 0 12px; border: 0; border-radius: 999px; background: #e9b03a; color: #1b1405; font: 600 12px inherit; cursor: pointer; }
   .trust { display: grid; gap: 6px; margin-bottom: 10px; }
+  .next, .hint { margin: 0 2px; font-size: 11px; color: #8a92a6; }
+  .hint { margin-bottom: 8px; line-height: 1.45; }
+  .effects { margin: 0 0 8px; padding: 7px 9px 7px 24px; border-radius: 9px; background: rgba(233, 176, 58, 0.1); color: #e8d9b4; font-size: 11.5px; line-height: 1.5; }
   .perk { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); color: #c9cfdc; font-size: 11.5px; }
   .perk b { color: #ffd27a; font-weight: 600; margin-right: 4px; }
   .perk.on { box-shadow: inset 0 0 0 1px rgba(255, 210, 122, 0.5); }
@@ -431,7 +440,7 @@
   .perk .tag { flex: none; color: #9aa2b6; font-size: 10.5px; }
   .perk.on .tag { color: #ffd27a; }
   .perk button { flex: none; height: 22px; padding: 0 10px; border: 0; border-radius: 999px; background: #e9b03a; color: #1b1405; font: 600 11px inherit; cursor: pointer; }
-  .trust .link { justify-self: start; border: 0; background: none; padding: 0; color: #9aa2b6; font: 500 11px inherit; text-decoration: underline; cursor: pointer; }
+  .link { justify-self: start; border: 0; background: none; padding: 0; color: #9aa2b6; font: 500 11px inherit; text-decoration: underline; cursor: pointer; }
   .promo button.x { background: none; color: #9aa2b6; padding: 0 6px; }
   .tabs { display: flex; gap: 2px; padding: 0 8px; }
   .look { display: flex; flex-direction: column; gap: 7px; }

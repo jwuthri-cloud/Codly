@@ -1,11 +1,20 @@
 // Breaks are social: two-player games need a partner, the PS5 takes one or two, pairs stay
 // together, and someone left alone waits a little, then moves on.
 import { describe, expect, it } from 'vitest';
-import { BreakRoom, LONELY_MS } from '../breakroom';
+import { BreakRoom, LONELY_MS, together } from '../breakroom';
 
 const games = (m: Map<string, { game: string; slot: number }>) => Object.fromEntries([...m].map(([id, s]) => [id, `${s.game}:${s.slot}`]));
 
 describe('break room', () => {
+  it('a free agent pairs with its best friend; those at one table or PS5 are together', () => {
+    const r = new BreakRoom();
+    r.bond = (a, b) => (a + b === 'adacy' || a + b === 'cyada' ? 9 : 0);
+    const s = r.update(['ada', 'bo', 'cy'], 0);
+    expect(s.get('cy')!.game).toBe(s.get('ada')!.game);
+    expect(s.get('bo')!.game).toBe('console');
+    expect(together(s)).toEqual([['ada', 'cy']]);
+  });
+
   it('one idle agent plays the PS5 alone; the next one joins on the second controller', () => {
     const r = new BreakRoom();
     expect(games(r.update(['ada'], 0))).toEqual({ ada: 'console:0' });

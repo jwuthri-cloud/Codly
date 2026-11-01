@@ -30,7 +30,7 @@ import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
 import { makeApplicants } from './util/career';
-import { demoBiggerModel, demoBringBack, demoBuyLot, demoDigest, demoExportOffice, demoGhosts, demoGiveXp, demoGrant, demoHome, demoLook, demoLot, demoLotOf, demoLots, demoMoveOffice, demoOffices, demoPlace, demoResetOffice, demoRest, demoSaveLot, demoSell, demoSellLot, demoShop, demoTired, demoTransfer, demoTrust, demoWallet } from './demo/office';
+import { demoBiggerModel, demoBringBack, demoBuyLot, demoDigest, demoExportOffice, demoGhosts, demoGiveXp, demoGrant, demoHangout, demoHome, demoLook, demoLot, demoLotOf, demoLots, demoMoveOffice, demoOffices, demoPlace, demoResetOffice, demoRest, demoSaveLot, demoSell, demoSellLot, demoShop, demoTired, demoTransfer, demoTrust, demoWallet } from './demo/office';
 import type { Lot } from './gen/Lot';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { REPO_LS } from './demo/repo';
@@ -297,6 +297,8 @@ export class MockTransport implements Transport {
         return demoHome(sim, String(a.agentId), (a.until as number | null) ?? null);
       case 'note_rest':
         return demoRest(sim, String(a.agentId), Boolean(a.sick));
+      case 'note_hangout':
+        return demoHangout(sim, String(a.a), String(a.b));
       case 'set_agent_tired':
         return demoTired(sim, String(a.agentId), Boolean(a.tired));
       case 'bigger_model':

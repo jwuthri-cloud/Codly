@@ -51,9 +51,35 @@ export interface Relation {
   agentId: string;
   /** 0 … 100. */
   score: number;
-  /** "3 reviews between them". */
+  /** "Friend", "Best friend"… */
+  label: string;
+  /** "5 times together". */
   why: string;
 }
+
+/** Times together (reviews, plans shipped together, breaks: `career.friends`) as a bar and a word. */
+export const friendScore = (n: number) => Math.min(100, Math.round(25 * Math.log2(1 + 2 * n)));
+export const bondLabel = (n: number) => (n >= 12 ? 'Best friend' : n >= 6 ? 'Good friend' : n >= 3 ? 'Friend' : 'Acquaintance');
+/** From this many times together they are friends: a break together lifts both more. */
+export const FRIEND_AT = 3;
+
+/** Mood at work: in a great mood its energy lasts longer, a tense one tires faster. */
+export function moodDrain(morale: number): number {
+  return morale > 0.75 ? 0.8 : morale < 0.35 ? 1.25 : 1;
+}
+
+/** What its mood does right now, in words (the Mood tab). */
+export function moodEffects(morale: number): string[] {
+  if (morale > 0.78) return ['Its energy lasts 25% longer', 'Wants a game with a friend on its breaks', 'Walks with a spring in its step'];
+  if (morale > 0.75) return ['Its energy lasts 25% longer', 'Walks with a spring in its step'];
+  if (morale < 0.35) return ['Tires 25% faster: it goes home sooner', 'Plays alone on the PS5 on its breaks'];
+  if (morale < 0.4) return ['Plays alone on the PS5 on its breaks'];
+  return [];
+}
+
+/** Together this long on a break counts as hanging out; once per pair per HANG_AGAIN_MS. */
+const HANG_MS = 20_000;
+const HANG_AGAIN_MS = 15 * 60_000;
 
 export type PlumbobColor = 'green' | 'amber' | 'red' | 'blue' | 'grey';
 
@@ -80,6 +106,8 @@ export interface SimSheet {
   plumbob: PlumbobColor;
   /** One word for the overall mood. */
   mood: string;
+  /** What that mood does now (`moodEffects`). */
+  effects: string[];
   rest: RestState;
 }
 
@@ -237,6 +265,8 @@ export interface SimsOutbox {
   home: { id: string; until: number | null }[];
   rest: { id: string; sick: boolean }[];
   tired: { id: string; tired: boolean }[];
+  /** Two agents who spent a break together (`api.noteHangout`: friends). */
+  hangouts: { a: string; b: string }[];
 }
 
 /** What keeps an agent from going home, for `SimsTracker.tick`: false, true (you talk to it), or
@@ -258,7 +288,10 @@ export class SimsTracker {
   private minds = new Map<string, Mind>();
   private agents = new Map<string, Agent>();
   private tasks = new Map<string, Task>();
-  private out: SimsOutbox = { home: [], rest: [], tired: [] };
+  /** Pairs on a break together now, since when; and when each pair last counted as a hangout. */
+  private with = new Map<string, number>();
+  private hung = new Map<string, number>();
+  private out: SimsOutbox = { home: [], rest: [], tired: [], hangouts: [] };
 
   setAgents(list: Agent[], now = Date.now()) {
     this.agents = new Map(list.map((a) => [a.id, a]));
@@ -267,6 +300,35 @@ export class SimsTracker {
 
   setTasks(list: Task[]) {
     this.tasks = new Map(list.map((t) => [t.id, t]));
+  }
+
+  /** Times together, saved on its career (reviews, plans shipped together, breaks). */
+  bond(a: string, b: string): number {
+    return this.agents.get(a)?.career?.friends?.[b] ?? 0;
+  }
+
+  /** Who is on a break together now (breakroom.ts `together`): after a while they hang out,
+   *  which lifts both (more with a friend) and tells the core (they get to know each other). */
+  together(groups: string[][], now: number) {
+    const seen = new Set<string>();
+    for (const g of groups)
+      for (let i = 0; i < g.length; i++)
+        for (let j = i + 1; j < g.length; j++) {
+          const [a, b] = [g[i], g[j]].sort();
+          const k = `${a}|${b}`;
+          seen.add(k);
+          const since = this.with.get(k) ?? now;
+          this.with.set(k, since);
+          if (now - since < HANG_MS || now - (this.hung.get(k) ?? -Infinity) < HANG_AGAIN_MS) continue;
+          this.hung.set(k, now);
+          this.out.hangouts.push({ a, b });
+          for (const [x, y] of [[a, b], [b, a]]) {
+            const name = this.agents.get(y)?.name ?? 'someone';
+            const friend = this.bond(x, y) >= FRIEND_AT;
+            this.feel(x, now, friend ? 0.1 : 0.05, friend ? { key: 'company', label: 'Good company', why: `A break with its friend ${name}`, tone: 'good', icon: 'users', emoji: '😄', ms: 15 * 60_000 } : { key: 'company', label: 'Getting to know someone', why: `A break with ${name}`, tone: 'good', icon: 'users', ms: 10 * 60_000 });
+          }
+        }
+    for (const k of [...this.with.keys()]) if (!seen.has(k)) this.with.delete(k);
   }
 
   private mind(id: string): Mind {
@@ -349,7 +411,7 @@ export class SimsTracker {
         const a = m.activity;
         // A nap rests at a third of home speed; the Lead rests at its desk when nothing runs.
         const rests = a === 'nap' || (lead && (a === 'idle' || a === 'wait'));
-        const d = rests ? min / (sh.homeMinutes * 3) : (-LOAD[a] * sh.drainPerHour * min) / 60;
+        const d = rests ? min / (sh.homeMinutes * 3) : (-LOAD[a] * sh.drainPerHour * moodDrain(this.moraleNow(m, t)) * min) / 60;
         if (d < 0) m.worked += Math.min(m.energy, -d);
         // The Lead never goes home: it eats at its desk while it rests.
         if (rests && lead) m.hunger = m.thirst = 1;
@@ -504,7 +566,7 @@ export class SimsTracker {
   /** What to tell the core since the last call. */
   drain(): SimsOutbox {
     const o = this.out;
-    this.out = { home: [], rest: [], tired: [] };
+    this.out = { home: [], rest: [], tired: [], hangouts: [] };
     return o;
   }
 
@@ -675,13 +737,13 @@ export class SimsTracker {
     m.moodlets = m.moodlets.filter((x) => x.until == null || x.until > now);
     const keys = new Set(live.map((x) => x.key));
     const moodlets = [...live, ...m.moodlets.filter((x) => !keys.has(x.key))].sort((a, b) => b.at - a.at);
-    // Relationships: the reviews saved on its career (they survive restarts).
+    // Relationships: the times together saved on its career (they survive restarts).
     const relations = Object.entries(agent?.career?.friends ?? {})
       .filter(([, n]) => n > 0)
-      .map(([other, n]) => ({ agentId: other, score: Math.min(100, Math.round(25 * Math.log2(1 + 2 * n))), why: `${n} review${n === 1 ? '' : 's'} between them` }))
+      .map(([other, n]) => ({ agentId: other, score: friendScore(n), label: bondLabel(n), why: `${n} time${n === 1 ? '' : 's'} together: reviews, plans shipped, breaks` }))
       .sort((a, b) => b.score - a.score);
     const rest: RestState = { home: m.home && { until: m.home.until, sick: m.home.sick }, caffeine, jittery, sick: m.sick, exhausted, cap: m.cap, canGoHome: !lead };
-    return { needs: { energy, focus, morale, hunger: m.hunger, thirst: m.thirst }, moodlets, relations, plumbob: plumbobOf(state), mood: moodWord(morale, moodlets), rest };
+    return { needs: { energy, focus, morale, hunger: m.hunger, thirst: m.thirst }, moodlets, relations, plumbob: plumbobOf(state), mood: moodWord(morale, moodlets), effects: lead ? [] : moodEffects(morale), rest };
   }
 }
 

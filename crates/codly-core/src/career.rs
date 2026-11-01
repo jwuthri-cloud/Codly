@@ -165,7 +165,7 @@ pub fn mentors(reviewer: Rank, author: Rank) -> bool {
     reviewer >= Rank::Senior && author <= Rank::Junior
 }
 
-/// One more review between it and another agent.
+/// One more time with another agent: a review, a plan shipped together, a break spent together.
 pub fn befriend(c: &mut Career, other: &str) {
     if c.friends.len() < MAX_FRIENDS || c.friends.contains_key(other) {
         *c.friends.entry(other.to_string()).or_default() += 1;

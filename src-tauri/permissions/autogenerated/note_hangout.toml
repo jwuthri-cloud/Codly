@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-note-hangout"
+description = "Enables the note_hangout command without any pre-configured scope."
+commands.allow = ["note_hangout"]
+
+[[permission]]
+identifier = "deny-note-hangout"
+description = "Denies the note_hangout command without any pre-configured scope."
+commands.deny = ["note_hangout"]

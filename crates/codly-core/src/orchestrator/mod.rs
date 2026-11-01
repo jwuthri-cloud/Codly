@@ -645,6 +645,11 @@ impl Core {
         self.inner.update_agent(agent_id, |a| crate::career::rest(&mut a.career, sick))
     }
 
+    /// The office reports two agents who spent a break together (a game, a coffee): friends.
+    pub fn note_hangout(&self, a: &str, b: &str) {
+        self.inner.together(&a.to_string(), &b.to_string());
+    }
+
     /// What the office did since `since` (ms), for the daily edition and the morning standup.
     pub fn digest(&self, since: i64) -> anyhow::Result<Digest> {
         let ws = self.inner.require_ws()?;

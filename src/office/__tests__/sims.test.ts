@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Agent } from '../../lib/gen/Agent';
 import type { EventRow } from '../../lib/gen/EventRow';
-import { activityFor, CALLED_IN, FEED, feedMs, headline, levelOf, SimsTracker } from '../sims';
+import { activityFor, CALLED_IN, FEED, feedMs, headline, levelOf, SimsTracker, moodDrain, moodEffects } from '../sims';
 import { breakDelay, breakPreference, reactionTo, traitsOf } from '../traits';
 import { BreakRoom } from '../breakroom';
 import { emptyCareer } from '../../lib/util/career';
@@ -110,7 +110,7 @@ describe('sims', () => {
     sh = s.stats('ada', 4 * HOUR + 1000, null);
     expect(sh.rest.home).toMatchObject({ until: 4 * HOUR + 1000 + 10 * MIN, sick: false });
     expect(headline(sh)).toMatchObject({ emoji: '🏠', why: 'Back in 10 min' });
-    expect(s.drain()).toEqual({ home: [{ id: 'ada', until: 4 * HOUR + 1000 + 10 * MIN }], rest: [{ id: 'ada', sick: false }], tired: [{ id: 'ada', tired: true }] });
+    expect(s.drain()).toEqual({ home: [{ id: 'ada', until: 4 * HOUR + 1000 + 10 * MIN }], rest: [{ id: 'ada', sick: false }], tired: [{ id: 'ada', tired: true }], hangouts: [] });
   });
 
   it('home refills it in ~10 min at stamina 0 and ~3 min at stamina 100; then it walks back in', () => {
@@ -205,7 +205,7 @@ describe('sims', () => {
     const sh = s.stats('lead', 5 * HOUR, null);
     expect(sh.rest).toMatchObject({ home: null, canGoHome: false, exhausted: true });
     expect(headline(sh)).toMatchObject({ label: 'Exhausted', why: 'Running on empty' });
-    expect(s.drain()).toEqual({ home: [], rest: [], tired: [] });
+    expect(s.drain()).toEqual({ home: [], rest: [], tired: [], hangouts: [] });
   });
 
   it('coffee: +15% and a cup of caffeine; 3 cups make it jittery, and they wear off in an hour', () => {
@@ -347,13 +347,37 @@ describe('sims', () => {
     expect(levelOf(100)).toEqual({ level: 10, progress: 1 });
   });
 
-  it('friends are the reviews saved on its career', () => {
+  it('friends are the times together saved on its career', () => {
     const s = new SimsTracker();
     s.setAgents([agent('ada', { career: { ...emptyCareer(), friends: { rev: 3, bob: 1 } } }), agent('rev')]);
     const r = s.stats('ada', 0, null).relations;
     expect(r.map((x) => x.agentId)).toEqual(['rev', 'bob']);
-    expect(r[0]).toMatchObject({ why: '3 reviews between them' });
+    expect(r[0]).toMatchObject({ label: 'Friend', why: '3 times together: reviews, plans shipped, breaks' });
+    expect(r[1].label).toBe('Acquaintance');
     expect(s.stats('rev', 0, null).relations).toEqual([]);
+  });
+
+  it('a break together is a hangout once it lasts, at most every 15 min per pair; a friend lifts more', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada', { career: { ...emptyCareer(), friends: { bob: 5 } } }), agent('bob'), agent('cy')]);
+    s.together([['ada', 'bob', 'cy']], 0);
+    expect(s.drain().hangouts).toEqual([]);
+    s.together([['ada', 'bob', 'cy']], 25_000);
+    expect(s.drain().hangouts).toEqual([{ a: 'ada', b: 'bob' }, { a: 'ada', b: 'cy' }, { a: 'bob', b: 'cy' }]);
+    s.together([['ada', 'bob']], 60_000);
+    expect(s.drain().hangouts).toEqual([]);
+    const ada = s.stats('ada', 60_000, null);
+    expect(ada.moodlets.find((m) => m.key === 'company')?.label).toBeDefined();
+    expect(ada.needs.morale).toBeGreaterThan(s.stats('cy', 60_000, null).needs.morale - 0.2);
+  });
+
+  it('mood changes how fast it tires, and says so', () => {
+    expect(moodDrain(0.9)).toBeLessThan(1);
+    expect(moodDrain(0.2)).toBeGreaterThan(1);
+    expect(moodDrain(0.6)).toBe(1);
+    expect(moodEffects(0.9)).toContain('Its energy lasts 25% longer');
+    expect(moodEffects(0.2)[0]).toMatch(/Tires 25% faster/);
+    expect(moodEffects(0.6)).toEqual([]);
   });
 });
 

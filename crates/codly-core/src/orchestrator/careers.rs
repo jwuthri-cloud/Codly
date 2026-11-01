@@ -59,6 +59,36 @@ impl Inner {
         {
             self.mentorship(reviewer, author, r.ts);
         }
+        // A merge in a plan: its worker and the others who shipped work in that plan are teammates.
+        if let (EventKind::Merged { .. }, Some(task)) = (&r.kind, r.task_id.as_deref().and_then(|t| self.task(t).ok())) {
+            self.teammates(&task);
+        }
+    }
+
+    /// Workers of the same plan get to know each other as each piece merges.
+    fn teammates(&self, task: &Task) {
+        let (Some(plan), Some(me)) = (task.plan_id.as_deref(), task.assignee.as_ref()) else { return };
+        let Ok(tasks) = self.store.plan_tasks(plan) else { return };
+        let mut others: Vec<&Id> = tasks
+            .iter()
+            .filter(|t| t.id != task.id && t.status == TaskStatus::Done)
+            .filter_map(|t| t.assignee.as_ref())
+            .filter(|a| *a != me)
+            .collect();
+        others.sort();
+        others.dedup();
+        for other in others {
+            self.together(me, other);
+        }
+    }
+
+    /// One more time two agents worked or spent a break together: both remember it (Leads aside).
+    pub(super) fn together(&self, a: &Id, b: &Id) {
+        if a == b || [a, b].iter().any(|id| self.agent(id).map_or(true, |x| x.role == Role::Lead)) {
+            return;
+        }
+        let _ = self.update_agent(a, |x| career::befriend(&mut x.career, b));
+        let _ = self.update_agent(b, |x| career::befriend(&mut x.career, a));
     }
 
     /// A review makes reviewer and author friends; a Senior or Staff reviewing an Intern or

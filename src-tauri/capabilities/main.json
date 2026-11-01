@@ -136,6 +136,7 @@
     "allow-office-digest",
     "allow-set-agent-home",
     "allow-note-rest",
+    "allow-note-hangout",
     "allow-set-agent-tired",
     "allow-bigger-model",
     "allow-install-cli",

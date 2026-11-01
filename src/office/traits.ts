@@ -62,6 +62,8 @@ export function breakPreference(traits: Trait[], needs: { energy: number | null;
   if (traits.includes('bookworm')) return 'library';
   if (traits.includes('lazy')) return 'console';
   if (traits.includes('competitive') || traits.includes('social')) return 'table';
+  // In a great mood it wants company: a game with someone.
+  if (needs && needs.morale > 0.78) return 'table';
   return 'any';
 }
 
