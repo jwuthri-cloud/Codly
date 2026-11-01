@@ -1622,6 +1622,9 @@ pub struct Settings {
     /// Pause (the office's speed control): no new task starts; running ones finish.
     #[serde(default)]
     pub paused: bool,
+    /// Offices paused one by one (their own Pause, or their tab closed): the same rule, there only.
+    #[serde(default)]
+    pub paused_offices: Vec<Id>,
     /// The Settings' Developer panel: cheats for testing the game (coins, XP, a fresh office).
     /// Cheats flag the wallet for good.
     #[serde(default)]
@@ -1653,6 +1656,7 @@ impl Default for Settings {
             byok_openrouter: false,
             use_my_claude_setup: true,
             paused: false,
+            paused_offices: vec![],
             developer_mode: false,
         }
     }

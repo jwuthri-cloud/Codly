@@ -27,10 +27,11 @@
   import type { Lot } from '../lib/gen/Lot';
   import type { EventRow } from '../lib/gen/EventRow';
   import { acquireArtifactUrl, releaseArtifactUrl } from '../lib/state/artifacts';
-  import { giveModel, interruptAgent, setAgentLook, stopAgent, updateSettings } from '../lib/state/actions';
+  import { giveModel, interruptAgent, setAgentLook, stopAgent } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { narrate } from '../lib/state/narration';
   import type { RepoFile } from '../lib/gen/RepoFile';
+  import { offices } from '../lib/state/offices.svelte';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { toast } from '../lib/state/toasts.svelte';
@@ -263,7 +264,8 @@
     const due = editionDue(last, Date.now());
     return due ? api.officeDigest(due.since) : null;
   }
-  const onpause = (paused: boolean) => updateSettings({ paused });
+  // Pause is this office's: the others keep working.
+  const onpause = (paused: boolean) => store.workspace && offices.pause(store.workspace.id, paused);
   // Read once per mount (not reactive): persisted events, oldest first.
   const historyAtMount = () => store.events.slice();
 
@@ -303,7 +305,7 @@
               const a = store.agentMap.get(id);
               if (a) setAgentLook(a, seed);
             }}
-            paused={store.settings.paused}
+            paused={!!store.workspace && offices.paused(store.workspace.id)}
             {onpause}
             onpickapplicant={(offerId, i) => api.pickApplicant(offerId, i).catch(fail('Could not pick'))}
             {ghosts}

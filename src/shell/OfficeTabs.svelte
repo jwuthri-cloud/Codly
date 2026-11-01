@@ -1,7 +1,8 @@
 <!--
   Office tabs, at the top of the rail: one tile per repo you keep at hand, the open one marked,
   a teal count while its agents are on tasks. Every office with work keeps working; a click only
-  changes where you look. × hides a tab (the office keeps working), + opens another repo.
+  changes where you look. ⏸ pauses one office (running tasks finish, nothing new starts), ×
+  closes its tab and pauses it, + opens another repo.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -36,6 +37,7 @@
     return s[0].toUpperCase() + s.slice(1).toLowerCase();
   }
   const tasks = (n: number) => `${n} task${n === 1 ? '' : 's'}`;
+  const state = (n: number, p: boolean) => (p ? ` · paused${n ? `, ${tasks(n)} finishing` : ''}` : n ? ` · ${tasks(n)} in flight` : '');
 
   function close(t: OfficeTab) {
     const i = offices.tabs.indexOf(t);
@@ -50,23 +52,29 @@
   {#each offices.tabs as t (t.id)}
     {@const n = busy(t)}
     {@const on = t.id === ws?.id}
-    <li class="tab" class:on>
+    {@const p = offices.paused(t.id)}
+    <li class="tab" class:on class:paused={p}>
       <button
         class="office"
         aria-current={on ? 'page' : undefined}
-        aria-label="{t.name}{n ? `, ${tasks(n)} in flight` : ''}"
-        data-tip="{t.name} — {tildify(t.path)}{n ? ` · ${tasks(n)} in flight` : ''}"
+        aria-label="{t.name}{state(n, p)}"
+        data-tip="{t.name} — {tildify(t.path)}{state(n, p)}"
         onclick={() => !on && openWorkspace(t.path)}
       >
         <span class="ini">{initials(t.name)}</span>
         {#if ui.railOpen}<span class="label">{t.name}</span>{/if}
-        {#if n}<span class="n num">{n}</span>{/if}
+        {#if p}<span class="n num p" aria-hidden="true">⏸</span>{:else if n}<span class="n num">{n}</span>{/if}
       </button>
+      <button
+        class="pp"
+        aria-label="{p ? 'Resume' : 'Pause'} {t.name}"
+        data-tip={p ? `Resume ${t.name}: new tasks start again` : `Pause ${t.name}: running tasks finish, nothing new starts`}
+        onclick={() => offices.pause(t.id, !p)}>{p ? '▶' : '⏸'}</button>
       {#if offices.tabs.length > 1}
         <button
           class="x"
           aria-label="Close the {t.name} tab"
-          data-tip={n ? `Close the tab: ${t.name} keeps working on its ${tasks(n)}` : 'Close the tab: the office keeps any work it gets'}
+          data-tip={n ? `Close and pause ${t.name}: its ${tasks(n)} finish, nothing new starts` : `Close and pause ${t.name}: reopen it to resume`}
           onclick={() => close(t)}><Icon name="x" size={10} /></button>
       {/if}
     </li>
@@ -91,9 +99,15 @@
   .x { position: absolute; top: 0; left: 0; display: none; place-items: center; width: 15px; height: 15px; border-radius: 50%; color: var(--ink-2); background: var(--glass-solid); box-shadow: 0 0 0 1px var(--line-2); }
   .x:hover { color: var(--ink-1); }
   .tab:hover .x, .x:focus-visible { display: grid; }
+  .pp { position: absolute; bottom: 0; left: 0; display: none; place-items: center; width: 15px; height: 15px; border-radius: 50%; font-size: 7.5px; color: var(--ink-2); background: var(--glass-solid); box-shadow: 0 0 0 1px var(--line-2); }
+  .pp:hover { color: var(--ink-1); }
+  .tab:hover .pp, .pp:focus-visible { display: grid; }
+  .paused .ini { opacity: 0.55; }
+  .n.p { background: var(--surface-3); color: var(--ink-2); font-size: 7.5px; }
   .label { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-  :global(.rail.open) .office { width: 100%; grid-template-columns: 26px 1fr auto; justify-items: start; gap: 9px; padding: 0 22px 0 6px; }
+  :global(.rail.open) .office { width: 100%; grid-template-columns: 26px 1fr auto; justify-items: start; gap: 9px; padding: 0 40px 0 6px; }
   :global(.rail.open) .add { padding-right: 6px; }
   :global(.rail.open) .n { position: static; box-shadow: none; }
   :global(.rail.open) .x { top: 50%; left: auto; right: 4px; margin-top: -7.5px; }
+  :global(.rail.open) .pp { top: 50%; bottom: auto; left: auto; right: 22px; margin-top: -7.5px; }
 </style>

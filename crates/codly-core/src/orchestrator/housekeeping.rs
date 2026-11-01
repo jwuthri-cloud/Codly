@@ -58,9 +58,12 @@ impl Inner {
 
     /// Judge the board now (`now` is a parameter so tests control the clock).
     pub(super) fn board_sweep_at(&self, now: i64) -> anyhow::Result<SweepReport> {
-        let ws = self.require_ws()?;
+        self.sweep_office(&self.require_ws()?, now)
+    }
+
+    fn sweep_office(&self, ws: &Workspace, now: i64) -> anyhow::Result<SweepReport> {
         let policy = self.board_policy();
-        let file = self.archive_file(&ws);
+        let file = self.archive_file(ws);
         let mut report = SweepReport::default();
         let mut to_archive = vec![];
         for t in self.store.tasks(&ws.id)? {
@@ -110,10 +113,14 @@ pub(super) async fn sweeper(inner: Arc<Inner>) {
         if inner.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        if inner.workspace().is_some()
-            && let Err(e) = inner.board_sweep_at(now_ms())
-        {
-            tracing::warn!("board sweep failed: {e}");
+        // Every office, open or not: one you left keeps its board tidy too.
+        for ws in inner.store.offices().unwrap_or_default() {
+            let Ok(Some(ws)) = inner.store.workspace(&ws.id) else { continue };
+            if Path::new(&ws.repo_path).is_dir()
+                && let Err(e) = inner.sweep_office(&ws, now_ms())
+            {
+                tracing::warn!("board sweep of {} failed: {e}", ws.name);
+            }
         }
         tokio::time::sleep(SWEEP_EVERY).await;
     }

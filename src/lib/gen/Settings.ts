@@ -62,6 +62,10 @@ use_my_claude_setup: boolean,
  */
 paused: boolean, 
 /**
+ * Offices paused one by one (their own Pause, or their tab closed): the same rule, there only.
+ */
+paused_offices: Array<string>, 
+/**
  * The Settings' Developer panel: cheats for testing the game (coins, XP, a fresh office).
  * Cheats flag the wallet for good.
  */

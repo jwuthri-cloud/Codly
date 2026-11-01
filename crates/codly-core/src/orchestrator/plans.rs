@@ -377,7 +377,8 @@ impl Inner {
         let plans = self.store.plans(&ws.id, 100)?;
         let agents = self.store.agents(&ws.id)?;
         let clis = self.clis();
-        let settings = self.settings();
+        let mut settings = self.settings();
+        settings.paused |= settings.paused_offices.contains(&ws.id);
         // A quiet 1:1 chat does not keep an agent from its task (it is stopped for it).
         let busy: HashSet<Id> = self.busy_agents();
         let accounts = self.account_states();

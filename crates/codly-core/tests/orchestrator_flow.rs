@@ -2300,3 +2300,35 @@ async fn two_offices_work_at_once_and_share_the_worker_slots() {
     assert_ne!(core.snapshot().await.unwrap().workspace.unwrap().id, wa);
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_office_starts_nothing_while_the_others_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));
+    let log = Arc::new(Mutex::new(Log::default()));
+    let hold: Behavior = Arc::new(|_turn: FakeTurn| Box::pin(std::future::pending::<()>()));
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(dir.path(), FakeSpawner { log, lead: idle, worker: hold }).await;
+    core.update_settings(Settings { paused: true, max_parallel: 2, max_per_provider: 2, ..core.settings() }).await.unwrap();
+
+    core.open_workspace(a.to_str().unwrap()).await.unwrap();
+    let ta = core.create_task("Docs for a", "").await.unwrap();
+    core.move_task(&ta.id, TaskStatus::Ready).await.unwrap();
+    let wa = core.snapshot().await.unwrap().workspace.unwrap().id;
+    core.open_workspace(b.to_str().unwrap()).await.unwrap();
+    let tb = core.create_task("Docs for b", "").await.unwrap();
+    core.move_task(&tb.id, TaskStatus::Ready).await.unwrap();
+
+    // "a" (in the background) is paused on its own: "b" works, "a" waits.
+    core.update_settings(Settings { paused: false, paused_offices: vec![wa.clone()], ..core.settings() }).await.unwrap();
+    let running_b = async || core.snapshot().await.unwrap().tasks.iter().any(|t| t.id == tb.id && t.status == TaskStatus::Running);
+    let running_a = || core.offices().unwrap().iter().find(|o| o.id == wa).map_or(0, |o| o.working);
+    wait_for("b to work", 10, async || running_b().await.then_some(())).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(running_a(), 0, "a paused office starts nothing");
+
+    // Resumed, it works too.
+    core.update_settings(Settings { paused_offices: vec![], ..core.settings() }).await.unwrap();
+    wait_for("a to work", 10, async || (running_a() == 1).then_some(())).await;
+    core.shutdown().await;
+}

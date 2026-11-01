@@ -6,6 +6,7 @@
 //! - A schedule posts its prompt in the first request's thread (author "codly") and hands
 //!   the same text to that Lead as a turn. With no repo open it waits (it is not "missed").
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -43,12 +44,18 @@ impl Inner {
 
     /// One pass: due schedules. Never holds a lock across an await.
     async fn trigger_pass(self: &Arc<Self>) -> anyhow::Result<()> {
-        let Some(ws) = self.workspace() else { return Ok(()) };
+        let open = self.workspace();
         let now = now_ms();
         let cfg = self.triggers();
 
         for id in due_schedules(&cfg.schedules, now) {
             let Some(s) = cfg.schedules.iter().find(|s| s.id == id) else { continue };
+            // Its own office, open or not (while the repo is on disk); an older one: the open one.
+            let ws = match &s.workspace_id {
+                Some(w) => self.store.workspace(w)?.filter(|w| Path::new(&w.repo_path).is_dir()),
+                None => open.clone(),
+            };
+            let Some(ws) = ws else { continue };
             let sent = self.fire_schedule(&ws, s).await;
             let entry = TriggerLog {
                 ts: now,
@@ -104,8 +111,14 @@ impl Core {
 
     /// Save the config from the UI. Codly-owned fields (log, clocks) are kept; returns what was stored.
     pub async fn set_triggers(&self, cfg: TriggersConfig) -> anyhow::Result<TriggersConfig> {
+        let open = self.inner.workspace().map(|w| w.id);
         self.inner.edit_triggers(|old| {
+            let known: Vec<Id> = old.schedules.iter().map(|s| s.id.clone()).collect();
             *old = normalize(cfg, old, now_ms());
+            // A new schedule belongs to the office it was made in.
+            for s in old.schedules.iter_mut().filter(|s| !known.contains(&s.id)) {
+                s.workspace_id = open.clone();
+            }
             old.clone()
         })
     }

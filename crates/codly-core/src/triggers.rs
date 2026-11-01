@@ -38,11 +38,14 @@ pub struct Schedule {
     pub created_at: i64,
     /// Owned by Codly: a save from the UI never moves it.
     pub last_fired_at: Option<i64>,
+    /// The office whose Lead it asks: the one open when it was made (older ones: the open one).
+    #[ts(optional)]
+    pub workspace_id: Option<Id>,
 }
 
 impl Default for Schedule {
     fn default() -> Self {
-        Schedule { id: String::new(), name: String::new(), prompt: String::new(), every_minutes: 60, enabled: true, created_at: 0, last_fired_at: None }
+        Schedule { id: String::new(), name: String::new(), prompt: String::new(), every_minutes: 60, enabled: true, created_at: 0, last_fired_at: None, workspace_id: None }
     }
 }
 
@@ -201,6 +204,7 @@ pub fn normalize(mut new: TriggersConfig, old: &TriggersConfig, now: i64) -> Tri
             Some(o) => {
                 s.created_at = o.created_at;
                 s.last_fired_at = o.last_fired_at;
+                s.workspace_id = o.workspace_id.clone();
                 // Changing the interval restarts the clock instead of firing at once.
                 if o.every_minutes != s.every_minutes && o.next_is_overdue(now) {
                     s.last_fired_at = Some(now);
@@ -275,7 +279,7 @@ mod tests {
     #[test]
     fn normalize_keeps_codly_owned_fields_and_clamps() {
         let mut old = TriggersConfig::default();
-        old.schedules.push(sched(60, 5, Some(77)));
+        old.schedules.push(Schedule { workspace_id: Some("ws1".into()), ..sched(60, 5, Some(77)) });
         old.state.push_log(TriggerLog { ts: 9, kind: "schedule".into(), label: "x".into(), detail: String::new(), ok: true });
         let mut new = TriggersConfig::default();
         new.schedules = vec![
@@ -286,6 +290,7 @@ mod tests {
         let out = normalize(new, &old, 1_000_000);
         assert_eq!(out.schedules[0].last_fired_at, Some(77));
         assert_eq!(out.schedules[0].created_at, 5);
+        assert_eq!(out.schedules[0].workspace_id.as_deref(), Some("ws1"), "its office stays");
         assert!(!out.schedules[1].id.is_empty());
         assert_eq!(out.schedules[1].every_minutes, MIN_EVERY_MINUTES);
         assert_eq!(out.schedules[1].name, "standup");

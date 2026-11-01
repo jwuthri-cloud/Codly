@@ -15,4 +15,8 @@ prompt: string, every_minutes: number, enabled: boolean, created_at: number,
 /**
  * Owned by Codly: a save from the UI never moves it.
  */
-last_fired_at: number | null, };
+last_fired_at: number | null, 
+/**
+ * The office whose Lead it asks: the one open when it was made (older ones: the open one).
+ */
+workspace_id?: string, };
