@@ -437,14 +437,14 @@ async fn single_task_plan_runs_end_to_end() {
     assert!(!core.plan_diff(&plan.id).await.unwrap().is_empty());
     assert!(core.task_diff(&task.id).await.unwrap().contains("+hello"));
 
-    // A dirty checkout is refused.
+    // Uncommitted work the plan doesn't touch doesn't block a merge...
     std::fs::write(repo.join("README.md"), "changed\n").unwrap();
-    let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
-    assert!(err.contains("uncommitted changes in README.md;"), "{err}");
-    // ...and one the plan also changed is called out.
+    assert_eq!(core.merge_plan(&plan.id).await.unwrap(), sha);
+    // ...but a file the plan also changed is refused, and only that one is named.
     std::fs::write(repo.join("hello.txt"), "mine\n").unwrap();
     let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
-    assert!(err.contains("(hello.txt also changed by this plan"), "{err}");
+    assert!(err.contains("uncommitted changes in hello.txt, which this plan also changes"), "{err}");
+    assert!(!err.contains("README.md"), "{err}");
     core.shutdown().await;
 }
 

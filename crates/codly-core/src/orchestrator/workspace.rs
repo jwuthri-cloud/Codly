@@ -385,6 +385,8 @@ impl Inner {
         let ws = self.store.workspace(&p.workspace_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
         let repo = PathBuf::from(&ws.repo_path);
         let _g = self.repo_lock.lock().await;
+        // Uncommitted work the plan doesn't touch is fine: git itself refuses a merge that would
+        // overwrite a dirty file, and `merge --abort` on conflict keeps unrelated local changes.
         if self.git.dirty(&repo, false).await? {
             let dirty = self.git.changed_paths(&repo, &["HEAD"]).await.unwrap_or_default();
             let ours = match p.base_commit.as_deref() {
@@ -392,11 +394,9 @@ impl Inner {
                 None => vec![],
             };
             let overlap: Vec<&String> = dirty.iter().filter(|f| ours.contains(f)).collect();
-            let mut why = format!("your checkout has uncommitted changes in {}", name_list(&dirty));
             if !overlap.is_empty() {
-                why += &format!(" ({} also changed by this plan, so stashing may conflict when you restore)", name_list(&overlap));
+                bail!("your checkout has uncommitted changes in {}, which this plan also changes; commit them, then merge again", name_list(&overlap));
             }
-            bail!("{why}; commit or stash them, then merge again");
         }
         let target = self
             .git
