@@ -48,14 +48,16 @@ export function traitsOf(id: string): Trait[] {
 }
 
 /** What it does on a break, by preference (the break room decides what is free). */
-export type Activity = 'any' | 'console' | 'table' | 'library' | 'coffee' | 'water' | 'snack' | 'nap';
+export type Activity = 'any' | 'console' | 'table' | 'library' | 'coffee' | 'water' | 'snack' | 'meal' | 'nap';
 
 export function breakPreference(traits: Trait[], needs: { energy: number | null; morale: number; jittery?: boolean; hunger?: number; thirst?: number } | null): Activity {
   // Needs first, like a Sim: exhausted → nap, tired → coffee (not once jittery), down → the couch.
   if (needs?.energy != null && needs.energy < 0.3) return 'nap';
   if (needs?.energy != null && needs.energy < 0.5 && !needs.jittery) return 'coffee';
-  if (needs?.thirst != null && needs.thirst < 0.4) return 'water';
-  if (needs?.hunger != null && needs.hunger < 0.4) return 'snack';
+  // The lower of hunger and thirst first; a lazy one snacks instead of cooking.
+  const hunger = needs?.hunger ?? 1;
+  const thirst = needs?.thirst ?? 1;
+  if (Math.min(hunger, thirst) < 0.4) return thirst <= hunger ? 'water' : traits.includes('lazy') ? 'snack' : 'meal';
   if (needs && needs.morale < 0.4) return 'console';
   if (traits.includes('bookworm')) return 'library';
   if (traits.includes('lazy')) return 'console';

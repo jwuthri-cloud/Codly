@@ -7,8 +7,11 @@
 //   Morale  = how its recent work went (checks, merges, reviews), refilled by games and reading,
 //             drifting back to normal
 //   Hunger, Thirst = 1 fed / watered … 0 starving / parched: work drains them (thirst ~3 h, hunger
-//             ~5 h of real work), the fridge, the water cooler and a coffee refill them, home fills
-//             them up. Under 25% morale slides; a hungry or thirsty agent's break goes to the kitchen.
+//             ~5 h of real work). They fill while the agent stays at a source (`FEED`), so a big
+//             refill takes longer: a toaster snack or the fridge (never past 60% fed), the
+//             microwave, the stove (fastest, and a good meal lifts morale); the water cooler, the
+//             fridge, a coffee. Home fills them up. Under 25% morale slides, under 10% faster (Starving,
+//             Parched); a hungry or thirsty agent's break goes to the kitchen.
 // Energy and Morale also move with what the agent does (`setActivity`): a nap, a PS5 session…
 // Moodlets are short-lived feelings from real events ("Tests passed", "Waiting on you");
 // relationships are the reviews saved on its career (`career.friends`). Skills are on the
@@ -99,10 +102,31 @@ const OVERTIME_MORALE = -0.15;
 /** Hunger and thirst a working hour drains (an idle one less, by LOAD). */
 const HUNGER_PER_HOUR = 0.2;
 const THIRST_PER_HOUR = 0.33;
-/** Under this it is Hungry / Thirsty: morale slides. */
+/** Under this it is Hungry / Thirsty: morale slides; under STARVING, faster. */
 export const PECKISH = 0.25;
-/** What a visit gives: [hunger, thirst]. */
-const MEAL: Partial<Record<RestActivity, [number, number]>> = { coffee: [0.25, 0.3], water: [0, 0.5], snack: [0.5, 0.2] };
+const STARVING = 0.1;
+/** What a minute at a source gives: [per minute, up to] for hunger and thirst. Bigger meals fill
+ *  faster per minute, so cooking beats snacking on repeat; a snack never makes a meal. */
+export const FEED: Partial<Record<RestActivity, { hunger?: [number, number]; thirst?: [number, number] }>> = {
+  coffee: { thirst: [0.2, 0.5] },
+  water: { thirst: [1, 1] },
+  snack: { hunger: [0.3, 0.6], thirst: [0.6, 0.8] }, // the fridge: a snack and a soda
+  toast: { hunger: [0.3, 0.6] },
+  heat: { hunger: [0.45, 1] },
+  cook: { hunger: [0.6, 1] },
+};
+/** How long a stay at `activity` takes to fill what it can (ms), for the break room. */
+export function feedMs(activity: RestActivity, needs: { hunger: number; thirst: number }): number {
+  const f = FEED[activity];
+  if (!f) return 0;
+  const ms = (k: 'hunger' | 'thirst') => {
+    const r = f[k];
+    return r && needs[k] < r[1] ? ((r[1] - needs[k]) / r[0]) * 60_000 : 0;
+  };
+  return Math.max(ms('hunger'), ms('thirst'));
+}
+/** Fed at least this much at the stove: a Good meal (morale). */
+const GOOD_MEAL = 0.3;
 
 /** Skill level from XP: 1, 4, 9, 16 … XP per level, up to 10 (like a Sims skill bar). */
 export function levelOf(xp: number): { level: number; progress: number } {
@@ -132,12 +156,12 @@ export function shiftOf(stamina: number) {
 }
 
 /** What an agent is doing right now, for its needs. `wait` = waiting on you (no drain). */
-export type RestActivity = 'work' | 'idle' | 'wait' | 'nap' | 'coffee' | 'water' | 'snack' | 'console' | 'table' | 'library';
+export type RestActivity = 'work' | 'idle' | 'wait' | 'nap' | 'coffee' | 'water' | 'snack' | 'toast' | 'heat' | 'cook' | 'console' | 'table' | 'library';
 
 /** How hard each activity draws on its energy, as a share of working (the rest restores). */
-const LOAD: Record<RestActivity, number> = { work: 1, idle: 0.2, wait: 0, nap: 0, coffee: 0.2, water: 0.2, snack: 0.2, console: 0.5, table: 0.6, library: 0.2 };
+const LOAD: Record<RestActivity, number> = { work: 1, idle: 0.2, wait: 0, nap: 0, coffee: 0.2, water: 0.2, snack: 0.2, toast: 0.2, heat: 0.2, cook: 0.3, console: 0.5, table: 0.6, library: 0.2 };
 /** Morale per minute while doing it (0 … 1). */
-const MORALE: Record<RestActivity, number> = { work: 0, idle: 0, wait: 0, nap: 0.02, coffee: 0.01, water: 0.01, snack: 0.01, console: 0.02, table: 0.02, library: 0.01 };
+const MORALE: Record<RestActivity, number> = { work: 0, idle: 0, wait: 0, nap: 0.02, coffee: 0.01, water: 0.01, snack: 0.01, toast: 0.01, heat: 0.01, cook: 0.02, console: 0.02, table: 0.02, library: 0.01 };
 
 /** The activity for what the office is showing: a station id (or null at the desk) and a pose. */
 export function activityFor(stationId: string | null, pose: string): RestActivity {
@@ -149,6 +173,12 @@ export function activityFor(stationId: string | null, pose: string): RestActivit
       return 'water';
     case 'fridge':
       return 'snack';
+    case 'toaster':
+      return 'toast';
+    case 'microwave':
+      return 'heat';
+    case 'stove':
+      return 'cook';
     case 'games.console':
       return 'console';
     case 'games.pool':
@@ -193,6 +223,8 @@ interface Mind {
   /** Sick: it must go home for a long rest. */
   sick: boolean;
   home: Home | null;
+  /** Hunger when it started cooking (a Good meal once it is done). */
+  cookFrom: number | null;
   /** The away_until it came back from (a stale agent row must not send it home again). */
   cleared: number | null;
   /** Tired or rested, as last told to the core (null: the core's row already agrees). */
@@ -258,6 +290,7 @@ export class SimsTracker {
           worked: 0,
           sick: false,
           home: null,
+          cookFrom: null,
           cleared: null,
           told: null,
         }),
@@ -324,12 +357,15 @@ export class SimsTracker {
           m.hunger = clamp(m.hunger - (LOAD[a] * HUNGER_PER_HOUR * min) / 60);
           m.thirst = clamp(m.thirst - (LOAD[a] * THIRST_PER_HOUR * min) / 60);
         }
+        const f = FEED[a];
+        if (f?.hunger && m.hunger < f.hunger[1]) m.hunger = Math.min(f.hunger[1], m.hunger + f.hunger[0] * min);
+        if (f?.thirst && m.thirst < f.thirst[1]) m.thirst = Math.min(f.thirst[1], m.thirst + f.thirst[0] * min);
         m.energy = clamp(m.energy + d, 0, m.cap);
         if (m.energy < 1e-9) m.energy = 0; // empty is empty (no float dust)
         mood = MORALE[a];
         if (m.energy < TIRED) mood -= 0.01;
-        if (m.hunger < PECKISH) mood -= 0.01;
-        if (m.thirst < PECKISH) mood -= 0.01;
+        if (m.hunger < PECKISH) mood -= m.hunger < STARVING ? 0.02 : 0.01;
+        if (m.thirst < PECKISH) mood -= m.thirst < STARVING ? 0.02 : 0.01;
         if (this.caffeine(m, t) >= sh.jitteryAt) mood -= 0.015;
       }
       m.morale = clamp(this.moraleNow(m, t) + mood * min);
@@ -344,10 +380,10 @@ export class SimsTracker {
     const m = this.mind(id);
     this.advance(id, m, now);
     if (activity === 'coffee' && m.activity !== 'coffee' && !m.home) this.drink(id, m, now);
-    const meal = MEAL[activity];
-    if (meal && m.activity !== activity && !m.home) {
-      m.hunger = clamp(m.hunger + meal[0]);
-      m.thirst = clamp(m.thirst + meal[1]);
+    if (activity === 'cook' && m.activity !== 'cook') m.cookFrom = m.hunger;
+    if (activity !== 'cook' && m.activity === 'cook' && m.cookFrom != null) {
+      if (m.hunger - m.cookFrom >= GOOD_MEAL) this.feel(id, now, 0.1, { key: 'meal', label: 'Good meal', why: 'Cooked a real lunch at the stove', tone: 'good', icon: 'coffee', emoji: '🍝', ms: 20 * 60_000 });
+      m.cookFrom = null;
     }
     m.activity = activity;
   }
@@ -633,8 +669,8 @@ export class SimsTracker {
     else if (exhausted) live.push({ key: 'tired', label: 'Exhausted', why: lead ? 'Running on empty' : 'Goes home once its task is done', tone: 'bad', icon: 'battery', emoji: '😵', at: now, until: null });
     else if (energy < TIRED && !m.home) live.push({ key: 'tired', label: 'Tired', why: `${Math.round(energy * 100)}% energy left`, tone: 'bad', icon: 'battery', emoji: '😴', at: now, until: null });
     if (jittery && !m.home) live.push({ key: 'jittery', label: 'Jittery', why: `${caffeine} cups of coffee in the last hour`, tone: 'bad', icon: 'coffee', emoji: '⚡', at: now, until: null });
-    if (m.hunger < PECKISH && !m.home) live.push({ key: 'hungry', label: 'Hungry', why: `${Math.round(m.hunger * 100)}% fed: a snack from the fridge`, tone: 'bad', icon: 'coffee', emoji: '🍔', at: now, until: null });
-    if (m.thirst < PECKISH && !m.home) live.push({ key: 'thirsty', label: 'Thirsty', why: `${Math.round(m.thirst * 100)}% watered: a glass at the cooler`, tone: 'bad', icon: 'coffee', emoji: '💧', at: now, until: null });
+    if (m.hunger < PECKISH && !m.home) live.push({ key: 'hungry', label: m.hunger < STARVING ? 'Starving' : 'Hungry', why: `${Math.round(m.hunger * 100)}% fed: a meal at the stove or the microwave`, tone: 'bad', icon: 'coffee', emoji: '🍔', at: now, until: null });
+    if (m.thirst < PECKISH && !m.home) live.push({ key: 'thirsty', label: m.thirst < STARVING ? 'Parched' : 'Thirsty', why: `${Math.round(m.thirst * 100)}% watered: a glass at the cooler`, tone: 'bad', icon: 'coffee', emoji: '💧', at: now, until: null });
     if (focus != null && focus < 0.2) live.push({ key: 'foggy', label: 'Foggy', why: 'Its context window is nearly full', tone: 'bad', icon: 'cloud', emoji: '🌫️', at: now, until: null });
     m.moodlets = m.moodlets.filter((x) => x.until == null || x.until > now);
     const keys = new Set(live.map((x) => x.key));

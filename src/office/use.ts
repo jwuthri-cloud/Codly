@@ -1,14 +1,14 @@
 // What a piece of furniture is for, Sims-style: sit on a sofa, nap on it, read at a bookcase,
-// get a coffee, watch TV, dance to the radio. Each use has spots around the piece (seats on it,
+// get a coffee, cook a meal, watch TV, dance to the radio. Each use has spots around the piece (seats on it,
 // or a place to stand in front). Pure: no three.js. Cosmetic: only idle agents use furniture.
 
 import type { Pose, Prop } from './behavior';
 import type { Piece } from './buy';
 import type { Slot } from './layout';
 
-export type Use = 'sit' | 'nap' | 'read' | 'coffee' | 'water' | 'drink' | 'watch' | 'dance';
+export type Use = 'sit' | 'nap' | 'read' | 'coffee' | 'water' | 'drink' | 'snack' | 'heat' | 'cook' | 'watch' | 'dance';
 
-export const USE_LABEL: Record<Use, string> = { sit: 'Sit', nap: 'Nap', read: 'Read', coffee: 'Make a coffee', water: 'Get water', drink: 'Grab a drink', watch: 'Watch TV', dance: 'Dance' };
+export const USE_LABEL: Record<Use, string> = { sit: 'Sit', nap: 'Nap', read: 'Read', coffee: 'Make a coffee', water: 'Get water', drink: 'Grab a snack and a drink', snack: 'Make toast', heat: 'Heat up a meal', cook: 'Cook a meal', watch: 'Watch TV', dance: 'Dance' };
 
 /** What the character does there. */
 export const USE_POSE: Record<Use, { pose: Pose; prop: Prop }> = {
@@ -18,6 +18,9 @@ export const USE_POSE: Record<Use, { pose: Pose; prop: Prop }> = {
   coffee: { pose: 'drink', prop: 'mug' },
   water: { pose: 'drink', prop: 'mug' },
   drink: { pose: 'drink', prop: 'mug' },
+  snack: { pose: 'drink', prop: 'plate' },
+  heat: { pose: 'drink', prop: 'plate' },
+  cook: { pose: 'drink', prop: 'plate' },
   watch: { pose: 'watch', prop: null },
   dance: { pose: 'dance', prop: null },
 };
@@ -28,7 +31,10 @@ const RULES: [RegExp, Use[]][] = [
   [/bookcase|shelf|book_set|books/i, ['read']],
   [/coffee|espresso/i, ['coffee']],
   [/cooler/i, ['water']],
-  [/fridge|microwave/i, ['drink']],
+  [/fridge/i, ['drink']],
+  [/toaster/i, ['snack']],
+  [/microwave/i, ['heat']],
+  [/stove/i, ['cook']],
   [/television/i, ['watch']],
   [/radio|speaker/i, ['dance']],
 ];

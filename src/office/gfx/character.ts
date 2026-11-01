@@ -890,6 +890,8 @@ export class PropKit {
     this.geos.set('phone', mk((b) => b.box(0, 0, 0.02, 0.04, 0.09, 0.016, lin('#26272c'))));
     this.geos.set('marker', mk((b) => b.cyl(0, -0.02, 0.02, 0.012, 0.13, lin('#2f6fd6'), 6)));
     this.geos.set('note', mk((b) => b.box(0, 0, 0.04, 0.08, 0.004, 0.08, lin('#ffd75e'))));
+    // A plate with a meal on it, held flat.
+    this.geos.set('plate', mk((b) => b.cyl(0, -0.01, 0.08, 0.1, 0.012, lin('#f4f1ec'), 14).ball(0, 0.015, 0.08, 0.06, 0.03, 0.06, lin('#d9893d'), 10, 6)));
     this.geos.set('mug', mk((b) => b.cyl(0, -0.04, 0.03, 0.035, 0.08, lin('#e9e2d6'), 10)));
     this.geos.set('gamepad', mk((b) => b.box(0.05, 0, 0.03, 0.15, 0.03, 0.07, lin('#f1f1f4')).ball(-0.02, -0.01, 0.05, 0.035, 0.025, 0.04, lin('#26272c'), 8, 6).ball(0.12, -0.01, 0.05, 0.035, 0.025, 0.04, lin('#26272c'), 8, 6)));
     this.geos.set('paddle', mk((b) => b.cyl(0, -0.07, 0.01, 0.012, 0.07, lin('#7a5234'), 8).ball(0, -0.13, 0.01, 0.065, 0.07, 0.008, lin('#d6403a'), 14, 6)));

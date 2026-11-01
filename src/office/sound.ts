@@ -173,8 +173,9 @@ class Sound {
     s.stop(t0 + env[env.length - 1][0] + 0.05);
   }
 
-  /** The made-up sounds: the TV crowd, a whistle, steam from the espresso machine, a glug. */
-  synth(kind: 'crowd' | 'crowd-goal' | 'crowd-ooh' | 'whistle' | 'whistle-end' | 'hiss' | 'glug', opts: { at?: [number, number]; gain?: number } = {}) {
+  /** The made-up sounds: the TV crowd, a whistle, steam from the espresso machine, a glug, the
+   *  toaster's pop, the microwave's hum and ding, a pan sizzling. */
+  synth(kind: 'crowd' | 'crowd-goal' | 'crowd-ooh' | 'whistle' | 'whistle-end' | 'hiss' | 'glug' | 'pop' | 'microwave' | 'sizzle', opts: { at?: [number, number]; gain?: number } = {}) {
     const node = this.chain(opts.gain ?? 1, opts.at);
     if (!node || !this.ctx) return;
     const ctx = this.ctx;
@@ -213,6 +214,26 @@ class Sound {
             n.stop(t0 + len + 0.02);
           }
         }
+        return;
+      }
+      case 'pop':
+        // The toast pops up at the end.
+        return this.noiseBurst(node, 'bandpass', 1800, 2, [[2.8, 0], [2.82, 0.35], [2.9, 0]]);
+      case 'sizzle':
+        return this.noiseBurst(node, 'highpass', 3000, 0.4, [[0.3, 0.14], [6.5, 0.12], [7.8, 0]]);
+      case 'microwave': {
+        // A low hum, then the ding.
+        this.noiseBurst(node, 'lowpass', 220, 1, [[0.2, 0.2], [4.6, 0.2], [4.8, 0]]);
+        const o = ctx.createOscillator();
+        o.frequency.value = 1760;
+        const g = ctx.createGain();
+        const t0 = ctx.currentTime + 4.9;
+        g.gain.setValueAtTime(0, t0);
+        g.gain.linearRampToValueAtTime(0.12, t0 + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.001, t0 + 1.2);
+        o.connect(g).connect(node);
+        o.start(t0);
+        o.stop(t0 + 1.25);
         return;
       }
       case 'glug': {

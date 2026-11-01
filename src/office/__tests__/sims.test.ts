@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Agent } from '../../lib/gen/Agent';
 import type { EventRow } from '../../lib/gen/EventRow';
-import { activityFor, CALLED_IN, headline, levelOf, SimsTracker } from '../sims';
+import { activityFor, CALLED_IN, FEED, feedMs, headline, levelOf, SimsTracker } from '../sims';
 import { breakDelay, breakPreference, reactionTo, traitsOf } from '../traits';
 import { BreakRoom } from '../breakroom';
 import { emptyCareer } from '../../lib/util/career';
@@ -23,21 +23,49 @@ describe('sims', () => {
     expect(sh.mood).toBe('Fine');
   });
 
-  it('work makes it hungry and thirsty; the cooler, the fridge and home refill them; a break goes to eat', () => {
+  it('work makes it hungry and thirsty; a stay at the cooler, the fridge or the stove refills them over time; home fills them up', () => {
     const s = new SimsTracker();
     s.setAgents([agent('ada')], 0);
     s.setActivity('ada', 0, 'work');
     const sh = s.stats('ada', 3 * HOUR, null);
     expect(sh.needs.thirst).toBeCloseTo(0.01, 2);
     expect(sh.needs.hunger).toBeCloseTo(0.4, 3);
-    expect(sh.moodlets.map((m) => m.key)).toContain('thirsty');
+    expect(sh.moodlets.find((m) => m.key === 'thirsty')?.label).toBe('Parched');
     expect(breakPreference([], { ...sh.needs, energy: 1, morale: 0.65 })).toBe('water');
-    s.setActivity('ada', 3 * HOUR, activityFor('water', 'drink'));
-    expect(s.stats('ada', 3 * HOUR, null).needs.thirst).toBeCloseTo(0.51, 2);
-    s.setActivity('ada', 3 * HOUR, activityFor('fridge', 'drink'));
-    expect(s.stats('ada', 3 * HOUR, null).needs.hunger).toBeCloseTo(0.9, 3);
-    s.sendHome('ada', 3 * HOUR);
-    expect(s.stats('ada', 3 * HOUR + MIN, null).needs).toMatchObject({ hunger: 1, thirst: 1 });
+    // The cooler: nothing on arrival, full after a minute.
+    const t = 3 * HOUR;
+    s.setActivity('ada', t, activityFor('water', 'drink'));
+    expect(s.stats('ada', t, null).needs.thirst).toBeCloseTo(0.01, 2);
+    expect(s.stats('ada', t + 30_000, null).needs.thirst).toBeCloseTo(0.51, 2);
+    expect(s.stats('ada', t + MIN, null).needs.thirst).toBe(1);
+    // The fridge: a snack never makes a meal (60% at most).
+    s.setActivity('ada', t + MIN, activityFor('fridge', 'drink'));
+    expect(s.stats('ada', t + 3 * MIN, null).needs.hunger).toBe(0.6);
+    s.sendHome('ada', t + 3 * MIN);
+    expect(s.stats('ada', t + 4 * MIN, null).needs).toMatchObject({ hunger: 1, thirst: 1 });
+  });
+
+  it('bigger meals fill faster per minute: a snack < the microwave < the stove; a stay lasts until full', () => {
+    const per = (a: 'toast' | 'heat' | 'cook') => FEED[a]!.hunger![0];
+    expect(per('toast')).toBeLessThan(per('heat'));
+    expect(per('heat')).toBeLessThan(per('cook'));
+    // Time grows with what it gives back: half as hungry, half as long at the stove.
+    expect(feedMs('cook', { hunger: 0.5, thirst: 1 })).toBeCloseTo(feedMs('cook', { hunger: 0, thirst: 1 }) / 2);
+    expect(feedMs('toast', { hunger: 0.7, thirst: 1 })).toBe(0);
+  });
+
+  it('a real lunch at the stove is a Good meal; hungry agents cook, lazy ones snack', () => {
+    const s = new SimsTracker();
+    s.setAgents([agent('ada')], 0);
+    s.setActivity('ada', 0, 'work');
+    s.setActivity('ada', 4 * HOUR, activityFor('stove', 'drink'));
+    s.setActivity('ada', 4 * HOUR + 1.5 * MIN, 'idle');
+    const sh = s.stats('ada', 4 * HOUR + 1.5 * MIN, null);
+    expect(sh.needs.hunger).toBeGreaterThan(0.95);
+    expect(sh.moodlets.map((m) => m.key)).toContain('meal');
+    const hungry = { energy: 1, morale: 0.65, hunger: 0.2, thirst: 0.9 };
+    expect(breakPreference([], hungry)).toBe('meal');
+    expect(breakPreference(['lazy'], hungry)).toBe('snack');
   });
 
   it('working drains energy over a ~4 h shift (3× slower at stamina 100); idle a little, waiting on you not at all', () => {

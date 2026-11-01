@@ -47,7 +47,7 @@ export type Pose =
   | 'pingpong'
   | 'drink';
 
-export type Prop = 'paper' | 'book' | 'card' | 'envelope' | 'folder' | 'phone' | 'marker' | 'note' | 'mug' | 'gamepad' | 'cue' | 'paddle' | null;
+export type Prop = 'paper' | 'book' | 'card' | 'envelope' | 'folder' | 'phone' | 'marker' | 'note' | 'mug' | 'plate' | 'gamepad' | 'cue' | 'paddle' | null;
 export type Emote = 'alert' | 'question' | 'rain' | 'zz' | 'think' | 'check' | null;
 export type Screen = 'off' | 'idle' | 'code' | 'doc' | 'terminal' | 'chat' | 'alert' | 'error' | 'think' | 'search';
 

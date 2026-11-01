@@ -50,4 +50,20 @@ describe('break room', () => {
     expect(games(new BreakRoom({ prefer: 'pool' }).update(['a', 'b'], 0))).toEqual({ a: 'pool:0', b: 'pool:1' });
     expect(games(new BreakRoom({ prefer: 'console' }).update(['a', 'b'], 0))).toEqual({ a: 'console:0', b: 'console:1' });
   });
+
+  it('a hungry agent cooks at the stove before it heats or snacks, and stays as long as filling up takes', () => {
+    const spots = [
+      { uid: 'toaster', use: 'snack' as const, n: 1 },
+      { uid: 'micro', use: 'heat' as const, n: 1 },
+      { uid: 'stove', use: 'cook' as const, n: 1 },
+    ];
+    const r = new BreakRoom();
+    const starving = { hunger: 0.1, thirst: 1 };
+    const seats = r.update([{ id: 'ada', prefer: 'meal', needs: starving }, { id: 'bo', prefer: 'meal', needs: { hunger: 0.35, thirst: 1 } }, { id: 'cy', prefer: 'snack', needs: starving }], 0, spots);
+    expect([...seats].map(([id, s]) => [id, s.piece])).toEqual([['ada', 'stove'], ['bo', 'micro'], ['cy', 'toaster']]);
+    // ada needs 90% at 60%/min: 1.5 min plus the walk; bo 65% at 45%/min.
+    expect(r.nextAt()).toBeCloseTo((0.65 / 0.45) * 60_000 + 10_000);
+    expect(r.update(['ada', 'bo', 'cy'], 99_000, spots).get('ada')?.piece).toBe('stove');
+    expect(r.update(['ada', 'bo', 'cy'], 100_000, spots).get('ada')?.piece).not.toBe('stove');
+  });
 });

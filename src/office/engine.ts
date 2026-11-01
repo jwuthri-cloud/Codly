@@ -38,7 +38,7 @@ import { activityFor, plumbobOf, type RestActivity } from './sims';
 import { breakPreference, reactionTo, traitsOf } from './traits';
 import { DWELL_MS, Dwell, Errands, breakIntent, deriveIntent, errandAllowedFor, idleIntent, leisure, errandPlace, intentKey, isBlocked, placeKey, stationBreak, type Errand, type Intent, type Place } from './behavior';
 import type { Spot } from './breakroom';
-import { spotsOf, USE_LABEL, usesOf } from './use';
+import { spotsOf, USE_LABEL, USE_POSE, usesOf, type Use } from './use';
 import { sound, type Sfx } from './sound';
 import { CameraRig, DEFAULT_PITCH } from './camera';
 import { BuildingGfx } from './gfx/building';
@@ -190,6 +190,11 @@ interface Intern {
   leaving: number | null;
 }
 
+
+/** A piece that makes a drink or a meal, and how long making it plays before it is in hand (ms). */
+type Source = Extract<Use, 'coffee' | 'water' | 'drink' | 'snack' | 'heat' | 'cook'>;
+const PREP_MS: Record<Source, number> = { coffee: 2600, water: 2600, drink: 1800, snack: 3000, heat: 5000, cook: 8000 };
+
 export class OfficeEngine {
   private container: HTMLElement;
   private renderer: WebGLRenderer;
@@ -254,8 +259,8 @@ export class OfficeEngine {
   private lastRaw = new Map<string, Intent>();
   /** When each typing agent's next key sound is due. */
   private keyAt = new Map<string, number>();
-  /** Someone at a coffee machine, water cooler or fridge: since when (the brew plays first). */
-  private brews = new Map<string, { uid: string; kind: 'coffee' | 'water' | 'drink'; since: number; puffAt: number }>();
+  /** Someone at a coffee machine, water cooler, fridge or stove: since when (the brew plays first). */
+  private brews = new Map<string, { uid: string; kind: Source; since: number; puffAt: number }>();
   /** The cup filling under an espresso machine's spout. */
   private cup = new Mesh(new CylinderGeometry(0.035, 0.028, 0.07, 10), new MeshStandardMaterial({ color: '#f4efe6', roughness: 0.6 }));
   private pieces: Piece[] = [];
@@ -656,18 +661,34 @@ export class OfficeEngine {
     });
   }
 
-  /** Where drinks come from: espresso machines, water coolers and fridges (built-in or bought). */
+  /** Where drinks and meals come from: espresso machines, water coolers, fridges, toasters,
+   *  microwaves and stoves (built-in or bought). */
   private drinkSources() {
     return [...this.builtinList, ...this.pieces].flatMap((p) => {
-      const kind = usesOf(p.item).find((u): u is 'coffee' | 'water' | 'drink' => u === 'coffee' || u === 'water' || u === 'drink');
+      const kind = usesOf(p.item).find((u): u is Source => u in PREP_MS);
       return kind ? [{ p, kind }] : [];
     });
   }
 
+  /** What the kitchen station's slot stands at: its espresso machine ('kitchen'), its fridge, or
+   *  nothing (no slot there). */
+  private kitchenAt(slot: number): string | null {
+    const s = this.L.stations.kitchen?.slots[slot];
+    if (!s) return null;
+    let best: string | null = 'kitchen';
+    let bd = Infinity;
+    for (const { p, kind } of this.drinkSources()) {
+      const d = Math.hypot(p.x - s.x, p.z - s.z);
+      if ((kind === 'coffee' || kind === 'drink') && d < bd) [best, bd] = [kind === 'drink' ? 'fridge' : 'kitchen', d];
+    }
+    return best;
+  }
+
   /**
-   * The kitchen, Sims-style: whoever arrives for a drink first makes it. The espresso machine
-   * steams over a cup under its spout, the water cooler bubbles, the fridge door swings open;
-   * then the mug is in hand. Cosmetic.
+   * The kitchen, Sims-style: whoever arrives for a drink or a meal first makes it. The espresso
+   * machine steams over a cup under its spout, the water cooler bubbles, the fridge door swings
+   * open, the toaster pops, the microwave hums then dings, the stove sizzles and steams; then the
+   * mug or the plate is in hand. Cosmetic.
    */
   private kitchenStep(now: number): boolean {
     let busy = false;
@@ -692,21 +713,24 @@ export class OfficeEngine {
         const at: [number, number] = [best.p.x, best.p.z];
         if (b.kind === 'coffee') sound.synth('hiss', { at });
         else if (b.kind === 'water') sound.synth('glug', { at });
-        else sound.play('fridge-open', { at, gain: 0.7 });
+        else if (b.kind === 'drink') sound.play('fridge-open', { at, gain: 0.7 });
+        else sound.synth(b.kind === 'snack' ? 'pop' : b.kind === 'heat' ? 'microwave' : 'sizzle', { at });
       }
       const { p } = best;
-      const brewing = now - b.since < (b.kind === 'drink' ? 1800 : 2600);
-      act.c.setProp(brewing ? null : 'mug');
+      const brewing = now - b.since < PREP_MS[b.kind];
+      act.c.setProp(brewing ? null : USE_POSE[b.kind].prop);
       if (!brewing) continue;
       busy = true;
       // The spout: the front of the machine, a little under its top.
       const fx = Math.sin(p.rot) * (p.dims.d / 2 - 0.06);
       const fz = Math.cos(p.rot) * (p.dims.d / 2 - 0.06);
       if (b.kind === 'coffee') cupAt = this.local(p.x + fx, p.y + 0.06, p.z + fz);
-      if (b.kind !== 'drink' && now >= b.puffAt) {
+      if ((b.kind === 'coffee' || b.kind === 'water' || b.kind === 'cook') && now >= b.puffAt) {
         b.puffAt = now + 450;
-        const steam = b.kind === 'coffee' ? this.local(p.x + fx, p.y + p.dims.h * 0.75, p.z + fz) : this.local(p.x, p.y + p.dims.h * 0.85, p.z);
-        this.fx.add(new Puff(steam, lin(b.kind === 'coffee' ? '#f4f1ec' : '#8fc8ff'), now, this.glowTex));
+        // Steam from the spout, bubbles in the cooler's bottle, steam off the pan on the stove.
+        const steam =
+          b.kind === 'coffee' ? this.local(p.x + fx, p.y + p.dims.h * 0.75, p.z + fz) : b.kind === 'cook' ? this.local(p.x, p.y + p.dims.h + 0.1, p.z) : this.local(p.x, p.y + p.dims.h * 0.85, p.z);
+        this.fx.add(new Puff(steam, lin(b.kind === 'water' ? '#8fc8ff' : '#f4f1ec'), now, this.glowTex));
       }
     }
     for (const id of [...this.brews.keys()]) if (!seen.has(id)) this.brews.delete(id);
@@ -1367,7 +1391,10 @@ export class OfficeEngine {
     }
     const onBreak = pending.filter((p) => p.intent.place.kind === 'break').sort((x, y) => x.a.lastEventAt - y.a.lastEventAt || (x.a.id < y.a.id ? -1 : 1));
     const seats = this.breakRoom.update(
-      onBreak.map((p) => ({ id: p.a.id, prefer: breakPreference(traitsOf(p.a.id), this.needsOf?.(p.a.id) ?? null) })),
+      onBreak.map((p) => {
+        const n = this.needsOf?.(p.a.id) ?? null;
+        return { id: p.a.id, prefer: breakPreference(traitsOf(p.a.id), n), needs: n?.hunger != null && n.thirst != null ? { hunger: n.hunger, thirst: n.thirst } : null };
+      }),
       wall,
       this.spots(),
     );
@@ -1376,10 +1403,10 @@ export class OfficeEngine {
     for (const { a, act, intent: raw } of pending) {
       const intent = raw.place.kind === 'break' ? breakIntent(seats.get(a.id) ?? null) : raw;
       // Waiting on you doesn't tire it; a coffee is a coffee only where there is a machine; the
-      // water cooler and the fridge feed it.
-      const PIECE_AT: Record<string, string> = { coffee: 'kitchen', water: 'water', drink: 'fridge' };
+      // water cooler, the fridge, the toaster, the microwave and the stove feed it.
+      const PIECE_AT: Record<string, string> = { coffee: 'kitchen', water: 'water', drink: 'fridge', snack: 'toaster', heat: 'microwave', cook: 'stove' };
       const at = intent.place.kind === 'station' ? intent.place.id : intent.place.kind === 'piece' ? (PIECE_AT[intent.place.use ?? ''] ?? null) : null;
-      const where = at === 'kitchen' && intent.place.kind === 'station' && !this.L.stations.kitchen?.slots.length ? null : at;
+      const where = at === 'kitchen' && intent.place.kind === 'station' ? this.kitchenAt(intent.place.slot ?? 0) : at;
       this.onActivity?.(a.id, wall, a.approval ? 'wait' : activityFor(where, intent.pose));
       // Personality: its own reaction to a fresh check result (a thump, a fist pump…).
       const ch = a.cheer;

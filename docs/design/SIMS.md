@@ -102,7 +102,7 @@ coffee machine, whiteboard, bookshelves, server racks.
 | Plumbob over the selected Sim, coloured by mood | plumbob over the selected agent, coloured by state | working / waiting for you / blocked / rate-limited |
 | Action queue (top-left icons, ✕ to cancel) | the agent's queue: current tool call, queued prompts | live run; ✕ = interrupt or stop |
 | Pie menu on click | Chat 1:1, Show task, Show terminal, Change model, Stop, Send on a break | existing commands |
-| Needs bars | **Energy** = a shift of real work (going home refills it) · **Focus** = context window left · **Morale** = recent checks and reviews | `UsageWindow`, `Usage.context_used`, gate results |
+| Needs bars | **Energy** = a shift of real work (going home refills it) · **Focus** = context window left · **Morale** = recent checks and reviews · **Hunger / Thirst** = real work drains them; they fill while the agent stays at a source, faster per minute for bigger meals (toaster or fridge snack 30%/min up to 60% · microwave 45%/min · stove 60%/min and a Good meal · cooler 100%/min), so a stay lasts as long as the refill (`sims.ts` `FEED`) | `UsageWindow`, `Usage.context_used`, gate results |
 | Moodlets ("Inspired", "Tense") | "Tests passed", "Waiting on you", "Rate-limited", "Frustrated" (2 failed checks in a row), "Approved" (its review), "Proud" (its work merged), with timers; the strongest shows as an emoji on its name tag | events |
 | Thought bubbles | an icon of what it is thinking about (file, test tube, question) | reasoning / activity |
 | Simlish speech bubbles | agent ↔ Lead messages as bubbles with icons; click to read the real text | `codly_ask_lead`, notes |

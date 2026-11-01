@@ -9,13 +9,16 @@
 // a coffee machine, a sofa to nap on; and half the time an idle agent picks a sofa, a TV or a
 // radio over the PS5.
 // Like a Sims action, each lasts a while (a coffee ~25 s, a game a couple of minutes); then the
-// agent moves on to something else, not the same thing again for a while.
+// agent moves on to something else, not the same thing again for a while. A meal or a drink lasts
+// as long as it takes to fill the need (sims.ts `FEED`): a starving agent cooks for longer. A
+// hungry one cooks at the stove, else heats one up, else grabs a snack (a lazy one snacks first).
 // Pairs are stable: a newcomer never splits a game. When real work calls a player back, the
 // partner waits a few seconds (someone may join), then moves to the PS5 or back to its desk.
 //
 // Stateful but pure (no engine, no clock of its own): the engine calls `update` on each sync.
 
 import { hash } from './text';
+import { feedMs, type RestActivity } from './sims';
 import type { Activity } from './traits';
 import type { Use } from './use';
 
@@ -40,7 +43,20 @@ export interface Spot {
 
 const TABLES: Game[] = ['pool', 'foosball', 'pingpong'];
 const SEATS: Record<Game, number> = { pool: 2, foosball: 2, pingpong: 2, console: 2, library: 2, coffee: 2, nap: 1, piece: 0 };
-const WISH_USE: Partial<Record<Activity, Use>> = { library: 'read', coffee: 'coffee', water: 'water', snack: 'drink', nap: 'nap' };
+/** What it looks for, best first. */
+const WISH_USES: Partial<Record<Activity, Use[]>> = {
+  library: ['read'],
+  coffee: ['coffee'],
+  water: ['water', 'drink'],
+  meal: ['cook', 'heat', 'drink', 'snack'],
+  snack: ['snack', 'drink', 'heat', 'cook'],
+  nap: ['nap'],
+};
+/** What eating or drinking there counts as (sims.ts), for how long it stays. */
+const FED_BY: Partial<Record<Use, RestActivity>> = { water: 'water', drink: 'snack', snack: 'toast', heat: 'heat', cook: 'cook' };
+/** A meal's stay: the time to fill up, plus the walk, within these bounds (ms). */
+const WALK_MS = 10_000;
+const MEAL_MS: [number, number] = [20_000, 180_000];
 const LOUNGING: Use[] = ['sit', 'watch', 'dance'];
 /** How long a player left alone at a table waits for someone before giving up. */
 export const LONELY_MS = 6000;
@@ -51,6 +67,8 @@ const PIECE_STAY: Partial<Record<Use, number>> = { coffee: 25_000, water: 25_000
 export const AGAIN_MS = 120_000;
 const keyOf = (s: Seat) => (s.game === 'piece' ? `piece:${s.piece}:${s.use}` : s.game);
 export const stayOf = (s: Seat) => (s.game === 'piece' ? (PIECE_STAY[s.use ?? 'sit'] ?? STAY.piece) : STAY[s.game]);
+
+export type Needs = { hunger: number; thirst: number };
 
 export interface BreakRoomOptions {
   /** Testing: send everyone to this game when it has room. */
@@ -63,6 +81,8 @@ export class BreakRoom {
   private alone = new Map<string, number>();
   /** When each agent started its activity. */
   private since = new Map<string, number>();
+  /** How long each agent's meal lasts (the rest last `stayOf`). */
+  private stays = new Map<string, number>();
   /** What each agent just finished (it does something else until `until`). */
   private done = new Map<string, { key: string; until: number }>();
 
@@ -83,13 +103,28 @@ export class BreakRoom {
   nextAt(): number {
     let t = Infinity;
     for (const since of this.alone.values()) t = Math.min(t, since + LONELY_MS);
-    for (const [id, s] of this.seats) t = Math.min(t, (this.since.get(id) ?? 0) + stayOf(s));
+    for (const [id, s] of this.seats) t = Math.min(t, (this.since.get(id) ?? 0) + this.stay(id, s));
     return t;
   }
 
-  private put(id: string, seat: Seat, now: number) {
+  private stay(id: string, s: Seat) {
+    return this.stays.get(id) ?? stayOf(s);
+  }
+
+  /** `needs`: a meal or a drink lasts until it is full. */
+  private put(id: string, seat: Seat, now: number, needs?: Needs) {
     this.seats.set(id, seat);
     this.since.set(id, now);
+    this.stays.delete(id);
+    const fed = seat.game === 'piece' ? FED_BY[seat.use ?? 'sit'] : seat.game === 'coffee' && seat.slot === 1 ? 'snack' : undefined;
+    if (fed && needs) this.stays.set(id, Math.min(MEAL_MS[1], Math.max(MEAL_MS[0], feedMs(fed, needs) + WALK_MS)));
+  }
+
+  private drop(id: string) {
+    this.seats.delete(id);
+    this.alone.delete(id);
+    this.since.delete(id);
+    this.stays.delete(id);
   }
 
   /** It just did this: something else for now. */
@@ -125,22 +160,18 @@ export class BreakRoom {
 
   /** `eligible`: idle agents wanting a break, earliest-free first, each with what it would
    *  like to do (traits, needs). Returns everyone's seat. */
-  update(list: (string | { id: string; prefer?: Activity })[], now: number, spots: Spot[] = []): Map<string, Seat> {
+  update(list: (string | { id: string; prefer?: Activity; needs?: Needs | null })[], now: number, spots: Spot[] = []): Map<string, Seat> {
     const wants = new Map(list.map((x) => (typeof x === 'string' ? [x, 'any' as Activity] : [x.id, x.prefer ?? 'any'])));
+    const needsOf = new Map(list.flatMap((x) => (typeof x !== 'string' && x.needs ? [[x.id, x.needs] as const] : [])));
     const eligible = [...wants.keys()];
     const want = new Set(eligible);
     const there = new Set(spots.map((s) => `${s.uid}:${s.use}`));
     for (const [id, s] of [...this.seats]) {
       // Gone (back to work), or its piece was sold or moved out of use.
-      if (!want.has(id) || (s.game === 'piece' && !there.has(`${s.piece}:${s.use}`))) {
-        this.seats.delete(id);
-        this.alone.delete(id);
-        this.since.delete(id);
-      } else if (now - (this.since.get(id) ?? now) >= stayOf(s)) {
-        // Done with it (the coffee is drunk, the game is over): on to something else.
-        this.seats.delete(id);
-        this.alone.delete(id);
-        this.since.delete(id);
+      if (!want.has(id) || (s.game === 'piece' && !there.has(`${s.piece}:${s.use}`))) this.drop(id);
+      else if (now - (this.since.get(id) ?? now) >= this.stay(id, s)) {
+        // Done with it (the coffee is drunk, the meal eaten, the game is over): on to something else.
+        this.drop(id);
         this.done.set(id, { key: keyOf(s), until: now + AGAIN_MS });
       }
     }
@@ -156,8 +187,7 @@ export class BreakRoom {
       const since = this.alone.get(id) ?? now;
       this.alone.set(id, since);
       if (now - since < LONELY_MS) continue;
-      this.alone.delete(id);
-      this.seats.delete(id);
+      this.drop(id);
       const seat = this.free('console');
       if (seat >= 0) this.put(id, { game: 'console', slot: seat }, now);
     }
@@ -175,15 +205,18 @@ export class BreakRoom {
         this.put(id, { game: solo, slot: this.free(solo) }, now);
         continue;
       }
-      const wishUse = WISH_USE[wish];
-      const own = wishUse ? this.piece(spots, [wishUse], id, now) : null;
+      let own: Seat | null = null;
+      for (const use of WISH_USES[wish] ?? []) if ((own = this.piece(spots, [use], id, now))) break;
       if (own) {
-        this.put(id, own, now);
+        this.put(id, own, now, needsOf.get(id));
         continue;
       }
-      // Hungry or thirsty and nothing bought for it: the kitchen counter (its coffee and fridge).
-      if ((wish === 'water' || wish === 'snack') && this.free('coffee') >= 0 && !this.tired(id, 'coffee', now)) {
-        this.put(id, { game: 'coffee', slot: this.free('coffee') }, now);
+      // Hungry or thirsty and nothing bought for it: the kitchen's fridge (its second spot,
+      // layout.ts puts the espresso machine first), else its coffee.
+      const food = wish === 'water' || wish === 'snack' || wish === 'meal';
+      if (food && this.free('coffee') >= 0 && !this.tired(id, 'coffee', now)) {
+        const occ = this.occupants('coffee');
+        this.put(id, { game: 'coffee', slot: occ.length > 1 && occ[1] == null ? 1 : this.free('coffee') }, now, needsOf.get(id));
         continue;
       }
       // Half the agents would rather lounge on furniture you bought than play.
