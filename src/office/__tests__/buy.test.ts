@@ -1,6 +1,6 @@
 // Build/Buy: the catalog matches its model files, and placement keeps the office walkable.
 import { describe, expect, it } from 'vitest';
-import { applyDecor, blocker, BY_ID, decorOf, FOR_SALE, FURNITURE, kitchens, locked, snap, surfaceAt, withBought, type Piece } from '../buy';
+import { applyDecor, blocker, BY_ID, crowded, decorOf, FOR_SALE, FURNITURE, kitchens, locked, snap, surfaceAt, withBought, type Piece } from '../buy';
 import { officeLayout, passableFn, cellOf, TEMPLATES } from '../layout';
 
 const piece = (item: string, x: number, z: number, w = 1, d = 0.5, extra: Partial<Piece> = {}): Piece => ({ uid: `${item}@${x},${z}`, item, x, y: 0, z, rot: 0, dims: { w, d, h: 0.5 }, ...extra });
@@ -99,5 +99,16 @@ describe('Build/Buy', () => {
     expect(ok(cx, cz)).toBe(false);
     applyDecor(L, []);
     expect(ok(cx, cz)).toBe(true);
+  });
+
+  it('a small thing sits on the highest top under it, never inside another small thing', () => {
+    const counter = piece('kenney.kitchenCabinetDrawer', 3, 3, 2, 0.7, { uid: 'item:4:0' });
+    expect(surfaceAt([counter], 3.5, 3)).toBe(counter);
+    expect(surfaceAt([counter], 5, 3)).toBeNull();
+    const espresso = piece('polypizza.espresso', 2.5, 3, 0.3, 0.3, { y: 0.5 });
+    const micro = (x: number) => piece('kenney.kitchenMicrowave', x, 3, 0.5, 0.35, { y: 0.5 });
+    expect(crowded([counter, espresso], micro(2.7))).toBe(true);
+    expect(crowded([counter, espresso], micro(3.5))).toBe(false);
+    expect(crowded([espresso], { ...micro(2.5), y: 0 })).toBe(false); // on the floor: blocker's job
   });
 });

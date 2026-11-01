@@ -2,8 +2,8 @@
 // via furniture.json) and where a piece may go. Pure: no three.js, so it is testable in Node.
 //
 // Rules: a piece snaps to the walking grid and turns in quarter turns. Rugs go anywhere on a
-// floor. Small things (lamps, plants, a laptop) go on top of a table or cabinet you bought, or
-// on the floor. Everything else blocks walking: it may not cover a wall, built-in furniture,
+// floor. Small things (lamps, plants, a laptop, a microwave) go on top of a table, counter or
+// cabinet (bought, or the office's own), one beside the other, or on the floor. Everything else blocks walking: it may not cover a wall, built-in furniture,
 // another piece, a seat or use-slot, nor cut any of those off from the front door.
 //
 // Some pieces are earned (`needs`): the PS5 or the pool table once someone on the crew is a
@@ -175,14 +175,27 @@ export function applyDecor(L: OfficeLayout, pieces: Piece[], seats: Slot[] = [])
     }
 }
 
-/** The surface under (x, z) a small thing would sit on: its top, or null for the floor. */
+/** The surface under (x, z) a small thing would sit on: the highest top there, or null for the floor. */
 export function surfaceAt(pieces: Piece[], x: number, z: number, skip?: string): Piece | null {
+  let best: Piece | null = null;
   for (const p of pieces) {
     if (p.uid === skip || !BY_ID.get(p.item)?.top) continue;
     const r = rect(p);
-    if (x >= r.x && x <= r.x + r.w && z >= r.z && z <= r.z + r.d) return p;
+    if (x >= r.x && x <= r.x + r.w && z >= r.z && z <= r.z + r.d && (!best || p.y + p.dims.h > best.y + best.dims.h)) best = p;
   }
-  return null;
+  return best;
+}
+
+/** Whether a small thing up on a surface would go into another one up there (a microwave into
+ *  the espresso machine). */
+export function crowded(pieces: Piece[], p: Piece): boolean {
+  if (!BY_ID.get(p.item)?.small || p.y <= 0) return false;
+  const a = rect(p);
+  return pieces.some((o) => {
+    if (o.uid === p.uid || o.y <= 0 || !BY_ID.get(o.item)?.small) return false;
+    const b = rect(o);
+    return a.x < b.x + b.w && b.x < a.x + a.w && a.z < b.z + b.d && b.z < a.z + a.d;
+  });
 }
 
 /** Things sitting on a surface (they'd float if it moved). */

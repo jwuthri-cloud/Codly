@@ -44,7 +44,7 @@ import { CameraRig, DEFAULT_PITCH } from './camera';
 import { BuildingGfx } from './gfx/building';
 import { DecorLayer, model } from './gfx/decor';
 import { BUILT_LABEL, builtinPieces, deskOfPiece, freeToUse, modeled, stationActions } from './gfx/builtins';
-import { applyDecor, blocker, BY_ID, onTop, snap, surfaceAt, type Piece } from './buy';
+import { applyDecor, blocker, BY_ID, crowded, onTop, snap, surfaceAt, type Piece } from './buy';
 import type { Placed } from '../lib/gen/Placed';
 import type { Provider } from '../lib/gen/Provider';
 import { Character, lookFor, lookPicks, PropKit } from './gfx/character';
@@ -982,10 +982,13 @@ export class OfficeEngine {
     if (!c || !f) return;
     void model(f).then(({ dims }) => {
       if (this.build?.carry !== c) return;
-      const top = f.small ? surfaceAt(this.pieces, x, z, c.uid ?? undefined) : null;
+      // Small things go on any top: bought, or the office's own (its counter, desks, tables).
+      const all = [...this.pieces, ...this.builtinList];
+      const top = f.small ? surfaceAt(all, x, z, c.uid ?? undefined) : null;
       const at = top ? { x, z, rot: c.rot } : snap(x, z, c.rot, dims);
       const y = top ? top.y + top.dims.h : 0;
-      const why = blocker(this.L, this.pieces, { uid: c.uid ?? '', item: c.item, x: at.x, y, z: at.z, rot: at.rot, dims });
+      const p = { uid: c.uid ?? '', item: c.item, x: at.x, y, z: at.z, rot: at.rot, dims };
+      const why = blocker(this.L, this.pieces, p) ?? (crowded(all, p) ? 'Something is already there' : null);
       c.at = { x: at.x, y, z: at.z };
       c.why = why;
       c.onstate(why);
