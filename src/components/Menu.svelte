@@ -21,10 +21,14 @@
     onclose: () => void;
     align?: 'start' | 'end';
     width?: number;
+    /** A search field on top (the caller filters its items); null for none. */
+    search?: string | null;
+    searchPlaceholder?: string;
   }
-  let { anchor, items, onclose, align = 'start', width = 240 }: Props = $props();
+  let { anchor, items, onclose, align = 'start', width = 240, search = $bindable(null), searchPlaceholder = 'Search' }: Props = $props();
 
   let el: HTMLDivElement | undefined = $state();
+  let input: HTMLInputElement | undefined = $state();
   let pos = $state({ x: 0, y: 0, up: false });
   let active = $state(-1);
   const actionable = $derived(items.map((it, i) => ((!it.kind || it.kind === 'item') && !(it as { disabled?: boolean }).disabled ? i : -1)).filter((i) => i >= 0));
@@ -51,6 +55,8 @@
       e.stopPropagation();
       onclose();
       anchor.focus();
+    } else if (e.target === input && (e.key === 'j' || e.key === 'k')) {
+      // typing in the search
     } else if (e.key === 'ArrowDown' || e.key === 'j') {
       e.preventDefault();
       const idx = actionable.indexOf(active);
@@ -85,7 +91,7 @@
     place();
     tick().then(() => {
       place();
-      el?.focus();
+      (input ?? el)?.focus();
     });
     window.addEventListener('pointerdown', outside, true);
     window.addEventListener('resize', onclose);
@@ -108,6 +114,9 @@
   style:width="{width}px"
   onkeydown={key}
 >
+  {#if search !== null}
+    <input class="search" bind:this={input} bind:value={search} placeholder={searchPlaceholder} spellcheck="false" autocomplete="off" oninput={() => (active = -1)} />
+  {/if}
   {#each items as it, i (i)}
     {#if it.kind === 'separator'}
       <div class="sep" role="separator"></div>
@@ -146,4 +155,5 @@
   .hint { color: var(--ink-3); font-size: var(--t-sm); max-width: 45%; }
   .sep { height: 1px; margin: 4px 8px; background: var(--line); }
   .hdr { padding: 8px 10px 3px; }
+  .search { position: sticky; top: -5px; z-index: 1; width: 100%; height: 32px; margin: -5px 0 4px; padding: 0 10px; border-radius: var(--r-md) var(--r-md) 0 0; background: var(--pop); box-shadow: inset 0 -1px 0 var(--line); font-size: var(--t-md); color: var(--ink-1); outline: none; }
 </style>

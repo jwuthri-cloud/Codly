@@ -26,6 +26,14 @@ export function joinModel(name: string, effort: string): string | null {
 /** Another model, keeping the thinking effort it had ("sonnet:high" + "opus[1m]" → "opus[1m]:high"). */
 export const withModel = (current: string | null, model: string): string | null => joinModel(model, splitModel(current).effort);
 
+/** The first `n` models with every word of `q` in their name ("claude son" → anthropic/claude-sonnet-4),
+ *  and how many matched in all. OpenRouter lists thousands. */
+export function findModels(list: string[], q: string, n: number): { shown: string[]; total: number } {
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = words.length ? list.filter((m) => words.every((w) => m.toLowerCase().includes(w))) : list;
+  return { shown: hits.slice(0, n), total: hits.length };
+}
+
 /** The job titles an agent can have (its badge). Mirrors `ROLE_TITLES` in the core. */
 export const ROLE_TITLES = ['Backend', 'Frontend', 'Full-stack', 'Mobile', 'Product manager', 'Designer', 'QA', 'DevOps', 'Data', 'Security', 'Docs', 'Reviewer'];
 

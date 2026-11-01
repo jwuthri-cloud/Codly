@@ -27,7 +27,7 @@
   import { setRequestPrefs } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
   import { PROVIDER_LABEL } from '../lib/util/labels';
-  import { EFFORTS, joinModel, splitModel } from '../lib/util/team';
+  import { EFFORTS, findModels, joinModel, splitModel } from '../lib/util/team';
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
 
@@ -69,6 +69,10 @@
   const setModel = (name: string, effort: string) => setRequestPrefs(thread, { model: joinModel(name, effort) });
   // A model belongs to its CLI: switching CLI goes back to that one's default model.
   const setCli = (p: Provider | null) => setRequestPrefs(thread, { provider: p, model: null });
+  // OpenRouter lists thousands: show a few, search for the rest.
+  const SHOWN = 8;
+  let query = $state('');
+  const found = $derived(findModels(models, query, SHOWN));
   const modelItems = $derived<MenuItem[]>([
     ...(clis.length > 1
       ? [
@@ -79,7 +83,9 @@
       : []),
     { kind: 'header', label: `${PROVIDER_LABEL[cli]} model` },
     { label: 'Default', checked: !model.name, stay: true, run: () => setModel('', model.effort) },
-    ...[...new Set([...models, ...(model.name ? [model.name] : [])])].map((m) => ({ label: m, checked: m === model.name, stay: true, run: () => setModel(m, model.effort) })),
+    ...[...new Set([...(model.name && !query ? [model.name] : []), ...found.shown])].map((m) => ({ label: m, checked: m === model.name, stay: true, run: () => setModel(m, model.effort) })),
+    ...(found.total > found.shown.length ? [{ label: `${found.total - found.shown.length} more`, hint: 'type to search', disabled: true, run: () => {} }] : []),
+    ...(query.trim() && !models.includes(query.trim()) ? [{ label: `Use “${query.trim()}”`, stay: true, run: () => setModel(query.trim(), model.effort) }] : []),
     ...(efforts.length
       ? [
           { kind: 'header' as const, label: 'Thinking' },
@@ -101,7 +107,7 @@
   </button>
 </div>
 {#if open === 'mode' && modeBtn}<Menu anchor={modeBtn} items={modeItems} onclose={() => (open = null)} width={340} />{/if}
-{#if open === 'model' && modelBtn}<Menu anchor={modelBtn} items={modelItems} onclose={() => (open = null)} width={240} />{/if}
+{#if open === 'model' && modelBtn}<Menu anchor={modelBtn} items={modelItems} onclose={() => ((open = null), (query = ''))} width={260} bind:search={() => (models.length > SHOWN ? query : null), (v) => (query = v ?? '')} searchPlaceholder="Search models" />{/if}
 
 <style>
   .controls { display: flex; gap: 4px; padding: 6px 10px 0; }
