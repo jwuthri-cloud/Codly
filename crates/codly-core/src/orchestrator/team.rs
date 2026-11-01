@@ -193,7 +193,7 @@ impl Inner {
     }
 
     /// Let an agent go: it leaves the board and the office; its memory and history stay.
-    fn retire(&self, ws_id: &str, a: &Agent, why: &str) -> Result<()> {
+    pub(super) fn retire(&self, ws_id: &str, a: &Agent, why: &str) -> Result<()> {
         self.update_agent(&a.id, |a| {
             a.archived = true;
             a.status = AgentStatus::Offline;

@@ -185,6 +185,8 @@ export const api = {
   ghosts: () => call<Agent[]>('ghosts', {}),
   /** Bring a ghost back as a regular worker (same name, look, career and memory). */
   bringBack: (agentId: string) => call<Agent>('bring_back', { agentId }),
+  /** Let go an agent you hired: it becomes a ghost you can bring back. Refused mid-task, for the Lead and team members. */
+  letGo: (agentId: string) => call<Agent>('let_go', { agentId }),
   /** Your other offices (repos opened before, the open one aside), with their crews and tasks in flight. */
   offices: () => call<Office[]>('offices', {}),
   /** Transfer an agent to another of your offices: its career, traits, stamina, look and memory

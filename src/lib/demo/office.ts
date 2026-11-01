@@ -242,6 +242,21 @@ export function demoBringBack(sim: Sim, id: string): Agent {
   return back;
 }
 
+/** "Let go…" (careers.rs `let_go`): it joins the ghosts by the memory archive. */
+export function demoLetGo(sim: Sim, id: string): Agent {
+  const a = sim.agents.get(id);
+  if (!a) throw new Error('no such agent');
+  if (a.role === 'lead') throw new Error('the Lead goes when you close its request');
+  if (a.member) throw new Error(`${a.name} is on the team: remove them in Settings → Team`);
+  const block = transferBlock(a, [...sim.tasks.values()]);
+  if (block) throw new Error(`${a.name}: ${block.replace("it can't transfer mid-task", 'let it finish, or cancel the task first')}`);
+  const gone = sim.patchAgent(id, { archived: true, status: 'offline', task_id: null, worktree: null });
+  sim.agents.delete(id);
+  ghosts = [...seeded(sim), gone];
+  sim.decision('staff', 'rule', `let ${a.name} go: your call`, { agent: id, consultant: a.consultant });
+  return gone;
+}
+
 // Two other offices for the Transfer picker (the demo has one repo), with who works there.
 const OFFICES = [
   { id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'], working: 0 },

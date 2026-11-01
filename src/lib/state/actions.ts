@@ -265,6 +265,14 @@ export async function stopAgent(agentId: string) {
   await attempt('stop the agent', () => api.stopAgent(agentId));
 }
 
+/** Let go an agent you hired: it joins the ghosts by the memory archive (you can bring it back). */
+export async function letGo(agentId: string) {
+  const a = await attempt('let them go', () => api.letGo(agentId));
+  if (!a) return;
+  if (ui.selection?.kind === 'agent' && ui.selection.id === agentId) ui.select(null);
+  toast({ kind: 'success', title: `${a.name} was let go`, body: 'A ghost by the memory archive now, with the same career and memory. Bring them back from there.' });
+}
+
 export async function addMemory(text: string, scope: MemoryScope, kind: MemoryKind, title: string | null = null, tags: string[] | null = null) {
   const m = await attempt('save the memory', () => api.addMemory(text, scope, kind, title, tags));
   if (m) store.upsertMemory(m);

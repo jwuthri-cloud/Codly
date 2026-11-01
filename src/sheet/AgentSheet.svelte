@@ -9,7 +9,7 @@
   import { tick } from 'svelte';
   import type { Agent } from '../lib/gen/Agent';
   import type { EventRow } from '../lib/gen/EventRow';
-  import { copyText, interruptAgent, refreshAccounts, stopAgent } from '../lib/state/actions';
+  import { copyText, interruptAgent, letGo, refreshAccounts, stopAgent } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { narrate } from '../lib/state/narration';
   import { store, type FileTouch } from '../lib/state/store.svelte';
@@ -228,6 +228,7 @@
   let moreBtn: HTMLButtonElement | undefined = $state();
   let moreOpen = $state(false);
   let confirmStop = $state(false);
+  let confirmLetGo = $state(false);
   const working = $derived(n?.tone === 'live' || n?.tone === 'wait');
   const moreItems = $derived<MenuItem[]>([
     { label: 'Open a terminal in its worktree', icon: 'terminal', disabled: !agent.worktree, run: () => { ui.terminalCwd = agent.worktree; ui.go('terminal'); } },
@@ -236,6 +237,8 @@
     { kind: 'separator' },
     { label: 'Interrupt this turn', icon: 'pause', disabled: !working, run: () => interruptAgent(agent.id) },
     { label: 'Stop the agent…', icon: 'stop', danger: true, disabled: agent.status === 'offline', run: () => (confirmStop = true) },
+    // The Lead goes with its request, a team member with Settings → Team.
+    ...(agent.role === 'lead' || agent.member ? [] : [{ label: 'Let go…', icon: 'x', danger: true, run: () => (confirmLetGo = true) } as MenuItem]),
   ]);
 </script>
 
@@ -259,6 +262,13 @@
       <span>Stop {agent.name}? The process ends; its worktree is kept.</span>
       <button class="btn sm danger" onclick={() => { confirmStop = false; stopAgent(agent.id); }}>Stop</button>
       <button class="btn sm ghost" onclick={() => (confirmStop = false)}>Keep</button>
+    </div>
+  {/if}
+  {#if confirmLetGo}
+    <div class="confirm">
+      <span>Let {agent.name} go? They leave the office as a ghost by the memory archive, with their career and memory; you can bring them back.</span>
+      <button class="btn sm danger" onclick={() => { confirmLetGo = false; letGo(agent.id); }}>Let go</button>
+      <button class="btn sm ghost" onclick={() => (confirmLetGo = false)}>Keep</button>
     </div>
   {/if}
 

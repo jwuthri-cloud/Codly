@@ -578,6 +578,15 @@ impl Core {
         Ok(a)
     }
 
+    /// Let go an agent you hired: it becomes a ghost you can bring back. Refused mid-task, for
+    /// the Lead and for team members.
+    pub async fn let_go(&self, agent_id: &str) -> anyhow::Result<Agent> {
+        let ws = self.inner.require_ws()?;
+        let a = self.inner.let_go(&ws, agent_id).await?;
+        self.inner.kick();
+        Ok(a)
+    }
+
     /// Your other offices (repos opened before, still on disk), with their crews: where an agent
     /// can transfer to. The open repo is not one of them.
     pub fn offices(&self) -> anyhow::Result<Vec<Office>> {

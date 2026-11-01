@@ -176,6 +176,7 @@ pub fn run() {
             hire_commands::bigger_model,
             hire_commands::ghosts,
             hire_commands::bring_back,
+            hire_commands::let_go,
             hire_commands::offices,
             hire_commands::transfer_agent,
             hire_commands::office_shop,

@@ -69,6 +69,12 @@ pub async fn bring_back(state: State<'_, AppState>, agent_id: String) -> Result<
     state.core().await?.bring_back(&agent_id).map_err(|e| format!("{e:#}"))
 }
 
+/// Let go an agent you hired: it becomes a ghost you can bring back.
+#[tauri::command]
+pub async fn let_go(state: State<'_, AppState>, agent_id: String) -> Result<Agent, String> {
+    state.core().await?.let_go(&agent_id).await.map_err(|e| format!("{e:#}"))
+}
+
 /// Your other offices (repos opened before), where an agent can transfer to.
 #[tauri::command]
 pub async fn offices(state: State<'_, AppState>) -> Result<Vec<Office>, String> {

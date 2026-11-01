@@ -249,3 +249,37 @@ async fn a_break_together_makes_friends_leads_aside() {
     assert_eq!(friends(&bo.id).get(&ada.id), Some(&2));
     assert!(!friends(&ada.id).contains_key(&lead.id), "the Lead keeps out of it");
 }
+
+/// "Let go…": an agent you hired becomes a ghost you can bring back; never mid-task, never the Lead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn letting_an_agent_go_makes_a_ghost_you_can_bring_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let here = temp_repo(dir.path(), "here");
+    std::fs::create_dir_all(dir.path().join("data")).unwrap();
+    let store = Store::open(&dir.path().join("data").join("codly.sqlite")).unwrap();
+    let ws = workspace(&store, &here);
+    let (hana, cy) = (agent("Hana", Role::Solo), agent("Cy", Role::Worker));
+    let lead = Agent { thread: Some("lead".into()), ..agent("Lead", Role::Lead) };
+    for a in [&hana, &cy, &lead] {
+        put(&store, &ws, a);
+    }
+    drop(store);
+
+    let core = start(dir.path()).await;
+    core.open_workspace(here.to_str().unwrap()).await.unwrap();
+    let no = |r: anyhow::Result<Agent>| r.unwrap_err().to_string();
+    assert!(no(core.let_go(&lead.id).await).contains("Lead"));
+    let card = core.create_task("Fix the build", "make it green").await.unwrap();
+    core.assign_task(&card.id, Some(&cy.id)).await.unwrap();
+    assert!(no(core.let_go(&cy.id).await).contains("is on"));
+
+    let gone = core.let_go(&hana.id).await.unwrap();
+    assert!(gone.archived);
+    assert!(!core.snapshot().await.unwrap().agents.iter().any(|a| a.id == hana.id));
+    assert!(core.ghosts().unwrap().iter().any(|g| g.id == hana.id));
+    assert!(no(core.let_go(&hana.id).await).contains("doesn't work in this office"));
+
+    let back = core.bring_back(&hana.id).unwrap();
+    assert!(!back.archived && back.role == Role::Solo);
+    core.shutdown().await;
+}

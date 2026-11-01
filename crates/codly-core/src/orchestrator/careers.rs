@@ -224,7 +224,36 @@ impl Inner {
     /// Workers let go in this repo (consultants after their task), newest first. Team members
     /// come back through Settings and Leads through their thread, so they are not ghosts.
     pub(super) fn ghosts(&self, ws: &str) -> Result<Vec<Agent>> {
-        Ok(self.store.archived_agents(ws)?.into_iter().filter(|a| a.role == Role::Worker && a.member.is_none()).collect())
+        Ok(self.store.archived_agents(ws)?.into_iter().filter(|a| a.role != Role::Lead && a.member.is_none()).collect())
+    }
+
+    /// Let go an agent you hired (the agent sheet's "Let go…"): it becomes a ghost by the memory
+    /// archive with its career and memory, and you can bring it back. Never mid-task; the Lead
+    /// goes with its request, team members with Settings → Team.
+    pub(super) async fn let_go(&self, ws: &Workspace, id: &str) -> Result<Agent> {
+        let a = self.agent(id)?;
+        if a.archived || self.store.agent_workspace(id)?.as_deref() != Some(ws.id.as_str()) {
+            bail!("{} doesn't work in this office", a.name);
+        }
+        if a.role == Role::Lead {
+            bail!("the Lead goes when you close its request");
+        }
+        if a.member.is_some() {
+            bail!("{} is on the team: remove them in Settings → Team", a.name);
+        }
+        let open = |t: &Task| !matches!(t.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled);
+        let held = self.store.tasks(&ws.id)?.into_iter().find(|t| a.task_id.as_ref() == Some(&t.id) || (t.assignee.as_ref() == Some(&a.id) && open(t)));
+        if a.task_id.is_some() || held.is_some() {
+            bail!("{} is on {}: let it finish, or cancel the task first", a.name, held.map_or("a task".into(), |t| t.key));
+        }
+        if !self.is_quiet(id) {
+            bail!("{} is in the middle of a turn: wait for it, or stop it first", a.name);
+        }
+        if !self.stop_and_wait(id).await {
+            bail!("{} did not stop in time; try again", a.name);
+        }
+        self.retire(&ws.id, &a, "your call")?;
+        self.agent(id)
     }
 
     /// Bring a ghost back as a regular worker: the scheduler reuses it for tasks of its
