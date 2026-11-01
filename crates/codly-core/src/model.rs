@@ -109,6 +109,10 @@ pub struct CliInfo {
     pub transport: String,
     /// How to install and sign in this CLI (trusted constants, `install.rs`).
     pub install: InstallHint,
+    /// The model it runs when Codly passes none (`env::default_model`): its config's, else its
+    /// built-in default. None = it doesn't say (Claude Code picks by plan).
+    #[serde(default)]
+    pub default_model: Option<String>,
 }
 
 /// How to get one agent CLI onto this machine. Built from constants in `install.rs`, never from

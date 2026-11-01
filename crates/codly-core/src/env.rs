@@ -269,6 +269,7 @@ async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
         problem: None,
         transport: transport(provider).into(),
         install: install_hint(provider),
+        default_model: None,
     };
     let Some(bin) = resolve_bin(provider, base) else {
         info.problem = Some(format!(
@@ -281,7 +282,8 @@ async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
     // Probe with the same scrubbed env the agents get, so billing reflects what they will use.
     let env = child_env(base, provider);
     let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    let (version, auth) = tokio::join!(run(&bin, &["--version"], &env, &cwd), auth_status(provider, &bin, &env, &cwd));
+    let (version, auth, default_model) = tokio::join!(run(&bin, &["--version"], &env, &cwd), auth_status(provider, &bin, &env, &cwd), default_model(provider, &bin, &env, &cwd));
+    info.default_model = default_model;
     match version {
         Ok(out) if out.ok => info.version = parse_version(&out.text()),
         Ok(out) => info.problem = Some(format!("`{} --version` failed: {}", bin_names(provider)[0], first_line(&out.text()))),
@@ -355,6 +357,61 @@ async fn auth_status(provider: Provider, bin: &Path, env: &HashMap<String, Strin
         // --format json` / a Copilot probe once one can be verified.
         Provider::Cursor | Provider::Copilot => ((None, Billing::Unknown, None, None), None),
     }
+}
+
+/// The model a CLI runs when Codly passes none, as its own config sets it: Claude Code's
+/// `ANTHROPIC_MODEL` or `settings.json` `model`; Codex's `config.toml` `model`, else the first
+/// model of its catalog; Gemini's and OpenCode's settings. None = the CLI decides at run time.
+/// ponytail: the default sign-in's config; an agent on another account (its own CODEX_HOME…)
+/// may differ until its first run reports the real one.
+async fn default_model(provider: Provider, bin: &Path, env: &HashMap<String, String>, cwd: &Path) -> Option<String> {
+    let home = env.get("HOME").map(PathBuf::from);
+    let json = |p: PathBuf| serde_json::from_str::<Value>(&std::fs::read_to_string(p).ok()?).ok();
+    match provider {
+        Provider::Claude => env.get("ANTHROPIC_MODEL").cloned().filter(|m| !m.is_empty()).or_else(|| {
+            let dir = env.get("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| Some(home?.join(".claude")))?;
+            json(dir.join("settings.json"))?["model"].as_str().map(str::to_owned)
+        }),
+        Provider::Codex => {
+            let dir = env.get("CODEX_HOME").map(PathBuf::from).or_else(|| Some(home.clone()?.join(".codex")));
+            if let Some(m) = dir.and_then(|d| std::fs::read_to_string(d.join("config.toml")).ok()).and_then(|t| toml_model(&t)) {
+                return Some(m);
+            }
+            let out = run(bin, &["debug", "models"], env, cwd).await.ok().filter(|o| o.ok)?;
+            codex_default(&out.stdout)
+        }
+        Provider::Gemini => {
+            let v = json(gemini_dir(env)?.join("settings.json"))?;
+            v["model"]["name"].as_str().or(v["model"].as_str()).map(str::to_owned)
+        }
+        Provider::Opencode => json(home?.join(".config/opencode/opencode.json"))?["model"].as_str().map(str::to_owned),
+        Provider::Cursor | Provider::Copilot => None,
+    }
+}
+
+/// The top-level `model = "…"` of a Codex `config.toml` (before any `[table]`).
+/// ponytail: a line scan, not a TOML parser; profiles are ignored.
+fn toml_model(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .take_while(|l| !l.starts_with('['))
+        .find_map(|l| {
+            let v = l.strip_prefix("model")?.trim_start().strip_prefix('=')?;
+            let v = v.split('#').next()?.trim().trim_matches(|c| c == '"' || c == '\'');
+            (!v.is_empty()).then(|| v.to_owned())
+        })
+}
+
+/// Codex's built-in default: the listed model it ranks first (`priority`).
+fn codex_default(stdout: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(stdout.trim()).ok()?;
+    v["models"]
+        .as_array()?
+        .iter()
+        .filter(|m| m["visibility"].as_str() == Some("list"))
+        .min_by_key(|m| m["priority"].as_i64().unwrap_or(i64::MAX))?["slug"]
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// `<GEMINI_CLI_HOME or HOME>/.gemini`.
@@ -778,6 +835,15 @@ async fn accounts_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_model_from_codex_config_or_catalog() {
+        let cfg = "# mine\nmodel_reasoning_effort = \"xhigh\"\nmodel = \"gpt-6-astra\" # the big one\n[profiles.fast]\nmodel = \"gpt-6-luna\"\n";
+        assert_eq!(toml_model(cfg).as_deref(), Some("gpt-6-astra"));
+        assert_eq!(toml_model("[profiles.fast]\nmodel = \"gpt-6-luna\"\n"), None);
+        let cat = r#"{"models":[{"slug":"hidden","visibility":"hide","priority":0},{"slug":"b","visibility":"list","priority":2},{"slug":"a","visibility":"list","priority":1}]}"#;
+        assert_eq!(codex_default(cat).as_deref(), Some("a"));
+    }
+
     use super::*;
 
     #[test]
@@ -974,6 +1040,7 @@ esac
                 problem: None,
                 transport: "test".into(),
                 install: install_hint(provider),
+                default_model: None,
             };
             let clis = vec![cli(Provider::Claude, script.to_str().unwrap()), cli(Provider::Gemini, "/usr/bin/true"), cli(Provider::Opencode, "/usr/bin/true")];
             Home { dir, base, clis }

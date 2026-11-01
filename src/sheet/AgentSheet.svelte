@@ -51,13 +51,14 @@
     void store.liveRev;
     return store.now(agent.id);
   });
-  /** The model picked for it, else the one its CLI reported at session start, else the CLI's default. */
-  const model = $derived(prettyModel(agent.model ?? live?.session?.model) || 'default model');
   const task = $derived(agent.task_id ? (store.taskMap.get(agent.task_id) ?? null) : null);
   const approvals = $derived(store.pendingApprovals.filter((a) => a.agent_id === agent.id));
   /** The same card is already on screen in the Lead conversation: point at it instead of repeating it. */
   const inConversation = $derived(ui.room === 'home' && ui.mode !== 'office' && !!approvals.length && approvals.every((a) => store.approvalThread(a) === ui.thread));
   const cli = $derived(store.clis.find((c) => c.provider === agent.provider) ?? null);
+  /** The model picked for it, else the one its CLI reported at session start, else the one its CLI
+   *  runs by default (its config, else its built-in default: `env::default_model`). */
+  const model = $derived(prettyModel(agent.model ?? live?.session?.model ?? cli?.default_model) || 'default model');
   const todo = $derived(live?.todo ?? []);
   const todoDone = $derived(todo.filter((s) => s.status === 'completed').length);
   const step = $derived(todo.findIndex((s) => s.status === 'in_progress'));

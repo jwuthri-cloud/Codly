@@ -30,4 +30,9 @@ transport: string,
 /**
  * How to install and sign in this CLI (trusted constants, `install.rs`).
  */
-install: InstallHint, };
+install: InstallHint, 
+/**
+ * The model it runs when Codly passes none (`env::default_model`): its config's, else its
+ * built-in default. None = it doesn't say (Claude Code picks by plan).
+ */
+default_model: string | null, };

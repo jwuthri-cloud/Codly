@@ -283,13 +283,16 @@ export const BILLING_TIP: Record<Billing, string> = {
 
 const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
-/** "claude-sonnet-5-5" → "Sonnet 5.5", "gpt-6.1-sol" → "GPT-6.1 Sol", "gemini-3.8-flash" → "Gemini 3.8 Flash". */
+/** "claude-sonnet-5-5" → "Sonnet 5.5", "gpt-6.1-sol" → "GPT-6.1 Sol", "gemini-3.8-flash" → "Gemini 3.8 Flash", "opus[1m]" → "Opus (1M)". */
 export function prettyModel(model: string | null | undefined): string {
   if (!model) return '';
   let m = /^claude-([a-z]+)-(\d+)-(\d+)/.exec(model);
   if (m) return `${cap(m[1])} ${m[2]}.${m[3]}`;
   m = /^gpt-([\d.]+)(?:-(.+))?$/.exec(model);
   if (m) return `GPT-${m[1]}${m[2] ? ' ' + m[2].split('-').map(cap).join(' ') : ''}`;
+  // Claude Code's aliases: "opus[1m]" → "Opus (1M)".
+  m = /^(opus|sonnet|haiku)(\[1m\])?$/.exec(model);
+  if (m) return `${cap(m[1])}${m[2] ? ' (1M)' : ''}`;
   m = /^gemini-([\d.]+)-(.+)$/.exec(model);
   if (m) return `Gemini ${m[1]} ${m[2].split('-').map(cap).join(' ')}`;
   return model;

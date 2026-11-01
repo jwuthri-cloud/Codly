@@ -207,6 +207,7 @@ mod tests {
             problem: None,
             transport: "acp".into(),
             install: crate::install::hint(provider),
+            default_model: None,
         };
         let mut off = vec![cli(Provider::Opencode), cli(Provider::Claude)];
         decorate(&mut off, false);

@@ -47,6 +47,7 @@ async fn start() -> (tempfile::TempDir, Arc<Core>, Arc<Mutex<Vec<SpawnSpec>>>) {
         problem: None,
         transport: "fake".into(),
         install: codly_core::env::install_hint(Provider::Claude),
+        default_model: None,
     };
     let specs = Arc::new(Mutex::new(vec![]));
     let opts = StartOptions { spawner: Some(Arc::new(Recorder(specs.clone()))), env: Some(std::env::vars().collect()), clis: Some(vec![claude]), index: false };
