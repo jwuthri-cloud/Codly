@@ -106,13 +106,14 @@ export interface Sign {
 
 /** What a plot's sign says. `live`: this is the open repo; `working`: how many of its agents work now
  *  (another office keeps working while it has tasks in flight). */
-export function signOf(s: LotSlot, live = false, working = 0): Sign {
+/** `open`: the office has its tab (it works whenever it has work); `paused`: it starts nothing new. */
+export function signOf(s: LotSlot, open = false, working = 0, paused = false): Sign {
   switch (slotKind(s)) {
     case 'office':
       return {
         title: `${s.name ?? 'Office'} · ${agentsLabel(s.crew)}`,
-        sub: live ? (working ? `Open · ${working} working` : 'Open') : working ? `Working · ${working}` : 'Closed',
-        state: live || working ? 'open' : 'closed',
+        sub: paused ? (working ? `Paused · ${working} finishing` : 'Paused') : open ? (working ? `Open · ${working} working` : 'Open') : working ? `Working · ${working}` : 'Closed',
+        state: (open && !paused) || working ? 'open' : 'closed',
       };
     case 'building':
       return { title: `${templateLabel(s.template!)} · No office yet`, sub: 'Move an office here', state: null };
@@ -123,9 +124,9 @@ export function signOf(s: LotSlot, live = false, working = 0): Sign {
   }
 }
 
-/** Lights in the windows: the open repo is lit, and any office whose agents work, brightest then. */
-export function lightsOf(s: LotSlot, live: boolean, working: number): 'off' | 'on' | 'busy' {
-  if (slotKind(s) !== 'office' || (!live && !working)) return 'off';
+/** Lights in the windows: every open office is lit, and any office whose agents work, brightest then. */
+export function lightsOf(s: LotSlot, open: boolean, working: number): 'off' | 'on' | 'busy' {
+  if (slotKind(s) !== 'office' || (!open && !working)) return 'off';
   return working > 0 ? 'busy' : 'on';
 }
 

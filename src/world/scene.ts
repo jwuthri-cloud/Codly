@@ -48,6 +48,9 @@ export interface SceneState {
   working: number;
   /** Your other offices' tasks in flight, by workspace id: they keep working, lit. */
   away: Map<string, number>;
+  /** Offices open in a tab (they work whenever they have work), and the paused ones. */
+  open?: Set<string>;
+  paused?: Set<string>;
   /** The plot whose panel is open. */
   selected: string | null;
   /** Agents at home, by the workspace id of their office (the open one's too). */
@@ -371,7 +374,9 @@ export class NeighbourhoodScene {
       g.edge.color.copy(color(hot ? t.amber : sale ? mix(ink, base, 0.25) : ink));
       g.edge.opacity = hot ? 1 : sale ? 0.55 : 0.85;
       const working = live ? this.state.working : (this.state.away.get(s.workspace_id ?? '') ?? 0);
-      const lights = lightsOf(s, live, working);
+      const paused = !!s.workspace_id && !!this.state.paused?.has(s.workspace_id);
+      const open = (live || !!this.state.open?.has(s.workspace_id ?? '')) && !paused;
+      const lights = lightsOf(s, open, working);
       if (g.glass) {
         if (lights === 'off') {
           g.glass.color.copy(color(night ? lin('#2a3046') : lin(MAT.glass)));
@@ -382,7 +387,7 @@ export class NeighbourhoodScene {
           g.glass.emissive.copy(color(t.lamp)).multiplyScalar(k);
         }
       }
-      const sign = signOf(live ? { ...s, crew: this.state.crew } : s, live, working);
+      const sign = signOf(live ? { ...s, crew: this.state.crew } : s, open, working, paused);
       const key = `${sign.title}|${sign.sub}|${sign.state}|${hot}`;
       if (key !== g.signKey) {
         g.signKey = key;

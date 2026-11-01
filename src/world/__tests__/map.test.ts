@@ -48,12 +48,14 @@ describe('grid to world', () => {
 });
 
 describe('signs', () => {
-  it('names the repo and its crew; only the open one is open', () => {
+  it('names the repo and its crew; every open tab is open, a paused one says so', () => {
     expect(signOf(office, true, 0)).toEqual({ title: 'codly · 5 agents', sub: 'Open', state: 'open' });
     expect(signOf(office, true, 2).sub).toBe('Open · 2 working');
     expect(signOf(office, false, 0)).toEqual({ title: 'codly · 5 agents', sub: 'Closed', state: 'closed' });
     expect(signOf(office, false, 2)).toEqual({ title: 'codly · 5 agents', sub: 'Working · 2', state: 'open' });
     expect(signOf({ ...office, crew: 1 }).title).toBe('codly · 1 agent');
+    expect(signOf(office, true, 1, true)).toEqual({ title: 'codly · 5 agents', sub: 'Paused · 1 finishing', state: 'open' });
+    expect(signOf(office, false, 0, true).sub).toBe('Paused');
   });
 
   it('says what an empty, a vacant and a for-sale lot are', () => {

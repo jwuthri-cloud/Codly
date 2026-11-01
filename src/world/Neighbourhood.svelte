@@ -14,6 +14,7 @@
   import type { Office } from '../lib/gen/Office';
   import type { Wallet } from '../lib/gen/Wallet';
   import { openWorkspace } from '../lib/state/actions';
+  import { offices as tabs } from '../lib/state/offices.svelte';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { ui } from '../lib/state/ui.svelte';
@@ -49,6 +50,12 @@
     if (ws && here.length) m.set(ws.id, here.map((a) => ({ id: a.id, name: a.name, color: a.color, since: a.away_since ?? null, until: a.away_until! })));
     return m;
   });
+  /** Every office with a tab is open (it works whenever it has work), unless paused. */
+  const paused = $derived(new Set([...repoIds()].filter((id) => tabs.paused(id))));
+  const open = $derived(new Set(tabs.tabs.map((t) => t.id).filter((id) => !paused.has(id))));
+  function repoIds() {
+    return new Set([...(ws ? [ws.id] : []), ...offices.map((o) => o.id)]);
+  }
   const slot = $derived(slots.find((s) => s.id === selected) ?? null);
   const balance = $derived(wallet?.balance ?? 0);
 
@@ -107,7 +114,7 @@
   });
 
   $effect(() => {
-    scene?.set({ slots, lots, live: ws?.id ?? null, crew: crewHere, working, away: new Map(offices.map((o) => [o.id, o.working])), selected, home });
+    scene?.set({ slots, lots, live: ws?.id ?? null, crew: crewHere, working, away: new Map(offices.map((o) => [o.id, o.working])), open, paused, selected, home });
   });
 
   // ───────────── actions ─────────────
@@ -221,7 +228,9 @@
 
   {#if slot}
     {@const live = slot.workspace_id === ws?.id}
-    {@const sign = signOf(live ? { ...slot, crew: crewHere } : slot, live, working)}
+    {@const p = paused.has(slot.workspace_id ?? '')}
+    {@const busy = live ? working : (offices.find((o) => o.id === slot.workspace_id)?.working ?? 0)}
+    {@const sign = signOf(live ? { ...slot, crew: crewHere } : slot, (live || open.has(slot.workspace_id ?? '')) && !p, busy, p)}
     {@const kind = slotKind(slot)}
     <div class="panel glass" role="dialog" aria-label={sign.title} style:left="{panelPos.x}px" style:top="{panelPos.y}px" style:width="{PANEL_W}px">
       <div class="p-head">
