@@ -8,12 +8,14 @@
   import ArtifactGallery from './ArtifactGallery.svelte';
   import DiffsLens from './DiffsLens.svelte';
 
-  const plan = $derived(store.planOf(ui.request) ?? store.activePlan);
+  // The plan you look at (DiffsLens's chips), else the request's.
+  const picked = $derived(ui.diffTarget && (ui.diffTarget.kind === 'plan' ? ui.diffTarget.id : store.taskMap.get(ui.diffTarget.id)?.plan_id));
+  const plan = $derived(ui.diffTarget ? ((picked && store.planMap.get(picked)) || null) : (store.planOf(ui.request) ?? store.activePlan));
   const stat = $derived(plan ? (diffstats.plan[plan.id] ?? null) : null);
 </script>
 
 <div class="changes">
-  <RoomHead eyebrow="Changes" title={ui.changesLens === 'artifacts' ? 'What the agents made' : 'What changed'}>
+  <RoomHead eyebrow="Changes" title={ui.changesLens === 'artifacts' ? 'What the agents made' : (plan?.summary ?? 'What changed')}>
     {#snippet sub()}
       {#if ui.changesLens === 'diffs'}
         <span class="num">{stat ? `${statLine(stat)} on the integration branch` : 'Diffs from each task’s worktree and the plan’s integration branch'}</span>

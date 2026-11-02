@@ -1,8 +1,9 @@
 <!--
-  Diffs: the plan's integration diff and each task's diff. Left: scopes with their diffstat, then
-  the files with +/−; right: unified view with line numbers. ] / [ jump between files.
-  Plans already in your branch (merged from Codly or by hand) or kept on their own branch fold
-  away under Merged, with their tasks.
+  Diffs, one plan at a time like the Plan room: a chip per plan (plus Other tasks and Merged)
+  picks it. Left: the whole plan (its integration branch) and each task's worktree with their
+  diffstat, then the files with +/−; right: unified view with line numbers. ] / [ jump between
+  files. Plans already in your branch (merged from Codly or by hand) or kept on their own branch
+  sit under Merged, with their tasks.
 -->
 <script lang="ts">
   import { api } from '../../lib/api';
@@ -22,14 +23,28 @@
   // Tasks with no plan shown above them: no plan, or a cancelled one.
   const loose = $derived(tasks.filter((t) => !plans.some((p) => p.id === t.plan_id)));
   const merged = $derived(allPlans.filter((p) => settled.has(p.id)));
+  // The request you are on picks its plan first, as in the Plan room.
+  const first = $derived(plans.find((p) => p.id === store.planOf(ui.request)?.id) ?? plans[0]);
   const target = $derived(
-    ui.diffTarget ?? (plans[0] ? { kind: 'plan' as const, id: plans[0].id } : tasks[0] ? { kind: 'task' as const, id: tasks[0].id } : merged[0] ? { kind: 'plan' as const, id: merged[0].id } : null),
+    ui.diffTarget ?? (first ? { kind: 'plan' as const, id: first.id } : tasks[0] ? { kind: 'task' as const, id: tasks[0].id } : merged[0] ? { kind: 'plan' as const, id: merged[0].id } : null),
   );
-  let showMerged = $state(false);
-  // Open while you look at something in it.
-  const mergedOpen = $derived(
-    showMerged || (!!target && (target.kind === 'plan' ? settled.has(target.id) : settled.has(store.taskMap.get(target.id)?.plan_id ?? ''))),
-  );
+  // The chip you are in: a plan's id, 'loose' (tasks with no plan shown) or 'merged'.
+  const group = $derived.by(() => {
+    if (!target) return null;
+    const pid = target.kind === 'plan' ? target.id : store.taskMap.get(target.id)?.plan_id;
+    if (pid && settled.has(pid)) return 'merged';
+    return pid && plans.some((p) => p.id === pid) ? pid : 'loose';
+  });
+  const groupPlan = $derived(plans.find((p) => p.id === group) ?? null);
+  const chips = $derived([
+    ...plans.map((p) => ({ id: p.id, label: p.summary, stat: diffstats.plan[p.id] ?? null, n: null as number | null })),
+    ...(loose.length ? [{ id: 'loose', label: plans.length ? 'Other tasks' : 'Tasks', stat: null, n: loose.length }] : []),
+    ...(merged.length ? [{ id: 'merged', label: 'Merged', stat: null, n: merged.length }] : []),
+  ]);
+  function choose(id: string) {
+    if (id === 'loose') ui.diffTarget = { kind: 'task', id: loose[0].id };
+    else ui.diffTarget = { kind: 'plan', id: id === 'merged' ? merged[0].id : id };
+  }
 
   let files = $state<DiffFile[]>([]);
   let loading = $state(false);
@@ -94,12 +109,22 @@
 {#if !target}
   <EmptyState title="Nothing has changed yet." body="When an agent finishes a task, its diff lands here, next to everything the agents made." />
 {:else}
+  {#if chips.length > 1}
+    <div class="picks" role="tablist" aria-label="Plan">
+      {#each chips as c (c.id)}
+        <button role="tab" aria-selected={group === c.id} class="pk" class:muted={c.id === 'merged'} onclick={() => choose(c.id)} data-tip={c.label}>
+          <span class="truncate">{c.label}</span>
+          {#if c.stat}<span class="num st"><span class="add">+{c.stat.added}</span> <span class="del">−{c.stat.removed}</span></span>{:else if c.n != null}<span class="num st">{c.n}</span>{/if}
+        </button>
+      {/each}
+    </div>
+  {/if}
   <div class="diffs">
     <aside class="side">
-      {#snippet planRow(p: (typeof allPlans)[number])}
+      {#snippet planRow(p: (typeof allPlans)[number], label?: string)}
         {@const s = diffstats.plan[p.id]}
-        <button class="scope" class:on={target?.kind === 'plan' && target.id === p.id} onclick={() => (ui.diffTarget = { kind: 'plan', id: p.id })}>
-          <span class="s-t truncate">{p.summary}</span>
+        <button class="scope" class:on={target?.kind === 'plan' && target.id === p.id} onclick={() => (ui.diffTarget = { kind: 'plan', id: p.id })} data-tip={p.integration_branch ?? undefined}>
+          <span class="s-t truncate">{label ?? p.summary}</span>
           {#if s}<span class="s-n num"><span class="add">+{s.added}</span> <span class="del">−{s.removed}</span></span>{/if}
         </button>
       {/snippet}
@@ -111,29 +136,24 @@
           {#if s}<span class="s-n num"><span class="add">+{s.added}</span> <span class="del">−{s.removed}</span></span>{:else}<span class="s-n">{TASK_STATUS_LABEL[t.status]}</span>{/if}
         </button>
       {/snippet}
-      {#if plans.length}
-        <p class="eyebrow">{plans.length > 1 ? 'Plans' : 'Plan'}</p>
-        {#each plans as p (p.id)}
-          {@render planRow(p)}
-          <div class="sub">{#each tasks.filter((t) => t.plan_id === p.id) as t (t.id)}{@render taskRow(t)}{/each}</div>
-        {/each}
-      {/if}
-      {#if loose.length}
+      {#if groupPlan}
+        {@const mine = tasks.filter((t) => t.plan_id === groupPlan.id)}
+        <p class="eyebrow">Integration branch</p>
+        {@render planRow(groupPlan, 'Whole plan')}
+        {#if mine.length}
+          <p class="eyebrow">{mine.length === 1 ? 'Worktree' : `Worktrees · ${mine.length}`}</p>
+          {#each mine as t (t.id)}{@render taskRow(t)}{/each}
+        {/if}
+      {:else if group === 'loose'}
         <p class="eyebrow">{plans.length ? 'Other tasks' : 'Tasks'}</p>
         {#each loose as t (t.id)}{@render taskRow(t)}{/each}
-      {:else if !plans.length}
-        <p class="all-in">Everything is in your branch.</p>
-      {/if}
-      {#if merged.length}
-        <button class="eyebrow fold" aria-expanded={mergedOpen} onclick={() => (showMerged = !mergedOpen)}>
-          <span class="chev" class:open={mergedOpen}>›</span>Merged · {merged.length}
-        </button>
-        {#if mergedOpen}
-          {#each merged as p (p.id)}
-            {@render planRow(p)}
-            <div class="sub">{#each allTasks.filter((t) => t.plan_id === p.id) as t (t.id)}{@render taskRow(t)}{/each}</div>
-          {/each}
-        {/if}
+      {:else if group === 'merged'}
+        {#if !plans.length && !loose.length}<p class="all-in">Everything is in your branch.</p>{/if}
+        <p class="eyebrow">Merged · {merged.length}</p>
+        {#each merged as p (p.id)}
+          {@render planRow(p)}
+          <div class="sub">{#each allTasks.filter((t) => t.plan_id === p.id) as t (t.id)}{@render taskRow(t)}{/each}</div>
+        {/each}
       {/if}
       {#if files.length}
         <p class="eyebrow files-h">{files.length} files · <span class="num"><span class="add">+{totals.added}</span> <span class="del">−{totals.removed}</span></span></p>
@@ -168,10 +188,12 @@
   .side { width: 290px; flex-shrink: 0; overflow-y: auto; padding: 4px 14px 24px 22px; display: flex; flex-direction: column; gap: 2px; }
   .side .eyebrow { padding: 14px 8px 6px; }
   .side .eyebrow:first-child { padding-top: 2px; }
-  .fold { display: flex; align-items: center; gap: 4px; width: 100%; text-align: left; cursor: pointer; }
-  .fold:hover { color: var(--ink-1); }
-  .chev { display: inline-block; width: 10px; transition: transform 0.15s; }
-  .chev.open { transform: rotate(90deg); }
+  .picks { display: flex; gap: 6px; padding: 0 28px 14px; overflow-x: auto; scrollbar-width: none; flex-shrink: 0; }
+  .pk { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: var(--r-full); max-width: 360px; font-size: var(--t-sm); font-weight: var(--w-med); color: var(--ink-2); background: var(--surface-1); flex-shrink: 0; }
+  .pk:hover { background: var(--surface-2); color: var(--ink-1); }
+  .pk[aria-selected='true'] { background: var(--surface-3); color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line-2); }
+  .pk.muted:not([aria-selected='true']) { color: var(--ink-3); }
+  .st { color: var(--ink-3); font-weight: var(--w-reg); white-space: nowrap; font-size: var(--t-xs); font-family: var(--font-mono); }
   .sub { padding-left: 12px; }
   .all-in { padding: 6px 10px; color: var(--ink-3); font-size: var(--t-sm); }
   .scope, .fl { display: flex; align-items: center; gap: 8px; width: 100%; height: 34px; padding: 0 10px; border-radius: var(--r-md); text-align: left; font-size: var(--t-md); color: var(--ink-2); }
