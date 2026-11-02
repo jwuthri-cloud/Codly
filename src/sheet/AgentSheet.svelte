@@ -238,7 +238,9 @@
     { label: 'Interrupt this turn', icon: 'pause', disabled: !working, run: () => interruptAgent(agent.id) },
     { label: 'Stop the agent…', icon: 'stop', danger: true, disabled: agent.status === 'offline', run: () => (confirmStop = true) },
     // The Lead goes with its request, a team member with Settings → Team.
-    ...(agent.role === 'lead' || agent.member ? [] : [{ label: 'Let go…', icon: 'x', danger: true, run: () => (confirmLetGo = true) } as MenuItem]),
+    ...(agent.role === 'lead' ? [] : agent.member
+      ? [{ label: 'Remove from team…', icon: 'settings', run: () => { ui.settingsTab = 'team'; ui.settingsOpen = true; } } as MenuItem]
+      : [{ label: 'Let go…', icon: 'x', danger: true, run: () => (confirmLetGo = true) } as MenuItem]),
   ]);
 </script>
 

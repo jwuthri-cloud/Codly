@@ -107,7 +107,8 @@
     { id: 'automation', label: 'Automation', icon: 'bolt' },
     { id: 'developer', label: 'Developer', icon: 'code' },
   ];
-  let tab = $state('general');
+  let tab = $state(ui.settingsTab ?? 'general');
+  ui.settingsTab = null;
   // Office sound (kept on this machine, not in the core's settings).
   let soundOn = $state(!sound.muted);
   let volume = $state(sound.volume);

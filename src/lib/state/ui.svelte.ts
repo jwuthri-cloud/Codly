@@ -99,6 +99,8 @@ class Ui {
   paletteOpen = $state(false);
   paletteSeed = $state('');
   settingsOpen = $state(false);
+  /** The Settings tab to open on next (read once when the sheet opens). */
+  settingsTab: string | null = null;
   shortcutsOpen = $state(false);
   /** The model dialog: starts an agent of `provider` (agentId null) or switches `agentId`'s model. */
   modelDialog = $state<{ provider: Provider; agentId: string | null } | null>(null);
