@@ -7,12 +7,14 @@
 -->
 <script lang="ts">
   import { api } from '../../lib/api';
+  import { mergePlan } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { diffStats, parseDiff, type DiffFile } from '../../lib/util/diff';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import EmptyState from '../../components/EmptyState.svelte';
+  import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
 
   const allPlans = $derived([...store.plans].filter((p) => p.status !== 'cancelled' && store.tasks.some((t) => t.plan_id === p.id && (t.status === 'done' || t.branch))).sort((a, b) => b.created_at - a.created_at));
@@ -41,6 +43,24 @@
     ...(loose.length ? [{ id: 'loose', label: plans.length ? 'Other tasks' : 'Tasks', stat: null, n: loose.length }] : []),
     ...(merged.length ? [{ id: 'merged', label: 'Merged', stat: null, n: merged.length }] : []),
   ]);
+  const into = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main');
+  // A done plan merges straight in (a failed merge goes to its Lead, see `mergePlan`).
+  const mergeable = $derived(!!groupPlan && groupPlan.status === 'done' && !store.planMerges[groupPlan.id]);
+  let merging = $state(false);
+  async function merge(planId: string) {
+    merging = true;
+    await mergePlan(planId);
+    merging = false;
+  }
+  // A task with no plan to merge through: a new request asks a Lead to land it.
+  const looseTask = $derived(group === 'loose' && target?.kind === 'task' ? store.taskMap.get(target.id) : null);
+  function landWithLead(t: NonNullable<typeof looseTask>) {
+    ui.newRequest();
+    ui.seedComposer(
+      ui.request,
+      `Bring ${t.key} “${t.title}” into ${into}. Its work is on the branch ${t.branch}${t.status === 'done' ? '' : ` (the task is ${TASK_STATUS_LABEL[t.status].toLowerCase()}, so check it is complete)`}. Merge it and resolve any conflicts.`,
+    );
+  }
   function choose(id: string) {
     if (id === 'loose') ui.diffTarget = { kind: 'task', id: loose[0].id };
     else ui.diffTarget = { kind: 'plan', id: id === 'merged' ? merged[0].id : id };
@@ -140,6 +160,7 @@
         {@const mine = tasks.filter((t) => t.plan_id === groupPlan.id)}
         <p class="eyebrow">Integration branch</p>
         {@render planRow(groupPlan, 'Whole plan')}
+        {#if mergeable}<button class="btn sm primary land" disabled={merging} onclick={() => merge(groupPlan.id)}><Icon name="merge" size={13} />Merge into {into}</button>{/if}
         {#if mine.length}
           <p class="eyebrow">{mine.length === 1 ? 'Worktree' : `Worktrees · ${mine.length}`}</p>
           {#each mine as t (t.id)}{@render taskRow(t)}{/each}
@@ -147,6 +168,9 @@
       {:else if group === 'loose'}
         <p class="eyebrow">{plans.length ? 'Other tasks' : 'Tasks'}</p>
         {#each loose as t (t.id)}{@render taskRow(t)}{/each}
+        {#if looseTask?.branch && files.length}
+          <button class="btn sm land" onclick={() => landWithLead(looseTask)} data-tip="Opens a new request for a Lead, with the prompt ready to send"><Icon name="merge" size={13} />Merge {looseTask.key} with the Lead</button>
+        {/if}
       {:else if group === 'merged'}
         {#if !plans.length && !loose.length}<p class="all-in">Everything is in your branch.</p>{/if}
         <p class="eyebrow">Merged · {merged.length}</p>
@@ -195,6 +219,7 @@
   .pk.muted:not([aria-selected='true']) { color: var(--ink-3); }
   .st { color: var(--ink-3); font-weight: var(--w-reg); white-space: nowrap; font-size: var(--t-xs); font-family: var(--font-mono); }
   .sub { padding-left: 12px; }
+  .land { margin: 6px 8px 2px; align-self: flex-start; }
   .all-in { padding: 6px 10px; color: var(--ink-3); font-size: var(--t-sm); }
   .scope, .fl { display: flex; align-items: center; gap: 8px; width: 100%; height: 34px; padding: 0 10px; border-radius: var(--r-md); text-align: left; font-size: var(--t-md); color: var(--ink-2); }
   .scope:hover, .fl:hover { background: var(--surface-1); color: var(--ink-1); }
