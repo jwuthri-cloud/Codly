@@ -197,8 +197,6 @@ struct Inner {
     /// use, and turns waiting for a free Lead slot.
     leads: Mutex<lead::LeadPool>,
     shutting_down: AtomicBool,
-    /// Set when memory::derive_triples is still a stub, to stop calling it.
-    kg_off: AtomicBool,
     /// Agent names and task keys by id, for readable knowledge-graph entities.
     labels: Mutex<HashMap<Id, String>>,
     /// Every sign-in of every installed CLI, in your order (`limits` empty: see `quota`).
@@ -229,9 +227,8 @@ fn write<T>(l: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     l.write().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Run code from a module that may still be a stub (index, memory and env are built in
-/// parallel) or may have a bug, without letting a panic escape into the orchestrator.
-/// ponytail: keep as a safety net; drop when those modules have proven themselves.
+/// Panic boundary for the index, memory and env modules: a panic there becomes an error
+/// instead of escaping into the orchestrator.
 fn guard<T>(what: &str, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(r) => r,
@@ -240,10 +237,6 @@ fn guard<T>(what: &str, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result
             Err(anyhow!("{what} unavailable ({msg})"))
         }
     }
-}
-
-fn is_stub(e: &anyhow::Error) -> bool {
-    e.to_string().contains("not yet implemented")
 }
 
 fn row(agent: Option<&str>, task: Option<&str>, run: Option<&str>, kind: EventKind) -> EventRow {
@@ -379,7 +372,6 @@ impl Core {
             pending_feedback: Mutex::new(HashMap::new()),
             leads: Mutex::new(lead::LeadPool::default()),
             shutting_down: AtomicBool::new(false),
-            kg_off: AtomicBool::new(false),
             labels: Mutex::new(HashMap::new()),
             accounts: RwLock::new(accounts),
             quota: Mutex::new(quota),
@@ -939,9 +931,11 @@ impl Core {
             bail!("that file is over {} MB", MAX >> 20);
         }
         let root = PathBuf::from(self.inner.require_ws()?.repo_path).join(".codly");
-        let dir = root.join("attachments").join(new_id());
+        let attachments = root.join("attachments");
+        // ponytail: folders older than 7 days are removed on each save; no size cap.
+        sweep_attachments(&attachments, std::time::Duration::from_secs(7 * 24 * 3600)).await;
+        let dir = attachments.join(new_id());
         tokio::fs::create_dir_all(&dir).await.context("create the attachments folder")?;
-        // ponytail: never pruned; add a sweep when .codly/attachments grows past a few hundred MB.
         tokio::fs::write(root.join(".gitignore"), "*\n").await.context("write .codly/.gitignore")?;
         let path = dir.join(attachment_name(name));
         tokio::fs::write(&path, bytes).await.context("save the file")?;
@@ -1277,13 +1271,7 @@ impl Inner {
         let ev = row(agent, if scope == MemoryScope::Task { scope_id } else { None }, None, EventKind::MemoryAdded { memory: m.clone() });
         let ev = self.store.tx(|tx| {
             // The event is the record; the memory module's table is its searchable projection.
-            // ponytail: while that module is a stub, keep the event (the blackboard reads events).
-            if let Err(e) = guard("memory", || memory::add_memory(tx, &m)) {
-                if !is_stub(&e) {
-                    return Err(e);
-                }
-                tracing::debug!("{e}");
-            }
+            guard("memory", || memory::add_memory(tx, &m))?;
             let mut ev = ev;
             ev.id = store::insert_event(tx, ws, &ev)?;
             Ok(ev)
@@ -1315,6 +1303,17 @@ impl Inner {
     }
 }
 
+/// Remove attachment folders last modified more than `max_age` ago. Errors are ignored.
+async fn sweep_attachments(dir: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
+    while let Ok(Some(e)) = entries.next_entry().await {
+        let old = e.metadata().await.and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > max_age);
+        if old {
+            let _ = tokio::fs::remove_dir_all(e.path()).await;
+        }
+    }
+}
+
 /// A safe file name for an attachment: no directories, no odd characters, at most 80 chars.
 fn attachment_name(raw: &str) -> String {
     let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
@@ -1325,7 +1324,20 @@ fn attachment_name(raw: &str) -> String {
 
 #[cfg(test)]
 mod attachment_tests {
-    use super::attachment_name;
+    use super::{attachment_name, sweep_attachments};
+
+    #[tokio::test]
+    async fn sweep_removes_only_old_folders() {
+        let root = std::env::temp_dir().join(format!("codly-sweep-{}", std::process::id()));
+        let (old, new) = (root.join("old"), root.join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
+        std::fs::File::open(&old).unwrap().set_modified(t).unwrap();
+        sweep_attachments(&root, std::time::Duration::from_secs(7 * 24 * 3600)).await;
+        assert!(!old.exists() && new.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn names_are_safe() {

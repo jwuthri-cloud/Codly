@@ -10,7 +10,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::approvals::{self, PolicyCtx, Verdict};
-use super::{Inner, guard, is_stub, lead, lock, prompts, row, scheduler};
+use super::{Inner, guard, lead, lock, prompts, row, scheduler};
 use crate::adapters::{AdapterEvent, AgentCmd};
 use crate::{career, memory};
 use crate::model::*;
@@ -620,9 +620,7 @@ impl Inner {
     }
 
     fn derive_triples(&self, ws: Option<&str>, r: &EventRow) {
-        if self.kg_off.load(Ordering::Relaxed)
-            || matches!(r.kind, EventKind::TripleAdded { .. } | EventKind::MemoryAdded { .. } | EventKind::Decision { .. })
-        {
+        if matches!(r.kind, EventKind::TripleAdded { .. } | EventKind::MemoryAdded { .. } | EventKind::Decision { .. }) {
             return;
         }
         let agent_name = r.agent_id.as_deref().and_then(|id| self.label(id, true));
@@ -635,12 +633,7 @@ impl Inner {
         let triples = match derived {
             Ok(t) => t,
             Err(e) => {
-                if is_stub(&e) {
-                    self.kg_off.store(true, Ordering::Relaxed);
-                    tracing::info!("knowledge triples off until memory::derive_triples is implemented");
-                } else {
-                    tracing::debug!("{e}");
-                }
+                tracing::debug!("{e}");
                 return;
             }
         };
@@ -649,10 +642,6 @@ impl Inner {
                 t.source_event = Some(r.id);
             }
             if let Err(e) = self.add_triple(ws, t, r.agent_id.as_deref()) {
-                if is_stub(&e) {
-                    self.kg_off.store(true, Ordering::Relaxed);
-                    return;
-                }
                 tracing::debug!("triple not stored: {e}");
             }
         }
