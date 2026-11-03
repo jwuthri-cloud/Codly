@@ -288,6 +288,10 @@ class CodlyStore {
 
   private onBatch(gen: number, b: UiBatch) {
     if (gen !== this.gen) return;
+    if (b.resync) {
+      void this.resync();
+      return;
+    }
     if (this.syncing) {
       this.buffered.push(...b.events);
       return;

@@ -67,7 +67,7 @@ import type { ExactHit } from './gen/ExactHit';
 import type { MemoryFile } from './gen/MemoryFile';
 import type { MessageGraph } from './gen/MessageGraph';
 
-export type UiBatch = { events: EventRow[] };
+export type UiBatch = { events: EventRow[]; resync?: boolean };
 
 export interface Transport {
   /** Install the batch sink first, then resolve with a snapshot. Drop events with id <= snapshot.as_of (id 0 = ephemeral, always apply). */
