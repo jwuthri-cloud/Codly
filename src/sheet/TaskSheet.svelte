@@ -48,8 +48,8 @@
   const LEGAL: Partial<Record<TaskStatus, { to: TaskStatus; label: string }[]>> = {
     pending: [{ to: 'ready', label: 'Move to Ready' }, { to: 'cancelled', label: 'Cancel' }],
     ready: [{ to: 'pending', label: 'Back to Backlog' }, { to: 'cancelled', label: 'Cancel' }],
-    blocked: [{ to: 'ready', label: 'Retry' }],
-    failed: [{ to: 'ready', label: 'Retry' }],
+    blocked: [{ to: 'ready', label: 'Retry' }, { to: 'cancelled', label: 'Cancel' }],
+    failed: [{ to: 'ready', label: 'Retry' }, { to: 'cancelled', label: 'Cancel' }],
     cancelled: [{ to: 'ready', label: 'Reopen' }],
   };
   const MARK_ICON: Record<string, string> = { committed: 'commit', verified: 'check-circle', reviewed: 'eye', merged: 'merge' };
