@@ -1553,6 +1553,8 @@ async fn a_plan_finishes_without_the_task_you_cancelled() {
         core.snapshot().await.unwrap().plans.first().is_some_and(|p| p.status == PlanStatus::Done).then_some(())
     })
     .await;
+    let s = core.snapshot().await.unwrap();
+    assert!(chats(&s, "lead").iter().any(|c| c.text.contains("1 task merged")), "the cancelled task isn't counted");
     core.shutdown().await;
 }
 

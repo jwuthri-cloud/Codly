@@ -1008,7 +1008,7 @@ impl Inner {
             _ => 0,
         };
         let target = self.git.current_branch(Path::new(&ws.repo_path)).await.ok().flatten().unwrap_or_else(|| ws.default_branch.clone());
-        let n = tasks.len();
+        let n = tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
         let text = if failed.is_empty() {
             format!(
                 "Plan done: \"{}\". {n} task{} merged into {branch} ({files} file{} changed). Review the diff, then merge it into {target}.",
