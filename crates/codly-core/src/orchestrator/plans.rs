@@ -423,7 +423,8 @@ impl Inner {
         }
         for p in plans.iter().filter(|p| p.status == PlanStatus::Running) {
             let ts: Vec<&Task> = tasks.iter().filter(|t| t.plan_id.as_deref() == Some(&p.id)).collect();
-            if !ts.is_empty() && ts.iter().all(|t| t.status == TaskStatus::Done) {
+            // A task you cancelled doesn't hold the plan open; the rest still has to be done.
+            if ts.iter().any(|t| t.status == TaskStatus::Done) && ts.iter().all(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)) {
                 let me = self.clone();
                 let id = p.id.clone();
                 tokio::spawn(async move { me.complete_plan(&id).await });

@@ -1529,6 +1529,33 @@ fn two_task_lead() -> Behavior {
     })
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plan_finishes_without_the_task_you_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("a.txt", "a\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created a.txt." })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log, lead: two_task_lead(), worker }).await;
+    let settings = Settings { lead_followups: false, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Add two files").await.unwrap();
+    let plan = wait_for("the plan", 30, async || core.snapshot().await.unwrap().plans.first().cloned()).await;
+    let t2 = core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.key == "t2").unwrap();
+    core.move_task(&t2.id, TaskStatus::Cancelled).await.unwrap();
+    core.run_plan(&plan.id).await.unwrap();
+    wait_for("the plan to finish", 30, async || {
+        core.snapshot().await.unwrap().plans.first().is_some_and(|p| p.status == PlanStatus::Done).then_some(())
+    })
+    .await;
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn parallel_tasks_spread_over_two_claude_accounts_and_skip_a_hot_one() {
     let dir = tempfile::tempdir().unwrap();
