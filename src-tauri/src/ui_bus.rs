@@ -21,9 +21,13 @@ pub struct UiBatch {
     pub resync: bool,
 }
 
+/// A browser tab on `codly serve` (see web.rs); false once it is gone.
+pub type WebSink = Box<dyn Fn(&UiBatch) -> bool + Send + Sync>;
+
 #[derive(Default)]
 pub struct UiBus {
     sink: Mutex<Option<Channel<UiBatch>>>,
+    web: Mutex<Vec<WebSink>>,
     pub visible: AtomicBool,
 }
 
@@ -32,14 +36,19 @@ const MAX_BATCH: usize = 4096;
 
 impl UiBus {
     pub fn new() -> Arc<Self> {
-        Arc::new(UiBus { sink: Mutex::new(None), visible: AtomicBool::new(true) })
+        Arc::new(UiBus { sink: Mutex::new(None), web: Mutex::new(vec![]), visible: AtomicBool::new(true) })
     }
 
     pub fn set_sink(&self, ch: Channel<UiBatch>) {
         *self.sink.lock().unwrap() = Some(ch);
     }
 
+    pub fn add_web(&self, sink: WebSink) {
+        self.web.lock().unwrap().push(sink);
+    }
+
     fn send(&self, batch: UiBatch) {
+        self.web.lock().unwrap().retain(|s| s(&batch)); // web sinks only queue, never block
         let ch = self.sink.lock().unwrap().clone(); // never hold the lock across send
         if let Some(ch) = ch {
             if ch.send(batch).is_err() {
@@ -82,7 +91,8 @@ impl UiBus {
 
     fn push(&self, buf: &mut Vec<EventRow>, ev: EventRow) {
         let ephemeral = ev.kind.is_ephemeral();
-        if ephemeral && !self.visible.load(Ordering::Relaxed) {
+        // A browser tab counts as watching: it cannot report the hidden window's state.
+        if ephemeral && !self.visible.load(Ordering::Relaxed) && self.web.lock().unwrap().is_empty() {
             return;
         }
         if let Some(last) = buf.last_mut() {

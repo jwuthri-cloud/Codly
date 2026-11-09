@@ -12,6 +12,7 @@ mod onboarding_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod ui_bus;
+mod web;
 
 use std::sync::Arc;
 
@@ -31,13 +32,25 @@ pub fn run() {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("CODLY_LOG").unwrap_or_else(|_| "info".into()))
         .init();
 
+    let serve = match web::from_args(&std::env::args().collect::<Vec<_>>()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
     let (core_tx, core_rx) = watch::channel(None);
     let (hub_tx, hub_rx) = watch::channel(None);
     let bus = UiBus::new();
 
     let app = tauri::Builder::default()
         // must be registered first (plugins run in registration order)
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // `codly serve` while the app runs: this app serves too, and opens the browser.
+            if let Ok(Some(s)) = web::from_args(&argv) {
+                tauri::async_runtime::spawn(web::run(app.clone(), s, true));
+                return;
+            }
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
                 let _ = w.set_focus();
@@ -54,6 +67,24 @@ pub fn run() {
         .manage(AppState { core: core_rx, bus: bus.clone(), pty: Default::default(), shell_env: OnceCell::new() })
         .manage(inbound::InboundHandle { hub: hub_rx })
         .setup(move |app| {
+            // The window starts hidden (tauri.conf.json): `codly serve` keeps it so, and out of the Dock.
+            match serve {
+                None => {
+                    if let Some(w) = app.get_webview_window("main") {
+                        w.show()?;
+                    }
+                }
+                Some(s) => {
+                    #[cfg(target_os = "macos")]
+                    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    let handle = app.handle().clone();
+                    tauri::async_runtime::spawn(web::run(handle.clone(), s, false));
+                    tauri::async_runtime::spawn(async move {
+                        let _ = tokio::signal::ctrl_c().await;
+                        handle.exit(0);
+                    });
+                }
+            }
             let data_dir = app.path().app_data_dir()?;
             let inbound_dir = data_dir.clone();
             let app_exe = std::env::current_exe()?;

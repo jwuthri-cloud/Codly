@@ -100,8 +100,69 @@ class TauriTransport implements Transport {
   }
 }
 
+/** `codly serve`: the same commands over HTTP, the bus and terminals as server-sent events. */
+class WebTransport implements Transport {
+  private events: EventSource | null = null;
+  subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot> {
+    this.events?.close();
+    const es = (this.events = new EventSource('/api/events'));
+    const data = (e: Event) => JSON.parse((e as MessageEvent<string>).data);
+    return new Promise<Snapshot>((resolve, reject) => {
+      let open = false;
+      es.addEventListener('batch', (e) => onBatch(data(e)));
+      es.addEventListener('snapshot', (e) => {
+        open = true;
+        resolve(data(e));
+      });
+      es.addEventListener('failed', (e) => {
+        es.close();
+        reject(new Error(data(e)));
+      });
+      es.onerror = () => {
+        es.close();
+        // Codly stopped or restarted: take a fresh snapshot (the store retries via resync).
+        if (open) setTimeout(() => onBatch({ events: [], resync: true }), 1000);
+        else reject(new Error('Can’t reach Codly. Is `codly serve` still running?'));
+      };
+    });
+  }
+  call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    return post<T>(cmd, JSON.stringify(args ?? {}), { 'content-type': 'application/json' });
+  }
+  upload(cmd: string, name: string, bytes: ArrayBuffer): Promise<string> {
+    return post<string>(cmd, bytes, { 'content-type': 'application/octet-stream', 'x-name': encodeURIComponent(name) });
+  }
+  attachPty(ptyId: string, onData: (bytes: Uint8Array) => void): Promise<void> {
+    // ponytail: one connection per terminal; browsers allow 6 per host over HTTP/1.1.
+    const es = new EventSource(`/api/pty/${encodeURIComponent(ptyId)}`);
+    es.addEventListener('data', (e) => onData(Uint8Array.from(atob((e as MessageEvent<string>).data), (c) => c.charCodeAt(0))));
+    return new Promise((resolve, reject) => {
+      es.onopen = () => resolve();
+      es.onerror = () => {
+        es.close(); // the terminal closed, or Codly went away
+        reject(new Error('no such terminal'));
+      };
+    });
+  }
+}
+
+/** A command's value, or what it rejected with (as Tauri's `invoke` does). */
+async function post<T>(cmd: string, body: BodyInit, headers: Record<string, string>): Promise<T> {
+  const r = await fetch(`/api/cmd/${cmd}`, { method: 'POST', body, headers });
+  const type = r.headers.get('content-type') ?? '';
+  const value = type.startsWith('application/json') ? await r.json() : type.startsWith('application/octet-stream') ? await r.arrayBuffer() : await r.text();
+  if (!r.ok) throw value;
+  return value as T;
+}
+
 export const isTauriApp = (): boolean =>
   typeof window !== 'undefined' && !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+
+/** The UI served by `codly serve` to a browser (index.html sets the flag). */
+export const isWebApp = (): boolean => typeof window !== 'undefined' && (window as unknown as { __CODLY_WEB__?: boolean }).__CODLY_WEB__ === true;
+
+/** A real Codly behind the UI: the app's window, or a browser on `codly serve`. */
+export const hasBackend = (): boolean => isTauriApp() || isWebApp();
 
 /** The public web demo (`pnpm build:site` → /demo/): the scripted fake repo, opened at once. */
 export const isSiteDemo = (): boolean => import.meta.env.VITE_SITE_DEMO === '1' && !isTauriApp();
@@ -111,6 +172,7 @@ let transport: Transport | null = null;
 export async function getTransport(): Promise<Transport> {
   if (transport) return transport;
   if (isTauriApp()) transport = new TauriTransport();
+  else if (isWebApp()) transport = new WebTransport();
   else transport = new (await import('./mock')).MockTransport();
   return transport;
 }

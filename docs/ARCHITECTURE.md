@@ -46,6 +46,12 @@ Codly.app (Tauri, one process)
              └─ each agent launches `<Codly exe> mcp` (stdio MCP bridge → Unix socket)
 ```
 
+`codly serve` (src-tauri/src/web.rs) is the same process with its window hidden and an HTTP
+server on 127.0.0.1: `POST /api/cmd/<name>` runs a command through Tauri's own IPC dispatch on
+that window (same handlers, same ACL), and the two Channels become server-sent events
+(`/api/events` for the UI bus, `/api/pty/<id>` for a terminal). A token, printed in the link
+and kept in the data dir, is traded once for an HttpOnly cookie.
+
 PATH: GUI apps get launchd's minimal PATH, so Codly captures the login shell env once
 (`$SHELL -ilc '/usr/bin/env -0'`, 5 s timeout) and resolves each CLI on it at every spawn.
 Child envs are scrubbed of variables that silently change billing or session behaviour

@@ -119,6 +119,15 @@ cargo test --workspace      # core tests; adapters replay captured CLI transcrip
 pnpm tauri build            # build the macOS app and .dmg
 ```
 
+To use Codly from a browser instead of its window, run the app with `serve`:
+
+```bash
+/Applications/Codly.app/Contents/MacOS/codly serve   # prints a link with a token; --port, --host
+```
+
+It runs without a window or Dock icon until Ctrl+C. Run while the app is already open,
+the open app serves too and opens the link in your browser.
+
 ## Project layout
 
 - `crates/codly-core/`: the engine, with no Tauri dependency. Orchestrator (Lead, team, planner, scheduler,

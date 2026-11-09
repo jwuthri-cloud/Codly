@@ -1,7 +1,7 @@
 // Free Flow: record in the webview, transcribe in the core, hand the text to a composer.
 // One recording at a time, app-wide. Audio is captured only between start() and stop(), and
 // goes nowhere until stop() hands it to the core (which sends it to Groq and nowhere else).
-import { api, isTauriApp } from '../api';
+import { api, hasBackend } from '../api';
 import type { DictationStatus } from '../gen/DictationStatus';
 import { MAX_RECORD_MS, pickMime, toBase64 } from '../util/freeflow';
 import { toast } from './toasts.svelte';
@@ -52,7 +52,7 @@ class FreeFlow {
     this.onText = onText;
     this.discard = false;
     this.chunks = [];
-    this.fake = !isTauriApp();
+    this.fake = !hasBackend();
     this.abortStart = false;
     this.phase = 'starting';
     try {
