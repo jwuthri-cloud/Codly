@@ -290,8 +290,8 @@ export function prettyModel(model: string | null | undefined): string {
   if (m) return `${cap(m[1])} ${m[2]}.${m[3]}`;
   m = /^gpt-([\d.]+)(?:-(.+))?$/.exec(model);
   if (m) return `GPT-${m[1]}${m[2] ? ' ' + m[2].split('-').map(cap).join(' ') : ''}`;
-  // Claude Code's aliases: "opus[1m]" → "Opus (1M)".
-  m = /^(opus|sonnet|haiku)(\[1m\])?$/.exec(model);
+  // Claude Code's aliases: "opus[1m]" → "Opus (1M)", "fable" → "Fable".
+  m = /^(opus|sonnet|haiku|fable)(\[1m\])?$/.exec(model);
   if (m) return `${cap(m[1])}${m[2] ? ' (1M)' : ''}`;
   m = /^gemini-([\d.]+)-(.+)$/.exec(model);
   if (m) return `Gemini ${m[1]} ${m[2].split('-').map(cap).join(' ')}`;

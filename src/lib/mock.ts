@@ -270,7 +270,7 @@ export class MockTransport implements Transport {
       case 'hire_agent':
         return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':
-        return a.provider === 'claude' ? ['sonnet', 'opus', 'haiku'] : a.provider === 'codex' ? ['gpt-5.5-codex', 'gpt-5.5-mini'] : [];
+        return a.provider === 'claude' ? ['sonnet', 'opus', 'haiku', 'fable'] : a.provider === 'codex' ? ['gpt-5.5-codex', 'gpt-5.5-mini'] : [];
       case 'hire_review':
         return reviewHire(String(a.raw));
       case 'hire_launch_preview':
