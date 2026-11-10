@@ -98,16 +98,16 @@
 </div>
 
 <style>
-  .menu { position: absolute; z-index: 402; transform: translate(-50%, calc(-100% - 12px)); min-width: 200px; max-width: 340px; padding: 10px 12px; border-radius: 14px; background: rgba(22, 26, 36, 0.95); color: #eef1f7; box-shadow: 0 18px 50px -20px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(255, 255, 255, 0.08); font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; }
+  .menu { position: absolute; z-index: 402; transform: translate(-50%, calc(-100% - 12px)); min-width: 200px; max-width: 340px; padding: 10px 12px; border-radius: 14px; background: var(--pop); color: var(--ink-1); box-shadow: var(--pop-shadow); font: 500 12.5px/1.35 var(--of-font); }
   header { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; }
-  .x { border: 0; background: none; color: #9aa2b6; font-size: 13px; cursor: pointer; }
-  .act { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid rgba(255, 255, 255, 0.07); }
-  .lbl { font-weight: 600; color: #8ff0b0; }
+  .x { border: 0; background: none; color: var(--ink-2); font-size: 13px; cursor: pointer; }
+  .act { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid var(--line); }
+  .lbl { font-weight: 600; color: var(--of-green); }
   .who { display: flex; flex-wrap: wrap; gap: 4px; }
-  .who button { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px 3px 3px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: inherit; font: inherit; cursor: pointer; }
-  .who button:hover { background: rgba(126, 224, 161, 0.2); }
+  .who button { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px 3px 3px; border: 0; border-radius: 999px; background: var(--surface-2); color: inherit; font: inherit; cursor: pointer; }
+  .who button:hover { background: color-mix(in srgb, var(--of-green) 20%, transparent); }
   img { border-radius: 50%; }
   .note { margin: 2px 0 0; font-size: 12px; opacity: 0.7; }
-  .wide { padding: 6px 12px; border: 0; border-radius: 999px; background: #7ee0a1; color: #0f2a1a; font: 600 12px 'Inter Variable', Inter, system-ui, sans-serif; cursor: pointer; }
-  .wide.ghost { background: rgba(255, 255, 255, 0.08); color: inherit; }
+  .wide { padding: 6px 12px; border: 0; border-radius: 999px; background: var(--of-green); color: var(--on-aurora); font: 600 12px var(--of-font); cursor: pointer; }
+  .wide.ghost { background: var(--surface-2); color: inherit; }
 </style>

@@ -73,17 +73,18 @@
 {/if}
 
 <style>
-  .job { position: absolute; z-index: 400; display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 12px; border: 0; border-radius: 999px; background: rgba(22, 26, 36, 0.92); color: #eef1f7; box-shadow: 0 8px 20px -10px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.1); font: 500 12px/1.3 'Inter Variable', Inter, system-ui, sans-serif; cursor: pointer; animation: pin 0.25s ease-out both; }
-  .job:hover:not(:disabled) { background: rgba(34, 40, 54, 0.96); }
+  .job { position: absolute; z-index: 400; display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 12px; border: 0; border-radius: 999px; background: var(--pop); color: var(--ink-1); box-shadow: var(--pop-shadow); font: 500 12px/1.3 var(--of-font); cursor: pointer; animation: pin 0.25s ease-out both; }
+  /* background-image: the hover wash lies over --pop, which stays underneath. */
+  .job:hover:not(:disabled) { background-image: linear-gradient(var(--surface-3), var(--surface-3)); }
   .job:disabled { cursor: default; }
-  .kicker { font: 700 10px/1 ui-monospace, monospace; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; }
-  .cta { padding: 2px 10px; border-radius: 999px; background: #eef1f7; color: #161a24; font-weight: 600; }
-  .scrim { position: absolute; inset: 0; z-index: 900; background: rgba(8, 10, 16, 0.45); }
-  .dlg { position: absolute; z-index: 901; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(620px, calc(100% - 32px)); padding: 16px; border-radius: 18px; background: rgba(22, 26, 36, 0.96); color: #eef1f7; box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(255, 255, 255, 0.08); font: 500 13px 'Inter Variable', Inter, system-ui, sans-serif; }
+  .kicker { font: 700 10px/1 var(--of-mono); letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; }
+  .cta { padding: 2px 10px; border-radius: 999px; background: var(--ink-1); color: var(--pop); font-weight: 600; }
+  .scrim { position: absolute; inset: 0; z-index: 900; background: var(--scrim); }
+  .dlg { position: absolute; z-index: 901; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(620px, calc(100% - 32px)); padding: 16px; border-radius: 18px; background: var(--pop); color: var(--ink-1); box-shadow: var(--pop-shadow); font: 500 13px var(--of-font); outline: none; }
   .dlg header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px; }
   .dlg h3 { margin: 4px 0 0; font-size: 18px; }
   .dlg small { font-size: 12px; opacity: 0.6; font-weight: 500; }
-  .x { border: 0; background: none; color: #9aa2b6; font-size: 16px; cursor: pointer; }
+  .x { border: 0; background: none; color: var(--ink-2); font-size: 16px; cursor: pointer; }
   .note { margin: 10px 0 0; font-size: 11.5px; opacity: 0.6; }
   @keyframes pin { from { opacity: 0; transform: translateY(-8px); } }
   @media (prefers-reduced-motion: reduce) { .job { animation: none; } }

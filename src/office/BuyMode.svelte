@@ -192,37 +192,38 @@
 {/if}
 
 <style>
-  .panel { font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; color: #eef1f7; }
-  .seg { display: inline-flex; gap: 2px; padding: 2px; margin-bottom: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.05); }
+  .panel { font: 500 12.5px/1.35 var(--of-font); color: var(--ink-1); }
+  .seg { display: inline-flex; gap: 2px; padding: 2px; margin-bottom: 4px; border-radius: 999px; background: var(--surface-1); }
   .seg button { padding: 4px 10px; border: 0; border-radius: 999px; background: none; color: inherit; font: inherit; cursor: pointer; }
-  .seg button.on { background: rgba(126, 224, 161, 0.22); color: #c8f5d6; }
-  .panel { position: absolute; z-index: 401; max-width: 980px; margin: 0 auto; padding: 12px; border-radius: 16px; background: rgba(22, 26, 36, 0.96); box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
+  /* The picked segment keeps the panel's ink: green text on its own wash is 3:1 in the light theme. */
+  .seg button.on { background: color-mix(in srgb, var(--of-green) 22%, transparent); }
+  .panel { position: absolute; z-index: 401; max-width: 980px; margin: 0 auto; padding: 12px; border-radius: 16px; background: var(--pop); box-shadow: var(--pop-shadow); }
   header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px; gap: 8px; }
-  .kicker { font: 700 10px/1 ui-monospace, monospace; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; margin-bottom: 3px; }
+  .kicker { font: 700 10px/1 var(--of-mono); letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; margin-bottom: 3px; }
   small { font-size: 11px; opacity: 0.6; }
-  .x { border: 0; background: none; color: #9aa2b6; font-size: 15px; cursor: pointer; }
+  .x { border: 0; background: none; color: var(--ink-2); font-size: 15px; cursor: pointer; }
   .side { display: flex; align-items: center; gap: 6px; flex: none; }
-  .export { padding: 4px 10px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: inherit; font: inherit; font-size: 11.5px; cursor: pointer; }
-  .export:hover { background: rgba(255, 255, 255, 0.14); }
+  .export { padding: 4px 10px; border: 0; border-radius: 999px; background: var(--surface-2); color: inherit; font: inherit; font-size: 11.5px; cursor: pointer; }
+  .export:hover { background: var(--surface-3); }
   .tabs { display: flex; gap: 4px; overflow-x: auto; margin-bottom: 8px; scrollbar-width: none; }
-  .tabs button { flex: none; padding: 4px 11px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.06); color: inherit; font: inherit; cursor: pointer; }
-  .tabs button.on { background: #7ee0a1; color: #0f2a1a; font-weight: 600; }
+  .tabs button { flex: none; padding: 4px 11px; border: 0; border-radius: 999px; background: var(--surface-2); color: inherit; font: inherit; cursor: pointer; }
+  .tabs button.on { background: var(--of-green); color: var(--on-aurora); font-weight: 600; }
   ul { list-style: none; margin: 0; padding: 0 0 4px; display: grid; grid-auto-flow: column; grid-auto-columns: 92px; grid-template-rows: auto; gap: 6px; overflow-x: auto; }
-  li button { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; border: 0; border-radius: 12px; background: rgba(255, 255, 255, 0.05); color: inherit; font: inherit; cursor: pointer; }
-  li button:hover:not(:disabled) { background: rgba(126, 224, 161, 0.14); }
+  li button { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; border: 0; border-radius: 12px; background: var(--surface-1); color: inherit; font: inherit; cursor: pointer; }
+  li button:hover:not(:disabled) { background: color-mix(in srgb, var(--of-green) 14%, transparent); }
   li button:disabled { opacity: 0.4; cursor: default; }
   li button.locked { opacity: 0.5; filter: grayscale(1); }
-  .why { font-size: 10px; line-height: 1.2; text-align: center; color: #f0c27e; }
+  .why { font-size: 10px; line-height: 1.2; text-align: center; color: var(--of-gold); }
   img { width: 64px; height: 64px; }
   .n { font-size: 11.5px; line-height: 1.2; text-align: center; min-height: 2.4em; }
-  .p { font-size: 11px; color: #8ff0b0; }
+  .p { font-size: 11px; color: var(--of-green); }
   .carry { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
   .what { font-size: 13px; }
   .hint { opacity: 0.75; flex: 1; }
-  .bad { color: #ff9b8f; opacity: 1; }
+  .bad { color: var(--bad); opacity: 1; }
   .keys { display: flex; gap: 6px; }
-  .keys button { padding: 5px 11px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.1); color: inherit; font: inherit; cursor: pointer; }
-  .keys button.sell { background: #f0c27e; color: #2a1e0f; font-weight: 600; }
-  kbd { font: 600 10px ui-monospace, monospace; opacity: 0.6; margin-left: 3px; }
+  .keys button { padding: 5px 11px; border: 0; border-radius: 999px; background: var(--surface-3); color: inherit; font: inherit; cursor: pointer; }
+  .keys button.sell { background: var(--amber); color: #2a1a04; font-weight: 600; }
+  kbd { font: 600 10px var(--of-mono); opacity: 0.6; margin-left: 3px; }
   .note { margin: 0 0 6px; font-size: 12px; }
 </style>
