@@ -32,6 +32,9 @@ struct Ctx {
     role: Role,
     task_id: Option<Id>,
     ws: Option<Id>,
+    /// Not live, and its row says `failed`: a start Codly gave up on (`spawn_failed`), whose CLI
+    /// may still come up and exit. The other writer of `failed` is `on_exit`, at a run's last event.
+    dead: bool,
 }
 
 impl Inner {
@@ -43,6 +46,7 @@ impl Inner {
                 role: l.role,
                 task_id: l.task_id.clone(),
                 ws: l.workspace_id.clone(),
+                dead: false,
             };
         }
         // Not (or no longer) live: the run row is written before the spawn, so it exists.
@@ -51,6 +55,7 @@ impl Inner {
             agent_id: agent_id.into(),
             run_id: run_id.into(),
             role: run.as_ref().map_or(Role::Worker, |r| r.role),
+            dead: run.as_ref().is_some_and(|r| r.status == "failed"),
             task_id: run.and_then(|r| r.task_id),
             ws: self.store.agent_workspace(agent_id).ok().flatten(),
         }
@@ -74,6 +79,9 @@ impl Inner {
             Err(e) => tracing::warn!("event not persisted ({}): {e}", r.kind.type_name()),
         }
         self.publish(ctx.ws.as_deref(), &r);
+        if ctx.dead {
+            return; // on record, and nothing else: the agent and the row keep what the failure wrote
+        }
         self.track_live(&ctx, &r.kind);
         self.breaker_observe(&ctx.agent_id, &r.kind);
         match &r.kind {

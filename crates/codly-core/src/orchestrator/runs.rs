@@ -214,6 +214,9 @@ impl Inner {
         if let Some(m) = self.mcp.get() {
             m.revoke(token);
         }
+        // The row first: ingest reads "not live" and "failed" as a dead run, so it must never
+        // see the first without the second.
+        let _ = self.store.set_run_status(run_id, "failed");
         // ponytail: prompts queued behind this start (`starting`) are dropped with it; the first
         // caller's error is the signal. Carry them to the retry if a lost one is ever missed.
         let removed = {
@@ -223,7 +226,6 @@ impl Inner {
         if removed {
             self.control_clear(agent_id); // controls do not outlive the run
         }
-        let _ = self.store.set_run_status(run_id, "failed");
         let _ = self.update_agent(agent_id, |a| {
             if a.run_id.as_deref() == Some(run_id) {
                 a.status = AgentStatus::Failed;

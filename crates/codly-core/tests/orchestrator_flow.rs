@@ -293,6 +293,32 @@ impl Spawner for ReviewerDiesOnce {
     }
 }
 
+/// Every start gives up at once on a CLI that still comes up a moment later, then exits (a
+/// handshake that outlasts its timeout).
+struct LateStart;
+
+impl Spawner for LateStart {
+    fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
+        Box::pin(async move {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let ev = |kind| AdapterEvent { agent_id: spec.agent_id.clone(), run_id: spec.run_id.clone(), kind };
+                let _ = events.send(ev(EventKind::SessionStarted {
+                    provider: spec.provider,
+                    model: Some("fake-model".into()),
+                    cwd: spec.cwd.to_string_lossy().into_owned(),
+                    cli_version: None,
+                    session_id: Some("stale".into()),
+                    billing: Billing::Subscription,
+                    tools: vec![],
+                }));
+                let _ = events.send(ev(EventKind::Exited { code: Some(0) }));
+            });
+            Err(anyhow::anyhow!("the agent did not finish the handshake"))
+        })
+    }
+}
+
 /// A Lead that turns every user request into a one-task plan writing hello.txt.
 fn planning_lead() -> Behavior {
     planning_lead_with(&["hello.txt"], "grep -q hello hello.txt")
@@ -965,6 +991,28 @@ async fn an_answer_for_a_worker_that_is_shutting_down_restarts_its_task_with_it(
     core.answer_blocker(&card.id, "Use Stripe").await.unwrap();
     let (task, _) = task_status(&core).await.unwrap();
     assert!(task.goal.contains("Use Stripe"), "the answer goes into the task for its next run: {}", task.goal);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn late_events_of_a_failed_start_change_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let core = start(dir.path(), LateStart).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let e = core.send_chat(&format!("agent:{}", solo.id), "hi").await.unwrap_err().to_string();
+    assert!(e.contains("did not finish the handshake"), "{e}");
+    // The CLI Codly gave up on comes up after all, then exits: on record, and nothing else.
+    let run_id = wait_for("the late exit to be recorded", 10, async || {
+        let events = core.events(Some(&solo.id), None, 100).await.unwrap();
+        events.into_iter().find(|e| matches!(e.kind, EventKind::Exited { .. }))?.run_id
+    })
+    .await;
+    let store = Store::open(&dir.path().join("data").join("codly.sqlite")).unwrap();
+    assert_eq!(store.run(&run_id).unwrap().unwrap().status, "failed", "a late exit does not turn a failed start into a completed run");
+    let agent = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == solo.id).unwrap();
+    assert_ne!(agent.session_id.as_deref(), Some("stale"), "the session of a start that failed is not the agent's");
     core.shutdown().await;
 }
 

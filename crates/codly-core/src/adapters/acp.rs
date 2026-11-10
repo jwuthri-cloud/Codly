@@ -157,7 +157,9 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         deadline: None,
     };
     tokio::spawn(actor.run(cmds, lines, exit_rx, ready_tx));
-    match tokio::time::timeout(HANDSHAKE_TIMEOUT + Duration::from_secs(5), ready_rx).await {
+    // The handshake is two calls in a row (initialize, then the session), each with its own
+    // deadline: wait for both, so the actor's own error always comes first.
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT * 2 + Duration::from_secs(5), ready_rx).await {
         Ok(Ok(Ok(()))) => Ok(AgentHandle { agent_id, run_id, tx }),
         Ok(Ok(Err(e))) => Err(e),
         Ok(Err(_)) => Err(anyhow!("ACP adapter stopped during startup")),
