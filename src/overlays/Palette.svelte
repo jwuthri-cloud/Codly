@@ -213,10 +213,16 @@
     const all = [...agentRows, ...taskRows, ...artifactRows, ...commands];
     if (!q) {
       const rec = recents.map((id) => all.find((r) => r.id === id)).filter((r): r is Row => !!r).map((r) => ({ ...r, section: 'Recent', hits: [] }));
-      // Only safe, forward actions are suggested; destructive ones need a query (or the > scope).
-      const needs = commands
-        .filter((c) => c.id.startsWith('plan:run:') || c.id.startsWith('plan:merge:') || c.id.startsWith('ap:ok:'))
-        .map((r) => ({ ...r, section: 'Suggested', hits: [] }));
+      // What waits on you is suggested as a place to go, never run: Enter on an empty palette must
+      // not merge or approve. Running it takes a query (or the > scope).
+      const needs: Row[] = [
+        ...store.plans
+          .filter((p) => p.status === 'awaiting_approval' || (p.status === 'done' && !store.planMerges[p.id]))
+          .map((p) => ({ id: `go:plan:${p.id}`, section: 'Suggested', title: `${p.status === 'done' ? 'Ready to merge' : 'Ready to run'}: ${p.summary}`, icon: 'plan', hits: [], run: () => ui.openPlan(p.id, p.thread) })),
+        ...store.pendingApprovals
+          .filter((ap) => ap.choices.includes('allow_once'))
+          .map((ap) => ({ id: `go:ap:${ap.id}`, section: 'Suggested', title: `${store.agentMap.get(ap.agent_id)?.name ?? 'An agent'} needs you: ${ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : ap.subject.kind}`, icon: 'check', hits: [], run: () => ui.selectAgent(ap.agent_id) })),
+      ];
       const suggested = agentRows.slice(0, 6).map((r) => ({ ...r, hits: [] }));
       const seen = new Set([...rec, ...needs].map((r) => r.id));
       return [...needs, ...rec.filter((r) => !needs.some((n) => n.id === r.id)), ...suggested.filter((r) => !seen.has(r.id)), ...commands.filter((c) => c.section === 'Go to' && !seen.has(c.id)).map((r) => ({ ...r, hits: [] }))];

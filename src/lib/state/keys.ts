@@ -70,7 +70,8 @@ export function installKeys(): () => void {
     const overlay = ui.paletteOpen || ui.settingsOpen || ui.shortcutsOpen;
 
     // ── the primary action (approve / run plan) ──
-    if (mod && e.key === 'Enter' && !overlay) {
+    // Other text fields (a deny note…) are not the composer: ⌘↵ there must not approve.
+    if (mod && e.key === 'Enter' && !overlay && (!typing || !!(e.target as HTMLElement).closest?.('[aria-label="Composer"]'))) {
       const ap = keyTargetApproval();
       if (e.altKey) {
         if (ap && ap.choices.includes('allow_session')) {

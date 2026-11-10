@@ -30,6 +30,8 @@
     { id: 'flow', label: 'Flow', icon: 'plan', hint: 'Which task waits on which' },
     { id: 'timeline', label: 'Timeline', icon: 'timeline', hint: 'What each agent did, when' },
   ];
+  /** Cancelling a running plan stops every worker: ask first, as closing its tab does. */
+  let confirmCancel = $state<string | null>(null);
   function pick(planId: string, thread: string) {
     ui.planId = planId;
     ui.request = thread;
@@ -51,7 +53,13 @@
       <button class="btn primary" onclick={() => runPlan(plan.id)}><Icon name="play" size={13} />Run plan<span class="k">⌘↵</span></button>
       <button class="btn ghost" onclick={() => cancelPlan(plan.id)}>Cancel</button>
     {:else if plan?.status === 'running'}
-      <button class="btn ghost sm" onclick={() => cancelPlan(plan.id)}>Cancel plan</button>
+      {#if confirmCancel === plan.id}
+        <span class="ask">Stop every worker?</span>
+        <button class="btn sm danger" onclick={() => { confirmCancel = null; cancelPlan(plan.id); }}>Cancel plan</button>
+        <button class="btn ghost sm" onclick={() => (confirmCancel = null)}>Keep</button>
+      {:else}
+        <button class="btn ghost sm" onclick={() => (confirmCancel = plan.id)}>Cancel plan</button>
+      {/if}
     {/if}
     <div class="lenses" role="radiogroup" aria-label="Lens">
       {#each LENSES as l (l.id)}
@@ -80,6 +88,7 @@
 {/if}
 
 <style>
+  .ask { font-size: var(--t-sm); color: var(--ink-2); }
   code { font-size: 11.5px; color: var(--ink-2); }
   .picks { display: flex; gap: 6px; padding: 0 28px 14px; overflow-x: auto; scrollbar-width: none; flex-shrink: 0; }
   .pk { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px 0 10px; border-radius: var(--r-full); max-width: 360px; font-size: var(--t-sm); font-weight: var(--w-med); color: var(--ink-2); background: var(--surface-1); flex-shrink: 0; }

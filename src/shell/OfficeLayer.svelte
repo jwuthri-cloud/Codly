@@ -215,7 +215,8 @@
       if (a.role === 'solo') ui.modelDialog = { provider: a.provider, agentId: id };
       else ui.settingsOpen = true;
     } else if (action === 'interrupt') interruptAgent(id);
-    else if (action === 'stop') stopAgent(id);
+    // One misclick here must not kill the Lead mid-plan: ask first, like the agent sheet does.
+    else if (action === 'stop') toast({ kind: 'attention', title: `Stop ${a.name}?`, body: 'The process ends; its worktree is kept.', action: { label: 'Stop', run: () => stopAgent(id) }, duration: 8000 });
     else if (action === 'export') exportAgent(id, a.name);
     else if (action === 'trust' || action === 'untrust') trustAgent(id, a.name, action === 'trust' ? a.career.rank : 'intern');
   };
