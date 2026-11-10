@@ -430,7 +430,7 @@
   .traits { display: flex; flex-wrap: wrap; gap: 6px; }
   .trait { height: 26px; padding: 0 11px; border-radius: var(--r-full); background: var(--surface-2); color: var(--ink-2); font-size: var(--t-sm); }
   .trait.work { box-shadow: inset 0 0 0 1px color-mix(in oklab, #3fcf72 55%, transparent); }
-  .trait.on { background: var(--surface-3); color: var(--ink-1); box-shadow: inset 0 0 0 2px var(--accent, #2d6bd8); }
+  .trait.on { background: var(--surface-3); color: var(--ink-1); box-shadow: inset 0 0 0 1.5px var(--ink-2); }
   .trait.work.on { box-shadow: inset 0 0 0 2px #3fcf72; }
   .trait:disabled { opacity: 0.4; }
   .step { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 12px 0 6px; border-radius: var(--r-full); color: var(--ink-3); font-size: var(--t-sm); font-weight: var(--w-med); }
@@ -445,7 +445,7 @@
   .callout { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: var(--r-md); background: var(--surface-2); font-size: var(--t-sm); color: var(--ink-2); }
   .callout.info, .callout.warn { display: block; line-height: 1.45; }
   .callout.info { box-shadow: inset 0 0 0 1px var(--line-2); }
-  .callout.warn { box-shadow: inset 0 0 0 1px var(--warn, var(--line-3)); }
+  .callout.warn { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 55%, transparent); }
   .callout.bad { color: var(--bad); background: var(--bad-soft); }
   .avatars { display: flex; flex-wrap: wrap; gap: 8px; }
   .avatar { display: grid; place-items: center; width: 56px; height: 56px; border-radius: var(--r-lg); background: var(--surface-2); }

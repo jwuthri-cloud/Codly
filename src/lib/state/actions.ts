@@ -225,16 +225,6 @@ export async function createTask(title: string, goal = '') {
   return t;
 }
 
-/** Returns whether the agent started, so the dialog that asked can close. */
-export async function hireAgent(provider: Provider, model: string | null = null, title: string | null = null): Promise<boolean> {
-  const a = await attempt(`start ${PROVIDER_LABEL[provider]}`, () => api.hireAgent(provider, model, title), 'Check that the CLI is installed and signed in.');
-  if (!a) return false;
-  store.upsertAgent(a);
-  ui.selectAgent(a.id);
-  toast({ kind: 'success', title: `${a.name} joined`, body: `${PROVIDER_LABEL[a.provider]} · 1:1 chat is ready` });
-  return true;
-}
-
 /** Returns whether the switch happened. The next message resumes the conversation on the new model. */
 export async function setAgentModel(agent: Agent, model: string | null): Promise<boolean> {
   const label = model ?? 'the default model';

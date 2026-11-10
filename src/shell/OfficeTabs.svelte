@@ -96,12 +96,13 @@
   .ini { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }
   .on .ini { background: var(--surface-1); box-shadow: inset 0 0 0 1.5px var(--ink-2); }
   .n { position: absolute; right: 1px; bottom: 1px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px; background: var(--live); color: var(--night); font-size: 9.5px; font-weight: 700; line-height: 14px; text-align: center; box-shadow: 0 0 0 2px var(--glass-solid); }
-  .x { position: absolute; top: 0; left: 0; display: none; place-items: center; width: 15px; height: 15px; border-radius: 50%; color: var(--ink-2); background: var(--glass-solid); box-shadow: 0 0 0 1px var(--line-2); }
+  /* Hidden by opacity, not display: an element that is not rendered cannot take keyboard focus.
+     :focus-visible, not :focus-within: in Chromium a clicked tile keeps focus, and they would stay. */
+  .x { position: absolute; top: 0; left: 0; display: grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; color: var(--ink-2); background: var(--glass-solid); box-shadow: 0 0 0 1px var(--line-2); opacity: 0; transition: opacity var(--d-1) var(--ease-out); }
   .x:hover { color: var(--ink-1); }
-  .tab:hover .x, .x:focus-visible { display: grid; }
-  .pp { position: absolute; bottom: 0; left: 0; display: none; place-items: center; width: 15px; height: 15px; border-radius: 50%; font-size: 7.5px; color: var(--ink-2); background: var(--glass-solid); box-shadow: 0 0 0 1px var(--line-2); }
+  .pp { position: absolute; bottom: 0; left: 0; display: grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; font-size: 7.5px; color: var(--ink-2); background: var(--glass-solid); box-shadow: 0 0 0 1px var(--line-2); opacity: 0; transition: opacity var(--d-1) var(--ease-out); }
   .pp:hover { color: var(--ink-1); }
-  .tab:hover .pp, .pp:focus-visible { display: grid; }
+  .tab:hover .x, .tab:has(:focus-visible) .x, .tab:hover .pp, .tab:has(:focus-visible) .pp { opacity: 1; }
   .paused .ini { opacity: 0.55; }
   .n.p { background: var(--surface-3); color: var(--ink-2); font-size: 7.5px; }
   .label { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }

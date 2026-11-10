@@ -1,7 +1,7 @@
 <!--
   The agent sheet. First screen answers: what is it doing (the same sentence as everywhere) and
   why, does it need me, what is its task. Then its own steps, the files it touched (and why),
-  its helpers, live output, honest cost, and the full history. Every fact carries its
+  its subagents, live output, honest cost, and the full history. Every fact carries its
   provenance: Observed (CLI event) · Inferred (Codly heuristic) · Provided (Codly put it in
   context) · Model-stated (its own words).
 -->
@@ -195,7 +195,7 @@
       case 'approval_resolved': return { icon: 'flag', text: `Approval ${k.status} by ${k.by === 'user' ? 'you' : k.by}`, tone: k.status === 'approved' ? 'good' : 'bad' };
       case 'retrieval': return { icon: 'link', text: `Codly provided ${k.citations.length} citations for “${oneLine(k.query, 50)}”` };
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
-      case 'sub_agent': return { icon: 'crew', text: `Helper ${k.status}: ${oneLine(k.description, 90)}` };
+      case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
       case 'decision': return { icon: 'help', text: k.summary };
       case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${k.files.length} files` };
@@ -318,7 +318,7 @@
       <Section id="needs" title="Needs you" tone="attention" collapsible={false}>
         {#if inConversation}
           <div class="needs-ptr">
-            <span>{approvals.length === 1 ? 'Its request is open in the conversation.' : `${approvals.length} requests are open in the conversation.`}</span>
+            <span>{approvals.length === 1 ? 'Its approval is open in the conversation.' : `${approvals.length} approvals are open in the conversation.`}</span>
             <button class="btn sm amber" onclick={() => (ui.revealApproval = approvals[0].id)}>Show it</button>
           </div>
         {:else}
@@ -375,7 +375,7 @@
     </Section>
 
     {#if subs.length}
-      <Section id="subagents" title="Background tasks" summary={subsRunning.length ? `${subsRunning.length} running` : `${subs.length} finished`}>
+      <Section id="subagents" title="Subagents" summary={subsRunning.length ? `${subsRunning.length} running` : `${subs.length} finished`}>
         <ul class="subs">
           {#each moreSubs ? subsRunning : subsRunning.slice(0, SHOW) as s (s.callId)}
             <li>

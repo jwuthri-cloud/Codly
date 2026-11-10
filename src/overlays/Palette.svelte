@@ -159,7 +159,7 @@
     store.tasks.map((t) => ({
       id: `task:${t.id}`, section: 'Tasks', title: `${t.key} · ${t.title}`, sub: TASK_STATUS_LABEL[t.status], icon: 'plan', state: toneOf(taskState(t.status)), hint: 'Details',
       run: () => ui.selectTask(t.id),
-      alt: { label: 'View diff', run: () => ui.openDiff({ kind: 'task', id: t.id }) },
+      alt: { label: 'View changes', run: () => ui.openDiff({ kind: 'task', id: t.id }) },
     })),
   );
 

@@ -108,7 +108,7 @@
           <button class="btn primary" disabled={busy || plan.status !== 'awaiting_approval'} onclick={() => act(() => runPlan(planId))}>
             <Icon name="play" size={13} />Run plan<span class="k">⌘↵</span>
           </button>
-          <button class="btn ghost" disabled={busy} onclick={edit}>Change it</button>
+          <button class="btn ghost" disabled={busy} onclick={edit}>Change the plan</button>
           <button class="btn ghost" disabled={busy} onclick={() => act(() => cancelPlan(planId))}>Cancel</button>
         </footer>
         <p class="fine">Each task runs in its own worktree and lands on an integration branch; <code>{store.workspace?.current_branch ?? 'main'}</code> is untouched until you merge.</p>

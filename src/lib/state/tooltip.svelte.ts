@@ -1,6 +1,7 @@
 // One global tooltip: any element with `data-tip="…"` gets it. The first tooltip waits 500 ms;
 // peers hovered within 400 ms of the last one show instantly (Vercel guideline: delay the first,
-// not the group). Optional `data-tip-kbd` renders a shortcut beside the text.
+// not the group). Optional `data-tip-kbd` renders a shortcut beside the text. Keyboard focus shows
+// it too (after 300 ms): icon-only controls have no other label on screen.
 
 class TipState {
   text = $state('');
@@ -46,13 +47,29 @@ export function installTooltips() {
     }
   };
 
+  // The capture keydown below hides the old tip before Tab moves focus, so this shows the new one.
+  const focusIn = (e: FocusEvent) => {
+    const el = (e.target as HTMLElement | null)?.closest?.('[data-tip]') as HTMLElement | null;
+    if (!el || !el.matches(':focus-visible')) return;
+    clearTimeout(timer);
+    current = el;
+    timer = setTimeout(() => current === el && show(el), 300);
+  };
+  // Not at once: Chromium fires focusout while Svelte removes the focused element, in the middle of
+  // its own update, where writing state throws. Focus that went straight to another tip keeps it.
+  const focusOut = () => queueMicrotask(() => document.activeElement?.closest('[data-tip]') === current || hide());
+
   document.addEventListener('pointerover', over);
+  document.addEventListener('focusin', focusIn);
+  document.addEventListener('focusout', focusOut);
   document.addEventListener('pointerdown', hide, true);
   document.addEventListener('keydown', hide, true);
   document.addEventListener('scroll', hide, true);
   window.addEventListener('blur', hide);
   return () => {
     document.removeEventListener('pointerover', over);
+    document.removeEventListener('focusin', focusIn);
+    document.removeEventListener('focusout', focusOut);
     document.removeEventListener('pointerdown', hide, true);
     document.removeEventListener('keydown', hide, true);
     document.removeEventListener('scroll', hide, true);

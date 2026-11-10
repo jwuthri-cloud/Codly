@@ -30,7 +30,7 @@ export function installNotifications(): () => void {
         const id = k.approval.id;
         const tid = toast({
           kind: 'attention',
-          title: s.kind === 'question' ? `${a?.name ?? 'An agent'} has a question` : `${a?.name ?? 'An agent'} needs your OK`,
+          title: s.kind === 'question' ? `${a?.name ?? 'An agent'} has a question` : `${a?.name ?? 'An agent'} needs your approval`,
           body: s.kind === 'command' ? oneLine(s.command, 80) : s.kind === 'question' ? 'Answer it in the conversation' : `Wants to ${s.kind.replace('_', ' ')}`,
           action: { label: 'Review', run: () => { ui.openRequest(thread); ui.revealApproval = id; } },
         });

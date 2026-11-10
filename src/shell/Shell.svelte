@@ -55,7 +55,7 @@
   <div class="veil" aria-hidden="true"></div>
   <Rail />
   <div class="frame">
-    <TopBar {narrow} />
+    <TopBar {narrow} {frameW} />
     <main class="stage">
       {#if ui.room === 'home'}
         <Home />

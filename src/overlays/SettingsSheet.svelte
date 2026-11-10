@@ -91,7 +91,7 @@
 
   const MODES: { id: ApprovalMode; title: string; body: string }[] = [
     { id: 'balanced', title: 'Balanced', body: 'Codly’s rules settle the obvious cases; anything risky (rm -rf, git push, outside the worktree, network installs) asks you.' },
-    { id: 'strict', title: 'Strict', body: 'Every command and edit the CLI would ask about comes to you.' },
+    { id: 'strict', title: 'Ask first', body: 'Every command and edit the CLI would ask about comes to you.' },
     { id: 'autonomous', title: 'Autonomous', body: 'Anything that stays inside the agent’s worktree is allowed. Risky commands still ask.' },
     { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, Codly’s private data and read-only agents still ask.' },
   ];
@@ -336,5 +336,5 @@
   .m-title { display: inline-flex; align-items: center; gap: 8px; font-weight: var(--w-semi); }
   .mode .desc { padding-left: 21px; }
   input[type='checkbox']:not(.switch) { accent-color: var(--aurora-m); }
-  .volume { width: 160px; accent-color: var(--accent, #7ee0a1); }
+  .volume { width: 160px; accent-color: var(--aurora-m); }
 </style>

@@ -33,7 +33,7 @@
       out.push({ label: 'Change the plan', run: () => ui.seedComposer(thread, 'Change the plan: ') });
       out.push({ label: 'Why these agents?', run: () => sendChat(thread, 'Why did you route the tasks to these agents?') });
     } else if (plan && (plan.status === 'running' || plan.status === 'integrating')) {
-      if (waiting.length) out.push({ label: waiting.length === 1 ? 'Review the request' : `Review ${waiting.length} requests`, icon: 'flag', run: () => (ui.revealApproval = waiting[0]?.id ?? null) });
+      if (waiting.length) out.push({ label: waiting.length === 1 ? 'Review the approval' : `Review ${waiting.length} approvals`, icon: 'flag', run: () => (ui.revealApproval = waiting[0]?.id ?? null) });
       out.push({ label: 'Show the plan', icon: 'plan', run: () => (ui.revealPlan = plan.id) });
       out.push({ label: 'What’s left?', run: () => sendChat(thread, 'What’s left, and is anything at risk?') });
     } else if (plan?.status === 'done' && !store.planMerges[plan.id] && !plan.merged_sha && !plan.kept && !ui.keptPlans.includes(plan.id)) {
@@ -41,7 +41,7 @@
       out.push({ label: 'Anything risky in the diff?', run: () => sendChat(thread, 'Before I merge: is anything in the diff risky?') });
     } else if (plan?.status === 'done') {
       out.push({ label: 'Plan a follow-up', run: () => sendChat(thread, 'What would you do next?') });
-      out.push({ label: 'Show changes', icon: 'diff', run: () => ui.openDiff({ kind: 'plan', id: plan.id }) });
+      out.push({ label: 'View changes', icon: 'diff', run: () => ui.openDiff({ kind: 'plan', id: plan.id }) });
     }
     return out;
   });

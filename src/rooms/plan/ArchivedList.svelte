@@ -49,7 +49,7 @@
   li { display: flex; flex-direction: column; gap: 4px; padding: 10px 14px; border-radius: var(--r-md); background: var(--surface-1); }
   header { display: flex; align-items: baseline; gap: 8px; }
   .key { font-size: var(--t-sm); color: var(--ink-3); }
-  h3 { font-size: var(--t-base); font-weight: var(--w-med); color: var(--ink-1); min-width: 0; }
+  h3 { font-size: var(--t-md); font-weight: var(--w-med); color: var(--ink-1); min-width: 0; }
   .why { margin-left: auto; font-size: var(--t-sm); color: var(--ink-4); white-space: nowrap; }
   p { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); white-space: pre-line; }
 </style>

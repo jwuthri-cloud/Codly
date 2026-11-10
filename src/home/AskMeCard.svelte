@@ -1,6 +1,6 @@
 <!--
   One "ask me" card: who asks, whether it blocks their work or is a heads-up, the question in
-  plain language, and a reply box. "Respond & unblock" sends your answer to the waiting agent
+  plain language, and a reply box. "Send answer" sends your answer to the waiting agent
   (⌘↵); a heads-up needs nothing and is dismissed with "Got it". Answered cards show the reply.
 -->
 <script lang="ts">
@@ -79,7 +79,7 @@
     {#if blocking}
       <textarea class="input" rows="2" placeholder="Your answer…" bind:value={text} onkeydown={key} disabled={busy} spellcheck="true"></textarea>
       <footer>
-        <button class="btn primary" disabled={busy || !text.trim()} onclick={send}>Respond &amp; unblock<span class="k">⌘↵</span></button>
+        <button class="btn primary" disabled={busy || !text.trim()} onclick={send}>Send answer<span class="k">⌘↵</span></button>
         <button class="btn ghost" disabled={busy} onclick={dismiss} data-tip="The agent carries on by its best judgment">Skip</button>
       </footer>
     {:else}

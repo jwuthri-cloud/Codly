@@ -200,7 +200,7 @@
     {#if subject.kind === 'question'}
       <footer>
         <button class="btn primary" disabled={busy || unanswered} onclick={submitAnswers}>Send answer</button>
-        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={() => decide('deny')}>Skip the question</button>{/if}
+        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={() => decide('deny')}>Skip</button>{/if}
       </footer>
     {:else if noteOpen}
       <form class="note" onsubmit={(e) => { e.preventDefault(); decide('deny', note.trim() || null); }}>
