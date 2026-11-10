@@ -200,6 +200,9 @@ impl AppServer {
                         let raw = me.bootstrap_raw.clone();
                         let _ = me.send(&msg, &raw).await;
                     });
+                } else if tid.is_some() {
+                    // A thread nobody owns (any more): its `turn/completed` must not end another agent's turn.
+                    self.bootstrap_raw.inbound(bytes);
                 } else {
                     // Thread-less notifications (account rate limits, warnings) concern every agent.
                     let routes: Vec<Route> = st.routes.values().cloned().collect();
@@ -367,11 +370,12 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         run_id: spec.run_id.clone(),
         cwd: spec.cwd.to_string_lossy().into_owned(),
         events,
-        server,
+        server: server.clone(),
         route,
-        raw,
+        raw: raw.clone(),
         effort,
         thread_id: None,
+        started: false,
         norm: CodexNormalizer::new(&spec.agent_id, &spec.run_id, spec.cwd.clone(), resumed),
         pending: HashMap::new(),
         active_turn: None,
@@ -390,6 +394,20 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         Ok(Err(_)) => Err(anyhow!("codex adapter stopped during startup")),
         Err(_) => {
             let _ = tx.send(AgentCmd::Shutdown);
+            // The thread may still open, and by then its adapter is gone: take the answer
+            // here and unsubscribe, so the thread is neither routed to a dead channel nor
+            // left loaded on the shared server. (The server's exit drops the waiter.)
+            let (late_tx, late) = oneshot::channel();
+            if let Some(w) = server.state.lock().unwrap().pending.get_mut(&start_id) {
+                *w = Waiter::Oneshot(late_tx, raw.clone());
+            }
+            tokio::spawn(async move {
+                if let Ok(Ok(r)) = late.await
+                    && let Some(tid) = r["thread"]["id"].as_str()
+                {
+                    let _ = server.call("thread/unsubscribe", json!({ "threadId": tid }), &raw, Duration::from_secs(3)).await;
+                }
+            });
             Err(anyhow!("codex app-server did not answer {method} within 60 s"))
         }
     }
@@ -421,6 +439,9 @@ struct CodexAgent {
     raw: Arc<RawLog>,
     effort: Option<String>,
     thread_id: Option<String>,
+    /// `spawn` got its Ok. If it gave up first (60 s), it failed the run itself and this
+    /// adapter must not report on it any more.
+    started: bool,
     norm: CodexNormalizer,
     pending: HashMap<i64, Pending>,
     active_turn: Option<String>,
@@ -500,6 +521,11 @@ impl CodexAgent {
         match (what, result) {
             (Pending::Thread, Ok(r)) => {
                 self.thread_id = r["thread"]["id"].as_str().map(str::to_owned);
+                // The spawner gave up: no session to announce, only a thread to let go.
+                let Some(waiting) = ready.take().filter(|w| !w.is_closed()) else {
+                    self.unsubscribe().await;
+                    return;
+                };
                 let info = self.server.info.lock().unwrap().clone();
                 self.emit(EventKind::SessionStarted {
                     provider: Provider::Codex,
@@ -510,9 +536,7 @@ impl CodexAgent {
                     billing: info.billing,
                     tools: Vec::new(),
                 });
-                if let Some(r) = ready.take() {
-                    let _ = r.send(Ok(()));
-                }
+                self.started = waiting.send(Ok(())).is_ok();
             }
             (Pending::Thread, Err(e)) => {
                 if let Some(r) = ready.take() {
@@ -683,10 +707,18 @@ impl CodexAgent {
         if let Some(tid) = &self.thread_id {
             self.server.unroute(tid);
         }
-        let events = self.norm.cancel_all_approvals();
-        self.emit_all(events);
-        self.emit(EventKind::StatusChanged { status: AgentStatus::Offline });
-        self.emit(EventKind::Exited { code: None });
+        if self.started {
+            let events = self.norm.cancel_all_approvals();
+            self.emit_all(events);
+            // Once unrouted, Codex's own `turn/completed` cannot reach us: close the turn here.
+            // Interrupted, not Failed: this is a shutdown Codly asked for, and a failed turn
+            // would send a stopped worker to the gate.
+            if self.active_turn.take().is_some() || std::mem::take(&mut self.turn_pending) {
+                self.emit(EventKind::TurnCompleted { status: TurnStatus::Interrupted, result_text: None, duration_ms: None });
+            }
+            self.emit(EventKind::StatusChanged { status: AgentStatus::Offline });
+            self.emit(EventKind::Exited { code: None });
+        }
         self.stage = Stage::Done;
     }
 
@@ -1538,5 +1570,127 @@ mod tests {
         let (m, p) = thread_request(&ro, None, None);
         assert_eq!((m, &p["threadId"], &p["sandbox"]), ("thread/resume", &json!("th-1"), &json!("read-only")));
         assert!(p.get("threadSource").is_none() && p.get("model").is_none());
+    }
+
+    /// An app-server with no process behind it: lines are fed by hand, every write fails.
+    fn fake_server(dir: &Path) -> Arc<AppServer> {
+        Arc::new(AppServer {
+            stdin: Mutex::new(None),
+            next_id: AtomicI64::new(0),
+            state: StdMutex::new(State::default()),
+            alive: AtomicBool::new(true),
+            pgid: 0,
+            stderr: StderrTail::default(),
+            info: StdMutex::new(ServerInfo { cli_version: None, billing: Billing::Unknown }),
+            bootstrap_raw: Arc::new(RawLog::open(&dir.join("raw.ndjson")).unwrap()),
+        })
+    }
+
+    /// An agent on `fake_server` as `spawn` leaves it: waiting for its thread (request 0).
+    fn fake_agent(server: &Arc<AppServer>) -> (CodexAgent, mpsc::UnboundedReceiver<AdapterEvent>) {
+        let (events, events_rx) = mpsc::unbounded_channel();
+        let raw = server.bootstrap_raw.clone();
+        let agent = CodexAgent {
+            agent_id: "a".into(),
+            run_id: "r".into(),
+            cwd: "/w".into(),
+            events,
+            server: server.clone(),
+            route: Route { tx: mpsc::unbounded_channel().0, raw: raw.clone() },
+            raw,
+            effort: None,
+            thread_id: None,
+            started: false,
+            norm: CodexNormalizer::new("a", "r", PathBuf::from("/w"), false),
+            pending: HashMap::from([(0, Pending::Thread)]),
+            active_turn: None,
+            turn_pending: false,
+            interrupt_after_start: false,
+            steer_queue: Vec::new(),
+            queue: VecDeque::new(),
+            stage: Stage::Running,
+            deadline: None,
+        };
+        (agent, events_rx)
+    }
+
+    fn emitted(events: &mut mpsc::UnboundedReceiver<AdapterEvent>) -> Vec<EventKind> {
+        std::iter::from_fn(|| events.try_recv().ok()).map(|e| e.kind).collect()
+    }
+
+    #[tokio::test]
+    async fn thread_notifications_without_a_route_reach_nobody() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let mut agents = Vec::new();
+        for tid in ["t1", "t2"] {
+            let (tx, rx) = mpsc::unbounded_channel();
+            server.state.lock().unwrap().routes.insert(tid.into(), Route { tx, raw: server.bootstrap_raw.clone() });
+            agents.push(rx);
+        }
+        let got = |rx: &mut mpsc::UnboundedReceiver<ServerMsg>| match rx.try_recv() {
+            Ok(ServerMsg::Notification { method, .. }) => Some(method),
+            _ => None,
+        };
+        // a thread unrouted on a deadline, or one Codly never opened
+        server.route_line(br#"{"method":"turn/completed","params":{"threadId":"gone","turn":{"status":"failed"}}}"#);
+        assert_eq!((got(&mut agents[0]), got(&mut agents[1])), (None, None), "another thread's turn/completed reached an agent");
+        // a routed thread still gets its own, and only its own
+        server.route_line(br#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"status":"completed"}}}"#);
+        assert_eq!((got(&mut agents[0]), got(&mut agents[1])), (Some("turn/completed".into()), None));
+        // what concerns the whole account still reaches everyone
+        server.route_line(br#"{"method":"account/rateLimits/updated","params":{"rateLimits":{}}}"#);
+        let limits = Some("account/rateLimits/updated".to_string());
+        assert_eq!((got(&mut agents[0]), got(&mut agents[1])), (limits.clone(), limits));
+    }
+
+    /// The spawner gave up after 60 s and failed the run itself: the adapter stays silent.
+    #[tokio::test]
+    async fn a_start_nobody_waits_for_emits_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let announces = |k: &EventKind| matches!(k, EventKind::SessionStarted { .. } | EventKind::StatusChanged { .. } | EventKind::Exited { .. });
+        let gave_up = || Some(oneshot::channel::<anyhow::Result<()>>().0); // its receiver is dropped
+
+        // the thread never opens: the spawner's Shutdown ends the adapter
+        let (mut agent, mut events) = fake_agent(&server);
+        agent.on_cmd(AgentCmd::Shutdown).await;
+        assert_eq!(agent.stage, Stage::Done);
+        let kinds = emitted(&mut events);
+        assert!(!kinds.iter().any(announces), "{kinds:?}");
+
+        // the thread opens after all: it is let go, not announced
+        let (mut agent, mut events) = fake_agent(&server);
+        agent.on_response(0, Ok(json!({ "thread": { "id": "t" } })), &mut gave_up()).await;
+        agent.on_cmd(AgentCmd::Shutdown).await;
+        assert_eq!(agent.stage, Stage::Done);
+        let kinds = emitted(&mut events);
+        assert!(!kinds.iter().any(announces), "{kinds:?}");
+    }
+
+    /// Codex never confirmed the interrupt, so its `turn/completed` will not come: the adapter
+    /// closes the turn itself. (The 5 s deadline is fired by hand: tokio's paused clock is not
+    /// among the workspace's features.)
+    #[tokio::test]
+    async fn shutdown_closes_the_open_turn_as_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        // the turn runs (false), or its `turn/start` is not answered yet (true)
+        for pending in [false, true] {
+            let (mut agent, mut events) = fake_agent(&server);
+            (agent.started, agent.thread_id) = (true, Some("t".into()));
+            agent.active_turn = (!pending).then(|| "u".to_string());
+            agent.turn_pending = pending;
+            agent.on_cmd(AgentCmd::Shutdown).await;
+            assert_eq!(agent.stage, Stage::Interrupting);
+            agent.on_deadline().await;
+            assert_eq!(agent.stage, Stage::Done);
+            let kinds = emitted(&mut events);
+            // Interrupted, not Failed: a failed turn sends a stopped worker to the gate
+            let closed = kinds.iter().position(|k| matches!(k, EventKind::TurnCompleted { status: TurnStatus::Interrupted, .. }));
+            let exited = kinds.iter().position(|k| matches!(k, EventKind::Exited { .. }));
+            assert!(closed.is_some() && closed < exited, "{kinds:?}");
+            assert_eq!(kinds.iter().filter(|k| matches!(k, EventKind::TurnCompleted { .. })).count(), 1, "{kinds:?}");
+        }
     }
 }
