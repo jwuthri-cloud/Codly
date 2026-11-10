@@ -164,8 +164,13 @@ pub fn resolve_bin(provider: Provider, base: &HashMap<String, String>) -> Option
 }
 
 /// Models a CLI can run, for the start-agent picker. Codex and OpenCode print their catalog and
-/// Claude takes aliases; the rest return none and take any name typed in.
-pub async fn list_models(provider: Provider, base: &HashMap<String, String>) -> Result<Vec<String>, String> {
+/// Claude takes aliases; the rest return none and take any name typed in. `openrouter_key` is the
+/// opt-in OpenRouter key (byok.rs): OpenCode lists the OpenRouter models only when it has it.
+pub async fn list_models(
+    provider: Provider,
+    base: &HashMap<String, String>,
+    openrouter_key: Option<&str>,
+) -> Result<Vec<String>, String> {
     let args: &[&str] = match provider {
         Provider::Claude => return Ok(["opus", "sonnet", "haiku"].map(str::to_owned).to_vec()),
         Provider::Codex => &["debug", "models"],
@@ -174,7 +179,7 @@ pub async fn list_models(provider: Provider, base: &HashMap<String, String>) -> 
     };
     let bin = resolve_bin(provider, base).ok_or_else(|| format!("{} is not installed", bin_names(provider)[0]))?;
     let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    let out = run(&bin, args, &child_env(base, provider), &cwd).await?;
+    let out = run(&bin, args, &child_env_with(base, provider, openrouter_key), &cwd).await?;
     if !out.ok {
         return Err(first_line(&out.text()));
     }
@@ -991,6 +996,27 @@ mod tests {
         assert_eq!(gemini_auth(Some("gemini-api-key")).1, Billing::ApiKey);
         assert_eq!(gemini_auth(Some("oauth-personal")).1, Billing::Subscription);
         assert!(gemini_auth(None).3.is_some());
+    }
+
+    #[tokio::test]
+    async fn opencode_lists_the_openrouter_models_only_with_the_byok_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("opencode");
+        std::fs::write(&bin, "#!/bin/sh\necho opencode/free\n[ -n \"$OPENROUTER_API_KEY\" ] && echo openrouter/a-model\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:/usr/bin:/bin", dir.path().display());
+        // A key in the login shell's env never counts: only the opt-in key reaches OpenCode.
+        let base: HashMap<String, String> =
+            [("PATH", path.as_str()), ("HOME", dir.path().to_str().unwrap()), ("OPENROUTER_API_KEY", "from-the-shell")]
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect();
+        assert_eq!(list_models(Provider::Opencode, &base, None).await.unwrap(), ["opencode/free"]);
+        assert_eq!(
+            list_models(Provider::Opencode, &base, Some("sk-or-test")).await.unwrap(),
+            ["opencode/free", "openrouter/a-model"]
+        );
     }
 
     // ───────────── accounts ─────────────
