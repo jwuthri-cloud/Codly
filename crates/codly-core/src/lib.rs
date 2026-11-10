@@ -22,6 +22,7 @@
 //! - `byok`         opt-in OpenRouter key for OpenCode only, in the Keychain
 //! - `hire`         hire manifests (the add-agent wizard's import/AI draft): strict validation
 //! - `lot`          build mode's lots: the ready-made Studio and Garage, a repo's first lot, checks
+//! - `repos`        the git repositories under a folder, for the browser's "Open repository" picker
 
 pub mod adapters;
 pub mod dictation;
@@ -45,6 +46,7 @@ pub mod price;
 pub mod proc;
 pub mod quota;
 pub mod pty;
+pub mod repos;
 pub mod skills;
 pub mod store;
 pub mod triggers;

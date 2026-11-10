@@ -25,6 +25,7 @@
     "allow-detect-clis",
     "allow-list-accounts",
     "allow-recent-workspaces",
+    "allow-list-repos",
     "allow-open-workspace",
     "allow-update-settings",
     "allow-send-chat",
