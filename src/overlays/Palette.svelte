@@ -215,7 +215,7 @@
       const rec = recents.map((id) => all.find((r) => r.id === id)).filter((r): r is Row => !!r).map((r) => ({ ...r, section: 'Recent', hits: [] }));
       // What waits on you is suggested as a place to go, never run: Enter on an empty palette must
       // not merge or approve. Running it takes a query (or the > scope).
-      const needs: Row[] = [
+      const needs: Scored[] = [
         ...store.plans
           .filter((p) => p.status === 'awaiting_approval' || (p.status === 'done' && !store.planMerges[p.id]))
           .map((p) => ({ id: `go:plan:${p.id}`, section: 'Suggested', title: `${p.status === 'done' ? 'Ready to merge' : 'Ready to run'}: ${p.summary}`, icon: 'plan', hits: [], run: () => ui.openPlan(p.id, p.thread) })),
