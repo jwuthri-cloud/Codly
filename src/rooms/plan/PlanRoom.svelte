@@ -4,7 +4,7 @@
   Timeline: what each agent did, when.
 -->
 <script lang="ts">
-  import { cancelPlan, runPlan } from '../../lib/state/actions';
+  import { cancelPlan, isStarting, runPlan } from '../../lib/state/actions';
   import { requests } from '../../lib/state/requests.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui, type PlanLens } from '../../lib/state/ui.svelte';
@@ -32,6 +32,16 @@
   ];
   /** Cancelling a running plan stops every worker: ask first, as closing its tab does. */
   let confirmCancel = $state<string | null>(null);
+  /** Starting a plan can take seconds, and ⌘↵ and the palette start it too: the buttons follow
+   *  the plan's own start, wherever it came from. Cancel: the plan you pressed it on. */
+  const starting = $derived(!!plan && isStarting(plan.id));
+  let cancelling = $state<string | null>(null);
+  const busy = $derived(starting || cancelling === plan?.id);
+  async function cancel(id: string) {
+    cancelling = id;
+    await cancelPlan(id);
+    if (cancelling === id) cancelling = null;
+  }
   function pick(planId: string, thread: string) {
     ui.planId = planId;
     ui.request = thread;
@@ -50,8 +60,8 @@
   {/snippet}
   {#snippet right()}
     {#if plan?.status === 'awaiting_approval'}
-      <button class="btn primary" onclick={() => runPlan(plan.id)}><Icon name="play" size={13} />Run plan<span class="k">⌘↵</span></button>
-      <button class="btn ghost" onclick={() => cancelPlan(plan.id)}>Cancel</button>
+      <button class="btn primary" disabled={busy} onclick={() => runPlan(plan.id)}><Icon name="play" size={13} />{starting ? 'Starting…' : 'Run plan'}<span class="k">⌘↵</span></button>
+      <button class="btn ghost" disabled={busy} onclick={() => cancel(plan.id)}>Cancel</button>
     {:else if plan?.status === 'running'}
       {#if confirmCancel === plan.id}
         <span class="ask">Stop every worker?</span>

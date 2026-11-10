@@ -59,6 +59,7 @@
   let listEl: HTMLDivElement | undefined = $state();
   let search = $state<SearchResult | null>(null);
   let searching = $state(false);
+  let searchError = $state<string | null>(null);
 
   // Seed (⌘N → "+", ui.openPalette('>') …)
   const seed = ui.paletteSeed;
@@ -165,14 +166,21 @@
   let searchSeq = 0;
   $effect(() => {
     const q = query.trim();
+    searchError = null;
     if (scope !== '/' || q.length < 2) {
+      // Nothing to search any more: a request still on its way must not answer here.
+      ++searchSeq;
+      searching = false;
       search = null;
       return;
     }
     const my = ++searchSeq;
     searching = true;
     const t = setTimeout(() => {
-      api.search(q).then((r) => my === searchSeq && (search = r)).catch(() => my === searchSeq && (search = null)).finally(() => my === searchSeq && (searching = false));
+      api.search(q)
+        .then((r) => my === searchSeq && (search = r))
+        .catch((e) => my === searchSeq && ((search = null), (searchError = e instanceof Error ? e.message : String(e))))
+        .finally(() => my === searchSeq && (searching = false));
     }, 120);
     return () => clearTimeout(t);
   });
@@ -343,9 +351,11 @@
     </div>
 
     <div class="list" id="palette-list" role="listbox" bind:this={listEl}>
-      {#if scope === '/' && !search && query.trim().length < 2}
+      {#if searchError}
+        <p class="hint-empty">Search failed: {searchError}</p>
+      {:else if scope === '/' && !search && query.trim().length < 2}
         <p class="hint-empty">Type at least two characters. Results come from Codly’s index: paths, symbols and code, with the evidence for each match.</p>
-      {:else if !withAsk.length}
+      {:else if !withAsk.length && !(scope === '/' && searching)}
         <p class="hint-empty">
           {#if scope === '/'}No matches for “{query}”. Try fewer words, or ask the Lead.
           {:else if scope === '+'}Type a title, then ↵.

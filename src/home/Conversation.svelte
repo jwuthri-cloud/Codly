@@ -91,9 +91,19 @@
   let atBottom = $state(true);
   let unseen = $state(false);
   let lastCount = 0;
+  let lastTop = 0;
+  /** Text is streaming into the newest message: it grows below the fold without a new item,
+   *  and a smooth scroll to it would end short (so "New activity" jumps there instead). */
+  const streamingLast = $derived.by(() => {
+    const last = items[items.length - 1];
+    return last?.kind === 'say' && last.streaming;
+  });
   function onScroll() {
     if (!scroller) return;
-    atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
+    // Any scroll up lets go of the newest line; coming back down within 60px takes it again.
+    const d = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    atBottom = d < 2 || (scroller.scrollTop >= lastTop && d < 60);
+    lastTop = scroller.scrollTop;
     if (atBottom) unseen = false;
   }
   function toBottom(smooth = false) {
@@ -105,7 +115,7 @@
     const grew = items.length > lastCount;
     lastCount = items.length;
     if (atBottom) tick().then(() => toBottom());
-    else if (grew) unseen = true;
+    else if (grew || streamingLast) unseen = true;
   });
   $effect(() => {
     void thread;
@@ -221,11 +231,10 @@
     {/if}
   </div>
 
-  {#if unseen}
-    <button class="newer" onclick={() => toBottom(true)}><Icon name="chevron-down" size={13} />New activity</button>
-  {/if}
-
   <div class="bottom">
+    {#if unseen}
+      <button class="newer" onclick={() => toBottom(!streamingLast)}><Icon name="chevron-down" size={13} />New activity</button>
+    {/if}
     <NextRow {thread} queued={waiting.size} />
     <Composer {thread} />
   </div>
@@ -244,7 +253,9 @@
   .ex { height: 32px; padding: 0 14px; border-radius: var(--r-full); background: var(--surface-2); color: var(--ink-2); font-size: var(--t-sm); }
   .ex:hover { background: var(--surface-3); color: var(--ink-1); }
   .items { display: flex; flex-direction: column; gap: 20px; padding: 0 32px; }
-  .it { min-width: 0; animation: rise-in var(--d-4) var(--spring) both; }
+  .it { min-width: 0; }
+  /* ponytail: only the newest item rises in, so a thread switch does not replay the whole history. Two items added at once animate only the last; animating each needs a "new since mount" flag per item. */
+  .it:last-child { animation: rise-in var(--d-4) var(--spring) both; }
   .k-work { margin: -8px 0; }
   .user { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
   .user p { max-width: 82%; padding: 10px 16px 11px; border-radius: 20px 20px 6px 20px; background: var(--surface-3); font-size: var(--t-lg); line-height: var(--lh-lg); white-space: pre-wrap; overflow-wrap: anywhere; transition: background-color var(--d-3), box-shadow var(--d-3), color var(--d-3); }
@@ -268,6 +279,6 @@
   .say { max-width: 66ch; }
   .say.commentary :global(.md) { font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-2); }
   .card-gap { margin-top: 14px; }
-  .newer { position: absolute; left: 50%; bottom: 104px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 14px; border-radius: var(--r-full); background: var(--pop); box-shadow: var(--pop-shadow); font-size: var(--t-sm); color: var(--ink-1); animation: rise-in var(--d-3) var(--spring); z-index: 2; }
-  .bottom { padding: 0 20px 18px; }
+  .newer { position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); width: fit-content; margin: 0 auto; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 14px; border-radius: var(--r-full); background: var(--pop); box-shadow: var(--pop-shadow); font-size: var(--t-sm); color: var(--ink-1); animation: rise-in var(--d-3) var(--spring); z-index: 2; }
+  .bottom { position: relative; padding: 0 20px 18px; }
 </style>

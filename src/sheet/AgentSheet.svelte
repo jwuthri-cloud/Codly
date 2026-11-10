@@ -150,9 +150,14 @@
     return null;
   });
   let outEl: HTMLPreElement | undefined = $state();
-  $effect(() => {
+  let outSeen: HTMLPreElement | undefined;
+  // A box that just opened starts on its newest line; after that it follows only while you
+  // are there (measured before the new text lands).
+  $effect.pre(() => {
     void liveOut?.text;
-    tick().then(() => outEl && (outEl.scrollTop = outEl.scrollHeight));
+    const stick = !outEl || outEl !== outSeen || outEl.scrollHeight - outEl.scrollTop - outEl.clientHeight < 24;
+    outSeen = outEl;
+    tick().then(() => stick && outEl && (outEl.scrollTop = outEl.scrollHeight));
   });
 
   // ── history ──
@@ -230,12 +235,28 @@
   let confirmStop = $state(false);
   let confirmLetGo = $state(false);
   const working = $derived(n?.tone === 'live' || n?.tone === 'wait');
+  /** Interrupt and Stop land when the CLI lets go: the button says so until then. */
+  let interrupting = $state(false);
+  let stopping = $state(false);
+  function interrupt() {
+    interrupting = true;
+    interruptAgent(agent.id);
+  }
+  async function stop() {
+    stopping = true;
+    await stopAgent(agent.id);
+    stopping = false;
+    confirmStop = false;
+  }
+  $effect(() => {
+    if (!working) interrupting = false;
+  });
   const moreItems = $derived<MenuItem[]>([
     { label: 'Open a terminal in its worktree', icon: 'terminal', disabled: !agent.worktree, run: () => { ui.terminalCwd = agent.worktree; ui.go('terminal'); } },
     { label: 'Copy worktree path', icon: 'copy', disabled: !agent.worktree, run: () => copyText(agent.worktree ?? '', 'Path copied') },
     { label: 'Change model…', icon: 'sparkle', disabled: agent.role !== 'solo', run: () => (ui.modelDialog = { provider: agent.provider, agentId: agent.id }) },
     { kind: 'separator' },
-    { label: 'Interrupt this turn', icon: 'pause', disabled: !working, run: () => interruptAgent(agent.id) },
+    { label: 'Interrupt this turn', icon: 'pause', disabled: !working || interrupting, run: interrupt },
     { label: 'Stop the agent…', icon: 'stop', danger: true, disabled: agent.status === 'offline', run: () => (confirmStop = true) },
     // The Lead goes with its request, a team member with Settings → Team.
     ...(agent.role === 'lead' ? [] : agent.member
@@ -256,14 +277,14 @@
   <div class="h-actions">
     <button class="btn sm" onclick={() => ui.openThread(store.threadOf(agent.id))}><Icon name="chat" size={13} />{agent.role === 'lead' ? 'Talk to the Lead' : `Talk to ${agent.name}`}</button>
     <button class="btn sm ghost" onclick={() => ide.open(agent.id)} data-tip="Browse and edit this agent’s worktree"><Icon name="code" size={13} />IDE</button>
-    {#if working}<button class="btn sm ghost" onclick={() => interruptAgent(agent.id)}><Icon name="pause" size={13} />Interrupt</button>{/if}
+    {#if working}<button class="btn sm ghost" disabled={interrupting} onclick={interrupt}><Icon name="pause" size={13} />{interrupting ? 'Interrupting…' : 'Interrupt'}</button>{/if}
     <button class="icon-btn" bind:this={moreBtn} aria-label="More actions" onclick={() => (moreOpen = !moreOpen)}><Icon name="more" /></button>
   </div>
   {#if confirmStop}
     <div class="confirm">
       <span>Stop {agent.name}? The process ends; its worktree is kept.</span>
-      <button class="btn sm danger" onclick={() => { confirmStop = false; stopAgent(agent.id); }}>Stop</button>
-      <button class="btn sm ghost" onclick={() => (confirmStop = false)}>Keep</button>
+      <button class="btn sm danger" disabled={stopping} onclick={stop}>{stopping ? 'Stopping…' : 'Stop'}</button>
+      <button class="btn sm ghost" disabled={stopping} onclick={() => (confirmStop = false)}>Keep</button>
     </div>
   {/if}
   {#if confirmLetGo}

@@ -1,5 +1,6 @@
 // User intents → core commands. Every action reports failure as a toast that says how to get
 // out, and applies command results the core does not echo as events (workspace, settings).
+import { SvelteSet } from 'svelte/reactivity';
 import { api, isTauriApp } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { AccountConfig } from '../gen/AccountConfig';
@@ -148,8 +149,20 @@ export async function sendQueuedNow(agentId: string) {
   await attempt('interrupt the agent', () => api.interruptAgent(agentId), 'Your message stays queued and runs when the turn ends.');
 }
 
+// Starting a plan can take seconds (integration worktree, dependency install) and has four ways
+// in (plan card, Plan room, ⌘↵, palette): a second press meanwhile is dropped, not an error.
+// Reactive, so a Run plan button says "Starting…" whichever way the plan was started.
+const starting = new SvelteSet<string>();
+export const isStarting = (planId: string) => starting.has(planId);
+
 export async function runPlan(planId: string) {
-  await attempt('run the plan', () => api.runPlan(planId));
+  if (starting.has(planId)) return;
+  starting.add(planId);
+  try {
+    await attempt('run the plan', () => api.runPlan(planId));
+  } finally {
+    starting.delete(planId);
+  }
 }
 
 export async function cancelPlan(planId: string) {
