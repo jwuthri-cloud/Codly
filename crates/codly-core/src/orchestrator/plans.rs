@@ -328,7 +328,7 @@ impl Inner {
     }
 
     /// Stop the worker and reviewer runs of a task and free those agents.
-    fn release_task_agents(&self, t: &Task) {
+    pub(super) fn release_task_agents(&self, t: &Task) {
         let agents = self.store.task_workspace(&t.id).ok().flatten().and_then(|ws| self.store.agents(&ws).ok()).unwrap_or_default();
         for a in agents.iter().filter(|a| {
             a.task_id.as_deref() == Some(t.id.as_str()) || (scheduler::is_active(t.status) && t.assignee.as_deref() == Some(a.id.as_str()))
@@ -859,17 +859,33 @@ impl Inner {
             // Plan tasks start as soon as their dependencies are merged; only ad-hoc tasks
             // have a backlog (the scheduler would make a plan task ready again at once).
             (Ready, Pending) if t.plan_id.is_none() => {}
-            (s, Cancelled) if !matches!(s, Cancelled) => self.release_task_agents(&t),
+            // Stop: Retry resumes it. Not while it merges (it is done in a moment).
+            (s, Blocked) if scheduler::is_active(s) && s != Merging => {}
+            (s, Cancelled) if !matches!(s, Cancelled) => {}
             _ => bail!("cannot move {} from {} to {}", t.key, store::enum_str(&from), store::enum_str(&to)),
         }
         if to == Ready {
             lock(&self.fix_rounds).remove(task_id); // a retry gets fresh fix rounds
         }
+        let was = t;
         let t = self.update_task_as(task_id, true, |t| {
+            // In the write: the gate may have reached the merge since the read above.
+            if to == Blocked && !(scheduler::is_active(t.status) && t.status != Merging) {
+                bail!("{} is {} now", t.key, store::enum_str(&t.status));
+            }
             t.status = to;
-            t.status_reason = (to == Cancelled).then(|| "cancelled by you".to_string());
+            t.status_reason = match to {
+                Cancelled => Some("cancelled by you".to_string()),
+                Blocked => Some("stopped by you; Retry to resume".to_string()),
+                _ => None,
+            };
             Ok(())
         })?;
+        // After the status: a worker that is still starting re-checks it before its brief, and
+        // a turn that ends now is not gated. The task as it was picks who to release.
+        if matches!(to, Cancelled | Blocked) {
+            self.release_task_agents(&was);
+        }
         let ws = self.store.task_workspace(task_id)?;
         self.decide_by(
             ws.as_deref(),

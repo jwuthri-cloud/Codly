@@ -45,9 +45,15 @@
     void store.rev;
     return store.decisions.filter((d) => d.taskId === task.id).map((d) => ({ prov: methodProvenance(d.method), text: d.summary, meta: clock(d.ts) }));
   });
+  // In flight: Stop blocks it and releases its agents (Retry resumes). Not while it merges.
+  const STOP: { to: TaskStatus; label: string }[] = [{ to: 'blocked', label: 'Stop' }, { to: 'cancelled', label: 'Cancel' }];
   const LEGAL: Partial<Record<TaskStatus, { to: TaskStatus; label: string }[]>> = {
     pending: [{ to: 'ready', label: 'Move to Ready' }, { to: 'cancelled', label: 'Cancel' }],
     ready: [{ to: 'pending', label: 'Back to Backlog' }, { to: 'cancelled', label: 'Cancel' }],
+    running: STOP,
+    verifying: STOP,
+    reviewing: STOP,
+    changes_requested: STOP,
     blocked: [{ to: 'ready', label: 'Retry' }, { to: 'cancelled', label: 'Cancel' }],
     failed: [{ to: 'ready', label: 'Retry' }, { to: 'cancelled', label: 'Cancel' }],
     cancelled: [{ to: 'ready', label: 'Reopen' }],

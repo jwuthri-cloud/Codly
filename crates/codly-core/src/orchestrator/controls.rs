@@ -297,8 +297,10 @@ impl Inner {
                 tracing::debug!("held prompt not delivered: {e}");
             }
         }
-        // A worker whose last turn was its finish waits at the gate for this moment.
-        if none_held && agent.role == Role::Worker && self.is_quiet(agent_id) {
+        // A worker whose last turn was its finish waits at the gate for this moment. (The run's
+        // role: a 1:1 agent on a task works as its worker.)
+        let works = lock(&self.live).get(agent_id).is_some_and(|l| l.role == Role::Worker);
+        if none_held && works && self.is_quiet(agent_id) {
             if let Some(task) = agent.task_id.clone() {
                 let me = self.clone();
                 tokio::spawn(async move { me.gate(task).await });

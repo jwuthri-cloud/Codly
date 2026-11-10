@@ -193,26 +193,38 @@ impl Inner {
 
     pub(super) async fn stop_agent(&self, agent_id: &str) -> anyhow::Result<()> {
         let agent = self.agent(agent_id)?;
-        if let Some(task_id) = agent.task_id.as_deref()
-            && let Ok(t) = self.task(task_id)
-            && scheduler::is_active(t.status)
-            && agent.role == Role::Worker
-        {
-            self.update_task(task_id, |t| {
-                t.status = TaskStatus::Blocked;
-                t.status_reason = Some(format!("stopped by you; move it to Ready to resume with {}", agent.name));
+        // The task it holds, as its worker or its reviewer, whatever its own role (a 1:1 agent
+        // on staff takes tasks too). The row first: it has the task before a run exists.
+        let held = agent.task_id.clone().or_else(|| lock(&self.live).get(agent_id).and_then(|l| l.task_id.clone()));
+        if let Some(t) = held.and_then(|id| self.task(&id).ok()) {
+            let reason = if t.assignee.as_deref() == Some(agent_id) {
+                format!("stopped by you; move it to Ready to resume with {}", agent.name)
+            } else {
+                "review stopped by you; Retry to re-check".to_string()
+            };
+            // Checked in the write: a task that reached its merge meanwhile is left to finish.
+            let mut blocked = false;
+            self.update_task(&t.id, |t| {
+                blocked = scheduler::is_active(t.status) && t.status != TaskStatus::Merging;
+                if blocked {
+                    t.status = TaskStatus::Blocked;
+                    t.status_reason = Some(reason.clone());
+                }
                 Ok(())
             })?;
+            // After the status: a worker that is still starting re-checks it before its brief,
+            // and the turn the stop interrupts ends on a task that is no longer in review. Both
+            // its agents go: a worker left running would keep a Retry waiting for it.
+            if blocked {
+                self.release_task_agents(&t);
+            }
         }
-        // After the task: a worker that is still starting re-checks its status before the brief.
         let stopped = self.stop_run(agent_id);
         self.update_agent(agent_id, |a| {
             a.status = AgentStatus::Offline;
             a.activity = None;
             a.activity_label = None;
-            if a.role != Role::Reviewer {
-                a.task_id = None;
-            }
+            a.task_id = None;
         })?;
         if !stopped {
             tracing::debug!("stop_agent: {agent_id} had no live run");

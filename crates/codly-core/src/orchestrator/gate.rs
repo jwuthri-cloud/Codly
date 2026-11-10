@@ -89,7 +89,8 @@ impl Inner {
         if self.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        if self.task(task_id).is_ok_and(|t| matches!(t.status, TaskStatus::Cancelled | TaskStatus::Done | TaskStatus::Blocked)) {
+        let was = self.task(task_id).ok();
+        if was.as_ref().is_some_and(|t| matches!(t.status, TaskStatus::Cancelled | TaskStatus::Done | TaskStatus::Blocked)) {
             return; // cancelled, stopped (or finished) while the gate ran: nothing to report
         }
         let reason = format!("blocked: the gate failed: {e}");
@@ -98,6 +99,11 @@ impl Inner {
             t.status_reason = Some(prompts::clip(&reason, 300));
             Ok(())
         });
+        // Its worker (and reviewer) are free again: left running, the worker would stay busy
+        // and a Retry would wait for it forever. The retry resumes its session.
+        if let Some(t) = &was {
+            self.release_task_agents(t);
+        }
         let ws = self.store.task_workspace(task_id).ok().flatten();
         let _ = self.decide(ws.as_deref(), Some(task_id), "gate", prompts::clip(&reason, 200), json!({ "error": e.to_string() }));
         if let (Some(ws), Ok(t)) = (ws, self.task(task_id)) {
@@ -196,6 +202,10 @@ impl Inner {
             if !v.ok {
                 return self.fix_round(&task, &worker, Fix::Verify { cmd: cmd.clone(), code: v.code, tail: v.tail }).await;
             }
+        }
+        // Stopped or cancelled while its checks ran: the gate ends here, with no verdict.
+        if self.task(task_id)?.status != TaskStatus::Verifying {
+            return Ok(());
         }
 
         // 4. Scope: changed files ⊆ write_scope ∪ declared exceptions.

@@ -1099,6 +1099,90 @@ async fn quitting_while_a_worker_starts_leaves_its_task_to_resume() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_task_can_be_stopped_from_the_board() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    // Each turn ends when the test lets it: the first one only after the stop.
+    let go = Arc::new(tokio::sync::Notify::new());
+    let wait = go.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let wait = wait.clone();
+        Box::pin(async move {
+            wait.notified().await;
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote it." })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the worker's turn", 20, async || {
+        let working = log.lock().unwrap().prompts.iter().any(|p| p.0 == Role::Worker);
+        task_status(&core).await.filter(|(t, _)| working && t.status == TaskStatus::Running)
+    })
+    .await;
+    let worker_id = task.assignee.clone().unwrap();
+    let stopped = core.move_task(&task.id, TaskStatus::Blocked).await.unwrap();
+    assert_eq!(stopped.status_reason.as_deref(), Some("stopped by you; Retry to resume"));
+    go.notify_one();
+    wait_for("the worker to exit", 10, async || log.lock().unwrap().shutdowns.contains(&worker_id).then_some(())).await;
+    tokio::time::sleep(Duration::from_millis(500)).await; // what its turn end set off has run its course
+    let (task, _) = task_status(&core).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Blocked, "the turn that ended after the stop is not gated");
+    let events = core.events(None, None, 2000).await.unwrap();
+    assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Verified { .. })), "nothing was checked");
+    // Retry: nobody holds the task or its worker, so it runs to the end.
+    go.notify_one();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gate_failure_frees_the_worker_so_retry_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    // The first time, the worktree breaks under the gate: its `.git` points nowhere.
+    let broken = Arc::new(Mutex::new(None::<(PathBuf, String)>));
+    let saved = broken.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let saved = saved.clone();
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            {
+                let mut saved = saved.lock().unwrap();
+                if saved.is_none() {
+                    let dot_git = turn.spec.cwd.join(".git");
+                    *saved = Some((dot_git.clone(), std::fs::read_to_string(&dot_git).unwrap()));
+                    std::fs::write(&dot_git, "gitdir: /nonexistent\n").unwrap();
+                }
+            }
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote it." })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the gate to fail", 30, async || {
+        task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Blocked && t.status_reason.as_deref().is_some_and(|r| r.contains("the gate failed")))
+    })
+    .await;
+    let worker_id = task.assignee.clone().unwrap();
+    wait_for("the worker to be released", 5, async || log.lock().unwrap().shutdowns.contains(&worker_id).then_some(())).await;
+    // You repair the worktree and retry: the same worker picks its session up again.
+    let (dot_git, content) = broken.lock().unwrap().clone().unwrap();
+    std::fs::write(dot_git, content).unwrap();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    let (task, _) = wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
+    assert_eq!(task.status, TaskStatus::Done);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_start_stopped_while_its_worktree_is_added_leaves_the_agents_next_chat_alone() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
@@ -1384,6 +1468,54 @@ async fn a_reviewer_that_got_busy_after_it_was_picked_is_replaced_not_skipped() 
     assert!(!events.iter().any(skipped), "a reviewer that is busy elsewhere is no reason to merge unreviewed");
     let reviewed = events.iter().find(|e| matches!(&e.kind, EventKind::Reviewed { verdict, .. } if verdict == "approve")).expect("someone reviewed it");
     assert_ne!(reviewed.agent_id.as_deref(), Some(picked.id.as_str()), "by another reviewer");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopping_a_reviewer_blocks_the_task_and_frees_its_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Greeting written." })).await;
+        })
+    });
+    // Mid-review when you stop it: its turn ends only then, without a verdict (a stopped CLI
+    // still closes its turn with a TurnCompleted before it exits).
+    let stopped = Arc::new(tokio::sync::Notify::new());
+    let wait = stopped.clone();
+    let reviewer: Behavior = Arc::new(move |_: FakeTurn| {
+        let wait = wait.clone();
+        Box::pin(async move { wait.notified().await })
+    });
+    let codex = CliInfo { provider: Provider::Codex, ..claude() };
+    let spawner = FakeSpawner { log: log.clone(), lead: planning_lead(), worker: by_role(worker, reviewer) };
+    let core = start_with_clis(dir.path(), spawner, vec![claude(), codex]).await;
+    let settings =
+        Settings { auto_run_plans: true, lead_followups: false, review_gate: true, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, reviewer_id) = wait_for("the review", 30, async || {
+        let reading = log.lock().unwrap().prompts.iter().any(|p| p.0 == Role::Reviewer);
+        let snap = core.snapshot().await.unwrap();
+        let reviewer = snap.agents.iter().find(|a| reading && a.role == Role::Reviewer)?.id.clone();
+        Some((snap.tasks.first().filter(|t| t.status == TaskStatus::Reviewing)?.clone(), reviewer))
+    })
+    .await;
+    let worker_id = task.assignee.clone().unwrap();
+    core.stop_agent(&reviewer_id).await.unwrap();
+    stopped.notify_one();
+    wait_for("the reviewer to exit", 10, async || log.lock().unwrap().shutdowns.contains(&reviewer_id).then_some(())).await;
+    tokio::time::sleep(Duration::from_millis(500)).await; // what its turn end set off has run its course
+    let (task, _) = task_status(&core).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Blocked, "{:?}", task.status_reason);
+    assert!(task.status_reason.as_deref().is_some_and(|r| r.starts_with("review stopped by you")), "{:?}", task.status_reason);
+    assert!(log.lock().unwrap().shutdowns.contains(&worker_id), "its worker is released too: a Retry can start it");
+    let events = core.events(None, None, 3000).await.unwrap();
+    assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Merged { .. })), "a review you stopped merges nothing");
     core.shutdown().await;
 }
 
@@ -2581,6 +2713,47 @@ async fn a_free_agent_on_staff_takes_the_task_before_a_hire() {
     let prompts = log.lock().unwrap().prompts.clone();
     let board = prompts.iter().find(|(r, _)| *r == Role::Lead).map(|(_, p)| p.clone()).unwrap();
     assert!(board.contains(&format!("Team (assign tasks by name):\n  {}", ivo.name)), "{board}");
+    core.shutdown().await;
+}
+
+/// A 1:1 agent on staff that took a task is that task's worker: stopping it stops the task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopping_a_solo_on_a_task_blocks_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    // Mid-turn when you stop it: the turn ends only then, with its work reported as done.
+    let stopped = Arc::new(tokio::sync::Notify::new());
+    let wait = stopped.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let wait = wait.clone();
+        Box::pin(async move {
+            wait.notified().await;
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created it." })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let ivo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    assert_eq!(ivo.role, Role::Solo);
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the task's worker to be mid-turn", 30, async || {
+        let working = log.lock().unwrap().prompts.iter().any(|p| p.0 == Role::Worker);
+        task_status(&core).await.filter(|(t, _)| working && t.status == TaskStatus::Running)
+    })
+    .await;
+    assert_eq!(task.assignee.as_deref(), Some(ivo.id.as_str()), "the free agent on staff took it");
+    core.stop_agent(&ivo.id).await.unwrap();
+    stopped.notify_one();
+    wait_for("the agent to exit", 10, async || log.lock().unwrap().shutdowns.contains(&ivo.id).then_some(())).await;
+    tokio::time::sleep(Duration::from_millis(500)).await; // what its turn end set off has run its course
+    let (task, _) = task_status(&core).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Blocked, "{:?}", task.status_reason);
+    assert!(task.status_reason.as_deref().is_some_and(|r| r.starts_with("stopped by you")), "{:?}", task.status_reason);
+    let events = core.events(None, None, 2000).await.unwrap();
+    assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Merged { .. })), "nothing merged");
     core.shutdown().await;
 }
 

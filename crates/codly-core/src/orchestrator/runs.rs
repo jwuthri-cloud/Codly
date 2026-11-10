@@ -304,6 +304,10 @@ impl Inner {
         if agent.model == model {
             return Ok(agent);
         }
+        // Its run of a task is not a chat to restart: stopping it would strand the task.
+        if agent.task_id.is_some() {
+            bail!("{} is on a task: its model can change when the task is done", agent.name);
+        }
         if lock(&self.live).get(agent_id).is_some_and(|l| l.turn_active) {
             bail!("{} is still working: stop its turn first", agent.name);
         }
