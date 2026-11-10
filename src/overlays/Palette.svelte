@@ -19,6 +19,7 @@
   import { ROOMS, ui } from '../lib/state/ui.svelte';
   import { fuzzy, highlight } from '../lib/util/fuzzy';
   import { PROVIDER_LABEL, TASK_STATUS_LABEL, taskState } from '../lib/util/labels';
+  import { modal } from '../lib/util/modal';
   import type { Tone } from '../lib/narrate';
   import { oneLine } from '../lib/util/sanitize';
   import Icon from '../components/Icon.svelte';
@@ -317,7 +318,7 @@
 </script>
 
 <div class="scrim" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && close()}>
-  <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette" use:modal={close}>
     <div class="input-row">
       <Icon name="search" size={16} />
       {#if scope}

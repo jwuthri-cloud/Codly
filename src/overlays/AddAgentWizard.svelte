@@ -23,6 +23,7 @@
   } from '../lib/util/hire';
   import { COMPANY_LABEL, PROVIDER_LABEL, idVar } from '../lib/util/labels';
   import { ROLE_TITLES } from '../lib/util/team';
+  import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
   import Portrait from '../components/Portrait.svelte';
   import ApplicantPicker from '../office/ApplicantPicker.svelte';
@@ -40,7 +41,6 @@
   let m = $state<HireManifest>(draft);
   let step = $state(0);
   let busy = $state(false);
-  let el: HTMLDivElement | undefined = $state();
   let fileInput: HTMLInputElement | undefined = $state();
   /** Where the fields came from, shown until the person edits on: a file, or the Lead's draft. */
   let loaded = $state<{ from: string; risks: string[] } | null>(null);
@@ -82,7 +82,6 @@
   let applicants = $state<Applicant[]>([]);
   let pickedApplicant = $state<number | null>(null);
   onMount(() => {
-    el?.focus();
     api.hireApplicants(3).then((a) => (applicants = a)).catch(() => {});
   });
   function takeApplicant(i: number) {
@@ -216,239 +215,217 @@
   const portrait = (seed: string) => ({ id: `wizard-${seed}`, color: m.color ?? 0, look_seed: seed, provider: (custom ? 'claude' : m.provider) as Provider, role: 'solo' as const, name: m.name });
 </script>
 
-<div class="scrim" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && close()}>
-  <div
-    class="sheet"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Add an agent"
-    tabindex="-1"
-    bind:this={el}
-    onkeydown={(e) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        close();
-      }
-    }}
-  >
-    <header>
-      <h2>Add an agent</h2>
-      <div class="starts">
-        <button type="button" class="btn sm ghost" onclick={() => fileInput?.click()}><Icon name="reveal" size={13} />Import agent…</button>
-        <button type="button" class="btn sm ghost" aria-expanded={aiOpen} onclick={() => (aiOpen = !aiOpen)}><Icon name="sparkle" size={13} />Generate with AI</button>
-        <button type="button" class="icon-btn" aria-label="Close" onclick={close}><Icon name="x" /></button>
-      </div>
-      <input bind:this={fileInput} class="sr-only" type="file" accept=".json,application/json" tabindex="-1" onchange={importFile} />
-    </header>
+<Dialog label="Add an agent" style="max-height: calc(100vh - 48px)" divider={false} onclose={close}>
+  {#snippet actions()}
+    <div class="starts">
+      <button type="button" class="btn sm ghost" onclick={() => fileInput?.click()}><Icon name="reveal" size={13} />Import agent…</button>
+      <button type="button" class="btn sm ghost" aria-expanded={aiOpen} onclick={() => (aiOpen = !aiOpen)}><Icon name="sparkle" size={13} />Generate with AI</button>
+    </div>
+    <input bind:this={fileInput} class="sr-only" type="file" accept=".json,application/json" tabindex="-1" onchange={importFile} />
+  {/snippet}
 
-    <ol class="steps" aria-label="Steps">
-      {#each STEPS as s, i (s)}
-        <li>
-          <button type="button" class="step" class:on={i === step} class:done={i < step} aria-current={i === step ? 'step' : undefined} onclick={() => (step = i)}>
-            <span class="n">{i + 1}</span>{s}
-          </button>
-        </li>
-      {/each}
-    </ol>
+  <ol class="steps" aria-label="Steps">
+    {#each STEPS as s, i (s)}
+      <li>
+        <button type="button" class="step" class:on={i === step} class:done={i < step} aria-current={i === step ? 'step' : undefined} onclick={() => (step = i)}>
+          <span class="n">{i + 1}</span>{s}
+        </button>
+      </li>
+    {/each}
+  </ol>
 
-    <div class="body">
-      {#if aiOpen}
-        <div class="callout">
-          <label class="field">
-            <span class="eyebrow">What should this agent do?</span>
-            <textarea rows="2" bind:value={brief} placeholder="e.g. Triage new bug reports and write up the likely cause" disabled={!!asking}></textarea>
-          </label>
-          <p class="muted small">The Lead drafts a hire and you review every field. It appears in the Lead’s conversation; nothing starts on its own.</p>
-          <div class="row">
-            {#if asking}
-              <span class="muted small" role="status">Waiting for the Lead…</span>
-              <button type="button" class="btn sm ghost" onclick={() => asking?.abort()}>Cancel</button>
-            {:else}
-              <button type="button" class="btn sm primary" disabled={!brief.trim()} onclick={generate}>Ask the Lead</button>
-            {/if}
-          </div>
-        </div>
-      {/if}
-      {#if loaded}
-        <div class="callout info" role="status">
-          <b>Filled from {loaded.from}.</b> Check each step; nothing starts until you press Start agent.
-          {#if loaded.risks.length}<br />It has a custom command with {loaded.risks.join(', ')}: you will be asked to confirm it.{/if}
-        </div>
-      {/if}
-      {#if notice.length}
-        <div class="callout bad" role="alert">
-          {#each notice as n (n)}<div>{n}</div>{/each}
-        </div>
-      {/if}
-
-      {#if step === 0}
-        {#if applicants.length && !m.career}
-          <div class="field">
-            <span class="eyebrow">Applicants</span>
-            <ApplicantPicker {applicants} provider={(custom ? 'claude' : m.provider) as Provider} role="solo" picked={pickedApplicant} onpick={takeApplicant} />
-          </div>
-        {/if}
-        {#if m.career}
-          <div class="callout info">
-            <b>{rankLabel(m.career.rank)} · {m.career.xp} XP</b> — {m.career.stats.merged} merged, {m.career.stats.checks_passed} checks passed{m.memory ? ', brings its memory file' : ''}. Its track record carries over.
-          </div>
-        {/if}
+  <div class="body">
+    {#if aiOpen}
+      <div class="callout">
         <label class="field">
-          <span class="eyebrow">Name</span>
-          <input bind:value={m.name} maxlength={MAX_NAME} placeholder="e.g. Mina" spellcheck="false" autocomplete="off" onkeydown={(e) => e.key === 'Enter' && (e.preventDefault(), !stepBlocked && next())} />
+          <span class="eyebrow">What should this agent do?</span>
+          <textarea rows="2" bind:value={brief} placeholder="e.g. Triage new bug reports and write up the likely cause" disabled={!!asking}></textarea>
         </label>
-        <div class="field">
-          <span class="eyebrow">Avatar</span>
-          <div class="avatars" role="radiogroup" aria-label="Avatar">
-            {#each AVATARS as seed (seed)}
-              <button type="button" class="avatar" role="radio" aria-checked={m.avatar === seed} aria-label={seed} class:on={m.avatar === seed} onclick={() => (m.avatar = seed)}>
-                <Portrait agent={portrait(seed)} size={44} />
-              </button>
-            {/each}
-          </div>
+        <p class="muted small">The Lead drafts a hire and you review every field. It appears in the Lead’s conversation; nothing starts on its own.</p>
+        <div class="row">
+          {#if asking}
+            <span class="muted small" role="status">Waiting for the Lead…</span>
+            <button type="button" class="btn sm ghost" onclick={() => asking?.abort()}>Cancel</button>
+          {:else}
+            <button type="button" class="btn sm primary" disabled={!brief.trim()} onclick={generate}>Ask the Lead</button>
+          {/if}
         </div>
+      </div>
+    {/if}
+    {#if loaded}
+      <div class="callout info" role="status">
+        <b>Filled from {loaded.from}.</b> Check each step; nothing starts until you press Start agent.
+        {#if loaded.risks.length}<br />It has a custom command with {loaded.risks.join(', ')}: you will be asked to confirm it.{/if}
+      </div>
+    {/if}
+    {#if notice.length}
+      <div class="callout bad" role="alert">
+        {#each notice as n (n)}<div>{n}</div>{/each}
+      </div>
+    {/if}
+
+    {#if step === 0}
+      {#if applicants.length && !m.career}
         <div class="field">
-          <span class="eyebrow">Colour</span>
-          <div class="swatches" role="radiogroup" aria-label="Colour">
-            {#each [0, 1, 2, 3, 4, 5, 6, 7] as c (c)}
-              <button type="button" class="swatch" role="radio" aria-checked={m.color === c} aria-label={`Colour ${c + 1}`} class:on={m.color === c} style:--hue={idVar(c)} onclick={() => (m.color = c)}></button>
-            {/each}
-          </div>
+          <span class="eyebrow">Applicants</span>
+          <ApplicantPicker {applicants} provider={(custom ? 'claude' : m.provider) as Provider} role="solo" picked={pickedApplicant} onpick={takeApplicant} />
         </div>
-        <div class="field">
-          <span class="eyebrow">Traits <span class="muted small">up to 3 · green ones change how it works</span></span>
-          <div class="traits" role="group" aria-label="Traits">
-            {#each TRAITS as t (t.id)}
-              {@const on = m.traits.includes(t.id)}
-              <button type="button" class="trait" class:on class:work={t.rule} aria-pressed={on} title={t.rule ?? 'Personality only (how it lives in the office)'} disabled={!on && (m.traits.length >= 3 || m.traits.some((x) => clashes(x, t.id)))} onclick={() => toggleTrait(t.id)}>{t.label}</button>
-            {/each}
-          </div>
-          {#each m.traits.map((id) => TRAITS.find((t) => t.id === id)).filter((t) => t?.rule) as t (t?.id)}
-            <span class="muted small">{t?.label}: {t?.rule}</span>
+      {/if}
+      {#if m.career}
+        <div class="callout info">
+          <b>{rankLabel(m.career.rank)} · {m.career.xp} XP</b> — {m.career.stats.merged} merged, {m.career.stats.checks_passed} checks passed{m.memory ? ', brings its memory file' : ''}. Its track record carries over.
+        </div>
+      {/if}
+      <label class="field">
+        <span class="eyebrow">Name</span>
+        <input bind:value={m.name} maxlength={MAX_NAME} placeholder="e.g. Mina" spellcheck="false" autocomplete="off" onkeydown={(e) => e.key === 'Enter' && (e.preventDefault(), !stepBlocked && next())} />
+      </label>
+      <div class="field">
+        <span class="eyebrow">Avatar</span>
+        <div class="avatars" role="radiogroup" aria-label="Avatar">
+          {#each AVATARS as seed (seed)}
+            <button type="button" class="avatar" role="radio" aria-checked={m.avatar === seed} aria-label={seed} class:on={m.avatar === seed} onclick={() => (m.avatar = seed)}>
+              <Portrait agent={portrait(seed)} size={44} />
+            </button>
           {/each}
         </div>
-        <label class="field">
-          <span class="eyebrow">Title</span>
-          <select value={m.title ?? ''} onchange={(e) => (m.title = e.currentTarget.value || null)}>
-            <option value="">None</option>
-            {#each ROLE_TITLES as t (t)}<option value={t}>{t}</option>{/each}
-          </select>
-        </label>
-      {:else if step === 1}
-        <div class="field">
-          <span class="eyebrow">Project folder</span>
-          <div class="path" title={folder?.repo_path}>
-            <Icon name="reveal" size={14} />
-            <span class="mono">{folder?.repo_path ?? 'No project open'}</span>
-            {#if folder?.current_branch}<span class="muted small">on {folder.current_branch}</span>{/if}
-          </div>
-          <p class="muted small">Agents start in the project that is open. Open another repository from the Welcome screen to hire into it.</p>
+      </div>
+      <div class="field">
+        <span class="eyebrow">Colour</span>
+        <div class="swatches" role="radiogroup" aria-label="Colour">
+          {#each [0, 1, 2, 3, 4, 5, 6, 7] as c (c)}
+            <button type="button" class="swatch" role="radio" aria-checked={m.color === c} aria-label={`Colour ${c + 1}`} class:on={m.color === c} style:--hue={idVar(c)} onclick={() => (m.color = c)}></button>
+          {/each}
         </div>
-        <label class="check">
-          <input type="checkbox" bind:checked={m.isolate} />
-          <span><b>Git isolation (own worktree)</b><span class="muted small block">Edits land on a branch of its own that you review and merge. Recommended.</span></span>
-        </label>
-        {#if !m.isolate}
-          <div class="callout warn" role="note">
-            This agent edits your project folder directly, on whatever branch is checked out, and Codly will not commit for it. Your approval mode still applies, but Autonomous allows edits here.
-          </div>
-        {/if}
-        <label class="field">
-          <span class="eyebrow">Resume a session <span class="muted">(optional)</span></span>
-          <input value={m.resume_session ?? ''} oninput={(e) => (m.resume_session = e.currentTarget.value.trim() || null)} placeholder="Session id from the CLI" spellcheck="false" autocomplete="off" />
-          <span class="muted small">Continues that conversation. If the CLI can’t resume it here, Codly starts a fresh one.</span>
-        </label>
-      {:else if step === 2}
-        <div class="field">
-          <span class="eyebrow">Engine</span>
-          <div class="choices" role="radiogroup" aria-label="Engine">
-            {#each PROVIDERS as p (p)}
-              {@const why = unavailable(p)}
-              <button type="button" class="choice" role="radio" aria-checked={m.provider === p} class:on={m.provider === p} disabled={!!why && m.provider !== p} data-tip={why ?? undefined} onclick={() => pickEngine(p)}>
-                <span class="radio"></span>{PROVIDER_LABEL[p]} <span class="muted small">{COMPANY_LABEL[p]}</span>
-              </button>
-            {/each}
-            <button type="button" class="choice" role="radio" aria-checked={custom} class:on={custom} onclick={() => pickEngine(CUSTOM)}>
-              <span class="radio"></span>Custom <span class="muted small">your command</span>
+      </div>
+      <div class="field">
+        <span class="eyebrow">Traits <span class="muted small">up to 3 · green ones change how it works</span></span>
+        <div class="traits" role="group" aria-label="Traits">
+          {#each TRAITS as t (t.id)}
+            {@const on = m.traits.includes(t.id)}
+            <button type="button" class="trait" class:on class:work={t.rule} aria-pressed={on} title={t.rule ?? 'Personality only (how it lives in the office)'} disabled={!on && (m.traits.length >= 3 || m.traits.some((x) => clashes(x, t.id)))} onclick={() => toggleTrait(t.id)}>{t.label}</button>
+          {/each}
+        </div>
+        {#each m.traits.map((id) => TRAITS.find((t) => t.id === id)).filter((t) => t?.rule) as t (t?.id)}
+          <span class="muted small">{t?.label}: {t?.rule}</span>
+        {/each}
+      </div>
+      <label class="field">
+        <span class="eyebrow">Title</span>
+        <select value={m.title ?? ''} onchange={(e) => (m.title = e.currentTarget.value || null)}>
+          <option value="">None</option>
+          {#each ROLE_TITLES as t (t)}<option value={t}>{t}</option>{/each}
+        </select>
+      </label>
+    {:else if step === 1}
+      <div class="field">
+        <span class="eyebrow">Project folder</span>
+        <div class="path" title={folder?.repo_path}>
+          <Icon name="reveal" size={14} />
+          <span class="mono">{folder?.repo_path ?? 'No project open'}</span>
+          {#if folder?.current_branch}<span class="muted small">on {folder.current_branch}</span>{/if}
+        </div>
+        <p class="muted small">Agents start in the project that is open. Open another repository from the Welcome screen to hire into it.</p>
+      </div>
+      <label class="check">
+        <input type="checkbox" bind:checked={m.isolate} />
+        <span><b>Git isolation (own worktree)</b><span class="muted small block">Edits land on a branch of its own that you review and merge. Recommended.</span></span>
+      </label>
+      {#if !m.isolate}
+        <div class="callout warn" role="note">
+          This agent edits your project folder directly, on whatever branch is checked out, and Codly will not commit for it. Your approval mode still applies, but Autonomous allows edits here.
+        </div>
+      {/if}
+      <label class="field">
+        <span class="eyebrow">Resume a session <span class="muted">(optional)</span></span>
+        <input value={m.resume_session ?? ''} oninput={(e) => (m.resume_session = e.currentTarget.value.trim() || null)} placeholder="Session id from the CLI" spellcheck="false" autocomplete="off" />
+        <span class="muted small">Continues that conversation. If the CLI can’t resume it here, Codly starts a fresh one.</span>
+      </label>
+    {:else if step === 2}
+      <div class="field">
+        <span class="eyebrow">Engine</span>
+        <div class="choices" role="radiogroup" aria-label="Engine">
+          {#each PROVIDERS as p (p)}
+            {@const why = unavailable(p)}
+            <button type="button" class="choice" role="radio" aria-checked={m.provider === p} class:on={m.provider === p} disabled={!!why && m.provider !== p} data-tip={why ?? undefined} onclick={() => pickEngine(p)}>
+              <span class="radio"></span>{PROVIDER_LABEL[p]} <span class="muted small">{COMPANY_LABEL[p]}</span>
             </button>
-          </div>
+          {/each}
+          <button type="button" class="choice" role="radio" aria-checked={custom} class:on={custom} onclick={() => pickEngine(CUSTOM)}>
+            <span class="radio"></span>Custom <span class="muted small">your command</span>
+          </button>
         </div>
-        {#if !custom}
-          <div class="field">
-            <span class="eyebrow">Model</span>
-            <div class="choices" role="radiogroup" aria-label="Model">
-              <button type="button" class="choice" role="radio" aria-checked={!m.model} class:on={!m.model} onclick={() => (m.model = null)}><span class="radio"></span>CLI default</button>
-              {#each models as name (name)}
-                <button type="button" class="choice" role="radio" aria-checked={m.model === name} class:on={m.model === name} onclick={() => (m.model = name)}><span class="radio"></span>{name}</button>
-              {/each}
-            </div>
-            <input value={m.model ?? ''} oninput={(e) => (m.model = e.currentTarget.value.trim() || null)} placeholder="Other model name" spellcheck="false" autocomplete="off" />
-          </div>
-        {/if}
+      </div>
+      {#if !custom}
         <div class="field">
-          <span class="eyebrow">Launch command</span>
-          {#if custom}
-            <input class="mono" value={m.command ?? ''} oninput={(e) => (m.command = e.currentTarget.value)} placeholder="my-agent --acp" spellcheck="false" autocomplete="off" aria-label="Launch command" />
-            <p class="muted small">Run as given, without a shell. Anything Codly can’t launch yet stays a saved hire file.</p>
-          {:else}
-            <input class="mono" value={preview?.command ?? ''} readonly aria-label="Launch command" />
-            <p class="muted small">
-              Codly adds the session, tool and MCP flags for each run.
-              <button type="button" class="link" onclick={() => pickEngine(CUSTOM)}>Edit as a custom command</button>
-            </p>
-          {/if}
-          {#if custom && preview?.problems.length}<p class="bad small">{preview.problems[0]}</p>{/if}
-          {#if custom && risks.length}
-            <div class="callout warn" role="alert">
-              <label class="check">
-                <input type="checkbox" bind:checked={confirmShell} />
-                <span>This command contains {risks.join(', ')}. Codly runs it without a shell, so these are passed as plain text, which is rarely what was meant. I checked the command and want to keep it.</span>
-              </label>
-            </div>
-          {/if}
-        </div>
-      {:else}
-        <div class="field">
-          <span class="eyebrow">Start from</span>
-          <div class="choices">
-            {#each TEMPLATES as t (t.id)}
-              <button type="button" class="choice" class:on={m.description === t.description && m.goal === t.goal} onclick={() => useTemplate(t)}>{t.label}</button>
+          <span class="eyebrow">Model</span>
+          <div class="choices" role="radiogroup" aria-label="Model">
+            <button type="button" class="choice" role="radio" aria-checked={!m.model} class:on={!m.model} onclick={() => (m.model = null)}><span class="radio"></span>CLI default</button>
+            {#each models as name (name)}
+              <button type="button" class="choice" role="radio" aria-checked={m.model === name} class:on={m.model === name} onclick={() => (m.model = name)}><span class="radio"></span>{name}</button>
             {/each}
           </div>
+          <input value={m.model ?? ''} oninput={(e) => (m.model = e.currentTarget.value.trim() || null)} placeholder="Other model name" spellcheck="false" autocomplete="off" />
         </div>
-        <label class="field">
-          <span class="eyebrow">Description <span class="muted">what this agent is</span></span>
-          <textarea rows="3" bind:value={m.description} maxlength={MAX_DESCRIPTION} placeholder="A few sentences on its role."></textarea>
-          <span class="count muted small">{m.description.length}/{MAX_DESCRIPTION}</span>
-        </label>
-        <label class="field">
-          <span class="eyebrow">Goal <span class="muted">long-running</span></span>
-          <textarea rows="4" bind:value={m.goal} maxlength={MAX_GOAL} placeholder="What it keeps working towards."></textarea>
-          <span class="count muted small">{m.goal.length}/{MAX_GOAL}. Put in front of every message you send this agent.</span>
-        </label>
-        {#if blocker}<p class="bad small" role="status">{blocker}</p>{/if}
       {/if}
-    </div>
-
-    <footer>
-      <button type="button" class="btn sm ghost save" onclick={saveFile} disabled={!m.name.trim()} data-tip="Download these settings as a .json hire file">Save as .json</button>
-      <button type="button" class="btn sm ghost" onclick={() => (step > 0 ? (step -= 1) : close())}>{step > 0 ? 'Back' : 'Cancel'}</button>
-      {#if step < STEPS.length - 1}
-        <button type="button" class="btn sm primary" disabled={stepBlocked} onclick={next}>Next</button>
-      {:else}
-        <button type="button" class="btn sm primary" disabled={!!blocker || busy} onclick={next}>Start agent</button>
-      {/if}
-    </footer>
+      <div class="field">
+        <span class="eyebrow">Launch command</span>
+        {#if custom}
+          <input class="mono" value={m.command ?? ''} oninput={(e) => (m.command = e.currentTarget.value)} placeholder="my-agent --acp" spellcheck="false" autocomplete="off" aria-label="Launch command" />
+          <p class="muted small">Run as given, without a shell. Anything Codly can’t launch yet stays a saved hire file.</p>
+        {:else}
+          <input class="mono" value={preview?.command ?? ''} readonly aria-label="Launch command" />
+          <p class="muted small">
+            Codly adds the session, tool and MCP flags for each run.
+            <button type="button" class="link" onclick={() => pickEngine(CUSTOM)}>Edit as a custom command</button>
+          </p>
+        {/if}
+        {#if custom && preview?.problems.length}<p class="bad small">{preview.problems[0]}</p>{/if}
+        {#if custom && risks.length}
+          <div class="callout warn" role="alert">
+            <label class="check">
+              <input type="checkbox" bind:checked={confirmShell} />
+              <span>This command contains {risks.join(', ')}. Codly runs it without a shell, so these are passed as plain text, which is rarely what was meant. I checked the command and want to keep it.</span>
+            </label>
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <div class="field">
+        <span class="eyebrow">Start from</span>
+        <div class="choices">
+          {#each TEMPLATES as t (t.id)}
+            <button type="button" class="choice" class:on={m.description === t.description && m.goal === t.goal} onclick={() => useTemplate(t)}>{t.label}</button>
+          {/each}
+        </div>
+      </div>
+      <label class="field">
+        <span class="eyebrow">Description <span class="muted">what this agent is</span></span>
+        <textarea rows="3" bind:value={m.description} maxlength={MAX_DESCRIPTION} placeholder="A few sentences on its role."></textarea>
+        <span class="count muted small">{m.description.length}/{MAX_DESCRIPTION}</span>
+      </label>
+      <label class="field">
+        <span class="eyebrow">Goal <span class="muted">long-running</span></span>
+        <textarea rows="4" bind:value={m.goal} maxlength={MAX_GOAL} placeholder="What it keeps working towards."></textarea>
+        <span class="count muted small">{m.goal.length}/{MAX_GOAL}. Put in front of every message you send this agent.</span>
+      </label>
+      {#if blocker}<p class="bad small" role="status">{blocker}</p>{/if}
+    {/if}
   </div>
-</div>
+
+  <footer>
+    <button type="button" class="btn sm ghost save" onclick={saveFile} disabled={!m.name.trim()} data-tip="Download these settings as a .json hire file">Save as .json</button>
+    <button type="button" class="btn sm ghost" onclick={() => (step > 0 ? (step -= 1) : close())}>{step > 0 ? 'Back' : 'Cancel'}</button>
+    {#if step < STEPS.length - 1}
+      <button type="button" class="btn sm primary" disabled={stepBlocked} onclick={next}>Next</button>
+    {:else}
+      <button type="button" class="btn sm primary" disabled={!!blocker || busy} onclick={next}>Start agent</button>
+    {/if}
+  </footer>
+</Dialog>
 
 <style>
-  .scrim { position: fixed; inset: 0; z-index: var(--z-modal); background: var(--scrim); display: grid; place-items: center; animation: fade-in var(--d-3) var(--ease-out); }
-  .sheet { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; border-radius: var(--r-xl); background: var(--pop); box-shadow: var(--pop-shadow), 0 40px 100px -30px rgba(0, 0, 0, 0.6); outline: none; animation: pop-in var(--d-4) var(--spring); }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 64px; padding: 0 14px 0 26px; flex-shrink: 0; }
-  h2 { font-family: var(--font-display); font-weight: 400; font-size: var(--d-sm); }
-  .starts { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+  .starts { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: flex-end; margin: 0 4px 0 12px; }
   .steps { display: flex; gap: 4px; list-style: none; margin: 0; padding: 0 22px 12px; box-shadow: inset 0 -1px 0 var(--line); flex-shrink: 0; }
   .traits { display: flex; flex-wrap: wrap; gap: 6px; }
   .trait { height: 26px; padding: 0 11px; border-radius: var(--r-full); background: var(--surface-2); color: var(--ink-2); font-size: var(--t-sm); }

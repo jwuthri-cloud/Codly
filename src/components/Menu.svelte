@@ -12,6 +12,8 @@
 
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { fade } from 'svelte/transition';
+  import { ui } from '../lib/state/ui.svelte';
   import Icon from './Icon.svelte';
   import Kbd from './Kbd.svelte';
 
@@ -113,6 +115,7 @@
   style:top="{pos.y}px"
   style:width="{width}px"
   onkeydown={key}
+  out:fade={{ duration: ui.reducedMotion ? 0 : 90 }}
 >
   {#if search !== null}
     <input class="search" bind:this={input} bind:value={search} placeholder={searchPlaceholder} spellcheck="false" autocomplete="off" oninput={() => (active = -1)} />

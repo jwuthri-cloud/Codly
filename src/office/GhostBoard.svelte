@@ -6,6 +6,7 @@
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
   import { rankLabel } from '../lib/util/career';
+  import { modal } from '../lib/util/modal';
   import type { OfficeEngine } from './engine';
   import { agentPortrait } from './portrait';
   import Scrapbook from './Scrapbook.svelte';
@@ -38,7 +39,7 @@
 
 {#if open && ghost}
   <div class="scrim" role="presentation" onclick={() => (open = false)}></div>
-  <div class="dlg" role="dialog" aria-modal="true" aria-label="Ghosts of the memory archive">
+  <div class="dlg" role="dialog" aria-modal="true" aria-label="Ghosts of the memory archive" use:modal={() => (open = false)}>
     <header>
       <div>
         <div class="kicker">Memory archive · let go, never forgotten</div>

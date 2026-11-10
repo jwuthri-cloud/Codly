@@ -67,7 +67,7 @@ export function installKeys(): () => void {
     const mod = e.metaKey || e.ctrlKey;
     const typing = isTyping(e.target);
     const k = e.key.toLowerCase();
-    const overlay = ui.paletteOpen || ui.settingsOpen || ui.shortcutsOpen;
+    const overlay = ui.paletteOpen || ui.settingsOpen || ui.shortcutsOpen || !!document.querySelector('[aria-modal="true"]');
 
     // ── the primary action (approve / run plan) ──
     // Other text fields (a deny note…) are not the composer: ⌘↵ there must not approve.

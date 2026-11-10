@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import type { JobOffer } from '../lib/gen/JobOffer';
+  import { modal } from '../lib/util/modal';
   import ApplicantPicker from './ApplicantPicker.svelte';
 
   interface Props {
@@ -49,7 +50,7 @@
 
 {#if dialog && onpick}
   <div class="scrim" role="presentation" onclick={() => (open = null)}></div>
-  <div class="dlg" role="dialog" aria-modal="true" aria-label="Choose who gets the job">
+  <div class="dlg" role="dialog" aria-modal="true" aria-label="Choose who gets the job" use:modal={() => (open = null)}>
     <header>
       <div>
         <div class="kicker">Now hiring · closes in {left(dialog)}s</div>
