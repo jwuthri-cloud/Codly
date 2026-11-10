@@ -302,8 +302,8 @@
 
 <style>
   .nb { position: absolute; inset: 0; overflow: hidden; outline: none; contain: strict; isolation: isolate; user-select: none; -webkit-user-select: none; background: var(--night); color: var(--ink-1); }
-  /* scene.ts sets [data-theme] for the hour (as the office does), so what floats over the map
-     reads as day or night with it */
+  /* scene.ts sets [data-theme] for the hour, so what floats over the map reads as day or night
+     with it (the office keeps its hour in [data-scene] and lets its HUD follow the app theme) */
   .nb :global(.nb-canvas) { position: absolute; inset: 0; display: block; touch-action: none; }
 
   .nb-head { position: absolute; z-index: 3; top: 0; left: calc(var(--rail-w) + var(--gutter) * 2); right: var(--gutter); height: var(--top-h); display: flex; align-items: center; justify-content: space-between; gap: 12px; pointer-events: none; }

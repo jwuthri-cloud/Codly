@@ -557,6 +557,13 @@
     -webkit-user-select: none;
     --of-font: var(--font-ui, 'Inter Variable', -apple-system, BlinkMacSystemFont, system-ui, sans-serif);
     --of-mono: var(--font-mono, 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace);
+    /* The HUD wears the app's tokens (tokens.css) and follows its theme; only these two are the office's own. */
+    --of-gold: #ffd27a;
+    --of-green: #7ee0a1;
+  }
+  :global([data-theme='light']) .of-office {
+    --of-gold: #9a6410;
+    --of-green: #2e8a4f;
   }
   .of-office:focus-visible {
     box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--focus, #6aa0ff) 70%, transparent);
@@ -573,7 +580,7 @@
     pointer-events: none;
     background: radial-gradient(130% 100% at 50% 45%, transparent 60%, rgba(6, 6, 14, 0.38) 100%);
   }
-  .of-office[data-theme='light'] .of-vignette {
+  .of-office[data-scene='light'] .of-vignette {
     background: radial-gradient(130% 100% at 50% 45%, transparent 64%, rgba(120, 100, 70, 0.12) 100%);
   }
   .of-backdrop :global(.of-canvas),
@@ -685,7 +692,7 @@
     color: rgba(243, 236, 226, 0.78);
     background: rgba(255, 255, 255, 0.08);
   }
-  .of-office[data-theme='light'] :global(.of-chip) {
+  .of-office[data-scene='light'] :global(.of-chip) {
     color: rgba(50, 40, 34, 0.72);
     background: rgba(60, 40, 20, 0.07);
   }
@@ -781,62 +788,62 @@
   }
 
   /* daylight */
-  .of-office[data-theme='light'] :global(.of-agent) {
+  .of-office[data-scene='light'] :global(.of-agent) {
     background: rgba(255, 252, 246, 0.94);
     color: #2a2420;
     box-shadow:
       0 0 0 1px rgba(60, 40, 20, 0.09),
       0 6px 18px -10px rgba(80, 56, 24, 0.4);
   }
-  .of-office[data-theme='light'] :global(.of-line) {
+  .of-office[data-scene='light'] :global(.of-line) {
     color: rgba(50, 40, 34, 0.72);
   }
-  .of-office[data-theme='light'] :global(.of-line code) {
+  .of-office[data-scene='light'] :global(.of-line code) {
     color: #1d1916;
     background: rgba(60, 40, 20, 0.07);
   }
-  .of-office[data-theme='light'] :global(.of-icon[data-icon='approval']),
-  .of-office[data-theme='light'] :global(.of-icon[data-icon='question']) {
+  .of-office[data-scene='light'] :global(.of-icon[data-icon='approval']),
+  .of-office[data-scene='light'] :global(.of-icon[data-icon='question']) {
     color: #b86a00;
   }
-  .of-office[data-theme='light'] :global(.of-icon[data-icon='blocked']),
-  .of-office[data-theme='light'] :global(.of-icon[data-icon='tests-fail']) {
+  .of-office[data-scene='light'] :global(.of-icon[data-icon='blocked']),
+  .of-office[data-scene='light'] :global(.of-icon[data-icon='tests-fail']) {
     color: #b8352a;
   }
-  .of-office[data-theme='light'] :global(.of-icon[data-icon='tests-pass']),
-  .of-office[data-theme='light'] :global(.of-icon[data-icon='done']) {
+  .of-office[data-scene='light'] :global(.of-icon[data-icon='tests-pass']),
+  .of-office[data-scene='light'] :global(.of-icon[data-icon='done']) {
     color: #1f8a4c;
   }
-  .of-office[data-theme='light'] :global(.of-agent[data-tone='warn']) {
+  .of-office[data-scene='light'] :global(.of-agent[data-tone='warn']) {
     background: rgba(255, 243, 220, 0.97);
     box-shadow:
       0 0 0 1px rgba(214, 140, 20, 0.6),
       0 0 22px -6px rgba(230, 150, 30, 0.45);
   }
-  .of-office[data-theme='light'] :global(.of-agent[data-tone='warn'] .of-line) {
+  .of-office[data-scene='light'] :global(.of-agent[data-tone='warn'] .of-line) {
     color: #7a4a00;
   }
-  .of-office[data-theme='light'] :global(.of-agent[data-tone='danger'] .of-line) {
+  .of-office[data-scene='light'] :global(.of-agent[data-tone='danger'] .of-line) {
     color: #a3281c;
   }
-  .of-office[data-theme='light'] :global(.of-agent[data-tone='success'] .of-line) {
+  .of-office[data-scene='light'] :global(.of-agent[data-tone='success'] .of-line) {
     color: #1f7a45;
   }
-  .of-office[data-theme='light'] :global(.of-agent[data-tone='muted'] .of-line) {
+  .of-office[data-scene='light'] :global(.of-agent[data-tone='muted'] .of-line) {
     color: rgba(50, 40, 34, 0.5);
   }
-  .of-office[data-theme='light'] :global(.of-room) {
+  .of-office[data-scene='light'] :global(.of-room) {
     color: rgba(92, 72, 56, 0.5);
     text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
   }
-  .of-office[data-theme='light'] :global(.of-tag) {
+  .of-office[data-scene='light'] :global(.of-tag) {
     background: rgba(255, 252, 246, 0.94);
     color: #2a2420;
   }
 
   /* ───── ticker ───── */
-  .of-buildbuy { position: absolute; z-index: 400; height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: rgba(18, 22, 32, 0.82); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08); color: #eef1f7; font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; cursor: pointer; }
-  .of-buildbuy b { color: #8ff0b0; }
+  .of-buildbuy { position: absolute; z-index: 400; height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--glass-strong); box-shadow: inset 0 0 0 1px var(--line); color: var(--ink-1); font: 500 12.5px/1.35 var(--of-font); cursor: pointer; }
+  .of-buildbuy b { color: var(--of-green); }
   .of-ticker {
     position: absolute;
     left: 16px;
@@ -885,22 +892,22 @@
   .of-ticker li[data-tone='success'] {
     color: #a9f0c5;
   }
-  .of-office[data-theme='light'] .of-ticker {
+  .of-office[data-scene='light'] .of-ticker {
     color: rgba(50, 40, 34, 0.8);
   }
-  .of-office[data-theme='light'] .of-ticker li {
+  .of-office[data-scene='light'] .of-ticker li {
     text-shadow: 0 1px 0 rgba(255, 255, 255, 0.85);
   }
-  .of-office[data-theme='light'] .of-ticker code {
+  .of-office[data-scene='light'] .of-ticker code {
     background: rgba(60, 40, 20, 0.06);
   }
-  .of-office[data-theme='light'] .of-ticker li[data-tone='warn'] {
+  .of-office[data-scene='light'] .of-ticker li[data-tone='warn'] {
     color: #8a5300;
   }
-  .of-office[data-theme='light'] .of-ticker li[data-tone='danger'] {
+  .of-office[data-scene='light'] .of-ticker li[data-tone='danger'] {
     color: #a3281c;
   }
-  .of-office[data-theme='light'] .of-ticker li[data-tone='success'] {
+  .of-office[data-scene='light'] .of-ticker li[data-tone='success'] {
     color: #1f7a45;
   }
 

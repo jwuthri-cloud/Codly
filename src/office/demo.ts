@@ -13,6 +13,7 @@
 //   ?lot=garage    a new repo's first office instead of the Studio (or ?lot=small-office)
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
+import '../styles/tokens.css';
 import { mount } from 'svelte';
 import { leisure } from './behavior';
 import Harness from './demo/Harness.svelte';
