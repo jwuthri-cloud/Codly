@@ -65,8 +65,9 @@ impl Inner {
         ws.dirty = self.git.dirty(&repo, false).await.unwrap_or(false);
     }
 
+    /// Load an office's code index and bring it up to date, in the background. The scheduler
+    /// decides which ones stay loaded (`schedule_pass`).
     pub(super) fn open_index(self: &Arc<Self>, ws: &Workspace) {
-        *write(&self.index) = None;
         let repo = PathBuf::from(&ws.repo_path);
         let db = self.data("index").join(format!("{}.sqlite", ws.id));
         let me = self.clone();
@@ -76,10 +77,8 @@ impl Inner {
                 Ok(i) => Arc::new(i),
                 Err(e) => return tracing::warn!("{e}"),
             };
-            if me.workspace().map(|w| w.id) != Some(ws_id) {
-                return;
-            }
-            *write(&me.index) = Some(idx.clone());
+            // One index per office: opened again while it is loaded, the loaded one is refreshed.
+            let idx = write(&me.index).entry(ws_id).or_insert(idx).clone();
             match guard("code index", || idx.refresh()) {
                 Ok(n) => tracing::info!("indexed {n} files in {}", repo.display()),
                 Err(e) => tracing::warn!("index refresh failed: {e}"),
@@ -87,7 +86,7 @@ impl Inner {
         });
     }
 
-    /// `ws_id`: the asking agent's office (only the open one has its index loaded).
+    /// `ws_id`: the asking agent's office (None = the open one).
     pub(super) async fn search(&self, ws_id: Option<&str>, query: &str, k: usize) -> anyhow::Result<SearchResult> {
         let idx = self.index_of(ws_id).ok_or_else(|| anyhow!("the code index is not ready; use grep/rg instead"))?;
         let q = query.to_string();

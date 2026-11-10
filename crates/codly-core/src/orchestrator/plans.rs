@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::planner::{self, PlanInput};
 use super::runs::{RunReq, new_session};
 use super::scheduler::{self, Action, AgentPick, SchedInput};
-use super::{Inner, careers, guard, lead, lock, names, prompts, row, workspace};
+use super::{Inner, careers, guard, lead, lock, names, prompts, read, row, workspace, write};
 use crate::adapters::SessionMode;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
@@ -351,8 +351,22 @@ impl Inner {
             if open.as_ref().is_none_or(|w| w.id != id)
                 && let Some(ws) = self.store.workspace(&id)?.filter(|w| Path::new(&w.repo_path).is_dir())
             {
+                // It has its code index too, like the open office (whose own `open_workspace`
+                // loads): loaded here when work starts in it, and after a restart.
+                // ponytail: a load that fails is tried again at each pass, with a warning each
+                // time. Remember the failure if a broken index file ever fills the log.
+                if self.use_index && self.index_of(Some(&ws.id)).is_none() {
+                    self.open_index(&ws);
+                }
                 spaces.push(ws);
             }
+        }
+        {
+            // The other offices' indexes are dropped. `open_workspace` sets the office before it
+            // loads its index, so under the `ws` lock the office open right now keeps its own.
+            let open = read(&self.ws);
+            let kept = |id: &Id| open.as_ref().is_some_and(|w| &w.id == id) || spaces.iter().any(|w| &w.id == id);
+            write(&self.index).retain(|id, _| kept(id));
         }
         for ws in &spaces {
             if let Err(e) = self.schedule_office(ws, &spaces).await {

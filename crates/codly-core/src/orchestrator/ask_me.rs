@@ -155,7 +155,12 @@ impl Inner {
     async fn resume(self: &Arc<Self>, b: &Blocker, text: String) -> Result<()> {
         let asker = self.agent(&b.agent_id)?;
         if asker.role == Role::Lead {
-            return self.chat_lead(&b.thread, &text).await;
+            // In the office the question came from, whichever one is open now.
+            let ws = match b.workspace_id.as_deref() {
+                Some(id) => self.store.workspace(id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
+                None => self.require_ws()?,
+            };
+            return self.chat_lead_in(&ws, &b.thread, &text).await;
         }
         let others_wait = |task_id: &str| {
             let all = self.store.with(|db| blockers::list(db, b.workspace_id.as_deref())).unwrap_or_default();

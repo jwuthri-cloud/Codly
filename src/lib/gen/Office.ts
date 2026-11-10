@@ -14,6 +14,10 @@ crew: number,
  */
 working: number, 
 /**
+ * What waits for you there: approvals, plans awaiting your go, and blocking questions.
+ */
+needs_you: number, 
+/**
  * Its agents at home now (`Agent::away_until` still ahead): the map walks them home.
  */
 home: Array<AwayAgent>, };

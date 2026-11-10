@@ -375,19 +375,35 @@ impl Store {
         })
     }
 
-    /// Every workspace with its crew (agents on the team, the Lead aside) and its tasks in
-    /// flight, most recently opened first.
+    /// Every workspace with its crew (agents on the team, the Lead aside), its tasks in flight
+    /// and what waits for you there, most recently opened first.
     pub fn offices(&self) -> Result<Vec<Office>> {
         let conn = self.conn();
         let sql = format!(
             "SELECT w.id, w.name, w.repo_path,
                (SELECT COUNT(*) FROM agent a WHERE a.workspace_id = w.id AND a.archived = 0 AND a.role != 'lead'),
-               (SELECT COUNT(*) FROM task t WHERE t.workspace_id = w.id AND t.status IN ({ACTIVE}))
+               (SELECT COUNT(*) FROM task t WHERE t.workspace_id = w.id AND t.status IN ({ACTIVE})),
+               (SELECT COUNT(*) FROM approval p WHERE p.workspace_id = w.id AND p.status = 'pending')
+                 + (SELECT COUNT(*) FROM plan p WHERE p.workspace_id = w.id AND p.status = 'awaiting_approval')
              FROM workspace w ORDER BY w.opened_at DESC"
         );
         let mut st = conn.prepare_cached(&sql)?;
-        let rows = st.query_map([], |r| Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)?, working: r.get(4)?, home: vec![] }))?;
+        let rows = st.query_map([], |r| {
+            Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)?, working: r.get(4)?, needs_you: r.get(5)?, home: vec![] })
+        })?;
         let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        // Blocking questions still open wait for you too.
+        // ponytail: `blockers::list` reads every `blocker_changed` event, and `event` has no index
+        // on `type`: a scan of the log on each call (the office tabs poll every 5 s). Add
+        // `event(type, id)` on main after this PR; it needs a migration.
+        for b in crate::blockers::list(&conn, None)? {
+            if b.status == crate::blockers::BlockerStatus::Open
+                && b.severity == crate::blockers::BlockerSeverity::Blocking
+                && let Some(o) = out.iter_mut().find(|o| Some(&o.id) == b.workspace_id.as_ref())
+            {
+                o.needs_you += 1;
+            }
+        }
         // Who is at home now, in each (the map walks them down the street).
         let mut st = conn.prepare_cached(
             "SELECT workspace_id, json FROM agent WHERE archived = 0 AND role != 'lead' AND json_extract(json, '$.away_until') > ?1 ORDER BY created_at, id",

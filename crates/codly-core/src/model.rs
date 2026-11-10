@@ -1755,6 +1755,9 @@ pub struct Office {
     pub crew: i64,
     /// Its tasks in flight now (running, in review or merging): each keeps an agent busy.
     pub working: i64,
+    /// What waits for you there: approvals, plans awaiting your go, and blocking questions.
+    #[serde(default)]
+    pub needs_you: i64,
     /// Its agents at home now (`Agent::away_until` still ahead): the map walks them home.
     #[serde(default)]
     pub home: Vec<AwayAgent>,

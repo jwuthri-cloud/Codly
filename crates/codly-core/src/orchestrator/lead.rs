@@ -128,24 +128,31 @@ impl Inner {
     /// Save a request's choices. A new model reaches its Lead on the next message (same session).
     /// A 1:1 thread ("agent:<id>") keeps only its permissions; its model is the agent's own.
     pub(super) fn set_request_prefs(&self, thread: &str, prefs: RequestPrefs) -> Result<RequestPrefs> {
-        if let Some(id) = thread.strip_prefix("agent:") {
-            if self.agent(id)?.role != Role::Solo {
+        let ws_id = if let Some(id) = thread.strip_prefix("agent:") {
+            let agent = self.agent(id)?;
+            if agent.role != Role::Solo {
                 bail!("only a 1:1 agent sets its own permissions");
             }
             if prefs.mode.is_some() || prefs.model.is_some() || prefs.provider.is_some() {
                 bail!("a 1:1 chat sets only its permissions");
             }
-        } else if !is_lead_thread(thread) {
+            // Saved where the broker reads them: in the agent's office, whichever one is open.
+            self.store.agent_workspace(id)?.ok_or_else(|| anyhow!("{} has no office", agent.name))?
+        } else if is_lead_thread(thread) {
+            // ponytail: a request thread does not say which office it is in, so its choices go to
+            // the open one (a save that crosses an office switch lands in the wrong office). The
+            // fix is the client sending its office id with the call.
+            self.require_ws()?.id
+        } else {
             bail!("{thread} is not a request");
-        }
-        let ws = self.require_ws()?;
+        };
         let mut prefs = prefs;
         prefs.model = prefs.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
         if let Some(m) = prefs.model.as_deref().filter(|m| !super::planner::valid_model(m)) {
             bail!("the model '{m}' must be one word (e.g. sonnet, opus:high)");
         }
         let empty = prefs == RequestPrefs::default();
-        self.store.save_request_prefs(&ws.id, thread, (!empty).then_some(&prefs))?;
+        self.store.save_request_prefs(&ws_id, thread, (!empty).then_some(&prefs))?;
         Ok(prefs)
     }
 
@@ -396,7 +403,7 @@ impl Inner {
                     if matches!(why, Delivery::NoSlot) && !m.noted {
                         m.noted = true;
                         let text = format!(
-                            "Queued: {MAX_LIVE_LEADS} Leads are busy with other requests. This message goes to this request's Lead as soon as one is free."
+                            "Queued: {MAX_LIVE_LEADS} Leads are busy with other requests across your offices. This message goes to this request's Lead as soon as one is free."
                         );
                         let _ = self.chat(Some(&ws.id), &m.thread, "codly", &text, None);
                     }
@@ -443,13 +450,18 @@ impl Inner {
     }
 
     pub(super) async fn chat_lead(self: &Arc<Self>, thread: &str, text: &str) -> Result<()> {
-        let ws = self.require_ws()?;
+        self.chat_lead_in(&self.require_ws()?, thread, text).await
+    }
+
+    /// Your message for the Lead of `thread` in the office `ws`, which is not always the open one
+    /// (the answer to a Lead's question, a 1:1 with a Lead).
+    pub(super) async fn chat_lead_in(self: &Arc<Self>, ws: &Workspace, thread: &str, text: &str) -> Result<()> {
         self.chat(Some(&ws.id), thread, "user", text, None)?;
-        let body = match self.lead_memory_pack(&ws, thread, text) {
+        let body = match self.lead_memory_pack(ws, thread, text) {
             Some(p) => format!("{p}\n\n{text}"),
             None => format!("\n{text}"),
         };
-        self.send_to_lead(&ws, thread, body, None).await
+        self.send_to_lead(ws, thread, body, None).await
     }
 
     /// Close a request: stop and archive its Lead, cancel its unfinished plans, and move its
@@ -586,10 +598,15 @@ impl Inner {
     /// worker mid-task — spawned (or resumed) if it is not running.
     pub(super) async fn chat_agent(self: &Arc<Self>, agent_id: &str, text: &str) -> Result<()> {
         let agent = self.agent(agent_id)?;
-        if agent.role == Role::Lead {
-            return self.chat_lead(thread_of(&agent), text).await;
-        }
         let ws_id = self.store.agent_workspace(agent_id)?;
+        if agent.role == Role::Lead {
+            // Its request thread is in its own office, whichever one is open.
+            let ws = match ws_id.as_deref() {
+                Some(id) => self.store.workspace(id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
+                None => self.require_ws()?,
+            };
+            return self.chat_lead_in(&ws, thread_of(&agent), text).await;
+        }
         let thread = format!("agent:{agent_id}");
         self.chat(ws_id.as_deref(), &thread, "user", text, None)?;
         let prompt = format!("[User] {text}");
@@ -701,7 +718,8 @@ impl Inner {
             workspace_id: Some(ws.id.clone()),
             account: None,
         };
-        self.spawn_run(req).await?;
+        let started = self.spawn_run(req).await;
+        self.spawned_or_live(agent_id, started)?;
         self.send_prompt(agent_id, prompt)
     }
 }

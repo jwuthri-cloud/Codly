@@ -899,6 +899,41 @@ async fn solo_chat_uses_its_own_permissions() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_to_one_prefs_are_saved_in_the_agents_office() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));
+    let log = Arc::new(Mutex::new(Log::default()));
+    let choices = Arc::new(Mutex::new(vec![]));
+    let seen = choices.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            let choice = turn.ask_approval("node scripts/gen.js").await;
+            seen.lock().unwrap().push(choice);
+            turn.say("done");
+        })
+    });
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(dir.path(), FakeSpawner { log, lead: idle, worker }).await;
+    core.open_workspace(a.to_str().unwrap()).await.unwrap();
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let thread = format!("agent:{}", solo.id);
+
+    // Saved while another office is the open one (a second window, or a save that crossed a switch).
+    core.open_workspace(b.to_str().unwrap()).await.unwrap();
+    let auto = RequestPrefs { approval_mode: Some(ApprovalMode::Autonomous), ..Default::default() };
+    core.set_request_prefs(&thread, auto).await.unwrap();
+
+    // The broker reads them in the agent's office: there they are.
+    core.open_workspace(a.to_str().unwrap()).await.unwrap();
+    core.send_chat(&thread, "generate the file").await.unwrap();
+    wait_for("the approval", 20, async || (!choices.lock().unwrap().is_empty()).then_some(())).await;
+    assert_eq!(choices.lock().unwrap().as_slice(), &[Some(ApprovalChoice::AllowOnce)]);
+    assert_eq!(core.snapshot().await.unwrap().request_prefs.get(&thread).and_then(|p| p.approval_mode), Some(ApprovalMode::Autonomous));
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelling_mid_gate_stays_cancelled_and_merges_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -2806,5 +2841,54 @@ async fn a_paused_office_starts_nothing_while_the_others_work() {
     // Resumed, it works too.
     core.update_settings(Settings { paused_offices: vec![], ..core.settings() }).await.unwrap();
     wait_for("a to work", 10, async || (running_a() == 1).then_some(())).await;
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_background_office_keeps_its_code_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));
+    let log = Arc::new(Mutex::new(Log::default()));
+    let found = Arc::new(Mutex::new(None));
+    let seen = found.clone();
+    // The worker searches the code (an index loads in the background: it asks for up to 5 s),
+    // then stays on its task.
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            let mut reply = turn.tool("codly_search", json!({ "query": "demo" })).await;
+            for _ in 0..50 {
+                if reply["ok"] == true {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                reply = turn.tool("codly_search", json!({ "query": "demo" })).await;
+            }
+            *seen.lock().unwrap() = Some(reply);
+            std::future::pending::<()>().await;
+        })
+    });
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let spawner = || FakeSpawner { log: log.clone(), lead: idle.clone(), worker: worker.clone() };
+    let core = start_full(dir.path(), spawner(), vec![claude()], true).await;
+    core.update_settings(Settings { paused: true, ..core.settings() }).await.unwrap();
+
+    // A task in "a"; "b" is the one left open when its worker starts.
+    core.open_workspace(a.to_str().unwrap()).await.unwrap();
+    let ta = core.create_task("Docs for a", "").await.unwrap();
+    core.move_task(&ta.id, TaskStatus::Ready).await.unwrap();
+    core.open_workspace(b.to_str().unwrap()).await.unwrap();
+    core.update_settings(Settings { paused: false, ..core.settings() }).await.unwrap();
+
+    let reply = wait_for("the worker's search", 20, async || found.lock().unwrap().clone()).await;
+    assert_eq!(reply["ok"], true, "codly_search works in an office that is not the open one: {reply}");
+    core.shutdown().await;
+    drop(core);
+
+    // A restart opens "b" only: "a" gets its index back when its task goes on.
+    *found.lock().unwrap() = None;
+    let core = start_full(dir.path(), spawner(), vec![claude()], true).await;
+    let reply = wait_for("the worker's search after the restart", 20, async || found.lock().unwrap().clone()).await;
+    assert_eq!(reply["ok"], true, "and after a restart: {reply}");
     core.shutdown().await;
 }
