@@ -123,6 +123,9 @@ async fn handle(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
     if !authed {
         return text(StatusCode::UNAUTHORIZED, "Open the link `codly serve` printed: it carries the token.");
     }
+    if path.starts_with("/api/") && !same_origin(req.headers()) {
+        return text(StatusCode::FORBIDDEN, "cross-site request refused");
+    }
     match (req.method(), path.as_str()) {
         (&Method::GET, "/api/events") => events(&app).await,
         (&Method::GET, p) if p.starts_with("/api/pty/") => pty(&app, &p["/api/pty/".len()..]),
@@ -132,6 +135,17 @@ async fn handle(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
         }
         (&Method::GET, p) => asset(&app, p),
         _ => text(StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
+/// Only Codly's own page may call the API. Cookies ignore the port, so without this any page on
+/// another localhost port (an agent's dev server…) could drive the app with your cookie.
+fn same_origin(h: &hyper::HeaderMap) -> bool {
+    let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok());
+    match get("sec-fetch-site") {
+        Some(site) => site == "same-origin" || site == "none",
+        // Browsers without Fetch Metadata still send Origin on cross-origin requests.
+        None => get("origin").is_none_or(|o| get("host").is_some_and(|host| o.strip_prefix("http://") == Some(host))),
     }
 }
 
@@ -250,6 +264,23 @@ fn text(status: StatusCode, msg: &str) -> Res {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_codly_own_page_calls_the_api() {
+        let h = |kv: &[(&'static str, &str)]| {
+            let mut m = hyper::HeaderMap::new();
+            for (k, v) in kv {
+                m.insert(*k, v.parse().unwrap());
+            }
+            same_origin(&m)
+        };
+        assert!(h(&[("sec-fetch-site", "same-origin")]));
+        assert!(!h(&[("sec-fetch-site", "same-site")]), "another localhost port");
+        assert!(!h(&[("sec-fetch-site", "cross-site")]));
+        assert!(h(&[("host", "127.0.0.1:4280"), ("origin", "http://127.0.0.1:4280")]));
+        assert!(!h(&[("host", "127.0.0.1:4280"), ("origin", "http://127.0.0.1:3000")]));
+        assert!(h(&[("host", "127.0.0.1:4280")]), "no Origin: a same-origin GET");
+    }
 
     #[test]
     fn serve_args() {

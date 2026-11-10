@@ -890,41 +890,51 @@ impl Inner {
     }
 
     async fn recover_inner(&self) -> Result<()> {
-        for r in self.store.runs_with_status(&["starting", "running"])? {
-            self.store.set_run_status(&r.id, "lost")?;
-            let ws = self.store.agent_workspace(&r.agent_id)?;
-            for a in self.store.pending_approvals_for_run(&r.id)? {
-                self.emit(
-                    ws.as_deref(),
-                    row(
-                        Some(&r.agent_id),
-                        a.task_id.as_deref(),
-                        Some(&r.id),
-                        EventKind::ApprovalResolved { approval_id: a.id, status: ApprovalStatus::Expired, by: "codly".into() },
-                    ),
-                )?;
+        // One bad row must not leave everything after it stuck: each item recovers on its own.
+        let each = |what: &str, id: &str, res: Result<()>| {
+            if let Err(e) = res {
+                tracing::warn!("crash recovery: {what} {id}: {e}");
             }
-            let session = r.session_id.as_deref().map(|s| format!(" (session {})", &s[..s.len().min(8)])).unwrap_or_default();
-            self.decide(
-                ws.as_deref(),
-                r.task_id.as_deref(),
-                "retry",
-                format!("a {} run was lost when Codly stopped{session}; it will be resumed", r.provider.label()),
-                json!({ "run_id": r.id, "session_id": r.session_id }),
-            )?;
+        };
+        for r in self.store.runs_with_status(&["starting", "running"])? {
+            each("run", &r.id, (|| {
+                self.store.set_run_status(&r.id, "lost")?;
+                let ws = self.store.agent_workspace(&r.agent_id)?;
+                for a in self.store.pending_approvals_for_run(&r.id)? {
+                    self.emit(
+                        ws.as_deref(),
+                        row(
+                            Some(&r.agent_id),
+                            a.task_id.as_deref(),
+                            Some(&r.id),
+                            EventKind::ApprovalResolved { approval_id: a.id, status: ApprovalStatus::Expired, by: "codly".into() },
+                        ),
+                    )?;
+                }
+                let session = r.session_id.as_deref().map(|s| format!(" (session {})", &s[..s.len().min(8)])).unwrap_or_default();
+                self.decide(
+                    ws.as_deref(),
+                    r.task_id.as_deref(),
+                    "retry",
+                    format!("a {} run was lost when Codly stopped{session}; it will be resumed", r.provider.label()),
+                    json!({ "run_id": r.id, "session_id": r.session_id }),
+                )?;
+                Ok(())
+            })());
         }
         let active = [TaskStatus::Running, TaskStatus::Verifying, TaskStatus::Reviewing, TaskStatus::ChangesRequested, TaskStatus::Merging];
         for t in self.store.tasks_with_status(&active)? {
-            self.update_task(&t.id, |t| {
+            let res = self.update_task(&t.id, |t| {
                 t.status = TaskStatus::Ready;
                 t.status_reason = Some("resuming after Codly restarted".into());
                 Ok(())
-            })?;
+            });
+            each("task", &t.id, res.map(drop));
         }
         for a in self.store.all_agents()? {
             let busy = !matches!(a.status, AgentStatus::Idle | AgentStatus::Offline | AgentStatus::Done);
             if busy || a.run_id.is_some() || a.task_id.is_some() {
-                self.update_agent(&a.id, |a| {
+                let res = self.update_agent(&a.id, |a| {
                     if !matches!(a.status, AgentStatus::Offline) {
                         a.status = AgentStatus::Idle;
                     }
@@ -932,20 +942,23 @@ impl Inner {
                     a.task_id = None;
                     a.activity = None;
                     a.activity_label = None;
-                })?;
+                });
+                each("agent", &a.id, res.map(drop));
             }
         }
         for p in self.store.plans_with_status(&[PlanStatus::Integrating])? {
-            self.update_plan(&p.id, |p| {
+            let res = self.update_plan(&p.id, |p| {
                 p.status = PlanStatus::Running;
                 Ok(())
-            })?;
+            });
+            each("plan", &p.id, res.map(drop));
         }
         for p in self.store.plans_with_status(&[PlanStatus::Running])? {
             if let Some(wt) = p.integration_worktree.as_deref().map(Path::new).filter(|w| w.exists())
                 && let Ok(true) = self.git.abort_merge(wt).await
             {
-                self.decide(Some(&p.workspace_id), None, "merge", "aborted a merge left half-done by a crash", json!({ "plan_id": p.id }))?;
+                let res = self.decide(Some(&p.workspace_id), None, "merge", "aborted a merge left half-done by a crash", json!({ "plan_id": p.id }));
+                each("plan", &p.id, res.map(drop));
             }
         }
         Ok(())

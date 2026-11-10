@@ -510,7 +510,15 @@ impl Git {
         }
         args.push(branch.into());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = self.run(wt, &args, false).await?;
+        let out = match self.run(wt, &args, false).await {
+            Ok(out) => out,
+            // Killed mid-merge (a slow hook hit the timeout): don't leave the checkout half-merged.
+            Err(e) => {
+                let aborted = self.abort_merge(wt).await;
+                let note = if aborted.is_err() { "the merge is still in progress: run `git merge --abort`" } else { "the merge was aborted, nothing changed" };
+                bail!("{e:#} ({note})");
+            }
+        };
         if out.ok {
             let sha = self.head(wt).await?.ok_or_else(|| anyhow!("merge produced no HEAD"))?;
             return Ok(MergeOutcome::Merged { sha });
