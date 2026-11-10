@@ -308,7 +308,8 @@ impl Inner {
             }
             // The status first: a worker that is still starting re-checks it before its brief,
             // so that check or `stop_run` sees the cancel. `t` (as it was) picks who to release.
-            self.update_task(&t.id, |t| {
+            // `by_user`: a cancel takes a blocked task too (the loop must not stop halfway).
+            self.update_task_as(&t.id, true, |t| {
                 t.status = TaskStatus::Cancelled;
                 t.status_reason = Some(format!("plan {why}"));
                 Ok(())
@@ -521,6 +522,11 @@ impl Inner {
 
     async fn start_worker(self: Arc<Self>, task_id: Id, agent_id: Id, account: String, why: Option<String>) {
         let Err(e) = self.try_start_worker(&task_id, &agent_id, &account, why.as_deref()).await else { return };
+        // Quitting: a run that is shutting down takes no brief. The task stays as it is and
+        // the next start resumes it.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
         let reason = format!("blocked: could not start the worker: {e}");
         let _ = self.update_task(&task_id, |t| {
             if t.status == TaskStatus::Running {
@@ -1033,17 +1039,24 @@ impl Inner {
         };
         if let Err(e) = self.complete_plan_inner(&plan).await {
             tracing::warn!("completing plan {plan_id}: {e}");
+            // Only if it is still integrating: a plan you cancelled meanwhile stays cancelled.
+            let mut current = false;
             let _ = self.update_plan(plan_id, |p| {
-                p.status = PlanStatus::Failed;
+                current = p.status == PlanStatus::Integrating;
+                if current {
+                    p.status = PlanStatus::Failed;
+                }
                 Ok(())
             });
-            let _ = self.chat(
-                Some(&plan.workspace_id),
-                &plan.thread,
-                "codly",
-                &format!("Finishing the plan failed: {e}"),
-                Some(json!({ "plan_id": plan_id })),
-            );
+            if current {
+                let _ = self.chat(
+                    Some(&plan.workspace_id),
+                    &plan.thread,
+                    "codly",
+                    &format!("Finishing the plan failed: {e}"),
+                    Some(json!({ "plan_id": plan_id })),
+                );
+            }
         }
     }
 
@@ -1091,6 +1104,19 @@ impl Inner {
                 failed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")
             )
         };
+        // The status before the news, and only if the plan is still integrating: one you
+        // cancelled while its checks ran stays cancelled and gets no "Plan done".
+        let mut current = false;
+        self.update_plan(&plan.id, |p| {
+            current = p.status == PlanStatus::Integrating;
+            if current {
+                p.status = status;
+            }
+            Ok(())
+        })?;
+        if !current {
+            return Ok(());
+        }
         self.chat(ws_id, &plan.thread, "codly", &text, Some(json!({ "plan_id": plan.id })))?;
         self.decide(
             ws_id,
@@ -1099,10 +1125,6 @@ impl Inner {
             prompts::clip(&text, 200),
             json!({ "plan_id": plan.id, "files": files, "failed_checks": failed }),
         )?;
-        self.update_plan(&plan.id, |p| {
-            p.status = status;
-            Ok(())
-        })?;
         self.lead_followup(&ws.id, &plan.thread, &text).await;
         Ok(())
     }

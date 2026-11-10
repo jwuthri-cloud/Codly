@@ -1123,8 +1123,9 @@ impl Inner {
         Ok(value)
     }
 
-    /// Codly's own task transitions. A cancelled or done task is final for Codly: an
-    /// in-flight gate or run can never bring it back (only the user can, via `move_task`).
+    /// Codly's own task transitions. A cancelled, done or blocked task is final for Codly: an
+    /// in-flight gate or run can never bring it back. Only the user can (`by_user`): a board
+    /// move, Cancel plan, the answer to a worker's question.
     fn update_task(&self, id: &str, f: impl FnOnce(&mut Task) -> anyhow::Result<()>) -> anyhow::Result<Task> {
         self.update_task_as(id, false, f)
     }
@@ -1136,7 +1137,7 @@ impl Inner {
             |t: &mut Task| {
                 let was = t.status;
                 f(t)?;
-                if !by_user && t.status != was && matches!(was, TaskStatus::Cancelled | TaskStatus::Done) {
+                if !by_user && t.status != was && matches!(was, TaskStatus::Cancelled | TaskStatus::Done | TaskStatus::Blocked) {
                     bail!("task {} is {}", t.key, store::enum_str(&was));
                 }
                 Ok(())

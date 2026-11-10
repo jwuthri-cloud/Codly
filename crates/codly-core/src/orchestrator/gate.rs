@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -63,7 +64,11 @@ impl Inner {
             g.insert(task_id.clone(), false);
         }
         loop {
-            if let Err(e) = self.gate_inner(&task_id).await {
+            // As its own task, so a panic fails this gate (a Blocked task) and still clears `gating`.
+            let (me, id) = (self.clone(), task_id.clone());
+            let res =
+                tokio::spawn(async move { me.gate_inner(&id).await }).await.unwrap_or_else(|e| Err(anyhow!("the gate crashed: {e}")));
+            if let Err(e) = res {
                 self.gate_error(&task_id, e).await;
             }
             let mut g = lock(&self.gating);
@@ -79,8 +84,13 @@ impl Inner {
 
     async fn gate_error(self: &Arc<Self>, task_id: &str, e: anyhow::Error) {
         tracing::warn!("gate for {task_id} failed: {e}");
-        if self.task(task_id).is_ok_and(|t| matches!(t.status, TaskStatus::Cancelled | TaskStatus::Done)) {
-            return; // cancelled (or finished) while the gate ran: nothing to report
+        // Quitting: a fix round that could not be sent is no failure. The task stays as it is
+        // and the next start resumes it.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.task(task_id).is_ok_and(|t| matches!(t.status, TaskStatus::Cancelled | TaskStatus::Done | TaskStatus::Blocked)) {
+            return; // cancelled, stopped (or finished) while the gate ran: nothing to report
         }
         let reason = format!("blocked: the gate failed: {e}");
         let _ = self.update_task(task_id, |t| {
@@ -236,7 +246,8 @@ impl Inner {
 
         // 6. Merge queue — unless the worker got a new message meanwhile (a user steer):
         // merging now would shut it down mid-turn. Its next turn end re-runs the gate.
-        if !self.is_quiet(&worker) || self.turns_done(&worker) != turns {
+        // (A worker that exited meanwhile has no next turn: its checked work merges.)
+        if self.is_live(&worker) && (!self.is_quiet(&worker) || self.turns_done(&worker) != turns) {
             self.update_task(task_id, |t| {
                 t.status = TaskStatus::Running;
                 t.status_reason = Some("the worker got a new message; re-checking when it finishes".into());
@@ -483,6 +494,13 @@ impl Inner {
     async fn review_done_inner(self: &Arc<Self>, task_id: &str, run_id: &str) -> Result<()> {
         let task = self.task(task_id)?;
         if task.status != TaskStatus::Reviewing {
+            // Stopped or cancelled meanwhile: nobody reads this review, so its reviewer is free
+            // (unless it runs something else by now).
+            if let Ok(Some(r)) = self.store.run(run_id)
+                && lock(&self.live).get(&r.agent_id).is_some_and(|l| l.run_id == run_id)
+            {
+                self.release_worker(&r.agent_id, task_id);
+            }
             return Ok(());
         }
         let run = self.store.run(run_id)?.ok_or_else(|| anyhow!("unknown reviewer run"))?;

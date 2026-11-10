@@ -180,7 +180,8 @@ impl Inner {
             if let Some(t) = &waiting_task
                 && !others_wait(&t.id)
             {
-                self.update_task(&t.id, |t| {
+                // Your answer is your move: only you take a task out of Blocked.
+                self.update_task_as(&t.id, true, |t| {
                     t.status = TaskStatus::Running;
                     t.status_reason = None;
                     Ok(())
@@ -192,7 +193,7 @@ impl Inner {
         // the answer in its brief.
         match waiting_task {
             Some(t) => {
-                self.update_task(&t.id, |t| {
+                self.update_task_as(&t.id, true, |t| {
                     t.goal = format!("{}\n\n{text}", t.goal);
                     t.status = TaskStatus::Ready;
                     t.status_reason = Some("you answered; restarting the worker".into());

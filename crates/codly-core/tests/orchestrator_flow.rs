@@ -228,16 +228,18 @@ impl Spawner for FakeSpawner {
     }
 }
 
-/// Runs of one role take a while to hand back their agent (a slow handshake).
-struct Slow(FakeSpawner, Role, Duration);
+/// Runs of one role hand back their agent only when the test says so (a slow handshake).
+struct Slow(FakeSpawner, Role, Arc<tokio::sync::Notify>);
 
 impl Spawner for Slow {
     fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
-        let delay = if spec.role == self.1 { self.2 } else { Duration::ZERO };
+        let up = (spec.role == self.1).then(|| self.2.clone());
         let spawn = self.0.spawn(spec, events);
         Box::pin(async move {
             let handle = spawn.await;
-            tokio::time::sleep(delay).await;
+            if let Some(up) = up {
+                up.notified().await;
+            }
             handle
         })
     }
@@ -966,12 +968,86 @@ async fn cancelling_mid_gate_stays_cancelled_and_merges_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopping_mid_gate_stays_blocked_and_the_plan_still_cancels() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote it." })).await;
+        })
+    });
+    let lead = planning_lead_with(&["hello.txt"], "sleep 1 && false");
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, plan) =
+        wait_for("verification to start", 20, async || task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Verifying)).await;
+    let worker_id = task.assignee.clone().unwrap();
+    core.stop_agent(&worker_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await; // the verify command fails meanwhile
+    let (task, _) = task_status(&core).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Blocked, "an in-flight gate never restarts a task you stopped");
+    assert!(task.status_reason.as_deref().is_some_and(|r| r.starts_with("stopped by you")), "{:?}", task.status_reason);
+    assert_eq!(log.lock().unwrap().runs.iter().filter(|r| r.0 == worker_id).count(), 1, "the stopped worker is not started again");
+    let events = core.events(None, None, 2000).await.unwrap();
+    assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Merged { .. })), "nothing merged");
+    // Cancel plan is your move too: it takes the task you stopped with it.
+    core.cancel_plan(&plan.id).await.unwrap();
+    let (task, plan) = task_status(&core).await.unwrap();
+    assert_eq!(plan.status, PlanStatus::Cancelled);
+    assert_eq!(task.status, TaskStatus::Cancelled);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_cancelled_while_integrating_stays_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote it." })).await;
+        })
+    });
+    let lead: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                return turn.say("Noted.");
+            }
+            let task = json!({ "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt containing hello",
+                "consultant": { "title": "Backend" }, "acceptance_criteria": ["hello.txt contains hello"], "write_scope": ["hello.txt"],
+                "depends_on": [], "verify": ["grep -q hello hello.txt"], "size": "M" });
+            let plan = json!({ "summary": "Add a hello file", "tasks": [task], "integration_checks": ["sleep 2"] });
+            let reply = turn.tool("codly_submit_plan", plan).await;
+            assert_eq!(reply["ok"], true, "{reply}");
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log, lead, worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (_, plan) =
+        wait_for("the integration checks to start", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Integrating)).await;
+    core.cancel_plan(&plan.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(3000)).await; // the integration check finishes meanwhile
+    let snap = core.snapshot().await.unwrap();
+    assert_eq!(snap.plans[0].status, PlanStatus::Cancelled, "a finished check never brings a cancelled plan back");
+    assert!(!snap.chats.iter().any(|c| c.text.starts_with("Plan done")), "no \"Plan done\" for a cancelled plan");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelling_while_the_worker_starts_sends_no_brief() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
     let log = Arc::new(Mutex::new(Log::default()));
     let worker: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("on it") }));
-    let spawner = Slow(FakeSpawner { log: log.clone(), lead: planning_lead(), worker }, Role::Worker, Duration::from_millis(500));
+    let up = Arc::new(tokio::sync::Notify::new());
+    let spawner = Slow(FakeSpawner { log: log.clone(), lead: planning_lead(), worker }, Role::Worker, up.clone());
     let core = start(dir.path(), spawner).await;
     core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
@@ -984,7 +1060,8 @@ async fn cancelling_while_the_worker_starts_sends_no_brief() {
     .await;
     let (_, plan) = task_status(&core).await.unwrap();
     core.cancel_plan(&plan.id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(1500)).await; // its handshake finishes meanwhile
+    up.notify_one(); // its handshake finishes only now, after the cancel
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     {
         let log = log.lock().unwrap();
         assert!(!log.prompts.iter().any(|p| p.0 == Role::Worker), "no brief for a cancelled task: {:?}", log.prompts);
@@ -999,6 +1076,26 @@ async fn cancelling_while_the_worker_starts_sends_no_brief() {
     let failed_start = |e: &EventRow| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("could not start"));
     assert!(!events.iter().any(failed_start), "a cancel is not a failed start");
     core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quitting_while_a_worker_starts_leaves_its_task_to_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("on it") }));
+    let up = Arc::new(tokio::sync::Notify::new());
+    let spawner = Slow(FakeSpawner { log: log.clone(), lead: planning_lead(), worker }, Role::Worker, up.clone());
+    let core = start(dir.path(), spawner).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    wait_for("the worker's process to start", 20, async || log.lock().unwrap().spawns.iter().any(|s| s.0 == Role::Worker).then_some(())).await;
+    // Quit; its handshake finishes right after, into a run that takes no brief any more.
+    tokio::join!(core.shutdown(), async { up.notify_one() });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (task, _) = task_status(&core).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Running, "the next start resumes it: {:?}", task.status_reason);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
