@@ -453,10 +453,11 @@ impl Inner {
         }
         let (cwd, read_only) = lock(&self.live).get(&ctx.agent_id).map_or((None, true), |l| (Some(l.cwd.clone()), l.read_only));
         let task = ctx.task_id.as_deref().and_then(|t| self.store.task(t).ok().flatten());
-        // The request the run works for (a Lead's own, a task's plan's) may set its own permissions.
+        // The request the run works for (a Lead's own, a task's plan's) or a 1:1 chat may set its own permissions.
         let thread = match (&task, ctx.role) {
             (Some(t), _) => Some(self.task_thread(t)),
             (None, Role::Lead) => self.agent(&ctx.agent_id).ok().map(|a| lead::thread_of(&a).to_string()),
+            (None, Role::Solo) => Some(format!("agent:{}", ctx.agent_id)),
             _ => None,
         };
         let verify = task.map(|t| t.verify).unwrap_or_default();

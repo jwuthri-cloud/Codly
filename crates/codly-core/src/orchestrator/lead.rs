@@ -126,8 +126,16 @@ impl Inner {
     }
 
     /// Save a request's choices. A new model reaches its Lead on the next message (same session).
+    /// A 1:1 thread ("agent:<id>") keeps only its permissions; its model is the agent's own.
     pub(super) fn set_request_prefs(&self, thread: &str, prefs: RequestPrefs) -> Result<RequestPrefs> {
-        if !is_lead_thread(thread) {
+        if let Some(id) = thread.strip_prefix("agent:") {
+            if self.agent(id)?.role != Role::Solo {
+                bail!("only a 1:1 agent sets its own permissions");
+            }
+            if prefs.mode.is_some() || prefs.model.is_some() || prefs.provider.is_some() {
+                bail!("a 1:1 chat sets only its permissions");
+            }
+        } else if !is_lead_thread(thread) {
             bail!("{thread} is not a request");
         }
         let ws = self.require_ws()?;
