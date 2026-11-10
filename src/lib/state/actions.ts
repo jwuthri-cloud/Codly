@@ -34,6 +34,11 @@ async function attempt<T>(what: string, fn: () => Promise<T>, hint?: string): Pr
 }
 
 export async function openWorkspace(path?: string) {
+  // A browser page cannot show a folder dialog: its picker lists the repositories and calls back here.
+  if (!path && !isTauriApp()) {
+    ui.repoPickerOpen = true;
+    return;
+  }
   const repo = path ?? (await api.pickFolder());
   if (!repo) return;
   const ws = await attempt('open the repository', () => api.openWorkspace(repo), 'Pick the folder that contains .git.');

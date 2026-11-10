@@ -172,7 +172,7 @@ pub async fn list_models(
     openrouter_key: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let args: &[&str] = match provider {
-        Provider::Claude => return Ok(["opus", "sonnet", "haiku"].map(str::to_owned).to_vec()),
+        Provider::Claude => return Ok(["opus", "sonnet", "haiku", "fable"].map(str::to_owned).to_vec()),
         Provider::Codex => &["debug", "models"],
         Provider::Opencode => &["models"],
         _ => return Ok(vec![]),
@@ -194,8 +194,11 @@ fn parse_models(provider: Provider, stdout: &str) -> Result<Vec<String>, String>
     Ok(stdout.lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains(char::is_whitespace)).map(str::to_owned).collect())
 }
 
-/// Claude Code's aliases with their context windows: `[1m]` asks for the 1M-token window.
-const CLAUDE_WINDOWS: [(&str, i64); 5] = [("opus[1m]", 1_000_000), ("sonnet[1m]", 1_000_000), ("opus", 200_000), ("sonnet", 200_000), ("haiku", 200_000)];
+/// Claude Code's aliases with their context windows. Every current model runs with 1M by default
+/// (Claude Code 2.1.318 reports 1,000,000 for opus, sonnet, haiku and fable); the `[1m]` names stay
+/// because saved settings may use them.
+const CLAUDE_WINDOWS: [(&str, i64); 6] =
+    [("opus[1m]", 1_000_000), ("sonnet[1m]", 1_000_000), ("opus", 1_000_000), ("sonnet", 1_000_000), ("haiku", 1_000_000), ("fable", 1_000_000)];
 
 /// Models a CLI can run with their context window (tokens), in the CLI's own order: Claude's
 /// aliases, Codex's listed catalog (`context_window`). Empty for a CLI that does not say.
@@ -878,6 +881,8 @@ mod tests {
         assert_eq!(bigger_window(&claude, Some("sonnet"), Some(200_000)), Some(("opus[1m]".into(), 1_000_000)));
         assert_eq!(bigger_window(&claude, Some("sonnet[1m]:max"), None), None);
         assert_eq!(bigger_window(&claude, Some("opus"), Some(1_000_000)), None, "a 1M window reported");
+        assert_eq!(bigger_window(&claude, Some("fable"), None), None, "Fable already has the biggest window");
+        assert_eq!(bigger_window(&claude, Some("haiku"), None), None, "every alias runs with 1M: nothing bigger");
     }
 
     #[test]

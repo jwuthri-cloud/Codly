@@ -195,6 +195,8 @@ export class MockTransport implements Transport {
         return sim.signIns.list(sim.settings, sim.clis);
       case 'recent_workspaces':
         return sim.recent;
+      case 'list_repos':
+        return sim.recent.map((r) => ({ name: r.name, path: r.repo_path, modified_ms: r.opened_at }));
       case 'open_workspace':
         return story.openWorkspace(String(a.repoPath ?? REPO));
       case 'update_settings': {
@@ -268,7 +270,7 @@ export class MockTransport implements Transport {
       case 'hire_agent':
         return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':
-        return a.provider === 'claude' ? ['sonnet', 'opus', 'haiku'] : a.provider === 'codex' ? ['gpt-5.5-codex', 'gpt-5.5-mini'] : [];
+        return a.provider === 'claude' ? ['sonnet', 'opus', 'haiku', 'fable'] : a.provider === 'codex' ? ['gpt-5.5-codex', 'gpt-5.5-mini'] : [];
       case 'hire_review':
         return reviewHire(String(a.raw));
       case 'hire_launch_preview':

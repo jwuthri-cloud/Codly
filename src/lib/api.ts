@@ -6,6 +6,7 @@
 import type { AccountInfo } from './gen/AccountInfo';
 import type { Agent } from './gen/Agent';
 import type { Rank } from './gen/Rank';
+import type { RepoEntry } from './gen/RepoEntry';
 import type { Digest } from './gen/Digest';
 import type { DictationStatus } from './gen/DictationStatus';
 import type { AgentGit } from './gen/AgentGit';
@@ -187,6 +188,8 @@ export const api = {
   /** Every sign-in of every installed CLI, with quota windows. `refresh` re-probes sign-in state. */
   listAccounts: (refresh = false) => call<AccountInfo[]>('list_accounts', { refresh }),
   recentWorkspaces: () => call<RecentWorkspace[]>('recent_workspaces'),
+  /** The git repositories under the home folder, newest first: the browser's "Open repository" picker. */
+  listRepos: () => call<RepoEntry[]>('list_repos'),
   openWorkspace: (repoPath: string) => call<Workspace>('open_workspace', { repoPath }),
   updateSettings: (settings: Settings) => call<Settings>('update_settings', { settings }),
   /** thread: "lead" or "agent:<id>" */
@@ -387,9 +390,10 @@ export const api = {
   byokConfigure: (enabled: boolean) => call<ByokStatus>('byok_configure', { enabled }),
   byokSaveKey: (key: string) => call<ByokStatus>('byok_save_key', { key }),
   byokClear: () => call<ByokStatus>('byok_clear_key'),
-  /** Native folder picker (Tauri dialog plugin); null if cancelled or in the browser. */
+  /** Native folder picker (Tauri dialog plugin); in the browser a path prompt (repositories open through
+   *  the repository picker instead, `openWorkspace`). Null if cancelled. */
   pickFolder: async (): Promise<string | null> => {
-    if (!isTauriApp()) return window.prompt('Repository path') || null;
+    if (!isTauriApp()) return window.prompt('Folder path') || null;
     const { open } = await import('@tauri-apps/plugin-dialog');
     const r = await open({ directory: true, multiple: false, title: 'Open a git repository' });
     return typeof r === 'string' ? r : null;
