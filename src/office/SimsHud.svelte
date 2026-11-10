@@ -423,7 +423,8 @@
   .p-sub b { color: var(--ink-1); font-weight: 600; }
   .p-traits { display: flex; gap: 4px; margin-top: 5px; }
   .p-traits span { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--focus) 14%, transparent); color: var(--focus); font-size: 11px; }
-  .p-traits span.work { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--of-green) 55%, transparent); color: var(--of-green); background: color-mix(in srgb, var(--of-green) 12%, transparent); }
+  /* A work trait keeps the panel's ink: green text on its own wash is under 4.5:1 in the light theme. */
+  .p-traits span.work { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--of-green) 55%, transparent); color: inherit; background: color-mix(in srgb, var(--of-green) 12%, transparent); }
   .p-rank { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center; margin-top: 6px; color: var(--ink-2); font-size: 11px; }
   .p-rank b { color: var(--of-gold); font-weight: 600; }
   .fill.xp { background: linear-gradient(90deg, var(--amber), var(--of-gold)); }
@@ -432,12 +433,12 @@
   .p-want.met .truncate { color: var(--of-green); }
   .p-rank b.legend { text-shadow: 0 0 8px color-mix(in srgb, var(--amber) 80%, transparent); }
   .rest { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; color: var(--ink-2); font-size: 11.5px; }
-  .rest button { flex: none; height: 24px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--surface-3); color: var(--ink-1); font: 600 11.5px inherit; cursor: pointer; }
+  .rest button { flex: none; height: 24px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--surface-3); color: var(--ink-1); font-weight: 600; font-size: 11.5px; cursor: pointer; }
   .rest button:hover { background: var(--focus); color: var(--on-aurora); }
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; color: var(--ink-2); }
   .stats b { color: var(--ink-1); }
   .promo { position: absolute; left: 50%; transform: translateX(-50%); z-index: 410; display: flex; gap: 10px; align-items: center; padding: 8px 8px 8px 14px; border-radius: 999px; background: var(--glass-strong); box-shadow: inset 0 0 0 1.5px var(--of-gold), var(--pop-shadow); color: var(--ink-1); font: 500 13px var(--of-font); pointer-events: auto; animation: pop 0.25s ease-out both; }
-  .promo button { height: 26px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--amber); color: #2a1a04; font: 600 12px inherit; cursor: pointer; }
+  .promo button { height: 26px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--amber); color: #2a1a04; font-weight: 600; font-size: 12px; cursor: pointer; }
   .trust { display: grid; gap: 6px; margin-bottom: 10px; }
   .next, .hint { margin: 0 2px; font-size: 11px; color: var(--ink-3); }
   .hint { margin-bottom: 8px; line-height: 1.45; }
@@ -448,8 +449,8 @@
   .perk.locked { opacity: 0.55; }
   .perk .tag { flex: none; color: var(--ink-2); font-size: 10.5px; }
   .perk.on .tag { color: var(--of-gold); }
-  .perk button { flex: none; height: 22px; padding: 0 10px; border: 0; border-radius: 999px; background: var(--amber); color: #2a1a04; font: 600 11px inherit; cursor: pointer; }
-  .link { justify-self: start; border: 0; background: none; padding: 0; color: var(--ink-2); font: 500 11px inherit; text-decoration: underline; cursor: pointer; }
+  .perk button { flex: none; height: 22px; padding: 0 10px; border: 0; border-radius: 999px; background: var(--amber); color: #2a1a04; font-weight: 600; font-size: 11px; cursor: pointer; }
+  .link { justify-self: start; border: 0; background: none; padding: 0; color: var(--ink-2); font-weight: 500; font-size: 11px; text-decoration: underline; cursor: pointer; }
   .promo button.x { background: none; color: var(--ink-2); padding: 0 6px; }
   .tabs { display: flex; gap: 2px; padding: 0 8px; }
   .look { display: flex; flex-direction: column; gap: 7px; }
@@ -481,9 +482,6 @@
   .moodlet[data-tone='bad'] { border-left-color: var(--bad); }
   .moodlet span { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { margin: 0; color: var(--ink-3); }
-  /* The Career tab's Scrapbook is also in GhostBoard's dark panel, so its rule and toggle are literals for dark: here they follow the theme. */
-  .p-body :global(.book) { border-left-color: var(--line-2); }
-  .p-body :global(.more) { color: var(--ink-2); }
 
   .pie { position: absolute; z-index: 7; width: 0; height: 0; pointer-events: none; }
   .pie button { position: absolute; left: 0; top: 0; padding: 7px 12px; border: 0; border-radius: 999px; background: var(--glass-strong); box-shadow: var(--pop-shadow); white-space: nowrap; cursor: pointer; pointer-events: auto; animation: pop 0.18s ease-out both; }

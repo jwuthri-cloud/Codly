@@ -20,6 +20,7 @@
   import Portrait from '../../components/Portrait.svelte';
   import Provenance from '../../components/Provenance.svelte';
   import Why, { type WhyLine } from '../../components/Why.svelte';
+  import { PERMISSIONS } from '../LeadControls.svelte';
 
   interface Props {
     approval: Approval;
@@ -60,8 +61,12 @@
     const todo = agent ? (store.live[agent.id]?.todo ?? []) : [];
     const at = todo.findIndex((s) => s.status === 'in_progress');
     if (at >= 0) lines.push({ prov: 'observed', text: `Step ${at + 1} of ${todo.length}: ${oneLine(todo[at].text, 90)}` });
-    if (subject.kind === 'command' && /\brm\s+-\w*r|\bsudo\b|git\s+push|curl[^|]*\|\s*(ba|z)?sh/.test(subject.command))
-      lines.push({ prov: 'inferred', text: `Codly always asks about this kind of command in ${store.settings.approval_mode} mode.` });
+    if (subject.kind === 'command' && /\brm\s+-\w*r|\bsudo\b|git\s+push|curl[^|]*\|\s*(ba|z)?sh/.test(subject.command)) {
+      // The mode by the name Settings and the pickers give it (the pickers do not offer Full access).
+      const mode = store.settings.approval_mode;
+      const label = mode === 'full' ? 'Full access' : (PERMISSIONS.find((p) => p.id === mode)?.label ?? mode);
+      lines.push({ prov: 'inferred', text: `Codly always asks about this kind of command in ${label} mode.` });
+    }
     return lines;
   });
 

@@ -90,9 +90,6 @@
   small { font-size: 11px; opacity: 0.6; font-weight: 500; }
   h4 { margin: 0 0 4px; font-size: 15px; }
   .stats { margin: 0 0 8px; font-size: 12px; opacity: 0.8; }
-  /* The Scrapbook's rule and toggle are literals for a dark panel: here they follow the theme (as in SimsHud). */
-  .dlg :global(.book) { border-left-color: var(--line-2); }
-  .dlg :global(.more) { color: var(--ink-2); }
   .back { margin-top: 10px; padding: 7px 14px; border: 0; border-radius: 999px; background: var(--focus); color: var(--on-aurora); font: 600 12.5px var(--of-font); cursor: pointer; }
   .note { margin: 6px 0 0; font-size: 11.5px; opacity: 0.6; }
   @media (max-width: 520px) { .body { grid-template-columns: 1fr; } }

@@ -51,11 +51,11 @@
 {/if}
 
 <style>
-  .book { list-style: none; margin: 0; padding: 0 0 0 10px; max-height: 190px; overflow-y: auto; border-left: 2px solid rgba(255, 255, 255, 0.12); }
+  .book { list-style: none; margin: 0; padding: 0 0 0 10px; max-height: 190px; overflow-y: auto; border-left: 2px solid var(--line-2); }
   .day { display: block; margin: 6px 0 3px -10px; padding-left: 10px; font: 700 10px/1 ui-monospace, monospace; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.55; }
   .page { display: grid; grid-template-columns: 18px 1fr auto; gap: 6px; align-items: center; padding: 3px 0; font-size: 12px; }
   .page b { font-weight: 600; }
   .t { font-size: 11px; opacity: 0.5; }
   .empty { margin: 4px 0; font-size: 12px; opacity: 0.6; }
-  .more { margin: 4px 0 0; padding: 0; border: 0; background: none; color: #9aa2b6; font: 500 11px inherit; text-decoration: underline; cursor: pointer; }
+  .more { margin: 4px 0 0; padding: 0; border: 0; background: none; color: var(--ink-2); font-weight: 500; font-size: 11px; text-decoration: underline; cursor: pointer; }
 </style>
