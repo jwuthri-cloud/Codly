@@ -31,7 +31,7 @@
   const waitingAgent = $derived(waiting ? store.agentMap.get(waiting.agent_id) : null);
   function review() {
     if (!waiting) return;
-    ui.openRequest(store.approvalThread(waiting));
+    ui.openThread(store.approvalThread(waiting));
     ui.revealApproval = waiting.id;
   }
 </script>

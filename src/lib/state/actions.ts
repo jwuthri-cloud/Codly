@@ -265,8 +265,13 @@ export async function setAgentLook(agent: Agent, lookSeed: string): Promise<bool
   return true;
 }
 
-export async function interruptAgent(agentId: string) {
-  await attempt('interrupt the agent', () => api.interruptAgent(agentId));
+/** Whether the core took the interrupt (a button that says "Interrupting…" needs to know). */
+export async function interruptAgent(agentId: string): Promise<boolean> {
+  const ok = await attempt('interrupt the agent', async () => {
+    await api.interruptAgent(agentId);
+    return true;
+  });
+  return !!ok;
 }
 
 export async function stopAgent(agentId: string) {

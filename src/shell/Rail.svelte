@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import { isTauriApp } from '../lib/api';
+  import { blockers } from '../lib/state/blockers.svelte';
   import { store } from '../lib/state/store.svelte';
   import { ROOMS, ui, type Room } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
@@ -12,7 +13,8 @@
   import OfficeTabs from './OfficeTabs.svelte';
 
   const tauri = isTauriApp();
-  const waiting = $derived(store.pendingApprovals.length);
+  // Approvals, and the ask-me cards that stop an agent (a heads-up needs no action).
+  const waiting = $derived(store.pendingApprovals.length + blockers.blocking.length);
   // Every running plan, across requests, counts towards the Plan badge.
   const running = $derived(store.plans.filter((p) => p.status === 'running' || p.status === 'integrating'));
   const planTasks = $derived(store.tasks.filter((t) => running.some((p) => p.id === t.plan_id)));

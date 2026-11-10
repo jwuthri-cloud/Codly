@@ -725,13 +725,13 @@ class CodlyStore {
     return p?.thread || 'lead';
   }
 
-  /** Where an approval shows: its task's request; a Lead's own, its request; otherwise "lead". */
+  /** Where an approval shows (the broker's rule): its task's request; a Lead's own, its request; an agent with no task, its 1:1. */
   approvalThread(ap: Approval): string {
     if (ap.task_id) return this.taskThread(ap.task_id);
     const a = this.agentMap.get(ap.agent_id);
     if (a?.role === 'lead') return a.thread ?? 'lead';
     if (a?.task_id) return this.taskThread(a.task_id);
-    return 'lead';
+    return a ? `agent:${a.id}` : 'lead';
   }
 
   /** The request's current plan: its newest one that was not cancelled (else the newest). */

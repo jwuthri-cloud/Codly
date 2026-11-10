@@ -71,7 +71,8 @@ export function installKeys(): () => void {
 
     // ── the primary action (approve / run plan) ──
     // Other text fields (a deny note…) are not the composer: ⌘↵ there must not approve.
-    if (mod && e.key === 'Enter' && !overlay && (!typing || !!(e.target as HTMLElement).closest?.('[aria-label="Composer"]'))) {
+    // A held key acts once: its repeats would answer the next approval, then run the plan.
+    if (mod && e.key === 'Enter' && !e.repeat && !overlay && (!typing || !!(e.target as HTMLElement).closest?.('[aria-label="Composer"]'))) {
       const ap = keyTargetApproval();
       if (e.altKey) {
         if (ap && ap.choices.includes('allow_session')) {
@@ -93,7 +94,7 @@ export function installKeys(): () => void {
       }
       return;
     }
-    if (mod && e.key === 'Backspace' && !overlay && !typing) {
+    if (mod && e.key === 'Backspace' && !e.repeat && !overlay && !typing) {
       const ap = keyTargetApproval();
       if (!ap || !ap.choices.includes('deny')) return;
       e.preventDefault();

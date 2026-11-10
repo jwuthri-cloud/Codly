@@ -98,11 +98,10 @@
 
   const agent = $derived(store.threadAgent(thread));
   const oneToOne = $derived(!isRequestThread(thread));
-  /** A plan worker asks per its request's permissions (the broker's rule), so its 1:1 shows those. */
+  /** An agent on a task asks per that task's request's permissions (the broker's rule), so its 1:1 shows those. */
   const workerRequest = $derived.by(() => {
-    const t = agent?.role === 'worker' && agent.task_id ? store.taskMap.get(agent.task_id) : null;
-    const p = t?.plan_id ? store.planMap.get(t.plan_id) : null;
-    return p ? p.thread || 'lead' : null;
+    const t = agent && (agent.role === 'worker' || agent.role === 'solo') && agent.task_id ? store.taskMap.get(agent.task_id) : null;
+    return t ? store.taskThread(t.id) : null;
   });
   const isBusy = $derived(busy(thread));
   const fresh = $derived(!oneToOne && !agent && !store.chats.some((c) => c.thread === thread) && !store.outbox.some((o) => o.thread === thread));
@@ -219,7 +218,7 @@
       setRequestPrefs(thread, { mode: MODES[(MODES.findIndex((m) => m.id === now) + 1) % MODES.length].id });
       return;
     }
-    if (e.key === 'Backspace' && !text && oneToOne) {
+    if (e.key === 'Backspace' && !text && oneToOne && !e.repeat) {
       e.preventDefault();
       ui.openRequest(ui.request);
       return;
@@ -288,7 +287,7 @@
       <Icon name="send" size={15} stroke={1.8} />
     </button>
   </div>
-  {#if !oneToOne}<LeadControls {thread} />{:else if agent?.role === 'solo'}<AgentControls {thread} />{:else if workerRequest}<AgentControls thread={workerRequest} request />{/if}
+  {#if !oneToOne}<LeadControls {thread} />{:else if workerRequest}<AgentControls thread={workerRequest} request />{:else if agent?.role === 'solo'}<AgentControls {thread} />{/if}
 </div>
 
 <style>

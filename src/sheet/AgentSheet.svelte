@@ -238,9 +238,9 @@
   /** Interrupt and Stop land when the CLI lets go: the button says so until then. */
   let interrupting = $state(false);
   let stopping = $state(false);
-  function interrupt() {
+  async function interrupt() {
     interrupting = true;
-    interruptAgent(agent.id);
+    if (!(await interruptAgent(agent.id))) interrupting = false;
   }
   async function stop() {
     stopping = true;

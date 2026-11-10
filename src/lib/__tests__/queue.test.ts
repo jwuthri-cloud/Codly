@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import type { Agent } from '../gen/Agent';
+import type { Approval } from '../gen/Approval';
 import { STEER_GRACE, waitingOf, type Sent, type Turn } from '../state/queue';
+import { store } from '../state/store.svelte';
 
 const msg = (key: string, ts: number, text = key): Sent => ({ key, ts, text });
 const turn = (start: number, end: number | null, input: string | null = null): Turn => ({ start, end, input });
@@ -46,5 +49,19 @@ describe('waitingOf', () => {
     expect(keys(r)).toEqual(['a', 'b']);
     // Once the Lead starts, the note no longer holds anything.
     expect(waitingOf([turn(600, null, 'a')], [msg('a', 100)], 700, { ts: 105 }).slot).toBe(false);
+  });
+});
+
+describe('approvalThread', () => {
+  // Only the fields approvalThread reads; the broker's rule is ingest.rs (task → request, Lead → its thread, else 1:1).
+  const agent = (o: Partial<Agent>) => ({ id: 'a1', role: 'solo', task_id: null, thread: null, ...o }) as Agent;
+  const approval = (agent_id: string) => ({ id: 'ap1', agent_id, task_id: null }) as Approval;
+
+  it('approvalThread routes a task-less agent to its 1:1', () => {
+    store.agents = [agent({ id: 'solo1' }), agent({ id: 'lead2', role: 'lead', thread: 'lead:x' })];
+    expect(store.approvalThread(approval('solo1'))).toBe('agent:solo1');
+    expect(store.approvalThread(approval('lead2'))).toBe('lead:x');
+    expect(store.approvalThread(approval('gone'))).toBe('lead');
+    store.agents = [];
   });
 });

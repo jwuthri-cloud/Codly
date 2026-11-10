@@ -4,6 +4,7 @@
 import type { Agent } from '../gen/Agent';
 import type { Plan } from '../gen/Plan';
 import { oneLine } from '../util/sanitize';
+import { blockers } from './blockers.svelte';
 import { store } from './store.svelte';
 import { isRequestThread, ui } from './ui.svelte';
 
@@ -52,6 +53,8 @@ class Requests {
       const t = store.approvalThread(ap);
       approvalsBy.set(t, (approvalsBy.get(t) ?? 0) + 1);
     }
+    // A blocking ask-me card waits for you just the same (its thread is the request's).
+    for (const b of blockers.blocking) approvalsBy.set(b.thread, (approvalsBy.get(b.thread) ?? 0) + 1);
 
     const out: Request[] = [];
     for (const [thread, s] of seen) {
