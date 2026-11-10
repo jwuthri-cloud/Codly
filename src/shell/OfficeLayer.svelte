@@ -84,16 +84,22 @@
   // Ghosts (agents let go) and the Build/Buy wallet: both move with agent changes (XP, let go),
   // and with the developer panel's cheats.
   let ghosts = $state.raw<Agent[]>([]);
+  // The furniture belongs to one office, like its lot: an answer for the office you just left
+  // never reaches the next one, and the next one shows none until its own arrives.
   let shop = $state.raw<Shop | null>(null);
+  let shopFor = $state<string | null>(null);
+  const shopHere = $derived(shopFor !== null && shopFor === store.workspace?.id ? shop : null);
+  const isOpen = (ws: string | null) => ws !== null && store.workspace?.id === ws;
   function refetchOffice() {
-    api.ghosts().then((g) => (ghosts = g)).catch(() => {});
-    api.officeShop().then((s) => (shop = s)).catch(() => {});
+    const ws = store.workspace?.id ?? null;
+    api.ghosts().then((g) => isOpen(ws) && (ghosts = g)).catch(() => {});
+    api.officeShop().then((s) => isOpen(ws) && ((shop = s), (shopFor = ws))).catch(() => {});
   }
   $effect(() => {
     void store.workspace?.id;
     void store.epoch;
     if (store.workspace) refetchOffice();
-    else (ghosts = []), (shop = null);
+    else (ghosts = []), (shop = null), (shopFor = null);
   });
   $effect(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
@@ -120,13 +126,21 @@
     fail(title)(e);
   };
   // The lot too: what came with the office (desks, the server) is drawn from it.
-  const relot = () => api.officeLot().then((l) => (lot = l), () => {});
-  const place = (p: Placed) => api.officePlace(p).then((s) => ((shop = s), relot()), undo('Could not put it there'));
-  const sell = (uid: string) => api.officeSell(uid).then((s) => ((shop = s), relot()), undo('Could not sell it'));
+  // Each answer lands only if its office is still the open one.
+  const relot = (ws: string | null) => api.officeLot().then((l) => isOpen(ws) && (lot = l), () => {});
+  const bought = (ws: string | null) => (s: Shop) => {
+    if (!isOpen(ws)) return;
+    shop = s;
+    relot(ws);
+  };
+  const place = (p: Placed) => api.officePlace(p).then(bought(store.workspace?.id ?? null), undo('Could not put it there'));
+  const sell = (uid: string) => api.officeSell(uid).then(bought(store.workspace?.id ?? null), undo('Could not sell it'));
   // Build mode: the core checks the lot and charges the wallet for the change (a refusal throws:
   // build mode puts the office back).
   const saveLot = async (l: Lot) => {
+    const ws = store.workspace?.id ?? null;
     const saved = await api.officeSaveLot(l);
+    if (!isOpen(ws)) return saved;
     lot = saved.lot;
     if (shop) shop = { ...shop, wallet: saved.wallet };
     return saved;
@@ -311,7 +325,7 @@
             {ghosts}
             onbringback={bringBack}
             {lot}
-            {shop}
+            shop={shopHere}
             onplace={place}
             onsell={sell}
             onexport={exportOffice}

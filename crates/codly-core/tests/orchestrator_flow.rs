@@ -737,6 +737,40 @@ async fn solo_model_switches_and_ignores_no_change() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn solo_chat_uses_its_own_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let choices = Arc::new(Mutex::new(vec![]));
+    let seen = choices.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            // Not a read or a test run: balanced mode asks, autonomous allows it in the worktree.
+            let choice = turn.ask_approval("node scripts/gen.js").await;
+            seen.lock().unwrap().push(choice);
+            turn.say("done");
+        })
+    });
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(dir.path(), FakeSpawner { log, lead: idle, worker }).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    assert_eq!(core.snapshot().await.unwrap().settings.approval_mode, ApprovalMode::Balanced);
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let thread = format!("agent:{}", solo.id);
+
+    let bad = RequestPrefs { mode: Some(LeadMode::Auto), approval_mode: Some(ApprovalMode::Autonomous), ..Default::default() };
+    assert!(core.set_request_prefs(&thread, bad).await.is_err(), "a 1:1 chat has no Lead mode");
+    let auto = RequestPrefs { approval_mode: Some(ApprovalMode::Autonomous), ..Default::default() };
+    assert_eq!(core.set_request_prefs(&thread, auto).await.unwrap().approval_mode, Some(ApprovalMode::Autonomous));
+    core.send_chat(&thread, "generate the file").await.unwrap();
+    wait_for("the approval", 20, async || (!choices.lock().unwrap().is_empty()).then_some(())).await;
+    assert_eq!(choices.lock().unwrap().as_slice(), &[Some(ApprovalChoice::AllowOnce)]);
+    assert_eq!(core.snapshot().await.unwrap().request_prefs[&thread].approval_mode, Some(ApprovalMode::Autonomous));
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelling_mid_gate_stays_cancelled_and_merges_nothing() {
     let dir = tempfile::tempdir().unwrap();

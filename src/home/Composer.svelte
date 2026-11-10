@@ -19,6 +19,7 @@
   import { appendTranscript } from '../lib/util/freeflow';
   import Portrait from '../components/Portrait.svelte';
   import LeadControls, { MODES } from './LeadControls.svelte';
+  import AgentControls from './AgentControls.svelte';
 
   interface Props {
     thread: string;
@@ -281,7 +282,7 @@
       <Icon name="send" size={15} stroke={1.8} />
     </button>
   </div>
-  {#if !oneToOne}<LeadControls {thread} />{/if}
+  {#if !oneToOne}<LeadControls {thread} />{:else if agent?.role === 'solo'}<AgentControls {thread} />{/if}
 </div>
 
 <style>
