@@ -2,6 +2,11 @@
 
 **A team of coding agents, one living office.**
 
+[![Watch the 3-minute tour of Codly](docs/media/codly-tour.jpg)](docs/media/codly-tour.mp4)
+
+▶ [Watch the 3-minute tour](docs/media/codly-tour.mp4): ask the Lead, run its plan, approve, merge, and
+start a long-term agent of your own.
+
 Codly turns the coding CLIs you already pay for (Claude Code, Codex, Gemini CLI and OpenCode) into one
 team on your Mac. A Lead agent plans the work, each agent builds in its own git worktree, and nothing
 lands on your branch until you merge it. It is a macOS app built with Tauri, Svelte and Rust.
