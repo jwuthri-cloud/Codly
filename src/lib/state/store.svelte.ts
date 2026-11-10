@@ -158,8 +158,8 @@ export type AgentLive = {
 };
 
 export type Stream = { itemId: string; agentId: string; kind: 'text' | 'reasoning'; text: string; ts: number };
-/** A message you sent that the core has not echoed yet (optimistic), or that failed to send. */
-export type Outgoing = { id: string; thread: string; text: string; ts: number; error: string | null };
+/** A message you sent that the core has not echoed yet (optimistic), or that failed to send. `ws`: the office it was sent in. */
+export type Outgoing = { id: string; thread: string; text: string; ts: number; ws: string | null; error: string | null };
 export type LiveOut = { callId: string; agentId: string; text: string; ts: number };
 
 const emptyLive = (ts: number): AgentLive => ({
@@ -225,8 +225,10 @@ class CodlyStore {
   triples = $state.raw<Triple[]>([]);
   artifacts = $state.raw<Artifact[]>([]);
   rateLimits = $state.raw<RateWindow[]>([]);
-  /** Optimistic user messages, until their `chat` event arrives. */
-  outbox = $state.raw<Outgoing[]>([]);
+  /** Optimistic user messages of every office, until their `chat` event arrives. */
+  private sent = $state.raw<Outgoing[]>([]);
+  /** The open office's: thread names repeat across offices, so another office's never show here. */
+  outbox = $derived(this.sent.filter((o) => o.ws === (this.workspace?.id ?? null)));
 
   // versions
   rev = $state(0);
@@ -246,8 +248,11 @@ class CodlyStore {
   /** Plans merged into the user's branch (decision `merge_plan`, or a successful merge command). */
   planMerges: Record<string, { sha: string; ts: number }> = {};
   sessionStart = 0;
+  /** The status a task had before the `task_changed` being applied (null: first seen), for listeners. */
+  prevTaskStatus: Task['status'] | null = null;
 
   private listeners = new Set<(ev: EventRow) => void>();
+  private elsewhere = new Set<(ev: EventRow) => void>();
 
   // lookups
   agentMap = $derived(new Map(this.agents.map((a) => [a.id, a])));
@@ -305,6 +310,22 @@ class CodlyStore {
     return () => this.listeners.delete(cb);
   }
 
+  /** Events of your other offices (never applied here): for what waits for you there. */
+  onElsewhere(cb: (ev: EventRow) => void): () => void {
+    this.elsewhere.add(cb);
+    return () => this.elsewhere.delete(cb);
+  }
+
+  private tell(to: Set<(ev: EventRow) => void>, ev: EventRow) {
+    for (const l of to) {
+      try {
+        l(ev);
+      } catch (e) {
+        console.error('[codly] event listener failed', e);
+      }
+    }
+  }
+
   private applySnapshot(s: Snapshot) {
     this.lastId = s.as_of;
     this.clis = s.clis;
@@ -318,7 +339,8 @@ class CodlyStore {
     this.tasks = s.tasks;
     this.approvals = s.approvals;
     this.chats = [...s.chats].sort((a, b) => a.ts - b.ts);
-    this.outbox = this.outbox.filter((o) => !s.chats.some((c) => c.author === 'user' && c.thread === o.thread && c.text.trim() === o.text && c.ts >= o.ts - 10_000));
+    const ws = s.workspace?.id ?? null;
+    this.sent = this.sent.filter((o) => o.ws !== ws || !s.chats.some((c) => c.author === 'user' && c.thread === o.thread && c.text.trim() === o.text && c.ts >= o.ts - 10_000));
     this.memories = s.memories;
     this.triples = s.triples;
     this.artifacts = [...(s.artifacts ?? [])].sort((a, b) => a.created_at - b.created_at);
@@ -344,7 +366,10 @@ class CodlyStore {
     let live = false;
     for (const ev of evs) {
       // Your other offices keep working: their events are not this view's.
-      if (ev.workspace_id && this.workspace && ev.workspace_id !== this.workspace.id) continue;
+      if (ev.workspace_id && this.workspace && ev.workspace_id !== this.workspace.id) {
+        this.tell(this.elsewhere, ev);
+        continue;
+      }
       if (ev.id !== 0) {
         if (ev.id <= this.lastId) continue;
         this.lastId = ev.id;
@@ -354,13 +379,7 @@ class CodlyStore {
       if (!this.sessionStart) this.sessionStart = ev.ts;
       this.applyEntity(ev);
       this.derive(ev, false);
-      for (const l of this.listeners) {
-        try {
-          l(ev);
-        } catch (e) {
-          console.error('[codly] event listener failed', e);
-        }
-      }
+      this.tell(this.listeners, ev);
     }
     if (this.events.length > LOG_CAP * 1.2) this.events = this.events.slice(-LOG_CAP);
     if (persisted) this.rev++;
@@ -376,6 +395,12 @@ class CodlyStore {
     const next = this.agents.slice();
     next[i] = { ...next[i], ...patch };
     this.agents = next;
+  }
+
+  /** The agent's current run (or no run named). A start that failed can come up late: the core
+   *  drops that dead run's events (`project_agent`), and so do we. */
+  private ofRun(ev: EventRow): boolean {
+    return ev.run_id == null || this.agents.find((a) => a.id === ev.agent_id)?.run_id === ev.run_id;
   }
 
   private applyEntity(ev: EventRow) {
@@ -395,6 +420,7 @@ class CodlyStore {
         this.plans = upsert(this.plans, k.plan);
         break;
       case 'task_changed':
+        this.prevTaskStatus = this.tasks.find((t) => t.id === k.task.id)?.status ?? null;
         this.tasks = upsert(this.tasks, k.task);
         break;
       case 'chat':
@@ -404,7 +430,7 @@ class CodlyStore {
             const o = this.outbox.find((x) => x.thread === m.thread && x.text === m.text.trim());
             if (o) {
               this.chatKeys.set(m.id, `o:${o.id}`);
-              this.outbox = this.outbox.filter((x) => x !== o);
+              this.sent = this.sent.filter((x) => x !== o);
             }
           }
           this.chats = [...this.chats, m];
@@ -428,10 +454,10 @@ class CodlyStore {
         this.artifacts = upsert(this.artifacts, k.artifact);
         break;
       case 'status_changed':
-        this.patchAgent(ev.agent_id, { status: k.status });
+        if (this.ofRun(ev)) this.patchAgent(ev.agent_id, { status: k.status });
         break;
       case 'usage_updated':
-        this.patchAgent(ev.agent_id, { usage: k.usage });
+        if (this.ofRun(ev)) this.patchAgent(ev.agent_id, { usage: k.usage });
         break;
     }
   }
@@ -473,7 +499,8 @@ class CodlyStore {
 
     switch (k.type) {
       case 'session_started':
-        if (l) l.session = { provider: k.provider, model: k.model, cwd: k.cwd, cliVersion: k.cli_version, tools: k.tools, ts: ev.ts };
+        // Replay keeps every run's (the agent may be between runs); live, only its own run's.
+        if (l && (replay || this.ofRun(ev))) l.session = { provider: k.provider, model: k.model, cwd: k.cwd, cliVersion: k.cli_version, tools: k.tools, ts: ev.ts };
         break;
       case 'turn_started':
         if (l) {
@@ -507,6 +534,9 @@ class CodlyStore {
       case 'reasoning_delta': {
         if (!aid) break;
         const kind = k.type === 'text_delta' ? 'text' : 'reasoning';
+        // A delta that was on its way while a snapshot was taken: its item is already whole in
+        // the snapshot, and a stream opened now would never close (two rows with one key).
+        if ((kind === 'text' ? l?.messages : l?.reasoning)?.some((x) => x.itemId === k.item_id)) break;
         const prev = this.streams.get(k.item_id);
         this.streams.set(k.item_id, {
           itemId: k.item_id, agentId: aid, kind, text: (prev?.text ?? '') + k.text, ts: prev?.ts ?? ev.ts,
@@ -664,7 +694,6 @@ class CodlyStore {
         break;
       }
     }
-    void replay;
   }
 
   // ───────────── queries used by several panels ─────────────
@@ -763,6 +792,10 @@ class CodlyStore {
   setWorkspace(ws: Workspace | null) {
     this.workspace = ws;
   }
+  /** Still the office a call was made in. Check it after an await: you may have switched. */
+  isOpen(ws: string | null | undefined): boolean {
+    return (this.workspace?.id ?? null) === (ws ?? null);
+  }
   setSettings(s: Settings) {
     this.settings = s;
   }
@@ -796,14 +829,14 @@ class CodlyStore {
   /** Show a message right away; it leaves the outbox when the core echoes it as a `chat`. */
   queueOutgoing(thread: string, text: string, ts: number): string {
     const id = Math.random().toString(36).slice(2, 10);
-    this.outbox = [...this.outbox, { id, thread, text, ts, error: null }];
+    this.sent = [...this.sent, { id, thread, text, ts, ws: this.workspace?.id ?? null, error: null }];
     return id;
   }
   failOutgoing(id: string, error: string) {
-    this.outbox = this.outbox.map((o) => (o.id === id ? { ...o, error } : o));
+    this.sent = this.sent.map((o) => (o.id === id ? { ...o, error } : o));
   }
   dropOutgoing(id: string) {
-    this.outbox = this.outbox.filter((o) => o.id !== id);
+    this.sent = this.sent.filter((o) => o.id !== id);
   }
   markPlanMerged(planId: string, sha: string) {
     this.planMerges = { ...this.planMerges, [planId]: { sha, ts: Date.now() } };

@@ -1,8 +1,8 @@
 <!--
   Office tabs, at the top of the rail: one tile per repo you keep at hand, the open one marked,
-  a teal count while its agents are on tasks. Every office with work keeps working; a click only
-  changes where you look. ⏸ pauses one office (running tasks finish, nothing new starts), ×
-  closes its tab and pauses it, + opens another repo.
+  a teal count while its agents are on tasks, an amber one for what waits for you there. Every
+  office with work keeps working; a click only changes where you look. ⏸ pauses one office
+  (running tasks finish, nothing new starts), × closes its tab and pauses it, + opens another repo.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -31,13 +31,15 @@
   });
 
   const busy = (t: OfficeTab) => (t.id === ws?.id ? here : (offices.working.get(t.id) ?? 0));
+  /** Approvals, plans to approve and blocking questions in an office you are not looking at (the open one shows its own). */
+  const waits = (t: OfficeTab) => (t.id === ws?.id ? 0 : (offices.needs.get(t.id) ?? 0));
   function initials(name: string): string {
     const words = name.replace(/^.*\//, '').split(/[^a-z0-9]+/i).filter(Boolean);
     const s = words.length > 1 ? words[0][0] + words[1][0] : (words[0] ?? '?').slice(0, 2);
     return s[0].toUpperCase() + s.slice(1).toLowerCase();
   }
   const tasks = (n: number) => `${n} task${n === 1 ? '' : 's'}`;
-  const state = (n: number, p: boolean) => (p ? ` · paused${n ? `, ${tasks(n)} finishing` : ''}` : n ? ` · ${tasks(n)} in flight` : '');
+  const state = (n: number, p: boolean, w: number) => (p ? ` · paused${n ? `, ${tasks(n)} finishing` : ''}` : n ? ` · ${tasks(n)} in flight` : '') + (w ? ` · ${w} waiting for you` : '');
 
   function close(t: OfficeTab) {
     const i = offices.tabs.indexOf(t);
@@ -53,17 +55,19 @@
     {@const n = busy(t)}
     {@const on = t.id === ws?.id}
     {@const p = offices.paused(t.id)}
+    {@const w = waits(t)}
     <li class="tab" class:on class:paused={p}>
       <button
         class="office"
         aria-current={on ? 'page' : undefined}
-        aria-label="{t.name}{state(n, p)}"
-        data-tip="{t.name} — {tildify(t.path)}{state(n, p)}"
+        aria-label="{t.name}{state(n, p, w)}"
+        data-tip="{t.name} — {tildify(t.path)}{state(n, p, w)}"
         onclick={() => !on && openWorkspace(t.path)}
       >
         <span class="ini">{initials(t.name)}</span>
         {#if ui.railOpen}<span class="label">{t.name}</span>{/if}
         {#if p}<span class="n num p" aria-hidden="true">⏸</span>{:else if n}<span class="n num">{n}</span>{/if}
+        {#if w}<span class="n num w">{w}</span>{/if}
       </button>
       <button
         class="pp"
@@ -105,10 +109,15 @@
   .tab:hover .x, .tab:has(:focus-visible) .x, .tab:hover .pp, .tab:has(:focus-visible) .pp { opacity: 1; }
   .paused .ini { opacity: 0.55; }
   .n.p { background: var(--surface-3); color: var(--ink-2); font-size: 7.5px; }
+  /* What waits for you: amber, top right (the task count keeps the bottom), paused or not.
+     The rail's own waiting badge (Rail.svelte .b-wait): dark ink on amber in both themes. */
+  .n.w { top: 1px; bottom: auto; background: var(--amber); color: #241504; }
   .label { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   :global(.rail.open) .office { width: 100%; grid-template-columns: 26px 1fr auto; justify-items: start; gap: 9px; padding: 0 40px 0 6px; }
   :global(.rail.open) .add { padding-right: 6px; }
   :global(.rail.open) .n { position: static; box-shadow: none; }
+  /* Open rail: on the tile's corner, so the row keeps its three columns. */
+  :global(.rail.open) .n.w { position: absolute; top: 1px; left: 24px; right: auto; box-shadow: 0 0 0 2px var(--glass-solid); }
   :global(.rail.open) .x { top: 50%; left: auto; right: 4px; margin-top: -7.5px; }
   :global(.rail.open) .pp { top: 50%; bottom: auto; left: auto; right: 22px; margin-top: -7.5px; }
 </style>

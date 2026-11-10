@@ -258,9 +258,10 @@ export function demoLetGo(sim: Sim, id: string): Agent {
 }
 
 // Two other offices for the Transfer picker (the demo has one repo), with who works there.
+// billing-api has an approval waiting, so its tab shows the amber count.
 const OFFICES = [
   { id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'], working: 0, needs_you: 0 },
-  { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'], working: 2, needs_you: 0 },
+  { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'], working: 2, needs_you: 1 },
 ];
 
 /** Agents moved to those offices: still yours, so their XP stays in the wallet. */

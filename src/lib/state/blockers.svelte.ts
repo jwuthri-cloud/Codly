@@ -35,6 +35,8 @@ class Blockers {
   /** Answered and dismissed cards, newest first (history stays readable). */
   closed = $derived(this.list.filter((b) => b.status !== 'open').sort((a, b) => (b.answered_at ?? b.updated_at) - (a.answered_at ?? a.updated_at)));
   private started = false;
+  /** The office `list` belongs to. */
+  private ws: string | null = null;
 
   /** Listen for live changes (once). */
   start() {
@@ -46,17 +48,28 @@ class Blockers {
   }
 
   private apply(b: Blocker) {
+    // An answer that lands after you switched office is that office's card, not this one's.
+    if (b.workspace_id && store.workspace && b.workspace_id !== store.workspace.id) return;
     const i = this.list.findIndex((x) => x.id === b.id);
     if (i < 0) this.list = [...this.list, b];
     else if (this.list[i].updated_at <= b.updated_at) this.list = this.list.map((x) => (x.id === b.id ? b : x));
   }
 
   async load() {
+    // The core answers for the office open when it is asked: the cards of the one you left go
+    // at once, and its late answer is dropped.
+    const ws = store.workspace?.id ?? null;
+    if (ws !== this.ws) {
+      this.ws = ws;
+      this.list = [];
+    }
     try {
-      this.list = await api.listBlockers();
+      const list = await api.listBlockers();
+      if (!store.isOpen(ws)) return;
+      this.list = list;
       this.error = null;
     } catch (e) {
-      this.error = e instanceof Error ? e.message : String(e);
+      if (store.isOpen(ws)) this.error = e instanceof Error ? e.message : String(e);
     }
   }
 
