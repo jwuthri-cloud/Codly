@@ -43,6 +43,7 @@ pub async fn byok_configure(state: State<'_, AppState>, enabled: bool) -> R<Byok
     let core = state.core().await?;
     let settings = codly_core::model::Settings { byok_openrouter: enabled, ..core.settings() };
     core.update_settings(settings).await.map_err(err)?;
+    core.byok_changed();
     status(&state).await
 }
 
@@ -50,11 +51,13 @@ pub async fn byok_configure(state: State<'_, AppState>, enabled: bool) -> R<Byok
 #[tauri::command]
 pub async fn byok_save_key(state: State<'_, AppState>, key: String) -> R<ByokStatus> {
     tokio::task::spawn_blocking(move || byok::global().save_key(&key)).await.map_err(err)?.map_err(err)?;
+    state.core().await?.byok_changed();
     status(&state).await
 }
 
 #[tauri::command]
 pub async fn byok_clear_key(state: State<'_, AppState>) -> R<ByokStatus> {
     tokio::task::spawn_blocking(|| byok::global().clear_key()).await.map_err(err)?.map_err(err)?;
+    state.core().await?.byok_changed();
     status(&state).await
 }

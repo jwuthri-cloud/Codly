@@ -329,12 +329,14 @@ impl Inner {
         lock(&self.models).get(&p).cloned().unwrap_or_default()
     }
 
-    /// Ask the CLIs for their model lists in the background (once per CLI).
+    /// Ask the CLIs for their model lists in the background (once per CLI; OpenCode again after a
+    /// change of the OpenRouter key, `Core::byok_changed`).
     pub(super) fn warm_models(self: &Arc<Self>) {
         for p in CONSULTANT_CLIS.into_iter().filter(|p| self.cli_usable(*p) && !lock(&self.models).contains_key(p)) {
             let me = self.clone();
             tokio::spawn(async move {
-                let job = crate::env::list_models(p, &me.base_env);
+                let key = me.byok_key_for(p).await;
+                let job = crate::env::list_models(p, &me.base_env, key.as_ref().map(|k| k.expose()));
                 let models = match tokio::time::timeout(Duration::from_secs(10), job).await {
                     Ok(Ok(m)) => m,
                     _ => vec![],

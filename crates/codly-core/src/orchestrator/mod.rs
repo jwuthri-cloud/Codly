@@ -810,7 +810,17 @@ impl Core {
 
     /// Models a CLI can run, for the start-agent picker (empty when it takes any name).
     pub async fn list_models(&self, provider: Provider) -> anyhow::Result<Vec<String>> {
-        crate::env::list_models(provider, &self.inner.base_env).await.map_err(|e| anyhow::anyhow!(e))
+        let key = self.inner.byok_key_for(provider).await;
+        crate::env::list_models(provider, &self.inner.base_env, key.as_ref().map(|k| k.expose()))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// The OpenRouter key or its switch changed: forget OpenCode's cached model list and ask it
+    /// again, so the Lead's model choices follow (the start-agent picker asks every time).
+    pub fn byok_changed(&self) {
+        lock(&self.inner.models).remove(&Provider::Opencode);
+        self.inner.warm_models();
     }
 
     /// The model of its CLI with the biggest context window, when bigger than the agent's own
@@ -969,6 +979,15 @@ pub(crate) fn tired(a: &Agent, now: i64) -> bool {
 impl Inner {
     fn kick(&self) {
         self.kick.notify_one();
+    }
+
+    /// The opt-in OpenRouter key (byok.rs) for OpenCode's env: None for every other CLI and while
+    /// the switch is off. The Keychain read is a subprocess, so it runs off the async threads.
+    pub(super) async fn byok_key_for(&self, provider: Provider) -> Option<crate::inbound::secrets::Secret> {
+        if provider != Provider::Opencode || !self.settings().byok_openrouter {
+            return None;
+        }
+        tokio::task::spawn_blocking(|| crate::byok::global().active_key(true)).await.ok().flatten()
     }
 
     fn settings(&self) -> Settings {
