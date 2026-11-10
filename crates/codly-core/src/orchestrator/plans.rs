@@ -306,12 +306,14 @@ impl Inner {
             if matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled) {
                 continue;
             }
-            self.release_task_agents(&t);
+            // The status first: a worker that is still starting re-checks it before its brief,
+            // so that check or `stop_run` sees the cancel. `t` (as it was) picks who to release.
             self.update_task(&t.id, |t| {
                 t.status = TaskStatus::Cancelled;
                 t.status_reason = Some(format!("plan {why}"));
                 Ok(())
             })?;
+            self.release_task_agents(&t);
         }
         // Branches and worktrees are kept: never delete unmerged work.
         self.decide(
@@ -541,10 +543,6 @@ impl Inner {
             }
             None => (format!("codly/adhoc/{}", task.key), self.worktree_root(&ws).join("adhoc").join(&task.key), "HEAD".to_string()),
         };
-        // An idle 1:1 chat gives way to the task (the scheduler does not count it as busy).
-        if self.preemptible(agent_id) && !self.stop_and_wait(agent_id).await {
-            bail!("{} did not leave its chat in time", agent.name);
-        }
         let member = agent.member.is_some().then(|| self.team_member(&agent)).flatten();
         // A team member works in its own stable worktree, switched to the task's branch.
         let (wt, switch_note) = if agent.member.is_some() {
@@ -580,7 +578,8 @@ impl Inner {
                 && r.session_id.is_some()
                 && r.account.clone().or_else(|| primary.clone()).as_deref().is_none_or(|a| a == account)
         });
-        let feedback = lock(&self.pending_feedback).remove(task_id);
+        // Taken for good only when the brief goes out: a start that stops short keeps it for the retry.
+        let feedback = lock(&self.pending_feedback).get(task_id).cloned();
         // A member continues its own conversation on a new task (unless the Lead asked for a
         // fresh one), when that conversation lives on this account.
         let own = match (&member, &agent.session_id) {
@@ -620,6 +619,19 @@ impl Inner {
             New,
         }
         let resume = prev.and_then(|r| r.session_id).map(|s| (s, Start::SameTask)).or(own.map(|s| (s, Start::OwnSession)));
+        // Cancelled or stopped while its worktree was prepared (or, below, while its CLI
+        // started): the task is no longer this worker's to run. What the agent runs by now (a
+        // chat, its next task) stays: `release_worker` stops only a run of this task.
+        let stale = || !self.task(task_id).is_ok_and(|t| t.status == TaskStatus::Running && t.assignee.as_deref() == Some(agent_id));
+        if stale() {
+            self.release_worker(agent_id, task_id);
+            return Ok(());
+        }
+        // An idle 1:1 chat gives way to the task (the scheduler does not count it as busy).
+        // Checked only now, so one that started while the worktree was prepared gives way too.
+        if self.preemptible(agent_id) && !self.stop_and_wait(agent_id).await {
+            bail!("{} did not leave its chat in time", agent.name);
+        }
         let started = match resume {
             Some((session_id, how)) => match self.spawn_run(req(SessionMode::Resume { session_id })).await {
                 Ok(_) => how,
@@ -653,6 +665,11 @@ impl Inner {
                 }
             }
         };
+        if stale() {
+            self.release_worker(agent_id, task_id);
+            return Ok(());
+        }
+        lock(&self.pending_feedback).remove(task_id);
         self.send_prompt(agent_id, prompt)
     }
 

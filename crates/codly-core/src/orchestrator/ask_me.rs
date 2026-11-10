@@ -166,7 +166,12 @@ impl Inner {
             .as_deref()
             .and_then(|t| self.task(t).ok())
             .filter(|t| t.status == TaskStatus::Blocked && t.status_reason.as_deref().is_some_and(|r| r.starts_with(WAITING)));
-        if self.is_live(&b.agent_id) {
+        // The answer first: if it cannot be delivered, the task must not show as running. A run
+        // that is shutting down takes no more turns, and the card is closed by now (it cannot
+        // be answered again): for the answer, that run is already gone.
+        let sent = self.is_live(&b.agent_id)
+            && self.send_prompt(&b.agent_id, format!("[User] {text}")).inspect_err(|e| tracing::debug!("answer not sent as a prompt: {e}")).is_ok();
+        if sent {
             if let Some(t) = &waiting_task
                 && !others_wait(&t.id)
             {
@@ -176,9 +181,10 @@ impl Inner {
                     Ok(())
                 })?;
             }
-            return self.send_prompt(&b.agent_id, format!("[User] {text}"));
+            return Ok(());
         }
-        // The worker's process is gone (app restarted): rerun the task with the answer in its brief.
+        // The worker's process is gone (app restarted) or going (stopped): rerun the task with
+        // the answer in its brief.
         match waiting_task {
             Some(t) => {
                 self.update_task(&t.id, |t| {

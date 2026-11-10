@@ -136,6 +136,12 @@ struct Live {
     turn_active: bool,
     /// Prompts sent but not started yet (the adapter queues them; Codex steers instead).
     queued: u32,
+    /// Some while the CLI is still in its handshake (`spawn_run` holds the agent's place, with
+    /// a `handle` nobody listens to): the prompts sent meanwhile, in order.
+    starting: Option<Vec<String>>,
+    /// Those prompts once the CLI is up, until the run's first prompt (the one it was started
+    /// for) goes out: they follow it.
+    waited: Vec<String>,
     /// Codly asked it to shut down (task done, user stop, app exit).
     stopping: bool,
     /// Turns completed in this run (the gate checks no turn ended while it ran).

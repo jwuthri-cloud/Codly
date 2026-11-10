@@ -585,6 +585,7 @@ impl Inner {
             .is_some_and(|t| matches!(t.status, TaskStatus::Verifying | TaskStatus::Reviewing | TaskStatus::Merging));
         let prompt = prompts::lead_message(text, hands_off);
         self.chat(Some(&ws.id), &format!("agent:{}", agent.id), lead_id, &prompts::clip(text, 4000), None)?;
+        let mut first = false;
         let delivery = if self.is_live(&agent.id) {
             "delivered into its session"
         } else {
@@ -594,7 +595,9 @@ impl Inner {
             if !self.cli_usable(agent.provider) {
                 bail!("{}'s CLI ({}) is not available", agent.name, agent.provider.label());
             }
-            self.spawn_member_chat(&ws, &agent).await?;
+            let started = self.spawn_member_chat(&ws, &agent).await;
+            first = started.is_ok(); // started for this message: its first turn reads it
+            self.spawned_or_live(&agent.id, started)?;
             if let Some(l) = lock(&self.live).get_mut(&agent.id) {
                 l.answer_only = true;
             }
@@ -603,7 +606,15 @@ impl Inner {
         let steer = self.would_steer(&agent.id);
         self.send_prompt(&agent.id, prompt)?;
         if let Some(l) = lock(&self.live).get_mut(&agent.id) {
-            let due = if steer { l.turns + 1 } else { l.turns + l.turn_active as u64 + l.queued as u64 };
+            // The message a run was started for is its first turn, ahead of what was sent while
+            // it started. Any other one is the last in the queue, behind that first message if
+            // it has not gone out yet (`Live::waited`).
+            let behind_first = (l.starting.is_some() || !l.waited.is_empty()) as u64;
+            let due = match (first, steer) {
+                (true, _) => 1,
+                (_, true) => l.turns + 1,
+                _ => l.turns + l.turn_active as u64 + l.queued as u64 + behind_first,
+            };
             l.answers.push(Answer { due, ws_id: ws.id.clone(), thread });
         }
         Ok(json!({ "ok": true, "delivery": delivery, "note": format!("{}'s answer arrives as a later [Codly] message.", agent.name) }))
@@ -696,7 +707,12 @@ impl Inner {
     /// task for that agent may stop it and start.
     pub(super) fn preemptible(&self, agent_id: &str) -> bool {
         lock(&self.live).get(agent_id).is_some_and(|l| {
-            l.task_id.is_none() && !l.turn_active && l.queued == 0 && l.answers.is_empty() && !matches!(l.role, Role::Lead | Role::Solo)
+            l.task_id.is_none()
+                && l.starting.is_none()
+                && !l.turn_active
+                && l.queued == 0
+                && l.answers.is_empty()
+                && !matches!(l.role, Role::Lead | Role::Solo)
         })
     }
 

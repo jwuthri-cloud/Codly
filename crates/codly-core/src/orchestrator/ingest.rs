@@ -527,10 +527,13 @@ impl Inner {
             self.control_clear(&ctx.agent_id); // controls do not outlive the process
         }
         let stopping = removed.as_ref().is_none_or(|l| l.stopping);
+        // It exited during its handshake: `spawn_run` owns this start and fails it, and its
+        // caller may already be starting the next one (resume, then a new session).
+        let starting = removed.as_ref().is_some_and(|l| l.starting.is_some());
         let shutting = self.shutting_down.load(Ordering::SeqCst);
         let status = if shutting {
             "lost" // resumed by session id on the next start
-        } else if stopping || code == Some(0) {
+        } else if !starting && (stopping || code == Some(0)) {
             "completed"
         } else {
             "failed"
@@ -572,7 +575,7 @@ impl Inner {
             }
             self.pump_leads(); // a Lead slot freed up
         }
-        if !stopping && let Some(task_id) = ctx.task_id.clone() {
+        if !stopping && !starting && let Some(task_id) = ctx.task_id.clone() {
             let me = self.clone();
             let (role, agent_id, run) = (ctx.role, ctx.agent_id.clone(), ctx.run_id.clone());
             tokio::spawn(async move { me.task_run_lost(task_id, role, agent_id, run, code).await });

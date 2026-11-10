@@ -228,6 +228,71 @@ impl Spawner for FakeSpawner {
     }
 }
 
+/// Runs of one role take a while to hand back their agent (a slow handshake).
+struct Slow(FakeSpawner, Role, Duration);
+
+impl Spawner for Slow {
+    fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
+        let delay = if spec.role == self.1 { self.2 } else { Duration::ZERO };
+        let spawn = self.0.spawn(spec, events);
+        Box::pin(async move {
+            let handle = spawn.await;
+            tokio::time::sleep(delay).await;
+            handle
+        })
+    }
+}
+
+/// Runs take a while to shut down and take no more prompts meanwhile, like the real adapters.
+struct SlowStop(FakeSpawner, Duration);
+
+impl Spawner for SlowStop {
+    fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
+        let (spawn, delay) = (self.0.spawn(spec, events), self.1);
+        Box::pin(async move {
+            let agent = spawn.await?;
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let handle = AgentHandle { agent_id: agent.agent_id.clone(), run_id: agent.run_id.clone(), tx };
+            tokio::spawn(async move {
+                while let Some(cmd) = rx.recv().await {
+                    let last = matches!(cmd, AgentCmd::Shutdown);
+                    if last {
+                        tokio::time::sleep(delay).await;
+                    }
+                    agent.send(cmd);
+                    if last {
+                        break; // what was sent meanwhile is dropped
+                    }
+                }
+            });
+            Ok(handle)
+        })
+    }
+}
+
+/// The first reviewer start dies during its handshake, and fails when the test says so.
+struct ReviewerDiesOnce {
+    spawner: FakeSpawner,
+    died: Arc<tokio::sync::Notify>,
+    fail: Arc<tokio::sync::Notify>,
+    done: AtomicBool,
+}
+
+impl Spawner for ReviewerDiesOnce {
+    fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
+        if spec.role != Role::Reviewer || self.done.swap(true, Ordering::SeqCst) {
+            return self.spawner.spawn(spec, events);
+        }
+        let (died, fail) = (self.died.clone(), self.fail.clone());
+        Box::pin(async move {
+            let _ = events.send(AdapterEvent { agent_id: spec.agent_id, run_id: spec.run_id, kind: EventKind::Exited { code: Some(1) } });
+            died.notify_one();
+            fail.notified().await;
+            Err(anyhow::anyhow!("the reviewer's CLI died"))
+        })
+    }
+}
+
 /// A Lead that turns every user request into a one-task plan writing hello.txt.
 fn planning_lead() -> Behavior {
     planning_lead_with(&["hello.txt"], "grep -q hello hello.txt")
@@ -261,15 +326,15 @@ async fn task_status(core: &Core) -> Option<(Task, Plan)> {
     Some((s.tasks.first()?.clone(), s.plans.first()?.clone()))
 }
 
-async fn start(root: &Path, spawner: FakeSpawner) -> Arc<Core> {
+async fn start(root: &Path, spawner: impl Spawner) -> Arc<Core> {
     start_with_clis(root, spawner, vec![claude()]).await
 }
 
-async fn start_with_clis(root: &Path, spawner: FakeSpawner, clis: Vec<CliInfo>) -> Arc<Core> {
+async fn start_with_clis(root: &Path, spawner: impl Spawner, clis: Vec<CliInfo>) -> Arc<Core> {
     start_full(root, spawner, clis, false).await
 }
 
-async fn start_full(root: &Path, spawner: FakeSpawner, clis: Vec<CliInfo>, index: bool) -> Arc<Core> {
+async fn start_full(root: &Path, spawner: impl Spawner, clis: Vec<CliInfo>, index: bool) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(clis), index };
     Core::start_with(cfg, opts).await.unwrap()
@@ -803,6 +868,107 @@ async fn cancelling_mid_gate_stays_cancelled_and_merges_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_while_the_worker_starts_sends_no_brief() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("on it") }));
+    let spawner = Slow(FakeSpawner { log: log.clone(), lead: planning_lead(), worker }, Role::Worker, Duration::from_millis(500));
+    let core = start(dir.path(), spawner).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let worker_id = wait_for("the worker's process to start", 20, async || {
+        let log = log.lock().unwrap();
+        let at = log.spawns.iter().position(|s| s.0 == Role::Worker)?;
+        Some(log.runs[at].0.clone())
+    })
+    .await;
+    let (_, plan) = task_status(&core).await.unwrap();
+    core.cancel_plan(&plan.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await; // its handshake finishes meanwhile
+    {
+        let log = log.lock().unwrap();
+        assert!(!log.prompts.iter().any(|p| p.0 == Role::Worker), "no brief for a cancelled task: {:?}", log.prompts);
+        assert!(log.shutdowns.contains(&worker_id), "the worker that came up is shut down");
+    }
+    let snap = core.snapshot().await.unwrap();
+    assert_eq!(snap.tasks[0].status, TaskStatus::Cancelled);
+    let ghosts = core.ghosts().unwrap();
+    let agent = snap.agents.iter().chain(&ghosts).find(|a| a.id == worker_id).unwrap();
+    assert_eq!((agent.run_id.as_deref(), agent.task_id.as_deref()), (None, None), "nothing holds the agent");
+    let events = core.events(None, None, 2000).await.unwrap();
+    let failed_start = |e: &EventRow| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("could not start"));
+    assert!(!events.iter().any(failed_start), "a cancel is not a failed start");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_start_stopped_while_its_worktree_is_added_leaves_the_agents_next_chat_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    // A post-checkout hook (git-lfs, husky) makes every new worktree take a second to add.
+    let hooks = dir.path().join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("post-checkout"), "#!/bin/sh\nsleep 1\n").unwrap();
+    std::fs::set_permissions(hooks.join("post-checkout"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    sh(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("here") }));
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let worker_id = wait_for("the task to be claimed", 20, async || {
+        let snap = core.snapshot().await.unwrap();
+        let worker = snap.tasks.first().filter(|t| t.status == TaskStatus::Running)?.assignee.clone()?;
+        snap.agents.iter().any(|a| a.id == worker && a.task_id.is_some()).then_some(worker)
+    })
+    .await;
+    // Its worktree is still being added: stop it, then talk to it.
+    core.stop_agent(&worker_id).await.unwrap();
+    core.send_chat(&format!("agent:{worker_id}"), "are you there?").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2000)).await; // the stopped start runs its course meanwhile
+    {
+        let log = log.lock().unwrap();
+        assert!(log.turns.iter().any(|t| t.0 == worker_id && t.1.ends_with("are you there?")), "{:?}", log.turns);
+        assert_eq!(log.runs.iter().filter(|r| r.0 == worker_id).count(), 1, "the stopped task starts no worker; the chat is its only run");
+        assert!(!log.shutdowns.contains(&worker_id), "the chat is not the stopped start's to shut down");
+    }
+    let snap = core.snapshot().await.unwrap();
+    assert_eq!(snap.tasks[0].status, TaskStatus::Blocked);
+    assert!(snap.agents.iter().any(|a| a.id == worker_id && a.run_id.is_some()), "the chat is still running");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_for_a_worker_that_is_shutting_down_restarts_its_task_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if !turn.prompt.contains("Use Stripe") {
+                turn.tool("codly_ask_user", json!({ "title": "Which provider?", "question": "Stripe or Adyen?" })).await;
+            }
+        })
+    });
+    let spawner = SlowStop(FakeSpawner { log, lead: planning_lead(), worker }, Duration::from_millis(500));
+    let core = start(dir.path(), spawner).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the worker's question", 20, async || task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Blocked)).await;
+    let card = core.list_blockers().await.unwrap().into_iter().next().unwrap();
+    core.stop_agent(task.assignee.as_deref().unwrap()).await.unwrap();
+    // Its process is still shutting down and takes no more prompts; a card is answered only once.
+    core.answer_blocker(&card.id, "Use Stripe").await.unwrap();
+    let (task, _) = task_status(&core).await.unwrap();
+    assert!(task.goal.contains("Use Stripe"), "the answer goes into the task for its next run: {}", task.goal);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_user_steer_during_the_gate_is_committed_before_merging() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
@@ -919,6 +1085,56 @@ async fn cross_vendor_review_requests_changes_then_approves() {
     let fix = log.lock().unwrap().prompts.iter().find(|p| p.0 == Role::Worker && p.1.contains("requested changes")).unwrap().1.clone();
     assert!(fix.contains("[major] hello.txt:1 should greet the world"), "{fix}");
     assert!(fix.contains("<untrusted from=\"reviewer\">"), "reviewer text is quoted as data");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reviewer_that_got_busy_after_it_was_picked_is_replaced_not_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Greeting written." })).await;
+        })
+    });
+    let reviewer: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if !turn.prompt.contains("[Codly] Review task") {
+                return turn.say("hi");
+            }
+            let criteria = json!([{ "criterion": "hello.txt contains hello", "met": true }]);
+            turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
+        })
+    });
+    let (died, fail) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+    let spawner = FakeSpawner { log, lead: planning_lead(), worker: by_role(worker, reviewer) };
+    let spawner = ReviewerDiesOnce { spawner, died: died.clone(), fail: fail.clone(), done: AtomicBool::new(false) };
+    let codex = CliInfo { provider: Provider::Codex, ..claude() };
+    let core = start_with_clis(dir.path(), spawner, vec![claude(), codex]).await;
+    let settings =
+        Settings { auto_run_plans: true, lead_followups: false, review_gate: true, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    // The picked reviewer's start is failing. Meanwhile you talk to that reviewer: it is running
+    // again, for you, when the review's start gives up on it.
+    tokio::time::timeout(Duration::from_secs(20), died.notified()).await.expect("the review starts");
+    let picked = wait_for("the reviewer's dead start to be over", 10, async || {
+        core.snapshot().await.unwrap().agents.into_iter().find(|a| a.role == Role::Reviewer && a.run_id.is_none())
+    })
+    .await;
+    core.send_chat(&format!("agent:{}", picked.id), "hello").await.unwrap();
+    fail.notify_one();
+    let (task, _) =
+        wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| matches!(p.status, PlanStatus::Done | PlanStatus::Failed))).await;
+    assert_eq!(task.status, TaskStatus::Done);
+    let events = core.events(None, None, 3000).await.unwrap();
+    let skipped = |e: &EventRow| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("review skipped"));
+    assert!(!events.iter().any(skipped), "a reviewer that is busy elsewhere is no reason to merge unreviewed");
+    let reviewed = events.iter().find(|e| matches!(&e.kind, EventKind::Reviewed { verdict, .. } if verdict == "approve")).expect("someone reviewed it");
+    assert_ne!(reviewed.agent_id.as_deref(), Some(picked.id.as_str()), "by another reviewer");
     core.shutdown().await;
 }
 

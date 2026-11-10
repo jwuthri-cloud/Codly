@@ -593,8 +593,14 @@ impl Inner {
         let thread = format!("agent:{agent_id}");
         self.chat(ws_id.as_deref(), &thread, "user", text, None)?;
         let prompt = format!("[User] {text}");
-        if self.is_live(agent_id) {
-            return self.send_prompt(agent_id, prompt);
+        let stopping = lock(&self.live).get(agent_id).map(|l| l.stopping);
+        match stopping {
+            Some(false) => return self.send_prompt(agent_id, prompt),
+            // A run that is shutting down takes no more turns: this one starts (resumes) the next.
+            Some(true) if !self.stop_and_wait(agent_id).await => {
+                bail!("{} is still shutting down; send your message again in a moment", agent.name)
+            }
+            _ => {}
         }
         let ws = match ws_id.as_deref() {
             Some(id) => self.store.workspace(id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
@@ -605,7 +611,8 @@ impl Inner {
         }
         // A team member talks in its own worktree, in its own conversation.
         if agent.member.is_some() {
-            self.spawn_member_chat(&ws, &agent).await?;
+            let started = self.spawn_member_chat(&ws, &agent).await;
+            self.spawned_or_live(agent_id, started)?;
             return self.send_prompt(agent_id, prompt);
         }
         let session = match &agent.session_id {
@@ -647,8 +654,9 @@ impl Inner {
             },
         };
         let resumed = matches!(req.session, SessionMode::Resume { .. });
-        match self.spawn_run(req).await {
-            Ok(_) => {}
+        let started = self.spawn_run(req).await;
+        match self.spawned_or_live(agent_id, started) {
+            Ok(()) => {}
             Err(e) if resumed => {
                 tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
                 self.update_agent(agent_id, |a| a.session_id = None)?;
@@ -657,6 +665,16 @@ impl Inner {
             Err(e) => return Err(e),
         }
         self.send_prompt(agent_id, prompt)
+    }
+
+    /// The outcome of starting an agent's run, for a caller that only wants it running: a
+    /// start that failed while the agent is live lost to another message's start, and that
+    /// run takes this prompt too.
+    pub(super) fn spawned_or_live<T>(&self, agent_id: &str, started: Result<T>) -> Result<()> {
+        match started {
+            Err(e) if !self.is_live(agent_id) => Err(e),
+            _ => Ok(()),
+        }
     }
 
     async fn chat_agent_spawn_fresh(self: &Arc<Self>, agent_id: &str, prompt: String) -> Result<()> {

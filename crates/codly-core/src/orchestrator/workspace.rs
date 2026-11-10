@@ -191,7 +191,6 @@ impl Inner {
 
     pub(super) async fn stop_agent(&self, agent_id: &str) -> anyhow::Result<()> {
         let agent = self.agent(agent_id)?;
-        let stopped = self.stop_run(agent_id);
         if let Some(task_id) = agent.task_id.as_deref()
             && let Ok(t) = self.task(task_id)
             && scheduler::is_active(t.status)
@@ -203,6 +202,8 @@ impl Inner {
                 Ok(())
             })?;
         }
+        // After the task: a worker that is still starting re-checks its status before the brief.
+        let stopped = self.stop_run(agent_id);
         self.update_agent(agent_id, |a| {
             a.status = AgentStatus::Offline;
             a.activity = None;

@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
+use tokio::sync::mpsc;
 
 use super::{Inner, Live, guard, lock, read};
-use crate::adapters::{AgentCmd, SessionMode, SpawnSpec};
+use crate::adapters::{AgentCmd, AgentHandle, SessionMode, SpawnSpec};
 use crate::mcp::ToolCtx;
 use crate::model::*;
 use crate::store::RunRow;
@@ -75,11 +76,48 @@ impl Inner {
         self.prepare_default_mcp(&raw_log, &req.cwd);
         let token =
             mcp.register(ToolCtx { agent_id: req.agent.id.clone(), run_id: run_id.clone(), task_id: req.task_id.clone(), role: req.role });
+        // One run per agent, and it is live from here: a stop, an exit or a second message
+        // during the handshake finds it. Nobody listens to its handle until the CLI is up.
+        {
+            let mut live = lock(&self.live);
+            if live.contains_key(&req.agent.id) {
+                drop(live);
+                mcp.revoke(&token);
+                bail!("{} is already running", req.agent.name);
+            }
+            live.insert(
+                req.agent.id.clone(),
+                Live {
+                    handle: AgentHandle { agent_id: req.agent.id.clone(), run_id: run_id.clone(), tx: mpsc::unbounded_channel().0 },
+                    run_id: run_id.clone(),
+                    role: req.role,
+                    provider,
+                    model: req.agent.model.clone(),
+                    account: account.clone(),
+                    task_id: req.task_id.clone(),
+                    workspace_id: req.workspace_id.clone(),
+                    cwd: req.cwd.clone(),
+                    read_only: req.read_only,
+                    token: token.clone(),
+                    turn_active: false,
+                    queued: 0,
+                    starting: Some(vec![]),
+                    waited: vec![],
+                    stopping: false,
+                    turns: 0,
+                    last_text: None,
+                    turn_messages: 0,
+                    last_prompt: None,
+                    answers: vec![],
+                    answer_only: false,
+                },
+            );
+        }
         let session_id = match &req.session {
             SessionMode::New { session_id } => session_id.clone(),
             SessionMode::Resume { session_id } => Some(session_id.clone()),
         };
-        self.store.insert_run(&RunRow {
+        let run = RunRow {
             id: run_id.clone(),
             agent_id: req.agent.id.clone(),
             task_id: req.task_id.clone(),
@@ -94,7 +132,8 @@ impl Inner {
             report: None,
             started_at: now_ms(),
             ended_at: None,
-        })?;
+        };
+        self.store.insert_run(&run).map_err(|e| self.spawn_failed(&req.agent.id, &run_id, &token, e))?;
         let worktree = matches!(req.role, Role::Worker | Role::Solo).then(|| req.cwd.to_string_lossy().into_owned());
         self.update_agent(&req.agent.id, |a| {
             a.status = AgentStatus::Starting;
@@ -114,7 +153,8 @@ impl Inner {
             if worktree.is_some() {
                 a.worktree = worktree.clone();
             }
-        })?;
+        })
+        .map_err(|e| self.spawn_failed(&req.agent.id, &run_id, &token, e))?;
         let spec = SpawnSpec {
             agent_id: req.agent.id.clone(),
             run_id: run_id.clone(),
@@ -140,43 +180,55 @@ impl Inner {
                 return Err(self.spawn_failed(&req.agent.id, &run_id, &token, anyhow!("the {} adapter crashed: {e}", provider.label())));
             }
         };
-        lock(&self.live).insert(
-            req.agent.id.clone(),
-            Live {
-                handle,
-                run_id: run_id.clone(),
-                role: req.role,
-                provider,
-                model: req.agent.model.clone(),
-                account,
-                task_id: req.task_id,
-                workspace_id: req.workspace_id,
-                cwd: req.cwd,
-                read_only: req.read_only,
-                token,
-                turn_active: false,
-                queued: 0,
-                stopping: false,
-                turns: 0,
-                last_text: None,
-                turn_messages: 0,
-                last_prompt: None,
-                answers: vec![],
-                answer_only: false,
-            },
-        );
-        self.store.set_run_status(&run_id, "running")?;
+        // Written before the handle goes in: an exit handled right after has the last word on the row.
+        if let Err(e) = self.store.set_run_status(&run_id, "running") {
+            tracing::warn!("run {run_id} not marked running: {e}");
+        }
+        // Still ours: the real handle. What was sent meanwhile waits for the caller's own prompt
+        // (the one this run was started for) and follows it: see `send_prompt`. Gone: the CLI
+        // exited during its handshake and `on_exit` took the entry.
+        let ours = {
+            let mut live = lock(&self.live);
+            match live.get_mut(&req.agent.id).filter(|l| l.run_id == run_id) {
+                Some(l) => {
+                    l.handle = handle;
+                    l.waited = l.starting.take().unwrap_or_default();
+                    if l.stopping {
+                        l.handle.send(AgentCmd::Shutdown); // stopped while it started
+                    }
+                    true
+                }
+                None => false,
+            }
+        };
+        if !ours {
+            return Err(self.spawn_failed(&req.agent.id, &run_id, &token, anyhow!("{} exited during startup", provider.label())));
+        }
         Ok(run_id)
     }
 
+    /// A start that failed: its token, its place in the live table and its row. The agent row
+    /// only if this run still owns it (not a newer run's, not what `on_exit` already wrote).
+    /// Never call it holding the `live` lock.
     fn spawn_failed(&self, agent_id: &str, run_id: &str, token: &str, e: anyhow::Error) -> anyhow::Error {
         if let Some(m) = self.mcp.get() {
             m.revoke(token);
         }
+        // ponytail: prompts queued behind this start (`starting`) are dropped with it; the first
+        // caller's error is the signal. Carry them to the retry if a lost one is ever missed.
+        let removed = {
+            let mut live = lock(&self.live);
+            live.get(agent_id).is_some_and(|l| l.run_id == run_id) && live.remove(agent_id).is_some()
+        };
+        if removed {
+            self.control_clear(agent_id); // controls do not outlive the run
+        }
         let _ = self.store.set_run_status(run_id, "failed");
         let _ = self.update_agent(agent_id, |a| {
-            a.status = AgentStatus::Failed;
-            a.run_id = None;
+            if a.run_id.as_deref() == Some(run_id) {
+                a.status = AgentStatus::Failed;
+                a.run_id = None;
+            }
         });
         e
     }
@@ -189,14 +241,30 @@ impl Inner {
         let wrapped = self.with_briefing(agent_id, &text); // a hired agent's standing goal, on every prompt
         let mut live = lock(&self.live);
         let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
+        // The adapters drop prompts during their shutdown ladder: say so instead.
+        if l.stopping {
+            bail!("that agent is shutting down; send your message again in a moment");
+        }
         let steer = l.provider == Provider::Codex && l.turn_active;
         if !steer {
             l.queued += 1;
         }
         l.last_prompt = text.lines().find(|s| !s.trim().is_empty()).map(|s| s.trim().to_string());
+        // Still in its handshake: it goes out once the CLI is up, behind the run's first prompt.
+        if let Some(waiting) = &mut l.starting {
+            waiting.push(wrapped);
+            return Ok(());
+        }
         if !l.handle.send(AgentCmd::Prompt(wrapped)) {
             l.queued = l.queued.saturating_sub(1);
             bail!("that agent's process is gone");
+        }
+        // The first prompt once the CLI is up is the one this run was started for: what was sent
+        // meanwhile follows it.
+        // ponytail: nothing marks that prompt. Another one landing first (no await in between
+        // for a chat) takes its place and leads.
+        for prompt in std::mem::take(&mut l.waited) {
+            l.handle.send(AgentCmd::Prompt(prompt));
         }
         Ok(())
     }
@@ -208,11 +276,17 @@ impl Inner {
 
     /// Ask a live run to shut down. Returns false if the agent had no live run.
     pub(super) fn stop_run(&self, agent_id: &str) -> bool {
+        self.stop_run_if(agent_id, |_| true)
+    }
+
+    /// `stop_run`, but only a run the caller means (`mine`): the agent may have another by now.
+    pub(super) fn stop_run_if(&self, agent_id: &str, mine: impl FnOnce(&Live) -> bool) -> bool {
         let mut live = lock(&self.live);
-        match live.get_mut(agent_id) {
+        match live.get_mut(agent_id).filter(|l| mine(l)) {
             Some(l) => {
                 l.stopping = true;
-                l.handle.send(AgentCmd::Shutdown)
+                // A run still in its handshake has nobody to tell yet: `spawn_run` shuts it down.
+                l.starting.is_some() || l.handle.send(AgentCmd::Shutdown)
             }
             None => false,
         }

@@ -325,9 +325,11 @@ impl Inner {
         Ok(())
     }
 
-    /// Shut a worker's run down and free the agent for the next task.
-    fn release_worker(&self, agent_id: &str, task_id: &str) {
-        self.stop_run(agent_id);
+    /// Shut a worker's run of this task down and free the agent for the next task. A run of
+    /// anything else is not this task's to stop: by now the agent may be in a chat you started
+    /// or on its next task (a start that was cancelled while its worktree was prepared).
+    pub(super) fn release_worker(&self, agent_id: &str, task_id: &str) {
+        self.stop_run_if(agent_id, |l| l.task_id.as_deref() == Some(task_id));
         let _ = self.update_agent(agent_id, |a| {
             if a.task_id.as_deref() == Some(task_id) {
                 a.task_id = None;
@@ -391,13 +393,15 @@ impl Inner {
         // The most senior free reviewer: a Senior or Staff mentors juniors (career::mentors);
         // between equals, one at work and rested (the office's energy; never refused).
         let rested = |a: &&Agent| (a.career.rank, super::at_home(a, now).is_none(), !super::tired(a, now));
-        let reviewer = match member.or_else(|| agents.iter().filter(free).max_by_key(rested)) {
+        let hire = || {
+            let agents = self.store.agents(ws_id)?;
+            let name = names::next_name(&agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
+            let color = names::next_color(&agents.iter().map(|a| a.color).collect::<Vec<_>>());
+            self.create_agent(ws_id, &name, provider, Role::Reviewer, color, None)
+        };
+        let mut reviewer = match member.or_else(|| agents.iter().filter(free).max_by_key(rested)) {
             Some(a) => a.clone(),
-            None => {
-                let name = names::next_name(&agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
-                let color = names::next_color(&agents.iter().map(|a| a.color).collect::<Vec<_>>());
-                self.create_agent(ws_id, &name, provider, Role::Reviewer, color, None)?
-            }
+            None => hire()?,
         };
         let branch = task.branch.clone().ok_or_else(|| anyhow!("the task has no branch"))?;
         let diff = self.git.diff(Path::new(&ws.repo_path), base_ref, &branch).await?;
@@ -414,22 +418,41 @@ impl Inner {
             json!({ "plan_id": task.plan_id, "provider": provider, "agent": reviewer.name }),
         )?;
         let wt = PathBuf::from(task.worktree.clone().unwrap_or_default());
-        let req = RunReq {
+        let req = |reviewer: &Agent| RunReq {
             agent: reviewer.clone(),
             role: Role::Reviewer,
-            cwd: wt,
+            cwd: wt.clone(),
             read_only: true,
             task_id: Some(task.id.clone()),
             // Reviewers run in the author's worktree, so even a team member starts fresh.
             session: new_session(provider),
-            system_prompt: match self.team_member(&reviewer) {
+            system_prompt: match self.team_member(reviewer) {
                 Some(m) => prompts::member_system(prompts::REVIEWER_SYSTEM, &m),
                 None => prompts::REVIEWER_SYSTEM.to_string(),
             },
             workspace_id: Some(ws_id.to_string()),
             account: None, // a new session: the account with the most quota left
         };
-        if let Err(e) = self.spawn_run(req).await {
+        let mut started = self.spawn_run(req(&reviewer)).await;
+        // Free when it was picked, running by now (another task's review, a message from you):
+        // that run is not this review. A new reviewer does it; a lost race never skips a review.
+        if started.is_err() && self.is_live(&reviewer.id) {
+            let taken = reviewer.name;
+            reviewer = hire()?;
+            self.update_task(&task.id, |t| {
+                t.status_reason = Some(format!("review by {} ({})", reviewer.name, provider.label()));
+                Ok(())
+            })?;
+            self.decide(
+                Some(ws_id),
+                Some(&task.id),
+                "review",
+                format!("{}: reviewer {} · {} ({taken} got busy meanwhile)", task.key, provider.label(), reviewer.name),
+                json!({ "plan_id": task.plan_id, "provider": provider, "agent": reviewer.name }),
+            )?;
+            started = self.spawn_run(req(&reviewer)).await;
+        }
+        if let Err(e) = started {
             self.decide(
                 Some(ws_id),
                 Some(&task.id),
