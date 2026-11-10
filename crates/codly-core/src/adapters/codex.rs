@@ -40,7 +40,10 @@ const OPT_OUT: &[&str] = &["remoteControl/status/changed"];
 
 /// One app-server per sign-in: its CODEX_HOME (None = unset) holds the account's auth and
 /// threads, and its thread-less notifications (rate limits) concern that account only.
-static SERVERS: Mutex<Vec<(Option<String>, Arc<AppServer>)>> = Mutex::const_new(Vec::new());
+/// Each account has a slot with its own lock, held while its server starts (up to ~45 s),
+/// so a slow start makes only that account's agents wait.
+static SERVERS: Servers = Mutex::const_new(Vec::new());
+type Servers = Mutex<Vec<(Option<String>, Arc<Mutex<Option<Arc<AppServer>>>>)>>;
 
 #[derive(Debug, Clone)]
 struct ServerInfo {
@@ -279,23 +282,38 @@ impl AppServer {
     }
 }
 
-async fn server_for(spec: &SpawnSpec, raw: &Arc<RawLog>) -> anyhow::Result<Arc<AppServer>> {
+async fn server_for(servers: &Servers, spec: &SpawnSpec, raw: &Arc<RawLog>) -> anyhow::Result<Arc<AppServer>> {
     let home = spec.env.get("CODEX_HOME").cloned();
-    let mut guard = SERVERS.lock().await;
-    guard.retain(|(_, s)| s.alive.load(Ordering::SeqCst));
-    if let Some((_, s)) = guard.iter().find(|(h, _)| *h == home) {
+    // The list is locked for the lookup only; the start below holds the account's slot.
+    let slot = {
+        let mut guard = servers.lock().await;
+        match guard.iter().find(|(h, _)| *h == home) {
+            Some((_, slot)) => slot.clone(),
+            None => {
+                let slot = Arc::default();
+                guard.push((home, Arc::clone(&slot)));
+                slot
+            }
+        }
+    };
+    let mut cur = slot.lock().await;
+    if let Some(s) = cur.as_ref().filter(|s| s.alive.load(Ordering::SeqCst)) {
         return Ok(s.clone());
     }
     let s = AppServer::start(spec, raw.clone()).await?;
-    guard.push((home, s.clone()));
+    *cur = Some(s.clone()); // in place of the dead one, if any
     Ok(s)
 }
 
 /// Stop every app-server (call at app exit). Their agents receive `Exited`.
 pub async fn shutdown_server() {
     let mut set = tokio::task::JoinSet::new();
-    for (_, s) in SERVERS.lock().await.drain(..) {
-        set.spawn(async move { s.close().await });
+    for (_, slot) in SERVERS.lock().await.drain(..) {
+        set.spawn(async move {
+            if let Some(s) = slot.lock().await.take() {
+                s.close().await
+            }
+        });
     }
     set.join_all().await;
 }
@@ -355,7 +373,7 @@ pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str
 
 pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> anyhow::Result<AgentHandle> {
     let raw = Arc::new(RawLog::open(&spec.raw_log).with_context(|| format!("cannot open raw log {}", spec.raw_log.display()))?);
-    let server = server_for(&spec, &raw).await?;
+    let server = server_for(&SERVERS, &spec, &raw).await?;
     let (msg_tx, msgs) = mpsc::unbounded_channel();
     let route = Route { tx: msg_tx, raw: raw.clone() };
     let (model, effort) = classify::split_model_effort(spec.model.as_deref());
@@ -1692,5 +1710,66 @@ mod tests {
             assert!(closed.is_some() && closed < exited, "{kinds:?}");
             assert_eq!(kinds.iter().filter(|k| matches!(k, EventKind::TurnCompleted { .. })).count(), 1, "{kinds:?}");
         }
+    }
+
+    /// Two accounts, each with a `/bin/sh` for app-server (it runs the `app-server` script of
+    /// its cwd). One never answers `initialize`: the other's agents must not wait behind it.
+    /// The list is the test's own: `SERVERS` belongs to the whole process, and a test that
+    /// shuts a Core down closes every server in it.
+    #[tokio::test]
+    async fn a_slow_account_does_not_block_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = |home: &str, script: &str| {
+            let cwd = dir.path().join(home);
+            std::fs::create_dir_all(&cwd).unwrap();
+            std::fs::write(cwd.join("app-server"), script).unwrap();
+            SpawnSpec {
+                agent_id: home.into(),
+                run_id: home.into(),
+                provider: Provider::Codex,
+                role: Role::Worker,
+                model: None,
+                bin: PathBuf::from("/bin/sh"),
+                env: HashMap::from([("CODEX_HOME".to_string(), home.to_string())]),
+                session: SessionMode::New { session_id: None },
+                system_prompt: String::new(),
+                read_only: false,
+                mcp: None,
+                use_user_setup: false,
+                raw_log: cwd.join("raw.ndjson"),
+                cwd,
+            }
+        };
+        let slow = account("slow", ": > up\nwhile read -r line; do :; done\n");
+        let fast = account(
+            "fast",
+            r#"while read -r line; do
+  case "$line" in
+    *'"id":0'*) echo '{"id":0,"result":{"userAgent":"codex/0.0.0 (sh)"}}' ;;
+    *'"id":1'*) echo '{"id":1,"result":{"account":{"type":"apiKey"}}}' ;;
+  esac
+done
+"#,
+        );
+        let servers = Servers::default();
+        let raw = Arc::new(RawLog::open(&dir.path().join("raw.ndjson")).unwrap());
+
+        let stuck = server_for(&servers, &slow, &raw);
+        tokio::pin!(stuck);
+        let others = async {
+            while !slow.cwd.join("up").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await; // until the slow start is under way
+            }
+            tokio::join!(server_for(&servers, &fast, &raw), server_for(&servers, &fast, &raw))
+        };
+        let (a, b) = tokio::select! {
+            r = &mut stuck => panic!("the start that never gets an answer ended: {:?}", r.map(|_| ())),
+            r = tokio::time::timeout(Duration::from_secs(10), others) => r.expect("waited behind the other account's start"),
+        };
+        // still one server per account, however many agents ask at once
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(a.info.lock().unwrap().billing, Billing::ApiKey);
+        a.close().await;
     }
 }
