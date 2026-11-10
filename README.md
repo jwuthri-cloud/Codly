@@ -2,9 +2,9 @@
 
 **A team of coding agents, one living office.**
 
-[![Watch the 3-minute tour of Codly](docs/media/codly-tour.jpg)](docs/media/codly-tour.mp4)
+[![Watch the 3-minute tour of Codly](docs/media/codly-tour.jpg)](https://cdn.jsdelivr.net/gh/jwuthri-cloud/Codly@ed48fc5f4c9288d5e500d73756b29836b638e716/docs/media/codly-tour.mp4)
 
-▶ [Watch the 3-minute tour](docs/media/codly-tour.mp4): ask the Lead, run its plan, approve, merge, and
+▶ [Watch the 3-minute tour](https://cdn.jsdelivr.net/gh/jwuthri-cloud/Codly@ed48fc5f4c9288d5e500d73756b29836b638e716/docs/media/codly-tour.mp4): ask the Lead, run its plan, approve, merge, and
 start a long-term agent of your own.
 
 Codly turns the coding CLIs you already pay for (Claude Code, Codex, Gemini CLI and OpenCode) into one
