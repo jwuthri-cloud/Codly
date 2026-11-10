@@ -84,6 +84,8 @@ struct AppServer {
     state: StdMutex<State>,
     alive: AtomicBool,
     pgid: i32,
+    /// With `pgid`, what every run on this server records for crash recovery.
+    started_ms: i64,
     stderr: StderrTail,
     info: StdMutex<ServerInfo>,
     /// Raw log of the agent that started the server: lines that belong to nobody else.
@@ -104,6 +106,7 @@ impl AppServer {
             state: StdMutex::new(State::default()),
             alive: AtomicBool::new(true),
             pgid: child.id().map(|p| p as i32).unwrap_or(0),
+            started_ms: now_ms(),
             stderr: StderrTail::spawn(child.stderr.take().context("no stderr")?, 64 << 10),
             info: StdMutex::new(ServerInfo { cli_version: None, billing: Billing::Unknown }),
             bootstrap_raw: raw.clone(),
@@ -374,6 +377,7 @@ pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str
 pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> anyhow::Result<AgentHandle> {
     let raw = Arc::new(RawLog::open(&spec.raw_log).with_context(|| format!("cannot open raw log {}", spec.raw_log.display()))?);
     let server = server_for(&SERVERS, &spec, &raw).await?;
+    proc::record_group(&spec.raw_log, server.pgid, server.started_ms);
     let (msg_tx, msgs) = mpsc::unbounded_channel();
     let route = Route { tx: msg_tx, raw: raw.clone() };
     let (model, effort) = classify::split_model_effort(spec.model.as_deref());
@@ -1598,6 +1602,7 @@ mod tests {
             state: StdMutex::new(State::default()),
             alive: AtomicBool::new(true),
             pgid: 0,
+            started_ms: 0,
             stderr: StderrTail::default(),
             info: StdMutex::new(ServerInfo { cli_version: None, billing: Billing::Unknown }),
             bootstrap_raw: Arc::new(RawLog::open(&dir.join("raw.ndjson")).unwrap()),

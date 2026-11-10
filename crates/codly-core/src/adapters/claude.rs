@@ -157,6 +157,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         .spawn()
         .with_context(|| format!("failed to start {}", spec.bin.display()))?;
     let pgid = child.id().map(|p| p as i32).unwrap_or(0);
+    proc::record_group(&spec.raw_log, pgid, now_ms());
     let stdin = child.stdin.take().context("no stdin")?;
     let lines = proc::spawn_json_reader(child.stdout.take().context("no stdout")?, raw.clone());
     let stderr = StderrTail::spawn(child.stderr.take().context("no stderr")?, 64 << 10);

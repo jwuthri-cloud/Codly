@@ -177,6 +177,21 @@ pub async fn kill_group(pgid: i32, grace: Duration) {
     let _ = killpg(pg, Signal::SIGKILL);
 }
 
+/// Note a run's process group and when its leader started in `pgid`, next to the run's raw
+/// log, so that the next start can find the group if Codly dies before the CLI does.
+pub fn record_group(raw_log: &Path, pgid: i32, started_ms: i64) {
+    if let Err(e) = std::fs::write(raw_log.with_file_name("pgid"), format!("{pgid} {started_ms}")) {
+        tracing::warn!("cannot record the process group of a run: {e}");
+    }
+}
+
+/// What [`record_group`] noted for the run with this raw log: (pgid, started_ms).
+pub fn recorded_group(raw_log: &Path) -> Option<(i32, i64)> {
+    let text = std::fs::read_to_string(raw_log.with_file_name("pgid")).ok()?;
+    let (pgid, started_ms) = text.trim().split_once(' ')?;
+    Some((pgid.parse().ok()?, started_ms.parse().ok()?))
+}
+
 /// Exit code of a finished child; signals map to 128 + signo like a shell reports them.
 pub fn exit_code(status: std::process::ExitStatus) -> Option<i64> {
     use std::os::unix::process::ExitStatusExt;

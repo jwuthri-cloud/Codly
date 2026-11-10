@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::planner::{self, PlanInput};
 use super::runs::{RunReq, new_session};
 use super::scheduler::{self, Action, AgentPick, SchedInput};
-use super::{Inner, careers, guard, lead, lock, names, prompts, row};
+use super::{Inner, careers, guard, lead, lock, names, prompts, row, workspace};
 use crate::adapters::SessionMode;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
@@ -897,9 +897,9 @@ impl Inner {
 
     // ───────────── crash recovery ─────────────
 
-    /// Runs left `starting`/`running` by a crash become `lost`; every pending approval
-    /// expires; their tasks go back to ready, keeping the assignee, so the scheduler resumes
-    /// the same agent with the stored session id.
+    /// Runs left `starting`/`running` by a crash become `lost` and the process groups they
+    /// left running are killed; every pending approval expires; their tasks go back to ready,
+    /// keeping the assignee, so the scheduler resumes the same agent with the stored session id.
     pub(super) async fn recover(&self) {
         if let Err(e) = self.recover_inner().await {
             tracing::warn!("crash recovery incomplete: {e}");
@@ -913,7 +913,9 @@ impl Inner {
                 tracing::warn!("crash recovery: {what} {id}: {e}");
             }
         };
+        let mut groups: Vec<(i32, i64)> = Vec::new();
         for r in self.store.runs_with_status(&["starting", "running"])? {
+            groups.extend(crate::proc::recorded_group(Path::new(&r.raw_log)));
             each("run", &r.id, (|| {
                 self.store.set_run_status(&r.id, "lost")?;
                 let ws = self.store.agent_workspace(&r.agent_id)?;
@@ -938,6 +940,19 @@ impl Inner {
                 )?;
                 Ok(())
             })());
+        }
+        // Their CLIs lost stdin with the crash and stop by themselves, but the tests, builds
+        // and dev servers of their last turn may still be writing to the worktree a resumed
+        // session is about to use.
+        if !groups.is_empty() {
+            let mut kills = tokio::task::JoinSet::new();
+            for pgid in workspace::orphans(&workspace::processes().await, &groups) {
+                kills.spawn(crate::proc::kill_group(pgid, Duration::from_secs(3)));
+            }
+            if !kills.is_empty() {
+                tracing::warn!("killing {} agent process group(s) left by a crash", kills.len());
+                kills.join_all().await;
+            }
         }
         // Every approval still pending after that (its run was written off at shutdown, or its
         // start had failed): nothing is live yet, and a CLI's request does not outlive its process.
