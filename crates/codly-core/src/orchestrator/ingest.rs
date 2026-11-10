@@ -74,11 +74,15 @@ impl Inner {
             let _ = self.bus.send(r);
             return;
         }
+        // Only what is on record is shown (as `emit` does): a row the store refused would be a card
+        // nobody can answer, gone at the next resync. The run's bookkeeping below still follows it.
         match self.store.append_event(ctx.ws.as_deref(), &r) {
-            Ok(id) => r.id = id,
+            Ok(id) => {
+                r.id = id;
+                self.publish(ctx.ws.as_deref(), &r);
+            }
             Err(e) => tracing::warn!("event not persisted ({}): {e}", r.kind.type_name()),
         }
-        self.publish(ctx.ws.as_deref(), &r);
         if ctx.dead {
             return; // on record, and nothing else: the agent and the row keep what the failure wrote
         }

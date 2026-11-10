@@ -782,6 +782,43 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recover_expires_pending_approvals_nobody_owns() {
+    let dir = tempfile::tempdir().unwrap();
+    // What a hard stop can leave behind: a request still pending, of a run that is not `running`
+    // any more (written off at shutdown), so no lost run brings it along.
+    let approval_id = {
+        let store = Store::open(&dir.path().join("data").join("codly.sqlite")).unwrap();
+        let approval = Approval {
+            id: new_id(),
+            agent_id: "gone".into(),
+            run_id: "gone".into(),
+            task_id: None,
+            call_id: None,
+            subject: ApprovalSubject::Command { command: "rm -rf build".into(), cwd: None },
+            reason: None,
+            choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny],
+            risks: vec![],
+            status: ApprovalStatus::Pending,
+            decided_by: None,
+            created_at: now_ms(),
+        };
+        let kind = EventKind::ApprovalRequested { approval: approval.clone() };
+        let ev = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind };
+        store.append_event(None, &ev).unwrap();
+        approval.id
+    };
+    let log = Arc::new(Mutex::new(Log::default()));
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(dir.path(), FakeSpawner { log, lead: idle.clone(), worker: idle }).await;
+    assert!(core.snapshot().await.unwrap().approvals.is_empty(), "a card nobody can answer does not wait for you");
+    let events = core.events(None, None, 100).await.unwrap();
+    assert!(events.iter().any(
+        |e| matches!(&e.kind, EventKind::ApprovalResolved { approval_id: id, status: ApprovalStatus::Expired, .. } if *id == approval_id)
+    ));
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn board_moves_follow_the_rules() {
     let dir = tempfile::tempdir().unwrap();
@@ -1013,6 +1050,38 @@ async fn late_events_of_a_failed_start_change_nothing() {
     assert_eq!(store.run(&run_id).unwrap().unwrap().status, "failed", "a late exit does not turn a failed start into a completed run");
     let agent = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == solo.id).unwrap();
     assert_ne!(agent.session_id.as_deref(), Some("stale"), "the session of a start that failed is not the agent's");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejected_event_is_not_broadcast() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    // The CLI closes a request Codly has no record of: the store refuses that row.
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.emit(EventKind::ApprovalResolved { approval_id: "nope".into(), status: ApprovalStatus::Cancelled, by: "provider".into() });
+            turn.say("done");
+        })
+    });
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(dir.path(), FakeSpawner { log, lead: idle, worker }).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let mut bus = core.subscribe();
+    core.send_chat(&format!("agent:{}", solo.id), "hi").await.unwrap();
+    // Everything the UI is told until that turn ends.
+    let mut shown = vec![];
+    loop {
+        let e = tokio::time::timeout(Duration::from_secs(20), bus.recv()).await.expect("the turn ends").unwrap();
+        match e.kind {
+            EventKind::ApprovalResolved { .. } => shown.push(e.id),
+            EventKind::TurnCompleted { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(shown.is_empty(), "a row that is not on record was shown, with id {shown:?}");
     core.shutdown().await;
 }
 

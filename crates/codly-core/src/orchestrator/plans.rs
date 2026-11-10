@@ -897,8 +897,8 @@ impl Inner {
 
     // ───────────── crash recovery ─────────────
 
-    /// Runs left `starting`/`running` by a crash become `lost`; their pending approvals
-    /// expire; their tasks go back to ready, keeping the assignee, so the scheduler resumes
+    /// Runs left `starting`/`running` by a crash become `lost`; every pending approval
+    /// expires; their tasks go back to ready, keeping the assignee, so the scheduler resumes
     /// the same agent with the stored session id.
     pub(super) async fn recover(&self) {
         if let Err(e) = self.recover_inner().await {
@@ -938,6 +938,15 @@ impl Inner {
                 )?;
                 Ok(())
             })());
+        }
+        // Every approval still pending after that (its run was written off at shutdown, or its
+        // start had failed): nothing is live yet, and a CLI's request does not outlive its process.
+        for a in self.store.pending_approvals(None)? {
+            let res = self.store.agent_workspace(&a.agent_id).and_then(|ws| {
+                let kind = EventKind::ApprovalResolved { approval_id: a.id.clone(), status: ApprovalStatus::Expired, by: "codly".into() };
+                self.emit(ws.as_deref(), row(Some(&a.agent_id), a.task_id.as_deref(), Some(&a.run_id), kind))
+            });
+            each("approval", &a.id, res.map(drop));
         }
         let active = [TaskStatus::Running, TaskStatus::Verifying, TaskStatus::Reviewing, TaskStatus::ChangesRequested, TaskStatus::Merging];
         for t in self.store.tasks_with_status(&active)? {

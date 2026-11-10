@@ -580,10 +580,14 @@ impl CodexAgent {
             }
             AgentCmd::Interrupt => self.interrupt().await,
             AgentCmd::Approval { approval_id, decision } => match self.norm.answer(&approval_id, &decision) {
-                Some((reply, events)) => {
-                    let _ = self.server.send(&reply, &self.raw).await;
-                    self.emit_all(events);
-                }
+                Some((reply, events)) => match self.server.send(&reply, &self.raw).await {
+                    Ok(()) => self.emit_all(events),
+                    Err(e) => {
+                        // The answer never reached the app-server: the card must not say it did.
+                        tracing::warn!("codex: approval answer not sent: {e}");
+                        self.emit(EventKind::ApprovalResolved { approval_id, status: ApprovalStatus::Expired, by: "provider".into() });
+                    }
+                },
                 None => tracing::warn!("codex: no pending approval {approval_id}"),
             },
             AgentCmd::Shutdown => self.begin_shutdown().await,

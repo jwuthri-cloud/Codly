@@ -502,8 +502,12 @@ impl Actor {
             AgentCmd::Interrupt => self.cancel_turn().await,
             AgentCmd::Approval { approval_id, decision } => match self.norm.answer(&approval_id, &decision) {
                 Some((reply, events, cancel_turn)) => {
-                    self.write(reply).await;
-                    self.emit_all(events);
+                    if self.write(reply).await {
+                        self.emit_all(events);
+                    } else {
+                        // The answer never reached the CLI: the card must not say it did.
+                        self.emit(EventKind::ApprovalResolved { approval_id, status: ApprovalStatus::Expired, by: "provider".into() });
+                    }
                     if cancel_turn {
                         self.cancel_turn().await;
                     }

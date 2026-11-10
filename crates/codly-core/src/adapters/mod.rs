@@ -11,7 +11,8 @@
 //! - Approvals: on a provider permission request the adapter generates a Codly approval id,
 //!   remembers the provider request id, and emits `ApprovalRequested`. The orchestrator
 //!   replies with `AgentCmd::Approval`. If the provider cancels, emit `ApprovalResolved`
-//!   with status `Cancelled` and by = "provider".
+//!   with status `Cancelled` and by = "provider"; if the reply cannot be written to the CLI,
+//!   emit it with status `Expired` and by = "provider".
 //! - Status: emit `StatusChanged` on every coarse transition (Thinking when a request
 //!   starts, Working while a tool runs, WaitingApproval, Idle when a turn ends).
 //! - When the process exits, emit `Exited` and stop.
@@ -19,8 +20,9 @@
 //! Verified behaviour the orchestrator relies on (live, 2026-10-25; CRITIQUE.md §10):
 //! - Claude emits `SessionStarted` twice: at spawn (no tool list yet) and after the first
 //!   prompt (with the real tools). Treat it as an upsert.
-//! - Adapters emit `ApprovalResolved` only when the CLI itself cancels a request; the
-//!   orchestrator emits it for user/policy decisions.
+//! - Adapters emit `ApprovalResolved` only for a request whose answer never reached the CLI
+//!   (it cancelled, or the write failed); the orchestrator emits it for user/policy
+//!   decisions. The store lets by = "provider" replace an earlier decision, and nothing else.
 //! - Codex assigns its own thread ids (a pre-assigned session id is ignored); Claude and ACP
 //!   agents queue a prompt sent mid-turn (one prompt = one turn), Codex steers it into the
 //!   running turn (no separate turn events).

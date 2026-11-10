@@ -3,8 +3,8 @@
 //! into the user's branch.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
@@ -16,6 +16,9 @@ use crate::index::Index;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
 use crate::store;
+
+/// Answering an approval is read-check-write over the event log: one at a time.
+static RESOLVING: Mutex<()> = Mutex::new(());
 
 impl Inner {
     // ───────────── workspace ─────────────
@@ -262,6 +265,8 @@ impl Inner {
     // ───────────── approvals ─────────────
 
     pub(super) fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision, by: &str) -> anyhow::Result<()> {
+        // From the read to the event: of two answers at once, the agent gets the one on record.
+        let _g = lock(&RESOLVING);
         let a = self.store.approval(approval_id)?.ok_or_else(|| anyhow!("unknown approval {approval_id}"))?;
         if a.status != ApprovalStatus::Pending {
             bail!("that approval was already {}", store::enum_str(&a.status));

@@ -801,12 +801,19 @@ fn project(db: &Connection, ws: Option<&str>, row: &EventRow) -> Result<()> {
             ])?;
         }
         EventKind::ApprovalResolved { approval_id, status, by } => {
+            // The first answer stands, except against the CLI's own word: an adapter says
+            // "provider" only for a request whose answer never reached the CLI.
             let status = enum_str(status);
-            db.prepare_cached(
-                "UPDATE approval SET status = ?2, decided_at = ?3, json = json_set(json, '$.status', ?2, '$.decided_by', ?4)
-                 WHERE id = ?1",
-            )?
-            .execute(params![approval_id, status, row.ts, by])?;
+            let n = db
+                .prepare_cached(
+                    "UPDATE approval SET status = ?2, decided_at = ?3, json = json_set(json, '$.status', ?2, '$.decided_by', ?4)
+                     WHERE id = ?1 AND (status = 'pending' OR ?4 = 'provider')",
+                )?
+                .execute(params![approval_id, status, row.ts, by])?;
+            if n == 0 {
+                // or was never recorded; the caller's transaction drops the event with it
+                return Err(anyhow!("approval {approval_id} was already resolved"));
+            }
         }
         EventKind::Decision { id, decision_type, method, summary, detail } => {
             db.prepare_cached(
@@ -953,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn approvals_resolve_in_place() {
+    fn an_approval_resolves_once_and_a_provider_cancel_wins() {
         let store = Store::open_in_memory().unwrap();
         let a = Approval {
             id: new_id(),
@@ -981,6 +988,17 @@ mod tests {
         assert_eq!(got.status, ApprovalStatus::Approved);
         assert_eq!(got.decided_by.as_deref(), Some("user"));
         assert!(store.pending_approvals(None).unwrap().is_empty());
+
+        // The first answer stands: a second one is refused, and its event is not kept.
+        let resolved = |status, by: &str| row(EventKind::ApprovalResolved { approval_id: a.id.clone(), status, by: by.into() });
+        let last = store.last_event_id().unwrap();
+        assert!(store.append_event(None, &resolved(ApprovalStatus::Denied, "user")).is_err());
+        assert_eq!(store.approval(&a.id).unwrap().unwrap().status, ApprovalStatus::Approved);
+        assert_eq!(store.last_event_id().unwrap(), last);
+        // Except by the CLI's own word: the answer never reached it.
+        store.append_event(None, &resolved(ApprovalStatus::Cancelled, "provider")).unwrap();
+        let got = store.approval(&a.id).unwrap().unwrap();
+        assert_eq!((got.status, got.decided_by.as_deref()), (ApprovalStatus::Cancelled, Some("provider")));
     }
 
     #[test]

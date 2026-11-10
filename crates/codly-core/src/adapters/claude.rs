@@ -396,9 +396,13 @@ impl Actor {
             }
             AgentCmd::Approval { approval_id, decision } => match self.norm.answer(&approval_id, &decision) {
                 Some((reply, events)) => {
-                    self.write(&reply).await;
-                    for e in events {
-                        self.emit(e);
+                    if self.write(&reply).await {
+                        for e in events {
+                            self.emit(e);
+                        }
+                    } else {
+                        // The answer never reached the CLI: the card must not say it did.
+                        self.emit(EventKind::ApprovalResolved { approval_id, status: ApprovalStatus::Expired, by: "provider".into() });
                     }
                 }
                 None => tracing::warn!("claude: no pending approval {approval_id}"),
