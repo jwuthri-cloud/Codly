@@ -82,6 +82,14 @@ pub async fn recent_workspaces(state: State<'_, AppState>) -> R<Vec<RecentWorksp
     state.core().await?.recent_workspaces().await.map_err(err)
 }
 
+/// The git repositories under the home folder, newest first: the browser's "Open repository"
+/// picker (`codly serve` cannot show a folder dialog). Three folders deep, at most 200.
+#[tauri::command]
+pub async fn list_repos() -> R<Vec<codly_core::repos::RepoEntry>> {
+    let home = codly_core::skills::home_dir().map_err(err)?;
+    tokio::task::spawn_blocking(move || codly_core::repos::find_repos(&home, 3, 200)).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn open_workspace(state: State<'_, AppState>, repo_path: String) -> R<Workspace> {
     state.core().await?.open_workspace(&repo_path).await.map_err(err)

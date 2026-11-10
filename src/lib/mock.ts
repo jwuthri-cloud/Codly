@@ -195,6 +195,8 @@ export class MockTransport implements Transport {
         return sim.signIns.list(sim.settings, sim.clis);
       case 'recent_workspaces':
         return sim.recent;
+      case 'list_repos':
+        return sim.recent.map((r) => ({ name: r.name, path: r.repo_path, modified_ms: r.opened_at }));
       case 'open_workspace':
         return story.openWorkspace(String(a.repoPath ?? REPO));
       case 'update_settings': {

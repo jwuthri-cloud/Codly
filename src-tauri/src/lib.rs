@@ -110,6 +110,7 @@ pub fn run() {
             commands::detect_clis,
             commands::list_accounts,
             commands::recent_workspaces,
+            commands::list_repos,
             commands::open_workspace,
             commands::update_settings,
             commands::send_chat,

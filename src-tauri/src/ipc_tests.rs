@@ -60,6 +60,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::search_code,
             commands::get_events,
             commands::recent_workspaces,
+            commands::list_repos,
             commands::exact_search,
             commands::message_graph,
             commands::memory_file,
@@ -104,6 +105,7 @@ fn commands_round_trip_with_frontend_arg_names() {
     let events = invoke(&wv, "get_events", json!({ "agentId": null, "before": null, "limit": 50 })).unwrap();
     assert!(!events.as_array().unwrap().is_empty());
     invoke(&wv, "recent_workspaces", json!({})).unwrap();
+    assert!(invoke(&wv, "list_repos", json!({})).unwrap().is_array());
 
     // Find / Files / Messages lenses: the memory just made is found by its words; no path escapes.
     let hits = invoke(&wv, "exact_search", json!({ "query": "PNPM" })).unwrap();

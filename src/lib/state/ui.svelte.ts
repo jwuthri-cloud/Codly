@@ -104,6 +104,8 @@ class Ui {
   shortcutsOpen = $state(false);
   /** The model dialog: starts an agent of `provider` (agentId null) or switches `agentId`'s model. */
   modelDialog = $state<{ provider: Provider; agentId: string | null } | null>(null);
+  /** The browser's "Open repository" picker (the desktop app shows a folder dialog instead). */
+  repoPickerOpen = $state(false);
 
   /** Conversation thread on Home: a request thread ("lead" / "lead:<id>") or "agent:<id>" (1:1). */
   thread = $state('lead');
