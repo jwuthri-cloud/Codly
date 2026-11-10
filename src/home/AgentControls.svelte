@@ -12,8 +12,10 @@
 
   interface Props {
     thread: string;
+    /** A plan worker's chat: the picker is its request's, shared by every agent on that plan. */
+    request?: boolean;
   }
-  let { thread }: Props = $props();
+  let { thread, request = false }: Props = $props();
 
   const own = $derived(store.requestPrefs[thread]?.approval_mode ?? null);
   const perm = $derived<ApprovalMode>(own ?? store.settings.approval_mode);
@@ -28,8 +30,8 @@
 </script>
 
 <div class="controls">
-  <button class="chip" bind:this={btn} aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)} data-tip="How much this agent asks you before it acts">
-    <Icon name="lock" size={13} />{label}{#if !own}<span class="sub">· Settings</span>{/if}<Icon name="chevron-down" size={12} />
+  <button class="chip" bind:this={btn} aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)} data-tip={request ? 'How much every agent on this request asks you before it acts' : 'How much this agent asks you before it acts'}>
+    <Icon name="lock" size={13} />{label}{#if request}<span class="sub">· whole request</span>{:else if !own}<span class="sub">· Settings</span>{/if}<Icon name="chevron-down" size={12} />
   </button>
 </div>
 {#if open && btn}<Menu anchor={btn} items={items} onclose={() => (open = false)} width={300} />{/if}

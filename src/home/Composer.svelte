@@ -98,6 +98,12 @@
 
   const agent = $derived(store.threadAgent(thread));
   const oneToOne = $derived(!isRequestThread(thread));
+  /** A plan worker asks per its request's permissions (the broker's rule), so its 1:1 shows those. */
+  const workerRequest = $derived.by(() => {
+    const t = agent?.role === 'worker' && agent.task_id ? store.taskMap.get(agent.task_id) : null;
+    const p = t?.plan_id ? store.planMap.get(t.plan_id) : null;
+    return p ? p.thread || 'lead' : null;
+  });
   const isBusy = $derived(busy(thread));
   const fresh = $derived(!oneToOne && !agent && !store.chats.some((c) => c.thread === thread) && !store.outbox.some((o) => o.thread === thread));
   const placeholder = $derived(
@@ -282,7 +288,7 @@
       <Icon name="send" size={15} stroke={1.8} />
     </button>
   </div>
-  {#if !oneToOne}<LeadControls {thread} />{:else if agent?.role === 'solo'}<AgentControls {thread} />{/if}
+  {#if !oneToOne}<LeadControls {thread} />{:else if agent?.role === 'solo'}<AgentControls {thread} />{:else if workerRequest}<AgentControls thread={workerRequest} request />{/if}
 </div>
 
 <style>
