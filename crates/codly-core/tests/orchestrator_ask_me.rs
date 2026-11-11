@@ -276,6 +276,48 @@ async fn skipping_a_blocking_card_tells_the_worker_to_use_its_best_judgment() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retrying_a_task_that_waits_for_your_answer_restarts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    // Asks; back on the task after your Retry, it does the work when the test lets it.
+    let go = Arc::new(tokio::sync::Notify::new());
+    let wait = go.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let wait = wait.clone();
+        Box::pin(async move {
+            if turn.prompt.contains("You are back on task") {
+                wait.notified().await;
+                std::fs::write(turn.spec.cwd.join("hello.txt"), "hello\n").unwrap();
+                turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created hello.txt.", "files_changed": ["hello.txt"] })).await;
+            } else if turn.prompt.contains("Answer to your question") {
+                turn.say("Thanks.");
+            } else {
+                turn.tool("codly_ask_user", json!({ "title": "Which greeting?", "question": "Formal or casual hello?" })).await;
+                turn.say("Waiting for the user's answer.");
+            }
+        })
+    });
+    let (core, turns, card) = run_until_card(dir.path(), worker).await;
+    let task = wait_for("the task to wait for you", 10, async || Some(task_of(&core).await).filter(|t| t.status == TaskStatus::Blocked)).await;
+    let worker_id = task.assignee.clone().unwrap();
+
+    // Retry instead of an answer: the worker that waits lets go of the task and starts again.
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    wait_for("the worker to be back on the task", 20, async || {
+        turns_of(&turns, Some(&worker_id)).iter().any(|t| t.contains("You are back on task")).then_some(())
+    })
+    .await;
+    assert_eq!(task_of(&core).await.status, TaskStatus::Running);
+
+    // The card is still open: its answer reaches the worker as its next turn.
+    core.answer_blocker(&card.id, "casual please").await.unwrap();
+    go.notify_one();
+    plan_done(&core).await;
+    let seen = turns_of(&turns, Some(&worker_id));
+    assert!(seen.iter().any(|t| t.contains("[User] Answer to your question \"Which greeting?\": casual please")), "{seen:?}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_office_counts_what_waits_for_you() {
     let dir = tempfile::tempdir().unwrap();
     let (core, _turns, card) = run_until_card(dir.path(), asking_worker("Formal or casual hello?")).await;

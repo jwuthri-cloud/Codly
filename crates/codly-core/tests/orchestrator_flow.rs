@@ -1183,6 +1183,54 @@ async fn a_gate_failure_frees_the_worker_so_retry_works() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_task_that_is_merging_cannot_be_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    // A post-checkout hook that lasts while a file exists: a new worktree keeps the repository
+    // busy as long as the test says.
+    let (hooks, hold, held) = (dir.path().join("hooks"), dir.path().join("hold"), dir.path().join("held"));
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = format!("#!/bin/sh\nwhile [ -f '{}' ]; do touch '{}'; sleep 0.05; done\n", hold.display(), held.display());
+    std::fs::write(hooks.join("post-checkout"), hook).unwrap();
+    std::fs::set_permissions(hooks.join("post-checkout"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    sh(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote it." })).await;
+        })
+    });
+    // The checks say when they run (the work is committed by then) and last until the test
+    // says so. Both through files outside the worktree.
+    let (checking, checked) = (dir.path().join("checking"), dir.path().join("checked"));
+    let verify = format!("touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; grep -q hello hello.txt", checking.display(), checked.display());
+    let core = start(dir.path(), FakeSpawner { log, lead: planning_lead_with(&["hello.txt"], &verify), worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the checks to run", 20, async || task_status(&core).await.filter(|_| checking.exists())).await;
+    // The repository is busy (a hire's worktree is being added) when the checks pass: the
+    // merge has begun and waits its turn.
+    std::fs::write(&hold, "").unwrap();
+    let hire = tokio::spawn({
+        let core = core.clone();
+        async move { core.hire_agent(Provider::Claude, None, None).await }
+    });
+    wait_for("the hire's worktree to keep the repository busy", 20, async || held.exists().then_some(())).await;
+    std::fs::write(&checked, "").unwrap();
+    wait_for("the merge to begin", 20, async || task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Merging)).await;
+    let refused = core.move_task(&task.id, TaskStatus::Cancelled).await.map(|t| t.status);
+    std::fs::remove_file(&hold).unwrap();
+    hire.await.unwrap().unwrap();
+    let e = refused.expect_err("a merge in flight lands: its task cannot show as cancelled").to_string();
+    assert!(e.contains("is merging now"), "{e}");
+    let (task, _) = wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
+    assert_eq!(task.status, TaskStatus::Done);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_start_stopped_while_its_worktree_is_added_leaves_the_agents_next_chat_alone() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
@@ -1655,6 +1703,61 @@ async fn a_steer_during_review_is_gated_before_merging() {
     assert!(integ.join("bye.txt").exists(), "the steered turn's work was committed, reviewed and merged");
     let reviews = log.lock().unwrap().prompts.iter().filter(|p| p.0 == Role::Reviewer).count();
     assert_eq!(reviews, 2, "the work the first review never saw got its own review");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steer_during_verify_is_reviewed_before_merging() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.starts_with("[User]") {
+                turn.write("bye.txt", "bye\n");
+                turn.say("Added bye.txt too.");
+            } else {
+                turn.write("hello.txt", "hello\n");
+                turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote hello.txt." })).await;
+            }
+        })
+    });
+    let reviewer: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            let criteria = json!([{ "criterion": "hello.txt contains hello", "met": true }]);
+            turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
+        })
+    });
+    // The checks say when they run (the work is committed by then) and last until the test
+    // says so: after your steer. Both through files outside the worktree.
+    let (checking, checked) = (dir.path().join("checking"), dir.path().join("checked"));
+    let verify = format!("touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; test -f hello.txt", checking.display(), checked.display());
+    let codex = CliInfo { provider: Provider::Codex, ..claude() };
+    let lead = planning_lead_with(&["*.txt"], &verify);
+    let spawner = FakeSpawner { log: log.clone(), lead, worker: by_role(worker, reviewer) };
+    let core = start_with_clis(dir.path(), spawner, vec![claude(), codex]).await;
+    let settings =
+        Settings { auto_run_plans: true, lead_followups: false, review_gate: true, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the checks to run", 20, async || task_status(&core).await.filter(|_| checking.exists())).await;
+    assert_eq!(task.status, TaskStatus::Verifying);
+    // You steer the worker while its work is checked; its turn is over before the checks are,
+    // and before any reviewer exists.
+    let worker_id = task.assignee.clone().unwrap();
+    core.send_chat(&format!("agent:{worker_id}"), "also add bye.txt").await.unwrap();
+    wait_chat(&core, &format!("agent:{worker_id}"), "Added bye.txt too.").await;
+    std::fs::write(&checked, "").unwrap();
+    let (task, plan) =
+        wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
+    assert_eq!(task.status, TaskStatus::Done);
+    let integ = PathBuf::from(plan.integration_worktree.unwrap());
+    assert!(integ.join("hello.txt").exists());
+    assert!(integ.join("bye.txt").exists(), "the steered turn's work was committed and merged");
+    let reviews: Vec<String> = log.lock().unwrap().prompts.iter().filter(|p| p.0 == Role::Reviewer).map(|p| p.1.clone()).collect();
+    assert_eq!(reviews.len(), 1, "one review, of the whole work");
+    assert!(reviews[0].contains("bye.txt"), "the review read the steered turn's work: {}", reviews[0]);
     core.shutdown().await;
 }
 

@@ -245,18 +245,14 @@ impl Inner {
             json!({ "plan_id": task.plan_id, "verify": results, "files": files, "declared_exceptions": declared }),
         )?;
 
-        // 5. Optional cross-vendor review; it resumes the gate from review_done().
-        let staff = self.agent(&worker).is_ok_and(|a| crate::career::trusts(&a.career, Rank::Staff));
-        if self.settings().review_gate && !files.is_empty() && staff {
-            self.decide(ws, Some(task_id), "gate", format!("{}: no review, its worker is a trusted Staff", task.key), json!({ "plan_id": task.plan_id }))?;
-        } else if self.settings().review_gate && !files.is_empty() {
-            let notes = report["notes_for_reviewer"].as_str().map(String::from);
-            return self.start_review(&task, &ws_id, &base_ref, &results, &declared, notes.as_deref()).await;
-        }
-
-        // 6. Merge queue — unless the worker got a new message meanwhile (a user steer):
-        // merging now would shut it down mid-turn. Its next turn end re-runs the gate.
-        // (A worker that exited meanwhile has no next turn: its checked work merges.)
+        // 5. Not if the worker got a new message meanwhile (a user steer): that turn's work is
+        // not in the commit above, so a review would not read it, and a merge would leave it
+        // out and shut the worker down mid-turn. Its turn's end re-runs the gate.
+        // (A worker that exited meanwhile has no next turn: its checked work goes on.)
+        // ponytail: a turn that starts after this check and before the reviewer's run exists
+        // (the diff, a reviewer start that fails first), and ends before the review does, is
+        // still missed: `steered_in_review` counts turns from that run's start. Carry `turns`
+        // into the review if that ever shows.
         if self.is_live(&worker) && (!self.is_quiet(&worker) || self.turns_done(&worker) != turns) {
             self.update_task(task_id, |t| {
                 t.status = TaskStatus::Running;
@@ -265,6 +261,17 @@ impl Inner {
             })?;
             return Ok(());
         }
+
+        // 6. Optional cross-vendor review; it resumes the gate from review_done().
+        let staff = self.agent(&worker).is_ok_and(|a| crate::career::trusts(&a.career, Rank::Staff));
+        if self.settings().review_gate && !files.is_empty() && staff {
+            self.decide(ws, Some(task_id), "gate", format!("{}: no review, its worker is a trusted Staff", task.key), json!({ "plan_id": task.plan_id }))?;
+        } else if self.settings().review_gate && !files.is_empty() {
+            let notes = report["notes_for_reviewer"].as_str().map(String::from);
+            return self.start_review(&task, &ws_id, &base_ref, &results, &declared, notes.as_deref()).await;
+        }
+
+        // 7. Merge queue.
         self.merge_task(task_id, 0).await
     }
 

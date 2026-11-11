@@ -899,8 +899,10 @@ impl Inner {
         }
         let was = t;
         let t = self.update_task_as(task_id, true, |t| {
-            // In the write: the gate may have reached the merge since the read above.
-            if to == Blocked && !(scheduler::is_active(t.status) && t.status != Merging) {
+            // In the write: the gate may have reached the merge since the read above. A merge
+            // in flight lands: cancelled on the board, the task would still be on the branch.
+            let stop = to == Blocked && !(scheduler::is_active(t.status) && t.status != Merging);
+            if stop || (to == Cancelled && matches!(t.status, Merging | Done)) {
                 bail!("{} is {} now", t.key, store::enum_str(&t.status));
             }
             t.status = to;
@@ -913,7 +915,9 @@ impl Inner {
         })?;
         // After the status: a worker that is still starting re-checks it before its brief, and
         // a turn that ends now is not gated. The task as it was picks who to release.
-        if matches!(to, Cancelled | Blocked) {
+        // A retry too, of a task that waits for your answer: its worker still holds it and
+        // would keep the retry waiting for ever. Released, the retry resumes its session.
+        if matches!(to, Cancelled | Blocked) || from == Blocked {
             self.release_task_agents(&was);
         }
         let ws = self.store.task_workspace(task_id)?;
