@@ -530,6 +530,9 @@ impl Inner {
                     "[Codly] You ended without a verdict. Call codly_submit_review now with your verdict, criteria and issues.".into(),
                 );
             }
+            if !self.take_review(task_id)? {
+                return Ok(());
+            }
             lock(&self.review_nudges).remove(run_id);
             self.release_worker(&reviewer, task_id);
             self.emit(
@@ -541,6 +544,9 @@ impl Inner {
                     EventKind::Reviewed { verdict: "none".into(), summary: "the reviewer gave no verdict".into() },
                 ),
             )?;
+            if self.steered_in_review(&task, &run)? {
+                return Ok(());
+            }
             self.decide(
                 ws.as_deref(),
                 Some(task_id),
@@ -550,6 +556,9 @@ impl Inner {
             )?;
             return self.merge_task(task_id, 0).await;
         };
+        if !self.take_review(task_id)? {
+            return Ok(());
+        }
         lock(&self.review_nudges).remove(run_id);
         self.release_worker(&reviewer, task_id);
         let r = judge(&review);
@@ -575,6 +584,7 @@ impl Inner {
         )?;
         let worker = task.assignee.clone().unwrap_or_default();
         match r.verdict.as_str() {
+            "approve" if self.steered_in_review(&task, &run)? => Ok(()),
             "approve" => self.merge_task(task_id, 0).await,
             "reject" => {
                 let reason = format!("failed: the reviewer rejected it: {}", prompts::clip(&r.summary, 200));
@@ -591,6 +601,42 @@ impl Inner {
             }
             _ => self.fix_round(&task, &worker, Fix::Review { summary: r.summary, issues: r.issues, unmet: r.unmet }).await,
         }
+    }
+
+    /// A review ends once, however often it is reported (a reviewer's turn end and its exit
+    /// both do): the first pass takes the task out of Reviewing. False = another pass has it,
+    /// or the task was stopped or cancelled meanwhile.
+    fn take_review(&self, task_id: &str) -> Result<bool> {
+        let mut mine = false;
+        self.update_task(task_id, |t| {
+            mine = t.status == TaskStatus::Reviewing;
+            if mine {
+                t.status = TaskStatus::Verifying;
+                t.status_reason = Some("Codly is reading the review".into());
+            }
+            Ok(())
+        })?;
+        Ok(mine)
+    }
+
+    /// Before a reviewed task merges: did its worker get a turn since the review started (a
+    /// message from you, or from the Lead)? The review never saw that work, and merging now
+    /// would leave it out and shut the worker down mid-turn. The task goes back to Running:
+    /// the turn's end, or the gate started here when it is already over, checks it again.
+    /// By its turns, not by a dirty worktree: verify commands leave files behind too.
+    fn steered_in_review(self: &Arc<Self>, task: &Task, review: &crate::store::RunRow) -> Result<bool> {
+        let worker = task.assignee.clone().unwrap_or_default();
+        let turn_since = |e: &EventRow| e.agent_id.as_deref() == Some(worker.as_str()) && e.ts >= review.started_at;
+        if self.is_quiet(&worker) && !self.store.task_events(&task.id, "turn_started")?.iter().any(turn_since) {
+            return Ok(false);
+        }
+        self.update_task(&task.id, |t| {
+            t.status = TaskStatus::Running;
+            t.status_reason = Some("the worker got a new message; re-checking when it finishes".into());
+            Ok(())
+        })?;
+        tokio::spawn(self.clone().gate(task.id.clone()));
+        Ok(true)
     }
 
     // ───────────── merge queue ─────────────
@@ -648,8 +694,11 @@ impl Inner {
                                 EventKind::Merged { sha: sha.clone(), branch: integ.clone() },
                             ),
                         )?;
+                        // Still in the queue until the task is Done: a Cancel plan that waits here
+                        // then leaves it done (it is merged), and a second end of its review finds it done.
+                        let done = self.finish_task(&task, Some((sha, ev.id))).await;
                         drop(guard);
-                        return self.finish_task(&task, Some((sha, ev.id))).await;
+                        return done;
                     }
                     MergeOutcome::Conflict { files, .. } => files,
                 }

@@ -1221,6 +1221,47 @@ async fn a_start_stopped_while_its_worktree_is_added_leaves_the_agents_next_chat
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_a_plan_while_a_worktree_is_added_leaves_the_agents_chat_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    // A post-checkout hook (git-lfs, husky) makes every new worktree take two seconds to add.
+    let hooks = dir.path().join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("post-checkout"), "#!/bin/sh\nsleep 2\n").unwrap();
+    std::fs::set_permissions(hooks.join("post-checkout"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    sh(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("here") }));
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let worker_id = wait_for("the task to be claimed", 20, async || {
+        let snap = core.snapshot().await.unwrap();
+        let worker = snap.tasks.first().filter(|t| t.status == TaskStatus::Running)?.assignee.clone()?;
+        snap.agents.iter().any(|a| a.id == worker && a.task_id.is_some()).then_some(worker)
+    })
+    .await;
+    // Its worktree is still being added: you talk to it, then cancel the plan.
+    core.send_chat(&format!("agent:{worker_id}"), "are you there?").await.unwrap();
+    let (_, plan) = task_status(&core).await.unwrap();
+    core.cancel_plan(&plan.id).await.unwrap();
+    // The cancelled start runs its course: it notes the worktree once it is added, then stops short.
+    wait_for("the worktree to be added", 20, async || task_status(&core).await.filter(|(t, _)| t.worktree.is_some())).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    {
+        let log = log.lock().unwrap();
+        assert!(log.turns.iter().any(|t| t.0 == worker_id && t.1.ends_with("are you there?")), "{:?}", log.turns);
+        assert_eq!(log.runs.iter().filter(|r| r.0 == worker_id).count(), 1, "the cancelled task starts no worker; the chat is its only run");
+        assert!(!log.shutdowns.contains(&worker_id), "the chat is not the cancelled task's to shut down");
+    }
+    let snap = core.snapshot().await.unwrap();
+    assert_eq!(snap.tasks[0].status, TaskStatus::Cancelled);
+    assert!(snap.agents.iter().any(|a| a.id == worker_id && a.run_id.is_some()), "the chat is still running");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_answer_for_a_worker_that_is_shutting_down_restarts_its_task_with_it() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
@@ -1516,6 +1557,104 @@ async fn stopping_a_reviewer_blocks_the_task_and_frees_its_worker() {
     assert!(log.lock().unwrap().shutdowns.contains(&worker_id), "its worker is released too: a Retry can start it");
     let events = core.events(None, None, 3000).await.unwrap();
     assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Merged { .. })), "a review you stopped merges nothing");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_review_that_ends_twice_merges_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Greeting written." })).await;
+        })
+    });
+    // Its CLI exits by itself as its turn ends: the exit and the turn end each say the review is over.
+    let reviewer: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            let criteria = json!([{ "criterion": "hello.txt contains hello", "met": true }]);
+            turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
+            turn.emit(EventKind::Exited { code: Some(0) });
+        })
+    });
+    let codex = CliInfo { provider: Provider::Codex, ..claude() };
+    let spawner = FakeSpawner { log, lead: planning_lead(), worker: by_role(worker, reviewer) };
+    let core = start_with_clis(dir.path(), spawner, vec![claude(), codex]).await;
+    let settings =
+        Settings { auto_run_plans: true, lead_followups: false, review_gate: true, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
+    assert_eq!(task.status, TaskStatus::Done);
+    tokio::time::sleep(Duration::from_millis(500)).await; // the review's second end has run its course
+    let events = core.events(None, None, 3000).await.unwrap();
+    let count = |f: fn(&EventKind) -> bool| events.iter().filter(|e| f(&e.kind)).count();
+    assert_eq!(count(|k| matches!(k, EventKind::Reviewed { .. })), 1, "one review, read once");
+    assert_eq!(count(|k| matches!(k, EventKind::Merged { .. })), 1, "merged once");
+    let merged = |k: &EventKind| matches!(k, EventKind::Decision { summary, .. } if summary.contains("merged at"));
+    assert_eq!(count(merged), 1, "and recorded once");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steer_during_review_is_gated_before_merging() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.starts_with("[User]") {
+                turn.write("bye.txt", "bye\n");
+                turn.say("Added bye.txt too.");
+            } else {
+                turn.write("hello.txt", "hello\n");
+                turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote hello.txt." })).await;
+            }
+        })
+    });
+    // The first review (a diff without bye.txt) ends only when the test says so: after your steer.
+    let reviewed = Arc::new(tokio::sync::Notify::new());
+    let wait = reviewed.clone();
+    let reviewer: Behavior = Arc::new(move |turn: FakeTurn| {
+        let wait = wait.clone();
+        Box::pin(async move {
+            if !turn.prompt.contains("bye.txt") {
+                wait.notified().await;
+            }
+            let criteria = json!([{ "criterion": "hello.txt contains hello", "met": true }]);
+            turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
+        })
+    });
+    let codex = CliInfo { provider: Provider::Codex, ..claude() };
+    let lead = planning_lead_with(&["*.txt"], "test -f hello.txt");
+    let spawner = FakeSpawner { log: log.clone(), lead, worker: by_role(worker, reviewer) };
+    let core = start_with_clis(dir.path(), spawner, vec![claude(), codex]).await;
+    let settings =
+        Settings { auto_run_plans: true, lead_followups: false, review_gate: true, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the review", 30, async || {
+        let reading = log.lock().unwrap().prompts.iter().any(|p| p.0 == Role::Reviewer);
+        task_status(&core).await.filter(|(t, _)| reading && t.status == TaskStatus::Reviewing)
+    })
+    .await;
+    // You steer the worker while its work is read; its turn is over before the review is.
+    let worker_id = task.assignee.clone().unwrap();
+    core.send_chat(&format!("agent:{worker_id}"), "also add bye.txt").await.unwrap();
+    wait_chat(&core, &format!("agent:{worker_id}"), "Added bye.txt too.").await;
+    reviewed.notify_one();
+    let (task, plan) =
+        wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
+    assert_eq!(task.status, TaskStatus::Done);
+    let integ = PathBuf::from(plan.integration_worktree.unwrap());
+    assert!(integ.join("hello.txt").exists());
+    assert!(integ.join("bye.txt").exists(), "the steered turn's work was committed, reviewed and merged");
+    let reviews = log.lock().unwrap().prompts.iter().filter(|p| p.0 == Role::Reviewer).count();
+    assert_eq!(reviews, 2, "the work the first review never saw got its own review");
     core.shutdown().await;
 }
 
@@ -2186,6 +2325,30 @@ async fn a_plan_finishes_without_the_task_you_cancelled() {
     .await;
     let s = core.snapshot().await.unwrap();
     assert!(chats(&s, "lead").iter().any(|c| c.text.contains("1 task merged")), "the cancelled task isn't counted");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plan_with_every_task_cancelled_is_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let idle: Behavior = Arc::new(|_turn: FakeTurn| Box::pin(async {}));
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: two_task_lead(), worker: idle }).await;
+    let settings = Settings { lead_followups: false, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Add two files").await.unwrap();
+    let plan = wait_for("the plan", 30, async || core.snapshot().await.unwrap().plans.first().cloned()).await;
+    for t in core.snapshot().await.unwrap().tasks {
+        core.move_task(&t.id, TaskStatus::Cancelled).await.unwrap();
+    }
+    core.run_plan(&plan.id).await.unwrap();
+    wait_for("the plan to be cancelled", 20, async || {
+        core.snapshot().await.unwrap().plans.first().is_some_and(|p| p.status == PlanStatus::Cancelled).then_some(())
+    })
+    .await;
+    assert!(!log.lock().unwrap().spawns.iter().any(|s| s.0 == Role::Worker), "nothing was started");
     core.shutdown().await;
 }
 

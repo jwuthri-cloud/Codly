@@ -298,6 +298,14 @@ impl Inner {
         if matches!(plan.status, PlanStatus::Done | PlanStatus::Cancelled) {
             return Ok(());
         }
+        // Behind a merge in flight: its task is Done when the cancel goes on, so nothing lands
+        // on the integration branch for a task the board shows cancelled. A plan that has not
+        // run merges nothing and never waits. Never call this holding `merge_lock` or
+        // `sched_lock` (a scheduling pass would stall behind a merge).
+        let _queue = match plan.status {
+            PlanStatus::Running | PlanStatus::Integrating => Some(self.merge_lock.lock().await),
+            _ => None,
+        };
         self.update_plan(&plan.id, |p| {
             p.status = PlanStatus::Cancelled;
             Ok(())
@@ -327,14 +335,14 @@ impl Inner {
         Ok(())
     }
 
-    /// Stop the worker and reviewer runs of a task and free those agents.
+    /// Stop the worker and reviewer runs of a task and free those agents. Only their runs of
+    /// this task: one that is in a chat or on its next task by now keeps that run.
     pub(super) fn release_task_agents(&self, t: &Task) {
         let agents = self.store.task_workspace(&t.id).ok().flatten().and_then(|ws| self.store.agents(&ws).ok()).unwrap_or_default();
         for a in agents.iter().filter(|a| {
             a.task_id.as_deref() == Some(t.id.as_str()) || (scheduler::is_active(t.status) && t.assignee.as_deref() == Some(a.id.as_str()))
         }) {
-            self.stop_run(&a.id);
-            let _ = self.update_agent(&a.id, |a| a.task_id = None);
+            self.release_worker(&a.id, &t.id);
         }
         lock(&self.fix_rounds).remove(&t.id);
     }
@@ -445,6 +453,22 @@ impl Inner {
                 let me = self.clone();
                 let id = p.id.clone();
                 tokio::spawn(async move { me.complete_plan(&id).await });
+            } else if !ts.is_empty() && ts.iter().all(|t| t.status == TaskStatus::Cancelled) {
+                // You cancelled every task: nothing is left to run or to finish. Written here,
+                // not through `cancel_plan_inner`: that one waits for the merge queue, and
+                // this pass holds `sched_lock`.
+                let mut cancelled = false;
+                self.update_plan(&p.id, |p| {
+                    cancelled = p.status == PlanStatus::Running;
+                    if cancelled {
+                        p.status = PlanStatus::Cancelled;
+                    }
+                    Ok(())
+                })?;
+                if cancelled {
+                    let summary = format!("plan \"{}\" cancelled: you cancelled every task", prompts::clip(&p.summary, 60));
+                    self.decide(Some(&ws.id), None, "schedule", summary, json!({ "plan_id": p.id }))?;
+                }
             }
         }
         Ok(())
