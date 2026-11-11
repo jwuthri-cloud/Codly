@@ -439,7 +439,12 @@ impl Inner {
 
     /// Deliver waiting Lead turns (a Lead went idle or exited). Never blocks the caller.
     pub(super) fn pump_leads(self: &Arc<Self>) {
-        if lock(&self.leads).waiting.is_empty() {
+        // Nothing to do only if nothing waits and no pass is in flight: a pass holds the turns
+        // it keeps (their Lead is shutting down, or no slot) outside `waiting` until it ends,
+        // so a queue that looks empty then proves nothing. Pump again behind that pass.
+        if let Ok(_g) = self.lead_lock.try_lock()
+            && lock(&self.leads).waiting.is_empty()
+        {
             return;
         }
         let me = self.clone();

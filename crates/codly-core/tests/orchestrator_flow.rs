@@ -229,9 +229,9 @@ impl Spawner for FakeSpawner {
 }
 
 /// Runs of one role hand back their agent only when the test says so (a slow handshake).
-struct Slow(FakeSpawner, Role, Arc<tokio::sync::Notify>);
+struct Slow<S>(S, Role, Arc<tokio::sync::Notify>);
 
-impl Spawner for Slow {
+impl<S: Spawner> Spawner for Slow<S> {
     fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
         let up = (spec.role == self.1).then(|| self.2.clone());
         let spawn = self.0.spawn(spec, events);
@@ -1989,6 +1989,60 @@ async fn a_new_lead_model_restarts_an_idle_lead_on_its_session() {
     let runs: Vec<&SessionMode> = l.runs.iter().filter(|r| r.0 == lead.id).map(|r| &r.1).collect();
     assert!(matches!(runs[1], SessionMode::Resume { .. }), "same conversation: {runs:?}");
     drop(l);
+    core.shutdown().await;
+}
+
+/// Two requests at once. A message kept for a Lead that restarts goes out as soon as that Lead
+/// has exited, also when the exit lands while the other request's Lead is still starting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_kept_for_a_restarting_lead_goes_out_when_it_has_exited() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let hold = Arc::new(AtomicBool::new(true));
+    let fake = FakeSpawner { log: log.clone(), lead: echo_lead(hold.clone()), worker: echo_lead(hold.clone()) };
+    // Leads take a second to stop, and come up only when the test says so.
+    let up = Arc::new(tokio::sync::Notify::new());
+    let core = start(dir.path(), Slow(SlowStop(fake, Duration::from_secs(1)), Role::Lead, up.clone())).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    up.notify_one();
+    core.send_chat("lead", "one").await.unwrap();
+    let lead = wait_for("the Lead to be idle again", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        let answered = chats(&s, "lead").iter().any(|c| c.text == "ok: one");
+        lead_of(&s, "lead").filter(|l| answered && l.status == AgentStatus::Idle).cloned()
+    })
+    .await;
+
+    // A new model: the next message restarts the idle Lead and is kept until it has exited.
+    let settings = Settings { lead_model: Some("opus:high".into()), ..core.snapshot().await.unwrap().settings };
+    core.update_settings(settings).await.unwrap();
+    core.send_chat("lead", "two").await.unwrap();
+    // At once, a second request: its Lead is still starting when the first one exits.
+    let other = tokio::spawn({
+        let core = core.clone();
+        async move { core.send_chat("lead:a", "hold on").await }
+    });
+    wait_for("the second Lead's start", 10, async || {
+        (log.lock().unwrap().spawns.iter().filter(|s| s.0 == Role::Lead).count() == 2).then_some(())
+    })
+    .await;
+    wait_for("the first Lead to exit", 10, async || {
+        core.snapshot().await.unwrap().agents.iter().any(|a| a.id == lead.id && a.run_id.is_none()).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await; // its exit has been handled
+    up.notify_one(); // the second Lead is up, and holds its turn
+    other.await.unwrap().unwrap();
+    up.notify_one(); // the first Lead may come back
+    wait_for("\"ok: two\" while the other Lead still works", 5, async || {
+        chats(&core.snapshot().await.unwrap(), "lead").iter().any(|c| c.text == "ok: two").then_some(())
+    })
+    .await;
+    hold.store(false, Ordering::SeqCst);
+    wait_chat(&core, "lead:a", "ok: hold on").await;
+    let models: Vec<Option<String>> = log.lock().unwrap().models.iter().filter(|m| m.0 == lead.id).map(|m| m.1.clone()).collect();
+    assert_eq!(models, [None, Some("opus:high".to_string())], "restarted once, on the new model");
     core.shutdown().await;
 }
 
