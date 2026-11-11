@@ -576,7 +576,8 @@ export class Story {
       sim.cancelled.delete(act.id);
       const t = sim.tasks.get(task.id)!;
       const plan = t.plan_id ? sim.plans.get(t.plan_id) : null;
-      if (t.status !== 'done' && t.status !== 'cancelled' && plan?.status !== 'cancelled')
+      // Only a task still in flight: one you stopped on the board (or retried since) keeps its status.
+      if (['running', 'verifying', 'merging'].includes(t.status) && plan?.status !== 'cancelled')
         sim.patchTask(t.id, { status: 'blocked', status_reason: 'Interrupted by you. Move it to Ready to retry.' });
       if (act.a.status !== 'offline') act.status('idle');
     } finally {
@@ -586,18 +587,26 @@ export class Story {
 
   private async gate(act: Actor, task: Task, o: { files: string[]; message: string; verify: string; tail: string; summary: string; integration: boolean }) {
     const sim = this.sim;
+    // Like the core: the gate ends when the task was stopped or cancelled meanwhile.
+    const live = () => {
+      const s = sim.tasks.get(task.id)!.status;
+      if (s !== 'verifying' && s !== 'merging') throw new Cancelled();
+    };
     act.status('done', 'done');
     sim.patchTask(task.id, { status: 'verifying', status_reason: `Committing and running ${o.verify}` });
     await sim.sleep(900);
+    live();
     const commit = sha();
     sim.emit({ type: 'committed', sha: commit, files: o.files, message: o.message }, { agent: act.id, task: task.id });
     sim.committedKeys.add(this.fileKey(task));
     await sim.sleep(1700);
+    live();
     sim.emit({ type: 'verified', command: o.verify, ok: true, exit_code: 0, tail: o.tail }, { agent: act.id, task: task.id });
     if (o.integration) {
       const branch = (task.plan_id && sim.plans.get(task.plan_id)?.integration_branch) || 'codly/integration';
       sim.patchTask(task.id, { status: 'merging', status_reason: 'In the merge queue' });
       await sim.sleep(1100);
+      live();
       sim.decision('merge', 'rule', `${task.key} merged into ${branch} — merge-tree pre-check clean`, { plan_id: task.plan_id, task: task.key, sha: commit }, { agent: act.id, task: task.id });
       sim.emit({ type: 'merged', sha: sha(), branch }, { agent: act.id, task: task.id });
     }
@@ -1041,18 +1050,25 @@ export class Story {
     if (!t) throw new Error('Unknown task');
     const from = t.status;
     const retry = ['blocked', 'failed', 'cancelled'].includes(from);
+    // Like the core. Stop: a task in flight goes Blocked and Retry resumes it; not while it
+    // merges (it is done in a moment). Cancel: from anything but done and cancelled.
+    const stop = status === 'blocked' && ['running', 'verifying', 'reviewing', 'changes_requested'].includes(from);
+    const cancel = status === 'cancelled' && from !== 'cancelled' && from !== 'done';
     const legal =
-      (from === 'pending' && (status === 'ready' || status === 'cancelled')) ||
-      (from === 'ready' && (status === 'pending' || status === 'cancelled')) ||
-      (retry && (status === 'ready' || status === 'pending'));
+      (from === 'pending' && status === 'ready') ||
+      (from === 'ready' && status === 'pending') ||
+      (retry && (status === 'ready' || status === 'pending')) ||
+      stop || cancel;
     if (!legal) throw new Error('Running, review and done are Codly’s stages — tasks move there on their own.');
     const plan = t.plan_id ? sim.plans.get(t.plan_id) : null;
     if (plan && plan.status === 'awaiting_approval' && status === 'ready') throw new Error('Run the plan first — its tasks start together.');
     const unmet = t.depends_on.filter((d) => sim.tasks.get(d)?.status !== 'done');
     const reason = status === 'ready'
       ? unmet.length ? `Waiting on ${unmet.map((d) => sim.tasks.get(d)?.key).join(', ')}` : t.assignee ? 'Starting…' : 'Ready: a free agent picks it up'
-      : status === 'cancelled' ? 'Cancelled by you' : null;
+      : status === 'cancelled' ? 'Cancelled by you' : stop ? 'stopped by you; Retry to resume' : null;
     const next = sim.patchTask(id, { status, status_reason: reason });
+    // After the status: the worker that holds the task lets go at its next step.
+    if ((stop || cancel) && t.assignee && this.running.has(t.assignee) && sim.agents.get(t.assignee)?.task_id === id) sim.cancelled.add(t.assignee);
     sim.decision('move', 'human', `You moved ${t.key} to ${status}`, { task: t.key, from, to: status }, { task: id });
     if (status === 'ready' && !unmet.length) void this.autoStart(next);
     return next;
@@ -1079,6 +1095,8 @@ export class Story {
   private async autoStart(t: Task) {
     const sim = this.sim;
     await sim.sleep(700);
+    // A task you stopped, then retried: its worker lets go of the old run at its next step.
+    while (t.assignee && sim.cancelled.has(t.assignee) && this.running.has(t.assignee)) await sim.sleep(300);
     const task = sim.tasks.get(t.id)!;
     if (task.status !== 'ready' && task.status !== 'pending') return;
     const spec = task.plan_id ? this.specOfPlan.get(task.plan_id) : undefined;
