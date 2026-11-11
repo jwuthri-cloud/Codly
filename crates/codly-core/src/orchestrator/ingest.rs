@@ -224,7 +224,11 @@ impl Inner {
             }
             match kind {
                 EventKind::SessionStarted { session_id, model, .. } => {
-                    if let Some(s) = session_id {
+                    // A 1:1 agent's session is its conversation with you: a task it takes (a
+                    // Worker run, in the task's worktree) has its own, kept on the run.
+                    if let Some(s) = session_id
+                        && (a.role != Role::Solo || ctx.role == Role::Solo)
+                    {
                         a.session_id = Some(s.clone());
                     }
                     // A member keeps its configured model (with its effort suffix) for the next run.
@@ -396,6 +400,8 @@ impl Inner {
 
     /// A worker hit its usage limit mid-task: no gate on half-done work. Stop it and put the
     /// task back to Ready, unassigned, so the next free provider continues in the same worktree.
+    /// A team member keeps its task: the work is in its own worktree, on the task's branch,
+    /// which no other worktree can check out. The task waits for the member's quota.
     fn hand_off(self: &Arc<Self>, ctx: &Ctx) {
         let task_id = ctx.task_id.clone().unwrap_or_default();
         let Ok(t) = self.task(&task_id) else { return };
@@ -404,14 +410,16 @@ impl Inner {
         }
         self.stop_run(&ctx.agent_id); // stopping: on_exit will not call task_run_lost
         let provider = self.provider_of(&ctx.agent_id).map_or("The provider", |p| p.label());
-        let reason = format!(
-            "{provider} hit its usage limit; handing off to the next free provider. Continue from the work already in this worktree."
-        );
+        let member = self.agent(&ctx.agent_id).is_ok_and(|a| a.member.is_some());
+        let next = if member { "waiting for its quota" } else { "handing off to the next free provider" };
+        let reason = format!("{provider} hit its usage limit; {next}. Continue from the work already in this worktree.");
         // status_reason reaches a resumed session; a fresh one (another provider) gets this.
         lock(&self.pending_feedback).entry(task_id.clone()).or_insert_with(|| format!("[Codly] {reason}"));
-        let _ = self.update_task(&task_id, |t| {
+        let moved = self.update_task(&task_id, |t| {
             t.status = TaskStatus::Ready;
-            t.assignee = None;
+            if !member {
+                t.assignee = None;
+            }
             t.status_reason = Some(reason.clone());
             Ok(())
         });
@@ -420,6 +428,9 @@ impl Inner {
                 a.task_id = None;
             }
         });
+        if moved.is_err() {
+            return; // stopped or cancelled by you meanwhile: that stands, and nothing is retried
+        }
         let ws = self.store.task_workspace(&task_id).ok().flatten();
         let _ = self.decide(ws.as_deref(), Some(&task_id), "retry", reason, json!({ "plan_id": t.plan_id, "provider": provider }));
         self.kick();
@@ -609,7 +620,7 @@ impl Inner {
                 } else {
                     format!("the worker exited unexpectedly ({code}); restarting it")
                 };
-                let _ = self.update_task(&task_id, |t| {
+                let moved = self.update_task(&task_id, |t| {
                     t.status = if give_up { TaskStatus::Blocked } else { TaskStatus::Ready };
                     t.status_reason = Some(reason.clone());
                     Ok(())
@@ -619,6 +630,9 @@ impl Inner {
                         a.task_id = None;
                     }
                 });
+                if moved.is_err() {
+                    return; // stopped or cancelled by you meanwhile: that stands, and nothing is retried
+                }
                 let _ = self.decide(
                     ws.as_deref(),
                     Some(&task_id),

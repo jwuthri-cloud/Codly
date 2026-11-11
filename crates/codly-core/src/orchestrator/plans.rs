@@ -370,13 +370,15 @@ impl Inner {
                 spaces.push(ws);
             }
         }
-        {
-            // The other offices' indexes are dropped. `open_workspace` sets the office before it
-            // loads its index, so under the `ws` lock the office open right now keeps its own.
+        // The other offices' indexes go. `open_workspace` sets the office before it loads its
+        // index, so under the `ws` lock the office open right now keeps its own. They are
+        // dropped (each closes two SQLite connections) once both locks are released.
+        let gone: Vec<_> = {
             let open = read(&self.ws);
             let kept = |id: &Id| open.as_ref().is_some_and(|w| &w.id == id) || spaces.iter().any(|w| &w.id == id);
-            write(&self.index).retain(|id, _| kept(id));
-        }
+            write(&self.index).extract_if(|id, _| !kept(id)).collect()
+        };
+        drop(gone);
         for ws in &spaces {
             if let Err(e) = self.schedule_office(ws, &spaces).await {
                 tracing::warn!("scheduling {}: {e}", ws.name);
@@ -387,10 +389,14 @@ impl Inner {
 
     async fn schedule_office(self: &Arc<Self>, ws: &Workspace, spaces: &[Workspace]) -> Result<()> {
         let mut elsewhere = vec![];
+        let busy = self.busy_agents();
         for o in spaces.iter().filter(|o| o.id != ws.id) {
             let agents = self.store.agents(&o.id)?;
-            for t in self.store.tasks(&o.id)?.into_iter().filter(|t| scheduler::is_active(t.status)) {
-                elsewhere.extend(agents.iter().find(|a| t.assignee.as_ref() == Some(&a.id)).cloned());
+            for t in self.store.tasks(&o.id)? {
+                let worker = agents.iter().find(|a| t.assignee.as_ref() == Some(&a.id));
+                if scheduler::is_active(t.status) || scheduler::held(&t, worker, &busy) {
+                    elsewhere.extend(worker.cloned());
+                }
             }
         }
         self.sync_team(&ws)?;

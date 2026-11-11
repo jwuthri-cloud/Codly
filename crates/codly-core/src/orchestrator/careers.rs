@@ -241,6 +241,9 @@ impl Inner {
         if a.member.is_some() {
             bail!("{} is on the team: remove them in Settings → Team", a.name);
         }
+        // No scheduling pass from this check until it is gone: while its idle chat shuts down
+        // (up to 5 s) it looks free, and a pass would hand it a task.
+        let _g = self.sched_lock.lock().await;
         let open = |t: &Task| !matches!(t.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled);
         let held = self.store.tasks(&ws.id)?.into_iter().find(|t| a.task_id.as_ref() == Some(&t.id) || (t.assignee.as_ref() == Some(&a.id) && open(t)));
         if a.task_id.is_some() || held.is_some() {
@@ -278,7 +281,20 @@ impl Inner {
 
     /// Your other offices (repos opened before, still on disk), for the Transfer picker.
     pub(super) fn offices(&self, here: Option<&str>) -> Result<Vec<Office>> {
-        Ok(self.store.offices()?.into_iter().filter(|o| Some(o.id.as_str()) != here && Path::new(&o.repo_path).is_dir()).collect())
+        let mut all = self.store.offices()?;
+        // Blocking questions still open wait for you too.
+        // ponytail: `blockers::list` reads every `blocker_changed` event, and `event` has no index
+        // on `type`: a scan of the log on each call (the office tabs poll every 5 s). Add
+        // `event(type, id)` on main after this PR; it needs a migration.
+        for b in self.store.with(|db| crate::blockers::list(db, None))? {
+            if b.status == crate::blockers::BlockerStatus::Open
+                && b.severity == crate::blockers::BlockerSeverity::Blocking
+                && let Some(o) = all.iter_mut().find(|o| Some(&o.id) == b.workspace_id.as_ref())
+            {
+                o.needs_you += 1;
+            }
+        }
+        Ok(all.into_iter().filter(|o| Some(o.id.as_str()) != here && Path::new(&o.repo_path).is_dir()).collect())
     }
 
     /// Transfer an agent to another of your offices (PROGRESSION.md §4): its row moves there with
@@ -303,6 +319,9 @@ impl Inner {
         if !Path::new(&dest.repo_path).is_dir() {
             bail!("{} is gone from disk", dest.repo_path);
         }
+        // No scheduling pass from this check until it has moved: while its idle chat shuts down
+        // (up to 5 s) it looks free, and a pass would hand it a task of the office it leaves.
+        let _g = self.sched_lock.lock().await;
         let open = |t: &Task| !matches!(t.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled);
         let held = self.store.tasks(&from.id)?.into_iter().find(|t| a.task_id.as_ref() == Some(&t.id) || (t.assignee.as_ref() == Some(&a.id) && open(t)));
         if a.task_id.is_some() || held.is_some() {

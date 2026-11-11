@@ -376,7 +376,9 @@ impl Store {
     }
 
     /// Every workspace with its crew (agents on the team, the Lead aside), its tasks in flight
-    /// and what waits for you there, most recently opened first.
+    /// and what waits for you there, most recently opened first. `needs_you` counts approvals
+    /// and plans here; the open blocking questions are added by the one caller that serves the
+    /// field (`Inner::offices`): they cost a scan of the event log, too much for every caller.
     pub fn offices(&self) -> Result<Vec<Office>> {
         let conn = self.conn();
         let sql = format!(
@@ -392,18 +394,6 @@ impl Store {
             Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)?, working: r.get(4)?, needs_you: r.get(5)?, home: vec![] })
         })?;
         let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        // Blocking questions still open wait for you too.
-        // ponytail: `blockers::list` reads every `blocker_changed` event, and `event` has no index
-        // on `type`: a scan of the log on each call (the office tabs poll every 5 s). Add
-        // `event(type, id)` on main after this PR; it needs a migration.
-        for b in crate::blockers::list(&conn, None)? {
-            if b.status == crate::blockers::BlockerStatus::Open
-                && b.severity == crate::blockers::BlockerSeverity::Blocking
-                && let Some(o) = out.iter_mut().find(|o| Some(&o.id) == b.workspace_id.as_ref())
-            {
-                o.needs_you += 1;
-            }
-        }
         // Who is at home now, in each (the map walks them down the street).
         let mut st = conn.prepare_cached(
             "SELECT workspace_id, json FROM agent WHERE archived = 0 AND role != 'lead' AND json_extract(json, '$.away_until') > ?1 ORDER BY created_at, id",

@@ -134,7 +134,9 @@ impl Inner {
             ended_at: None,
         };
         self.store.insert_run(&run).map_err(|e| self.spawn_failed(&req.agent.id, &run_id, &token, e))?;
-        let worktree = matches!(req.role, Role::Worker | Role::Solo).then(|| req.cwd.to_string_lossy().into_owned());
+        // A 1:1 agent keeps its own worktree on its row while it runs a task in the task's.
+        let own = req.agent.role != Role::Solo || req.role == Role::Solo;
+        let worktree = (own && matches!(req.role, Role::Worker | Role::Solo)).then(|| req.cwd.to_string_lossy().into_owned());
         self.update_agent(&req.agent.id, |a| {
             a.status = AgentStatus::Starting;
             a.run_id = Some(run_id.clone());

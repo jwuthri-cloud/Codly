@@ -1719,6 +1719,67 @@ async fn a_worker_at_its_usage_limit_hands_the_task_to_the_next_provider() {
     core.shutdown().await;
 }
 
+/// A team member's half-done work is in its own worktree, on the task's branch: nobody else
+/// can take that branch over, so the task waits for the member's quota.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_at_its_limit_keeps_its_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let lead: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.ends_with("the quota is back") {
+                // A fresh reading for the account: under its limit again.
+                return turn.emit(EventKind::RateLimit { window: "limit".into(), used_fraction: Some(0.1), resets_at: None, status: Some("allowed".into()) });
+            }
+            if turn.prompt.contains("[Codly]") {
+                return;
+            }
+            let plan = json!({ "summary": "Add a hello file", "tasks": [{
+                "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt containing hello", "assignee": "Ana",
+                "acceptance_criteria": ["hello.txt contains hello"], "write_scope": ["hello.txt"], "depends_on": [], "verify": ["grep -q hello hello.txt"],
+            }] });
+            let r = turn.tool("codly_submit_plan", plan).await;
+            assert_eq!(r["ok"], true, "{r}");
+        })
+    });
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if !turn.prompt.contains("hit its usage limit") {
+                // Half the work, then the usage limit (no RateLimit event, like Codex errors).
+                turn.write("hello.txt", "hel");
+                return turn.emit(EventKind::StatusChanged { status: AgentStatus::RateLimited });
+            }
+            assert_eq!(std::fs::read_to_string(turn.spec.cwd.join("hello.txt")).unwrap(), "hel", "same worktree");
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Finished the greeting." })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    let ana = TeamMember { name: "Ana".into(), role: "Backend dev".into(), ..Default::default() };
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, team: vec![ana], ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the task to wait for quota", 30, async || {
+        task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Ready && t.status_reason.as_deref().is_some_and(|r| r.contains("parked")))
+    })
+    .await;
+    let ana = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.member.is_some()).expect("Ana is on the board");
+    assert_eq!(task.assignee.as_deref(), Some(ana.id.as_str()), "the task stays with the member: {:?}", task.status_reason);
+    core.send_chat("lead", "the quota is back").await.unwrap();
+    let (task, _) = wait_for("the task to end", 30, async || {
+        task_status(&core).await.filter(|(t, _)| matches!(t.status, TaskStatus::Done | TaskStatus::Blocked | TaskStatus::Failed))
+    })
+    .await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    let runs: Vec<SessionMode> = log.lock().unwrap().runs.iter().filter(|r| r.0 == ana.id).map(|r| r.1.clone()).collect();
+    let SessionMode::New { session_id: Some(first) } = &runs[0] else { panic!("{runs:?}") };
+    assert!(runs.len() == 2 && matches!(&runs[1], SessionMode::Resume { session_id } if session_id == first), "it continues its session: {runs:?}");
+    let events = core.events(None, None, 3000).await.unwrap();
+    assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("could not start the worker"))));
+    core.shutdown().await;
+}
+
 /// The Tauri shell awaits these inside `#[tauri::command] async fn`s, which need `Send`
 /// futures: this only compiles if every Core future is `Send`.
 #[allow(dead_code, unused_must_use, clippy::let_underscore_future)]
@@ -2917,6 +2978,47 @@ async fn stopping_a_solo_on_a_task_blocks_it() {
     assert!(task.status_reason.as_deref().is_some_and(|r| r.starts_with("stopped by you")), "{:?}", task.status_reason);
     let events = core.events(None, None, 2000).await.unwrap();
     assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Merged { .. })), "nothing merged");
+    core.shutdown().await;
+}
+
+/// A 1:1 agent on staff that did a task talks to you in its own conversation afterwards, not in
+/// the task's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_solo_keeps_its_own_session_after_a_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.starts_with("[User]") {
+                return turn.say("hi");
+            }
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created it." })).await;
+        })
+    });
+    let spawner = || FakeSpawner { log: log.clone(), lead: planning_lead(), worker: worker.clone() };
+    let core = start(dir.path(), spawner()).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let ivo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let thread = format!("agent:{}", ivo.id);
+    // Its own conversation, from before a restart (while its chat runs, a 1:1 agent takes no task).
+    core.send_chat(&thread, "hello").await.unwrap();
+    wait_chat(&core, &thread, "hi").await;
+    core.shutdown().await;
+    drop(core);
+
+    let core = start(dir.path(), spawner()).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the task done", 30, async || task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Done)).await;
+    assert_eq!(task.assignee.as_deref(), Some(ivo.id.as_str()), "the free agent on staff took it");
+    core.send_chat(&thread, "hello again").await.unwrap();
+    let runs: Vec<SessionMode> = log.lock().unwrap().runs.iter().filter(|r| r.0 == ivo.id).map(|r| r.1.clone()).collect();
+    let SessionMode::New { session_id: Some(own) } = &runs[0] else { panic!("{runs:?}") };
+    assert!(matches!(&runs[1], SessionMode::New { .. }), "the task ran in a session of its own: {runs:?}");
+    assert!(runs.len() == 3 && matches!(&runs[2], SessionMode::Resume { session_id } if session_id == own), "back in its own conversation: {runs:?}");
     core.shutdown().await;
 }
 
