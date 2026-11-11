@@ -1,5 +1,6 @@
 // User intents → core commands. Every action reports failure as a toast that says how to get
 // out, and applies command results the core does not echo as events (workspace, settings).
+import { SvelteSet } from 'svelte/reactivity';
 import { api, isTauriApp } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { AccountConfig } from '../gen/AccountConfig';
@@ -49,6 +50,7 @@ export async function openWorkspace(path?: string) {
   await store.resync();
   if (!store.workspace) store.setWorkspace(ws);
   const [memories, triples] = await Promise.all([api.memories().catch(() => null), api.triples().catch(() => null)]);
+  if (!store.isOpen(ws.id)) return; // you switched again meanwhile: that switch owns the screen
   if (memories) store.setMemories(memories);
   if (triples) store.setTriples(triples);
   ui.selection = null;
@@ -78,18 +80,21 @@ export async function setRequestPrefs(thread: string, patch: Partial<RequestPref
   const prev = store.requestPrefs[thread] ?? { mode: null, approval_mode: null, model: null, provider: null };
   const next = { ...prev, ...patch };
   const seq = (prefsSeq[thread] = (prefsSeq[thread] ?? 0) + 1);
+  const ws = store.workspace?.id;
   store.setRequestPrefs(thread, next);
   const saved = await attempt('change the request', () => api.setRequestPrefs(thread, next));
-  // Picks in a row (the menu stays open): an older answer never undoes a newer pick.
-  if (seq === prefsSeq[thread]) store.setRequestPrefs(thread, saved ?? prev);
+  // Picks in a row (the menu stays open): an older answer never undoes a newer pick. Thread
+  // names repeat across offices: an answer for the office you left is not this one's.
+  if (seq === prefsSeq[thread] && store.isOpen(ws)) store.setRequestPrefs(thread, saved ?? prev);
 }
 
 /** Save the open repo's team changes; shown at once, reverted if the core refuses them. */
 export async function saveWorkspaceTeam(next: WorkspaceTeam) {
   const prev = store.workspaceTeam;
+  const ws = store.workspace?.id;
   store.setWorkspaceTeam(next);
   const saved = await attempt('save the team', () => api.setWorkspaceTeam(next));
-  store.setWorkspaceTeam(saved ?? prev);
+  if (store.isOpen(ws)) store.setWorkspaceTeam(saved ?? prev);
 }
 
 /** Re-read every CLI's sign-ins and quota. `probe` re-checks who is signed in (a few seconds). */
@@ -148,8 +153,20 @@ export async function sendQueuedNow(agentId: string) {
   await attempt('interrupt the agent', () => api.interruptAgent(agentId), 'Your message stays queued and runs when the turn ends.');
 }
 
+// Starting a plan can take seconds (integration worktree, dependency install) and has four ways
+// in (plan card, Plan room, ⌘↵, palette): a second press meanwhile is dropped, not an error.
+// Reactive, so a Run plan button says "Starting…" whichever way the plan was started.
+const starting = new SvelteSet<string>();
+export const isStarting = (planId: string) => starting.has(planId);
+
 export async function runPlan(planId: string) {
-  await attempt('run the plan', () => api.runPlan(planId));
+  if (starting.has(planId)) return;
+  starting.add(planId);
+  try {
+    await attempt('run the plan', () => api.runPlan(planId));
+  } finally {
+    starting.delete(planId);
+  }
 }
 
 export async function cancelPlan(planId: string) {
@@ -181,8 +198,9 @@ export async function mergePlan(planId: string) {
     store.markPlanMerged(planId, sha);
     toastsUpdate(id, { kind: 'success', title: `Merged into ${target}`, body: `${plan?.summary ?? 'Plan'} · ${shortSha(sha)}` });
   } catch (e) {
-    // The Lead that planned it explains in the request's chat, instead of a bare error.
-    const asked = !!plan && sendChat(plan.thread, `Merging “${plan.summary}” into ${target} failed: ${msg(e)}\n\nWhy, and what's the safest way to get it merged?`);
+    // The Lead that planned it explains in the request's chat, instead of a bare error. Only in
+    // the plan's own office: a merge can take minutes, and the chat goes to the open one.
+    const asked = !!plan && store.isOpen(plan.workspace_id) && sendChat(plan.thread, `Merging “${plan.summary}” into ${target} failed: ${msg(e)}\n\nWhy, and what's the safest way to get it merged?`);
     toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${target}`, body: asked ? `${msg(e)} — the Lead is looking into it in the chat.` : msg(e) });
   }
 }
@@ -193,41 +211,38 @@ export async function resolveApproval(approvalId: string, choice: ApprovalChoice
   );
 }
 
+// What a command answers belongs to the office it was sent from: after a switch it is dropped
+// here (that office's next snapshot has it), never added to the one you are looking at now.
+
 export async function moveTask(taskId: string, status: TaskStatus) {
+  const ws = store.workspace?.id;
   const t = await attempt(`move the task to ${TASK_STATUS_LABEL[status]}`, () => api.moveTask(taskId, status));
-  if (t) store.upsertTask(t);
+  if (t && store.isOpen(ws)) store.upsertTask(t);
 }
 
 export async function assignTask(taskId: string, agentId: string | null) {
+  const ws = store.workspace?.id;
   const t = await attempt('assign the task', () => api.assignTask(taskId, agentId));
-  if (t) store.upsertTask(t);
+  if (t && store.isOpen(ws)) store.upsertTask(t);
 }
 
 export async function createTask(title: string, goal = '') {
+  const ws = store.workspace?.id;
   const t = await attempt('create the task', () => api.createTask(title, goal || title));
-  if (t) {
+  if (t && store.isOpen(ws)) {
     store.upsertTask(t);
     ui.selectTask(t.id);
   }
   return t;
 }
 
-/** Returns whether the agent started, so the dialog that asked can close. */
-export async function hireAgent(provider: Provider, model: string | null = null, title: string | null = null): Promise<boolean> {
-  const a = await attempt(`start ${PROVIDER_LABEL[provider]}`, () => api.hireAgent(provider, model, title), 'Check that the CLI is installed and signed in.');
-  if (!a) return false;
-  store.upsertAgent(a);
-  ui.selectAgent(a.id);
-  toast({ kind: 'success', title: `${a.name} joined`, body: `${PROVIDER_LABEL[a.provider]} · 1:1 chat is ready` });
-  return true;
-}
-
 /** Returns whether the switch happened. The next message resumes the conversation on the new model. */
 export async function setAgentModel(agent: Agent, model: string | null): Promise<boolean> {
   const label = model ?? 'the default model';
+  const ws = store.workspace?.id;
   const a = await attempt(`switch ${agent.name} to ${label}`, () => api.setAgentModel(agent.id, model), 'Stop its current turn first, then try again.');
   if (!a) return false;
-  store.upsertAgent(a);
+  if (store.isOpen(ws)) store.upsertAgent(a);
   toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${label}` });
   return true;
 }
@@ -256,14 +271,20 @@ export async function giveModel(agent: Agent, model: string): Promise<boolean> {
 
 /** Save how an agent looks in the office (the look editor's picks in its `look_seed`). */
 export async function setAgentLook(agent: Agent, lookSeed: string): Promise<boolean> {
+  const ws = store.workspace?.id;
   const a = await attempt(`change ${agent.name}'s look`, () => api.setAgentLook(agent.id, lookSeed));
   if (!a) return false;
-  store.upsertAgent(a);
+  if (store.isOpen(ws)) store.upsertAgent(a);
   return true;
 }
 
-export async function interruptAgent(agentId: string) {
-  await attempt('interrupt the agent', () => api.interruptAgent(agentId));
+/** Whether the core took the interrupt (a button that says "Interrupting…" needs to know). */
+export async function interruptAgent(agentId: string): Promise<boolean> {
+  const ok = await attempt('interrupt the agent', async () => {
+    await api.interruptAgent(agentId);
+    return true;
+  });
+  return !!ok;
 }
 
 export async function stopAgent(agentId: string) {
@@ -279,8 +300,9 @@ export async function letGo(agentId: string) {
 }
 
 export async function addMemory(text: string, scope: MemoryScope, kind: MemoryKind, title: string | null = null, tags: string[] | null = null) {
+  const ws = store.workspace?.id;
   const m = await attempt('save the memory', () => api.addMemory(text, scope, kind, title, tags));
-  if (m) store.upsertMemory(m);
+  if (m && (!m.workspace_id || store.isOpen(ws))) store.upsertMemory(m); // a global memory is every office's
   return m;
 }
 

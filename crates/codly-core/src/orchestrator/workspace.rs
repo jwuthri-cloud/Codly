@@ -3,8 +3,8 @@
 //! into the user's branch.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
@@ -16,6 +16,9 @@ use crate::index::Index;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
 use crate::store;
+
+/// Answering an approval is read-check-write over the event log: one at a time.
+static RESOLVING: Mutex<()> = Mutex::new(());
 
 impl Inner {
     // ───────────── workspace ─────────────
@@ -62,8 +65,9 @@ impl Inner {
         ws.dirty = self.git.dirty(&repo, false).await.unwrap_or(false);
     }
 
+    /// Load an office's code index and bring it up to date, in the background. The scheduler
+    /// decides which ones stay loaded (`schedule_pass`).
     pub(super) fn open_index(self: &Arc<Self>, ws: &Workspace) {
-        *write(&self.index) = None;
         let repo = PathBuf::from(&ws.repo_path);
         let db = self.data("index").join(format!("{}.sqlite", ws.id));
         let me = self.clone();
@@ -73,10 +77,8 @@ impl Inner {
                 Ok(i) => Arc::new(i),
                 Err(e) => return tracing::warn!("{e}"),
             };
-            if me.workspace().map(|w| w.id) != Some(ws_id) {
-                return;
-            }
-            *write(&me.index) = Some(idx.clone());
+            // One index per office: opened again while it is loaded, the loaded one is refreshed.
+            let idx = write(&me.index).entry(ws_id).or_insert(idx).clone();
             match guard("code index", || idx.refresh()) {
                 Ok(n) => tracing::info!("indexed {n} files in {}", repo.display()),
                 Err(e) => tracing::warn!("index refresh failed: {e}"),
@@ -84,7 +86,7 @@ impl Inner {
         });
     }
 
-    /// `ws_id`: the asking agent's office (only the open one has its index loaded).
+    /// `ws_id`: the asking agent's office (None = the open one).
     pub(super) async fn search(&self, ws_id: Option<&str>, query: &str, k: usize) -> anyhow::Result<SearchResult> {
         let idx = self.index_of(ws_id).ok_or_else(|| anyhow!("the code index is not ready; use grep/rg instead"))?;
         let q = query.to_string();
@@ -191,25 +193,38 @@ impl Inner {
 
     pub(super) async fn stop_agent(&self, agent_id: &str) -> anyhow::Result<()> {
         let agent = self.agent(agent_id)?;
-        let stopped = self.stop_run(agent_id);
-        if let Some(task_id) = agent.task_id.as_deref()
-            && let Ok(t) = self.task(task_id)
-            && scheduler::is_active(t.status)
-            && agent.role == Role::Worker
-        {
-            self.update_task(task_id, |t| {
-                t.status = TaskStatus::Blocked;
-                t.status_reason = Some(format!("stopped by you; move it to Ready to resume with {}", agent.name));
+        // The task it holds, as its worker or its reviewer, whatever its own role (a 1:1 agent
+        // on staff takes tasks too). The row first: it has the task before a run exists.
+        let held = agent.task_id.clone().or_else(|| lock(&self.live).get(agent_id).and_then(|l| l.task_id.clone()));
+        if let Some(t) = held.and_then(|id| self.task(&id).ok()) {
+            let reason = if t.assignee.as_deref() == Some(agent_id) {
+                format!("stopped by you; move it to Ready to resume with {}", agent.name)
+            } else {
+                "review stopped by you; Retry to re-check".to_string()
+            };
+            // Checked in the write: a task that reached its merge meanwhile is left to finish.
+            let mut blocked = false;
+            self.update_task(&t.id, |t| {
+                blocked = scheduler::is_active(t.status) && t.status != TaskStatus::Merging;
+                if blocked {
+                    t.status = TaskStatus::Blocked;
+                    t.status_reason = Some(reason.clone());
+                }
                 Ok(())
             })?;
+            // After the status: a worker that is still starting re-checks it before its brief,
+            // and the turn the stop interrupts ends on a task that is no longer in review. Both
+            // its agents go: a worker left running would keep a Retry waiting for it.
+            if blocked {
+                self.release_task_agents(&t);
+            }
         }
+        let stopped = self.stop_run(agent_id);
         self.update_agent(agent_id, |a| {
             a.status = AgentStatus::Offline;
             a.activity = None;
             a.activity_label = None;
-            if a.role != Role::Reviewer {
-                a.task_id = None;
-            }
+            a.task_id = None;
         })?;
         if !stopped {
             tracing::debug!("stop_agent: {agent_id} had no live run");
@@ -261,6 +276,8 @@ impl Inner {
     // ───────────── approvals ─────────────
 
     pub(super) fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision, by: &str) -> anyhow::Result<()> {
+        // From the read to the event: of two answers at once, the agent gets the one on record.
+        let _g = lock(&RESOLVING);
         let a = self.store.approval(approval_id)?.ok_or_else(|| anyhow!("unknown approval {approval_id}"))?;
         if a.status != ApprovalStatus::Pending {
             bail!("that approval was already {}", store::enum_str(&a.status));
@@ -469,20 +486,77 @@ impl Inner {
 async fn child_groups() -> Vec<i32> {
     let me = std::process::id() as i32;
     let own = nix::unistd::getpgrp().as_raw();
+    let all = processes().await;
+    all.iter().filter(|p| p.ppid == me && p.pgid == p.pid && p.pgid > 1 && p.pgid != own).map(|p| p.pgid).collect()
+}
+
+/// One `ps` row. `started` is epoch ms, to the second (`ps` prints how long ago in whole
+/// seconds); None when that column could not be read.
+pub(super) struct Proc {
+    pid: i32,
+    ppid: i32,
+    pgid: i32,
+    started: Option<i64>,
+}
+
+/// Every process, from one `ps` call (none if `ps` fails or takes over a second).
+pub(super) async fn processes() -> Vec<Proc> {
     let ps = if Path::new("/bin/ps").exists() { "/bin/ps" } else { "ps" };
     let mut cmd = tokio::process::Command::new(ps);
-    cmd.args(["-A", "-o", "pid=,ppid=,pgid="]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    cmd.args(["-A", "-o", "pid=,ppid=,pgid=,etime="]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    // `ps` reads the clock once, as it starts: elapsed times count back from about here.
+    let now = now_ms();
     let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(1), cmd.output()).await else { return vec![] };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
+    parse_ps(&String::from_utf8_lossy(&out.stdout), now)
+}
+
+fn parse_ps(text: &str, now: i64) -> Vec<Proc> {
+    text.lines()
         .filter_map(|line| {
-            let v: Vec<i32> = line.split_whitespace().filter_map(|x| x.parse().ok()).collect();
-            match v.as_slice() {
-                &[pid, ppid, pgid] if ppid == me && pgid == pid && pgid > 1 && pgid != own => Some(pgid),
-                _ => None,
-            }
+            let mut cols = line.split_whitespace();
+            let mut id = || cols.next()?.parse::<i32>().ok();
+            let (pid, ppid, pgid) = (id()?, id()?, id()?);
+            Some(Proc { pid, ppid, pgid, started: cols.next().and_then(etime_secs).map(|s| now - s * 1000) })
         })
         .collect()
+}
+
+/// `ps` etime, `[[dd-]hh:]mm:ss`, in seconds.
+fn etime_secs(etime: &str) -> Option<i64> {
+    let (days, clock) = match etime.split_once('-') {
+        Some((d, clock)) => (d.parse::<i64>().ok()?, clock),
+        None => (0, etime),
+    };
+    let parts: Vec<i64> = clock.split(':').map(|p| p.parse().ok()).collect::<Option<_>>()?;
+    match parts.as_slice() {
+        &[m, s] if days == 0 => Some(m * 60 + s),
+        &[h, m, s] => Some(((days * 24 + h) * 60 + m) * 60 + s),
+        _ => None,
+    }
+}
+
+/// Of the recorded groups (`proc::recorded_group`: pgid, start in ms), those a crashed Codly
+/// left running. All of these must hold, or the group is not touched:
+/// - its leader is alive and still leads it;
+/// - the leader's parent is pid 1, so the Codly that started it is gone (the agents of a
+///   second, running Codly have that Codly as their parent);
+/// - the leader started when the record says, within etime's whole seconds (a reused pid, and
+///   anything after a reboot, started later).
+///
+/// ponytail: a group whose leader already exited is left alone, and so is an orphan adopted
+/// by a subreaper other than pid 1 (Linux user sessions). Covering those means recording each
+/// member's pid and start time, not loosening these checks.
+pub(super) fn orphans(snapshot: &[Proc], wanted: &[(i32, i64)]) -> Vec<i32> {
+    let mut found: Vec<i32> = Vec::new();
+    for &(pgid, started) in wanted {
+        let orphaned = snapshot
+            .iter()
+            .any(|p| p.pid == pgid && p.pgid == pgid && p.ppid == 1 && pgid > 1 && p.started.is_some_and(|s| (s - started).abs() <= 2000));
+        if orphaned && !found.contains(&pgid) {
+            found.push(pgid);
+        }
+    }
+    found
 }
 
 /// "a.rs, b.rs, c.rs and 9 more".
@@ -528,5 +602,45 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pgid), None).is_err(), "the background sleep is gone too");
         let _ = ours.kill().await;
+    }
+
+    /// Crash recovery kills a recorded group only when its leader is certainly the process
+    /// Codly started and no running Codly owns it. Synthetic `ps` rows: nothing is signalled.
+    #[test]
+    fn only_orphaned_leaders_with_the_recorded_start_match() {
+        let now = 1_800_000_000_000;
+        let ago = |secs: i64| now - secs * 1000;
+        // pid, ppid, pgid, etime
+        let snapshot = parse_ps(
+            "100   1 100       00:30\n\
+             101 100 100       00:29\n\
+             200 777 200       00:30\n\
+             300   1 300    01:00:00\n\
+             400   1 399       00:30\n\
+             500   1 500 02-03:04:05\n\
+             600   1 600           -\n\
+             0     1   0       00:30\n",
+            now,
+        );
+        assert_eq!(snapshot.len(), 8);
+        let one = |pgid: i32, started: i64| orphans(&snapshot, &[(pgid, started)]);
+
+        // launchd adopted the leader, and it started when the record says (to etime's second)
+        assert_eq!(one(100, ago(30) + 400), [100]);
+        assert_eq!(one(100, ago(32)), [100]);
+        assert_eq!(one(300, ago(3600)), [300], "hh:mm:ss");
+        assert_eq!(one(500, ago(((2 * 24 + 3) * 60 + 4) * 60 + 5)), [500], "dd-hh:mm:ss");
+
+        assert!(one(100, ago(33)).is_empty(), "3 s off is another process");
+        assert!(one(100, ago(3600)).is_empty(), "the pid was reused since");
+        assert!(one(200, ago(30)).is_empty(), "its parent lives: a second Codly's agent");
+        assert!(one(399, ago(30)).is_empty(), "the leader is gone");
+        assert!(one(400, ago(30)).is_empty(), "not a group leader");
+        assert!(one(600, ago(30)).is_empty(), "no start time to compare");
+        assert!(one(0, ago(30)).is_empty(), "never our own group");
+
+        // Codex runs share one server: its group comes once.
+        let wanted = [(100, ago(30)), (200, ago(30)), (500, ago(183_845)), (100, ago(30))];
+        assert_eq!(orphans(&snapshot, &wanted), [100, 500]);
     }
 }

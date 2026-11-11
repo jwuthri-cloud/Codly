@@ -32,6 +32,9 @@ struct Ctx {
     role: Role,
     task_id: Option<Id>,
     ws: Option<Id>,
+    /// Not live, and its row says `failed`: a start Codly gave up on (`spawn_failed`), whose CLI
+    /// may still come up and exit. The other writer of `failed` is `on_exit`, at a run's last event.
+    dead: bool,
 }
 
 impl Inner {
@@ -43,6 +46,7 @@ impl Inner {
                 role: l.role,
                 task_id: l.task_id.clone(),
                 ws: l.workspace_id.clone(),
+                dead: false,
             };
         }
         // Not (or no longer) live: the run row is written before the spawn, so it exists.
@@ -51,6 +55,7 @@ impl Inner {
             agent_id: agent_id.into(),
             run_id: run_id.into(),
             role: run.as_ref().map_or(Role::Worker, |r| r.role),
+            dead: run.as_ref().is_some_and(|r| r.status == "failed"),
             task_id: run.and_then(|r| r.task_id),
             ws: self.store.agent_workspace(agent_id).ok().flatten(),
         }
@@ -69,11 +74,18 @@ impl Inner {
             let _ = self.bus.send(r);
             return;
         }
+        // Only what is on record is shown (as `emit` does): a row the store refused would be a card
+        // nobody can answer, gone at the next resync. The run's bookkeeping below still follows it.
         match self.store.append_event(ctx.ws.as_deref(), &r) {
-            Ok(id) => r.id = id,
+            Ok(id) => {
+                r.id = id;
+                self.publish(ctx.ws.as_deref(), &r);
+            }
             Err(e) => tracing::warn!("event not persisted ({}): {e}", r.kind.type_name()),
         }
-        self.publish(ctx.ws.as_deref(), &r);
+        if ctx.dead {
+            return; // on record, and nothing else: the agent and the row keep what the failure wrote
+        }
         self.track_live(&ctx, &r.kind);
         self.breaker_observe(&ctx.agent_id, &r.kind);
         match &r.kind {
@@ -212,7 +224,11 @@ impl Inner {
             }
             match kind {
                 EventKind::SessionStarted { session_id, model, .. } => {
-                    if let Some(s) = session_id {
+                    // A 1:1 agent's session is its conversation with you: a task it takes (a
+                    // Worker run, in the task's worktree) has its own, kept on the run.
+                    if let Some(s) = session_id
+                        && (a.role != Role::Solo || ctx.role == Role::Solo)
+                    {
                         a.session_id = Some(s.clone());
                     }
                     // A member keeps its configured model (with its effort suffix) for the next run.
@@ -384,6 +400,8 @@ impl Inner {
 
     /// A worker hit its usage limit mid-task: no gate on half-done work. Stop it and put the
     /// task back to Ready, unassigned, so the next free provider continues in the same worktree.
+    /// A team member keeps its task: the work is in its own worktree, on the task's branch,
+    /// which no other worktree can check out. The task waits for the member's quota.
     fn hand_off(self: &Arc<Self>, ctx: &Ctx) {
         let task_id = ctx.task_id.clone().unwrap_or_default();
         let Ok(t) = self.task(&task_id) else { return };
@@ -392,14 +410,16 @@ impl Inner {
         }
         self.stop_run(&ctx.agent_id); // stopping: on_exit will not call task_run_lost
         let provider = self.provider_of(&ctx.agent_id).map_or("The provider", |p| p.label());
-        let reason = format!(
-            "{provider} hit its usage limit; handing off to the next free provider. Continue from the work already in this worktree."
-        );
+        let member = self.agent(&ctx.agent_id).is_ok_and(|a| a.member.is_some());
+        let next = if member { "waiting for its quota" } else { "handing off to the next free provider" };
+        let reason = format!("{provider} hit its usage limit; {next}. Continue from the work already in this worktree.");
         // status_reason reaches a resumed session; a fresh one (another provider) gets this.
         lock(&self.pending_feedback).entry(task_id.clone()).or_insert_with(|| format!("[Codly] {reason}"));
-        let _ = self.update_task(&task_id, |t| {
+        let moved = self.update_task(&task_id, |t| {
             t.status = TaskStatus::Ready;
-            t.assignee = None;
+            if !member {
+                t.assignee = None;
+            }
             t.status_reason = Some(reason.clone());
             Ok(())
         });
@@ -408,6 +428,9 @@ impl Inner {
                 a.task_id = None;
             }
         });
+        if moved.is_err() {
+            return; // stopped or cancelled by you meanwhile: that stands, and nothing is retried
+        }
         let ws = self.store.task_workspace(&task_id).ok().flatten();
         let _ = self.decide(ws.as_deref(), Some(&task_id), "retry", reason, json!({ "plan_id": t.plan_id, "provider": provider }));
         self.kick();
@@ -527,10 +550,13 @@ impl Inner {
             self.control_clear(&ctx.agent_id); // controls do not outlive the process
         }
         let stopping = removed.as_ref().is_none_or(|l| l.stopping);
+        // It exited during its handshake: `spawn_run` owns this start and fails it, and its
+        // caller may already be starting the next one (resume, then a new session).
+        let starting = removed.as_ref().is_some_and(|l| l.starting.is_some());
         let shutting = self.shutting_down.load(Ordering::SeqCst);
         let status = if shutting {
             "lost" // resumed by session id on the next start
-        } else if stopping || code == Some(0) {
+        } else if !starting && (stopping || code == Some(0)) {
             "completed"
         } else {
             "failed"
@@ -572,7 +598,7 @@ impl Inner {
             }
             self.pump_leads(); // a Lead slot freed up
         }
-        if !stopping && let Some(task_id) = ctx.task_id.clone() {
+        if !stopping && !starting && let Some(task_id) = ctx.task_id.clone() {
             let me = self.clone();
             let (role, agent_id, run) = (ctx.role, ctx.agent_id.clone(), ctx.run_id.clone());
             tokio::spawn(async move { me.task_run_lost(task_id, role, agent_id, run, code).await });
@@ -594,7 +620,7 @@ impl Inner {
                 } else {
                     format!("the worker exited unexpectedly ({code}); restarting it")
                 };
-                let _ = self.update_task(&task_id, |t| {
+                let moved = self.update_task(&task_id, |t| {
                     t.status = if give_up { TaskStatus::Blocked } else { TaskStatus::Ready };
                     t.status_reason = Some(reason.clone());
                     Ok(())
@@ -604,6 +630,9 @@ impl Inner {
                         a.task_id = None;
                     }
                 });
+                if moved.is_err() {
+                    return; // stopped or cancelled by you meanwhile: that stands, and nothing is retried
+                }
                 let _ = self.decide(
                     ws.as_deref(),
                     Some(&task_id),

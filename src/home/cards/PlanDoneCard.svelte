@@ -65,11 +65,11 @@
     <footer>
       {#if merged}
         <span class="done"><Icon name="check" size={13} stroke={2} />Merged into <code>{target}</code> at <code>{shortSha(merged.sha)}</code></span>
-        <button class="btn ghost sm" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>Review the diff</button>
+        <button class="btn ghost sm" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {:else}
         <button class="btn primary" disabled={busy || kept} onclick={merge}><Icon name="merge" size={14} />Merge into {target}</button>
         <button class="btn" disabled={busy || kept} onclick={() => keepBranch(planId)}>Keep the branch</button>
-        <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>Review changes</button>
+        <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {/if}
     </footer>
   </article>

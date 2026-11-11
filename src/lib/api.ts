@@ -168,14 +168,16 @@ export const hasBackend = (): boolean => isTauriApp() || isWebApp();
 /** The public web demo (`pnpm build:site` → /demo/): the scripted fake repo, opened at once. */
 export const isSiteDemo = (): boolean => import.meta.env.VITE_SITE_DEMO === '1' && !isTauriApp();
 
-let transport: Transport | null = null;
+// The promise, not the instance: two callers during the mock's import must share one transport
+// (or the store listens to one scripted office while commands go to another).
+let transport: Promise<Transport> | null = null;
 
-export async function getTransport(): Promise<Transport> {
-  if (transport) return transport;
-  if (isTauriApp()) transport = new TauriTransport();
-  else if (isWebApp()) transport = new WebTransport();
-  else transport = new (await import('./mock')).MockTransport();
-  return transport;
+export function getTransport(): Promise<Transport> {
+  return (transport ??= (async () => {
+    if (isTauriApp()) return new TauriTransport();
+    if (isWebApp()) return new WebTransport();
+    return new (await import('./mock')).MockTransport();
+  })());
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

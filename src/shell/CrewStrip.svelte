@@ -12,9 +12,10 @@
   import CrewPill from './CrewPill.svelte';
 
   interface Props {
-    compact?: boolean;
+    /** The width the strip may take, in px. */
+    room: number;
   }
-  let { compact = false }: Props = $props();
+  let { room }: Props = $props();
 
   const leads = $derived(store.leads.filter((a) => a.status !== 'offline'));
   const crew = $derived(
@@ -23,6 +24,10 @@
       .filter((a) => a.role !== 'lead' && (a.status !== 'offline' || a.member))
       .sort((a, b) => Number(!a.member) - Number(!b.member) || a.created_at - b.created_at),
   );
+  // Workers drop their sentence only when the strip itself runs out of room, not when the window is
+  // narrow. ponytail: 100 px per Lead and 200 per worker are estimates; measure the pills if the
+  // threshold feels wrong.
+  const compact = $derived(room < leads.length * 100 + crew.length * 200);
 
   /** The CLI a new agent starts on (changeable in the dialog). */
   const starter = $derived((store.clis.find((c) => c.path && !c.problem && c.logged_in !== false)?.provider ?? null) as Provider | null);
@@ -61,8 +66,12 @@
 <p class="sr-only" aria-live="polite">{announce}</p>
 
 <style>
-  .strip { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; padding: 4px 2px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%); }
+  .strip { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 2px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%); }
   .strip::-webkit-scrollbar { display: none; }
+  /* Centred while it fits; when it overflows it scrolls from the start (the Leads), which
+     justify-content: center would put out of reach. */
+  .strip > :global(:first-child) { margin-left: auto; }
+  .strip > :global(:last-child) { margin-right: auto; }
   .add { flex-shrink: 0; color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line-2); border-radius: var(--r-full); }
   .sep { width: 1px; height: 22px; background: var(--line-2); flex-shrink: 0; margin: 0 2px; }
 </style>

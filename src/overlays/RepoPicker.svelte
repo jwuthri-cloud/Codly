@@ -9,6 +9,7 @@
   import { api } from '../lib/api';
   import { openWorkspace } from '../lib/state/actions';
   import { ui } from '../lib/state/ui.svelte';
+  import { modal } from '../lib/util/modal';
   import { filterRepos, typedPath } from '../lib/util/repos';
   import { tildify } from '../lib/util/sanitize';
   import Icon from '../components/Icon.svelte';
@@ -42,11 +43,7 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      close();
-    } else if (e.key === 'ArrowDown') {
+    if (e.key === 'ArrowDown') {
       e.preventDefault();
       active = Math.min(active + 1, rows.length - 1);
     } else if (e.key === 'ArrowUp') {
@@ -60,7 +57,7 @@
 </script>
 
 <div class="scrim" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && close()}>
-  <div class="sheet" role="dialog" aria-modal="true" aria-label="Open a repository" tabindex="-1" {onkeydown}>
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Open a repository" tabindex="-1" use:modal={close} {onkeydown}>
     <header>
       <h2>Open a repository</h2>
       <button type="button" class="icon-btn" aria-label="Close" onclick={close}><Icon name="x" /></button>

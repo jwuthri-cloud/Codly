@@ -136,6 +136,12 @@ struct Live {
     turn_active: bool,
     /// Prompts sent but not started yet (the adapter queues them; Codex steers instead).
     queued: u32,
+    /// Some while the CLI is still in its handshake (`spawn_run` holds the agent's place, with
+    /// a `handle` nobody listens to): the prompts sent meanwhile, in order.
+    starting: Option<Vec<String>>,
+    /// Those prompts once the CLI is up, until the run's first prompt (the one it was started
+    /// for) goes out: they follow it.
+    waited: Vec<String>,
     /// Codly asked it to shut down (task done, user stop, app exit).
     stopping: bool,
     /// Turns completed in this run (the gate checks no turn ended while it ran).
@@ -171,7 +177,8 @@ struct Inner {
     fixed_clis: bool,
     settings: RwLock<Settings>,
     ws: RwLock<Option<Workspace>>,
-    index: RwLock<Option<SharedIndex>>,
+    /// The code indexes that are loaded, by office: the open one's and those of offices with work.
+    index: RwLock<HashMap<Id, SharedIndex>>,
     use_index: bool,
     live: Mutex<HashMap<Id, Live>>,
     /// Per-agent live controls (block tools, stop after this step, held notes); see controls.rs.
@@ -357,7 +364,7 @@ impl Core {
             fixed_clis,
             settings: RwLock::new(settings),
             ws: RwLock::new(None),
-            index: RwLock::new(None),
+            index: RwLock::new(HashMap::new()),
             use_index: opts.index,
             live: Mutex::new(HashMap::new()),
             controls: Mutex::new(HashMap::new()),
@@ -584,6 +591,13 @@ impl Core {
     pub fn offices(&self) -> anyhow::Result<Vec<Office>> {
         let ws = self.inner.workspace();
         self.inner.offices(ws.as_ref().map(|w| w.id.as_str()))
+    }
+
+    /// The names of an office and of an agent, for a notification that says who needs you where.
+    pub fn names_for(&self, ws: Option<&str>, agent: Option<&str>) -> (Option<String>, Option<String>) {
+        let store = &self.inner.store;
+        let office = ws.and_then(|id| store.workspace(id).ok().flatten()).map(|w| w.name);
+        (office, agent.and_then(|id| store.agent(id).ok().flatten()).map(|a| a.name))
     }
 
     /// Transfer an agent from the open repo to another of your offices (`offices`): same id,
@@ -914,8 +928,7 @@ impl Core {
 
     /// Files of the open workspace for the 3D codebase city (from the code index).
     pub async fn repo_map(&self) -> anyhow::Result<Vec<RepoFile>> {
-        let index = self.inner.index.read().map_err(|_| anyhow!("index lock poisoned"))?.clone();
-        match index {
+        match self.inner.index_of(None) {
             Some(ix) => tokio::task::spawn_blocking(move || ix.files()).await?,
             None => Ok(Vec::new()),
         }
@@ -1018,13 +1031,10 @@ impl Inner {
         Ok(())
     }
 
-    fn index(&self) -> Option<SharedIndex> {
-        read(&self.index).clone()
-    }
-
-    /// The code index if it is `ws_id`'s: only the open repo has one loaded.
+    /// An office's code index (None = the open office's), if it is loaded.
     fn index_of(&self, ws_id: Option<&str>) -> Option<SharedIndex> {
-        self.index().filter(|_| ws_id.is_none() || self.workspace().map(|w| w.id).as_deref() == ws_id)
+        let open = self.workspace().map(|w| w.id);
+        read(&self.index).get(ws_id.or(open.as_deref())?).cloned()
     }
 
     fn is_live(&self, agent_id: &str) -> bool {
@@ -1113,8 +1123,9 @@ impl Inner {
         Ok(value)
     }
 
-    /// Codly's own task transitions. A cancelled or done task is final for Codly: an
-    /// in-flight gate or run can never bring it back (only the user can, via `move_task`).
+    /// Codly's own task transitions. A cancelled, done or blocked task is final for Codly: an
+    /// in-flight gate or run can never bring it back. Only the user can (`by_user`): a board
+    /// move, Cancel plan, the answer to a worker's question.
     fn update_task(&self, id: &str, f: impl FnOnce(&mut Task) -> anyhow::Result<()>) -> anyhow::Result<Task> {
         self.update_task_as(id, false, f)
     }
@@ -1126,7 +1137,7 @@ impl Inner {
             |t: &mut Task| {
                 let was = t.status;
                 f(t)?;
-                if !by_user && t.status != was && matches!(was, TaskStatus::Cancelled | TaskStatus::Done) {
+                if !by_user && t.status != was && matches!(was, TaskStatus::Cancelled | TaskStatus::Done | TaskStatus::Blocked) {
                     bail!("task {} is {}", t.key, store::enum_str(&was));
                 }
                 Ok(())

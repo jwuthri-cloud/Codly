@@ -155,7 +155,12 @@ impl Inner {
     async fn resume(self: &Arc<Self>, b: &Blocker, text: String) -> Result<()> {
         let asker = self.agent(&b.agent_id)?;
         if asker.role == Role::Lead {
-            return self.chat_lead(&b.thread, &text).await;
+            // In the office the question came from, whichever one is open now.
+            let ws = match b.workspace_id.as_deref() {
+                Some(id) => self.store.workspace(id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
+                None => self.require_ws()?,
+            };
+            return self.chat_lead_in(&ws, &b.thread, &text).await;
         }
         let others_wait = |task_id: &str| {
             let all = self.store.with(|db| blockers::list(db, b.workspace_id.as_deref())).unwrap_or_default();
@@ -166,25 +171,37 @@ impl Inner {
             .as_deref()
             .and_then(|t| self.task(t).ok())
             .filter(|t| t.status == TaskStatus::Blocked && t.status_reason.as_deref().is_some_and(|r| r.starts_with(WAITING)));
-        if self.is_live(&b.agent_id) {
+        // The answer first: if it cannot be delivered, the task must not show as running. A run
+        // that is shutting down takes no more turns, and the card is closed by now (it cannot
+        // be answered again): for the answer, that run is already gone.
+        let sent = self.is_live(&b.agent_id)
+            && self.send_prompt(&b.agent_id, format!("[User] {text}")).inspect_err(|e| tracing::debug!("answer not sent as a prompt: {e}")).is_ok();
+        if sent {
             if let Some(t) = &waiting_task
                 && !others_wait(&t.id)
             {
-                self.update_task(&t.id, |t| {
-                    t.status = TaskStatus::Running;
-                    t.status_reason = None;
+                // Your answer is your move: only you take a task out of Blocked. In the write:
+                // a Cancel (or a Retry) since the read above stands.
+                self.update_task_as(&t.id, true, |t| {
+                    if t.status == TaskStatus::Blocked {
+                        t.status = TaskStatus::Running;
+                        t.status_reason = None;
+                    }
                     Ok(())
                 })?;
             }
-            return self.send_prompt(&b.agent_id, format!("[User] {text}"));
+            return Ok(());
         }
-        // The worker's process is gone (app restarted): rerun the task with the answer in its brief.
+        // The worker's process is gone (app restarted) or going (stopped): rerun the task with
+        // the answer in its brief.
         match waiting_task {
             Some(t) => {
-                self.update_task(&t.id, |t| {
-                    t.goal = format!("{}\n\n{text}", t.goal);
-                    t.status = TaskStatus::Ready;
-                    t.status_reason = Some("you answered; restarting the worker".into());
+                self.update_task_as(&t.id, true, |t| {
+                    if t.status == TaskStatus::Blocked {
+                        t.goal = format!("{}\n\n{text}", t.goal);
+                        t.status = TaskStatus::Ready;
+                        t.status_reason = Some("you answered; restarting the worker".into());
+                    }
                     Ok(())
                 })?;
                 self.update_agent(&b.agent_id, |a| {

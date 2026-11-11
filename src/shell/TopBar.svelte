@@ -17,8 +17,10 @@
 
   interface Props {
     narrow?: boolean;
+    /** The bar's width in px: the crew strip gets what the two sides leave (see `.crew`). */
+    frameW: number;
   }
-  let { narrow = false }: Props = $props();
+  let { narrow = false, frameW }: Props = $props();
 
   const tauri = isTauriApp();
   const siteDemo = isSiteDemo();
@@ -49,7 +51,7 @@
       {#if !narrow}<span class="branch"><Icon name="branch" size={12} />{branch}</span>{/if}
     </button>
   </div>
-  <div class="crew"><CrewStrip compact={narrow} /></div>
+  <div class="crew"><CrewStrip room={frameW - 400} /></div>
   <div class="actions">
     {#if siteDemo}
       <a class="demo" href="/" data-tip="A fake repo and a scripted team: nothing runs on your machine. Back to the Codly site.">
@@ -71,7 +73,8 @@
   .ws:hover { background: var(--surface-2); }
   .name { font-size: 22px; line-height: 34px; font-style: italic; color: var(--ink-1); white-space: nowrap; }
   .branch { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
-  /* centred on the stage (and so on the conversation column), whatever sits left and right */
+  /* centred on the stage (and so on the conversation column), whatever sits left and right;
+     the 2 × 200px kept for the sides is the 400 taken off the strip's `room` above */
   .crew { position: absolute; left: 50%; top: 0; height: 100%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 2 * 200px); display: flex; align-items: center; }
   .crew > :global(.strip) { min-width: 0; }
   .actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }

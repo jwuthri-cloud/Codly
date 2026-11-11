@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { fade } from 'svelte/transition';
   import { toasts } from '../lib/state/toasts.svelte';
+  import { ui } from '../lib/state/ui.svelte';
   import Icon from './Icon.svelte';
   import Kbd from './Kbd.svelte';
 
@@ -13,6 +15,7 @@
       role={t.kind === 'error' ? 'alert' : 'status'}
       onpointerenter={() => toasts.pause(t.id)}
       onpointerleave={() => toasts.resume(t.id)}
+      out:fade={{ duration: ui.reducedMotion ? 0 : 120 }}
     >
       <span class="ic" class:spin={t.kind === 'progress'}><Icon name={ICON[t.kind]} size={16} /></span>
       <div class="txt">

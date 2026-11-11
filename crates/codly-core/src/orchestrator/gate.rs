@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -63,7 +64,11 @@ impl Inner {
             g.insert(task_id.clone(), false);
         }
         loop {
-            if let Err(e) = self.gate_inner(&task_id).await {
+            // As its own task, so a panic fails this gate (a Blocked task) and still clears `gating`.
+            let (me, id) = (self.clone(), task_id.clone());
+            let res =
+                tokio::spawn(async move { me.gate_inner(&id).await }).await.unwrap_or_else(|e| Err(anyhow!("the gate crashed: {e}")));
+            if let Err(e) = res {
                 self.gate_error(&task_id, e).await;
             }
             let mut g = lock(&self.gating);
@@ -79,8 +84,14 @@ impl Inner {
 
     async fn gate_error(self: &Arc<Self>, task_id: &str, e: anyhow::Error) {
         tracing::warn!("gate for {task_id} failed: {e}");
-        if self.task(task_id).is_ok_and(|t| matches!(t.status, TaskStatus::Cancelled | TaskStatus::Done)) {
-            return; // cancelled (or finished) while the gate ran: nothing to report
+        // Quitting: a fix round that could not be sent is no failure. The task stays as it is
+        // and the next start resumes it.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let was = self.task(task_id).ok();
+        if was.as_ref().is_some_and(|t| matches!(t.status, TaskStatus::Cancelled | TaskStatus::Done | TaskStatus::Blocked)) {
+            return; // cancelled, stopped (or finished) while the gate ran: nothing to report
         }
         let reason = format!("blocked: the gate failed: {e}");
         let _ = self.update_task(task_id, |t| {
@@ -88,6 +99,11 @@ impl Inner {
             t.status_reason = Some(prompts::clip(&reason, 300));
             Ok(())
         });
+        // Its worker (and reviewer) are free again: left running, the worker would stay busy
+        // and a Retry would wait for it forever. The retry resumes its session.
+        if let Some(t) = &was {
+            self.release_task_agents(t);
+        }
         let ws = self.store.task_workspace(task_id).ok().flatten();
         let _ = self.decide(ws.as_deref(), Some(task_id), "gate", prompts::clip(&reason, 200), json!({ "error": e.to_string() }));
         if let (Some(ws), Ok(t)) = (ws, self.task(task_id)) {
@@ -187,6 +203,10 @@ impl Inner {
                 return self.fix_round(&task, &worker, Fix::Verify { cmd: cmd.clone(), code: v.code, tail: v.tail }).await;
             }
         }
+        // Stopped or cancelled while its checks ran: the gate ends here, with no verdict.
+        if self.task(task_id)?.status != TaskStatus::Verifying {
+            return Ok(());
+        }
 
         // 4. Scope: changed files ⊆ write_scope ∪ declared exceptions.
         let plan = task.plan_id.as_deref().map(|p| self.plan(p)).transpose()?;
@@ -225,7 +245,24 @@ impl Inner {
             json!({ "plan_id": task.plan_id, "verify": results, "files": files, "declared_exceptions": declared }),
         )?;
 
-        // 5. Optional cross-vendor review; it resumes the gate from review_done().
+        // 5. Not if the worker got a new message meanwhile (a user steer): that turn's work is
+        // not in the commit above, so a review would not read it, and a merge would leave it
+        // out and shut the worker down mid-turn. Its turn's end re-runs the gate.
+        // (A worker that exited meanwhile has no next turn: its checked work goes on.)
+        // ponytail: a turn that starts after this check and before the reviewer's run exists
+        // (the diff, a reviewer start that fails first), and ends before the review does, is
+        // still missed: `steered_in_review` counts turns from that run's start. Carry `turns`
+        // into the review if that ever shows.
+        if self.is_live(&worker) && (!self.is_quiet(&worker) || self.turns_done(&worker) != turns) {
+            self.update_task(task_id, |t| {
+                t.status = TaskStatus::Running;
+                t.status_reason = Some("the worker got a new message; re-checking when it finishes".into());
+                Ok(())
+            })?;
+            return Ok(());
+        }
+
+        // 6. Optional cross-vendor review; it resumes the gate from review_done().
         let staff = self.agent(&worker).is_ok_and(|a| crate::career::trusts(&a.career, Rank::Staff));
         if self.settings().review_gate && !files.is_empty() && staff {
             self.decide(ws, Some(task_id), "gate", format!("{}: no review, its worker is a trusted Staff", task.key), json!({ "plan_id": task.plan_id }))?;
@@ -234,16 +271,7 @@ impl Inner {
             return self.start_review(&task, &ws_id, &base_ref, &results, &declared, notes.as_deref()).await;
         }
 
-        // 6. Merge queue — unless the worker got a new message meanwhile (a user steer):
-        // merging now would shut it down mid-turn. Its next turn end re-runs the gate.
-        if !self.is_quiet(&worker) || self.turns_done(&worker) != turns {
-            self.update_task(task_id, |t| {
-                t.status = TaskStatus::Running;
-                t.status_reason = Some("the worker got a new message; re-checking when it finishes".into());
-                Ok(())
-            })?;
-            return Ok(());
-        }
+        // 7. Merge queue.
         self.merge_task(task_id, 0).await
     }
 
@@ -325,9 +353,11 @@ impl Inner {
         Ok(())
     }
 
-    /// Shut a worker's run down and free the agent for the next task.
-    fn release_worker(&self, agent_id: &str, task_id: &str) {
-        self.stop_run(agent_id);
+    /// Shut a worker's run of this task down and free the agent for the next task. A run of
+    /// anything else is not this task's to stop: by now the agent may be in a chat you started
+    /// or on its next task (a start that was cancelled while its worktree was prepared).
+    pub(super) fn release_worker(&self, agent_id: &str, task_id: &str) {
+        self.stop_run_if(agent_id, |l| l.task_id.as_deref() == Some(task_id));
         let _ = self.update_agent(agent_id, |a| {
             if a.task_id.as_deref() == Some(task_id) {
                 a.task_id = None;
@@ -391,13 +421,15 @@ impl Inner {
         // The most senior free reviewer: a Senior or Staff mentors juniors (career::mentors);
         // between equals, one at work and rested (the office's energy; never refused).
         let rested = |a: &&Agent| (a.career.rank, super::at_home(a, now).is_none(), !super::tired(a, now));
-        let reviewer = match member.or_else(|| agents.iter().filter(free).max_by_key(rested)) {
+        let hire = || {
+            let agents = self.store.agents(ws_id)?;
+            let name = names::next_name(&agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
+            let color = names::next_color(&agents.iter().map(|a| a.color).collect::<Vec<_>>());
+            self.create_agent(ws_id, &name, provider, Role::Reviewer, color, None)
+        };
+        let mut reviewer = match member.or_else(|| agents.iter().filter(free).max_by_key(rested)) {
             Some(a) => a.clone(),
-            None => {
-                let name = names::next_name(&agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
-                let color = names::next_color(&agents.iter().map(|a| a.color).collect::<Vec<_>>());
-                self.create_agent(ws_id, &name, provider, Role::Reviewer, color, None)?
-            }
+            None => hire()?,
         };
         let branch = task.branch.clone().ok_or_else(|| anyhow!("the task has no branch"))?;
         let diff = self.git.diff(Path::new(&ws.repo_path), base_ref, &branch).await?;
@@ -414,22 +446,41 @@ impl Inner {
             json!({ "plan_id": task.plan_id, "provider": provider, "agent": reviewer.name }),
         )?;
         let wt = PathBuf::from(task.worktree.clone().unwrap_or_default());
-        let req = RunReq {
+        let req = |reviewer: &Agent| RunReq {
             agent: reviewer.clone(),
             role: Role::Reviewer,
-            cwd: wt,
+            cwd: wt.clone(),
             read_only: true,
             task_id: Some(task.id.clone()),
             // Reviewers run in the author's worktree, so even a team member starts fresh.
             session: new_session(provider),
-            system_prompt: match self.team_member(&reviewer) {
+            system_prompt: match self.team_member(reviewer) {
                 Some(m) => prompts::member_system(prompts::REVIEWER_SYSTEM, &m),
                 None => prompts::REVIEWER_SYSTEM.to_string(),
             },
             workspace_id: Some(ws_id.to_string()),
             account: None, // a new session: the account with the most quota left
         };
-        if let Err(e) = self.spawn_run(req).await {
+        let mut started = self.spawn_run(req(&reviewer)).await;
+        // Free when it was picked, running by now (another task's review, a message from you):
+        // that run is not this review. A new reviewer does it; a lost race never skips a review.
+        if started.is_err() && self.is_live(&reviewer.id) {
+            let taken = reviewer.name;
+            reviewer = hire()?;
+            self.update_task(&task.id, |t| {
+                t.status_reason = Some(format!("review by {} ({})", reviewer.name, provider.label()));
+                Ok(())
+            })?;
+            self.decide(
+                Some(ws_id),
+                Some(&task.id),
+                "review",
+                format!("{}: reviewer {} · {} ({taken} got busy meanwhile)", task.key, provider.label(), reviewer.name),
+                json!({ "plan_id": task.plan_id, "provider": provider, "agent": reviewer.name }),
+            )?;
+            started = self.spawn_run(req(&reviewer)).await;
+        }
+        if let Err(e) = started {
             self.decide(
                 Some(ws_id),
                 Some(&task.id),
@@ -460,6 +511,13 @@ impl Inner {
     async fn review_done_inner(self: &Arc<Self>, task_id: &str, run_id: &str) -> Result<()> {
         let task = self.task(task_id)?;
         if task.status != TaskStatus::Reviewing {
+            // Stopped or cancelled meanwhile: nobody reads this review, so its reviewer is free
+            // (unless it runs something else by now).
+            if let Ok(Some(r)) = self.store.run(run_id)
+                && lock(&self.live).get(&r.agent_id).is_some_and(|l| l.run_id == run_id)
+            {
+                self.release_worker(&r.agent_id, task_id);
+            }
             return Ok(());
         }
         let run = self.store.run(run_id)?.ok_or_else(|| anyhow!("unknown reviewer run"))?;
@@ -479,6 +537,9 @@ impl Inner {
                     "[Codly] You ended without a verdict. Call codly_submit_review now with your verdict, criteria and issues.".into(),
                 );
             }
+            if !self.take_review(task_id)? {
+                return Ok(());
+            }
             lock(&self.review_nudges).remove(run_id);
             self.release_worker(&reviewer, task_id);
             self.emit(
@@ -490,6 +551,9 @@ impl Inner {
                     EventKind::Reviewed { verdict: "none".into(), summary: "the reviewer gave no verdict".into() },
                 ),
             )?;
+            if self.steered_in_review(&task, &run)? {
+                return Ok(());
+            }
             self.decide(
                 ws.as_deref(),
                 Some(task_id),
@@ -499,6 +563,9 @@ impl Inner {
             )?;
             return self.merge_task(task_id, 0).await;
         };
+        if !self.take_review(task_id)? {
+            return Ok(());
+        }
         lock(&self.review_nudges).remove(run_id);
         self.release_worker(&reviewer, task_id);
         let r = judge(&review);
@@ -524,6 +591,7 @@ impl Inner {
         )?;
         let worker = task.assignee.clone().unwrap_or_default();
         match r.verdict.as_str() {
+            "approve" if self.steered_in_review(&task, &run)? => Ok(()),
             "approve" => self.merge_task(task_id, 0).await,
             "reject" => {
                 let reason = format!("failed: the reviewer rejected it: {}", prompts::clip(&r.summary, 200));
@@ -540,6 +608,42 @@ impl Inner {
             }
             _ => self.fix_round(&task, &worker, Fix::Review { summary: r.summary, issues: r.issues, unmet: r.unmet }).await,
         }
+    }
+
+    /// A review ends once, however often it is reported (a reviewer's turn end and its exit
+    /// both do): the first pass takes the task out of Reviewing. False = another pass has it,
+    /// or the task was stopped or cancelled meanwhile.
+    fn take_review(&self, task_id: &str) -> Result<bool> {
+        let mut mine = false;
+        self.update_task(task_id, |t| {
+            mine = t.status == TaskStatus::Reviewing;
+            if mine {
+                t.status = TaskStatus::Verifying;
+                t.status_reason = Some("Codly is reading the review".into());
+            }
+            Ok(())
+        })?;
+        Ok(mine)
+    }
+
+    /// Before a reviewed task merges: did its worker get a turn since the review started (a
+    /// message from you, or from the Lead)? The review never saw that work, and merging now
+    /// would leave it out and shut the worker down mid-turn. The task goes back to Running:
+    /// the turn's end, or the gate started here when it is already over, checks it again.
+    /// By its turns, not by a dirty worktree: verify commands leave files behind too.
+    fn steered_in_review(self: &Arc<Self>, task: &Task, review: &crate::store::RunRow) -> Result<bool> {
+        let worker = task.assignee.clone().unwrap_or_default();
+        let turn_since = |e: &EventRow| e.agent_id.as_deref() == Some(worker.as_str()) && e.ts >= review.started_at;
+        if self.is_quiet(&worker) && !self.store.task_events(&task.id, "turn_started")?.iter().any(turn_since) {
+            return Ok(false);
+        }
+        self.update_task(&task.id, |t| {
+            t.status = TaskStatus::Running;
+            t.status_reason = Some("the worker got a new message; re-checking when it finishes".into());
+            Ok(())
+        })?;
+        tokio::spawn(self.clone().gate(task.id.clone()));
+        Ok(true)
     }
 
     // ───────────── merge queue ─────────────
@@ -597,8 +701,11 @@ impl Inner {
                                 EventKind::Merged { sha: sha.clone(), branch: integ.clone() },
                             ),
                         )?;
+                        // Still in the queue until the task is Done: a Cancel plan that waits here
+                        // then leaves it done (it is merged), and a second end of its review finds it done.
+                        let done = self.finish_task(&task, Some((sha, ev.id))).await;
                         drop(guard);
-                        return self.finish_task(&task, Some((sha, ev.id))).await;
+                        return done;
                     }
                     MergeOutcome::Conflict { files, .. } => files,
                 }

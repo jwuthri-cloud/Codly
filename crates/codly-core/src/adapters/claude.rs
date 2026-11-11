@@ -157,6 +157,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         .spawn()
         .with_context(|| format!("failed to start {}", spec.bin.display()))?;
     let pgid = child.id().map(|p| p as i32).unwrap_or(0);
+    proc::record_group(&spec.raw_log, pgid, now_ms());
     let stdin = child.stdin.take().context("no stdin")?;
     let lines = proc::spawn_json_reader(child.stdout.take().context("no stdout")?, raw.clone());
     let stderr = StderrTail::spawn(child.stderr.take().context("no stderr")?, 64 << 10);
@@ -396,9 +397,13 @@ impl Actor {
             }
             AgentCmd::Approval { approval_id, decision } => match self.norm.answer(&approval_id, &decision) {
                 Some((reply, events)) => {
-                    self.write(&reply).await;
-                    for e in events {
-                        self.emit(e);
+                    if self.write(&reply).await {
+                        for e in events {
+                            self.emit(e);
+                        }
+                    } else {
+                        // The answer never reached the CLI: the card must not say it did.
+                        self.emit(EventKind::ApprovalResolved { approval_id, status: ApprovalStatus::Expired, by: "provider".into() });
                     }
                 }
                 None => tracing::warn!("claude: no pending approval {approval_id}"),

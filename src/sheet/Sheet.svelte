@@ -3,6 +3,8 @@
   and slides away on Esc or ×. The stage makes room for it; nothing is covered.
 -->
 <script lang="ts">
+  import { cubicIn } from 'svelte/easing';
+  import { fly } from 'svelte/transition';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
@@ -16,8 +18,9 @@
   const label = $derived(agent ? `${agent.name} details` : task ? `Task ${task.key}` : sel?.kind === 'file' ? 'File' : '');
 </script>
 
+<!-- The exit runs through the Web Animations API, which the CSS reduced-motion override does not reach. -->
 {#if sel}
-  <aside class="sheet glass" aria-label={label}>
+  <aside class="sheet glass" aria-label={label} out:fly={{ x: 16, duration: ui.reducedMotion ? 0 : 180, easing: cubicIn }}>
     <button class="icon-btn close" aria-label="Close" data-tip="Close" data-tip-kbd="Esc" onclick={() => ui.select(null)}><Icon name="x" /></button>
     {#key sel.kind + sel.id}
       <div class="body">

@@ -6,6 +6,7 @@
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
   import { rankLabel } from '../lib/util/career';
+  import { modal } from '../lib/util/modal';
   import type { OfficeEngine } from './engine';
   import { agentPortrait } from './portrait';
   import Scrapbook from './Scrapbook.svelte';
@@ -38,7 +39,7 @@
 
 {#if open && ghost}
   <div class="scrim" role="presentation" onclick={() => (open = false)}></div>
-  <div class="dlg" role="dialog" aria-modal="true" aria-label="Ghosts of the memory archive">
+  <div class="dlg" role="dialog" aria-modal="true" aria-label="Ghosts of the memory archive" use:modal={() => (open = false)}>
     <header>
       <div>
         <div class="kicker">Memory archive · let go, never forgotten</div>
@@ -71,24 +72,25 @@
 {/if}
 
 <style>
-  .tag { position: absolute; z-index: 400; transform: translateX(-50%); padding: 5px 12px; border: 0; border-radius: 999px; background: rgba(150, 190, 255, 0.2); box-shadow: inset 0 0 0 1px rgba(170, 205, 255, 0.45), 0 0 18px rgba(140, 180, 255, 0.35); color: #e4eeff; font: 600 12px/1.2 'Inter Variable', Inter, system-ui, sans-serif; cursor: pointer; backdrop-filter: blur(4px); }
+  /* In the scene, over the archive, like a name tag: a ghost's own glow, whatever the theme. */
+  .tag { position: absolute; z-index: 400; transform: translateX(-50%); padding: 5px 12px; border: 0; border-radius: 999px; background: rgba(150, 190, 255, 0.2); box-shadow: inset 0 0 0 1px rgba(170, 205, 255, 0.45), 0 0 18px rgba(140, 180, 255, 0.35); color: #e4eeff; font: 600 12px/1.2 var(--of-font); cursor: pointer; backdrop-filter: blur(4px); }
   .tag:hover { background: rgba(150, 190, 255, 0.32); }
-  .scrim { position: absolute; inset: 0; z-index: 900; background: rgba(8, 10, 16, 0.45); }
-  .dlg { position: absolute; z-index: 901; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(600px, calc(100% - 32px)); padding: 16px; border-radius: 18px; background: rgba(22, 26, 36, 0.96); color: #eef1f7; box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(170, 205, 255, 0.18); font: 500 13px 'Inter Variable', Inter, system-ui, sans-serif; }
+  .scrim { position: absolute; inset: 0; z-index: 900; background: var(--scrim); }
+  .dlg { position: absolute; z-index: 901; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(600px, calc(100% - 32px)); padding: 16px; border-radius: 18px; background: var(--pop); color: var(--ink-1); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--focus) 18%, transparent), var(--pop-shadow); font: 500 13px var(--of-font); outline: none; }
   header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px; }
-  .kicker { font: 700 10px/1 ui-monospace, monospace; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; }
+  .kicker { font: 700 10px/1 var(--of-mono); letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.6; }
   h3 { margin: 4px 0 0; font-size: 18px; }
-  .x { border: 0; background: none; color: #9aa2b6; font-size: 16px; cursor: pointer; }
+  .x { border: 0; background: none; color: var(--ink-2); font-size: 16px; cursor: pointer; }
   .body { display: grid; grid-template-columns: minmax(150px, 190px) 1fr; gap: 14px; }
   .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .list button { width: 100%; display: flex; gap: 8px; align-items: center; padding: 6px; border: 0; border-radius: 10px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-  .list button.on, .list button:hover { background: rgba(255, 255, 255, 0.06); }
+  .list button.on, .list button:hover { background: var(--surface-2); }
   .list img { border-radius: 10px; opacity: 0.75; filter: saturate(0.6) hue-rotate(10deg); }
   .list span { display: flex; flex-direction: column; }
   small { font-size: 11px; opacity: 0.6; font-weight: 500; }
   h4 { margin: 0 0 4px; font-size: 15px; }
   .stats { margin: 0 0 8px; font-size: 12px; opacity: 0.8; }
-  .back { margin-top: 10px; padding: 7px 14px; border: 0; border-radius: 999px; background: #9cc3ff; color: #10203a; font: 600 12.5px 'Inter Variable', Inter, system-ui, sans-serif; cursor: pointer; }
+  .back { margin-top: 10px; padding: 7px 14px; border: 0; border-radius: 999px; background: var(--focus); color: var(--on-aurora); font: 600 12.5px var(--of-font); cursor: pointer; }
   .note { margin: 6px 0 0; font-size: 11.5px; opacity: 0.6; }
   @media (max-width: 520px) { .body { grid-template-columns: 1fr; } }
 </style>

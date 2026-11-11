@@ -12,8 +12,12 @@
   // The caret rides inline at the end of the streamed text (a private-use marker survives
   // markdown + sanitizing and is swapped for a span afterwards).
   const CARET = '\uE000';
+  // The conversation hands every message a fresh item on each streamed batch: an unchanged
+  // string stops at these two, so only the streaming message is parsed again.
+  const src = $derived(text);
+  const live = $derived(streaming);
   const html = $derived(
-    streaming ? renderMarkdown(text + CARET).replace(CARET, '<span class="caret" aria-hidden="true"></span>') : renderMarkdown(text),
+    live ? renderMarkdown(src + CARET).replace(CARET, '<span class="caret" aria-hidden="true"></span>') : renderMarkdown(src),
   );
 
   function click(e: MouseEvent) {

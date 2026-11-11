@@ -14,10 +14,11 @@ mod ipc_tests;
 mod ui_bus;
 mod web;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use codly_core::blockers::{BlockerSeverity, BlockerStatus};
-use codly_core::model::{EventKind, PlanStatus, TaskStatus};
+use codly_core::model::{Approval, EventKind, PlanStatus, TaskStatus};
 use codly_core::{Core, CoreConfig};
 use tauri::{Manager, RunEvent};
 use tauri_plugin_notification::NotificationExt;
@@ -254,6 +255,9 @@ pub fn run() {
 /// approval must never wait silently. Only when the window is not focused.
 async fn notify_loop(app: tauri::AppHandle, core: Arc<Core>) {
     let mut rx = core.subscribe();
+    // Approvals not answered yet. The broker allows most of them by itself right away: only one
+    // it leaves to you ("asking you: …") is worth a notification.
+    let mut asked: HashMap<String, Approval> = HashMap::new();
     loop {
         let ev = match rx.recv().await {
             Ok(ev) => ev,
@@ -262,6 +266,15 @@ async fn notify_loop(app: tauri::AppHandle, core: Arc<Core>) {
         };
         let (title, body) = match &ev.kind {
             EventKind::ApprovalRequested { approval } => {
+                asked.insert(approval.id.clone(), approval.clone());
+                continue;
+            }
+            EventKind::ApprovalResolved { approval_id, .. } => {
+                asked.remove(approval_id);
+                continue;
+            }
+            EventKind::Decision { decision_type, summary, detail, .. } if decision_type == "approval_policy" && summary.starts_with("asking you") => {
+                let Some(approval) = detail["approval_id"].as_str().and_then(|id| asked.remove(id)) else { continue };
                 let what = match &approval.subject {
                     codly_core::model::ApprovalSubject::Command { command, .. } => format!("run `{}`", truncate(command, 60)),
                     codly_core::model::ApprovalSubject::FileChange { paths, .. } => format!("change {} file(s)", paths.len()),
@@ -269,7 +282,11 @@ async fn notify_loop(app: tauri::AppHandle, core: Arc<Core>) {
                     codly_core::model::ApprovalSubject::Tool { name, .. } => format!("use {name}"),
                     codly_core::model::ApprovalSubject::Permissions { .. } => "get more permissions".into(),
                 };
-                ("An agent needs you".to_string(), format!("It wants to {what}."))
+                // Who, and in which office: it may not be the one on screen.
+                let (office, agent) = core.names_for(ev.workspace_id.as_deref(), Some(&approval.agent_id));
+                let agent = agent.unwrap_or_else(|| "An agent".into());
+                let title = office.map_or_else(|| format!("{agent} needs you"), |o| format!("{o}: {agent} needs you"));
+                (title, format!("It wants to {what}."))
             }
             // A new blocking question, or one that has waited for days.
             EventKind::BlockerChanged { blocker }

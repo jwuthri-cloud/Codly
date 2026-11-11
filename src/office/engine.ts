@@ -1191,7 +1191,8 @@ export class OfficeEngine {
     this.scene.background = null;
     this.renderer.setClearColor(new Color(t.name === 'dark' ? 0x12131f : 0xf1eadf), 1);
     this.container.style.setProperty('--of-sky', t.sky);
-    this.container.dataset.theme = t.name;
+    // data-scene, not data-theme: tokens.css themes whatever carries data-theme, and the HUD follows the app.
+    this.container.dataset.scene = t.name;
     this.hemi.color.setRGB(...t.hemiSky);
     this.hemi.groundColor.setRGB(...t.hemiGround);
     this.hemi.intensity = t.hemiIntensity;

@@ -375,18 +375,24 @@ impl Store {
         })
     }
 
-    /// Every workspace with its crew (agents on the team, the Lead aside) and its tasks in
-    /// flight, most recently opened first.
+    /// Every workspace with its crew (agents on the team, the Lead aside), its tasks in flight
+    /// and what waits for you there, most recently opened first. `needs_you` counts approvals
+    /// and plans here; the open blocking questions are added by the one caller that serves the
+    /// field (`Inner::offices`): they cost a scan of the event log, too much for every caller.
     pub fn offices(&self) -> Result<Vec<Office>> {
         let conn = self.conn();
         let sql = format!(
             "SELECT w.id, w.name, w.repo_path,
                (SELECT COUNT(*) FROM agent a WHERE a.workspace_id = w.id AND a.archived = 0 AND a.role != 'lead'),
-               (SELECT COUNT(*) FROM task t WHERE t.workspace_id = w.id AND t.status IN ({ACTIVE}))
+               (SELECT COUNT(*) FROM task t WHERE t.workspace_id = w.id AND t.status IN ({ACTIVE})),
+               (SELECT COUNT(*) FROM approval p WHERE p.workspace_id = w.id AND p.status = 'pending')
+                 + (SELECT COUNT(*) FROM plan p WHERE p.workspace_id = w.id AND p.status = 'awaiting_approval')
              FROM workspace w ORDER BY w.opened_at DESC"
         );
         let mut st = conn.prepare_cached(&sql)?;
-        let rows = st.query_map([], |r| Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)?, working: r.get(4)?, home: vec![] }))?;
+        let rows = st.query_map([], |r| {
+            Ok(Office { id: r.get(0)?, name: r.get(1)?, repo_path: r.get(2)?, crew: r.get(3)?, working: r.get(4)?, needs_you: r.get(5)?, home: vec![] })
+        })?;
         let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         // Who is at home now, in each (the map walks them down the street).
         let mut st = conn.prepare_cached(
@@ -801,12 +807,19 @@ fn project(db: &Connection, ws: Option<&str>, row: &EventRow) -> Result<()> {
             ])?;
         }
         EventKind::ApprovalResolved { approval_id, status, by } => {
+            // The first answer stands, except against the CLI's own word: an adapter says
+            // "provider" only for a request whose answer never reached the CLI.
             let status = enum_str(status);
-            db.prepare_cached(
-                "UPDATE approval SET status = ?2, decided_at = ?3, json = json_set(json, '$.status', ?2, '$.decided_by', ?4)
-                 WHERE id = ?1",
-            )?
-            .execute(params![approval_id, status, row.ts, by])?;
+            let n = db
+                .prepare_cached(
+                    "UPDATE approval SET status = ?2, decided_at = ?3, json = json_set(json, '$.status', ?2, '$.decided_by', ?4)
+                     WHERE id = ?1 AND (status = 'pending' OR ?4 = 'provider')",
+                )?
+                .execute(params![approval_id, status, row.ts, by])?;
+            if n == 0 {
+                // or was never recorded; the caller's transaction drops the event with it
+                return Err(anyhow!("approval {approval_id} was already resolved"));
+            }
         }
         EventKind::Decision { id, decision_type, method, summary, detail } => {
             db.prepare_cached(
@@ -953,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn approvals_resolve_in_place() {
+    fn an_approval_resolves_once_and_a_provider_cancel_wins() {
         let store = Store::open_in_memory().unwrap();
         let a = Approval {
             id: new_id(),
@@ -981,6 +994,17 @@ mod tests {
         assert_eq!(got.status, ApprovalStatus::Approved);
         assert_eq!(got.decided_by.as_deref(), Some("user"));
         assert!(store.pending_approvals(None).unwrap().is_empty());
+
+        // The first answer stands: a second one is refused, and its event is not kept.
+        let resolved = |status, by: &str| row(EventKind::ApprovalResolved { approval_id: a.id.clone(), status, by: by.into() });
+        let last = store.last_event_id().unwrap();
+        assert!(store.append_event(None, &resolved(ApprovalStatus::Denied, "user")).is_err());
+        assert_eq!(store.approval(&a.id).unwrap().unwrap().status, ApprovalStatus::Approved);
+        assert_eq!(store.last_event_id().unwrap(), last);
+        // Except by the CLI's own word: the answer never reached it.
+        store.append_event(None, &resolved(ApprovalStatus::Cancelled, "provider")).unwrap();
+        let got = store.approval(&a.id).unwrap().unwrap();
+        assert_eq!((got.status, got.decided_by.as_deref()), (ApprovalStatus::Cancelled, Some("provider")));
     }
 
     #[test]

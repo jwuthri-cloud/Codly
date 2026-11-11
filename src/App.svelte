@@ -12,6 +12,7 @@
   import SkillsManager from './overlays/SkillsManager.svelte';
   import { skillsUi } from './lib/state/skills.svelte';
   import IdeOverlay from './ide/IdeOverlay.svelte';
+  import EmptyState from './components/EmptyState.svelte';
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
   import DragGhost from './components/DragGhost.svelte';
@@ -52,6 +53,13 @@
   <div class="boot" data-tauri-drag-region></div>
 {:else if store.workspace}
   <Shell />
+{:else if store.error}
+  <!-- The first snapshot never arrived: say why, instead of an empty Welcome. -->
+  <div class="boot fail" data-tauri-drag-region>
+    <EmptyState title="Codly couldn’t start." body={store.error}>
+      <button class="btn primary" onclick={() => store.connect()}>Try again</button>
+    </EmptyState>
+  </div>
 {:else if ui.onboarded}
   <Welcome />
 {:else}
@@ -72,4 +80,5 @@
 
 <style>
   .boot { position: fixed; inset: 0; background: var(--night); }
+  .boot.fail { display: grid; place-items: center; }
 </style>

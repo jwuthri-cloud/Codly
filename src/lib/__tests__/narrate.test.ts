@@ -62,6 +62,13 @@ describe('narration', () => {
     expect(n.tone).toBe('wait');
   });
 
+  it('a task waiting for you narrates as wait', () => {
+    const n = narrateFrom(input({ agent: agent({ status: 'idle' }), task: task({ status: 'blocked', status_reason: 'waiting for you: Which provider?' }) }));
+    expect(n.tone).toBe('wait');
+    // Any other blocked reason stays red.
+    expect(narrateFrom(input({ agent: agent({ status: 'idle' }), task: task({ status: 'blocked', status_reason: 'verify failed' }) })).tone).toBe('blocked');
+  });
+
   it('reports the diff of the last finished task', () => {
     const n = narrateFrom(input({
       agent: agent({ status: 'idle', task_id: null }), task: null,

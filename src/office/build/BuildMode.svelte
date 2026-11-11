@@ -766,56 +766,59 @@
 {/if}
 
 <style>
-  .panel, .tag { font: 500 12.5px/1.35 'Inter Variable', Inter, system-ui, sans-serif; color: #eef1f7; }
-  .panel { position: absolute; z-index: 401; max-width: 1060px; margin: 0 auto; padding: 10px 12px 12px; border-radius: 16px; background: rgba(22, 26, 36, 0.96); box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
+  .panel, .tag { font: 500 12.5px/1.35 var(--of-font); color: var(--ink-1); }
+  .panel { position: absolute; z-index: 401; max-width: 1060px; margin: 0 auto; padding: 10px 12px 12px; border-radius: 16px; background: var(--pop); box-shadow: var(--pop-shadow); }
   header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
   .grow { flex: 1; }
   .title { font-size: 14px; }
-  .money { font-weight: 600; color: #8ff0b0; }
+  .money { font-weight: 600; color: var(--of-green); }
   small { font-size: 11px; opacity: 0.6; }
-  .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 999px; background: rgba(255, 255, 255, 0.05); }
+  .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 999px; background: var(--surface-1); }
   .seg button, .btn { padding: 4px 10px; border: 0; border-radius: 999px; background: none; color: inherit; font: inherit; cursor: pointer; }
-  .btn { background: rgba(255, 255, 255, 0.08); }
+  .btn { background: var(--surface-2); }
   .btn:disabled { opacity: 0.35; cursor: default; }
-  .seg button.on { background: rgba(126, 224, 161, 0.22); color: #c8f5d6; }
-  .x { border: 0; background: none; color: #9aa2b6; font-size: 15px; cursor: pointer; }
+  /* A picked segment or chip keeps the panel's ink: green text on its own wash is 3:1 in the light theme. */
+  .seg button.on { background: color-mix(in srgb, var(--of-green) 22%, transparent); }
+  .x { border: 0; background: none; color: var(--ink-2); font-size: 15px; cursor: pointer; }
   .tools { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
-  .tools button { position: relative; flex: none; display: flex; align-items: center; gap: 6px; padding: 7px 12px; border: 0; border-radius: 10px; background: rgba(255, 255, 255, 0.06); color: inherit; font: inherit; font-size: 13px; cursor: pointer; }
-  .tools button:hover { background: rgba(126, 224, 161, 0.12); }
-  .tools button.on { background: #7ee0a1; color: #0f2a1a; font-weight: 600; }
-  .tools button.small { font-size: 12px; background: rgba(255, 255, 255, 0.03); }
+  .tools button { position: relative; flex: none; display: flex; align-items: center; gap: 6px; padding: 7px 12px; border: 0; border-radius: 10px; background: var(--surface-2); color: inherit; font: inherit; font-size: 13px; cursor: pointer; }
+  .tools button:hover { background: color-mix(in srgb, var(--of-green) 12%, transparent); }
+  /* .small goes before .on, so a picked "More…" tool gets the green fill its text is made for. */
+  .tools button.small { font-size: 12px; background: var(--surface-1); }
+  .tools button.on { background: var(--of-green); color: var(--on-aurora); font-weight: 600; }
   .tools .more { background: none; opacity: 0.75; }
   .i { font-size: 16px; line-height: 1; }
-  .badge { min-width: 16px; padding: 0 4px; border-radius: 999px; background: #f0c27e; color: #2a1e0f; font-size: 10px; font-weight: 700; text-align: center; }
-  .how { margin: 10px 2px 8px; font-size: 13px; color: #d7dceb; }
+  .badge { min-width: 16px; padding: 0 4px; border-radius: 999px; background: var(--amber); color: #2a1a04; font-size: 10px; font-weight: 700; text-align: center; }
+  .how { margin: 10px 2px 8px; font-size: 13px; color: var(--ink-1); }
   .cards { display: flex; align-items: center; gap: 6px; min-height: 42px; padding-bottom: 2px; overflow-x: auto; scrollbar-width: thin; }
   .cards > * { flex: none; }
-  .card { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; min-width: 118px; padding: 6px 10px 6px 6px; border: 0; border-radius: 10px; background: rgba(255, 255, 255, 0.05); color: inherit; font: inherit; text-align: left; cursor: pointer; }
-  .card:hover { background: rgba(126, 224, 161, 0.12); }
-  .card.on { background: rgba(126, 224, 161, 0.2); box-shadow: inset 0 0 0 1.5px #7ee0a1; }
+  .card { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; min-width: 118px; padding: 6px 10px 6px 6px; border: 0; border-radius: 10px; background: var(--surface-1); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .card:hover { background: color-mix(in srgb, var(--of-green) 12%, transparent); }
+  .card.on { background: color-mix(in srgb, var(--of-green) 20%, transparent); box-shadow: inset 0 0 0 1.5px var(--of-green); }
   .card > :first-child { grid-row: span 2; }
   .card .n { font-size: 12px; font-weight: 600; }
   .card .p { font-size: 10.5px; opacity: 0.65; }
+  /* Swatches picture what gets built (wall kinds here, floors and paints from JS): the same in both themes. */
   .sw, .ic, .wall { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25); font-size: 15px; }
-  .ic { box-shadow: none; background: rgba(255, 255, 255, 0.06); }
-  .sw.keep { background: rgba(255, 255, 255, 0.06); font-weight: 700; opacity: 0.7; }
+  .ic { box-shadow: none; background: var(--surface-2); }
+  .sw.keep { background: var(--surface-2); font-weight: 700; opacity: 0.7; }
   .wall { background: linear-gradient(#cfd3dc, #a9aebb); }
   .wall.glass { background: linear-gradient(rgba(170, 215, 240, 0.7), rgba(120, 170, 200, 0.5)); }
   .wall.half { background: linear-gradient(transparent 55%, #b9bec9 55%); }
   .wall.exterior { background: linear-gradient(#c9a58a, #9c7a62); }
   .sep { margin: 0 2px 0 8px; font-size: 11px; opacity: 0.55; }
-  .chip { padding: 5px 12px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: inherit; font: inherit; cursor: pointer; }
-  .chip.on { background: rgba(126, 224, 161, 0.25); color: #c8f5d6; box-shadow: inset 0 0 0 1px rgba(126, 224, 161, 0.6); }
+  .chip { padding: 5px 12px; border: 0; border-radius: 999px; background: var(--surface-2); color: inherit; font: inherit; cursor: pointer; }
+  .chip.on { background: color-mix(in srgb, var(--of-green) 25%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--of-green) 60%, transparent); }
   .chip:disabled { opacity: 0.4; cursor: default; }
   .saved { display: inline-flex; align-items: center; }
-  .forget { border: 0; background: none; color: #9aa2b6; cursor: pointer; font-size: 11px; }
-  .name { padding: 5px 10px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.1); color: inherit; font: inherit; outline: none; box-shadow: inset 0 0 0 1px rgba(126, 224, 161, 0.5); }
+  .forget { border: 0; background: none; color: var(--ink-2); cursor: pointer; font-size: 11px; }
+  .name { padding: 5px 10px; border: 0; border-radius: 999px; background: var(--surface-3); color: inherit; font: inherit; outline: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--of-green) 50%, transparent); }
   .muted { opacity: 0.6; }
   .toast { margin: 8px 2px 0; font-size: 12px; }
-  .toast.ok { color: #8ff0b0; }
-  .toast.bad, .bad { color: #ff9b8f; }
-  .tag { position: fixed; z-index: 402; display: flex; flex-direction: column; gap: 1px; max-width: 260px; padding: 5px 9px; border-radius: 9px; background: rgba(18, 22, 32, 0.92); box-shadow: 0 6px 20px -6px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(255, 255, 255, 0.1); pointer-events: none; }
-  .cost { color: #8ff0b0; font-weight: 600; }
-  .cost.back { color: #f0c27e; }
-  kbd { font: 600 10px ui-monospace, monospace; opacity: 0.6; margin-left: 3px; }
+  .toast.ok { color: var(--of-green); }
+  .toast.bad, .bad { color: var(--bad); }
+  .tag { position: fixed; z-index: 402; display: flex; flex-direction: column; gap: 1px; max-width: 260px; padding: 5px 9px; border-radius: 9px; background: var(--glass-strong); box-shadow: var(--pop-shadow); pointer-events: none; }
+  .cost { color: var(--of-green); font-weight: 600; }
+  .cost.back { color: var(--of-gold); }
+  kbd { font: 600 10px var(--of-mono); opacity: 0.6; margin-left: 3px; }
 </style>

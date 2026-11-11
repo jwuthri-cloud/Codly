@@ -12,10 +12,14 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : typeof e === 'stri
 
 /** Start the agent the person confirmed. Returns whether it started, so the wizard can close. */
 export async function startHire(m: HireManifest, confirmShell: boolean): Promise<boolean> {
+  const ws = store.workspace?.id;
   try {
     const a = await api.hireFromManifest(m, confirmShell);
-    store.upsertAgent(a);
-    ui.selectAgent(a.id);
+    // It joined the office it was hired in: after a switch it is not this one's to show.
+    if (store.isOpen(ws)) {
+      store.upsertAgent(a);
+      ui.selectAgent(a.id);
+    }
     toast({ kind: 'success', title: `${a.name} joined`, body: `${PROVIDER_LABEL[a.provider]} · 1:1 chat is ready` });
     return true;
   } catch (e) {

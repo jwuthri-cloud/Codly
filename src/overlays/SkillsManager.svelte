@@ -13,6 +13,7 @@
   import { skillsUi } from '../lib/state/skills.svelte';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
+  import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
 
   const project = $derived(store.workspace?.repo_path ?? null);
@@ -29,7 +30,6 @@
   let confirming = $state<string | null>(null);
   let installing = $state<string[]>([]);
   let removing = $state<string | null>(null);
-  let el: HTMLDivElement | undefined = $state();
 
   const close = () => (skillsUi.open = false);
   const reloadInstalled = () => api.listSkills(project).then((l) => (skills = l));
@@ -43,7 +43,6 @@
     }
   }
   onMount(() => {
-    el?.focus();
     load();
   });
 
@@ -83,111 +82,104 @@
   }
   const openFolder = (s: Skill) => api.openSkillFolder(s.path, project).catch((e) => toast({ kind: 'error', title: 'Couldn’t open the folder', body: msg(e) }));
 
+  /** Esc first takes back "Delete this folder?"; with nothing asked, the dialog closes. */
   function key(e: KeyboardEvent) {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || !confirming) return;
     e.preventDefault();
     e.stopPropagation();
-    if (confirming) confirming = null;
-    else close();
+    confirming = null;
   }
 </script>
 
-<div class="scrim" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && close()}>
-  <div class="sheet" role="dialog" aria-modal="true" aria-label="Skills" tabindex="-1" bind:this={el} onkeydown={key}>
-    <header>
-      <h2>Skills</h2>
-      <div class="lenses" role="tablist" aria-label="Skills">
-        <button role="tab" aria-selected={skillsUi.tab === 'installed'} onclick={() => (skillsUi.tab = 'installed')}>Installed {#if skills}<span class="n">{skills.length}</span>{/if}</button>
-        <button role="tab" aria-selected={skillsUi.tab === 'browse'} onclick={() => (skillsUi.tab = 'browse')}>Browse {#if catalog}<span class="n">{catalog.length}</span>{/if}</button>
+<Dialog label="Skills" width={820} style="height: min(680px, calc(100vh - 48px)); overflow: hidden" onclose={close} onkeydown={key}>
+  {#snippet actions()}
+    <div class="lenses" role="tablist" aria-label="Skills">
+      <button role="tab" aria-selected={skillsUi.tab === 'installed'} onclick={() => (skillsUi.tab = 'installed')}>Installed {#if skills}<span class="n">{skills.length}</span>{/if}</button>
+      <button role="tab" aria-selected={skillsUi.tab === 'browse'} onclick={() => (skillsUi.tab = 'browse')}>Browse {#if catalog}<span class="n">{catalog.length}</span>{/if}</button>
+    </div>
+  {/snippet}
+
+  <div class="bar">
+    <input class="input search" type="search" placeholder={skillsUi.tab === 'installed' ? 'Search installed skills' : 'Search the catalog'} bind:value={query} spellcheck="false" aria-label="Search skills" />
+    {#if skillsUi.tab === 'browse'}
+      <div class="cats" role="radiogroup" aria-label="Category">
+        {#each categories as c (c)}
+          <button class="chip cat" role="radio" aria-checked={category === c} class:on={category === c} onclick={() => (category = c)}>{c}</button>
+        {/each}
       </div>
-      <button class="icon-btn" aria-label="Close" onclick={close}><Icon name="x" /></button>
-    </header>
-
-    <div class="bar">
-      <input class="input search" type="search" placeholder={skillsUi.tab === 'installed' ? 'Search installed skills' : 'Search the catalog'} bind:value={query} spellcheck="false" aria-label="Search skills" />
-      {#if skillsUi.tab === 'browse'}
-        <div class="cats" role="radiogroup" aria-label="Category">
-          {#each categories as c (c)}
-            <button class="chip cat" role="radio" aria-checked={category === c} class:on={category === c} onclick={() => (category = c)}>{c}</button>
-          {/each}
-        </div>
-      {/if}
-    </div>
-
-    <div class="list">
-      {#if problem}
-        <p class="note">Couldn’t read the skills ({problem}). <button class="link" onclick={load}>Try again</button></p>
-      {:else if skillsUi.tab === 'installed'}
-        {#if !skills}
-          <p class="note muted">Looking for skills…</p>
-        {:else if !shown.length}
-          <p class="note muted">{query ? 'No skill matches that.' : 'No skills installed yet. Browse the catalog to add one.'}</p>
-        {/if}
-        {#each shown as s (s.path)}
-          <div class="row" class:asking={confirming === s.path}>
-            <div class="main">
-              <div class="line">
-                <span class="name">{s.name}</span>
-                <span class="chip sm engine">{ENGINE[s.engine]}</span>
-                <span class="chip sm scope-{s.scope}">{SCOPE[s.scope]}</span>
-                {#if s.origin}<span class="muted origin">{s.origin}</span>{/if}
-              </div>
-              {#if s.description}<p class="desc">{s.description}</p>{/if}
-              <p class="path mono truncate" title={s.path}>{pretty(s.path)}</p>
-            </div>
-            <div class="actions">
-              {#if confirming === s.path}
-                <span class="ask">Delete this folder?</span>
-                <button class="btn sm ghost" onclick={() => (confirming = null)}>Keep</button>
-                <button class="btn sm danger" disabled={removing === s.path} onclick={() => uninstall(s)}>{removing === s.path ? 'Removing…' : 'Uninstall'}</button>
-              {:else}
-                {#if s.scope !== 'bundled'}
-                  <button class="btn sm ghost" onclick={() => openFolder(s)}><Icon name="folder" size={13} />Open folder</button>
-                {/if}
-                {#if s.removable}
-                  <button class="btn sm ghost" onclick={() => (confirming = s.path)}><Icon name="trash" size={13} />Uninstall</button>
-                {/if}
-              {/if}
-            </div>
-          </div>
-        {/each}
-      {:else}
-        {#if !catalog}
-          <p class="note muted">Loading the catalog…</p>
-        {:else if !browse.length}
-          <p class="note muted">No skill matches that.</p>
-        {/if}
-        {#each browse as c (c.id)}
-          <div class="row">
-            <div class="main">
-              <div class="line">
-                <span class="name">{c.id}</span>
-                <span class="chip sm">{c.category}</span>
-                <span class="muted origin">{c.author}</span>
-              </div>
-              <p class="desc">{c.description}</p>
-              <p class="path mono truncate" title={c.repo}>{c.repo.replace('https://', '').replace(/\.git$/, '')}{c.subdir ? ` · ${c.subdir}` : ''}</p>
-            </div>
-            <div class="actions">
-              {#if c.installed}
-                <span class="chip sm done"><Icon name="check" size={12} />Installed</span>
-              {:else}
-                <button class="btn sm primary" disabled={installing.includes(c.id)} onclick={() => install(c)}>{installing.includes(c.id) ? 'Cloning…' : 'Install'}</button>
-              {/if}
-            </div>
-          </div>
-        {/each}
-        <p class="foot muted">Installs with <span class="mono">git clone --depth 1</span> into <span class="mono">~/.claude/skills</span>. Review a skill before you rely on it: it is instructions your agents will follow.</p>
-      {/if}
-    </div>
+    {/if}
   </div>
-</div>
+
+  <div class="list">
+    {#if problem}
+      <p class="note">Couldn’t read the skills ({problem}). <button class="link" onclick={load}>Try again</button></p>
+    {:else if skillsUi.tab === 'installed'}
+      {#if !skills}
+        <p class="note muted">Looking for skills…</p>
+      {:else if !shown.length}
+        <p class="note muted">{query ? 'No skill matches that.' : 'No skills installed yet. Browse the catalog to add one.'}</p>
+      {/if}
+      {#each shown as s (s.path)}
+        <div class="row" class:asking={confirming === s.path}>
+          <div class="main">
+            <div class="line">
+              <span class="name">{s.name}</span>
+              <span class="chip sm engine">{ENGINE[s.engine]}</span>
+              <span class="chip sm scope-{s.scope}">{SCOPE[s.scope]}</span>
+              {#if s.origin}<span class="muted origin">{s.origin}</span>{/if}
+            </div>
+            {#if s.description}<p class="desc">{s.description}</p>{/if}
+            <p class="path mono truncate" title={s.path}>{pretty(s.path)}</p>
+          </div>
+          <div class="actions">
+            {#if confirming === s.path}
+              <span class="ask">Delete this folder?</span>
+              <button class="btn sm ghost" onclick={() => (confirming = null)}>Keep</button>
+              <button class="btn sm danger" disabled={removing === s.path} onclick={() => uninstall(s)}>{removing === s.path ? 'Removing…' : 'Uninstall'}</button>
+            {:else}
+              {#if s.scope !== 'bundled'}
+                <button class="btn sm ghost" onclick={() => openFolder(s)}><Icon name="folder" size={13} />Open folder</button>
+              {/if}
+              {#if s.removable}
+                <button class="btn sm ghost" onclick={() => (confirming = s.path)}><Icon name="trash" size={13} />Uninstall</button>
+              {/if}
+            {/if}
+          </div>
+        </div>
+      {/each}
+    {:else}
+      {#if !catalog}
+        <p class="note muted">Loading the catalog…</p>
+      {:else if !browse.length}
+        <p class="note muted">No skill matches that.</p>
+      {/if}
+      {#each browse as c (c.id)}
+        <div class="row">
+          <div class="main">
+            <div class="line">
+              <span class="name">{c.id}</span>
+              <span class="chip sm">{c.category}</span>
+              <span class="muted origin">{c.author}</span>
+            </div>
+            <p class="desc">{c.description}</p>
+            <p class="path mono truncate" title={c.repo}>{c.repo.replace('https://', '').replace(/\.git$/, '')}{c.subdir ? ` · ${c.subdir}` : ''}</p>
+          </div>
+          <div class="actions">
+            {#if c.installed}
+              <span class="chip sm done"><Icon name="check" size={12} />Installed</span>
+            {:else}
+              <button class="btn sm primary" disabled={installing.includes(c.id)} onclick={() => install(c)}>{installing.includes(c.id) ? 'Cloning…' : 'Install'}</button>
+            {/if}
+          </div>
+        </div>
+      {/each}
+      <p class="foot muted">Installs with <span class="mono">git clone --depth 1</span> into <span class="mono">~/.claude/skills</span>. Review a skill before you rely on it: it is instructions your agents will follow.</p>
+    {/if}
+  </div>
+</Dialog>
 
 <style>
-  .scrim { position: fixed; inset: 0; z-index: var(--z-modal); background: var(--scrim); display: grid; place-items: center; animation: fade-in var(--d-3) var(--ease-out); }
-  .sheet { display: flex; flex-direction: column; width: min(820px, calc(100vw - 32px)); height: min(680px, calc(100vh - 48px)); border-radius: var(--r-xl); background: var(--pop); box-shadow: var(--pop-shadow), 0 40px 100px -30px rgba(0, 0, 0, 0.6); outline: none; overflow: hidden; animation: pop-in var(--d-4) var(--spring); }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-shrink: 0; height: 64px; padding: 0 14px 0 26px; box-shadow: inset 0 -1px 0 var(--line); }
-  h2 { font-family: var(--font-display); font-weight: 400; font-size: var(--d-sm); margin-right: auto; }
+  .lenses { margin: 0 16px; }
   .bar { display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; padding: 14px 26px 10px; }
   .search { width: 100%; }
   .cats { display: flex; flex-wrap: wrap; gap: 6px; }

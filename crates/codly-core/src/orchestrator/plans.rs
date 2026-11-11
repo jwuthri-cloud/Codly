@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::planner::{self, PlanInput};
 use super::runs::{RunReq, new_session};
 use super::scheduler::{self, Action, AgentPick, SchedInput};
-use super::{Inner, careers, guard, lead, lock, names, prompts, row};
+use super::{Inner, careers, guard, lead, lock, names, prompts, read, row, workspace, write};
 use crate::adapters::SessionMode;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
@@ -298,6 +298,14 @@ impl Inner {
         if matches!(plan.status, PlanStatus::Done | PlanStatus::Cancelled) {
             return Ok(());
         }
+        // Behind a merge in flight: its task is Done when the cancel goes on, so nothing lands
+        // on the integration branch for a task the board shows cancelled. A plan that has not
+        // run merges nothing and never waits. Never call this holding `merge_lock` or
+        // `sched_lock` (a scheduling pass would stall behind a merge).
+        let _queue = match plan.status {
+            PlanStatus::Running | PlanStatus::Integrating => Some(self.merge_lock.lock().await),
+            _ => None,
+        };
         self.update_plan(&plan.id, |p| {
             p.status = PlanStatus::Cancelled;
             Ok(())
@@ -306,12 +314,15 @@ impl Inner {
             if matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled) {
                 continue;
             }
-            self.release_task_agents(&t);
-            self.update_task(&t.id, |t| {
+            // The status first: a worker that is still starting re-checks it before its brief,
+            // so that check or `stop_run` sees the cancel. `t` (as it was) picks who to release.
+            // `by_user`: a cancel takes a blocked task too (the loop must not stop halfway).
+            self.update_task_as(&t.id, true, |t| {
                 t.status = TaskStatus::Cancelled;
                 t.status_reason = Some(format!("plan {why}"));
                 Ok(())
             })?;
+            self.release_task_agents(&t);
         }
         // Branches and worktrees are kept: never delete unmerged work.
         self.decide(
@@ -324,14 +335,14 @@ impl Inner {
         Ok(())
     }
 
-    /// Stop the worker and reviewer runs of a task and free those agents.
-    fn release_task_agents(&self, t: &Task) {
+    /// Stop the worker and reviewer runs of a task and free those agents. Only their runs of
+    /// this task: one that is in a chat or on its next task by now keeps that run.
+    pub(super) fn release_task_agents(&self, t: &Task) {
         let agents = self.store.task_workspace(&t.id).ok().flatten().and_then(|ws| self.store.agents(&ws).ok()).unwrap_or_default();
         for a in agents.iter().filter(|a| {
             a.task_id.as_deref() == Some(t.id.as_str()) || (scheduler::is_active(t.status) && t.assignee.as_deref() == Some(a.id.as_str()))
         }) {
-            self.stop_run(&a.id);
-            let _ = self.update_agent(&a.id, |a| a.task_id = None);
+            self.release_worker(&a.id, &t.id);
         }
         lock(&self.fix_rounds).remove(&t.id);
     }
@@ -349,9 +360,25 @@ impl Inner {
             if open.as_ref().is_none_or(|w| w.id != id)
                 && let Some(ws) = self.store.workspace(&id)?.filter(|w| Path::new(&w.repo_path).is_dir())
             {
+                // It has its code index too, like the open office (whose own `open_workspace`
+                // loads): loaded here when work starts in it, and after a restart.
+                // ponytail: a load that fails is tried again at each pass, with a warning each
+                // time. Remember the failure if a broken index file ever fills the log.
+                if self.use_index && self.index_of(Some(&ws.id)).is_none() {
+                    self.open_index(&ws);
+                }
                 spaces.push(ws);
             }
         }
+        // The other offices' indexes go. `open_workspace` sets the office before it loads its
+        // index, so under the `ws` lock the office open right now keeps its own. They are
+        // dropped (each closes two SQLite connections) once both locks are released.
+        let gone: Vec<_> = {
+            let open = read(&self.ws);
+            let kept = |id: &Id| open.as_ref().is_some_and(|w| &w.id == id) || spaces.iter().any(|w| &w.id == id);
+            write(&self.index).extract_if(|id, _| !kept(id)).collect()
+        };
+        drop(gone);
         for ws in &spaces {
             if let Err(e) = self.schedule_office(ws, &spaces).await {
                 tracing::warn!("scheduling {}: {e}", ws.name);
@@ -362,10 +389,14 @@ impl Inner {
 
     async fn schedule_office(self: &Arc<Self>, ws: &Workspace, spaces: &[Workspace]) -> Result<()> {
         let mut elsewhere = vec![];
+        let busy = self.busy_agents();
         for o in spaces.iter().filter(|o| o.id != ws.id) {
             let agents = self.store.agents(&o.id)?;
-            for t in self.store.tasks(&o.id)?.into_iter().filter(|t| scheduler::is_active(t.status)) {
-                elsewhere.extend(agents.iter().find(|a| t.assignee.as_ref() == Some(&a.id)).cloned());
+            for t in self.store.tasks(&o.id)? {
+                let worker = agents.iter().find(|a| t.assignee.as_ref() == Some(&a.id));
+                if scheduler::is_active(t.status) || scheduler::held(&t, worker, &busy) {
+                    elsewhere.extend(worker.cloned());
+                }
             }
         }
         self.sync_team(&ws)?;
@@ -428,6 +459,22 @@ impl Inner {
                 let me = self.clone();
                 let id = p.id.clone();
                 tokio::spawn(async move { me.complete_plan(&id).await });
+            } else if !ts.is_empty() && ts.iter().all(|t| t.status == TaskStatus::Cancelled) {
+                // You cancelled every task: nothing is left to run or to finish. Written here,
+                // not through `cancel_plan_inner`: that one waits for the merge queue, and
+                // this pass holds `sched_lock`.
+                let mut cancelled = false;
+                self.update_plan(&p.id, |p| {
+                    cancelled = p.status == PlanStatus::Running;
+                    if cancelled {
+                        p.status = PlanStatus::Cancelled;
+                    }
+                    Ok(())
+                })?;
+                if cancelled {
+                    let summary = format!("plan \"{}\" cancelled: you cancelled every task", prompts::clip(&p.summary, 60));
+                    self.decide(Some(&ws.id), None, "schedule", summary, json!({ "plan_id": p.id }))?;
+                }
             }
         }
         Ok(())
@@ -505,6 +552,11 @@ impl Inner {
 
     async fn start_worker(self: Arc<Self>, task_id: Id, agent_id: Id, account: String, why: Option<String>) {
         let Err(e) = self.try_start_worker(&task_id, &agent_id, &account, why.as_deref()).await else { return };
+        // Quitting: a run that is shutting down takes no brief. The task stays as it is and
+        // the next start resumes it.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
         let reason = format!("blocked: could not start the worker: {e}");
         let _ = self.update_task(&task_id, |t| {
             if t.status == TaskStatus::Running {
@@ -541,10 +593,6 @@ impl Inner {
             }
             None => (format!("codly/adhoc/{}", task.key), self.worktree_root(&ws).join("adhoc").join(&task.key), "HEAD".to_string()),
         };
-        // An idle 1:1 chat gives way to the task (the scheduler does not count it as busy).
-        if self.preemptible(agent_id) && !self.stop_and_wait(agent_id).await {
-            bail!("{} did not leave its chat in time", agent.name);
-        }
         let member = agent.member.is_some().then(|| self.team_member(&agent)).flatten();
         // A team member works in its own stable worktree, switched to the task's branch.
         let (wt, switch_note) = if agent.member.is_some() {
@@ -580,7 +628,8 @@ impl Inner {
                 && r.session_id.is_some()
                 && r.account.clone().or_else(|| primary.clone()).as_deref().is_none_or(|a| a == account)
         });
-        let feedback = lock(&self.pending_feedback).remove(task_id);
+        // Taken for good only when the brief goes out: a start that stops short keeps it for the retry.
+        let feedback = lock(&self.pending_feedback).get(task_id).cloned();
         // A member continues its own conversation on a new task (unless the Lead asked for a
         // fresh one), when that conversation lives on this account.
         let own = match (&member, &agent.session_id) {
@@ -620,6 +669,19 @@ impl Inner {
             New,
         }
         let resume = prev.and_then(|r| r.session_id).map(|s| (s, Start::SameTask)).or(own.map(|s| (s, Start::OwnSession)));
+        // Cancelled or stopped while its worktree was prepared (or, below, while its CLI
+        // started): the task is no longer this worker's to run. What the agent runs by now (a
+        // chat, its next task) stays: `release_worker` stops only a run of this task.
+        let stale = || !self.task(task_id).is_ok_and(|t| t.status == TaskStatus::Running && t.assignee.as_deref() == Some(agent_id));
+        if stale() {
+            self.release_worker(agent_id, task_id);
+            return Ok(());
+        }
+        // An idle 1:1 chat gives way to the task (the scheduler does not count it as busy).
+        // Checked only now, so one that started while the worktree was prepared gives way too.
+        if self.preemptible(agent_id) && !self.stop_and_wait(agent_id).await {
+            bail!("{} did not leave its chat in time", agent.name);
+        }
         let started = match resume {
             Some((session_id, how)) => match self.spawn_run(req(SessionMode::Resume { session_id })).await {
                 Ok(_) => how,
@@ -653,6 +715,11 @@ impl Inner {
                 }
             }
         };
+        if stale() {
+            self.release_worker(agent_id, task_id);
+            return Ok(());
+        }
+        lock(&self.pending_feedback).remove(task_id);
         self.send_prompt(agent_id, prompt)
     }
 
@@ -822,17 +889,37 @@ impl Inner {
             // Plan tasks start as soon as their dependencies are merged; only ad-hoc tasks
             // have a backlog (the scheduler would make a plan task ready again at once).
             (Ready, Pending) if t.plan_id.is_none() => {}
-            (s, Cancelled) if !matches!(s, Cancelled) => self.release_task_agents(&t),
+            // Stop: Retry resumes it. Not while it merges (it is done in a moment).
+            (s, Blocked) if scheduler::is_active(s) && s != Merging => {}
+            (s, Cancelled) if !matches!(s, Cancelled) => {}
             _ => bail!("cannot move {} from {} to {}", t.key, store::enum_str(&from), store::enum_str(&to)),
         }
         if to == Ready {
             lock(&self.fix_rounds).remove(task_id); // a retry gets fresh fix rounds
         }
+        let was = t;
         let t = self.update_task_as(task_id, true, |t| {
+            // In the write: the gate may have reached the merge since the read above. A merge
+            // in flight lands: cancelled on the board, the task would still be on the branch.
+            let stop = to == Blocked && !(scheduler::is_active(t.status) && t.status != Merging);
+            if stop || (to == Cancelled && matches!(t.status, Merging | Done)) {
+                bail!("{} is {} now", t.key, store::enum_str(&t.status));
+            }
             t.status = to;
-            t.status_reason = (to == Cancelled).then(|| "cancelled by you".to_string());
+            t.status_reason = match to {
+                Cancelled => Some("cancelled by you".to_string()),
+                Blocked => Some("stopped by you; Retry to resume".to_string()),
+                _ => None,
+            };
             Ok(())
         })?;
+        // After the status: a worker that is still starting re-checks it before its brief, and
+        // a turn that ends now is not gated. The task as it was picks who to release.
+        // A retry too, of a task that waits for your answer: its worker still holds it and
+        // would keep the retry waiting for ever. Released, the retry resumes its session.
+        if matches!(to, Cancelled | Blocked) || from == Blocked {
+            self.release_task_agents(&was);
+        }
         let ws = self.store.task_workspace(task_id)?;
         self.decide_by(
             ws.as_deref(),
@@ -880,9 +967,9 @@ impl Inner {
 
     // ───────────── crash recovery ─────────────
 
-    /// Runs left `starting`/`running` by a crash become `lost`; their pending approvals
-    /// expire; their tasks go back to ready, keeping the assignee, so the scheduler resumes
-    /// the same agent with the stored session id.
+    /// Runs left `starting`/`running` by a crash become `lost` and the process groups they
+    /// left running are killed; every pending approval expires; their tasks go back to ready,
+    /// keeping the assignee, so the scheduler resumes the same agent with the stored session id.
     pub(super) async fn recover(&self) {
         if let Err(e) = self.recover_inner().await {
             tracing::warn!("crash recovery incomplete: {e}");
@@ -896,7 +983,9 @@ impl Inner {
                 tracing::warn!("crash recovery: {what} {id}: {e}");
             }
         };
+        let mut groups: Vec<(i32, i64)> = Vec::new();
         for r in self.store.runs_with_status(&["starting", "running"])? {
+            groups.extend(crate::proc::recorded_group(Path::new(&r.raw_log)));
             each("run", &r.id, (|| {
                 self.store.set_run_status(&r.id, "lost")?;
                 let ws = self.store.agent_workspace(&r.agent_id)?;
@@ -921,6 +1010,28 @@ impl Inner {
                 )?;
                 Ok(())
             })());
+        }
+        // Their CLIs lost stdin with the crash and stop by themselves, but the tests, builds
+        // and dev servers of their last turn may still be writing to the worktree a resumed
+        // session is about to use.
+        if !groups.is_empty() {
+            let mut kills = tokio::task::JoinSet::new();
+            for pgid in workspace::orphans(&workspace::processes().await, &groups) {
+                kills.spawn(crate::proc::kill_group(pgid, Duration::from_secs(3)));
+            }
+            if !kills.is_empty() {
+                tracing::warn!("killing {} agent process group(s) left by a crash", kills.len());
+                kills.join_all().await;
+            }
+        }
+        // Every approval still pending after that (its run was written off at shutdown, or its
+        // start had failed): nothing is live yet, and a CLI's request does not outlive its process.
+        for a in self.store.pending_approvals(None)? {
+            let res = self.store.agent_workspace(&a.agent_id).and_then(|ws| {
+                let kind = EventKind::ApprovalResolved { approval_id: a.id.clone(), status: ApprovalStatus::Expired, by: "codly".into() };
+                self.emit(ws.as_deref(), row(Some(&a.agent_id), a.task_id.as_deref(), Some(&a.run_id), kind))
+            });
+            each("approval", &a.id, res.map(drop));
         }
         let active = [TaskStatus::Running, TaskStatus::Verifying, TaskStatus::Reviewing, TaskStatus::ChangesRequested, TaskStatus::Merging];
         for t in self.store.tasks_with_status(&active)? {
@@ -978,17 +1089,24 @@ impl Inner {
         };
         if let Err(e) = self.complete_plan_inner(&plan).await {
             tracing::warn!("completing plan {plan_id}: {e}");
+            // Only if it is still integrating: a plan you cancelled meanwhile stays cancelled.
+            let mut current = false;
             let _ = self.update_plan(plan_id, |p| {
-                p.status = PlanStatus::Failed;
+                current = p.status == PlanStatus::Integrating;
+                if current {
+                    p.status = PlanStatus::Failed;
+                }
                 Ok(())
             });
-            let _ = self.chat(
-                Some(&plan.workspace_id),
-                &plan.thread,
-                "codly",
-                &format!("Finishing the plan failed: {e}"),
-                Some(json!({ "plan_id": plan_id })),
-            );
+            if current {
+                let _ = self.chat(
+                    Some(&plan.workspace_id),
+                    &plan.thread,
+                    "codly",
+                    &format!("Finishing the plan failed: {e}"),
+                    Some(json!({ "plan_id": plan_id })),
+                );
+            }
         }
     }
 
@@ -1036,6 +1154,19 @@ impl Inner {
                 failed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")
             )
         };
+        // The status before the news, and only if the plan is still integrating: one you
+        // cancelled while its checks ran stays cancelled and gets no "Plan done".
+        let mut current = false;
+        self.update_plan(&plan.id, |p| {
+            current = p.status == PlanStatus::Integrating;
+            if current {
+                p.status = status;
+            }
+            Ok(())
+        })?;
+        if !current {
+            return Ok(());
+        }
         self.chat(ws_id, &plan.thread, "codly", &text, Some(json!({ "plan_id": plan.id })))?;
         self.decide(
             ws_id,
@@ -1044,10 +1175,6 @@ impl Inner {
             prompts::clip(&text, 200),
             json!({ "plan_id": plan.id, "files": files, "failed_checks": failed }),
         )?;
-        self.update_plan(&plan.id, |p| {
-            p.status = status;
-            Ok(())
-        })?;
         self.lead_followup(&ws.id, &plan.thread, &text).await;
         Ok(())
     }

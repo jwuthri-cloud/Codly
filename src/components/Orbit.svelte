@@ -1,7 +1,7 @@
 <!--
   The orbit: an agent's todo-list progress drawn as a ring around its portrait, with a small dot
-  where its drone is along the way. Live = aurora, needs you = amber, done = settled.
-  Moves only when progress changes; never loops.
+  where its drone is along the way. Live = aurora on a teal track, needs you = amber,
+  blocked = red, done = settled. Moves only when progress changes; never loops.
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
@@ -64,6 +64,10 @@
   .t-idle .arc, .t-off .arc { stroke: var(--ink-3); }
   .t-blocked .arc { stroke: var(--bad); }
   .t-wait .track { stroke: var(--amber-soft); }
+  /* With no todo list there is no arc: the track alone tells working and blocked from idle.
+     Tinted, not solid, so an arc drawn over it still shows how far the agent got. */
+  .t-live .track { stroke: color-mix(in srgb, var(--live) 45%, transparent); }
+  .t-blocked .track { stroke: color-mix(in srgb, var(--bad) 45%, transparent); }
   .drone { fill: var(--aurora-b); stroke: var(--night); stroke-width: 1.5; transition: cx var(--d-5) var(--spring), cy var(--d-5) var(--spring); }
   .face { display: grid; place-items: center; }
 </style>

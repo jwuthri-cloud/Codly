@@ -258,9 +258,10 @@ export function demoLetGo(sim: Sim, id: string): Agent {
 }
 
 // Two other offices for the Transfer picker (the demo has one repo), with who works there.
+// billing-api has an approval waiting, so its tab shows the amber count.
 const OFFICES = [
-  { id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'], working: 0 },
-  { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'], working: 2 },
+  { id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'], working: 0, needs_you: 0 },
+  { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'], working: 2, needs_you: 1 },
 ];
 
 /** Agents moved to those offices: still yours, so their XP stays in the wallet. */
@@ -289,7 +290,7 @@ function demoAway(office: string, now: number): AwayAgent[] {
   return out;
 }
 
-export const demoOffices = (): Office[] => OFFICES.map((o) => ({ id: o.id, name: o.name, repo_path: o.repo_path, crew: o.crew.length, working: o.working, home: demoAway(o.id, Date.now()) }));
+export const demoOffices = (): Office[] => OFFICES.map((o) => ({ id: o.id, name: o.name, repo_path: o.repo_path, crew: o.crew.length, working: o.working, needs_you: o.needs_you, home: demoAway(o.id, Date.now()) }));
 
 /** Transfer an agent to one of the demo's other offices: same rules as the core's; it leaves this office's crew. */
 export function demoTransfer(sim: Sim, id: string, to: string): Agent {

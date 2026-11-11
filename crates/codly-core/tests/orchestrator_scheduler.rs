@@ -233,6 +233,30 @@ fn leases_block_overlapping_scopes() {
     assert_eq!(starts(&a)[0].0, "t3");
 }
 
+/// A worker that asked you something waits for the answer with its process running: the
+/// answer puts its task straight back to Running, so the task keeps its files and its slot.
+#[test]
+fn a_blocked_task_with_a_live_worker_keeps_its_slot() {
+    let mut asked = task("t1", "p", TaskStatus::Blocked, &["a/**"], &[]);
+    asked.assignee = Some("w1".into());
+    let mut w = World::new(vec![asked, task("t2", "p", TaskStatus::Ready, &["a/ui/**"], &[]), task("t3", "p", TaskStatus::Ready, &["b/**"], &[])]);
+    let mut w1 = agent("w1", "Ada", Provider::Claude, Role::Worker);
+    w1.task_id = Some("t1".into());
+    w.agents = vec![w1];
+    w.busy.insert("w1".into());
+    w.settings.max_parallel = 2;
+    let a = w.run();
+    let wt = waits(&a);
+    assert_eq!(wt.len(), 1, "{wt:?}");
+    assert!(wt[0].0 == "t2" && wt[0].1.contains("overlaps running task t1"), "{wt:?}");
+    assert_eq!(starts(&a).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["t3"]);
+    w.settings.max_parallel = 1;
+    assert_eq!(waits(&w.run())[1], ("t3".to_string(), "waiting: all 1 worker slots are busy".to_string()));
+    // Stopped, or its worker gone: a blocked task holds nothing.
+    w.busy.clear();
+    assert_eq!(starts(&w.run()).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["t2"]);
+}
+
 #[test]
 fn slots_and_provider_caps() {
     let mut w = World::new((1..=4).map(|i| task(&format!("t{i}"), "p", TaskStatus::Ready, &[&format!("d{i}/**")], &[])).collect());

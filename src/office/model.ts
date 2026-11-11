@@ -47,6 +47,8 @@ export interface AgentState {
   /** When the status last changed from an event (a stale roster must not undo it). */
   statusAt: number;
   taskId: string | null;
+  /** Its current run (null between runs): a dead run's late events are not its own. */
+  runId: string | null;
   present: boolean;
   /** Open tool calls in start order. */
   tools: Map<string, ToolCall>;

@@ -81,9 +81,12 @@
     return `${t?.status}:${l ? Object.values(l.files).filter((f) => f.modified).length : 0}`;
   });
   let seq = 0;
+  /** Try again: bumps to load the same diff once more. */
+  let retry = $state(0);
   $effect(() => {
     const t = target;
     void version;
+    void retry;
     if (!t) return;
     const my = ++seq;
     loading = true;
@@ -195,7 +198,8 @@
       {/if}
     </aside>
     <div class="main">
-      {#if error}<p class="err">Couldn’t load the diff: {error}</p>
+      {#if error}<p class="err">Couldn’t load the diff: {error}<button class="btn sm" disabled={loading} onclick={() => retry++}>Try again</button></p>
+      {:else if loading && !files.length}<EmptyState compact title="Loading the diff…" />
       {:else if !files.length && !loading}<EmptyState compact title="No changes in this scope yet." />
       {:else}
         {#each files as f (f.path)}
@@ -234,5 +238,5 @@
   .add { color: var(--ok); }
   .del { color: var(--bad); }
   .main { flex: 1; min-width: 0; overflow-y: auto; padding: 4px 24px 24px 6px; display: flex; flex-direction: column; gap: 12px; }
-  .err { color: var(--bad); font-size: var(--t-sm); padding: 20px; }
+  .err { display: flex; align-items: center; gap: 10px; color: var(--bad); font-size: var(--t-sm); padding: 20px; }
 </style>

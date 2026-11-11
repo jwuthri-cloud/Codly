@@ -114,6 +114,12 @@ pub fn is_active(s: TaskStatus) -> bool {
     matches!(s, TaskStatus::Running | TaskStatus::Verifying | TaskStatus::Reviewing | TaskStatus::ChangesRequested | TaskStatus::Merging)
 }
 
+/// A blocked task whose worker (`assignee`) is still live on it holds its slot and lease too:
+/// the worker asked you something, and your answer puts the task straight back to Running.
+pub fn held(t: &Task, assignee: Option<&Agent>, busy: &HashSet<Id>) -> bool {
+    t.status == TaskStatus::Blocked && assignee.is_some_and(|a| busy.contains(&a.id) && a.task_id.as_deref() == Some(t.id.as_str()))
+}
+
 /// Installed and not known to be signed out (`logged_in: None` = no cheap status check).
 pub fn usable(cli: &CliInfo) -> bool {
     cli.path.is_some() && cli.logged_in != Some(false)
@@ -185,7 +191,8 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
     let mut busy: HashSet<Id> = input.busy.clone();
     // Agent → the active task it works on (why an assigned task waits).
     let mut doing: HashMap<Id, String> = HashMap::new();
-    for t in input.tasks.iter().filter(|t| is_active(t.status)) {
+    let worker = |t: &Task| t.assignee.as_deref().and_then(|id| agent_by_id.get(id)).copied();
+    for t in input.tasks.iter().filter(|t| is_active(t.status) || held(t, worker(t), input.busy)) {
         active += 1;
         leases.push((t.key.clone(), t.write_scope.clone()));
         if let Some(a) = t.assignee.as_deref().and_then(|id| agent_by_id.get(id)) {

@@ -28,7 +28,7 @@
       if (v) return { cmd, state: v.ok ? 'pass' : 'fail', detail: v.ok ? 'passed · Codly' : 'failed · Codly', by: 'codly' };
       const s = [...segs].reverse().find((x) => (x.target.command ?? '').includes(cmd) || cmd.includes(x.target.command ?? '\u0000'));
       if (s) {
-        if (s.end == null && store.pendingApprovals.some((a) => a.call_id === s.callId)) return { cmd, state: 'wait', detail: 'needs your OK', by: 'agent' };
+        if (s.end == null && store.pendingApprovals.some((a) => a.call_id === s.callId)) return { cmd, state: 'wait', detail: 'needs your approval', by: 'agent' };
         if (s.end == null) return { cmd, state: 'running', detail: 'running now', by: 'agent', since: s.start };
         const counts = s.testsPassed != null ? (s.testsFailed ? `${s.testsFailed} failed, ${s.testsPassed} passed` : `${s.testsPassed} passed`) : s.ok ? 'passed' : 'failed';
         return { cmd, state: s.ok === false || s.testsFailed ? 'fail' : 'pass', detail: `${counts} · its run`, by: 'agent' };

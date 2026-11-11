@@ -5,7 +5,7 @@
   same checklist stays here and updates live; once it is over it folds to one line you can open.
 -->
 <script lang="ts">
-  import { cancelPlan, runPlan } from '../../lib/state/actions';
+  import { cancelPlan, isStarting, runPlan } from '../../lib/state/actions';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock } from '../../lib/util/format';
@@ -27,7 +27,10 @@
   const live = $derived(plan?.status === 'running' || plan?.status === 'integrating');
   const over = $derived(!deciding && !live);
   let open = $state(false);
-  let busy = $state(false);
+  let acting = $state(false);
+  /** ⌘↵, the palette and the Plan room start the plan too: the card follows the plan's own start. */
+  const starting = $derived(isStarting(planId));
+  const busy = $derived(acting || starting);
   let el: HTMLElement | undefined = $state();
 
   const eyebrow = $derived.by(() => {
@@ -48,9 +51,9 @@
   });
 
   async function act(fn: () => Promise<unknown>) {
-    busy = true;
+    acting = true;
     await fn();
-    busy = false;
+    acting = false;
   }
   function edit() {
     ui.seedComposer(plan?.thread || 'lead', 'Change the plan: ');
@@ -106,9 +109,9 @@
       {#if deciding}
         <footer>
           <button class="btn primary" disabled={busy || plan.status !== 'awaiting_approval'} onclick={() => act(() => runPlan(planId))}>
-            <Icon name="play" size={13} />Run plan<span class="k">⌘↵</span>
+            <Icon name="play" size={13} />{starting ? 'Starting…' : 'Run plan'}<span class="k">⌘↵</span>
           </button>
-          <button class="btn ghost" disabled={busy} onclick={edit}>Change it</button>
+          <button class="btn ghost" disabled={busy} onclick={edit}>Change the plan</button>
           <button class="btn ghost" disabled={busy} onclick={() => act(() => cancelPlan(planId))}>Cancel</button>
         </footer>
         <p class="fine">Each task runs in its own worktree and lands on an integration branch; <code>{store.workspace?.current_branch ?? 'main'}</code> is untouched until you merge.</p>

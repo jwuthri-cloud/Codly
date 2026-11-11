@@ -48,6 +48,7 @@ function placeholder(id: string, ts: number): AgentState {
     status: 'idle',
     statusAt: 0,
     taskId: null,
+    runId: null,
     rank: -1,
     promotedAt: null,
     present: true,
@@ -96,6 +97,7 @@ function copyAgent(a: AgentState, ag: Agent, now: number) {
   a.seed = ag.look_seed || ag.id;
   a.thread = ag.thread ?? (ag.role === 'lead' ? 'lead' : null);
   a.taskId = ag.task_id;
+  a.runId = ag.run_id;
   setChosenTraits(ag.id, ag.career?.traits ?? []);
   const rank = RANK_ORDER.indexOf(ag.career?.rank ?? 'intern');
   if (a.rank >= 0 && rank > a.rank) a.promotedAt = now;
@@ -287,10 +289,13 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
   const tick = (text: string, code: string | null = null, tone: Tone = 'normal', who: string | null = aid) =>
     fx({ t: 'ticker', agentId: who, text: `${nameOf(m, who)} · ${text}`, code, tone, at, eventId: ev.id });
   const recently = (ag: AgentState, kind: keyof AgentState['lastToolAt'], ms: number) => at - (ag.lastToolAt[kind] ?? -Infinity) < ms;
+  // A start that failed can come up late, after the retry began: the core drops that dead
+  // run's events (`project_agent`), and so does the office.
+  const own = !!a && (ev.run_id == null || a.runId === ev.run_id);
 
   switch (k.type) {
     case 'session_started':
-      if (a) {
+      if (a && own) {
         a.provider = k.provider;
         a.present = true;
       }
@@ -303,7 +308,7 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
       }
       break;
     case 'status_changed':
-      if (a) applyStatus(a, k.status, at);
+      if (a && own) applyStatus(a, k.status, at);
       break;
     case 'text_delta':
       if (a) a.replyingSince ??= at;
@@ -503,7 +508,7 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
       }
       break;
     case 'exited':
-      if (a) clearWork(a);
+      if (a && own) clearWork(a);
       break;
     case 'agent_changed': {
       const ag = ensureAgent(m, k.agent.id, at);

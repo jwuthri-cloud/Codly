@@ -180,7 +180,8 @@ export function narrateFrom(i: NarrationInput): Narration {
   }
   if (a.status === 'blocked' || i.task?.status === 'blocked') {
     const why = i.task?.status_reason;
-    return out([txt(why ? `Blocked: ${oneLine(why, 64)}` : 'Blocked')], 'blocked');
+    // "waiting for you:" is ask_me.rs's WAITING prefix: the task waits on your answer, so it is amber, not red.
+    return out([txt(why ? `Blocked: ${oneLine(why, 64)}` : 'Blocked')], why?.startsWith('waiting for you:') ? 'wait' : 'blocked');
   }
 
   // 3 · An open tool call (the most recent one wins).

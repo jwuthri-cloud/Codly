@@ -80,7 +80,7 @@ rich, actionable card, in order:
 
 Composer: compact (one line, grows), `@agent` to talk 1:1 (switches the thread, clearly
 shown as a chip), `#task` references, suggested next actions as small chips under the last
-message ("Run plan", "Show changes", "Merge"). Streaming text renders progressively without
+message ("Run plan", "View changes", "Merge"). Streaming text renders progressively without
 layout jumps. 1:1 chats with agents use the same component, reached from the crew strip.
 
 ## 5. Visual identity (fixes "looks generic")

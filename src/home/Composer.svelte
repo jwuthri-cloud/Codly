@@ -65,17 +65,19 @@
     addFiles(list);
   }
   let ta: HTMLTextAreaElement | undefined = $state();
-  let lastThread = '';
+  /** Where a draft lives: thread names repeat across offices, so a draft is its office's too. */
+  const slot = $derived(`${store.workspace?.id ?? ''}|${thread}`);
+  let lastSlot = '';
 
   $effect(() => {
-    if (thread !== lastThread) {
-      if (lastThread) {
-        drafts[lastThread] = text;
-        fileDrafts[lastThread] = files;
+    if (slot !== lastSlot) {
+      if (lastSlot) {
+        drafts[lastSlot] = text;
+        fileDrafts[lastSlot] = files;
       }
-      text = drafts[thread] ?? '';
-      files = fileDrafts[thread] ?? [];
-      lastThread = thread;
+      text = drafts[slot] ?? '';
+      files = fileDrafts[slot] ?? [];
+      lastSlot = slot;
       tick().then(resize);
     }
   });
@@ -98,11 +100,10 @@
 
   const agent = $derived(store.threadAgent(thread));
   const oneToOne = $derived(!isRequestThread(thread));
-  /** A plan worker asks per its request's permissions (the broker's rule), so its 1:1 shows those. */
+  /** An agent on a task asks per that task's request's permissions (the broker's rule), so its 1:1 shows those. */
   const workerRequest = $derived.by(() => {
-    const t = agent?.role === 'worker' && agent.task_id ? store.taskMap.get(agent.task_id) : null;
-    const p = t?.plan_id ? store.planMap.get(t.plan_id) : null;
-    return p ? p.thread || 'lead' : null;
+    const t = agent && (agent.role === 'worker' || agent.role === 'solo') && agent.task_id ? store.taskMap.get(agent.task_id) : null;
+    return t ? store.taskThread(t.id) : null;
   });
   const isBusy = $derived(busy(thread));
   const fresh = $derived(!oneToOne && !agent && !store.chats.some((c) => c.thread === thread) && !store.outbox.some((o) => o.thread === thread));
@@ -183,17 +184,17 @@
     sendChat(thread, t);
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
     files = [];
-    fileDrafts[thread] = [];
+    fileDrafts[slot] = [];
     text = '';
-    drafts[thread] = '';
+    drafts[slot] = '';
     mention = null;
     tick().then(resize);
   }
 
   /** A transcript from Free Flow joins the draft for review. It is never sent for you. */
-  function dictated(forThread: string, transcript: string) {
-    if (forThread !== thread) {
-      drafts[forThread] = appendTranscript(drafts[forThread] ?? '', transcript);
+  function dictated(forSlot: string, transcript: string) {
+    if (forSlot !== slot) {
+      drafts[forSlot] = appendTranscript(drafts[forSlot] ?? '', transcript);
       return;
     }
     text = appendTranscript(text, transcript);
@@ -219,7 +220,7 @@
       setRequestPrefs(thread, { mode: MODES[(MODES.findIndex((m) => m.id === now) + 1) % MODES.length].id });
       return;
     }
-    if (e.key === 'Backspace' && !text && oneToOne) {
+    if (e.key === 'Backspace' && !text && oneToOne && !e.repeat) {
       e.preventDefault();
       ui.openRequest(ui.request);
       return;
@@ -283,12 +284,12 @@
     ></textarea>
     <input bind:this={picker} type="file" multiple hidden onchange={() => { addFiles([...(picker?.files ?? [])]); if (picker) picker.value = ''; }} />
     <button class="attach" onclick={() => picker?.click()} aria-label="Attach files" data-tip="Attach images or files — or paste or drop them"><Icon name="paperclip" size={15} stroke={1.6} /></button>
-    <DictationButton target={ta} {thread} onText={dictated} />
+    <DictationButton target={ta} thread={slot} onText={dictated} />
     <button class="send" disabled={!canSend} onclick={send} aria-label={isBusy ? 'Queue' : 'Send'} data-tip={isBusy ? 'Send — it queues until the turn ends' : 'Send'} data-tip-kbd="↵">
       <Icon name="send" size={15} stroke={1.8} />
     </button>
   </div>
-  {#if !oneToOne}<LeadControls {thread} />{:else if agent?.role === 'solo'}<AgentControls {thread} />{:else if workerRequest}<AgentControls thread={workerRequest} request />{/if}
+  {#if !oneToOne}<LeadControls {thread} />{:else if workerRequest}<AgentControls thread={workerRequest} request />{:else if agent?.role === 'solo'}<AgentControls {thread} />{/if}
 </div>
 
 <style>

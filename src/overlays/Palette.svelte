@@ -19,6 +19,7 @@
   import { ROOMS, ui } from '../lib/state/ui.svelte';
   import { fuzzy, highlight } from '../lib/util/fuzzy';
   import { PROVIDER_LABEL, TASK_STATUS_LABEL, taskState } from '../lib/util/labels';
+  import { modal } from '../lib/util/modal';
   import type { Tone } from '../lib/narrate';
   import { oneLine } from '../lib/util/sanitize';
   import Icon from '../components/Icon.svelte';
@@ -58,6 +59,7 @@
   let listEl: HTMLDivElement | undefined = $state();
   let search = $state<SearchResult | null>(null);
   let searching = $state(false);
+  let searchError = $state<string | null>(null);
 
   // Seed (⌘N → "+", ui.openPalette('>') …)
   const seed = ui.paletteSeed;
@@ -157,21 +159,28 @@
     store.tasks.map((t) => ({
       id: `task:${t.id}`, section: 'Tasks', title: `${t.key} · ${t.title}`, sub: TASK_STATUS_LABEL[t.status], icon: 'plan', state: toneOf(taskState(t.status)), hint: 'Details',
       run: () => ui.selectTask(t.id),
-      alt: { label: 'View diff', run: () => ui.openDiff({ kind: 'task', id: t.id }) },
+      alt: { label: 'View changes', run: () => ui.openDiff({ kind: 'task', id: t.id }) },
     })),
   );
 
   let searchSeq = 0;
   $effect(() => {
     const q = query.trim();
+    searchError = null;
     if (scope !== '/' || q.length < 2) {
+      // Nothing to search any more: a request still on its way must not answer here.
+      ++searchSeq;
+      searching = false;
       search = null;
       return;
     }
     const my = ++searchSeq;
     searching = true;
     const t = setTimeout(() => {
-      api.search(q).then((r) => my === searchSeq && (search = r)).catch(() => my === searchSeq && (search = null)).finally(() => my === searchSeq && (searching = false));
+      api.search(q)
+        .then((r) => my === searchSeq && (search = r))
+        .catch((e) => my === searchSeq && ((search = null), (searchError = e instanceof Error ? e.message : String(e))))
+        .finally(() => my === searchSeq && (searching = false));
     }, 120);
     return () => clearTimeout(t);
   });
@@ -215,7 +224,7 @@
       const rec = recents.map((id) => all.find((r) => r.id === id)).filter((r): r is Row => !!r).map((r) => ({ ...r, section: 'Recent', hits: [] }));
       // What waits on you is suggested as a place to go, never run: Enter on an empty palette must
       // not merge or approve. Running it takes a query (or the > scope).
-      const needs: Row[] = [
+      const needs: Scored[] = [
         ...store.plans
           .filter((p) => p.status === 'awaiting_approval' || (p.status === 'done' && !store.planMerges[p.id]))
           .map((p) => ({ id: `go:plan:${p.id}`, section: 'Suggested', title: `${p.status === 'done' ? 'Ready to merge' : 'Ready to run'}: ${p.summary}`, icon: 'plan', hits: [], run: () => ui.openPlan(p.id, p.thread) })),
@@ -317,7 +326,7 @@
 </script>
 
 <div class="scrim" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && close()}>
-  <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette" use:modal={close}>
     <div class="input-row">
       <Icon name="search" size={16} />
       {#if scope}
@@ -342,9 +351,11 @@
     </div>
 
     <div class="list" id="palette-list" role="listbox" bind:this={listEl}>
-      {#if scope === '/' && !search && query.trim().length < 2}
+      {#if searchError}
+        <p class="hint-empty">Search failed: {searchError}</p>
+      {:else if scope === '/' && !search && query.trim().length < 2}
         <p class="hint-empty">Type at least two characters. Results come from Codly’s index: paths, symbols and code, with the evidence for each match.</p>
-      {:else if !withAsk.length}
+      {:else if !withAsk.length && !(scope === '/' && searching)}
         <p class="hint-empty">
           {#if scope === '/'}No matches for “{query}”. Try fewer words, or ask the Lead.
           {:else if scope === '+'}Type a title, then ↵.
