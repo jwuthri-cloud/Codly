@@ -117,7 +117,7 @@
     for (const p of store.plans) {
       if (p.status === 'awaiting_approval') rows.push({ id: `plan:run:${p.id}`, section: 'Plan', title: `Run plan: ${p.summary}`, icon: 'play', run: () => runPlan(p.id) });
       if (p.status === 'running' || p.status === 'awaiting_approval') rows.push({ id: `plan:cancel:${p.id}`, section: 'Plan', title: `Cancel plan: ${p.summary}`, icon: 'stop', run: () => cancelPlan(p.id) });
-      if (p.status === 'done' && !store.planMerges[p.id]) rows.push({ id: `plan:merge:${p.id}`, section: 'Plan', title: `Merge into ${store.workspace?.current_branch ?? 'main'}: ${p.summary}`, icon: 'merge', run: () => mergePlan(p.id) });
+      if (p.status === 'done' && !store.mergeOf(p.id)) rows.push({ id: `plan:merge:${p.id}`, section: 'Plan', title: `Merge into ${store.workspace?.current_branch ?? 'main'}: ${p.summary}`, icon: 'merge', run: () => mergePlan(p.id) });
     }
     for (const ap of store.pendingApprovals) {
       const a = store.agentMap.get(ap.agent_id);
@@ -226,7 +226,7 @@
       // not merge or approve. Running it takes a query (or the > scope).
       const needs: Scored[] = [
         ...store.plans
-          .filter((p) => p.status === 'awaiting_approval' || (p.status === 'done' && !store.planMerges[p.id]))
+          .filter((p) => p.status === 'awaiting_approval' || (p.status === 'done' && !store.mergeOf(p.id)))
           .map((p) => ({ id: `go:plan:${p.id}`, section: 'Suggested', title: `${p.status === 'done' ? 'Ready to merge' : 'Ready to run'}: ${p.summary}`, icon: 'plan', hits: [], run: () => ui.openPlan(p.id, p.thread) })),
         ...store.pendingApprovals
           .filter((ap) => ap.choices.includes('allow_once'))

@@ -185,4 +185,14 @@ describe('a run that is not the agent’s', () => {
     store.live = {};
     store.streams = new Map();
   });
+
+  it('a plan merged before a reload still shows as merged', () => {
+    // After a reload (or a switch of office and back) the merge command's event is not in the
+    // snapshot's events: the plan itself carries it.
+    const plan = { id: 'p1', status: 'done', merged_sha: 'abc1234def', kept: false };
+    const snap = { as_of: 1, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [], plans: [plan], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [] };
+    (store as unknown as { applySnapshot(s: Snapshot): void }).applySnapshot(snap as unknown as Snapshot);
+    expect(store.mergeOf('p1')?.sha).toBe('abc1234def');
+    store.plans = [];
+  });
 });

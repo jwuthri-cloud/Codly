@@ -22,7 +22,7 @@
   const arts = $derived(store.artifacts.filter((a) => a.task_id && tasks.some((t) => t.id === a.task_id)));
   const merged = $derived.by(() => {
     void store.rev;
-    return store.planMerges[planId] ?? null;
+    return store.mergeOf(planId);
   });
   const kept = $derived(ui.keptPlans.includes(planId) || !!store.planMap.get(planId)?.kept);
   const target = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main');
