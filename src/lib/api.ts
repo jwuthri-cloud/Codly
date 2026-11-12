@@ -259,12 +259,14 @@ export const api = {
   /** Transfer an agent to another of your offices: its career, traits, stamina, look and memory
    *  go with it; trust, friends, mentor and its session stay. Refused mid-task and for the Lead. */
   transferAgent: (agentId: string, toWorkspaceId: string) => call<Agent>('transfer_agent', { agentId, toWorkspaceId }),
-  /** Build/Buy: the wallet (coins, across every repo) and the furniture in this office. */
-  officeShop: () => call<Shop>('office_shop', {}),
+  // Build/Buy and Build mode name their office (`ws`): a save can land after you switched to
+  // another one, which must not get this one's walls and furniture.
+  /** Build/Buy: the wallet (coins, across every repo) and the furniture in office `ws`. */
+  officeShop: (ws: string) => call<Shop>('office_shop', { workspaceId: ws }),
   /** Buy a piece of furniture and put it down, or move one already bought (same uid). */
-  officePlace: (piece: Placed) => call<Shop>('office_place', { piece }),
+  officePlace: (ws: string, piece: Placed) => call<Shop>('office_place', { workspaceId: ws, piece }),
   /** Sell a piece of furniture back for the full price. */
-  officeSell: (uid: string) => call<Shop>('office_sell', { uid }),
+  officeSell: (ws: string, uid: string) => call<Shop>('office_sell', { workspaceId: ws, uid }),
   /** The player's coins (🪙): every repo's XP earned, plus grants, less what is owned. */
   wallet: () => call<Wallet>('wallet', {}),
   /** Developer mode only: give coins (flags the wallet as cheated, for good). */
@@ -273,11 +275,11 @@ export const api = {
   devGiveXp: (agentId: string, xp: number) => call<Agent>('dev_give_xp', { agentId, xp }),
   /** Developer mode only: this repo's lot back to a gift Garage (what stood there sells back). */
   devResetOffice: () => call<Shop>('dev_reset_office', {}),
-  /** Build mode: the open repo's lot (walls, floors, furniture), made on the first read. */
-  officeLot: () => call<Lot>('office_lot', {}),
+  /** Build mode: office `ws`'s lot (walls, floors, furniture), made on the first read. */
+  officeLot: (ws: string) => call<Lot>('office_lot', { workspaceId: ws }),
   /** Build mode: save the lot, checked and priced by the core (what changed is paid for or sold
    *  back; refused if the wallet can't pay): the lot as stored, the wallet, and the cost. */
-  officeSaveLot: (lot: Lot) => call<LotSaved>('office_save_lot', { lot }),
+  officeSaveLot: (ws: string, lot: Lot) => call<LotSaved>('office_save_lot', { workspaceId: ws, lot }),
   /** The neighbourhood: every plot, yours and for sale, with the repo on each. */
   lots: () => call<LotSlot[]>('lots', {}),
   /** A plot's lot, for drawing it from outside (a bare plot if it isn't yours). */

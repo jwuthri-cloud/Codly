@@ -132,20 +132,20 @@ pub async fn office_digest(state: State<'_, AppState>, since: i64) -> Result<Dig
 
 /// Build/Buy: the wallet and what the office owns.
 #[tauri::command]
-pub async fn office_shop(state: State<'_, AppState>) -> Result<Shop, String> {
-    state.core().await?.shop().map_err(|e| format!("{e:#}"))
+pub async fn office_shop(state: State<'_, AppState>, workspace_id: Option<String>) -> Result<Shop, String> {
+    state.core().await?.shop(workspace_id.as_deref()).map_err(|e| format!("{e:#}"))
 }
 
 /// Buy a piece of furniture and put it down, or move one already bought.
 #[tauri::command]
-pub async fn office_place(state: State<'_, AppState>, piece: Placed) -> Result<Shop, String> {
-    state.core().await?.place(piece).map_err(|e| format!("{e:#}"))
+pub async fn office_place(state: State<'_, AppState>, workspace_id: Option<String>, piece: Placed) -> Result<Shop, String> {
+    state.core().await?.place(workspace_id.as_deref(), piece).map_err(|e| format!("{e:#}"))
 }
 
 /// Sell a piece of furniture back.
 #[tauri::command]
-pub async fn office_sell(state: State<'_, AppState>, uid: String) -> Result<Shop, String> {
-    state.core().await?.sell(&uid).map_err(|e| format!("{e:#}"))
+pub async fn office_sell(state: State<'_, AppState>, workspace_id: Option<String>, uid: String) -> Result<Shop, String> {
+    state.core().await?.sell(workspace_id.as_deref(), &uid).map_err(|e| format!("{e:#}"))
 }
 
 /// The player's coins (🪙), across every repo.
@@ -174,14 +174,14 @@ pub async fn dev_reset_office(state: State<'_, AppState>) -> Result<Shop, String
 
 /// Build mode: the open repo's lot (made on the first read).
 #[tauri::command]
-pub async fn office_lot(state: State<'_, AppState>) -> Result<Lot, String> {
-    state.core().await?.lot().map_err(|e| format!("{e:#}"))
+pub async fn office_lot(state: State<'_, AppState>, workspace_id: Option<String>) -> Result<Lot, String> {
+    state.core().await?.lot(workspace_id.as_deref()).map_err(|e| format!("{e:#}"))
 }
 
 /// Build mode: check, price and store the open repo's lot (refused if the wallet can't pay).
 #[tauri::command]
-pub async fn office_save_lot(state: State<'_, AppState>, lot: Lot) -> Result<LotSaved, String> {
-    state.core().await?.save_lot(lot).map_err(|e| format!("{e:#}"))
+pub async fn office_save_lot(state: State<'_, AppState>, workspace_id: Option<String>, lot: Lot) -> Result<LotSaved, String> {
+    state.core().await?.save_lot(workspace_id.as_deref(), lot).map_err(|e| format!("{e:#}"))
 }
 
 /// The neighbourhood: every plot, yours and for sale.
