@@ -116,7 +116,7 @@ mod tests {
         let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
         let core = Core::start_with(CoreConfig { data_dir: root.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
         let ws = core.open_workspace(repo.to_str().unwrap()).await.unwrap();
-        assert_eq!(core.lot().unwrap().template, "garage", "a new repo's");
+        assert_eq!(core.lot(None).unwrap().template, "garage", "a new repo's");
 
         // An agent in the middle of work: its session, worktree, branch, task and a prompt.
         let worktree = root.path().join("data/worktrees/ada-feature-login");

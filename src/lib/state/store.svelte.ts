@@ -838,6 +838,12 @@ class CodlyStore {
   dropOutgoing(id: string) {
     this.sent = this.sent.filter((o) => o.id !== id);
   }
+  /** The plan's merge into your branch, if any: on record on the plan (`merged_sha`, so it
+   *  survives a reload and a switch of office), else this session's merge command. */
+  mergeOf(planId: string): { sha: string } | null {
+    const sha = this.planMap.get(planId)?.merged_sha;
+    return sha ? { sha } : (this.planMerges[planId] ?? null);
+  }
   markPlanMerged(planId: string, sha: string) {
     this.planMerges = { ...this.planMerges, [planId]: { sha, ts: Date.now() } };
     this.rev++;

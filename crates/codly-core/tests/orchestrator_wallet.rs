@@ -94,7 +94,7 @@ async fn cheats_need_developer_mode_and_flag_the_wallet() {
     let w = core.wallet().unwrap();
     assert_eq!((w.earned, w.balance, w.cheated), (40, 40, false), "another repo's XP is in the wallet");
     let piece = Placed { uid: "s1".into(), item: "kenney.loungeDesignSofa".into(), x: 1.0, y: 0.0, z: 5.0, rot: 0.0 };
-    assert!(core.place(piece.clone()).unwrap_err().to_string().contains("not enough coins"));
+    assert!(core.place(None, piece.clone()).unwrap_err().to_string().contains("not enough coins"));
 
     // Off by default: every cheat is refused.
     assert!(!core.settings().developer_mode);
@@ -107,7 +107,7 @@ async fn cheats_need_developer_mode_and_flag_the_wallet() {
     let w = core.dev_grant(1000).unwrap();
     assert_eq!((w.granted, w.balance, w.cheated), (1000, 1040, true));
     assert!(core.dev_grant(0).is_err());
-    let shop = core.place(piece).unwrap();
+    let shop = core.place(None, piece).unwrap();
     assert_eq!(shop.placed.len(), 1);
     let a = core.dev_give_xp(&ada, 250).unwrap();
     assert_eq!((a.career.xp, a.career.rank), (290, Rank::Senior), "the rank follows");
@@ -130,26 +130,54 @@ async fn games_and_coffee_are_earned_and_stand_in_the_lot() {
     seed_worker(&dir.path().join("data"), 0);
     let core = start(dir.path()).await;
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
-    assert_eq!(core.lot().unwrap().template, "garage");
+    assert_eq!(core.lot(None).unwrap().template, "garage");
     core.update_settings(Settings { developer_mode: true, ..core.settings() }).await.unwrap();
     core.dev_grant(5000).unwrap();
     let at = |uid: &str, item: &str| Placed { uid: uid.into(), item: item.into(), x: 7.0, y: 0.0, z: 5.5, rot: 0.0 };
 
     // The PS5 needs a Senior on this crew (Ada works in another repo); coffee needs a kitchen.
-    let err = core.place(at("tv", "office.tvStand")).unwrap_err().to_string();
+    let err = core.place(None, at("tv", "office.tvStand")).unwrap_err().to_string();
     assert!(err.contains("must be a Senior"), "{err}");
-    let err = core.place(at("cup", "polypizza.espresso")).unwrap_err().to_string();
+    let err = core.place(None, at("cup", "polypizza.espresso")).unwrap_err().to_string();
     assert!(err.contains("kitchen"), "{err}");
-    core.place(at("fridge", "kenney.kitchenFridge")).unwrap();
-    core.place(at("cup", "polypizza.espresso")).unwrap();
+    core.place(None, at("fridge", "kenney.kitchenFridge")).unwrap();
+    core.place(None, at("cup", "polypizza.espresso")).unwrap();
 
     // A foosball stands in the lot (it plays there); moved or sold, the lot follows.
-    core.place(at("foos", "office.foosball")).unwrap();
+    core.place(None, at("foos", "office.foosball")).unwrap();
     let foos = |lot: &Lot| lot.furniture.iter().find(|p| p.uid == "foos").map(|p| p.x);
-    assert_eq!(foos(&core.lot().unwrap()), Some(7.0));
-    core.place(Placed { x: 3.0, ..at("foos", "office.foosball") }).unwrap();
-    assert_eq!(foos(&core.lot().unwrap()), Some(3.0));
-    core.sell("foos").unwrap();
-    assert_eq!(foos(&core.lot().unwrap()), None);
+    assert_eq!(foos(&core.lot(None).unwrap()), Some(7.0));
+    core.place(None, Placed { x: 3.0, ..at("foos", "office.foosball") }).unwrap();
+    assert_eq!(foos(&core.lot(None).unwrap()), Some(3.0));
+    core.sell(None, "foos").unwrap();
+    assert_eq!(foos(&core.lot(None).unwrap()), None);
+    core.shutdown().await;
+}
+
+/// Build mode saves as it closes, and switching office closes it: that save (and the furniture
+/// it moves) names the office it was made in, so the office you switched to keeps its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_save_for_the_office_you_left_stays_in_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));
+    let core = start(dir.path()).await;
+    let wa = core.open_workspace(a.to_str().unwrap()).await.unwrap().id;
+    core.update_settings(Settings { developer_mode: true, ..core.settings() }).await.unwrap();
+    core.dev_grant(5000).unwrap();
+    let at = |uid: &str, item: &str| Placed { uid: uid.into(), item: item.into(), x: 7.0, y: 0.0, z: 5.5, rot: 0.0 };
+    let mut built = core.lot(None).unwrap();
+    built.furniture.push(at("sofa", "kenney.loungeSofa"));
+
+    // You switch to B; A's Build mode saves what you did there as it closes.
+    let wb = core.open_workspace(b.to_str().unwrap()).await.unwrap().id;
+    let b_before = serde_json::to_string(&core.lot(None).unwrap()).unwrap();
+    core.save_lot(Some(&wa), built).unwrap();
+    core.place(Some(&wa), at("chair", "kenney.chair")).unwrap();
+
+    let has = |lot: &Lot, uid: &str| lot.furniture.iter().any(|p| p.uid == uid);
+    let in_a = core.lot(Some(&wa)).unwrap();
+    assert!(has(&in_a, "sofa") && has(&in_a, "chair"), "the office you left has what you did there");
+    assert_eq!(serde_json::to_string(&core.lot(Some(&wb)).unwrap()).unwrap(), b_before, "the office you are in keeps its own");
+    assert!(core.shop(None).unwrap().placed.is_empty(), "and its shop shows none of A's");
     core.shutdown().await;
 }

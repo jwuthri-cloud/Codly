@@ -45,7 +45,7 @@
   ]);
   const into = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main');
   // A done plan merges straight in (a failed merge goes to its Lead, see `mergePlan`).
-  const mergeable = $derived(!!groupPlan && groupPlan.status === 'done' && !store.planMerges[groupPlan.id]);
+  const mergeable = $derived(!!groupPlan && groupPlan.status === 'done' && !store.mergeOf(groupPlan.id));
   let merging = $state(false);
   async function merge(planId: string) {
     merging = true;

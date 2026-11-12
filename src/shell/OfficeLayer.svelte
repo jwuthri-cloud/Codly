@@ -74,7 +74,7 @@
     void store.epoch;
     void onMap;
     if (!ws) return void ((lot = null), (lotFor = null));
-    api.officeLot().then(
+    api.officeLot(ws).then(
       (l) => store.workspace?.id === ws && ((lot = l), (lotFor = ws)),
       () => store.workspace?.id === ws && (lotFor = ws),
     );
@@ -93,7 +93,7 @@
   function refetchOffice() {
     const ws = store.workspace?.id ?? null;
     api.ghosts().then((g) => isOpen(ws) && (ghosts = g)).catch(() => {});
-    api.officeShop().then((s) => isOpen(ws) && ((shop = s), (shopFor = ws))).catch(() => {});
+    if (ws) api.officeShop(ws).then((s) => isOpen(ws) && ((shop = s), (shopFor = ws))).catch(() => {});
   }
   $effect(() => {
     void store.workspace?.id;
@@ -127,19 +127,21 @@
   };
   // The lot too: what came with the office (desks, the server) is drawn from it.
   // Each answer lands only if its office is still the open one.
-  const relot = (ws: string | null) => api.officeLot().then((l) => isOpen(ws) && (lot = l), () => {});
-  const bought = (ws: string | null) => (s: Shop) => {
+  const relot = (ws: string) => api.officeLot(ws).then((l) => isOpen(ws) && (lot = l), () => {});
+  const bought = (ws: string) => (s: Shop) => {
     if (!isOpen(ws)) return;
     shop = s;
     relot(ws);
   };
-  const place = (p: Placed) => api.officePlace(p).then(bought(store.workspace?.id ?? null), undo('Could not put it there'));
-  const sell = (uid: string) => api.officeSell(uid).then(bought(store.workspace?.id ?? null), undo('Could not sell it'));
+  // `ws` is the office the view was drawn for (the markup pins it), not the open one: Build mode
+  // saves as it closes, and switching office closes it after the switch. Sent to the open office,
+  // that save gave it the walls and furniture of the one you left.
+  const place = (ws: string, p: Placed) => api.officePlace(ws, p).then(bought(ws), undo('Could not put it there'));
+  const sell = (ws: string, uid: string) => api.officeSell(ws, uid).then(bought(ws), undo('Could not sell it'));
   // Build mode: the core checks the lot and charges the wallet for the change (a refusal throws:
   // build mode puts the office back).
-  const saveLot = async (l: Lot) => {
-    const ws = store.workspace?.id ?? null;
-    const saved = await api.officeSaveLot(l);
+  const saveLot = async (ws: string, l: Lot) => {
+    const saved = await api.officeSaveLot(ws, l);
     if (!isOpen(ws)) return saved;
     lot = saved.lot;
     if (shop) shop = { ...shop, wallet: saved.wallet };
@@ -296,60 +298,64 @@
     {#if lotReady}
       <svelte:boundary onerror={(e) => console.error('[codly] office crashed', e)}>
         {#key store.epoch}
-          <OfficeView
-            {files}
-            agents={store.agents}
-            tasks={store.tasks}
-            approvals={store.approvals}
-            artifacts={officeArtifacts}
-            {selection}
-            {hover}
-            reducedMotion={ui.reducedMotion}
-            {backdrop}
-            {onselect}
-            {onhover}
-            {subscribe}
-            history={historyAtMount()}
-            narrate={officeNarrate}
-            {artifactUrl}
-            {insets}
-            ticker={ui.mode === 'office'}
-            accounts={accounts.list}
-            {onaction}
-            onlook={(id, seed) => {
-              const a = store.agentMap.get(id);
-              if (a) setAgentLook(a, seed);
-            }}
-            paused={!!store.workspace && offices.paused(store.workspace.id)}
-            {onpause}
-            onpickapplicant={(offerId, i) => api.pickApplicant(offerId, i).catch(fail('Could not pick'))}
-            {ghosts}
-            onbringback={bringBack}
-            {lot}
-            shop={shopHere}
-            onplace={place}
-            onsell={sell}
-            onexport={exportOffice}
-            onsavelot={saveLot}
-            {digest}
-            simsKey="codly.sims.{store.workspace?.id ?? 'demo'}"
-            onhome={(id, until) => api.setAgentHome(id, until).catch(() => {})}
-            onrest={(id, sick) => api.noteRest(id, sick).catch(() => {})}
-            ontired={(id, tired) => api.setAgentTired(id, tired).catch(() => {})}
-            onhangout={(a, b) => api.noteHangout(a, b).catch(() => {})}
-            biggerModel={(id) => api.biggerModel(id)}
-            ongivemodel={(id, model) => {
-              const a = store.agentMap.get(id);
-              if (a) giveModel(a, model);
-            }}
-            offices={() => api.offices()}
-            ontransfer={transferAgent}
-            oneditionread={() => {
-              try {
-                localStorage.setItem(editionKey(), String(Date.now()));
-              } catch {}
-            }}
-          />
+          <!-- One office per view: `ws` stays the office this view was drawn for, also in what
+               its Build mode saves while it closes after a switch. -->
+          {#each [lotFor] as ws (ws)}
+            <OfficeView
+              {files}
+              agents={store.agents}
+              tasks={store.tasks}
+              approvals={store.approvals}
+              artifacts={officeArtifacts}
+              {selection}
+              {hover}
+              reducedMotion={ui.reducedMotion}
+              {backdrop}
+              {onselect}
+              {onhover}
+              {subscribe}
+              history={historyAtMount()}
+              narrate={officeNarrate}
+              {artifactUrl}
+              {insets}
+              ticker={ui.mode === 'office'}
+              accounts={accounts.list}
+              {onaction}
+              onlook={(id, seed) => {
+                const a = store.agentMap.get(id);
+                if (a) setAgentLook(a, seed);
+              }}
+              paused={!!store.workspace && offices.paused(store.workspace.id)}
+              {onpause}
+              onpickapplicant={(offerId, i) => api.pickApplicant(offerId, i).catch(fail('Could not pick'))}
+              {ghosts}
+              onbringback={bringBack}
+              {lot}
+              shop={shopHere}
+              onplace={ws ? (p) => place(ws, p) : undefined}
+              onsell={ws ? (uid) => sell(ws, uid) : undefined}
+              onexport={exportOffice}
+              onsavelot={ws ? (l) => saveLot(ws, l) : undefined}
+              {digest}
+              simsKey="codly.sims.{store.workspace?.id ?? 'demo'}"
+              onhome={(id, until) => api.setAgentHome(id, until).catch(() => {})}
+              onrest={(id, sick) => api.noteRest(id, sick).catch(() => {})}
+              ontired={(id, tired) => api.setAgentTired(id, tired).catch(() => {})}
+              onhangout={(a, b) => api.noteHangout(a, b).catch(() => {})}
+              biggerModel={(id) => api.biggerModel(id)}
+              ongivemodel={(id, model) => {
+                const a = store.agentMap.get(id);
+                if (a) giveModel(a, model);
+              }}
+              offices={() => api.offices()}
+              ontransfer={transferAgent}
+              oneditionread={() => {
+                try {
+                  localStorage.setItem(editionKey(), String(Date.now()));
+                } catch {}
+              }}
+            />
+          {/each}
         {/key}
         {#snippet failed(_error, reset)}
           <div class="fail">

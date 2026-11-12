@@ -676,23 +676,20 @@ impl Core {
         wallet::wallet(&self.inner.store)
     }
 
-    /// Build/Buy: the wallet and the open repo's furniture.
-    pub fn shop(&self) -> anyhow::Result<Shop> {
-        let ws = self.inner.require_ws()?;
-        wallet::shop(&self.inner.store, &ws.id)
+    /// Build/Buy: the wallet and an office's furniture (`ws`; None: the open repo's).
+    pub fn shop(&self, ws: Option<&str>) -> anyhow::Result<Shop> {
+        wallet::shop(&self.inner.store, &self.office(ws)?)
     }
 
     /// Buy a piece of furniture and put it down (if the wallet has the coins), or move one
     /// already bought (same `uid`).
-    pub fn place(&self, piece: Placed) -> anyhow::Result<Shop> {
-        let ws = self.inner.require_ws()?;
-        wallet::place(&self.inner.store, &ws.id, piece)
+    pub fn place(&self, ws: Option<&str>, piece: Placed) -> anyhow::Result<Shop> {
+        wallet::place(&self.inner.store, &self.office(ws)?, piece)
     }
 
     /// Sell a piece of furniture back for the full price.
-    pub fn sell(&self, uid: &str) -> anyhow::Result<Shop> {
-        let ws = self.inner.require_ws()?;
-        wallet::sell(&self.inner.store, &ws.id, uid)
+    pub fn sell(&self, ws: Option<&str>, uid: &str) -> anyhow::Result<Shop> {
+        wallet::sell(&self.inner.store, &self.office(ws)?, uid)
     }
 
     /// Developer panel: give coins. Flags the wallet for good.
@@ -736,18 +733,26 @@ impl Core {
         Ok(shop)
     }
 
-    /// Build mode: the open repo's lot, made on the first read (the Studio for a repo with
-    /// history, the Garage for a new one).
-    pub fn lot(&self) -> anyhow::Result<Lot> {
-        let ws = self.inner.require_ws()?;
-        self.inner.lot(&ws.id)
+    /// Build mode: an office's lot (`ws`; None: the open repo's), made on the first read (the
+    /// Studio for a repo with history, the Garage for a new one).
+    pub fn lot(&self, ws: Option<&str>) -> anyhow::Result<Lot> {
+        self.inner.lot(&self.office(ws)?)
     }
 
-    /// Build mode: check, price and store the open repo's lot (refused if the wallet can't pay
+    /// Build mode: check, price and store an office's lot (refused if the wallet can't pay
     /// for what changed); returns it as stored, the wallet and the cost.
-    pub fn save_lot(&self, lot: Lot) -> anyhow::Result<LotSaved> {
-        let ws = self.inner.require_ws()?;
-        self.inner.save_lot(&ws.id, lot)
+    pub fn save_lot(&self, ws: Option<&str>, lot: Lot) -> anyhow::Result<LotSaved> {
+        self.inner.save_lot(&self.office(ws)?, lot)
+    }
+
+    /// The office a Build/Buy call is for. The UI names it: by the time a save lands (Build mode
+    /// saves as it closes, which a switch of office does), the open repo can be another one, and
+    /// its lot must not get this office's walls and furniture.
+    fn office(&self, ws: Option<&str>) -> anyhow::Result<String> {
+        match ws {
+            Some(id) => Ok(id.to_string()),
+            None => Ok(self.inner.require_ws()?.id),
+        }
     }
 
     /// The neighbourhood: every plot, yours and for sale, with the repo on each (no repo needs to
