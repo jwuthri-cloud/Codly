@@ -140,15 +140,21 @@
     const seg = now?.seg;
     if (seg) {
       const o = store.liveOut.get(seg.callId);
-      if (o) return { title: seg.label || seg.name, text: o.text, live: true, ok: null as boolean | null };
+      if (o) return { title: seg.label || seg.name, text: o.text, live: true, ok: null as boolean | null, path: segPath(seg, o.text) };
     }
     const lo = live?.lastOutput;
     if (lo) {
       const s = live?.segments.find((x) => x.callId === lo.callId);
-      return { title: s ? `${pastVerb(s.activity)} ${s.label}` : 'Last output', text: lo.text, live: false, ok: lo.ok };
+      return { title: s ? `${pastVerb(s.activity)} ${s.label}` : 'Last output', text: lo.text, live: false, ok: lo.ok, path: segPath(s, lo.text) };
     }
     return null;
   });
+  /** The file a tool call wrote or read: its target, else the path in "File created successfully at: …". */
+  function segPath(s: { target: { path: string | null; paths: string[] } } | undefined, text: string): string | null {
+    const t = s?.target.path ?? s?.target.paths[0];
+    if (t) return t;
+    return /(?:created|updated|written|saved)[^\n]*? at:?\s+(\/[^\s()]+)/i.exec(text)?.[1] ?? null;
+  }
   let outEl: HTMLPreElement | undefined = $state();
   let outSeen: HTMLPreElement | undefined;
   // A box that just opened starts on its newest line; after that it follows only while you
@@ -406,7 +412,16 @@
 
     <Section id="output" title="Output" summary={liveOut ? (liveOut.live ? 'live' : liveOut.title) : 'none'}>
       {#if liveOut}
-        <div class="out-head">{#if liveOut.live}<span class="live-dot"></span>{:else}<Icon name={liveOut.ok === false ? 'x-circle' : 'check'} size={12} />{/if}<code class="truncate">{liveOut.title}</code></div>
+        <div class="out-head">
+          {#if liveOut.live}<span class="live-dot"></span>{:else}<Icon name={liveOut.ok === false ? 'x-circle' : 'check'} size={12} />{/if}
+          {#if liveOut.path}
+            {@const p = liveOut.path}
+            <button class="title-link truncate" onclick={() => ide.openPath(agent.id, p)} data-tip="Open {p}"><code>{liveOut.title}</code></button>
+            <button class="btn sm ghost open-file" onclick={() => ide.openPath(agent.id, p)} data-tip={p}><Icon name="file" size={12} />Open</button>
+          {:else}
+            <code class="truncate">{liveOut.title}</code>
+          {/if}
+        </div>
         <pre class="out selectable" bind:this={outEl}>{clean(liveOut.text)}</pre>
       {:else}
         <p class="small">No command output yet.</p>
@@ -535,6 +550,9 @@
   .s-meta { font-size: var(--t-xs); color: var(--ink-3); }
   .out-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: var(--t-sm); color: var(--ink-3); }
   .out-head code { font-size: 11.5px; color: var(--ink-2); }
+  .out-head .open-file { margin-left: auto; flex: none; }
+  .title-link { min-width: 0; text-align: left; }
+  .title-link:hover code { color: var(--ink-1); text-decoration: underline; }
   .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--aurora); box-shadow: 0 0 0 3px var(--live-soft); }
   .out { margin: 0; max-height: 240px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-family: var(--font-mono); font-size: 11.5px; line-height: 17px; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
   .cost { display: flex; flex-direction: column; gap: 10px; }

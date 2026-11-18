@@ -56,6 +56,23 @@ class Ide {
     this.visible = false;
   }
 
+  /** Open the IDE on an agent's worktree, on the file at `path` (root-relative or absolute). */
+  async openPath(agentId: string, path: string, line: number | null = null) {
+    await this.open(agentId);
+    const root = this.info?.root.replace(/\/+$/, '');
+    let rel = path;
+    if (path.startsWith('/')) {
+      if (!root || !path.startsWith(`${root}/`)) {
+        toast({ kind: 'error', title: 'Couldn’t open the file', body: `${path} is outside this agent’s worktree.` });
+        return;
+      }
+      rel = path.slice(root.length + 1);
+    }
+    rel = rel.replace(/^\.\//, '');
+    await this.reveal(rel);
+    await this.openFile(rel, line);
+  }
+
   isDirty(t: Tab): boolean {
     return t.kind === 'file' && !t.loading && !t.error && t.content !== t.saved;
   }
