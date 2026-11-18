@@ -7,7 +7,7 @@
  *
  * Web only (`codly serve`): the desktop window has no relay next to it.
  */
-import type { Agent } from '../gen/Agent';
+import { isRequestThread } from './ui.svelte';
 import { isWebApp } from '../api';
 import { sendChat } from './actions';
 import { store } from './store.svelte';
@@ -39,7 +39,14 @@ class Cap extends AudioWorkletProcessor {
 }
 registerProcessor("cap", Cap);`;
 
-type Pending = { agentId: string; turnsBefore: number; sentAt: number; timer: ReturnType<typeof setInterval> };
+type Pending = { turnsBefore: number; sentAt: number; timer: ReturnType<typeof setInterval> };
+
+/** Who the voice speaks for: the thread's agent, or the Lead a request thread gets on its first message. */
+function who(thread: string): { name: string; role: string; provider: string } {
+  const a = store.threadAgent(thread);
+  if (a) return { name: a.name, role: a.role, provider: a.provider };
+  return isRequestThread(thread) ? { name: 'the Lead', role: 'lead', provider: 'Codly' } : { name: 'the agent', role: 'agent', provider: 'a CLI' };
+}
 
 class Voice {
   phase = $state<VoicePhase>('off');
@@ -61,8 +68,6 @@ class Voice {
 
   /** Start talking to the agent of `thread`. A session on another thread is ended first. */
   async start(thread: string): Promise<void> {
-    const agent = store.threadAgent(thread);
-    if (!agent) return;
     this.stop();
     this.thread = thread;
     this.lines = [];
@@ -85,7 +90,7 @@ class Voice {
     const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/voice/ws`);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
-    ws.onmessage = (e) => (e.data instanceof ArrayBuffer ? this.play(e.data) : this.onEvent(JSON.parse(e.data), agent));
+    ws.onmessage = (e) => (e.data instanceof ArrayBuffer ? this.play(e.data) : this.onEvent(JSON.parse(e.data), thread));
     ws.onclose = () => {
       if (this.ws !== ws) return;
       if (this.phase !== 'error') this.fail('The voice connection closed.');
@@ -124,15 +129,18 @@ class Voice {
   }
 
   private say(role: VoiceLine['role'], text: string): void {
-    this.lines = [...this.lines, { role, text }].slice(-40);
+    this.lines = [...this.lines, { role, text }].slice(-200);
   }
 
-  private onEvent(m: Record<string, unknown>, agent: Agent): void {
+  private onEvent(m: Record<string, unknown>, thread: string): void {
     switch (m.type) {
       case 'ready':
         this.model = String(m.model ?? '');
         this.phase = 'listening';
-        this.send({ type: 'context', agent: agent.name, role: agent.role, provider: agent.provider });
+        {
+          const w = who(thread);
+          this.send({ type: 'context', agent: w.name, role: w.role, provider: w.provider });
+        }
         break;
       case 'clear':
         this.clearPlayback();
@@ -150,7 +158,7 @@ class Voice {
         if (String(m.text ?? '').trim()) this.say('voice', String(m.text));
         break;
       case 'tool_call':
-        this.tool(String(m.id), String(m.name), (m.args ?? {}) as Record<string, unknown>, agent.id);
+        this.tool(String(m.id), String(m.name), (m.args ?? {}) as Record<string, unknown>, thread);
         break;
       case 'error':
         this.error = String(m.text ?? 'Voice error');
@@ -158,39 +166,40 @@ class Voice {
     }
   }
 
-  private tool(id: string, name: string, args: Record<string, unknown>, agentId: string): void {
-    const agent = store.agentMap.get(agentId);
+  private tool(id: string, name: string, args: Record<string, unknown>, thread: string): void {
+    const agent = store.threadAgent(thread);
     if (name === 'agent_status') {
-      const last = store.live[agentId]?.messages.at(-1)?.text ?? null;
+      const last = (agent && store.live[agent.id]?.messages.at(-1)?.text) || null;
       this.send({ type: 'tool_result', id, output: { status: agent?.status ?? 'unknown', latest_message: last && clip(last, 1500) } });
       return;
     }
     if (name === 'ask_agent') {
       const message = String(args.message ?? '').trim();
-      if (!message || !this.thread) {
+      if (!message) {
         this.send({ type: 'tool_result', id, output: { error: 'empty message' } });
         return;
       }
-      const turnsBefore = store.live[agentId]?.turns.length ?? 0;
+      const turnsBefore = (agent && store.live[agent.id]?.turns.length) || 0;
       const sentAt = Date.now();
-      const ok = sendChat(this.thread, message);
+      const ok = sendChat(thread, message);
       this.say('agent', `→ ${message}`);
       this.send({ type: 'tool_result', id, output: ok ? { status: 'sent', note: 'The agent is working; its reply comes later.' } : { error: 'Codly refused the message' } });
-      if (ok) this.watch(agentId, turnsBefore, sentAt);
+      if (ok) this.watch(thread, turnsBefore, sentAt);
       return;
     }
     this.send({ type: 'tool_result', id, output: { error: `unknown tool ${name}` } });
   }
 
   /** Waits for the agent's turn to end after `ask_agent`, then hands its reply to the voice. */
-  private watch(agentId: string, turnsBefore: number, sentAt: number): void {
+  private watch(thread: string, turnsBefore: number, sentAt: number): void {
     const p: Pending = {
-      agentId,
       turnsBefore,
       sentAt,
       timer: setInterval(() => {
-        const live = store.live[agentId];
-        const status = store.agentMap.get(agentId)?.status ?? 'offline';
+        const agent = store.threadAgent(thread); // a new request's Lead appears after the first message
+        if (!agent) return;
+        const live = store.live[agent.id];
+        const status = agent.status;
         const turns = live?.turns ?? [];
         const ended = turns.length > p.turnsBefore && turns.at(-1)?.end != null;
         if (!ended || !RESTING.has(status)) return;
@@ -201,6 +210,7 @@ class Voice {
         const text = (finals.length ? finals : msgs.slice(-1)).map((m) => m.text).join('\n\n').trim();
         const head = status === 'waiting_approval' ? 'The agent is waiting for an approval in Codly.\n\n' : status === 'failed' ? 'The agent failed.\n\n' : '';
         this.send({ type: 'agent_reply', text: head + (text ? clip(text, REPLY_CAP) : '(no message)') });
+        this.say('agent', `← ${head}${text ? clip(text, 600) : '(no message)'}`);
       }, POLL_MS),
     };
     this.pending.push(p);
