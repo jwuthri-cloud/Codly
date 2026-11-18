@@ -2,6 +2,7 @@
 import type { AccountConfig } from "./AccountConfig";
 import type { AccountStrategy } from "./AccountStrategy";
 import type { ApprovalMode } from "./ApprovalMode";
+import type { ByokSettings } from "./ByokSettings";
 import type { Provider } from "./Provider";
 import type { TeamMember } from "./TeamMember";
 
@@ -48,10 +49,11 @@ theme: string,
  */
 team: Array<TeamMember>, 
 /**
- * Opt in to your own OpenRouter key for OpenCode (the key itself lives in the Keychain).
- * Off = subscription-only: every API-key variable is scrubbed from the agents' env.
+ * Your own API credentials, per vendor (byok.rs): a saved key (kept in the Keychain or an
+ * owner-only file, never here) or a token command. All off = subscription-only: every
+ * API-key variable is scrubbed from the agents' env.
  */
-byok_openrouter: boolean, 
+byok: ByokSettings, 
 /**
  * Claude agents also load your own Claude Code setup: your MCP servers, plugins, skills
  * and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
