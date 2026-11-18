@@ -36,7 +36,7 @@
   /** The lot whose panel is open, where it opened, and which step of it shows. */
   let selected = $state<string | null>(null);
   let anchor = $state({ x: 0, y: 0 });
-  let step = $state<'main' | 'move-here' | 'move-away' | 'sell'>('main');
+  let step = $state<'main' | 'move-here' | 'move-away' | 'close' | 'sell'>('main');
 
   const ws = $derived(store.workspace);
   const crewHere = $derived(store.agents.filter((a) => a.role !== 'lead' && !a.archived).length);
@@ -165,6 +165,22 @@
     });
   }
 
+  /** Close a lot's office: the repo leaves Codly (nothing deleted; opening it again brings it back). */
+  function closeOffice(s: LotSlot) {
+    const id = s.workspace_id;
+    if (!id) return;
+    void run('close the office', async () => {
+      const wasOpen = id === ws?.id;
+      await setSlots(await api.closeOffice(id));
+      tabs.forget(id);
+      offices = await api.offices().catch(() => offices);
+      toast({ kind: 'success', title: `${s.name ?? 'The office'} closed`, body: 'The repo left Codly; its lot is free. Open the repo again to bring it all back.' });
+      step = 'main';
+      // The open repo is gone from the core: start over from a fresh snapshot.
+      if (wasOpen) location.reload();
+    });
+  }
+
   /** Enter a lot's office: open its repo if it isn't the open one, then the office view. */
   function enter(s: LotSlot) {
     void run('open that office', async () => {
@@ -289,6 +305,12 @@
           {/each}
         </ul>
         <button class="btn ghost sm back" onclick={() => (step = 'main')}>Back</button>
+      {:else if step === 'close'}
+        <p class="p-note">Close {slot.name}? The repo leaves Codly and this lot is freed. Its agents stop. Nothing is deleted: the repo on disk is untouched, and opening it again brings back its agents, history and memory.</p>
+        <div class="confirm">
+          <button class="btn ghost sm" onclick={() => (step = 'main')}>Keep it</button>
+          <button class="btn danger sm" disabled={busy} onclick={() => slot && closeOffice(slot)}>Close office</button>
+        </div>
       {:else if step === 'sell'}
         <p class="p-note">Sell this lot{slot.template ? ' and its building' : ''} for {coins(slot.sells_for)}?{slot.gift ? ' It came as a gift, so it sells for nothing.' : ''}</p>
         <div class="confirm">

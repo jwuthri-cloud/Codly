@@ -226,6 +226,7 @@ pub fn run() {
             hire_commands::buy_lot,
             hire_commands::sell_lot,
             hire_commands::move_office,
+            hire_commands::close_office,
             commands::board_policy,
             commands::board_sweep,
             commands::board_archive,

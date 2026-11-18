@@ -132,7 +132,7 @@ export function lightsOf(s: LotSlot, open: boolean, working: number): 'off' | 'o
 
 // ───────────── what a click offers ─────────────
 
-export type ActionId = 'enter' | 'move-here' | 'move-away' | 'sell';
+export type ActionId = 'enter' | 'move-here' | 'move-away' | 'close' | 'sell';
 
 export interface SlotAction {
   id: ActionId;
@@ -157,13 +157,14 @@ export function slotActions(s: LotSlot, ctx: ActionContext): SlotAction[] {
   const sell: SlotAction = {
     id: 'sell',
     label: 'Sell',
-    disabled: kind === 'office' ? 'A repo lives here: move its office first' : null,
+    disabled: kind === 'office' ? 'A repo lives here: move or close its office first' : null,
     note: s.gift ? 'a gift: sells for 🪙 0' : `refund ${coins(s.sells_for)}`,
   };
   if (kind === 'office') {
     return [
       { id: 'enter', label: 'Enter', disabled: null },
       { id: 'move-away', label: 'Move office', disabled: ctx.freeLots ? null : 'No free lot of yours to move to', note: ctx.freeLots ? `${ctx.freeLots} free lot${ctx.freeLots === 1 ? '' : 's'}` : undefined },
+      { id: 'close', label: 'Close office', disabled: null, note: 'remove the repo from Codly' },
       sell,
     ];
   }

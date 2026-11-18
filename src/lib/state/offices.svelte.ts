@@ -72,6 +72,13 @@ class Offices {
     if (!store.settings.paused_offices.includes(id)) void this.pause(id, true);
   }
 
+  /** A closed office (Close office): its tab goes and nothing brings it back but opening the repo. */
+  forget(id: string) {
+    this.tabs = this.tabs.filter((t) => t.id !== id);
+    this.shut.delete(id);
+    this.save();
+  }
+
   async refresh() {
     this.others = await api.offices().catch(() => this.others);
     // An office working without a tab (left open in an older version, or work that just came

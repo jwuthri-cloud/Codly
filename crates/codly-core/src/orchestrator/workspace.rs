@@ -58,6 +58,41 @@ impl Inner {
         Ok(ws)
     }
 
+    /// Close an office: the repo leaves Codly (the map, the recent list, the offices) and its plot is
+    /// freed, building included, to sell or reuse. Its agents stop; nothing is deleted, so opening
+    /// the repo again brings back its agents, history and memory (on a new plot). Refused while
+    /// any of its work is unfinished or an agent is mid-turn. The repo on disk is never touched.
+    pub(super) async fn close_office(&self, ws_id: &str) -> anyhow::Result<()> {
+        let ws = self.store.workspace(ws_id)?.ok_or_else(|| anyhow!("no such office"))?;
+        let _g = self.sched_lock.lock().await; // no task starts here while it closes
+        let open = |s: TaskStatus| !matches!(s, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled);
+        if let Some(t) = self.store.tasks(ws_id)?.into_iter().find(|t| open(t.status)) {
+            bail!("{} still has unfinished work ({} \"{}\"): finish or cancel it first", ws.name, t.key, t.title);
+        }
+        let agents = self.store.agents(ws_id)?;
+        if let Some(a) = agents.iter().find(|a| !self.is_quiet(&a.id)) {
+            bail!("{} is in the middle of a turn in {}: wait for it, or stop it first", a.name, ws.name);
+        }
+        for a in &agents {
+            if !self.stop_and_wait(&a.id).await {
+                bail!("{} did not stop in time; try again", a.name);
+            }
+        }
+        self.store.close_workspace(ws_id)?;
+        super::lots::vacate(&self.store, ws_id)?;
+        {
+            let mut s = write(&self.settings);
+            if s.paused_offices.iter().any(|id| id == ws_id) {
+                s.paused_offices.retain(|id| id != ws_id);
+                self.store.save_settings(&s)?;
+            }
+        }
+        if self.workspace().is_some_and(|w| w.id == ws_id) {
+            *write(&self.ws) = None;
+        }
+        Ok(())
+    }
+
     pub(super) async fn refresh_git(&self, ws: &mut Workspace) {
         let repo = PathBuf::from(&ws.repo_path);
         ws.current_branch = self.git.current_branch(&repo).await.ok().flatten();

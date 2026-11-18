@@ -208,6 +208,13 @@ pub async fn sell_lot(state: State<'_, AppState>, slot_id: String) -> Result<Wal
     state.core().await?.sell_lot(&slot_id).map_err(|e| format!("{e:#}"))
 }
 
+/// Close a repo's office: it leaves Codly and its plot is freed (nothing deleted; opening the repo
+/// again brings it back). Returns the neighbourhood.
+#[tauri::command]
+pub async fn close_office(state: State<'_, AppState>, workspace_id: String) -> Result<Vec<LotSlot>, String> {
+    state.core().await?.close_office(&workspace_id).await.map_err(|e| format!("{e:#}"))
+}
+
 /// Move a repo's office to another plot of yours; returns the neighbourhood.
 #[tauri::command]
 pub async fn move_office(state: State<'_, AppState>, workspace_id: String, slot_id: String) -> Result<Vec<LotSlot>, String> {

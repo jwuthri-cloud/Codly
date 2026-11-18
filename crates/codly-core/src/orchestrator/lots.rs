@@ -322,6 +322,18 @@ pub(super) fn move_office(store: &Store, ws: &str, to: &str) -> Result<Vec<LotSl
     list(store)
 }
 
+/// A closed office leaves its plot: the plot stays yours with its building, empty of a repo, so
+/// you can sell it or move another office in. Call after the workspace is closed.
+pub(super) fn vacate(store: &Store, ws: &str) -> Result<()> {
+    let _m = wallet::money();
+    let mut rows = slots(store)?;
+    if let Some(i) = rows.iter().position(|r| r.workspace.as_deref() == Some(ws)) {
+        rows[i].workspace = None;
+        store.kv_write(&[(SLOTS.into(), json(&rows)?)])?;
+    }
+    Ok(())
+}
+
 /// The furniture (standing and stored) from `old` into the building on `new`, shifted as
 /// buildings sit on plots of another size (centred, against the street); with no building to
 /// line up (an office left on a bare plot), where it stands.
@@ -565,6 +577,27 @@ mod tests {
         assert_eq!(sell(&store, &medium.id).unwrap().balance, s.sells_for);
         assert!(sell(&store, &medium.id).is_err(), "not yours any more");
         assert!(!list(&store).unwrap().into_iter().find(|s| s.id == medium.id).unwrap().owned);
+    }
+
+    #[test]
+    fn a_closed_office_frees_its_plot_and_comes_back_when_reopened() {
+        let store = Store::open_in_memory().unwrap();
+        let (keep, gone) = (ws(&store, "keep"), ws(&store, "gone"));
+        let plot = slot(&list(&store).unwrap(), &gone).id.clone();
+        store.close_workspace(&gone).unwrap();
+        vacate(&store, &gone).unwrap();
+        let all = list(&store).unwrap();
+        let freed = all.iter().find(|s| s.id == plot).unwrap();
+        assert!(freed.owned && freed.workspace_id.is_none(), "still yours, with no repo: sellable");
+        assert!(all.iter().all(|s| s.workspace_id.as_deref() != Some(gone.as_str())), "no plot is given back to it");
+        assert_eq!(store.offices().unwrap().iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), [keep.as_str()]);
+        assert!(store.recent_workspaces(20).unwrap().iter().all(|r| r.name != "gone"));
+        assert!(sell(&store, &plot).is_ok());
+        // Opening the repo again reopens it, on a plot of its own.
+        let w = store.workspace(&gone).unwrap().unwrap();
+        store.upsert_workspace(&w).unwrap();
+        assert!(store.offices().unwrap().iter().any(|o| o.id == gone));
+        assert!(list(&store).unwrap().iter().any(|s| s.workspace_id.as_deref() == Some(gone.as_str())));
     }
 
     #[test]

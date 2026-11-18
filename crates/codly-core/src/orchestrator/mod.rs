@@ -784,6 +784,14 @@ impl Core {
         lots::move_office(&self.inner.store, workspace_id, slot_id)
     }
 
+    /// Close an office: the repo leaves Codly and its plot is freed; nothing is deleted, and opening
+    /// the repo again brings it back. Returns the neighbourhood.
+    pub async fn close_office(&self, workspace_id: &str) -> anyhow::Result<Vec<LotSlot>> {
+        self.inner.close_office(workspace_id).await?;
+        self.inner.kick();
+        lots::list(&self.inner.store)
+    }
+
     /// An agent as a `codly/agent@1` file (see `hires.rs`).
     pub fn export_agent(&self, agent_id: &str) -> anyhow::Result<String> {
         self.inner.export_agent(agent_id)

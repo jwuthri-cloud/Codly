@@ -23,7 +23,7 @@ use serde_json::Value;
 use crate::model::*;
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql")), M::up(include_str!("m3_memory_data.sql"))])
+    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql")), M::up(include_str!("m3_memory_data.sql")), M::up(include_str!("m4_workspace_closed.sql"))])
 }
 
 /// One agent process lifetime (`run` table). Not a UI type: the UI sees runs through events.
@@ -207,7 +207,7 @@ impl Store {
             "INSERT INTO workspace (id, repo_path, name, default_branch, created_at, opened_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, default_branch = excluded.default_branch,
-               opened_at = excluded.opened_at",
+               opened_at = excluded.opened_at, closed_at = NULL",
             params![ws.id, ws.repo_path, ws.name, ws.default_branch, ws.created_at, now_ms()],
         )?;
         Ok(())
@@ -249,9 +249,15 @@ impl Store {
         }
     }
 
+    /// Close an office (hide the repo); `upsert_workspace` (opening it again) reopens it.
+    pub fn close_workspace(&self, id: &str) -> Result<()> {
+        self.conn().execute("UPDATE workspace SET closed_at = ?2 WHERE id = ?1", params![id, now_ms()])?;
+        Ok(())
+    }
+
     pub fn recent_workspaces(&self, limit: i64) -> Result<Vec<RecentWorkspace>> {
         let conn = self.conn();
-        let mut st = conn.prepare_cached("SELECT repo_path, name, opened_at FROM workspace ORDER BY opened_at DESC LIMIT ?1")?;
+        let mut st = conn.prepare_cached("SELECT repo_path, name, opened_at FROM workspace WHERE closed_at IS NULL ORDER BY opened_at DESC LIMIT ?1")?;
         let rows = st.query_map([limit], |r| Ok(RecentWorkspace { repo_path: r.get(0)?, name: r.get(1)?, opened_at: r.get(2)? }))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -387,7 +393,7 @@ impl Store {
                (SELECT COUNT(*) FROM task t WHERE t.workspace_id = w.id AND t.status IN ({ACTIVE})),
                (SELECT COUNT(*) FROM approval p WHERE p.workspace_id = w.id AND p.status = 'pending')
                  + (SELECT COUNT(*) FROM plan p WHERE p.workspace_id = w.id AND p.status = 'awaiting_approval')
-             FROM workspace w ORDER BY w.opened_at DESC"
+             FROM workspace w WHERE w.closed_at IS NULL ORDER BY w.opened_at DESC"
         );
         let mut st = conn.prepare_cached(&sql)?;
         let rows = st.query_map([], |r| {

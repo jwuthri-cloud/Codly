@@ -294,6 +294,8 @@ export const api = {
   /** Move a repo's office to another plot of yours with none on it: the furniture comes along
    *  (what doesn't fit goes to storage), the building stays. Returns the neighbourhood. */
   moveOffice: (workspaceId: string, slotId: string) => call<LotSlot[]>('move_office', { workspaceId, slotId }),
+  /** Close a repo's office: it leaves Codly and its plot is freed. Nothing is deleted; opening the repo again brings it back. */
+  closeOffice: (workspaceId: string) => call<LotSlot[]>('close_office', { workspaceId }),
   /** The open repo's changes to the global team (members switched off, its own members). */
   setWorkspaceTeam: (team: WorkspaceTeam) => call<WorkspaceTeam>('set_workspace_team', { team }),
   /** A request's own mode, permissions and Lead model (null fields = the Settings defaults). */
