@@ -5,18 +5,21 @@ Runs next to `codly serve` on the same machine (the devbox). `codly serve` proxi
 authenticated page reaches it. Auth to OpenAI is workload identity federation (GCP identity token ->
 OpenAI); no API key exists, and no token reaches the browser.
 
-The realtime model is the voice; the Codly agent is the brain. The model drives the agent through
-tools, which the browser runs (it holds Codly's API and the agent's live state):
-  ask_agent(message)  sends a message to the agent; its answer arrives later as `agent_reply`
-  agent_status()      the agent's status and its latest message
+The realtime model is the voice; Codly's agents are the brains. Two modes, set by the page:
+- agent (a 1:1 thread): ask_agent(message) and agent_status() drive that one agent;
+- lead (a request thread): the voice is the team's lead. team_status() lists the agents,
+  delegate(agent, message) sends work straight to one, plan_with_lead(message) hands a large goal
+  to Codly's planner Lead.
+The browser runs these tools (it holds Codly's API and the agents' live state); replies come back
+as `agent_reply` when an agent's turn ends.
 For quick facts it does not wait for the agent: three read-only lookups run here in the relay,
 web_search (an OpenAI model with web search, WIF auth), search_papers (OpenAlex), arxiv_search.
 
 WebSocket /ws
   Browser -> relay: binary = PCM16 mono 24 kHz mic audio; text = JSON:
-    {"type": "context", "agent": name, "role": role, "provider": cli}  first frame, sets the instructions
+    {"type": "context", "mode": "agent"|"lead", "agent", "role", "provider", "team": [...]}  sets instructions and tools
     {"type": "tool_result", "id", "output"}                            answer to a tool_call
-    {"type": "agent_reply", "text"}                                    the agent finished a turn
+    {"type": "agent_reply", "agent", "text"}                           an agent finished a turn
     {"type": "text", "text"}                                           typed message
     {"type": "interrupt"}                                              stop the current answer
   Relay -> browser: binary = PCM16 mono 24 kHz reply audio; text = JSON:
@@ -44,86 +47,83 @@ LOOKUP_TIMEOUT = 60  # seconds; a lookup that takes longer is reported as failed
 LOOKUP_MAX_CHARS = 4000
 WIF_AUDIENCE = "https://api.openai.com"
 METADATA_IDENTITY_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity"
-BROWSER_TOOLS = {"ask_agent", "agent_status"}
+def _fn(name: str, description: str, properties: dict | None = None, required: list[str] | None = None) -> dict:
+    return {"type": "function", "name": name, "description": description,
+            "parameters": {"type": "object", "properties": properties or {}, "required": required or []}}
 
-TOOLS = [
-    {
-        "type": "function",
-        "name": "ask_agent",
-        "description": (
-            "Send a message to the coding agent: a question, a task, a change of plan or an answer to its "
-            "question. Returns at once; the agent's reply arrives later as a system message."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {"message": {"type": "string", "description": "What to tell the agent, in full sentences."}},
-            "required": ["message"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "agent_status",
-        "description": "The agent's current status (idle, working, waiting for approval...) and its latest message.",
-        "parameters": {"type": "object", "properties": {}},
-    },
-    {
-        "type": "function",
-        "name": "web_search",
-        "description": "Quick web lookup for a fact, a recent event or a page: returns a short answer with source links.",
-        "parameters": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "The question, in full words."}},
-            "required": ["query"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "search_papers",
-        "description": "Search academic papers (OpenAlex): title, authors, year, venue, citations, link, abstract.",
-        "parameters": {
-            "type": "object",
-            "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "description": "max results, default 5"}},
-            "required": ["query"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "arxiv_search",
-        "description": "Search arXiv preprints. Use sort 'recent' for the newest work.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer"},
-                "sort": {"type": "string", "enum": ["relevance", "recent"]},
-            },
-            "required": ["query"],
-        },
-    },
+
+_MESSAGE = {"message": {"type": "string", "description": "What to say, in full sentences."}}
+
+# Talking to one agent (its 1:1 thread). Run in the browser.
+AGENT_TOOLS = [
+    _fn("ask_agent", "Send a message to the agent: a question, a task, a change of plan or an answer to its question. "
+        "Returns at once; the agent's reply arrives later as a system message.", _MESSAGE, ["message"]),
+    _fn("agent_status", "The agent's current status (idle, working, waiting for approval...) and its latest message."),
 ]
-RELAY_TOOLS = {"web_search", "search_papers", "arxiv_search"}
+# The voice as the team's lead (a request thread). Run in the browser.
+LEAD_TOOLS = [
+    _fn("team_status", "Every agent on the team: name, job title, status and its latest message."),
+    _fn("delegate", "Send work or a question straight to one agent by name. Returns at once; its reply arrives later "
+        "as a system message that names it.", {"agent": {"type": "string", "description": "The agent's name, from team_status."}, **_MESSAGE},
+        ["agent", "message"]),
+    _fn("plan_with_lead", "Hand a large goal to Codly's planner Lead, which reads the repository and proposes a plan of tasks for "
+        "several agents (the user approves it on screen). Returns at once; the Lead's answer arrives later.", _MESSAGE, ["message"]),
+]
+# Quick read-only lookups. Run here in the relay.
+LOOKUP_TOOLS = [
+    _fn("web_search", "Quick web lookup for a fact, a recent event or a page: returns a short answer with source links.",
+        {"query": {"type": "string", "description": "The question, in full words."}}, ["query"]),
+    _fn("search_papers", "Search academic papers (OpenAlex): title, authors, year, venue, citations, link, abstract.",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "description": "max results, default 5"}}, ["query"]),
+    _fn("arxiv_search", "Search arXiv preprints. Use sort 'recent' for the newest work.",
+        {"query": {"type": "string"}, "limit": {"type": "integer"}, "sort": {"type": "string", "enum": ["relevance", "recent"]}}, ["query"]),
+]
+BROWSER_TOOLS = {t["name"] for t in AGENT_TOOLS + LEAD_TOOLS}
+RELAY_TOOLS = {t["name"] for t in LOOKUP_TOOLS}
 
 log = logging.getLogger("codly-voice")
 app = FastAPI()
 
+_COMMON = """
+- For a quick fact (a definition, who wrote a paper, what came out this week, a number), look it up
+  yourself with web_search, search_papers or arxiv_search and answer from the result. Name your source.
+- Never state a citation, a number or a quote that no tool or agent gave you.
+- When a system message brings an agent's reply, give the gist in one to three spoken sentences. Do not
+  read code, paths, diffs or long lists aloud: the user sees them on screen.
+- Agents have skills they can use when asked by name, for example: challenge-idea (stress-test a research
+  idea), design-experiment (hypothesis, baseline, controls, metrics, decision rule), lit-review,
+  pre-mortem (how a plan fails). Ask for one when it fits ("use the design-experiment skill to ...").
+- Short answers, plain words, like a colleague on a call. If you do not know, say so."""
 
-def instructions(agent: str, role: str, provider: str) -> str:
-    return f"""You are the voice of {agent}, a Codly coding agent ({role}, running on {provider}).
+
+def agent_instructions(agent: str, role: str, provider: str) -> str:
+    return f"""You are the voice of {agent}, a Codly agent ({role}, running on {provider}).
 The user talks to you out loud to work with {agent}. You do not write code or read files yourself:
-{agent} does the work. Your job is to pass the user's intent to {agent} with ask_agent, and to tell
-the user what {agent} answered.
+{agent} does the work.
 
 Rules:
 - When the user asks for work, research, a question about the code, or a decision, call ask_agent with
   a clear, complete message. Then say in a few words that {agent} is on it. Do not invent its answer.
-- For a quick fact (a definition, who wrote a paper, what came out this week, a number), look it up
-  yourself with web_search, search_papers or arxiv_search and answer from the result. Name your source.
-  Anything that needs reading several sources, judging evidence or writing something goes to {agent}.
-- Never state a citation, a number or a quote that no tool or {agent} gave you.
-- When a system message brings {agent}'s reply, give the gist in one to three spoken sentences. Do not
-  read code, paths, diffs or long lists aloud: the user sees them on screen.
-- Use agent_status when the user asks what {agent} is doing.
-- Short answers, plain words, like a colleague on a call. If you do not know, say so."""
+- Anything that needs reading several sources, judging evidence or writing something goes to {agent}.
+- Use agent_status when the user asks what {agent} is doing.{_COMMON}"""
+
+
+def lead_instructions(team: list[dict]) -> str:
+    roster = "\n".join(f"- {m.get('name')}: {m.get('title') or 'agent'} ({m.get('status')})" for m in team) or "- (no agents yet)"
+    return f"""You are the Lead of the user's Codly team, and you work by voice: the user talks, you decide
+who does what and keep them posted. You do not write code or read files yourself; your agents do.
+
+The team now (call team_status for fresh state):
+{roster}
+
+Rules:
+- Small or single-person work: pick the best agent by its title and send it with delegate (a clear,
+  complete brief: goal, context, what done looks like). Say in a few words who is on it.
+- Large work that needs several agents, dependencies or a plan the user should approve: use
+  plan_with_lead, and tell the user the plan will appear on screen.
+- Several independent pieces can go to several agents at once.
+- When the user asks how things are going, call team_status and summarize who is doing what.
+- Do not invent an agent's answer or its progress.{_COMMON}"""
 
 
 def gcp_identity_token() -> str:
@@ -218,10 +218,13 @@ class Session:
             cmd = json.loads(msg["text"])
             kind = cmd.get("type")
             if kind == "context":
+                lead = cmd.get("mode") == "lead"
                 await self.oai.session.update(
                     session={
                         "type": "realtime",
-                        "instructions": instructions(cmd.get("agent", "the agent"), cmd.get("role", "agent"), cmd.get("provider", "a CLI")),
+                        "instructions": lead_instructions(cmd.get("team") or []) if lead
+                        else agent_instructions(cmd.get("agent", "the agent"), cmd.get("role", "agent"), cmd.get("provider", "a CLI")),
+                        "tools": (LEAD_TOOLS if lead else AGENT_TOOLS) + LOOKUP_TOOLS,
                     }
                 )
             elif kind == "tool_result":
@@ -230,7 +233,8 @@ class Session:
                 )
                 await self.respond()
             elif kind == "agent_reply":
-                await self.say_as_system(f"The agent finished its turn. Its reply:\n\n{cmd.get('text', '')}")
+                who = cmd.get("agent") or "The agent"
+                await self.say_as_system(f"{who} finished its turn. Its reply:\n\n{cmd.get('text', '')}")
             elif kind == "text" and cmd.get("text", "").strip():
                 await self.oai.conversation.item.create(
                     item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": cmd["text"]}]}
@@ -305,8 +309,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
         await oai.session.update(
             session={
                 "type": "realtime",
-                "instructions": instructions("the agent", "agent", "a CLI"),
-                "tools": TOOLS,
+                "instructions": agent_instructions("the agent", "agent", "a CLI"),
+                "tools": AGENT_TOOLS + LOOKUP_TOOLS,
                 "tool_choice": "auto",
                 "audio": {
                     "input": {

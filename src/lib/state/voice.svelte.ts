@@ -1,9 +1,11 @@
 /**
- * Voice: talk to one agent out loud. The mic streams to the voice relay (`voice/relay.py`, through
+ * Voice: talk to an agent out loud; on a request thread, the voice is the team's Lead. The mic streams to the voice relay (`voice/relay.py`, through
  * `codly serve`'s `/api/voice/ws`), where OpenAI Realtime is the voice and the agent is the brain.
  * The relay's model drives the agent with two tools that run here, where Codly's API and the
  * agent's live state are: `ask_agent` sends a chat message to the agent's thread, and the agent's
  * reply goes back to the model as `agent_reply` when its turn ends. `agent_status` reads its state.
+ * On a request thread the voice leads: `team_status` lists the agents, `delegate` messages one by
+ * name (its 1:1 thread), and `plan_with_lead` hands a large goal to the thread's planner Lead.
  * Quick lookups (web, papers, arXiv) run in the relay; they only show here as `lookup` lines.
  *
  * Web only (`codly serve`): the desktop window has no relay next to it.
@@ -140,7 +142,8 @@ class Voice {
         this.phase = 'listening';
         {
           const w = who(thread);
-          this.send({ type: 'context', agent: w.name, role: w.role, provider: w.provider });
+          const lead = isRequestThread(thread);
+          this.send({ type: 'context', mode: lead ? 'lead' : 'agent', agent: w.name, role: w.role, provider: w.provider, team: lead ? team() : [] });
         }
         break;
       case 'clear':
@@ -173,30 +176,42 @@ class Voice {
   }
 
   private tool(id: string, name: string, args: Record<string, unknown>, thread: string): void {
-    const agent = store.threadAgent(thread);
-    if (name === 'agent_status') {
-      const last = (agent && store.live[agent.id]?.messages.at(-1)?.text) || null;
-      this.send({ type: 'tool_result', id, output: { status: agent?.status ?? 'unknown', latest_message: last && clip(last, 1500) } });
-      return;
-    }
-    if (name === 'ask_agent') {
-      const message = String(args.message ?? '').trim();
-      if (!message) {
-        this.send({ type: 'tool_result', id, output: { error: 'empty message' } });
-        return;
+    const answer = (output: unknown) => this.send({ type: 'tool_result', id, output });
+    const message = String(args.message ?? '').trim();
+    switch (name) {
+      case 'agent_status': {
+        const agent = store.threadAgent(thread);
+        const last = (agent && store.live[agent.id]?.messages.at(-1)?.text) || null;
+        return answer({ status: agent?.status ?? 'unknown', latest_message: last && clip(last, 1500) });
       }
-      const turnsBefore = (agent && store.live[agent.id]?.turns.length) || 0;
-      const sentAt = Date.now();
-      const ok = sendChat(thread, message);
-      this.say('agent', `→ ${message}`);
-      this.send({ type: 'tool_result', id, output: ok ? { status: 'sent', note: 'The agent is working; its reply comes later.' } : { error: 'Codly refused the message' } });
-      if (ok) this.watch(thread, turnsBefore, sentAt);
-      return;
+      case 'team_status':
+        return answer({ team: team().map((a) => ({ ...a, latest_message: a.latest && clip(a.latest, 300), latest: undefined })) });
+      case 'ask_agent':
+      case 'plan_with_lead':
+        // Both go to this thread's own agent: the 1:1 agent, or the request's planner Lead.
+        return answer(message ? this.message(thread, message) : { error: 'empty message' });
+      case 'delegate': {
+        const wanted = String(args.agent ?? '').trim().toLowerCase();
+        const to = store.agents.find((a) => a.role !== 'lead' && a.name.toLowerCase() === wanted);
+        if (!to) return answer({ error: `no agent called "${args.agent}"`, team: team().map((a) => a.name) });
+        return answer(message ? this.message(`agent:${to.id}`, message) : { error: 'empty message' });
+      }
     }
-    this.send({ type: 'tool_result', id, output: { error: `unknown tool ${name}` } });
+    answer({ error: `unknown tool ${name}` });
   }
 
-  /** Waits for the agent's turn to end after `ask_agent`, then hands its reply to the voice. */
+  /** Sends `text` to a thread's agent and watches for its reply. The tool result says whether Codly took it. */
+  private message(thread: string, text: string): Record<string, string> {
+    const agent = store.threadAgent(thread);
+    const turnsBefore = (agent && store.live[agent.id]?.turns.length) || 0;
+    const sentAt = Date.now();
+    if (!sendChat(thread, text)) return { error: 'Codly refused the message' };
+    this.say('agent', `→ ${who(thread).name}: ${text}`);
+    this.watch(thread, turnsBefore, sentAt);
+    return { status: 'sent', note: `${who(thread).name} is working; the reply comes later.` };
+  }
+
+  /** Waits for a thread agent's turn to end after a message, then hands its reply to the voice. */
   private watch(thread: string, turnsBefore: number, sentAt: number): void {
     const p: Pending = {
       turnsBefore,
@@ -214,9 +229,9 @@ class Voice {
         const msgs = (live?.messages ?? []).filter((m) => m.ts >= p.sentAt);
         const finals = msgs.filter((m) => m.phase === 'final');
         const text = (finals.length ? finals : msgs.slice(-1)).map((m) => m.text).join('\n\n').trim();
-        const head = status === 'waiting_approval' ? 'The agent is waiting for an approval in Codly.\n\n' : status === 'failed' ? 'The agent failed.\n\n' : '';
-        this.send({ type: 'agent_reply', text: head + (text ? clip(text, REPLY_CAP) : '(no message)') });
-        this.say('agent', `← ${head}${text ? clip(text, 600) : '(no message)'}`);
+        const head = status === 'waiting_approval' ? 'It is waiting for an approval in Codly.\n\n' : status === 'failed' ? 'It failed.\n\n' : '';
+        this.send({ type: 'agent_reply', agent: agent.name, text: head + (text ? clip(text, REPLY_CAP) : '(no message)') });
+        this.say('agent', `← ${agent.name}: ${head}${text ? clip(text, 600) : '(no message)'}`);
       }, POLL_MS),
     };
     this.pending.push(p);
@@ -255,6 +270,13 @@ class Voice {
     this.sources = [];
     this.nextTime = 0;
   }
+}
+
+/** The office's agents a voice Lead can delegate to (not the Leads themselves). */
+function team(): { name: string; title: string | null; status: string; latest: string | null }[] {
+  return store.agents
+    .filter((a) => a.role !== 'lead')
+    .map((a) => ({ name: a.name, title: a.title ?? null, status: a.status, latest: store.live[a.id]?.messages.at(-1)?.text ?? null }));
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
