@@ -895,6 +895,27 @@ impl Core {
         self.inner.merge_plan(plan_id).await
     }
 
+    /// Merge a solo agent's branch into the user's current branch (same dirty-checkout rule as a
+    /// plan). Returns the new HEAD sha.
+    pub async fn merge_agent(&self, agent_id: &str) -> anyhow::Result<String> {
+        self.inner.merge_agent(agent_id).await
+    }
+
+    /// The checkout against its upstream: ahead/behind and uncommitted tracked files.
+    pub async fn repo_sync(&self) -> anyhow::Result<RepoSync> {
+        self.inner.repo_sync().await
+    }
+
+    /// Commit the user's changes to tracked files in their checkout. Returns the new sha.
+    pub async fn commit_checkout(&self, message: &str) -> anyhow::Result<String> {
+        self.inner.commit_checkout(message).await
+    }
+
+    /// Push the user's checked-out branch to its remote.
+    pub async fn push_checkout(&self) -> anyhow::Result<RepoSync> {
+        self.inner.push_checkout().await
+    }
+
     /// The user keeps the plan's integration branch instead of merging it.
     pub async fn keep_plan(&self, plan_id: &str) -> anyhow::Result<Plan> {
         self.inner.update_plan(plan_id, |p| {

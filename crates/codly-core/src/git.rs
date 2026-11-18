@@ -33,6 +33,8 @@ pub const CODLY_EMAIL: &str = "codly@localhost";
 
 /// A hung git (lock wait, fsmonitor, huge repo) must not wedge the orchestrator forever.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Stable links to the newest forwarded SSH agent, under the home directory (see `Git::push`).
+const AGENT_LINKS: [&str; 2] = [".ssh/agent.sock", ".ssh/ssh_auth_sock"];
 
 /// Variables that would redirect git away from the `-C` directory (set e.g. when Codly or
 /// its tests run inside a git hook).
@@ -264,6 +266,68 @@ impl Git {
     /// Is `ancestor` contained in `descendant`?
     pub async fn is_ancestor(&self, repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
         Ok(self.run(repo, &["merge-base", "--is-ancestor", ancestor, descendant], true).await?.ok)
+    }
+
+    /// The best common ancestor of two revisions, if they share history.
+    pub async fn merge_base(&self, repo: &Path, a: &str, b: &str) -> Result<Option<String>> {
+        let out = self.run(repo, &["merge-base", a, b], true).await?;
+        Ok(out.ok.then(|| out.stdout.trim().to_string()).filter(|s| !s.is_empty()))
+    }
+
+    /// The upstream of the checked-out branch and how far HEAD is (ahead, behind) of it, as
+    /// last fetched. None when the branch tracks nothing.
+    pub async fn ahead_behind(&self, repo: &Path) -> Result<Option<(String, u32, u32)>> {
+        let up = self.run(repo, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], true).await?;
+        if !up.ok {
+            return Ok(None);
+        }
+        let counts = self.ok(repo, &["rev-list", "--left-right", "--count", "HEAD...@{u}"], true).await?;
+        let mut n = counts.split_whitespace().map(|x| x.parse::<u32>().unwrap_or(0));
+        Ok(Some((up.stdout.trim().to_string(), n.next().unwrap_or(0), n.next().unwrap_or(0))))
+    }
+
+    /// Commit the user's changes to tracked files in their own checkout (`commit -a`): their
+    /// hooks and signing apply, as when they commit by hand. Untracked files are left alone.
+    pub async fn commit_tracked(&self, repo: &Path, message: &str) -> Result<String> {
+        self.ok(repo, &["commit", "--all", "--quiet", "-m", message], false).await?;
+        self.head(repo).await?.ok_or_else(|| anyhow!("commit produced no HEAD"))
+    }
+
+    /// Push `branch` to `remote` (sets the upstream when it has none). A long-running server
+    /// keeps the SSH agent socket of the login that started it, which is gone once that SSH
+    /// session ends, so the agent is the first live one of: that socket, then the stable links
+    /// a `~/.ssh/rc` keeps pointing at the newest forwarded agent (`AGENT_LINKS`). SSH runs in
+    /// batch mode, so a missing key fails at once instead of waiting on a prompt.
+    pub async fn push(&self, repo: &Path, remote: &str, branch: &str) -> Result<()> {
+        let mut env = self.env.clone();
+        let home = self.env.get("HOME").map(PathBuf::from);
+        let live = self
+            .env
+            .get("SSH_AUTH_SOCK")
+            .map(PathBuf::from)
+            .into_iter()
+            .chain(home.iter().flat_map(|h| AGENT_LINKS.iter().map(move |l| h.join(l))))
+            .find(|p| p.exists()); // follows links: a dangling one does not count
+        if let Some(sock) = live {
+            env.insert("SSH_AUTH_SOCK".into(), sock.to_string_lossy().into_owned());
+        }
+        env.entry("GIT_SSH_COMMAND".into()).or_insert_with(|| "ssh -o BatchMode=yes".into());
+        let pusher = Git { bin: self.bin.clone(), env };
+        let refspec = format!("{branch}:refs/heads/{branch}");
+        let out = pusher.run(repo, &["push", "--set-upstream", remote, &refspec], false).await?;
+        if out.ok {
+            return Ok(());
+        }
+        let err = out.stderr.trim();
+        if err.contains("Permission denied (publickey)") || err.contains("authentication agent") || err.contains("Host key verification failed") {
+            bail!(
+                "the remote refused the SSH key, so nothing was pushed. Connect to this machine with agent forwarding (ssh -A, or ForwardAgent yes) from a computer that has your GitHub key, then push again. ({err})"
+            );
+        }
+        if err.contains("[rejected]") || err.contains("non-fast-forward") || err.contains("fetch first") {
+            bail!("{remote} has commits your branch does not have, so the push was refused. Pull (git pull --rebase) first, then push again.");
+        }
+        Err(out.err("push"))
     }
 
     pub async fn worktrees(&self, repo: &Path) -> Result<Vec<WorktreeInfo>> {
@@ -659,6 +723,41 @@ mod tests {
     }
 
     /// The IDE's Source tab: status lists uncommitted work, diffs cover tracked and untracked files.
+    /// The user's own git steps: commit tracked changes (untracked files stay out), see how far
+    /// the branch is ahead of its remote, push it (setting the upstream), and see a refused push.
+    #[tokio::test]
+    async fn commit_ahead_behind_and_push() {
+        let (d, repo) = repo();
+        let remote = d.path().join("remote.git");
+        sh(d.path(), &["init", "-q", "--bare", "-b", "main", &remote.to_string_lossy()]);
+        sh(&repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
+        let git = Git::from_process_env();
+        assert_eq!(git.ahead_behind(&repo).await.unwrap(), None, "no upstream yet");
+
+        git.push(&repo, "origin", "main").await.unwrap();
+        assert_eq!(git.ahead_behind(&repo).await.unwrap(), Some(("origin/main".into(), 0, 0)), "push set the upstream");
+
+        std::fs::write(repo.join("a.txt"), "a\nchanged\n").unwrap();
+        std::fs::write(repo.join("scratch.txt"), "not mine to commit").unwrap();
+        let sha = git.commit_tracked(&repo, "my edit").await.unwrap();
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()));
+        assert_eq!(git.status_z(&repo).await.unwrap(), "?? scratch.txt\0", "untracked files stay out of the commit");
+        assert_eq!(git.ahead_behind(&repo).await.unwrap(), Some(("origin/main".into(), 1, 0)));
+        assert_eq!(git.merge_base(&repo, "HEAD", "origin/main").await.unwrap(), git.rev_parse(&repo, "origin/main").await.unwrap());
+
+        // Someone else pushed first: the push is refused with a message that says what to do.
+        let other = d.path().join("other");
+        sh(d.path(), &["clone", "-q", &remote.to_string_lossy(), &other.to_string_lossy()]);
+        sh(&other, &["config", "user.name", "O"]);
+        sh(&other, &["config", "user.email", "o@o"]);
+        std::fs::write(other.join("b.txt"), "b\n").unwrap();
+        sh(&other, &["add", "-A"]);
+        sh(&other, &["commit", "-qm", "theirs"]);
+        sh(&other, &["push", "-q", "origin", "main"]);
+        let e = git.push(&repo, "origin", "main").await.unwrap_err().to_string();
+        assert!(e.contains("Pull (git pull --rebase) first"), "{e}");
+    }
+
     #[tokio::test]
     async fn status_and_file_diffs_for_the_ide() {
         let (_d, repo) = repo();

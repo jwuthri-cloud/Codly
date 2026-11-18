@@ -1711,6 +1711,20 @@ impl Default for Settings {
     }
 }
 
+/// Where the user's checkout stands against its remote (as last fetched): what Push would send.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepoSync {
+    /// None on a detached HEAD.
+    pub branch: Option<String>,
+    /// "origin/main"; None when the branch tracks nothing yet (Push sets it).
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    /// Tracked files with uncommitted changes.
+    pub dirty: Vec<String>,
+}
+
 /// Everything the UI needs on (re)connect. Deltas with `id <= as_of` are dropped.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]

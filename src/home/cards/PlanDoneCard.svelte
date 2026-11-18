@@ -11,6 +11,7 @@
   import { idVar, GLOSSARY } from '../../lib/util/labels';
   import ArtifactThumb from '../../components/ArtifactThumb.svelte';
   import Icon from '../../components/Icon.svelte';
+  import RepoSyncBar from '../../components/RepoSyncBar.svelte';
 
   interface Props {
     planId: string;
@@ -72,6 +73,7 @@
         <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {/if}
     </footer>
+    {#if !kept}<RepoSyncBar refresh={merged?.sha ?? busy} />{/if}
   </article>
 {/if}
 

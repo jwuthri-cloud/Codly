@@ -125,6 +125,8 @@ export class MockTransport implements Transport {
   /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
   private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
   /** BYOK demo state. Keys are never stored, only whether one was "saved". */
+  /** Demo repo: whether Push was clicked. */
+  private demoPushed = false;
   private byokSaved: Record<Vendor, boolean> = { anthropic: false, openai: false, openrouter: false };
   private triggers: TriggersConfig | null = null;
   private breaker: MockBreaker;
@@ -245,6 +247,16 @@ export class MockTransport implements Transport {
         return null;
       case 'merge_plan':
         return story.mergePlan(String(a.planId));
+      // The demo repo: a clean checkout, two merges not pushed yet (the real one runs git).
+      case 'merge_agent':
+        return Math.random().toString(16).slice(2, 12).padEnd(10, '0');
+      case 'repo_sync':
+        return { branch: 'main', upstream: 'origin/main', ahead: this.demoPushed ? 0 : 2, behind: 0, dirty: [] };
+      case 'commit_checkout':
+        return Math.random().toString(16).slice(2, 12).padEnd(10, '0');
+      case 'push_checkout':
+        this.demoPushed = true;
+        return { branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0, dirty: [] };
       case 'keep_plan':
       case 'pin_memory':
         return null; // ponytail: the mock keeps these as UI state only

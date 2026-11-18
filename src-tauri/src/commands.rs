@@ -196,6 +196,26 @@ pub async fn merge_plan(state: State<'_, AppState>, plan_id: String) -> R<String
 }
 
 #[tauri::command]
+pub async fn merge_agent(state: State<'_, AppState>, agent_id: String) -> R<String> {
+    state.core().await?.merge_agent(&agent_id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn repo_sync(state: State<'_, AppState>) -> R<codly_core::model::RepoSync> {
+    state.core().await?.repo_sync().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn commit_checkout(state: State<'_, AppState>, message: String) -> R<String> {
+    state.core().await?.commit_checkout(&message).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn push_checkout(state: State<'_, AppState>) -> R<codly_core::model::RepoSync> {
+    state.core().await?.push_checkout().await.map_err(err)
+}
+
+#[tauri::command]
 pub async fn get_events(state: State<'_, AppState>, agent_id: Option<String>, before: Option<i64>, limit: i64) -> R<Vec<EventRow>> {
     state.core().await?.events(agent_id.as_deref(), before, limit.clamp(1, 5000)).await.map_err(err)
 }

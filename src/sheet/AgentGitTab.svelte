@@ -1,11 +1,14 @@
-<!-- Git: the agent's worktree, read-only. Changed files, local branches, recent commits. -->
+<!-- Git: the agent's worktree. Changed files, local branches, recent commits; a solo agent's branch merges into yours from here. -->
 <script lang="ts">
   import { api } from '../lib/api';
   import type { Agent } from '../lib/gen/Agent';
   import type { AgentGit } from '../lib/gen/AgentGit';
   import { ui } from '../lib/state/ui.svelte';
   import { ago } from '../lib/util/format';
+  import { mergeAgent } from '../lib/state/actions';
+  import { store } from '../lib/state/store.svelte';
   import Icon from '../components/Icon.svelte';
+  import RepoSyncBar from '../components/RepoSyncBar.svelte';
 
   interface Props {
     agent: Agent;
@@ -36,6 +39,17 @@
     void load(agent.id);
   });
 
+  const target = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'your branch');
+  const resting = $derived(['idle', 'done', 'failed', 'offline'].includes(agent.status));
+  let merging = $state(false);
+  let merges = $state(0);
+  async function merge() {
+    merging = true;
+    if (await mergeAgent(agent.id)) merges++;
+    merging = false;
+    void load(agent.id);
+  }
+
   const STATE: Record<string, string> = { M: 'modified', A: 'added', D: 'deleted', R: 'renamed', C: 'copied', U: 'conflict', '?': 'new' };
   const word = (code: string) => STATE[code.trim()[0] ?? ''] ?? 'changed';
 </script>
@@ -43,8 +57,14 @@
 <div class="git">
   <div class="top">
     <span class="br"><Icon name="branch" size={12} /><code>{view?.branch ?? (view?.worktree ? 'detached HEAD' : 'no worktree')}</code></span>
-    <button class="icon-btn" aria-label="Refresh" data-tip="Refresh" disabled={busy} onclick={() => load(agent.id)}><Icon name="refresh" size={13} /></button>
+    <span class="acts">
+      {#if agent.role === 'solo' && view?.branch}
+        <button class="btn sm primary" disabled={merging || !resting} onclick={merge} data-tip={resting ? `Merge ${view.branch} into ${target}` : 'Wait until its turn ends'}><Icon name="merge" size={12} />Merge into {target}</button>
+      {/if}
+      <button class="icon-btn" aria-label="Refresh" data-tip="Refresh" disabled={busy} onclick={() => load(agent.id)}><Icon name="refresh" size={13} /></button>
+    </span>
   </div>
+  {#if agent.role === 'solo'}<RepoSyncBar refresh={merges} />{/if}
   {#if error}
     <p class="small bad">{error}</p>
   {:else if !view}
@@ -86,7 +106,8 @@
 
 <style>
   .git { display: flex; flex-direction: column; gap: 6px; }
-  .top { display: flex; align-items: center; justify-content: space-between; }
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .acts { display: inline-flex; align-items: center; gap: 6px; flex: none; }
   .br { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--ink-3); }
   .br code { font-size: 11.5px; color: var(--ink-1); overflow-wrap: anywhere; }
   .eyebrow { margin-top: 8px; }

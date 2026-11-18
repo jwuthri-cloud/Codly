@@ -1,5 +1,6 @@
 // User intents → core commands. Every action reports failure as a toast that says how to get
 // out, and applies command results the core does not echo as events (workspace, settings).
+import type { RepoSync } from '../gen/RepoSync';
 import { SvelteSet } from 'svelte/reactivity';
 import { api, isTauriApp } from '../api';
 import type { Agent } from '../gen/Agent';
@@ -202,6 +203,40 @@ export async function mergePlan(planId: string) {
     // the plan's own office: a merge can take minutes, and the chat goes to the open one.
     const asked = !!plan && store.isOpen(plan.workspace_id) && sendChat(plan.thread, `Merging “${plan.summary}” into ${target} failed: ${msg(e)}\n\nWhy, and what's the safest way to get it merged?`);
     toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${target}`, body: asked ? `${msg(e)} — the Lead is looking into it in the chat.` : msg(e) });
+  }
+}
+
+/** Merge a solo agent's branch into your branch; failures are explained in a toast. */
+export async function mergeAgent(agentId: string): Promise<boolean> {
+  const a = store.agentMap.get(agentId);
+  const target = store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'your branch';
+  const id = toast({ kind: 'progress', title: `Merging ${a?.name ?? 'the agent'}’s work into ${target}…` });
+  try {
+    const sha = await api.mergeAgent(agentId);
+    toastsUpdate(id, { kind: 'success', title: `Merged into ${target}`, body: `${a?.name ?? 'Agent'} · ${shortSha(sha)}` });
+    return true;
+  } catch (e) {
+    toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${target}`, body: msg(e) });
+    return false;
+  }
+}
+
+export async function commitCheckout(message: string): Promise<boolean> {
+  const sha = await attempt('commit your changes', () => api.commitCheckout(message));
+  if (sha) toast({ kind: 'success', title: 'Committed', body: shortSha(sha), duration: 3000 });
+  return !!sha;
+}
+
+export async function pushCheckout(): Promise<RepoSync | undefined> {
+  const branch = store.workspace?.current_branch ?? 'your branch';
+  const id = toast({ kind: 'progress', title: `Pushing ${branch}…` });
+  try {
+    const s = await api.pushCheckout();
+    toastsUpdate(id, { kind: 'success', title: `Pushed ${branch}`, body: s.upstream ? `${s.upstream} is up to date` : undefined });
+    return s;
+  } catch (e) {
+    toastsUpdate(id, { kind: 'error', title: `Couldn’t push ${branch}`, body: msg(e) });
+    return undefined;
   }
 }
 

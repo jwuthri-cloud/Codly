@@ -428,6 +428,139 @@ impl Inner {
         Ok(())
     }
 
+    /// Uncommitted work a branch doesn't touch is fine: git itself refuses a merge that would
+    /// overwrite a dirty file, and `merge --abort` on conflict keeps unrelated local changes.
+    /// Overlapping files are refused up front, with a message the UI can act on.
+    async fn check_dirty_overlap(&self, repo: &Path, branch: &str, base: Option<&str>, what: &str) -> anyhow::Result<()> {
+        if !self.git.dirty(repo, false).await? {
+            return Ok(());
+        }
+        let dirty = self.git.changed_paths(repo, &["HEAD"]).await.unwrap_or_default();
+        let ours = match base {
+            Some(base) => self.git.changed_paths(repo, &[base, branch]).await.unwrap_or_default(),
+            None => vec![],
+        };
+        let overlap: Vec<&String> = dirty.iter().filter(|f| ours.contains(f)).collect();
+        if !overlap.is_empty() {
+            bail!("your checkout has uncommitted changes in {}, which {what} also changes; commit them, then merge again", name_list(&overlap));
+        }
+        Ok(())
+    }
+
+    /// Merge a solo agent's branch (`codly/solo/<slug>`) into the user's checked-out branch, like
+    /// a plan. The agent keeps its worktree and goes on working from its own branch.
+    pub(super) async fn merge_agent(&self, agent_id: &str) -> anyhow::Result<String> {
+        let agent = self.agent(agent_id)?;
+        if agent.role != Role::Solo {
+            bail!("only a solo agent's branch can be merged this way; a task's work merges with its plan");
+        }
+        if agent.run_id.is_some() && !matches!(agent.status, AgentStatus::Idle | AgentStatus::Done | AgentStatus::Failed | AgentStatus::Offline) {
+            bail!("{} is still working; merge when its turn ends (Codly commits its work then)", agent.name);
+        }
+        let wt = agent.worktree.clone().ok_or_else(|| anyhow!("{} has no worktree yet, so there is nothing to merge", agent.name))?;
+        let ws = self.require_ws()?;
+        let repo = PathBuf::from(&ws.repo_path);
+        let branch = self
+            .git
+            .current_branch(Path::new(&wt))
+            .await?
+            .ok_or_else(|| anyhow!("{}'s worktree is on a detached HEAD", agent.name))?;
+        let _g = self.repo_lock.lock().await;
+        let target = self
+            .git
+            .current_branch(&repo)
+            .await?
+            .ok_or_else(|| anyhow!("your checkout is on a detached HEAD; switch to a branch first"))?;
+        if self.git.is_ancestor(&repo, &branch, "HEAD").await? {
+            bail!("{target} already has everything on {branch}");
+        }
+        let base = self.git.merge_base(&repo, "HEAD", &branch).await?;
+        self.check_dirty_overlap(&repo, &branch, base.as_deref(), &format!("{}'s branch", agent.name)).await?;
+        let before = self.git.head(&repo).await?;
+        let msg = format!("Merge {}'s work ({branch})", agent.name);
+        let sha = match self.git.merge(&repo, &branch, &msg, false).await? {
+            crate::git::MergeOutcome::Merged { sha } | crate::git::MergeOutcome::AlreadyMerged { sha } => sha,
+            crate::git::MergeOutcome::Conflict { files, .. } => {
+                bail!("merging into {target} conflicts in {}; the merge was aborted and your branch is unchanged", files.join(", "))
+            }
+        };
+        let ws_id = Some(ws.id.as_str());
+        self.emit(ws_id, row(Some(agent_id), None, None, EventKind::Merged { sha: sha.clone(), branch: target.clone() }))?;
+        self.decide_by(ws_id, Some(agent_id), "merge", "human", format!("you merged {branch} into {target}"), json!({ "agent_id": agent_id, "sha": sha }))?;
+        self.chat(ws_id, &format!("agent:{agent_id}"), "codly", &format!("Merged {}'s work into {target} ({}).", agent.name, &sha[..sha.len().min(10)]), None)?;
+        let touched = match before.as_deref() {
+            Some(b) => self.git.changed_files(&repo, b).await.unwrap_or_default(),
+            None => vec![],
+        };
+        drop(_g);
+        self.reindex_after_merge(&ws.id, touched);
+        if let Some(w) = write(&self.ws).as_mut().filter(|w| w.id == ws.id) {
+            w.head = Some(sha.clone());
+        }
+        Ok(sha)
+    }
+
+    /// Where the checkout stands against its upstream, and its uncommitted tracked files.
+    pub(super) async fn repo_sync(&self) -> anyhow::Result<RepoSync> {
+        let repo = PathBuf::from(self.require_ws()?.repo_path);
+        let branch = self.git.current_branch(&repo).await?;
+        let (upstream, ahead, behind) = match self.git.ahead_behind(&repo).await? {
+            Some((u, a, b)) => (Some(u), a, b),
+            None => (None, 0, 0),
+        };
+        let dirty = self.git.changed_paths(&repo, &["HEAD"]).await.unwrap_or_default();
+        Ok(RepoSync { branch, upstream, ahead, behind, dirty })
+    }
+
+    /// Commit the user's changes to tracked files in their checkout (their hooks apply).
+    pub(super) async fn commit_checkout(&self, message: &str) -> anyhow::Result<String> {
+        let message = message.trim();
+        if message.is_empty() {
+            bail!("write a commit message first");
+        }
+        let ws = self.require_ws()?;
+        let _g = self.repo_lock.lock().await;
+        let sha = self.git.commit_tracked(Path::new(&ws.repo_path), message).await?;
+        self.decide_by(Some(&ws.id), None, "commit", "human", format!("you committed your changes: {}", prompts::clip(message, 72)), json!({ "sha": sha }))?;
+        if let Some(w) = write(&self.ws).as_mut().filter(|w| w.id == ws.id) {
+            w.head = Some(sha.clone());
+        }
+        Ok(sha)
+    }
+
+    /// Push the checked-out branch to its remote (`origin` unless it tracks another).
+    pub(super) async fn push_checkout(&self) -> anyhow::Result<RepoSync> {
+        let ws = self.require_ws()?;
+        let repo = PathBuf::from(&ws.repo_path);
+        let branch = self
+            .git
+            .current_branch(&repo)
+            .await?
+            .ok_or_else(|| anyhow!("your checkout is on a detached HEAD; switch to a branch first"))?;
+        let remote = match self.git.ahead_behind(&repo).await? {
+            Some((up, ..)) => up.split_once('/').map(|(r, _)| r.to_string()).unwrap_or_else(|| "origin".into()),
+            None => "origin".into(),
+        };
+        {
+            let _g = self.repo_lock.lock().await;
+            self.git.push(&repo, &remote, &branch).await?;
+        }
+        self.decide_by(Some(&ws.id), None, "push", "human", format!("you pushed {branch} to {remote}"), json!({ "branch": branch, "remote": remote }))?;
+        self.repo_sync().await
+    }
+
+    /// The user's checkout changed under the index: re-index what a merge touched.
+    fn reindex_after_merge(&self, ws_id: &str, touched: Vec<String>) {
+        if let Some(idx) = self.index_of(Some(ws_id)).filter(|_| !touched.is_empty()) {
+            let paths: Vec<PathBuf> = touched.into_iter().map(PathBuf::from).collect();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = guard("code index", || idx.update_paths(&paths)) {
+                    tracing::warn!("index update after merge: {e}");
+                }
+            });
+        }
+    }
+
     pub(super) async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<String> {
         let p = self.plan(plan_id)?;
         if matches!(p.status, PlanStatus::Running | PlanStatus::Integrating) {
@@ -437,19 +570,7 @@ impl Inner {
         let ws = self.store.workspace(&p.workspace_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
         let repo = PathBuf::from(&ws.repo_path);
         let _g = self.repo_lock.lock().await;
-        // Uncommitted work the plan doesn't touch is fine: git itself refuses a merge that would
-        // overwrite a dirty file, and `merge --abort` on conflict keeps unrelated local changes.
-        if self.git.dirty(&repo, false).await? {
-            let dirty = self.git.changed_paths(&repo, &["HEAD"]).await.unwrap_or_default();
-            let ours = match p.base_commit.as_deref() {
-                Some(base) => self.git.changed_paths(&repo, &[base, &branch]).await.unwrap_or_default(),
-                None => vec![],
-            };
-            let overlap: Vec<&String> = dirty.iter().filter(|f| ours.contains(f)).collect();
-            if !overlap.is_empty() {
-                bail!("your checkout has uncommitted changes in {}, which this plan also changes; commit them, then merge again", name_list(&overlap));
-            }
-        }
+        self.check_dirty_overlap(&repo, &branch, p.base_commit.as_deref(), "this plan").await?;
         let target = self
             .git
             .current_branch(&repo)
@@ -496,14 +617,7 @@ impl Inner {
             tracing::info!("keeping {wt}: {e}");
         }
         drop(_g);
-        if let Some(idx) = self.index_of(Some(&ws.id)).filter(|_| !touched.is_empty()) {
-            let paths: Vec<PathBuf> = touched.into_iter().map(PathBuf::from).collect();
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = guard("code index", || idx.update_paths(&paths)) {
-                    tracing::warn!("index update after merge: {e}");
-                }
-            });
-        }
+        self.reindex_after_merge(&ws.id, touched);
         if let Some(w) = write(&self.ws).as_mut().filter(|w| w.id == ws.id) {
             w.head = Some(sha.clone());
         }

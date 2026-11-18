@@ -19,6 +19,7 @@ import type { ArchivePolicy } from './gen/ArchivePolicy';
 import type { Connection } from './gen/Connection';
 import type { ConnectionSecret } from './gen/ConnectionSecret';
 import type { SweepReport } from './gen/SweepReport';
+import type { RepoSync } from './gen/RepoSync';
 import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
@@ -308,6 +309,14 @@ export const api = {
   taskDiff: (taskId: string) => call<string>('task_diff', { taskId }),
   planDiff: (planId: string) => call<string>('plan_diff', { planId }),
   mergePlan: (planId: string) => call<string>('merge_plan', { planId }),
+  /** Merge a solo agent's branch into your checked-out branch. Returns the new HEAD sha. */
+  mergeAgent: (agentId: string) => call<string>('merge_agent', { agentId }),
+  /** Your checkout against its remote: ahead/behind and uncommitted tracked files. */
+  repoSync: () => call<RepoSync>('repo_sync'),
+  /** Commit your changes to tracked files (your hooks run). Returns the new sha. */
+  commitCheckout: (message: string) => call<string>('commit_checkout', { message }),
+  /** Push your checked-out branch to its remote. */
+  pushCheckout: () => call<RepoSync>('push_checkout'),
   keepPlan: (planId: string) => call<Plan>('keep_plan', { planId }),
   events: (agentId: string | null, before: number | null, limit = 500) =>
     call<EventRow[]>('get_events', { agentId, before, limit }),
