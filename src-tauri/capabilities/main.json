@@ -115,6 +115,7 @@
     "allow-buy-lot",
     "allow-sell-lot",
     "allow-move-office",
+    "allow-close-office",
     "allow-board-policy",
     "allow-board-sweep",
     "allow-board-archive",
