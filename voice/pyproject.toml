@@ -1,0 +1,15 @@
+[project]
+name = "codly-voice"
+version = "0.1.0"
+description = "Codly voice relay: talk to a Codly agent through OpenAI Realtime (WIF auth), proxied by codly serve"
+requires-python = ">=3.11"
+dependencies = [
+    "openai[realtime]>=3.46",
+    "httpx",
+    "fastapi",
+    "uvicorn",
+]
+
+[tool.uv]
+exclude-newer = "7 days"
+package = false

@@ -16,6 +16,7 @@
   import { idVar, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
   import Icon from '../components/Icon.svelte';
   import DictationButton from './DictationButton.svelte';
+  import VoiceButton from './VoiceButton.svelte';
   import { appendTranscript } from '../lib/util/freeflow';
   import Portrait from '../components/Portrait.svelte';
   import LeadControls, { MODES } from './LeadControls.svelte';
@@ -285,6 +286,7 @@
     <input bind:this={picker} type="file" multiple hidden onchange={() => { addFiles([...(picker?.files ?? [])]); if (picker) picker.value = ''; }} />
     <button class="attach" onclick={() => picker?.click()} aria-label="Attach files" data-tip="Attach images or files — or paste or drop them"><Icon name="paperclip" size={15} stroke={1.6} /></button>
     <DictationButton target={ta} thread={slot} onText={dictated} />
+    {#if oneToOne && agent}<VoiceButton {thread} />{/if}
     <button class="send" disabled={!canSend} onclick={send} aria-label={isBusy ? 'Queue' : 'Send'} data-tip={isBusy ? 'Send — it queues until the turn ends' : 'Send'} data-tip-kbd="↵">
       <Icon name="send" size={15} stroke={1.8} />
     </button>

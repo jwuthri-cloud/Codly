@@ -83,7 +83,8 @@ async fn serve(app: AppHandle, s: Serve, open: bool) -> anyhow::Result<()> {
                 let (app, token) = (app.clone(), token.clone());
                 async move { Ok::<_, Infallible>(handle(app, &token, req).await) }
             });
-            let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream), svc).await;
+            // Upgrades: the voice WebSocket (`/api/voice/ws`) is spliced through to the relay.
+            let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream), svc).with_upgrades().await;
         });
     }
 }
@@ -128,6 +129,7 @@ async fn handle(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
     }
     match (req.method(), path.as_str()) {
         (&Method::GET, "/api/events") => events(&app).await,
+        (&Method::GET, "/api/voice/ws") => voice(req).await,
         (&Method::GET, p) if p.starts_with("/api/pty/") => pty(&app, &p["/api/pty/".len()..]),
         (&Method::POST, p) if p.starts_with("/api/cmd/") => {
             let cmd = p["/api/cmd/".len()..].to_string();
@@ -136,6 +138,79 @@ async fn handle(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
         (&Method::GET, p) => asset(&app, p),
         _ => text(StatusCode::NOT_FOUND, "not found"),
     }
+}
+
+/// Port of the voice relay (`voice/relay.py`) on this machine.
+fn voice_port() -> u16 {
+    std::env::var("CODLY_VOICE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8766)
+}
+
+/// The voice WebSocket: the handshake is replayed to the relay on 127.0.0.1, its `101` goes back to
+/// the browser, then bytes are copied both ways. Only Codly's authenticated, same-origin page gets
+/// here (`handle` checks the cookie and the origin first), so the relay needs no auth of its own.
+async fn voice(req: Request<Incoming>) -> Res {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let h = req.headers();
+    let (Some(key), Some(version)) = (h.get("sec-websocket-key"), h.get("sec-websocket-version")) else {
+        return text(StatusCode::BAD_REQUEST, "expected a WebSocket handshake");
+    };
+    let port = voice_port();
+    let mut upstream = match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+        Ok(s) => s,
+        Err(_) => return text(StatusCode::BAD_GATEWAY, &format!("the voice relay is not running on port {port} (start it with voice/start.sh)")),
+    };
+    let handshake = format!(
+        "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: {}\r\n\r\n",
+        key.to_str().unwrap_or_default(),
+        version.to_str().unwrap_or_default(),
+    );
+    if upstream.write_all(handshake.as_bytes()).await.is_err() {
+        return text(StatusCode::BAD_GATEWAY, "the voice relay closed the connection");
+    }
+    // Read the relay's answer up to the end of its headers (bytes after it belong to the stream).
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1024];
+    let end = loop {
+        match upstream.read(&mut buf).await {
+            Ok(0) | Err(_) => return text(StatusCode::BAD_GATEWAY, "the voice relay closed the connection"),
+            Ok(n) => head.extend_from_slice(&buf[..n]),
+        }
+        if let Some(i) = memchr_crlf2(&head) {
+            break i;
+        }
+        if head.len() > 16 << 10 {
+            return text(StatusCode::BAD_GATEWAY, "the voice relay sent an oversized handshake");
+        }
+    };
+    let rest = head.split_off(end + 4);
+    let head = String::from_utf8_lossy(&head).to_string();
+    let mut lines = head.split("\r\n");
+    if !lines.next().is_some_and(|l| l.split(' ').nth(1) == Some("101")) {
+        return text(StatusCode::BAD_GATEWAY, "the voice relay refused the WebSocket");
+    }
+    let mut res = Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
+    for line in lines.filter(|l| !l.is_empty()) {
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim().to_ascii_lowercase();
+            if matches!(k.as_str(), "upgrade" | "connection" | "sec-websocket-accept") {
+                res = res.header(k, v.trim());
+            }
+        }
+    }
+    tokio::spawn(async move {
+        let Ok(up) = hyper::upgrade::on(req).await else { return };
+        let mut client = TokioIo::new(up);
+        if !rest.is_empty() && client.write_all(&rest).await.is_err() {
+            return;
+        }
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    });
+    res.body(full(Bytes::new())).unwrap()
+}
+
+/// Index of the blank line that ends HTTP headers.
+fn memchr_crlf2(b: &[u8]) -> Option<usize> {
+    b.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
 /// Only Codly's own page may call the API. Cookies ignore the port, so without this any page on
