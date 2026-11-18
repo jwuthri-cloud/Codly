@@ -9,6 +9,8 @@ The realtime model is the voice; the Codly agent is the brain. The model drives 
 tools, which the browser runs (it holds Codly's API and the agent's live state):
   ask_agent(message)  sends a message to the agent; its answer arrives later as `agent_reply`
   agent_status()      the agent's status and its latest message
+For quick facts it does not wait for the agent: three read-only lookups run here in the relay,
+web_search (an OpenAI model with web search, WIF auth), search_papers (OpenAlex), arxiv_search.
 
 WebSocket /ws
   Browser -> relay: binary = PCM16 mono 24 kHz mic audio; text = JSON:
@@ -19,7 +21,7 @@ WebSocket /ws
     {"type": "interrupt"}                                              stop the current answer
   Relay -> browser: binary = PCM16 mono 24 kHz reply audio; text = JSON:
     ready, clear, user_start, user, thinking, assistant_delta, assistant_done, response_done,
-    tool_call {id, name, args}, error.
+    tool_call {id, name, args} (to run and answer), lookup {name, args} (shown only), error.
 """
 import asyncio
 import base64
@@ -29,12 +31,17 @@ import os
 
 import httpx
 import uvicorn
+
+import papers
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from openai import AsyncOpenAI
 
 MODEL = os.environ.get("REALTIME_MODEL", "gpt-realtime-2.1")
 VOICE = os.environ.get("REALTIME_VOICE", "marin")
 TRANSCRIBE_MODEL = os.environ.get("REALTIME_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
+WEB_SEARCH_MODEL = os.environ.get("VOICE_WEB_SEARCH_MODEL", "gpt-5.2")
+LOOKUP_TIMEOUT = 60  # seconds; a lookup that takes longer is reported as failed, not waited on
+LOOKUP_MAX_CHARS = 4000
 WIF_AUDIENCE = "https://api.openai.com"
 METADATA_IDENTITY_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity"
 BROWSER_TOOLS = {"ask_agent", "agent_status"}
@@ -59,7 +66,42 @@ TOOLS = [
         "description": "The agent's current status (idle, working, waiting for approval...) and its latest message.",
         "parameters": {"type": "object", "properties": {}},
     },
+    {
+        "type": "function",
+        "name": "web_search",
+        "description": "Quick web lookup for a fact, a recent event or a page: returns a short answer with source links.",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "The question, in full words."}},
+            "required": ["query"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "search_papers",
+        "description": "Search academic papers (OpenAlex): title, authors, year, venue, citations, link, abstract.",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "description": "max results, default 5"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "arxiv_search",
+        "description": "Search arXiv preprints. Use sort 'recent' for the newest work.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+                "sort": {"type": "string", "enum": ["relevance", "recent"]},
+            },
+            "required": ["query"],
+        },
+    },
 ]
+RELAY_TOOLS = {"web_search", "search_papers", "arxiv_search"}
 
 log = logging.getLogger("codly-voice")
 app = FastAPI()
@@ -72,8 +114,12 @@ The user talks to you out loud to work with {agent}. You do not write code or re
 the user what {agent} answered.
 
 Rules:
-- When the user asks for work, a question about the code, or a decision, call ask_agent with a clear,
-  complete message. Then say in a few words that {agent} is on it. Do not invent its answer.
+- When the user asks for work, research, a question about the code, or a decision, call ask_agent with
+  a clear, complete message. Then say in a few words that {agent} is on it. Do not invent its answer.
+- For a quick fact (a definition, who wrote a paper, what came out this week, a number), look it up
+  yourself with web_search, search_papers or arxiv_search and answer from the result. Name your source.
+  Anything that needs reading several sources, judging evidence or writing something goes to {agent}.
+- Never state a citation, a number or a quote that no tool or {agent} gave you.
 - When a system message brings {agent}'s reply, give the gist in one to three spoken sentences. Do not
   read code, paths, diffs or long lists aloud: the user sees them on screen.
 - Use agent_status when the user asks what {agent} is doing.
@@ -102,6 +148,39 @@ def make_client() -> AsyncOpenAI:
             "provider": {"token_type": "jwt", "get_token": gcp_identity_token},
         },
     )
+
+
+_rest_client: AsyncOpenAI | None = None
+
+
+async def web_search(query: str) -> str:
+    """A short answer with sources, from an OpenAI model with web search (WIF auth over REST)."""
+    global _rest_client
+    _rest_client = _rest_client or make_client()
+    r = await _rest_client.responses.create(
+        model=WEB_SEARCH_MODEL,
+        tools=[{"type": "web_search"}],
+        instructions="Answer in at most five sentences, for a researcher. End with the sources you used: title and URL.",
+        input=query,
+    )
+    return r.output_text
+
+
+async def run_lookup(name: str, args: dict) -> str:
+    """One relay-side lookup, as the JSON text the model reads. Failures are reported, not raised."""
+    try:
+        if name == "web_search":
+            job = web_search(str(args["query"]))
+        elif name == "search_papers":
+            job = asyncio.to_thread(papers.search_papers, str(args["query"]), int(args.get("limit", 5)))
+        else:
+            job = asyncio.to_thread(papers.arxiv_search, str(args["query"]), int(args.get("limit", 5)), str(args.get("sort", "relevance")))
+        result = await asyncio.wait_for(job, LOOKUP_TIMEOUT)
+    except Exception as exc:  # the model hears the failure and can say so
+        log.warning("lookup %s failed: %r", name, exc)
+        return json.dumps({"error": f"{name} failed: {exc}"})
+    text = json.dumps(result) if not isinstance(result, str) else json.dumps({"answer": result})
+    return text[:LOOKUP_MAX_CHARS]
 
 
 class Session:
@@ -162,6 +241,12 @@ class Session:
                     await self.oai.response.cancel()
                 await self.ws.send_json({"type": "clear"})
 
+    async def lookup(self, call_id: str, name: str, args: dict) -> None:
+        """Runs beside the event loop, so audio keeps flowing while the lookup waits on the network."""
+        output = await run_lookup(name, args)
+        await self.oai.conversation.item.create(item={"type": "function_call_output", "call_id": call_id, "output": output})
+        await self.respond()
+
     async def from_openai(self) -> None:
         async for ev in self.oai:
             t = ev.type
@@ -184,6 +269,9 @@ class Session:
                 args = json.loads(ev.arguments or "{}")
                 if ev.name in BROWSER_TOOLS:
                     await self.ws.send_json({"type": "tool_call", "id": ev.call_id, "name": ev.name, "args": args})
+                elif ev.name in RELAY_TOOLS:
+                    await self.ws.send_json({"type": "lookup", "name": ev.name, "args": args})
+                    asyncio.create_task(self.lookup(ev.call_id, ev.name, args))
                 else:  # the model named a tool that does not exist: tell it, do not hang
                     await self.oai.conversation.item.create(
                         item={"type": "function_call_output", "call_id": ev.call_id, "output": json.dumps({"error": f"unknown tool {ev.name}"})}

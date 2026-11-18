@@ -203,8 +203,8 @@ pub struct AccountInfo {
 // ───────────────────────────── team ─────────────────────────────
 
 /// The job titles an agent can have (its badge). Mirrored in `src/lib/util/team.ts`.
-pub const ROLE_TITLES: [&str; 12] =
-    ["Backend", "Frontend", "Full-stack", "Mobile", "Product manager", "Designer", "QA", "DevOps", "Data", "Security", "Docs", "Reviewer"];
+pub const ROLE_TITLES: [&str; 13] =
+    ["Backend", "Frontend", "Full-stack", "Mobile", "Product manager", "Designer", "QA", "DevOps", "Data", "Security", "Docs", "Reviewer", "Researcher"];
 
 /// `s` as one of `ROLE_TITLES` (any case), if it is one.
 pub fn role_title(s: &str) -> Option<&'static str> {

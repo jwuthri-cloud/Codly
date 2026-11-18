@@ -4,6 +4,7 @@
  * The relay's model drives the agent with two tools that run here, where Codly's API and the
  * agent's live state are: `ask_agent` sends a chat message to the agent's thread, and the agent's
  * reply goes back to the model as `agent_reply` when its turn ends. `agent_status` reads its state.
+ * Quick lookups (web, papers, arXiv) run in the relay; they only show here as `lookup` lines.
  *
  * Web only (`codly serve`): the desktop window has no relay next to it.
  */
@@ -21,7 +22,7 @@ const REPLY_CAP = 4000;
 const RESTING = new Set(['idle', 'done', 'failed', 'waiting_approval', 'blocked', 'rate_limited', 'offline']);
 
 export type VoicePhase = 'off' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'error';
-export type VoiceLine = { role: 'user' | 'voice' | 'agent'; text: string };
+export type VoiceLine = { role: 'user' | 'voice' | 'agent' | 'lookup'; text: string };
 
 const WORKLET = `
 class Cap extends AudioWorkletProcessor {
@@ -157,6 +158,11 @@ class Voice {
       case 'assistant_done':
         if (String(m.text ?? '').trim()) this.say('voice', String(m.text));
         break;
+      case 'lookup': {
+        const a = (m.args ?? {}) as Record<string, unknown>;
+        this.say('lookup', `${String(m.name).replace('_', ' ')}: ${String(a.query ?? '')}`);
+        break;
+      }
       case 'tool_call':
         this.tool(String(m.id), String(m.name), (m.args ?? {}) as Record<string, unknown>, thread);
         break;

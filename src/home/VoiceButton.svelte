@@ -16,7 +16,7 @@
   const live = $derived(here && voice.phase !== 'off' && voice.phase !== 'error');
   const label = $derived(live ? 'Hang up' : 'Talk out loud');
   const STATE: Record<string, string> = { connecting: 'Connecting…', listening: 'Listening', thinking: 'Thinking…', speaking: 'Speaking' };
-  const WHO: Record<string, string> = { user: 'You', voice: 'Voice', agent: 'Agent' };
+  const WHO: Record<string, string> = { user: 'You', voice: 'Voice', agent: 'Agent', lookup: 'Lookup' };
   /** The full call transcript, opened by clicking the strip. */
   let open = $state(false);
   let list = $state<HTMLElement>();
@@ -77,7 +77,7 @@
   .log { position: absolute; left: 0; right: 0; bottom: calc(100% + 44px); max-height: min(50vh, 420px); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: var(--r-lg); background: var(--surface-1); box-shadow: inset 0 0 0 1px var(--line), 0 8px 24px rgb(0 0 0 / 0.18); font-size: var(--t-sm); line-height: var(--lh-sm); z-index: 2; }
   .line { color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
   .line b { display: inline-block; min-width: 46px; margin-right: 6px; font-weight: var(--w-med); color: var(--ink-1); }
-  .line.agent { color: var(--ink-3); }
+  .line.agent, .line.lookup { color: var(--ink-3); }
   .line.empty { color: var(--ink-3); }
   .state { flex: none; font-weight: var(--w-med); color: var(--ink-1); }
   .last { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); }
