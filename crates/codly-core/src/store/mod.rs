@@ -327,7 +327,7 @@ impl Store {
     /// failing startup: defaults are the safe configuration.
     pub fn settings(&self) -> Result<Settings> {
         Ok(match self.kv_get("settings")? {
-            Some(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+            Some(s) => serde_json::from_str::<serde_json::Value>(&s).map(migrate_settings).and_then(serde_json::from_value).unwrap_or_else(|e| {
                 tracing::warn!("settings unreadable, using defaults: {e}");
                 Settings::default()
             }),
@@ -906,8 +906,35 @@ pub fn parse_enum<T: DeserializeOwned>(s: &str) -> Option<T> {
     serde_json::from_value(Value::String(s.to_string())).ok()
 }
 
+/// Settings saved by older versions: `byok_openrouter: true` (the one BYOK switch there was)
+/// becomes `byok.openrouter = key`.
+fn migrate_settings(mut v: serde_json::Value) -> serde_json::Value {
+    if let Some(o) = v.as_object_mut()
+        && let Some(old) = o.remove("byok_openrouter")
+        && !o.contains_key("byok")
+        && old == serde_json::Value::Bool(true)
+    {
+        o.insert("byok".into(), serde_json::json!({ "openrouter": { "kind": "key" } }));
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn old_openrouter_switch_becomes_a_byok_source() {
+        use crate::byok::ByokSource;
+        let read = |json: serde_json::Value| -> Settings { serde_json::from_value(super::migrate_settings(json)).unwrap() };
+        let base = serde_json::to_value(Settings::default()).unwrap();
+        let mut on = base.clone();
+        on.as_object_mut().unwrap().remove("byok");
+        on["byok_openrouter"] = true.into();
+        assert_eq!(read(on.clone()).byok.openrouter, ByokSource::Key);
+        on["byok_openrouter"] = false.into();
+        assert_eq!(read(on).byok.openrouter, ByokSource::Off);
+        assert_eq!(read(base).byok, Default::default());
+    }
+
     use super::*;
 
     fn ws(store: &Store) -> Workspace {

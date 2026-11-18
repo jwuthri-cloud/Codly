@@ -118,14 +118,14 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(invoke(&wv, "install_cli", json!({ "provider": "claude", "rung": "npm; rm -rf ~" })).is_err());
     let e = invoke(&wv, "install_cli", json!({ "provider": "cursor", "rung": "npm" })).unwrap_err();
     assert!(e.to_string().contains("no npm package"), "{e}");
-    // BYOK: the switch persists in Settings; a bad key is refused before it reaches the Keychain;
-    // the status is two booleans.
-    let on = invoke(&wv, "byok_configure", json!({ "enabled": true })).unwrap();
-    assert_eq!(on["enabled"], true);
-    assert_eq!(invoke(&wv, "byok_status", json!({})).unwrap()["enabled"], true);
-    assert!(invoke(&wv, "byok_save_key", json!({ "key": "two words" })).is_err());
-    assert_eq!(on.as_object().unwrap().len(), 2, "{on}");
-    invoke(&wv, "byok_configure", json!({ "enabled": false })).unwrap();
+    // BYOK: a source persists in Settings; Key needs a saved key; a bad key is refused before it
+    // reaches the store; the status names sources and "key saved", never a key.
+    assert!(invoke(&wv, "byok_configure", json!({ "vendor": "anthropic", "source": { "kind": "key" } })).is_err());
+    let on = invoke(&wv, "byok_configure", json!({ "vendor": "openai", "source": { "kind": "command", "command": " mint-token openai " } })).unwrap();
+    assert_eq!(on["vendors"][1], json!({ "vendor": "openai", "source": { "kind": "command", "command": "mint-token openai" }, "key_saved": false }));
+    assert_eq!(invoke(&wv, "byok_status", json!({})).unwrap()["vendors"][1]["source"]["kind"], "command");
+    assert!(invoke(&wv, "byok_save_key", json!({ "vendor": "anthropic", "key": "two words" })).is_err());
+    invoke(&wv, "byok_configure", json!({ "vendor": "openai", "source": { "kind": "off" } })).unwrap();
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

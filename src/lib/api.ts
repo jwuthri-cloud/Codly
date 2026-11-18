@@ -19,7 +19,9 @@ import type { ArchivePolicy } from './gen/ArchivePolicy';
 import type { Connection } from './gen/Connection';
 import type { ConnectionSecret } from './gen/ConnectionSecret';
 import type { SweepReport } from './gen/SweepReport';
+import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
+import type { Vendor } from './gen/Vendor';
 import type { CliInfo } from './gen/CliInfo';
 import type { InstallRun } from './gen/InstallRun';
 import type { InstallRung } from './gen/InstallRung';
@@ -389,11 +391,12 @@ export const api = {
     call<Connection[]>('update_connection', { id, enabled, secret }),
   /** Onboarding: run the vendor's install line for a CLI in a visible terminal (attach with `ptyAttach`). The core picks the text from (provider, rung); nothing typed here is ever run. */
   installCli: (provider: Provider, rung: InstallRung) => call<InstallRun>('install_cli', { provider, rung }),
-  /** OpenRouter key for OpenCode (opt-in). The key goes in once and never comes back: every reply is a status. */
+  /** Your own API credentials per vendor (opt-in): Anthropic → Claude, OpenAI → Codex, OpenRouter → OpenCode.
+   *  A key goes in once and never comes back: every reply is a status. */
   byokStatus: () => call<ByokStatus>('byok_status'),
-  byokConfigure: (enabled: boolean) => call<ByokStatus>('byok_configure', { enabled }),
-  byokSaveKey: (key: string) => call<ByokStatus>('byok_save_key', { key }),
-  byokClear: () => call<ByokStatus>('byok_clear_key'),
+  byokConfigure: (vendor: Vendor, source: ByokSource) => call<ByokStatus>('byok_configure', { vendor, source }),
+  byokSaveKey: (vendor: Vendor, key: string) => call<ByokStatus>('byok_save_key', { vendor, key }),
+  byokClear: (vendor: Vendor) => call<ByokStatus>('byok_clear_key', { vendor }),
   /** Native folder picker (Tauri dialog plugin); in the browser a path prompt (repositories open through
    *  the repository picker instead, `openWorkspace`). Null if cancelled. */
   pickFolder: async (): Promise<string | null> => {

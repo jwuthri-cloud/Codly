@@ -205,6 +205,7 @@ async fn main() {
         mcp,
         use_user_setup: false,
         raw_log: raw_log.clone(),
+        byok_command: None,
     };
     println!("spawning {} ({:?}, model {:?}) in {}", spec.bin.display(), spec.role, spec.model, repo.display());
 

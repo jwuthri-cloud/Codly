@@ -829,16 +829,21 @@ impl Core {
 
     /// Models a CLI can run, for the start-agent picker (empty when it takes any name).
     pub async fn list_models(&self, provider: Provider) -> anyhow::Result<Vec<String>> {
-        let key = self.inner.byok_key_for(provider).await;
+        let key = self.inner.byok_for(provider).await.ok().and_then(|(key, _)| key);
         crate::env::list_models(provider, &self.inner.base_env, key.as_ref().map(|k| k.expose()))
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    /// The OpenRouter key or its switch changed: forget OpenCode's cached model list and ask it
+    /// A BYOK key or source changed: forget the model lists of the CLIs it concerns and ask them
     /// again, so the Lead's model choices follow (the start-agent picker asks every time).
     pub fn byok_changed(&self) {
-        lock(&self.inner.models).remove(&Provider::Opencode);
+        {
+            let mut models = lock(&self.inner.models);
+            for v in crate::byok::Vendor::ALL {
+                models.remove(&v.cli());
+            }
+        }
         self.inner.warm_models();
     }
 
@@ -999,24 +1004,36 @@ impl Inner {
         self.kick.notify_one();
     }
 
-    /// The opt-in OpenRouter key (byok.rs) for OpenCode's env: None for every other CLI and while
-    /// the switch is off. The Keychain read is a subprocess, so it runs off the async threads.
-    pub(super) async fn byok_key_for(&self, provider: Provider) -> Option<crate::inbound::secrets::Secret> {
-        if provider != Provider::Opencode || !self.settings().byok_openrouter {
-            return None;
-        }
-        tokio::task::spawn_blocking(|| crate::byok::global().active_key(true)).await.ok().flatten()
+    /// BYOK (byok.rs) for one spawn of `provider`: the key for its env, or the token command it
+    /// runs itself (Claude, Codex). OpenCode cannot run a command, so Codly runs it once here.
+    /// (None, None) = subscription only. The store read is a subprocess, so it runs off the async
+    /// threads; a failing token command fails the spawn rather than falling back to the plan.
+    pub(super) async fn byok_for(&self, provider: Provider) -> anyhow::Result<(Option<crate::inbound::secrets::Secret>, Option<String>)> {
+        use crate::byok::{Credential, Vendor};
+        let Some(vendor) = Vendor::of(provider) else { return Ok((None, None)) };
+        let settings = self.settings().byok;
+        let cred = tokio::task::spawn_blocking(move || crate::byok::global().credential(&settings, vendor)).await?;
+        Ok(match cred {
+            None => (None, None),
+            Some(Credential::Key(key)) => (Some(key), None),
+            Some(Credential::Command(cmd)) if matches!(provider, Provider::Claude | Provider::Codex) => (None, Some(cmd)),
+            Some(Credential::Command(cmd)) => {
+                let key = crate::byok::mint(&cmd, &self.base_env).await.with_context(|| format!("{} token command", vendor.label()))?;
+                (Some(key), None)
+            }
+        })
     }
 
     fn settings(&self) -> Settings {
         read(&self.settings).clone()
     }
 
-    /// The detected CLIs, with OpenCode's badge showing "OpenRouter · your key" while BYOK is on.
+    /// The detected CLIs, with a BYOK badge ("Anthropic API · your key") on each CLI that uses one.
     fn clis(&self) -> Vec<CliInfo> {
         let mut clis = read(&self.clis).clone();
-        let byok_on = self.settings().byok_openrouter && crate::byok::global().key().is_some();
-        crate::byok::decorate(&mut clis, byok_on);
+        let byok = self.settings().byok;
+        let active = crate::byok::global().active(&byok);
+        crate::byok::decorate(&mut clis, &byok, &active);
         clis
     }
 

@@ -1,6 +1,6 @@
 <!--
   Level 3: every other model, through OpenCode and one OpenRouter key. The key is opt-in, lives in the
-  Mac's Keychain, and is handed to OpenCode only (Codly otherwise scrubs API keys from agents).
+  Mac's Keychain (an owner-only file on Linux), and is handed to OpenCode only (Codly otherwise scrubs API keys from agents).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -11,18 +11,23 @@
   import Icon from '../components/Icon.svelte';
   import { catalog } from './catalog';
 
-  let st = $state<ByokStatus>({ enabled: false, key_saved: false });
+  /** OpenRouter's slice of the BYOK status (Settings → API keys has every vendor). */
+  let st = $state({ enabled: false, key_saved: false });
+  const slice = (s: ByokStatus) => {
+    const v = s.vendors.find((x) => x.vendor === 'openrouter');
+    return { enabled: v?.source.kind === 'key', key_saved: v?.key_saved ?? false };
+  };
   let key = $state('');
   let busy = $state(false);
   onMount(() => {
-    api.byokStatus().then((s) => (st = s)).catch(() => {});
+    api.byokStatus().then((s) => (st = slice(s))).catch(() => {});
   });
 
   async function run(f: () => Promise<ByokStatus | void>, ok?: string) {
     busy = true;
     try {
       const s = await f();
-      if (s) st = s;
+      if (s) st = slice(s);
       if (ok) toast({ kind: 'success', title: ok, duration: 3000 });
     } catch (e) {
       toast({ kind: 'error', title: 'Could not save', body: e instanceof Error ? e.message : String(e) });
@@ -31,7 +36,7 @@
     }
   }
   const save = () => run(async () => {
-    const s = await api.byokSaveKey(key.trim());
+    const s = await api.byokSaveKey('openrouter', key.trim());
     key = '';
     return s;
   }, 'OpenRouter key saved');
@@ -50,13 +55,13 @@
           <div class="key">
             <input type="password" bind:value={key} placeholder={st.key_saved ? 'Replace the saved key' : 'sk-or-…'} autocomplete="off" spellcheck="false" aria-label="OpenRouter API key" disabled={busy} />
             <button class="btn sm primary" onclick={save} disabled={busy || !key.trim()}>Save</button>
-            {#if st.key_saved}<button class="btn sm ghost" onclick={() => run(() => api.byokClear(), 'Key removed')} disabled={busy}>Remove</button>{/if}
+            {#if st.key_saved}<button class="btn sm ghost" onclick={() => run(() => api.byokClear('openrouter'), 'Key removed')} disabled={busy}>Remove</button>{/if}
           </div>
           <label class="use">
-            <input type="checkbox" class="switch" checked={st.enabled} disabled={busy || !st.key_saved} onchange={(e) => run(() => api.byokConfigure(e.currentTarget.checked))} />
+            <input type="checkbox" class="switch" checked={st.enabled} disabled={busy || !st.key_saved} onchange={(e) => run(() => api.byokConfigure('openrouter', { kind: e.currentTarget.checked ? 'key' : 'off' }))} />
             <span>Let OpenCode use my OpenRouter key <em>· billed to your OpenRouter account</em></span>
           </label>
-          <p class="state">{st.key_saved ? 'Key saved in your Mac’s Keychain. It is never shown again.' : 'No key saved. Skipping this is fine: nothing changes.'}</p>
+          <p class="state">{st.key_saved ? 'Key saved. It is never shown again.' : 'No key saved. Skipping this is fine: nothing changes.'}</p>
         {/if}
       </div>
     </li>

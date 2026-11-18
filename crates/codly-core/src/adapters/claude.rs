@@ -135,6 +135,10 @@ pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&P
     if let Some(e) = effort {
         a.extend(["--effort".into(), e]);
     }
+    // BYOK token command (byok.rs): Claude runs it for its API key and re-runs it on expiry.
+    if let Some(cmd) = &spec.byok_command {
+        a.extend(["--settings".into(), serde_json::json!({ "apiKeyHelper": cmd }).to_string()]);
+    }
     let role = format!("{:?}", spec.role).to_lowercase();
     let short: String = spec.agent_id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
     a.extend(["-n".into(), format!("codly:{role}-{short}")]);
@@ -1226,6 +1230,7 @@ mod tests {
             mcp: Some(McpLaunch { command: "/Applications/Codly.app/Contents/MacOS/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "t".into())] }),
             use_user_setup: false,
             raw_log: PathBuf::from("/tmp/x/raw.ndjson"),
+            byok_command: None,
         }
     }
 
@@ -1241,6 +1246,17 @@ mod tests {
 
     fn replay(norm: &mut ClaudeNormalizer, lines: &[Value]) -> Vec<EventKind> {
         lines.iter().flat_map(|v| norm.on_message(v)).collect()
+    }
+
+    #[test]
+    fn byok_token_command_becomes_an_api_key_helper() {
+        let s = spec(Role::Worker, false);
+        assert!(!build_args(&s, "s", None).contains(&"--settings".to_string()), "no BYOK, no --settings");
+        let s = SpawnSpec { byok_command: Some("~/bin/wif-token \"anthropic\"".into()), ..s };
+        let a = build_args(&s, "s", None);
+        let i = a.iter().position(|x| x == "--settings").unwrap();
+        let v: Value = serde_json::from_str(&a[i + 1]).unwrap();
+        assert_eq!(v, serde_json::json!({ "apiKeyHelper": "~/bin/wif-token \"anthropic\"" }));
     }
 
     #[test]

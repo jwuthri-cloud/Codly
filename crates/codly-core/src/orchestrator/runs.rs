@@ -55,7 +55,7 @@ impl Inner {
             .flatten()
             .or_else(|| cli.path.as_ref().map(PathBuf::from))
             .ok_or_else(|| anyhow!("{} binary not found", provider.label()))?;
-        let byok_key = self.byok_key_for(provider).await;
+        let (byok_key, byok_command) = self.byok_for(provider).await?;
         let mut env = guard("env::child_env", || {
             Ok(crate::env::child_env_with(&self.base_env, provider, byok_key.as_ref().map(|k| k.expose())))
         })
@@ -172,6 +172,7 @@ impl Inner {
             mcp: Some(mcp.launch(&self.cfg.app_exe, &token)),
             use_user_setup: self.settings().use_my_claude_setup,
             raw_log,
+            byok_command,
         };
         // A panicking adapter (or a stub) must fail this run, not the caller's task.
         let fut = self.spawner.spawn(spec, self.events_tx.clone());

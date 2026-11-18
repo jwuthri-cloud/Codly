@@ -62,7 +62,7 @@ export const DEFAULT_SETTINGS: Settings = {
   world_ambient: false,
   theme: 'system',
   team: [],
-  byok_openrouter: false,
+  byok: { anthropic: { kind: 'off' }, openai: { kind: 'off' }, openrouter: { kind: 'off' } },
 };
 
 // ───────────── derived record types ─────────────

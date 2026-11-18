@@ -43,7 +43,57 @@ const OPT_OUT: &[&str] = &["remoteControl/status/changed"];
 /// Each account has a slot with its own lock, held while its server starts (up to ~45 s),
 /// so a slow start makes only that account's agents wait.
 static SERVERS: Servers = Mutex::const_new(Vec::new());
-type Servers = Mutex<Vec<(Option<String>, Arc<Mutex<Option<Arc<AppServer>>>>)>>;
+/// Keyed by (CODEX_HOME, `auth_tag`): a change of BYOK credential gets a server of its own.
+type Servers = Mutex<Vec<(ServerKey, Arc<Mutex<Option<Arc<AppServer>>>>)>>;
+type ServerKey = (Option<String>, String);
+
+/// Codly's own model provider for BYOK (byok.rs): the OpenAI API with the user's key or token
+/// command, instead of the account's ChatGPT sign-in.
+const BYOK_PROVIDER: &str = "codly_openai";
+/// How often Codex re-runs a token command before the token can expire.
+const BYOK_REFRESH_MS: u64 = 5 * 60 * 1000;
+
+/// `-c` overrides that point Codex at `BYOK_PROVIDER`: a token command (`spec.byok_command`,
+/// re-run by Codex) or the saved key (OPENAI_API_KEY in the env, present only with BYOK on since
+/// `env::child_env` scrubs it otherwise). Empty = the account's own sign-in.
+fn byok_overrides(spec: &SpawnSpec) -> Vec<String> {
+    let q = |v: &str| serde_json::Value::from(v).to_string(); // a JSON string is a TOML basic string
+    let auth: Vec<(String, String)> = if let Some(cmd) = &spec.byok_command {
+        vec![
+            ("auth.command".into(), q("/bin/sh")),
+            ("auth.args".into(), serde_json::json!(["-c", cmd]).to_string()),
+            ("auth.timeout_ms".into(), crate::byok::COMMAND_TIMEOUT.as_millis().to_string()),
+            ("auth.refresh_interval_ms".into(), BYOK_REFRESH_MS.to_string()),
+        ]
+    } else if spec.env.contains_key(crate::byok::Vendor::Openai.env_var()) {
+        vec![("env_key".into(), q(crate::byok::Vendor::Openai.env_var()))]
+    } else {
+        return vec![];
+    };
+    let base = [("name", q("OpenAI (your credentials)")), ("base_url", q("https://api.openai.com/v1")), ("wire_api", q("responses"))];
+    let mut a = Vec::new();
+    for (k, v) in base.into_iter().map(|(k, v)| (k.to_string(), v)).chain(auth) {
+        a.extend(["-c".to_string(), format!("model_providers.{BYOK_PROVIDER}.{k}={v}")]);
+    }
+    a.extend(["-c".to_string(), format!("model_provider={}", q(BYOK_PROVIDER))]);
+    a
+}
+
+/// Which credential a server was started with, without the key itself (a hash, in memory only).
+fn auth_tag(spec: &SpawnSpec) -> String {
+    use std::hash::{Hash, Hasher};
+    if let Some(cmd) = &spec.byok_command {
+        return format!("cmd:{cmd}");
+    }
+    match spec.env.get(crate::byok::Vendor::Openai.env_var()) {
+        Some(key) => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut h);
+            format!("key:{:x}", h.finish())
+        }
+        None => String::new(),
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ServerInfo {
@@ -97,7 +147,9 @@ impl AppServer {
         let mut env = spec.env.clone();
         env.insert("NO_COLOR".into(), "1".into()); // its tracing logs on stderr are ANSI otherwise
         let cwd = spec.env.get("HOME").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| spec.cwd.clone());
-        let mut child = proc::command(&spec.bin, &["app-server".into()], &cwd, &env)
+        let mut args = byok_overrides(spec);
+        args.push("app-server".into());
+        let mut child = proc::command(&spec.bin, &args, &cwd, &env)
             .spawn()
             .with_context(|| format!("failed to start {} app-server", spec.bin.display()))?;
         let server = Arc::new(AppServer {
@@ -286,15 +338,15 @@ impl AppServer {
 }
 
 async fn server_for(servers: &Servers, spec: &SpawnSpec, raw: &Arc<RawLog>) -> anyhow::Result<Arc<AppServer>> {
-    let home = spec.env.get("CODEX_HOME").cloned();
+    let key: ServerKey = (spec.env.get("CODEX_HOME").cloned(), auth_tag(spec));
     // The list is locked for the lookup only; the start below holds the account's slot.
     let slot = {
         let mut guard = servers.lock().await;
-        match guard.iter().find(|(h, _)| *h == home) {
+        match guard.iter().find(|(k, _)| *k == key) {
             Some((_, slot)) => slot.clone(),
             None => {
                 let slot = Arc::default();
-                guard.push((home, Arc::clone(&slot)));
+                guard.push((key, Arc::clone(&slot)));
                 slot
             }
         }
@@ -1557,6 +1609,47 @@ mod tests {
     }
 
     #[test]
+    fn byok_points_codex_at_its_own_provider() {
+        let spec = |env: &[(&str, &str)], cmd: Option<&str>| SpawnSpec {
+            agent_id: "a".into(),
+            run_id: "r".into(),
+            provider: Provider::Codex,
+            role: Role::Worker,
+            model: None,
+            cwd: PathBuf::from("/w"),
+            bin: PathBuf::from("codex"),
+            env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            session: SessionMode::New { session_id: None },
+            system_prompt: String::new(),
+            read_only: false,
+            mcp: None,
+            use_user_setup: false,
+            raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
+            byok_command: cmd.map(str::to_owned),
+        };
+        let off = spec(&[("CODEX_HOME", "/h")], None);
+        assert!(byok_overrides(&off).is_empty());
+        assert_eq!(auth_tag(&off), "");
+
+        let key = spec(&[("OPENAI_API_KEY", "sk-proj-x")], None);
+        let a = byok_overrides(&key).join(" ");
+        assert!(a.contains(r#"-c model_providers.codly_openai.env_key="OPENAI_API_KEY""#), "{a}");
+        assert!(a.contains(r#"-c model_providers.codly_openai.base_url="https://api.openai.com/v1""#), "{a}");
+        assert!(a.ends_with(r#"-c model_provider="codly_openai""#), "{a}");
+        assert!(!a.contains("sk-proj-x"), "the key stays in the env, never in argv");
+        assert!(auth_tag(&key).starts_with("key:") && !auth_tag(&key).contains("sk-proj"));
+        assert_ne!(auth_tag(&key), auth_tag(&spec(&[("OPENAI_API_KEY", "sk-proj-y")], None)), "a new key gets a new server");
+
+        let cmd = spec(&[], Some(r#"wif "openai""#));
+        let a = byok_overrides(&cmd);
+        assert!(a.contains(&r#"model_providers.codly_openai.auth.command="/bin/sh""#.to_string()), "{a:?}");
+        assert!(a.contains(&r#"model_providers.codly_openai.auth.args=["-c","wif \"openai\""]"#.to_string()), "{a:?}");
+        assert!(a.contains(&"model_providers.codly_openai.auth.refresh_interval_ms=300000".to_string()), "{a:?}");
+        assert!(!a.iter().any(|x| x.contains("env_key")), "auth and env_key never together");
+        assert_eq!(auth_tag(&cmd), r#"cmd:wif "openai""#);
+    }
+
+    #[test]
     fn thread_params() {
         let spec = SpawnSpec {
             agent_id: "a".into(),
@@ -1573,6 +1666,7 @@ mod tests {
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "tok".into())] }),
             use_user_setup: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
+            byok_command: None,
         };
         let (model, effort) = classify::split_model_effort(spec.model.as_deref());
         let (m, p) = thread_request(&spec, model.as_deref(), effort.as_deref());
@@ -1742,6 +1836,7 @@ mod tests {
                 mcp: None,
                 use_user_setup: false,
                 raw_log: cwd.join("raw.ndjson"),
+                byok_command: None,
                 cwd,
             }
         };

@@ -84,6 +84,9 @@ pub struct SpawnSpec {
     pub use_user_setup: bool,
     /// `<data>/runs/<run_id>/raw.ndjson`, append-only.
     pub raw_log: PathBuf,
+    /// BYOK token command (byok.rs) the CLI runs itself, re-running it when the token expires:
+    /// Claude `apiKeyHelper`, Codex `[model_providers.<id>.auth]`. A saved key travels in `env`.
+    pub byok_command: Option<String>,
 }
 
 /// Commands the orchestrator sends to a running agent.

@@ -1251,6 +1251,7 @@ mod tests {
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "t".into())] }),
             use_user_setup: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
+            byok_command: None,
         };
         let (a, env) = launch(&spec, Some(Path::new("/tmp/r/gemini-policy.toml")));
         assert_eq!(a, ["--acp", "--skip-trust", "-m", "gemini-2.5-flash", "--policy", "/tmp/r/gemini-policy.toml"]);

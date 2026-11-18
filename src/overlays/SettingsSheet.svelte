@@ -15,6 +15,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
   import AccountsSection from './AccountsSection.svelte';
+  import ApiKeysSection from './ApiKeysSection.svelte';
   import FreeFlowSection from './FreeFlowSection.svelte';
   import BreakerSection from './BreakerSection.svelte';
   import InboundSection from './InboundSection.svelte';
@@ -27,7 +28,6 @@
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
   import FullAccessConfirm from '../onboarding/FullAccessConfirm.svelte';
-  import LevelBrains from '../onboarding/LevelBrains.svelte';
   import { sound } from '../office/sound';
 
   const s = $derived(store.settings);
@@ -261,11 +261,7 @@
 
     <AccountsSection />
 
-    <section id="openrouter">
-      <h3 class="eyebrow">OpenRouter key</h3>
-      <p class="desc">Every other model through OpenCode. Save, replace or remove your key, and switch it on or off.</p>
-      <LevelBrains />
-    </section>
+    <ApiKeysSection />
     {:else if tab === 'safety'}
     <section>
       <h3 class="eyebrow">Approvals</h3>

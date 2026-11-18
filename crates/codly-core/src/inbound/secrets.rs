@@ -33,6 +33,14 @@ impl Secret {
     }
 }
 
+/// Constant-time, so comparing two secrets says nothing about where they differ.
+impl PartialEq for Secret {
+    fn eq(&self, other: &Self) -> bool {
+        ct_eq(self.0.as_bytes(), other.0.as_bytes())
+    }
+}
+impl Eq for Secret {}
+
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Secret(***)")
@@ -131,9 +139,73 @@ impl SecretStore for MemorySecrets {
     }
 }
 
-/// The store the app uses: the Keychain on macOS.
+// ───────────────────────────── owner-only file (Linux) ─────────────────────────────
+
+/// Linux (`codly serve` on a server) has no Keychain: secrets live in one JSON file that only
+/// the owner can read (0600, in a 0700 directory), as `~/.codex/auth.json` or `~/.netrc` do.
+/// Writes go to a temporary file first and are renamed into place, so a crash leaves the old file.
+pub struct FileSecrets {
+    path: std::path::PathBuf,
+    lock: Mutex<()>,
+}
+
+impl FileSecrets {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        FileSecrets { path: path.into(), lock: Mutex::new(()) }
+    }
+
+    fn read(&self) -> Result<HashMap<String, String>> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => Ok(serde_json::from_str(&text)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn write(&self, all: &HashMap<String, String>) -> Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let dir = self.path.parent().ok_or_else(|| anyhow::anyhow!("the secrets file has no directory"))?;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        let tmp = self.path.with_extension("tmp");
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        f.write_all(serde_json::to_string(all)?.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+}
+
+impl SecretStore for FileSecrets {
+    fn get(&self, key: &str) -> Result<Option<String>> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(self.read()?.get(key).cloned())
+    }
+    fn set(&self, key: &str, value: &str) -> Result<()> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.read()?;
+        all.insert(key.into(), value.into());
+        self.write(&all)
+    }
+    fn delete(&self, key: &str) -> Result<()> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.read()?;
+        if all.remove(key).is_some() {
+            self.write(&all)?;
+        }
+        Ok(())
+    }
+}
+
+/// `<data dir>/dev.codly.desktop/secrets/<name>.json`: the app's own data dir on Linux
+/// (`~/.local/share/dev.codly.desktop`), where Tauri puts the rest of Codly's data.
+pub fn file_store(name: &str) -> FileSecrets {
+    let base = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
+    FileSecrets::new(base.join("dev.codly.desktop").join("secrets").join(format!("{name}.json")))
+}
+
+/// The store the app uses: the Keychain on macOS, an owner-only file elsewhere.
 pub fn default_store() -> Box<dyn SecretStore> {
-    if cfg!(target_os = "macos") { Box::new(Keychain::new("dev.codly.inbound")) } else { Box::new(MemorySecrets::default()) }
+    if cfg!(target_os = "macos") { Box::new(Keychain::new("dev.codly.inbound")) } else { Box::new(file_store("inbound")) }
 }
 
 #[cfg(test)]
@@ -173,6 +245,24 @@ mod tests {
         k.delete(&key).unwrap();
         k.delete(&key).unwrap();
         assert_eq!(k.get(&key).unwrap(), None);
+    }
+
+    #[test]
+    fn file_store_round_trip_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/secrets.json");
+        let s = FileSecrets::new(&path);
+        assert_eq!(s.get("a").unwrap(), None);
+        s.delete("a").unwrap();
+        s.set("a", "sk-ant-api03-x").unwrap();
+        s.set("b", "two words are fine here").unwrap();
+        assert_eq!(FileSecrets::new(&path).get("a").unwrap().as_deref(), Some("sk-ant-api03-x"), "a fresh handle reads the file");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        s.delete("a").unwrap();
+        assert_eq!(s.get("a").unwrap(), None);
+        assert_eq!(s.get("b").unwrap().as_deref(), Some("two words are fine here"));
     }
 
     #[test]

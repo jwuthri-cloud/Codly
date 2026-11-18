@@ -164,12 +164,12 @@ pub fn resolve_bin(provider: Provider, base: &HashMap<String, String>) -> Option
 }
 
 /// Models a CLI can run, for the start-agent picker. Codex and OpenCode print their catalog and
-/// Claude takes aliases; the rest return none and take any name typed in. `openrouter_key` is the
-/// opt-in OpenRouter key (byok.rs): OpenCode lists the OpenRouter models only when it has it.
+/// Claude takes aliases; the rest return none and take any name typed in. `byok_key` is the CLI's
+/// opt-in vendor key (byok.rs): OpenCode lists the OpenRouter models only when it has it.
 pub async fn list_models(
     provider: Provider,
     base: &HashMap<String, String>,
-    openrouter_key: Option<&str>,
+    byok_key: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let args: &[&str] = match provider {
         Provider::Claude => return Ok(["opus", "sonnet", "haiku", "fable"].map(str::to_owned).to_vec()),
@@ -179,7 +179,7 @@ pub async fn list_models(
     };
     let bin = resolve_bin(provider, base).ok_or_else(|| format!("{} is not installed", bin_names(provider)[0]))?;
     let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    let out = run(&bin, args, &child_env_with(base, provider, openrouter_key), &cwd).await?;
+    let out = run(&bin, args, &child_env_with(base, provider, byok_key), &cwd).await?;
     if !out.ok {
         return Err(first_line(&out.text()));
     }
@@ -551,9 +551,10 @@ pub fn child_env(base: &HashMap<String, String>, provider: Provider) -> HashMap<
     child_env_with(base, provider, None)
 }
 
-/// `child_env` plus the opt-in OpenRouter key (`byok.rs`): injected for OpenCode only, whatever
-/// the provider the caller asks about; `None` is the subscription-only default.
-pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, openrouter_key: Option<&str>) -> HashMap<String, String> {
+/// `child_env` plus the opt-in key of this CLI's own vendor (`byok.rs`: ANTHROPIC_API_KEY for
+/// Claude, OPENAI_API_KEY for Codex, OPENROUTER_API_KEY for OpenCode), set after the scrub;
+/// `None` is the subscription-only default. Other CLIs ignore `byok_key`.
+pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, byok_key: Option<&str>) -> HashMap<String, String> {
     let mut env: HashMap<String, String> =
         base.iter().filter(|(k, _)| !scrubbed(k, provider)).map(|(k, v)| (k.clone(), v.clone())).collect();
     env.insert("TERM".into(), "dumb".into());
@@ -565,12 +566,10 @@ pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, openro
         Provider::Codex => {
             env.insert("NO_COLOR".into(), "1".into());
         }
-        Provider::Opencode => {
-            if let Some(key) = openrouter_key {
-                env.insert(crate::byok::ENV_VAR.into(), key.into());
-            }
-        }
         _ => {}
+    }
+    if let (Some(key), Some(vendor)) = (byok_key, crate::byok::Vendor::of(provider)) {
+        env.insert(vendor.env_var().into(), key.into());
     }
     env
 }

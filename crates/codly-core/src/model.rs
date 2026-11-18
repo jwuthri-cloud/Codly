@@ -1659,10 +1659,11 @@ pub struct Settings {
     /// The standing team, in every repo unless a repo switches a member off.
     #[serde(default)]
     pub team: Vec<TeamMember>,
-    /// Opt in to your own OpenRouter key for OpenCode (the key itself lives in the Keychain).
-    /// Off = subscription-only: every API-key variable is scrubbed from the agents' env.
+    /// Your own API credentials, per vendor (byok.rs): a saved key (kept in the Keychain or an
+    /// owner-only file, never here) or a token command. All off = subscription-only: every
+    /// API-key variable is scrubbed from the agents' env.
     #[serde(default)]
-    pub byok_openrouter: bool,
+    pub byok: crate::byok::ByokSettings,
     /// Claude agents also load your own Claude Code setup: your MCP servers, plugins, skills
     /// and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
     #[serde(default = "yes")]
@@ -1701,7 +1702,7 @@ impl Default for Settings {
             world_ambient: false,
             theme: "system".into(),
             team: vec![],
-            byok_openrouter: false,
+            byok: Default::default(),
             use_my_claude_setup: true,
             paused: false,
             paused_offices: vec![],

@@ -14,7 +14,9 @@ import type { Placed } from './gen/Placed';
 import type { Rank } from './gen/Rank';
 import type { InstallHint } from './gen/InstallHint';
 import type { InstallRung } from './gen/InstallRung';
+import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
+import type { Vendor } from './gen/Vendor';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
 import type { Provider } from './gen/Provider';
@@ -98,8 +100,11 @@ const SETTINGS: Settings = {
   world_ambient: false,
   theme: 'system',
   team: [],
-  byok_openrouter: false,
+  byok: { anthropic: { kind: 'off' }, openai: { kind: 'off' }, openrouter: { kind: 'off' } },
 };
+
+const BYOK_VENDORS: Vendor[] = ['anthropic', 'openai', 'openrouter'];
+const BYOK_CLI: Record<Vendor, string> = { anthropic: 'claude', openai: 'codex', openrouter: 'opencode' };
 
 /** Like the core: a member without an id gets "<slug>-<4 hex>". */
 const withIds = (team: TeamMember[]): TeamMember[] =>
@@ -119,8 +124,8 @@ export class MockTransport implements Transport {
   private ptySeq = 0;
   /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
   private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
-  /** BYOK demo state. The key is never stored, only whether one was "saved". */
-  private byok = { key_saved: false };
+  /** BYOK demo state. Keys are never stored, only whether one was "saved". */
+  private byokSaved: Record<Vendor, boolean> = { anthropic: false, openai: false, openrouter: false };
   private triggers: TriggersConfig | null = null;
   private breaker: MockBreaker;
   private askMe!: MockAskMe;
@@ -179,7 +184,8 @@ export class MockTransport implements Transport {
   }
 
   private byokStatus(): ByokStatus {
-    return { enabled: this.sim.settings.byok_openrouter, key_saved: this.byok.key_saved };
+    const b = this.sim.settings.byok;
+    return { vendors: BYOK_VENDORS.map((v) => ({ vendor: v, source: b[v], key_saved: this.byokSaved[v] })) };
   }
 
   private dispatch(cmd: string, a: Record<string, unknown>): unknown {
@@ -189,8 +195,14 @@ export class MockTransport implements Transport {
       case 'ui_set_visible':
         return null;
       case 'detect_clis':
-        // Like the core: OpenCode's badge says so while your own OpenRouter key is in use.
-        return sim.clis.map((c) => (c.provider === 'opencode' && sim.settings.byok_openrouter && this.byok.key_saved ? { ...c, billing: 'third_party' as const, plan: 'OpenRouter · your key' } : c));
+        // Like the core: a CLI's badge says so while its vendor's own credential is in use.
+        return sim.clis.map((c) => {
+          const v = BYOK_VENDORS.find((x) => BYOK_CLI[x] === c.provider);
+          const src = v ? sim.settings.byok[v] : null;
+          if (!v || !src || src.kind === 'off' || (src.kind === 'key' && !this.byokSaved[v])) return c;
+          const label = { anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter' }[v];
+          return { ...c, billing: v === 'openrouter' ? ('third_party' as const) : ('api_key' as const), plan: `${label} API · ${src.kind === 'command' ? 'token command' : 'your key'}` };
+        });
       case 'list_accounts':
         return sim.signIns.list(sim.settings, sim.clis);
       case 'recent_workspaces':
@@ -450,16 +462,28 @@ export class MockTransport implements Transport {
       }
       case 'byok_status':
         return this.byokStatus();
-      case 'byok_configure':
-        sim.settings = { ...sim.settings, byok_openrouter: a.enabled === true };
+      case 'byok_configure': {
+        const v = a.vendor as Vendor;
+        let src = a.source as ByokSource;
+        if (src.kind === 'key' && !this.byokSaved[v]) throw new Error('save a key first');
+        if (src.kind === 'command') {
+          const command = src.command.trim();
+          if (!command) throw new Error('the command is empty');
+          src = { kind: 'command', command };
+        }
+        sim.settings = { ...sim.settings, byok: { ...sim.settings.byok, [v]: src } };
         return this.byokStatus();
+      }
       case 'byok_save_key':
         if (!/^[\w.-]{1,256}$/.test(String(a.key).trim())) throw new Error('the key may only contain letters, digits, - _ and .');
-        this.byok.key_saved = true;
+        this.byokSaved[a.vendor as Vendor] = true;
         return this.byokStatus();
-      case 'byok_clear_key':
-        this.byok.key_saved = false;
+      case 'byok_clear_key': {
+        const v = a.vendor as Vendor;
+        this.byokSaved[v] = false;
+        if (sim.settings.byok[v].kind === 'key') sim.settings = { ...sim.settings, byok: { ...sim.settings.byok, [v]: { kind: 'off' } } };
         return this.byokStatus();
+      }
       case 'agent_git':
         return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now());
       case 'get_triggers':
