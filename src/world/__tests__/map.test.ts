@@ -81,11 +81,12 @@ describe('what a lot offers', () => {
     expect([office, building, empty, sale].map(slotKind)).toEqual(['office', 'building', 'empty', 'sale']);
   });
 
-  it('a lot with a repo: enter, move, and no selling while it lives there', () => {
+  it('a lot with a repo: enter, move, close, and no selling while it lives there', () => {
     const a = slotActions(office, ctx);
     expect(a.map((x) => x.id)).toEqual(['enter', 'move-away', 'close', 'sell']);
     expect(a[0].disabled).toBeNull();
-    expect(a[2].disabled).toMatch(/repo lives here/);
+    expect(a[2].disabled).toBeNull();
+    expect(a[3].disabled).toMatch(/repo lives here/);
     expect(slotActions(office, { movable: 0, freeLots: 0 })[1].disabled).toMatch(/No free lot/);
   });
 
