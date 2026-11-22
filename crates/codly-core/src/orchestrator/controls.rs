@@ -20,6 +20,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
 use super::approvals::is_codly_tool;
+use super::interrupts::Asker;
 use super::{Inner, lock, row};
 use crate::adapters::AgentCmd;
 use crate::model::*;
@@ -208,7 +209,7 @@ impl Inner {
         if verdict != ToolVerdict::Interrupt {
             return;
         }
-        let sent = lock(&self.live).get(agent_id).is_some_and(|l| l.handle.send(AgentCmd::Interrupt));
+        let sent = self.interrupt_run(agent_id, Asker::ToolBlock);
         if sent {
             self.control_decision(agent_id, format!("blocked tool {name}: interrupted the turn (tools are blocked for this agent)"));
             let _ = self.send_prompt(agent_id, BLOCKED_NOTE.into());

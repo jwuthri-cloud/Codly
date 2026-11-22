@@ -36,6 +36,10 @@ use crate::proc::{self, Inbound, RawLog, StderrTail};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long a turn has to end after `session/cancel`. Past it the agent is stuck: its process
+/// is ended (stdin closed, then SIGTERM, then SIGKILL) and the session resumes with the next run.
+const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// The only ACP version Codly speaks.
 const PROTOCOL_VERSION: i64 = 1;
 
@@ -160,6 +164,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         replaying: false,
         stage: Stage::Running,
         deadline: None,
+        interrupt_failed: false,
     };
     tokio::spawn(actor.run(cmds, lines, exit_rx, ready_tx));
     // The handshake is two calls in a row (initialize, then the session), each with its own
@@ -207,7 +212,10 @@ struct Actor {
     /// `session/load` replays history as updates: keep them out of the live stream.
     replaying: bool,
     stage: Stage,
+    /// While running: when a cancelled turn must have ended. In a shutdown: the stage's limit.
     deadline: Option<tokio::time::Instant>,
+    /// A cancelled turn did not end within `INTERRUPT_TIMEOUT`, so the process is being ended.
+    interrupt_failed: bool,
 }
 
 type Ready = Option<oneshot::Sender<anyhow::Result<()>>>;
@@ -226,14 +234,26 @@ impl Actor {
     async fn write(&mut self, mut msg: Value) -> bool {
         msg["jsonrpc"] = json!("2.0");
         let Some(stdin) = self.stdin.as_mut() else { return false };
-        match proc::write_json(stdin, &self.raw, &msg).await {
+        match proc::write_json_within(stdin, &self.raw, &msg, proc::WRITE_TIMEOUT).await {
             Ok(()) => true,
             Err(e) => {
                 tracing::warn!("acp stdin write failed: {e}");
                 self.stdin = None;
+                if e.kind() == std::io::ErrorKind::TimedOut {
+                    self.stopped_reading();
+                }
                 false
             }
         }
+    }
+
+    /// The agent no longer reads its stdin: nothing can be said to it, not even "cancel". Its
+    /// process is ended; the exit is reported as any other, and the next run resumes the session.
+    fn stopped_reading(&self) {
+        self.raw.note("the agent stopped reading its input: ending its process");
+        let message = format!("{} stopped reading its input, so Codly ended its process.", self.spec.provider.label());
+        self.emit(EventKind::Error { message, fatal: false });
+        tokio::spawn(proc::kill_group(self.pgid, Duration::from_secs(2)));
     }
 
     async fn request(&mut self, method: &str, params: Value) -> i64 {
@@ -438,7 +458,8 @@ impl Actor {
         let cancelled = self.norm.cancel_all_approvals();
         self.emit_all(cancelled);
         if self.prompt_in_flight {
-            self.emit(EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: Some("the agent exited before the turn finished".into()), duration_ms: None });
+            let (status, result_text) = self.unfinished_turn();
+            self.emit(EventKind::TurnCompleted { status, result_text, duration_ms: None });
         }
         if self.stage == Stage::Running {
             let tail = self.stderr.tail(2000);
@@ -469,10 +490,11 @@ impl Actor {
                         self.emit_all(events);
                         if self.stage == Stage::Interrupting {
                             self.close_stdin();
-                        } else if self.stage == Stage::Running
-                            && let Some(next) = self.queue.pop_front()
-                        {
-                            self.send_prompt(next).await;
+                        } else if self.stage == Stage::Running {
+                            self.deadline = None; // a cancelled turn ended in time
+                            if let Some(next) = self.queue.pop_front() {
+                                self.send_prompt(next).await;
+                            }
                         }
                     }
                     Some(Pending::Config(what)) => {
@@ -567,6 +589,20 @@ impl Actor {
             self.write(reply).await;
             self.emit(event);
         }
+        // A shutdown sets its own, shorter limit right after this.
+        if self.stage == Stage::Running {
+            self.deadline = Some(tokio::time::Instant::now() + INTERRUPT_TIMEOUT);
+        }
+    }
+
+    /// How a turn that is still open when the process exits ends: interrupted when Codly ended
+    /// the process because the turn did not stop, failed otherwise.
+    fn unfinished_turn(&self) -> (TurnStatus, Option<String>) {
+        if self.interrupt_failed {
+            (TurnStatus::Interrupted, None)
+        } else {
+            (TurnStatus::Failed, Some("the agent exited before the turn finished".into()))
+        }
     }
 
     async fn begin_shutdown(&mut self) {
@@ -597,7 +633,24 @@ impl Actor {
                 self.deadline = None;
                 tokio::spawn(proc::kill_group(self.pgid, Duration::from_secs(3)));
             }
-            Stage::Running | Stage::Killing => self.deadline = None,
+            // The turn did not end after `session/cancel`: the agent is stuck in a tool or a
+            // request that ignores it. End the process; the session resumes with the next run.
+            Stage::Running => {
+                self.interrupt_failed = true;
+                let unsent = super::unsent_note(self.queue.len());
+                self.queue.clear();
+                self.emit(EventKind::Error {
+                    message: format!(
+                        "{} did not stop within {} s, so Codly ended its process. The session is kept: its next run resumes it.{unsent}",
+                        self.spec.provider.label(),
+                        INTERRUPT_TIMEOUT.as_secs()
+                    ),
+                    fatal: false,
+                });
+                self.emit(super::gave_up(self.spec.provider.label(), INTERRUPT_TIMEOUT));
+                self.close_stdin();
+            }
+            Stage::Killing => self.deadline = None,
         }
     }
 }
@@ -1387,5 +1440,109 @@ mod tests {
         assert_eq!(tool_name("read_file__read_file_1792964533840_0", Some("README.md")).as_deref(), Some("read_file"));
         assert_eq!(tool_name("ccd5e765-06b2", Some("read")).as_deref(), Some("read"));
         assert_eq!(tool_name("ccd5e765-06b2", Some("git status --short")), None);
+    }
+
+    /// An actor on a child that reads its stdin and never answers, with a session open.
+    fn silent_actor(dir: &Path) -> (Actor, mpsc::UnboundedReceiver<AdapterEvent>, tokio::process::Child) {
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let mut child = proc::command(Path::new("/bin/sh"), &["-c".into(), "cat > /dev/null".into()], dir, &env).spawn().unwrap();
+        let spec = SpawnSpec {
+            agent_id: "a".into(),
+            run_id: "r".into(),
+            provider: Provider::Gemini,
+            role: crate::model::Role::Worker,
+            model: None,
+            cwd: dir.to_path_buf(),
+            bin: PathBuf::from("gemini"),
+            env: HashMap::new(),
+            session: SessionMode::New { session_id: None },
+            system_prompt: String::new(),
+            read_only: false,
+            mcp: None,
+            use_user_setup: false,
+            raw_log: dir.join("raw.ndjson"),
+            byok_command: None,
+        };
+        let (events, events_rx) = mpsc::unbounded_channel();
+        let actor = Actor {
+            norm: AcpNormalizer::new(spec.provider, &spec.agent_id, &spec.run_id, spec.cwd.clone()),
+            system_prompt: None,
+            events,
+            stdin: child.stdin.take(),
+            raw: Arc::new(RawLog::open(&spec.raw_log).unwrap()),
+            pgid: 0, // nothing to signal: the child ends with the test
+            stderr: StderrTail::default(),
+            next_id: 0,
+            session_id: Some("s".into()),
+            pending: HashMap::new(),
+            prompt_in_flight: false,
+            queue: VecDeque::new(),
+            replaying: false,
+            stage: Stage::Running,
+            deadline: None,
+            interrupt_failed: false,
+            spec,
+        };
+        (actor, events_rx, child)
+    }
+
+    fn emitted(events: &mut mpsc::UnboundedReceiver<AdapterEvent>) -> Vec<EventKind> {
+        std::iter::from_fn(|| events.try_recv().ok()).map(|e| e.kind).collect()
+    }
+
+    /// A turn that does not end after `session/cancel` is not waited for without end. (The
+    /// deadline is fired by hand: tokio's paused clock is not among the workspace's features.)
+    #[tokio::test]
+    async fn a_cancel_that_does_not_end_the_turn_ends_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+
+        // no turn runs: nothing to cancel, nothing to wait for
+        actor.on_cmd(AgentCmd::Interrupt).await;
+        assert!(actor.deadline.is_none());
+
+        // a turn runs, and a message waits behind it
+        actor.on_cmd(AgentCmd::Prompt("build it".into())).await;
+        actor.on_cmd(AgentCmd::Prompt("then test it".into())).await;
+        assert!(actor.prompt_in_flight);
+        actor.on_cmd(AgentCmd::Interrupt).await;
+        assert!(actor.deadline.is_some() && actor.stage == Stage::Running);
+        emitted(&mut events);
+
+        // the prompt is not answered within the limit: Codly says so and ends the process
+        actor.on_deadline().await;
+        assert_eq!(actor.stage, Stage::Closing);
+        assert!(actor.stdin.is_none() && actor.queue.is_empty());
+        let kinds = emitted(&mut events);
+        assert!(
+            matches!(&kinds[..], [EventKind::Error { message, fatal: false }, EventKind::Decision { decision_type, .. }]
+                if message.starts_with("Gemini CLI did not stop within 15 s")
+                    && message.contains("1 message that waited for this turn was not sent")
+                    && decision_type == crate::adapters::GAVE_UP),
+            "the exit that follows is marked as Codly's doing: {kinds:?}"
+        );
+        // The turn it leaves open ends as interrupted: a failed turn would be asked to continue.
+        assert_eq!(actor.unfinished_turn(), (TurnStatus::Interrupted, None));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_that_ends_in_time_keeps_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        actor.on_cmd(AgentCmd::Prompt("build it".into())).await; // request 0
+        actor.on_cmd(AgentCmd::Prompt("then test it".into())).await;
+        actor.on_cmd(AgentCmd::Interrupt).await;
+        assert!(actor.deadline.is_some());
+        emitted(&mut events);
+
+        actor.on_json(json!({ "jsonrpc": "2.0", "id": 0, "result": { "stopReason": "cancelled" } })).await;
+        assert!(actor.deadline.is_none() && actor.stage == Stage::Running && actor.stdin.is_some());
+        let kinds = emitted(&mut events);
+        let ended = kinds.iter().position(|k| matches!(k, EventKind::TurnCompleted { status: TurnStatus::Interrupted, .. }));
+        let next = kinds.iter().position(|k| matches!(k, EventKind::TurnStarted { input: Some(text) } if text == "then test it"));
+        assert!(ended.is_some() && ended < next, "the message that waited is the next turn: {kinds:?}");
+        assert!(actor.prompt_in_flight && actor.queue.is_empty());
+        // No cancel is pending any more: an exit now is a failed turn.
+        assert_eq!(actor.unfinished_turn().0, TurnStatus::Failed);
     }
 }

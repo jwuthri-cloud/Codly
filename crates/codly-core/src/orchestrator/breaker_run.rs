@@ -19,8 +19,8 @@ use serde_json::json;
 use ts_rs::TS;
 
 use super::breaker::{self, Action, BEAT_MS, BreakerConfig, BreakerLevel, Tracker, Transition, Trip};
+use super::interrupts::Asker;
 use super::{Core, Inner, lock, row, scheduler};
-use crate::adapters::AgentCmd;
 use crate::model::*;
 
 const KV_KEY: &str = "breaker";
@@ -99,7 +99,7 @@ impl Inner {
                 // A task's worker is paused too.
                 Some(task) => self.breaker_pause(ws.as_deref(), &agent, task, trip),
                 None => {
-                    let interrupted = lock(&self.live).get(&t.agent).is_some_and(|l| l.handle.send(AgentCmd::Interrupt));
+                    let interrupted = self.interrupt_run(&t.agent, Asker::Breaker);
                     interrupted && self.send_prompt(&t.agent, breaker::note(BreakerLevel::Constrained, trip)).is_ok()
                 }
             },
@@ -155,14 +155,14 @@ impl Inner {
     fn breaker_pause(&self, ws: Option<&str>, agent: &Agent, task: &Task, trip: &Trip) -> bool {
         let (interrupted, held) = {
             // Under the `live` lock: an exit (which clears the controls) is before or after, not between.
-            let live = lock(&self.live);
-            let Some(l) = live.get(&agent.id) else { return false };
+            let mut live = lock(&self.live);
+            let Some(l) = live.get_mut(&agent.id) else { return false };
             let mut controls = lock(&self.controls);
             let control = controls.entry(agent.id.clone()).or_default();
             let held = control.holding();
             // The note is its next turn: the pause holds from now and shows when a turn ends.
             control.request_stop(true);
-            (l.handle.send(AgentCmd::Interrupt), held)
+            (l.send_interrupt(Asker::Breaker), held)
         };
         if !interrupted {
             return false; // its process is gone: the exit clears the pause

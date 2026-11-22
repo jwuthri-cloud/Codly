@@ -150,6 +150,21 @@ gated. A crash mid-turn restarts the worker. A worker the circuit breaker constr
 until you resume it (one you hold already reads why on your Resume); a breaker stop says so on the
 task.
 
+**No agent sits "running" without end.** A watchdog looks at every live run each 15 s. A turn that
+gives no event for 10 minutes (60 with a tool call open; `Settings.watchdog`) is flagged on its
+task ("stalled: no output for 10 min") and you are notified. At twice that its turn is interrupted
+and the agent is asked to continue, once. Silent for as long again, the run is stopped: a worker's
+task goes back in line (blocked from its third start on), a Lead or a 1:1 agent resumes with your
+next message. A turn that waits for your answer is not silent. A worker that sits between turns
+for 2 minutes on a task that still runs (you interrupted it) is flagged as idle; nothing is done
+to it. Below that, each adapter gives Stop a limit: a turn that has not ended 8 s (Claude) or 15 s
+(Codex, ACP agents) after the interrupt request loses its process (or, on the shared Codex server,
+its thread) and the session resumes with the next run. That exit is no crash, and who asked for
+the interrupt says what is next: after the watchdog's, the work goes back in line as above; after
+yours, the circuit breaker's or a tool block's, a worker's task waits for you, Blocked, and
+nothing restarts it. A write to a CLI that stopped reading its stdin gives up after 10 s and ends
+that process.
+
 **Parallel requests.** Each request is its own thread (`lead`, `lead:<id>`) with its own Lead
 session ("Lead", "Lead 2"…, at most 3 live; idle ones pause and resume by session id). Plans,
 follow-ups and workers' questions stay in their request's thread; every Lead's board header
@@ -284,6 +299,8 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       gate.rs                             commit → verify → scope → review → merge queue
                       approvals.rs controls.rs ask_me.rs  approval policy, live agent controls, "ask me" cards
                       breaker.rs breaker_run.rs           circuit breaker: policy and enforcement
+                      watchdog.rs                         silent turns and idle workers: flag, interrupt, stop
+                      interrupts.rs                       who asked for an interrupt; what follows when the CLI does not stop
                       team.rs hires.rs careers.rs         standing team and consultants, hired agents, XP and offers
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses

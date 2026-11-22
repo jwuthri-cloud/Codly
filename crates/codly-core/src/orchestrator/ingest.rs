@@ -74,6 +74,7 @@ impl Inner {
     }
 
     fn ingest(self: &Arc<Self>, ev: AdapterEvent) {
+        self.watchdog_seen(&ev); // any event is a life sign, the live deltas below too
         let ctx = self.run_ctx(&ev.agent_id, &ev.run_id);
         let mut r = row(Some(&ev.agent_id), ctx.task_id.as_deref(), Some(&ev.run_id), ev.kind);
         if let EventKind::ApprovalRequested { approval } = &mut r.kind
@@ -185,6 +186,7 @@ impl Inner {
     fn track_live(&self, ctx: &Ctx, kind: &EventKind) {
         let mut live = lock(&self.live);
         let Some(l) = live.get_mut(&ctx.agent_id).filter(|l| l.run_id == ctx.run_id) else { return };
+        l.interrupt.seen(kind);
         match kind {
             EventKind::TurnStarted { .. } => {
                 l.turn_active = true;
@@ -688,13 +690,17 @@ impl Inner {
             self.control_clear(&ctx.agent_id); // controls do not outlive the process
         }
         let stopping = removed.as_ref().is_none_or(|l| l.stopping);
+        // Its adapter ended it because the turn did not stop after an interrupt: Codly's doing
+        // too, and no crash (interrupts.rs). A run Codly also asked to stop is the stopper's.
+        let gave_up = removed.as_ref().filter(|l| !l.stopping).and_then(|l| l.gave_up(&ctx.agent_id));
+        let ended = stopping || gave_up.is_some();
         // It exited during its handshake: `spawn_run` owns this start and fails it, and its
         // caller may already be starting the next one (resume, then a new session).
         let starting = removed.as_ref().is_some_and(|l| l.starting.is_some());
         let shutting = self.shutting_down.load(Ordering::SeqCst);
         let status = if shutting {
             "lost" // resumed by session id on the next start
-        } else if !starting && (stopping || code == Some(0)) {
+        } else if !starting && (ended || code == Some(0)) {
             "completed"
         } else {
             "failed"
@@ -715,7 +721,7 @@ impl Inner {
         if shutting {
             return;
         }
-        let unexpected = !stopping && code != Some(0);
+        let unexpected = !ended && code != Some(0);
         let run_id = ctx.run_id.clone();
         let _ = self.update_agent(&ctx.agent_id, |a| {
             if a.run_id.as_deref() == Some(run_id.as_str()) {
@@ -736,7 +742,11 @@ impl Inner {
             }
             self.pump_leads(); // a Lead slot freed up
         }
-        if !stopping && !starting && let Some(task_id) = ctx.task_id.clone() {
+        if let Some(gave_up) = gave_up {
+            // Who asked for the interrupt says what is next.
+            let me = self.clone();
+            tokio::spawn(async move { me.interrupt_gave_up(gave_up).await });
+        } else if !stopping && !starting && let Some(task_id) = ctx.task_id.clone() {
             let me = self.clone();
             let (role, agent_id, run) = (ctx.role, ctx.agent_id.clone(), ctx.run_id.clone());
             tokio::spawn(async move { me.task_run_lost(task_id, role, agent_id, run, code).await });

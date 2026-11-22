@@ -324,6 +324,13 @@ async fn notify_loop<R: tauri::Runtime>(app: tauri::AppHandle<R>, core: Arc<Core
             {
                 ("An agent needs a look".to_string(), truncate(summary, 160))
             }
+            // The watchdog saw an agent that gives no output or sits idle on its task, or it
+            // ended a silent turn or run. (Asking an agent to continue needs no look from you.)
+            EventKind::Decision { decision_type, summary, detail, .. }
+                if decision_type == "watchdog" && matches!(detail["action"].as_str(), Some("flagged" | "idle" | "interrupted" | "stopped")) =>
+            {
+                ("An agent needs a look".to_string(), truncate(summary, 160))
+            }
             _ => continue,
         };
         let focused = app.get_webview_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
