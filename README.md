@@ -243,6 +243,10 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   checkout and in the new worktree too, so that it stays out of the commits: commit the `.gitignore`
   line first, or the task says that the file was not copied. To copy one file from a folder that git
   ignores as a whole, write its path (`secrets/dev.env`), not only its name.
+- To try work before you merge it, a finished plan and an agent's Git tab have **Run…** and **Open in
+  terminal**. Run… runs a command you type (for example `pnpm dev --port $CODLY_PORT_BASE`) in that
+  worktree and shows its output. Codly keeps your last command for the repo and never picks one for
+  you. The command ends when you press Stop, when you merge that work, or when you quit Codly.
 - A repo can have a setup script, `.codly/setup.sh`, that Codly runs once in each new worktree (to
   install packages, or to write the worktree's own ports from `$CODLY_PORT_BASE` into a local env
   file). It is off until you turn it on in Settings → Safety, which shows you the script. Codly runs

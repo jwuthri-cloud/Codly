@@ -35,6 +35,7 @@ import type { LastMerge } from './gen/LastMerge';
 import type { RepoSync } from './gen/RepoSync';
 import { mockAgentGit } from './demo/agentgit';
 import { PullRequestDemo } from './demo/pullrequest';
+import { PreviewDemo } from './demo/preview';
 import { DemoCheckpoints } from './demo/checkpoints';
 import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
@@ -150,6 +151,8 @@ export class MockTransport implements Transport {
   private demoMerge: Omit<LastMerge, 'blocked'> | null = null;
   /** Demo repo: the pull requests "opened" from the app. */
   private pullRequests = new PullRequestDemo();
+  /** Demo repo: the commands "run" to try a plan's or an agent's work. */
+  private previews = new PreviewDemo();
   /** The demo repo: a clean checkout, two merges not pushed yet (the real one runs git). */
   private demoSync(): RepoSync {
     const pushed = this.demoPushed;
@@ -328,6 +331,8 @@ export class MockTransport implements Transport {
       case 'push_pr_branch':
       case 'refresh_pull_request':
         return this.pullRequests.handle(cmd, a, sim);
+      case 'preview':
+        return this.previews.handle(a, sim);
       case 'keep_plan':
       case 'pin_memory':
         return null; // ponytail: the mock keeps these as UI state only

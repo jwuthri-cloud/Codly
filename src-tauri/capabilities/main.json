@@ -175,6 +175,7 @@
     "allow-cancel-task-tree",
     "allow-finish-plan",
     "allow-worktree-setup",
+    "allow-preview",
     "allow-pull-request",
     "allow-draft-pull-request",
     "allow-create-pull-request",

@@ -37,6 +37,10 @@ import type { PrDraft } from './gen/PrDraft';
 import type { PrPushed } from './gen/PrPushed';
 import type { PrSource } from './gen/PrSource';
 import type { PullRequest } from './gen/PullRequest';
+import type { Preview } from './gen/Preview';
+import type { PreviewAction } from './gen/PreviewAction';
+import type { PreviewSeen } from './gen/PreviewSeen';
+import type { PreviewSource } from './gen/PreviewSource';
 import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
@@ -390,6 +394,9 @@ export const api = {
   pushPrBranch: (source: PrSource, confirm: PrConfirm) => call<PrPushed>('push_pr_branch', { source, confirm }),
   /** Read the pull request's checks again: one `gh pr checks` call. */
   refreshPullRequest: (source: PrSource) => call<PullRequest>('refresh_pull_request', { source }),
+  /** The preview of a plan's or an agent's worktree: the repo's command and the run there, with its output after `seen`. `action` starts your command or stops it first. */
+  preview: (source: PreviewSource, action: PreviewAction | null = null, seen: PreviewSeen | null = null) =>
+    call<Preview>('preview', { source, action, seen }),
   keepPlan: (planId: string) => call<Plan>('keep_plan', { planId }),
   events: (agentId: string | null, before: number | null, limit = 500) =>
     call<EventRow[]>('get_events', { agentId, before, limit }),

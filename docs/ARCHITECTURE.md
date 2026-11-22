@@ -141,6 +141,14 @@ one the plan started from. The last merge Codly made there can be taken back wit
 that merge commit, no remote branch has it, and no tracked file has uncommitted changes. The
 merged work always stays on a branch: if its branch was deleted since, the undo puts it back.
 
+**Try it before you merge.** A finished plan's card and an agent's Git tab have Run… and Open in
+terminal (`preview.rs`). Run… runs a command the user typed, in the plan's integration worktree or
+the agent's worktree, with the user's login environment and the worktree's `CODLY_PORT_BASE`; the
+last command is kept per repo and shown again, never guessed, and each run is a Decision. The
+command leads its own process group, which ends on Stop, when that work is merged, when the
+worktree is removed and when Codly quits (SIGTERM, SIGKILL 2 s later). Its output is kept in
+memory only. A crash of Codly leaves the command running.
+
 Every routing, scheduling, gate and merge choice is written to the `decision` table and
 emitted as an event, so "Why did Codex get this task?" always has an answer.
 
@@ -385,6 +393,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       team.rs hires.rs careers.rs         standing team and consultants, hired agents, XP and offers
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
                       pull_request.rs                     the pull-request step: push a Codly branch, `gh pr create`, checks
+                      preview.rs                          try work before a merge: your command in a plan's or an agent's worktree
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
@@ -421,7 +430,7 @@ src-tauri/src/            the macOS shell
   diagnostics.rs    Settings → Troubleshooting: the scrubbed report for a bug report
   commands.rs       most Tauri commands: thin wrappers over Core
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
-  onboarding_commands.rs pr_commands.rs    the other commands, one file per topic
+  onboarding_commands.rs pr_commands.rs preview_commands.rs    the other commands, one file per topic
   ui_bus.rs         one ordered Channel of coalesced event batches per webview
   web.rs            `codly serve`: the same UI over HTTP; passes /api/voice/ws to the voice relay
   ipc_tests.rs      the real commands through Tauri's IPC layer (mock runtime)

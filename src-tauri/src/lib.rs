@@ -13,6 +13,7 @@ mod inbound;
 mod hire_commands;
 mod onboarding_commands;
 mod pr_commands;
+mod preview_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod logging;
@@ -248,6 +249,7 @@ pub fn run() {
             commands::board_sweep,
             commands::board_archive,
             commands::worktree_setup,
+            preview_commands::preview,
             commands::list_connections,
             commands::update_connection,
             commands::storage_report,

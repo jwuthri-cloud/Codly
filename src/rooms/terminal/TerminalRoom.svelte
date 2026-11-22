@@ -1,5 +1,6 @@
 <!--
-  Terminal room: a real shell (portable-pty in the core) in the repo or any agent's worktree.
+  Terminal room: a real shell (portable-pty in the core) in the repo, any agent's worktree, or
+  a plan's integration worktree (Open in terminal on its card).
   Sessions survive room switches; WebGL rendering only while visible.
 -->
 <script lang="ts">
@@ -25,6 +26,13 @@
       if (!a.worktree || seen.has(a.worktree)) continue;
       seen.add(a.worktree);
       list.push({ key: a.worktree, cwd: a.worktree, label: `${a.name}’s worktree`, agentId: a.id });
+    }
+    // A plan's integration worktree: when its card sent you here, and while a shell is open there.
+    for (const p of store.plans) {
+      const wt = p.integration_worktree;
+      if (!wt || seen.has(wt) || (wt !== ui.terminalCwd && !openKeys.includes(wt))) continue;
+      seen.add(wt);
+      list.push({ key: wt, cwd: wt, label: `Plan: ${p.summary}`, agentId: null });
     }
     return list;
   });

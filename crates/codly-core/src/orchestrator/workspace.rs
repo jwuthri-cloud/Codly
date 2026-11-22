@@ -312,7 +312,8 @@ impl Inner {
         for id in &ids {
             self.stop_run(id);
         }
-        self.wait_for_runs(tokio::time::Instant::now() + RUNS_GRACE).await;
+        // The commands you ran to try work end with the app, inside the same wait.
+        tokio::join!(self.wait_for_runs(tokio::time::Instant::now() + RUNS_GRACE), super::preview::stop_all(&self.cfg.data_dir));
         // Codex agents share one app-server per account; it outlives its threads.
         let codex_stopped = tokio::time::timeout(CODEX_GRACE, crate::adapters::codex::shutdown_server()).await.is_ok();
         if !codex_stopped {
@@ -673,6 +674,8 @@ impl Inner {
             None => vec![],
         };
         drop(_g);
+        // The work is in your branch now: a command you ran to try it ends.
+        super::preview::stop_in(&wt).await;
         self.reindex_after_merge(&ws.id, touched);
         if let Some(w) = write(&self.ws).as_mut().filter(|w| w.id == ws.id) {
             w.head = Some(sha.clone());
@@ -925,6 +928,10 @@ impl Inner {
             Some(b) => self.git.changed_files(&repo, b).await.unwrap_or_default(),
             None => vec![],
         };
+        // A command you ran to try the plan ends with the merge, before its folder goes.
+        if let Some(wt) = p.integration_worktree.as_deref() {
+            super::preview::stop_in(Path::new(wt)).await;
+        }
         // The integration worktree has served its purpose (the branch stays for the record).
         if let Some(wt) = p.integration_worktree.as_deref()
             && let Err(e) = self.git.worktree_remove(&repo, Path::new(wt), Some(&target), false).await

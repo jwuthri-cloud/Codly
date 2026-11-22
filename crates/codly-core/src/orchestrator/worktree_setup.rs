@@ -61,7 +61,7 @@ const CP_FLAGS: &str = "-R";
 const PORT_FIRST: u16 = 20_000;
 const PORT_BLOCK: u16 = 10;
 const PORT_BLOCKS: u16 = 2_000;
-const PORT_VAR: &str = "CODLY_PORT_BASE";
+pub(super) const PORT_VAR: &str = "CODLY_PORT_BASE";
 const PORT_PREFIX: &str = "worktree_ports:";
 const NEW_PREFIX: &str = "worktree_new:";
 
@@ -435,7 +435,7 @@ impl Inner {
 
     /// Give `wt` the lowest port block no live worktree holds. A worktree that is gone
     /// gives its block back. No block left: the worktree gets no `CODLY_PORT_BASE`.
-    fn assign_ports(&self, wt: &Path) -> Result<()> {
+    pub(super) fn assign_ports(&self, wt: &Path) -> Result<()> {
         let _one = lock(&PORTS);
         let key = port_key(wt);
         let mut taken = HashSet::new();

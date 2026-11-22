@@ -68,6 +68,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::undo_merge,
             commands::repo_sync,
             commands::worktree_setup,
+            crate::preview_commands::preview,
             commands::breaker_config,
             commands::set_breaker_config,
             commands::breaker_status,
@@ -237,6 +238,18 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "worktree_setup", json!({ "set": { "allow": "abc" } })).unwrap_err();
     assert!(e.to_string().contains("no .codly/setup.sh"), "{e}");
     assert_eq!(invoke(&wv, "worktree_setup", json!({ "set": { "allow": null } })).unwrap()["on"], false);
+
+    // Run… with the keys the frontend sends. No plan ran and no agent has a worktree here, so
+    // the core answers that, and no command starts.
+    let plan = json!({ "kind": "plan", "id": "nope" });
+    let e = invoke(&wv, "preview", json!({ "source": plan, "action": null, "seen": null })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
+    let start = json!({ "do": "start", "command": "echo hi" });
+    let e = invoke(&wv, "preview", json!({ "source": plan, "action": start, "seen": { "run": "r1", "lines": 3 } })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
+    let e = invoke(&wv, "preview", json!({ "source": { "kind": "agent", "id": "nope" }, "action": { "do": "stop" }, "seen": null })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    assert!(invoke(&wv, "preview", json!({ "source": plan, "action": { "do": "restart" }, "seen": null })).is_err(), "only start and stop");
 
     // Budgets: the limits and the status with the fields Settings reads, and a plan's total by
     // the key the plan cards send.
