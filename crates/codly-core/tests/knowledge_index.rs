@@ -2,7 +2,7 @@
 //! incremental updates, ignore rules and concurrency, on a small multi-language repo.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use codly_core::git::Git;
 use codly_core::index::{Index, WorktreeView};
@@ -428,9 +428,9 @@ fn a_new_file_is_found_by_the_next_search_that_is_due() {
 
     // Written in an editor while Codly runs: nobody tells the index.
     write(r, "src/cache/lru.rs", "/// Least-recently-used cache.\npub struct LruCache {}\n");
-    f.index.refresh_if_due(Duration::from_secs(3600), Duration::ZERO).unwrap();
+    f.index.refresh_if_due(Duration::from_secs(3600), Instant::now()).unwrap();
     assert!(!f.index.is_indexed("src/cache/lru.rs"), "the files were compared a moment ago: not again yet");
-    f.index.refresh_if_due(Duration::ZERO, Duration::ZERO).unwrap();
+    f.index.refresh_if_due(Duration::ZERO, Instant::now()).unwrap();
     let found = f.index.search("LruCache", 3).unwrap();
     assert_eq!(found.citations[0].path, "src/cache/lru.rs");
     assert!(found.warnings.is_empty(), "{:?}", found.warnings);
@@ -447,7 +447,7 @@ fn a_result_says_how_old_the_index_is_when_it_could_not_be_refreshed() {
     // The checkout goes away (a disk that is unmounted, a folder that is moved).
     let away = r.with_extension("away");
     std::fs::rename(r, &away).unwrap();
-    assert!(f.index.refresh_if_due(Duration::ZERO, Duration::ZERO).is_err());
+    assert!(f.index.refresh_if_due(Duration::ZERO, Instant::now()).is_err());
     let kept = f.index.search("UploadClient", 3).unwrap();
     assert_eq!(kept.citations[0].path, "src/net/upload.rs", "what was indexed is kept, not thrown away");
     let w = &kept.warnings[0];
@@ -457,7 +457,7 @@ fn a_result_says_how_old_the_index_is_when_it_could_not_be_refreshed() {
 
     // Back again: the next refresh works and the warning goes.
     std::fs::rename(&away, r).unwrap();
-    f.index.refresh_if_due(Duration::ZERO, Duration::ZERO).unwrap();
+    f.index.refresh_if_due(Duration::ZERO, Instant::now()).unwrap();
     assert!(f.index.search("UploadClient", 3).unwrap().warnings.is_empty());
 }
 
@@ -550,6 +550,10 @@ async fn a_search_from_a_worktree_says_what_differs_there() {
     assert!(!paths(&r).contains(&"lib/billing/invoice.py"), "{:?}", paths(&r));
     assert_ne!(r.confidence, Confidence::Exact);
     assert!(r.warnings.iter().any(|w| w.contains("left out")), "{:?}", r.warnings);
+    // With the lower confidence come the patterns to grep the worktree with.
+    assert!(r.fallback_rg.iter().any(|p| p.contains("total")), "{:?}", r.fallback_rg);
+    let (pack, _) = c.index.pointer_pack_in(&view, "compute_total").unwrap();
+    assert!(pack.contains("rg -n -i '") && !pack.contains("<the rarest words"), "{pack}");
 
     // A file that is the same on both sides: cited as it is.
     let r = c.index.search_in(&view, "SessionStore", 5).unwrap();

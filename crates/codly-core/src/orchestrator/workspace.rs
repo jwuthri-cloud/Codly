@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -160,8 +160,11 @@ impl Inner {
     /// index is behind until it ends.
     async fn freshen(&self, idx: &Arc<Index>) {
         let index = idx.clone();
-        let job = tokio::task::spawn_blocking(move || guard("code index", || index.refresh_if_due(INDEX_CHECK_EVERY, INDEX_WAIT)));
-        match tokio::time::timeout(INDEX_WAIT, job).await {
+        // Taken here, not on the thread that refreshes: when this search stops waiting, the
+        // index knows that the refresh is a long one.
+        let until = Instant::now() + INDEX_WAIT;
+        let job = tokio::task::spawn_blocking(move || guard("code index", || index.refresh_if_due(INDEX_CHECK_EVERY, until)));
+        match tokio::time::timeout_at(until.into(), job).await {
             Ok(Ok(Ok(()))) | Err(_) => {}
             Ok(Ok(Err(e))) => tracing::warn!("index refresh failed: {e}"),
             Ok(Err(e)) => tracing::warn!("index refresh failed: {e}"),

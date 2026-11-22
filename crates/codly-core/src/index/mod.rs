@@ -114,14 +114,21 @@ impl Index {
 
     /// `refresh`, unless one ended less than `every` ago: the walk reads no file content, but
     /// it visits every file, so a search asks for it at most that often. When a refresh is in
-    /// progress, wait for it instead of starting another, until it has run for `wait`.
-    /// Blocking. If the index is still behind afterwards (a long first build, an error), the
-    /// search results say so.
-    pub fn refresh_if_due(&self, every: Duration, wait: Duration) -> anyhow::Result<()> {
+    /// progress, wait for it instead of starting another.
+    ///
+    /// `until` is when the asking search stops waiting; take it before a thread is started for
+    /// this call. A refresh that is still in progress then is a long one: from then on search
+    /// results say that the index is being updated, and later searches do not wait for it.
+    /// Blocking: a refresh that this call starts runs to its end, also after `until`. If the
+    /// index is still behind afterwards (a long first build, an error), the search results
+    /// say so.
+    pub fn refresh_if_due(&self, every: Duration, until: Instant) -> anyhow::Result<()> {
         let mut state = self.fresh_state();
-        let running_since = state.running_since;
-        if let Some(since) = running_since {
-            let left = wait.saturating_sub(since.elapsed());
+        if state.running > 0 {
+            // Nobody waits longer than the first search that asked.
+            let late_from = state.late_from.map_or(until, |at| at.min(until));
+            state.late_from = Some(late_from);
+            let left = late_from.saturating_duration_since(Instant::now());
             drop(self.refreshed.wait_timeout_while(state, left, |s| s.running > 0));
             return Ok(());
         }
@@ -129,6 +136,7 @@ impl Index {
             return Ok(());
         }
         claim_refresh(&mut state);
+        state.late_from = Some(until);
         drop(state);
         self.refresh_claimed().map(|_| ())
     }
@@ -150,7 +158,7 @@ impl Index {
                 let mut state = self.index.fresh_state();
                 state.running -= 1;
                 if state.running == 0 {
-                    state.running_since = None;
+                    state.late_from = None;
                 }
                 state.checked = Some(Instant::now());
                 match self.outcome.take() {
@@ -455,7 +463,6 @@ impl Index {
 /// Count one more refresh in progress. `Index::refresh_claimed` must follow.
 fn claim_refresh(state: &mut Fresh) {
     state.running += 1;
-    state.running_since.get_or_insert_with(Instant::now);
 }
 
 /// Read one file and decide what the index should do with it.
@@ -551,13 +558,22 @@ mod tests {
         idx.refresh().unwrap();
         std::fs::write(repo.join("b.rs"), "pub fn late_symbol() {}\n").unwrap();
 
-        // Another caller's refresh is in progress and takes longer than this one waits.
+        // Another search starts the next comparison with the files. A search that answers
+        // meanwhile has nothing to say about it: the index matched the files a moment ago.
         claim_refresh(&mut idx.fresh_state());
-        idx.refresh_if_due(Duration::ZERO, Duration::from_millis(20)).unwrap();
+        let r = idx.search("early_symbol", 3).unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+
+        // The comparison takes longer than this search waits for it.
+        idx.refresh_if_due(Duration::ZERO, Instant::now() + Duration::from_millis(20)).unwrap();
         assert!(!idx.is_indexed("b.rs"), "no second refresh is started next to the one in progress");
         let r = idx.search("early_symbol", 3).unwrap();
         assert_eq!(r.citations[0].path, "a.rs", "the search answers from what is indexed");
         assert!(r.warnings[0].contains("is being updated") && r.warnings[0].contains("ago"), "{:?}", r.warnings);
+        // It is known to be long now: the next search does not wait for it again.
+        let asked = Instant::now();
+        idx.refresh_if_due(Duration::ZERO, asked + Duration::from_secs(60)).unwrap();
+        assert!(asked.elapsed() < Duration::from_secs(30), "waited {:?}", asked.elapsed());
 
         // It ends: the new file is there, and nothing is left to warn about.
         idx.refresh_claimed().unwrap();

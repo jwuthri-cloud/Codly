@@ -90,13 +90,15 @@ impl WorktreeView {
                 marked += 1;
             }
         }
-        // The confidence was computed with the matches that are now left out.
-        r.result.confidence = match r.result.confidence {
+        // The confidence was computed with the matches that are now left out. A lower one
+        // comes with the rg patterns, as it does from the ranker.
+        let confidence = match r.result.confidence {
             _ if r.result.citations.is_empty() => Confidence::Low,
             Confidence::Exact if !r.meta.iter().any(|m| m.level == Confidence::Exact) => Confidence::Medium,
             Confidence::High if gone > 0 => Confidence::Medium,
             c => c,
         };
+        r.set_confidence(confidence);
 
         let warnings = &mut r.result.warnings;
         if gone > 0 {
