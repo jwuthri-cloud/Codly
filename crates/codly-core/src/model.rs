@@ -452,8 +452,9 @@ pub struct Agent {
     /// Track record, rank and traits; kept for good and carried along when exported.
     #[serde(default)]
     pub career: Career,
-    /// Gone home to rest (the office's energy) until then (ms). The Lead gives it no new work
-    /// meanwhile; you still can. Its conversation and session are untouched.
+    /// Gone home to rest (the office's energy) until then (ms). With the office rules on
+    /// (`Settings::game_rules`) the Lead gives it no new work meanwhile; you still can. Its
+    /// conversation and session are untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub away_until: Option<i64>,
@@ -462,7 +463,8 @@ pub struct Agent {
     #[ts(optional)]
     pub away_since: Option<i64>,
     /// Tired since then (ms): the office's energy fell under 30% (it reports crossing back).
-    /// Only a hint: the Lead and the scheduler prefer someone rested, never refuse it work.
+    /// Only a hint, with the office rules on: the Lead and the scheduler prefer someone rested,
+    /// never refuse it work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub tired_since: Option<i64>,
@@ -1693,6 +1695,12 @@ pub struct Settings {
     /// Offices paused one by one (their own Pause, or their tab closed): the same rule, there only.
     #[serde(default)]
     pub paused_offices: Vec<Id>,
+    /// The office game changes real work: an agent at home gets no new work from the Lead and
+    /// its queued task waits, a tired one is a second choice, a new consultant waits for its job
+    /// offer, and the traits rolled for a worker ride on its prompts. Off (the default): the
+    /// office only shows all this, and work is never delayed, refused or changed by it.
+    #[serde(default)]
+    pub game_rules: bool,
     /// The Settings' Developer panel: cheats for testing the game (coins, XP, a fresh office).
     /// Cheats flag the wallet for good.
     #[serde(default)]
@@ -1726,6 +1734,7 @@ impl Default for Settings {
             use_my_claude_setup: true,
             paused: false,
             paused_offices: vec![],
+            game_rules: false,
             developer_mode: false,
         }
     }

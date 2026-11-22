@@ -3179,14 +3179,11 @@ async fn a_solo_keeps_its_own_session_after_a_task() {
     core.shutdown().await;
 }
 
-/// A new consultant is hired through a job offer: it stays up until you pick an applicant
-/// (or it closes on the Lead's pick); the one you pick walks in with its own name and traits,
-/// and earns XP for the work it does.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_job_offer_hires_the_applicant_you_pick() {
-    let dir = tempfile::tempdir().unwrap();
-    let repo = temp_repo(dir.path());
-    let log = Arc::new(Mutex::new(Log::default()));
+/// A core set up as the app does (a 60 s hiring window) whose Lead plans one task for a new
+/// consultant, with the office rules (`Settings::game_rules`) on or off; the request is sent.
+/// Returns the core and its repo.
+async fn hiring_a_consultant(root: &Path, game_rules: bool) -> (Arc<Core>, PathBuf) {
+    let repo = temp_repo(root);
     let worker: Behavior = Arc::new(|turn: FakeTurn| {
         Box::pin(async move {
             turn.write("hello.txt", "hello\n");
@@ -3195,21 +3192,88 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
             turn.say("Done.");
         })
     });
-    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;
+    let core = start(root, FakeSpawner { log: Arc::new(Mutex::new(Log::default())), lead: planning_lead(), worker }).await;
     core.set_hiring_window(Duration::from_secs(60));
-    let mut settings = Settings { auto_run_plans: true, lead_followups: false, ..Default::default() };
+    let mut settings = Settings { auto_run_plans: true, lead_followups: false, game_rules, ..Default::default() };
     settings.worker_providers = vec![Provider::Claude];
     core.update_settings(settings).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     core.send_chat("lead", "Please add a hello file").await.unwrap();
+    (core, repo)
+}
 
-    let offer = wait_for("the job offer", 15, async || {
-        core.events(None, None, 500).await.unwrap().into_iter().find_map(|e| match e.kind {
+/// Every job offer event so far, newest first.
+async fn job_offers(core: &Core) -> Vec<JobOffer> {
+    let events = core.events(None, None, 2000).await.unwrap();
+    events
+        .into_iter()
+        .filter_map(|e| match e.kind {
             EventKind::JobOffer { offer } => Some(offer),
             _ => None,
         })
+        .collect()
+}
+
+/// Once the plan is done: the snapshot, and the worker's last state (newest first: it may have
+/// been let go since).
+async fn hired_when_done(core: &Core) -> (Snapshot, Agent) {
+    let snap = wait_for("the plan to finish", 30, async || {
+        let s = core.snapshot().await.unwrap();
+        s.plans.first().is_some_and(|p| p.status == PlanStatus::Done).then_some(s)
     })
     .await;
+    let events = core.events(None, None, 2000).await.unwrap();
+    let hired = events.into_iter().find_map(|e| match e.kind {
+        EventKind::AgentChanged { agent } if agent.role == Role::Worker => Some(agent),
+        _ => None,
+    });
+    (snap, hired.expect("a worker was hired"))
+}
+
+/// By default the office game never delays work: with the app's hiring window set, a new
+/// consultant is hired at once and nothing is rolled for it. The office only hears who got the
+/// job, as an offer that is already closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_consultant_is_hired_at_once_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = hiring_a_consultant(dir.path(), false).await;
+    let (_, hired) = hired_when_done(&core).await;
+    assert!(hired.career.traits.is_empty(), "no traits are rolled: {:?}", hired.career.traits);
+    let offers = job_offers(&core).await;
+    assert_eq!(offers.len(), 1, "no offer was ever open: {offers:?}");
+    let o = &offers[0];
+    assert_eq!((o.hired, o.by_you, o.title.as_deref()), (Some(0), false, Some("Backend")));
+    assert_eq!(o.applicants.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), [hired.name.as_str()]);
+    let events = core.events(None, None, 2000).await.unwrap();
+    let waited = |e: &EventRow| matches!(&e.kind, EventKind::TaskChanged { task } if task.status_reason.as_deref().is_some_and(|r| r.contains("hiring")));
+    assert!(!events.iter().any(waited), "the task never waited for a hire");
+    core.shutdown().await;
+}
+
+/// Switching the office rules off while a job offer is up closes it at once on the Lead's pick:
+/// the task does not wait out the offer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn switching_the_office_rules_off_closes_an_open_job_offer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = hiring_a_consultant(dir.path(), true).await;
+    let offer = wait_for("the job offer", 15, async || job_offers(&core).await.into_iter().next()).await;
+    assert_eq!(offer.hired, None);
+    core.update_settings(Settings { game_rules: false, ..core.settings() }).await.unwrap();
+    let (_, hired) = hired_when_done(&core).await;
+    assert_eq!(hired.name, offer.applicants[0].name, "the Lead's pick");
+    let closed = job_offers(&core).await.into_iter().next().unwrap();
+    assert_eq!((closed.id, closed.hired, closed.by_you), (offer.id, Some(0), false));
+    core.shutdown().await;
+}
+
+/// With the office rules on, a new consultant is hired through a job offer: it stays up until
+/// you pick an applicant (or it closes on the Lead's pick); the one you pick walks in with its
+/// own name and traits, and earns XP for the work it does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_offer_hires_the_applicant_you_pick() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, repo) = hiring_a_consultant(dir.path(), true).await;
+    let offer = wait_for("the job offer", 15, async || job_offers(&core).await.into_iter().next()).await;
     assert_eq!((offer.applicants.len(), offer.title.as_deref(), offer.hired), (3, Some("Backend"), None));
     let task = core.snapshot().await.unwrap().tasks[0].clone();
     assert_eq!(task.status_reason.as_deref(), Some("waiting: hiring (the job offer is up in the office)"));
@@ -3218,17 +3282,7 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     let pick = offer.applicants[2].clone();
     core.pick_applicant(&offer.id, 2).unwrap();
     assert!(core.pick_applicant(&offer.id, 1).is_err(), "a closed offer can't be picked again");
-    let snap = wait_for("the plan to finish", 30, async || {
-        let s = core.snapshot().await.unwrap();
-        s.plans.first().is_some_and(|p| p.status == PlanStatus::Done).then_some(s)
-    })
-    .await;
-    // Newest first: the worker's last AgentChanged (it may have been let go since).
-    let hired = core.events(None, None, 2000).await.unwrap().into_iter().find_map(|e| match e.kind {
-        EventKind::AgentChanged { agent } if agent.role == Role::Worker => Some(agent),
-        _ => None,
-    });
-    let hired = hired.unwrap();
+    let (snap, hired) = hired_when_done(&core).await;
     assert_eq!((hired.name.as_str(), hired.color, hired.look_seed.as_str()), (pick.name.as_str(), pick.color, pick.avatar.as_str()));
     assert_eq!(hired.career.traits, pick.traits);
     assert!(hired.career.xp >= 15 + 10 + 30, "commit, passing check and merge all count: {:?}", hired.career);
@@ -3301,9 +3355,89 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     core.shutdown().await;
 }
 
-/// An agent at home (the office's energy) gets no new work from the Lead: its plans, quick
-/// tasks and messages to it are refused with when it is back, and the board says so. You can
-/// still give it work; and when the whole team is home, the Lead may assign it anyway.
+/// By default (`Settings::game_rules` off) the office game is only for show: a task you queue
+/// for a member at home starts at once, the Lead's plan for a member at home is accepted, its
+/// message goes through, and the board says nothing about who is at home or tired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn home_and_tired_change_no_work_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                return; // Ana's answer to the message
+            }
+            let plan = json!({ "summary": "Add a.txt", "tasks": [{
+                "id": "t1", "title": "Create a.txt", "goal": "Create a.txt", "assignee": "Ana",
+                "acceptance_criteria": ["a.txt exists"], "write_scope": ["a.txt"], "depends_on": [], "verify": ["test -f a.txt"],
+            }] });
+            let r = turn.tool("codly_submit_plan", plan).await;
+            let plan = r["error"].as_str().map_or_else(|| "ok".to_string(), String::from);
+            let r = turn.tool("codly_message_member", json!({ "to": "Ana", "text": "Hi" })).await;
+            let msg = r["error"].as_str().map_or_else(|| "ok".to_string(), String::from);
+            let r = turn.tool("codly_board", json!({})).await;
+            let team = r["result"]["team"].as_array().cloned().unwrap_or_default();
+            let of = |n: &str, k: &str| team.iter().find(|m| m["name"] == n).map(|m| m[k].to_string()).unwrap_or_default();
+            turn.say(&format!("plan: {plan} | message: {msg} | ana home: {} | bo: {}", of("Ana", "at_home_until"), of("Bo", "energy")));
+        })
+    });
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.say("Hello.");
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: Arc::new(Mutex::new(Log::default())), lead, worker }).await;
+    let team = ["Ana", "Bo", "Cy"].map(|n| TeamMember { name: n.into(), role: "Backend".into(), ..Default::default() }).to_vec();
+    let s = core.update_settings(Settings { auto_run_plans: false, lead_followups: false, team, ..Default::default() }).await.unwrap();
+    assert!(!s.game_rules, "off by default");
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let members = wait_for("the team's agents", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        let m: Vec<Agent> = s.agents.iter().filter(|a| a.member.is_some()).cloned().collect();
+        (m.len() == 3).then_some(m)
+    })
+    .await;
+    let id = |n: &str| members.iter().find(|a| a.name == n).unwrap().id.clone();
+    let back = now_ms() + 30 * 60_000;
+    for n in ["Ana", "Cy"] {
+        assert_eq!(core.set_agent_home(&id(n), Some(back)).unwrap().away_until, Some(back), "the office still shows it at home");
+    }
+    assert!(core.set_agent_tired(&id("Bo"), true).unwrap().tired_since.is_some());
+
+    // A task you queue for Cy starts at once, though Bo is at work: it is not held, and nobody
+    // is "called in".
+    let t = core.create_task("Say hello", "Say hello").await.unwrap();
+    core.assign_task(&t.id, Some(&id("Cy"))).await.unwrap();
+    wait_for("Cy to start the task", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        let cy = s.agents.iter().find(|a| a.name == "Cy")?;
+        (cy.task_id.as_deref() == Some(t.id.as_str()) && cy.away_until.is_none()).then_some(())
+    })
+    .await;
+    let events = core.events(None, None, 2000).await.unwrap();
+    let said = |what: &str| events.iter().any(|e| match &e.kind {
+        EventKind::Decision { summary, .. } => summary.contains(what),
+        EventKind::TaskChanged { task } => task.status_reason.as_deref().is_some_and(|r| r.contains(what)),
+        _ => false,
+    });
+    assert!(!said("called in") && !said("at home"), "the game is never a reason");
+
+    // The Lead plans for Ana and messages it as if it were at its desk.
+    core.send_chat("lead", "add a").await.unwrap();
+    let s = wait_for("the Lead's report", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        chats(&s, "lead").iter().find(|c| c.text.starts_with("plan: ")).map(|c| c.text.clone())
+    })
+    .await;
+    assert_eq!(s, "plan: ok | message: ok | ana home: null | bo: null");
+    assert_eq!(core.snapshot().await.unwrap().plans.len(), 1, "the plan was accepted");
+    core.shutdown().await;
+}
+
+/// With the office rules on, an agent at home (the office's energy) gets no new work from the
+/// Lead: its plans, quick tasks and messages to it are refused with when it is back, and the
+/// board says so. You can still give it work; and when the whole team is home, the Lead may
+/// assign it anyway.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_at_home_gets_no_new_work_from_the_lead_but_from_you() {
     let dir = tempfile::tempdir().unwrap();
@@ -3335,7 +3469,7 @@ async fn an_agent_at_home_gets_no_new_work_from_the_lead_but_from_you() {
     });
     let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
     let team = vec![TeamMember { name: "Ana".into(), role: "Backend".into(), ..Default::default() }, TeamMember { name: "Bo".into(), role: "Frontend".into(), ..Default::default() }];
-    core.update_settings(Settings { auto_run_plans: false, lead_followups: false, team, ..Default::default() }).await.unwrap();
+    core.update_settings(Settings { auto_run_plans: false, lead_followups: false, game_rules: true, team, ..Default::default() }).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     let members = wait_for("the team's agents", 20, async || {
         let s = core.snapshot().await.unwrap();
@@ -3381,9 +3515,10 @@ async fn an_agent_at_home_gets_no_new_work_from_the_lead_but_from_you() {
     core.shutdown().await;
 }
 
-/// The office says who is tired: the Lead's board shows it and its refusals list the rested
-/// first (a hint, never a refusal). A task queued for a member at home waits while someone else
-/// is at work; when nobody else is, it calls the member in and the decision says why.
+/// With the office rules on, the office says who is tired: the Lead's board shows it and its
+/// refusals list the rested first (a hint, never a refusal). A task queued for a member at home
+/// waits while someone else is at work; when nobody else is, it calls the member in and the
+/// decision says why.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_lead_prefers_rested_members_and_a_queued_task_waits_for_home() {
     let dir = tempfile::tempdir().unwrap();
@@ -3413,7 +3548,7 @@ async fn the_lead_prefers_rested_members_and_a_queued_task_waits_for_home() {
     });
     let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
     let team = ["Ana", "Bo", "Cy"].map(|n| TeamMember { name: n.into(), role: "Backend".into(), ..Default::default() }).to_vec();
-    core.update_settings(Settings { auto_run_plans: false, lead_followups: false, team, ..Default::default() }).await.unwrap();
+    core.update_settings(Settings { auto_run_plans: false, lead_followups: false, game_rules: true, team, ..Default::default() }).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     let members = wait_for("the team's agents", 20, async || {
         let s = core.snapshot().await.unwrap();

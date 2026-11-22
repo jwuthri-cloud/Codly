@@ -56,8 +56,9 @@ impl Inner {
             Some(b) => hire::wrap_prompt(&b.description, &b.goal, b.isolate, text),
             None => text.to_string(),
         };
-        // The traits you picked and its track record (career.rs), for workers and 1:1 agents.
-        let career = self.agent(agent_id).ok().filter(|a| matches!(a.role, Role::Worker | Role::Solo)).map(|a| crate::career::briefing(&a.career));
+        // Its traits' work rules and its track record (career.rs), for workers and 1:1 agents.
+        let rules = self.settings().game_rules;
+        let career = self.agent(agent_id).ok().filter(|a| matches!(a.role, Role::Worker | Role::Solo)).map(|a| career_briefing(a.role, &a.career, rules));
         match career.filter(|c| !c.is_empty()) {
             Some(c) => format!("{text}\n\n[Who you are at work]\n{c}"),
             None => text,
@@ -203,10 +204,34 @@ impl Inner {
     }
 }
 
+/// What a career adds in front of an agent's prompts. A 1:1 agent has the traits you gave it
+/// when you hired it. A worker's traits were rolled for its job offer, so their work rules count
+/// only with the office rules on (`Settings::game_rules`); its track record always does.
+fn career_briefing(role: Role, career: &Career, game_rules: bool) -> String {
+    if role == Role::Worker && !game_rules {
+        return crate::career::briefing(&Career { traits: vec![], ..career.clone() });
+    }
+    crate::career::briefing(career)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{Core, CoreConfig, StartOptions};
+    use super::career_briefing;
     use crate::model::*;
+
+    /// Traits rolled for a job offer change a worker's prompts only with the office rules on;
+    /// the traits you gave a 1:1 agent always count, and so does a track record.
+    #[test]
+    fn rolled_traits_reach_a_workers_prompts_only_with_the_office_rules_on() {
+        let career = Career { traits: vec!["perfectionist".into(), "clumsy".into()], xp: 70, ..Default::default() };
+        let rule = "Perfectionist: Before you say you are done";
+        let off = career_briefing(Role::Worker, &career, false);
+        assert!(!off.contains("Perfectionist") && off.starts_with("Your track record: "), "{off}");
+        assert!(career_briefing(Role::Worker, &career, true).starts_with(rule));
+        assert!(career_briefing(Role::Solo, &career, false).starts_with(rule), "the traits you picked always count");
+        assert_eq!(career_briefing(Role::Worker, &Career { xp: 0, ..career }, false), "", "nothing to add");
+    }
 
     #[tokio::test]
     async fn solo_system_carries_the_memory_file() {

@@ -561,6 +561,7 @@ impl Inner {
             accounts: &self.accounts(),
             consultant_clis: &self.consultant_clis(),
             mode: self.lead_mode(&ws.id, thread),
+            game_rules: self.settings().game_rules,
         }))
     }
 
