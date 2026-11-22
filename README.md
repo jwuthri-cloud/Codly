@@ -250,6 +250,10 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   in the worktree's top folder, with the program its first line names (`#!/usr/bin/env bash`) or
   `/bin/sh`: use paths from that folder, or `$CODLY_REPO_PATH` for your checkout, not the script's
   own place (`$0`). The script is not sandboxed.
+- Before each turn of an agent, Codly keeps the files of the agent's worktree as a checkpoint (a commit
+  under a private ref, on no branch). **Restore files to this point**, in the agent's Git tab, puts the
+  files back and can be undone. It changes files only: the agent still remembers its later turns. An agent
+  with Git isolation off has no checkpoints, because Codly never puts files back in your own folder.
 
 **The network**
 

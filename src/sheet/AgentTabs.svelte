@@ -1,6 +1,7 @@
 <!--
   Per-agent tabs under the agent sheet's own sections: Messages (the thread with this agent and
-  a reply box), Traces (its tool calls with real durations), Git (its worktree, read-only).
+  a reply box), Traces (its tool calls with real durations), Git (its worktree; the one thing it
+  changes is "Restore files to this point" on a checkpoint).
   Only the open tab mounts, so Git runs its commands only while you look at it.
 -->
 <script lang="ts">

@@ -90,6 +90,8 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::storage_clean,
             commands::storage_delete_worktree,
             commands::storage_delete_branch,
+            commands::agent_checkpoints,
+            commands::restore_checkpoint,
             crate::onboarding_commands::install_cli,
             crate::onboarding_commands::byok_status,
             crate::onboarding_commands::byok_configure,
@@ -265,6 +267,15 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "refresh_pull_request", json!({ "source": { "kind": "agent", "id": "nope" } })).unwrap_err();
     assert!(e.to_string().contains("has not opened a pull request"), "{e}");
     assert!(invoke(&wv, "draft_pull_request", json!({ "source": { "kind": "branch", "id": "main" } })).is_err(), "only a plan or a solo agent");
+
+    // Checkpoints, with the keys the Git tab sends: the core answers (no agent here), not the
+    // argument check.
+    let e = invoke(&wv, "agent_checkpoints", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    let e = invoke(&wv, "restore_checkpoint", json!({ "agentId": "nope", "checkpoint": 3 })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    let e = invoke(&wv, "restore_checkpoint", json!({ "agentId": "nope", "checkpoint": -1 })).unwrap_err();
+    assert!(!e.to_string().contains("unknown agent"), "a negative number is refused before the core is asked: {e}");
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

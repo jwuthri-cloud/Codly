@@ -35,6 +35,7 @@ import type { LastMerge } from './gen/LastMerge';
 import type { RepoSync } from './gen/RepoSync';
 import { mockAgentGit } from './demo/agentgit';
 import { PullRequestDemo } from './demo/pullrequest';
+import { DemoCheckpoints } from './demo/checkpoints';
 import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
@@ -160,6 +161,7 @@ export class MockTransport implements Transport {
   private breaker: MockBreaker;
   private approvalRules: MockApprovalRules;
   private askMe!: MockAskMe;
+  private checkpoints = new DemoCheckpoints();
   private hk: HousekeepingDemo | undefined;
   private worktrees = new WorktreeDemo();
 
@@ -591,6 +593,10 @@ export class MockTransport implements Transport {
       }
       case 'agent_git':
         return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now());
+      case 'agent_checkpoints':
+        return this.checkpoints.list(sim.agents.get(String(a.agentId)), sim.now());
+      case 'restore_checkpoint':
+        return this.checkpoints.restore(sim.agents.get(String(a.agentId)), Number(a.checkpoint), sim.now());
       case 'get_triggers':
         return (this.triggers ??= seedTriggers());
       case 'set_triggers':

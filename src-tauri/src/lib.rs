@@ -179,6 +179,8 @@ pub fn run() {
             dictation::dictation_clear_key,
             dictation::dictation_transcribe,
             commands::agent_git,
+            commands::agent_checkpoints,
+            commands::restore_checkpoint,
             commands::get_triggers,
             commands::set_triggers,
             commands::list_skills,

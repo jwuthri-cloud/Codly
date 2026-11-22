@@ -143,6 +143,11 @@ impl Git {
     }
 
     async fn run(&self, dir: &Path, args: &[&str], read: bool) -> Result<Out> {
+        self.run_on(dir, args, read, None).await
+    }
+
+    /// `run` with `index` as the index file (`GIT_INDEX_FILE`) in place of the worktree's own.
+    async fn run_on(&self, dir: &Path, args: &[&str], read: bool, index: Option<&Path>) -> Result<Out> {
         let mut cmd = tokio::process::Command::new(&self.bin);
         cmd.env_clear()
             .envs(&self.env)
@@ -160,6 +165,9 @@ impl Git {
         if read {
             // status/diff must not take index.lock while an agent or Codly commits.
             cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        }
+        if let Some(index) = index {
+            cmd.env("GIT_INDEX_FILE", index);
         }
         let child = cmd.spawn().map_err(|e| anyhow!("cannot run git ({}): {e}", self.bin.display()))?;
         let out = tokio::time::timeout(GIT_TIMEOUT, child.wait_with_output())
@@ -885,6 +893,111 @@ impl Git {
     }
 }
 
+/// A private index file; removed when dropped.
+struct ScratchIndex(PathBuf);
+
+/// The files of a worktree as git read them at one moment (`Git::snapshot`): `tree` names
+/// them, and the private index they are staged in is what `Git::restore_tree` starts from.
+pub struct Snapshot {
+    index: ScratchIndex,
+    tree: String,
+}
+
+impl Snapshot {
+    /// The tree of everything that was in the worktree then.
+    pub fn tree(&self) -> &str {
+        &self.tree
+    }
+}
+
+impl Drop for ScratchIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Checkpoints (`orchestrator/checkpoints.rs`): the files of a worktree kept as a commit that is
+/// on no branch, and the way back to it. Nothing here moves HEAD or a branch, and nothing writes
+/// the worktree's own index: the files are staged in a private index file. Like every git call
+/// in an agent's worktree, these come after `check_worktree`.
+impl Git {
+    /// Everything in the worktree, staged in a private index: tracked and untracked files, and
+    /// no ignored one (as `add -A`). The index starts as a copy of the worktree's own, whose
+    /// file stats keep git from reading the files that did not change.
+    async fn stage_apart(&self, wt: &Path) -> Result<ScratchIndex> {
+        let dir = self.git_path(wt, "--git-dir").await?;
+        let index = ScratchIndex(dir.join(format!("codly-index-{}", uuid::Uuid::new_v4())));
+        match std::fs::copy(dir.join("index"), &index.0) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // nothing was ever staged there
+            Err(e) => bail!("cannot copy the index of {}: {e}", wt.display()),
+        }
+        self.on_index(wt, &index, &["add", "-A"]).await?;
+        Ok(index)
+    }
+
+    /// An internal git write (no hooks, no fsmonitor program) that works on a private index.
+    async fn on_index(&self, wt: &Path, index: &ScratchIndex, args: &[&str]) -> Result<String> {
+        let mut full: Vec<&str> = Self::SAFE.to_vec();
+        full.extend_from_slice(args);
+        let out = self.run_on(wt, &full, false, Some(&index.0)).await?;
+        if !out.ok {
+            return Err(out.err(args.first().copied().unwrap_or("")));
+        }
+        Ok(out.stdout)
+    }
+
+    /// Everything in the worktree now (tracked and untracked files, no ignored one), read once.
+    /// This is the slow part of a checkpoint: git reads every file that changed. It writes
+    /// objects only: files and folders that did not change are already stored.
+    pub async fn snapshot(&self, wt: &Path) -> Result<Snapshot> {
+        let index = self.stage_apart(wt).await?;
+        let tree = self.on_index(wt, &index, &["write-tree"]).await?.trim().to_string();
+        Ok(Snapshot { index, tree })
+    }
+
+    /// The tree of everything in the worktree now (`snapshot`, for a caller that restores
+    /// nothing).
+    pub async fn worktree_tree(&self, wt: &Path) -> Result<String> {
+        Ok(self.snapshot(wt).await?.tree)
+    }
+
+    /// A commit of `tree` on top of `parent` that no branch points at. An internal checkpoint:
+    /// no hooks, no signing (see the module doc).
+    pub async fn commit_tree(&self, wt: &Path, tree: &str, parent: Option<&str>, message: &str) -> Result<String> {
+        let mut args = self.internal_flags(wt).await?;
+        args.extend(["commit-tree", "-m", message].map(String::from));
+        if let Some(parent) = parent {
+            args.extend(["-p", parent].map(String::from));
+        }
+        args.push(tree.into());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        Ok(self.ok(wt, &args, false).await?.trim().to_string())
+    }
+
+    /// Create the ref `name` at `sha`. Refused when the ref exists: a checkpoint is never
+    /// written over.
+    pub async fn create_ref(&self, repo: &Path, name: &str, sha: &str) -> Result<()> {
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        self.ok(repo, &[c1, hooks, c2, fsmonitor, "update-ref", name, sha, ""], false).await.map(drop)
+    }
+
+    pub async fn delete_ref(&self, repo: &Path, name: &str) -> Result<()> {
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        self.ok(repo, &[c1, hooks, c2, fsmonitor, "update-ref", "-d", name], false).await.map(drop)
+    }
+
+    /// Put the worktree's files back to `tree`: files that changed or were deleted since come
+    /// back, files that are not in `tree` are removed, and ignored files are left alone. HEAD,
+    /// the branch and the worktree's own index stay as they are, so the difference shows as
+    /// uncommitted changes. `present` is the worktree as it is (`snapshot`): its tree is what
+    /// to keep if the present state must not be lost, and with the files already read, this
+    /// call only writes the files that differ.
+    pub async fn restore_tree(&self, wt: &Path, present: Snapshot, tree: &str) -> Result<()> {
+        self.on_index(wt, &present.index, &["read-tree", "--reset", "-u", tree]).await.map(drop)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1322,5 +1435,114 @@ mod tests {
 
         sh(&repo, &["switch", "-q", "--detach"]);
         assert_eq!(git.checked_out_branch(&repo).await.unwrap(), None);
+    }
+
+    /// What `git` prints for a question about `dir`.
+    fn out(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A worktree with work in every state: a tracked file changed, a file staged, a file that
+    /// is untracked (in a new folder) and a file that the repository ignores.
+    async fn worktree_with_work(d: &Path, repo: &Path, git: &Git) -> PathBuf {
+        std::fs::write(repo.join(".gitignore"), "*.log\n").unwrap();
+        commit_file(repo, "b.txt", "b\n");
+        let wt = d.join("wt");
+        git.worktree_add(repo, &wt, "work", "main").await.unwrap();
+        std::fs::write(wt.join("a.txt"), "a changed\n").unwrap();
+        std::fs::write(wt.join("staged.txt"), "staged\n").unwrap();
+        sh(&wt, &["add", "staged.txt"]);
+        std::fs::create_dir(wt.join("new")).unwrap();
+        std::fs::write(wt.join("new/untracked.txt"), "untracked\n").unwrap();
+        std::fs::write(wt.join("build.log"), "ignored\n").unwrap();
+        wt
+    }
+
+    /// A checkpoint's tree has the tracked and the untracked files and no ignored one. Taking
+    /// it changes neither the worktree's index, nor HEAD, nor a branch, nor a file.
+    #[tokio::test]
+    async fn a_worktree_tree_has_untracked_files_and_leaves_the_index_and_head_alone() {
+        let (d, repo) = repo();
+        let git = Git::from_process_env();
+        let wt = worktree_with_work(d.path(), &repo, &git).await;
+        let status = out(&wt, &["status", "--porcelain=v1"]);
+        let head = out(&wt, &["rev-parse", "HEAD"]);
+        let refs = out(&wt, &["for-each-ref"]);
+        // Read after `status`, which may refresh the index itself.
+        let admin = git.git_path(&wt, "--git-dir").await.unwrap();
+        let index = std::fs::read(admin.join("index")).unwrap();
+
+        let tree = git.worktree_tree(&wt).await.unwrap();
+        assert_eq!(std::fs::read(admin.join("index")).unwrap(), index, "the worktree's own index is untouched");
+        let files = out(&wt, &["ls-tree", "-r", "--name-only", &tree]);
+        assert_eq!(files.lines().collect::<Vec<_>>(), [".gitignore", "a.txt", "b.txt", "new/untracked.txt", "staged.txt"]);
+        assert_eq!(out(&wt, &["show", &format!("{tree}:a.txt")]), "a changed\n", "the file as it is now, not as committed");
+        assert_eq!(out(&wt, &["status", "--porcelain=v1"]), status);
+        assert_eq!(out(&wt, &["rev-parse", "HEAD"]), head);
+        assert_eq!(out(&wt, &["for-each-ref"]), refs, "no branch or ref moved");
+        let left: Vec<String> = std::fs::read_dir(&admin).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert!(!left.iter().any(|f| f.starts_with("codly-index")), "the private index is removed: {left:?}");
+        assert_eq!(git.worktree_tree(&wt).await.unwrap(), tree, "nothing changed: the same tree");
+
+        // The commit is on no branch: only the private ref names it, and it is never replaced.
+        let sha = git.commit_tree(&wt, &tree, Some(head.trim()), "codly(checkpoint): test").await.unwrap();
+        git.create_ref(&repo, "refs/codly/checkpoints/a/1", &sha).await.unwrap();
+        assert_eq!(out(&wt, &["rev-parse", "HEAD"]), head);
+        assert_eq!(out(&repo, &["branch", "--contains", &sha]), "", "on no branch");
+        assert_eq!(out(&repo, &["rev-parse", "refs/codly/checkpoints/a/1"]).trim(), sha);
+        assert!(git.create_ref(&repo, "refs/codly/checkpoints/a/1", head.trim()).await.is_err(), "a checkpoint is never written over");
+        git.delete_ref(&repo, "refs/codly/checkpoints/a/1").await.unwrap();
+        assert_eq!(out(&repo, &["for-each-ref", "refs/codly"]), "");
+    }
+
+    /// Restore: changed and deleted files come back, files made later go, ignored files stay,
+    /// HEAD and the index do not move. The state that a restore replaced can be restored too.
+    #[tokio::test]
+    async fn restore_tree_puts_files_back_and_can_be_undone() {
+        let (d, repo) = repo();
+        let git = Git::from_process_env();
+        let wt = worktree_with_work(d.path(), &repo, &git).await;
+        let before = git.worktree_tree(&wt).await.unwrap();
+
+        // A turn's work: a file changed, a tracked and an untracked file deleted, a file made in
+        // a new folder, Codly's commit of all that, and one more file after the commit.
+        std::fs::write(wt.join("a.txt"), "a changed again\n").unwrap();
+        std::fs::remove_file(wt.join("b.txt")).unwrap();
+        std::fs::remove_file(wt.join("new/untracked.txt")).unwrap();
+        std::fs::create_dir(wt.join("later")).unwrap();
+        std::fs::write(wt.join("later/made.txt"), "made later\n").unwrap();
+        std::fs::write(wt.join("build.log"), "ignored, written later\n").unwrap();
+        git.commit_all(&wt, "the turn").await.unwrap().unwrap();
+        std::fs::write(wt.join("after.txt"), "not committed\n").unwrap();
+        let head = out(&wt, &["rev-parse", "HEAD"]);
+        let after = git.worktree_tree(&wt).await.unwrap();
+        let admin = git.git_path(&wt, "--git-dir").await.unwrap();
+        let index = std::fs::read(admin.join("index")).unwrap();
+
+        let present = git.snapshot(&wt).await.unwrap();
+        assert_eq!(present.tree(), after);
+        git.restore_tree(&wt, present, &before).await.unwrap();
+        assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "a changed\n");
+        assert_eq!(std::fs::read_to_string(wt.join("b.txt")).unwrap(), "b\n", "a deleted file is back");
+        assert_eq!(std::fs::read_to_string(wt.join("new/untracked.txt")).unwrap(), "untracked\n", "also one that was never committed");
+        assert!(!wt.join("later").exists() && !wt.join("after.txt").exists(), "files made later are gone");
+        assert_eq!(std::fs::read_to_string(wt.join("build.log")).unwrap(), "ignored, written later\n", "ignored files are left alone");
+        assert_eq!(git.worktree_tree(&wt).await.unwrap(), before, "the files are exactly as they were");
+        assert_eq!(out(&wt, &["rev-parse", "HEAD"]), head, "HEAD did not move");
+        assert_eq!(out(&wt, &["symbolic-ref", "--short", "HEAD"]).trim(), "work");
+        assert_eq!(std::fs::read(admin.join("index")).unwrap(), index, "the worktree's own index is untouched");
+        assert!(git.dirty(&wt, true).await.unwrap(), "the difference from HEAD shows as uncommitted changes");
+
+        // Undo: back to the state that the restore replaced.
+        let present = git.snapshot(&wt).await.unwrap();
+        git.restore_tree(&wt, present, &after).await.unwrap();
+        assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "a changed again\n");
+        assert!(!wt.join("b.txt").exists() && !wt.join("new").exists());
+        assert_eq!(std::fs::read_to_string(wt.join("later/made.txt")).unwrap(), "made later\n");
+        assert_eq!(std::fs::read_to_string(wt.join("after.txt")).unwrap(), "not committed\n");
+        assert_eq!(git.worktree_tree(&wt).await.unwrap(), after);
+        assert_eq!(out(&wt, &["rev-parse", "HEAD"]), head);
     }
 }

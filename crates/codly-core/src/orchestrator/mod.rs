@@ -22,12 +22,14 @@
 //! - `interrupts` who asked for an interrupt, and what follows when the CLI does not stop
 //! - `wallet`   the player's coins (🪙) across every repo, Build/Buy, developer grants
 //! - `worktree_setup` a new worktree made ready: copied ignored files, a port block, the setup script
+//! - `checkpoints` an agent's files before each turn (private refs), "Restore files to this point"
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
 pub mod approvals;
 mod approval_rules;
 pub mod agent_git;
+pub mod checkpoints;
 pub mod breaker;
 mod breaker_run;
 mod careers;

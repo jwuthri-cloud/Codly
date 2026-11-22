@@ -436,6 +436,19 @@ pub async fn agent_git(state: State<'_, AppState>, agent_id: String) -> R<codly_
     state.core().await?.agent_git(&agent_id).await.map_err(err)
 }
 
+/// The Git tab's checkpoints: an agent's files as they were before each of its turns.
+#[tauri::command]
+pub async fn agent_checkpoints(state: State<'_, AppState>, agent_id: String) -> R<codly_core::orchestrator::checkpoints::AgentCheckpoints> {
+    state.core().await?.agent_checkpoints(&agent_id).await.map_err(err)
+}
+
+/// "Restore files to this point": puts the files of the agent's worktree back to a checkpoint.
+/// Files only; the state it replaces is kept as a checkpoint, so it can be undone.
+#[tauri::command]
+pub async fn restore_checkpoint(state: State<'_, AppState>, agent_id: String, checkpoint: u32) -> R<codly_core::orchestrator::checkpoints::CheckpointRestore> {
+    state.core().await?.restore_checkpoint(&agent_id, checkpoint).await.map_err(err)
+}
+
 /// Triggers: schedules, context rules and network mode, with the log of what they did.
 #[tauri::command]
 pub async fn get_triggers(state: State<'_, AppState>) -> R<codly_core::triggers::TriggersConfig> {

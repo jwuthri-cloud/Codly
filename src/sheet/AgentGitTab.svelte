@@ -10,6 +10,7 @@
   import Icon from '../components/Icon.svelte';
   import RepoSyncBar from '../components/RepoSyncBar.svelte';
   import PullRequestStep from '../components/PullRequestStep.svelte';
+  import AgentCheckpoints from './AgentCheckpoints.svelte';
 
   interface Props {
     agent: Agent;
@@ -105,6 +106,7 @@
       <p class="small">No commits yet.</p>
     {/if}
   {/if}
+  {#if view?.worktree}<AgentCheckpoints {agent} refresh={view} onrestored={() => load(agent.id)} />{/if}
 </div>
 
 <style>
