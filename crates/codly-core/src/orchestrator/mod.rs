@@ -261,6 +261,8 @@ struct Inner {
     stuck_told: Mutex<HashMap<Id, String>>,
     /// The last look for plans merged outside Codly, per office.
     merge_looks: Mutex<HashMap<Id, plans::MergeLook>>,
+    /// 1:1 agents whose work "Check the work" checks now: one run for an agent at a time.
+    checking: Mutex<HashSet<Id>>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -431,6 +433,7 @@ impl Core {
             retries: Mutex::new(retry::Retries::default()),
             stuck_told: Mutex::new(HashMap::new()),
             merge_looks: Mutex::new(HashMap::new()),
+            checking: Mutex::new(HashSet::new()),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);

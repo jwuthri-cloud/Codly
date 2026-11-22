@@ -1,9 +1,9 @@
 <!--
   The plan card: the clearest thing in the conversation. What you asked (your words), the Lead's
   plan as a checklist (each task: title, who does it, what it waits on, its state), open
-  questions and tasks with no real check highlighted, and the one action that matters: Run plan
-  ⌘↵. While the plan runs the same checklist stays here and updates live; once it is over it
-  folds to one line you can open.
+  questions highlighted, and the one action that matters: Run plan ⌘↵. Tasks with no real check
+  are marked (WeakChecks), before the plan runs and after. While the plan runs the same checklist
+  stays here and updates live; once it is over it folds to one line you can open.
   A running plan that cannot go on by itself says so here, with Keep what is merged.
 -->
 <script lang="ts">
@@ -14,10 +14,11 @@
   import { PLAN_SPENT_TIP, spentLine } from '../../lib/util/cost';
   import { clock } from '../../lib/util/format';
   import { methodProvenance, PLAN_STATUS_LABEL } from '../../lib/util/labels';
-  import { keyList, stuckPlan, weakTasks } from '../../lib/util/plan';
+  import { keyList, stuckPlan } from '../../lib/util/plan';
   import Icon from '../../components/Icon.svelte';
   import Why, { type WhyLine } from '../../components/Why.svelte';
   import TaskRow from './TaskRow.svelte';
+  import WeakChecks from './WeakChecks.svelte';
 
   interface Props {
     planId: string;
@@ -75,11 +76,6 @@
       .slice(0, 6)
       .map((d) => ({ prov: methodProvenance(d.method), text: d.summary }));
   });
-  /** Tasks whose verify commands prove nothing about the work: said before you run the plan. */
-  const weak = $derived.by(() => {
-    void store.rev;
-    return weakTasks(store.decisions, planId);
-  });
 
   async function act(fn: () => Promise<unknown>) {
     acting = true;
@@ -126,19 +122,7 @@
         {#each tasks as t (t.id)}<TaskRow task={t} {plan} goal={deciding} />{/each}
       </ol>
 
-      {#if deciding && weak.length}
-        <ul class="qs weak" aria-label="Tasks with no real check">
-          {#each weak as w (w.task)}
-            <li>
-              <Icon name="alert" size={14} />
-              <span>
-                <strong>{w.task}</strong> has no check that can fail on the work: {#each w.checks as c, i (i)}{i ? ', ' : ''}<code>{c.command}</code> {c.why}{/each}.
-                Codly would pass this task whatever it changes. Ask for a real test with Change the plan, or run the plan as it is.
-              </span>
-            </li>
-          {/each}
-        </ul>
-      {/if}
+      <WeakChecks {plan} />
       {#if deciding && plan.open_questions.length}
         <ul class="qs">
           {#each plan.open_questions as q, i (i)}<li><Icon name="question" size={14} /><span>{q}</span></li>{/each}
@@ -199,7 +183,6 @@
   .qs { display: flex; flex-direction: column; gap: 6px; }
   .qs li { display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; border-radius: var(--r-md); background: var(--amber-soft); color: var(--ink-1); font-size: var(--t-md); line-height: var(--lh-md); }
   .qs li :global(svg) { color: var(--amber); margin-top: 3px; flex-shrink: 0; }
-  .weak code { font-size: 11.5px; overflow-wrap: anywhere; }
   .as { display: flex; flex-direction: column; gap: 3px; margin: 0 4px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .stuck { display: flex; flex-direction: column; gap: 8px; margin: 0 4px; padding: 10px 12px; border-radius: var(--r-md); background: var(--amber-soft); color: var(--ink-1); font-size: var(--t-md); line-height: var(--lh-md); }
   .stuck-acts { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; font-size: var(--t-sm); color: var(--ink-2); }

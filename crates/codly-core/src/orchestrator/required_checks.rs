@@ -23,7 +23,7 @@ use serde_json::json;
 use ts_rs::TS;
 
 use super::worktree_setup::fingerprint;
-use super::{Core, Inner, approvals, prompts, row};
+use super::{Core, Inner, approvals, lock, prompts, row};
 use crate::model::*;
 
 /// The repo's required checks, relative to the repo root.
@@ -142,6 +142,19 @@ fn count(n: usize) -> String {
     format!("{n} required check{}", if n == 1 { "" } else { "s" })
 }
 
+/// An agent's place in `Inner::checking` while "Check the work" runs: given back when the
+/// run ends, however it ends.
+struct Checking<'a> {
+    inner: &'a Inner,
+    agent_id: Id,
+}
+
+impl Drop for Checking<'_> {
+    fn drop(&mut self) {
+        lock(&self.inner.checking).remove(&self.agent_id);
+    }
+}
+
 impl Inner {
     // ───────────── the switch ─────────────
 
@@ -234,19 +247,41 @@ impl Inner {
 
     // ───────────── an agent you chat with ─────────────
 
+    /// Is the agent in a turn, or about to be? A stopped agent counts as working until its
+    /// process is gone: it may still write files.
+    fn at_work(&self, agent: &Agent) -> bool {
+        let resting = matches!(agent.status, AgentStatus::Idle | AgentStatus::Done | AgentStatus::Failed | AgentStatus::Offline);
+        (agent.run_id.is_some() && !resting) || !self.is_quiet(&agent.id)
+    }
+
+    /// Did the agent start a turn after its event `mark`? `own`: the events Codly wrote for it
+    /// since (its check runs).
+    fn turn_since(&self, agent_id: &str, mark: i64, own: usize) -> Result<bool> {
+        let page = own + 200;
+        let since: Vec<EventRow> = self.store.events(None, Some(agent_id), None, page as i64)?.into_iter().filter(|e| e.id > mark).collect();
+        // A full page of new events is an agent at work, whatever the events are.
+        Ok(since.len() == page || since.iter().any(|e| matches!(e.kind, EventKind::TurnStarted { .. })))
+    }
+
     /// "Check the work": run the required checks in the worktree of a 1:1 agent, as it is
     /// now. Its work has no gate, so nothing else checks it before you merge its branch. The
-    /// result is yours to read: it stops no merge.
+    /// result is yours to read: it stops no merge. One run for an agent at a time (the
+    /// commands share its worktree and its ports), and a result is kept only when the agent
+    /// did not work while the commands ran: it is about the files you asked about.
     async fn check_agent(&self, agent_id: &str) -> Result<Vec<CheckResult>> {
         let agent = self.agent(agent_id)?;
         if agent.role != Role::Solo {
             bail!("this checks the work of an agent you chat with; Codly checks a task's work by itself when its worker finishes");
         }
-        // A stopped agent counts as working until its process is gone: it may still write files.
-        let resting = matches!(agent.status, AgentStatus::Idle | AgentStatus::Done | AgentStatus::Failed | AgentStatus::Offline);
-        if (agent.run_id.is_some() && !resting) || !self.is_quiet(agent_id) {
+        if self.at_work(&agent) {
             bail!("{} is still working; check its work when its turn ends", agent.name);
         }
+        if !lock(&self.checking).insert(agent.id.clone()) {
+            bail!("Codly is still checking {}'s work; the result comes when its checks end", agent.name);
+        }
+        let _checking = Checking { inner: self, agent_id: agent.id.clone() };
+        // The agent's newest event: a turn of it that starts later changes the files under the checks.
+        let mark = self.store.events(None, Some(agent_id), None, 1)?.first().map_or(0, |e| e.id);
         let wt = PathBuf::from(agent.worktree.clone().ok_or_else(|| anyhow!("{} has no worktree yet, so there is nothing to check", agent.name))?);
         let ws = match self.store.agent_workspace(agent_id)? {
             Some(id) => self.store.workspace(&id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
@@ -262,6 +297,9 @@ impl Inner {
             Required::Stale(why) => bail!("{}", not_run(&why)),
         };
         let results = self.run_checks(&ws.id, &wt, Some(agent_id), &cmds).await?;
+        if self.at_work(&self.agent(agent_id)?) || self.turn_since(agent_id, mark, results.len())? {
+            bail!("{} worked while the checks ran, so their result is not about its files as they are now. Check its work again when its turn ends", agent.name);
+        }
         let failed: Vec<String> = results
             .iter()
             .filter(|r| !r.ok)
@@ -275,8 +313,9 @@ impl Inner {
             0 => format!("{} passed", count(results.len())),
             n => format!("{n} of {} failed: {}", count(results.len()), failed.join(", ")),
         };
-        let checks: Vec<_> = results.iter().map(|r| (&r.command, r.ok, r.exit_code)).collect();
-        self.decide_by(Some(&ws.id), None, "gate", "human", format!("you checked {}'s work: {outcome}", agent.name), json!({ "agent_id": agent_id, "checks": checks }))?;
+        // The whole result: the agent's Git tab shows the last one from this decision
+        // (src/lib/util/checks.ts), also after you left the tab.
+        self.decide_by(Some(&ws.id), None, "gate", "human", format!("you checked {}'s work: {outcome}", agent.name), json!({ "agent_id": agent_id, "checks": results }))?;
         self.chat(Some(&ws.id), &format!("agent:{agent_id}"), "codly", &format!("Checked {}'s work: {outcome}.", agent.name), None)?;
         Ok(results)
     }

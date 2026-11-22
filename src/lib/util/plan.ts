@@ -70,6 +70,14 @@ export function weakTasks(decisions: Decision[], planId: string): WeakTask[] {
   return marked;
 }
 
+/** What you can do about a task with no real check, by where its plan is. Null: nothing any more
+ *  (the plan is cancelled, or its work is merged into your branch). */
+export function weakAdvice(plan: Pick<Plan, 'status' | 'merged_sha'>): string | null {
+  if (plan.status === 'planning' || plan.status === 'awaiting_approval') return 'Ask the Lead for a real test, or run the plan as it is.';
+  if (plan.status === 'cancelled' || plan.merged_sha) return null;
+  return 'Read what this task changed before you merge the plan.';
+}
+
 /** "t1", "t1 and t2", "t1, t2 and t3". */
 export function keyList(tasks: Task[]): string {
   const keys = tasks.map((t) => t.key);

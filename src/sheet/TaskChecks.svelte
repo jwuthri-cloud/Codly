@@ -1,12 +1,14 @@
 <!--
-  A task's acceptance criteria and its verify commands with their live results: running now,
-  passed (with test counts), failed, or not run yet. Codly's own verify run is Observed; an
-  agent's run of the same command is Observed too; ticking a criterion is Inferred from them.
+  A task's acceptance criteria and its checks with their live results: running now, passed (with
+  test counts), failed, or not run yet. First the task's own verify commands, then the repo's
+  required checks that Codly ran for it. Codly's own run is Observed; an agent's run of the same
+  command is Observed too; ticking a criterion is Inferred from them.
 -->
 <script lang="ts">
   import type { Task } from '../lib/gen/Task';
-  import { store, type Seg } from '../lib/state/store.svelte';
+  import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
+  import { checksPassed, taskChecks } from '../lib/util/checks';
   import { timer } from '../lib/util/format';
   import Icon from '../components/Icon.svelte';
   import InlineText from '../components/InlineText.svelte';
@@ -17,26 +19,14 @@
   }
   let { task }: Props = $props();
 
-  type Check = { cmd: string; state: 'running' | 'pass' | 'fail' | 'none' | 'wait'; detail: string; by: 'codly' | 'agent' | null; since?: number };
-  const checks = $derived.by((): Check[] => {
+  const checks = $derived.by(() => {
     // The task's finished steps (replaced on change) and its assignee's own tool calls.
     if (task.assignee) void store.revBy.get(task.assignee);
     const marks = store.taskMarks[task.id] ?? [];
-    const segs: Seg[] = task.assignee ? (store.live[task.assignee]?.segments ?? []).filter((s) => s.taskId === task.id && (s.activity === 'test' || s.activity === 'execute')) : [];
-    return task.verify.map((cmd): Check => {
-      const v = [...marks].reverse().find((m) => m.kind === 'verified' && (m.text === cmd || m.text.includes(cmd) || cmd.includes(m.text)));
-      if (v) return { cmd, state: v.ok ? 'pass' : 'fail', detail: v.ok ? 'passed · Codly' : 'failed · Codly', by: 'codly' };
-      const s = [...segs].reverse().find((x) => (x.target.command ?? '').includes(cmd) || cmd.includes(x.target.command ?? '\u0000'));
-      if (s) {
-        if (s.end == null && store.pendingApprovals.some((a) => a.call_id === s.callId)) return { cmd, state: 'wait', detail: 'needs your approval', by: 'agent' };
-        if (s.end == null) return { cmd, state: 'running', detail: 'running now', by: 'agent', since: s.start };
-        const counts = s.testsPassed != null ? (s.testsFailed ? `${s.testsFailed} failed, ${s.testsPassed} passed` : `${s.testsPassed} passed`) : s.ok ? 'passed' : 'failed';
-        return { cmd, state: s.ok === false || s.testsFailed ? 'fail' : 'pass', detail: `${counts} · its run`, by: 'agent' };
-      }
-      return { cmd, state: 'none', detail: 'not run yet', by: null };
-    });
+    const segs = task.assignee ? (store.live[task.assignee]?.segments ?? []).filter((s) => s.taskId === task.id && (s.activity === 'test' || s.activity === 'execute')) : [];
+    return taskChecks(task.verify, marks, segs, (callId) => store.pendingApprovals.some((a) => a.call_id === callId));
   });
-  const verified = $derived(task.status === 'done' || (checks.length > 0 && checks.every((c) => c.state === 'pass' && c.by === 'codly')));
+  const verified = $derived(task.status === 'done' || checksPassed(checks));
 </script>
 
 {#if task.acceptance.length}

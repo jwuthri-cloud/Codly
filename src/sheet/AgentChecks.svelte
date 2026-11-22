@@ -3,12 +3,15 @@
   merge its branch. This runs the repo's required checks (`.codly/checks`, turned on in Settings →
   Safety) in the agent's worktree and shows each command's result, with the output of the ones
   that failed. It stops no merge: the result is yours to read.
+  A run and its result outlive this tab: the run is in `agentChecks`, the result is the decision
+  the core records for it. A result goes when the agent works again: it was about other files.
 -->
 <script lang="ts">
-  import { api } from '../lib/api';
   import type { Agent } from '../lib/gen/Agent';
-  import type { CheckResult } from '../lib/gen/CheckResult';
-  import { checkLine, checksLine } from '../lib/util/checks';
+  import { agentChecks } from '../lib/state/agentChecks.svelte';
+  import { store } from '../lib/state/store.svelte';
+  import { checkLine, checksLine, lastAgentCheck } from '../lib/util/checks';
+  import { clock } from '../lib/util/format';
   import Icon from '../components/Icon.svelte';
 
   interface Props {
@@ -18,46 +21,26 @@
   }
   let { agent, resting }: Props = $props();
 
-  let running = $state(false);
-  let results = $state<CheckResult[] | null>(null);
-  let error = $state<string | null>(null);
-  // A result is about the files as they were: it goes when the agent works again, or another agent is shown.
-  const moment = $derived(`${agent.id} ${agent.status}`);
-  $effect(() => {
-    void moment;
-    results = null;
-    error = null;
+  const running = $derived(agentChecks.running[agent.id] ?? false);
+  const error = $derived(agentChecks.failed[agent.id] ?? null);
+  const last = $derived.by(() => {
+    void store.rev;
+    return lastAgentCheck(store.decisions, agent.id, store.live[agent.id]?.turn?.startedAt ?? null);
   });
-
-  async function run() {
-    const id = agent.id;
-    running = true;
-    error = null;
-    try {
-      const r = await api.checkAgent(id);
-      if (id === agent.id) results = r;
-    } catch (e) {
-      if (id === agent.id) {
-        results = null;
-        error = e instanceof Error ? e.message : String(e);
-      }
-    } finally {
-      running = false;
-    }
-  }
+  const shown = $derived(running ? null : last);
 </script>
 
 <div class="checks">
   <div class="head">
-    <span class="what" role="status">{running ? 'Running your required checks…' : results ? checksLine(results) : 'Codly has not checked this work.'}</span>
-    <button class="btn sm" disabled={running || !resting} onclick={run} data-tip={resting ? 'Run the repo’s required checks (.codly/checks) in this worktree' : 'Wait until its turn ends'}>
+    <span class="what" role="status">{running ? 'Running your required checks…' : shown ? `${checksLine(shown.results)} · checked at ${clock(shown.ts)}` : 'Codly has not checked this work.'}</span>
+    <button class="btn sm" disabled={running || !resting} onclick={() => agentChecks.run(agent.id)} data-tip={resting ? 'Run the repo’s required checks (.codly/checks) in this worktree' : 'Wait until its turn ends'}>
       <Icon name="check" size={12} />Check the work
     </button>
   </div>
-  {#if error}<p class="bad">Couldn’t check the work: {error}</p>{/if}
-  {#if results}
+  {#if error && !running}<p class="bad">Couldn’t check the work: {error}</p>{/if}
+  {#if shown}
     <ul>
-      {#each results as r (r.command)}
+      {#each shown.results as r (r.command)}
         <li class:fail={!r.ok}>
           <span class="line"><Icon name={r.ok ? 'check' : 'x'} size={12} stroke={2.2} /><code class="truncate">{r.command}</code><span class="how">{checkLine(r)}</span></span>
           {#if !r.ok && r.tail}<pre class="tail" aria-label="Output of {r.command}">{r.tail}</pre>{/if}

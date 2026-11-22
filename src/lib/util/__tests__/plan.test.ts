@@ -3,7 +3,7 @@ import type { Plan } from '../../gen/Plan';
 import type { JsonValue } from '../../gen/serde_json/JsonValue';
 import type { Task } from '../../gen/Task';
 import type { Decision } from '../../state/store.svelte';
-import { keyList, stuckPlan, waitingOn, weakTasks } from '../plan';
+import { keyList, stuckPlan, waitingOn, weakAdvice, weakTasks } from '../plan';
 
 const plan = (o: Partial<Plan> = {}): Plan => ({
   id: 'p1', workspace_id: 'ws', thread: 'lead', request: '', summary: 'Sign-in', assumptions: [], open_questions: [], status: 'running',
@@ -91,6 +91,18 @@ describe('weakTasks', () => {
     ];
     expect(weakTasks(decisions, 'p1')).toEqual([]);
     expect(weakTasks(decisions, 'p2').map((w) => w.task)).toEqual(['t1']);
+  });
+});
+
+describe('weakAdvice', () => {
+  it('says what you can still do about a task with no real check, in every state of its plan', () => {
+    const before = 'Ask the Lead for a real test, or run the plan as it is.';
+    const after = 'Read what this task changed before you merge the plan.';
+    expect([weakAdvice(plan({ status: 'planning' })), weakAdvice(plan({ status: 'awaiting_approval' }))]).toEqual([before, before]);
+    // A plan that ran at once (Auto, Direct) never waited: the mark stays while it runs and when it is done.
+    for (const status of ['running', 'integrating', 'done', 'failed'] as const) expect(weakAdvice(plan({ status }))).toBe(after);
+    expect(weakAdvice(plan({ status: 'cancelled' }))).toBeNull();
+    expect(weakAdvice(plan({ status: 'done', merged_sha: 'abc1234' }))).toBeNull();
   });
 });
 

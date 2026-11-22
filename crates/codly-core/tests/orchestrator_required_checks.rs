@@ -6,8 +6,10 @@
 //! - a checks file that is not the text you turned on runs nothing and passes nothing: the
 //!   task waits until you read the new text;
 //! - a required check that fails on the merged work fails the plan;
-//! - "Check the work" runs them in the worktree of an agent you chat with;
-//! - a plan whose task has only checks that prove nothing is marked.
+//! - "Check the work" runs them in the worktree of an agent you chat with: one run for an
+//!   agent at a time, and no result when the agent worked while the commands ran;
+//! - a plan whose task has only checks that prove nothing is marked, and a plan that runs at
+//!   once says so in its chat line.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,7 +19,7 @@ use std::time::Duration;
 
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
 use codly_core::model::*;
-use codly_core::orchestrator::required_checks::{ChecksChoice, RequiredChecks};
+use codly_core::orchestrator::required_checks::{CheckResult, ChecksChoice, RequiredChecks};
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -281,10 +283,28 @@ async fn the_gate_runs_your_required_checks_for_each_task_and_for_the_plan() {
     assert_eq!(prompts.len(), 2, "the brief and one fix round");
     assert!(prompts[0].contains("The owner of this repo requires these checks") && prompts[0].contains(&format!("  - {required}\n")), "{}", prompts[0]);
     assert!(prompts[1].contains(&format!("Verification failed (fix round 1/2): `{required}` exited 1")), "{}", prompts[1]);
-    // A check that only looks for the file is marked on the plan, before it runs.
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_that_runs_at_once_says_which_task_has_no_real_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path(), "# none yet\n");
+    // A check that only looks for the file: it passes whatever the worker wrote in it.
+    let own = "test -f hello.txt";
+    let core = start(dir.path(), &repo, FakeSpawner { lead: lead_with(own), worker: hello_worker(), turns: Turns::default() }).await;
+
+    // An Auto request: nobody clicks Run plan, so the plan never waits with its card open.
+    core.send_chat("lead", "Please do it").await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    let snap = core.snapshot().await.unwrap();
+    let ready = snap.chats.iter().find(|c| c.author == "codly" && c.text.starts_with("Plan ready:")).expect("the plan's line");
+    assert_eq!(ready.text, "Plan ready: Add a hello file (1 task). t1 has no check that can fail on the work: the plan card says why. Running it now.");
+    // The mark is the plan's: its card shows it while the plan runs and when it is done.
+    let all = events(&core).await;
     let weak = decisions(&all).into_iter().find(|d| d["rule"] == "weak_verify").expect("the weak check is marked");
-    assert_eq!((&weak["task"], &weak["checks"][0]["command"]), (&json!("t1"), &json!(own)));
-    assert!(!weak["plan_id"].is_null(), "the plan card finds the mark by its plan");
+    assert_eq!((&weak["task"], &weak["plan_id"]), (&json!("t1"), &json!(snap.plans[0].id)));
+    assert_eq!(weak["checks"], json!([{ "command": own, "why": "only checks that a file is there" }]));
     core.shutdown().await;
 }
 
@@ -360,9 +380,9 @@ async fn check_the_work_runs_your_required_checks_in_a_solo_agents_worktree() {
     turn_on(&core).await;
 
     // All of them run, also after a failure: you see every result, with its output.
-    let results = core.check_agent(&solo.id).await.unwrap();
-    assert_eq!(results.iter().map(|r| (r.command.as_str(), r.ok, r.exit_code)).collect::<Vec<_>>(), [("grep -q hello hello.txt", false, Some(2)), ("test -f hello.txt", false, Some(1))]);
-    assert!(results[0].tail.contains("hello.txt") && !results[0].timed_out, "{results:?}");
+    let first = core.check_agent(&solo.id).await.unwrap();
+    assert_eq!(first.iter().map(|r| (r.command.as_str(), r.ok, r.exit_code)).collect::<Vec<_>>(), [("grep -q hello hello.txt", false, Some(2)), ("test -f hello.txt", false, Some(1))]);
+    assert!(first[0].tail.contains("hello.txt") && !first[0].timed_out, "{first:?}");
     std::fs::write(wt.join("hello.txt"), "hello\n").unwrap();
     let results = core.check_agent(&solo.id).await.unwrap();
     assert!(results.len() == 2 && results.iter().all(|r| r.ok && r.exit_code == Some(0)), "{results:?}");
@@ -374,10 +394,82 @@ async fn check_the_work_runs_your_required_checks_in_a_solo_agents_worktree() {
     let all = events(&core).await;
     let runs = all.iter().filter(|e| matches!(e.kind, EventKind::Verified { .. }) && e.agent_id.as_deref() == Some(solo.id.as_str())).count();
     assert_eq!(runs, 4, "each run is in the agent's record");
+    // Each result is on record in full, output too: the agent's Git tab reads the last one from there.
+    let checked: Vec<&Value> = decisions(&all).into_iter().filter(|d| d["agent_id"] == json!(solo.id)).collect();
+    assert_eq!(checked.len(), 2);
+    assert_eq!((&checked[0]["checks"], &checked[1]["checks"]), (&serde_json::to_value(&first).unwrap(), &serde_json::to_value(&results).unwrap()));
 
     // A text you did not read does not run here either.
     std::fs::write(repo.join(CHECKS_FILE), "true\n").unwrap();
     let e = core.check_agent(&solo.id).await.unwrap_err().to_string();
     assert!(e.starts_with("Codly did not run your required checks: .codly/checks changed since you turned them on."), "{e}");
+    core.shutdown().await;
+}
+
+/// A required check that waits until the file `go` is in the worktree; `started` says it runs.
+const WAITS: &str = "touch started; while [ ! -f go ]; do sleep 0.1; done";
+
+/// A core with one agent you chat with, whose every turn says "ok", and `WAITS` turned on.
+async fn solo_with_a_check_that_waits(root: &Path) -> (Arc<Core>, Agent, PathBuf) {
+    let repo = temp_repo(root, &format!("{WAITS}\n"));
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(root, &repo, FakeSpawner { lead: idle.clone(), worker: idle, turns: Turns::default() }).await;
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let wt = PathBuf::from(solo.worktree.clone().unwrap());
+    turn_on(&core).await;
+    (core, solo, wt)
+}
+
+fn check_in_background(core: &Arc<Core>, agent: &Agent) -> tokio::task::JoinHandle<anyhow::Result<Vec<CheckResult>>> {
+    let (core, id) = (core.clone(), agent.id.clone());
+    tokio::spawn(async move { core.check_agent(&id).await })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn check_the_work_is_one_run_for_an_agent_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, solo, wt) = solo_with_a_check_that_waits(dir.path()).await;
+
+    // Two clicks (the Git tab was closed and opened again while the checks ran).
+    let (first, second) = (check_in_background(&core, &solo), check_in_background(&core, &solo));
+    wait_for("one of the two to be refused", 20, async || (first.is_finished() || second.is_finished()).then_some(())).await;
+    std::fs::write(wt.join("go"), "").unwrap();
+    let (ran, refused): (Vec<_>, Vec<_>) = [first.await.unwrap(), second.await.unwrap()].into_iter().partition(|r| r.is_ok());
+    assert_eq!((ran.len(), refused.len()), (1, 1), "{ran:?} {refused:?}");
+    assert_eq!(refused[0].as_ref().unwrap_err().to_string(), format!("Codly is still checking {}'s work; the result comes when its checks end", solo.name));
+    assert!(ran[0].as_ref().unwrap().iter().all(|r| r.ok), "{ran:?}");
+    let all = events(&core).await;
+    assert_eq!(verified(&all).len(), 1, "the commands ran once: {:?}", verified(&all));
+
+    // The run is over: the next click runs them again.
+    assert!(core.check_agent(&solo.id).await.unwrap().iter().all(|r| r.ok));
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn check_the_work_keeps_no_result_when_the_agent_worked_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, solo, wt) = solo_with_a_check_that_waits(dir.path()).await;
+    let thread = format!("agent:{}", solo.id);
+
+    let check = check_in_background(&core, &solo);
+    wait_for("the check to run", 20, async || wt.join("started").exists().then_some(())).await;
+    // You send the agent a message while the commands run: its turn can change the files under them.
+    core.send_chat(&thread, "one more thing").await.unwrap();
+    wait_for("the agent's turn", 20, async || {
+        events(&core).await.iter().any(|e| e.agent_id.as_deref() == Some(solo.id.as_str()) && matches!(e.kind, EventKind::TurnCompleted { .. })).then_some(())
+    })
+    .await;
+    std::fs::write(wt.join("go"), "").unwrap();
+    let e = check.await.unwrap().unwrap_err().to_string();
+    assert_eq!(e, format!("{} worked while the checks ran, so their result is not about its files as they are now. Check its work again when its turn ends", solo.name));
+    let said = |snap: &Snapshot| snap.chats.iter().filter(|c| c.thread == thread && c.author == "codly" && c.text.starts_with("Checked")).count();
+    assert_eq!(said(&core.snapshot().await.unwrap()), 0, "no result is said");
+    assert!(!decisions(&events(&core).await).iter().any(|d| d["agent_id"] == json!(solo.id)), "and none is on record");
+
+    // Its turn is over: the next run is about the files as they are, and it counts.
+    let results = wait_for("the agent to rest", 20, async || core.check_agent(&solo.id).await.ok()).await;
+    assert!(results.iter().all(|r| r.ok), "{results:?}");
+    assert_eq!(said(&core.snapshot().await.unwrap()), 1);
     core.shutdown().await;
 }

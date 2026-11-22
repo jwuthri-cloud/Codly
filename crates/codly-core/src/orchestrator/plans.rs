@@ -234,8 +234,16 @@ impl Inner {
             self.publish(Some(&ws.id), r);
         }
         let n = tasks.len();
+        // Tasks the planner marked (`weak_verify`): said here too, because a plan that runs at
+        // once never waits with its card open.
+        let weak: Vec<&str> = valid.fixes.iter().filter(|f| f.detail["rule"] == "weak_verify").filter_map(|f| f.detail["task"].as_str()).collect();
+        let weak = match weak.len() {
+            0 => String::new(),
+            1 => format!(" {} has no check that can fail on the work: the plan card says why.", weak[0]),
+            _ => format!(" {} have no check that can fail on the work: the plan card says why.", weak.join(", ")),
+        };
         let text = format!(
-            "Plan ready: {} ({n} task{}).{}",
+            "Plan ready: {} ({n} task{}).{weak}{}",
             plan.summary,
             if n == 1 { "" } else { "s" },
             if auto {
