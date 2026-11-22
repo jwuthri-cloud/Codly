@@ -7,10 +7,14 @@
   import { api } from '../lib/api';
   import type { ArchivePolicy } from '../lib/gen/ArchivePolicy';
   import { housekeeping } from '../lib/state/housekeeping.svelte';
+  import { Loader } from '../lib/state/loader.svelte';
+  import { toast } from '../lib/state/toasts.svelte';
   import Icon from '../components/Icon.svelte';
+  import LoadError from '../components/LoadError.svelte';
 
-  let p = $state.raw<ArchivePolicy | null>(null);
-  onMount(() => void api.boardPolicy().then((v) => (p = v)).catch(() => {}));
+  const policy = new Loader<ArchivePolicy>(() => api.boardPolicy());
+  const p = $derived(policy.value);
+  onMount(() => void policy.load());
 
   const ROWS: { key: keyof ArchivePolicy; title: string; body: string }[] = [
     { key: 'done_days', title: 'Archive finished tasks after', body: 'Days after a task is done (or cancelled).' },
@@ -22,7 +26,13 @@
   async function step(key: keyof ArchivePolicy, d: number) {
     if (!p) return;
     const next = { ...p, [key]: Math.max(0, Math.min(365, p[key] + d)) };
-    p = await api.boardPolicy(next);
+    // The number on screen changes only once the core has saved it.
+    try {
+      policy.set(await api.boardPolicy(next));
+    } catch (e) {
+      toast({ kind: 'error', title: 'Couldn’t save the board rule', body: e instanceof Error ? e.message : String(e) });
+      return;
+    }
     void housekeeping.sweep();
   }
 </script>
@@ -40,6 +50,10 @@
         </div>
       </div>
     {/each}
+  {:else if policy.error}
+    <LoadError what="the board rules" error={policy.error} loading={policy.loading} onretry={() => policy.load()} />
+  {:else}
+    <p class="desc">Loading…</p>
   {/if}
 </section>
 

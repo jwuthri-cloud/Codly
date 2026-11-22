@@ -8,21 +8,24 @@
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
   import type { Connection } from '../lib/gen/Connection';
+  import { Loader } from '../lib/state/loader.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import Icon from '../components/Icon.svelte';
+  import LoadError from '../components/LoadError.svelte';
 
-  let list = $state.raw<Connection[]>([]);
+  const conns = new Loader<Connection[]>(() => api.listConnections());
+  const list = $derived(conns.value ?? []);
   let busy = $state<string | null>(null);
   /** Key being typed, by "<server>:<ENV>". Never kept after saving. */
   let draft = $state<Record<string, string>>({});
   let open = $state<string | null>(null);
 
-  onMount(() => void api.listConnections().then((l) => (list = l)).catch(() => {}));
+  onMount(() => void conns.load());
 
   async function run(id: string, p: Promise<Connection[]>) {
     busy = id;
     try {
-      list = await p;
+      conns.set(await p);
     } catch (e) {
       toast({ kind: 'error', title: 'Could not update the connection', body: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -84,10 +87,16 @@
     </li>
   {/snippet}
 
-  <h4>Read-only · on by default</h4>
-  <ul class="list">{#each safe as c (c.id)}{@render row(c)}{/each}</ul>
-  <h4>Needs a key · off until you add one</h4>
-  <ul class="list">{#each keyed as c (c.id)}{@render row(c)}{/each}</ul>
+  {#if conns.value}
+    <h4>Read-only · on by default</h4>
+    <ul class="list">{#each safe as c (c.id)}{@render row(c)}{/each}</ul>
+    <h4>Needs a key · off until you add one</h4>
+    <ul class="list">{#each keyed as c (c.id)}{@render row(c)}{/each}</ul>
+  {:else if conns.error}
+    <LoadError what="the connections" error={conns.error} loading={conns.loading} onretry={() => conns.load()} />
+  {:else}
+    <p class="desc">Loading…</p>
+  {/if}
 </section>
 
 <style>

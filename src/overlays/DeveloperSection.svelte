@@ -9,16 +9,19 @@
   import type { Wallet } from '../lib/gen/Wallet';
   import { api } from '../lib/api';
   import { updateSettings } from '../lib/state/actions';
+  import { Loader } from '../lib/state/loader.svelte';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { rankLabel } from '../lib/util/career';
   import { coins } from '../lib/util/format';
   import { live } from '../office/sims';
+  import LoadError from '../components/LoadError.svelte';
 
   const on = $derived(store.settings.developer_mode);
-  let wallet = $state.raw<Wallet | null>(null);
-  const load = () => api.wallet().then((w) => (wallet = w)).catch(() => {});
+  const purse = new Loader<Wallet>(() => api.wallet());
+  const wallet = $derived(purse.value);
+  const load = () => purse.load();
   onMount(() => void load());
 
   // The agent selected in the office, unless you pick another here.
@@ -31,7 +34,7 @@
   const fail = (title: string) => (e: unknown) => toast({ kind: 'error', title, body: e instanceof Error ? e.message : String(e) });
   function grant(n: number) {
     api.devGrant(n).then((w) => {
-      wallet = w;
+      purse.set(w);
       toast({ kind: 'success', title: `+${coins(n)}`, body: `${coins(w.balance)} to spend` });
     }, fail('Couldn’t add coins'));
   }
@@ -56,7 +59,7 @@
   function reset() {
     confirmReset = false;
     api.devResetOffice().then((s) => {
-      wallet = s.wallet;
+      purse.set(s.wallet);
       toast({ kind: 'success', title: 'Office reset', body: 'It’s a garage again; what stood there was sold back.' });
     }, fail('Couldn’t reset the office'));
   }
@@ -73,6 +76,7 @@
   {/if}
 
   {#if on}
+    {#if purse.error && !wallet}<LoadError what="the wallet" error={purse.error} loading={purse.loading} onretry={load} />{/if}
     <div class="row">
       <div class="r-text">
         <span class="r-title">Coins</span>

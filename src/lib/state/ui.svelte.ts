@@ -281,8 +281,9 @@ class Ui {
     this.sections = { ...this.sections, [id]: !(this.sections[id] ?? true) };
   }
 
-  togglePin(id: string) {
-    this.pinned = this.pinned.includes(id) ? this.pinned.filter((x) => x !== id) : [...this.pinned, id];
+  setPin(id: string, on: boolean) {
+    const rest = this.pinned.filter((x) => x !== id);
+    this.pinned = on ? [...rest, id] : rest;
   }
 
   keepPlan(id: string) {

@@ -4,6 +4,8 @@
   line while you are there, and never jumps while you read further up.
   You can always write: a message to a busy agent shows as Queued (in order) until its turn
   starts; the first one offers Send now (interrupt the turn, so it runs next).
+  An error or a turn that failed is a line of its own, where it happened, with the reason.
+  Hover a message (or tab to it) to copy it; one of yours can go back to the composer.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -22,12 +24,13 @@
   import PlanCard from './cards/PlanCard.svelte';
   import PlanDoneCard from './cards/PlanDoneCard.svelte';
   import TaskDoneCard from './cards/TaskDoneCard.svelte';
+  import TroubleRow from './cards/TroubleRow.svelte';
   import WorkRow from './cards/WorkRow.svelte';
   import Composer from './Composer.svelte';
   import NextRow from './NextRow.svelte';
   import { buildSpine, type Item } from './spine';
-  import { resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
-  import { queued, type Sent } from '../lib/state/queue';
+  import { copyText, resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
+  import { busy, queued, type Sent } from '../lib/state/queue';
   import { isRequestThread } from '../lib/state/ui.svelte';
 
   interface Props {
@@ -60,6 +63,13 @@
     stopping = key;
     await sendQueuedNow(agentId);
   }
+
+  // ── Retry on a failed turn: only while nothing was said after it, and the agent is free ──
+  const isBusy = $derived(busy(thread));
+  const lastSaid = $derived.by(() => {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].kind === 'user' || items[i].kind === 'say') return i;
+    return -1;
+  });
 
   /** Consecutive messages from the same agent share one header. */
   function showHeader(i: number): boolean {
@@ -197,6 +207,12 @@
                   </div>
                 {/if}
               </div>
+              {#if !q && !failed}
+                <div class="acts mine">
+                  <button class="act" onclick={() => copyText(it.msg.text, 'Message copied')}><Icon name="copy" size={11} />Copy</button>
+                  <button class="act" onclick={() => ui.seedComposer(thread, it.msg.text)} data-tip="Put it back in the composer, to change and send again">Edit</button>
+                </div>
+              {/if}
             {:else if it.kind === 'system'}
               {#if it.card?.type === 'plan'}<PlanCard planId={it.card.planId} />
               {:else if it.card?.type === 'plan-done'}<PlanDoneCard planId={it.card.planId} />
@@ -216,6 +232,14 @@
               </div>
               {#if it.card?.type === 'plan'}<div class="card-gap"><PlanCard planId={it.card.planId} /></div>
               {:else if it.card?.type === 'plan-done'}<div class="card-gap"><PlanDoneCard planId={it.card.planId} /></div>{/if}
+              {#if !it.streaming}
+                <div class="acts">
+                  <button class="act" onclick={() => copyText(it.text, 'Message copied')}><Icon name="copy" size={11} />Copy</button>
+                </div>
+              {/if}
+            {:else if it.kind === 'trouble'}
+              {@const again = it.retry}
+              <TroubleRow agentId={it.agentId} eventId={it.eventId} ts={it.ts} what={it.what} reason={it.reason} onretry={again && i > lastSaid && !isBusy ? () => sendChat(thread, again) : undefined} />
             {:else if it.kind === 'work'}
               <WorkRow segs={it.segs} thoughts={it.thoughts} thinking={it.thinking} />
             {:else if it.kind === 'approval'}
@@ -248,12 +272,12 @@
   .o-name b { color: var(--ink-1); font-weight: var(--w-semi); }
   .o-prov { font-size: var(--t-xs); color: var(--ink-3); }
   .o-now { font-size: var(--t-sm); color: var(--ink-3); }
-  .scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; padding: 28px 0 12px; scroll-padding-bottom: 20px; mask-image: linear-gradient(180deg, transparent 0, #000 28px, #000 calc(100% - 10px), transparent 100%); }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; padding: 28px 0 28px; scroll-padding-bottom: 20px; mask-image: linear-gradient(180deg, transparent 0, #000 28px, #000 calc(100% - 10px), transparent 100%); }
   .hero { height: 100%; display: grid; place-items: center; }
   .ex { height: 32px; padding: 0 14px; border-radius: var(--r-full); background: var(--surface-2); color: var(--ink-2); font-size: var(--t-sm); }
   .ex:hover { background: var(--surface-3); color: var(--ink-1); }
   .items { display: flex; flex-direction: column; gap: 20px; padding: 0 32px; }
-  .it { min-width: 0; }
+  .it { position: relative; min-width: 0; }
   /* ponytail: only the newest item rises in, so a thread switch does not replay the whole history. Two items added at once animate only the last; animating each needs a "new since mount" flag per item. */
   .it:last-child { animation: rise-in var(--d-4) var(--spring) both; }
   .k-work { margin: -8px 0; }
@@ -268,6 +292,12 @@
   .now { height: 26px; padding: 0 11px; margin-left: 2px; border-radius: var(--r-full); font-size: var(--t-sm); font-weight: var(--w-semi); color: var(--ink-1); background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line-2); white-space: nowrap; }
   .now:hover { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line-3); }
   .now:disabled { opacity: 1; color: var(--ink-3); }
+  /* Message actions sit in the gap under the message, so showing them moves nothing. */
+  .acts { position: absolute; top: 100%; left: -7px; z-index: 1; display: flex; gap: 2px; opacity: 0; transition: opacity var(--d-2); }
+  .acts.mine { left: auto; right: 0; }
+  .it:hover > .acts, .acts:focus-within { opacity: 1; }
+  .act { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; border-radius: var(--r-full); font-size: var(--t-xs); font-weight: var(--w-med); color: var(--ink-3); }
+  .act:hover { background: var(--surface-3); color: var(--ink-1); }
   .mention { display: inline; padding: 0 3px; margin: 0 -1px; border-radius: 4px; color: var(--ink-1); font-weight: var(--w-semi); background: var(--surface-3); font-size: inherit; line-height: inherit; }
   .sys { display: flex; justify-content: center; gap: 8px; font-size: var(--t-sm); color: var(--ink-3); }
   .sys time { color: var(--ink-4); }

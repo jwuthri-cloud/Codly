@@ -1,11 +1,14 @@
 <!--
   One fixed-height row above the composer (so nothing jumps): while the thread's agent works it
   says what it is doing (and how many of your messages wait for it); otherwise it offers the next
-  sensible actions for this request as small chips. New request (⌘N) always sits on the right.
+  sensible actions for this request as small chips. While its turn runs, Stop (Esc) interrupts it.
+  New request (⌘N) always sits on the right.
 -->
 <script lang="ts">
-  import { sendChat } from '../lib/state/actions';
+  import { sendChat, stopThread } from '../lib/state/actions';
   import { narrate } from '../lib/state/narration';
+  import { busy } from '../lib/state/queue';
+  import { stopping } from '../lib/state/stops';
   import { store } from '../lib/state/store.svelte';
   import { isRequestThread, ui } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
@@ -21,6 +24,9 @@
   const n = $derived(agent ? narrate(agent.id) : null);
   const working = $derived(n?.tone === 'live');
   const isRequest = $derived(isRequestThread(thread));
+  /** A turn is running (also while it waits for your approval): Stop interrupts it. */
+  const running = $derived(busy(thread));
+  const halting = $derived(!!agent && stopping(agent.id));
 
   type Chip = { label: string; icon?: string; kbd?: string; primary?: boolean; run: () => void };
   const chips = $derived.by((): Chip[] => {
@@ -64,6 +70,11 @@
   {:else}
     <span class="grow"></span>
   {/if}
+  {#if running && agent}
+    <button class="nc stop" disabled={halting} onclick={() => stopThread(thread)} data-tip={isRequest ? `Stop ${agent.name}’s turn. Agents on tasks keep working.` : `Stop ${agent.name}’s turn`} data-tip-kbd="Esc">
+      <Icon name="stop" size={12} />{halting ? 'Stopping…' : 'Stop'}
+    </button>
+  {/if}
   {#if isRequest}
     <button class="nc new" onclick={() => ui.newRequest()} data-tip="Start another request in parallel — its own Lead, its own plan" data-tip-kbd="⌘N">
       <Icon name="plus" size={12} stroke={1.8} />New request
@@ -83,6 +94,8 @@
   .nc:hover { background: var(--surface-3); color: var(--ink-1); }
   .nc.primary { background: var(--aurora); color: var(--on-aurora); font-weight: var(--w-semi); }
   .nc.primary:hover { filter: brightness(1.06); }
+  .nc.stop { flex-shrink: 0; color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line-3); }
+  .nc.stop:disabled { opacity: 1; color: var(--ink-3); }
   .nc.new { flex-shrink: 0; background: transparent; box-shadow: inset 0 0 0 1px var(--line-2); }
   .nc.new:hover { background: var(--surface-2); }
   .k { opacity: 0.65; font-weight: var(--w-reg); }

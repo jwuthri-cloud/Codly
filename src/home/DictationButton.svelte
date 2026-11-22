@@ -56,7 +56,11 @@
     const el = target;
     if (!el || !freeflow.ready) return;
     const down = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && recording) freeflow.cancel();
+      // This Esc is spent: the composer must not also stop the agent's turn with it.
+      if (e.key === 'Escape' && recording) {
+        freeflow.cancel();
+        e.preventDefault();
+      }
       hold.keydown(e);
     };
     const up = (e: KeyboardEvent) => hold.keyup(e);

@@ -19,7 +19,9 @@ import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { withModel } from '../util/team';
 import { accounts } from './accounts.svelte';
 import { diffstats } from './diffstats.svelte';
+import { busy } from './queue';
 import { requests } from './requests.svelte';
+import { noteStop, stopping } from './stops';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
 import { ui, wallNow } from './ui.svelte';
@@ -151,7 +153,12 @@ export function resendChat(id: string) {
 
 /** Send now: stop the agent's current turn; Codly then runs your oldest queued message. */
 export async function sendQueuedNow(agentId: string) {
-  await attempt('interrupt the agent', () => api.interruptAgent(agentId), 'Your message stays queued and runs when the turn ends.');
+  const undo = noteStop(agentId);
+  const ok = await attempt('interrupt the agent', async () => {
+    await api.interruptAgent(agentId);
+    return true;
+  }, 'Your message stays queued and runs when the turn ends.');
+  if (!ok) undo();
 }
 
 // Starting a plan can take seconds (integration worktree, dependency install) and has four ways
@@ -315,15 +322,31 @@ export async function setAgentLook(agent: Agent, lookSeed: string): Promise<bool
 
 /** Whether the core took the interrupt (a button that says "Interrupting…" needs to know). */
 export async function interruptAgent(agentId: string): Promise<boolean> {
+  const undo = noteStop(agentId);
   const ok = await attempt('interrupt the agent', async () => {
     await api.interruptAgent(agentId);
     return true;
   });
+  if (!ok) undo();
   return !!ok;
 }
 
+/** Stop the running turn of a thread's agent (the Stop button, Esc). False: no turn was running. */
+export function stopThread(thread: string): boolean {
+  const agent = store.threadAgent(thread);
+  if (!agent || !busy(thread)) return false;
+  // A second press while the CLI lets go asks nothing new.
+  if (!stopping(agent.id)) void interruptAgent(agent.id);
+  return true;
+}
+
 export async function stopAgent(agentId: string) {
-  await attempt('stop the agent', () => api.stopAgent(agentId));
+  const undo = noteStop(agentId);
+  const ok = await attempt('stop the agent', async () => {
+    await api.stopAgent(agentId);
+    return true;
+  });
+  if (!ok) undo();
 }
 
 /** Let go an agent you hired: it joins the ghosts by the memory archive (you can bring it back). */
@@ -351,20 +374,30 @@ export async function redetect() {
   if (clis) store.setClis(clis);
 }
 
-export function keepBranch(planId: string) {
+/** Keep a finished plan's branch instead of merging it. The merge prompt goes once the core has recorded it. */
+export async function keepBranch(planId: string): Promise<boolean> {
   const plan = store.planMap.get(planId);
+  const ok = await attempt('keep the branch', async () => {
+    await api.keepPlan(planId);
+    return true;
+  });
+  if (!ok) return false;
   ui.keepPlan(planId);
-  void api.keepPlan(planId).catch(() => {});
   toast({ kind: 'info', title: 'Branch kept', body: plan?.integration_branch ? `${plan.integration_branch} stays as it is; merge it whenever you like.` : 'The integration branch stays as it is.' });
+  return true;
 }
 
-/** Pin or unpin a memory (pinned memories always make the agents' memory pack). */
-export function togglePinMemory(m: { id: string; pinned: boolean }) {
+/** Pin or unpin a memory (pinned memories always make the agents' memory pack). The pin shows once the core has saved it. */
+export async function togglePinMemory(m: { id: string; pinned: boolean }): Promise<boolean> {
   const next = !(m.pinned || ui.pinned.includes(m.id));
-  ui.togglePin(m.id);
-  const cur = store.memories.find((x) => x.id === m.id);
-  if (cur) store.memories = store.memories.map((x) => (x.id === m.id ? { ...x, pinned: next } : x));
-  void api.pinMemory(m.id, next).catch(() => {});
+  const ok = await attempt(next ? 'pin the memory' : 'unpin the memory', async () => {
+    await api.pinMemory(m.id, next);
+    return true;
+  });
+  if (!ok) return false;
+  ui.setPin(m.id, next);
+  store.memories = store.memories.map((x) => (x.id === m.id ? { ...x, pinned: next } : x));
+  return true;
 }
 
 export async function copyText(text: string, what = 'Copied') {
