@@ -270,6 +270,8 @@
   /** Never blocks: clear the line, show the message, send in the background. */
   function send() {
     if (!canSend) return;
+    // One `- <path>` line per file: the core finds the attached images by these lines and sends
+    // them to the model as images too (crates/codly-core/src/adapters/attachments.rs).
     const list = ready.map((f) => `- ${f.path}`).join('\n');
     const t = [text.trim() || (list ? 'See the attached files.' : ''), list && `Attached files (read them by path):\n${list}`].filter(Boolean).join('\n\n');
     sendChat(thread, t);

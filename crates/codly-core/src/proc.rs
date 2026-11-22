@@ -202,8 +202,8 @@ pub fn exit_code(status: std::process::ExitStatus) -> Option<i64> {
 /// before parsing so a run can be replayed and re-normalized after mapping fixes.
 /// Inbound lines are stored verbatim; lines Codly wrote to the CLI are stored as
 /// `{"codly_sent":<line>}` and Codly's own notes as `{"codly_note":"..."}`, so the file stays NDJSON.
-/// The file is owner-only, and the keys in what Codly sends to a CLI are left out of it
-/// (`write_json`).
+/// The file is owner-only, and the keys in what Codly sends to a CLI are left out of it, as
+/// are the bytes of attached images (`write_json`).
 pub struct RawLog {
     file: Mutex<File>,
 }
@@ -246,10 +246,11 @@ impl RawLog {
 }
 
 /// Serialize `msg`, log it as outbound, and write it as one NDJSON line. The CLI gets the
-/// message as it is; the log gets it without the keys in it (`without_mcp_secrets`).
+/// message as it is; the log gets it without the keys in it (`without_mcp_secrets`) and
+/// without the bytes of its images (`without_image_data`).
 pub async fn write_json<W: AsyncWrite + Unpin>(w: &mut W, raw: &RawLog, msg: &Value) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(msg)?;
-    match without_mcp_secrets(msg) {
+    match without_mcp_secrets(msg).or_else(|| without_image_data(msg)) {
         Some(safe) => raw.outbound(&serde_json::to_vec(&safe)?),
         None => raw.outbound(&line),
     }
@@ -300,6 +301,34 @@ pub fn without_mcp_secrets(msg: &Value) -> Option<Value> {
                 Some(Value::Object(env)) => env.values_mut().for_each(|v| *v = REDACTED.into()),
                 Some(Value::Array(env)) => env.iter_mut().filter_map(|e| e.get_mut("value")).for_each(|v| *v = REDACTED.into()),
                 _ => {}
+            }
+        }
+    }
+    Some(safe)
+}
+
+/// Where an outbound message holds the content blocks of a prompt: Claude's stream-json user
+/// message and ACP `session/prompt`.
+const PROMPT_BLOCKS: [&str; 2] = ["/message/content", "/params/prompt"];
+
+/// A copy of `msg` for the raw log without the bytes of the images in it (base64, megabytes
+/// for one screenshot): the log keeps how long each was. None when `msg` holds no image block
+/// (almost every message), so nothing is copied.
+pub fn without_image_data(msg: &Value) -> Option<Value> {
+    let is_image = |block: &Value| block["type"] == "image";
+    let blocks_of = |msg: &Value, at: &str| msg.pointer(at).and_then(Value::as_array).is_some_and(|blocks| blocks.iter().any(is_image));
+    if PROMPT_BLOCKS.iter().all(|at| !blocks_of(msg, at)) {
+        return None;
+    }
+    let mut safe = msg.clone();
+    for at in PROMPT_BLOCKS {
+        let Some(Value::Array(blocks)) = safe.pointer_mut(at) else { continue };
+        for block in blocks.iter_mut().filter(|block| is_image(block)) {
+            // Claude keeps the bytes in `source.data`, ACP in `data`.
+            for data in ["/source/data", "/data"] {
+                if let Some(Value::String(base64)) = block.pointer_mut(data) {
+                    *base64 = format!("<{} base64 characters left out>", base64.len());
+                }
             }
         }
     }
@@ -531,6 +560,46 @@ mod tests {
         // Only the owner reads the log.
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// An attached image reaches the CLI whole; the raw log keeps the message without its bytes.
+    #[tokio::test]
+    async fn image_bytes_reach_the_cli_but_not_the_raw_log() {
+        let data = "aGVsbG8gd29ybGQ=".repeat(1000);
+        // Claude's user message and ACP `session/prompt`, as `adapters::attachments` builds them.
+        let claude = serde_json::json!({ "type": "user", "session_id": "", "parent_tool_use_id": null, "message": { "role": "user", "content": [
+            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": data } },
+            { "type": "text", "text": "what is this?" },
+        ] } });
+        let acp = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": { "sessionId": "s", "prompt": [
+            { "type": "text", "text": "what is this?" },
+            { "type": "image", "mimeType": "image/png", "data": data },
+        ] } });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.ndjson");
+        let log = RawLog::open(&path).unwrap();
+        let mut sent = Vec::new();
+        for msg in [&claude, &acp] {
+            write_json(&mut sent, &log, msg).await.unwrap();
+        }
+        // The CLI got every byte.
+        let sent = String::from_utf8(sent).unwrap();
+        let lines: Vec<Value> = sent.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines, [claude.clone(), acp.clone()]);
+        // The log has the same messages with the length of the bytes in their place.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&data), "{} bytes logged", text.len());
+        let logged: Vec<Value> = text.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"].clone()).collect();
+        let left_out = "<16000 base64 characters left out>";
+        assert_eq!(logged[0]["message"]["content"][0], serde_json::json!({ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": left_out } }));
+        assert_eq!(logged[0]["message"]["content"][1], claude["message"]["content"][1]);
+        assert_eq!(logged[1]["params"]["prompt"][0], acp["params"]["prompt"][0]);
+        assert_eq!(logged[1]["params"]["prompt"][1], serde_json::json!({ "type": "image", "mimeType": "image/png", "data": left_out }));
+        assert_eq!(logged[1]["params"]["sessionId"], "s");
+        // A prompt without an image is logged as it is, with no copy made.
+        assert_eq!(without_image_data(&serde_json::json!({ "type": "user", "message": { "role": "user", "content": "hi" } })), None);
+        assert_eq!(without_image_data(&serde_json::json!({ "method": "session/prompt", "params": { "prompt": [{ "type": "text", "text": "hi" }] } })), None);
     }
 
     #[tokio::test]

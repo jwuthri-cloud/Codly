@@ -25,7 +25,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
-use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, startup};
+use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, attachments, startup};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, Billing, EventKind,
     Id, MessagePhase, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
@@ -489,9 +489,14 @@ impl Actor {
     }
 
     async fn send_prompt(&mut self, text: String) {
+        // Attached images go as image blocks before the text, which keeps their paths.
+        let attached = attachments::images(&text).await;
+        if let Some(note) = attached.note {
+            self.emit(EventKind::Error { message: note, fatal: false });
+        }
         let msg = json!({
             "type": "user", "session_id": "", "parent_tool_use_id": null,
-            "message": { "role": "user", "content": text },
+            "message": { "role": "user", "content": attachments::claude_content(&text, &attached.images) },
         });
         if !self.write(&msg).await {
             self.emit(EventKind::Error { message: "could not send the prompt: claude's stdin is closed".into(), fatal: false });
@@ -2261,6 +2266,30 @@ mod tests {
 
     fn emitted(events: &mut mpsc::UnboundedReceiver<AdapterEvent>) -> Vec<EventKind> {
         std::iter::from_fn(|| events.try_recv().ok()).map(|e| e.kind).collect()
+    }
+
+    /// An attached image goes out in the user message as an image block before the text; one
+    /// over the size limit stays a path, and the user is told before the turn starts.
+    #[tokio::test]
+    async fn an_attached_image_goes_out_as_an_image_block() {
+        use crate::adapters::attachments::testing::{attach, message, png_of};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        let shot = attach(dir.path(), "shot.png", &png_of(300));
+        let big = attach(dir.path(), "big.png", &png_of(4_000_000));
+        let text = message("Make it look like this.", &[&shot, &big]);
+        actor.on_cmd(AgentCmd::Prompt(text.clone())).await;
+
+        let log = std::fs::read_to_string(dir.path().join("raw.ndjson")).unwrap();
+        let sent: Vec<Value> = log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"].clone()).filter(|l| l["type"] == "user").collect();
+        // The raw log keeps the block without its bytes (`proc::without_image_data`); the
+        // bytes themselves are compared with the recording in attachments.rs.
+        let image = json!({ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "<400 base64 characters left out>" } });
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["message"]["content"], json!([image, { "type": "text", "text": text }]));
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[0], EventKind::Error { message, fatal: false } if message.starts_with("big.png is over 3.5 MB")), "{kinds:?}");
+        assert!(kinds.iter().any(|k| matches!(k, EventKind::TurnStarted { input: Some(input) } if *input == text)), "the turn shows the text: {kinds:?}");
     }
 
     /// Stop always reaches the CLI, and a turn that does not end after it is not waited for

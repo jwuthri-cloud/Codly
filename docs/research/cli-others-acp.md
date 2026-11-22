@@ -106,6 +106,7 @@ a→c  {"id":3,"result":{"sessions":[{"sessionId":"ses_…","cwd":"/…","title"
 - `ClientCapabilities`: `fs.readTextFile`, `fs.writeTextFile`, `terminal` (bool), `session` (client session capabilities), `auth`, `elicitation`, `_meta`. With the unstable `subagents` RFD, also `subagents: {}`.
 - `AgentCapabilities`: `loadSession`, `promptCapabilities{image,audio,embeddedContext}`, `mcpCapabilities{http,sse}` (stdio MCP is mandatory), `sessionCapabilities{list,delete,additionalDirectories,resume,close}`, `auth`, `_meta`.
 - `AuthMethod` is `{id,name,description?}` (type `agent`, the default: the agent runs its own OAuth or browser flow when the client calls `authenticate`) or `{type:"terminal", args[], env{}}`. With `terminal`, the client relaunches the agent binary with those args in a TTY for an interactive login. The registry only lists agents that support one of these two. [V-src registry AUTHENTICATION.md]
+- An image in a prompt is the content block `{type:"image", mimeType, data}`: `data` is the base64 of the file and both fields are required (`uri` and `annotations` are optional). A client may send it only to an agent that reports `promptCapabilities.image`; text and resource links are the only blocks every agent must take. Gemini 0.62 and OpenCode both report `image: true` [V-local `acp-gemini.jsonl`, `acp-opencode.jsonl`]. Not verified: an image block sent to a live agent, and a size limit. [V-docs agentclientprotocol.com/protocol/content, 2026-11-22]
 
 ### 1.6 `session/update` variants
 

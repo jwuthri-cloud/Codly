@@ -30,7 +30,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
-use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, startup};
+use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, attachments, startup};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, Billing, EventKind,
     Id, MessagePhase, PlanStep, Provider, TurnStatus, Usage, new_id, now_ms,
@@ -853,13 +853,19 @@ impl CodexAgent {
         }
     }
 
-    fn input(text: &str) -> Value {
-        json!([{ "type": "text", "text": text, "text_elements": [] }])
+    /// The `input` of a turn: the text, which keeps the paths of its attached files, and the
+    /// attached images as items of their own.
+    async fn input(&self, text: &str) -> Value {
+        let attached = attachments::images(text).await;
+        if let Some(note) = attached.note {
+            self.emit(EventKind::Error { message: note, fatal: false });
+        }
+        attachments::codex_input(text, &attached.images)
     }
 
     async fn start_turn(&mut self, text: String) {
         let Some(tid) = self.thread_id.clone() else { return };
-        let mut params = json!({ "threadId": tid, "input": Self::input(&text) });
+        let mut params = json!({ "threadId": tid, "input": self.input(&text).await });
         if let Some(e) = &self.effort {
             params["effort"] = json!(e);
         }
@@ -897,7 +903,7 @@ impl CodexAgent {
             self.queue.push_back(text);
             return;
         };
-        let params = json!({ "threadId": tid, "input": Self::input(&text), "expectedTurnId": turn });
+        let params = json!({ "threadId": tid, "input": self.input(&text).await, "expectedTurnId": turn });
         self.request("turn/steer", params, Pending::Steer(text)).await;
     }
 
@@ -1998,6 +2004,29 @@ mod tests {
 
     fn emitted(events: &mut mpsc::UnboundedReceiver<AdapterEvent>) -> Vec<EventKind> {
         std::iter::from_fn(|| events.try_recv().ok()).map(|e| e.kind).collect()
+    }
+
+    /// The input of a turn names an attached image as an item of its own beside the text; one
+    /// over the size limit stays a path, and the user is told.
+    #[tokio::test]
+    async fn an_attached_image_is_an_input_item_of_its_own() {
+        use crate::adapters::attachments::testing::{attach, message, png_of};
+        let dir = tempfile::tempdir().unwrap();
+        let (agent, mut events) = fake_agent(&fake_server(dir.path()));
+        let shot = attach(dir.path(), "shot.png", &png_of(300));
+        let big = attach(dir.path(), "big.png", &png_of(4_000_000));
+        let text = message("Make it look like this.", &[&shot, &big]);
+
+        // Written from the schema types of codex-cli 0.166.0 (`app-server generate-ts`):
+        // `TurnStartParams.input` and `TurnSteerParams.input` are `Array<UserInput>`, with the
+        // items `{ "type": "text", text, text_elements }` and `{ "type": "localImage", path }`.
+        let expected = json!([{ "type": "text", "text": text, "text_elements": [] }, { "type": "localImage", "path": shot.to_str().unwrap() }]);
+        assert_eq!(agent.input(&text).await, expected);
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::Error { message, fatal: false }] if message.starts_with("big.png is over 3.5 MB")), "{kinds:?}");
+
+        assert_eq!(agent.input("no files").await, json!([{ "type": "text", "text": "no files", "text_elements": [] }]));
+        assert!(emitted(&mut events).is_empty());
     }
 
     #[tokio::test]

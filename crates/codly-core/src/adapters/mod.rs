@@ -18,6 +18,9 @@
 //! - Status: emit `StatusChanged` on every coarse transition (Thinking when a request
 //!   starts, Working while a tool runs, WaitingApproval, Idle when a turn ends).
 //! - When the process exits, emit `Exited` and stop.
+//! - `AgentCmd::Prompt` is text. The images it names as attached (the composer's `- <path>`
+//!   lines) go to the CLI as images where it takes them, and the text keeps their paths
+//!   (attachments.rs).
 //! - `Interrupt` has a deadline. A turn that does not end in time loses its run: the adapter
 //!   says so (`Error`, not fatal), emits `gave_up`, closes the turn as `Interrupted` and exits.
 //!
@@ -34,6 +37,7 @@
 //! - The shared Codex app-server must be stopped at exit: `codex::shutdown_server()`.
 
 pub mod acp;
+mod attachments;
 pub mod claude;
 pub mod classify;
 pub mod codex;
