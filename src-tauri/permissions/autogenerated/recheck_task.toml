@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recheck-task"
+description = "Enables the recheck_task command without any pre-configured scope."
+commands.allow = ["recheck_task"]
+
+[[permission]]
+identifier = "deny-recheck-task"
+description = "Denies the recheck_task command without any pre-configured scope."
+commands.deny = ["recheck_task"]

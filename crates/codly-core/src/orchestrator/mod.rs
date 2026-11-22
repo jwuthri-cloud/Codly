@@ -194,8 +194,9 @@ struct Inner {
     /// Tasks whose gate is running (one per task at a time) → "run it again when done"
     /// (a worker turn ended while it ran).
     gating: Mutex<HashMap<Id, bool>>,
-    /// Fix rounds used per task (verify, scope, review and conflict feedback); a user retry resets them.
-    fix_rounds: Mutex<HashMap<Id, u32>>,
+    /// Rounds used per task: fix rounds (verify, scope, review feedback) and, apart, merge
+    /// conflict rounds; a user retry resets them.
+    fix_rounds: Mutex<HashMap<Id, gate::Rounds>>,
     /// Reminders sent to a reviewer run that ended without a verdict.
     review_nudges: Mutex<HashMap<Id, u32>>,
     /// Feedback for the next worker run of a task whose worker was not alive.
@@ -457,6 +458,7 @@ impl Core {
         let mut s = settings;
         s.max_parallel = s.max_parallel.clamp(1, 8);
         s.max_per_provider = s.max_per_provider.clamp(1, s.max_parallel);
+        s.verify_timeout_secs = s.verify_timeout_secs.clamp(1, 24 * 3600); // 0 would stop every check at once
         let mut seen = HashSet::new();
         s.worker_providers.retain(|p| seen.insert(*p));
         s.accounts = normalize_accounts(std::mem::take(&mut s.accounts), &self.inner.base_env)?;
@@ -872,6 +874,20 @@ impl Core {
     /// Kanban drag-and-drop. Only user-legal transitions (e.g. backlog ↔ ready, cancel, retry).
     pub async fn move_task(&self, task_id: &str, status: TaskStatus) -> anyhow::Result<Task> {
         self.inner.move_task(task_id, status).await
+    }
+
+    /// Re-run checks, from the card of a blocked or failed task: the gate runs again with no
+    /// worker turn. `allow` names the task's risky verify commands you OK'd. Returns the
+    /// commands that still need your OK (then nothing ran); empty = the checks are running.
+    pub async fn recheck_task(&self, task_id: &str, allow: Vec<String>) -> anyhow::Result<Vec<HeldCheck>> {
+        self.inner.recheck_task(task_id, allow).await
+    }
+
+    /// Merge anyway, from the card of a blocked or failed task: it goes on to the scope
+    /// check, the review and the merge without its verify commands. Your decision and the
+    /// check that failed last stay in the task's record.
+    pub async fn accept_task(&self, task_id: &str) -> anyhow::Result<Task> {
+        self.inner.accept_task(task_id).await
     }
 
     /// Drag an agent onto a task (or None to unassign).

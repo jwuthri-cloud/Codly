@@ -59,6 +59,7 @@ export const DEFAULT_SETTINGS: Settings = {
   paused: false,
   paused_offices: [],
   developer_mode: false,
+  verify_timeout_secs: 600,
   world_ambient: false,
   theme: 'system',
   team: [],

@@ -97,6 +97,7 @@ const SETTINGS: Settings = {
   paused: false,
   paused_offices: [],
   developer_mode: false,
+  verify_timeout_secs: 600,
   world_ambient: false,
   theme: 'system',
   team: [],
@@ -217,6 +218,7 @@ export class MockTransport implements Transport {
         const next = sim.signIns.normalize(a.settings as Settings);
         next.max_parallel = Math.min(8, Math.max(1, next.max_parallel));
         next.max_per_provider = Math.min(next.max_parallel, Math.max(1, next.max_per_provider));
+        next.verify_timeout_secs = Math.min(24 * 3600, Math.max(1, next.verify_timeout_secs));
         next.team = withIds(next.team ?? []);
         sim.settings = next;
         story.syncTeam();
@@ -373,6 +375,10 @@ export class MockTransport implements Transport {
         return story.createTask(String(a.title), String(a.goal ?? ''));
       case 'move_task':
         return story.moveTask(String(a.taskId), a.status as TaskStatus);
+      case 'recheck_task':
+        return story.recheckTask(String(a.taskId));
+      case 'accept_task':
+        return story.acceptTask(String(a.taskId));
       case 'assign_task':
         return story.assignTask(String(a.taskId), (a.agentId as string | null) ?? null);
       case 'task_diff':

@@ -47,6 +47,8 @@
     "allow-breaker-status",
     "allow-reset-breaker",
     "allow-move-task",
+    "allow-recheck-task",
+    "allow-accept-task",
     "allow-assign-task",
     "allow-task-diff",
     "allow-plan-diff",

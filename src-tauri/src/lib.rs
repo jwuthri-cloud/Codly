@@ -138,6 +138,8 @@ pub fn run() {
             commands::set_agent_look,
             commands::create_task,
             commands::move_task,
+            commands::recheck_task,
+            commands::accept_task,
             commands::assign_task,
             commands::task_diff,
             commands::plan_diff,

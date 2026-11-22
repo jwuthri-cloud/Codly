@@ -125,6 +125,8 @@
     ['use_my_claude_setup', 'Use my Claude Code setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings. Applies to agents started after the change; approvals still go through Codly.'],
   ];
   const REVIEW_TOGGLES = [['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.']];
+  // Seconds; the value in use is always one of the choices.
+  const checkLimits = $derived([...new Set([300, 600, 1200, 1800, 3600, 7200, s.verify_timeout_secs])].sort((a, b) => a - b));
 </script>
 
 <Dialog label="Settings" width={820} style="height: min(760px, calc(100vh - 64px))" onclose={() => (ui.settingsOpen = false)}>
@@ -280,6 +282,15 @@
     <section>
       <h3 class="eyebrow">Review</h3>
       {@render toggles(REVIEW_TOGGLES)}
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Time limit for checks</span>
+          <span class="desc">How long one verify command may run before Codly stops it. A check that runs out of time blocks its task for you; it does not go back to the worker.</span>
+        </div>
+        <select class="field" value={String(s.verify_timeout_secs)} aria-label="Time limit for checks" onchange={(e) => set({ verify_timeout_secs: Number(e.currentTarget.value) })}>
+          {#each checkLimits as secs (secs)}<option value={String(secs)}>{secs % 60 ? `${secs} s` : `${secs / 60} min`}</option>{/each}
+        </select>
+      </div>
     </section>
 
     <BreakerSection />

@@ -1120,14 +1120,17 @@ impl Inner {
         let wt = plan.integration_worktree.as_deref().map(PathBuf::from);
         let mut failed = vec![];
         if let Some(wt) = &wt {
+            let mode = self.approval_mode_for(ws_id, Some(&plan.thread));
             for cmd in &checks {
-                let v = self.run_verify(wt, cmd).await;
+                let v = self.run_verify(wt, cmd, mode).await;
                 self.emit(
                     ws_id,
                     row(None, None, None, EventKind::Verified { command: cmd.clone(), ok: v.ok, exit_code: v.code, tail: v.tail }),
                 )?;
-                if !v.ok {
+                if !v.ok && v.held.is_empty() {
                     failed.push(cmd.clone());
+                } else if !v.ok {
+                    failed.push(format!("{cmd} (not run, it needs your OK: {})", v.held.join(", ")));
                 }
             }
         }

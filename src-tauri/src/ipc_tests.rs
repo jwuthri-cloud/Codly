@@ -54,6 +54,8 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::update_settings,
             commands::create_task,
             commands::move_task,
+            commands::recheck_task,
+            commands::accept_task,
             commands::list_memories,
             commands::add_memory,
             commands::list_triples,
@@ -95,6 +97,11 @@ fn commands_round_trip_with_frontend_arg_names() {
     let task = invoke(&wv, "create_task", json!({ "title": "Board task", "goal": "Try the board" })).unwrap();
     let moved = invoke(&wv, "move_task", json!({ "taskId": task["id"], "status": "cancelled" })).unwrap();
     assert_eq!(moved["status"], "cancelled");
+    // The task card's Re-run checks and Merge anyway: only for a task the gate stopped.
+    let e = invoke(&wv, "recheck_task", json!({ "taskId": task["id"], "allow": [] })).unwrap_err();
+    assert!(e.to_string().contains("only a blocked or failed task"), "{e}");
+    let e = invoke(&wv, "accept_task", json!({ "taskId": task["id"] })).unwrap_err();
+    assert!(e.to_string().contains("only a blocked or failed task"), "{e}");
 
     let m = invoke(&wv, "add_memory", json!({ "text": "We use pnpm.", "scope": "project", "kind": "decision" })).unwrap();
     assert_eq!(m["kind"], "decision");

@@ -163,6 +163,13 @@ untrusted") and can never change approvals or policy.
   shell commands routed to the broker; Lead and reviewers read-only.
 - Approval broker: rules (path outside worktree, `rm -rf`, `git push`, `curl | sh`, `sudo` →
   always ask), then you. No silent timeouts; choices mirror the provider's.
+- The gate runs the plan's verify and integration commands (the Lead wrote them) through the
+  same risk rules: one with a risk is not run until you allow it on its task (an integration
+  check is refused). Full access runs them. The rules read the command's text only: a test
+  runner still runs the worker's code, unsandboxed.
+- The gate is fair to the worker: a merge conflict has its own rounds (3) apart from the fix
+  rounds, and a check that runs out of time (Settings, 10 min by default) blocks the task for
+  you. From its card you re-run the checks or merge anyway; the failure stays in its record.
 - Clean-room profile for untrusted repos (`--setting-sources`, `--strict-mcp-config`).
 - Never deletes a dirty or unmerged worktree; never pushes.
 

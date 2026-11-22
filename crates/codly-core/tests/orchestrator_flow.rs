@@ -1206,7 +1206,9 @@ async fn a_task_that_is_merging_cannot_be_cancelled() {
     let (checking, checked) = (dir.path().join("checking"), dir.path().join("checked"));
     let verify = format!("touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; grep -q hello hello.txt", checking.display(), checked.display());
     let core = start(dir.path(), FakeSpawner { log, lead: planning_lead_with(&["hello.txt"], &verify), worker }).await;
-    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    // Full access: the gate runs a check that touches files outside the worktree without asking.
+    let settings = Settings { auto_run_plans: true, lead_followups: false, approval_mode: ApprovalMode::Full, ..Default::default() };
+    core.update_settings(settings).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     core.send_chat("lead", "Please add a hello file").await.unwrap();
     let (task, _) = wait_for("the checks to run", 20, async || task_status(&core).await.filter(|_| checking.exists())).await;
@@ -1736,8 +1738,15 @@ async fn a_steer_during_verify_is_reviewed_before_merging() {
     let lead = planning_lead_with(&["*.txt"], &verify);
     let spawner = FakeSpawner { log: log.clone(), lead, worker: by_role(worker, reviewer) };
     let core = start_with_clis(dir.path(), spawner, vec![claude(), codex]).await;
-    let settings =
-        Settings { auto_run_plans: true, lead_followups: false, review_gate: true, worker_providers: vec![Provider::Claude], ..Default::default() };
+    // Full access: the gate runs a check that touches files outside the worktree without asking.
+    let settings = Settings {
+        auto_run_plans: true,
+        lead_followups: false,
+        review_gate: true,
+        worker_providers: vec![Provider::Claude],
+        approval_mode: ApprovalMode::Full,
+        ..Default::default()
+    };
     core.update_settings(settings).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     core.send_chat("lead", "Please add a hello file").await.unwrap();

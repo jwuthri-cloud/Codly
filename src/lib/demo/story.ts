@@ -11,6 +11,7 @@
 import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
 import type { Citation } from '../gen/Citation';
+import type { HeldCheck } from '../gen/HeldCheck';
 import type { Plan } from '../gen/Plan';
 import type { Provider } from '../gen/Provider';
 import type { Task } from '../gen/Task';
@@ -1071,6 +1072,43 @@ export class Story {
     if ((stop || cancel) && t.assignee && this.running.has(t.assignee) && sim.agents.get(t.assignee)?.task_id === id) sim.cancelled.add(t.assignee);
     sim.decision('move', 'human', `You moved ${t.key} to ${status}`, { task: t.key, from, to: status }, { task: id });
     if (status === 'ready' && !unmet.length) void this.autoStart(next);
+    return next;
+  }
+
+  /** Re-run checks, from a stopped task's card. No demo check has a risk, so none waits for your OK. */
+  recheckTask(id: string): HeldCheck[] {
+    const t = this.stoppedTask(id);
+    this.sim.decision('gate', 'human', `You re-ran the checks of ${t.key}`, { task: t.key }, { task: id });
+    this.landStopped(t, true);
+    return [];
+  }
+
+  /** Merge anyway, from a stopped task's card: it lands without its checks. */
+  acceptTask(id: string): Task {
+    const t = this.stoppedTask(id);
+    this.sim.decision('gate', 'human', `You chose to merge ${t.key} anyway, without its checks`, { task: t.key, not_run: t.verify }, { task: id });
+    return this.landStopped(t, false);
+  }
+
+  /** Like the core: only a blocked or failed task. */
+  private stoppedTask(id: string): Task {
+    const t = this.sim.tasks.get(id);
+    if (!t) throw new Error('Unknown task');
+    if (t.status !== 'blocked' && t.status !== 'failed') throw new Error(`${t.key} is ${t.status}; only a blocked or failed task can be checked again`);
+    return t;
+  }
+
+  /** The demo's short gate for a stopped task: its checks (when asked for), then done. */
+  private landStopped(t: Task, verify: boolean): Task {
+    const sim = this.sim;
+    const next = sim.patchTask(t.id, { status: 'verifying', status_reason: verify ? 'Codly is checking the work' : 'Merging without its checks' });
+    void (async () => {
+      await sim.sleep(1200);
+      // Stopped or cancelled meanwhile: the gate ends there.
+      if (sim.tasks.get(t.id)?.status !== 'verifying') return;
+      if (verify) for (const command of t.verify) sim.emit({ type: 'verified', command, ok: true, exit_code: 0, tail: '' }, { agent: t.assignee, task: t.id });
+      sim.patchTask(t.id, { status: 'done', status_reason: null });
+    })();
     return next;
   }
 

@@ -6,6 +6,7 @@ import { api, isTauriApp } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { AccountConfig } from '../gen/AccountConfig';
 import type { ApprovalChoice } from '../gen/ApprovalChoice';
+import type { HeldCheck } from '../gen/HeldCheck';
 import type { MemoryKind } from '../gen/MemoryKind';
 import type { MemoryScope } from '../gen/MemoryScope';
 import type { Provider } from '../gen/Provider';
@@ -252,6 +253,18 @@ export async function resolveApproval(approvalId: string, choice: ApprovalChoice
 export async function moveTask(taskId: string, status: TaskStatus) {
   const ws = store.workspace?.id;
   const t = await attempt(`move the task to ${TASK_STATUS_LABEL[status]}`, () => api.moveTask(taskId, status));
+  if (t && store.isOpen(ws)) store.upsertTask(t);
+}
+
+/** Re-run a stopped task's checks. Answers the commands that need your OK first (none = the checks are running). */
+export async function recheckTask(taskId: string, allow: string[] = []): Promise<HeldCheck[]> {
+  return (await attempt('re-run the checks', () => api.recheckTask(taskId, allow))) ?? [];
+}
+
+/** Merge anyway: the task goes on without its checks. */
+export async function acceptTask(taskId: string) {
+  const ws = store.workspace?.id;
+  const t = await attempt('merge the task', () => api.acceptTask(taskId));
   if (t && store.isOpen(ws)) store.upsertTask(t);
 }
 
