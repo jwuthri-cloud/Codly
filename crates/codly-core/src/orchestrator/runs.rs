@@ -110,6 +110,9 @@ impl Inner {
                     last_prompt: None,
                     answers: vec![],
                     answer_only: false,
+                    failed_turns: 0,
+                    last_error: None,
+                    continue_owed: None,
                 },
             );
         }
@@ -245,6 +248,12 @@ impl Inner {
     pub(super) fn send_prompt(&self, agent_id: &str, text: String) -> Result<()> {
         // A pending "stop after this step" or a pause holds every prompt until the resume.
         let Some(text) = self.route_prompt(agent_id, text) else { return Ok(()) };
+        self.deliver_prompt(agent_id, text)
+    }
+
+    /// `send_prompt` past the agent's controls: for what it must read although it is held (the
+    /// circuit breaker's note to a worker it pauses).
+    pub(super) fn deliver_prompt(&self, agent_id: &str, text: String) -> Result<()> {
         let wrapped = self.with_briefing(agent_id, &text); // a hired agent's standing goal, on every prompt
         let mut live = lock(&self.live);
         let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;

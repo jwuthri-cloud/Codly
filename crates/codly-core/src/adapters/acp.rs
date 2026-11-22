@@ -1042,13 +1042,19 @@ impl AcpNormalizer {
             self.usage.output_tokens += q["output_tokens"].as_i64().unwrap_or(0);
             out.push(EventKind::UsageUpdated { usage: self.usage.clone() });
         }
-        let status = match r["stopReason"].as_str() {
+        let reason = r["stopReason"].as_str();
+        let status = match reason {
             _ if self.interrupt_requested => TurnStatus::Interrupted,
             Some("end_turn") => TurnStatus::Completed,
             Some("cancelled") => TurnStatus::Interrupted,
             Some("max_turn_requests") => TurnStatus::MaxTurns,
             _ => TurnStatus::Failed,
         };
+        // A failed turn says why (max_tokens, refusal, …): Codly shows it and tells the worker.
+        if status == TurnStatus::Failed {
+            let message = format!("the agent stopped before it finished: {}", reason.unwrap_or("no stop reason given"));
+            out.push(EventKind::Error { message, fatal: false });
+        }
         self.close_turn(status, &mut out);
         out
     }
@@ -1286,6 +1292,11 @@ mod tests {
         norm.interrupt_requested = true;
         let ev = norm.turn_ended(&json!({ "stopReason": "cancelled" }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Interrupted, .. })));
+        assert!(!ev.iter().any(|e| matches!(e, EventKind::Error { .. })), "an interrupt is no error: {ev:?}");
+        // A turn that stopped short fails, and says why before it ends.
+        let ev = norm.turn_ended(&json!({ "stopReason": "max_tokens" }));
+        let end = ev.iter().position(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Failed, .. })).unwrap();
+        assert!(ev[..end].iter().any(|e| matches!(e, EventKind::Error { message, fatal: false } if message.contains("max_tokens"))), "{ev:?}");
 
         let ev = norm.on_update(&json!({ "sessionUpdate": "plan", "entries": [{ "content": "a", "priority": "high", "status": "in_progress" }] }));
         assert!(matches!(&ev[0], EventKind::PlanUpdated { steps } if steps[0].status == "in_progress"));
