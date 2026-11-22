@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use super::planner::{self, PlanInput};
+use super::required_checks::Required;
 use super::retry::Failure;
 use super::runs::{RunReq, new_session};
 use super::scheduler::{self, Action, AgentPick, SchedInput};
@@ -876,7 +877,12 @@ impl Inner {
         let memory_pack = memory::panel::with_memory_file(memory_pack, &self.data("memory"), &agent.id);
         let history = if history && member.is_some() { self.member_history(&ws.id, &agent.id) } else { vec![] };
         let role = member.map(|m| m.role.clone());
-        prompts::task_brief(&prompts::Brief { task, plan, deps, pointer_pack, memory_pack, role, history })
+        let brief = prompts::task_brief(&prompts::Brief { task, plan, deps, pointer_pack, memory_pack, role, history });
+        // The gate runs the repo's required checks after the task's own: the worker is told.
+        match self.required_checks(&ws.id, Path::new(&ws.repo_path)) {
+            Ok(Required::Run(cmds)) => format!("{brief}{}", prompts::required_checks_note(&cmds, &task.verify)),
+            _ => brief,
+        }
     }
 
     /// Blackboard notes of the dependency tasks, read from events (used while the memory
@@ -1231,6 +1237,8 @@ impl Inner {
         let mut failed = vec![];
         // Not run: the approval rules see a risk in them, and nobody could allow them.
         let mut refused: Vec<HeldCheck> = vec![];
+        // Your required checks are on and did not run: what to say about it.
+        let mut unchecked = None;
         if let Some(wt) = &wt {
             let mode = self.approval_mode_for(ws_id, Some(&plan.thread));
             for cmd in &checks {
@@ -1245,6 +1253,11 @@ impl Inner {
                     failed.push(cmd.clone());
                 }
             }
+            // Then the repo's required checks (yours), on the merged work.
+            let ran: Vec<String> = checks.iter().filter(|c| !refused.iter().any(|h| h.command == **c)).cloned().collect();
+            let required = self.required_on_plan(&ws, wt, &ran).await?;
+            failed.extend(required.failed);
+            unchecked = required.not_run;
         }
         // Only a check that ran and failed fails the plan. One Codly refused to run leaves it
         // done, so you can still merge it: its message says what was not checked.
@@ -1291,6 +1304,11 @@ impl Inner {
                 if n == 1 { "" } else { "s" },
                 if files == 1 { "" } else { "s" }
             )
+        };
+        // Required checks that did not run are said: silence would read as a pass.
+        let text = match unchecked {
+            Some(why) => format!("{text} {why}"),
+            None => text,
         };
         // The status before the news, and only if the plan is still integrating: one you
         // cancelled while its checks ran stays cancelled and gets no "Plan done".

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-required-checks"
+description = "Enables the required_checks command without any pre-configured scope."
+commands.allow = ["required_checks"]
+
+[[permission]]
+identifier = "deny-required-checks"
+description = "Denies the required_checks command without any pre-configured scope."
+commands.deny = ["required_checks"]

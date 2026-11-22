@@ -1,5 +1,7 @@
-// Settings → Safety → New worktrees: what you can do with the repo's setup script now.
+// Settings → Safety: what you can do now with a text from the repo that Codly runs only once you
+// turned it on (New worktrees: the setup script; Required checks: the checks file).
 
+import type { RequiredChecks } from '../gen/RequiredChecks';
 import type { WorktreeSetup } from '../gen/WorktreeSetup';
 
 export interface SetupChoices {
@@ -12,6 +14,6 @@ export interface SetupChoices {
   ask: boolean;
 }
 
-export function setupChoices(s: WorktreeSetup): SetupChoices {
+export function setupChoices(s: WorktreeSetup | RequiredChecks): SetupChoices {
   return { on: s.on ? null : s.sha, off: s.on || s.changed, ask: s.changed };
 }

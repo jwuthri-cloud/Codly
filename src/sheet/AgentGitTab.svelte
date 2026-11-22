@@ -1,4 +1,4 @@
-<!-- Git: the agent's worktree. Changed files, local branches, recent commits; a solo agent's branch merges into yours from here. -->
+<!-- Git: the agent's worktree. Changed files, local branches, recent commits; a solo agent's work is checked (your required checks) and its branch merges into yours from here. -->
 <script lang="ts">
   import { api } from '../lib/api';
   import type { Agent } from '../lib/gen/Agent';
@@ -11,6 +11,7 @@
   import RepoSyncBar from '../components/RepoSyncBar.svelte';
   import PullRequestStep from '../components/PullRequestStep.svelte';
   import AgentCheckpoints from './AgentCheckpoints.svelte';
+  import AgentChecks from './AgentChecks.svelte';
 
   interface Props {
     agent: Agent;
@@ -66,6 +67,7 @@
       <button class="icon-btn" aria-label="Refresh" data-tip="Refresh" disabled={busy} onclick={() => load(agent.id)}><Icon name="refresh" size={13} /></button>
     </span>
   </div>
+  {#if agent.role === 'solo' && view?.worktree}<AgentChecks {agent} {resting} />{/if}
   {#if agent.role === 'solo'}<RepoSyncBar refresh={merges} agentId={agent.id} />{/if}
   <!-- Only for Codly's own branch: the core pushes no other one from here. -->
   {#if agent.role === 'solo' && view?.branch?.startsWith('codly/')}<PullRequestStep source={{ kind: 'agent', id: agent.id }} wait={resting ? null : 'Wait until its turn ends'} />{/if}

@@ -37,8 +37,11 @@ pub const INCLUDE_FILE: &str = ".worktreeinclude";
 /// The repo's setup script, relative to the repo root.
 pub const SETUP_FILE: &str = ".codly/setup.sh";
 /// `.codly/.gitignore`: git sees nothing of what Codly keeps in `.codly/` (pasted files),
-/// except the setup script, which you commit so that it can be reviewed.
-pub(super) const CODLY_IGNORE: &str = "*\n!/setup.sh\n";
+/// except the setup script and the required checks (`required_checks.rs`), which you commit
+/// so that they can be reviewed.
+pub(super) const CODLY_IGNORE: &str = "*\n!/setup.sh\n!/checks\n";
+/// `.codly/.gitignore` as earlier versions of Codly wrote it.
+const OLD_CODLY_IGNORES: [&str; 2] = ["*\n", "*\n!/setup.sh\n"];
 /// Copied when present and git-ignored, with or without an include file: installed
 /// dependencies and local env files at the repo root. A later line wins, so `!/node_modules/`
 /// in `.worktreeinclude` drops an entry.
@@ -115,7 +118,7 @@ fn port_key(wt: &Path) -> String {
     format!("{PORT_PREFIX}{}", wt.display())
 }
 
-fn fingerprint(text: &str) -> String {
+pub(super) fn fingerprint(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
@@ -223,12 +226,12 @@ fn interpreter(text: &str) -> Vec<&str> {
     if named.is_empty() { vec!["/bin/sh"] } else { named }
 }
 
-/// `.codly/.gitignore` as Codly wrote it before there was a setup script hides that script
-/// from git too (`git add` refuses it). Rewrite that old file, so the script can be
-/// committed and reviewed.
+/// `.codly/.gitignore` as Codly wrote it before there was a setup script (or a checks file)
+/// hides that file from git too (`git add` refuses it). Rewrite that old file, so the script
+/// and the checks can be committed and reviewed.
 pub(super) fn show_setup_file_to_git(repo: &Path) {
     let path = repo.join(".codly/.gitignore");
-    if std::fs::read_to_string(&path).is_ok_and(|old| old == "*\n")
+    if std::fs::read_to_string(&path).is_ok_and(|old| OLD_CODLY_IGNORES.contains(&old.as_str()))
         && let Err(e) = std::fs::write(&path, CODLY_IGNORE)
     {
         tracing::warn!("could not rewrite {}: {e}", path.display());
@@ -709,6 +712,12 @@ mod tests {
         assert_eq!(std::fs::read_to_string(repo.join(".codly/.gitignore")).unwrap(), CODLY_IGNORE);
         assert_eq!(sh(&repo, &["status", "--porcelain", "-uall"]), "?? .codly/setup.sh", "the script, and nothing else of .codly/");
         core.shutdown().await;
+
+        // The file of a Codly that knew the setup script only hid the required checks.
+        write(&repo.join(".codly/.gitignore"), "*\n!/setup.sh\n");
+        write(&repo.join(".codly/checks"), "pnpm test\n");
+        show_setup_file_to_git(&repo);
+        assert_eq!(sh(&repo, &["status", "--porcelain", "-uall"]), "?? .codly/checks\n?? .codly/setup.sh");
 
         // A `.codly/.gitignore` you wrote yourself is left as it is.
         write(&repo.join(".codly/.gitignore"), "*\n!/notes.md\n");

@@ -68,6 +68,8 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::undo_merge,
             commands::repo_sync,
             commands::worktree_setup,
+            commands::required_checks,
+            commands::check_agent,
             commands::breaker_config,
             commands::set_breaker_config,
             commands::breaker_status,
@@ -237,6 +239,16 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "worktree_setup", json!({ "set": { "allow": "abc" } })).unwrap_err();
     assert!(e.to_string().contains("no .codly/setup.sh"), "{e}");
     assert_eq!(invoke(&wv, "worktree_setup", json!({ "set": { "allow": null } })).unwrap()["on"], false);
+
+    // Required checks: no .codly/checks in this repo, so nothing is on, nothing can be turned
+    // on, and "Check the work" names an agent (the key the Git tab sends).
+    let checks = invoke(&wv, "required_checks", json!({ "set": null })).unwrap();
+    assert_eq!(checks, json!({ "text": null, "sha": null, "commands": [], "on": false, "changed": false, "problem": null }));
+    let e = invoke(&wv, "required_checks", json!({ "set": { "allow": "abc" } })).unwrap_err();
+    assert!(e.to_string().contains("no .codly/checks"), "{e}");
+    assert_eq!(invoke(&wv, "required_checks", json!({ "set": { "allow": null } })).unwrap()["on"], false);
+    let e = invoke(&wv, "check_agent", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent"), "{e}");
 
     // Budgets: the limits and the status with the fields Settings reads, and a plan's total by
     // the key the plan cards send.
