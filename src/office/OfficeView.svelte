@@ -356,7 +356,8 @@
 
   // Home and back ticks only while the office can be seen: not in Work mode or on the map, not
   // while the window is hidden. Seen again, it ticks at once: sims.ts brings energy and morale
-  // up to now from the clock, so the time away is not lost. Hidden, what it knows is saved.
+  // up to now from the clock, so the time away is not lost. Hidden, what it knows is saved, and
+  // only an event from an agent at home ticks it (see the event subscription below).
   $effect(() => {
     if (!engine || hidden || windowHidden) return;
     untrack(() => rest.set(true));
@@ -382,6 +383,10 @@
     if (!e) return;
     return sub((ev) => {
       e.push(ev);
+      // The office is hidden, so the clock does not tick. An agent at home that is heard from
+      // (its time was up and the core gave it work, or it was called in) is back now, not when
+      // the office is shown: from here on its work tires it like everyone else's.
+      if (!rest.on && sims.atHome(ev)) restTick();
       sims.ingest(ev);
       seeOffer(ev);
     });
