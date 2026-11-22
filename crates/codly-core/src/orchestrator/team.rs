@@ -606,18 +606,14 @@ impl Inner {
             }
             "started a read-only chat"
         };
-        let steer = self.would_steer(&agent.id);
         self.send_prompt(&agent.id, prompt)?;
         if let Some(l) = lock(&self.live).get_mut(&agent.id) {
             // The message a run was started for is its first turn, ahead of what was sent while
             // it started. Any other one is the last in the queue, behind that first message if
-            // it has not gone out yet (`Live::waited`).
+            // it has not gone out yet (`Live::waited`). One that goes into the running turn
+            // instead of a turn of its own is due a turn sooner (`track_live`, PromptSteered).
             let behind_first = (l.starting.is_some() || !l.waited.is_empty()) as u64;
-            let due = match (first, steer) {
-                (true, _) => 1,
-                (_, true) => l.turns + 1,
-                _ => l.turns + l.turn_active as u64 + l.queued as u64 + behind_first,
-            };
+            let due = if first { 1 } else { l.turns + l.turn_active as u64 + l.queued as u64 + behind_first };
             l.answers.push(Answer { due, ws_id: ws.id.clone(), thread });
         }
         Ok(json!({ "ok": true, "delivery": delivery, "note": format!("{}'s answer arrives as a later [Codly] message.", agent.name) }))

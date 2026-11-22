@@ -172,8 +172,8 @@ export type AgentLive = {
   searches: { query: string; output: string }[];
   session: { provider: Provider; model: string | null; cwd: string; cliVersion: string | null; tools: string[]; ts: number } | null;
   turn: { startedAt: number; input: string | null; endedAt: number | null; status: string | null } | null;
-  /** Turns in order; `input` is the prompt Codly sent (it contains the user's words verbatim). */
-  turns: { start: number; end: number | null; input: string | null }[];
+  /** Turns in order; `input` is the prompt Codly sent (it contains the user's words verbatim), `steers` the prompts the turn took in while it ran. */
+  turns: { start: number; end: number | null; input: string | null; steers?: { ts: number; input: string }[] }[];
   statusSince: number;
   lastOutput: { callId: string; text: string; ts: number; ok: boolean | null } | null;
   errors: { message: string; fatal: boolean; ts: number }[];
@@ -792,6 +792,14 @@ class CodlyStore {
           l.turn = { startedAt: ev.ts, input: k.input, endedAt: null, status: null };
           l.turns = [...l.turns, { start: ev.ts, end: null, input: k.input }];
           if (aid) l.turns = this.tail(aid, l.turns, 200);
+        }
+        break;
+      case 'prompt_steered':
+        // The running turn took this prompt in: no turn of its own will carry it (state/queue.ts).
+        if (l) {
+          const t = l.turns;
+          const open = t[t.length - 1];
+          if (open && open.end == null) l.turns = [...t.slice(0, -1), { ...open, steers: [...(open.steers ?? []), { ts: ev.ts, input: k.input }] }];
         }
         break;
       case 'turn_completed':

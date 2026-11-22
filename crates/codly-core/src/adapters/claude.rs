@@ -10,8 +10,17 @@
 //!   `SessionStarted` is emitted twice: at spawn from the `initialize` handshake (tools empty)
 //!   and once more from `system/init`. Treat it as an upsert.
 //!
-//! Prompts are queued Codly-side while a turn runs, so every `AgentCmd::Prompt` is exactly one
-//! turn with its own `TurnStarted` and `TurnCompleted`.
+//! Turns follow the CLI's own lines (recorded on 2.1.311: cli-claude-stream-json-2.1.311 §1, §5):
+//! - Every user message carries a `uuid`. A prompt for an idle CLI starts a turn at once. One
+//!   sent while a turn runs is written at once too: the CLI keeps it and takes it into the
+//!   running turn at the next tool boundary (`PromptSteered`), or runs it as a turn of its own
+//!   when the turn ends first (`TurnStarted`). Its `command_lifecycle` line (`started`) says
+//!   which; until then the prompt waits and the orchestrator counts it as queued.
+//! - Codly holds a prompt back until the turn ends only when the CLI has no such lines, when a
+//!   stop is on its way (the prompt after an interrupt is the next turn), and for a slash
+//!   command (recorded only as a turn of its own).
+//! - The CLI starts a turn by itself when a background task ends. `system/init` opens every
+//!   turn, so one that comes while no turn is open is such a turn: `TurnStarted` with no input.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -189,6 +198,8 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         stderr,
         norm,
         queue: VecDeque::new(),
+        waiting: Vec::new(),
+        lifecycle: false,
         turn_active: false,
         next_req: 0,
         stage: Stage::Running,
@@ -279,7 +290,13 @@ struct Actor {
     pgid: i32,
     stderr: StderrTail,
     norm: ClaudeNormalizer,
+    /// Prompts Codly holds until the CLI can take them (`can_steer`), oldest first.
     queue: VecDeque<String>,
+    /// Prompts written while a turn ran, by the uuid Codly put on them: the CLI has them, and
+    /// no turn took them yet.
+    waiting: Vec<(String, String)>,
+    /// The CLI reports what it does with each user message (`msg_lifecycle_v1` in `system/init`).
+    lifecycle: bool,
     turn_active: bool,
     next_req: u64,
     stage: Stage,
@@ -416,6 +433,19 @@ impl Actor {
             }
             return;
         }
+        if v["type"] == "command_lifecycle" {
+            return self.on_lifecycle(&v).await;
+        }
+        let init = v["type"] == "system" && v["subtype"] == "init";
+        if init {
+            self.lifecycle = v["capabilities"].as_array().is_some_and(|c| c.iter().any(|x| x.as_str() == Some("msg_lifecycle_v1")));
+        }
+        // No prompt of Codly's opened this turn: the CLI started it by itself (a background task
+        // that ended woke it). `system/init` opens every turn, and a `result` ends one: it never
+        // comes for a turn that is not open.
+        if !self.turn_active && (init || v["type"] == "result") {
+            self.open_turn(None);
+        }
         let events = self.norm.on_message(&v);
         let turn_done = events.iter().any(|e| matches!(e, EventKind::TurnCompleted { .. }));
         for e in events {
@@ -430,10 +460,72 @@ impl Actor {
                 self.close_stdin();
             } else if self.stage == Stage::Running {
                 self.deadline = None; // an interrupted turn ended in time
-                if let Some(next) = self.queue.pop_front() {
-                    self.send_prompt(next).await;
+                self.flush().await;
+            }
+        } else if init && self.stage == Stage::Running {
+            self.flush().await; // what was held until the CLI said it reports on its messages
+        }
+    }
+
+    /// `command_lifecycle`: what the CLI does with a user message, named by the uuid Codly put
+    /// on it. Only the prompts written while a turn ran are followed here: the one that opened
+    /// its turn was announced when it was written.
+    async fn on_lifecycle(&mut self, v: &Value) {
+        let Some(at) = self.waiting.iter().position(|(uuid, _)| v["command_uuid"] == uuid.as_str()) else { return };
+        match v["state"].as_str() {
+            Some("started") => {
+                let (_, text) = self.waiting.remove(at);
+                if self.turn_active {
+                    self.emit(EventKind::PromptSteered { input: text });
+                } else {
+                    self.open_turn(Some(&text));
                 }
             }
+            // The CLI dropped it before a turn took it: it is sent again, as a turn of its own.
+            Some("cancelled") => {
+                let (_, text) = self.waiting.remove(at);
+                self.queue.push_front(text);
+                if !self.busy() && self.stage == Stage::Running {
+                    self.flush().await;
+                }
+            }
+            _ => {} // "queued": it waits. "completed": the turn's `result` says so.
+        }
+    }
+
+    /// A turn opens: with the prompt that started it, or with none when the CLI started it.
+    fn open_turn(&mut self, input: Option<&str>) {
+        self.turn_active = true;
+        let events = match input {
+            Some(text) => self.norm.turn_started(text),
+            None => self.norm.turn_self_started(),
+        };
+        for e in events {
+            self.emit(e);
+        }
+    }
+
+    /// The CLI has work it knows of: a turn runs, or prompts wait in it for their turn.
+    fn busy(&self) -> bool {
+        self.turn_active || !self.waiting.is_empty()
+    }
+
+    /// May this prompt be written to a busy CLI? Only when the CLI says what it does with it
+    /// (`command_lifecycle`), when no stop is on its way (the prompt behind an interrupt is the
+    /// next turn, not a part of the stopped one), and when it is no slash command (those are
+    /// recorded only as a turn of their own).
+    fn can_steer(&self, text: &str) -> bool {
+        self.lifecycle && !self.norm.interrupt_requested && !text.starts_with('/')
+    }
+
+    /// Send what Codly holds, oldest first, as far as the CLI can take it now.
+    async fn flush(&mut self) {
+        while let Some(next) = self.queue.front() {
+            if self.busy() && !self.can_steer(next) {
+                break;
+            }
+            let Some(text) = self.queue.pop_front() else { break };
+            self.send_prompt(text).await;
         }
     }
 
@@ -453,11 +545,8 @@ impl Actor {
                 if self.stage != Stage::Running {
                     return;
                 }
-                if self.turn_active {
-                    self.queue.push_back(text);
-                } else {
-                    self.send_prompt(text).await;
-                }
+                self.queue.push_back(text);
+                self.flush().await;
             }
             AgentCmd::Interrupt => {
                 if self.stage != Stage::Running {
@@ -488,18 +577,22 @@ impl Actor {
         }
     }
 
+    /// Write a prompt to the CLI. An idle CLI starts a turn with it at once. A busy one keeps
+    /// it, and its `command_lifecycle` lines say when a turn takes it (`on_lifecycle`).
     async fn send_prompt(&mut self, text: String) {
+        let uuid = uuid::Uuid::new_v4().to_string();
         let msg = json!({
-            "type": "user", "session_id": "", "parent_tool_use_id": null,
+            "type": "user", "session_id": "", "parent_tool_use_id": null, "uuid": uuid,
             "message": { "role": "user", "content": text },
         });
         if !self.write(&msg).await {
             self.emit(EventKind::Error { message: "could not send the prompt: claude's stdin is closed".into(), fatal: false });
             return;
         }
-        self.turn_active = true;
-        for e in self.norm.turn_started(&text) {
-            self.emit(e);
+        if self.busy() {
+            self.waiting.push((uuid, text));
+        } else {
+            self.open_turn(Some(&text));
         }
     }
 
@@ -538,8 +631,9 @@ impl Actor {
             // that ignores it. End the process; the session resumes with the next run.
             Stage::Running => {
                 self.interrupt_failed = true;
-                let unsent = super::unsent_note(self.queue.len());
+                let unsent = super::unsent_note(self.queue.len() + self.waiting.len());
                 self.queue.clear();
+                self.waiting.clear();
                 self.emit(EventKind::Error {
                     message: format!(
                         "Claude did not stop within {} s, so Codly ended its process. The session is kept: its next run resumes it.{unsent}",
@@ -846,7 +940,16 @@ impl ClaudeNormalizer {
 
     /// The actor sent a user message: a new turn starts.
     pub fn turn_started(&mut self, text: &str) -> Vec<EventKind> {
-        let mut out = vec![EventKind::TurnStarted { input: Some(text.to_string()) }];
+        self.turn_opened(Some(text.to_string()))
+    }
+
+    /// The CLI started a turn by itself (a background task that ended woke it): no prompt.
+    pub fn turn_self_started(&mut self) -> Vec<EventKind> {
+        self.turn_opened(None)
+    }
+
+    fn turn_opened(&mut self, input: Option<String>) -> Vec<EventKind> {
+        let mut out = vec![EventKind::TurnStarted { input }];
         self.interrupt_requested = false;
         self.api_failure = None;
         self.turn_error = None;
@@ -869,6 +972,8 @@ impl ClaudeNormalizer {
             // elapsed-time heartbeat only; Claude has no live command output (CRITIQUE G7)
             "tool_progress" => {}
             "control_response" => {}
+            // what the CLI does with each user message: the actor follows it (`on_lifecycle`)
+            "command_lifecycle" => {}
             other => out.push(EventKind::Unknown { raw_type: if other.is_empty() { "untyped".into() } else { other.into() } }),
         }
         out
@@ -2242,6 +2347,8 @@ mod tests {
             stderr: StderrTail::default(),
             norm: ClaudeNormalizer::new(&spec(Role::Worker, false), "s".into()),
             queue: VecDeque::new(),
+            waiting: Vec::new(),
+            lifecycle: false,
             turn_active: false,
             next_req: 0,
             stage: Stage::Running,
@@ -2321,5 +2428,218 @@ mod tests {
         assert!(actor.turn_active && actor.queue.is_empty());
         // No interrupt is pending any more: an exit now is a failed turn.
         assert_eq!(actor.unfinished_turn().0, TurnStatus::Failed);
+    }
+
+    /// The user messages Codly wrote to the CLI so far.
+    fn prompts_sent(dir: &Path) -> Vec<Value> {
+        let log = std::fs::read_to_string(dir.join("raw.ndjson")).unwrap();
+        log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"].clone()).filter(|m| m["type"] == "user").collect()
+    }
+
+    /// The turn accounting in `kinds`, a word per event: "start:<the prompt's first word>"
+    /// ("start" for a turn no prompt started), "steer:<first word>", "end:<status>".
+    fn turns(kinds: &[EventKind]) -> Vec<String> {
+        let word = |text: &str| text.split_whitespace().next().unwrap_or_default().to_string();
+        kinds
+            .iter()
+            .filter_map(|k| match k {
+                EventKind::TurnStarted { input: Some(text) } => Some(format!("start:{}", word(text))),
+                EventKind::TurnStarted { input: None } => Some("start".into()),
+                EventKind::PromptSteered { input } => Some(format!("steer:{}", word(input))),
+                EventKind::TurnCompleted { status, .. } => Some(format!("end:{status:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A recording of the real CLI (docs/research/fixtures/claude-2.1.311) played to an actor:
+    /// each user message its driver sent is a prompt for the actor, each stdout line is a line
+    /// the actor reads. The recording's `user-msg-N` (the driver's uuid on its N-th message)
+    /// stands for the uuid the actor put on the N-th message it wrote.
+    struct Replay {
+        actor: Actor,
+        events: mpsc::UnboundedReceiver<AdapterEvent>,
+        lines: VecDeque<Value>,
+        dir: tempfile::TempDir,
+        _child: tokio::process::Child,
+    }
+
+    impl Replay {
+        fn of(name: &str) -> Replay {
+            let dir = tempfile::tempdir().unwrap();
+            let (actor, events, child) = silent_actor(dir.path());
+            Replay { actor, events, lines: fixture(&format!("claude-2.1.311/{name}.ndjson")).into(), dir, _child: child }
+        }
+
+        fn written(&self) -> Vec<Value> {
+            prompts_sent(self.dir.path())
+        }
+
+        /// Play the recording up to and with the first line `stop` accepts (to its end when
+        /// none does). Returns what the actor emitted meanwhile.
+        async fn play(&mut self, stop: impl Fn(&Value) -> bool) -> Vec<EventKind> {
+            while let Some(mut line) = self.lines.pop_front() {
+                let last = stop(&line);
+                if line["_sent"]["type"] == "user" {
+                    let text = line["_sent"]["message"]["content"].as_str().unwrap().to_string();
+                    self.actor.on_cmd(AgentCmd::Prompt(text)).await;
+                } else if line.as_object().is_some_and(|o| !o.keys().any(|k| k.starts_with('_'))) {
+                    let nth = line["command_uuid"].as_str().and_then(|id| id.strip_prefix("user-msg-")).and_then(|n| n.parse::<usize>().ok());
+                    if let Some(n) = nth {
+                        line["command_uuid"] = self.written()[n - 1]["uuid"].clone();
+                    }
+                    self.actor.on_json(line, "codly-0", &mut None).await;
+                }
+                if last {
+                    break;
+                }
+            }
+            emitted(&mut self.events)
+        }
+    }
+
+    const BANANA: &str = "also say the word banana at the end";
+
+    /// A message sent while a turn runs is written at once, with a uuid. It waits in the CLI
+    /// until the next tool boundary, where the running turn takes it: one turn, one result.
+    #[tokio::test]
+    async fn a_message_sent_mid_turn_goes_into_the_running_turn() {
+        let mut cli = Replay::of("mid-turn-user-message-uuid");
+        let kinds = cli.play(|l| l["_sent"]["uuid"] == "user-msg-2").await;
+        assert_eq!(turns(&kinds), ["start:Run"]);
+        let written = cli.written();
+        assert_eq!(written.len(), 2, "not held until the turn ends");
+        assert!(written.iter().all(|m| m["uuid"].as_str().is_some_and(|u| u.len() == 36) && m.get("priority").is_none()), "{written:?}");
+        assert_ne!(written[0]["uuid"], written[1]["uuid"]);
+        assert_eq!(cli.actor.waiting.len(), 1, "it waits until the CLI says a turn took it");
+
+        // the first tool call ends: the CLI takes the message into the turn
+        let kinds = cli.play(|l| l["type"] == "command_lifecycle" && l["state"] == "started").await;
+        assert!(kinds.iter().any(|k| matches!(k, EventKind::ToolCompleted { .. })), "{kinds:?}");
+        assert!(matches!(kinds.last(), Some(EventKind::PromptSteered { input }) if input == BANANA), "{kinds:?}");
+        assert!(cli.actor.waiting.is_empty() && cli.actor.turn_active);
+
+        let kinds = cli.play(|_| false).await;
+        assert_eq!(turns(&kinds), ["end:Completed"], "one result ends the one turn");
+        assert!(kinds.iter().any(|k| matches!(k, EventKind::TurnCompleted { result_text: Some(text), .. } if text == "done banana")), "{kinds:?}");
+        assert!(!cli.actor.turn_active && cli.actor.queue.is_empty());
+    }
+
+    /// A message the running turn did not take is a turn of its own: the CLI starts it when
+    /// the turn has ended, and says so. (This recording made the CLI wait with
+    /// `priority: "later"`. Codly sends no priority; whatever makes the CLI wait, the actor
+    /// follows its lines.)
+    #[tokio::test]
+    async fn a_message_the_turn_did_not_take_is_the_next_turn() {
+        let mut cli = Replay::of("mid-turn-user-message-uuid-later");
+        let kinds = cli.play(|l| l["type"] == "result").await;
+        assert_eq!(turns(&kinds), ["start:Run", "end:Completed"]);
+        assert!(!cli.actor.turn_active && cli.actor.waiting.len() == 1, "between the two turns the message still waits");
+
+        let kinds = cli.play(|_| false).await;
+        assert_eq!(turns(&kinds), ["start:also", "end:Completed"]);
+        assert!(kinds.iter().any(|k| matches!(k, EventKind::TurnStarted { input: Some(text) } if text == BANANA)), "{kinds:?}");
+        assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty());
+    }
+
+    /// The CLI can end the running turn early for a message (`priority: "now"` in this
+    /// recording): the stopped turn ends as interrupted, the `cancelled` line of the message
+    /// that had started it sends nothing again, and the message that waited is the next turn.
+    #[tokio::test]
+    async fn a_turn_stopped_for_a_message_ends_before_that_messages_turn() {
+        let mut cli = Replay::of("mid-turn-user-message-uuid-now");
+        let kinds = cli.play(|_| false).await;
+        assert_eq!(turns(&kinds), ["start:Run", "end:Interrupted", "start:also", "end:Completed"]);
+        assert_eq!(cli.written().len(), 2);
+        assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.queue.is_empty());
+    }
+
+    /// A background task that ends wakes the CLI: it starts a turn no prompt asked for. The
+    /// agent is at work again, that turn has its own start and end, and its result is not
+    /// taken for the answer to a prompt sent meanwhile.
+    #[tokio::test]
+    async fn a_turn_the_cli_starts_by_itself_has_its_own_start_and_end() {
+        let mut cli = Replay::of("background-wakeup");
+        let kinds = cli.play(|l| l["type"] == "result").await;
+        assert_eq!(turns(&kinds), ["start:Run", "end:Completed"]);
+        assert!(matches!(kinds.last(), Some(EventKind::StatusChanged { status: AgentStatus::Idle })), "{kinds:?}");
+
+        // the task ends 5.5 s later, and the CLI opens a turn (`system/init`)
+        let kinds = cli.play(|l| l["subtype"] == "init").await;
+        assert_eq!(turns(&kinds), ["start"]);
+        assert!(matches!(kinds.last(), Some(EventKind::StatusChanged { status: AgentStatus::Thinking })), "the agent shows as working: {kinds:?}");
+        assert!(cli.actor.turn_active);
+
+        // a prompt sent now waits in the CLI for a turn to take it
+        cli.actor.on_cmd(AgentCmd::Prompt("fix the test".into())).await;
+        let kinds = cli.play(|_| false).await;
+        assert_eq!(turns(&kinds), ["end:Completed"]);
+        assert_eq!(cli.written().len(), 2);
+        assert!(!cli.actor.turn_active && cli.actor.waiting.len() == 1, "the result closed the CLI's own turn, not the prompt's");
+    }
+
+    /// What Codly still holds until the turn ends, on a CLI that takes messages mid-turn: the
+    /// prompt behind a stop (it is the next turn, not a part of the stopped one) and a slash
+    /// command, with what was sent after it.
+    #[tokio::test]
+    async fn a_prompt_behind_a_stop_and_a_slash_command_wait_for_the_turns_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        actor.lifecycle = true;
+        let stopped = json!({ "type": "result", "subtype": "error_during_execution", "is_error": true, "duration_ms": 5 });
+        let done = json!({ "type": "result", "subtype": "success", "is_error": false, "result": "ok", "duration_ms": 5 });
+
+        actor.on_cmd(AgentCmd::Prompt("build it".into())).await;
+        actor.on_cmd(AgentCmd::Interrupt).await;
+        actor.on_cmd(AgentCmd::Prompt("try something different".into())).await;
+        assert_eq!((prompts_sent(dir.path()).len(), actor.queue.len(), actor.waiting.len()), (1, 1, 0));
+        emitted(&mut events);
+        actor.on_json(stopped, "codly-0", &mut None).await;
+        assert_eq!(turns(&emitted(&mut events)), ["end:Interrupted", "start:try"]);
+
+        actor.on_cmd(AgentCmd::Prompt("/compact".into())).await;
+        actor.on_cmd(AgentCmd::Prompt("then test it".into())).await;
+        assert_eq!((prompts_sent(dir.path()).len(), actor.queue.len(), actor.waiting.len()), (2, 2, 0), "in order, behind the slash command");
+        actor.on_json(done, "codly-0", &mut None).await;
+        assert_eq!(turns(&emitted(&mut events)), ["end:Completed", "start:/compact"]);
+        assert_eq!((prompts_sent(dir.path()).len(), actor.queue.len(), actor.waiting.len()), (4, 0, 1));
+
+        // A turn that does not stop: what the CLI had not taken yet is lost with its process.
+        actor.on_cmd(AgentCmd::Interrupt).await;
+        actor.on_deadline().await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[0], EventKind::Error { message, .. } if message.contains("1 message that waited for this turn was not sent")), "{kinds:?}");
+        assert!(actor.waiting.is_empty());
+    }
+
+    /// A message the CLI drops before a turn took it is sent again when the turn has ended.
+    /// (The recordings have `cancelled` for the message of a turn that was stopped. The line
+    /// for a message that still waited is written here from that shape.)
+    #[tokio::test]
+    async fn a_waiting_message_the_cli_drops_is_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        actor.lifecycle = true;
+        actor.on_cmd(AgentCmd::Prompt("build it".into())).await;
+        actor.on_cmd(AgentCmd::Prompt("also run the tests".into())).await;
+        let uuid = actor.waiting[0].0.clone();
+        actor.on_json(json!({ "type": "command_lifecycle", "command_uuid": uuid, "state": "cancelled" }), "codly-0", &mut None).await;
+        assert_eq!((prompts_sent(dir.path()).len(), actor.queue.len(), actor.waiting.len()), (2, 1, 0));
+        emitted(&mut events);
+
+        actor.on_json(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "ok" }), "codly-0", &mut None).await;
+        assert_eq!(turns(&emitted(&mut events)), ["end:Completed", "start:also"]);
+        assert_eq!(prompts_sent(dir.path()).len(), 3);
+    }
+
+    /// A `result` never ends a turn that is not open: one that comes with no turn announced
+    /// (a CLI that writes no `system/init` when it starts a turn by itself) gets its start.
+    #[tokio::test]
+    async fn a_result_with_no_open_turn_gets_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        actor.on_json(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "ok" }), "codly-0", &mut None).await;
+        assert_eq!(turns(&emitted(&mut events)), ["start", "end:Completed"]);
+        assert!(!actor.turn_active);
     }
 }

@@ -100,14 +100,20 @@ impl LeadPool {
         self.turns.remove(lead);
     }
 
-    fn sent(&mut self, lead: &str, forward_to: Option<Id>, steered: bool) {
-        let turns = self.turns.entry(lead.to_string()).or_default();
-        let targets: Vec<Id> = forward_to.into_iter().collect();
-        match turns.back_mut() {
-            // Codex folds a prompt into the running turn, so its reply covers both.
-            Some(back) if steered => back.extend(targets),
-            _ => turns.push_back(targets),
+    /// The oldest prompt that waited went into the Lead's running turn (`PromptSteered`), not
+    /// into a turn of its own: that turn's reply answers it too.
+    pub(super) fn steered(&mut self, lead: &str) {
+        let Some(turns) = self.turns.get_mut(lead) else { return };
+        if let Some(folded) = turns.remove(1)
+            && let Some(running) = turns.front_mut()
+        {
+            running.extend(folded);
         }
+    }
+
+    fn sent(&mut self, lead: &str, forward_to: Option<Id>) {
+        let turns = self.turns.entry(lead.to_string()).or_default();
+        turns.push_back(forward_to.into_iter().collect());
         self.tick += 1;
         self.used.insert(lead.to_string(), self.tick);
     }
@@ -380,9 +386,8 @@ impl Inner {
             }
         }
         let header = self.board_header(ws, thread).await.unwrap_or_default();
-        let steered = self.would_steer(&lead.id);
         // Recorded before sending: the reply's Message event looks it up (reply_to).
-        lock(&self.leads).sent(&lead.id, forward_to.cloned(), steered);
+        lock(&self.leads).sent(&lead.id, forward_to.cloned());
         if let Err(e) = self.send_prompt(&lead.id, format!("{header}\n{body}")) {
             lock(&self.leads).forget(&lead.id);
             return Err(e);
@@ -788,5 +793,29 @@ impl Inner {
         let started = self.spawn_run(req).await;
         self.spawned_or_live(agent_id, started)?;
         self.send_prompt(agent_id, prompt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every prompt is recorded as a turn of its own. One that goes into the running turn is
+    /// answered by that turn's reply, and the turns behind it keep their own.
+    #[test]
+    fn a_prompt_steered_into_the_leads_turn_shares_its_reply() {
+        let mut pool = LeadPool::default();
+        pool.sent("lead", Some("w1".into()));
+        pool.sent("lead", Some("w2".into()));
+        pool.sent("lead", Some("w3".into()));
+        pool.steered("lead");
+        assert_eq!(pool.reply_to("lead").as_deref(), Some("w1"));
+        assert_eq!(pool.turn_done("lead"), ["w1", "w2"]);
+        assert_eq!(pool.turn_done("lead"), ["w3"]);
+        // Nothing waits behind the running turn: nothing to move.
+        pool.sent("lead", None);
+        pool.steered("lead");
+        pool.steered("other");
+        assert!(pool.turn_done("lead").is_empty());
     }
 }

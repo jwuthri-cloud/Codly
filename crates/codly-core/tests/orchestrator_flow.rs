@@ -1724,6 +1724,104 @@ async fn a_prompt_steered_into_the_running_turn_does_not_hold_the_gate() {
     core.shutdown().await;
 }
 
+/// Claude starts a turn by itself when a background task ends: a `TurnStarted` with no input.
+/// That turn takes no prompt. A message that still waits for a turn of its own keeps the worker
+/// out of the gate until that turn has ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_the_cli_starts_by_itself_takes_no_waiting_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            // Like the Claude adapter: the message waits in the CLI and the brief's turn ends
+            // without it, ...
+            let next = tokio::time::timeout(Duration::from_secs(5), async { turn.cmds.lock().await.recv().await }).await;
+            let Ok(Some(AgentCmd::Prompt(text))) = next else { return };
+            let end = || turn.emit(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(5) });
+            end();
+            // ... a background task that ended wakes the CLI for a turn of its own ...
+            turn.emit(EventKind::TurnStarted { input: None });
+            end();
+            // (time for a gate that started too early to ask for the report that is missing)
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            // ... and only then the message gets its turn, which does the work.
+            turn.emit(EventKind::TurnStarted { input: Some(text) });
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote hello.txt." })).await;
+        })
+    });
+    let up = Arc::new(tokio::sync::Notify::new());
+    let spawner = Slow(FakeSpawner { log: log.clone(), lead: planning_lead(), worker }, Role::Worker, up.clone());
+    let core = start(dir.path(), spawner).await;
+    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let worker_id = wait_for("the worker's process to start", 20, async || {
+        let log = log.lock().unwrap();
+        let at = log.spawns.iter().position(|s| s.0 == Role::Worker)?;
+        Some(log.runs[at].0.clone())
+    })
+    .await;
+    // Sent during the handshake: it goes out right behind the brief.
+    core.send_chat(&format!("agent:{worker_id}"), "keep the greeting lowercase").await.unwrap();
+    up.notify_one();
+    let (task, plan) = wait_for("the plan to finish", 30, async || {
+        task_status(&core).await.filter(|(_, p)| matches!(p.status, PlanStatus::Done | PlanStatus::Failed))
+    })
+    .await;
+    assert_eq!((task.status, plan.status), (TaskStatus::Done, PlanStatus::Done));
+    assert_eq!(turns_of(&log, &worker_id).len(), 1, "the gate asked the worker for nothing before the message's turn had ended");
+    core.shutdown().await;
+}
+
+/// A Lead's message that goes into a member's running turn (`PromptSteered`) is answered by
+/// that turn: its reply goes back to the Lead when that turn ends, not a turn later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_members_answer_follows_a_message_steered_into_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let lead: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                return; // Ana's answer
+            }
+            let r = turn.tool("codly_message_member", json!({ "to": "Ana", "text": "What did you change?" })).await;
+            assert_eq!(r["ok"], true, "{r}");
+        })
+    });
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            // The Lead's message arrives while this turn runs, and goes into it.
+            let next = tokio::time::timeout(Duration::from_secs(10), async { turn.cmds.lock().await.recv().await }).await;
+            let Ok(Some(AgentCmd::Prompt(text))) = next else { return };
+            tokio::time::sleep(Duration::from_millis(50)).await; // a CLI takes it at its next tool boundary, not at once
+            turn.emit(EventKind::PromptSteered { input: text });
+            turn.say("I changed nothing yet.");
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker }).await;
+    let ana = TeamMember { name: "Ana".into(), role: "Backend".into(), ..Default::default() };
+    core.update_settings(Settings { auto_run_plans: false, lead_followups: false, team: vec![ana], ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let ana = wait_for("Ana on the board", 20, async || {
+        let s = core.snapshot().await.unwrap();
+        s.agents.iter().find(|a| a.member.is_some()).map(|a| a.id.clone())
+    })
+    .await;
+    core.send_chat(&format!("agent:{ana}"), "Stay with me").await.unwrap();
+    wait_for("Ana's turn to start", 20, async || (!turns_of(&log, &ana).is_empty()).then_some(())).await;
+    core.send_chat("lead", "Ask Ana what she changed").await.unwrap();
+    wait_for("Ana's answer to reach the Lead", 20, async || {
+        let log = log.lock().unwrap();
+        log.prompts.iter().any(|(role, p)| *role == Role::Lead && p.contains("answers your message") && p.contains("I changed nothing yet.")).then_some(())
+    })
+    .await;
+    assert_eq!(turns_of(&log, &ana).len(), 1, "one turn took both messages");
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_vendor_review_requests_changes_then_approves() {
     let dir = tempfile::tempdir().unwrap();

@@ -4,8 +4,9 @@
 //
 // A queued message is delivered by the first later `turn_started` whose prompt contains it
 // (Codly wraps your words, it never rewrites them); a turn with no recorded prompt takes the
-// oldest waiting message. Codex can steer a message into the running turn instead of starting a
-// new one: once the agent has been idle a few seconds, nothing it was sent is still waiting.
+// oldest waiting message. Claude and Codex can take a message into the running turn instead of
+// starting a new one: the turn's `prompt_steered` delivers it the same way. And once the agent
+// has been idle a few seconds, nothing it was sent is still waiting.
 // When every Lead slot is busy, Codly says so in the thread ("Queued: …", author codly): what
 // you sent since the request's last turn waits for a free Lead (nothing to interrupt yet).
 import { store } from './store.svelte';
@@ -14,7 +15,8 @@ import { ui } from './ui.svelte';
 /** agentId null: waiting for a free Lead slot (no turn to interrupt). */
 export type Waiting = { position: number; total: number; agentId: string | null; reason: string | null };
 export type Sent = { key: string; ts: number; text: string };
-export type Turn = { start: number; end: number | null; input: string | null };
+/** `steers`: the prompts the turn took in while it ran (`prompt_steered`). */
+export type Turn = { start: number; end: number | null; input: string | null; steers?: { ts: number; input: string }[] };
 
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
 export const STEER_GRACE = 5000;
@@ -26,8 +28,12 @@ export const isSlotNote = (author: string, text: string) => author === 'codly' &
  */
 export function waitingOf(turns: Turn[], sent: Sent[], now: number, slotNote: { ts: number } | null = null): { waiting: Sent[]; slot: boolean } {
   const busyAt = (ts: number) => turns.some((t) => t.start <= ts && (t.end == null || t.end > ts));
-  type Ev = { ts: number; msg?: Sent; turn?: Turn };
-  const evs: Ev[] = [...sent.map((m) => ({ ts: m.ts, msg: m })), ...turns.map((t) => ({ ts: t.start, turn: t }))];
+  // `input`: the prompt of a turn that starts, or one the running turn took in.
+  type Ev = { ts: number; msg?: Sent; input?: string | null };
+  const evs: Ev[] = [
+    ...sent.map((m) => ({ ts: m.ts, msg: m })),
+    ...turns.flatMap((t) => [{ ts: t.start, input: t.input }, ...(t.steers ?? []).map((s) => ({ ts: s.ts, input: s.input }))]),
+  ];
   // A message and the turn it starts can share a millisecond: the message comes first.
   evs.sort((a, b) => a.ts - b.ts || (a.msg ? -1 : 1));
   let waiting: Sent[] = [];
@@ -37,7 +43,7 @@ export function waitingOf(turns: Turn[], sent: Sent[], now: number, slotNote: { 
       continue;
     }
     if (!waiting.length) continue;
-    const input = e.turn!.input ? norm(e.turn!.input) : '';
+    const input = e.input ? norm(e.input) : '';
     const i = input ? waiting.findIndex((m) => input.includes(norm(m.text))) : 0;
     if (i >= 0) waiting = waiting.filter((_, j) => j !== i);
   }

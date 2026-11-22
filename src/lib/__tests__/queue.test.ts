@@ -48,6 +48,22 @@ describe('waitingOf', () => {
     expect(keys(waitingOf([turn(100, 400), turn(401, null, null)], sent, 410))).toEqual(['b']);
   });
 
+  it('a message the running turn took in stops waiting, and the one behind it does not', () => {
+    const sent = [msg('a', 150, 'also do X'), msg('b', 160, 'and Y')];
+    const running: Turn = { ...turn(100, null, 'plan it'), steers: [{ ts: 170, input: '[User] also do X' }] };
+    expect(keys(waitingOf([running], sent, 180))).toEqual(['b']);
+    // What it took in at 170 says nothing about a message sent after that.
+    expect(keys(waitingOf([running], [msg('c', 175, 'also do X')], 180))).toEqual(['c']);
+  });
+
+  it('the store keeps what a turn took in with that turn', () => {
+    apply(row({ type: 'turn_started', input: 'plan it' }, { agent_id: 'q1' }), row({ type: 'prompt_steered', input: '[User] also do X' }, { agent_id: 'q1' }));
+    const turns = store.live.q1.turns;
+    expect(turns.map((t) => [t.input, t.steers?.map((s) => s.input)])).toEqual([['plan it', ['[User] also do X']]]);
+    expect(keys(waitingOf(turns, [msg('a', turns[0].start + 0.5, 'also do X')], turns[0].start + 5))).toEqual([]);
+    store.live = {};
+  });
+
   it('steered into the running turn: nothing waits once the agent has been idle a while', () => {
     const sent = [msg('a', 150)];
     const turns = [turn(100, 400, 'go')];
