@@ -4,7 +4,7 @@ import { blocked, DemoTakeovers, resumeCommand } from '../demo/takeover';
 import type { Agent } from '../gen/Agent';
 import type { Task } from '../gen/Task';
 import type { TakeoverState } from '../gen/TakeoverState';
-import { giveBack, loadTakeover, openInTerminal, takeovers } from '../state/takeover.svelte';
+import { giveBack, loadTakeover, loadTakeovers, openInTerminal, takeovers } from '../state/takeover.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
 
@@ -17,9 +17,10 @@ const task = (o: Partial<Task> = {}) => ({ id: 't1', key: 'T-1', status: 'runnin
 
 // The demo follows the rules of orchestrator/takeover.rs; these are the same cases.
 describe('the demo’s side of "Open in my terminal"', () => {
-  it('gives each CLI its own resume command, and no command to a CLI without one', () => {
+  it('gives Claude Code its resume command, and no command to a CLI whose sessions do not go', () => {
     expect(resumeCommand(agent())).toEqual({ command: `claude --resume ${SESSION}` });
-    expect(resumeCommand(agent({ provider: 'codex' }))).toEqual({ command: `codex resume ${SESSION}` });
+    // Codex has a resume command, but its sessions stay with Codly for now.
+    expect(resumeCommand(agent({ provider: 'codex' }))).toMatchObject({ why: expect.stringMatching(/^a Codex agent cannot go to your terminal yet/) });
     for (const provider of ['gemini', 'opencode', 'cursor', 'copilot'] as const) {
       expect(resumeCommand(agent({ provider }))).toMatchObject({ why: expect.stringContaining('command that opens one session by its id') });
     }
@@ -54,8 +55,11 @@ describe('the demo’s side of "Open in my terminal"', () => {
     expect(demo.has('a1')).toBe(true);
     // Asked again, the same hand-over.
     expect(demo.take(agent(), [], REPO, NOW + 5)).toEqual(there);
+    // The list has it, and not an agent that stayed.
+    expect(demo.list([agent({ id: 'a0' }), agent()], [], REPO)).toEqual([there.takeover]);
     expect(demo.giveBack(agent(), [], REPO)).toEqual({ takeover: null, blocked: null });
     expect(demo.has('a1')).toBe(false);
+    expect(demo.list([agent()], [], REPO)).toEqual([]);
 
     // Without a worktree the terminal opens in the repository; a path with a space is quoted.
     expect(demo.take(agent({ id: 'a2', worktree: null }), [], '/demo/my repo', NOW).takeover).toMatchObject({ cwd: '/demo/my repo', copy_command: `cd '/demo/my repo' && ${command}` });
@@ -87,10 +91,25 @@ describe('Open in my terminal', () => {
   });
 
   it('says the core’s reason and opens nothing when the agent may not go', async () => {
-    vi.spyOn(api, 'takeOverAgent').mockRejectedValue(new Error('Ada is in the middle of a turn: wait for it, or stop it first'));
+    const why = 'Ada is in the middle of a turn: wait for it, or stop it first';
+    vi.spyOn(api, 'takeOverAgent').mockRejectedValue(new Error(why));
+    const look = vi.spyOn(api, 'agentTakeover').mockResolvedValue({ takeover: null, blocked: why });
     expect(await openInTerminal('a1')).toBe(false);
-    expect(said()).toEqual([['error', 'Couldn’t open it in your terminal', 'Ada is in the middle of a turn: wait for it, or stop it first']]);
-    expect([ui.room, ui.terminalTakeover, takeovers.of('a1')]).toEqual(['home', null, null]);
+    expect(said()).toEqual([['error', 'Couldn’t open it in your terminal', why]]);
+    expect([ui.room, ui.terminalTakeover]).toEqual(['home', null]);
+    // The sheet shows where the agent is after the failure, not what it showed before.
+    expect(look).toHaveBeenCalledWith('a1');
+    expect(takeovers.of('a1')).toEqual({ takeover: null, blocked: why });
+  });
+
+  it('does not leave an agent marked when its process did not stop', async () => {
+    // The sheet asked while the core was stopping the agent's process.
+    takeovers.set('a1', { takeover: null, blocked: 'Ada is stopping: one moment' });
+    vi.spyOn(api, 'takeOverAgent').mockRejectedValue(new Error('Ada did not stop in time; try again'));
+    vi.spyOn(api, 'agentTakeover').mockResolvedValue(free);
+    expect(await openInTerminal('a1')).toBe(false);
+    expect(takeovers.of('a1')).toEqual(free);
+    expect(takeovers.has('a1')).toBe(false);
   });
 
   it('gives the agent back', async () => {
@@ -103,6 +122,7 @@ describe('Open in my terminal', () => {
     // A give-back that failed leaves the agent where it is, and says so.
     takeovers.set('a1', there);
     core.mockRejectedValue('the store is locked');
+    vi.spyOn(api, 'agentTakeover').mockResolvedValue(there);
     expect(await giveBack('a1')).toBe(false);
     expect(takeovers.active).toEqual([there.takeover]);
     expect(said()).toEqual([['error', 'Couldn’t give it back', 'the store is locked']]);
@@ -119,5 +139,27 @@ describe('Open in my terminal', () => {
     await loadTakeover('a1');
     expect(takeovers.of('a1')).toEqual({ takeover: null, blocked: 'unknown agent a1' });
     expect(said()).toEqual([]);
+  });
+
+  it('marks every agent that is in your terminal when an office opens', async () => {
+    const other = { ...there.takeover!, agent_id: 'a2' };
+    // What this window knew: a1 is there, a3 cannot go.
+    takeovers.set('a1', there);
+    takeovers.set('a3', { takeover: null, blocked: 'Cy has no session yet: send it a message first' });
+    const list = vi.spyOn(api, 'listTakeovers').mockResolvedValue([other]);
+    // a1 is not on the core's list: it was given back elsewhere, and the core is asked about it.
+    const look = vi.spyOn(api, 'agentTakeover').mockResolvedValue(free);
+    await loadTakeovers();
+    expect(takeovers.active).toEqual([other]);
+    expect([takeovers.has('a1'), takeovers.has('a2'), takeovers.has('a3')]).toEqual([false, true, false]);
+    expect(look.mock.calls).toEqual([['a1']]);
+    expect(takeovers.of('a1')).toEqual(free);
+    expect(takeovers.of('a3')?.blocked).toBe('Cy has no session yet: send it a message first');
+
+    // A list that cannot be read is said, and what the window knew stays.
+    list.mockRejectedValue(new Error('the store is locked'));
+    await loadTakeovers();
+    expect(takeovers.active).toEqual([other]);
+    expect(said()).toEqual([['error', 'Couldn’t read which agents are in your terminal', 'the store is locked']]);
   });
 });

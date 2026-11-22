@@ -2,7 +2,8 @@
   "Open in my terminal": continue an agent's session yourself, in its CLI's own terminal UI.
   The core owns the hand-over (orchestrator/takeover.rs): it says whether the agent may go,
   stops its own process for the session first, builds the command, and starts nothing for the
-  agent until "Give it back". This card only asks and shows.
+  agent until "Give it back". This card only asks and shows. Elsewhere the agent reads "In your
+  terminal" (narration), from the core's list of every agent that is there (Shell.svelte).
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
@@ -31,11 +32,11 @@
   });
 
   // The core's answer follows what the agent does: ask again when it starts or ends a turn,
-  // gets a session, or its task moves.
+  // its process starts or ends, it gets a session, or its task moves.
   const resting = $derived(['idle', 'done', 'failed', 'offline'].includes(agent.status));
   const taskStatus = $derived(agent.task_id ? store.taskMap.get(agent.task_id)?.status : undefined);
   $effect(() => {
-    void [resting, agent.session_id, agent.task_id, taskStatus, agent.archived];
+    void [resting, agent.run_id, agent.session_id, agent.task_id, taskStatus, agent.archived];
     void loadTakeover(agent.id);
   });
 

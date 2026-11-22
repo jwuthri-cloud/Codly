@@ -5,11 +5,15 @@
 //! this is a hand-over, enforced here and not in the UI:
 //!
 //! - **Take over**: only an agent that is between turns and whose task, if it has one, is not
-//!   in flight. Codly stops its own process for the session first, then marks the agent as in
-//!   your terminal.
+//!   in flight. Codly marks the agent, then stops its own process for the session. The mark
+//!   comes first, so no start gets in while the process stops: `take_over` writes the mark and
+//!   then reads the live table, `spawn_run` enters the live table and then reads the mark, and
+//!   one of the two always sees the other. The agent is in your terminal once the process is
+//!   gone; if it does not stop, the mark is taken back.
 //! - **While it is there** no run starts for the agent: `spawn_run` refuses, a message to it is
-//!   refused before it is recorded (`chat_agent_from`), and the scheduler counts it as busy
-//!   (`busy_agents`), so a task for it waits.
+//!   refused before it is recorded (`chat_agent_from`), the scheduler counts it as busy
+//!   (`busy_agents`), so a task for it waits and says why, and it is not picked for a review
+//!   (`start_review`).
 //! - **Give it back** removes the mark. The agent's session id never changed, so its next
 //!   message or task resumes the same session.
 //!
@@ -20,7 +24,8 @@
 //!
 //! The command lines are built here and nowhere else (`resume_command`): the CLI's name, its
 //! resume form and a session id, never a flag that changes what the CLI may do. A CLI has one
-//! only where docs/research shows a form that opens one session by its id.
+//! only where docs/research shows a form that opens one session by its id, and shows that the
+//! session Codly resumes afterwards has what the terminal did.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -30,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use ts_rs::TS;
 
-use super::{Inner, row, scheduler};
+use super::{Inner, Live, lock, row, scheduler};
 use crate::model::*;
 use crate::pty::PtyManager;
 
@@ -79,8 +84,13 @@ fn plain_id(id: &str) -> bool {
 /// is none (a sentence for the user).
 ///
 /// - Claude Code: `claude --resume <id>` (docs/research/cli-claude-codex.md §2.6: it finds the
-///   session by its id, from any folder).
-/// - Codex: `codex resume <id>`, a subcommand (cli-claude-codex.md §3.1, landscape.md §1.2).
+///   session by its id, from any folder). Each run of Codly is a process of its own that reads
+///   the session from disk, so the next one has what the terminal did.
+/// - Codex has `codex resume <id>` (cli-claude-codex.md §3.1), but its sessions do not go yet.
+///   Codly's agents of one sign-in share one `codex app-server`, which stays up after an agent
+///   lets go of its thread, and `thread/resume` on a thread the server still holds rejoins it
+///   in memory. Nothing on record shows when the server drops a thread nobody listens to, so
+///   the turns of a terminal could be missing after the give-back (cli-claude-codex.md §3.5).
 /// - Gemini CLI resumes `latest` or a place in its list, not an id (cli-others-acp.md §4.1).
 ///   OpenCode's `--session <id>` is recorded for `opencode run` only (§5.1). Cursor and Copilot
 ///   were never installed here (§6, §7). None of them gets a command until a live check shows
@@ -88,7 +98,9 @@ fn plain_id(id: &str) -> bool {
 pub fn resume_command(provider: Provider, session_id: &str) -> Result<String> {
     let resume = match provider {
         Provider::Claude => "claude --resume",
-        Provider::Codex => "codex resume",
+        Provider::Codex => bail!(
+            "a Codex agent cannot go to your terminal yet: Codex can keep its session in memory, and what you do in the terminal could be lost when you give it back"
+        ),
         Provider::Gemini | Provider::Opencode | Provider::Cursor | Provider::Copilot => {
             bail!("Codly knows no {} command that opens one session by its id", provider.label())
         }
@@ -138,6 +150,12 @@ pub fn close_terminal(pty: &PtyManager, agent_id: &str) {
     pty.close_tagged(&mark(agent_id));
 }
 
+/// A run that is between turns: no turn runs, none is queued, and it is not starting (a run
+/// starts for a prompt).
+fn between_turns(l: &Live) -> bool {
+    !l.turn_active && l.queued == 0 && l.starting.is_none()
+}
+
 impl Inner {
     /// What was handed over when the agent went to your terminal; None = it is not there.
     fn handed_over(&self, agent_id: &str) -> Result<Option<Takeover>> {
@@ -157,12 +175,13 @@ impl Inner {
         Ok(())
     }
 
-    /// Every agent that is in your terminal: no task goes to one of them (`busy_agents`).
+    /// Every agent that is in your terminal: no task goes to one of them (`busy_agents`), and
+    /// none of them is picked for a review.
     pub(super) fn in_terminal_ids(&self) -> Vec<Id> {
         match self.store.kv_prefixed(MARK) {
             Ok(marks) => marks.into_iter().map(|(key, _)| key[MARK.len()..].to_string()).collect(),
             Err(e) => {
-                // `spawn_run` still refuses each of them: a task then fails to start, with the reason.
+                // `spawn_run` still refuses each of them: a start then fails, with the reason.
                 tracing::warn!("the agents in your terminal could not be read: {e}");
                 vec![]
             }
@@ -213,7 +232,7 @@ impl Inner {
                 bail!("{} is on {}, which is still running: stop {} first, or wait for the task", a.name, t.key, a.name);
             }
         }
-        if !self.is_quiet(&a.id) {
+        if lock(&self.live).get(&a.id).is_some_and(|l| !between_turns(l)) {
             bail!("{} is in the middle of a turn: wait for it, or stop it first", a.name);
         }
         let cwd = self.terminal_cwd(a)?;
@@ -222,9 +241,25 @@ impl Inner {
 
     fn takeover_state(&self, a: &Agent) -> Result<TakeoverState> {
         Ok(match self.handed_over(&a.id)? {
+            // Marked, and its process is not gone yet (`take_over`): not yours until it is.
+            Some(_) if self.is_live(&a.id) => TakeoverState { takeover: None, blocked: Some(format!("{} is stopping: one moment", a.name)) },
             Some(takeover) => TakeoverState { takeover: Some(takeover), blocked: None },
             None => TakeoverState { takeover: None, blocked: self.hand_over(a).err().map(|e| format!("{e:#}")) },
         })
+    }
+
+    /// Every agent that is in your terminal, the one that went first at the top.
+    fn takeovers(&self) -> Result<Vec<Takeover>> {
+        let mut all = vec![];
+        for (key, json) in self.store.kv_prefixed(MARK)? {
+            let takeover: Takeover = serde_json::from_str(&json).with_context(|| format!("the terminal mark {key} is unreadable"))?;
+            // Marked while its process still stops (`take_over`): not there yet.
+            if !self.is_live(&takeover.agent_id) {
+                all.push(takeover);
+            }
+        }
+        all.sort_by_key(|t| t.since);
+        Ok(all)
     }
 
     /// Record the hand-over where the agent's history shows it.
@@ -240,7 +275,7 @@ impl Inner {
         let _ = self.emit(ws.as_deref(), row(Some(a.id.as_str()), a.task_id.as_deref(), None, kind));
     }
 
-    /// Hand the agent's session to the user: stop Codly's process for it, then mark the agent.
+    /// Hand the agent's session to the user: mark the agent, then stop Codly's process for it.
     /// Asked again for an agent that is there already, it answers with the same hand-over.
     async fn take_over(&self, agent_id: &str) -> Result<TakeoverState> {
         let a = self.agent(agent_id)?;
@@ -251,11 +286,17 @@ impl Inner {
         // down (up to 5 s) it looks free, and a pass would hand it a task.
         let _g = self.sched_lock.lock().await;
         let takeover = self.hand_over(&a)?;
-        // The mark first: from here a message or a start for it is refused, so nothing can
-        // begin a turn while its process stops.
+        // The mark first: from here a message for it is refused, and a start that is on its way
+        // finds the mark once it is in the live table (`spawn_run`) and gives up.
         self.store.kv_set(&mark(agent_id), &serde_json::to_string(&takeover)?)?;
-        // Looked at again under the mark: a prompt may have slipped in before it.
-        let refused = if !self.is_quiet(agent_id) {
+        // Looked at again under the mark, and told to stop in the same step: a prompt or a start
+        // that got in before the mark keeps its turn, and nothing gets in after the look.
+        let mut in_turn = false;
+        self.stop_run_if(agent_id, |l| {
+            in_turn = !between_turns(l);
+            !in_turn
+        });
+        let refused = if in_turn {
             Some(anyhow!("{} is in the middle of a turn: wait for it, or stop it first", a.name))
         } else if !self.stop_and_wait(agent_id).await {
             Some(anyhow!("{} did not stop in time; try again", a.name))
@@ -289,6 +330,11 @@ impl super::Core {
         self.inner.takeover_state(&a)
     }
 
+    /// Every agent that is in your terminal: what the window marks them with.
+    pub async fn takeovers(&self) -> Result<Vec<Takeover>> {
+        self.inner.takeovers()
+    }
+
     /// "Open in my terminal": stop Codly's process for the agent's session and keep Codly away
     /// from it until `give_back_agent`. Refused for an agent in a turn or on a task in flight.
     pub async fn take_over_agent(&self, agent_id: &str) -> Result<TakeoverState> {
@@ -311,7 +357,10 @@ mod tests {
     #[test]
     fn each_cli_gets_its_own_resume_command_and_nothing_else() {
         assert_eq!(resume_command(Provider::Claude, ID).unwrap(), format!("claude --resume {ID}"));
-        assert_eq!(resume_command(Provider::Codex, ID).unwrap(), format!("codex resume {ID}"));
+        // Codex has a resume command, but nothing on record shows that the session Codly
+        // resumes afterwards has what the terminal did: its sessions stay with Codly.
+        let e = resume_command(Provider::Codex, ID).unwrap_err().to_string();
+        assert!(e.starts_with("a Codex agent cannot go to your terminal yet"), "{e}");
         // No form that opens one session by its id is on record for the others.
         for p in [Provider::Gemini, Provider::Opencode, Provider::Cursor, Provider::Copilot] {
             let e = resume_command(p, ID).unwrap_err().to_string();
@@ -329,12 +378,10 @@ mod tests {
     #[test]
     fn a_session_id_that_is_not_one_plain_word_gets_no_command() {
         for bad in ["", "--dangerously-skip-permissions", "-c", "a b", "a;rm -rf ~", "$(id)", "a\nb", "a'b", "é", "a".repeat(129).as_str()] {
-            for p in [Provider::Claude, Provider::Codex] {
-                let e = resume_command(p, bad).unwrap_err().to_string();
-                assert!(e.contains("not a plain word"), "{bad:?}: {e}");
-            }
+            let e = resume_command(Provider::Claude, bad).unwrap_err().to_string();
+            assert!(e.contains("not a plain word"), "{bad:?}: {e}");
         }
-        assert!(resume_command(Provider::Codex, "ses_01J_x-2").is_ok());
+        assert!(resume_command(Provider::Claude, "ses_01J_x-2").is_ok());
     }
 
     #[test]
@@ -351,15 +398,11 @@ mod tests {
         assert_eq!(claude(Some(Some("/Users/me/my homes/.claude")), None), format!("CLAUDE_CONFIG_DIR='/Users/me/my homes/.claude' {line}"));
         // The default sign-in, in a shell that points the CLI at another one.
         assert_eq!(claude(Some(None), Some("/Users/me/.claude-work")), format!("env -u CLAUDE_CONFIG_DIR {line}"));
-        assert_eq!(
-            on_account("codex resume abc", Provider::Codex, Some(Some("/Users/me/.codex-b")), None),
-            "CODEX_HOME=/Users/me/.codex-b codex resume abc"
-        );
     }
 
     #[test]
     fn the_line_to_copy_goes_to_the_worktree_first() {
-        assert_eq!(with_cd("/data/worktrees/web/bo", "codex resume abc"), "cd /data/worktrees/web/bo && codex resume abc");
+        assert_eq!(with_cd("/data/worktrees/web/bo", "claude --resume abc"), "cd /data/worktrees/web/bo && claude --resume abc");
         assert_eq!(with_cd("/data/my repo/it's", "claude --resume abc"), r"cd '/data/my repo/it'\''s' && claude --resume abc");
     }
 

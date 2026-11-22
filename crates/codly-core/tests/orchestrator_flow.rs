@@ -1857,6 +1857,100 @@ async fn a_reviewer_that_got_busy_after_it_was_picked_is_replaced_not_skipped() 
     core.shutdown().await;
 }
 
+/// A reviewer whose session is in your terminal ("Open in my terminal") reviews nothing until
+/// you give it back: the next review goes to another reviewer, and no task merges unreviewed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reviewer_in_your_terminal_is_not_picked_and_no_review_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let task = |id: &str, file: &str, after: &[&str]| {
+        json!({
+            "id": id, "title": format!("Create {file}"), "goal": format!("Create {file}"), "consultant": { "title": "Backend" },
+            "acceptance_criteria": [format!("{file} exists")], "write_scope": [file], "depends_on": after,
+            "verify": [format!("test -f {file}")], "size": "M",
+        })
+    };
+    let plan = json!({ "summary": "Add two files", "tasks": [task("t1", "a.txt", &[]), task("t2", "b.txt", &["t1"])] });
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        let plan = plan.clone();
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly]") {
+                return turn.say("Noted.");
+            }
+            let reply = turn.tool("codly_submit_plan", plan).await;
+            assert_eq!(reply["ok"], true, "{reply}");
+        })
+    });
+    // The second task starts from the first one's merge, so its worktree has a.txt: its worker
+    // writes b.txt, and only when the test says so.
+    let go = Arc::new(AtomicBool::new(false));
+    let gate = go.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let go = gate.clone();
+        Box::pin(async move {
+            if turn.spec.cwd.join("a.txt").exists() {
+                while !go.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                turn.write("b.txt", "b\n");
+            } else {
+                turn.write("a.txt", "a\n");
+            }
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "File written." })).await;
+        })
+    });
+    let reviewer: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if !turn.prompt.contains("[Codly] Review task") {
+                return turn.say("hi");
+            }
+            let file = if turn.spec.cwd.join("b.txt").exists() { "b.txt" } else { "a.txt" };
+            let criteria = json!([{ "criterion": format!("{file} exists"), "met": true }]);
+            turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
+        })
+    });
+    // Claude only: the reviewer is a Claude agent, and a Claude session can go to a terminal.
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead, worker: by_role(worker, reviewer) }).await;
+    let settings =
+        Settings { auto_run_plans: true, lead_followups: false, review_gate: true, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add two files").await.unwrap();
+
+    // The first task is reviewed and merged. Its reviewer rests, with a session: you open it
+    // in your terminal.
+    let first = wait_for("the first review", 30, async || {
+        let events = core.events(None, None, 3000).await.unwrap();
+        events.into_iter().find(|e| matches!(&e.kind, EventKind::Reviewed { .. })).and_then(|e| e.agent_id)
+    })
+    .await;
+    wait_for("the first reviewer to rest", 20, async || {
+        (core.agent_takeover(&first).await.unwrap() == codly_core::orchestrator::takeover::TakeoverState::default()).then_some(())
+    })
+    .await;
+    core.take_over_agent(&first).await.unwrap().takeover.expect("the reviewer is in your terminal");
+
+    // The second task reaches its review meanwhile.
+    go.store(true, Ordering::SeqCst);
+    let (_, plan) =
+        wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| matches!(p.status, PlanStatus::Done | PlanStatus::Failed))).await;
+    assert_eq!(plan.status, PlanStatus::Done);
+    let events = core.events(None, None, 3000).await.unwrap();
+    let skipped = |e: &EventRow| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("review skipped"));
+    assert!(!events.iter().any(skipped), "a reviewer in your terminal is no reason to merge unreviewed");
+    let approved_by: Vec<&str> = events
+        .iter()
+        .filter(|e| matches!(&e.kind, EventKind::Reviewed { verdict, .. } if verdict == "approve"))
+        .filter_map(|e| e.agent_id.as_deref())
+        .collect();
+    assert_eq!(approved_by.len(), 2, "both tasks were reviewed");
+    assert_eq!(approved_by.iter().filter(|r| **r == first).count(), 1, "the second review is another reviewer's");
+    let runs = log.lock().unwrap().runs.iter().filter(|(agent, _)| *agent == first).count();
+    assert_eq!(runs, 1, "Codly started nothing for the reviewer in your terminal");
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stopping_a_reviewer_blocks_the_task_and_frees_its_worker() {
     let dir = tempfile::tempdir().unwrap();

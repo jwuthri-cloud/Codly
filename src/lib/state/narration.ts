@@ -7,6 +7,7 @@ import type { Task } from '../gen/Task';
 import { accounts } from './accounts.svelte';
 import { diffstats } from './diffstats.svelte';
 import { store } from './store.svelte';
+import { takeovers } from './takeover.svelte';
 import { ui } from './ui.svelte';
 
 /** The agent's most recently finished task (newest first). */
@@ -39,5 +40,6 @@ export function narrate(agentId: string, now = ui.now): Narration | null {
     task,
     lastDone: done ? { task: done, stat: diffstats.task[done.id] ?? null, files } : null,
     rate,
+    inTerminal: takeovers.has(agentId),
   });
 }

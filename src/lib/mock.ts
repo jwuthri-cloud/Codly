@@ -379,6 +379,8 @@ export class MockTransport implements Transport {
         return this.ctl.steer(String(a.agentId), String(a.text ?? ''));
       case 'agent_takeover':
         return this.takeovers.state(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
+      case 'list_takeovers':
+        return this.takeovers.list([...sim.agents.values()], [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
       case 'take_over_agent':
         return this.takeovers.take(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO, sim.now());
       case 'open_takeover_terminal': {
@@ -816,7 +818,6 @@ class FakeShell {
         this.close();
         return;
       case 'claude':
-      case 'codex':
         say(`${C.dim}(mock) the demo has no ${bin} to run. In the app, this opens the agent’s session in ${bin}’s own terminal UI.${C.reset}`);
         break;
       default:

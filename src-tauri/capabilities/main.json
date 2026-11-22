@@ -21,6 +21,7 @@
     "allow-resume-agent",
     "allow-steer-agent",
     "allow-agent-takeover",
+    "allow-list-takeovers",
     "allow-take-over-agent",
     "allow-open-takeover-terminal",
     "allow-give-back-agent",

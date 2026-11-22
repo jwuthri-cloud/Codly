@@ -44,6 +44,8 @@ export type NarrationInput = {
   lastDone: { task: Task; stat: DiffStat | null; files: number } | null;
   /** The worst rate-limit window for its provider. */
   rate: RateWindow | null;
+  /** Its session is in your terminal ("Open in my terminal"): Codly runs nothing for it until you give it back. */
+  inTerminal: boolean;
 };
 
 const code = (t: string): Part => ({ t, code: true });
@@ -160,6 +162,9 @@ export function narrateFrom(i: NarrationInput): Narration {
     const all = showTimer && since != null ? [...parts, txt(' · '), { t: timer(now - since), timer: true }] : parts;
     return { parts: all, text: plainOf(all), key, tone, since, progress: tone === 'done' && progress != null ? 1 : progress };
   };
+
+  // 0 · Its session is in your terminal: whatever its row says, it is yours until you give it back.
+  if (i.inTerminal) return out([txt('In your terminal')], 'idle');
 
   if (a.status === 'offline') return out([txt('Stopped')], 'off');
 

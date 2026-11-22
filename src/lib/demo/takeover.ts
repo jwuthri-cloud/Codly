@@ -5,13 +5,16 @@
 import type { Agent } from '../gen/Agent';
 import type { Provider } from '../gen/Provider';
 import type { Task } from '../gen/Task';
+import type { Takeover } from '../gen/Takeover';
 import type { TakeoverState } from '../gen/TakeoverState';
 import { PROVIDER_LABEL } from '../util/labels';
 
 const RESTING = ['idle', 'done', 'failed', 'offline'];
 const IN_FLIGHT = ['running', 'verifying', 'reviewing', 'changes_requested', 'merging'];
-/** The CLIs with a command that opens one session by its id (`resume_command` in the core). */
-const RESUME: Partial<Record<Provider, string>> = { claude: 'claude --resume', codex: 'codex resume' };
+/** The CLIs whose sessions go to a terminal, with the command that opens one by its id (`resume_command` in the core). */
+const RESUME: Partial<Record<Provider, string>> = { claude: 'claude --resume' };
+/** Codex has `codex resume <id>`, but nothing on record shows that the session Codly resumes afterwards has what the terminal did. */
+const CODEX_NOT_YET = 'a Codex agent cannot go to your terminal yet: Codex can keep its session in memory, and what you do in the terminal could be lost when you give it back';
 
 /** A path as one word of a shell line. */
 const quote = (path: string) => (/^[A-Za-z0-9/._~+-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`);
@@ -19,6 +22,7 @@ const quote = (path: string) => (/^[A-Za-z0-9/._~+-]+$/.test(path) ? path : `'${
 /** The resume command for the agent's session, or why there is none. */
 export function resumeCommand(agent: Agent): { command: string } | { why: string } {
   if (!agent.session_id) return { why: `${agent.name} has no session yet: send it a message first` };
+  if (agent.provider === 'codex') return { why: CODEX_NOT_YET };
   const resume = RESUME[agent.provider];
   if (!resume) return { why: `Codly knows no ${PROVIDER_LABEL[agent.provider]} command that opens one session by its id` };
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(agent.session_id)) return { why: `the session id of ${PROVIDER_LABEL[agent.provider]} is not a plain word, so Codly does not put it in a command` };
@@ -53,6 +57,11 @@ export class DemoTakeovers {
     if ('why' in line) throw new Error(line.why);
     const cwd = agent.worktree ?? repo;
     return { takeover: { agent_id: agent.id, cwd, command: line.command, copy_command: `cd ${quote(cwd)} && ${line.command}`, since }, blocked: null };
+  }
+
+  /** Every agent that is in your terminal, the one that went first at the top. */
+  list(agents: Agent[], tasks: Task[], repo: string): Takeover[] {
+    return agents.flatMap((a) => this.state(a, tasks, repo).takeover ?? []).sort((x, y) => x.since - y.since);
   }
 
   take(agent: Agent | undefined, tasks: Task[], repo: string, now: number): TakeoverState {

@@ -46,6 +46,7 @@ import type { ClosedTranscript } from './gen/ClosedTranscript';
 import type { InstallRun } from './gen/InstallRun';
 import type { InstallRung } from './gen/InstallRung';
 import type { ControlState } from './gen/ControlState';
+import type { Takeover } from './gen/Takeover';
 import type { TakeoverState } from './gen/TakeoverState';
 import type { EventRow } from './gen/EventRow';
 import type { IdeChange } from './gen/IdeChange';
@@ -267,6 +268,8 @@ export const api = {
   steerAgent: (agentId: string, text: string) => call<ControlState>('steer_agent', { agentId, text }),
   /** "Open in my terminal" (agent sheet). Is the agent in your terminal, and if not, may it go there now? */
   agentTakeover: (agentId: string) => call<TakeoverState>('agent_takeover', { agentId }),
+  /** Every agent that is in your terminal: what the window marks them with. */
+  listTakeovers: () => call<Takeover[]>('list_takeovers'),
   /** Codly stops its own process for the agent's session and starts none until `giveBackAgent`. */
   takeOverAgent: (agentId: string) => call<TakeoverState>('take_over_agent', { agentId }),
   /** A terminal (attach with `ptyAttach`) in the worktree of an agent that is in your terminal, with the CLI's resume command typed, not run. */

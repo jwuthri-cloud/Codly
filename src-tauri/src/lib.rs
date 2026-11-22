@@ -137,6 +137,7 @@ pub fn run() {
             agent_controls::resume_agent,
             agent_controls::steer_agent,
             takeover_commands::agent_takeover,
+            takeover_commands::list_takeovers,
             takeover_commands::take_over_agent,
             takeover_commands::open_takeover_terminal,
             takeover_commands::give_back_agent,

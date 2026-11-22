@@ -129,6 +129,11 @@ impl Inner {
                 },
             );
         }
+        // Looked at again now that the run is in the live table: a take-over writes its mark and
+        // then reads that table (`take_over`), so one of the two always sees the other.
+        if let Err(e) = self.not_in_terminal(&req.agent) {
+            return Err(self.spawn_failed(&req.agent.id, &run_id, &token, e));
+        }
         let session_id = match &req.session {
             SessionMode::New { session_id } => session_id.clone(),
             SessionMode::Resume { session_id } => Some(session_id.clone()),

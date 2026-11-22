@@ -3,7 +3,7 @@
 //! opens a terminal with that line typed, and closes it when the agent is given back. The UI
 //! sends an agent id, never a command.
 
-use codly_core::orchestrator::takeover::{self, TakeoverState};
+use codly_core::orchestrator::takeover::{self, Takeover, TakeoverState};
 use tauri::State;
 
 use crate::commands::AppState;
@@ -19,6 +19,13 @@ pub async fn agent_takeover(state: State<'_, AppState>, agent_id: String) -> R<T
     state.core().await?.agent_takeover(&agent_id).await.map_err(err)
 }
 
+/// Every agent that is in your terminal: the window marks them, and the Terminal room has a
+/// tab for each.
+#[tauri::command]
+pub async fn list_takeovers(state: State<'_, AppState>) -> R<Vec<Takeover>> {
+    state.core().await?.takeovers().await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn take_over_agent(state: State<'_, AppState>, agent_id: String) -> R<TakeoverState> {
     state.core().await?.take_over_agent(&agent_id).await.map_err(err)
@@ -26,6 +33,8 @@ pub async fn take_over_agent(state: State<'_, AppState>, agent_id: String) -> R<
 
 /// A terminal (attach with `pty_attach`) in the worktree of an agent that is in your terminal,
 /// with the CLI's resume command typed and not run. A terminal opened for it before is closed.
+/// None opens while Codly's own process for the session is still stopping: the core says the
+/// agent is in your terminal only once that process is gone.
 #[tauri::command]
 pub async fn open_takeover_terminal(state: State<'_, AppState>, agent_id: String) -> R<String> {
     let core = state.core().await?;

@@ -174,14 +174,20 @@ that process.
 **An agent's session can go to your terminal.** "Open in my terminal" in an agent's sheet
 (`orchestrator/takeover.rs`) hands the agent's CLI session to you: Codly stops its own process
 for it, opens a terminal in the agent's worktree and types the CLI's own resume command there
-(`claude --resume <id>`, `codex resume <id>`, and nothing else; Enter is yours). Only an agent
-between turns goes, and not while its task runs, is checked or merges. The Lead never goes (a
-terminal has none of Codly's tools), and neither does an agent of a CLI for which no command
-that opens one session by its id is on record (Gemini, OpenCode, Cursor, Copilot). While the
-agent is there Codly starts no process for it: a message to it is refused, and a task for it
-waits. That outlives a restart of Codly. "Give it back" closes the terminal Codly opened, and
-the agent's next message or task resumes the same session. Codly cannot see a terminal of your
-own: quit the CLI there before you give the agent back.
+(`claude --resume <id>`, and nothing else; Enter is yours). Only an agent between turns goes,
+and not while its process starts or its task runs, is checked or merges. The Lead never goes
+(a terminal has none of Codly's tools). Neither does an agent of a CLI for which no command
+that opens one session by its id is on record (Gemini, OpenCode, Cursor, Copilot), nor a Codex
+agent for now: Codly's Codex agents share one `codex app-server`, and nothing on record shows
+that the session Codly resumes after the give-back has what the terminal did
+(docs/research/cli-claude-codex.md §3.5). While the agent is there Codly starts no process for
+it: a message to it is refused, a task for it waits and says so, and it is not picked for a
+review. Two guards keep a start and a take-over apart: the take-over writes its mark and then
+looks at the live runs, a start enters the live runs and then looks at the mark, so one of the
+two always sees the other. The agent reads "In your terminal" wherever its one sentence shows,
+and has a tab in the Terminal room; both outlive a restart of Codly. "Give it back" closes the
+terminal Codly opened, and the agent's next message or task resumes the same session. Codly
+cannot see a terminal of your own: quit the CLI there before you give the agent back.
 
 **A plan that cannot go on says so.** When nothing of a running plan runs or can start (a task is
 blocked or failed and the rest waits for it), Codly says so once in the plan's thread. You can
@@ -365,6 +371,7 @@ they are build output or third-party code in most repos. If one holds your own c
 | ~~Deep Agents + OpenRouter sidecar (API-key backend)~~ | dropped (2026-10-26): OpenCode with its OpenRouter provider covers API-key models |
 | Launchd daemon so agents survive app restarts | resume-by-session-id proves insufficient |
 | Take-over of an agent in the middle of a turn, of the Lead, and of Gemini, OpenCode, Cursor and Copilot agents | a live check shows a resume command that opens the session Codly started; users ask to drive an agent by hand mid-turn |
+| Take-over of a Codex agent (`codex resume <id>`) | a live check shows that the shared app-server no longer holds the thread after Codly's `thread/unsubscribe`, and that `thread/resume` after the give-back has the terminal's turns (docs/research/cli-claude-codex.md §3.5) |
 | Slack Socket Mode connection (the source and its gates exist, the socket does not) | a user asks for Slack as an inbound path |
 | Windows/Linux | after macOS ships |
 

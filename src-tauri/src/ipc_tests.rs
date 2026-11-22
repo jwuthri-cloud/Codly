@@ -93,6 +93,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::agent_checkpoints,
             commands::restore_checkpoint,
             crate::takeover_commands::agent_takeover,
+            crate::takeover_commands::list_takeovers,
             crate::takeover_commands::take_over_agent,
             crate::takeover_commands::open_takeover_terminal,
             crate::takeover_commands::give_back_agent,
@@ -287,6 +288,7 @@ fn commands_round_trip_with_frontend_arg_names() {
         let e = invoke(&wv, cmd, json!({ "agentId": "nope" })).unwrap_err();
         assert!(e.to_string().contains("unknown agent nope"), "{cmd}: {e}");
     }
+    assert_eq!(invoke(&wv, "list_takeovers", json!({})).unwrap(), json!([]), "no agent is in your terminal");
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));
