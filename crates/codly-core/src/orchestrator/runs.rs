@@ -113,6 +113,7 @@ impl Inner {
                     failed_turns: 0,
                     last_error: None,
                     continue_owed: None,
+                    watch: super::watchdog::Watch::new(),
                 },
             );
         }

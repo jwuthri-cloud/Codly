@@ -4,6 +4,10 @@
 //! failing blocks the task, a crash restarts the worker, and a worker the circuit breaker
 //! constrains waits for your Resume. Neither your Resume nor a turn that answers a message
 //! sends the unfinished work to the gate. A breaker stop says so on the task.
+//!
+//! The watchdog, with limits of a second: a turn that gives no output is flagged, then
+//! interrupted and continued, then stopped with its task back in line; a turn that waits for
+//! your answer is left alone; a worker that sits idle on its running task is flagged.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -15,6 +19,7 @@ use std::time::Duration;
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SpawnSpec};
 use codly_core::model::*;
 use codly_core::orchestrator::breaker::BreakerConfig;
+use codly_core::orchestrator::watchdog::WatchdogSettings;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::{Notify, mpsc};
 
@@ -61,6 +66,8 @@ enum End {
     Crash,
     /// It keeps going until Codly interrupts it.
     Interrupted,
+    /// It hangs: it says nothing and ignores an interrupt. Only a shutdown ends it.
+    Stuck,
 }
 
 /// One prompt the fake worker got.
@@ -69,6 +76,8 @@ struct Turn<'a> {
     n: usize,
     prompt: &'a str,
     cwd: &'a Path,
+    agent_id: &'a str,
+    run_id: &'a str,
     emit: &'a (dyn Fn(EventKind) + Send + Sync),
 }
 
@@ -109,7 +118,7 @@ impl Spawner for Fake {
                 billing: Billing::Subscription,
                 tools: vec![],
             });
-            let cwd = spec.cwd.clone();
+            let (cwd, agent_id, run_id) = (spec.cwd.clone(), spec.agent_id.clone(), spec.run_id.clone());
             tokio::spawn(async move {
                 let exit = |code| {
                     seen.lock().unwrap().shutdowns += usize::from(code == 0);
@@ -133,7 +142,7 @@ impl Spawner for Fake {
                                 s.prompts.len() - 1
                             };
                             send(EventKind::TurnStarted { input: Some(text.clone()) });
-                            let end = script(&Turn { n, prompt: &text, cwd: &cwd, emit: &send });
+                            let end = script(&Turn { n, prompt: &text, cwd: &cwd, agent_id: &agent_id, run_id: &run_id, emit: &send });
                             let done = |status, result: Option<&str>| {
                                 send(EventKind::TurnCompleted { status, result_text: result.map(String::from), duration_ms: Some(1) });
                             };
@@ -154,6 +163,14 @@ impl Spawner for Fake {
                                         Some(AgentCmd::Prompt(prompt)) => waiting.push_back(prompt),
                                         Some(AgentCmd::Shutdown) => return exit(0),
                                         Some(AgentCmd::Approval { .. }) => {}
+                                        None => return,
+                                    }
+                                },
+                                End::Stuck => loop {
+                                    match rx.recv().await {
+                                        Some(AgentCmd::Shutdown) => return exit(0),
+                                        Some(AgentCmd::Prompt(prompt)) => waiting.push_back(prompt),
+                                        Some(AgentCmd::Interrupt | AgentCmd::Approval { .. }) => {}
                                         None => return,
                                     }
                                 },
@@ -546,5 +563,173 @@ async fn a_breaker_stop_is_not_reported_as_yours() {
     assert!(!core.snapshot().await.unwrap().agents.iter().any(|a| a.id == worker && a.task_id.is_some()), "the worker is free");
     let said = chats(&core).await;
     assert!(said.iter().any(|t| t.starts_with("The circuit breaker stopped") && t.contains("blocked until you retry it")), "{said:?}");
+    core.shutdown().await;
+}
+
+// ───────────── the watchdog: a turn that gives no output, a worker that sits idle ─────────────
+
+/// Short limits for the watchdog: a turn is silent after `quiet_secs`, a worker idle after
+/// `idle_secs` (0 turns a check off).
+async fn watch(core: &Core, quiet_secs: u32, idle_secs: u32) {
+    let watchdog = WatchdogSettings { quiet_secs, quiet_tool_secs: quiet_secs, idle_secs };
+    core.update_settings(Settings { lead_followups: false, watchdog, ..Default::default() }).await.unwrap();
+}
+
+/// The task once it ended, with the watchdog looking as often as the test does.
+async fn watched_to_its_end(core: &Core, id: &str) -> Task {
+    wait_for("the task to end", async || {
+        core.watchdog_beat();
+        Some(task_now(core, id).await).filter(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Blocked | TaskStatus::Failed))
+    })
+    .await
+}
+
+/// The task once the watchdog wrote a reason that starts with `flag` on it.
+async fn flagged(core: &Core, id: &str, flag: &str) -> Task {
+    wait_for("the watchdog's flag", async || {
+        core.watchdog_beat();
+        Some(task_now(core, id).await).filter(|t| t.status_reason.as_deref().is_some_and(|r| r.starts_with(flag)))
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_turn_is_flagged_then_interrupted_and_continued() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|turn: &Turn| {
+        if turn.n == 0 {
+            write_hello(turn, "hel");
+            return End::Interrupted; // it says nothing more until it is interrupted
+        }
+        write_hello(turn, "hello\n");
+        End::Turn(TurnStatus::Completed, None)
+    });
+    let (core, seen, task) = start(dir.path(), None, script).await;
+    watch(&core, 1, 0).await;
+    first_turn_worker(&core, &seen, &task).await;
+
+    // Silent for the limit: the task says so, and the worker is left alone for now.
+    let stalled = flagged(&core, &task.id, "stalled: no output for").await;
+    assert_eq!(stalled.status, TaskStatus::Running);
+    let said = decisions(&core, "watchdog").await;
+    assert!(said.iter().any(|s| s.contains("Codly interrupts its turn if it stays silent")), "{said:?}");
+
+    // Still silent at twice the limit: interrupted, and asked to continue in the same session.
+    let task = watched_to_its_end(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!((seen.runs, seen.prompts.len()), (1, 2), "the same session goes on: {:?}", seen.prompts);
+        let again = &seen.prompts[1];
+        assert!(again.contains("gave no output for") && again.contains("so Codly interrupted it"), "{again}");
+    }
+    assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the work of the silent turn was not checked before it was finished");
+    let said = decisions(&core, "watchdog").await;
+    assert!(said.iter().any(|s| s.contains("Codly interrupted its turn and asks it to continue")), "{said:?}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_that_stays_silent_is_stopped_and_its_task_goes_back_in_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|turn: &Turn| {
+        if turn.n == 0 {
+            write_hello(turn, "hel");
+            return End::Stuck; // the interrupt changes nothing
+        }
+        write_hello(turn, "hello\n");
+        End::Turn(TurnStatus::Completed, None)
+    });
+    let (core, seen, task) = start(dir.path(), None, script).await;
+    watch(&core, 1, 0).await;
+
+    // Flagged, interrupted, stopped; then the task starts again and runs to its end.
+    let task = watched_to_its_end(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    {
+        let seen = seen.lock().unwrap();
+        // The continue prompt waits for the interrupted turn to end, and that turn never did.
+        assert_eq!((seen.runs, seen.prompts.len()), (2, 2), "the worker was restarted: {:?}", seen.prompts);
+        assert!(seen.prompts[1].contains("You are back on task"), "{}", seen.prompts[1]);
+    }
+    assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the work of the silent turn was never committed or checked");
+    let said = decisions(&core, "watchdog").await;
+    assert!(said.iter().any(|s| s.contains("did not recover. Codly stopped it and restarts its task")), "{said:?}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_that_waits_for_your_answer_is_not_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|turn: &Turn| {
+        if turn.n == 0 {
+            // A question to you: no rule answers it.
+            let approval = Approval {
+                id: "which-db".into(),
+                agent_id: turn.agent_id.into(),
+                run_id: turn.run_id.into(),
+                task_id: None,
+                call_id: None,
+                subject: ApprovalSubject::Question { questions: serde_json::json!([{ "question": "Which DB?" }]) },
+                reason: None,
+                choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny],
+                risks: vec![],
+                status: ApprovalStatus::Pending,
+                decided_by: None,
+                created_at: 0,
+            };
+            (turn.emit)(EventKind::ApprovalRequested { approval });
+            return End::Interrupted;
+        }
+        End::Turn(TurnStatus::Completed, None)
+    });
+    let (core, seen, task) = start(dir.path(), None, script).await;
+    watch(&core, 1, 0).await;
+    first_turn_worker(&core, &seen, &task).await;
+
+    // Well past the limit, and past the interrupt that follows a flag.
+    let until = tokio::time::Instant::now() + Duration::from_millis(2600);
+    while tokio::time::Instant::now() < until {
+        core.watchdog_beat();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let said = decisions(&core, "watchdog").await;
+    assert!(said.is_empty(), "the worker waits for you: {said:?}");
+    let waiting = task_now(&core, &task.id).await;
+    assert_eq!(waiting.status, TaskStatus::Running);
+    assert!(!waiting.status_reason.as_deref().is_some_and(|r| r.starts_with("stalled")), "{:?}", waiting.status_reason);
+    assert_eq!(seen.lock().unwrap().prompts.len(), 1, "it was not interrupted and asked to continue");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_you_interrupt_is_flagged_as_idle_until_you_say_what_is_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|turn: &Turn| {
+        if turn.n == 0 {
+            write_hello(turn, "hel");
+            return End::Interrupted;
+        }
+        write_hello(turn, "hello\n");
+        End::Turn(TurnStatus::Completed, None)
+    });
+    let (core, seen, task) = start(dir.path(), None, script).await;
+    watch(&core, 0, 1).await;
+    let worker = first_turn_worker(&core, &seen, &task).await;
+
+    // Your interrupt ends the turn; the task stays Running with a worker that does nothing.
+    core.interrupt_agent(&worker).await.unwrap();
+    let idle = flagged(&core, &task.id, "idle: the worker stopped without finishing").await;
+    assert_eq!(idle.status, TaskStatus::Running, "nothing is done to it: what is next is yours to say");
+    assert!(committed(&core, &idle).await.is_empty(), "the half-done work was not checked");
+    let said = decisions(&core, "watchdog").await;
+    assert!(matches!(&said[..], [one] if one.contains("stopped without finishing")), "{said:?}");
+
+    // You tell it to go on: it finishes, and only then is its work checked.
+    core.steer_agent(&worker, "go on").await.unwrap();
+    let task = watched_to_its_end(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    assert_eq!(committed(&core, &task).await, vec!["hello\n"]);
+    assert_eq!(decisions(&core, "watchdog").await.len(), 1, "flagged once");
     core.shutdown().await;
 }

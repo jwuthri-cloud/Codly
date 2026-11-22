@@ -74,6 +74,7 @@ impl Inner {
     }
 
     fn ingest(self: &Arc<Self>, ev: AdapterEvent) {
+        self.watchdog_seen(&ev); // any event is a life sign, the live deltas below too
         let ctx = self.run_ctx(&ev.agent_id, &ev.run_id);
         let mut r = row(Some(&ev.agent_id), ctx.task_id.as_deref(), Some(&ev.run_id), ev.kind);
         if let EventKind::ApprovalRequested { approval } = &mut r.kind

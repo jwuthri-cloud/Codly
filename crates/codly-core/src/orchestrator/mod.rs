@@ -15,6 +15,7 @@
 //! - `housekeeping` board archiving sweep, default MCP servers for new agents
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - `breaker_run` circuit breaker enforcement (policy in `breaker`): steer, constrain, stop
+//! - `watchdog` a turn that gives no output, a worker idle on a running task: flag, interrupt, stop
 //! - `wallet`   the player's coins (🪙) across every repo, Build/Buy, developer grants
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
@@ -48,6 +49,7 @@ mod triggers;
 pub mod wallet;
 mod workspace;
 mod memgraph;
+pub mod watchdog;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -163,6 +165,8 @@ struct Live {
     /// The continue prompt a failed turn still owes this worker. It goes out after the retry
     /// wait, when another turn completes or when you resume the worker, whichever is first.
     continue_owed: Option<String>,
+    /// When its last event came, and what the watchdog did about a silence (watchdog.rs).
+    watch: watchdog::Watch,
 }
 
 /// A member's reply the Lead of `thread` waits for: the reply of turn number `due`.
@@ -409,6 +413,7 @@ impl Core {
         tokio::spawn(triggers::run(inner.clone()));
         tokio::spawn(breaker_run::beat_loop(inner.clone()));
         tokio::spawn(housekeeping::sweeper(inner.clone()));
+        tokio::spawn(watchdog::run(inner.clone()));
         match inner.store.last_workspace() {
             Ok(Some(ws)) => {
                 if let Err(e) = inner.open_workspace(&ws.repo_path).await {

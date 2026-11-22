@@ -5,6 +5,7 @@ import type { ApprovalMode } from "./ApprovalMode";
 import type { ByokSettings } from "./ByokSettings";
 import type { Provider } from "./Provider";
 import type { TeamMember } from "./TeamMember";
+import type { WatchdogSettings } from "./WatchdogSettings";
 
 export type Settings = { lead_provider: Provider | null, lead_model: string | null, 
 /**
@@ -90,4 +91,9 @@ developer_mode: boolean,
  * Seconds one verify or integration command may run before the gate stops it. A check
  * that runs out of time blocks its task for you; it is not sent back to the worker.
  */
-verify_timeout_secs: number, };
+verify_timeout_secs: number, 
+/**
+ * When the watchdog flags, interrupts and stops an agent that gives no output, and flags
+ * a worker that sits idle on a running task.
+ */
+watchdog: WatchdogSettings, };

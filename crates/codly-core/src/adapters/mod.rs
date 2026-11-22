@@ -130,3 +130,13 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         Provider::Gemini | Provider::Opencode | Provider::Cursor | Provider::Copilot => acp::spawn(spec, events).await,
     }
 }
+
+/// What an adapter adds when it ends a run whose turn would not stop: the prompts that waited
+/// behind that turn are gone with it, and the user must know.
+fn unsent_note(waiting: usize) -> String {
+    match waiting {
+        0 => String::new(),
+        1 => " 1 message that waited for this turn was not sent: send it again.".into(),
+        n => format!(" {n} messages that waited for this turn were not sent: send them again."),
+    }
+}

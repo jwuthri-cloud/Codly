@@ -46,6 +46,12 @@ const RATE_LIMITS: &str = "account/rateLimits/updated";
 /// reset time counts only while it was seen recently.
 const LIMITS_REFRESH_MS: i64 = 60_000;
 
+/// How long Codex has to open a thread, and to answer `turn/start`.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a turn has to end after `turn/interrupt`. Past either limit the thread is let go:
+/// the run ends and the next one resumes the thread.
+const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// One app-server per sign-in: its CODEX_HOME (None = unset) holds the account's auth and
 /// threads, and its thread-less notifications (rate limits) concern that account only.
 /// Each account has a slot with its own lock, held while its server starts (up to ~45 s),
@@ -154,6 +160,11 @@ struct AppServer {
     next_id: AtomicI64,
     state: StdMutex<State>,
     alive: AtomicBool,
+    /// Codly gave this server up (`give_up`): its process is being ended, and no new agent
+    /// may start on it.
+    abandoned: AtomicBool,
+    /// When the server last wrote a line (ms): how long it has said nothing to anybody.
+    last_inbound_ms: AtomicI64,
     pgid: i32,
     /// With `pgid`, what every run on this server records for crash recovery.
     started_ms: i64,
@@ -178,6 +189,8 @@ impl AppServer {
             next_id: AtomicI64::new(0),
             state: StdMutex::new(State::default()),
             alive: AtomicBool::new(true),
+            abandoned: AtomicBool::new(false),
+            last_inbound_ms: AtomicI64::new(now_ms()),
             pgid: child.id().map(|p| p as i32).unwrap_or(0),
             started_ms: now_ms(),
             stderr: StderrTail::spawn(child.stderr.take().context("no stderr")?, 64 << 10),
@@ -233,6 +246,7 @@ impl AppServer {
 
     /// Write each line to the owning agent's raw log, then hand it over in stream order.
     fn route_line(self: &Arc<Self>, bytes: &[u8]) {
+        self.last_inbound_ms.store(now_ms(), Ordering::SeqCst);
         let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
             self.bootstrap_raw.inbound(bytes);
             return;
@@ -327,10 +341,56 @@ impl AppServer {
     }
 
     async fn send(&self, msg: &Value, raw: &RawLog) -> std::io::Result<()> {
+        self.send_within(msg, raw, proc::WRITE_TIMEOUT).await
+    }
+
+    /// Every agent of the account writes through this one lock, so a write may never wait
+    /// without end: a server that does not take a line within `limit` has stopped reading. It
+    /// is given up, and every later write fails at once instead of waiting behind this one.
+    async fn send_within(&self, msg: &Value, raw: &RawLog, limit: Duration) -> std::io::Result<()> {
         let mut stdin = self.stdin.lock().await;
-        match stdin.as_mut() {
-            Some(w) => proc::write_json(w, raw, msg).await,
-            None => Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "codex app-server stdin is closed")),
+        let Some(w) = stdin.as_mut() else {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "codex app-server stdin is closed"));
+        };
+        let sent = proc::write_json_within(w, raw, msg, limit).await;
+        if sent.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::TimedOut) {
+            *stdin = None;
+            self.give_up("it stopped reading its input");
+        }
+        sent
+    }
+
+    /// Usable for a new agent: its process runs and Codly did not give it up.
+    fn usable(&self) -> bool {
+        self.alive.load(Ordering::SeqCst) && !self.abandoned.load(Ordering::SeqCst)
+    }
+
+    /// How long the server has written nothing at all (ms).
+    fn silent_ms(&self) -> i64 {
+        now_ms() - self.last_inbound_ms.load(Ordering::SeqCst)
+    }
+
+    /// The server is hung, or runs a turn nobody can stop: end its process. Its agents receive
+    /// `Exited` when it is gone, and the next agent of the account starts a new server.
+    fn give_up(&self, why: &str) {
+        if self.abandoned.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!("stopping a codex app-server: {why}");
+        self.bootstrap_raw.note(&format!("stopping the codex app-server: {why}"));
+        tokio::spawn(proc::kill_group(self.pgid, Duration::from_secs(2)));
+    }
+
+    /// `give_up` when no agent is on this server and nothing else waits for an answer from it
+    /// (an agent that starts, an account read). Requests of `mine`, the agent that leaves, do
+    /// not count: its own unanswered ones are why it leaves.
+    fn give_up_if_unused(&self, mine: &Route, why: &str) {
+        let unused = {
+            let st = self.state.lock().unwrap();
+            st.routes.is_empty() && st.pending.values().all(|w| matches!(w, Waiter::Agent { route, .. } if route.tx.same_channel(&mine.tx)))
+        };
+        if unused {
+            self.give_up(why);
         }
     }
 
@@ -359,14 +419,18 @@ impl AppServer {
         self.state.lock().unwrap().routes.remove(thread_id);
     }
 
-    /// Close stdin (the server exits on EOF), then SIGTERM → SIGKILL if it lingers.
+    /// Close stdin (the server exits on EOF), then SIGTERM → SIGKILL if it lingers. A write
+    /// that is still under way holds stdin: after 1 s the close goes straight to the signals.
     async fn close(&self) {
-        self.stdin.lock().await.take();
-        for _ in 0..30 {
-            if !self.alive.load(Ordering::SeqCst) {
-                return;
+        if let Ok(mut stdin) = tokio::time::timeout(Duration::from_secs(1), self.stdin.lock()).await {
+            stdin.take();
+            drop(stdin);
+            for _ in 0..30 {
+                if !self.alive.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         proc::kill_group(self.pgid, Duration::from_secs(3)).await;
     }
@@ -402,11 +466,11 @@ async fn server_for(servers: &Servers, spec: &SpawnSpec, raw: &Arc<RawLog>) -> a
         }
     };
     let mut cur = slot.lock().await;
-    if let Some(s) = cur.as_ref().filter(|s| s.alive.load(Ordering::SeqCst)) {
+    if let Some(s) = cur.as_ref().filter(|s| s.usable()) {
         return Ok(s.clone());
     }
     let s = AppServer::start(spec, raw.clone()).await?;
-    *cur = Some(s.clone()); // in place of the dead one, if any
+    *cur = Some(s.clone()); // in place of the dead or hung one, if any
     Ok(s)
 }
 
@@ -513,12 +577,17 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     };
     agent.pending.insert(start_id, Pending::Thread);
     tokio::spawn(agent.run(cmds, msgs, ready_tx));
-    match tokio::time::timeout(Duration::from_secs(60), ready_rx).await {
+    match tokio::time::timeout(START_TIMEOUT, ready_rx).await {
         Ok(Ok(Ok(()))) => Ok(AgentHandle { agent_id: spec.agent_id, run_id: spec.run_id, tx }),
         Ok(Ok(Err(e))) => Err(startup::explain(&spec, server.info.lock().unwrap().cli_version.as_deref(), e)),
         Ok(Err(_)) => Err(anyhow!("codex adapter stopped during startup")),
         Err(_) => {
             let _ = tx.send(AgentCmd::Shutdown);
+            // A server that said nothing to anybody all that time is hung: the next start gets
+            // a new one, instead of waiting 60 s behind this one again.
+            if server.silent_ms() >= START_TIMEOUT.as_millis() as i64 {
+                server.give_up("it answered nothing while a thread waited to open");
+            }
             // The thread may still open, and by then its adapter is gone: take the answer
             // here and unsubscribe, so the thread is neither routed to a dead channel nor
             // left loaded on the shared server. (The server's exit drops the waiter.)
@@ -533,7 +602,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
                     let _ = server.call("thread/unsubscribe", json!({ "threadId": tid }), &raw, Duration::from_secs(3)).await;
                 }
             });
-            Err(anyhow!("codex app-server did not answer {method} within 60 s"))
+            Err(anyhow!("codex app-server did not answer {method} within {} s", START_TIMEOUT.as_secs()))
         }
     }
 }
@@ -581,6 +650,8 @@ struct CodexAgent {
     /// after it: handled, in order, once the last steer is answered.
     held: Vec<(String, Value)>,
     stage: Stage,
+    /// While running: when `turn/start` must be answered, or an interrupted turn must have
+    /// ended. In a shutdown: the stage's limit.
     deadline: Option<tokio::time::Instant>,
 }
 
@@ -675,6 +746,7 @@ impl CodexAgent {
             (Pending::TurnStart, Ok(r)) => {
                 self.turn_pending = false;
                 self.active_turn = r["turn"]["id"].as_str().map(str::to_owned);
+                self.answered_in_time();
                 if self.interrupt_after_start {
                     self.interrupt_after_start = false;
                     self.interrupt().await;
@@ -685,6 +757,7 @@ impl CodexAgent {
             }
             (Pending::TurnStart, Err(e)) => {
                 self.turn_pending = false;
+                self.answered_in_time();
                 self.emit(EventKind::Error { message: format!("codex refused the turn: {}", err_text(&e)), fatal: false });
                 let events = self.norm.turn_failed();
                 self.emit_all(events);
@@ -741,6 +814,7 @@ impl CodexAgent {
         self.emit_all(events);
         if method == "turn/completed" {
             self.active_turn = None;
+            self.answered_in_time();
             match self.stage {
                 Stage::Interrupting => self.unsubscribe().await,
                 Stage::Running => self.next_turn().await,
@@ -791,8 +865,24 @@ impl CodexAgent {
         }
         if self.request("turn/start", params, Pending::TurnStart).await {
             self.turn_pending = true;
+            self.wait_at_most(START_TIMEOUT);
             let events = self.norm.turn_started(&text);
             self.emit_all(events);
+        }
+    }
+
+    /// While running, wait `limit` for what was just asked (a turn to start, a turn to end);
+    /// `on_deadline` lets the thread go when it does not come. A shutdown keeps its own limits.
+    fn wait_at_most(&mut self, limit: Duration) {
+        if self.stage == Stage::Running {
+            self.deadline = Some(tokio::time::Instant::now() + limit);
+        }
+    }
+
+    /// What `wait_at_most` waited for came.
+    fn answered_in_time(&mut self) {
+        if self.stage == Stage::Running {
+            self.deadline = None;
         }
     }
 
@@ -816,7 +906,9 @@ impl CodexAgent {
             (Some(tid), Some(turn)) => {
                 self.norm.interrupt_requested = true;
                 self.request("turn/interrupt", json!({ "threadId": tid, "turnId": turn }), Pending::Interrupt).await;
+                self.wait_at_most(INTERRUPT_TIMEOUT);
             }
+            // The limit of its `turn/start` still runs.
             _ if self.turn_pending => self.interrupt_after_start = true,
             _ => {}
         }
@@ -857,8 +949,35 @@ impl CodexAgent {
         match self.stage {
             Stage::Interrupting => self.unsubscribe().await,
             Stage::Unsubscribing => self.finish(),
-            _ => {}
+            Stage::Running => self.let_go().await,
+            Stage::Done => {}
         }
+    }
+
+    /// `turn/start` got no answer, or the turn did not end after `turn/interrupt`: the thread
+    /// is stuck. Codly says so and ends the run (`Exited`); the next run resumes the thread. A
+    /// turn that never started ends as failed, one that would not stop as interrupted.
+    async fn let_go(&mut self) {
+        let unsent = super::unsent_note(self.queue.len() + self.steer_queue.len());
+        self.queue.clear();
+        self.steer_queue.clear();
+        let what = if self.turn_pending {
+            format!("Codex did not start the turn within {} s", START_TIMEOUT.as_secs())
+        } else {
+            format!("Codex did not stop within {} s", INTERRUPT_TIMEOUT.as_secs())
+        };
+        self.emit(EventKind::Error { message: format!("{what}, so Codly ended this run. Your next message resumes the session.{unsent}"), fatal: false });
+        if std::mem::take(&mut self.turn_pending) {
+            // An answer that comes after all starts nothing here: the turn is over for Codly.
+            self.pending.retain(|_, what| !matches!(what, Pending::TurnStart));
+            let events = self.norm.turn_failed();
+            self.emit_all(events);
+            // Nothing from the server for anybody all that time: it is hung for every agent on it.
+            if self.server.silent_ms() >= START_TIMEOUT.as_millis() as i64 {
+                self.server.give_up("it answered nothing while a turn waited to start");
+            }
+        }
+        self.unsubscribe().await;
     }
 
     fn finish(&mut self) {
@@ -868,17 +987,23 @@ impl CodexAgent {
         if let Some(tid) = &self.thread_id {
             self.server.unroute(tid);
         }
+        let open = self.active_turn.take().is_some() || std::mem::take(&mut self.turn_pending);
         if self.started {
             let events = self.norm.cancel_all_approvals();
             self.emit_all(events);
             // Once unrouted, Codex's own `turn/completed` cannot reach us: close the turn here.
             // Interrupted, not Failed: this is a shutdown Codly asked for, and a failed turn
             // would send a stopped worker to the gate.
-            if self.active_turn.take().is_some() || std::mem::take(&mut self.turn_pending) {
+            if open {
                 self.emit(EventKind::TurnCompleted { status: TurnStatus::Interrupted, result_text: None, duration_ms: None });
             }
             self.emit(EventKind::StatusChanged { status: AgentStatus::Offline });
             self.emit(EventKind::Exited { code: None });
+        }
+        // The turn never ended, so it may still run on the server, with nobody to stop it or
+        // to read it. A server that no other agent uses is ended with it.
+        if open {
+            self.server.give_up_if_unused(&self.route, "a turn did not stop and no other agent uses the server");
         }
         self.stage = Stage::Done;
     }
@@ -1827,6 +1952,8 @@ mod tests {
             next_id: AtomicI64::new(0),
             state: StdMutex::new(State::default()),
             alive: AtomicBool::new(true),
+            abandoned: AtomicBool::new(false),
+            last_inbound_ms: AtomicI64::new(0),
             pgid: 0,
             started_ms: 0,
             stderr: StderrTail::default(),
@@ -2048,6 +2175,112 @@ mod tests {
             assert!(closed.is_some() && closed < exited, "{kinds:?}");
             assert_eq!(kinds.iter().filter(|k| matches!(k, EventKind::TurnCompleted { .. })).count(), 1, "{kinds:?}");
         }
+    }
+
+    fn turn_ends(kinds: &[EventKind]) -> Vec<TurnStatus> {
+        kinds.iter().filter_map(|k| if let EventKind::TurnCompleted { status, .. } = k { Some(*status) } else { None }).collect()
+    }
+
+    /// `turn/start` is never answered: the thread is let go and the turn ends as failed. A
+    /// server that said nothing to anybody meanwhile is hung and is given up; one that still
+    /// talks is kept for its other agents. (Deadlines are fired by hand, as above.)
+    #[tokio::test]
+    async fn a_turn_that_never_starts_ends_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        for talks in [false, true] {
+            let server = fake_server(dir.path());
+            if talks {
+                server.last_inbound_ms.store(now_ms(), Ordering::SeqCst);
+            }
+            let (mut agent, mut events) = fake_agent(&server);
+            (agent.started, agent.thread_id, agent.turn_pending) = (true, Some("t".into()), true);
+            agent.pending.insert(3, Pending::TurnStart);
+            agent.steer_queue.push("then test it".into());
+            agent.on_deadline().await;
+            assert_eq!(agent.stage, Stage::Done);
+            let kinds = emitted(&mut events);
+            assert!(
+                matches!(&kinds[0], EventKind::Error { message, fatal: false }
+                    if message.starts_with("Codex did not start the turn within 60 s") && message.contains("1 message that waited for this turn was not sent")),
+                "{kinds:?}"
+            );
+            assert_eq!(turn_ends(&kinds), [TurnStatus::Failed], "{kinds:?}");
+            assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
+            assert_eq!(server.usable(), talks);
+            // An answer that comes after all starts nothing here.
+            agent.on_response(3, Ok(json!({ "turn": { "id": "u" } })), &mut None).await;
+            assert!(agent.active_turn.is_none() && emitted(&mut events).is_empty());
+        }
+    }
+
+    /// The turn does not end after `turn/interrupt`: the thread is let go and the turn ends as
+    /// interrupted. It may still run on the server, so a server no other agent uses is ended too.
+    #[tokio::test]
+    async fn an_interrupt_that_does_not_end_the_turn_ends_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        // Who else is on the server: nobody, an agent with a thread, an agent that opens one.
+        for other in ["nobody", "a thread", "a start"] {
+            let shared = other != "nobody";
+            let server = fake_server(dir.path());
+            server.last_inbound_ms.store(now_ms(), Ordering::SeqCst);
+            let (mut agent, mut events) = fake_agent(&server);
+            let route = || Route { tx: mpsc::unbounded_channel().0, raw: server.bootstrap_raw.clone() };
+            {
+                let mut st = server.state.lock().unwrap();
+                // The agent's own `turn/interrupt`, never answered, keeps nobody's server alive.
+                st.pending.insert(7, Waiter::Agent { route: agent.route.clone(), register: false });
+                if other == "a thread" {
+                    st.routes.insert("other".into(), route());
+                }
+                if other == "a start" {
+                    st.pending.insert(8, Waiter::Agent { route: route(), register: true });
+                }
+            }
+            (agent.started, agent.thread_id, agent.active_turn) = (true, Some("t".into()), Some("u".into()));
+            agent.on_cmd(AgentCmd::Interrupt).await;
+            assert!(agent.deadline.is_some() && agent.stage == Stage::Running);
+            emitted(&mut events);
+
+            agent.on_deadline().await;
+            assert_eq!(agent.stage, Stage::Done);
+            let kinds = emitted(&mut events);
+            assert!(matches!(&kinds[0], EventKind::Error { message, fatal: false } if message.starts_with("Codex did not stop within 15 s")), "{kinds:?}");
+            assert_eq!(turn_ends(&kinds), [TurnStatus::Interrupted], "{kinds:?}");
+            assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
+            assert_eq!(server.usable(), shared);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_turn_that_ends_in_time_keeps_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let (mut agent, _events) = fake_agent(&server);
+        (agent.started, agent.thread_id, agent.active_turn) = (true, Some("t".into()), Some("u".into()));
+        agent.on_cmd(AgentCmd::Interrupt).await;
+        assert!(agent.deadline.is_some());
+        agent.on_notification("turn/completed", &json!({ "threadId": "t", "turn": { "status": "interrupted" } })).await;
+        assert!(agent.deadline.is_none() && agent.active_turn.is_none());
+        assert_eq!(agent.stage, Stage::Running);
+        assert!(server.usable());
+    }
+
+    /// Every agent of an account writes to one app-server. One that stops reading must not
+    /// hold them all behind a write: the write gives up, and so does every later one, at once.
+    #[tokio::test]
+    async fn a_server_that_stops_reading_is_given_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let mut child = proc::command(Path::new("/bin/sh"), &["-c".into(), "exec sleep 30".into()], dir.path(), &env).spawn().unwrap();
+        let server = fake_server(dir.path());
+        *server.stdin.lock().await = child.stdin.take();
+        let raw = server.bootstrap_raw.clone();
+        let big = json!({ "method": "turn/start", "params": { "text": "x".repeat(1 << 20) } });
+        let e = server.send_within(&big, &raw, Duration::from_millis(200)).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut, "{e}");
+        assert!(!server.usable(), "no new agent starts on a server that stopped reading");
+        let e = server.send(&json!({ "method": "initialized" }), &raw).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
     }
 
     #[test]

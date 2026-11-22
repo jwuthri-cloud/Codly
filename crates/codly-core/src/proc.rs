@@ -251,6 +251,20 @@ pub async fn write_json<W: AsyncWrite + Unpin>(w: &mut W, raw: &RawLog, msg: &Va
     w.flush().await
 }
 
+/// How long a CLI may take to read one line Codly writes to its stdin. A CLI that takes
+/// longer has stopped reading (its pipe is full): it is hung.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// [`write_json`] with a deadline: `TimedOut` when the CLI does not take the line within
+/// `limit`. A part of the line may be in the pipe by then, so the caller must give the
+/// process up: nothing more can be written to it.
+pub async fn write_json_within<W: AsyncWrite + Unpin>(w: &mut W, raw: &RawLog, msg: &Value, limit: Duration) -> std::io::Result<()> {
+    match tokio::time::timeout(limit, write_json(w, raw, msg)).await {
+        Ok(written) => written,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("the CLI did not read its input within {} s", limit.as_secs()))),
+    }
+}
+
 /// The last `cap` bytes a child wrote to stderr. The drain task keeps reading forever, so a
 /// chatty child (Codex logs every MCP failure there) never blocks on a full stderr pipe.
 #[derive(Clone, Default)]
@@ -379,6 +393,32 @@ mod tests {
         assert_eq!(lines[0]["type"], "system");
         assert_eq!(lines[1]["codly_sent"]["type"], "user");
         assert_eq!(lines[2]["codly_note"], "dropped 5 bytes");
+    }
+
+    /// A CLI that stopped reading its stdin: the write gives up at the deadline instead of
+    /// waiting for ever, and a write that is read goes through.
+    #[tokio::test]
+    async fn a_write_nobody_reads_gives_up_at_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = RawLog::open(&dir.path().join("raw.ndjson")).unwrap();
+        // 16 bytes of pipe, and nobody reads the other end.
+        let (mut w, _unread) = tokio::io::duplex(16);
+        let msg = serde_json::json!({ "type": "user", "text": "x".repeat(4096) });
+        let started = std::time::Instant::now();
+        let e = write_json_within(&mut w, &log, &msg, Duration::from_millis(100)).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut, "{e}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let (mut w, mut r) = tokio::io::duplex(16);
+        let reader = tokio::spawn(async move {
+            let mut all = Vec::new();
+            r.read_to_end(&mut all).await.unwrap();
+            all
+        });
+        write_json_within(&mut w, &log, &msg, Duration::from_secs(5)).await.unwrap();
+        drop(w);
+        let line = reader.await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&line).unwrap(), msg);
     }
 
     #[tokio::test]
