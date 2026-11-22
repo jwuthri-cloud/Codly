@@ -10,6 +10,7 @@
 //! - `gate`     commit → verify → scope → review → merge queue → done
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
+//! - `approval_rules` "always allow in this repo": saved rules the approval broker follows
 //! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
 //! - `triggers` schedules and context rules run on a clock (policy: `crate::triggers`)
 //! - `housekeeping` board archiving sweep, default MCP servers for new agents
@@ -20,6 +21,7 @@
 
 pub mod accounts;
 pub mod approvals;
+mod approval_rules;
 pub mod agent_git;
 pub mod breaker;
 mod breaker_run;

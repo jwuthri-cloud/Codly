@@ -25,7 +25,7 @@ use serde_json::Value;
 use crate::model::*;
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql")), M::up(include_str!("m3_memory_data.sql")), M::up(include_str!("m4_workspace_closed.sql")), M::up(include_str!("m5_lookup_indexes.sql"))])
+    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql")), M::up(include_str!("m3_memory_data.sql")), M::up(include_str!("m4_workspace_closed.sql")), M::up(include_str!("m5_lookup_indexes.sql")), M::up(include_str!("m6_approval_rules.sql"))])
 }
 
 /// One agent process lifetime (`run` table). Not a UI type: the UI sees runs through events.
@@ -745,6 +745,72 @@ impl Store {
         self.json_rows("SELECT json FROM approval WHERE status = 'pending' AND run_id = ?1 ORDER BY created_at", run_id)
     }
 
+    // ───────────── saved approval rules ("always allow in this repo") ─────────────
+
+    /// A repo's saved rules, oldest first.
+    pub fn approval_rules(&self, workspace_id: &str) -> Result<Vec<ApprovalRule>> {
+        let conn = self.conn();
+        let mut st = conn.prepare_cached(&format!("SELECT {RULE_COLUMNS} FROM approval_rule WHERE workspace_id = ?1 ORDER BY rowid"))?;
+        let rows = st.query_map([workspace_id], approval_rule_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Save a rule. Saving the same rule again returns the one that is there.
+    pub fn add_approval_rule(&self, workspace_id: &str, kind: ApprovalRuleKind, command: &str) -> Result<ApprovalRule> {
+        self.tx(|tx| {
+            tx.execute(
+                "INSERT INTO approval_rule (id, workspace_id, kind, command, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(workspace_id, kind, command) DO NOTHING",
+                params![new_id(), workspace_id, enum_str(&kind), command, now_ms()],
+            )?;
+            Ok(tx.query_row(
+                &format!("SELECT {RULE_COLUMNS} FROM approval_rule WHERE workspace_id = ?1 AND kind = ?2 AND command = ?3"),
+                params![workspace_id, enum_str(&kind), command],
+                approval_rule_from_row,
+            )?)
+        })
+    }
+
+    /// Remove a rule; returns it, or None when there is no such rule.
+    pub fn remove_approval_rule(&self, id: &str) -> Result<Option<ApprovalRule>> {
+        self.tx(|tx| {
+            let rule = tx.query_row(&format!("SELECT {RULE_COLUMNS} FROM approval_rule WHERE id = ?1"), [id], approval_rule_from_row).optional()?;
+            tx.execute("DELETE FROM approval_rule WHERE id = ?1", [id])?;
+            Ok(rule)
+        })
+    }
+
+    /// Record the rules a request can be saved as (the broker does, when it asks you).
+    pub fn set_rule_offer(&self, approval_id: &str, offer: &ApprovalRuleOffer) -> Result<()> {
+        self.conn().execute("UPDATE approval SET rule_offer = ?2 WHERE id = ?1", params![approval_id, serde_json::to_string(offer)?])?;
+        Ok(())
+    }
+
+    /// The rules a request can be saved as: none once it is answered, or when Codly always
+    /// asks about it.
+    pub fn rule_offer(&self, approval_id: &str) -> Result<ApprovalRuleOffer> {
+        let saved: Option<Option<String>> = self
+            .conn()
+            .query_row("SELECT rule_offer FROM approval WHERE id = ?1 AND status = 'pending'", [approval_id], |r| r.get(0))
+            .optional()?;
+        Ok(saved.flatten().map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default())
+    }
+
+    /// The requests of a repo that wait for you and can be saved as a rule, oldest first.
+    pub fn pending_rule_offers(&self, workspace_id: &str) -> Result<Vec<(Id, ApprovalRuleOffer)>> {
+        let conn = self.conn();
+        let mut st = conn.prepare_cached(
+            "SELECT id, rule_offer FROM approval WHERE status = 'pending' AND workspace_id = ?1 AND rule_offer IS NOT NULL ORDER BY created_at",
+        )?;
+        let rows = st.query_map([workspace_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = vec![];
+        for row in rows {
+            let (id, offer) = row?;
+            out.push((id, serde_json::from_str(&offer)?));
+        }
+        Ok(out)
+    }
+
     /// Move a thread's messages to another one (a closed request's go to its archive thread).
     pub fn move_chats(&self, workspace_id: &str, from: &str, to: &str) -> Result<usize> {
         Ok(self.conn().execute(
@@ -1007,6 +1073,15 @@ fn event_from_row(r: &rusqlite::Row) -> rusqlite::Result<EventRow> {
     Ok(EventRow { id: r.get(0)?, ts: r.get(1)?, agent_id: r.get(2)?, task_id: r.get(3)?, run_id: r.get(4)?, workspace_id: None, kind })
 }
 
+const RULE_COLUMNS: &str = "id, workspace_id, kind, command, created_at";
+
+/// An `approval_rule` row, read as `RULE_COLUMNS`.
+fn approval_rule_from_row(r: &rusqlite::Row) -> rusqlite::Result<ApprovalRule> {
+    let kind: String = r.get(2)?;
+    let kind = parse_enum(&kind).ok_or_else(|| rusqlite::Error::InvalidColumnType(2, format!("approval rule kind {kind}"), rusqlite::types::Type::Text))?;
+    Ok(ApprovalRule { id: r.get(0)?, workspace_id: r.get(1)?, kind, command: r.get(3)?, created_at: r.get(4)? })
+}
+
 fn decode_all<T: DeserializeOwned>(rows: impl Iterator<Item = rusqlite::Result<String>>) -> Result<Vec<T>> {
     let mut out = vec![];
     for s in rows {
@@ -1169,6 +1244,48 @@ mod tests {
         store.append_event(None, &resolved(ApprovalStatus::Cancelled, "provider")).unwrap();
         let got = store.approval(&a.id).unwrap().unwrap();
         assert_eq!((got.status, got.decided_by.as_deref()), (ApprovalStatus::Cancelled, Some("provider")));
+    }
+
+    #[test]
+    fn approval_rules_are_kept_per_repo_and_an_offer_lasts_while_the_request_waits() {
+        let store = Store::open_in_memory().unwrap();
+        let w = ws(&store);
+        let rule = store.add_approval_rule(&w.id, ApprovalRuleKind::Prefix, "cargo test").unwrap();
+        assert_eq!((rule.kind, rule.command.as_str(), rule.workspace_id.as_str()), (ApprovalRuleKind::Prefix, "cargo test", w.id.as_str()));
+        // The same rule again is the one that is there; the exact command is another rule.
+        assert_eq!(store.add_approval_rule(&w.id, ApprovalRuleKind::Prefix, "cargo test").unwrap().id, rule.id);
+        let exact = store.add_approval_rule(&w.id, ApprovalRuleKind::Exact, "cargo test").unwrap();
+        assert_eq!(store.approval_rules(&w.id).unwrap(), vec![rule.clone(), exact.clone()]);
+        assert!(store.approval_rules("another-repo").unwrap().is_empty());
+        assert_eq!(store.remove_approval_rule(&rule.id).unwrap(), Some(rule.clone()));
+        assert_eq!(store.remove_approval_rule(&rule.id).unwrap(), None);
+        assert_eq!(store.approval_rules(&w.id).unwrap(), vec![exact]);
+
+        let a = Approval {
+            id: new_id(),
+            agent_id: "a".into(),
+            run_id: "r".into(),
+            task_id: None,
+            call_id: None,
+            subject: ApprovalSubject::Command { command: "pnpm install".into(), cwd: None },
+            reason: None,
+            choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny],
+            risks: vec![],
+            status: ApprovalStatus::Pending,
+            decided_by: None,
+            created_at: now_ms(),
+        };
+        store.append_event(Some(&w.id), &row(EventKind::ApprovalRequested { approval: a.clone() })).unwrap();
+        assert!(store.rule_offer(&a.id).unwrap().is_empty(), "nothing recorded yet");
+        assert!(store.pending_rule_offers(&w.id).unwrap().is_empty());
+        let offer = ApprovalRuleOffer { exact: Some("pnpm install".into()), prefix: Some("pnpm install".into()) };
+        store.set_rule_offer(&a.id, &offer).unwrap();
+        assert_eq!(store.rule_offer(&a.id).unwrap(), offer);
+        assert_eq!(store.pending_rule_offers(&w.id).unwrap(), vec![(a.id.clone(), offer)]);
+        let answered = EventKind::ApprovalResolved { approval_id: a.id.clone(), status: ApprovalStatus::Approved, by: "user".into() };
+        store.append_event(Some(&w.id), &row(answered)).unwrap();
+        assert!(store.rule_offer(&a.id).unwrap().is_empty(), "an answered request offers nothing");
+        assert!(store.pending_rule_offers(&w.id).unwrap().is_empty());
     }
 
     #[test]

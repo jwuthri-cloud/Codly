@@ -17,6 +17,12 @@
 //!
 //! Only `allow_once` is ever chosen automatically, never a session or permanent grant.
 //!
+//! 5. What the rules above would ask you about, a rule you saved for the repo ("always allow
+//!    in this repo", `rule_offer`) may answer instead: the exact command, or one plain command
+//!    that starts with the saved words (`cargo test`). A saved rule covers a package download
+//!    and a git command that changes the repository; the exact command also covers other
+//!    network use. Every other risk still asks, and so do strict mode and read-only agents.
+//!
 //! What the rules cannot see: they read the command line, not what a program does. A script,
 //! an interpreter (`python x.py`, `node -e …`), `make` or a test the agent wrote can do anything
 //! the agent's user account can, so no mode proves that an allowed command stays inside the
@@ -120,6 +126,96 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
 /// Strict and full are explicit choices and stay as they are.
 pub fn with_trust(mode: ApprovalMode, trusted: bool) -> ApprovalMode {
     if trusted && mode == ApprovalMode::Balanced { ApprovalMode::Autonomous } else { mode }
+}
+
+// ───────────────────────────── saved rules ─────────────────────────────
+
+/// The rules a request can be saved as ("always allow in this repo"): nothing for what Codly
+/// always asks about. A saved rule allows exactly the requests that offer it, so the card that
+/// shows the choice and the broker that follows the rule can never disagree.
+///
+/// - Only commands, from an agent that may write, outside strict mode, with a worktree to
+///   check paths against and a one-time allow to answer with.
+/// - Every risk of the request must be one a rule may cover: `PACKAGE_INSTALL`,
+///   `NPX_DOWNLOAD`, `GIT_WRITE`, and for the exact command any other "network". A delete, a
+///   push, sudo, a pipe into a shell, a secret, a path outside the worktree, a change to an
+///   agent's settings and what cannot be checked are never covered.
+/// - The prefix is for one plain command only (`rule_prefix`): a longer line that chains or
+///   substitutes anything offers at most itself, as the exact command.
+pub fn rule_offer(a: &Approval, ctx: &PolicyCtx) -> ApprovalRuleOffer {
+    let none = ApprovalRuleOffer::default();
+    let ApprovalSubject::Command { command, .. } = &a.subject else { return none };
+    let one_time = a.choices.is_empty() || a.choices.contains(&ApprovalChoice::AllowOnce);
+    if ctx.mode == ApprovalMode::Strict || ctx.read_only || ctx.worktree.is_none() || !one_time || command.trim().is_empty() {
+        return none;
+    }
+    let detected = detect_risks(&a.subject, ctx.worktree);
+    // A provider says "network" for every download; Codly's own label says which kind it is.
+    let download = detected.iter().any(|r| r == PACKAGE_INSTALL || r == NPX_DOWNLOAD) && !detected.iter().any(|r| r == "network");
+    let by_prefix = |r: &String| [PACKAGE_INSTALL, NPX_DOWNLOAD, GIT_WRITE].contains(&r.as_str()) || (r == "network" && download);
+    let by_exact = |r: &String| r == "network" || by_prefix(r);
+    if !a.risks.iter().chain(&detected).all(by_exact) {
+        return none;
+    }
+    let prefix = if a.risks.iter().chain(&detected).all(by_prefix) { rule_prefix(command) } else { None };
+    ApprovalRuleOffer { exact: Some(command.trim().to_string()), prefix }
+}
+
+/// Programs whose first argument is a subcommand: their prefix is `program subcommand`.
+const SUBCOMMAND_TOOLS: &[&str] = &[
+    "git", "npm", "pnpm", "yarn", "bun", "cargo", "go", "uv", "pip", "pip3", "poetry", "bundle", "gem", "composer", "make", "just", "task",
+    "gradle", "mvn", "dotnet", "swift", "deno", "mix",
+];
+
+/// git subcommands a prefix may cover: what they change stays in the repository and on its
+/// branch. `config` writes outside it, `rebase`, `bisect` or `submodule` run other commands,
+/// and `reset` can drop the commits Codly made.
+const GIT_PREFIXES: &[&str] =
+    &["add", "commit", "stash", "checkout", "switch", "restore", "branch", "tag", "merge", "cherry-pick", "revert", "mv", "apply"];
+
+/// Subcommands that change your own account or settings: never a prefix.
+const NO_PREFIX: &[&str] = &["config", "login", "logout", "publish"];
+
+/// Does `program subcommand` only say that something runs, so the next word names what
+/// (`npm run build`, `uv run pytest`, `pnpm dlx create-vite`)?
+fn names_what_runs(prog: &str, sub: &str) -> bool {
+    match prog {
+        "npm" | "pnpm" | "yarn" | "bun" => ["run", "run-script", "exec", "dlx", "x", "create", "init"].contains(&sub),
+        "uv" => ["run", "pip", "tool"].contains(&sub),
+        "poetry" => sub == "run",
+        "bundle" => sub == "exec",
+        "deno" => sub == "task",
+        _ => false,
+    }
+}
+
+/// The prefix a command can be saved under: `cargo test` for `cargo test -p core`,
+/// `npm run build` for `npm run build -- --watch`. Only for one plain command: no chain,
+/// pipe, substitution or redirect to a file, no `$` expansion, no `VAR=x`, wrapper or path in
+/// front of the program. The words of the prefix are plain names, so no option and no path
+/// is ever part of a rule.
+/// ponytail: a line that only pipes the command into a filter (`pnpm install 2>&1 | tail -5`)
+/// offers the exact line alone; give it the prefix once risks are known per simple command.
+fn rule_prefix(cmd: &str) -> Option<String> {
+    let p = parse(cmd);
+    let [seg] = p.segments.as_slice() else { return None };
+    if p.complex || p.writes.iter().any(|w| w.var || w.text != "/dev/null") || seg.iter().any(|w| w.var) {
+        return None;
+    }
+    let name = |w: &&Word| {
+        !w.glob && w.text.starts_with(|c: char| c.is_ascii_alphabetic()) && w.text.chars().all(|c| c.is_ascii_alphanumeric() || "-_:".contains(c))
+    };
+    let mut words = seg.iter();
+    let prog = words.next().filter(|w| !w.glob && SUBCOMMAND_TOOLS.contains(&w.text.as_str()))?.text.as_str();
+    let sub = words.next().filter(name)?.text.as_str();
+    if NO_PREFIX.contains(&sub) || (prog == "git" && !GIT_PREFIXES.contains(&sub)) {
+        return None;
+    }
+    let mut prefix = vec![prog, sub];
+    if names_what_runs(prog, sub) {
+        prefix.push(words.next().filter(name)?.text.as_str());
+    }
+    Some(prefix.join(" "))
 }
 
 fn short(s: &str) -> String {
@@ -601,6 +697,11 @@ fn git_dirs(args: &[String], start: &Path) -> Vec<PathBuf> {
 
 const NETWORK: &[&str] =
     &["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "telnet", "ftp", "http", "https", "aria2c", "gh"];
+/// The risk labels a saved rule can cover (`rule_offer`): a package manager's download, an
+/// npx download, a git command that changes the repository.
+const PACKAGE_INSTALL: &str = "network (package install)";
+const NPX_DOWNLOAD: &str = "network (npx)";
+const GIT_WRITE: &str = "git write (Codly commits and merges for you)";
 const DELETES: &[&str] = &["rm", "rmdir", "unlink", "shred", "srm", "trash"];
 const HARMLESS_PATHS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr"];
 
@@ -776,22 +877,22 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
                         "clean" => add("deletes files"),
                         "reset" if has(rest, &["--hard"]) => add("discards changes"),
                         "restore" | "checkout" if rest.iter().any(|x| x == "--" || x == ".") => add("discards changes"),
-                        s if !git_read_only(s, rest) => add("git write (Codly commits and merges for you)"),
+                        s if !git_read_only(s, rest) => add(GIT_WRITE),
                         _ => {}
                     }
                 }
                 "npm" | "pnpm" | "yarn" | "bun" => match first_non_flag(a).unwrap_or("") {
                     "publish" => add("publish"),
                     "install" | "i" | "add" | "ci" | "update" | "upgrade" | "up" | "remove" | "rm" | "uninstall" | "dlx" | "x"
-                    | "create" => add("network (package install)"),
-                    "exec" if package_flag(a) => add("network (package install)"),
+                    | "create" => add(PACKAGE_INSTALL),
+                    "exec" if package_flag(a) => add(PACKAGE_INSTALL),
                     "exec" if call_flag(a) => add("runs dynamic code"),
                     // `npm exec` is npx: it downloads what the project does not have (pnpm and
                     // yarn only run what is installed).
-                    "exec" if prog == "npm" && !npx_local(a.split(|x| x == "exec").nth(1).unwrap_or_default()) => add("network (npx)"),
+                    "exec" if prog == "npm" && !npx_local(a.split(|x| x == "exec").nth(1).unwrap_or_default()) => add(NPX_DOWNLOAD),
                     _ => {}
                 },
-                "npx" | "bunx" if !npx_local(a) => add("network (npx)"),
+                "npx" | "bunx" if !npx_local(a) => add(NPX_DOWNLOAD),
                 "pip" | "pip3" | "poetry" | "uv" | "pipx" | "gem" | "bundle" | "brew" | "apt" | "apt-get" | "yum" | "dnf" | "composer" => {
                     let sub = first_non_flag(a);
                     if sub.is_some_and(|x| {
@@ -800,15 +901,15 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
                     }) || (prog == "pipx" && sub == Some("run"))
                         || (prog == "uv" && classify::uv_run_fetches(a))
                     {
-                        add("network (package install)");
+                        add(PACKAGE_INSTALL);
                     }
                 }
                 // uvx runs a package from PyPI; tox and nox install what their config lists.
-                "uvx" | "tox" | "nox" => add("network (package install)"),
+                "uvx" | "tox" | "nox" => add(PACKAGE_INSTALL),
                 "cargo" if first_non_flag(a).is_some_and(|x| ["install", "add", "publish", "remove", "update", "login"].contains(&x)) => {
-                    add("network (package install)")
+                    add(PACKAGE_INSTALL)
                 }
-                "go" if first_non_flag(a).is_some_and(|x| ["get", "install"].contains(&x)) => add("network (package install)"),
+                "go" if first_non_flag(a).is_some_and(|x| ["get", "install"].contains(&x)) => add(PACKAGE_INSTALL),
                 _ => {}
             }
         }

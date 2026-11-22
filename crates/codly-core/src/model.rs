@@ -1094,6 +1094,58 @@ pub struct ApprovalDecision {
     pub answers: Option<Value>,
 }
 
+/// How a saved rule reads a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ApprovalRuleKind {
+    /// The whole command line, as it was asked.
+    Exact,
+    /// One plain command that starts with these words (`cargo test`).
+    Prefix,
+}
+
+/// "Always allow in this repo": a command you told Codly not to ask about again, for every
+/// agent of one repo. Kept in Codly's store (`orchestrator/approval_rules.rs`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApprovalRule {
+    pub id: Id,
+    pub workspace_id: Id,
+    pub kind: ApprovalRuleKind,
+    pub command: String,
+    pub created_at: i64,
+}
+
+/// The rules one request can be saved as. Both are None for what Codly always asks about.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApprovalRuleOffer {
+    /// The command line itself.
+    pub exact: Option<String>,
+    /// Its first words, when it is one plain command of a program that takes a subcommand.
+    pub prefix: Option<String>,
+}
+
+impl ApprovalRuleOffer {
+    pub fn is_empty(&self) -> bool {
+        self.exact.is_none() && self.prefix.is_none()
+    }
+
+    /// The text this request would be saved under as a rule of that kind.
+    pub fn text(&self, kind: ApprovalRuleKind) -> Option<&str> {
+        match kind {
+            ApprovalRuleKind::Exact => self.exact.as_deref(),
+            ApprovalRuleKind::Prefix => self.prefix.as_deref(),
+        }
+    }
+
+    /// Is `rule` one of the rules this request offers? A rule allows these requests only.
+    pub fn offers(&self, rule: &ApprovalRule) -> bool {
+        self.text(rule.kind) == Some(rule.command.as_str())
+    }
+}
+
 // ───────────────────────────── chat, notes, memory, knowledge ─────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

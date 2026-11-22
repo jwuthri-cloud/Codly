@@ -248,7 +248,7 @@
             {:else if it.kind === 'work'}
               <WorkRow segs={it.segs} thoughts={it.thoughts} thinking={it.thinking} />
             {:else if it.kind === 'approval'}
-              <ApprovalCard approval={it.approval} />
+              <ApprovalCard approval={it.approval} twins={it.twins} />
             {:else if it.kind === 'ask'}
               <AskCard msg={it.msg} agentId={it.agentId} />
             {:else if it.kind === 'task-done'}

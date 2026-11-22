@@ -184,6 +184,15 @@ not what a script or program then does, so this is not a sandbox) and **Full acc
 changes, changes to the agent's own CLI settings, writes by read-only agents and Codly's own data
 dir still ask).
 
+**Saved rules** (`orchestrator/approval_rules.rs`): "Always allow in this repo" on an approval card
+saves a rule in Codly's store (table `approval_rule`; not in the repo, not in a worktree) that the
+broker follows for every agent of that repo. A rule is the exact command, or the first words of one
+plain command (`cargo test`): a longer line that chains, pipes or substitutes anything never matches
+a prefix. A rule covers a package download and a git command that changes the repository (the
+exact command also covers other network use); deletes, `git push`, `sudo`, a pipe into a shell,
+secrets, paths outside the worktree and what cannot be checked always ask, and so do strict mode
+and read-only agents. Settings → Safety lists the rules; removing one makes Codly ask again.
+
 **Triggers and inbound** (Settings → Triggers / Inbound). `triggers.rs` holds the pure policy and
 `orchestrator/triggers.rs` the loop: schedules that send a prompt to the Lead on a repeating clock
 and a network mode that gates every
@@ -283,6 +292,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       runs.rs ingest.rs                   agent runs; the one event pipeline
                       gate.rs                             commit → verify → scope → review → merge queue
                       approvals.rs controls.rs ask_me.rs  approval policy, live agent controls, "ask me" cards
+                      approval_rules.rs                   "always allow in this repo": saved approval rules
                       breaker.rs breaker_run.rs           circuit breaker: policy and enforcement
                       team.rs hires.rs careers.rs         standing team and consultants, hired agents, XP and offers
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade

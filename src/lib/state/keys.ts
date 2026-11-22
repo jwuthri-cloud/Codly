@@ -4,7 +4,8 @@
 // note · G-sequences to rooms · J/K lists · Esc (close, deselect, then stop the running turn) · ?.
 // ponytail: hand-rolled instead of tinykeys — one listener, sequences included.
 import type { Approval } from '../gen/Approval';
-import { openWorkspace, resolveApproval, runPlan, stopThread } from './actions';
+import { openWorkspace, resolveApprovals, runPlan, stopThread } from './actions';
+import { twinsIn } from './approvalGroups';
 import { escStep } from './esc';
 import { requests } from './requests.svelte';
 import { store } from './store.svelte';
@@ -48,6 +49,13 @@ export function keyTargetApproval(): Approval | null {
   return pending[0] ?? null;
 }
 
+/** The requests one key press answers: the key target and, in the conversation, the other
+ *  agents' requests that share its card (`groupSame`). */
+function keyTargetIds(ap: Approval): string[] {
+  const twins = inThread(ap) ? twinsIn(store.pendingApprovals.filter(inThread), ap) : [];
+  return [ap, ...twins].map((a) => a.id);
+}
+
 /** The plan ⌘↵ runs when no approval is waiting: the one of the request you are on. */
 export function keyTargetPlan(): string | null {
   if ((ui.mode === 'office' && ui.room === 'home') || ui.mode === 'map') return null;
@@ -78,14 +86,14 @@ export function installKeys(): () => void {
       if (e.altKey) {
         if (ap && ap.choices.includes('allow_session')) {
           e.preventDefault();
-          resolveApproval(ap.id, 'allow_session');
+          resolveApprovals(keyTargetIds(ap), 'allow_session');
         }
         return;
       }
       if (e.shiftKey) return;
       if (ap && ap.choices.includes('allow_once')) {
         e.preventDefault();
-        resolveApproval(ap.id, 'allow_once');
+        resolveApprovals(keyTargetIds(ap), 'allow_once');
         return;
       }
       const plan = keyTargetPlan();
@@ -100,7 +108,7 @@ export function installKeys(): () => void {
       if (!ap || !ap.choices.includes('deny')) return;
       e.preventDefault();
       if (e.shiftKey) ui.denyNoteFor = ap.id;
-      else resolveApproval(ap.id, 'deny');
+      else resolveApprovals(keyTargetIds(ap), 'deny');
       return;
     }
 

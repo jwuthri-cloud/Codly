@@ -12,6 +12,9 @@ import type { DictationStatus } from './gen/DictationStatus';
 import type { AgentGit } from './gen/AgentGit';
 import type { Blocker } from './gen/Blocker';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
+import type { ApprovalRule } from './gen/ApprovalRule';
+import type { ApprovalRuleKind } from './gen/ApprovalRuleKind';
+import type { ApprovalRuleOffer } from './gen/ApprovalRuleOffer';
 import type { BreakerConfig } from './gen/BreakerConfig';
 import type { BreakerStatus } from './gen/BreakerStatus';
 import type { ArchivedItem } from './gen/ArchivedItem';
@@ -220,6 +223,13 @@ export const api = {
   closeThread: (thread: string) => call<void>('close_thread', { thread }),
   resolveApproval: (approvalId: string, decision: ApprovalDecision) =>
     call<void>('resolve_approval', { approvalId, decision }),
+  /** "Always allow in this repo": what a waiting request can be saved as (nothing for what Codly always asks about). */
+  approvalRuleOffer: (approvalId: string) => call<ApprovalRuleOffer>('approval_rule_offer', { approvalId }),
+  /** Save the rule and answer the waiting requests it covers. The rule's text comes from the request. */
+  addApprovalRule: (approvalId: string, kind: ApprovalRuleKind) => call<ApprovalRule>('add_approval_rule', { approvalId, kind }),
+  /** The open repo's saved rules (Settings → Approvals). */
+  approvalRules: () => call<ApprovalRule[]>('approval_rules'),
+  removeApprovalRule: (ruleId: string) => call<void>('remove_approval_rule', { ruleId }),
   /** Circuit breaker (Settings → Autonomy & Budgets): limits, live levels, and a fresh start. */
   breakerConfig: () => call<BreakerConfig>('breaker_config'),
   setBreakerConfig: (config: BreakerConfig) => call<BreakerConfig>('set_breaker_config', { config }),

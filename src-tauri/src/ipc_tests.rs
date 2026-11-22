@@ -52,6 +52,10 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::list_accounts,
             commands::open_workspace,
             commands::update_settings,
+            commands::approval_rule_offer,
+            commands::add_approval_rule,
+            commands::approval_rules,
+            commands::remove_approval_rule,
             commands::create_task,
             commands::move_task,
             commands::recheck_task,
@@ -122,6 +126,16 @@ fn commands_round_trip_with_frontend_arg_names() {
     let found = invoke(&wv, "list_memories", json!({ "query": "pnpm", "scope": null })).unwrap();
     assert!(!found.as_array().unwrap().is_empty(), "{found}");
     invoke(&wv, "list_triples", json!({ "entity": null })).unwrap();
+
+    // "Always allow in this repo": a rule is only ever saved from a request that waits, so the
+    // caller names a request and a kind, never the rule's text.
+    assert_eq!(invoke(&wv, "approval_rules", json!({})).unwrap(), json!([]));
+    assert_eq!(invoke(&wv, "approval_rule_offer", json!({ "approvalId": "nope" })).unwrap(), json!({ "exact": null, "prefix": null }));
+    let e = invoke(&wv, "add_approval_rule", json!({ "approvalId": "nope", "kind": "prefix" })).unwrap_err();
+    assert!(e.to_string().contains("unknown approval"), "{e}");
+    assert!(invoke(&wv, "add_approval_rule", json!({ "approvalId": "nope", "kind": "cargo test" })).is_err(), "a kind, not a command");
+    let e = invoke(&wv, "remove_approval_rule", json!({ "ruleId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("already removed"), "{e}");
 
     let events = invoke(&wv, "get_events", json!({ "agentId": null, "before": null, "limit": 50 })).unwrap();
     assert!(!events.as_array().unwrap().is_empty());

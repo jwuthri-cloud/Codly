@@ -500,6 +500,8 @@ pub struct ClaudeNormalizer {
     agent_id: Id,
     run_id: Id,
     cwd: PathBuf,
+    /// A worker: its `cwd` is a task worktree that Codly commits and later removes.
+    worker: bool,
     session_id: String,
     model: Option<String>,
     requested_tools: Vec<String>,
@@ -528,6 +530,7 @@ impl ClaudeNormalizer {
             agent_id: spec.agent_id.clone(),
             run_id: spec.run_id.clone(),
             cwd: spec.cwd.clone(),
+            worker: spec.role == Role::Worker,
             session_id,
             model: classify::split_model_effort(spec.model.as_deref()).0,
             requested_tools: tools_for(spec).iter().map(|t| t.to_string()).collect(),
@@ -1083,9 +1086,17 @@ impl ClaudeNormalizer {
         let choices = if tool == "AskUserQuestion" {
             vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel]
         } else {
-            let mut c = vec![ApprovalChoice::AllowOnce, ApprovalChoice::AllowSession];
+            // A session or permanent grant is a permission rule the CLI suggested: without
+            // one, "for this session" could only be sent as a one-time allow, so it is not offered.
+            let mut c = vec![ApprovalChoice::AllowOnce];
             if !suggestions.is_empty() {
-                c.push(ApprovalChoice::AllowAlways);
+                c.push(ApprovalChoice::AllowSession);
+                // The CLI saves "always" in its settings under `cwd`. In a worker's task
+                // worktree that file can be committed with the work and is lost with the
+                // worktree: there, "always" is Codly's own rule for the repo.
+                if !self.worker {
+                    c.push(ApprovalChoice::AllowAlways);
+                }
             }
             c.extend([ApprovalChoice::Deny, ApprovalChoice::Cancel]);
             c
@@ -1461,7 +1472,8 @@ mod tests {
         let events = norm.on_message(&can_use_tool("Bash", json!({ "command": "echo codly > hello.txt", "description": "write" }), suggestion.clone()));
         let a = approval_of(&events);
         assert!(matches!(&a.subject, ApprovalSubject::Command { command, .. } if command == "echo codly > hello.txt"));
-        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::AllowSession, ApprovalChoice::AllowAlways, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
+        // A worker is not offered the CLI's "always": it would be saved in its task worktree.
+        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::AllowSession, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
         assert_eq!(a.call_id.as_deref(), Some("toolu_1"));
         assert_eq!(a.reason.as_deref(), Some("Bash commands need approval"));
         assert!(events.iter().any(|e| matches!(e, EventKind::StatusChanged { status: AgentStatus::WaitingApproval })));
@@ -1474,17 +1486,21 @@ mod tests {
         assert!(reply["response"]["response"].get("updatedPermissions").is_none());
         assert!(norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).is_none(), "answered once");
 
-        // always → echo the suggestion; session → same rule scoped to the session
-        let a = approval_of(&norm.on_message(&can_use_tool("Bash", json!({"command": "ls"}), suggestion.clone())));
-        let (r, _) = norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::AllowAlways, message: None, answers: None }).unwrap();
-        assert_eq!(r["response"]["response"]["updatedPermissions"], suggestion);
+        // session → the suggested rule, scoped to the session
         let a = approval_of(&norm.on_message(&can_use_tool("Bash", json!({"command": "ls"}), suggestion.clone())));
         let (r, _) = norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::AllowSession, message: None, answers: None }).unwrap();
         assert_eq!(r["response"]["response"]["updatedPermissions"][0]["destination"], "session");
+        // always (a 1:1 agent, whose directory stays) → echo the suggestion
+        let mut solo = ClaudeNormalizer::new(&spec(Role::Solo, false), "s".into());
+        let a = approval_of(&solo.on_message(&can_use_tool("Bash", json!({"command": "ls"}), suggestion.clone())));
+        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::AllowSession, ApprovalChoice::AllowAlways, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
+        let (r, _) = solo.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::AllowAlways, message: None, answers: None }).unwrap();
+        assert_eq!(r["response"]["response"]["updatedPermissions"], suggestion);
 
+        // No suggested rule: nothing would hold for the session, so only "once" is offered.
         // deny with feedback, cancel interrupts
         let a = approval_of(&norm.on_message(&can_use_tool("Bash", json!({"command": "rm -rf build"}), json!([]))));
-        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::AllowSession, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
+        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
         assert_eq!(a.risks, vec!["deletes files".to_string()]);
         let (r, _) = norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::Deny, message: Some("use pnpm".into()), answers: None }).unwrap();
         assert_eq!(r["response"]["response"], json!({ "behavior": "deny", "message": "use pnpm", "interrupt": false }));

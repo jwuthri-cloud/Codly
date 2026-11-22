@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { sendChat, stopThread } from '../lib/state/actions';
+  import { groupSame } from '../lib/state/approvalGroups';
   import { narrate } from '../lib/state/narration';
   import { busy } from '../lib/state/queue';
   import { stopping } from '../lib/state/stops';
@@ -34,7 +35,8 @@
     void store.rev;
     const plan = store.planOf(thread);
     const out: Chip[] = [];
-    const waiting = store.pendingApprovals.filter((a) => store.approvalThread(a) === thread);
+    // Counted as the conversation shows them: the same request from several agents is one card.
+    const waiting = groupSame(store.pendingApprovals.filter((a) => store.approvalThread(a) === thread)).map((g) => g.approval);
     if (plan?.status === 'awaiting_approval') {
       out.push({ label: 'Change the plan', run: () => ui.seedComposer(thread, 'Change the plan: ') });
       out.push({ label: 'Why these agents?', run: () => sendChat(thread, 'Why did you route the tasks to these agents?') });

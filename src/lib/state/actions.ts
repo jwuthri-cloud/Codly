@@ -7,6 +7,7 @@ import { api, isTauriApp } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { AccountConfig } from '../gen/AccountConfig';
 import type { ApprovalChoice } from '../gen/ApprovalChoice';
+import type { ApprovalRuleKind } from '../gen/ApprovalRuleKind';
 import type { HeldCheck } from '../gen/HeldCheck';
 import type { MemoryKind } from '../gen/MemoryKind';
 import type { MemoryScope } from '../gen/MemoryScope';
@@ -280,6 +281,19 @@ export async function resolveApproval(approvalId: string, choice: ApprovalChoice
   await attempt('send your answer', () =>
     api.resolveApproval(approvalId, { choice, message, answers: (answers ?? null) as never }),
   );
+}
+
+/** One answer for the requests that share a card: the same command asked by several agents. */
+export async function resolveApprovals(approvalIds: string[], choice: ApprovalChoice, message: string | null = null, answers: unknown = null) {
+  await Promise.all(approvalIds.map((id) => resolveApproval(id, choice, message, answers)));
+}
+
+/** "Always allow in this repo": save the rule a card offers. The core answers the requests it covers. */
+export async function saveApprovalRule(approvalId: string, kind: ApprovalRuleKind) {
+  const rule = await attempt('save the rule', () => api.addApprovalRule(approvalId, kind));
+  if (!rule) return;
+  const what = rule.kind === 'prefix' ? `commands that start with ${rule.command}` : rule.command;
+  toast({ kind: 'success', title: 'Codly will not ask about this again', body: `In this repo: ${what}. Remove the rule in Settings → Safety.` });
 }
 
 // What a command answers belongs to the office it was sent from: after a switch it is dropped
