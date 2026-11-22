@@ -7,7 +7,12 @@
 //!
 //! The watchdog, with limits of a second: a turn that gives no output is flagged, then
 //! interrupted and continued, then stopped with its task back in line; a turn that waits for
-//! your answer is left alone; a worker that sits idle on its running task is flagged.
+//! your answer is left alone; a worker that sits idle on its running task is flagged; the Lead
+//! is interrupted, and Codly writes no prompt for it.
+//!
+//! A CLI that does not stop when it is interrupted loses its process, as in the adapters. That
+//! exit is no crash: after the watchdog's interrupt the task goes back in line (blocked at its
+//! third start), after yours or the circuit breaker's it waits for you.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -66,9 +71,14 @@ enum End {
     Crash,
     /// It keeps going until Codly interrupts it.
     Interrupted,
-    /// It hangs: it says nothing and ignores an interrupt. Only a shutdown ends it.
-    Stuck,
+    /// It hangs: it says nothing, and it does not stop when Codly interrupts it. The adapters
+    /// then end the process, and so does the fake: it says so, marks the exit (`gave_up`),
+    /// closes the turn as interrupted and exits on a signal.
+    Hung,
 }
+
+/// How long the fake waits for a hung turn to stop (the adapters: 8 to 15 s).
+const INTERRUPT_LIMIT: Duration = Duration::from_millis(100);
 
 /// One prompt the fake worker got.
 struct Turn<'a> {
@@ -166,11 +176,18 @@ impl Spawner for Fake {
                                         None => return,
                                     }
                                 },
-                                End::Stuck => loop {
+                                End::Hung => loop {
                                     match rx.recv().await {
+                                        Some(AgentCmd::Interrupt) => {
+                                            tokio::time::sleep(INTERRUPT_LIMIT).await;
+                                            send(EventKind::Error { message: "the CLI did not stop, so Codly ended its process".into(), fatal: false });
+                                            send(codly_core::adapters::gave_up("the CLI", INTERRUPT_LIMIT));
+                                            done(TurnStatus::Interrupted, None);
+                                            return send(EventKind::Exited { code: None });
+                                        }
                                         Some(AgentCmd::Shutdown) => return exit(0),
                                         Some(AgentCmd::Prompt(prompt)) => waiting.push_back(prompt),
-                                        Some(AgentCmd::Interrupt | AgentCmd::Approval { .. }) => {}
+                                        Some(AgentCmd::Approval { .. }) => {}
                                         None => return,
                                     }
                                 },
@@ -197,8 +214,8 @@ async fn wait_for<T>(what: &str, mut f: impl AsyncFnMut() -> Option<T>) -> T {
     }
 }
 
-/// A started core with one ad-hoc task that is ready to run, and what its worker sees.
-async fn start(dir: &Path, breaker: Option<BreakerConfig>, script: Script) -> (Arc<Core>, Arc<Mutex<Seen>>, Task) {
+/// A started core with an open office and nothing to do yet, and what its agents see.
+async fn office(dir: &Path, breaker: Option<BreakerConfig>, script: Script) -> (Arc<Core>, Arc<Mutex<Seen>>) {
     let repo = temp_repo(dir);
     let seen = Arc::new(Mutex::new(Seen::default()));
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
@@ -215,6 +232,12 @@ async fn start(dir: &Path, breaker: Option<BreakerConfig>, script: Script) -> (A
         core.set_breaker_config(breaker).await.unwrap();
     }
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    (core, seen)
+}
+
+/// A started core with one ad-hoc task that is ready to run, and what its worker sees.
+async fn start(dir: &Path, breaker: Option<BreakerConfig>, script: Script) -> (Arc<Core>, Arc<Mutex<Seen>>, Task) {
+    let (core, seen) = office(dir, breaker, script).await;
     let task = core.create_task("Write the greeting", "Create hello.txt containing hello").await.unwrap();
     core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
     (core, seen, task)
@@ -635,7 +658,10 @@ async fn a_turn_that_stays_silent_is_stopped_and_its_task_goes_back_in_line() {
     let script: Script = Arc::new(|turn: &Turn| {
         if turn.n == 0 {
             write_hello(turn, "hel");
-            return End::Stuck; // the interrupt changes nothing
+            return End::Interrupted;
+        }
+        if turn.n == 1 {
+            return End::Interrupted; // asked to continue, it says nothing again
         }
         write_hello(turn, "hello\n");
         End::Turn(TurnStatus::Completed, None)
@@ -643,18 +669,188 @@ async fn a_turn_that_stays_silent_is_stopped_and_its_task_goes_back_in_line() {
     let (core, seen, task) = start(dir.path(), None, script).await;
     watch(&core, 1, 0).await;
 
-    // Flagged, interrupted, stopped; then the task starts again and runs to its end.
+    // Flagged, interrupted and continued, stopped; then the task starts again and runs to its end.
     let task = watched_to_its_end(&core, &task.id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    assert_eq!(task.attempt, 2);
     {
         let seen = seen.lock().unwrap();
-        // The continue prompt waits for the interrupted turn to end, and that turn never did.
+        assert_eq!((seen.runs, seen.prompts.len()), (2, 3), "one chance to continue, then a restart: {:?}", seen.prompts);
+        assert!(seen.prompts[1].contains("so Codly interrupted it"), "{}", seen.prompts[1]);
+        assert!(seen.prompts[2].contains("You are back on task"), "{}", seen.prompts[2]);
+    }
+    assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the work of the silent turns was never committed or checked");
+    let said = decisions(&core, "watchdog").await;
+    assert!(said.iter().any(|s| s.contains("did not recover. Codly stopped it and restarts its task")), "{said:?}");
+    core.shutdown().await;
+}
+
+/// The agent row of `id`.
+async fn agent_now(core: &Core, id: &str) -> Agent {
+    core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == id).expect("the agent is on staff")
+}
+
+/// What a really hung CLI gets: the watchdog's interrupt changes nothing, so the adapter ends
+/// the process. That exit is the watchdog's stop, not a crash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_turn_that_does_not_stop_loses_its_process_and_its_task_goes_back_in_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|turn: &Turn| {
+        if turn.n == 0 {
+            write_hello(turn, "hel");
+            return End::Hung;
+        }
+        write_hello(turn, "hello\n");
+        End::Turn(TurnStatus::Completed, None)
+    });
+    let (core, seen, task) = start(dir.path(), None, script).await;
+    watch(&core, 1, 0).await;
+
+    let task = watched_to_its_end(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    assert_eq!(task.attempt, 2, "one restart");
+    {
+        let seen = seen.lock().unwrap();
+        // The continue prompt waits for the interrupted turn to end in time, and it did not.
         assert_eq!((seen.runs, seen.prompts.len()), (2, 2), "the worker was restarted: {:?}", seen.prompts);
-        assert!(seen.prompts[1].contains("You are back on task"), "{}", seen.prompts[1]);
+        let back = &seen.prompts[1];
+        assert!(back.contains("You are back on task") && back.contains("gave no output for") && back.contains("Codly stopped it and restarts it"), "{back}");
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the work of the silent turn was never committed or checked");
     let said = decisions(&core, "watchdog").await;
     assert!(said.iter().any(|s| s.contains("did not recover. Codly stopped it and restarts its task")), "{said:?}");
+    let retries = decisions(&core, "retry").await;
+    assert!(!retries.iter().any(|s| s.contains("exited unexpectedly")), "Codly ended the process itself: {retries:?}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_that_hangs_on_every_start_blocks_its_task_at_the_third() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|_: &Turn| End::Hung);
+    let (core, seen, task) = start(dir.path(), None, script).await;
+    watch(&core, 1, 0).await;
+
+    let task = watched_to_its_end(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Blocked, "{:?}", task.status_reason);
+    let runs = seen.lock().unwrap().runs;
+    assert_eq!((task.attempt, runs), (3, 3));
+    let reason = task.status_reason.clone().unwrap_or_default();
+    assert!(reason.starts_with("blocked: the worker gave no output for") && reason.contains("restarts did not help (3 starts)"), "{reason}");
+    let said = decisions(&core, "watchdog").await;
+    assert_eq!(said.iter().filter(|s| s.contains("Codly stopped it and restarts its task")).count(), 2, "{said:?}");
+    assert!(said.iter().any(|s| s.contains("did not recover. Codly stopped it and blocked its task")), "{said:?}");
+    let retries = decisions(&core, "retry").await;
+    assert!(!retries.iter().any(|s| s.contains("exited unexpectedly")), "{retries:?}");
+    let worker = task.assignee.clone().expect("the task keeps its worker");
+    assert!(agent_now(&core, &worker).await.task_id.is_none(), "the worker is free");
+    core.shutdown().await;
+}
+
+/// Your interrupt holds when the CLI does not stop: the adapter ends the process, and nothing
+/// starts the worker again behind your back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_you_interrupt_that_does_not_stop_blocks_its_task_and_is_not_restarted() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|turn: &Turn| {
+        if turn.n == 0 {
+            write_hello(turn, "hel");
+            return End::Hung;
+        }
+        write_hello(turn, "hello\n");
+        End::Turn(TurnStatus::Completed, None)
+    });
+    let (core, seen, task) = start(dir.path(), None, script).await;
+    let worker = first_turn_worker(&core, &seen, &task).await;
+
+    core.interrupt_agent(&worker).await.unwrap();
+    let blocked = task_ended(&core, &task.id).await;
+    assert_eq!((blocked.status, blocked.attempt), (TaskStatus::Blocked, 1), "{:?}", blocked.status_reason);
+    let reason = blocked.status_reason.clone().unwrap_or_default();
+    assert!(reason.starts_with("interrupted by you; the CLI did not stop, so Codly ended its process; move it to Ready to resume with"), "{reason}");
+    tokio::time::sleep(Duration::from_millis(400)).await; // a restart would have come by now
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!((seen.runs, seen.prompts.len()), (1, 1), "the worker was not started again: {:?}", seen.prompts);
+    }
+    let agent = agent_now(&core, &worker).await;
+    assert!(agent.status != AgentStatus::Failed && agent.task_id.is_none(), "the worker did not fail, and it is free: {:?}", agent.status);
+    let retries = decisions(&core, "retry").await;
+    assert!(!retries.iter().any(|s| s.contains("exited unexpectedly")), "{retries:?}");
+    let said = decisions(&core, "interrupt").await;
+    assert!(matches!(&said[..], [one] if one.contains("was interrupted by you") && one.contains("blocked its task")), "{said:?}");
+    assert!(committed(&core, &blocked).await.is_empty(), "the half-done work was not checked");
+
+    // You move it to Ready: its worker comes back and finishes.
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    assert_eq!(committed(&core, &task).await, vec!["hello\n"]);
+    core.shutdown().await;
+}
+
+/// The breaker's pause holds too: a worker that does not stop is not restarted to go on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_the_breaker_pauses_that_does_not_stop_is_not_restarted() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|turn: &Turn| {
+        for _ in 0..2 {
+            (turn.emit)(EventKind::Error { message: "tool call failed".into(), fatal: false });
+        }
+        End::Hung
+    });
+    let (core, seen, task) = start(dir.path(), Some(error_storm(false)), script).await;
+    let worker = first_turn_worker(&core, &seen, &task).await;
+    // One level a beat: steered, then constrained (which interrupts the turn).
+    wait_for("the breaker to constrain it", async || {
+        core.breaker_beat().await;
+        let control = core.agent_control(&worker).await.unwrap();
+        (control.stop_requested || control.paused).then_some(())
+    })
+    .await;
+
+    let blocked = task_ended(&core, &task.id).await;
+    assert_eq!((blocked.status, blocked.attempt), (TaskStatus::Blocked, 1), "{:?}", blocked.status_reason);
+    let reason = blocked.status_reason.clone().unwrap_or_default();
+    assert!(reason.starts_with("interrupted by the circuit breaker; the CLI did not stop, so Codly ended its process"), "{reason}");
+    tokio::time::sleep(Duration::from_millis(400)).await; // a restart would have come by now
+    assert_eq!(seen.lock().unwrap().runs, 1, "the worker was not started again");
+    let said = chats(&core).await;
+    assert!(said.iter().any(|t| t.contains("was interrupted by the circuit breaker") && t.contains("blocked until you move it to Ready")), "{said:?}");
+    core.shutdown().await;
+}
+
+/// The Lead's turns answer you or a worker: its silent turn is interrupted, the thread says
+/// so, and Codly writes no prompt for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_lead_is_interrupted_and_not_asked_to_continue() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|_: &Turn| End::Interrupted);
+    let (core, seen) = office(dir.path(), None, script).await;
+    watch(&core, 1, 0).await;
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    wait_for("the Lead's turn", async || (seen.lock().unwrap().prompts.len() == 1).then_some(())).await;
+
+    let said = wait_for("the watchdog to interrupt the Lead", async || {
+        core.watchdog_beat();
+        Some(decisions(&core, "watchdog").await).filter(|said| said.iter().any(|s| s.ends_with("Codly interrupted its turn.")))
+    })
+    .await;
+    assert!(said.iter().any(|s| s.contains("Codly interrupts its turn if it stays silent")), "flagged first: {said:?}");
+    let lines = chats(&core).await;
+    assert!(lines.iter().any(|t| t.contains("so Codly interrupted its turn. Send your message again.")), "{lines:?}");
+
+    // Its turn ended; the beats that follow send it nothing.
+    for _ in 0..10 {
+        core.watchdog_beat();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let said = decisions(&core, "watchdog").await;
+    assert!(!said.iter().any(|s| s.contains("asks it to continue")), "{said:?}");
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!((seen.runs, seen.prompts.len()), (1, 1), "Codly writes no prompt for the Lead: {:?}", seen.prompts);
+    }
     core.shutdown().await;
 }
 

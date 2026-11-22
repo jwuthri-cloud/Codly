@@ -16,6 +16,7 @@
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - `breaker_run` circuit breaker enforcement (policy in `breaker`): steer, constrain, stop
 //! - `watchdog` a turn that gives no output, a worker idle on a running task: flag, interrupt, stop
+//! - `interrupts` who asked for an interrupt, and what follows when the CLI does not stop
 //! - `wallet`   the player's coins (🪙) across every repo, Build/Buy, developer grants
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
@@ -50,6 +51,7 @@ pub mod wallet;
 mod workspace;
 mod memgraph;
 pub mod watchdog;
+mod interrupts;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -66,7 +68,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::{Notify, broadcast, mpsc};
 
-use crate::adapters::{AdapterEvent, AgentCmd, AgentHandle, SpawnSpec};
+use crate::adapters::{AdapterEvent, AgentHandle, SpawnSpec};
 use crate::git::Git;
 use crate::index::Index;
 use crate::mcp::McpServer;
@@ -167,6 +169,8 @@ struct Live {
     continue_owed: Option<String>,
     /// When its last event came, and what the watchdog did about a silence (watchdog.rs).
     watch: watchdog::Watch,
+    /// Who asked its turn to stop, and whether its adapter gave that turn up (interrupts.rs).
+    interrupt: interrupts::Interrupt,
 }
 
 /// A member's reply the Lead of `thread` waits for: the reply of turn number `due`.
@@ -549,9 +553,9 @@ impl Core {
     }
 
     pub async fn interrupt_agent(&self, agent_id: &str) -> anyhow::Result<()> {
-        let live = lock(&self.inner.live);
-        let l = live.get(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
-        if !l.handle.send(AgentCmd::Interrupt) {
+        let mut live = lock(&self.inner.live);
+        let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
+        if !l.send_interrupt(interrupts::Asker::You) {
             bail!("that agent's process is gone");
         }
         Ok(())

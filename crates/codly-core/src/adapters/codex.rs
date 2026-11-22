@@ -966,7 +966,7 @@ impl CodexAgent {
         } else {
             format!("Codex did not stop within {} s", INTERRUPT_TIMEOUT.as_secs())
         };
-        self.emit(EventKind::Error { message: format!("{what}, so Codly ended this run. Your next message resumes the session.{unsent}"), fatal: false });
+        self.emit(EventKind::Error { message: format!("{what}, so Codly ended this run. The session is kept: its next run resumes it.{unsent}"), fatal: false });
         if std::mem::take(&mut self.turn_pending) {
             // An answer that comes after all starts nothing here: the turn is over for Codly.
             self.pending.retain(|_, what| !matches!(what, Pending::TurnStart));
@@ -976,6 +976,9 @@ impl CodexAgent {
             if self.server.silent_ms() >= START_TIMEOUT.as_millis() as i64 {
                 self.server.give_up("it answered nothing while a turn waited to start");
             }
+        } else {
+            // The exit that follows ends an interrupt nobody answered: it is no crash.
+            self.emit(super::gave_up("Codex", INTERRUPT_TIMEOUT));
         }
         self.unsubscribe().await;
     }
@@ -2177,6 +2180,11 @@ mod tests {
         }
     }
 
+    /// Did the adapter mark the exit as the end of an interrupt that was not answered?
+    fn gave_up(kinds: &[EventKind]) -> bool {
+        kinds.iter().any(|k| matches!(k, EventKind::Decision { decision_type, .. } if decision_type == crate::adapters::GAVE_UP))
+    }
+
     fn turn_ends(kinds: &[EventKind]) -> Vec<TurnStatus> {
         kinds.iter().filter_map(|k| if let EventKind::TurnCompleted { status, .. } = k { Some(*status) } else { None }).collect()
     }
@@ -2205,6 +2213,7 @@ mod tests {
                 "{kinds:?}"
             );
             assert_eq!(turn_ends(&kinds), [TurnStatus::Failed], "{kinds:?}");
+            assert!(!gave_up(&kinds), "no interrupt was asked: this exit is handled as a crash: {kinds:?}");
             assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
             assert_eq!(server.usable(), talks);
             // An answer that comes after all starts nothing here.
@@ -2245,6 +2254,7 @@ mod tests {
             assert_eq!(agent.stage, Stage::Done);
             let kinds = emitted(&mut events);
             assert!(matches!(&kinds[0], EventKind::Error { message, fatal: false } if message.starts_with("Codex did not stop within 15 s")), "{kinds:?}");
+            assert!(gave_up(&kinds), "the exit that follows is marked as Codly's doing: {kinds:?}");
             assert_eq!(turn_ends(&kinds), [TurnStatus::Interrupted], "{kinds:?}");
             assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
             assert_eq!(server.usable(), shared);

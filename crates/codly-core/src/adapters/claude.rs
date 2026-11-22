@@ -504,11 +504,12 @@ impl Actor {
                 self.queue.clear();
                 self.emit(EventKind::Error {
                     message: format!(
-                        "Claude did not stop within {} s, so Codly ended its process. Your next message resumes the session.{unsent}",
+                        "Claude did not stop within {} s, so Codly ended its process. The session is kept: its next run resumes it.{unsent}",
                         INTERRUPT_TIMEOUT.as_secs()
                     ),
                     fatal: false,
                 });
+                self.emit(super::gave_up("Claude", INTERRUPT_TIMEOUT));
                 self.close_stdin();
             }
             Stage::Killing => self.deadline = None,
@@ -1745,9 +1746,11 @@ mod tests {
         assert!(actor.stdin.is_none() && actor.queue.is_empty());
         let kinds = emitted(&mut events);
         assert!(
-            matches!(&kinds[..], [EventKind::Error { message, fatal: false }]
-                if message.contains("did not stop within 8 s") && message.contains("1 message that waited for this turn was not sent")),
-            "{kinds:?}"
+            matches!(&kinds[..], [EventKind::Error { message, fatal: false }, EventKind::Decision { decision_type, .. }]
+                if message.contains("did not stop within 8 s")
+                    && message.contains("1 message that waited for this turn was not sent")
+                    && decision_type == crate::adapters::GAVE_UP),
+            "the exit that follows is marked as Codly's doing: {kinds:?}"
         );
         // The turn it leaves open ends as interrupted: a failed turn would be asked to continue.
         assert_eq!(actor.unfinished_turn(), (TurnStatus::Interrupted, None));

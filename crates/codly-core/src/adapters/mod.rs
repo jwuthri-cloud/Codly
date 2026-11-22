@@ -16,6 +16,8 @@
 //! - Status: emit `StatusChanged` on every coarse transition (Thinking when a request
 //!   starts, Working while a tool runs, WaitingApproval, Idle when a turn ends).
 //! - When the process exits, emit `Exited` and stop.
+//! - `Interrupt` has a deadline. A turn that does not end in time loses its run: the adapter
+//!   says so (`Error`, not fatal), emits `gave_up`, closes the turn as `Interrupted` and exits.
 //!
 //! Verified behaviour the orchestrator relies on (live, 2026-10-25; CRITIQUE.md §10):
 //! - Claude emits `SessionStarted` twice: at spawn (no tool list yet) and after the first
@@ -37,10 +39,12 @@ mod startup;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
+use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::model::{ApprovalDecision, EventKind, Id, Provider, Role};
+use crate::model::{ApprovalDecision, EventKind, Id, Provider, Role, new_id};
 
 /// How the codly MCP server is launched by the agent CLI (stdio transport).
 #[derive(Debug, Clone)]
@@ -128,6 +132,23 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         Provider::Claude => claude::spawn(spec, events).await,
         Provider::Codex => codex::spawn(spec, events).await,
         Provider::Gemini | Provider::Opencode | Provider::Cursor | Provider::Copilot => acp::spawn(spec, events).await,
+    }
+}
+
+/// `decision_type` of the record an adapter leaves when it ends its run because the turn did
+/// not stop after an interrupt (`gave_up`).
+pub const GAVE_UP: &str = "interrupt_timeout";
+
+/// What an adapter emits when it ends its run because the turn did not stop within `limit` of
+/// an interrupt, before it closes the turn and exits. The orchestrator reads it: the exit that
+/// follows is Codly's doing and no crash, and who asked for the interrupt says what is next.
+pub fn gave_up(cli: &str, limit: Duration) -> EventKind {
+    EventKind::Decision {
+        id: new_id(),
+        decision_type: GAVE_UP.into(),
+        method: "rule".into(),
+        summary: format!("{cli} did not stop within {} s of the interrupt, so Codly ended its run", limit.as_secs()),
+        detail: json!({ "limit_secs": limit.as_secs() }),
     }
 }
 

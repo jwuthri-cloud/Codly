@@ -114,6 +114,7 @@ impl Inner {
                     last_error: None,
                     continue_owed: None,
                     watch: super::watchdog::Watch::new(),
+                    interrupt: Default::default(),
                 },
             );
         }

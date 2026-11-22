@@ -6,8 +6,9 @@
 //!   Still silent at twice the limit, its turn is interrupted and it is asked to continue,
 //!   once. Silent for one more limit after that, the run is stopped: a worker's task goes
 //!   back in line (blocked from its third start on), a review ends without a verdict, a Lead
-//!   or a 1:1 agent resumes with your next message. A run that waits for your answer to an
-//!   approval or a question is not silent.
+//!   or a 1:1 agent resumes with your next message. The same follows when the CLI does not
+//!   stop at the interrupt and its adapter ends the process (`interrupts`). A run that waits
+//!   for your answer to an approval or a question is not silent.
 //! - **An idle worker.** A task's worker that sits between turns with nothing queued for
 //!   `idle_secs`, on a task that is still running (you interrupted it, a control stopped its
 //!   turn), is flagged the same way: "idle: …". Nothing is done to it: what is next is yours
@@ -27,8 +28,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use ts_rs::TS;
 
-use super::{Core, Inner, lead, lock, row};
-use crate::adapters::{AdapterEvent, AgentCmd};
+use super::interrupts::Asker;
+use super::{Core, Inner, Live, lead, lock, row};
+use crate::adapters::AdapterEvent;
 use crate::model::*;
 
 /// How often the watchdog looks.
@@ -164,7 +166,7 @@ fn span(d: Duration) -> String {
 }
 
 /// Is `agent_id` the worker of this task, with the task still its to work on?
-fn working(t: &Task, agent_id: &str) -> bool {
+pub(super) fn working(t: &Task, agent_id: &str) -> bool {
     matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) && t.assignee.as_deref() == Some(agent_id)
 }
 
@@ -187,14 +189,14 @@ fn continue_prompt(role: Role, task: Option<&Task>, quiet: &str) -> String {
     }
 }
 
-/// One live run, as a beat saw it.
+/// One live run, as a beat saw it (or `on_exit`, for a run its adapter ended).
 #[derive(Debug, Clone)]
-struct Look {
-    agent_id: Id,
-    run_id: Id,
-    role: Role,
-    task_id: Option<Id>,
-    ws: Option<Id>,
+pub(super) struct Look {
+    pub(super) agent_id: Id,
+    pub(super) run_id: Id,
+    pub(super) role: Role,
+    pub(super) task_id: Option<Id>,
+    pub(super) ws: Option<Id>,
     turn_active: bool,
     /// In a turn, or sent a prompt that no turn has taken yet.
     busy: bool,
@@ -206,6 +208,21 @@ struct Look {
 }
 
 impl Look {
+    pub(super) fn of(agent_id: &str, l: &Live, now: Instant) -> Look {
+        Look {
+            agent_id: agent_id.to_string(),
+            run_id: l.run_id.clone(),
+            role: l.role,
+            task_id: l.task_id.clone(),
+            ws: l.workspace_id.clone(),
+            turn_active: l.turn_active,
+            busy: l.turn_active || l.queued > 0,
+            retrying: l.continue_owed.is_some(),
+            quiet: now.duration_since(l.watch.last_event),
+            watch: l.watch,
+        }
+    }
+
     /// The task this run works on as its worker.
     fn work(&self) -> Option<&str> {
         self.task_id.as_deref().filter(|_| self.role == Role::Worker)
@@ -240,20 +257,10 @@ impl Inner {
         let now = Instant::now();
         let looks: Vec<Look> = lock(&self.live)
             .iter()
-            // A run that starts or stops has limits of its own (the handshake, the shutdown ladder).
-            .filter(|(_, l)| !l.stopping && l.starting.is_none())
-            .map(|(id, l)| Look {
-                agent_id: id.clone(),
-                run_id: l.run_id.clone(),
-                role: l.role,
-                task_id: l.task_id.clone(),
-                ws: l.workspace_id.clone(),
-                turn_active: l.turn_active,
-                busy: l.turn_active || l.queued > 0,
-                retrying: l.continue_owed.is_some(),
-                quiet: now.duration_since(l.watch.last_event),
-                watch: l.watch,
-            })
+            // A run that starts or stops has limits of its own (the handshake, the shutdown ladder),
+            // and so has one that its adapter is ending after an interrupt.
+            .filter(|(_, l)| !l.stopping && l.starting.is_none() && !l.interrupt.gave_up())
+            .map(|(id, l)| Look::of(id, l, now))
             .collect();
         for r in looks {
             match r.watch.owes_continue {
@@ -401,15 +408,15 @@ impl Inner {
 
     /// Still silent at twice the limit: interrupt the turn. The continue prompt follows at the
     /// beat that sees the turn ended (`send_continue`), so no adapter folds it into the turn
-    /// that is being interrupted. An adapter whose CLI ignores the interrupt ends the process,
-    /// and the exit says what is next.
+    /// that is being interrupted. An adapter whose CLI ignores the interrupt ends the process:
+    /// that exit comes back here (`stalled_run_gave_up`), as the watchdog asked.
     fn watch_nudge(&self, r: &Look, now: Instant) {
         let to_continue = r.role != Role::Lead;
         let sent = match lock(&self.live).get_mut(&r.agent_id).filter(|l| l.run_id == r.run_id && !l.stopping) {
             Some(l) => {
                 l.watch.nudged = Some(now);
                 l.watch.owes_continue = to_continue.then_some(r.quiet);
-                l.handle.send(AgentCmd::Interrupt)
+                l.send_interrupt(Asker::Watchdog { quiet: r.quiet })
             }
             None => return,
         };
@@ -462,6 +469,20 @@ impl Inner {
         if self.shutting_down.load(Ordering::SeqCst) {
             return; // quitting: the next start resumes the work
         }
+        self.stalled_run_ended(r).await;
+    }
+
+    /// The CLI did not stop at the watchdog's interrupt of a turn that was silent for `quiet`,
+    /// so its adapter ended the process (`interrupts`). What is next is the same as for a run
+    /// the watchdog stops itself. The restart is its one more chance, in place of the
+    /// continue prompt that an interrupted turn would get.
+    pub(super) async fn stalled_run_gave_up(self: Arc<Self>, r: Look, quiet: Duration) {
+        self.stalled_run_ended(Look { quiet, ..r }).await;
+    }
+
+    /// A run that was silent for `r.quiet` is gone, stopped by the watchdog or ended by its
+    /// adapter: put its work back in line, and say so.
+    async fn stalled_run_ended(self: Arc<Self>, r: Look) {
         let Ok(agent) = self.agent(&r.agent_id) else { return };
         let quiet = span(r.quiet);
         let task = r.task_id.as_deref().and_then(|id| self.task(id).ok());
