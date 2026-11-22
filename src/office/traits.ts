@@ -19,8 +19,8 @@ export const TRAITS: Record<Trait, { label: string; about: string }> = {
 };
 
 const ALL = Object.keys(TRAITS) as Trait[];
-/** Pairs that make no sense together. */
-const CLASH: [Trait, Trait][] = [
+/** Pairs that make no sense together (the core has the same list: career.rs `CLASH`). */
+export const CLASH: [Trait, Trait][] = [
   ['lazy', 'perfectionist'],
   ['lazy', 'competitive'],
   ['bookworm', 'social'],

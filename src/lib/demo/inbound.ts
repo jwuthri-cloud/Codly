@@ -17,7 +17,7 @@ const state: InboundState = {
     bot_token_set: false,
     app_token_set: false,
     connected: false,
-    status: 'Not connected yet: your settings and tokens are saved, but this build cannot open the Socket Mode connection.',
+    status: 'Not available yet: this version cannot connect to Slack, so it takes no Slack tokens.',
   },
   deliveries: [],
 };
@@ -73,10 +73,10 @@ export function inboundMock(cmd: string, a: Record<string, unknown>): unknown {
     }
     case 'inbound_set_slack': {
       const u = a.update as SlackUpdate;
-      for (const [t, prefix, key] of [[u.bot_token, 'xoxb-', 'bot_token_set'], [u.app_token, 'xapp-', 'app_token_set']] as const) {
-        if (t && !t.startsWith(prefix)) throw new Error(`a Slack token starts with ${prefix}`);
-        if (t !== null) state.slack[key] = t !== '';
-      }
+      // As the core: no new token while Slack cannot connect; '' removes a saved one.
+      if (u.bot_token || u.app_token) throw new Error('Slack is not available yet, so Codly does not take Slack tokens');
+      if (u.bot_token !== null) state.slack.bot_token_set = false;
+      if (u.app_token !== null) state.slack.app_token_set = false;
       state.slack.config = u.config;
       return refresh();
     }

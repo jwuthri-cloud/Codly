@@ -101,9 +101,18 @@ impl Inner {
     }
 
     /// Called as a run is prepared: write the enabled default servers beside its raw log. The
-    /// adapters merge them next to the `codly` server. Never fails the spawn.
-    pub(super) fn prepare_default_mcp(&self, raw_log: &Path, cwd: &Path) {
-        let extra = connections::resolve(&self.mcp_prefs(), &KeychainStore, cwd);
+    /// adapters merge them next to the `codly` server. Never fails the spawn. Which servers
+    /// have their keys is asked of the Keychain through a subprocess, which can wait on a
+    /// permission dialog, so that part runs off the runtime threads.
+    pub(super) async fn prepare_default_mcp(&self, raw_log: &Path, cwd: &Path) {
+        let (prefs, cwd) = (self.mcp_prefs(), cwd.to_path_buf());
+        let extra = match tokio::task::spawn_blocking(move || connections::resolve(&prefs, &KeychainStore, &cwd)).await {
+            Ok(extra) => extra,
+            Err(e) => {
+                tracing::warn!("could not read the default MCP servers: {e}");
+                return;
+            }
+        };
         if let Err(e) = connections::write_sidecar(raw_log, &extra) {
             tracing::warn!("could not write the default MCP servers: {e}");
         }

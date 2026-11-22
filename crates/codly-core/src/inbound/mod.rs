@@ -142,7 +142,7 @@ pub struct SlackView {
     pub bot_token_set: bool,
     pub app_token_set: bool,
     pub connected: bool,
-    /// One sentence on where it stands ("Not connected yet: …").
+    /// One sentence on where it stands ("Not available yet: …").
     pub status: String,
 }
 
@@ -172,7 +172,8 @@ pub struct NewWebhook {
 #[ts(export)]
 pub struct SlackUpdate {
     pub config: SlackConfig,
-    /// None keeps the stored token, "" removes it, anything else replaces it.
+    /// None keeps the stored token, "" removes it. Anything else is refused while Slack is not
+    /// available (`InboundHub::set_slack`).
     pub bot_token: Option<String>,
     pub app_token: Option<String>,
 }
@@ -426,16 +427,17 @@ impl InboundHub {
         Ok(())
     }
 
-    /// Save the Slack config; tokens go to the Keychain. Returns an error before changing
-    /// anything if a token is malformed.
+    /// Save the Slack config, and remove a token an earlier version saved (`Some("")`). A new
+    /// token is refused before anything changes: the connection is not built, so nothing would
+    /// read it.
     pub fn set_slack(&self, u: SlackUpdate) -> Result<()> {
-        slack::check_tokens(u.bot_token.as_deref(), u.app_token.as_deref())?;
+        if [&u.bot_token, &u.app_token].into_iter().any(|t| t.as_deref().is_some_and(|t| !t.is_empty())) {
+            bail!("Slack is not available yet, so Codly does not take Slack tokens");
+        }
         let cfg = u.config.cleaned();
         for (key, v) in [(slack::BOT_KEY, &u.bot_token), (slack::APP_KEY, &u.app_token)] {
-            match v.as_deref() {
-                None => {}
-                Some("") => self.secrets.delete(key)?,
-                Some(t) => self.secrets.set(key, t)?,
+            if v.is_some() {
+                self.secrets.delete(key)?;
             }
         }
         {

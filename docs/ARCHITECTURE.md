@@ -83,7 +83,7 @@ accounts makes `quota.rs` read the Claude Code OAuth token (login Keychain, else
 `.credentials.json`) and send it to `https://api.anthropic.com/api/oauth/usage`, as `/usage`
 does. The token goes to curl on stdin and is not stored or logged. `detect_clis`, which the
 onboarding polls, never does this. Keys the user gives Codly live in the Keychain: API keys
-(`byok.rs`), the Groq key (`dictation.rs`), webhook secrets and Slack tokens
+(`byok.rs`), the Groq key (`dictation.rs`), webhook secrets
 (`inbound/secrets.rs`) and keys of agents' tool servers (`housekeeping/connections.rs`).
 
 ## 3. One event stream, two views
@@ -240,7 +240,7 @@ and read-only agents. Settings → Safety lists the rules; removing one makes Co
 and a network mode that gates every
 inbound path. `inbound/` has the sources: a loopback webhook listener (one secret per endpoint,
 created switched off) and Slack over Socket Mode (config and gating exist; the socket is not
-connected yet). An inbound message is never the user's: the thread stores and shows it under its
+connected yet, so Codly takes no Slack token). An inbound message is never the user's: the thread stores and shows it under its
 source's name, the Lead reads it as quoted untrusted data, and a plan made after it waits for Run plan
 unless you let that endpoint run plans without asking (off for every new endpoint). Your next message
 in the thread, or a schedule of yours that fires there, ends the wait for the plans that follow. One

@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
 use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, startup};
+use crate::housekeeping::connections::{self, ReadyMcp};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, Billing, EventKind,
     Id, MessagePhase, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
@@ -72,8 +73,10 @@ pub fn permission_mode(spec: &SpawnSpec) -> &'static str {
     if spec.role == Role::Worker && !spec.read_only { "acceptEdits" } else { "manual" }
 }
 
-/// The `--mcp-config` document for the codly server (or None without MCP).
-pub fn mcp_config(spec: &SpawnSpec) -> Option<Value> {
+/// The `--mcp-config` document for the codly server (or None without MCP). `ready`: the
+/// user's default servers with their keys (`connections::load_ready`), looked up once per
+/// spawn so this document and `--allowedTools` name the same servers.
+pub fn mcp_config(spec: &SpawnSpec, ready: &[ReadyMcp]) -> Option<Value> {
     let m = spec.mcp.as_ref()?;
     let env: serde_json::Map<String, Value> = m.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
     let mut doc = json!({ "mcpServers": { "codly": {
@@ -82,7 +85,7 @@ pub fn mcp_config(spec: &SpawnSpec) -> Option<Value> {
         "alwaysLoad": true
     }}});
     // The user's default servers (Settings → Connections), as enabled when this run started.
-    for x in crate::housekeeping::connections::load_ready(&spec.raw_log) {
+    for x in ready {
         let env: serde_json::Map<String, Value> = x.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
         doc["mcpServers"][&x.name] = json!({ "type": "stdio", "command": x.command, "args": x.args, "env": env });
     }
@@ -90,13 +93,14 @@ pub fn mcp_config(spec: &SpawnSpec) -> Option<Value> {
 }
 
 /// `--allowedTools` patterns for the default servers that only read; the others ask first.
-fn default_mcp_allowed(spec: &SpawnSpec) -> Vec<String> {
-    crate::housekeeping::connections::load_ready(&spec.raw_log).into_iter().filter(|x| x.read_only).map(|x| format!("mcp__{}__*", x.name)).collect()
+fn default_mcp_allowed(ready: &[ReadyMcp]) -> Vec<String> {
+    ready.iter().filter(|x| x.read_only).map(|x| format!("mcp__{}__*", x.name)).collect()
 }
 
 /// The full `claude` argv. `mcp_config_path` is a 0600 file holding [`mcp_config`] (a file,
-/// not an inline string, so the per-run MCP token never shows up in `ps`).
-pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&Path>) -> Vec<String> {
+/// not an inline string, so the per-run MCP token never shows up in `ps`); `ready` is the
+/// list that document was made from.
+pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&Path>, ready: &[ReadyMcp]) -> Vec<String> {
     let mut a: Vec<String> = [
         "-p",
         "--input-format",
@@ -125,7 +129,7 @@ pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&P
     if let Some(p) = mcp_config_path {
         a.extend(["--mcp-config".into(), p.to_string_lossy().into_owned()]);
         let mut allowed = vec!["mcp__codly__*".to_string()];
-        allowed.extend(default_mcp_allowed(spec));
+        allowed.extend(default_mcp_allowed(ready));
         a.extend(["--allowedTools".into(), allowed.join(",")]);
     }
     a.extend(["--setting-sources".into(), if spec.use_user_setup { "user,project,local" } else { "user,local" }.into()]);
@@ -156,11 +160,17 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         SessionMode::Resume { session_id } => session_id.clone(),
     };
     let raw = Arc::new(RawLog::open(&spec.raw_log).with_context(|| format!("cannot open raw log {}", spec.raw_log.display()))?);
-    let mcp_file = match mcp_config(&spec) {
+    // The keys of the default servers come from the Keychain through a subprocess, which can
+    // wait on a permission dialog: once per spawn, and not on a runtime thread.
+    let ready = {
+        let raw_log = spec.raw_log.clone();
+        tokio::task::spawn_blocking(move || connections::load_ready(&raw_log)).await.context("reading the default MCP servers")?
+    };
+    let mcp_file = match mcp_config(&spec, &ready) {
         Some(doc) => Some(PrivateFile::write(&spec.raw_log.with_file_name(MCP_CONFIG_FILE), &doc.to_string())?),
         None => None,
     };
-    let args = build_args(&spec, &session_id, mcp_file.as_ref().map(|f| f.0.as_path()));
+    let args = build_args(&spec, &session_id, mcp_file.as_ref().map(|f| f.0.as_path()), &ready);
     startup::check_cwd(&spec.cwd)?;
     let mut child = proc::command(&spec.bin, &args, &spec.cwd, &spec.env)
         .spawn()
@@ -1600,9 +1610,9 @@ mod tests {
     #[test]
     fn byok_token_command_becomes_an_api_key_helper() {
         let s = spec(Role::Worker, false);
-        assert!(!build_args(&s, "s", None).contains(&"--settings".to_string()), "no BYOK, no --settings");
+        assert!(!build_args(&s, "s", None, &[]).contains(&"--settings".to_string()), "no BYOK, no --settings");
         let s = SpawnSpec { byok_command: Some("~/bin/wif-token \"anthropic\"".into()), ..s };
-        let a = build_args(&s, "s", None);
+        let a = build_args(&s, "s", None, &[]);
         let i = a.iter().position(|x| x == "--settings").unwrap();
         let v: Value = serde_json::from_str(&a[i + 1]).unwrap();
         assert_eq!(v, serde_json::json!({ "apiKeyHelper": "~/bin/wif-token \"anthropic\"" }));
@@ -1611,7 +1621,7 @@ mod tests {
     #[test]
     fn args_for_a_worker() {
         let s = spec(Role::Worker, false);
-        let a = build_args(&s, "11111111-2222-4333-8444-555555555555", Some(Path::new("/tmp/x/claude-mcp.json")));
+        let a = build_args(&s, "11111111-2222-4333-8444-555555555555", Some(Path::new("/tmp/x/claude-mcp.json")), &[]);
         let joined = a.join(" ");
         for want in [
             "-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages",
@@ -1628,9 +1638,32 @@ mod tests {
         assert!(!joined.contains("ToolSearch"));
         let i = a.iter().position(|x| x == "--append-system-prompt").unwrap();
         assert_eq!(a[i + 1], "You are a Codly worker.");
-        let cfg = mcp_config(&s).unwrap();
+        let cfg = mcp_config(&s, &[]).unwrap();
         assert_eq!(cfg["mcpServers"]["codly"]["alwaysLoad"], true);
         assert_eq!(cfg["mcpServers"]["codly"]["env"]["CODLY_MCP_TOKEN"], "t");
+    }
+
+    /// The default servers are looked up once per spawn: the MCP config and `--allowedTools`
+    /// are made from that one list, so a server is never in one and missing from the other.
+    #[test]
+    fn the_mcp_config_and_the_allowed_tools_name_the_same_default_servers() {
+        let s = spec(Role::Worker, false);
+        let server = |name: &str, read_only: bool| ReadyMcp {
+            name: name.into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), format!("@example/{name}")],
+            env: vec![("API_KEY".into(), format!("key-of-{name}"))],
+            read_only,
+        };
+        let ready = [server("docs", true), server("tracker", false)];
+        let cfg = mcp_config(&s, &ready).unwrap();
+        let names: Vec<&String> = cfg["mcpServers"].as_object().unwrap().keys().collect();
+        assert_eq!(names, ["codly", "docs", "tracker"]);
+        assert_eq!(cfg["mcpServers"]["tracker"], json!({ "type": "stdio", "command": "npx", "args": ["-y", "@example/tracker"], "env": { "API_KEY": "key-of-tracker" } }));
+        let a = build_args(&s, "sid", Some(Path::new("/tmp/x/claude-mcp.json")), &ready);
+        let i = a.iter().position(|x| x == "--allowedTools").unwrap();
+        assert_eq!(a[i + 1], "mcp__codly__*,mcp__docs__*", "a read-only server runs without asking; the other asks first");
+        assert!(!a.join(" ").contains("key-of-"), "keys go in the 0600 file, never in argv");
     }
 
     /// The file with a run's keys is the user's alone and does not outlive the run; what an
@@ -1642,7 +1675,7 @@ mod tests {
         let runs = dir.path().join("runs");
         std::fs::create_dir_all(runs.join("r1")).unwrap();
         let path = runs.join("r1").join(MCP_CONFIG_FILE);
-        let file = PrivateFile::write(&path, &mcp_config(&spec(Role::Worker, false)).unwrap().to_string()).unwrap();
+        let file = PrivateFile::write(&path, &mcp_config(&spec(Role::Worker, false), &[]).unwrap().to_string()).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(std::fs::read_to_string(&path).unwrap().contains("CODLY_MCP_TOKEN"));
         drop(file); // the run is over
@@ -1663,7 +1696,7 @@ mod tests {
         let mut s = spec(Role::Lead, true);
         s.session = SessionMode::Resume { session_id: "abc".into() };
         s.mcp = None;
-        let joined = build_args(&s, "abc", None).join(" ");
+        let joined = build_args(&s, "abc", None, &[]).join(" ");
         assert!(joined.contains("--permission-mode manual"));
         assert!(joined.contains("--resume abc") && !joined.contains("--session-id"));
         assert!(joined.contains("--tools Read,Grep,Glob,WebFetch,WebSearch,Skill,LSP "));
@@ -1989,7 +2022,7 @@ mod tests {
     #[test]
     fn tools_and_user_setup() {
         let mut sp = spec(Role::Worker, false);
-        let joined = |s: &SpawnSpec| build_args(s, "sid", None).join(" ");
+        let joined = |s: &SpawnSpec| build_args(s, "sid", None, &[]).join(" ");
         let a = joined(&sp);
         assert!(a.contains("Monitor,TaskStop,Skill,LSP") && a.contains("--strict-mcp-config") && a.contains("user,local"));
         assert!(!a.contains("ToolSearch") && !a.contains("Cron") && !a.contains("ScheduleWakeup") && !a.contains("RemoteTrigger"));

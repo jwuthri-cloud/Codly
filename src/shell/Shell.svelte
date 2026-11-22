@@ -13,6 +13,7 @@
   import ChangesRoom from '../rooms/changes/ChangesRoom.svelte';
   import KnowledgeRoom from '../rooms/knowledge/KnowledgeRoom.svelte';
   import TerminalRoom from '../rooms/terminal/TerminalRoom.svelte';
+  import { closeSessionsOutside, sessionKey } from '../rooms/terminal/sessions';
   import Sheet from '../sheet/Sheet.svelte';
   import OfficeLayer from './OfficeLayer.svelte';
   import Rail from './Rail.svelte';
@@ -38,6 +39,13 @@
       const done = tasks.filter((t) => t.status === 'done').length;
       if (done) diffstats.ensurePlan(p.id, `${p.status}:${done}`);
     }
+  });
+
+  // A shell lives as long as its folder is a place of this office (the repository, an agent's
+  // worktree), whatever room is open. After another office opens or an agent leaves, it is closed.
+  $effect(() => {
+    const places = [sessionKey(store.workspace?.repo_path ?? null), ...store.agents.flatMap((a) => (a.worktree ? [a.worktree] : []))];
+    void closeSessionsOutside(places);
   });
 </script>
 

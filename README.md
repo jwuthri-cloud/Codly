@@ -103,7 +103,7 @@ mission.
 
 Approvals have four modes: balanced, strict, autonomous and Full access (auto-approves everything except
 a few hard floors; off unless you choose it). Settings also holds Triggers (schedules and network mode)
-and Inbound (webhook and Slack sources for the Lead).
+and Inbound (webhook sources for the Lead; Slack is not available yet).
 
 ## Requirements
 
@@ -211,7 +211,7 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   use this token. With it off, a sign-in shows its usage once an agent has run on it.
 - Keys that you give to Codly are stored in the macOS Keychain, not in Codly's settings or database: your
   own API keys (Settings → API keys; each one goes to one CLI only), the Groq key for dictation, webhook
-  secrets and Slack tokens, and the keys of the tool servers you switch on for agents.
+  secrets, and the keys of the tool servers you switch on for agents.
 - Each agent shows a billing badge (subscription, API key or third party). API-key variables that would
   silently switch billing are removed from agent environments, unless you turned on your own API key for
   that vendor.
@@ -220,6 +220,9 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 
 - Codly commits and merges by itself only on its own `codly/…` branches: a task's branch, then the
   plan's integration branch after the task's checks pass.
+- Codly's commit of an agent's work leaves out a new folder with more than 2,000 files and a new file
+  over 25 MB (build output or a dependency folder that the repository does not ignore). The task says
+  what was left out, and the files stay in the worktree.
 - Codly changes your branch only when you press a button: **Merge** (a plan's integration branch, or one
   agent's branch, into the branch you have checked out), **Commit** (your own uncommitted changes) and
   **Push** (the branch you have checked out, to its remote, through your own SSH agent).

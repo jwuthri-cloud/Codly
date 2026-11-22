@@ -13,12 +13,12 @@
   import Icon from '../../components/Icon.svelte';
   import Portrait from '../../components/Portrait.svelte';
   import RoomHead from '../RoomHead.svelte';
-  import { closeSession, disableWebgl, enableWebgl, openSession, sessions, xtermTheme, type Session } from './sessions';
+  import { closeSession, disableWebgl, enableWebgl, openSession, sessionKey, sessions, xtermTheme, type Session } from './sessions';
 
   type Place = { key: string; cwd: string | null; label: string; agentId: string | null };
   const places = $derived.by((): Place[] => {
     const repo = store.workspace?.repo_path ?? null;
-    const list: Place[] = [{ key: repo ?? '(repo)', cwd: repo, label: store.workspace?.name ?? 'Repository', agentId: null }];
+    const list: Place[] = [{ key: sessionKey(repo), cwd: repo, label: store.workspace?.name ?? 'Repository', agentId: null }];
     // Agents can share a worktree (or sit in the repo itself): one tab per path, keys must be unique.
     const seen = new Set(list.map((p) => p.key));
     for (const a of store.agents) {

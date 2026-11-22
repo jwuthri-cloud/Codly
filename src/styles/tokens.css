@@ -76,8 +76,11 @@
 
   --ink-1: #e9ecf4;
   --ink-2: #a6aec2;
-  --ink-3: #6c748b;
-  --ink-4: #4a5168;
+  /* ink-3 and ink-4 carry small text (times, queue and status lines, line numbers): both hold
+     WCAG AA (4.5:1) on --glass-solid and --pop, and ink-3 also on --surface-3 over them
+     (src/styles/__tests__/contrast.test.ts). */
+  --ink-3: #8e96ac;
+  --ink-4: #7c849b;
   --on-aurora: #07131a;
 
   /* the aurora: live activity + the primary action, nothing else */
@@ -135,8 +138,8 @@
 
   --ink-1: #1b1d25;
   --ink-2: #545969;
-  --ink-3: #868a97;
-  --ink-4: #b0b2ba;
+  --ink-3: #606471;
+  --ink-4: #6d717e;
   --on-aurora: #ffffff;
 
   --aurora-a: #078a7c;

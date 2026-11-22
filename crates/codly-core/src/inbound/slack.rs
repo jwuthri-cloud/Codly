@@ -1,10 +1,12 @@
 //! Slack as an inbound source, over Socket Mode (your own Slack app: a bot token `xoxb-…` and an
 //! app-level token `xapp-…`; no public URL, no tunnel).
 //!
-//! STATUS: the settings, the Keychain-held tokens and the envelope parsing with its gates are
-//! done and tested (`parse_envelope`). The WebSocket itself (`apps.connections.open` → wss
-//! → ack each envelope) needs an HTTPS and a WebSocket client that the core does not depend on
-//! yet, so `start` says so and the source never runs. The UI shows "not connected yet".
+//! STATUS: not available yet. The settings and the envelope parsing with its gates are done and
+//! tested (`parse_envelope`). The WebSocket itself (`apps.connections.open` → wss → ack each
+//! envelope) needs an HTTPS and a WebSocket client that the core does not depend on yet, so
+//! `start` says so and the source never runs. Until it can run, Codly takes no Slack token: a
+//! token in the Keychain with nothing to read it is a risk with no use (`InboundHub::set_slack`).
+//! A token saved by an earlier version can still be removed.
 //!
 //! Gates, because a Slack message is open ingress into an agent team: only `app_mention` events
 //! and direct messages, never bots or edited/system subtypes, only from allowed users (the list
@@ -54,18 +56,6 @@ impl SlackConfig {
     }
 }
 
-/// Reject a token that cannot be the right kind before it reaches the Keychain.
-pub fn check_tokens(bot: Option<&str>, app: Option<&str>) -> Result<()> {
-    for (t, prefix, what) in [(bot, "xoxb-", "bot token"), (app, "xapp-", "app-level token")] {
-        if let Some(t) = t.filter(|t| !t.is_empty()) {
-            if !t.starts_with(prefix) || t.len() > 400 || !t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.') {
-                bail!("a Slack {what} starts with {prefix}");
-            }
-        }
-    }
-    Ok(())
-}
-
 pub struct SlackSource {
     cfg: Mutex<SlackConfig>,
     bot_set: AtomicBool,
@@ -106,11 +96,11 @@ impl InboundSource for SlackSource {
     }
 
     fn status(&self) -> SourceStatus {
-        SourceStatus { running: false, detail: Some("Not connected yet: your settings and tokens are saved, but this build cannot open the Socket Mode connection.".into()) }
+        SourceStatus { running: false, detail: Some("Not available yet: this version cannot connect to Slack, so it takes no Slack tokens.".into()) }
     }
 
     fn start(&self, _sink: Sink) -> Result<()> {
-        bail!("Not connected yet: the Slack Socket Mode connection is not built in this version.")
+        bail!("Not available yet: the Slack Socket Mode connection is not built in this version.")
     }
 
     fn stop(&self) {}
@@ -259,19 +249,10 @@ mod tests {
     }
 
     #[test]
-    fn tokens_are_checked_by_kind() {
-        assert!(check_tokens(Some("xoxb-1-2-abc"), Some("xapp-1-A-2-abc")).is_ok());
-        assert!(check_tokens(Some("xapp-1"), None).is_err());
-        assert!(check_tokens(None, Some("xoxb-1")).is_err());
-        assert!(check_tokens(Some("xoxb-a b"), None).is_err());
-        assert!(check_tokens(Some(""), Some("")).is_ok(), "empty means remove");
-    }
-
-    #[test]
     fn slack_is_honest_about_not_connecting() {
         let s = SlackSource::new(cfg(), Arc::new(super::super::secrets::MemorySecrets::default()));
         assert!(!s.wanted(), "no tokens");
         assert!(!s.status().running);
-        assert!(s.start(Arc::new(|_| Box::pin(async { Ok(()) }))).unwrap_err().to_string().contains("Not connected yet"));
+        assert!(s.start(Arc::new(|_| Box::pin(async { Ok(()) }))).unwrap_err().to_string().contains("Not available yet"));
     }
 }

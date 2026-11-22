@@ -363,8 +363,6 @@ export class MockTransport implements Transport {
         story.interrupt(String(a.agentId), true);
         this.ctl.clear(String(a.agentId));
         return null;
-      case 'agent_control':
-        return this.ctl.state(String(a.agentId));
       case 'set_agent_block_tools':
         return this.ctl.setBlockTools(String(a.agentId), !!a.on);
       case 'stop_agent_after_step':
@@ -373,8 +371,6 @@ export class MockTransport implements Transport {
         return this.ctl.resume(String(a.agentId));
       case 'steer_agent':
         return this.ctl.steer(String(a.agentId), String(a.text ?? ''));
-      case 'hire_agent':
-        return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':
         return a.provider === 'claude' ? ['sonnet', 'opus', 'haiku', 'fable'] : a.provider === 'codex' ? ['gpt-5.5-codex', 'gpt-5.5-mini'] : [];
       case 'hire_review':

@@ -25,7 +25,7 @@ use tokio::io::AsyncReadExt;
 
 use super::scope::ScopeMatcher;
 use super::{Inner, approvals, lock, names, prompts, row, runs::RunReq, runs::new_session, scheduler};
-use crate::git::MergeOutcome;
+use crate::git::{LeftOut, MAX_NEW_FILE_BYTES, MAX_NEW_FOLDER_FILES, MergeOutcome};
 use crate::model::*;
 use crate::store;
 
@@ -269,11 +269,12 @@ impl Inner {
             }
         }
         let message = format!("codly({}): {}", task.key, prompts::clip(&task.title, 60));
-        let commit = {
+        let snap = {
             let _g = self.repo_lock.lock().await;
-            self.git.commit_all(&wt, &message).await?
+            self.git.commit_work(&wt, &message).await?
         };
-        if let Some(c) = commit {
+        self.note_left_out(ws, None, Some(&task), &task.key, &wt, &snap.left_out)?;
+        if let Some(c) = snap.commit {
             self.store.set_task_commits(task_id, None, Some(&c.sha))?;
             self.emit(
                 ws,
@@ -631,6 +632,36 @@ impl Inner {
             bail!("{} has no finished work yet; Retry lets its worker go on", t.key);
         }
         Ok((t, wt))
+    }
+
+    /// Say what Codly's commit in `wt` left out (`Git::commit_work`: a huge new folder or
+    /// file), in the task's record, or in the agent's when it works alone. Every later
+    /// commit leaves the same paths out, so it is said once per task (or agent), and again
+    /// when the list changes.
+    pub(super) fn note_left_out(&self, ws: Option<&str>, agent: Option<&str>, task: Option<&Task>, who: &str, wt: &Path, left: &[LeftOut]) -> Result<()> {
+        let key = format!("left_out:{}:{}", task.map(|t| t.id.as_str()).or(agent).unwrap_or_default(), wt.display());
+        let list = left.iter().map(LeftOut::to_string).collect::<Vec<_>>().join(", ");
+        if self.store.kv_get(&key)?.unwrap_or_default() == list {
+            return Ok(());
+        }
+        self.store.kv_set(&key, &list)?;
+        if left.is_empty() {
+            return Ok(());
+        }
+        let summary = format!(
+            "{who}: Codly did not commit {list}. This looks like build output or downloaded files, not work (a new folder with more \
+             than {MAX_NEW_FOLDER_FILES} files, or a new file over {} MB). It is still in the worktree: add it to .gitignore or delete \
+             it, or commit it yourself if it is work.",
+            MAX_NEW_FILE_BYTES >> 20
+        );
+        let detail = json!({
+            "plan_id": task.and_then(|t| t.plan_id.clone()),
+            "left_out": left.iter().map(LeftOut::path).collect::<Vec<_>>(),
+            "worktree": wt.to_string_lossy(),
+        });
+        let kind = EventKind::Decision { id: new_id(), decision_type: "commit".into(), method: "rule".into(), summary, detail };
+        self.emit(ws, row(agent, task.map(|t| t.id.as_str()), None, kind))?;
+        Ok(())
     }
 
     /// Did its checks stop the task? Then its last decision is the gate's, with one of

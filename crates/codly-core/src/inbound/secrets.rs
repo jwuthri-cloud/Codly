@@ -1,4 +1,5 @@
-//! Where inbound secrets live: the webhook endpoint secrets and the Slack tokens.
+//! Where inbound secrets live: the webhook endpoint secrets (and the Slack tokens, once Slack
+//! can connect: none is taken before that).
 //!
 //! Codly never stores the credentials of the agent CLIs (their own sign-ins are used as they
 //! are), so there was no store to reuse. These secrets are Codly's own, and they go to the macOS

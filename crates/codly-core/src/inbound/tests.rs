@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use super::secrets::{MemorySecrets, SecretStore};
-use super::slack::SlackConfig;
+use super::slack::{APP_KEY, BOT_KEY, SlackConfig};
 use super::*;
 
 type Inbox = Arc<Mutex<Vec<(String, InboundMessage)>>>;
@@ -226,18 +226,43 @@ async fn secrets_never_touch_the_config_file_or_the_state() {
     let secrets: Arc<MemorySecrets> = Arc::default();
     let (h, _) = hub(dir.path(), secrets.clone());
     let w = h.create_webhook("a").unwrap();
-    h.set_slack(SlackUpdate { config: SlackConfig::default(), bot_token: Some("xoxb-1-secret".into()), app_token: Some("xapp-1-secret".into()) }).unwrap();
     let file = std::fs::read_to_string(dir.path().join("inbound.json")).unwrap();
     let state = serde_json::to_string(&h.state()).unwrap();
     for hay in [&file, &state] {
-        assert!(!hay.contains(&w.secret) && !hay.contains("xoxb-1-secret") && !hay.contains("xapp-1-secret"), "{hay}");
+        assert!(!hay.contains(&w.secret), "{hay}");
     }
-    assert!(state.contains("\"bot_token_set\":true") && state.contains("\"app_token_set\":true"));
-    assert_eq!(secrets.get("slack-bot-token").unwrap().as_deref(), Some("xoxb-1-secret"));
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(dir.path().join("inbound.json")).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+/// Slack cannot connect in this version, so a token would sit in the Keychain with nothing to
+/// read it. None is taken; the tokens an earlier version saved are shown as saved and can go.
+#[tokio::test]
+async fn slack_takes_no_token_and_lets_a_saved_one_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets: Arc<MemorySecrets> = Arc::default();
+    secrets.set(BOT_KEY, "xoxb-1-secret").unwrap();
+    secrets.set(APP_KEY, "xapp-1-secret").unwrap();
+    let (h, _) = hub(dir.path(), secrets.clone());
+    let state = serde_json::to_string(&h.state()).unwrap();
+    assert!(state.contains("\"bot_token_set\":true") && state.contains("\"app_token_set\":true"), "{state}");
+    assert!(!state.contains("xoxb-1-secret") && !state.contains("xapp-1-secret"), "{state}");
+
+    for update in [
+        SlackUpdate { config: SlackConfig::default(), bot_token: Some("xoxb-2-new".into()), app_token: None },
+        SlackUpdate { config: SlackConfig::default(), bot_token: Some(String::new()), app_token: Some("xapp-2-new".into()) },
+    ] {
+        let e = h.set_slack(update).unwrap_err().to_string();
+        assert!(e.contains("not available yet"), "{e}");
+    }
+    assert_eq!(secrets.get(BOT_KEY).unwrap().as_deref(), Some("xoxb-1-secret"), "a refused update changes nothing");
+    assert_eq!(secrets.get(APP_KEY).unwrap().as_deref(), Some("xapp-1-secret"));
+
     h.set_slack(SlackUpdate { config: SlackConfig::default(), bot_token: Some(String::new()), app_token: None }).unwrap();
-    assert!(!h.state().slack.bot_token_set && h.state().slack.app_token_set);
+    assert!(!h.state().slack.bot_token_set && h.state().slack.app_token_set, "one token removed, the other kept");
+    h.set_slack(SlackUpdate { config: SlackConfig::default(), bot_token: None, app_token: Some(String::new()) }).unwrap();
+    assert!(secrets.get(BOT_KEY).unwrap().is_none() && secrets.get(APP_KEY).unwrap().is_none());
+    assert!(!h.state().slack.connected);
 }
 
 #[tokio::test]

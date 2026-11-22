@@ -72,10 +72,6 @@ export class MockControls {
     this.sim.decision('agent_control', 'human', summary, { agent_id: id }, { agent: id });
   }
 
-  state(id: string): ControlState {
-    return this.of(id).state();
-  }
-
   setBlockTools(id: string, on: boolean): ControlState {
     const a = this.agent(id);
     if (a.role === 'lead') throw new Error('the Lead needs its tools to plan; stop it instead');

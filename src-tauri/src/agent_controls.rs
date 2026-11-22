@@ -13,11 +13,6 @@ fn err(e: anyhow::Error) -> String {
 }
 
 #[tauri::command]
-pub async fn agent_control(state: State<'_, AppState>, agent_id: String) -> R<ControlState> {
-    state.core().await?.agent_control(&agent_id).await.map_err(err)
-}
-
-#[tauri::command]
 pub async fn set_agent_block_tools(state: State<'_, AppState>, agent_id: String, on: bool) -> R<ControlState> {
     state.core().await?.set_agent_block_tools(&agent_id, on).await.map_err(err)
 }

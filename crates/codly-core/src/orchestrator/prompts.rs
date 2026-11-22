@@ -308,8 +308,15 @@ pub fn verify_failed(cmd: &str, code: Option<i64>, tail: &str, round: u32, max: 
     )
 }
 
+/// A prompt lists at most this many paths and counts the rest: a thousand lines of paths
+/// push the instruction out of the worker's view.
+const MAX_LISTED: usize = 30;
+
 pub fn scope_violation(files: &[&String], scope: &[String], round: u32, max: u32) -> String {
-    let list: Vec<String> = files.iter().map(|f| format!("  - {f}")).collect();
+    let mut list: Vec<String> = files.iter().take(MAX_LISTED).map(|f| format!("  - {f}")).collect();
+    if files.len() > MAX_LISTED {
+        list.push(format!("  - and {} more files", files.len() - MAX_LISTED));
+    }
     format!(
         "[Codly] Scope check failed (fix round {round}/{max}): these files are outside your write scope ({}):\n{}\n\
          Revert those edits, or, if they are truly required, keep them minimal and list each one with a reason in \
@@ -707,6 +714,19 @@ pub fn inbound_message(source: &str, text: &str, may_start_work: bool) -> String
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A scope failure over a great many files names the first ones and counts the rest.
+    #[test]
+    fn a_long_scope_violation_names_the_first_files_and_counts_the_rest() {
+        let files: Vec<String> = (0..MAX_LISTED + 12).map(|i| format!("out/{i}.js")).collect();
+        let refs: Vec<&String> = files.iter().collect();
+        let scope = ["src/**".to_string()];
+        let long = scope_violation(&refs, &scope, 1, 2);
+        assert_eq!(long.matches("\n  - ").count(), MAX_LISTED + 1, "{long}");
+        assert!(long.contains("  - out/29.js\n  - and 12 more files\n") && !long.contains("out/30.js"), "{long}");
+        let short = scope_violation(&refs[..3], &scope, 1, 2);
+        assert!(short.contains("  - out/2.js\nRevert") && !short.contains("more files"), "{short}");
+    }
 
     /// An inbound message cannot pass for the user or for Codly: all of it is inside the block.
     #[test]

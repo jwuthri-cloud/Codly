@@ -173,11 +173,6 @@ pub async fn stop_agent(state: State<'_, AppState>, agent_id: String) -> R<()> {
 }
 
 #[tauri::command]
-pub async fn hire_agent(state: State<'_, AppState>, provider: Provider, model: Option<String>, title: Option<String>) -> R<Agent> {
-    state.core().await?.hire_agent(provider, model, title).await.map_err(err)
-}
-
-#[tauri::command]
 pub async fn set_request_prefs(state: State<'_, AppState>, thread: String, prefs: RequestPrefs) -> R<RequestPrefs> {
     state.core().await?.set_request_prefs(&thread, prefs).await.map_err(err)
 }
