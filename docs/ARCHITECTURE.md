@@ -231,6 +231,15 @@ they are build output or third-party code in most repos. If one holds your own c
   check is refused: the plan is still done, and its message names the check to run yourself).
   Full access runs them. The rules read the command's text only: a test runner still runs the
   worker's code, unsandboxed.
+- A new worktree (`worktree_setup.rs`) gets, once: copies of the checkout's git-ignored files
+  that the built-in list (`node_modules`, `.venv`, `venv`, root `.env` files) or the repo's
+  `.worktreeinclude` (gitignore syntax) names, never a tracked or a non-ignored file; a block
+  of 10 ports in `CODLY_PORT_BASE` (setup script, verify commands, the agent); and the repo's
+  `.codly/setup.sh`. That script is code from the repo: it is off until the user turns it on
+  in Settings, which shows its text and what the risk rules see in it, and Codly runs only
+  the exact text that was turned on (a changed file waits for the user again). It runs like
+  a verify command (`/bin/sh`, scrubbed env, 10 min), unsandboxed. If it fails, the plan does
+  not start or the task is blocked with its last line; a 1:1 agent is told in its chat.
 - The gate is fair to the worker: a merge conflict has its own rounds (3) apart from the fix
   rounds, and a check that runs out of time (Settings, 10 min by default) blocks the task for
   you. From its card you re-run the checks or, when its checks stopped it, merge anyway; the
@@ -288,6 +297,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/
+                      worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
   store/            SQLite: schema.sql, later migrations (m2…m4), typed queries
   git.rs            worktrees, commits, merges, push (shells out to the user's git)

@@ -37,6 +37,8 @@ import { makeApplicants } from './util/career';
 import { demoBiggerModel, demoBringBack, demoBuyLot, demoLetGo, demoDigest, demoExportOffice, demoGhosts, demoGiveXp, demoGrant, demoHangout, demoHome, demoLook, demoLot, demoLotOf, demoLots, demoMoveOffice, demoOffices, demoPlace, demoResetOffice, demoRest, demoSaveLot, demoSell, demoSellLot, demoShop, demoTired, demoTransfer, demoTrust, demoWallet } from './demo/office';
 import type { Lot } from './gen/Lot';
 import { HousekeepingDemo } from './demo/housekeeping';
+import { WorktreeDemo } from './demo/worktree';
+import type { SetupChoice } from './gen/SetupChoice';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
 import { repoMap } from './demo/repomap';
@@ -147,6 +149,7 @@ export class MockTransport implements Transport {
   private breaker: MockBreaker;
   private askMe!: MockAskMe;
   private hk: HousekeepingDemo | undefined;
+  private worktrees = new WorktreeDemo();
 
   constructor() {
     const p = params();
@@ -571,6 +574,8 @@ export class MockTransport implements Transport {
       case 'list_connections':
       case 'update_connection':
         return (this.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
+      case 'worktree_setup':
+        return this.worktrees.setup((a.set as SetupChoice | null) ?? null);
       case 'diagnostics':
         // The shape of the app's report (src-tauri/src/diagnostics.rs), about the scripted session.
         return {

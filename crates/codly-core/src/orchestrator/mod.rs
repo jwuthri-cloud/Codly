@@ -16,6 +16,7 @@
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - `breaker_run` circuit breaker enforcement (policy in `breaker`): steer, constrain, stop
 //! - `wallet`   the player's coins (🪙) across every repo, Build/Buy, developer grants
+//! - `worktree_setup` a new worktree made ready: copied ignored files, a port block, the setup script
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
@@ -48,6 +49,7 @@ mod triggers;
 pub mod wallet;
 mod workspace;
 mod memgraph;
+pub mod worktree_setup;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -1046,7 +1048,8 @@ impl Core {
 
     /// Save a pasted or dropped file where the Lead can read it and return its absolute path:
     /// `<repo>/.codly/attachments/<id>/<name>`. Inside the repo because agents may not read
-    /// Codly's data dir; `.codly/` ignores itself, so git never sees it.
+    /// Codly's data dir; `.codly/` ignores itself, so git never sees it (except the repo's
+    /// setup script, `.codly/setup.sh`, which you can commit).
     pub async fn save_attachment(&self, name: &str, bytes: Vec<u8>) -> anyhow::Result<String> {
         const MAX: usize = 25 * 1024 * 1024;
         if bytes.is_empty() {
@@ -1061,7 +1064,7 @@ impl Core {
         sweep_attachments(&attachments, std::time::Duration::from_secs(7 * 24 * 3600)).await;
         let dir = attachments.join(new_id());
         tokio::fs::create_dir_all(&dir).await.context("create the attachments folder")?;
-        tokio::fs::write(root.join(".gitignore"), "*\n").await.context("write .codly/.gitignore")?;
+        tokio::fs::write(root.join(".gitignore"), "*\n!/setup.sh\n").await.context("write .codly/.gitignore")?;
         let path = dir.join(attachment_name(name));
         tokio::fs::write(&path, bytes).await.context("save the file")?;
         Ok(path.to_string_lossy().into_owned())

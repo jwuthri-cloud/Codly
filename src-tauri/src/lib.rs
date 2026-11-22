@@ -236,6 +236,7 @@ pub fn run() {
             commands::board_policy,
             commands::board_sweep,
             commands::board_archive,
+            commands::worktree_setup,
             commands::list_connections,
             commands::update_connection,
             onboarding_commands::install_cli,

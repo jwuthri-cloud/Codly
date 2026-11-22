@@ -60,6 +60,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::merge_plan_warning,
             commands::undo_merge,
             commands::repo_sync,
+            commands::worktree_setup,
             commands::list_memories,
             commands::add_memory,
             commands::list_triples,
@@ -163,6 +164,13 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("unknown plan"), "{e}");
     let e = invoke(&wv, "merge_plan", json!({ "planId": "nope", "into": null })).unwrap_err();
     assert!(e.to_string().contains("unknown plan"), "{e}");
+
+    // New worktrees: no setup script in this repo, so nothing is on and nothing can be turned on.
+    let setup = invoke(&wv, "worktree_setup", json!({ "set": null })).unwrap();
+    assert_eq!(setup, json!({ "script": null, "sha": null, "risks": [], "on": false, "changed": false, "include": [] }));
+    let e = invoke(&wv, "worktree_setup", json!({ "set": { "allow": "abc" } })).unwrap_err();
+    assert!(e.to_string().contains("no .codly/setup.sh"), "{e}");
+    assert_eq!(invoke(&wv, "worktree_setup", json!({ "set": { "allow": null } })).unwrap()["on"], false);
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

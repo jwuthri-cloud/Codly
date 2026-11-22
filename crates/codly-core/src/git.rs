@@ -368,9 +368,11 @@ impl Git {
         self.ok(repo, &["diff", "--no-color", "--no-ext-diff", "--find-renames", "-U3", &range], true).await
     }
 
-    /// Is `rel` ignored by the repository's ignore rules (so `add -A` never picks it up)?
-    pub async fn is_ignored(&self, repo: &Path, rel: &str) -> Result<bool> {
-        Ok(self.run(repo, &["check-ignore", "-q", "--no-index", rel], true).await?.ok)
+    /// The untracked paths the repository's ignore rules hide (so `add -A` never picks them
+    /// up), relative to `repo`. A folder that is ignored as a whole is one entry ending in
+    /// `/`: git does not look inside it.
+    pub async fn ignored(&self, repo: &Path) -> Result<Vec<String>> {
+        Ok(split_z(&self.ok(repo, &["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], true).await?))
     }
 
     pub async fn ls_files(&self, repo: &Path) -> Result<Vec<String>> {
@@ -1146,5 +1148,25 @@ mod tests {
         assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.is_err());
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "a new file of mine\n");
         assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()), "the merge is still there");
+    }
+
+    /// What a new worktree lacks: the ignored paths, a folder ignored as a whole as one entry.
+    #[tokio::test]
+    async fn ignored_lists_ignored_untracked_paths_and_whole_folders_once() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        std::fs::write(repo.join(".gitignore"), "node_modules/\n.env\nlocal.json\n").unwrap();
+        std::fs::create_dir_all(repo.join("pkg/node_modules/dep")).unwrap();
+        std::fs::write(repo.join("pkg/index.js"), "tracked\n").unwrap();
+        std::fs::write(repo.join("pkg/local.json"), "{}\n").unwrap();
+        std::fs::write(repo.join("pkg/node_modules/dep/a.js"), "a\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-qm", "ignore rules"]);
+        std::fs::create_dir_all(repo.join("node_modules/dep")).unwrap();
+        std::fs::write(repo.join("node_modules/dep/a.js"), "a\n").unwrap();
+        std::fs::write(repo.join(".env"), "A=1\n").unwrap();
+        std::fs::write(repo.join("notes.txt"), "untracked, not ignored\n").unwrap();
+
+        assert_eq!(git.ignored(&repo).await.unwrap(), [".env", "node_modules/", "pkg/local.json", "pkg/node_modules/"]);
     }
 }

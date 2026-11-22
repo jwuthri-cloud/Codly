@@ -146,6 +146,7 @@ impl Inner {
             let start = self.git.head(&repo).await?.ok_or_else(|| anyhow!("the repository has no commits yet"))?;
             let _g = self.repo_lock.lock().await;
             self.git.worktree_add(&repo, &wt, &branch, &start).await?;
+            self.mark_new_worktree(&wt)?; // prepared at its first message
         }
         let title = m.title.as_deref().and_then(role_title).map(String::from);
         self.update_agent(&agent.id, |a| {

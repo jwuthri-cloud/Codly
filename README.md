@@ -210,6 +210,13 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
   access, which approves it.
 - Codly removes a worktree only when it is clean and merged. It keeps the branch.
+- A new worktree gets copies of files that git ignores and an agent needs: `node_modules`, `.venv`,
+  `venv` and the `.env` files at the top of the repo, plus what a `.worktreeinclude` file at the top of
+  the repo lists (same syntax as `.gitignore`). Only ignored files are copied, so they never reach a commit.
+- A repo can have a setup script, `.codly/setup.sh`, that Codly runs once in each new worktree (to
+  install packages, or to write the worktree's own ports from `$CODLY_PORT_BASE` into a local env
+  file). It is off until you turn it on in Settings → Safety, which shows you the script. Codly runs
+  only the text you turned on: if the file changes, it asks you again. The script is not sandboxed.
 
 **The network**
 

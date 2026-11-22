@@ -236,6 +236,7 @@ impl Inner {
             let _g = self.repo_lock.lock().await;
             self.git.worktree_add(&repo, &wt, &branch, &start).await?;
         }
+        self.mark_new_worktree(&wt)?; // prepared at its first message
         self.update_agent(&agent.id, |a| {
             a.worktree = Some(wt.to_string_lossy().into_owned());
             a.title = title;

@@ -759,11 +759,14 @@ impl Inner {
         Duration::from_secs(u64::from(self.settings().verify_timeout_secs))
     }
 
-    /// Run one command in a worktree: `/bin/sh -c`, scrubbed env, own process group, the
-    /// Settings' time limit, last 80 lines of combined output kept. Only for a command that
-    /// passed the risk check (`command_risks`) or that you allowed.
+    /// Run one command in a worktree: `/bin/sh -c`, scrubbed env (plus the worktree's
+    /// `CODLY_PORT_BASE`), own process group, the Settings' time limit, last 80 lines of
+    /// combined output kept. Only for a command that passed the risk check (`command_risks`)
+    /// or that you allowed.
     async fn run_shell(&self, wt: &Path, cmd: &str) -> VerifyOut {
-        verify_in(wt, cmd, verify_env(&self.base_env), self.verify_timeout()).await
+        let mut env = verify_env(&self.base_env);
+        env.extend(self.worktree_env(wt));
+        verify_in(wt, cmd, env, self.verify_timeout()).await
     }
 
     /// Run one of a plan's integration checks, unless the approval rules see a risk in it:
@@ -1234,7 +1237,7 @@ impl Inner {
 
 /// `/bin/sh -c cmd` in `wt` with `env`, in its own process group; the group is killed when
 /// the command ends (or times out).
-async fn verify_in(wt: &Path, cmd: &str, env: Vec<(String, String)>, timeout: Duration) -> VerifyOut {
+pub(super) async fn verify_in(wt: &Path, cmd: &str, env: Vec<(String, String)>, timeout: Duration) -> VerifyOut {
     let mut c = tokio::process::Command::new("/bin/sh");
     c.arg("-c")
         .arg(cmd)
@@ -1315,7 +1318,7 @@ fn held_checks(cmds: &[String], wt: &Path, mode: ApprovalMode, allowed: &[String
 
 /// The child env for verify commands: the base env minus agent/provider secrets and
 /// session markers, non-interactive (CI=1 stops watch modes and prompts).
-fn verify_env(base: &std::collections::HashMap<String, String>) -> Vec<(String, String)> {
+pub(super) fn verify_env(base: &std::collections::HashMap<String, String>) -> Vec<(String, String)> {
     const DROP_PREFIX: &[&str] = &["ANTHROPIC_", "OPENAI_", "CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CODLY_", "CODEX_"];
     const DROP: &[&str] = &["CLAUDECODE", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY"];
     let mut env: Vec<(String, String)> = base

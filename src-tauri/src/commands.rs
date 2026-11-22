@@ -491,6 +491,16 @@ pub async fn board_archive(state: State<'_, AppState>, query: Option<String>) ->
     state.core().await?.board_archive(query.as_deref()).await.map_err(err)
 }
 
+/// What a new worktree of the open repo gets: its `.worktreeinclude` lines and its setup
+/// script (text, risks, on or off). Pass `set` to turn the script on, for the text you read, or off.
+#[tauri::command]
+pub async fn worktree_setup(
+    state: State<'_, AppState>,
+    set: Option<codly_core::orchestrator::worktree_setup::SetupChoice>,
+) -> R<codly_core::orchestrator::worktree_setup::WorktreeSetup> {
+    state.core().await?.worktree_setup(set).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn list_connections(state: State<'_, AppState>) -> R<Vec<codly_core::housekeeping::connections::Connection>> {
     state.core().await?.connections().await.map_err(err)

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
 use codly_core::model::*;
+use codly_core::orchestrator::worktree_setup::SetupChoice;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use codly_core::store::{RunRow, Store};
 use serde_json::{Value, json};
@@ -1002,6 +1003,7 @@ async fn solo_chat_uses_its_own_permissions() {
     let worker: Behavior = Arc::new(move |turn: FakeTurn| {
         let seen = seen.clone();
         Box::pin(async move {
+            assert!(turn.spec.cwd.join("node_modules/dep/index.js").exists(), "a 1:1 agent's worktree gets the deps too");
             // Not a read or a test run: balanced mode asks, autonomous allows it in the worktree.
             let choice = turn.ask_approval("node scripts/gen.js").await;
             seen.lock().unwrap().push(choice);
@@ -1262,6 +1264,68 @@ async fn a_running_task_can_be_stopped_from_the_board() {
     go.notify_one();
     core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
     wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
+    core.shutdown().await;
+}
+
+/// The repo's setup script fails in the plan's integration worktree: the plan does not start
+/// and says why. Fixed and turned on again, the plan starts from where its branch was cut, and
+/// the task's worktree is set up, with ports of its own, before its worker's first turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failing_setup_script_holds_the_plan_until_it_is_fixed() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    std::fs::create_dir_all(repo.join(".codly")).unwrap();
+    std::fs::write(repo.join(".codly/setup.sh"), "echo no lockfile >&2\nexit 2\n").unwrap();
+    let log = Arc::new(Mutex::new(Log::default()));
+    let seen = Arc::new(Mutex::new(vec![]));
+    let saw = seen.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let saw = saw.clone();
+        Box::pin(async move {
+            let ready = std::fs::read_to_string(turn.spec.cwd.join("node_modules/.setup")).ok();
+            saw.lock().unwrap().push((ready, turn.spec.env.get("CODLY_PORT_BASE").cloned()));
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created hello.txt." })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log, lead: planning_lead(), worker }).await;
+    let settings = Settings { auto_run_plans: true, lead_followups: false, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let turn_on = async || {
+        let sha = core.worktree_setup(None).await.unwrap().sha;
+        assert!(core.worktree_setup(Some(SetupChoice { allow: sha })).await.unwrap().on);
+    };
+    turn_on().await;
+    let base = sh(&repo, &["rev-parse", "HEAD"]);
+
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let said = wait_for("the plan not to start", 30, async || {
+        let chats = core.snapshot().await.unwrap().chats;
+        chats.into_iter().find(|c| c.author == "codly" && c.text.starts_with("Could not start the plan"))
+    })
+    .await;
+    assert!(said.text.contains(".codly/setup.sh exited with code 2: no lockfile"), "{}", said.text);
+    let (_, plan) = task_status(&core).await.unwrap();
+    assert_eq!(plan.status, PlanStatus::AwaitingApproval);
+    assert!(seen.lock().unwrap().is_empty(), "no worker starts in a worktree that is not set up");
+
+    // You fix the script, commit something of your own, and turn the new text on.
+    std::fs::write(repo.join(".codly/setup.sh"), "mkdir -p node_modules && echo \"$CODLY_PORT_BASE\" > node_modules/.setup\n").unwrap();
+    std::fs::write(repo.join("NOTES.md"), "mine\n").unwrap();
+    sh(&repo, &["add", "NOTES.md"]);
+    sh(&repo, &["commit", "-qm", "notes"]);
+    let err = core.run_plan(&plan.id).await.unwrap_err().to_string();
+    assert!(err.contains("changed since you turned it on"), "the new text does not run before you read it: {err}");
+    turn_on().await;
+    core.run_plan(&plan.id).await.unwrap();
+    let (_, plan) = wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
+    assert_eq!(plan.base_commit.as_deref(), Some(base.as_str()), "the plan's branch was cut before your commit");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let (ready, port) = &seen[0];
+    assert!(port.as_deref().is_some_and(|p| p.parse::<u16>().is_ok()), "the worker has ports of its own: {port:?}");
+    assert_eq!(ready.as_deref().map(str::trim), port.as_deref(), "the script ran in the task's worktree before the worker's first turn");
     core.shutdown().await;
 }
 
