@@ -22,7 +22,7 @@ Munder Difflin). Fixtures captured from the real CLIs: `docs/research/fixtures/`
 | Inter-agent context | **Codly MCP server** given to every agent (`codly_*` tools) + a supervisor **blackboard** | typed, validated, auditable; Munder's file mailboxes and typed PTY nudges were its most fragile part (coordination.md §9) |
 | Supervisor | the **Lead**: a real CLI agent (read-only) that chats with you and submits plans through `codly_submit_plan`; Codly enforces the DAG, scopes, leases, gates | Munder's supervisor rules were prompt-only and unenforced |
 | Isolation | one git worktree + branch per task, branched from the plan's integration branch; **Codly commits**, agents never do | Codex sandbox makes `.git` read-only (CRITIQUE W2) |
-| Merge | serial merge queue into `codly/<plan>/integration`, `git merge-tree` pre-check; Codly merges into the user's branch and pushes it only when the user presses the button | agents-backend §6.8 |
+| Merge | serial merge queue into `codly/<plan>/integration`, `git merge-tree` pre-check; Codly merges into the user's branch and pushes it only when the user presses the button; a pull request (`gh`) is opened the same way | agents-backend §6.8 |
 | Storage | one SQLite (rusqlite bundled, WAL); `event` table is the source of truth; raw provider lines in `runs/<id>/raw.ndjson` | replayable timeline and world |
 | Retrieval | per-repo FTS5 over paths, regex symbols and contextual 60-line chunks (path + enclosing symbols prefixed) → RRF → agreement confidence → **pointer pack** (≤ 1.2k tokens) + `codly_search` | commit-replay Hit@5 0.66–0.84 on 4 real repos vs 0.25–0.32 naive grep on 3 of them (0.69 on pi-mono); `examples/bench_localize.rs` |
 | Memory | scoped memories (global / project = shared, agent = private, task), FTS5; temporal knowledge triples, many derived from real events | the user's "shared + single memory, triplets, RAG" |
@@ -242,13 +242,20 @@ they are build output or third-party code in most repos. If one holds your own c
   commands change the user's branch or its remote (commits, merges, push), each behind a
   button: `merge_plan` and `merge_agent` (merge into the checked-out branch),
   `commit_checkout` (the user's own changes) and `push_checkout` (`git push` of the
-  checked-out branch, with the user's SSH agent). Codly never pushes on its own.
+  checked-out branch, with the user's SSH agent). Two more push one of Codly's own `codly/…`
+  branches (a plan's integration branch or a solo agent's branch, never the user's own, never
+  with force) to the user's remote: `create_pull_request`, which then opens the pull request
+  with the user's `gh` and its sign-in (Codly stores no token), and `push_pr_branch`, the way
+  without `gh`. Both run from a dialog that names the remote, the branch and the base, and
+  send nothing when the repository no longer matches it. Codly never pushes on its own.
 - The workspace IDE saves files where its agent works (`ide_write`, `ide_create`): in the
   agent's worktree, or in the user's checkout when the agent has none (the Lead, or an agent
   hired with Git isolation off). It never commits.
 - Codly's own network use: CLI installers and skill installs (`git clone` of a catalog entry)
   when the user clicks, agents' default tool servers fetched by `npx`/`uvx`, Groq dictation and
-  the Claude usage read when switched on, and `git push` on Push. Inbound webhooks and
+  the Claude usage read when switched on, `git push` on Push and on Create pull request, and
+  the user's `gh` for the pull-request step (`gh auth status` for the dialog, `gh pr create`,
+  and `gh pr checks` once per Refresh: no polling). Inbound webhooks and
   `codly serve` listen on 127.0.0.1 (`codly serve --host` changes that).
 
 ## 7. Deliberately deferred (ponytail list)
@@ -286,6 +293,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       breaker.rs breaker_run.rs           circuit breaker: policy and enforcement
                       team.rs hires.rs careers.rs         standing team and consultants, hired agents, XP and offers
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
+                      pull_request.rs                     the pull-request step: push a Codly branch, `gh pr create`, checks
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
@@ -319,7 +327,7 @@ src-tauri/src/            the macOS shell
   diagnostics.rs    Settings → Troubleshooting: the scrubbed report for a bug report
   commands.rs       most Tauri commands: thin wrappers over Core
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
-  onboarding_commands.rs    the other commands, one file per topic
+  onboarding_commands.rs pr_commands.rs    the other commands, one file per topic
   ui_bus.rs         one ordered Channel of coalesced event batches per webview
   web.rs            `codly serve`: the same UI over HTTP; passes /api/voice/ws to the voice relay
   ipc_tests.rs      the real commands through Tauri's IPC layer (mock runtime)

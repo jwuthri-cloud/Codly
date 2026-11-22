@@ -72,7 +72,8 @@ you. Approve once, allow for the session, or deny.
    scope, optionally asks a reviewer from another vendor, and merges into the plan's integration branch.
    Agents never commit on their own.
 5. **You merge.** Review the diff and merge it into your branch. Codly pushes your branch only when you
-   press Push.
+   press Push. For a review on GitHub, **Create pull request** pushes the plan's branch and opens a pull
+   request with a title and a description drafted from the plan, which you can edit first.
 
 Agents coordinate through Codly's MCP tools, so every exchange is typed, validated and visible. Every
 agent gets `codly_get_task`, `codly_board`, `codly_search`, `codly_memory_search`, `codly_memory_write`,
@@ -205,6 +206,10 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 - Codly changes your branch only when you press a button: **Merge** (a plan's integration branch, or one
   agent's branch, into the branch you have checked out), **Commit** (your own uncommitted changes) and
   **Push** (the branch you have checked out, to its remote, through your own SSH agent).
+- **Create pull request** pushes one of Codly's own `codly/…` branches (a plan's, or one agent's), never
+  a branch of yours and never with force. It asks first and names the remote, the branch and the base.
+  Your own `gh` opens the pull request with its sign-in: Codly stores no GitHub token. Without `gh` you
+  can still push the branch and open the compare page in your browser.
 - One kind of agent edits your project folder directly: an agent that you hire with **Git isolation**
   switched off. The hire screen warns you about it.
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
@@ -216,7 +221,9 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 - There are no Codly servers: no account, nothing to sync. Your CLIs talk to their own providers as
   before.
 - Codly itself goes online only to install a CLI or a skill when you click, to fetch the tool servers
-  that agents start with (through `npx` or `uvx`), to push when you press Push, and for two features that
+  that agents start with (through `npx` or `uvx`), to push when you press Push or Create pull request
+  (your `gh` then opens the pull request, and reads its checks when you press Refresh), and for two
+  features that
   are off until you turn them on: dictation (audio goes to Groq with your key) and Show Claude usage.
   The voice relay in `voice/` talks to OpenAI, and only if you run it.
 - Inbound webhooks listen on this Mac only (loopback) and are created switched off. `codly serve` also

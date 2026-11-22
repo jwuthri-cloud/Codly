@@ -38,6 +38,7 @@ pub mod names;
 pub mod planner;
 mod plans;
 pub mod prompts;
+pub mod pull_request;
 mod runs;
 pub mod scheduler;
 pub mod scope;

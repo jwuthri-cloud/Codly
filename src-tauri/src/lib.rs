@@ -12,6 +12,7 @@ mod ide_commands;
 mod inbound;
 mod hire_commands;
 mod onboarding_commands;
+mod pr_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod logging;
@@ -244,6 +245,11 @@ pub fn run() {
             onboarding_commands::byok_save_key,
             onboarding_commands::byok_clear_key,
             diagnostics::diagnostics,
+            pr_commands::pull_request,
+            pr_commands::draft_pull_request,
+            pr_commands::create_pull_request,
+            pr_commands::push_pr_branch,
+            pr_commands::refresh_pull_request,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

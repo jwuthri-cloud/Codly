@@ -20,6 +20,7 @@ fn main() {
         "save_attachment", "hire_draft", "trust_agent", "office_digest", "set_agent_home", "note_rest", "note_hangout", "set_agent_tired", "bigger_model",
         "install_cli", "byok_status", "byok_configure", "byok_save_key", "byok_clear_key",
         "diagnostics",
+        "pull_request", "draft_pull_request", "create_pull_request", "push_pr_branch", "refresh_pull_request",
     ])))
     .expect("tauri-build failed");
 }

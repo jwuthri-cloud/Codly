@@ -11,6 +11,8 @@
   import RepoPicker from './overlays/RepoPicker.svelte';
   import SkillsManager from './overlays/SkillsManager.svelte';
   import { skillsUi } from './lib/state/skills.svelte';
+  import PullRequestDialog from './overlays/PullRequestDialog.svelte';
+  import { prUi } from './lib/state/pullRequest.svelte';
   import IdeOverlay from './ide/IdeOverlay.svelte';
   import DiagnosticsReport from './components/DiagnosticsReport.svelte';
   import EmptyState from './components/EmptyState.svelte';
@@ -86,6 +88,7 @@
 {#if ui.modelDialog}{#if ui.modelDialog.agentId}<ModelDialog />{:else}<AddAgentWizard />{/if}{/if}
 {#if ui.repoPickerOpen}<RepoPicker />{/if}
 {#if skillsUi.open}<SkillsManager />{/if}
+{#if prUi.dialog}<PullRequestDialog />{/if}
 <IdeOverlay />
 <Toasts />
 <TooltipHost />
