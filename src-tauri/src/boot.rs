@@ -44,6 +44,7 @@ async fn start_core<R: Runtime>(app: &AppHandle<R>, boot: &Boot) -> anyhow::Resu
     core.set_hiring_window(Duration::from_secs(30));
     tauri::async_runtime::spawn(boot.bus.clone().pump(core.subscribe()));
     tauri::async_runtime::spawn(crate::notify_loop(app.clone(), core.clone()));
+    tauri::async_runtime::spawn(crate::awake::run(core.clone()));
     let _ = boot.hub.send(inbound::start(core.clone(), data_dir).await);
     Ok(core)
 }

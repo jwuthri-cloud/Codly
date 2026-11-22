@@ -200,10 +200,8 @@ impl AppServer {
         let reader = server.clone();
         proc::spawn_reader(child.stdout.take().context("no stdout")?, move |rec| reader.on_record(rec));
         let waiter = server.clone();
-        tokio::spawn(async move {
-            let code = child.wait().await.ok().and_then(proc::exit_code);
-            waiter.on_exit(code);
-        });
+        // Also ends what the server left running in its group (the commands of its agents) once it is gone.
+        proc::reap(child, move |code| waiter.on_exit(code));
 
         let caps = json!({ "experimentalApi": false, "optOutNotificationMethods": OPT_OUT });
         let client = json!({ "name": "codly", "title": "Codly", "version": crate::version() });

@@ -84,6 +84,8 @@ export const DEFAULT_SETTINGS: Settings = {
   developer_mode: false,
   verify_timeout_secs: 600,
   watchdog: { quiet_secs: 600, quiet_tool_secs: 3600, idle_secs: 120 },
+  keep_awake: true,
+  confirm_quit: true,
   world_ambient: false,
   theme: 'system',
   team: [],

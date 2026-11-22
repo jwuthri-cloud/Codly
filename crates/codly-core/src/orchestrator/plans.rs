@@ -802,7 +802,17 @@ impl Inner {
         };
         let prompt = match (started, feedback) {
             (Start::SameTask, Some(f)) => f,
-            (Start::SameTask, None) => prompts::continuation(&task, why),
+            (Start::SameTask, None) => {
+                // Read just before the prompt goes out: the session may be older than the files.
+                let seen = match self.seen_in_worktree(&repo, &wt, &task).await {
+                    Ok(seen) => Some(seen),
+                    Err(e) => {
+                        tracing::warn!("{} resumes without what Codly sees in its worktree: {e:#}", task.key);
+                        None
+                    }
+                };
+                prompts::continuation(&task, why, seen.as_ref())
+            }
             (Start::OwnSession, f) => {
                 let brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), false).await;
                 let next = prompts::member_next_task(&brief, &branch, switch_note.as_deref());
@@ -823,6 +833,20 @@ impl Inner {
         lock(&self.retries).started(task_id);
         self.send_prompt(agent_id, prompt)?;
         self.clear_feedback(task_id)
+    }
+
+    /// What is in the worktree a worker comes back to, and what Codly last did with the task's
+    /// work, for the first prompt of its resumed session (`prompts::continuation`).
+    async fn seen_in_worktree(&self, repo: &Path, wt: &Path, task: &Task) -> Result<prompts::Seen> {
+        self.git.check_worktree(repo, wt).await?; // the reads below run in the agent's worktree
+        let branch = self.git.checked_out_branch(wt).await?;
+        let uncommitted = self.git.dirty_paths(wt).await?;
+        let last_commit = self.store.task_commits(&task.id)?.1;
+        let last_check = self.store.task_events(&task.id, "decision")?.into_iter().rev().find_map(|e| match e.kind {
+            EventKind::Decision { decision_type, summary, .. } if matches!(decision_type.as_str(), "gate" | "merge") => Some(summary),
+            _ => None,
+        });
+        Ok(prompts::Seen { branch, uncommitted, last_commit, last_check })
     }
 
     /// Task brief + pointer pack (logged as a Retrieval event) + memory pack + what the

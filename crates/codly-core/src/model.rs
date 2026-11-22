@@ -1802,6 +1802,13 @@ pub struct Settings {
     /// a worker that sits idle on a running task.
     #[serde(default)]
     pub watchdog: crate::orchestrator::watchdog::WatchdogSettings,
+    /// Keep the Mac from going to sleep by itself while agents work or a plan runs, so a long
+    /// run is not cut off when you walk away. Closing the lid still puts it to sleep.
+    #[serde(default = "yes")]
+    pub keep_awake: bool,
+    /// Ask before Codly quits while agents work: they stop, and resume at the next start.
+    #[serde(default = "yes")]
+    pub confirm_quit: bool,
 }
 
 fn yes() -> bool {
@@ -1849,6 +1856,8 @@ impl Default for Settings {
             developer_mode: false,
             verify_timeout_secs: verify_timeout_secs(),
             watchdog: Default::default(),
+            keep_awake: true,
+            confirm_quit: true,
         }
     }
 }

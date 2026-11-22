@@ -128,6 +128,10 @@
     ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
     ['use_my_claude_setup', 'Use my Claude Code setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings. Applies to agents started after the change; approvals still go through Codly.'],
   ];
+  const LONG_RUN_TOGGLES = [
+    ['keep_awake', 'Keep the Mac awake while agents work', 'The Mac does not go to sleep by itself while an agent works or a plan runs. Closing the lid still puts it to sleep.'],
+    ['confirm_quit', 'Ask before quitting while agents work', 'Agents stop when Codly quits. They resume when you open Codly again.'],
+  ];
   const OFFICE_TOGGLES = [['game_rules', 'Office rules affect work', 'Agents can be at home or tired, and new hires wait for a job offer.']];
   const REVIEW_TOGGLES = [['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.']];
   // Seconds; the value in use is always one of the choices.
@@ -188,6 +192,11 @@
     <section>
       <h3 class="eyebrow">Plans</h3>
       {@render toggles(PLAN_TOGGLES)}
+    </section>
+
+    <section>
+      <h3 class="eyebrow">Long runs</h3>
+      {@render toggles(LONG_RUN_TOGGLES)}
     </section>
 
     <section>

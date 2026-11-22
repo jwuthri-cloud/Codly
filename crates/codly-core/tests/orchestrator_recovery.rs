@@ -4,7 +4,9 @@
 //! out of context starts again as a new one;
 //! a plan that cannot go on says so once and can finish with what is merged; a task and the
 //! tasks that wait for it are cancelled together; after a restart of Codly a task that was in
-//! its checks is checked again with no worker turn; and a plan you merged with git is noticed.
+//! its checks is checked again with no worker turn, and a worker that is resumed is told what
+//! Codly sees in its worktree; a lock file another git process holds for a moment does not block
+//! a task; the work under way is counted for the shell; and a plan you merged with git is noticed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,6 +15,7 @@ use std::time::Duration;
 
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
 use codly_core::model::*;
+use codly_core::orchestrator::activity::Activity;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use codly_core::store::{RunRow, Store};
 use serde_json::{Value, json};
@@ -63,6 +66,11 @@ enum End {
     Fail(&'static str),
     /// The CLI dies mid-turn: exit code 1.
     Crash,
+    /// As `Done`, and when the turn ends another git process holds the index lock of the
+    /// worktree, for a moment (an editor's git panel, a watcher).
+    Locked,
+    /// As `Done`, once the test lets the turn end.
+    Hold(Arc<tokio::sync::Notify>),
 }
 
 /// Decides how the worker's `n`-th turn (over every run of the test) ends.
@@ -160,10 +168,28 @@ impl Spawner for Fake {
                         s.prompts.push(text);
                         s.prompts.len() - 1
                     };
+                    let work = || {
+                        let name = spec.cwd.file_name().unwrap().to_string_lossy().into_owned();
+                        std::fs::write(spec.cwd.join(format!("{name}.txt")), "done\n").unwrap();
+                    };
                     match script(n) {
                         End::Done => {
-                            let name = spec.cwd.file_name().unwrap().to_string_lossy().into_owned();
-                            std::fs::write(spec.cwd.join(format!("{name}.txt")), "done\n").unwrap();
+                            work();
+                            done(TurnStatus::Completed, None);
+                        }
+                        End::Locked => {
+                            work();
+                            let lock = Path::new(&git(&spec.cwd, &["rev-parse", "--absolute-git-dir"])).join("index.lock");
+                            std::fs::write(&lock, "").unwrap();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(700)).await;
+                                std::fs::remove_file(lock).unwrap();
+                            });
+                            done(TurnStatus::Completed, None);
+                        }
+                        End::Hold(go) => {
+                            go.notified().await;
+                            work();
                             done(TurnStatus::Completed, None);
                         }
                         End::Idle => done(TurnStatus::Completed, None),
@@ -408,6 +434,10 @@ async fn a_turn_the_worker_completes_ends_the_row_of_crashes() {
     // The crash in the fix round came after the check that failed.
     let fix = seen.lock().unwrap().prompts[4].clone();
     assert!(fix.contains("test -f t1.txt"), "{fix}");
+    // The worker that comes back after that crash is told what Codly last found, and where it is.
+    let back = seen.lock().unwrap().prompts[5].clone();
+    assert!(back.contains("What Codly sees in your worktree now:\n- Branch: codly/"), "{back}");
+    assert!(back.contains("\n- Codly's last check: t1: fix round 1/2: `test -f t1.txt` failed (exit 1)\n"), "{back}");
     core.shutdown().await;
 }
 
@@ -580,6 +610,8 @@ fn seed_task_in_checks(store: &Store, ws: &Workspace, data: &Path, key: &str, tu
         std::fs::write(wt.join(format!("{key}.txt")), "done\n").unwrap();
     } else {
         store.append_event(Some(&ws.id), &ev(EventKind::TurnStarted { input: None })).unwrap();
+        // That turn had written a part of the file when Codly quit.
+        std::fs::write(wt.join(format!("{key}.txt")), "half\n").unwrap();
     }
     (task_id, agent_id)
 }
@@ -623,7 +655,57 @@ async fn after_a_restart_a_task_in_its_checks_is_checked_again_without_a_worker_
         assert_eq!(seen.runs.len(), 1);
         assert!(seen.runs[0].0 == mid.1 && matches!(&seen.runs[0].1, SessionMode::Resume { session_id } if session_id == "sess-b1"), "{:?}", seen.runs);
         assert!(seen.prompts[0].contains("resuming after Codly restarted"), "{}", seen.prompts[0]);
+        // It is told what Codly sees in its worktree, so it neither starts over nor counts on
+        // work that is not there.
+        let state = "What Codly sees in your worktree now:\n\
+                     - Branch: codly/adhoc/b1\n\
+                     - Uncommitted changes in 1 file: b1.txt\n\
+                     - Codly has not committed any of your work yet.\n\
+                     - Codly has not checked your work yet.\n";
+        assert!(seen.prompts[0].contains(state), "{}", seen.prompts[0]);
     }
+    core.shutdown().await;
+}
+
+/// Another git process holds the index lock of the worktree for a moment when the worker's
+/// turn ends. The gate's commit fails on it, changes nothing, and is made once more: the task
+/// is done, and never blocked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lock_file_held_for_a_moment_does_not_block_the_task() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first turn ends with no report and Codly asks for it; the gate commits after the second.
+    let script: Script = Arc::new(|n: usize| if n == 1 { End::Locked } else { End::Done });
+    let (core, _, _) = start(dir.path(), works().0, script, json!({})).await;
+    let task = ready_task(&core).await;
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    assert!(!statuses(&core, &task.id).await.contains(&TaskStatus::Blocked));
+    let gate = decisions(&core, "gate").await;
+    let again: Vec<&String> = gate.iter().filter(|d| d.contains("Codly tries it once more")).collect();
+    assert_eq!(again.len(), 1, "{gate:?}");
+    assert!(again[0].contains("index.lock': File exists"), "{}", again[0]);
+    core.shutdown().await;
+}
+
+/// What the shell asks before it lets the Mac sleep or Codly quit: an agent in a turn is work
+/// under way, an office where nothing runs is not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_work_under_way_is_counted_while_an_agent_is_in_a_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let go = Arc::new(tokio::sync::Notify::new());
+    let script: Script = {
+        let go = go.clone();
+        Arc::new(move |n: usize| if n == 0 { End::Hold(go.clone()) } else { End::Done })
+    };
+    let (core, _, _) = start(dir.path(), works().0, script, json!({})).await;
+    assert_eq!(core.activity().unwrap(), Activity::default(), "nothing runs in a new office");
+    let task = ready_task(&core).await;
+    let working = wait_for("the worker's turn", async || Some(core.activity().unwrap()).filter(|a| a.agents == 1)).await;
+    assert!(working.busy(), "{working:?}");
+    go.notify_one();
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    wait_for("the work to end", async || (!core.activity().unwrap().busy()).then_some(())).await;
     core.shutdown().await;
 }
 

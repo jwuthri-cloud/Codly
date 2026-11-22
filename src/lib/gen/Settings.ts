@@ -96,4 +96,13 @@ verify_timeout_secs: number,
  * When the watchdog flags, interrupts and stops an agent that gives no output, and flags
  * a worker that sits idle on a running task.
  */
-watchdog: WatchdogSettings, };
+watchdog: WatchdogSettings, 
+/**
+ * Keep the Mac from going to sleep by itself while agents work or a plan runs, so a long
+ * run is not cut off when you walk away. Closing the lid still puts it to sleep.
+ */
+keep_awake: boolean, 
+/**
+ * Ask before Codly quits while agents work: they stop, and resume at the next start.
+ */
+confirm_quit: boolean, };
