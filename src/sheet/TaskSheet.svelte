@@ -6,13 +6,15 @@
 <script lang="ts">
   import type { Task } from '../lib/gen/Task';
   import type { TaskStatus } from '../lib/gen/TaskStatus';
-  import { moveTask } from '../lib/state/actions';
+  import type { HeldCheck } from '../lib/gen/HeldCheck';
+  import { acceptTask, moveTask, recheckTask } from '../lib/state/actions';
   import { diffstats, statLine } from '../lib/state/diffstats.svelte';
   import { narrate } from '../lib/state/narration';
   import { store } from '../lib/state/store.svelte';
   import { accounts } from '../lib/state/accounts.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { clock, shortSha } from '../lib/util/format';
+  import { stoppedByChecks } from '../lib/util/gate';
   import { GLOSSARY, idVar, methodProvenance, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
   import { tildify } from '../lib/util/sanitize';
   import ArtifactThumb from '../components/ArtifactThumb.svelte';
@@ -59,6 +61,31 @@
     cancelled: [{ to: 'ready', label: 'Reopen' }],
   };
   const MARK_ICON: Record<string, string> = { committed: 'commit', verified: 'check-circle', reviewed: 'eye', merged: 'merge' };
+  // Stopped after Codly committed its work: you can run its checks again, or take the work as it is.
+  const stopped = $derived((task.status === 'blocked' || task.status === 'failed') && marks.some((m) => m.kind === 'committed'));
+  // Merge anyway skips the task's checks, so it is only for a task that its checks stopped.
+  const byChecks = $derived.by(() => {
+    void store.rev;
+    return stopped && stoppedByChecks(store.decisions, task.id);
+  });
+  /** Checks with a risk: Codly runs them only with your OK. */
+  let held = $state<HeldCheck[]>([]);
+  let confirmAccept = $state(false);
+  // What you were asked belongs to the task as it was: another task, or a new status, closes it.
+  const asked = $derived(`${task.id}:${task.status}`);
+  $effect(() => {
+    void asked;
+    held = [];
+    confirmAccept = false;
+  });
+  async function recheck(allow: string[] = []) {
+    confirmAccept = false;
+    held = await recheckTask(task.id, allow);
+  }
+  function accept() {
+    confirmAccept = false;
+    void acceptTask(task.id);
+  }
 </script>
 
 <div class="ts" style:--hue={idVar(agent?.color ?? 0)}>
@@ -69,8 +96,30 @@
     <div class="acts">
       {#if marks.length || task.status === 'done'}<button class="btn sm" onclick={() => ui.openDiff({ kind: 'task', id: task.id })}><Icon name="diff" size={13} />View changes</button>{/if}
       {#each LEGAL[task.status] ?? [] as l (l.to)}<button class="btn sm ghost" onclick={() => moveTask(task.id, l.to)}>{l.label}</button>{/each}
+      {#if stopped}
+        {#if task.verify.length}<button class="btn sm ghost" onclick={() => recheck()}>Re-run checks</button>{/if}
+        {#if byChecks}<button class="btn sm ghost" onclick={() => ((held = []), (confirmAccept = true))}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>{/if}
+      {/if}
       {#if plan}<button class="btn sm ghost" onclick={() => ui.openPlan(plan.id, plan.thread)}><Icon name="plan" size={13} />In the plan</button>{/if}
     </div>
+    {#if held.length}
+      <div class="ask" role="alertdialog" aria-label="Checks that need your OK">
+        <p>The Lead wrote {held.length === 1 ? 'a check' : 'checks'} that can do more than test this task. Codly runs {held.length === 1 ? 'it' : 'them'} only with your OK:</p>
+        <ul>{#each held as h (h.command)}<li><code class="selectable">{h.command}</code><span>{h.risks.join(', ')}</span></li>{/each}</ul>
+        <div class="ask-acts">
+          <button class="btn sm ghost" onclick={() => (held = [])}>Not now</button>
+          <button class="btn sm amber" onclick={() => recheck(held.map((h) => h.command))}>Allow and run</button>
+        </div>
+      </div>
+    {:else if confirmAccept}
+      <div class="ask" role="alertdialog" aria-label={plan ? 'Merge anyway' : 'Accept anyway'}>
+        <p>{plan ? 'Merge this task without its checks?' : 'Accept this task without its checks?'} Codly does not run them again for it. Your choice stays in the task’s record.</p>
+        <div class="ask-acts">
+          <button class="btn sm ghost" onclick={() => (confirmAccept = false)}>Not now</button>
+          <button class="btn sm amber" onclick={accept}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>
+        </div>
+      </div>
+    {/if}
   </header>
 
   <div class="sections">
@@ -136,6 +185,12 @@
   .st-blocked, .st-failed { color: var(--bad); }
   .st-done { color: var(--ok); }
   .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .ask { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; padding: 12px 14px; border-radius: var(--r-md); background: var(--amber-soft); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); }
+  .ask ul { display: flex; flex-direction: column; gap: 6px; }
+  .ask li { display: flex; flex-direction: column; gap: 2px; }
+  .ask code { font-size: 11.5px; color: var(--ink-1); overflow-wrap: anywhere; }
+  .ask li span { color: var(--amber-ink); }
+  .ask-acts { display: flex; justify-content: flex-end; gap: 8px; }
   .who { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: var(--r-md); background: var(--surface-1); text-align: left; margin-bottom: 8px; }
   .who:hover { background: var(--surface-2); }
   .w-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }

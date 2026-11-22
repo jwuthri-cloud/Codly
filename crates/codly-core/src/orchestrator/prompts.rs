@@ -274,9 +274,12 @@ pub fn continuation(t: &Task, why: Option<&str>) -> String {
 }
 
 pub fn verify_failed(cmd: &str, code: Option<i64>, tail: &str, round: u32, max: u32) -> String {
-    let code = code.map_or("was killed (timeout)".to_string(), |c| format!("exited {c}"));
+    // No exit code: killed by a signal, or it did not start. (A check that runs out of time is
+    // not the worker's to fix: the gate blocks the task for the user instead.)
+    let code = code.map_or("was killed or did not start".to_string(), |c| format!("exited {c}"));
     format!(
         "[Codly] Verification failed (fix round {round}/{max}): `{cmd}` {code}. Last lines of its output:\n{}\n\
+         Codly ran it from your worktree's root with CI=1 and no terminal. \
          Fix the cause, re-run the verify commands, then call codly_submit_report again. Do not commit.",
         untrusted("verify output", tail, 6000)
     )

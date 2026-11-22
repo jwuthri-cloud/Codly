@@ -1125,18 +1125,25 @@ impl Inner {
             .unwrap_or_default();
         let wt = plan.integration_worktree.as_deref().map(PathBuf::from);
         let mut failed = vec![];
+        // Not run: the approval rules see a risk in them, and nobody could allow them.
+        let mut refused: Vec<HeldCheck> = vec![];
         if let Some(wt) = &wt {
+            let mode = self.approval_mode_for(ws_id, Some(&plan.thread));
             for cmd in &checks {
-                let v = self.run_verify(wt, cmd).await;
+                let v = self.run_verify(wt, cmd, mode).await;
                 self.emit(
                     ws_id,
                     row(None, None, None, EventKind::Verified { command: cmd.clone(), ok: v.ok, exit_code: v.code, tail: v.tail }),
                 )?;
-                if !v.ok {
+                if !v.held.is_empty() {
+                    refused.push(HeldCheck { command: cmd.clone(), risks: v.held });
+                } else if !v.ok {
                     failed.push(cmd.clone());
                 }
             }
         }
+        // Only a check that ran and failed fails the plan. One Codly refused to run leaves it
+        // done, so you can still merge it: its message says what was not checked.
         let status = if failed.is_empty() { PlanStatus::Done } else { PlanStatus::Failed };
         let tasks = self.store.plan_tasks(&plan.id)?;
         let branch = plan.integration_branch.clone().unwrap_or_default();
@@ -1146,18 +1153,39 @@ impl Inner {
         };
         let target = self.git.current_branch(Path::new(&ws.repo_path)).await.ok().flatten().unwrap_or_else(|| ws.default_branch.clone());
         let n = tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
-        let text = if failed.is_empty() {
+        // A check Codly did not run is no failed check: the work may be fine, and no fix plan
+        // changes that. You are told which ones, why, and where to run them yourself.
+        let not_run = || {
+            let one = refused.len() == 1;
+            let list = refused.iter().map(|h| format!("`{}` ({})", h.command, h.risks.join(", "))).collect::<Vec<_>>().join(", ");
+            let place = wt.as_deref().map(|w| format!(" in {}", w.display())).unwrap_or_default();
+            format!(
+                "Codly did not run {} integration check{}: {} your OK first. {list}. Run {it} yourself{place} if you trust {it}. \
+                 Under Full access, Codly runs such checks by itself.",
+                refused.len(),
+                if one { "" } else { "s" },
+                if one { "it needs" } else { "they need" },
+                it = if one { "it" } else { "them" },
+            )
+        };
+        let text = if !failed.is_empty() {
+            let mut text = format!(
+                "Plan \"{}\" finished, but integration checks failed: {}. The work is on {branch}; ask the Lead for a fix plan or merge it anyway.",
+                plan.summary,
+                failed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")
+            );
+            if !refused.is_empty() {
+                text.push_str(&format!(" {}", not_run()));
+            }
+            text
+        } else if !refused.is_empty() {
+            format!("Plan \"{}\" finished, but {} The work is on {branch}: review the diff, then merge it into {target}.", plan.summary, not_run())
+        } else {
             format!(
                 "Plan done: \"{}\". {n} task{} merged into {branch} ({files} file{} changed). Review the diff, then merge it into {target}.",
                 plan.summary,
                 if n == 1 { "" } else { "s" },
                 if files == 1 { "" } else { "s" }
-            )
-        } else {
-            format!(
-                "Plan \"{}\" finished, but integration checks failed: {}. The work is on {branch}; ask the Lead for a fix plan or merge it anyway.",
-                plan.summary,
-                failed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")
             )
         };
         // The status before the news, and only if the plan is still integrating: one you
@@ -1179,7 +1207,7 @@ impl Inner {
             None,
             "merge",
             prompts::clip(&text, 200),
-            json!({ "plan_id": plan.id, "files": files, "failed_checks": failed }),
+            json!({ "plan_id": plan.id, "files": files, "failed_checks": failed, "refused_checks": refused }),
         )?;
         self.lead_followup(&ws.id, &plan.thread, &text).await;
         Ok(())

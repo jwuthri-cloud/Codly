@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import type { Memory } from '../gen/Memory';
 import type { Plan } from '../gen/Plan';
-import { isStarting, keepBranch, runPlan, togglePinMemory } from '../state/actions';
+import { isStarting, keepBranch, recheckTask, runPlan, togglePinMemory } from '../state/actions';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
@@ -62,5 +62,20 @@ describe('actions that used to report success before the core answered', () => {
     expect(core).toHaveBeenLastCalledWith('m1', false);
     expect(store.memories[0].pinned).toBe(false);
     expect(ui.pinned).toEqual([]);
+  });
+});
+
+describe('recheckTask', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('answers the checks that need your OK, and none when the core refuses', async () => {
+    const held = [{ command: 'rm -rf dist && npm test', risks: ['deletes files'] }];
+    const core = vi.spyOn(api, 'recheckTask').mockResolvedValueOnce(held).mockRejectedValueOnce(new Error('t1 is done'));
+    // The first click allows nothing: the core says what waits.
+    expect(await recheckTask('t1')).toEqual(held);
+    expect(core).toHaveBeenLastCalledWith('t1', []);
+    // A refusal is a toast, not a card that asks for an OK.
+    expect(await recheckTask('t1', [held[0].command])).toEqual([]);
+    expect(core).toHaveBeenLastCalledWith('t1', [held[0].command]);
   });
 });

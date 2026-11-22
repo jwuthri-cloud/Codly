@@ -175,6 +175,19 @@ pub async fn move_task(state: State<'_, AppState>, task_id: String, status: Task
     state.core().await?.move_task(&task_id, status).await.map_err(err)
 }
 
+/// Re-run a blocked or failed task's checks. Answers the risky commands that need the
+/// user's OK first (then nothing ran); `allow` names the ones the user OK'd.
+#[tauri::command]
+pub async fn recheck_task(state: State<'_, AppState>, task_id: String, allow: Vec<String>) -> R<Vec<HeldCheck>> {
+    state.core().await?.recheck_task(&task_id, allow).await.map_err(err)
+}
+
+/// Merge anyway: a task that its checks stopped goes on without them.
+#[tauri::command]
+pub async fn accept_task(state: State<'_, AppState>, task_id: String) -> R<Task> {
+    state.core().await?.accept_task(&task_id).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn assign_task(state: State<'_, AppState>, task_id: String, agent_id: Option<String>) -> R<Task> {
     state.core().await?.assign_task(&task_id, agent_id.as_deref()).await.map_err(err)

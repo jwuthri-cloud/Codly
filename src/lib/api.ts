@@ -42,6 +42,7 @@ import type { Wallet } from './gen/Wallet';
 import type { Lot } from './gen/Lot';
 import type { LotSaved } from './gen/LotSaved';
 import type { LotSlot } from './gen/LotSlot';
+import type { HeldCheck } from './gen/HeldCheck';
 import type { HireReview } from './gen/HireReview';
 import type { LaunchPreview } from './gen/LaunchPreview';
 import type { Memory } from './gen/Memory';
@@ -316,6 +317,12 @@ export const api = {
   setAgentLook: (agentId: string, lookSeed: string) => call<Agent>('set_agent_look', { agentId, lookSeed }),
   createTask: (title: string, goal: string) => call<Task>('create_task', { title, goal }),
   moveTask: (taskId: string, status: TaskStatus) => call<Task>('move_task', { taskId, status }),
+  /** Run a blocked or failed task's checks again, with no worker turn. `allow` names the risky commands you OK'd.
+   *  Returns the commands that still need your OK (then nothing ran); none = the checks are running, or the task
+   *  is Ready again for a team member that is on other work in the same worktree. */
+  recheckTask: (taskId: string, allow: string[]) => call<HeldCheck[]>('recheck_task', { taskId, allow }),
+  /** Merge anyway: a task that its checks stopped goes on without them. Your choice stays in its record. */
+  acceptTask: (taskId: string) => call<Task>('accept_task', { taskId }),
   assignTask: (taskId: string, agentId: string | null) => call<Task>('assign_task', { taskId, agentId }),
   taskDiff: (taskId: string) => call<string>('task_diff', { taskId }),
   planDiff: (planId: string) => call<string>('plan_diff', { planId }),

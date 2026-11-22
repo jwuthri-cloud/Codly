@@ -211,6 +211,16 @@ they are build output or third-party code in most repos. If one holds your own c
   approves them), then you. No silent timeouts; choices mirror the provider's. The rules read
   the command line only: what a test, a script or an interpreter does once it runs is not
   checked (only Codex has an OS sandbox).
+- The gate runs the plan's verify and integration commands (the Lead wrote them) through the
+  same risk rules: one with a risk is not run until you allow it on its task (an integration
+  check is refused: the plan is still done, and its message names the check to run yourself).
+  Full access runs them. The rules read the command's text only: a test runner still runs the
+  worker's code, unsandboxed.
+- The gate is fair to the worker: a merge conflict has its own rounds (3) apart from the fix
+  rounds, and a check that runs out of time (Settings, 10 min by default) blocks the task for
+  you. From its card you re-run the checks or, when its checks stopped it, merge anyway; the
+  failure stays in its record. A team member's task shares the member's worktree: while the
+  member is on other work, the task goes back in line for it and keeps your choice.
 - Clean-room profile for untrusted repos (`--setting-sources`, `--strict-mcp-config`).
 - Never deletes a dirty or unmerged worktree, and keeps the branch.
 - The user's branch: Codly commits and merges by itself only on `codly/…` branches. Four

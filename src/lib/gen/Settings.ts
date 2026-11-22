@@ -85,4 +85,9 @@ game_rules: boolean,
  * The Settings' Developer panel: cheats for testing the game (coins, XP, a fresh office).
  * Cheats flag the wallet for good.
  */
-developer_mode: boolean, };
+developer_mode: boolean, 
+/**
+ * Seconds one verify or integration command may run before the gate stops it. A check
+ * that runs out of time blocks its task for you; it is not sent back to the worker.
+ */
+verify_timeout_secs: number, };

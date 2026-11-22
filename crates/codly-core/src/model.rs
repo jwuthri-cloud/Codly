@@ -1705,10 +1705,28 @@ pub struct Settings {
     /// Cheats flag the wallet for good.
     #[serde(default)]
     pub developer_mode: bool,
+    /// Seconds one verify or integration command may run before the gate stops it. A check
+    /// that runs out of time blocks its task for you; it is not sent back to the worker.
+    #[serde(default = "verify_timeout_secs")]
+    pub verify_timeout_secs: u32,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn verify_timeout_secs() -> u32 {
+    600
+}
+
+/// A verify command the gate did not run: the approval rules see a risk in it. You allow it
+/// from the task's card (Re-run checks).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HeldCheck {
+    pub command: String,
+    /// "network", "deletes files", "outside worktree"…
+    pub risks: Vec<String>,
 }
 
 impl Default for Settings {
@@ -1736,6 +1754,7 @@ impl Default for Settings {
             paused_offices: vec![],
             game_rules: false,
             developer_mode: false,
+            verify_timeout_secs: verify_timeout_secs(),
         }
     }
 }
