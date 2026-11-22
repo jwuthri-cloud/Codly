@@ -1,29 +1,47 @@
 <!--
   The agent's own work between two messages, folded into one quiet line ("Read 6 files ·
-  searched twice"). Open it for each step (with provenance) and the reasoning summary.
+  searched twice"). Open it for each step (with provenance) and the reasoning summary. A
+  helper (subagent) is one step, with its own calls under it.
 -->
 <script lang="ts">
-  import type { Seg, Thought } from '../../lib/state/store.svelte';
+  import type { Seg, SubAgent, Thought } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { dur } from '../../lib/util/format';
   import { pastVerb, phrase } from '../../lib/util/labels';
   import Icon from '../../components/Icon.svelte';
   import Provenance from '../../components/Provenance.svelte';
+  import { splitHelpers } from '../helpers';
   import { workSummary } from '../workSummary';
+  import HelperRow from './HelperRow.svelte';
 
   interface Props {
     segs: Seg[];
     thoughts: Thought[];
     thinking: string | null;
+    /** The helpers (subagents) that calls of this row started. */
+    helpers: SubAgent[];
   }
-  let { segs, thoughts, thinking }: Props = $props();
+  let { segs, thoughts, thinking, helpers }: Props = $props();
   let open = $state(false);
-  const running = $derived(segs.some((s) => s.end == null) || thinking != null);
+  /** The agent's own steps, and each helper's calls apart from them. */
+  const split = $derived(splitHelpers(segs, helpers));
+  const helperOf = (s: Seg) => helpers.find((h) => h.callId === s.callId);
+  const running = $derived(segs.some((s) => s.end == null) || thinking != null || helpers.some((h) => h.status === 'running'));
   /** Only the latest outcome counts: a failing run fixed later in the same stretch is not a failure. */
-  const failed = $derived(segs.filter((s) => s.ok != null).at(-1)?.ok === false);
-  const summary = $derived(workSummary(segs) || (thinking != null ? 'Thinking' : thoughts.length ? 'Thought it through' : ''));
-  const steps = $derived(segs.length + thoughts.length);
+  const failed = $derived(split.own.filter((s) => s.ok != null).at(-1)?.ok === false);
+  const summary = $derived(workSummary(split.own) || (thinking != null ? 'Thinking' : thoughts.length ? 'Thought it through' : ''));
+  const steps = $derived(split.own.length + thoughts.length);
 </script>
+
+{#snippet step(s: Seg)}
+  <button class="step" onclick={() => ui.selectAgent(s.agentId, s.eventId)}>
+    <span class="verb">{s.end == null ? phrase(s.activity, '') : pastVerb(s.activity)}</span>
+    <code class="target truncate">{s.label || s.name}</code>
+    {#if s.testsPassed != null}<span class="tests" class:bad={!!s.testsFailed}>{s.testsFailed ? `${s.testsFailed} failed` : `${s.testsPassed} passed`}</span>{/if}
+    <span class="dur num">{s.end != null ? dur(s.end - s.start) : '…'}</span>
+    <Provenance kind={s.confidence === 'observed' ? 'observed' : 'inferred'} compact />
+  </button>
+{/snippet}
 
 {#if summary}
   <div class="work" class:running>
@@ -37,15 +55,14 @@
     </button>
     {#if open}
       <ol class="steps">
-        {#each segs as s (s.callId)}
+        {#each split.own as s (s.callId)}
+          {@const helper = helperOf(s)}
           <li>
-            <button class="step" onclick={() => ui.selectAgent(s.agentId, s.eventId)}>
-              <span class="verb">{s.end == null ? phrase(s.activity, '') : pastVerb(s.activity)}</span>
-              <code class="target truncate">{s.label || s.name}</code>
-              {#if s.testsPassed != null}<span class="tests" class:bad={!!s.testsFailed}>{s.testsFailed ? `${s.testsFailed} failed` : `${s.testsPassed} passed`}</span>{/if}
-              <span class="dur num">{s.end != null ? dur(s.end - s.start) : '…'}</span>
-              <Provenance kind={s.confidence === 'observed' ? 'observed' : 'inferred'} compact />
-            </button>
+            {#if helper}
+              <HelperRow {helper} call={s} steps={split.under.get(s.callId) ?? []} {step} />
+            {:else}
+              {@render step(s)}
+            {/if}
           </li>
         {/each}
         {#each thoughts as t (t.itemId)}
