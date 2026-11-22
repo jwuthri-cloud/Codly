@@ -182,7 +182,7 @@ pub async fn recheck_task(state: State<'_, AppState>, task_id: String, allow: Ve
     state.core().await?.recheck_task(&task_id, allow).await.map_err(err)
 }
 
-/// Merge anyway: a blocked or failed task goes on without its checks.
+/// Merge anyway: a task that its checks stopped goes on without them.
 #[tauri::command]
 pub async fn accept_task(state: State<'_, AppState>, task_id: String) -> R<Task> {
     state.core().await?.accept_task(&task_id).await.map_err(err)

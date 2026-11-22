@@ -307,9 +307,10 @@ export const api = {
   createTask: (title: string, goal: string) => call<Task>('create_task', { title, goal }),
   moveTask: (taskId: string, status: TaskStatus) => call<Task>('move_task', { taskId, status }),
   /** Run a blocked or failed task's checks again, with no worker turn. `allow` names the risky commands you OK'd.
-   *  Returns the commands that still need your OK (then nothing ran); none = the checks are running. */
+   *  Returns the commands that still need your OK (then nothing ran); none = the checks are running, or the task
+   *  is Ready again for a team member that is on other work in the same worktree. */
   recheckTask: (taskId: string, allow: string[]) => call<HeldCheck[]>('recheck_task', { taskId, allow }),
-  /** Merge anyway: a blocked or failed task goes on without its checks. The failed check stays in its record. */
+  /** Merge anyway: a task that its checks stopped goes on without them. Your choice stays in its record. */
   acceptTask: (taskId: string) => call<Task>('accept_task', { taskId }),
   assignTask: (taskId: string, agentId: string | null) => call<Task>('assign_task', { taskId, agentId }),
   taskDiff: (taskId: string) => call<string>('task_diff', { taskId }),

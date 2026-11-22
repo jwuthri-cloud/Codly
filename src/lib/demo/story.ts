@@ -1077,7 +1077,7 @@ export class Story {
 
   /** Re-run checks, from a stopped task's card. No demo check has a risk, so none waits for your OK. */
   recheckTask(id: string): HeldCheck[] {
-    const t = this.stoppedTask(id);
+    const t = this.stoppedTask(id, 'only a blocked or failed task can be checked again');
     this.sim.decision('gate', 'human', `You re-ran the checks of ${t.key}`, { task: t.key }, { task: id });
     this.landStopped(t, true);
     return [];
@@ -1085,16 +1085,16 @@ export class Story {
 
   /** Merge anyway, from a stopped task's card: it lands without its checks. */
   acceptTask(id: string): Task {
-    const t = this.stoppedTask(id);
+    const t = this.stoppedTask(id, 'only a task that its checks stopped can be merged anyway');
     this.sim.decision('gate', 'human', `You chose to merge ${t.key} anyway, without its checks`, { task: t.key, not_run: t.verify }, { task: id });
     return this.landStopped(t, false);
   }
 
-  /** Like the core: only a blocked or failed task. */
-  private stoppedTask(id: string): Task {
+  /** Like the core: only a blocked or failed task. `only` says which tasks the card's action is for. */
+  private stoppedTask(id: string, only: string): Task {
     const t = this.sim.tasks.get(id);
     if (!t) throw new Error('Unknown task');
-    if (t.status !== 'blocked' && t.status !== 'failed') throw new Error(`${t.key} is ${t.status}; only a blocked or failed task can be checked again`);
+    if (t.status !== 'blocked' && t.status !== 'failed') throw new Error(`${t.key} is ${t.status}; ${only}`);
     return t;
   }
 

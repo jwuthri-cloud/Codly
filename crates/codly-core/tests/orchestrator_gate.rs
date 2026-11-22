@@ -3,7 +3,10 @@
 //!   Re-run checks runs the gate again with no worker turn;
 //! - a verify command with a risk (the approval rules' own check) is not run until you allow
 //!   it from the task; a risky integration check is refused;
-//! - Merge anyway lands a task whose checks failed, with the failure kept in its record;
+//! - Merge anyway lands a task whose checks failed, with the failure kept in its record, and
+//!   is refused for a task that something else stopped;
+//! - a team member's stopped task can be checked or merged anyway after the member's worktree
+//!   moved on to its next task;
 //! - a merge conflict has its own rounds (two used fix rounds do not fail the task), and a
 //!   task that fails with conflict markers is not left in the middle of a merge.
 
@@ -333,7 +336,8 @@ async fn a_risky_integration_check_is_refused() {
     let spawner = FakeSpawner { lead: lead_with(plan), worker: hello_worker(), turns: Turns::default() };
     let core = start(dir.path(), spawner, auto()).await;
 
-    wait_plan(&core, PlanStatus::Failed).await;
+    // Nothing failed: the plan is done, and its message says what was not checked.
+    wait_plan(&core, PlanStatus::Done).await;
     let all = events(&core).await;
     let checks: Vec<(String, bool, String)> = all
         .iter()
@@ -345,10 +349,16 @@ async fn a_risky_integration_check_is_refused() {
     assert_eq!(checks.len(), 2, "{checks:?}");
     assert!(checks[0].1, "the safe check ran: {checks:?}");
     assert!(!checks[1].1 && checks[1].2.contains("not run") && checks[1].2.contains("deletes files"), "{checks:?}");
-    assert!(
-        decisions(&all).iter().any(|d| d.1.contains("`rm -f stale.txt (not run, it needs your OK: deletes files)`")),
-        "the plan's message says the check was not run"
-    );
+    let snap = core.snapshot().await.unwrap();
+    let report = snap.chats.iter().find(|c| c.author == "codly" && c.text.contains("finished"));
+    let said = report.map(|c| c.text.clone()).expect("Codly reports the plan");
+    assert!(said.contains("Codly did not run 1 integration check: it needs your OK first. `rm -f stale.txt` (deletes files)."), "{said}");
+    let integration = snap.plans[0].integration_worktree.clone().unwrap();
+    assert!(said.contains(&format!("Run it yourself in {integration}")) && said.contains("then merge it into main"), "{said}");
+    assert!(!said.contains("failed") && !said.contains("fix plan"), "a check that did not run did not fail: {said}");
+    let merge = decisions(&all).into_iter().rfind(|d| !d.2["refused_checks"].is_null()).expect("the decision keeps the refused check");
+    assert_eq!(merge.2["refused_checks"], json!([{ "command": "rm -f stale.txt", "risks": ["deletes files"] }]));
+    assert_eq!(merge.2["failed_checks"], json!([]));
     core.shutdown().await;
 }
 
@@ -380,7 +390,134 @@ async fn merge_anyway_lands_a_task_whose_checks_failed() {
     assert!(all.iter().any(|e| matches!(e.kind, EventKind::Merged { .. })));
     assert_eq!(worker_prompts(&turns).len(), 3, "merging anyway needs no worker turn");
     let e = core.accept_task(&t.id).await.unwrap_err().to_string();
-    assert!(e.contains("only a blocked or failed task"), "{e}");
+    assert!(e.contains("can be merged anyway"), "{e}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn merge_anyway_is_only_for_a_task_its_checks_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    // The checks pass; the worker keeps writing a file outside its scope.
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.write("other.txt", "not mine\n");
+            turn.done().await;
+        })
+    });
+    let plan = json!({ "summary": "Add a hello file", "tasks": [task("t1", "hello.txt", "grep -q hello hello.txt")] });
+    let core = start(dir.path(), FakeSpawner { lead: lead_with(plan), worker, turns: turns.clone() }, auto()).await;
+
+    let t = wait_task(&core, "t1", TaskStatus::Failed).await;
+    assert!(t.status_reason.as_deref().is_some_and(|r| r.contains("outside the write scope after 2 fix rounds")), "{:?}", t.status_reason);
+    let e = core.accept_task(&t.id).await.unwrap_err().to_string();
+    assert!(e.contains("was not stopped by its checks") && e.contains("Retry"), "{e}");
+    // Nothing moved: no new pass, no worker turn, checks still on.
+    let after = task_by_key(&core, "t1").await.unwrap();
+    assert_eq!((after.status, &after.status_reason), (TaskStatus::Failed, &t.status_reason));
+    assert_eq!(worker_prompts(&turns).len(), 3, "the brief and two fix rounds");
+    assert!(!decisions(&events(&core).await).iter().any(|d| d.1.contains("anyway")), "no choice of yours is on record");
+    core.shutdown().await;
+}
+
+/// A plan of two tasks for the team member Ana: t1 has a verify command with a risk (it is
+/// held), t2 a safe one. Ana works in one worktree, so t2 takes it over once t1 is stopped.
+/// Ana's turn on t2 ends when `go` says so.
+async fn member_tasks(root: &Path, go: Arc<tokio::sync::Notify>) -> (Arc<Core>, Turns) {
+    let turns = Turns::default();
+    let mut tasks = vec![task("t1", "t1.txt", RISKY), task("t2", "t2.txt", "test -f t2.txt")];
+    for t in &mut tasks {
+        // Ana's, not a consultant's.
+        t.as_object_mut().unwrap().remove("consultant");
+        t["assignee"] = json!("Ana");
+    }
+    let plan = json!({ "summary": "Add files", "tasks": tasks });
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let go = go.clone();
+        Box::pin(async move {
+            // A brief names its task; back on a task (a retry), its file is already there.
+            if let Some(key) = turn.prompt.split(BRIEF).nth(1).and_then(|s| s.split(':').next()) {
+                if key == "t2" {
+                    go.notified().await;
+                }
+                turn.write(&format!("{key}.txt"), "x\n");
+            }
+            turn.done().await;
+        })
+    });
+    let ana = TeamMember { name: "Ana".into(), role: "Backend dev".into(), ..Default::default() };
+    let core = start(root, FakeSpawner { lead: lead_with(plan), worker, turns: turns.clone() }, Settings { team: vec![ana], ..auto() }).await;
+    (core, turns)
+}
+
+/// Harmless here, but `rm` is a risk for the approval rules.
+const RISKY: &str = "rm -f stale.txt && test -f t1.txt";
+
+fn branch_of(worktree: &Path) -> String {
+    String::from_utf8(git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).stdout).unwrap().trim().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_members_stopped_task_is_checked_after_its_worktree_moved_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let go = Arc::new(tokio::sync::Notify::new());
+    go.notify_one(); // t2 runs straight through
+    let (core, turns) = member_tasks(dir.path(), go).await;
+
+    let t1 = wait_task(&core, "t1", TaskStatus::Blocked).await;
+    assert!(t1.status_reason.as_deref().is_some_and(|r| r.contains("needs your OK")), "{:?}", t1.status_reason);
+    // Ana did t2 meanwhile, in the same worktree, and is free again.
+    let t2 = wait_task(&core, "t2", TaskStatus::Done).await;
+    let ana = t1.assignee.clone().unwrap();
+    let free = async || core.snapshot().await.unwrap().agents.iter().any(|a| a.id == ana && a.run_id.is_none()).then_some(());
+    wait_for("Ana to be free", 20, free).await;
+    let wt = PathBuf::from(t1.worktree.clone().unwrap());
+    assert_eq!(t2.worktree, t1.worktree, "a member has one worktree");
+    assert_eq!(Some(branch_of(&wt)), t2.branch, "the worktree is on t2's branch");
+
+    // Re-run checks still says what waits for your OK.
+    let held = core.recheck_task(&t1.id, vec![]).await.unwrap();
+    assert!(held.len() == 1 && held[0].command == RISKY, "{held:?}");
+    // With your OK, Codly brings the worktree back to t1 and checks it, with no worker turn.
+    assert!(core.recheck_task(&t1.id, vec![RISKY.into()]).await.unwrap().is_empty());
+    wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(task_by_key(&core, "t1").await.unwrap().status, TaskStatus::Done);
+    // The check passed, and t1.txt is only on t1's branch: the worktree was back on it.
+    let all = events(&core).await;
+    assert!(verified(&all).contains(&(RISKY.to_string(), true)), "{:?}", verified(&all));
+    assert_eq!(worker_prompts(&turns).len(), 2, "one brief per task, and no turn for the re-run");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_members_stopped_task_waits_for_the_member_and_keeps_your_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let go = Arc::new(tokio::sync::Notify::new());
+    let (core, turns) = member_tasks(dir.path(), go.clone()).await;
+
+    let t1 = wait_task(&core, "t1", TaskStatus::Blocked).await;
+    // Ana is in her turn on t2, in the worktree t1 shares.
+    wait_for("Ana to start t2", 20, async || (worker_prompts(&turns).len() == 2).then_some(())).await;
+
+    // Merge anyway cannot have the worktree now: t1 goes back in line for Ana.
+    let queued = core.accept_task(&t1.id).await.unwrap();
+    assert_eq!(queued.status, TaskStatus::Ready);
+    assert!(queued.status_reason.as_deref().is_some_and(|r| r.contains("Ana is on other work")), "{:?}", queued.status_reason);
+    let said = decisions(&events(&core).await);
+    let yours = said.into_iter().find(|d| d.0 == "human" && d.1.contains("merge t1 anyway")).expect("your decision is on record");
+    assert!(yours.1.contains("goes back to Ana first") && yours.2["waits_for"] == "Ana", "{yours:?}");
+    assert_eq!(task_by_key(&core, "t2").await.unwrap().status, TaskStatus::Running, "Ana's turn on t2 goes on");
+
+    // Ana finishes t2, then takes t1 again: the gate after that turn uses your choice.
+    go.notify_one();
+    wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(task_by_key(&core, "t1").await.unwrap().status, TaskStatus::Done);
+    let all = events(&core).await;
+    assert!(!verified(&all).iter().any(|v| v.0 == RISKY), "the check you skipped never ran: {:?}", verified(&all));
+    assert!(decisions(&all).iter().any(|d| d.1 == "t1: checks not run, you chose to merge anyway"));
+    let prompts = worker_prompts(&turns);
+    assert!(prompts.len() == 3 && prompts[2].contains("You are back on task t1"), "{prompts:?}");
     core.shutdown().await;
 }
 

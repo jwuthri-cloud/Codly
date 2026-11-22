@@ -5,7 +5,7 @@
 //! most `MAX_FIX_ROUNDS` times; merge conflicts (another task's doing) have their own
 //! `MAX_CONFLICT_ROUNDS`. What the worker cannot fix (a check that ran out of time, a verify
 //! command with a risk nobody allowed) blocks the task for you: its card re-runs the checks
-//! or merges anyway. Every outcome is a Decision.
+//! or merges anyway (only a task its checks stopped). Every outcome is a Decision.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,10 @@ pub const MAX_FIX_ROUNDS: u32 = 2;
 /// its own rounds and never uses a fix round.
 const MAX_CONFLICT_ROUNDS: u32 = 3;
 const TAIL_LINES: usize = 80;
+/// Keys in a gate decision's detail that say the task's checks stopped it: one failed its last
+/// fix round, one ran out of time, some wait for your OK. The task's card reads the same keys
+/// (src/lib/util/gate.ts) to offer Merge anyway.
+const CHECK_STOPS: [&str; 3] = ["failed_check", "timed_out", "held"];
 
 /// Rounds a task has used since it last started (a retry starts them again).
 #[derive(Default)]
@@ -70,6 +74,14 @@ struct CheckChoice {
     /// Merge anyway: the task's verify commands are not run.
     #[serde(default)]
     skip: bool,
+}
+
+/// How your own pass began.
+enum Begun {
+    /// The task is Verifying: the pass runs now.
+    Now(Task),
+    /// Not now: the team member whose worktree the task shares is on other work (its name).
+    Busy(String),
 }
 
 fn checks_key(task_id: &str) -> String {
@@ -225,6 +237,9 @@ impl Inner {
         })?;
         let repo = PathBuf::from(self.store.workspace(&ws_id)?.ok_or_else(|| anyhow!("unknown workspace"))?.repo_path);
         self.git.check_worktree(&repo, &wt).await?;
+        if pass == Pass::User {
+            self.checkout_task(&ws_id, &task, &wt).await?;
+        }
         if self.git.in_merge(&wt).await {
             let unmerged = self.git.unmerged_files(&wt).await.unwrap_or_default();
             let markers = files_with_markers(&wt, &unmerged);
@@ -262,6 +277,9 @@ impl Inner {
             let mode = self.approval_mode_for(ws, Some(&self.task_thread(&task)));
             let held = held_checks(&task.verify, &wt, mode, &choice.allowed);
             if !held.is_empty() {
+                if self.steered(pass, &worker, turns) {
+                    return self.wait_for_turn(task_id);
+                }
                 return self.hold_checks(&task, &worker, held).await;
             }
             for cmd in &task.verify {
@@ -272,7 +290,12 @@ impl Inner {
                 )?;
                 results.push((cmd.clone(), v.ok, v.code));
                 if v.timed_out {
-                    // Not the worker's fault, so not a fix round: the task waits for you.
+                    // Not the worker's fault, so not a fix round: the task waits for you. Unless
+                    // the worker got a new message while the check ran: blocking the task would
+                    // shut it down mid-turn. Its turn's end runs the checks again.
+                    if self.steered(pass, &worker, turns) {
+                        return self.wait_for_turn(task_id);
+                    }
                     let reason = format!(
                         "blocked: `{}` did not finish in {}, so Codly stopped it. Raise the time limit for checks in Settings and \
                          re-run the checks, or merge anyway.",
@@ -334,14 +357,8 @@ impl Inner {
         // (the diff, a reviewer start that fails first), and ends before the review does, is
         // still missed: `steered_in_review` counts turns from that run's start. Carry `turns`
         // into the review if that ever shows.
-        // (Your own pass has no worker turn: the worker was released before it started.)
-        if pass == Pass::Turn && self.is_live(&worker) && (!self.is_quiet(&worker) || self.turns_done(&worker) != turns) {
-            self.update_task(task_id, |t| {
-                t.status = TaskStatus::Running;
-                t.status_reason = Some("the worker got a new message; re-checking when it finishes".into());
-                Ok(())
-            })?;
-            return Ok(());
+        if self.steered(pass, &worker, turns) {
+            return self.wait_for_turn(task_id);
         }
 
         // 6. Optional cross-vendor review; it resumes the gate from review_done().
@@ -355,6 +372,23 @@ impl Inner {
 
         // 7. Merge queue.
         self.merge_task(task_id, 0).await
+    }
+
+    /// Did the worker get a new message while this pass ran (a user steer)? Its run is in a
+    /// turn, has one queued, or ended one since the pass began (`turns`).
+    /// (Your own pass has no worker turn: the worker was released before it started.)
+    fn steered(&self, pass: Pass, worker: &str, turns: Option<u64>) -> bool {
+        pass == Pass::Turn && self.is_live(worker) && (!self.is_quiet(worker) || self.turns_done(worker) != turns)
+    }
+
+    /// Leave the task to the turn its worker got meanwhile: that turn's end runs the gate again.
+    fn wait_for_turn(&self, task_id: &str) -> Result<()> {
+        self.update_task(task_id, |t| {
+            t.status = TaskStatus::Running;
+            t.status_reason = Some("the worker got a new message; re-checking when it finishes".into());
+            Ok(())
+        })?;
+        Ok(())
     }
 
     /// Send the work back to the same worker session, or fail the task when its rounds are
@@ -389,13 +423,11 @@ impl Inner {
                 t.status_reason = Some(reason.clone());
                 Ok(())
             })?;
-            self.decide(
-                ws,
-                Some(&task.id),
-                "gate",
-                format!("{}: {reason}", task.key),
-                json!({ "plan_id": task.plan_id, "rounds": max, "merge_aborted": aborted }),
-            )?;
+            let mut detail = json!({ "plan_id": task.plan_id, "rounds": max, "merge_aborted": aborted });
+            if let Fix::Verify { cmd, .. } = &fix {
+                detail["failed_check"] = json!(cmd);
+            }
+            self.decide(ws, Some(&task.id), "gate", format!("{}: {reason}", task.key), detail)?;
             self.release_worker(worker, &task.id);
             lock(&self.fix_rounds).remove(&task.id);
             if let Some(ws) = ws_id.as_deref() {
@@ -504,39 +536,46 @@ impl Inner {
 
     // ───────────── your own pass, from the task's card ─────────────
 
-    /// A task the gate (or you) stopped after Codly committed its work: Blocked or Failed,
-    /// its branch still checked out in its worktree, in a plan that runs.
-    async fn stopped_task(&self, task_id: &str) -> Result<(Task, PathBuf)> {
+    /// A task the gate (or you) stopped after Codly committed its work: Blocked or Failed, in
+    /// a plan that runs. `only` says which tasks the card's action is for, when this is none.
+    fn stopped_task(&self, task_id: &str, only: &str) -> Result<(Task, PathBuf)> {
         let t = self.task(task_id)?;
         if !matches!(t.status, TaskStatus::Blocked | TaskStatus::Failed) {
-            bail!("{} is {}; only a blocked or failed task can be checked again", t.key, store::enum_str(&t.status));
+            bail!("{} is {}; {only}", t.key, store::enum_str(&t.status));
         }
         if let Some(p) = t.plan_id.as_deref()
             && self.plan(p)?.status != PlanStatus::Running
         {
             bail!("run the plan first");
         }
-        let wt = t.worktree.as_deref().map(PathBuf::from).filter(|w| w.exists());
-        let (Some(wt), Some(branch)) = (wt, t.branch.as_deref()) else { bail!("{} has no work yet; Retry starts its worker", t.key) };
+        let wt = t.worktree.as_deref().map(PathBuf::from).filter(|w| t.branch.is_some() && w.exists());
+        let Some(wt) = wt else { bail!("{} has no work yet; Retry starts its worker", t.key) };
         if self.store.task_events(task_id, "committed")?.is_empty() {
             bail!("{} has no finished work yet; Retry lets its worker go on", t.key);
         }
-        // A team member's worktree moves on to its next task.
-        if self.git.current_branch(&wt).await?.as_deref() != Some(branch) {
-            bail!("the worktree of {} is on other work now; Retry brings it back", t.key);
-        }
         Ok((t, wt))
+    }
+
+    /// Did its checks stop the task? Then its last decision is the gate's, with one of
+    /// `CHECK_STOPS`. (Stopped by you, its worker, the scope check or a reviewer: another
+    /// decision is on record last.)
+    fn stopped_by_checks(&self, task_id: &str) -> Result<bool> {
+        Ok(self.store.task_events(task_id, "decision")?.last().is_some_and(|e| {
+            matches!(&e.kind, EventKind::Decision { decision_type, detail, .. }
+                if decision_type == "gate" && CHECK_STOPS.iter().any(|k| !detail[*k].is_null()))
+        }))
     }
 
     /// Re-run checks, from the task's card: Codly commits the worktree and runs the gate
     /// again, with no worker turn first. `allow` names the task's risky verify commands you
     /// OK'd. Returns the commands that still need your OK (then nothing ran and nothing
-    /// changed); empty = the checks are running.
+    /// changed); empty = the checks are running, or wait for the task's team member (see
+    /// `user_pass`).
     pub(super) async fn recheck_task(self: &Arc<Self>, task_id: &str, allow: Vec<String>) -> Result<Vec<HeldCheck>> {
-        let (task, wt) = self.stopped_task(task_id).await?;
+        let (task, wt) = self.stopped_task(task_id, "only a blocked or failed task can be checked again")?;
         let reported = self.store.latest_task_run(task_id, Some(Role::Worker))?.and_then(|r| r.report);
         if let Some(s) = reported.as_ref().and_then(|r| r["status"].as_str()).filter(|s| matches!(*s, "blocked" | "failed")) {
-            bail!("the worker of {} said it is {s}: Retry lets it go on, or merge anyway to take the work as it is", task.key);
+            bail!("the worker of {} said it is {s}: Retry lets it go on", task.key);
         }
         let ws = self.store.task_workspace(task_id)?;
         let choice = self.check_choice(task_id)?;
@@ -544,6 +583,8 @@ impl Inner {
         let allowed: Vec<String> = allow.into_iter().filter(|c| task.verify.contains(c) && !choice.allowed.contains(c)).collect();
         let mode = self.approval_mode_for(ws.as_deref(), Some(&self.task_thread(&task)));
         let ok: Vec<String> = choice.allowed.iter().chain(&allowed).cloned().collect();
+        // The worktree only names the place the commands would run in: whatever branch a team
+        // member has it on by now, you see what waits for your OK.
         let held = held_checks(&task.verify, &wt, mode, &ok);
         if !held.is_empty() {
             return Ok(held);
@@ -558,11 +599,16 @@ impl Inner {
         Ok(vec![])
     }
 
-    /// Merge anyway, from the task's card: the task goes on to the scope check, the review
-    /// and the merge without its verify commands, now and in every later pass. Your
-    /// decision and the check that failed last stay in its record.
+    /// Merge anyway, from the card of a task its checks stopped: the task goes on to the
+    /// scope check, the review and the merge without its verify commands, now and in every
+    /// later pass. Your decision and the check that failed last stay in its record.
     pub(super) async fn accept_task(self: &Arc<Self>, task_id: &str) -> Result<Task> {
-        let (task, _) = self.stopped_task(task_id).await?;
+        let (task, _) = self.stopped_task(task_id, "only a task that its checks stopped can be merged anyway")?;
+        // Any other stop has no check to skip: this would restart the worker, start a new
+        // review or merge half-done work instead of what its name says.
+        if !self.stopped_by_checks(task_id)? {
+            bail!("{} was not stopped by its checks, so there is no check to skip; Retry lets its worker go on", task.key);
+        }
         let last_failed = self.store.task_events(task_id, "verified")?.into_iter().rev().find_map(|e| match e.kind {
             EventKind::Verified { command, ok: false, exit_code, .. } => Some((e.id, command, exit_code)),
             _ => None,
@@ -579,7 +625,10 @@ impl Inner {
     }
 
     /// Start a pass of the gate for a stopped task, recorded as your decision. `choice` =
-    /// what you decided about its checks, when that changed.
+    /// what you decided about its checks, when that changed. A team member's task shares the
+    /// member's worktree with its other tasks: while the member is on other work there, the
+    /// pass cannot have it, so the task goes back in line for the member (Ready) and the gate
+    /// after its next turn uses your choice.
     async fn user_pass(self: &Arc<Self>, task: &Task, choice: Option<CheckChoice>, what: String, detail: Value) -> Result<Task> {
         // One gate per task at a time: take it before anything changes.
         {
@@ -589,19 +638,20 @@ impl Inner {
             }
             g.insert(task.id.clone(), false);
         }
-        match self.begin_user_pass(task, choice, what, detail).await {
-            Ok(t) => {
-                tokio::spawn(self.clone().gate_passes(task.id.clone(), Pass::User));
-                Ok(t)
-            }
-            Err(e) => {
-                lock(&self.gating).remove(&task.id);
-                Err(e)
-            }
+        let begun = self.begin_user_pass(task, choice.as_ref(), &what, &detail).await;
+        if let Ok(Begun::Now(_)) = &begun {
+            tokio::spawn(self.clone().gate_passes(task.id.clone(), Pass::User));
+        } else {
+            // Before the task can run again: a turn that ends finds no gate to wait behind.
+            lock(&self.gating).remove(&task.id);
+        }
+        match begun? {
+            Begun::Now(t) => Ok(t),
+            Begun::Busy(who) => self.requeue_for_member(task, &who, choice.as_ref(), &what, detail),
         }
     }
 
-    async fn begin_user_pass(&self, task: &Task, choice: Option<CheckChoice>, what: String, mut detail: Value) -> Result<Task> {
+    async fn begin_user_pass(&self, task: &Task, choice: Option<&CheckChoice>, what: &str, detail: &Value) -> Result<Begun> {
         // A worker that still holds the task (it waits for your answer) lets go first: this
         // pass has no worker turn, and feedback goes to the task's next run. New rounds too.
         self.release_task_agents(task);
@@ -616,32 +666,90 @@ impl Inner {
                 bail!("the worker of {} did not stop in time; try again in a moment", task.key);
             }
         }
-        // The choice first: the pass reads it. It stands only if the pass starts.
+        // A team member's tasks share its worktree. Under the scheduler's lock, so the member
+        // starts no other task between this look and the status that keeps it for this one
+        // (an active task keeps its assignee busy).
+        let member = self.member_of(task);
+        let sched = match &member {
+            Some(_) => Some(self.sched_lock.lock().await),
+            None => None,
+        };
+        if let Some(a) = member
+            && self.on_other_work(&a, task)?
+        {
+            return Ok(Begun::Busy(a.name));
+        }
+        let t = self.move_with_choice(task, choice, TaskStatus::Verifying, "Codly is checking the work".into())?;
+        drop(sched);
+        let ws = self.store.task_workspace(&task.id)?;
+        let mut detail = detail.clone();
+        detail["plan_id"] = json!(task.plan_id);
+        self.decide_by(ws.as_deref(), Some(&task.id), "gate", "human", what, detail)?;
+        Ok(Begun::Now(t))
+    }
+
+    /// Move a stopped task on, with what you decided about its checks stored first: the next
+    /// pass of the gate reads it. The choice stands only if the task moves.
+    fn move_with_choice(&self, task: &Task, choice: Option<&CheckChoice>, to: TaskStatus, reason: String) -> Result<Task> {
         let before = self.check_choice(&task.id)?;
-        if let Some(choice) = &choice {
+        if let Some(choice) = choice {
             self.set_check_choice(&task.id, choice)?;
         }
         let moved = self.update_task_as(&task.id, true, |t| {
             if !matches!(t.status, TaskStatus::Blocked | TaskStatus::Failed) {
                 bail!("{} is {} now", t.key, store::enum_str(&t.status));
             }
-            t.status = TaskStatus::Verifying;
-            t.status_reason = Some("Codly is checking the work".into());
+            t.status = to;
+            t.status_reason = Some(reason);
             Ok(())
         });
-        let t = match moved {
-            Ok(t) => t,
-            Err(e) => {
-                if choice.is_some() {
-                    self.set_check_choice(&task.id, &before)?;
-                }
-                return Err(e);
-            }
-        };
+        if moved.is_err() && choice.is_some() {
+            self.set_check_choice(&task.id, &before)?;
+        }
+        moved
+    }
+
+    /// The team member a task is assigned to: the task lives in that member's worktree.
+    fn member_of(&self, task: &Task) -> Option<Agent> {
+        task.assignee.as_deref().and_then(|a| self.agent(a).ok()).filter(|a| a.member.is_some())
+    }
+
+    /// Is the task's team member on other work right now: another task of its own in flight,
+    /// or a run that is not an idle chat? Then its worktree is that work's.
+    fn on_other_work(&self, member: &Agent, task: &Task) -> Result<bool> {
+        let Some(ws) = self.store.task_workspace(&task.id)? else { return Ok(false) };
+        let other = |t: &Task| t.id != task.id && scheduler::is_active(t.status) && t.assignee.as_deref() == Some(member.id.as_str());
+        Ok(self.busy_agents().contains(&member.id) || self.store.tasks(&ws)?.iter().any(other))
+    }
+
+    /// Your pass cannot run now (see `user_pass`): the task is Ready for its team member
+    /// again, with your choice about its checks kept and your decision on record.
+    fn requeue_for_member(&self, task: &Task, who: &str, choice: Option<&CheckChoice>, what: &str, mut detail: Value) -> Result<Task> {
+        let reason = format!("waiting: {who} is on other work in the same worktree; Codly checks {} after {who}'s next turn on it", task.key);
+        let t = self.move_with_choice(task, choice, TaskStatus::Ready, reason)?;
         let ws = self.store.task_workspace(&task.id)?;
         detail["plan_id"] = json!(task.plan_id);
-        self.decide_by(ws.as_deref(), Some(&task.id), "gate", "human", what, detail)?;
+        detail["waits_for"] = json!(who);
+        let summary = format!("{what}; {who} is on other work in the same worktree, so {} goes back to {who} first", task.key);
+        self.decide_by(ws.as_deref(), Some(&task.id), "gate", "human", summary, detail)?;
+        self.kick();
         Ok(t)
+    }
+
+    /// Before your own pass commits: the task's branch is checked out in its worktree. A team
+    /// member's worktree stays on the branch of its last task; the member is free (the pass
+    /// began), so it comes back to this one. Leftovers of the other task are committed there.
+    async fn checkout_task(&self, ws_id: &str, task: &Task, wt: &Path) -> Result<()> {
+        let branch = task.branch.as_deref().ok_or_else(|| anyhow!("the task has no branch"))?;
+        if self.git.current_branch(wt).await?.as_deref() == Some(branch) {
+            return Ok(());
+        }
+        let ws = self.store.workspace(ws_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
+        let Some(member) = self.member_of(task).filter(|_| self.is_member_worktree(&ws, wt)) else {
+            bail!("the worktree of {} is on another branch now; Retry brings it back", task.key)
+        };
+        self.switch_member_worktree(&ws, &member, &task.key, branch, branch).await?;
+        Ok(())
     }
 
     // ───────────── verify commands ─────────────

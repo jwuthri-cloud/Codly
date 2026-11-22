@@ -14,6 +14,7 @@
   import { accounts } from '../lib/state/accounts.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { clock, shortSha } from '../lib/util/format';
+  import { stoppedByChecks } from '../lib/util/gate';
   import { GLOSSARY, idVar, methodProvenance, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
   import { tildify } from '../lib/util/sanitize';
   import ArtifactThumb from '../components/ArtifactThumb.svelte';
@@ -62,6 +63,11 @@
   const MARK_ICON: Record<string, string> = { committed: 'commit', verified: 'check-circle', reviewed: 'eye', merged: 'merge' };
   // Stopped after Codly committed its work: you can run its checks again, or take the work as it is.
   const stopped = $derived((task.status === 'blocked' || task.status === 'failed') && marks.some((m) => m.kind === 'committed'));
+  // Merge anyway skips the task's checks, so it is only for a task that its checks stopped.
+  const byChecks = $derived.by(() => {
+    void store.rev;
+    return stopped && stoppedByChecks(store.decisions, task.id);
+  });
   /** Checks with a risk: Codly runs them only with your OK. */
   let held = $state<HeldCheck[]>([]);
   let confirmAccept = $state(false);
@@ -92,7 +98,7 @@
       {#each LEGAL[task.status] ?? [] as l (l.to)}<button class="btn sm ghost" onclick={() => moveTask(task.id, l.to)}>{l.label}</button>{/each}
       {#if stopped}
         {#if task.verify.length}<button class="btn sm ghost" onclick={() => recheck()}>Re-run checks</button>{/if}
-        <button class="btn sm ghost" onclick={() => ((held = []), (confirmAccept = true))}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>
+        {#if byChecks}<button class="btn sm ghost" onclick={() => ((held = []), (confirmAccept = true))}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>{/if}
       {/if}
       {#if plan}<button class="btn sm ghost" onclick={() => ui.openPlan(plan.id, plan.thread)}><Icon name="plan" size={13} />In the plan</button>{/if}
     </div>
@@ -107,7 +113,7 @@
       </div>
     {:else if confirmAccept}
       <div class="ask" role="alertdialog" aria-label={plan ? 'Merge anyway' : 'Accept anyway'}>
-        <p>{plan ? 'Merge this task without its checks?' : 'Accept this task without its checks?'} Codly does not run them again for it. The check that failed stays in the task’s record.</p>
+        <p>{plan ? 'Merge this task without its checks?' : 'Accept this task without its checks?'} Codly does not run them again for it. Your choice stays in the task’s record.</p>
         <div class="ask-acts">
           <button class="btn sm ghost" onclick={() => (confirmAccept = false)}>Not now</button>
           <button class="btn sm amber" onclick={accept}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>

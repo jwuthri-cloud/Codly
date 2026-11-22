@@ -1770,6 +1770,76 @@ async fn a_steer_during_verify_is_reviewed_before_merging() {
     core.shutdown().await;
 }
 
+/// A check that runs out of time blocks the task for you, but not under a worker that got a
+/// new message meanwhile: its turn is not cut short, and its end runs the checks again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_check_that_times_out_during_a_steer_waits_for_the_workers_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    // The steered turn ends only when the test says so: after the check ran out of time.
+    let steered = Arc::new(tokio::sync::Notify::new());
+    let wait = steered.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let wait = wait.clone();
+        Box::pin(async move {
+            if turn.prompt.starts_with("[User]") {
+                wait.notified().await;
+                turn.write("bye.txt", "bye\n");
+                turn.say("Added bye.txt too.");
+            } else {
+                turn.write("hello.txt", "hello\n");
+                turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote hello.txt." })).await;
+            }
+        })
+    });
+    // The check says when it runs (through a file outside the worktree), then outlasts its
+    // time limit until the steered turn's file is there.
+    let checking = dir.path().join("checking");
+    let verify = format!("touch '{}'; test -f bye.txt || sleep 60", checking.display());
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead_with(&["*.txt"], &verify), worker }).await;
+    // Full access: the gate runs a check that touches files outside the worktree without asking.
+    let settings = Settings {
+        auto_run_plans: true,
+        lead_followups: false,
+        review_gate: false,
+        approval_mode: ApprovalMode::Full,
+        verify_timeout_secs: 3,
+        ..Default::default()
+    };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let (task, _) = wait_for("the check to run", 20, async || task_status(&core).await.filter(|_| checking.exists())).await;
+    assert_eq!(task.status, TaskStatus::Verifying);
+    // You steer the worker while the check runs; its turn is still going when the time is up.
+    let worker_id = task.assignee.clone().unwrap();
+    core.send_chat(&format!("agent:{worker_id}"), "also add bye.txt").await.unwrap();
+    let timed_out = async || {
+        let events = core.events(None, None, 3000).await.unwrap();
+        events.iter().any(|e| matches!(e.kind, EventKind::Verified { ok: false, .. })).then_some(())
+    };
+    wait_for("the check to run out of time", 20, timed_out).await;
+    let left = async || task_status(&core).await.filter(|(t, _)| t.status != TaskStatus::Verifying);
+    let (task, _) = wait_for("the gate to leave the task", 10, left).await;
+    assert_eq!(task.status, TaskStatus::Running, "not blocked under a worker in its turn: {:?}", task.status_reason);
+    assert!(task.status_reason.as_deref().is_some_and(|r| r.contains("new message")), "{:?}", task.status_reason);
+    // The turn ends: its work is committed, the check passes now, and the task lands.
+    steered.notify_one();
+    let (task, plan) =
+        wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
+    assert_eq!(task.status, TaskStatus::Done);
+    assert!(PathBuf::from(plan.integration_worktree.unwrap()).join("bye.txt").exists(), "the steered turn's work was merged");
+    let events = core.events(None, None, 3000).await.unwrap();
+    let checks: Vec<bool> = events.iter().filter_map(|e| if let EventKind::Verified { ok, .. } = &e.kind { Some(*ok) } else { None }).collect();
+    assert_eq!(checks.iter().filter(|ok| !**ok).count(), 1, "the check ran out of time once: {checks:?}");
+    assert!(checks.iter().any(|ok| *ok), "then it passed: {checks:?}");
+    let said = |what: &str| events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains(what)));
+    assert!(!said("blocked:") && !said("fix round"), "neither blocked nor a fix round");
+    assert_eq!(log.lock().unwrap().runs.iter().filter(|r| r.0 == worker_id).count(), 1, "the same worker run did both turns");
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_worker_at_its_usage_limit_hands_the_task_to_the_next_provider() {
     let dir = tempfile::tempdir().unwrap();

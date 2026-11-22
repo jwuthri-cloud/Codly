@@ -878,14 +878,16 @@ impl Core {
 
     /// Re-run checks, from the card of a blocked or failed task: the gate runs again with no
     /// worker turn. `allow` names the task's risky verify commands you OK'd. Returns the
-    /// commands that still need your OK (then nothing ran); empty = the checks are running.
+    /// commands that still need your OK (then nothing ran); empty = the checks are running, or
+    /// the task is Ready again for a team member that is on other work in the same worktree.
     pub async fn recheck_task(&self, task_id: &str, allow: Vec<String>) -> anyhow::Result<Vec<HeldCheck>> {
         self.inner.recheck_task(task_id, allow).await
     }
 
-    /// Merge anyway, from the card of a blocked or failed task: it goes on to the scope
-    /// check, the review and the merge without its verify commands. Your decision and the
-    /// check that failed last stay in the task's record.
+    /// Merge anyway, from the card of a task that its checks stopped (one failed its last fix
+    /// round, ran out of time, or waits for your OK): it goes on to the scope check, the review
+    /// and the merge without its verify commands. Your decision and the check that failed
+    /// last stay in the task's record.
     pub async fn accept_task(&self, task_id: &str) -> anyhow::Result<Task> {
         self.inner.accept_task(task_id).await
     }
