@@ -11,9 +11,10 @@ on:
 permissions:
   contents: read
 
-# A new push to a pull request takes the place of the run in progress. Runs on main all finish.
+# A new push to a pull request takes the place of the run in progress. On main each commit has
+# its own group: every push is checked, and no run waits for or cancels another.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -49,26 +50,57 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      # rustup is on the runner already.
+      # rustup is on the runner already. The version goes into the cache key.
       - name: Install Rust (stable)
+        id: rust
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
+          rustc --version
+          echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
 
-      # Keyed on the lockfile: the crates Codly depends on are built once per Cargo.lock.
-      - name: Cache cargo downloads and build
-        uses: actions/cache@v4
+      # Keyed on the Rust version and the lockfile: the crates Codly depends on are built once
+      # per pair. A new Cargo.lock starts from the last build of the same Rust version, so the
+      # saved build keeps a few old crates; a new Rust release (every six weeks) starts from
+      # nothing, which is the limit on that growth.
+      - name: Restore cargo downloads and build
+        id: cargo-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-test-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-test-
+          key: cargo-${{ runner.os }}-test-rust${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-test-rust${{ steps.rust.outputs.version }}-
 
       - name: Run every check
         run: scripts/verify.sh
+
+      # The build is saved after a red run too: a failing test must not make every later run a
+      # full build. A key is saved once and never written again, so only a complete build may
+      # take it: `cargo test --no-run` passes, and does no work, when everything is built. The
+      # Tauri shell compiles only after `pnpm build` made dist, so without dist the checks
+      # stopped before the Rust build.
+      - name: Check the Rust build is complete
+        id: built
+        if: ${{ !cancelled() && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        run: |
+          if [ -d dist ] && cargo test --workspace --locked --no-run; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save cargo downloads and build
+        if: ${{ !cancelled() && steps.built.outputs.complete == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   macos:
     # Codly ships for macOS, and the Linux job never compiles the code behind
@@ -83,10 +115,15 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust (stable)
+        id: rust
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
+          rustc --version
+          echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
 
+      # Keyed like the Linux job's. This job only compiles, so a green job is a complete build,
+      # and actions/cache saves after a green job.
       - name: Cache cargo downloads and build
         uses: actions/cache@v4
         with:
@@ -95,8 +132,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-check-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-check-
+          key: cargo-${{ runner.os }}-check-rust${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-check-rust${{ steps.rust.outputs.version }}-
 
       - name: Compile the workspace and its tests
         run: cargo check --workspace --all-targets --locked
