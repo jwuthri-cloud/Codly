@@ -142,6 +142,21 @@ then works for anyone on your network until Codly stops. Quit the app first: an 
 already open does not serve to the network. `codly --help` lists every command and
 `codly --version` prints the version.
 
+## Develop
+
+Before you push, run the checks that CI runs:
+
+```bash
+scripts/verify.sh           # pnpm check, pnpm test, pnpm build, cargo test --workspace
+```
+
+It also fails when the tests rewrite `src/lib/gen`: those TypeScript types are generated from the
+Rust types by `cargo test`, so commit them with the change that needs them.
+
+CI (`.github/workflows/ci.yml`) runs the same script on Linux for every pull request and every
+push to `main`, and compiles the workspace on macOS. To run it on Linux yourself, install the
+system packages the workflow lists.
+
 ## Troubleshooting
 
 Settings → General → Troubleshooting collects what a bug report needs: the Codly version, your

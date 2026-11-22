@@ -1,0 +1,102 @@
+# The project's checks, on every pull request and on main.
+# The list of checks is scripts/verify.sh: run it yourself before you push.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# The jobs only read the code.
+permissions:
+  contents: read
+
+# A new push to a pull request takes the place of the run in progress. Runs on main all finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every run starts from a fresh checkout: incremental build data would only grow the cache.
+  CARGO_INCREMENTAL: 0
+  # Smaller builds (disk, cache); a panic's backtrace still names the file and line.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  verify:
+    name: Checks and tests (Linux)
+    # A fixed release: the package names below belong to it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # What a Tauri 2 app builds against on Linux (https://tauri.app/start/prerequisites/).
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # rustup is on the runner already.
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      # Keyed on the lockfile: the crates Codly depends on are built once per Cargo.lock.
+      - name: Cache cargo downloads and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-test-
+
+      - name: Run every check
+        run: scripts/verify.sh
+
+  macos:
+    # Codly ships for macOS, and the Linux job never compiles the code behind
+    # cfg(target_os = "macos"). This job compiles everything there, tests included; it does not
+    # run them.
+    name: Compile (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Cache cargo downloads and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-check-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-check-
+
+      - name: Compile the workspace and its tests
+        run: cargo check --workspace --all-targets --locked

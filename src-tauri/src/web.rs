@@ -172,25 +172,37 @@ fn secure(res: &mut Res, path: &str) {
     }
 }
 
-async fn route(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
-    let path = req.uri().path().to_string();
+/// The answer to a request that stops at the door: the printed link's token trade, a request
+/// without the cookie, another site's call to the API. None: the request may go on.
+fn gate(token: &str, uri: &hyper::Uri, headers: &hyper::HeaderMap) -> Option<Res> {
+    let path = uri.path();
     let cookie = format!("codly_token={token}");
     // The printed link: trade the token for a cookie and drop it from the address bar.
-    if req.uri().query().is_some_and(|q| q.split('&').any(|kv| kv == format!("token={token}"))) {
-        return Response::builder()
-            .status(StatusCode::SEE_OTHER)
-            .header(header::LOCATION, path)
-            .header(header::SET_COOKIE, format!("{cookie}; Path=/; HttpOnly; SameSite=Strict"))
-            .body(full(Bytes::new()))
-            .unwrap();
+    if uri.query().is_some_and(|q| q.split('&').any(|kv| kv == format!("token={token}"))) {
+        return Some(
+            Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header(header::LOCATION, path)
+                .header(header::SET_COOKIE, format!("{cookie}; Path=/; HttpOnly; SameSite=Strict"))
+                .body(full(Bytes::new()))
+                .unwrap(),
+        );
     }
-    let authed = req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).any(|c| c.trim() == cookie);
+    let authed = headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).any(|c| c.trim() == cookie);
     if !authed {
-        return text(StatusCode::UNAUTHORIZED, "Open the link `codly serve` printed: it carries the token.");
+        return Some(text(StatusCode::UNAUTHORIZED, "Open the link `codly serve` printed: it carries the token."));
     }
-    if path.starts_with("/api/") && !same_origin(req.headers()) {
-        return text(StatusCode::FORBIDDEN, "cross-site request refused");
+    if path.starts_with("/api/") && !same_origin(headers) {
+        return Some(text(StatusCode::FORBIDDEN, "cross-site request refused"));
     }
+    None
+}
+
+async fn route(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
+    if let Some(res) = gate(token, req.uri(), req.headers()) {
+        return res;
+    }
+    let path = req.uri().path().to_string();
     match (req.method(), path.as_str()) {
         (&Method::GET, "/api/events") => events(&app).await,
         (&Method::GET, "/api/voice/ws") => voice(req).await,
@@ -289,10 +301,15 @@ fn same_origin(h: &hyper::HeaderMap) -> bool {
     }
 }
 
+/// A command only the window can run: Channels can't cross HTTP (see /api/events and
+/// /api/pty), and plugins act on the window.
+fn window_only(cmd: &str) -> bool {
+    cmd.starts_with("plugin:") || matches!(cmd, "ui_subscribe" | "pty_attach")
+}
+
 /// Any app command, through the window's own IPC dispatch.
 async fn command(app: &AppHandle, cmd: String, req: Request<Incoming>) -> Res {
-    // Channels can't cross HTTP (see /api/events and /api/pty); plugins act on the window.
-    if cmd.starts_with("plugin:") || matches!(cmd.as_str(), "ui_subscribe" | "pty_attach") {
+    if window_only(&cmd) {
         return text(StatusCode::NOT_FOUND, &format!("{cmd} is not available in the browser"));
     }
     let Some(wv) = app.get_webview_window("main") else { return text(StatusCode::SERVICE_UNAVAILABLE, "Codly is still starting") };
@@ -553,5 +570,107 @@ mod tests {
     fn the_page_learns_it_is_served_without_an_inline_script() {
         let html = web_index("<!doctype html><html><head><title>Codly</title></head><body></body></html>");
         assert_eq!(html, "<!doctype html><html><head><script src=\"/codly-web.js\"></script><title>Codly</title></head><body></body></html>");
+    }
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// What the door answers to a request for `target` with these headers (None: it may go on).
+    fn knock(target: &str, kv: &[(&'static str, &str)]) -> Option<Res> {
+        let mut h = hyper::HeaderMap::new();
+        for (k, v) in kv {
+            h.append(*k, v.parse().unwrap());
+        }
+        gate(TOKEN, &target.parse().unwrap(), &h)
+    }
+
+    fn status(target: &str, kv: &[(&'static str, &str)]) -> Option<StatusCode> {
+        knock(target, kv).map(|res| res.status())
+    }
+
+    fn value(res: &Res, k: header::HeaderName) -> Option<&str> {
+        res.headers().get(k).map(|v| v.to_str().unwrap())
+    }
+
+    #[test]
+    fn the_printed_link_trades_its_token_for_a_cookie() {
+        let cookie = format!("codly_token={TOKEN}; Path=/; HttpOnly; SameSite=Strict");
+        let mut res = knock(&format!("/?token={TOKEN}"), &[]).expect("the link is answered at the door");
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(value(&res, header::LOCATION), Some("/"), "the token leaves the address bar");
+        assert_eq!(value(&res, header::SET_COOKIE), Some(cookie.as_str()), "a page's script cannot read it, another site cannot send it");
+        secure(&mut res, "/");
+        assert_eq!(value(&res, header::CACHE_CONTROL), Some("no-store"));
+        // On any page, next to other parameters.
+        let res = knock(&format!("/board?tab=plan&token={TOKEN}"), &[]).unwrap();
+        assert_eq!((res.status(), value(&res, header::LOCATION), value(&res, header::SET_COOKIE)), (StatusCode::SEE_OTHER, Some("/board"), Some(cookie.as_str())));
+
+        // Anything but the whole token trades nothing: it is a request without the cookie.
+        let wrong = ["token=".to_string(), "token=wrong".to_string(), format!("token={}", &TOKEN[..47]), format!("token={TOKEN}0"), format!("xtoken={TOKEN}"), TOKEN.to_string()];
+        for query in &wrong {
+            let res = knock(&format!("/?{query}"), &[]).expect("refused");
+            assert_eq!((res.status(), value(&res, header::SET_COOKIE)), (StatusCode::UNAUTHORIZED, None), "{query}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_served_without_the_cookie() {
+        let cookie = format!("codly_token={TOKEN}");
+        let own_page = ("sec-fetch-site", "same-origin");
+        for path in ["/", "/assets/index.js", "/codly-web.js", "/api/events", "/api/pty/1", "/api/voice/ws", "/api/cmd/list_repos"] {
+            assert_eq!(status(path, &[own_page]), Some(StatusCode::UNAUTHORIZED), "{path}");
+            assert_eq!(status(path, &[own_page, ("cookie", "codly_token=the-token-of-another-install")]), Some(StatusCode::UNAUTHORIZED), "{path}");
+            assert_eq!(status(path, &[own_page, ("cookie", cookie.as_str())]), None, "{path}");
+        }
+        // The cookie is compared whole: no shorter, longer or renamed one passes.
+        let wrong = [format!("{cookie}0"), cookie[..cookie.len() - 1].to_string(), format!("x{cookie}"), format!("token={TOKEN}"), "codly_token=".to_string(), TOKEN.to_string()];
+        for c in &wrong {
+            assert_eq!(status("/api/cmd/list_repos", &[own_page, ("cookie", c.as_str())]), Some(StatusCode::UNAUTHORIZED), "{c}");
+        }
+        // A browser sends it among the other cookies of this host, in one header or in several.
+        let among = format!("theme=dark; {cookie}; lang=en");
+        assert_eq!(status("/", &[("cookie", among.as_str())]), None);
+        assert_eq!(status("/", &[("cookie", "theme=dark"), ("cookie", cookie.as_str())]), None);
+    }
+
+    #[test]
+    fn another_site_cannot_call_the_api_with_your_cookie() {
+        let cookie = format!("codly_token={TOKEN}");
+        for path in ["/api/cmd/stop_agent", "/api/events", "/api/pty/1", "/api/voice/ws"] {
+            for site in ["cross-site", "same-site"] {
+                assert_eq!(status(path, &[("cookie", cookie.as_str()), ("sec-fetch-site", site)]), Some(StatusCode::FORBIDDEN), "{path} from {site}");
+            }
+            assert_eq!(status(path, &[("cookie", cookie.as_str()), ("host", "127.0.0.1:4280"), ("origin", "http://127.0.0.1:3000")]), Some(StatusCode::FORBIDDEN), "{path}");
+            // Without the cookie the answer does not say more than "no".
+            assert_eq!(status(path, &[("sec-fetch-site", "cross-site")]), Some(StatusCode::UNAUTHORIZED), "{path}");
+        }
+        // A link to the page from another site still opens it: only the API is closed.
+        assert_eq!(status("/", &[("cookie", cookie.as_str()), ("sec-fetch-site", "cross-site")]), None);
+    }
+
+    #[test]
+    fn commands_that_need_the_window_are_refused() {
+        for cmd in ["ui_subscribe", "pty_attach", "plugin:dialog|open", "plugin:opener|open_url", "plugin:notification|notify"] {
+            assert!(window_only(cmd), "{cmd}");
+        }
+        for cmd in ["list_repos", "send_chat", "ui_set_visible", "pty_open", "pty_write"] {
+            assert!(!window_only(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn the_install_keeps_one_token_only_its_user_can_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data"); // a first run: the folder is not there yet
+        let first = token(&data).unwrap();
+        assert!(first.len() == 48 && first.bytes().all(|b| b.is_ascii_hexdigit()), "{first}");
+        assert_eq!(std::fs::metadata(data.join("web-token")).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(token(&data).unwrap(), first, "the link survives a restart");
+        assert_ne!(new_token().unwrap(), first, "a link for the network gets a token of its own");
+        // A file that holds no token (cut short, emptied) is not served as the secret.
+        std::fs::write(data.join("web-token"), "short\n").unwrap();
+        let next = token(&data).unwrap();
+        assert!(next.len() == 48 && next != first, "{next}");
+        assert_eq!(token(&data).unwrap(), next);
     }
 }
