@@ -7,6 +7,8 @@
 //! - `runs`     spawning agent runs (the `Spawner` seam), prompts, the live-run table
 //! - `lead`     the supervisors: one Lead per request thread (≤ 3 live), board header, follow-ups
 //! - `plans`    submit/run/cancel plans, the scheduler loop, starting workers
+//! - `retry`    a worker that failed starts again after a wait; what blocks instead
+//! - `stuck`    plans that cannot go on by themselves: the notice, keep what is merged
 //! - `gate`     commit → verify → scope → review → merge queue → done
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
@@ -40,10 +42,12 @@ pub mod names;
 pub mod planner;
 mod plans;
 pub mod prompts;
+mod retry;
 mod runs;
 pub mod scheduler;
 pub mod scope;
 mod snapshot;
+mod stuck;
 mod team;
 mod tools;
 mod triggers;
@@ -240,6 +244,12 @@ struct Inner {
     /// How long Codly waits before it asks a worker whose turn failed to continue: one wait
     /// per retry, then the task is blocked (`ingest::TURN_RETRY_WAITS`; tests shorten them).
     turn_retry_waits: RwLock<Vec<Duration>>,
+    /// Workers that failed lately: failures in a row per task, and when each starts again.
+    retries: Mutex<retry::Retries>,
+    /// The stuck plans Codly told you about: plan → the tasks that stopped it (`stuck.rs`).
+    stuck_told: Mutex<HashMap<Id, String>>,
+    /// The last look for plans merged outside Codly, per office.
+    merge_looks: Mutex<HashMap<Id, plans::MergeLook>>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -408,6 +418,9 @@ impl Core {
             models: Mutex::new(HashMap::new()),
             breaker,
             turn_retry_waits: RwLock::new(ingest::TURN_RETRY_WAITS.to_vec()),
+            retries: Mutex::new(retry::Retries::default()),
+            stuck_told: Mutex::new(HashMap::new()),
+            merge_looks: Mutex::new(HashMap::new()),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);

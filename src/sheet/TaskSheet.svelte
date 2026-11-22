@@ -7,7 +7,7 @@
   import type { Task } from '../lib/gen/Task';
   import type { TaskStatus } from '../lib/gen/TaskStatus';
   import type { HeldCheck } from '../lib/gen/HeldCheck';
-  import { acceptTask, moveTask, recheckTask } from '../lib/state/actions';
+  import { acceptTask, cancelTaskTree, moveTask, recheckTask } from '../lib/state/actions';
   import { diffstats, statLine } from '../lib/state/diffstats.svelte';
   import { narrate } from '../lib/state/narration';
   import { store } from '../lib/state/store.svelte';
@@ -15,6 +15,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import { clock, shortSha } from '../lib/util/format';
   import { stoppedByChecks } from '../lib/util/gate';
+  import { keyList, waitingOn } from '../lib/util/plan';
   import { GLOSSARY, idVar, methodProvenance, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
   import { tildify } from '../lib/util/sanitize';
   import ArtifactThumb from '../components/ArtifactThumb.svelte';
@@ -71,15 +72,34 @@
   /** Checks with a risk: Codly runs them only with your OK. */
   let held = $state<HeldCheck[]>([]);
   let confirmAccept = $state(false);
+  /** The plan's tasks that wait for this one: once it is cancelled they can never start. */
+  const behind = $derived(plan ? waitingOn(store.tasks.filter((t) => t.plan_id === plan.id), task.id) : []);
+  let confirmCancel = $state(false);
   // What you were asked belongs to the task as it was: another task, or a new status, closes it.
   const asked = $derived(`${task.id}:${task.status}`);
   $effect(() => {
     void asked;
     held = [];
     confirmAccept = false;
+    confirmCancel = false;
   });
+  /** A board move. Cancel asks first when other tasks wait for this one. */
+  function move(to: TaskStatus) {
+    if (to === 'cancelled' && behind.length) {
+      held = [];
+      confirmAccept = false;
+      confirmCancel = true;
+      return;
+    }
+    void moveTask(task.id, to);
+  }
+  function cancel(withBehind: boolean) {
+    confirmCancel = false;
+    void (withBehind ? cancelTaskTree(task.id) : moveTask(task.id, 'cancelled'));
+  }
   async function recheck(allow: string[] = []) {
     confirmAccept = false;
+    confirmCancel = false;
     held = await recheckTask(task.id, allow);
   }
   function accept() {
@@ -95,10 +115,10 @@
     <p class="status st-{task.status}">{TASK_STATUS_LABEL[task.status]}{task.status_reason ? ` — ${task.status_reason}` : ''}</p>
     <div class="acts">
       {#if marks.length || task.status === 'done'}<button class="btn sm" onclick={() => ui.openDiff({ kind: 'task', id: task.id })}><Icon name="diff" size={13} />View changes</button>{/if}
-      {#each LEGAL[task.status] ?? [] as l (l.to)}<button class="btn sm ghost" onclick={() => moveTask(task.id, l.to)}>{l.label}</button>{/each}
+      {#each LEGAL[task.status] ?? [] as l (l.to)}<button class="btn sm ghost" onclick={() => move(l.to)}>{l.label}</button>{/each}
       {#if stopped}
         {#if task.verify.length}<button class="btn sm ghost" onclick={() => recheck()}>Re-run checks</button>{/if}
-        {#if byChecks}<button class="btn sm ghost" onclick={() => ((held = []), (confirmAccept = true))}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>{/if}
+        {#if byChecks}<button class="btn sm ghost" onclick={() => ((held = []), (confirmCancel = false), (confirmAccept = true))}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>{/if}
       {/if}
       {#if plan}<button class="btn sm ghost" onclick={() => ui.openPlan(plan.id, plan.thread)}><Icon name="plan" size={13} />In the plan</button>{/if}
     </div>
@@ -117,6 +137,15 @@
         <div class="ask-acts">
           <button class="btn sm ghost" onclick={() => (confirmAccept = false)}>Not now</button>
           <button class="btn sm amber" onclick={accept}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>
+        </div>
+      </div>
+    {:else if confirmCancel}
+      <div class="ask" role="alertdialog" aria-label="Cancel the tasks that wait for this one too">
+        <p>{keyList(behind)} {behind.length === 1 ? 'waits' : 'wait'} for this task and cannot start without it. Cancel {behind.length === 1 ? 'it' : 'them'} too?</p>
+        <div class="ask-acts">
+          <button class="btn sm ghost" onclick={() => (confirmCancel = false)}>Not now</button>
+          <button class="btn sm ghost" onclick={() => cancel(false)}>Only this task</button>
+          <button class="btn sm amber" onclick={() => cancel(true)}>Cancel all {behind.length + 1}</button>
         </div>
       </div>
     {/if}

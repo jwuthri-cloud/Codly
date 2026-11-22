@@ -90,21 +90,29 @@ pub struct Load {
     pub parked: Option<String>,
 }
 
-pub fn load(limits: &[UsageWindow], now: i64) -> Load {
-    let mut used: Option<f64> = None;
-    let mut worst: Option<(f64, &UsageWindow)> = None;
-    for w in limits.iter().filter(|w| live(w, now)) {
-        let f = if rejected(w.status.as_deref()) { 1.0 } else { w.used_fraction };
-        used = Some(used.map_or(f, |u: f64| u.max(f)));
-        if f >= PARK_AT && worst.is_none_or(|(g, _)| f > g) {
-            worst = Some((f, w));
+/// How spent a window is: one the provider refuses work on counts as fully spent.
+fn spent(w: &UsageWindow) -> f64 {
+    if rejected(w.status.as_deref()) { 1.0 } else { w.used_fraction }
+}
+
+/// The window that parks an account: the most spent live one at or over `PARK_AT`.
+fn parking(limits: &[UsageWindow], now: i64) -> Option<&UsageWindow> {
+    let mut worst: Option<&UsageWindow> = None;
+    for w in limits.iter().filter(|w| live(w, now) && spent(w) >= PARK_AT) {
+        if worst.is_none_or(|g| spent(w) > spent(g)) {
+            worst = Some(w);
         }
     }
-    let parked = worst.map(|(f, w)| {
+    worst
+}
+
+pub fn load(limits: &[UsageWindow], now: i64) -> Load {
+    let used = limits.iter().filter(|w| live(w, now)).map(spent).reduce(f64::max);
+    let parked = parking(limits, now).map(|w| {
         let what = if rejected(w.status.as_deref()) {
             format!("{} limit reached", window_name(&w.window))
         } else {
-            format!("{:.0}% of {} used", f * 100.0, window_name(&w.window))
+            format!("{:.0}% of {} used", spent(w) * 100.0, window_name(&w.window))
         };
         match w.resets_at {
             Some(r) => format!("{what}, resets in {}", in_time(r - now)),
@@ -114,9 +122,29 @@ pub fn load(limits: &[UsageWindow], now: i64) -> Load {
     Load { used, parked }
 }
 
+/// Why new work stays off an account, in words that do not change while it is parked: "over
+/// 85% of 5h used, resets at 14:05". The scheduler puts this in the reason of every task that
+/// waits, and writes a reason again each time it changes: the percentage and the countdown of
+/// `Load::parked` would do that every minute. `clock` gives a time (ms) in a chrono format.
+pub fn parked_until(limits: &[UsageWindow], now: i64, clock: impl Fn(i64, &str) -> String) -> Option<String> {
+    const DAY_MS: i64 = 24 * 3_600_000;
+    let w = parking(limits, now)?;
+    let name = window_name(&w.window);
+    let what = if rejected(w.status.as_deref()) { format!("{name} limit reached") } else { format!("over {:.0}% of {name} used", PARK_AT * 100.0) };
+    Some(match w.resets_at {
+        // With the day when the reset is a day or more away.
+        Some(r) => format!("{what}, resets at {}", clock(r, if r - now < DAY_MS { "%H:%M" } else { "%a %H:%M" })),
+        None => what,
+    })
+}
+
+/// A time (ms) on your local clock.
+fn local_clock(at: i64, format: &str) -> String {
+    chrono::DateTime::from_timestamp_millis(at).map(|t| t.with_timezone(&chrono::Local).format(format).to_string()).unwrap_or_default()
+}
+
 /// What the scheduler needs to know about one sign-in (unknown usage counts as half used).
 pub fn state_of(a: &AccountInfo, now: i64) -> AccountState {
-    let l = load(&a.limits, now);
     AccountState {
         id: a.id.clone(),
         provider: a.provider,
@@ -124,8 +152,8 @@ pub fn state_of(a: &AccountInfo, now: i64) -> AccountState {
         primary: a.primary,
         enabled: a.enabled,
         logged_in: a.logged_in,
-        parked: l.parked,
-        used: l.used.unwrap_or(UNKNOWN_USED),
+        parked: parked_until(&a.limits, now, local_clock),
+        used: load(&a.limits, now).used.unwrap_or(UNKNOWN_USED),
     }
 }
 
@@ -428,8 +456,30 @@ mod tests {
         assert_eq!((s.used, s.parked.clone(), s.usable()), (UNKNOWN_USED, None, true));
         a.limits = vec![w("five_hour", 0.9, Some(now + H), None, now)];
         let s = state_of(&a, now);
-        assert_eq!((s.used, s.parked.as_deref()), (0.9, Some("90% of 5h used, resets in 1h")));
+        assert_eq!(s.used, 0.9);
+        // The reset is on your local clock, so only its start is the same everywhere.
+        assert_eq!(s.parked, parked_until(&a.limits, now, local_clock));
+        assert!(s.parked.as_deref().is_some_and(|p| p.starts_with("over 85% of 5h used, resets at ")), "{:?}", s.parked);
         assert_eq!(window_name("seven_day_opus"), "7d opus");
+    }
+
+    /// The scheduler writes a waiting task's reason again each time it changes, so the words
+    /// for a parked account hold no number that moves while it is parked.
+    #[test]
+    fn the_schedulers_parked_reason_stays_the_same_while_parked() {
+        let now = 1_000 * H;
+        let clock = |at: i64, format: &str| format!("hour {} as {format}", at / H);
+        let reset = now + 2 * H + 10 * 60_000;
+        let said = parked_until(&[w("five_hour", 0.91, Some(reset), None, now)], now, clock);
+        assert_eq!(said.as_deref(), Some("over 85% of 5h used, resets at hour 1002 as %H:%M"));
+        // A minute later, with more of the window spent: the same words.
+        assert_eq!(parked_until(&[w("five_hour", 0.97, Some(reset), None, now + 60_000)], now + 60_000, clock), said);
+        // A reset a day or more away comes with its day.
+        let refused = [w("seven_day", 0.3, Some(now + 50 * H), Some("rejected"), now)];
+        assert_eq!(parked_until(&refused, now, clock).as_deref(), Some("7d limit reached, resets at hour 1050 as %a %H:%M"));
+        assert_eq!(parked_until(&[w("five_hour", 0.9, None, None, now)], now, clock).as_deref(), Some("over 85% of 5h used"));
+        assert_eq!(parked_until(&[w("five_hour", 0.6, Some(now + H), None, now)], now, clock), None, "not parked");
+        assert_eq!(local_clock(0, "%Y").len(), 4, "a real clock formats the time");
     }
 
     fn account(id: &str, provider: Provider, home: Option<&str>) -> AccountInfo {

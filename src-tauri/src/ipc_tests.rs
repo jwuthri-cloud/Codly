@@ -54,6 +54,8 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::update_settings,
             commands::create_task,
             commands::move_task,
+            commands::cancel_task_tree,
+            commands::finish_plan,
             commands::recheck_task,
             commands::accept_task,
             commands::merge_plan,
@@ -116,6 +118,14 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("only a blocked or failed task"), "{e}");
     let e = invoke(&wv, "accept_task", json!({ "taskId": task["id"] })).unwrap_err();
     assert!(e.to_string().contains("can be merged anyway"), "{e}");
+
+    // Cancel with the tasks that wait for it (a board task has none), and Keep what is merged
+    // (only a running plan can finish early).
+    let other = invoke(&wv, "create_task", json!({ "title": "Another board task", "goal": "" })).unwrap();
+    let tree = invoke(&wv, "cancel_task_tree", json!({ "taskId": other["id"] })).unwrap();
+    assert!(tree.as_array().is_some_and(|t| t.len() == 1 && t[0]["status"] == "cancelled"), "{tree}");
+    let e = invoke(&wv, "finish_plan", json!({ "planId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
 
     let m = invoke(&wv, "add_memory", json!({ "text": "We use pnpm.", "scope": "project", "kind": "decision" })).unwrap();
     assert_eq!(m["kind"], "decision");

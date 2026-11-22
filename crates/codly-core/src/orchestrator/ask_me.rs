@@ -21,7 +21,7 @@ use crate::mcp::ToolCtx;
 use crate::model::*;
 
 /// Prefix of the `status_reason` of a task that waits for an answer.
-const WAITING: &str = "waiting for you:";
+pub(super) const WAITING: &str = "waiting for you:";
 /// Open cards one agent may have at once; an agent that floods the inbox is told to stop.
 const MAX_OPEN_PER_AGENT: usize = 5;
 const MAX_TITLE: usize = 120;

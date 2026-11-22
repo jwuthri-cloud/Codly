@@ -18,7 +18,7 @@ mod logging;
 mod ui_bus;
 mod web;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use codly_core::blockers::{BlockerSeverity, BlockerStatus};
@@ -244,6 +244,8 @@ pub fn run() {
             onboarding_commands::byok_save_key,
             onboarding_commands::byok_clear_key,
             diagnostics::diagnostics,
+            commands::cancel_task_tree,
+            commands::finish_plan,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
@@ -275,12 +277,15 @@ async fn notify_loop<R: tauri::Runtime>(app: tauri::AppHandle<R>, core: Arc<Core
     // Approvals not answered yet. The broker allows most of them by itself right away: only one
     // it leaves to you ("asking you: …") is worth a notification.
     let mut asked: HashMap<String, Approval> = HashMap::new();
+    let mut stops = Stops::default();
     loop {
         let ev = match rx.recv().await {
             Ok(ev) => ev,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(_) => return,
         };
+        // Looked at for every event: it must see a stop end to tell the next one.
+        let stop = stops.notice(&ev.kind);
         let (title, body) = match &ev.kind {
             EventKind::ApprovalRequested { approval } => {
                 asked.insert(approval.id.clone(), approval.clone());
@@ -331,7 +336,11 @@ async fn notify_loop<R: tauri::Runtime>(app: tauri::AppHandle<R>, core: Arc<Core
             {
                 ("An agent needs a look".to_string(), truncate(summary, 160))
             }
-            _ => continue,
+            // Codly blocked a task, or a plan failed: that work waits for you.
+            _ => match stop {
+                Some(notice) => notice,
+                None => continue,
+            },
         };
         let focused = app.get_webview_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
         if !focused {
@@ -346,4 +355,93 @@ fn truncate(s: &str, n: usize) -> String {
         out.push('…');
     }
     out
+}
+
+/// Work that stopped and waits for you: a task Codly blocked, a plan that failed. Each stop
+/// is told once, however many events show it, and again only after it ended.
+#[derive(Default)]
+struct Stops {
+    tasks: HashSet<String>,
+    plans: HashSet<String>,
+}
+
+impl Stops {
+    /// The notification (title, body) for this event, if it is the first to show a stop.
+    fn notice(&mut self, kind: &EventKind) -> Option<(String, String)> {
+        match kind {
+            EventKind::TaskChanged { task } => {
+                let reason = task.status_reason.as_deref().unwrap_or_default();
+                // Not a task you stopped yourself, and not one that asks you a question (its
+                // card has a notification of its own).
+                let yours = ["stopped by", "review stopped by", "waiting for you:"].iter().any(|p| reason.starts_with(p));
+                if task.status != TaskStatus::Blocked || yours {
+                    self.tasks.remove(&task.id);
+                    return None;
+                }
+                let why = truncate(reason.strip_prefix("blocked: ").unwrap_or(reason), 100);
+                self.tasks.insert(task.id.clone()).then(|| ("Task blocked".to_string(), format!("{} — {}: {why}", task.key, truncate(&task.title, 60))))
+            }
+            EventKind::PlanChanged { plan } => {
+                if plan.status != PlanStatus::Failed {
+                    self.plans.remove(&plan.id);
+                    return None;
+                }
+                self.plans.insert(plan.id.clone()).then(|| ("Plan failed".to_string(), truncate(&plan.summary, 120)))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod stop_notice_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn task(status: &str, reason: &str) -> EventKind {
+        let task = serde_json::from_value(json!({
+            "id": "t", "plan_id": null, "key": "t1", "title": "Add sign-in", "goal": "", "acceptance": [], "write_scope": [],
+            "verify": [], "depends_on": [], "status": status, "assignee": null, "agent_hint": null, "branch": null, "worktree": null,
+            "attempt": 1, "status_reason": reason, "summary": null, "created_at": 0, "updated_at": 0,
+        }))
+        .unwrap();
+        EventKind::TaskChanged { task }
+    }
+
+    fn plan(status: &str) -> EventKind {
+        let plan = serde_json::from_value(json!({
+            "id": "p", "workspace_id": "ws", "request": "", "summary": "Sign-in page", "assumptions": [], "open_questions": [],
+            "status": status, "base_commit": null, "integration_branch": null, "integration_worktree": null, "created_at": 0, "updated_at": 0,
+        }))
+        .unwrap();
+        EventKind::PlanChanged { plan }
+    }
+
+    #[test]
+    fn a_task_codly_blocked_is_told_once_and_again_after_a_retry() {
+        let mut stops = Stops::default();
+        let blocked = task("blocked", "blocked: could not start the worker: Claude Code is not signed in");
+        let notice = stops.notice(&blocked).expect("a blocked task is worth a notification");
+        assert_eq!(notice, ("Task blocked".to_string(), "t1 — Add sign-in: could not start the worker: Claude Code is not signed in".to_string()));
+        assert_eq!(stops.notice(&blocked), None, "another change of the same blocked task says nothing");
+        assert_eq!(stops.notice(&task("ready", "")), None);
+        assert!(stops.notice(&blocked).is_some(), "blocked again after your Retry: told again");
+    }
+
+    #[test]
+    fn a_task_you_stopped_or_that_asks_you_has_no_blocked_notice() {
+        let mut stops = Stops::default();
+        for reason in ["stopped by you; Retry to resume", "review stopped by you; Retry to re-check", "waiting for you: Which provider?"] {
+            assert_eq!(stops.notice(&task("blocked", reason)), None, "{reason}");
+        }
+        assert_eq!(stops.notice(&task("failed", "failed: checks")), None, "a failed task has its own notification");
+    }
+
+    #[test]
+    fn a_failed_plan_is_told_once() {
+        let mut stops = Stops::default();
+        assert_eq!(stops.notice(&plan("running")), None);
+        assert_eq!(stops.notice(&plan("failed")), Some(("Plan failed".to_string(), "Sign-in page".to_string())));
+        assert_eq!(stops.notice(&plan("failed")), None);
+    }
 }

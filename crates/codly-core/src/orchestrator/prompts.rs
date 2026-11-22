@@ -273,6 +273,15 @@ pub fn continuation(t: &Task, why: Option<&str>) -> String {
     )
 }
 
+/// Added to the brief of a new session that takes over a task whose last session ran out of
+/// context: the work so far is in the worktree, not in this conversation.
+pub fn new_session_note() -> &'static str {
+    "[Codly] Your earlier session on this task ran out of context, so this is a new session: it remembers nothing of the \
+     work done so far. That work is in your worktree. Run `git status` and `git diff` first to see where you are, then \
+     continue toward the acceptance criteria. Do not redo work that is already there, read only the files you need, and \
+     do not commit. Call codly_submit_report when done."
+}
+
 /// A turn of the worker ended on an error or at its turn limit; the same session goes on after
 /// a wait. `error` is what the CLI said, quoted as data.
 pub fn turn_failed(t: &Task, error: &str) -> String {

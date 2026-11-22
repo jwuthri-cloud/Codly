@@ -146,7 +146,11 @@ emitted as an event, so "Why did Codex get this task?" always has an answer.
 is not finished work: Codly asks the same session to continue (after 15 s, then 60 s), and a third
 failure in a row blocks the task with the error. If you resume the worker, or a turn that answers
 a message completes, before that wait is over, the worker is asked to continue then: neither is
-gated. A crash mid-turn restarts the worker. A worker the circuit breaker constrains is paused
+gated. A worker that crashes mid-turn, or that does not start, is started again after a wait (5 s,
+then 30 s); its third failure in a row blocks the task, and so does, at once, a cause only you
+can fix (a CLI that is not installed or not signed in). A turn the worker completes ends the row,
+time does not. A session that ran out of context starts
+again as a new session. A worker the circuit breaker constrains is paused
 until you resume it (one you hold already reads why on your Resume); a breaker stop says so on the
 task.
 
@@ -164,6 +168,12 @@ the interrupt says what is next: after the watchdog's, the work goes back in lin
 yours, the circuit breaker's or a tool block's, a worker's task waits for you, Blocked, and
 nothing restarts it. A write to a CLI that stopped reading its stdin gives up after 10 s and ends
 that process.
+
+**A plan that cannot go on says so.** When nothing of a running plan runs or can start (a task is
+blocked or failed and the rest waits for it), Codly says so once in the plan's thread. You can
+retry the task, cancel it together with the tasks that wait for it, or keep what is merged: the
+plan then finishes with its merged tasks. After a restart of Codly, a task that was in its checks,
+review or merge is checked again with no worker turn.
 
 **Parallel requests.** Each request is its own thread (`lead`, `lead:<id>`) with its own Lead
 session ("Lead", "Lead 2"…, at most 3 live; idle ones pause and resume by session id). Plans,
@@ -295,6 +305,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       lead.rs prompts.rs names.rs         Leads and 1:1 chats, every word said to an agent, names
                       planner.rs plans.rs scope.rs        plan validation, plans and tasks, write scopes
                       scheduler.rs accounts.rs            routing; sign-ins, usage windows, account choice
+                      retry.rs stuck.rs                   worker retries with a wait; plans that cannot go on by themselves
                       runs.rs ingest.rs                   agent runs; the one event pipeline
                       gate.rs                             commit → verify → scope → review → merge queue
                       approvals.rs controls.rs ask_me.rs  approval policy, live agent controls, "ask me" cards

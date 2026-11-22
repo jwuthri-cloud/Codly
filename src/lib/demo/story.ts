@@ -20,6 +20,7 @@ import type { Workspace } from '../gen/Workspace';
 import { bytesOf, contrastCsv, contrastSvg, ILLUSTRATION_PROMPT, illustrationPng, SETTINGS_API_MD, TOGGLE_PREVIEW_HTML } from './artifacts';
 import { diffOf, INDEX, INDEX_AFTER, NEXT_BUMP, TASK_FILES, type RepoFile } from './repo';
 import { Actor, Cancelled, REPO, Sim, WORKTREES, sha, uid } from './sim';
+import { waitingOn } from '../util/plan';
 import { memberTitle } from '../util/team';
 
 export const REQUEST =
@@ -1082,6 +1083,35 @@ export class Story {
     sim.decision('move', 'human', `You moved ${t.key} to ${status}`, { task: t.key, from, to: status }, { task: id });
     if (status === 'ready' && !unmet.length) void this.autoStart(next);
     return next;
+  }
+
+  /** Like the core: the task and every task that waits for it are cancelled; the task comes first. */
+  cancelTaskTree(id: string): Task[] {
+    const root = this.sim.tasks.get(id);
+    if (!root) throw new Error('Unknown task');
+    const plan = root.plan_id ? [...this.sim.tasks.values()].filter((t) => t.plan_id === root.plan_id) : [];
+    const behind = waitingOn(plan, id);
+    return [root.status === 'cancelled' ? root : this.moveTask(id, 'cancelled'), ...behind.map((t) => this.moveTask(t.id, 'cancelled'))];
+  }
+
+  /** Keep what is merged: the plan's unfinished tasks are cancelled and it is done with the merged
+   *  ones (cancelled, with nothing merged). */
+  finishPlan(planId: string): Plan {
+    const sim = this.sim;
+    const plan = sim.plans.get(planId);
+    if (!plan) throw new Error('Unknown plan');
+    if (plan.status !== 'running') throw new Error(`Only a running plan can finish with what is merged; this one is ${plan.status}.`);
+    let merged = 0;
+    for (const t of [...sim.tasks.values()].filter((t) => t.plan_id === planId && t.status !== 'cancelled')) {
+      if (t.status === 'done') {
+        merged += 1;
+        continue;
+      }
+      if (t.assignee && this.running.has(t.assignee)) sim.cancelled.add(t.assignee);
+      sim.patchTask(t.id, { status: 'cancelled', status_reason: 'cancelled: you kept what is merged' });
+    }
+    sim.decision('schedule', 'human', 'You kept what is merged; the other tasks are cancelled', { plan_id: planId });
+    return sim.patchPlan(planId, { status: merged ? 'done' : 'cancelled' });
   }
 
   /** Re-run checks, from a stopped task's card. No demo check has a risk, so none waits for your OK. */

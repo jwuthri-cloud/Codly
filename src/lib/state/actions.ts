@@ -183,6 +183,11 @@ export async function cancelPlan(planId: string) {
   await attempt('cancel the plan', () => api.cancelPlan(planId));
 }
 
+/** Keep what is merged: the plan's unfinished tasks are cancelled and it finishes with the merged ones. */
+export async function finishPlan(planId: string) {
+  await attempt('finish the plan with what is merged', () => api.finishPlan(planId));
+}
+
 /** Close a request's tab: its Lead stops and its unfinished plans are cancelled (branches and
  *  history stay). You land on the tab beside it. */
 export async function closeRequest(thread: string): Promise<boolean> {
@@ -289,6 +294,13 @@ export async function moveTask(taskId: string, status: TaskStatus) {
   const ws = store.workspace?.id;
   const t = await attempt(`move the task to ${TASK_STATUS_LABEL[status]}`, () => api.moveTask(taskId, status));
   if (t && store.isOpen(ws)) store.upsertTask(t);
+}
+
+/** Cancel a task together with the tasks that wait for it. */
+export async function cancelTaskTree(taskId: string) {
+  const ws = store.workspace?.id;
+  const tasks = await attempt('cancel the tasks', () => api.cancelTaskTree(taskId));
+  if (tasks && store.isOpen(ws)) for (const t of tasks) store.upsertTask(t);
 }
 
 /** Re-run a stopped task's checks. Answers the commands that need your OK first (none = the checks are running). */

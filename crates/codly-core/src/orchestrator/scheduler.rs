@@ -33,6 +33,9 @@ pub struct SchedInput<'a> {
     /// Who works on an active task in your other offices: worker slots and account caps
     /// count every office.
     pub elsewhere: &'a [Agent],
+    /// Ready tasks whose worker failed a moment ago: task → the time (ms) before which it
+    /// does not start again (`retry.rs`).
+    pub not_before: &'a HashMap<Id, i64>,
 }
 
 /// Park an account once this fraction of one of its usage windows is spent (C17).
@@ -258,6 +261,11 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
     let mut taken_names: Vec<String> = input.agents.iter().map(|a| a.name.clone()).collect();
     let mut used_colors: Vec<i64> = input.agents.iter().map(|a| a.color).collect();
     for t in ready {
+        // Its worker starts again after a wait: until then the task keeps the reason that says
+        // so (no action) and takes no slot.
+        if input.not_before.get(&t.id).is_some_and(|at| *at > input.now) {
+            continue;
+        }
         let wait = |reason: String| Action::Wait {
             task_id: t.id.clone(),
             detail: json!({ "task": t.key, "plan_id": t.plan_id, "reason": reason }),
@@ -564,6 +572,86 @@ fn idle_staff<'a>(ctx: &'a RouteCtx, provider: Provider, account: &str) -> Optio
             let rules = ctx.settings.game_rules;
             (a.role != Role::Worker, other_account, super::kept_home(rules, a, ctx.now).is_some(), super::tired(rules, a, ctx.now), a.created_at, a.id.clone())
         })
+}
+
+/// A running plan that cannot go on by itself: nothing of it runs, waits for a worker or can
+/// start, and work is left. Only you can move it on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stuck {
+    pub plan_id: Id,
+    /// The tasks that stopped it: blocked, failed, or cancelled while others wait for them.
+    pub stopped: Vec<Id>,
+    /// The tasks that cannot start because of them.
+    pub waiting: Vec<Id>,
+    /// Tasks merged into the plan's integration branch.
+    pub merged: usize,
+}
+
+/// The running plans that are stuck after this pass (`actions` = what `schedule` returned for
+/// the same input). A plan whose stopped tasks all wait for your answer is left out: each of
+/// those has its own Ask me card.
+pub fn stuck_plans(input: &SchedInput, actions: &[Action]) -> Vec<Stuck> {
+    let moving: HashSet<&str> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::MakeReady { task_id } | Action::Start { task_id, .. } => Some(task_id.as_str()),
+            Action::Wait { .. } => None,
+        })
+        .collect();
+    let worker = |t: &Task| t.assignee.as_deref().and_then(|id| input.agents.iter().find(|a| a.id == id));
+    let mut out = vec![];
+    for p in input.plans.iter().filter(|p| p.status == PlanStatus::Running) {
+        let tasks: Vec<&Task> = input.tasks.iter().filter(|t| t.plan_id.as_deref() == Some(p.id.as_str())).collect();
+        let goes_on = |t: &&Task| {
+            t.status == TaskStatus::Ready || is_active(t.status) || held(*t, worker(*t), input.busy) || moving.contains(t.id.as_str())
+        };
+        if tasks.iter().any(goes_on) {
+            continue;
+        }
+        let waiting: Vec<&Task> = tasks.iter().copied().filter(|t| t.status == TaskStatus::Pending).collect();
+        let stopped: Vec<&Task> = tasks
+            .iter()
+            .copied()
+            .filter(|t| match t.status {
+                TaskStatus::Blocked | TaskStatus::Failed => true,
+                TaskStatus::Cancelled => waiting.iter().any(|w| w.depends_on.contains(&t.id)),
+                _ => false,
+            })
+            .collect();
+        if stopped.is_empty() && waiting.is_empty() {
+            continue; // every task is done or cancelled: the plan finishes by itself
+        }
+        let asks_you =
+            |t: &&Task| t.status == TaskStatus::Blocked && t.status_reason.as_deref().is_some_and(|r| r.starts_with(super::ask_me::WAITING));
+        if !stopped.is_empty() && stopped.iter().all(asks_you) {
+            continue;
+        }
+        out.push(Stuck {
+            plan_id: p.id.clone(),
+            stopped: stopped.iter().map(|t| t.id.clone()).collect(),
+            waiting: waiting.iter().map(|t| t.id.clone()).collect(),
+            merged: tasks.iter().filter(|t| t.status == TaskStatus::Done).count(),
+        });
+    }
+    out
+}
+
+/// Every task that waits for `id`, directly or through other tasks, in the order given.
+pub fn dependents<'a>(tasks: &'a [Task], id: &str) -> Vec<&'a Task> {
+    let mut found: HashSet<&str> = HashSet::from([id]);
+    // Plans are small: look again until a pass finds nothing new.
+    loop {
+        let before = found.len();
+        for t in tasks {
+            if t.depends_on.iter().any(|d| found.contains(d.as_str())) {
+                found.insert(t.id.as_str());
+            }
+        }
+        if found.len() == before {
+            break;
+        }
+    }
+    tasks.iter().filter(|t| t.id != id && found.contains(t.id.as_str())).collect()
 }
 
 /// Longest dependent chain (in tasks) starting at each task.
