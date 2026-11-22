@@ -3,23 +3,30 @@
   running in parallel. Title = your first words; the dot says where its plan is (planning ·
   waiting for you · running · done), amber when it needs you. ⌘[ / ⌘] switch, ⌘N starts one.
   × closes a request (its Lead stops); a running plan asks first, since closing cancels it.
+  A close can be taken back: the tab leaves at once and a toast offers Undo for a few seconds
+  (lib/state/closing.ts). The clock at the end opens the requests you closed, to read again.
 -->
 <script lang="ts">
   import { closeRequest } from '../lib/state/actions';
-  import { requests } from '../lib/state/requests.svelte';
-  import { ui } from '../lib/state/ui.svelte';
+  import { closeWithUndo } from '../lib/state/closing';
+  import { requests, type Request } from '../lib/state/requests.svelte';
+  import { CLOSED_LIST, isClosedThread, ui } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
 
   const list = $derived(requests.list);
   let bar: HTMLDivElement | undefined = $state();
-  /** The running request waiting for "Close" / "Keep", and the one being closed. */
+  /** You are reading the closed requests: no tab is the open one. */
+  const reading = $derived(isClosedThread(ui.thread));
+  /** The running request waiting for "Close" / "Keep", and the empty one being closed. */
   let asking = $state<string | null>(null);
   let closing = $state<string | null>(null);
 
-  async function close(thread: string) {
+  async function close(r: Request) {
     asking = null;
-    closing = thread;
-    await closeRequest(thread);
+    if (r.phase !== 'new') return closeWithUndo(r.thread, r.title);
+    // Nothing was asked in it: there is nothing to bring back.
+    closing = r.thread;
+    await closeRequest(r.thread);
     closing = null;
   }
   $effect(() => {
@@ -31,11 +38,11 @@
 <nav class="tabs" aria-label="Requests">
   <div class="list" role="tablist" bind:this={bar}>
     {#each list as r (r.thread)}
-      {@const on = ui.request === r.thread}
+      {@const on = !reading && ui.request === r.thread}
       {#if asking === r.thread}
         <div class="ask" role="group" aria-label="Close {r.title}">
           <span>Cancel its running plan and close?</span>
-          <button class="btn sm danger" onclick={() => close(r.thread)}>Close</button>
+          <button class="btn sm danger" onclick={() => close(r)}>Close</button>
           <button class="btn sm ghost" onclick={() => (asking = null)}>Keep</button>
         </div>
       {:else}
@@ -56,9 +63,9 @@
           <button
             class="x"
             aria-label="Close {r.title}"
-            data-tip={r.phase === 'running' ? 'Close — cancels its running plan' : 'Close — its Lead stops'}
+            data-tip={r.phase === 'running' ? 'Close — cancels its running plan' : r.phase === 'new' ? 'Close' : 'Close — its Lead stops. You can undo for a few seconds'}
             disabled={closing === r.thread}
-            onclick={() => (r.phase === 'running' ? (asking = r.thread) : close(r.thread))}
+            onclick={() => (r.phase === 'running' ? (asking = r.thread) : close(r))}
           >
             <Icon name="x" size={12} stroke={2} />
           </button>
@@ -68,6 +75,9 @@
   </div>
   <button class="new" onclick={() => ui.newRequest()} aria-label="New request" data-tip="New request — its own Lead plans it while the others keep going" data-tip-kbd="⌘N">
     <Icon name="plus" size={14} stroke={1.8} />
+  </button>
+  <button class="new" class:on={reading} onclick={() => ui.openThread(CLOSED_LIST)} aria-label="Closed requests" aria-pressed={reading} data-tip="Closed requests — read them again">
+    <Icon name="clock" size={14} stroke={1.6} />
   </button>
 </nav>
 
@@ -97,6 +107,7 @@
   .n { min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--amber); color: #241504; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; }
   .new { display: grid; place-items: center; width: 30px; height: 30px; border-radius: var(--r-full); color: var(--ink-2); flex-shrink: 0; }
   .new:hover { background: var(--surface-2); color: var(--ink-1); }
+  .new.on { background: var(--surface-3); color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line-2); }
   @keyframes breathe { 50% { box-shadow: 0 0 0 5px transparent; } }
   @media (prefers-reduced-motion: reduce) { .p-planning .dot { animation: none; } }
 </style>

@@ -120,6 +120,18 @@ pub async fn close_thread(state: State<'_, AppState>, thread: String) -> R<()> {
     state.core().await?.close_thread(&thread).await.map_err(err)
 }
 
+/// The requests closed in the open repo, newest first.
+#[tauri::command]
+pub async fn closed_requests(state: State<'_, AppState>) -> R<Vec<ClosedRequest>> {
+    state.core().await?.closed_requests().await.map_err(err)
+}
+
+/// One closed request's messages, to read again (`thread` comes from `closed_requests`).
+#[tauri::command]
+pub async fn closed_request(state: State<'_, AppState>, thread: String) -> R<ClosedTranscript> {
+    state.core().await?.closed_request(&thread).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn resolve_approval(state: State<'_, AppState>, approval_id: String, decision: ApprovalDecision) -> R<()> {
     state.core().await?.resolve_approval(&approval_id, decision).await.map_err(err)

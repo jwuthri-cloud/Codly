@@ -25,6 +25,8 @@ import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
 import type { CliInfo } from './gen/CliInfo';
+import type { ClosedRequest } from './gen/ClosedRequest';
+import type { ClosedTranscript } from './gen/ClosedTranscript';
 import type { InstallRun } from './gen/InstallRun';
 import type { InstallRung } from './gen/InstallRung';
 import type { ControlState } from './gen/ControlState';
@@ -218,6 +220,10 @@ export const api = {
   cancelPlan: (planId: string) => call<void>('cancel_plan', { planId }),
   /** Close a request: its Lead stops, its unfinished plans are cancelled, it leaves the tabs. */
   closeThread: (thread: string) => call<void>('close_thread', { thread }),
+  /** The requests you closed in the open repo, newest first. */
+  closedRequests: () => call<ClosedRequest[]>('closed_requests'),
+  /** One closed request's messages, to read again (`thread` from `closedRequests`). */
+  closedRequest: (thread: string) => call<ClosedTranscript>('closed_request', { thread }),
   resolveApproval: (approvalId: string, decision: ApprovalDecision) =>
     call<void>('resolve_approval', { approvalId, decision }),
   /** Circuit breaker (Settings → Autonomy & Budgets): limits, live levels, and a fresh start. */

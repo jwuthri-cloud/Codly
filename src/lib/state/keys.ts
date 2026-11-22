@@ -1,4 +1,4 @@
-// Global keyboard map. ⌘K palette · ⌘1 full office · ⌘2 full work · ⌘. focus · ⌘, settings ·
+// Global keyboard map. ⌘K palette · ⌘F find in the conversation · ⌘1 full office · ⌘2 full work · ⌘. focus · ⌘, settings ·
 // ⌘N new request · ⌘[ / ⌘] previous / next request · ⇧⌘N new task · ⌘O open repo · ⌘↵ the one
 // primary action (approve / run plan) · ⌥⌘↵ allow for the session · ⌘⌫ deny · ⇧⌘⌫ deny with a
 // note · G-sequences to rooms · J/K lists · Esc (close, deselect, then stop the running turn) · ?.
@@ -8,7 +8,7 @@ import { openWorkspace, resolveApproval, runPlan, stopThread } from './actions';
 import { escStep } from './esc';
 import { requests } from './requests.svelte';
 import { store } from './store.svelte';
-import { ROOMS, isRequestThread, ui, type Room } from './ui.svelte';
+import { ROOMS, isClosedThread, isRequestThread, ui, type Room } from './ui.svelte';
 
 export type ListNav = { next: () => void; prev: () => void; open?: () => void };
 let navStack: ListNav[] = [];
@@ -132,6 +132,12 @@ export function installKeys(): () => void {
         else ui.openPalette();
         return;
       }
+      // Find in the conversation on screen (also while typing: the composer is where you are).
+      if (k === 'f' && !overlay && workspaceOpen() && ui.room === 'home' && ui.mode !== 'office' && ui.mode !== 'map') {
+        e.preventDefault();
+        ui.openFind();
+        return;
+      }
       if (k === '1' || k === '2' || k === '3') {
         e.preventDefault();
         ui.toggleMode(k === '1' ? 'office' : k === '2' ? 'work' : 'map');
@@ -173,6 +179,10 @@ export function installKeys(): () => void {
       if (step === 'close-artifact') ui.artifactOpen = null;
       else if (step === 'deselect') ui.selection = null;
       else if (step === 'leave-office') ui.mode = 'blend';
+      // Before a turn is stopped: the find bar closes, and a closed request you are reading
+      // goes back to your requests.
+      else if (step === 'stop' && ui.findOpen) ui.findOpen = false;
+      else if (step === 'stop' && isClosedThread(ui.thread)) ui.openRequest(ui.request);
       else if (step === 'stop') stopThread(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
       return;
     }
@@ -221,6 +231,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     group: 'Everywhere',
     items: [
       ['⌘K', 'Search and commands'],
+      ['⌘F', 'Find in the conversation (↵ next · ⇧↵ previous)'],
       ['⌘1', 'Full office'],
       ['⌘2', 'Full work (hide the office)'],
       ['⌘3', 'Neighbourhood (all your lots)'],
@@ -247,8 +258,9 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['↑', 'Bring back what you sent (empty line)'],
       ['⇧⇥', 'Next mode: Ask · Plan · Auto · Direct'],
       ['⌫', 'Back to the request (empty line, 1:1)'],
-      ['@', 'Talk to one agent'],
+      ['@', 'Talk to one agent · mention a file'],
       ['#', 'Mention a task'],
+      ['/', 'Actions: new request, stop, mode, model…'],
       ['⌘↵', 'Approve once · run the plan'],
       ['⌥⌘↵', 'Allow for this session'],
       ['⌘⌫', 'Deny'],

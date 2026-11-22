@@ -65,6 +65,8 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::list_triples,
             commands::search_code,
             commands::get_events,
+            commands::closed_requests,
+            commands::closed_request,
             commands::recent_workspaces,
             commands::list_repos,
             commands::exact_search,
@@ -128,6 +130,12 @@ fn commands_round_trip_with_frontend_arg_names() {
     // One conversation's page (the transcript's "Load earlier").
     let page = invoke(&wv, "get_events", json!({ "agentId": null, "thread": "lead", "before": null, "limit": 50 })).unwrap();
     assert!(page.is_array(), "{page}");
+    // Closed requests: none yet; only an archive thread is read this way.
+    assert_eq!(invoke(&wv, "closed_requests", json!({})).unwrap(), json!([]));
+    let none = invoke(&wv, "closed_request", json!({ "thread": "closed:lead:1" })).unwrap();
+    assert_eq!(none, json!({ "messages": [], "total": 0, "authors": {} }));
+    let e = invoke(&wv, "closed_request", json!({ "thread": "lead" })).unwrap_err();
+    assert!(e.to_string().contains("not a closed request"), "{e}");
     invoke(&wv, "recent_workspaces", json!({})).unwrap();
     assert!(invoke(&wv, "list_repos", json!({})).unwrap().is_array());
 

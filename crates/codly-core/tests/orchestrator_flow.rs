@@ -2308,6 +2308,17 @@ async fn closing_a_request_cancels_its_plan_and_frees_the_thread() {
     assert!(s.agents.iter().all(|a| a.id != old.id), "its Lead is archived");
     assert!(log.lock().unwrap().shutdowns.contains(&old.id), "and stopped");
 
+    // It is listed as closed, and can be read again with its Lead's name.
+    let closed = core.closed_requests().await.unwrap();
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    assert_eq!((closed[0].thread.as_str(), closed[0].title.as_str()), (p.thread.as_str(), "Add a bye file"));
+    let read = core.closed_request(&closed[0].thread).await.unwrap();
+    assert_eq!(read.total, closed[0].messages);
+    assert_eq!(read.messages.first().map(|m| (m.author.as_str(), m.text.as_str())), Some(("user", "Add a bye file")));
+    assert!(read.messages.iter().any(|m| m.author == old.id && m.text == "Planned bye.txt."), "{:?}", read.messages);
+    assert_eq!(read.authors.get(&old.id), Some(&old.name));
+    assert!(core.closed_request("lead:b").await.is_err(), "an open request is not read this way");
+
     // The thread id works again, with a fresh Lead in a new session.
     core.send_chat("lead:b", "Add a bye file").await.unwrap();
     let s = wait_chat(&core, "lead:b", "Planned bye.txt.").await;

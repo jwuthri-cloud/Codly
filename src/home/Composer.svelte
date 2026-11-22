@@ -2,9 +2,12 @@
   The composer: one line that grows. ↵ sends, ⇧↵ breaks the line. It never locks: the message
   shows at once, and if the agent is mid-turn it queues (the conversation says so). Start with
   `@agent` to talk to one agent 1:1 (the thread switches and shows as a chip); `@` mid-sentence
-  mentions, `#` refers to a task. Esc on an empty line stops the running turn; ↑ on an empty line
-  brings back what you sent. A draft (text and files) is kept when the composer leaves the screen,
-  and Edit on an earlier message does not replace it.
+  mentions an agent or a file of the repo (its path, which the agent reads), `#` refers to a task.
+  `/` alone on the line lists Codly's own actions (new request, stop, mode, model, clear…) and ↵
+  runs one; it is not sent. A CLI's own slash commands are not offered: Codly cannot run them.
+  Esc on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
+  draft (text and files) is kept when the composer leaves the screen, and Edit on an earlier
+  message does not replace it.
 -->
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
@@ -13,9 +16,10 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { busy } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
-  import { isRequestThread, ui } from '../lib/state/ui.svelte';
+  import { CLOSED_LIST, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { fuzzy } from '../lib/util/fuzzy';
   import { idVar, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
+  import { basename, dirname } from '../lib/util/sanitize';
   import Icon from '../components/Icon.svelte';
   import DictationButton from './DictationButton.svelte';
   import VoiceButton from './VoiceButton.svelte';
@@ -25,6 +29,8 @@
   import AgentControls from './AgentControls.svelte';
   import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from './drafts';
   import { recall, type Recalled } from './recall';
+  import { fileMention, filterSlash, rankFiles, triggerAt, type SlashCommand, type Trigger } from './composerMenu';
+  import { repoFiles } from './repoFiles';
 
   interface Props {
     thread: string;
@@ -119,48 +125,111 @@
     isBusy ? `${agent?.name ?? 'The agent'} is mid-turn — your message queues and runs next`
     : oneToOne ? `Message ${agent?.name ?? 'the agent'} directly…`
     : fresh && thread !== 'lead' ? 'Describe the new request — its own Lead plans it in parallel…'
-    : 'Ask the Lead to build, fix or explain something…',
+    : 'Ask the Lead to build, fix or explain — @ for a file, / for actions',
   );
 
-  // ── mentions ──
-  type Opt = { id: string; kind: 'agent' | 'task'; insert: string; label: string; sub: string; agentId?: string };
-  let mention = $state<{ trigger: '@' | '#'; start: number; query: string; atStart: boolean } | null>(null);
+  // ── the menu: @ an agent or a file, # a task, / one of Codly's actions ──
+  type Opt = { id: string; label: string; sub: string } & (
+    | { kind: 'agent'; agentId: string; insert: string }
+    | { kind: 'task' | 'file'; insert: string }
+    | { kind: 'command'; icon: string; hint: string; run: () => void }
+  );
+  const SHOWN = 6;
+  let mention = $state<Trigger | null>(null);
   let mi = $state(0);
-  const options = $derived.by((): Opt[] => {
-    if (!mention) return [];
-    const pool: Opt[] =
-      mention.trigger === '@'
-        ? store.agents.filter((a) => a.status !== 'offline').map((a) => ({ id: a.id, kind: 'agent' as const, insert: `@${a.name} `, label: a.name, sub: a.role === 'lead' ? 'Lead' : PROVIDER_LABEL[a.provider], agentId: a.id }))
-        : store.tasks.map((t) => ({ id: t.id, kind: 'task' as const, insert: `#${t.key} `, label: `${t.key} · ${t.title}`, sub: TASK_STATUS_LABEL[t.status] }));
-    return pool
-      .map((o) => ({ o, m: fuzzy(mention!.query, o.label) }))
-      .filter((x) => x.m)
-      .sort((a, b) => b.m!.score - a.m!.score)
-      .slice(0, 6)
-      .map((x) => x.o);
+
+  /** The repo's indexed files, asked for when `@` opens the menu. */
+  let filePaths = $state.raw<string[]>([]);
+  let filesFailed = $state(false);
+  function loadFiles() {
+    const office = store.workspace?.id;
+    if (!office) return;
+    repoFiles(office).then(
+      (paths) => {
+        if (store.workspace?.id !== office) return;
+        filePaths = paths;
+        filesFailed = false;
+      },
+      () => (filesFailed = true),
+    );
+  }
+
+  let lead: LeadControls | undefined = $state();
+  const plan = $derived.by(() => {
+    void store.rev;
+    return oneToOne ? null : store.planOf(thread);
   });
+  function clearDraft() {
+    for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
+    files = [];
+  }
+  /** What `/` offers: actions Codly has, for the conversation you are in. */
+  const commands = $derived.by((): SlashCommand[] => {
+    const list: SlashCommand[] = [{ name: 'new', label: 'New request', hint: 'Its own Lead, in parallel', icon: 'plus', run: () => ui.newRequest() }];
+    if (isBusy) list.push({ name: 'stop', label: `Stop ${agent?.name ?? 'the agent'}`, hint: 'Ends the running turn', icon: 'stop', run: () => void stopThread(thread) });
+    if (!oneToOne) {
+      for (const m of MODES) list.push({ name: m.id, label: `${m.label} mode`, hint: m.hint, icon: m.icon, run: () => void setRequestPrefs(thread, { mode: m.id }) });
+      list.push({ name: 'model', label: 'Model', hint: 'The Lead’s CLI, model and thinking', icon: 'sparkle', run: () => lead?.showModels() });
+      const p = plan;
+      if (p?.integration_branch) list.push({ name: 'diff', label: 'View the changes', hint: 'What this request’s plan changed', icon: 'diff', run: () => ui.openDiff({ kind: 'plan', id: p.id }) });
+    } else if (agent?.role === 'solo') {
+      const a = agent;
+      list.push({ name: 'model', label: 'Model', hint: `${a.name}’s model`, icon: 'sparkle', run: () => (ui.modelDialog = { provider: a.provider, agentId: a.id }) });
+    }
+    list.push(
+      { name: 'clear', label: 'Clear the draft', hint: 'The text and the attached files', icon: 'trash', run: clearDraft },
+      { name: 'closed', label: 'Closed requests', hint: 'Read them again', icon: 'clock', run: () => ui.openThread(CLOSED_LIST) },
+      { name: 'settings', label: 'Settings', hint: '⌘,', icon: 'settings', run: () => (ui.settingsOpen = true) },
+      { name: 'shortcuts', label: 'Keyboard shortcuts', hint: '?', icon: 'keyboard', run: () => (ui.shortcutsOpen = true) },
+    );
+    return list;
+  });
+
+  const options = $derived.by((): Opt[] => {
+    const m = mention;
+    if (!m) return [];
+    if (m.trigger === '/') return filterSlash(commands, m.query).map((c): Opt => ({ id: `/${c.name}`, kind: 'command', label: c.label, sub: `/${c.name}`, icon: c.icon, hint: c.hint, run: c.run }));
+    const best = (pool: Opt[]): Opt[] =>
+      pool
+        .map((o) => ({ o, m: fuzzy(m.query, o.label) }))
+        .filter((x) => x.m)
+        .sort((a, b) => b.m!.score - a.m!.score)
+        .slice(0, SHOWN)
+        .map((x) => x.o);
+    if (m.trigger === '#') return best(store.tasks.map((t): Opt => ({ id: t.id, kind: 'task', insert: `#${t.key} `, label: `${t.key} · ${t.title}`, sub: TASK_STATUS_LABEL[t.status] })));
+    return [
+      ...best(store.agents.filter((a) => a.status !== 'offline').map((a): Opt => ({ id: a.id, kind: 'agent', insert: `@${a.name} `, label: a.name, sub: a.role === 'lead' ? 'Lead' : PROVIDER_LABEL[a.provider], agentId: a.id }))),
+      ...rankFiles(filePaths, m.query, SHOWN).map((path): Opt => ({ id: `file:${path}`, kind: 'file', insert: fileMention(path), label: basename(path), sub: dirname(path) })),
+    ];
+  });
+  /** The files could not be listed: the menu says so instead of showing none. */
+  const noFiles = $derived(mention?.trigger === '@' && !!mention.query && filesFailed);
 
   function detect() {
     if (!ta) return;
-    const pos = ta.selectionStart ?? 0;
-    const before = text.slice(0, pos);
-    const m = /(^|\s)([@#])([\w.-]*)$/.exec(before);
-    if (m) {
-      const start = pos - m[3].length - 1;
-      mention = { trigger: m[2] as '@' | '#', start, query: m[3], atStart: m[2] === '@' && before.slice(0, start).trim() === '' };
-      mi = 0;
-    } else mention = null;
+    const next = triggerAt(text, ta.selectionStart ?? 0);
+    if (next?.trigger === '@' && mention?.trigger !== '@') loadFiles();
+    mention = next;
+    if (next) mi = 0;
   }
 
   function pick(o: Opt) {
     if (!mention || !ta) return;
     const end = ta.selectionStart ?? text.length;
+    if (o.kind === 'command') {
+      // The line was only the action's name: it runs, and nothing is sent.
+      mention = null;
+      text = '';
+      tick().then(resize);
+      o.run();
+      return;
+    }
     if (o.kind === 'agent' && mention.atStart) {
       // "@Ada" at the start: talk to Ada 1:1.
       const rest = text.slice(end).trimStart();
       mention = null;
       text = '';
-      ui.openThread(store.threadOf(o.agentId!));
+      ui.openThread(store.threadOf(o.agentId));
       tick().then(() => {
         text = rest;
         ta?.focus();
@@ -238,8 +307,15 @@
     if (mention && options.length) {
       if (e.key === 'ArrowDown') { e.preventDefault(); mi = (mi + 1) % options.length; return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); mi = (mi - 1 + options.length) % options.length; return; }
-      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pick(options[mi]); return; }
+      // A held key runs no action: its repeats would run the next one too.
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); if (!(e.repeat && options[mi].kind === 'command')) pick(options[mi]); return; }
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); mention = null; return; }
+    }
+    // An open find bar closes first: Esc never stops a turn while something is still open.
+    if (e.key === 'Escape' && ui.findOpen && !e.defaultPrevented) {
+      e.preventDefault();
+      ui.findOpen = false;
+      return;
     }
     // Esc on an empty line stops the running turn (an Esc that cancelled a dictation did its job
     // already, and the repeats of a held key stop nothing). With text typed, or nothing running,
@@ -274,18 +350,20 @@
   ondragover={(e) => { if (hasFiles(e)) { e.preventDefault(); dragging = true; } }}
   ondragleave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) dragging = false; }}
   ondrop={(e) => { if (!hasFiles(e)) return; e.preventDefault(); dragging = false; addFiles([...(e.dataTransfer?.files ?? [])]); }}>
-  {#if mention && options.length}
-    <ul class="mentions" role="listbox" aria-label={mention.trigger === '@' ? (mention.atStart ? 'Talk to' : 'Mention an agent') : 'Mention a task'}>
-      {#if mention.atStart}<li class="mh eyebrow">Talk 1:1 with</li>{/if}
+  {#if mention && (options.length || noFiles)}
+    <ul class="mentions" role="listbox" aria-label={mention.trigger === '/' ? 'Actions' : mention.trigger === '#' ? 'Mention a task' : mention.atStart ? 'Talk to an agent, or mention a file' : 'Mention an agent or a file'}>
       {#each options as o, i (o.id)}
+        {#if o.kind === 'agent' && i === 0 && mention?.atStart}<li class="mh eyebrow">Talk 1:1 with</li>{/if}
+        {#if o.kind === 'file' && options[i - 1]?.kind !== 'file'}<li class="mh eyebrow">Files</li>{/if}
         <li>
           <button class="opt" class:active={i === mi} role="option" aria-selected={i === mi} onpointerenter={() => (mi = i)} onmousedown={(e) => { e.preventDefault(); pick(o); }}>
-            {#if o.agentId}<Portrait agent={store.agentMap.get(o.agentId)} size={20} />{:else}<Icon name="plan" size={14} />{/if}
-            <span class="ol truncate">{o.label}</span>
-            <span class="os">{o.sub}</span>
+            {#if o.kind === 'agent'}<Portrait agent={store.agentMap.get(o.agentId)} size={20} />{:else}<Icon name={o.kind === 'command' ? o.icon : o.kind === 'file' ? 'file' : 'plan'} size={14} />{/if}
+            <span class="ol truncate">{o.label}{#if o.kind === 'command'}<span class="oh">{o.hint}</span>{/if}</span>
+            <span class="os truncate">{o.sub}</span>
           </button>
         </li>
       {/each}
+      {#if noFiles}<li class="mh bad" role="alert">Couldn’t list the repo’s files</li>{/if}
     </ul>
   {/if}
   {#if files.length}
@@ -326,7 +404,7 @@
       <Icon name="send" size={15} stroke={1.8} />
     </button>
   </div>
-  {#if !oneToOne}<LeadControls {thread} />{:else if workerRequest}<AgentControls thread={workerRequest} request />{:else if agent?.role === 'solo'}<AgentControls {thread} />{/if}
+  {#if !oneToOne}<LeadControls {thread} bind:this={lead} />{:else if workerRequest}<AgentControls thread={workerRequest} request />{:else if agent?.role === 'solo'}<AgentControls {thread} />{/if}
 </div>
 
 <style>
@@ -353,9 +431,11 @@
   .has .send { background: var(--aurora); color: var(--on-aurora); transform: scale(1.04); }
   .mentions { position: absolute; left: 6px; bottom: calc(100% + 8px); width: min(360px, calc(100% - 12px)); padding: 5px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); z-index: var(--z-pop); animation: rise-in var(--d-3) var(--spring); }
   .mh { padding: 6px 10px 4px; }
+  .mh.bad { font-size: var(--t-sm); color: var(--bad); }
   .opt { display: flex; align-items: center; gap: 9px; width: 100%; height: 36px; padding: 0 10px; border-radius: var(--r-md); text-align: left; }
   .opt.active { background: var(--surface-3); }
   .opt :global(svg) { color: var(--ink-2); }
   .ol { flex: 1; font-weight: var(--w-med); }
-  .os { font-size: var(--t-sm); color: var(--ink-3); white-space: nowrap; }
+  .oh { margin-left: 8px; font-weight: var(--w-reg); color: var(--ink-3); }
+  .os { max-width: 60%; font-size: var(--t-sm); color: var(--ink-3); }
 </style>

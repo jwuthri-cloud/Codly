@@ -1110,6 +1110,33 @@ pub struct ChatMessage {
     pub ts: i64,
 }
 
+/// A request you closed, in the list of closed requests. Its messages stay under its archive
+/// thread, to read again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ClosedRequest {
+    /// The archive thread, "closed:<thread>:<ms>".
+    pub thread: String,
+    /// The start of your first message there ("" when you wrote none).
+    pub title: String,
+    /// When it was closed (ms).
+    pub closed_at: i64,
+    pub messages: i64,
+}
+
+/// One closed request, to read again.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ClosedTranscript {
+    /// Its newest messages, in the order they were written.
+    pub messages: Vec<ChatMessage>,
+    /// How many messages it has in all (`messages` may leave the oldest out).
+    pub total: i64,
+    /// Agent id → name of the agents who wrote there. Its Lead is archived, so the snapshot
+    /// no longer has it.
+    pub authors: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]

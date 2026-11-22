@@ -116,6 +116,8 @@ pub fn run() {
             commands::run_plan,
             commands::cancel_plan,
             commands::close_thread,
+            commands::closed_requests,
+            commands::closed_request,
             commands::resolve_approval,
             commands::breaker_config,
             commands::set_breaker_config,

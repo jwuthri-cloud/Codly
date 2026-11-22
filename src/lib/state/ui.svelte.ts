@@ -38,6 +38,10 @@ export const ONBOARD_DEMO = typeof location !== 'undefined' && new URLSearchPara
 /** Request threads: "lead" (the first) and "lead:<id>" (parallel requests, each with its own Lead). */
 export const isRequestThread = (thread: string | null | undefined): thread is string => thread === 'lead' || !!thread?.startsWith('lead:');
 
+/** Closed requests on Home, read-only: the list of them (`CLOSED_LIST`) or one archive thread ("closed:<thread>:<ms>"). */
+export const CLOSED_LIST = 'closed:';
+export const isClosedThread = (thread: string): boolean => thread.startsWith(CLOSED_LIST);
+
 /** A short id for a new request thread ("lead:" + shortId()). */
 export function shortId(): string {
   const b = new Uint8Array(6);
@@ -113,8 +117,13 @@ class Ui {
   request = $state('lead');
   /** Requests you opened (⌘N) that have no message yet: they show as tabs until you leave them empty. */
   draftRequests = $state<{ thread: string; ts: number }[]>([]);
+  /** Requests you just closed, per office, while Undo is still on offer: not tabs any more, not closed yet. */
+  closingRequests = $state<{ office: string | null; thread: string }[]>([]);
   /** Bumped to focus the composer (New request, palette…). */
   composerFocus = $state(0);
+  /** ⌘F: the find bar over the open conversation; `findFocus` is bumped to focus its field again. */
+  findOpen = $state(false);
+  findFocus = $state(0);
   /** Plan card to scroll into view on Home (the pinned progress header). */
   revealPlan = $state<string | null>(null);
   planLens = $state<PlanLens>(this.prefs.planView && ['list', 'flow', 'timeline'].includes(this.prefs.planView) ? this.prefs.planView : 'list');
@@ -270,6 +279,12 @@ class Ui {
     if (planId) this.planId = planId;
     if (thread && isRequestThread(thread)) this.request = thread;
     this.go('plan');
+  }
+
+  /** ⌘F on Home: find text in the conversation on screen. */
+  openFind() {
+    this.findOpen = true;
+    this.findFocus++;
   }
 
   openPalette(seed = '') {
