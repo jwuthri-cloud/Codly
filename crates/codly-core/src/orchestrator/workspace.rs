@@ -31,6 +31,8 @@ struct MergeRecord {
     /// Where the branch was before the merge: Undo goes back here.
     before: String,
     branch: String,
+    /// The branch that was merged: Undo puts it back if it was deleted since.
+    source: String,
     plan_id: Option<Id>,
     agent_id: Option<Id>,
 }
@@ -508,7 +510,7 @@ impl Inner {
         let msg = format!("Merge {}'s work ({branch})", agent.name);
         let sha = match self.git.merge(&repo, &branch, &msg, false).await? {
             MergeOutcome::Merged { sha } => {
-                self.record_merge(&ws.id, &sha, before.as_deref(), &target, None, Some(agent_id))?;
+                self.record_merge(&ws.id, &sha, before.as_deref(), &target, &branch, None, Some(agent_id))?;
                 sha
             }
             MergeOutcome::AlreadyMerged { sha } => sha,
@@ -544,7 +546,7 @@ impl Inner {
         let dirty = self.git.changed_paths(&repo, &["HEAD"]).await.unwrap_or_default();
         let last_merge = match self.last_merge(&ws.id)? {
             Some(m) => {
-                let blocked = self.git.undo_merge_blocker(&repo, &m.branch, &m.sha, &m.before).await?;
+                let blocked = self.git.undo_merge_blocker(&repo, &m.branch, &m.sha, &m.before, &m.source).await?;
                 Some(LastMerge { sha: m.sha, branch: m.branch, plan_id: m.plan_id, agent_id: m.agent_id, blocked })
             }
             None => None,
@@ -558,12 +560,14 @@ impl Inner {
 
     /// Remember a merge commit Codly just made on the user's branch, for Undo merge. A branch
     /// that had no commit before the merge (`before` = None) has nothing to go back to.
-    fn record_merge(&self, ws_id: &str, sha: &str, before: Option<&str>, branch: &str, plan_id: Option<&str>, agent_id: Option<&str>) -> anyhow::Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    fn record_merge(&self, ws_id: &str, sha: &str, before: Option<&str>, branch: &str, source: &str, plan_id: Option<&str>, agent_id: Option<&str>) -> anyhow::Result<()> {
         let Some(before) = before else { return Ok(()) };
         let record = MergeRecord {
             sha: sha.into(),
             before: before.into(),
             branch: branch.into(),
+            source: source.into(),
             plan_id: plan_id.map(Into::into),
             agent_id: agent_id.map(Into::into),
         };
@@ -572,8 +576,8 @@ impl Inner {
 
     /// Undo the last merge Codly made into the user's branch (`sha` = the merge the user saw):
     /// the branch goes back to the commit before it, and the merged work stays on its own
-    /// branch, ready to merge again. Refused with the reason when it is not safe any more (see
-    /// `Git::undo_merge_blocker`).
+    /// branch (put back if it was deleted since), ready to merge again. Refused with the reason
+    /// when it is not safe any more (see `Git::undo_merge_blocker`).
     pub(super) async fn undo_merge(&self, sha: &str) -> anyhow::Result<RepoSync> {
         let ws = self.require_ws()?;
         let repo = PathBuf::from(&ws.repo_path);
@@ -583,9 +587,14 @@ impl Inner {
             .last_merge(&ws.id)?
             .filter(|m| m.sha == sha)
             .ok_or_else(|| anyhow!("that is not the last merge Codly made into your branch, so it cannot be undone here"))?;
-        self.git.undo_merge(&repo, &m.branch, &m.sha, &m.before).await?;
+        let restored = self.git.undo_merge(&repo, &m.branch, &m.sha, &m.before, &m.source).await?;
         self.store.kv_write(&[(last_merge_key(&ws.id), None)])?;
         let back = format!("{} is back at {}", m.branch, &m.before[..m.before.len().min(10)]);
+        let kept = if restored {
+            format!("Its branch {} had been deleted, so Codly put it back; you can merge it again.", m.source)
+        } else {
+            "The work is still on its branch; you can merge it again.".to_string()
+        };
         if let Some(plan_id) = m.plan_id.as_deref() {
             let p = self.update_plan(plan_id, |p| {
                 if p.merged_sha.as_deref() == Some(sha) {
@@ -599,12 +608,12 @@ impl Inner {
             {
                 tracing::info!("not restoring {wt}: {e}");
             }
-            let text = format!("Undid the merge of \"{}\": {back}. The work is still on its branch; you can merge it again.", p.summary);
+            let text = format!("Undid the merge of \"{}\": {back}. {kept}", p.summary);
             self.chat(ws_id, &p.thread, "codly", &text, Some(json!({ "plan_id": p.id })))?;
         }
         if let Some(agent_id) = m.agent_id.as_deref() {
             let name = self.agent(agent_id).map(|a| a.name).unwrap_or_else(|_| "the agent".into());
-            let text = format!("Undid the merge of {name}'s work: {back}. The work is still on its branch; you can merge it again.");
+            let text = format!("Undid the merge of {name}'s work: {back}. {kept}");
             self.chat(ws_id, &format!("agent:{agent_id}"), "codly", &text, None)?;
         }
         self.decide_by(
@@ -735,7 +744,7 @@ impl Inner {
         let msg = format!("Merge Codly plan: {}", prompts::clip(&p.summary, 72));
         let sha = match self.git.merge(&repo, &branch, &msg, false).await? {
             MergeOutcome::Merged { sha } => {
-                self.record_merge(&ws.id, &sha, before.as_deref(), &target, Some(&p.id), None)?;
+                self.record_merge(&ws.id, &sha, before.as_deref(), &target, &branch, Some(&p.id), None)?;
                 sha
             }
             MergeOutcome::AlreadyMerged { sha } => sha,

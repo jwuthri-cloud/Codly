@@ -423,13 +423,23 @@ impl Git {
         matches!(self.rev_parse(wt, "MERGE_HEAD").await, Ok(Some(head)) if internal || head == tip)
     }
 
-    /// Why the merge commit `merged`, made on `branch` on top of `before`, cannot be taken back
-    /// right now; None when it can. Taking it back moves `branch` to `before`, so it is only
-    /// safe while nothing else depends on the merge: the checkout is still on `branch` at that
-    /// very commit, no remote branch has it, and no tracked file has uncommitted changes.
-    pub async fn undo_merge_blocker(&self, repo: &Path, branch: &str, merged: &str, before: &str) -> Result<Option<String>> {
+    /// Is `rev` on a local branch other than `except`?
+    async fn on_another_branch(&self, repo: &Path, rev: &str, except: &str) -> Result<bool> {
+        let heads = self.read(repo, &["for-each-ref", "--contains", rev, "--format=%(refname)", "refs/heads"]).await?;
+        Ok(heads.lines().filter_map(|r| r.strip_prefix("refs/heads/")).any(|b| b != except))
+    }
+
+    /// Why the merge commit `merged` of `source`, made on `branch` on top of `before`, cannot be
+    /// taken back right now; None when it can. Taking it back moves `branch` to `before`, so it
+    /// is only safe while nothing else depends on the merge: the checkout is still on `branch`
+    /// at that very commit, no remote branch has it, the merged work stays on a branch, and no
+    /// tracked file has uncommitted changes. Every way out it names keeps undo possible: a
+    /// commit on top of the merge (also one that finishes an operation in progress) ends it.
+    pub async fn undo_merge_blocker(&self, repo: &Path, branch: &str, merged: &str, before: &str, source: &str) -> Result<Option<String>> {
         if let Some(op) = self.in_progress(repo).await? {
-            return Ok(Some(format!("your checkout has {op} in progress; finish or abort it first")));
+            return Ok(Some(format!(
+                "your checkout has {op} in progress; abort it first (finishing it would put a commit on top of the merge and make undo impossible)"
+            )));
         }
         match self.current_branch(repo).await? {
             Some(b) if b == branch => {}
@@ -440,17 +450,29 @@ impl Git {
         if head != merged {
             return Ok(Some(format!("{branch} has changed since this merge (it is at {} now)", short(&head))));
         }
-        if self.rev_parse(repo, &format!("{merged}^1")).await?.as_deref() != Some(before) {
+        let on_top = self.rev_parse(repo, &format!("{merged}^1")).await?.as_deref() == Some(before);
+        let Some(work) = self.rev_parse(repo, &format!("{merged}^2")).await?.filter(|_| on_top) else {
             return Ok(Some(format!("{} is not a merge made on top of {}", short(merged), short(before))));
-        }
+        };
         let remotes = self.read(repo, &["for-each-ref", "--contains", merged, "--format=%(refname)", "refs/remotes"]).await?;
         let pushed = remotes.lines().filter_map(|r| r.strip_prefix("refs/remotes/")).find(|r| !r.ends_with("/HEAD"));
         if let Some(remote) = pushed {
             return Ok(Some(format!("the merge is already on {remote}; undo it there with git revert -m 1 {}", short(merged))));
         }
+        // A deleted `source` is put back by the undo itself. One that points somewhere else now
+        // cannot be: without another branch at the merged work, only `branch` still holds it.
+        if !self.on_another_branch(repo, &work, branch).await? && self.branch_exists(repo, source).await? {
+            return Ok(Some(format!(
+                "{source} was moved and no other branch has the merged work, so undoing would leave that work on no branch; keep it first with git branch <new name> {}",
+                short(&work)
+            )));
+        }
         let dirty = self.changed_paths(repo, &["HEAD"]).await?;
         if !dirty.is_empty() {
-            return Ok(Some(format!("your checkout has uncommitted changes in {}; commit or stash them first", name_list(&dirty))));
+            return Ok(Some(format!(
+                "your checkout has uncommitted changes in {}; put them aside with git stash first (a commit on top of the merge would make undo impossible)",
+                name_list(&dirty)
+            )));
         }
         Ok(None)
     }
@@ -689,15 +711,23 @@ impl Git {
         Ok(true)
     }
 
-    /// Take back the merge commit `merged` in the user's checkout: `branch` goes back to
-    /// `before`, the commit it was at. Refused with the reason unless `undo_merge_blocker` finds
-    /// it safe. `reset --keep` moves the branch and the merged files only, and stops instead of
-    /// overwriting anything that is not committed.
-    pub async fn undo_merge(&self, repo: &Path, branch: &str, merged: &str, before: &str) -> Result<()> {
-        if let Some(why) = self.undo_merge_blocker(repo, branch, merged, before).await? {
+    /// Take back the merge commit `merged` of `source` in the user's checkout: `branch` goes
+    /// back to `before`, the commit it was at. Refused with the reason unless
+    /// `undo_merge_blocker` finds it safe. The merged work always stays on a branch: when
+    /// `source` was deleted after the merge and no other branch has the work, `source` is put
+    /// back first (returns true). `reset --keep` moves the branch and the merged files only, and
+    /// stops instead of overwriting anything that is not committed.
+    pub async fn undo_merge(&self, repo: &Path, branch: &str, merged: &str, before: &str, source: &str) -> Result<bool> {
+        if let Some(why) = self.undo_merge_blocker(repo, branch, merged, before, source).await? {
             bail!("the merge cannot be undone: {why}");
         }
-        self.ok(repo, &["reset", "--keep", "--quiet", before], false).await.map(drop)
+        let work = format!("{merged}^2");
+        let restored = !self.on_another_branch(repo, &work, branch).await?;
+        if restored {
+            self.create_branch(repo, source, &work).await?;
+        }
+        self.ok(repo, &["reset", "--keep", "--quiet", before], false).await?;
+        Ok(restored)
     }
 }
 
@@ -972,9 +1002,9 @@ mod tests {
         let before = git.head(&repo).await.unwrap().unwrap();
         let MergeOutcome::Merged { sha } = git.merge(&repo, "plan", "merge plan", false).await.unwrap() else { panic!("expected a merge") };
         std::fs::write(repo.join("notes.txt"), "not committed\n").unwrap();
-        assert_eq!(git.undo_merge_blocker(&repo, "main", &sha, &before).await.unwrap(), None);
+        assert_eq!(git.undo_merge_blocker(&repo, "main", &sha, &before, "plan").await.unwrap(), None);
 
-        git.undo_merge(&repo, "main", &sha, &before).await.unwrap();
+        assert!(!git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap(), "no branch had to be put back");
         assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(before.as_str()));
         assert_eq!(git.current_branch(&repo).await.unwrap().as_deref(), Some("main"));
         assert!(!repo.join("b.txt").exists(), "the merged file is gone from the checkout");
@@ -984,7 +1014,7 @@ mod tests {
         assert!(git.diff(&repo, "main", "plan").await.unwrap().contains("+b"), "the work is still on its branch");
 
         // Undone once: the same undo is refused, and the merge can be made again.
-        let again = git.undo_merge(&repo, "main", &sha, &before).await.unwrap_err().to_string();
+        let again = git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap_err().to_string();
         assert!(again.contains("main has changed since this merge"), "{again}");
         assert!(matches!(git.merge(&repo, "plan", "merge plan", false).await.unwrap(), MergeOutcome::Merged { .. }));
     }
@@ -1003,22 +1033,27 @@ mod tests {
         commit_file(&repo, "c.txt", "c\n");
         let before = git.head(&repo).await.unwrap().unwrap();
         let MergeOutcome::Merged { sha } = git.merge(&repo, "plan", "merge plan", false).await.unwrap() else { panic!("expected a merge") };
-        let why = async || git.undo_merge_blocker(&repo, "main", &sha, &before).await.unwrap().unwrap_or_default();
+        let why = async || git.undo_merge_blocker(&repo, "main", &sha, &before, "plan").await.unwrap().unwrap_or_default();
         assert_eq!(why().await, "", "an unpushed merge at the tip of a clean checkout can be undone");
 
         // A tracked file with uncommitted changes, staged or not.
         std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
-        assert_eq!(why().await, "your checkout has uncommitted changes in a.txt; commit or stash them first");
+        let dirty = "your checkout has uncommitted changes in a.txt; put them aside with git stash first (a commit on top of the merge would make undo impossible)";
+        assert_eq!(why().await, dirty);
         sh(&repo, &["add", "a.txt"]);
-        let err = git.undo_merge(&repo, "main", &sha, &before).await.unwrap_err().to_string();
+        let err = git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap_err().to_string();
         assert!(err.contains("cannot be undone") && err.contains("uncommitted changes in a.txt"), "{err}");
         assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()), "nothing moved");
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "edited\n");
+        // The way out it names keeps undo possible.
+        sh(&repo, &["stash", "-q"]);
+        assert_eq!(why().await, "");
+        sh(&repo, &["stash", "pop", "-q"]);
         sh(&repo, &["reset", "-q", "--hard"]);
 
         // The wrong commit to go back to.
         let wrong = git.rev_parse(&repo, "plan").await.unwrap().unwrap();
-        let odd = git.undo_merge_blocker(&repo, "main", &sha, &wrong).await.unwrap().unwrap();
+        let odd = git.undo_merge_blocker(&repo, "main", &sha, &wrong, "plan").await.unwrap().unwrap();
         assert!(odd.contains("is not a merge made on top of"), "{odd}");
 
         // Another branch checked out, at the same commit.
@@ -1031,8 +1066,10 @@ mod tests {
         // A merge of their own in progress.
         branch_with(&repo, "theirs", "d.txt", Some("d\n"));
         sh(&repo, &["merge", "-q", "--no-ff", "--no-commit", "theirs"]);
-        assert_eq!(why().await, "your checkout has a merge in progress; finish or abort it first");
+        let merging = "your checkout has a merge in progress; abort it first (finishing it would put a commit on top of the merge and make undo impossible)";
+        assert_eq!(why().await, merging);
         sh(&repo, &["merge", "--abort"]);
+        assert_eq!(why().await, "", "after the abort it names, the merge can still be undone");
 
         // Pushed: undoing it here would rewrite what the remote already has.
         git.push(&repo, "origin", "main").await.unwrap();
@@ -1043,8 +1080,54 @@ mod tests {
         commit_file(&repo, "a.txt", "later\n");
         let moved = why().await;
         assert!(moved.starts_with("main has changed since this merge (it is at "), "{moved}");
-        assert!(git.undo_merge(&repo, "main", &sha, &before).await.is_err());
+        assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.is_err());
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "later\n");
+    }
+
+    /// The merged branch was deleted after the merge (git allows it: it is merged). Undo puts it
+    /// back at the merged work first, so that work is never left on no branch.
+    #[tokio::test]
+    async fn undo_merge_puts_a_deleted_branch_back() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        branch_with(&repo, "plan", "b.txt", Some("b\n"));
+        commit_file(&repo, "c.txt", "c\n");
+        let before = git.head(&repo).await.unwrap().unwrap();
+        let work = git.rev_parse(&repo, "plan").await.unwrap();
+        let MergeOutcome::Merged { sha } = git.merge(&repo, "plan", "merge plan", false).await.unwrap() else { panic!("expected a merge") };
+        sh(&repo, &["branch", "-q", "-d", "plan"]);
+        assert_eq!(git.undo_merge_blocker(&repo, "main", &sha, &before, "plan").await.unwrap(), None);
+
+        assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap(), "the branch was put back");
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(before.as_str()));
+        assert_eq!(git.rev_parse(&repo, "plan").await.unwrap(), work, "the work is on its branch again");
+        assert!(matches!(git.merge(&repo, "plan", "merge plan", false).await.unwrap(), MergeOutcome::Merged { .. }));
+    }
+
+    /// The merged branch points somewhere else now, so undo cannot put it back: refused while
+    /// no other branch has the merged work, and fine once one does.
+    #[tokio::test]
+    async fn undo_merge_never_leaves_the_work_on_no_branch() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        branch_with(&repo, "plan", "b.txt", Some("b\n"));
+        commit_file(&repo, "c.txt", "c\n");
+        let before = git.head(&repo).await.unwrap().unwrap();
+        let work = git.rev_parse(&repo, "plan").await.unwrap().unwrap();
+        let MergeOutcome::Merged { sha } = git.merge(&repo, "plan", "merge plan", false).await.unwrap() else { panic!("expected a merge") };
+        sh(&repo, &["branch", "-q", "-f", "plan", &before]);
+
+        let why = git.undo_merge_blocker(&repo, "main", &sha, &before, "plan").await.unwrap().unwrap();
+        let keep = format!("keep it first with git branch <new name> {}", short(&work));
+        assert!(why.starts_with("plan was moved and no other branch has the merged work") && why.ends_with(&keep), "{why}");
+        assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.is_err());
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()), "the merge is still there");
+
+        sh(&repo, &["branch", "-q", "kept", &work]);
+        assert!(!git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap(), "kept has the work: nothing to put back");
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(before.as_str()));
+        assert_eq!(git.rev_parse(&repo, "plan").await.unwrap().as_deref(), Some(before.as_str()), "plan stays where the user moved it");
+        assert_eq!(git.rev_parse(&repo, "kept").await.unwrap().as_deref(), Some(work.as_str()));
     }
 
     /// The merge deleted a file and the user has since made a new, uncommitted file of that
@@ -1060,7 +1143,7 @@ mod tests {
         assert!(!repo.join("a.txt").exists());
         std::fs::write(repo.join("a.txt"), "a new file of mine\n").unwrap();
 
-        assert!(git.undo_merge(&repo, "main", &sha, &before).await.is_err());
+        assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.is_err());
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "a new file of mine\n");
         assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()), "the merge is still there");
     }

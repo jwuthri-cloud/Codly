@@ -106,7 +106,8 @@ you ─► Lead (read-only agent: Read/Grep/Glob + codly tools)
 of your own merge, rebase or cherry-pick, and asks first when the checked-out branch is not the
 one the plan started from. The last merge Codly made there can be taken back with "Undo merge"
 (`git reset --keep` to the commit before it) while that loses nothing: the branch is still at
-that merge commit, no remote branch has it, and no tracked file has uncommitted changes.
+that merge commit, no remote branch has it, and no tracked file has uncommitted changes. The
+merged work always stays on a branch: if its branch was deleted since, the undo puts it back.
 
 Every routing, scheduling, gate and merge choice is written to the `decision` table and
 emitted as an event, so "Why did Codex get this task?" always has an answer.

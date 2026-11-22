@@ -592,7 +592,13 @@ async fn a_plan_asks_before_merging_into_another_branch_and_its_merge_can_be_und
     let last = core.repo_sync().await.unwrap().last_merge.unwrap();
     assert_eq!((last.sha.as_str(), last.branch.as_str(), last.plan_id.as_deref(), last.blocked), (sha.as_str(), "main", Some(plan.id.as_str()), None));
 
-    // Undo merge: main is back, the plan is done and not merged, its work still on its branch.
+    // You tidy up meanwhile: git lets you delete the plan's branch, it is merged.
+    let integ_branch = plan.integration_branch.clone().unwrap();
+    let work = sh(&repo, &["rev-parse", &integ_branch]);
+    sh(&repo, &["branch", "-q", "-d", &integ_branch]);
+    assert_eq!(core.repo_sync().await.unwrap().last_merge.unwrap().blocked, None, "Undo puts the branch back itself");
+
+    // Undo merge: main is back, the plan is done and not merged, its work on its branch again.
     let sync = core.undo_merge(&sha).await.unwrap();
     assert_eq!(sync.last_merge, None);
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), main);
@@ -600,8 +606,10 @@ async fn a_plan_asks_before_merging_into_another_branch_and_its_merge_can_be_und
     let s = core.snapshot().await.unwrap();
     let undone = s.plans.iter().find(|p| p.id == plan.id).unwrap();
     assert_eq!((undone.status, undone.merged_sha.as_deref()), (PlanStatus::Done, None));
+    assert_eq!(sh(&repo, &["rev-parse", &integ_branch]), work, "the deleted branch is back at the merged work");
     assert!(integ_wt.join("hello.txt").exists(), "its integration worktree is back");
-    assert!(chats(&s, "lead").iter().any(|c| c.text.starts_with("Undid the merge of \"Add a hello file\"")));
+    let said = format!("Its branch {integ_branch} had been deleted, so Codly put it back; you can merge it again.");
+    assert!(chats(&s, "lead").iter().any(|c| c.text.starts_with("Undid the merge of \"Add a hello file\"") && c.text.ends_with(&said)));
     assert!(core.undo_merge(&sha).await.is_err(), "a merge is undone once");
 
     // Back on the branch it started from, it merges without a question.
@@ -649,7 +657,8 @@ async fn a_solo_merge_takes_uncommitted_work_and_can_be_undone() {
     assert!(!repo.join("notes.txt").exists());
     assert_eq!(std::fs::read_to_string(wt.join("notes.txt")).unwrap(), "from the agent\n", "the agent's branch keeps the work");
     let s = core.snapshot().await.unwrap();
-    assert!(chats(&s, &format!("agent:{}", solo.id)).iter().any(|c| c.text.starts_with("Undid the merge")));
+    let said = "The work is still on its branch; you can merge it again.";
+    assert!(chats(&s, &format!("agent:{}", solo.id)).iter().any(|c| c.text.starts_with("Undid the merge") && c.text.ends_with(said)));
 
     // The same work can be merged again.
     core.merge_agent(&solo.id).await.unwrap();
