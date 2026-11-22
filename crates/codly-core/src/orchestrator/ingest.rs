@@ -180,6 +180,8 @@ impl Inner {
                 l.turn_messages = 0;
                 l.last_text = None;
             }
+            // Delivered into the running turn: no turn of its own will take it off the count.
+            EventKind::PromptSteered { .. } => l.queued = l.queued.saturating_sub(1),
             EventKind::Message { text, .. } if !text.trim().is_empty() => {
                 l.last_text = Some(text.clone());
                 l.turn_messages += 1;

@@ -134,7 +134,8 @@ struct Live {
     token: String,
     /// Between TurnStarted and TurnCompleted.
     turn_active: bool,
-    /// Prompts sent but not started yet (the adapter queues them; Codex steers instead).
+    /// Prompts sent that no `TurnStarted` (a turn of its own) or `PromptSteered` (Codex put it
+    /// into the running turn) has accounted for yet.
     queued: u32,
     /// Some while the CLI is still in its handshake (`spawn_run` holds the agent's place, with
     /// a `handle` nobody listens to): the prompts sent meanwhile, in order.

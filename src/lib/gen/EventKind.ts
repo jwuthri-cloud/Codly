@@ -29,7 +29,7 @@ import type { JsonValue } from "./serde_json/JsonValue";
  * domain kinds. Persisted to SQLite (except ephemeral deltas) and streamed to the UI.
  * Both views (Workspace and World) are projections of this stream.
  */
-export type EventKind = { "type": "session_started", provider: Provider, model: string | null, cwd: string, cli_version: string | null, session_id: string | null, billing: Billing, tools: Array<string>, } | { "type": "turn_started", input: string | null, } | { "type": "status_changed", status: AgentStatus, } | { "type": "text_delta", item_id: string, text: string, } | { "type": "message", item_id: string, text: string, phase: MessagePhase, } | { "type": "reasoning_delta", item_id: string, text: string, } | { "type": "reasoning", item_id: string, text: string, } | { "type": "tool_started", call_id: string, 
+export type EventKind = { "type": "session_started", provider: Provider, model: string | null, cwd: string, cli_version: string | null, session_id: string | null, billing: Billing, tools: Array<string>, } | { "type": "turn_started", input: string | null, } | { "type": "prompt_steered", input: string, } | { "type": "status_changed", status: AgentStatus, } | { "type": "text_delta", item_id: string, text: string, } | { "type": "message", item_id: string, text: string, phase: MessagePhase, } | { "type": "reasoning_delta", item_id: string, text: string, } | { "type": "reasoning", item_id: string, text: string, } | { "type": "tool_started", call_id: string, 
 /**
  * Provider tool name ("Bash", "commandExecution", "read_file"…).
  */

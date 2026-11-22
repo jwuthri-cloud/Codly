@@ -1321,6 +1321,11 @@ pub enum EventKind {
     TurnStarted {
         input: Option<String>,
     },
+    /// A prompt delivered into the running turn (Codex `turn/steer`): it gets no
+    /// `TurnStarted`/`TurnCompleted` of its own.
+    PromptSteered {
+        input: String,
+    },
     StatusChanged {
         status: AgentStatus,
     },
@@ -1510,6 +1515,7 @@ impl EventKind {
         match self {
             EventKind::SessionStarted { .. } => "session_started",
             EventKind::TurnStarted { .. } => "turn_started",
+            EventKind::PromptSteered { .. } => "prompt_steered",
             EventKind::StatusChanged { .. } => "status_changed",
             EventKind::TextDelta { .. } => "text_delta",
             EventKind::Message { .. } => "message",
