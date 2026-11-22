@@ -382,11 +382,13 @@ export async function createTask(title: string, goal = '') {
   return t;
 }
 
-/** Returns whether the switch happened. The next message resumes the conversation on the new model. */
+/** Returns whether the switch happened. A live Claude agent switches in place; any other
+ *  resumes the conversation on the new model with its next message. The core's refusal says
+ *  what to do (stop its turn first, wait for its task, pick a model the CLI knows). */
 export async function setAgentModel(agent: Agent, model: string | null): Promise<boolean> {
   const label = model ?? 'the default model';
   const ws = store.workspace?.id;
-  const a = await attempt(`switch ${agent.name} to ${label}`, () => api.setAgentModel(agent.id, model), 'Stop its current turn first, then try again.');
+  const a = await attempt(`switch ${agent.name} to ${label}`, () => api.setAgentModel(agent.id, model));
   if (!a) return false;
   if (store.isOpen(ws)) store.upsertAgent(a);
   toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${label}` });

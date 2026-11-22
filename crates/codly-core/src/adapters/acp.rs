@@ -567,6 +567,10 @@ impl Actor {
                 None => tracing::warn!("acp: no pending approval {approval_id}"),
             },
             AgentCmd::Shutdown => self.begin_shutdown().await,
+            // Claude's control requests: the orchestrator sends them to Claude agents only.
+            AgentCmd::Session { reply, .. } => {
+                let _ = reply.send(Err("this CLI has no such request".into()));
+            }
         }
     }
 

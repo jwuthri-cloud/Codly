@@ -46,7 +46,7 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::model::{ApprovalDecision, EventKind, Id, Provider, Role, new_id};
+use crate::model::{ApprovalDecision, EventKind, Id, PermissionMode, Provider, Role, new_id};
 
 /// How the codly MCP server is launched by the agent CLI (stdio transport).
 #[derive(Debug, Clone)]
@@ -110,7 +110,29 @@ pub enum AgentCmd {
     Approval { approval_id: Id, decision: ApprovalDecision },
     /// Graceful shutdown ladder (interrupt → close stdin → SIGTERM → SIGKILL).
     Shutdown,
+    /// Change or read the live session itself, with no restart. Claude only: the other
+    /// adapters answer with an error.
+    Session { request: SessionRequest, reply: SessionReply },
 }
+
+/// What Codly asks of a live Claude session: the control requests that
+/// docs/research/cli-claude-stream-json-2.1.311.md §2 recorded. The CLI answers them at
+/// once, between turns and during one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionRequest {
+    /// `set_permission_mode`.
+    PermissionMode(PermissionMode),
+    /// `set_model`, with a name of the CLI's model list ("sonnet") or a model id. The next
+    /// request to the model uses it.
+    Model(String),
+    /// `get_context_usage`: how full the context is.
+    ContextUsage,
+}
+
+/// Where the answer to a `SessionRequest` goes: the `response` object of the CLI's control
+/// response, or its error text. Exactly one answer is sent; a sender dropped without one
+/// means the process ended first. (A channel that can be cloned, because `AgentCmd` is.)
+pub type SessionReply = mpsc::UnboundedSender<Result<serde_json::Value, String>>;
 
 #[derive(Debug, Clone)]
 pub struct AdapterEvent {
@@ -155,6 +177,23 @@ pub fn gave_up(cli: &str, limit: Duration) -> EventKind {
         method: "rule".into(),
         summary: format!("{cli} did not stop within {} s of the interrupt, so Codly ended its run", limit.as_secs()),
         detail: json!({ "limit_secs": limit.as_secs() }),
+    }
+}
+
+/// `decision_type` of the record an adapter leaves when the CLI changed its permission mode by
+/// itself (`permission_mode_changed`).
+pub const MODE_CHANGED: &str = "permission_mode";
+
+/// What an adapter emits when the CLI left the permission mode Codly put it in: Claude Code
+/// ends plan mode when you accept its plan. The orchestrator reads it, and the agent's switch
+/// follows. A switch Codly asked for makes no such record.
+pub fn permission_mode_changed(mode: PermissionMode) -> EventKind {
+    EventKind::Decision {
+        id: new_id(),
+        decision_type: MODE_CHANGED.into(),
+        method: "rule".into(),
+        summary: format!("Claude Code changed its mode to \"{}\"", mode.label()),
+        detail: json!({ "mode": mode }),
     }
 }
 

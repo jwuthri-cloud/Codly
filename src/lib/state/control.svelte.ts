@@ -1,9 +1,13 @@
 // Per-agent live controls (agent panel): block tools, stop after this step, steer note.
 // The core owns the state machine (orchestrator/controls.rs); this mirrors its latest
 // `control_changed` event per agent (store.svelte.ts feeds `set`) and sends the intents.
-// Kill is the existing `stopAgent` action.
+// Kill is the existing `stopAgent` action. A Claude agent also has its mode, "compact now"
+// and a context reading: requests to its live session (the mode is on the agent itself).
 import { api } from '../api';
+import type { ContextUsage } from '../gen/ContextUsage';
 import type { ControlState } from '../gen/ControlState';
+import type { PermissionMode } from '../gen/PermissionMode';
+import { tokens } from '../util/format';
 import { toast } from './toasts.svelte';
 
 export const NO_CONTROL: ControlState = { block_tools: false, stop_requested: false, paused: false, held: 0 };
@@ -39,3 +43,48 @@ export const setBlockTools = (agentId: string, on: boolean) => run(on ? 'block i
 export const stopAfterStep = (agentId: string) => run('stop it after this step', agentId, () => api.stopAgentAfterStep(agentId));
 export const resumeAgent = (agentId: string) => run('resume it', agentId, () => api.resumeAgent(agentId));
 export const steerAgent = (agentId: string, text: string) => run('send the steer note', agentId, () => api.steerAgent(agentId, text));
+
+/** How a 1:1 Claude agent works with edits. Commands always follow your permissions. */
+export const PERMISSION_MODES: { id: PermissionMode; label: string; hint: string }[] = [
+  { id: 'ask', label: 'Ask for edits', hint: 'Every edit follows your permissions first, like a command.' },
+  { id: 'accept_edits', label: 'Accept edits', hint: 'It edits files in its worktree without asking. Commands still follow your permissions.' },
+  { id: 'plan', label: 'Plan first', hint: 'It reads and plans, and changes nothing. Its plan comes to you as a card: accept it or send it back.' },
+];
+
+/** Returns whether the agent switched. The agent's own `agent_changed` event carries the new mode. */
+export async function setPermissionMode(agentId: string, mode: PermissionMode): Promise<boolean> {
+  try {
+    await api.setAgentPermissionMode(agentId, mode);
+    return true;
+  } catch (e) {
+    toast({ kind: 'error', title: 'Couldn’t change its mode', body: msg(e) });
+    return false;
+  }
+}
+
+/** Ask a 1:1 Claude agent to summarize its conversation now, to free context. */
+export async function compactNow(agentId: string): Promise<boolean> {
+  try {
+    await api.compactAgent(agentId);
+    return true;
+  } catch (e) {
+    toast({ kind: 'error', title: 'Couldn’t compact its conversation', body: msg(e) });
+    return false;
+  }
+}
+
+/** How full a Claude agent's context is right now; null when it could not be read. */
+export async function readContext(agentId: string): Promise<ContextUsage | null> {
+  try {
+    return await api.agentContextUsage(agentId);
+  } catch (e) {
+    toast({ kind: 'error', title: 'Couldn’t read its context', body: msg(e) });
+    return null;
+  }
+}
+
+/** "6k of 1M tokens (1%) · compacts by itself at 967k" */
+export function contextLine(u: ContextUsage): string {
+  const line = `${tokens(u.used_tokens)} of ${tokens(u.max_tokens)} tokens (${Math.round(u.percent)}%)`;
+  return u.auto_compact_at == null ? line : `${line} · compacts by itself at ${tokens(u.auto_compact_at)}`;
+}

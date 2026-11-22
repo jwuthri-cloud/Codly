@@ -468,6 +468,11 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub tired_since: Option<i64>,
+    /// 1:1 Claude agents only: how it works with edits (`PermissionMode`), kept for its next
+    /// run. None = never chosen: it asks before every edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub permission_mode: Option<PermissionMode>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1980,4 +1985,73 @@ impl ControlState {
     pub fn is_default(&self) -> bool {
         *self == ControlState::default()
     }
+}
+
+/// How a 1:1 Claude agent works with edits: Claude Code's permission mode, which Codly can
+/// switch on a live session. Commands and everything else the CLI asks about still go through
+/// Codly's approval rules, whichever mode is on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PermissionMode {
+    /// It asks before every edit (Claude Code's `default`).
+    #[default]
+    Ask,
+    /// Edits inside its worktree are made without asking (`acceptEdits`).
+    AcceptEdits,
+    /// It reads and plans, changes nothing, and shows you its plan (`plan`).
+    Plan,
+}
+
+impl PermissionMode {
+    /// The name Claude Code gives the mode.
+    pub fn cli(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "default",
+            PermissionMode::AcceptEdits => "acceptEdits",
+            PermissionMode::Plan => "plan",
+        }
+    }
+
+    /// From Claude Code's name. None for the modes Codly never offers (`auto`, `dontAsk`,
+    /// `bypassPermissions`): they would decide in place of Codly's approval rules.
+    pub fn from_cli(name: &str) -> Option<Self> {
+        match name {
+            "default" | "manual" => Some(PermissionMode::Ask),
+            "acceptEdits" => Some(PermissionMode::AcceptEdits),
+            "plan" => Some(PermissionMode::Plan),
+            _ => None,
+        }
+    }
+
+    /// The name the agent panel gives the mode.
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "ask for edits",
+            PermissionMode::AcceptEdits => "accept edits",
+            PermissionMode::Plan => "plan first",
+        }
+    }
+}
+
+/// How full a Claude agent's context is, as its CLI counts it right now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContextUsage {
+    pub used_tokens: i64,
+    pub max_tokens: i64,
+    /// `used_tokens` of `max_tokens`, in percent, as the CLI rounds it.
+    pub percent: f64,
+    /// The CLI compacts the conversation by itself at this many tokens (None = it does not).
+    pub auto_compact_at: Option<i64>,
+    /// What takes the room, as the CLI lists it.
+    pub parts: Vec<ContextPart>,
+}
+
+/// One part of a context (system prompt, tools, messages, …).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContextPart {
+    pub name: String,
+    pub tokens: i64,
 }

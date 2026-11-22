@@ -66,6 +66,7 @@ fn seed_worker(data: &Path, xp: i64) -> Id {
         away_until: None,
         away_since: None,
         tired_since: None,
+        permission_mode: None,
         archived: false,
         usage: Usage::default(),
         career: Career { xp, ..Default::default() },

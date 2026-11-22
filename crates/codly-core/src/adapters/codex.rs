@@ -850,6 +850,10 @@ impl CodexAgent {
                 None => tracing::warn!("codex: no pending approval {approval_id}"),
             },
             AgentCmd::Shutdown => self.begin_shutdown().await,
+            // Claude's control requests: the orchestrator sends them to Claude agents only.
+            AgentCmd::Session { reply, .. } => {
+                let _ = reply.send(Err("Codex has no such request".into()));
+            }
         }
     }
 

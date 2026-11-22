@@ -11,22 +11,59 @@
 //!   running turn, Codex steers it into the turn. Nothing is typed into a terminal.
 //! - **Kill** is the existing `stop_agent` (shutdown ladder), which also clears the controls.
 //!
+//! For a Claude agent, three more go to the live session as the control requests its CLI
+//! takes without a restart (`SessionRequest`; docs/research/cli-claude-stream-json-2.1.311.md):
+//!
+//! - **Mode** (a 1:1 agent): ask for edits, accept edits, or plan first. It is kept on the
+//!   agent and set again on every run. It changes what the CLI asks about, never what Codly
+//!   answers: every request still goes through the approval broker, a plan is always yours to
+//!   accept, and Codly never asks for a mode that decides in its place.
+//! - **Compact now** (a 1:1 agent): `/compact` as a turn of its own, between turns.
+//! - **Context** reads how full the context is. The model switch (`set_agent_model`, runs.rs)
+//!   uses the same path.
+//!
 //! `AgentControl` is the pure state machine (unit-tested below); the `impl Inner`/`impl Core`
 //! blocks are the glue the ingest pipeline and `send_prompt` call.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use serde_json::json;
+use serde_json::{Value, json};
+use tokio::sync::mpsc;
 
 use super::approvals::is_codly_tool;
 use super::interrupts::Asker;
 use super::{Inner, lock, row};
-use crate::adapters::AgentCmd;
+use crate::adapters::{AgentCmd, SessionRequest};
 use crate::model::*;
 
 /// Held steer notes / prompts per agent; the oldest drop first.
 const MAX_HELD: usize = 32;
+
+/// How long a CLI has to answer a session request. Claude answers at once, also during a turn.
+const SESSION_ANSWER_LIMIT: Duration = Duration::from_secs(10);
+
+/// Claude Code's own command that summarizes the conversation to free context. Sent as a user
+/// message with nothing around it: it is a turn of its own.
+const COMPACT: &str = "/compact";
+
+/// The CLI's answer to `get_context_usage`, as the agent panel shows it. None when the
+/// answer has no token counts.
+fn context_usage(answer: &Value) -> Option<ContextUsage> {
+    let parts = answer["categories"].as_array().into_iter().flatten();
+    Some(ContextUsage {
+        used_tokens: answer["totalTokens"].as_i64()?,
+        max_tokens: answer["maxTokens"].as_i64()?,
+        percent: answer["percentage"].as_f64()?,
+        auto_compact_at: answer["autoCompactThreshold"].as_i64().filter(|_| answer["isAutoCompactEnabled"] == true),
+        // The other kinds are room that is not taken (free space, the reserve for compacting).
+        parts: parts
+            .filter(|c| c["kind"] == "used")
+            .filter_map(|c| Some(ContextPart { name: c["name"].as_str()?.to_string(), tokens: c["tokens"].as_i64()? }))
+            .collect(),
+    })
+}
 
 /// What to do with a `ToolStarted` while tools may be blocked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +364,142 @@ impl Inner {
         self.send_prompt(agent_id, steer_prompt(text))?;
         Ok(self.control_state(agent_id))
     }
+
+    /// Send a request about its session to the agent's live Claude run. It is on its way when
+    /// this returns (before anything sent after it); the receiver gets the CLI's answer.
+    pub(super) fn ask_session(&self, agent_id: &str, request: SessionRequest) -> Result<mpsc::UnboundedReceiver<Result<Value, String>>> {
+        let (reply, answer) = mpsc::unbounded_channel();
+        let live = lock(&self.live);
+        let l = live.get(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
+        if l.provider != Provider::Claude {
+            bail!("only a Claude agent takes this without a restart");
+        }
+        if l.starting.is_some() {
+            bail!("that agent is still starting; try again in a moment");
+        }
+        if l.stopping || !l.handle.send(AgentCmd::Session { request, reply }) {
+            bail!("that agent is shutting down");
+        }
+        Ok(answer)
+    }
+
+    /// Wait for the CLI's answer to `ask_session`.
+    pub(super) async fn session_answer(mut answer: mpsc::UnboundedReceiver<Result<Value, String>>) -> Result<Value> {
+        match tokio::time::timeout(SESSION_ANSWER_LIMIT, answer.recv()).await {
+            Ok(Some(Ok(v))) => Ok(v),
+            Ok(Some(Err(e))) => bail!("Claude Code answered: {e}"),
+            Ok(None) => bail!("the agent's process ended before it answered"),
+            Err(_) => bail!("Claude Code did not answer within {} s", SESSION_ANSWER_LIMIT.as_secs()),
+        }
+    }
+
+    /// Put a 1:1 Claude agent in another permission mode: its live session now, every later
+    /// run when it starts (`restore_permission_mode`).
+    pub(super) async fn set_permission_mode(&self, agent_id: &str, mode: PermissionMode) -> Result<Agent> {
+        let agent = self.agent(agent_id)?;
+        if agent.role != Role::Solo || agent.provider != Provider::Claude {
+            bail!("only a 1:1 Claude agent has a mode to switch");
+        }
+        // Its run of a task works as a worker, in the task's own worktree, where edits are
+        // accepted: that run is not the conversation this switch is for.
+        let chat = lock(&self.live).get(agent_id).map(|l| l.role == Role::Solo && !l.read_only);
+        if agent.task_id.is_some() || chat == Some(false) {
+            bail!("{} is on a task: its mode can change when the task is done", agent.name);
+        }
+        if agent.permission_mode.unwrap_or_default() == mode {
+            return Ok(agent);
+        }
+        if chat == Some(true) {
+            let answer = self.ask_session(agent_id, SessionRequest::PermissionMode(mode))?;
+            Self::session_answer(answer).await?;
+        }
+        self.control_decision(agent_id, format!("{} now works in the mode \"{}\"", agent.name, mode.label()));
+        self.update_agent(agent_id, |a| a.permission_mode = Some(mode))
+    }
+
+    /// A run started: a 1:1 Claude agent goes back to the mode you chose for it (its CLI
+    /// starts in "ask for edits"). Called before the run's first prompt is sent, so the mode
+    /// is on when the CLI reads that prompt.
+    pub(super) fn restore_permission_mode(self: &Arc<Self>, agent: &Agent, role: Role, read_only: bool) {
+        let Some(mode) = agent.permission_mode.filter(|m| *m != PermissionMode::Ask) else { return };
+        if agent.provider != Provider::Claude || role != Role::Solo || read_only {
+            return;
+        }
+        let answer = match self.ask_session(&agent.id, SessionRequest::PermissionMode(mode)) {
+            Ok(answer) => answer,
+            // Stopped while it started: there is no session to set up.
+            Err(e) => return tracing::debug!("{}'s mode not restored: {e}", agent.name),
+        };
+        let (me, id, name) = (self.clone(), agent.id.clone(), agent.name.clone());
+        tokio::spawn(async move {
+            let Err(e) = Self::session_answer(answer).await else { return };
+            // The CLI stayed in "ask for edits", the careful one: the switch shows that, and why.
+            let (ws, run) = match lock(&me.live).get(&id) {
+                Some(l) => (l.workspace_id.clone(), Some(l.run_id.clone())),
+                None => (me.store.agent_workspace(&id).ok().flatten(), None),
+            };
+            let message = format!("{name} could not go back to the mode \"{}\" ({e}). It asks before every edit instead.", mode.label());
+            let _ = me.emit(ws.as_deref(), row(Some(id.as_str()), None, run.as_deref(), EventKind::Error { message, fatal: false }));
+            let _ = me.update_agent(&id, |a| a.permission_mode = None);
+        });
+    }
+
+    /// The CLI changed its permission mode by itself (`adapters::permission_mode_changed`):
+    /// Claude Code ends plan mode when you accept its plan. The agent's switch follows what is
+    /// true, in its own conversation only (a task run of a 1:1 agent has no switch).
+    pub(super) fn control_mode_changed(&self, agent_id: &str, role: Role, detail: &Value) {
+        let Ok(mode) = serde_json::from_value::<PermissionMode>(detail["mode"].clone()) else { return };
+        if role != Role::Solo {
+            return;
+        }
+        if let Err(e) = self.update_agent(agent_id, |a| a.permission_mode = Some(mode)) {
+            tracing::debug!("permission mode not recorded: {e}");
+        }
+    }
+
+    /// "Compact now": Claude Code summarizes the conversation to free context. It is a turn of
+    /// its own, so only between turns, and only for a 1:1 agent: for a worker, a reviewer or
+    /// the Lead the end of a turn means its work is ready to be checked.
+    pub(super) fn compact_agent(&self, agent_id: &str) -> Result<()> {
+        let agent = self.live_agent(agent_id)?;
+        if self.control_holding(agent_id) {
+            bail!("{} is paused: resume it first", agent.name);
+        }
+        {
+            let mut live = lock(&self.live);
+            let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("{} is not running", agent.name))?;
+            if l.provider != Provider::Claude {
+                bail!("only a Claude agent can be compacted from here");
+            }
+            if l.role != Role::Solo {
+                if agent.role == Role::Solo {
+                    bail!("{} is on a task: compact it when the task is done", agent.name);
+                }
+                bail!("only a 1:1 agent can be compacted by hand");
+            }
+            if l.starting.is_some() || l.stopping {
+                bail!("{} is starting or shutting down; try again in a moment", agent.name);
+            }
+            if l.turn_active || l.queued > 0 {
+                bail!("{} is still working: compact it when its turn ends", agent.name);
+            }
+            // The command alone (`deliver_prompt` would put the briefing around it): one turn.
+            if !l.handle.send(AgentCmd::Prompt(COMPACT.into())) {
+                bail!("that agent's process is gone");
+            }
+            l.queued += 1;
+        }
+        self.control_decision(agent_id, format!("asked {} to compact its conversation", agent.name));
+        Ok(())
+    }
+
+    /// How full the agent's context is, asked of its live Claude session.
+    pub(super) async fn agent_context_usage(&self, agent_id: &str) -> Result<ContextUsage> {
+        self.live_agent(agent_id)?;
+        let answer = self.ask_session(agent_id, SessionRequest::ContextUsage)?;
+        let answer = Self::session_answer(answer).await?;
+        context_usage(&answer).ok_or_else(|| anyhow!("Claude Code's answer had no token counts"))
+    }
 }
 
 impl super::Core {
@@ -355,6 +528,22 @@ impl super::Core {
     /// A note that reaches the agent as context on its next turn; held while it is paused.
     pub async fn steer_agent(&self, agent_id: &str, text: &str) -> Result<ControlState> {
         self.inner.steer_agent(agent_id, text)
+    }
+
+    /// How a 1:1 Claude agent works with edits: asks first, accepts them, or plans first. A
+    /// live session switches at once; the mode is kept for its next runs.
+    pub async fn set_agent_permission_mode(&self, agent_id: &str, mode: PermissionMode) -> Result<Agent> {
+        self.inner.set_permission_mode(agent_id, mode).await
+    }
+
+    /// Ask a live 1:1 Claude agent, between turns, to compact its conversation now.
+    pub async fn compact_agent(&self, agent_id: &str) -> Result<()> {
+        self.inner.compact_agent(agent_id)
+    }
+
+    /// How full a live Claude agent's context is, as its CLI counts it right now.
+    pub async fn agent_context_usage(&self, agent_id: &str) -> Result<ContextUsage> {
+        self.inner.agent_context_usage(agent_id).await
     }
 }
 
@@ -443,6 +632,29 @@ mod tests {
         c.request_stop(false);
         c.resume();
         assert!(c.state().block_tools && !c.state().paused);
+    }
+
+    /// Claude Code 2.1.311's recorded answer to `get_context_usage`.
+    #[test]
+    fn context_usage_is_read_from_the_recorded_answer() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/research/fixtures/claude-2.1.311/control-requests.ndjson");
+        let lines: Vec<Value> = std::fs::read_to_string(&path).unwrap().lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect();
+        let asked = lines.iter().position(|l| l["_sent"]["request"]["subtype"] == "get_context_usage").expect("the recorded request");
+        let id = lines[asked]["_sent"]["request_id"].clone();
+        let answer = lines.iter().find(|l| l["type"] == "control_response" && l["response"]["request_id"] == id).expect("its answer");
+        let usage = context_usage(&answer["response"]["response"]).expect("token counts");
+        assert_eq!((usage.used_tokens, usage.max_tokens, usage.percent), (6035, 1_000_000, 1.0));
+        assert_eq!(usage.auto_compact_at, Some(967_000));
+        // Free space and the reserve for compacting are not parts of what is used.
+        let parts: Vec<(&str, i64)> = usage.parts.iter().map(|p| (p.name.as_str(), p.tokens)).collect();
+        assert_eq!(parts, [("System prompt", 2251), ("System tools", 2342), ("Messages", 1442)]);
+        assert_eq!(usage.parts.iter().map(|p| p.tokens).sum::<i64>(), usage.used_tokens);
+
+        // Auto-compaction off: no threshold is shown. An answer without counts is no reading.
+        let mut off = answer["response"]["response"].clone();
+        off["isAutoCompactEnabled"] = json!(false);
+        assert_eq!(context_usage(&off).unwrap().auto_compact_at, None);
+        assert_eq!(context_usage(&json!({ "categories": [] })), None);
     }
 
     #[test]

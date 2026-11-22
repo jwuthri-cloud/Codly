@@ -23,6 +23,7 @@ import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
+import type { PermissionMode } from './gen/PermissionMode';
 import type { Provider } from './gen/Provider';
 import type { SearchResult } from './gen/SearchResult';
 import type { Settings } from './gen/Settings';
@@ -373,6 +374,12 @@ export class MockTransport implements Transport {
         return this.ctl.resume(String(a.agentId));
       case 'steer_agent':
         return this.ctl.steer(String(a.agentId), String(a.text ?? ''));
+      case 'set_agent_permission_mode':
+        return this.ctl.setMode(String(a.agentId), a.mode as PermissionMode);
+      case 'compact_agent':
+        return this.ctl.compact(String(a.agentId));
+      case 'agent_context_usage':
+        return this.ctl.contextUsage(String(a.agentId));
       case 'hire_agent':
         return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':

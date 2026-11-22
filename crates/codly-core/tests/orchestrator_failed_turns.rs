@@ -172,7 +172,7 @@ impl Spawner for Fake {
                                         Some(AgentCmd::Interrupt) => break done(TurnStatus::Interrupted, None),
                                         Some(AgentCmd::Prompt(prompt)) => waiting.push_back(prompt),
                                         Some(AgentCmd::Shutdown) => return exit(0),
-                                        Some(AgentCmd::Approval { .. }) => {}
+                                        Some(AgentCmd::Approval { .. } | AgentCmd::Session { .. }) => {}
                                         None => return,
                                     }
                                 },
@@ -187,14 +187,14 @@ impl Spawner for Fake {
                                         }
                                         Some(AgentCmd::Shutdown) => return exit(0),
                                         Some(AgentCmd::Prompt(prompt)) => waiting.push_back(prompt),
-                                        Some(AgentCmd::Approval { .. }) => {}
+                                        Some(AgentCmd::Approval { .. } | AgentCmd::Session { .. }) => {}
                                         None => return,
                                     }
                                 },
                             }
                         }
                         AgentCmd::Shutdown => return exit(0),
-                        AgentCmd::Interrupt | AgentCmd::Approval { .. } => {}
+                        AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. } => {}
                     }
                 }
             });

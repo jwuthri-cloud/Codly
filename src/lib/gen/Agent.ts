@@ -3,6 +3,7 @@ import type { ActivityKind } from "./ActivityKind";
 import type { AgentStatus } from "./AgentStatus";
 import type { Billing } from "./Billing";
 import type { Career } from "./Career";
+import type { PermissionMode } from "./PermissionMode";
 import type { Provider } from "./Provider";
 import type { Role } from "./Role";
 import type { Usage } from "./Usage";
@@ -72,4 +73,9 @@ away_since?: number,
  * Only a hint, with the office rules on: the Lead and the scheduler prefer someone rested,
  * never refuse it work.
  */
-tired_since?: number, created_at: number, updated_at: number, };
+tired_since?: number, 
+/**
+ * 1:1 Claude agents only: how it works with edits (`PermissionMode`), kept for its next
+ * run. None = never chosen: it asks before every edit.
+ */
+permission_mode?: PermissionMode, created_at: number, updated_at: number, };

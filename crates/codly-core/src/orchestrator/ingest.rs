@@ -106,6 +106,9 @@ impl Inner {
             EventKind::TurnCompleted { .. } => self.control_turn_done(&ctx.agent_id),
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
             EventKind::TurnStarted { .. } => self.checkpoint_turn(&ctx.agent_id, &ctx.run_id), // the files before the turn
+            EventKind::Decision { decision_type, detail, .. } if decision_type == crate::adapters::MODE_CHANGED => {
+                self.control_mode_changed(&ctx.agent_id, ctx.role, detail)
+            }
             _ => {}
         }
         if let Err(e) = self.project_agent(&ctx, &r.kind) {

@@ -432,6 +432,7 @@ mod tests {
             away_until: None,
             away_since: None,
             tired_since: None,
+            permission_mode: None,
             archived: true,
             usage: Usage::default(),
             career: Career::default(),

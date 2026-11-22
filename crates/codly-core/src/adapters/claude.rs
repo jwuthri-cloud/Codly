@@ -12,6 +12,11 @@
 //!
 //! Prompts are queued Codly-side while a turn runs, so every `AgentCmd::Prompt` is exactly one
 //! turn with its own `TurnStarted` and `TurnCompleted`.
+//!
+//! `AgentCmd::Session` (permission mode, model, context use) is written at once as a control
+//! request: the CLI answers those between turns and during one. Request and answer shapes,
+//! and what a permission suggestion does when it is sent back, are recorded on 2.1.311
+//! (docs/research/cli-claude-stream-json-2.1.311.md §2 and §10).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -25,10 +30,10 @@ use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
-use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, startup};
+use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SessionReply, SessionRequest, SpawnSpec, startup};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, Billing, EventKind,
-    Id, MessagePhase, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
+    Id, MessagePhase, PermissionMode, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
 };
 use crate::proc::{self, Inbound, RawLog, StderrTail};
 
@@ -51,6 +56,10 @@ pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "WebFetch", "WebS
 const OPTIONAL_TOOLS: &[&str] = &["Monitor", "TaskStop", "Skill", "LSP", TOOL_SEARCH];
 /// Needed to reach the user's own MCP servers when there are many of them.
 const TOOL_SEARCH: &str = "ToolSearch";
+/// How Claude shows its plan in plan mode: the call arrives as a `can_use_tool` request with
+/// the plan text (cli-claude-stream-json-2.1.311 §10). Left out of `--tools`, the CLI denies
+/// the call by a rule of its own and a plan could never be accepted.
+pub const EXIT_PLAN_MODE: &str = "ExitPlanMode";
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -62,6 +71,10 @@ pub fn tools_for(spec: &SpawnSpec) -> Vec<&'static str> {
     let mut t = if spec.read_only { READ_ONLY_TOOLS } else { WORKER_TOOLS }.to_vec();
     if spec.use_user_setup {
         t.push(TOOL_SEARCH);
+    }
+    // Only a 1:1 agent can be put in plan mode (`PermissionMode::Plan`).
+    if spec.role == Role::Solo && !spec.read_only {
+        t.push(EXIT_PLAN_MODE);
     }
     t
 }
@@ -191,6 +204,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         queue: VecDeque::new(),
         turn_active: false,
         next_req: 0,
+        session_replies: HashMap::new(),
         stage: Stage::Running,
         deadline: None,
         start_failed: false,
@@ -282,6 +296,8 @@ struct Actor {
     queue: VecDeque<String>,
     turn_active: bool,
     next_req: u64,
+    /// Session requests the CLI has not answered yet, by control request id.
+    session_replies: HashMap<String, (SessionRequest, SessionReply)>,
     stage: Stage,
     /// While running: when an interrupted turn must have ended. In a shutdown: the stage's limit.
     deadline: Option<tokio::time::Instant>,
@@ -411,6 +427,8 @@ impl Actor {
                     self.start_failed = true; // spawn() returned the error: no events for this run
                     self.begin_shutdown().await;
                 }
+            } else if let Some((request, reply)) = resp["request_id"].as_str().and_then(|id| self.session_replies.remove(id)) {
+                self.session_answered(request, reply, resp);
             } else if resp["subtype"] == "error" {
                 self.emit(EventKind::Error { message: format!("claude control request failed: {}", resp["error"]), fatal: false });
             }
@@ -485,7 +503,52 @@ impl Actor {
                 None => tracing::warn!("claude: no pending approval {approval_id}"),
             },
             AgentCmd::Shutdown => self.begin_shutdown().await,
+            AgentCmd::Session { request, reply } => self.session_request(request, reply).await,
         }
+    }
+
+    /// Write a session request as its control request (shapes: cli-claude-stream-json-2.1.311
+    /// §2). The CLI answers at once, during a turn too, so nothing is queued here.
+    async fn session_request(&mut self, request: SessionRequest, reply: SessionReply) {
+        if self.stage != Stage::Running {
+            let _ = reply.send(Err("Claude Code is shutting down".into()));
+            return;
+        }
+        let (subtype, body) = match &request {
+            SessionRequest::PermissionMode(mode) => ("set_permission_mode", json!({ "mode": mode.cli() })),
+            SessionRequest::Model(model) => ("set_model", json!({ "model": model })),
+            SessionRequest::ContextUsage => ("get_context_usage", json!({})),
+        };
+        let id = self.control(subtype, body).await;
+        if self.stdin.is_none() {
+            let _ = reply.send(Err("Claude Code no longer reads its input".into()));
+            return;
+        }
+        // Known before the answer: the CLI's status line for this switch can come first, and it
+        // is no change of the CLI's own.
+        if let SessionRequest::PermissionMode(mode) = &request {
+            self.norm.permission_mode = Some(*mode);
+        }
+        self.session_replies.insert(id, (request, reply));
+    }
+
+    /// The CLI answered a session request: the answer goes to whoever asked (an error too: it
+    /// is theirs to show, not a line of the timeline).
+    fn session_answered(&mut self, request: SessionRequest, reply: SessionReply, resp: &Value) {
+        let answer = if resp["subtype"] == "success" {
+            Ok(resp["response"].clone())
+        } else {
+            Err(resp["error"].as_str().map_or_else(|| resp["error"].to_string(), str::to_owned))
+        };
+        match (&request, &answer) {
+            // A refused switch leaves the CLI in the mode it had, which this request overwrote
+            // here: its next status line says which one it is.
+            (SessionRequest::PermissionMode(_), Err(_)) => self.norm.permission_mode = None,
+            (SessionRequest::Model(model), Ok(_)) => self.norm.model = Some(model.clone()),
+            _ => {}
+        }
+        // Nobody waits any more (the asker gave up): the request still took effect.
+        let _ = reply.send(answer);
     }
 
     async fn send_prompt(&mut self, text: String) {
@@ -680,6 +743,9 @@ pub struct ClaudeNormalizer {
     worker: bool,
     session_id: String,
     model: Option<String>,
+    /// The permission mode the session is in, when known: from the handshake, from a switch
+    /// Codly asked for (the actor sets it), from the CLI's status lines.
+    permission_mode: Option<PermissionMode>,
     /// "Claude Code is not signed in: run `…` in a terminal", for this run's account.
     sign_in: String,
     /// The run pays with the user's own API key or token command: signing in is no fix.
@@ -724,6 +790,7 @@ impl ClaudeNormalizer {
             worker: spec.role == Role::Worker,
             session_id,
             model: classify::split_model_effort(spec.model.as_deref()).0,
+            permission_mode: None,
             sign_in: startup::not_signed_in(Provider::Claude, startup::account_home(spec), None),
             own_key: startup::uses_own_key(spec),
             requested_tools: tools_for(spec).iter().map(|t| t.to_string()).collect(),
@@ -817,6 +884,7 @@ impl ClaudeNormalizer {
     pub fn on_initialize(&mut self, resp: &Value) -> EventKind {
         // Signed in with a plan: {subscriptionType: "Claude Team", apiProvider: "firstParty", …};
         // a minimal env shows {tokenSource: "none", …}; an API key shows its tokenSource.
+        self.permission_mode = resp["current_permission_mode"].as_str().and_then(PermissionMode::from_cli);
         let account = &resp["account"];
         let token_source = account["tokenSource"].as_str().or(account["apiKeySource"].as_str());
         let billing = if account["apiProvider"].as_str().is_some_and(|p| p != "firstParty") {
@@ -881,7 +949,7 @@ impl ClaudeNormalizer {
             "status" => match v["status"].as_str() {
                 Some("requesting") => self.set_status(AgentStatus::Thinking, out),
                 Some("compacting") => out.push(EventKind::Compacting { pre_tokens: None, post_tokens: None }),
-                None => {} // permissionMode echo
+                None => self.on_permission_mode(v, out),
                 Some(_) => out.push(EventKind::Unknown { raw_type: "system/status".into() }),
             },
             "api_retry" => {
@@ -943,6 +1011,25 @@ impl ClaudeNormalizer {
                 _ => {}
             },
             _ => out.push(EventKind::Unknown { raw_type: format!("system/{subtype}") }),
+        }
+    }
+
+    /// A `system/status` line without a status: it names the session's permission mode after a
+    /// switch (or the outcome of a compaction, which `compact_boundary` reports). A switch
+    /// Codly asked for is known already; one the CLI made itself is reported.
+    fn on_permission_mode(&mut self, v: &Value, out: &mut Vec<EventKind>) {
+        let Some(name) = v["permissionMode"].as_str() else { return };
+        match PermissionMode::from_cli(name) {
+            Some(mode) if self.permission_mode == Some(mode) => {}
+            Some(mode) => {
+                self.permission_mode = Some(mode);
+                out.push(super::permission_mode_changed(mode));
+            }
+            // Codly never asks for these modes and never sends back a suggestion to enter one.
+            None => {
+                self.permission_mode = None;
+                self.problem(format!("Claude Code changed its permission mode to {name}, which Codly does not offer"), false, out);
+            }
         }
     }
 
@@ -1140,7 +1227,7 @@ impl ClaudeNormalizer {
             if !self.tools.values().any(|t| t.activity != ActivityKind::Delegate) {
                 self.set_status(AgentStatus::Thinking, out);
             }
-        } else if !result_text(&v["message"]["content"]).starts_with("[Request interrupted") {
+        } else if !result_text(&v["message"]["content"]).starts_with("[Request interrupted") && !written_by_the_cli(v) {
             // (the CLI's own interruption notice is known and says nothing new)
             out.push(EventKind::Unknown { raw_type: "user".into() });
         }
@@ -1390,8 +1477,8 @@ impl ClaudeNormalizer {
     fn approval_requested(&mut self, request_id: String, req: &Value, out: &mut Vec<EventKind>) {
         let tool = req["tool_name"].as_str().unwrap_or("").to_string();
         let input = req["input"].clone();
-        let suggestions = req["permission_suggestions"].as_array().cloned().unwrap_or_default();
         let cwd = self.cwd.clone();
+        let suggestions = grantable(&tool, &req["permission_suggestions"], &cwd);
         let mut risks: Vec<String> = Vec::new();
         let subject = match tool.as_str() {
             "Bash" | "Monitor" => {
@@ -1416,8 +1503,9 @@ impl ClaudeNormalizer {
         let choices = if tool == "AskUserQuestion" {
             vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel]
         } else {
-            // A session or permanent grant is a permission rule the CLI suggested: without
-            // one, "for this session" could only be sent as a one-time allow, so it is not offered.
+            // A session or permanent grant is a permission rule the CLI suggested (`grantable`):
+            // without one, "for this session" could only be sent as a one-time allow, so it is
+            // not offered.
             let mut c = vec![ApprovalChoice::AllowOnce];
             if !suggestions.is_empty() {
                 c.push(ApprovalChoice::AllowSession);
@@ -1524,6 +1612,31 @@ impl ClaudeNormalizer {
             .map(|(id, _)| EventKind::ApprovalResolved { approval_id: id, status: ApprovalStatus::Cancelled, by: "provider".into() })
             .collect()
     }
+}
+
+/// A `user` line the CLI wrote itself, not something the user or a tool said (recorded,
+/// cli-claude-stream-json-2.1.311 §2 and §11): the echo of a local command (`isReplay`:
+/// "Set model to …" after a model switch, "Compacted" after a compaction) and the summary a
+/// compaction puts in place of the conversation (`isSynthetic`). The events of the switch
+/// and of the compaction already say what happened.
+fn written_by_the_cli(v: &Value) -> bool {
+    v["isSynthetic"] == true || (v["isReplay"] == true && result_text(&v["message"]["content"]).starts_with("<local-command-stdout>"))
+}
+
+/// The permission suggestions of a request that "for this session" and "always" may send
+/// back: allow rules for the tool that asked, and directories inside the agent's own folder.
+/// Never `setMode`: sent back, it puts the whole session in another permission mode
+/// (recorded, cli-claude-stream-json-2.1.311 §10), which is more than the request you
+/// approved. A directory outside `cwd` would let later edits there pass without a question.
+fn grantable(tool: &str, suggestions: &Value, cwd: &Path) -> Vec<Value> {
+    let keep = |s: &&Value| match s["type"].as_str() {
+        Some("addRules") => s["behavior"] == "allow" && s["rules"].as_array().is_some_and(|r| !r.is_empty() && r.iter().all(|r| r["toolName"] == tool)),
+        Some("addDirectories") => s["directories"]
+            .as_array()
+            .is_some_and(|d| !d.is_empty() && d.iter().all(|d| d.as_str().is_some_and(|d| !classify::outside(d, cwd, cwd)))),
+        _ => false,
+    };
+    suggestions.as_array().into_iter().flatten().filter(keep).cloned().collect()
 }
 
 /// Tokens the model saw on one API call (the context meter, never a sum of turns).
@@ -1758,6 +1871,7 @@ mod tests {
         let mut s = spec(Role::Solo, false);
         s.cwd = PathBuf::from(lines.iter().find(|l| l["subtype"] == "init").unwrap()["cwd"].as_str().unwrap());
         let mut norm = ClaudeNormalizer::new(&s, "4a6796bf-c299-4975-8a0e-6bc9eaf3b8e2".into());
+        norm.requested_tools.retain(|t| t != EXIT_PLAN_MODE); // the capture is older than the plan tool: its run did not ask for it
         let init = lines.iter().find(|l| l["type"] == "control_response").unwrap();
         assert!(matches!(norm.on_initialize(&init["response"]["response"]), EventKind::SessionStarted { billing: Billing::Subscription, .. }));
         let mut events = norm.turn_started("go");
@@ -2244,6 +2358,7 @@ mod tests {
             queue: VecDeque::new(),
             turn_active: false,
             next_req: 0,
+            session_replies: HashMap::new(),
             stage: Stage::Running,
             deadline: None,
             start_failed: false,
@@ -2321,5 +2436,244 @@ mod tests {
         assert!(actor.turn_active && actor.queue.is_empty());
         // No interrupt is pending any more: an exit now is a failed turn.
         assert_eq!(actor.unfinished_turn().0, TurnStatus::Failed);
+    }
+
+    // ───── the session's mode, model and context (recordings of Claude Code 2.1.311) ─────
+
+    /// The lines of a 2.1.311 recording: the CLI's stdout lines, and the driver's own
+    /// (`_sent` = a line it wrote to the CLI).
+    fn recording(name: &str) -> Vec<Value> {
+        fixture(&format!("claude-2.1.311/{name}.ndjson"))
+    }
+
+    /// The control request with this body that the recording's driver sent, and the CLI's answer.
+    fn recorded_control(lines: &[Value], request: &Value) -> (Value, Value) {
+        let sent = lines
+            .iter()
+            .map(|l| &l["_sent"])
+            .find(|s| s["type"] == "control_request" && s["request"] == *request)
+            .unwrap_or_else(|| panic!("no recorded request {request}"));
+        let answer = lines
+            .iter()
+            .find(|l| l["type"] == "control_response" && l["response"]["request_id"] == sent["request_id"])
+            .unwrap_or_else(|| panic!("no recorded answer to {request}"));
+        (sent.clone(), answer.clone())
+    }
+
+    /// The last line Codly wrote to the CLI.
+    fn last_sent(dir: &Path) -> Value {
+        let log = std::fs::read_to_string(dir.join("raw.ndjson")).unwrap();
+        log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).filter_map(|l| l.get("codly_sent").cloned()).last().expect("a line was written")
+    }
+
+    /// Send a session request through the actor, compare the line it wrote with the recorded
+    /// request, and feed it the recorded answer (under the id the actor gave its request).
+    async fn ask_as_recorded(actor: &mut Actor, dir: &Path, lines: &[Value], request: SessionRequest, recorded: Value) -> Result<Value, String> {
+        let (reply, mut answer) = mpsc::unbounded_channel();
+        actor.on_cmd(AgentCmd::Session { request, reply }).await;
+        let wrote = last_sent(dir);
+        let (sent, mut response) = recorded_control(lines, &recorded);
+        assert_eq!((&wrote["type"], &wrote["request"]), (&sent["type"], &sent["request"]), "Codly writes the recorded request");
+        assert!(answer.try_recv().is_err(), "no answer before the CLI's own");
+        response["response"]["request_id"] = wrote["request_id"].clone();
+        actor.on_json(response, "codly-0", &mut None).await;
+        answer.try_recv().expect("the CLI's answer reaches whoever asked")
+    }
+
+    #[tokio::test]
+    async fn session_requests_go_out_and_come_back_as_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        let lines = recording("control-requests");
+        let dir = dir.path();
+
+        // Plan mode, then accept edits. The CLI's status line for a switch Codly asked for is
+        // no news: it makes no record.
+        let request = json!({ "subtype": "set_permission_mode", "mode": "plan" });
+        let plan = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::PermissionMode(PermissionMode::Plan), request).await;
+        assert_eq!(plan, Ok(json!({ "mode": "plan" })));
+        let status = lines.iter().find(|l| l["subtype"] == "status" && l["permissionMode"] == "plan").expect("the recorded status line").clone();
+        actor.on_json(status, "codly-0", &mut None).await;
+        let request = json!({ "subtype": "set_permission_mode", "mode": "acceptEdits" });
+        let accept = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::PermissionMode(PermissionMode::AcceptEdits), request).await;
+        assert_eq!(accept, Ok(json!({ "mode": "acceptEdits" })));
+        assert_eq!(actor.norm.permission_mode, Some(PermissionMode::AcceptEdits));
+
+        // Another model; and one the CLI does not know: its own words are the error.
+        let request = json!({ "subtype": "set_model", "model": "sonnet" });
+        let model = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::Model("sonnet".into()), request).await;
+        assert_eq!(model, Ok(json!({ "model": "claude-sonnet-5-5" })));
+        let request = json!({ "subtype": "set_model", "model": "no-such-model-xyz" });
+        let unknown = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::Model("no-such-model-xyz".into()), request).await;
+        assert_eq!(unknown, Err("Model 'no-such-model-xyz' not found".to_string()));
+        assert_eq!(actor.norm.model.as_deref(), Some("sonnet"), "a refused model is not the session's model");
+
+        // How full the context is.
+        let usage = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::ContextUsage, json!({ "subtype": "get_context_usage" })).await.unwrap();
+        assert_eq!((usage["totalTokens"].as_i64(), usage["maxTokens"].as_i64()), (Some(6035), Some(1_000_000)));
+
+        // Answers and errors went to whoever asked: none of it is a line of the timeline.
+        let kinds = emitted(&mut events);
+        assert!(kinds.is_empty(), "{kinds:?}");
+        assert!(actor.session_replies.is_empty());
+
+        // A refused switch: the session's mode is not the one Codly asked for.
+        let (reply, mut answer) = mpsc::unbounded_channel();
+        actor.on_cmd(AgentCmd::Session { request: SessionRequest::PermissionMode(PermissionMode::Plan), reply }).await;
+        let id = last_sent(dir)["request_id"].clone();
+        let refused = json!({ "type": "control_response", "response": { "subtype": "error", "request_id": id, "error": "refused" } });
+        actor.on_json(refused, "codly-0", &mut None).await;
+        assert_eq!(answer.try_recv().unwrap(), Err("refused".to_string()));
+        assert_eq!(actor.norm.permission_mode, None);
+
+        // During a shutdown nothing is written any more, and the asker is told so.
+        actor.on_cmd(AgentCmd::Shutdown).await;
+        let (reply, mut answer) = mpsc::unbounded_channel();
+        actor.on_cmd(AgentCmd::Session { request: SessionRequest::ContextUsage, reply }).await;
+        assert_eq!(answer.try_recv().unwrap(), Err("Claude Code is shutting down".to_string()));
+    }
+
+    /// The plan-mode recording: `ExitPlanMode` arrives as a request with the plan in it. Sent
+    /// back with a note, the session stays in plan mode and the plan comes again; accepted,
+    /// the CLI leaves plan mode by itself and Codly records that.
+    #[test]
+    fn a_plan_is_a_request_and_accepting_it_ends_plan_mode() {
+        let lines = recording("permission-plan-mode");
+        let mut s = spec(Role::Solo, false);
+        s.cwd = PathBuf::from("/tmp/work/plan");
+        let mut norm = ClaudeNormalizer::new(&s, "sess-1".into());
+        norm.permission_mode = Some(PermissionMode::Plan); // as after Codly's own switch
+        // Codly's answers, as the recording's driver gave them: the plan sent back with a
+        // note, the next plan accepted, the command that follows allowed once.
+        let note = "Not yet: add a final step that reads the file back to check it. Then present the plan again.";
+        let once = || ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None };
+        let mut decisions = vec![ApprovalDecision { choice: ApprovalChoice::Deny, message: Some(note.into()), answers: None }, once(), once()].into_iter();
+        let mut plans = Vec::new();
+        let mut events = norm.turn_started("plan it");
+        for (i, line) in lines.iter().enumerate().filter(|(_, l)| l["type"].is_string()) {
+            let out = norm.on_message(line);
+            if let Some(EventKind::ApprovalRequested { approval }) = out.iter().find(|e| matches!(e, EventKind::ApprovalRequested { .. })) {
+                if let ApprovalSubject::Tool { name, input } = &approval.subject {
+                    assert_eq!(name, EXIT_PLAN_MODE);
+                    assert_eq!(approval.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
+                    plans.push(input["plan"].as_str().expect("the plan text").to_string());
+                }
+                let (reply, _) = norm.answer(&approval.id, &decisions.next().expect("three requests")).unwrap();
+                assert_eq!(reply, lines[i + 1]["_sent"], "Codly's answer is the recorded one");
+            }
+            events.extend(out);
+        }
+        assert!(decisions.next().is_none(), "three requests: two plans and a command");
+        assert_eq!(plans.len(), 2, "the plan, and the plan again after it was sent back");
+        assert!(plans.iter().all(|p| p.starts_with("# Add `world` to hello.txt")), "{plans:?}");
+        // One change of mode, the CLI's own, after the accepted plan: it asks for edits again.
+        let modes: Vec<Value> = events
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::Decision { decision_type, detail, .. } if decision_type == crate::adapters::MODE_CHANGED => Some(detail["mode"].clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(modes, [json!("ask")]);
+        assert_eq!(norm.permission_mode, Some(PermissionMode::Ask));
+    }
+
+    /// The recorded requests of mode `default`. "For this session" and "always" send back the
+    /// rule for the tool that asked and a folder of the agent's own, never a switch of the
+    /// session's mode and never a folder outside.
+    #[test]
+    fn a_grant_never_changes_the_mode_of_the_session() {
+        let lines = recording("permission-request-shapes");
+        let mut s = spec(Role::Solo, false);
+        s.cwd = PathBuf::from("/tmp/work/permissions");
+        let mut norm = ClaudeNormalizer::new(&s, "sess-1".into());
+        let request = |tool: &str, n: usize| {
+            let mut asked = lines.iter().filter(|l| l["request"]["subtype"] == "can_use_tool" && l["request"]["tool_name"] == tool);
+            asked.nth(n).unwrap_or_else(|| panic!("no recorded {tool} request {n}")).clone()
+        };
+        let suggested = |r: &Value| r["request"]["permission_suggestions"].as_array().unwrap().iter().map(|s| s["type"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let granted = |r: &Value| r["response"]["response"]["updatedPermissions"].clone();
+        let decide = |choice| ApprovalDecision { choice, message: None, answers: None };
+
+        // An edit: the CLI suggests only "accept edits for the session". That is no grant for
+        // this edit, so "once" is the only way to allow it.
+        let edit = request("Edit", 0);
+        assert_eq!(suggested(&edit), ["setMode"]);
+        let a = approval_of(&norm.on_message(&edit));
+        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
+        let (r, _) = norm.answer(&a.id, &decide(ApprovalChoice::AllowOnce)).unwrap();
+        assert!(granted(&r).is_null());
+
+        // `rm note.txt` in the agent's folder: its rule and that folder, for the session.
+        let rm = request("Bash", 3);
+        assert_eq!(rm["request"]["input"]["command"], "rm note.txt");
+        assert_eq!(suggested(&rm), ["addRules", "addDirectories", "setMode"]);
+        let a = approval_of(&norm.on_message(&rm));
+        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::AllowSession, ApprovalChoice::AllowAlways, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
+        let (r, _) = norm.answer(&a.id, &decide(ApprovalChoice::AllowSession)).unwrap();
+        assert_eq!(
+            granted(&r),
+            json!([
+                { "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "rm note.txt" }], "behavior": "allow", "destination": "session" },
+                { "type": "addDirectories", "directories": ["/tmp/work/permissions"], "destination": "session" },
+            ])
+        );
+
+        // `touch /tmp/…` writes outside: "always" keeps the rule for that command, not `/tmp`.
+        let touch = request("Bash", 2);
+        assert_eq!(suggested(&touch), ["addRules", "addDirectories", "setMode"]);
+        let a = approval_of(&norm.on_message(&touch));
+        let (r, _) = norm.answer(&a.id, &decide(ApprovalChoice::AllowAlways)).unwrap();
+        assert_eq!(
+            granted(&r),
+            json!([{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "touch /tmp/perm-probe-outside.txt" }], "behavior": "allow", "destination": "localSettings" }])
+        );
+
+        // A rule for another tool than the one that asked, or one that denies, is not sent back.
+        let odd = json!([
+            { "type": "addRules", "rules": [{ "toolName": "Edit", "ruleContent": "**" }], "behavior": "allow", "destination": "session" },
+            { "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "ls" }], "behavior": "deny", "destination": "session" },
+        ]);
+        let a = approval_of(&norm.on_message(&can_use_tool("Bash", json!({ "command": "ls" }), odd)));
+        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
+    }
+
+    #[test]
+    fn only_a_one_to_one_agent_gets_the_plan_tool() {
+        assert!(tools_for(&spec(Role::Solo, false)).contains(&EXIT_PLAN_MODE));
+        assert!(build_args(&spec(Role::Solo, false), "sid", None).join(" ").contains("Skill,LSP,ExitPlanMode "));
+        assert!(!tools_for(&spec(Role::Worker, false)).contains(&EXIT_PLAN_MODE));
+        assert!(!tools_for(&spec(Role::Solo, true)).contains(&EXIT_PLAN_MODE), "a read-only run has nothing to plan");
+        assert!(!tools_for(&spec(Role::Lead, true)).contains(&EXIT_PLAN_MODE));
+        // Asked for, the CLI lists it among its tools (recorded): no "not enabled" line follows.
+        let init = recording("permission-plan-mode").into_iter().find(|l| l["subtype"] == "init").expect("the recorded init line");
+        assert!(init["tools"].as_array().unwrap().contains(&json!(EXIT_PLAN_MODE)));
+    }
+
+    /// What the CLI writes back after a model switch and around a compaction is known: no
+    /// "unknown" rows, and the compaction is reported with its token counts.
+    #[test]
+    fn lines_the_cli_writes_itself_make_no_unknown_rows() {
+        for name in ["control-requests", "compaction-and-slash"] {
+            let lines = recording(name);
+            assert!(lines.iter().any(|l| l["type"] == "user" && l["isReplay"] == true), "{name} has such lines");
+            let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "sess-1".into());
+            let events: Vec<EventKind> = lines.iter().filter(|l| l["type"].is_string()).flat_map(|l| norm.on_message(l)).collect();
+            assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { raw_type } if raw_type == "user")), "{name}: {events:?}");
+            if name == "compaction-and-slash" {
+                let compactions: Vec<_> = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        EventKind::Compacting { pre_tokens: Some(pre), post_tokens: Some(post) } => Some((*pre, *post)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(compactions, [(5955, 1197), (7892, 546)]);
+            }
+        }
+        // What the user or a tool did not say stays unknown when the CLI does not mark it as its own.
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "s".into());
+        let ev = norm.on_message(&json!({ "type": "user", "message": { "role": "user", "content": "<local-command-stdout>x</local-command-stdout>" } }));
+        assert!(matches!(&ev[..], [EventKind::Unknown { raw_type }] if raw_type == "user"), "{ev:?}");
     }
 }
