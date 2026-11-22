@@ -392,12 +392,12 @@ impl Inner {
 
     async fn schedule_office(self: &Arc<Self>, ws: &Workspace, spaces: &[Workspace]) -> Result<()> {
         let mut elsewhere = vec![];
-        let busy = self.busy_agents();
         for o in spaces.iter().filter(|o| o.id != ws.id) {
             let agents = self.store.agents(&o.id)?;
             for t in self.store.tasks(&o.id)? {
                 let worker = agents.iter().find(|a| t.assignee.as_ref() == Some(&a.id));
-                if scheduler::is_active(t.status) || scheduler::held(&t, worker, &busy) {
+                // Not one that waits for your answer: nobody works on it, so it holds no slot.
+                if scheduler::is_active(t.status) {
                     elsewhere.extend(worker.cloned());
                 }
             }
@@ -638,7 +638,7 @@ impl Inner {
                 && r.account.clone().or_else(|| primary.clone()).as_deref().is_none_or(|a| a == account)
         });
         // Taken for good only when the brief goes out: a start that stops short keeps it for the retry.
-        let feedback = lock(&self.pending_feedback).get(task_id).cloned();
+        let feedback = self.feedback(task_id)?;
         // A member continues its own conversation on a new task (unless the Lead asked for a
         // fresh one), when that conversation lives on this account.
         let own = match (&member, &agent.session_id) {
@@ -728,8 +728,8 @@ impl Inner {
             self.release_worker(agent_id, task_id);
             return Ok(());
         }
-        lock(&self.pending_feedback).remove(task_id);
-        self.send_prompt(agent_id, prompt)
+        self.send_prompt(agent_id, prompt)?;
+        self.clear_feedback(task_id)
     }
 
     /// Give a new worktree what git does not carry (CRITIQUE G9): the checkout's installed

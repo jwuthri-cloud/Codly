@@ -48,6 +48,7 @@ mod triggers;
 pub mod wallet;
 mod workspace;
 mod memgraph;
+mod rebrief;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -205,10 +206,9 @@ struct Inner {
     /// Rounds used per task: fix rounds (verify, scope, review feedback) and, apart, merge
     /// conflict rounds; a user retry resets them.
     fix_rounds: Mutex<HashMap<Id, gate::Rounds>>,
-    /// Reminders sent to a reviewer run that ended without a verdict.
-    review_nudges: Mutex<HashMap<Id, u32>>,
-    /// Feedback for the next worker run of a task whose worker was not alive.
-    pending_feedback: Mutex<HashMap<Id, String>>,
+    /// Reminders sent to a run that ended without what the gate needs from it, by run: a
+    /// reviewer's verdict, a worker's report.
+    nudges: Mutex<HashMap<Id, u32>>,
     /// The request threads' Leads: per-Lead turn queues (codly_ask_lead forwarding), LRU
     /// use, and turns waiting for a free Lead slot.
     leads: Mutex<lead::LeadPool>,
@@ -387,8 +387,7 @@ impl Core {
             kick: Notify::new(),
             gating: Mutex::new(HashMap::new()),
             fix_rounds: Mutex::new(HashMap::new()),
-            review_nudges: Mutex::new(HashMap::new()),
-            pending_feedback: Mutex::new(HashMap::new()),
+            nudges: Mutex::new(HashMap::new()),
             leads: Mutex::new(lead::LeadPool::default()),
             shutting_down: AtomicBool::new(false),
             labels: Mutex::new(HashMap::new()),

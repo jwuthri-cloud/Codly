@@ -2,6 +2,8 @@
 //! with codly_ask_user, its task parks as Blocked ("waiting for you") and is not gated or
 //! merged; your answer resumes the same worker with a [User] prompt, and the plan finishes.
 //! A heads-up card does not stop the worker, and dismissing a blocking card unblocks it too.
+//! A task that waits holds no worker slot, and an answer for a worker that is gone (Codly
+//! restarted) or that has no slot to go on in is kept for the worker's next run of the task.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -135,16 +137,22 @@ impl Spawner for FakeSpawner {
     }
 }
 
+/// A task that creates one file.
+fn file_task(id: &str, file: &str) -> Value {
+    json!({
+        "id": id, "title": format!("Create {file}"), "goal": format!("Create {file} containing the greeting"),
+        "consultant": { "title": "Backend" }, "acceptance_criteria": [format!("{file} exists")], "write_scope": [file],
+        "depends_on": [], "verify": [format!("test -f {file}")], "size": "M",
+    })
+}
+
 /// A Lead that turns a request into a one-task plan writing hello.txt.
 fn planning_lead() -> Behavior {
-    let plan = json!({
-        "summary": "Add a hello file",
-        "tasks": [{
-            "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt containing the greeting",
-            "consultant": { "title": "Backend" }, "acceptance_criteria": ["hello.txt exists"], "write_scope": ["hello.txt"],
-            "depends_on": [], "verify": ["test -f hello.txt"], "size": "M",
-        }],
-    });
+    lead_with(json!({ "summary": "Add a hello file", "tasks": [file_task("t1", "hello.txt")] }))
+}
+
+/// A Lead that submits this plan for every request.
+fn lead_with(plan: Value) -> Behavior {
     Arc::new(move |turn: FakeTurn| {
         let plan = plan.clone();
         Box::pin(async move {
@@ -226,6 +234,13 @@ async fn plan_done(core: &Core) {
 fn turns_of(turns: &Turns, agent: Option<&str>) -> Vec<String> {
     turns.lock().unwrap().iter().filter(|(a, _)| Some(a.as_str()) == agent).map(|(_, t)| t.clone()).collect()
 }
+
+async fn task_by_key(core: &Core, key: &str) -> Option<Task> {
+    core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.key == key)
+}
+
+/// Your answer, as the worker reads it.
+const ANSWER: &str = "[User] Answer to your question \"Which greeting?\": casual please";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn answering_a_blocking_card_resumes_the_worker_and_the_plan_finishes() {
@@ -314,6 +329,101 @@ async fn retrying_a_task_that_waits_for_your_answer_restarts_it() {
     plan_done(&core).await;
     let seen = turns_of(&turns, Some(&worker_id));
     assert!(seen.iter().any(|t| t.contains("[User] Answer to your question \"Which greeting?\": casual please")), "{seen:?}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_task_that_waits_for_your_answer_holds_no_worker_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    // t1's worker asks you something; t2's does its work when the test lets it.
+    let go = Arc::new(tokio::sync::Notify::new());
+    let wait = go.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let wait = wait.clone();
+        Box::pin(async move {
+            let file = if turn.prompt.contains("Answer to your question") {
+                "hello.txt"
+            } else if turn.prompt.contains("[Codly] Task t1:") {
+                turn.tool("codly_ask_user", json!({ "title": "Which greeting?", "question": "Formal or casual hello?" })).await;
+                return;
+            } else {
+                wait.notified().await;
+                "bye.txt"
+            };
+            std::fs::write(turn.spec.cwd.join(file), "hi\n").unwrap();
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": format!("Created {file}."), "files_changed": [file] })).await;
+        })
+    });
+    let turns: Turns = Arc::new(Mutex::new(vec![]));
+    let plan = json!({ "summary": "Add two files", "tasks": [file_task("t1", "hello.txt"), file_task("t2", "bye.txt")] });
+    let core = start(dir.path(), FakeSpawner { lead: lead_with(plan), worker, turns: turns.clone() }).await;
+    // One worker slot in all.
+    let one_slot =
+        Settings { auto_run_plans: true, lead_followups: false, max_parallel: 1, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(one_slot).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add two files").await.unwrap();
+    let card = wait_for("the blocking card", 30, async || open_card(&core).await).await;
+
+    // t1 waits for you and nobody works on it: the one slot goes to t2.
+    let t2 = wait_for("t2 to start", 20, async || task_by_key(&core, "t2").await.filter(|t| t.status == TaskStatus::Running)).await;
+    wait_for("t2's worker to get its brief", 20, async || (!turns_of(&turns, t2.assignee.as_deref()).is_empty()).then_some(())).await;
+    let t1 = task_by_key(&core, "t1").await.unwrap();
+    assert_eq!(t1.status, TaskStatus::Blocked);
+    assert_ne!(t1.assignee, t2.assignee);
+
+    // You answer while t2 has the slot: t1 does not run on top of it. It waits for the slot,
+    // with your answer kept for it.
+    core.answer_blocker(&card.id, "casual please").await.unwrap();
+    let waits = wait_for("t1 to wait for the slot", 20, async || {
+        task_by_key(&core, "t1").await.filter(|t| t.status_reason.as_deref().is_some_and(|r| r.contains("worker slots are busy")))
+    })
+    .await;
+    assert_eq!(waits.status, TaskStatus::Ready);
+    assert!(turns_of(&turns, t1.assignee.as_deref()).iter().all(|t| !t.contains("Answer to your question")), "nothing ran above the limit");
+    assert_eq!(task_by_key(&core, "t2").await.unwrap().status, TaskStatus::Running);
+
+    // t2 finishes: t1's worker is back, and the first thing it reads is your answer.
+    go.notify_one();
+    plan_done(&core).await;
+    let seen = turns_of(&turns, t1.assignee.as_deref());
+    assert!(seen.len() == 2 && seen[1].starts_with(ANSWER), "the brief, then the answer: {seen:?}");
+    assert_eq!(task_by_key(&core, "t1").await.unwrap().assignee, t1.assignee, "the same worker went on");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn your_answer_survives_a_restart_and_reaches_the_restarted_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, turns, card) = run_until_card(dir.path(), asking_worker("Formal or casual hello?")).await;
+    let task = task_of(&core).await;
+    let worker = task.assignee.clone();
+    let before = turns_of(&turns, worker.as_deref()).len();
+    // You quit Codly with the question open, and answer it the next day.
+    core.shutdown().await;
+    drop(core);
+    let again = || FakeSpawner { lead: planning_lead(), worker: asking_worker("Formal or casual hello?"), turns: turns.clone() };
+    let repo = dir.path().join("repo");
+    let core = start(dir.path(), again()).await;
+    // Paused, so the task cannot start before Codly is closed once more.
+    core.update_settings(Settings { paused: true, ..core.settings() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    assert_eq!(task_of(&core).await.status, TaskStatus::Blocked, "the question is still open after the restart");
+    core.answer_blocker(&card.id, "casual please").await.unwrap();
+    let answered = task_of(&core).await;
+    assert_eq!(answered.status, TaskStatus::Ready, "{:?}", answered.status_reason);
+    assert_eq!(answered.goal, task.goal, "the answer is not written into the task's goal");
+    core.shutdown().await;
+    drop(core);
+
+    // The answer was kept in the store: the worker that starts now reads it first, in its session.
+    let core = start(dir.path(), again()).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.update_settings(Settings { paused: false, ..core.settings() }).await.unwrap();
+    plan_done(&core).await;
+    let seen = turns_of(&turns, worker.as_deref());
+    assert!(seen.len() == before + 1 && seen[before].starts_with(ANSWER), "{seen:?}");
     core.shutdown().await;
 }
 

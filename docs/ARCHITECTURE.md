@@ -281,7 +281,8 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       planner.rs plans.rs scope.rs        plan validation, plans and tasks, write scopes
                       scheduler.rs accounts.rs            routing; sign-ins, usage windows, account choice
                       runs.rs ingest.rs                   agent runs; the one event pipeline
-                      gate.rs                             commit → verify → scope → review → merge queue
+                      gate.rs rebrief.rs                  commit → verify → scope → review → merge queue; a worker's task
+                                                          again after a context compaction
                       approvals.rs controls.rs ask_me.rs  approval policy, live agent controls, "ask me" cards
                       breaker.rs breaker_run.rs           circuit breaker: policy and enforcement
                       team.rs hires.rs careers.rs         standing team and consultants, hired agents, XP and offers

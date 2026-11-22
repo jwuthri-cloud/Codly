@@ -6,6 +6,10 @@
 //! `MAX_CONFLICT_ROUNDS`. What the worker cannot fix (a check that ran out of time, a verify
 //! command with a risk nobody allowed) blocks the task for you: its card re-runs the checks
 //! or merges anyway (only a task its checks stopped). Every outcome is a Decision.
+//!
+//! A turn that ends with no report (`codly_submit_report`) may not be the worker's finish (it
+//! answered a message of yours, or stopped early): the worker is asked for its report once,
+//! and the end of that turn is checked as it is.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -87,6 +91,18 @@ enum Begun {
 fn checks_key(task_id: &str) -> String {
     format!("checks:{task_id}")
 }
+
+fn feedback_key(task_id: &str) -> String {
+    format!("task_feedback:{task_id}")
+}
+
+/// Feedback changes are read-modify-write over the store: one at a time.
+static FEEDBACK: Mutex<()> = Mutex::new(());
+
+/// Sent once to a worker whose turn ended with no report (`Inner::ask_for_report`).
+const REPORT_NUDGE: &str = "[Codly] You ended your turn without a report. If the task is done, call codly_submit_report now \
+    with status done and a summary. If you cannot finish it, report blocked or failed and say why. If you are not done yet, \
+    go on with the work and report when it is done. Do not commit.";
 
 /// Why a task goes back to its worker.
 enum Fix {
@@ -226,6 +242,11 @@ impl Inner {
             self.release_worker(&worker, task_id);
             let who = self.agent(&worker).map(|a| a.name).unwrap_or_else(|_| "worker".into());
             self.lead_followup(&ws_id, &self.task_thread(&task), &prompts::worker_stopped(&task, reported, &who, &summary)).await;
+            return Ok(());
+        }
+        // No report at all: the turn may not be the worker's finish. Asked once; the end of
+        // the turn that answers is checked as it is, with or without a report.
+        if pass == Pass::Turn && report.is_null() && self.ask_for_report(&task, &worker, ws)? {
             return Ok(());
         }
 
@@ -391,6 +412,62 @@ impl Inner {
         Ok(())
     }
 
+    /// A worker's turn ended and its run has no report: ask for it, once per run. True = asked,
+    /// so the gate waits for the end of the turn that answers. False = it was asked before, or
+    /// its run takes no prompt (it is gone or shutting down): the work is checked as it is.
+    fn ask_for_report(&self, task: &Task, worker: &str, ws: Option<&str>) -> Result<bool> {
+        let run = lock(&self.live).get(worker).filter(|l| l.task_id.as_deref() == Some(task.id.as_str())).map(|l| l.run_id.clone());
+        let Some(run_id) = run else { return Ok(false) };
+        let first = {
+            let mut m = lock(&self.nudges);
+            let n = m.entry(run_id).or_insert(0);
+            *n += 1;
+            *n == 1
+        };
+        if !first {
+            return Ok(false);
+        }
+        if let Err(e) = self.send_prompt(worker, REPORT_NUDGE.into()) {
+            tracing::debug!("the worker of {} was not asked for its report: {e}", task.key);
+            return Ok(false);
+        }
+        let reason = "the worker ended its turn without a report; Codly asked for it".to_string();
+        self.update_task(&task.id, |t| {
+            if matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) {
+                t.status_reason = Some(reason.clone());
+            }
+            Ok(())
+        })?;
+        self.decide(ws, Some(&task.id), "gate", format!("{}: {reason}", task.key), json!({ "plan_id": task.plan_id }))?;
+        Ok(true)
+    }
+
+    // ───────────── what waits for a task's next worker run ─────────────
+
+    /// Keep a message for the next worker run of a task whose worker does not run now: the
+    /// gate's feedback, your answer to its question, a hand-off note. It goes after what
+    /// already waits, and it is kept in the store: a restart of Codly does not lose it.
+    pub(super) fn add_feedback(&self, task_id: &str, text: &str) -> Result<()> {
+        let _g = FEEDBACK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = feedback_key(task_id);
+        let all = match self.store.kv_get(&key)? {
+            Some(before) => format!("{before}\n\n{text}"),
+            None => text.to_string(),
+        };
+        self.store.kv_set(&key, &all)
+    }
+
+    /// What waits for the task's next worker run (`add_feedback`).
+    pub(super) fn feedback(&self, task_id: &str) -> Result<Option<String>> {
+        self.store.kv_get(&feedback_key(task_id))
+    }
+
+    /// The task's worker got what waited for it: nothing waits any more.
+    pub(super) fn clear_feedback(&self, task_id: &str) -> Result<()> {
+        let _g = FEEDBACK.lock().unwrap_or_else(|e| e.into_inner());
+        self.store.kv_write(&[(feedback_key(task_id), None)])
+    }
+
     /// Send the work back to the same worker session, or fail the task when its rounds are
     /// used up: `MAX_FIX_ROUNDS` for its own work, `MAX_CONFLICT_ROUNDS` for merge conflicts
     /// (counted apart: a conflict never costs a fix round).
@@ -471,7 +548,7 @@ impl Inner {
             self.send_prompt(worker, prompt)?;
         } else {
             // The worker exited; the next run of this task resumes its session with the feedback.
-            lock(&self.pending_feedback).insert(task.id.clone(), prompt);
+            self.add_feedback(&task.id, &prompt)?;
             self.update_task(&task.id, |t| {
                 t.status = TaskStatus::Ready;
                 Ok(())
@@ -494,7 +571,7 @@ impl Inner {
     }
 
     /// Does this agent have a live run of this task?
-    fn works_on(&self, agent_id: &str, task_id: &str) -> bool {
+    pub(super) fn works_on(&self, agent_id: &str, task_id: &str) -> bool {
         lock(&self.live).get(agent_id).is_some_and(|l| l.task_id.as_deref() == Some(task_id))
     }
 
@@ -932,7 +1009,7 @@ impl Inner {
         let review = run.report.clone().or_else(|| self.last_text(&reviewer).and_then(|t| verdict_in_text(&t)));
         let Some(review) = review else {
             let nudges = {
-                let mut m = lock(&self.review_nudges);
+                let mut m = lock(&self.nudges);
                 let n = m.entry(run_id.to_string()).or_insert(0);
                 *n += 1;
                 *n
@@ -946,7 +1023,7 @@ impl Inner {
             if !self.take_review(task_id)? {
                 return Ok(());
             }
-            lock(&self.review_nudges).remove(run_id);
+            lock(&self.nudges).remove(run_id);
             self.release_worker(&reviewer, task_id);
             self.emit(
                 ws.as_deref(),
@@ -972,7 +1049,7 @@ impl Inner {
         if !self.take_review(task_id)? {
             return Ok(());
         }
-        lock(&self.review_nudges).remove(run_id);
+        lock(&self.nudges).remove(run_id);
         self.release_worker(&reviewer, task_id);
         let r = judge(&review);
         self.emit(
@@ -1035,7 +1112,8 @@ impl Inner {
     /// Before a reviewed task merges: did its worker get a turn since the review started (a
     /// message from you, or from the Lead)? The review never saw that work, and merging now
     /// would leave it out and shut the worker down mid-turn. The task goes back to Running:
-    /// the turn's end, or the gate started here when it is already over, checks it again.
+    /// the turn's end, or the gate started here when it is already over, checks it again
+    /// (a turn that failed is over too, but only the turn that continues it is checked).
     /// By its turns, not by a dirty worktree: verify commands leave files behind too.
     fn steered_in_review(self: &Arc<Self>, task: &Task, review: &crate::store::RunRow) -> Result<bool> {
         let worker = task.assignee.clone().unwrap_or_default();
@@ -1050,7 +1128,14 @@ impl Inner {
             t.status_reason = Some("the worker got a new message; re-checking when it finishes".into());
             Ok(())
         })?;
-        tokio::spawn(self.clone().gate(task.id.clone()));
+        // Not after a turn that failed: that turn is not the worker's finish. Codly asks the
+        // worker to continue (ingest.rs `turn_failed`), and the end of that turn runs the gate.
+        let failed = lock(&self.live)
+            .get(&worker)
+            .is_some_and(|l| l.task_id.as_deref() == Some(task.id.as_str()) && l.failed_turns > 0);
+        if !failed {
+            tokio::spawn(self.clone().gate(task.id.clone()));
+        }
         Ok(true)
     }
 
@@ -1159,9 +1244,10 @@ impl Inner {
         let ws_id = self.store.task_workspace(&task.id)?;
         let ws = ws_id.as_deref();
         let worker = task.assignee.clone().unwrap_or_default();
-        let report = self.store.latest_task_run(&task.id, Some(Role::Worker))?.and_then(|r| r.report);
-        let summary = report
+        let run = self.store.latest_task_run(&task.id, Some(Role::Worker))?;
+        let summary = run
             .as_ref()
+            .and_then(|r| r.report.as_ref())
             .and_then(|r| r["summary"].as_str().map(String::from))
             .or_else(|| self.last_text(&worker))
             .map(|s| prompts::clip(s.trim(), 1200))
@@ -1169,7 +1255,10 @@ impl Inner {
         // Clean up before announcing Done: "done" then means nothing is left running.
         self.release_worker(&worker, &task.id);
         lock(&self.fix_rounds).remove(&task.id);
-        lock(&self.pending_feedback).remove(&task.id);
+        if let Some(r) = &run {
+            lock(&self.nudges).remove(&r.id);
+        }
+        self.clear_feedback(&task.id)?;
         self.store.kv_write(&[(checks_key(&task.id), None)])?;
         // A merged, clean worktree is disposable; anything else is kept.
         if merged.is_some()

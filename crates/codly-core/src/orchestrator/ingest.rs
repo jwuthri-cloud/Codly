@@ -442,8 +442,11 @@ impl Inner {
         let member = self.agent(&ctx.agent_id).is_ok_and(|a| a.member.is_some());
         let next = if member { "waiting for its quota" } else { "handing off to the next free provider" };
         let reason = format!("{provider} hit its usage limit; {next}. Continue from the work already in this worktree.");
-        // status_reason reaches a resumed session; a fresh one (another provider) gets this.
-        lock(&self.pending_feedback).entry(task_id.clone()).or_insert_with(|| format!("[Codly] {reason}"));
+        // status_reason reaches a resumed session; a fresh one (another provider) gets this,
+        // after what already waits for the task's next run (your answer, the gate's feedback).
+        if let Err(e) = self.add_feedback(&task_id, &format!("[Codly] {reason}")) {
+            tracing::warn!("the hand-off note of task {task_id} was not kept: {e}");
+        }
         let moved = self.update_task(&task_id, |t| {
             t.status = TaskStatus::Ready;
             if !member {

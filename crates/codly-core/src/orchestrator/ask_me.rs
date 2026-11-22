@@ -4,8 +4,11 @@
 //! - **Heads-up** cards need no action: the agent carries on, you can read and dismiss them.
 //! - **Blocking** cards pause the agent's task (`Blocked`, with a "waiting for you" reason the
 //!   gate and the board both show) until you reply. The reply reaches the worker as a `[User]`
-//!   prompt in its own session, or the Lead as a message in its request thread. If the worker's
-//!   process is gone, the task goes back to `Ready` with your answer appended to its goal.
+//!   prompt in its own session, or the Lead as a message in its request thread. A task that
+//!   waits holds no worker slot (scheduler.rs), only its files. If the worker's process is
+//!   gone, or no worker slot is free when you reply, the task goes back to `Ready` with your
+//!   answer kept in the store (`add_feedback`): the worker's next run of the task, in the
+//!   session it had, reads it first.
 //! - A card still open after `REMIND_AFTER_DAYS` is flagged (`reminded_at`) so the UI can nag.
 //!
 //! State is event-sourced (`crate::blockers`); this file is the orchestration around it.
@@ -15,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use super::{Inner, lead, prompts, row};
+use super::{Inner, lead, prompts, row, scheduler};
 use crate::blockers::{self, Blocker, BlockerSeverity, BlockerStatus};
 use crate::mcp::ToolCtx;
 use crate::model::*;
@@ -27,6 +30,9 @@ const MAX_OPEN_PER_AGENT: usize = 5;
 const MAX_TITLE: usize = 120;
 const MAX_BODY: usize = 2000;
 const MAX_ANSWER: usize = 4000;
+/// The statuses that hold a worker slot (`scheduler::is_active`).
+const ACTIVE: [TaskStatus; 5] =
+    [TaskStatus::Running, TaskStatus::Verifying, TaskStatus::Reviewing, TaskStatus::ChangesRequested, TaskStatus::Merging];
 
 /// Blocker changes are read-modify-write over the event log: one at a time.
 static CHANGES: Mutex<()> = Mutex::new(());
@@ -90,6 +96,7 @@ impl Inner {
                 t.status_reason = Some(format!("{WAITING} {}", prompts::clip(&title, 100)));
                 Ok(())
             })?;
+            self.kick(); // its worker slot is free for another task
         }
         Ok(reply(severity))
     }
@@ -171,18 +178,34 @@ impl Inner {
             .as_deref()
             .and_then(|t| self.task(t).ok())
             .filter(|t| t.status == TaskStatus::Blocked && t.status_reason.as_deref().is_some_and(|r| r.starts_with(WAITING)));
+        let prompt = format!("[User] {text}");
+        let Some(task) = waiting_task else {
+            // No task waits for it (a heads-up, or the task moved on): a message for the agent.
+            let sent = self.is_live(&b.agent_id)
+                && self.send_prompt(&b.agent_id, prompt).inspect_err(|e| tracing::debug!("answer not sent as a prompt: {e}")).is_ok();
+            return if sent { Ok(()) } else { self.chat_agent(&b.agent_id, &text).await };
+        };
+        // One more open question keeps the task waiting: the worker reads this answer, and
+        // nothing else moves.
+        let stays = others_wait(&task.id);
+        // Back to Running, the task needs a worker slot again. Under the scheduler's lock, so no
+        // other task takes the slot between this look and the write.
+        let _sched = self.sched_lock.lock().await;
+        // Only the worker's run of this task takes the answer: by now the agent may be on other
+        // work (a team member whose run of this task ended).
+        let live = self.works_on(&b.agent_id, &task.id);
+        let room = stays || self.has_room(&asker)?;
         // The answer first: if it cannot be delivered, the task must not show as running. A run
         // that is shutting down takes no more turns, and the card is closed by now (it cannot
         // be answered again): for the answer, that run is already gone.
-        let sent = self.is_live(&b.agent_id)
-            && self.send_prompt(&b.agent_id, format!("[User] {text}")).inspect_err(|e| tracing::debug!("answer not sent as a prompt: {e}")).is_ok();
+        let sent = live
+            && room
+            && self.send_prompt(&b.agent_id, prompt.clone()).inspect_err(|e| tracing::debug!("answer not sent as a prompt: {e}")).is_ok();
         if sent {
-            if let Some(t) = &waiting_task
-                && !others_wait(&t.id)
-            {
+            if !stays {
                 // Your answer is your move: only you take a task out of Blocked. In the write:
                 // a Cancel (or a Retry) since the read above stands.
-                self.update_task_as(&t.id, true, |t| {
+                self.update_task_as(&task.id, true, |t| {
                     if t.status == TaskStatus::Blocked {
                         t.status = TaskStatus::Running;
                         t.status_reason = None;
@@ -192,28 +215,47 @@ impl Inner {
             }
             return Ok(());
         }
-        // The worker's process is gone (app restarted) or going (stopped): rerun the task with
-        // the answer in its brief.
-        match waiting_task {
-            Some(t) => {
-                self.update_task_as(&t.id, true, |t| {
-                    if t.status == TaskStatus::Blocked {
-                        t.goal = format!("{}\n\n{text}", t.goal);
-                        t.status = TaskStatus::Ready;
-                        t.status_reason = Some("you answered; restarting the worker".into());
-                    }
-                    Ok(())
-                })?;
-                self.update_agent(&b.agent_id, |a| {
-                    if a.task_id.as_deref() == Some(t.id.as_str()) {
-                        a.task_id = None;
-                    }
-                })?;
-                self.kick();
-                Ok(())
+        // The worker's process is gone (Codly restarted) or going (stopped), or every worker slot
+        // is taken: the answer is kept for the task's next run, which the scheduler starts.
+        // Kept first: a task that is Ready without it could start without it.
+        self.add_feedback(&task.id, &prompt)?;
+        let reason = if live && !room { "you answered; it goes on when a worker slot is free" } else { "you answered; restarting the worker" };
+        self.update_task_as(&task.id, true, |t| {
+            if t.status == TaskStatus::Blocked {
+                t.status = TaskStatus::Ready;
+                t.status_reason = Some(reason.into());
             }
-            None => self.chat_agent(&b.agent_id, &text).await,
+            Ok(())
+        })?;
+        if live && !room {
+            // Its run still waits for the answer: it ends, and the next one resumes its session.
+            self.release_worker(&b.agent_id, &task.id);
+        } else {
+            self.update_agent(&b.agent_id, |a| {
+                if a.task_id.as_deref() == Some(task.id.as_str()) {
+                    a.task_id = None;
+                }
+            })?;
         }
+        self.kick();
+        Ok(())
+    }
+
+    /// Is there a worker slot for a task of `agent` that goes back to Running: one of the
+    /// `max_parallel` slots, and one of its account's? Counted as the scheduler counts them,
+    /// over the active tasks of every office.
+    fn has_room(&self, agent: &Agent) -> Result<bool> {
+        let settings = self.settings();
+        let accounts = scheduler::Accounts::new(&self.account_states(), &self.clis());
+        let account = |a: &Agent| accounts.of_agent(a).map(|x| x.id.clone());
+        let mine = account(agent);
+        let active = self.store.tasks_with_status(&ACTIVE)?;
+        let on_account = active
+            .iter()
+            .filter_map(|t| t.assignee.as_deref().and_then(|id| self.store.agent(id).ok().flatten()))
+            .filter(|a| mine.is_some() && account(a) == mine)
+            .count();
+        Ok(active.len() < settings.max_parallel.max(1) as usize && on_account < settings.max_per_provider.max(1) as usize)
     }
 }
 

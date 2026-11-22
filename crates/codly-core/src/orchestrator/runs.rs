@@ -255,6 +255,7 @@ impl Inner {
     /// circuit breaker's note to a worker it pauses).
     pub(super) fn deliver_prompt(&self, agent_id: &str, text: String) -> Result<()> {
         let wrapped = self.with_briefing(agent_id, &text); // a hired agent's standing goal, on every prompt
+        let wrapped = self.with_task_rules(agent_id, wrapped); // a worker's task again, after a compaction
         let mut live = lock(&self.live);
         let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
         // The adapters drop prompts during their shutdown ladder: say so instead.
