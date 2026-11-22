@@ -2,6 +2,7 @@
 //! `crate::career`), the job offer posted in the office before a new consultant is hired, and
 //! ghosts: workers let go, who keep their career and can be brought back, and transfers to your
 //! other offices. The XP they earn is also the wallet's coins (`wallet.rs`, with Build/Buy).
+//! Trust is not part of that game: `set_trust` is your call alone, and every change is a decision.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -309,6 +310,41 @@ impl Inner {
         })
     }
 
+    /// Set how much you trust an agent of this office (`career::trust_allows`): what it may do
+    /// without asking, and whether its work skips the review. Any level at any time, whatever its
+    /// rank or XP; Intern takes it all back. Only an agent that writes on its own can be trusted
+    /// (a worker or a 1:1 agent): the Lead and reviewers always ask. A change is recorded as a
+    /// decision on the agent.
+    pub(super) fn set_trust(&self, ws: &Workspace, id: &str, level: Rank) -> Result<Agent> {
+        let a = self.agent(id)?;
+        if a.archived || self.store.agent_workspace(id)?.as_deref() != Some(ws.id.as_str()) {
+            bail!("{} doesn't work in this office", a.name);
+        }
+        if level > Rank::Intern && !matches!(a.role, Role::Worker | Role::Solo) {
+            bail!("only a worker or a 1:1 agent can be trusted: {} always asks before it changes anything", a.name);
+        }
+        let from = a.career.trust;
+        if from == level {
+            return Ok(a);
+        }
+        let a = self.update_agent(id, |a| a.career.trust = level)?;
+        let summary = match career::trust_allows(level) {
+            Some(what) => format!("you trust {} to {what}", a.name),
+            None => format!("you took back your trust in {}: it asks like every other agent", a.name),
+        };
+        self.trust_decision(&ws.id, &a, from, "human", summary)?;
+        Ok(a)
+    }
+
+    /// Record a change of trust on the agent (`from` → what it has now): its History and the
+    /// decision log say what it may do without asking, since when, and by whose call (`method`).
+    fn trust_decision(&self, ws: &str, a: &Agent, from: Rank, method: &str, summary: String) -> Result<()> {
+        let detail = serde_json::json!({ "agent": a.id, "name": a.name, "from": from, "to": a.career.trust });
+        let kind = EventKind::Decision { id: new_id(), decision_type: "trust".into(), method: method.into(), summary, detail };
+        self.emit(Some(ws), super::row(Some(&a.id), None, None, kind))?;
+        Ok(())
+    }
+
     /// Your other offices (repos opened before, still on disk), for the Transfer picker.
     pub(super) fn offices(&self, here: Option<&str>) -> Result<Vec<Office>> {
         let mut all = self.store.offices()?;
@@ -391,6 +427,10 @@ impl Inner {
         let detail = serde_json::json!({ "agent": id, "name": a.name, "from": from.id, "to": dest.id, "to_name": dest.name });
         self.decide(Some(&from.id), None, "transfer", format!("{} moved to {}", a.name, dest.name), detail.clone())?;
         self.decide(Some(&dest.id), None, "transfer", format!("{} moved in from {}", a.name, from.name), detail)?;
+        if a.career.trust > Rank::Intern {
+            let summary = format!("{} asks like every other agent here: your trust in it stayed in {}", a.name, from.name);
+            self.trust_decision(&dest.id, &moved, a.career.trust, "rule", summary)?;
+        }
         Ok(moved)
     }
 }

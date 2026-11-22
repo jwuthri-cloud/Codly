@@ -1028,6 +1028,46 @@ async fn solo_chat_uses_its_own_permissions() {
     core.shutdown().await;
 }
 
+/// Trust is yours to give whatever the rank: a new hire you trust works on its own where
+/// permissions are Balanced, and the decision says why in the agent sheet's words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_hire_you_trust_works_on_its_own_and_the_decision_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let choices = Arc::new(Mutex::new(vec![]));
+    let seen = choices.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            // Not a read or a test run: balanced mode asks, unless you trust the agent.
+            let choice = turn.ask_approval("node scripts/gen.js").await;
+            seen.lock().unwrap().push(choice);
+            turn.say("done");
+        })
+    });
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(dir.path(), FakeSpawner { log, lead: idle, worker }).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    assert_eq!(core.snapshot().await.unwrap().settings.approval_mode, ApprovalMode::Balanced);
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    assert_eq!((solo.career.rank, solo.career.trust), (Rank::Intern, Rank::Intern));
+    core.trust_agent(&solo.id, Rank::Senior).unwrap();
+
+    core.send_chat(&format!("agent:{}", solo.id), "generate the file").await.unwrap();
+    let why = wait_for("the broker's decision", 20, async || {
+        core.events(None, None, 2000).await.unwrap().into_iter().find_map(|e| match e.kind {
+            EventKind::Decision { decision_type, summary, .. } if decision_type == "approval_policy" => Some(summary),
+            _ => None,
+        })
+    })
+    .await;
+    assert_eq!(why, "auto-allowed autonomous: no risk detected (you trust it to work on its own)");
+    wait_for("the agent to get its answer", 20, async || (!choices.lock().unwrap().is_empty()).then_some(())).await;
+    assert_eq!(choices.lock().unwrap().as_slice(), &[Some(ApprovalChoice::AllowOnce)]);
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_to_one_prefs_are_saved_in_the_agents_office() {
     let dir = tempfile::tempdir().unwrap();

@@ -87,7 +87,7 @@ pub async fn transfer_agent(state: State<'_, AppState>, agent_id: String, to_wor
     state.core().await?.transfer_agent(&agent_id, &to_workspace_id).await.map_err(|e| format!("{e:#}"))
 }
 
-/// Trust an agent up to a rank's perks (Intern takes them back).
+/// Set how much you trust an agent, whatever its rank (`rank` names the level; Intern takes it all back).
 #[tauri::command]
 pub async fn trust_agent(state: State<'_, AppState>, agent_id: String, rank: Rank) -> Result<Agent, String> {
     state.core().await?.trust_agent(&agent_id, rank).map_err(|e| format!("{e:#}"))

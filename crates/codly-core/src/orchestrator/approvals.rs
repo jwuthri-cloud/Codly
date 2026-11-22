@@ -50,7 +50,7 @@ pub struct PolicyCtx<'a> {
     /// Lead, reviewers, between-task chats: only reads are ever auto-allowed, in any mode
     /// (the Lead's working directory is the user's own checkout).
     pub read_only: bool,
-    /// Trusted as Junior (`career::PERKS`): file changes inside the worktree are approved in balanced mode.
+    /// You trust it to edit on its own (`career::trusts`, Junior): file changes inside the worktree are approved in balanced mode.
     pub edits: bool,
 }
 
@@ -109,7 +109,7 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
             ApprovalSubject::Tool { name, .. } => ask(format!("tool {name} is not read-only")),
             // No risk was found above, so every path stays inside the worktree.
             ApprovalSubject::FileChange { .. } if ctx.edits && ctx.worktree.is_some() => {
-                allow("trusted Junior: edits inside its worktree".into())
+                allow("edits inside its worktree (you trust it to edit on its own)".into())
             }
             _ => ask("balanced mode asks before file changes the CLI did not auto-accept".into()),
         },

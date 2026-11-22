@@ -141,6 +141,7 @@ class Ui {
   sections = $state<Record<string, boolean>>({
     now: true,
     needs: true,
+    trust: false,
     controls: false,
     task: true,
     steps: true,

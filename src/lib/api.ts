@@ -260,7 +260,7 @@ export const api = {
   exportAgent: (agentId: string) => call<string>('export_agent', { agentId }),
   /** The open repo's office as a `codly/office@1` file (the lot and the crew; no code, paths or prompts). */
   exportOffice: () => call<string>('export_office'),
-  /** Trust an agent up to a rank's perks (capped at its rank); 'intern' takes them back. */
+  /** Set how much you trust an agent (`TRUST` in util/career), whatever its rank; 'intern' takes it all back. */
   trustAgent: (agentId: string, rank: Rank) => call<Agent>('trust_agent', { agentId, rank }),
   /** The office sends an agent home to rest until `until` (ms), or calls it back (null). The
    *  Lead gives it no new work meanwhile; its conversation is untouched. */

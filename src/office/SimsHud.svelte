@@ -3,9 +3,10 @@
   - top-left: the selected agent's action queue (what it does now, ✕ to interrupt; its to-dos queued)
   - bottom-left: its panel: portrait, rank, mood, and tabs for Needs / Mood / Skills / Friends / Career,
     and Look (Create-a-Sim: hairstyle, hair and skin color, outfit, glasses; saved in its look_seed)
-  - top-center: a promotion (its real track record), with the offer of trust (Junior, Senior and Staff
-    perks) and of a stronger model; a new Legend is offered its CLI's biggest context window
-    (only when bigger than its own: the core says which, `bigger_model`)
+  - top-center: a promotion (its real track record), with the offer of a stronger model; a new
+    Legend is offered its CLI's biggest context window (only when bigger than its own: the core
+    says which, `bigger_model`). A promotion never offers trust: that is a safety setting, shown
+    in the Career tab and changed in the agent sheet
   - around a clicked agent: the click menu (chat, task, model, send home or call in, stop, details,
     and Transfer to… another of your offices: never mid-task, never the Lead)
   - in its Needs tab: Send home / Call in (sims.ts: home refills its energy; the Lead never goes)
@@ -13,7 +14,7 @@
   Shown only in the full office (not as the backdrop), inside the app's insets.
 -->
 <script lang="ts" module>
-  export type AgentAction = 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export' | 'trust' | 'untrust' | 'home' | 'callin';
+  export type AgentAction = 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export' | 'trust' | 'home' | 'callin';
 </script>
 
 <script lang="ts">
@@ -32,7 +33,7 @@
   import { sound } from './sound';
   import { bondLabel, friendScore, levelOf, type SimSheet, type SimsTracker } from './sims';
   import { TRAITS, traitsOf } from './traits';
-  import { atLeast, contextLabel, MENTORED_XP, PERKS, rankLabel, rankProgress, titleOf, TRAITS as WORK_TRAITS, WANT_XP, wantProgress } from '../lib/util/career';
+  import { canTrust, contextLabel, MENTORED_XP, rankProgress, titleOf, TRAITS as WORK_TRAITS, trustOf, WANT_XP, wantProgress } from '../lib/util/career';
 
   interface Props {
     engine: OfficeEngine;
@@ -105,7 +106,7 @@
 
   // Promotions: a rank above the one seen before (not on first sight); Legend is the title above Staff.
   let ranks = new Map<string, string>();
-  let promo = $state<{ id: string; name: string; rank: string; perk: boolean; legend: boolean; offer: ModelOffer | null } | null>(null);
+  let promo = $state<{ id: string; name: string; rank: string; legend: boolean; offer: ModelOffer | null } | null>(null);
   let promoTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     for (const a of agents) {
@@ -113,7 +114,7 @@
       const before = ranks.get(a.id);
       if (before && before !== r && ORDER.indexOf(r) > ORDER.indexOf(before)) {
         const legend = r === 'legend';
-        promo = { id: a.id, name: a.name, rank: a.career ? titleOf(a.career) : 'Intern', perk: PERKS.some((p) => p.rank === r), legend, offer: null };
+        promo = { id: a.id, name: a.name, rank: a.career ? titleOf(a.career) : 'Intern', legend, offer: null };
         clearTimeout(promoTimer);
         promoTimer = setTimeout(() => (promo = null), legend ? 30_000 : 15_000);
         // A Legend's focus can grow for real: the biggest context window of its CLI, if bigger.
@@ -320,17 +321,13 @@
           <span><b>{career.stats.merged}</b> merged</span><span><b>{career.stats.checks_passed}</b> checks passed</span><span><b>{career.stats.approved}</b> approved</span><span><b>{career.stats.commits}</b> commits</span>
           <span title="From its days on the crew, merges and shifts; less each time it got sick"><b>{career.stamina}</b> stamina</span><span><b>{career.stats.shifts}</b> shifts</span>
         </div>
-        {@const trusted = PERKS.filter((p) => atLeast(career.trust, p.rank) && atLeast(career.rank, p.rank)).at(-1)}
-        {@const offer = PERKS.find((p) => !atLeast(career.trust, p.rank) && atLeast(career.rank, p.rank))}
-        {@const next = PERKS.find((p) => !atLeast(career.rank, p.rank))}
-        <div class="trust">
-          <div class="perk" class:on={!!trusted} title={PERKS.map((p) => `${rankLabel(p.rank)}: ${p.perk}`).join('\n')}>
-            <span>{#if trusted}<b>Trusted</b> {trusted.perk}{:else}<b>Not trusted yet</b> it asks before it acts{/if}</span>
-            {#if offer && onaction}<button onclick={() => onaction?.(agent.id, 'trust')}>Trust as {rankLabel(offer.rank)}</button>
-            {:else if trusted && onaction}<button class="link" onclick={() => onaction?.(agent.id, 'untrust')}>Take back</button>{/if}
+        {#if canTrust(agent.role)}
+          {@const trust = trustOf(career.trust)}
+          <div class="perk" class:on={career.trust !== 'intern'}>
+            <span><b>{trust.label}</b> {trust.allows}</span>
+            {#if onaction}<button onclick={() => onaction?.(agent.id, 'trust')}>Change</button>{/if}
           </div>
-          {#if next}<p class="next">At {rankLabel(next.rank)}: {next.perk.toLowerCase()}</p>{/if}
-        </div>
+        {/if}
         <Scrapbook milestones={career.milestones} highlights />
       {:else}
         {#each friends.slice(0, allFriends ? undefined : 6) as r (r.agentId)}
@@ -382,7 +379,6 @@
 {#if promo}
   <div class="promo" style:top="{insets.top + 12}px" role="status">
     <span>🎉 <b>{promo.name}</b> was promoted to <b>{promo.rank}</b></span>
-    {#if onaction && promo.perk}<button onclick={() => { if (promo) onaction?.(promo.id, 'trust'); promo = null; }}>Trust it more</button>{/if}
     {#if promo.legend}
       {#if ongivemodel && promo.offer}{@const o = promo.offer}<button title="Its CLI's biggest context window: more room to focus. Nothing changes unless you click." onclick={() => { if (promo) ongivemodel?.(promo.id, o.model); promo = null; }}>Give it {o.model} · {contextLabel(o.context_window)} context</button>{/if}
     {:else if onaction}<button onclick={() => { if (promo) onaction?.(promo.id, 'model'); promo = null; }}>Give a stronger model</button>{/if}
@@ -439,11 +435,9 @@
   .stats b { color: var(--ink-1); }
   .promo { position: absolute; left: 50%; transform: translateX(-50%); z-index: 410; display: flex; gap: 10px; align-items: center; padding: 8px 8px 8px 14px; border-radius: 999px; background: var(--glass-strong); box-shadow: inset 0 0 0 1.5px var(--of-gold), var(--pop-shadow); color: var(--ink-1); font: 500 13px var(--of-font); pointer-events: auto; animation: pop 0.25s ease-out both; }
   .promo button { height: 26px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--amber); color: #2a1a04; font-weight: 600; font-size: 12px; cursor: pointer; }
-  .trust { display: grid; gap: 6px; margin-bottom: 10px; }
-  .next, .hint { margin: 0 2px; font-size: 11px; color: var(--ink-3); }
-  .hint { margin-bottom: 8px; line-height: 1.45; }
+  .hint { margin: 0 2px 8px; font-size: 11px; line-height: 1.45; color: var(--ink-3); }
   .effects { margin: 0 0 8px; padding: 7px 9px 7px 24px; border-radius: 9px; background: var(--amber-soft); color: var(--ink-1); font-size: 11.5px; line-height: 1.5; }
-  .perk { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 8px; border-radius: 8px; background: var(--surface-1); color: var(--ink-1); font-size: 11.5px; }
+  .perk { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 10px; padding: 6px 8px; border-radius: 8px; background: var(--surface-1); color: var(--ink-1); font-size: 11.5px; }
   .perk b { color: var(--of-gold); font-weight: 600; margin-right: 4px; }
   .perk.on { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--of-gold) 50%, transparent); }
   .perk.locked { opacity: 0.55; }

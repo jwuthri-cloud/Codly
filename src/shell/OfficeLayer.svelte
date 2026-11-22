@@ -22,8 +22,6 @@
   import type { Artifact } from '../lib/gen/Artifact';
   import type { Office } from '../lib/gen/Office';
   import type { Placed } from '../lib/gen/Placed';
-  import type { Rank } from '../lib/gen/Rank';
-  import { atLeast, PERKS, rankLabel } from '../lib/util/career';
   import { editionDue } from '../office/daily';
   import type { Shop } from '../lib/gen/Shop';
   import type { Lot } from '../lib/gen/Lot';
@@ -209,7 +207,7 @@
   };
   const onhover = (sel: Sel | null) => ui.setHover(sel);
   // The office's click menu (The Sims' pie menu): each item is a real command.
-  const onaction = (id: string, action: 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export' | 'trust' | 'untrust' | 'home' | 'callin') => {
+  const onaction = (id: string, action: 'chat' | 'task' | 'model' | 'stop' | 'interrupt' | 'details' | 'export' | 'trust' | 'home' | 'callin') => {
     const a = store.agentMap.get(id);
     if (!a) return;
     if (action === 'chat') ui.openThread(`agent:${id}`);
@@ -224,18 +222,12 @@
     // One misclick here must not kill the Lead mid-plan: ask first, like the agent sheet does.
     else if (action === 'stop') toast({ kind: 'attention', title: `Stop ${a.name}?`, body: 'The process ends; its worktree is kept.', action: { label: 'Stop', run: () => stopAgent(id) }, duration: 8000 });
     else if (action === 'export') exportAgent(id, a.name);
-    else if (action === 'trust' || action === 'untrust') trustAgent(id, a.name, action === 'trust' ? a.career.rank : 'intern');
-  };
-  /** Grant (up to its rank) or take back the perks a rank earns (career::PERKS). */
-  async function trustAgent(id: string, name: string, rank: Rank) {
-    try {
-      const a = await api.trustAgent(id, rank);
-      const perks = PERKS.filter((p) => atLeast(a.career.trust, p.rank)).map((p) => p.perk.toLowerCase());
-      toast(perks.length ? { kind: 'success', title: `You trust ${name} as ${rankLabel(a.career.trust)}`, body: `${perks.join('; ')}.` } : { kind: 'info', title: `${name} asks you again`, body: 'Your approval settings apply to it like everyone else.' });
-    } catch (e) {
-      toast({ kind: 'error', title: 'Could not change trust', body: String(e) });
+    // Trust is a safety setting: it is changed in one place, the agent sheet's Trust section.
+    else if (action === 'trust') {
+      ui.selectAgent(id);
+      ui.sheetFocus = 'trust';
     }
-  }
+  };
   /** Move an agent to another of your offices: once the core has it, it walks out of this one. */
   async function transferAgent(id: string, office: Office) {
     const name = store.agentMap.get(id)?.name ?? 'It';
