@@ -564,6 +564,22 @@ impl Core {
         self.inner.close_thread(thread).await
     }
 
+    /// The requests closed in the open repo, newest first (at most `store::CLOSED_LISTED`).
+    pub async fn closed_requests(&self) -> anyhow::Result<Vec<ClosedRequest>> {
+        let ws = self.inner.require_ws()?;
+        self.inner.store.closed_requests(&ws.id, store::CLOSED_LISTED)
+    }
+
+    /// One closed request of the open repo, to read again: `thread` is its archive thread, from
+    /// `closed_requests`. Open conversations are not read this way (the snapshot has them).
+    pub async fn closed_request(&self, thread: &str) -> anyhow::Result<ClosedTranscript> {
+        if !thread.starts_with("closed:") {
+            bail!("{thread} is not a closed request");
+        }
+        let ws = self.inner.require_ws()?;
+        self.inner.store.closed_transcript(&ws.id, thread, store::CLOSED_MESSAGES)
+    }
+
     pub async fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision) -> anyhow::Result<()> {
         self.inner.resolve_approval(approval_id, decision, "user")
     }

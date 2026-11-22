@@ -68,6 +68,10 @@
   });
 
   let open = $state<'mode' | 'model' | null>(null);
+  /** Open the CLI and model menu (the composer's `/model`). */
+  export function showModels() {
+    open = 'model';
+  }
   let modeBtn: HTMLButtonElement | undefined = $state();
   let modelBtn: HTMLButtonElement | undefined = $state();
 

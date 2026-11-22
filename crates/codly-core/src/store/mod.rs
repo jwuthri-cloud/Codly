@@ -901,6 +901,57 @@ impl Store {
         decode_all(rows.into_iter().map(|(_, _, json)| Ok(json)))
     }
 
+    /// The requests closed in a workspace, newest first, at most `limit`: each archive thread
+    /// with the start of the user's first message and how many messages it holds.
+    pub fn closed_requests(&self, workspace_id: &str, limit: usize) -> Result<Vec<ClosedRequest>> {
+        let conn = self.conn();
+        let mut threads = conn.prepare_cached(CLOSED_THREADS_SQL)?;
+        // An archive's name ends with the time it was closed ("closed:<thread>:<ms>").
+        let mut found: Vec<(i64, String)> = vec![];
+        for thread in threads.query_map(params![workspace_id], |r| r.get::<_, String>(0))? {
+            let thread = thread?;
+            let closed_at = thread.rsplit(':').next().and_then(|ms| ms.parse::<i64>().ok());
+            if let Some(closed_at) = closed_at {
+                found.push((closed_at, thread));
+            }
+        }
+        found.sort_unstable_by(|a, b| b.cmp(a));
+        found.truncate(limit);
+        let mut first = conn.prepare_cached(CLOSED_TITLE_SQL)?;
+        let mut count = conn.prepare_cached(CHAT_COUNT_SQL)?;
+        let mut closed = Vec::with_capacity(found.len());
+        for (closed_at, thread) in found {
+            let title: Option<String> = first.query_row(params![workspace_id, thread], |r| r.get(0)).optional()?;
+            let messages = count.query_row(params![workspace_id, thread], |r| r.get(0))?;
+            closed.push(ClosedRequest { thread, title: title.unwrap_or_default(), closed_at, messages });
+        }
+        Ok(closed)
+    }
+
+    /// One closed request to read again: its newest `limit` messages in the order they were
+    /// written, how many it has in all, and the names of the agents who wrote them.
+    pub fn closed_transcript(&self, workspace_id: &str, thread: &str, limit: i64) -> Result<ClosedTranscript> {
+        let (messages, total) = {
+            let conn = self.conn();
+            let mut tail = conn.prepare_cached(CHAT_TAIL_SQL)?;
+            let mut rows = tail.query_map(params![workspace_id, thread, limit], |r| r.get::<_, String>(2))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.reverse();
+            let messages: Vec<ChatMessage> = decode_all(rows.into_iter().map(Ok))?;
+            let total: i64 = conn.prepare_cached(CHAT_COUNT_SQL)?.query_row(params![workspace_id, thread], |r| r.get(0))?;
+            (messages, total)
+        };
+        let mut authors = std::collections::BTreeMap::new();
+        for m in &messages {
+            if m.author == "user" || m.author == "codly" || authors.contains_key(&m.author) {
+                continue;
+            }
+            if let Some(agent) = self.agent(&m.author)? {
+                authors.insert(m.author.clone(), agent.name);
+            }
+        }
+        Ok(ClosedTranscript { messages, total, authors })
+    }
+
     /// Record how a decision turned out (calibration log, agents-backend §5.6).
     pub fn set_decision_outcome(&self, id: &str, outcome: &str) -> Result<()> {
         self.conn().execute("UPDATE decision SET outcome = ?2 WHERE id = ?1", params![id, outcome])?;
@@ -1098,6 +1149,21 @@ const CHAT_THREADS_SQL: &str = "SELECT DISTINCT thread FROM chat WHERE workspace
 
 /// The newest ?3 messages of one thread, as (ts, rowid, json).
 const CHAT_TAIL_SQL: &str = "SELECT ts, rowid, json FROM chat WHERE workspace_id IS ?1 AND thread = ?2 ORDER BY ts DESC, rowid DESC LIMIT ?3";
+
+/// How many closed requests are listed, and how many of one's messages are read back.
+pub const CLOSED_LISTED: usize = 50;
+pub const CLOSED_MESSAGES: i64 = 500;
+
+/// Archive threads of a workspace's closed requests: one range of the `chat_thread` index
+/// (';' is the character after ':').
+const CLOSED_THREADS_SQL: &str = "SELECT DISTINCT thread FROM chat WHERE workspace_id IS ?1 AND thread >= 'closed:' AND thread < 'closed;'";
+
+/// The start of the user's first message in one thread.
+const CLOSED_TITLE_SQL: &str = "SELECT substr(json_extract(json, '$.text'), 1, 300) FROM chat
+     WHERE workspace_id IS ?1 AND thread = ?2 AND json_extract(json, '$.author') = 'user' ORDER BY ts, rowid LIMIT 1";
+
+/// How many messages one thread holds.
+const CHAT_COUNT_SQL: &str = "SELECT COUNT(*) FROM chat WHERE workspace_id IS ?1 AND thread = ?2";
 
 fn latest_task_run_sql() -> String {
     format!("{RUN_COLS} WHERE task_id = ?1 AND (?2 IS NULL OR role = ?2) ORDER BY started_at DESC, rowid DESC LIMIT 1")
@@ -1426,6 +1492,56 @@ mod tests {
     }
 
     #[test]
+    fn closed_requests_are_listed_newest_first_and_read_back_in_order() {
+        let store = Store::open_in_memory().unwrap();
+        let here = ws(&store);
+        let there = Workspace { id: new_id(), repo_path: "/tmp/other".into(), ..here.clone() };
+        store.upsert_workspace(&there).unwrap();
+        // Its Lead, archived when the request closed: the store still knows its name.
+        let lead: Agent = serde_json::from_value(serde_json::json!({
+            "id": "l1", "name": "Mira", "provider": "claude", "model": null, "role": "lead", "status": "offline",
+            "activity": null, "activity_label": null, "task_id": null, "run_id": null, "session_id": null,
+            "worktree": null, "billing": "subscription", "color": 1, "look_seed": "l1", "thread": "closed:lead:100",
+            "archived": true, "usage": Usage::default(),
+            "created_at": 1, "updated_at": 1
+        }))
+        .unwrap();
+        store.append_event(Some(&here.id), &row(EventKind::AgentChanged { agent: lead.clone() })).unwrap();
+        // (office, thread, author, text, ts)
+        for (w, thread, author, text, ts) in [
+            (&here, "lead", "user", "still open", 1),
+            (&here, "closed:lead:100", lead.id.as_str(), "On it.", 2),
+            (&here, "closed:lead:100", "user", "Fix the login", 3),
+            (&here, "closed:lead:100", "codly", "Plan cancelled.", 4),
+            (&here, "closed:lead:b:900", "user", "Add a bye file", 5),
+            (&here, "closed:lead:c:500", "gone", "Nobody asked.", 6),
+            (&there, "closed:lead:999", "user", "elsewhere", 7),
+        ] {
+            let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment: None, ts };
+            store.append_event(Some(&w.id), &row(EventKind::Chat { message })).unwrap();
+        }
+
+        // Newest closed first; the title is the user's first message, not the first message.
+        let closed = store.closed_requests(&here.id, 10).unwrap();
+        let listed: Vec<_> = closed.iter().map(|c| (c.thread.as_str(), c.title.as_str(), c.closed_at, c.messages)).collect();
+        assert_eq!(listed, vec![("closed:lead:b:900", "Add a bye file", 900, 1), ("closed:lead:c:500", "", 500, 1), ("closed:lead:100", "Fix the login", 100, 3)]);
+        assert_eq!(store.closed_requests(&here.id, 1).unwrap().len(), 1, "at most `limit`");
+        assert_eq!(store.closed_requests(&there.id, 10).unwrap().len(), 1, "each office has its own");
+
+        // Read back in the order written, with the names of the agents Codly still knows.
+        let t = store.closed_transcript(&here.id, "closed:lead:100", 10).unwrap();
+        assert_eq!(t.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), vec!["On it.", "Fix the login", "Plan cancelled."]);
+        assert_eq!(t.total, 3);
+        assert_eq!(t.authors.get(&lead.id).map(String::as_str), Some("Mira"));
+        assert_eq!(t.authors.len(), 1, "you and Codly are not agents");
+        // A long one keeps its newest messages and says how many there are.
+        let t = store.closed_transcript(&here.id, "closed:lead:100", 2).unwrap();
+        assert_eq!((t.messages[0].text.as_str(), t.messages.len(), t.total), ("Fix the login", 2, 3));
+        assert!(store.closed_transcript(&here.id, "closed:lead:c:500", 10).unwrap().authors.is_empty(), "an agent Codly no longer has gets no name");
+        assert_eq!(store.closed_transcript(&there.id, "closed:lead:100", 10).unwrap().total, 0, "another office's is not read");
+    }
+
+    #[test]
     fn events_of_one_type_are_read_newest_first() {
         let store = Store::open_in_memory().unwrap();
         let w = ws(&store);
@@ -1472,6 +1588,9 @@ mod tests {
         check(&latest_task_run_sql(), "run_task", true);
         check(CHAT_THREADS_SQL, "chat_thread", false);
         check(CHAT_TAIL_SQL, "chat_thread", true);
+        check(CLOSED_THREADS_SQL, "chat_thread", false);
+        check(CLOSED_TITLE_SQL, "chat_thread", true);
+        check(CHAT_COUNT_SQL, "chat_thread", false);
         // The open questions the office tabs poll (`blockers::list`).
         check("SELECT payload FROM event WHERE type = 'blocker_changed' AND (?1 IS NULL OR workspace_id = ?1) ORDER BY id", "event_type", true);
     }

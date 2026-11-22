@@ -24,6 +24,7 @@ fn main() {
         "diagnostics",
         "cancel_task_tree", "finish_plan",
         "worktree_setup",
+        "closed_requests", "closed_request",
     ])))
     .expect("tauri-build failed");
 }

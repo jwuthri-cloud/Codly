@@ -56,6 +56,10 @@ class Requests {
     // A blocking ask-me card waits for you just the same (its thread is the request's).
     for (const b of blockers.blocking) approvalsBy.set(b.thread, (approvalsBy.get(b.thread) ?? 0) + 1);
 
+    // A request you just closed leaves the tabs at once (Undo brings it back, see ./closing.ts).
+    const office = store.workspace?.id ?? null;
+    for (const c of ui.closingRequests) if (c.office === office) seen.delete(c.thread);
+
     const out: Request[] = [];
     for (const [thread, s] of seen) {
       const lead = store.leadOf(thread);

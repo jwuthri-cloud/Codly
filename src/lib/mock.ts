@@ -10,7 +10,10 @@
 import { isSiteDemo, type Transport, type UiBatch } from './api';
 import type { ApprovalRuleKind } from './gen/ApprovalRuleKind';
 import type { BreakerConfig } from './gen/BreakerConfig';
+import type { ChatMessage } from './gen/ChatMessage';
 import type { CliInfo } from './gen/CliInfo';
+import type { ClosedRequest } from './gen/ClosedRequest';
+import type { ClosedTranscript } from './gen/ClosedTranscript';
 import type { Placed } from './gen/Placed';
 import type { Rank } from './gen/Rank';
 import type { InstallHint } from './gen/InstallHint';
@@ -139,6 +142,8 @@ export class MockTransport implements Transport {
   /** BYOK demo state. Keys are never stored, only whether one was "saved". */
   /** Demo repo: whether Push was clicked. */
   private demoPushed = false;
+  /** The requests closed in the demo, newest first, with what was said in each. */
+  private demoClosed: { thread: string; closed_at: number; messages: ChatMessage[]; authors: Record<string, string> }[] = [];
   /** Demo repo: the last merge into main, until it is undone. */
   private demoMerge: Omit<LastMerge, 'blocked'> | null = null;
   /** The demo repo: a clean checkout, two merges not pushed yet (the real one runs git). */
@@ -267,9 +272,22 @@ export class MockTransport implements Transport {
       case 'cancel_plan':
         story.cancelPlan(String(a.planId));
         return null;
-      case 'close_thread':
-        story.closeThread(String(a.thread));
+      case 'close_thread': {
+        const thread = String(a.thread);
+        const messages = sim.chats.filter((c) => c.thread === thread);
+        const authors = Object.fromEntries(messages.flatMap((m) => (sim.agents.has(m.author) ? [[m.author, sim.agents.get(m.author)!.name]] : [])));
+        story.closeThread(thread);
+        // Like the core: what was said stays, to read again.
+        const at = sim.now();
+        if (messages.length) this.demoClosed.unshift({ thread: `closed:${thread}:${at}`, closed_at: at, messages, authors });
         return null;
+      }
+      case 'closed_requests':
+        return this.demoClosed.map((c): ClosedRequest => ({ thread: c.thread, title: (c.messages.find((m) => m.author === 'user')?.text ?? '').slice(0, 300), closed_at: c.closed_at, messages: c.messages.length }));
+      case 'closed_request': {
+        const c = this.demoClosed.find((x) => x.thread === String(a.thread));
+        return { messages: c?.messages ?? [], total: c?.messages.length ?? 0, authors: c?.authors ?? {} } satisfies ClosedTranscript;
+      }
       case 'merge_plan': {
         const sha = story.mergePlan(String(a.planId));
         this.demoMerge = { sha, branch: 'main', plan_id: String(a.planId), agent_id: null };

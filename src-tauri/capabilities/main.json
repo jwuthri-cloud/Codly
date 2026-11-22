@@ -32,6 +32,8 @@
     "allow-run-plan",
     "allow-cancel-plan",
     "allow-close-thread",
+    "allow-closed-requests",
+    "allow-closed-request",
     "allow-resolve-approval",
     "allow-approval-rule-offer",
     "allow-add-approval-rule",
