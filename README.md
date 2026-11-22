@@ -226,7 +226,10 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   switched off. The hire screen warns you about it.
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
   access, which approves it.
-- Codly removes a worktree only when it is clean and merged. It keeps the branch.
+- By itself, Codly removes a worktree only when it is clean and merged, and deletes a `codly/…` branch
+  only when its work is merged and its plan has been over for a day. Work that is not committed or not
+  merged stays until you delete it in **Settings → Storage**, which first names what you would lose.
+  Raw logs of agent runs are deleted after 30 days; you can change that there too.
 - A new worktree gets copies of files that git ignores and an agent needs: `node_modules`, `.venv`,
   `venv` and the `.env` files at the top of the repo, plus what a `.worktreeinclude` file at the top of
   the repo lists (same syntax as `.gitignore`). Codly copies a file only when git ignores it in your

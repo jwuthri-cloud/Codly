@@ -23,6 +23,7 @@
   import ConnectionsSection from './ConnectionsSection.svelte';
   import DeveloperSection from './DeveloperSection.svelte';
   import HousekeepingSection from './HousekeepingSection.svelte';
+  import StorageSection from './StorageSection.svelte';
   import TeamSection from './TeamSection.svelte';
   import TriggersSection from './TriggersSection.svelte';
   import WorktreeSection from './WorktreeSection.svelte';
@@ -236,6 +237,7 @@
     </section>
 
     <HousekeepingSection />
+    <StorageSection />
 
     <section>
       <h3 class="eyebrow">Troubleshooting</h3>

@@ -808,6 +808,83 @@ impl Git {
     }
 }
 
+/// A local branch as Settings → Storage lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchInfo {
+    /// Short name ("codly/plan-1a2b/t1").
+    pub name: String,
+    pub head: String,
+    /// When its last commit was made (unix ms).
+    pub committed_at: i64,
+}
+
+/// Reads and deletes for Settings → Storage (`housekeeping/storage.rs`): what Codly left in a
+/// repository, and what would be lost with it.
+impl Git {
+    /// Every local branch under `codly/`.
+    pub async fn codly_branches(&self, repo: &Path) -> Result<Vec<BranchInfo>> {
+        let out = self.read(repo, &["for-each-ref", "--format=%(objectname) %(committerdate:unix) %(refname)", "refs/heads/codly/"]).await?;
+        Ok(out
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, ' ');
+                let (head, secs, name) = (parts.next()?, parts.next()?, parts.next()?.strip_prefix("refs/heads/")?);
+                Some(BranchInfo { name: name.to_string(), head: head.to_string(), committed_at: secs.parse::<i64>().ok()? * 1000 })
+            })
+            .collect())
+    }
+
+    /// The branch checked out in `dir`, by its name under `refs/heads/` (None: on no branch).
+    /// `current_branch` gives the name the way git shortens it: "heads/x" when a tag is also
+    /// named x.
+    pub async fn checked_out_branch(&self, dir: &Path) -> Result<Option<String>> {
+        let out = self.run(dir, &["symbolic-ref", "--quiet", "HEAD"], true).await?;
+        Ok(if out.ok { out.stdout.trim().strip_prefix("refs/heads/").map(String::from) } else { None })
+    }
+
+    /// How many commits `rev` has that none of the local branches `others` has. 0 = `rev` is
+    /// contained in one of them: nothing is lost when only they stay. With no `others`, every
+    /// commit counts.
+    pub async fn commits_only_on(&self, repo: &Path, rev: &str, others: &[String]) -> Result<u32> {
+        // Full ref names, and "--" to end the revisions: a branch can have the name of a tag,
+        // or of a file or a folder in the checkout, and git refuses a name that is two things.
+        let others: Vec<String> = others.iter().map(|branch| format!("refs/heads/{branch}")).collect();
+        let mut args = vec!["rev-list", "--count", rev, "--not"];
+        args.extend(others.iter().map(String::as_str));
+        args.push("--");
+        Ok(self.read(repo, &args).await?.trim().parse()?)
+    }
+
+    /// How many commits `rev` has that no local branch has: what goes with a worktree that is
+    /// on no branch.
+    pub async fn commits_on_no_branch(&self, repo: &Path, rev: &str) -> Result<u32> {
+        Ok(self.read(repo, &["rev-list", "--count", rev, "--not", "--branches", "--"]).await?.trim().parse()?)
+    }
+
+    /// When the commit `rev` was made (unix ms).
+    pub async fn committed_at(&self, repo: &Path, rev: &str) -> Result<i64> {
+        Ok(self.read(repo, &["log", "-1", "--format=%ct", rev, "--"]).await?.trim().parse::<i64>()? * 1000)
+    }
+
+    /// The uncommitted files of a worktree: changed tracked files and untracked files that are
+    /// not ignored (what `dirty(.., true)` counts). Call `check_worktree` first.
+    pub async fn dirty_paths(&self, wt: &Path) -> Result<Vec<String>> {
+        let out = self.read(wt, &["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--no-renames"]).await?;
+        // One entry is "XY <path>".
+        Ok(out.split('\0').filter_map(|entry| entry.get(3..)).filter(|path| !path.is_empty()).map(String::from).collect())
+    }
+
+    /// Delete the local branch `branch` if it is still at `head`. Refused when it moved since,
+    /// and when a worktree has it checked out.
+    pub async fn delete_branch(&self, repo: &Path, branch: &str, head: &str) -> Result<()> {
+        if self.worktrees(repo).await?.iter().any(|w| w.branch.as_deref() == Some(branch)) {
+            bail!("{branch} is checked out in a worktree; keeping it");
+        }
+        let r = format!("refs/heads/{branch}");
+        self.ok(repo, &["update-ref", "-d", &r, head], false).await.map(drop)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1218,5 +1295,32 @@ mod tests {
         assert!(!git.is_ignored(&wt, "src", true).await.unwrap());
         assert!(git.is_ignored(&repo, "config/local.json", false).await.unwrap());
         assert!(!git.is_ignored(&wt, "config/local.json", false).await.unwrap(), "the worktree's own rules decide");
+    }
+
+    /// A branch can have the name of a folder or a file in the checkout, or of a tag. The
+    /// storage reads still mean the branch, and git does not stop on a name that is two things.
+    #[tokio::test]
+    async fn storage_reads_take_a_branch_name_for_the_branch_only() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        let base = git.head(&repo).await.unwrap().unwrap();
+        sh(&repo, &["switch", "-q", "-c", "docs"]);
+        std::fs::create_dir(repo.join("docs")).unwrap();
+        commit_file(&repo, "docs/guide.md", "guide\n");
+        let head = git.head(&repo).await.unwrap().unwrap();
+        // A tag named like the checked-out branch, and a built program named like the default one.
+        sh(&repo, &["tag", "docs", &base]);
+        std::fs::write(repo.join("main"), "binary").unwrap();
+
+        assert_eq!(git.checked_out_branch(&repo).await.unwrap().as_deref(), Some("docs"));
+        assert_eq!(git.commits_only_on(&repo, &head, &["main".to_string()]).await.unwrap(), 1);
+        let kept = ["docs".to_string(), "main".to_string()];
+        assert_eq!(git.commits_only_on(&repo, &head, &kept).await.unwrap(), 0, "the branch docs has the commit; the tag docs does not");
+        assert_eq!(git.commits_only_on(&repo, &head, &[]).await.unwrap(), 2);
+        assert_eq!(git.commits_on_no_branch(&repo, &head).await.unwrap(), 0);
+        assert!(git.committed_at(&repo, &head).await.unwrap() > 0);
+
+        sh(&repo, &["switch", "-q", "--detach"]);
+        assert_eq!(git.checked_out_branch(&repo).await.unwrap(), None);
     }
 }

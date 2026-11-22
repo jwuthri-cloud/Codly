@@ -407,10 +407,18 @@ impl Inner {
         let (Some(base), Some(branch)) = (p.base_commit.as_deref(), p.integration_branch.as_deref()) else { return Ok(String::new()) };
         let ws = self.store.workspace(&p.workspace_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
         let repo = Path::new(&ws.repo_path);
-        if self.git.rev_parse(repo, branch).await?.is_none() {
+        let head = match self.git.rev_parse(repo, branch).await? {
+            Some(head) => Some(head),
+            // A storage cleanup deleted the branch and kept the commit it was at.
+            None => match self.deleted_plan_branch(&p.id)? {
+                Some(head) => self.git.rev_parse(repo, &head).await?,
+                None => None,
+            },
+        };
+        let Some(head) = head else {
             bail!("the plan's branch {branch} was deleted, so its combined diff is gone; each task's diff still works");
-        }
-        self.git.diff(repo, base, branch).await
+        };
+        self.git.diff(repo, base, &head).await
     }
 
     /// Plans you merged without Codly (git on the command line, another tool): a done plan whose

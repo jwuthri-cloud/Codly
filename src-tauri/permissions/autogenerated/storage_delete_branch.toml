@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-storage-delete-branch"
+description = "Enables the storage_delete_branch command without any pre-configured scope."
+commands.allow = ["storage_delete_branch"]
+
+[[permission]]
+identifier = "deny-storage-delete-branch"
+description = "Denies the storage_delete_branch command without any pre-configured scope."
+commands.deny = ["storage_delete_branch"]

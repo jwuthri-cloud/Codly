@@ -554,3 +554,41 @@ pub async fn update_connection(
 ) -> R<Vec<codly_core::housekeeping::connections::Connection>> {
     state.core().await?.update_connection(&id, enabled, secret).await.map_err(err)
 }
+
+// ───────────── housekeeping: storage (worktrees, codly/… branches, run logs) ─────────────
+
+/// What Codly holds on disk and in each repository (Settings → Storage). Measures every
+/// worktree, so it can take a while.
+#[tauri::command]
+pub async fn storage_report(state: State<'_, AppState>) -> R<codly_core::housekeeping::storage::StorageReport> {
+    state.core().await?.storage().await.map_err(err)
+}
+
+/// How long run logs are kept and whether the sweep cleans up after finished plans; pass
+/// `policy` to change them.
+#[tauri::command]
+pub async fn storage_policy(state: State<'_, AppState>, policy: Option<codly_core::housekeeping::storage::StoragePolicy>) -> R<codly_core::housekeeping::storage::StoragePolicy> {
+    state.core().await?.storage_policy(policy).await.map_err(err)
+}
+
+/// "Clean up now": remove what has nothing to lose (merged, clean worktrees and merged branches
+/// of finished work, run logs past their limit). Returns what went.
+#[tauri::command]
+pub async fn storage_clean(state: State<'_, AppState>) -> R<codly_core::housekeeping::storage::StorageCleanup> {
+    Ok(state.core().await?.clean_storage().await)
+}
+
+/// Delete one of Codly's worktrees. `head` is the commit the list showed. A dirty or unmerged
+/// one is refused unless `force` (the user confirmed what is lost) and keeps its branch
+/// unless `delete_branch`.
+#[tauri::command]
+pub async fn storage_delete_worktree(state: State<'_, AppState>, office_id: String, path: String, head: Option<String>, force: bool, delete_branch: bool) -> R<()> {
+    state.core().await?.delete_worktree(&office_id, &path, head.as_deref(), force, delete_branch).await.map_err(err)
+}
+
+/// Delete a `codly/…` branch that no worktree has checked out. Commits that no other branch
+/// has are refused unless `force`.
+#[tauri::command]
+pub async fn storage_delete_branch(state: State<'_, AppState>, office_id: String, branch: String, head: String, force: bool) -> R<()> {
+    state.core().await?.delete_branch(&office_id, &branch, &head, force).await.map_err(err)
+}
