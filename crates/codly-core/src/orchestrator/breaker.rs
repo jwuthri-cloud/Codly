@@ -2,10 +2,14 @@
 //! against runaway agents and spend. No IO, no clock, no locks, so every rule is unit-tested.
 //!
 //! - `evaluate`  one agent, one beat: signals + its previous level → the next level and what
-//!   to do about it. Steer first, then constrain, then (only with `hard_stop`) stop; one level
-//!   per beat, never a jump to a kill; one level back down per healthy beat.
+//!   to do about it. Steer first, then constrain, then (only with `hard_stop`, and only for a
+//!   limit the agent crossed itself) stop; one level per beat, never a jump to a kill; one
+//!   level back down per healthy beat. A budget alone never kills.
 //! - `Tracker`   folds the event stream (usage, tool calls, errors, compaction) into those
 //!   signals and runs `evaluate` for every agent on each beat.
+//! - `over_budget`  the budget the whole team is over. The scheduler starts no task past it,
+//!   and an agent with no turn running gets no note about it (a note would start a turn).
+//! - `Spent`, `Today`  what was used: since the last Reset, on one day, by one plan.
 //!
 //! `breaker_run` enforces the verdicts with the existing mechanisms (a prompt that rides the
 //! agent's next turn, an interrupt, `stop_agent`) and records each change as a `Decision`.
@@ -17,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::model::{EventKind, Id, TurnStatus};
+use crate::model::{EventKind, Id, TurnStatus, Usage};
 
 /// How often the breaker looks at the floor.
 pub const BEAT_MS: i64 = 30_000;
@@ -35,21 +39,34 @@ const COMPACT_GRACE_MS: i64 = 300_000;
 pub struct BreakerConfig {
     pub enabled: bool,
     /// Work tokens (input + output + cache writes; cache reads excluded) all agents may use
-    /// together since the app started or you pressed Reset.
+    /// together since you last pressed Reset. The count is kept when you quit.
     pub token_budget: i64,
+    /// Dollars all agents may use together since you last pressed Reset, as their CLIs report
+    /// them (Claude Code: an estimate at list price; Codex and Gemini report none).
+    #[serde(default)]
+    pub cost_budget_usd: f64,
     /// Output tokens per minute one agent may sustain.
     pub velocity_per_min: i64,
     /// The same tool call with the same input this many times in a row.
     pub repeated_tool_limit: i64,
     /// Errors in a row (no success in between).
     pub error_storm_limit: i64,
-    /// Kill the agent as the last step. Off: the breaker never goes beyond constraining.
+    /// Kill the agent as the last step, when it is over a limit of its own (loop, errors,
+    /// velocity). Off: the breaker never goes beyond constraining. A budget never kills.
     pub hard_stop: bool,
 }
 
 impl Default for BreakerConfig {
     fn default() -> Self {
-        BreakerConfig { enabled: true, token_budget: 0, velocity_per_min: 60_000, repeated_tool_limit: 8, error_storm_limit: 5, hard_stop: false }
+        BreakerConfig {
+            enabled: true,
+            token_budget: 0,
+            cost_budget_usd: 0.0,
+            velocity_per_min: 60_000,
+            repeated_tool_limit: 8,
+            error_storm_limit: 5,
+            hard_stop: false,
+        }
     }
 }
 
@@ -57,11 +74,117 @@ impl BreakerConfig {
     /// Negative limits are nonsense; a loop limit of 1 would trip on every call.
     pub fn normalized(mut self) -> Self {
         self.token_budget = self.token_budget.max(0);
+        self.cost_budget_usd = if self.cost_budget_usd.is_finite() { self.cost_budget_usd.max(0.0) } else { 0.0 };
         self.velocity_per_min = self.velocity_per_min.max(0);
         self.repeated_tool_limit = if self.repeated_tool_limit <= 0 { 0 } else { self.repeated_tool_limit.max(3) };
         self.error_storm_limit = if self.error_storm_limit <= 0 { 0 } else { self.error_storm_limit.max(2) };
         self
     }
+}
+
+// ───────────────────────────── what was used ─────────────────────────────
+
+/// Work tokens and the cost the CLIs reported for them, added up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Spent {
+    /// Input + output + cache writes; cache reads excluded.
+    pub tokens: i64,
+    /// What the CLIs reported (Claude Code: an estimate at list price). 0 when none did.
+    pub cost_usd: f64,
+}
+
+impl Spent {
+    /// One run's total. A run's counts start from zero and only grow (every adapter reports
+    /// them so), so its last usage report is its total.
+    pub fn of(u: &Usage) -> Spent {
+        Spent { tokens: u.input_tokens + u.output_tokens + u.cache_write_tokens, cost_usd: u.cost_usd.unwrap_or(0.0).max(0.0) }
+    }
+
+    pub fn add(&mut self, more: Spent) {
+        self.tokens += more.tokens;
+        self.cost_usd += more.cost_usd;
+    }
+}
+
+impl std::iter::Sum for Spent {
+    fn sum<I: Iterator<Item = Spent>>(iter: I) -> Spent {
+        iter.fold(Spent::default(), |mut total, s| {
+            total.add(s);
+            total
+        })
+    }
+}
+
+/// What the team used on one local day ("2026-11-01").
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Today {
+    day: String,
+    spent: Spent,
+}
+
+impl Today {
+    /// Count what was just used on `day`. A new day starts from zero.
+    pub fn add(&mut self, day: &str, more: Spent) {
+        if self.day != day {
+            *self = Today { day: day.to_string(), spent: Spent::default() };
+        }
+        self.spent.add(more);
+    }
+
+    /// What was used on `day`: nothing when the count is another day's.
+    pub fn on(&self, day: &str) -> Spent {
+        if self.day == day { self.spent } else { Spent::default() }
+    }
+}
+
+/// A budget the whole team is over.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Budget {
+    Tokens { used: i64, limit: i64 },
+    Cost { used: f64, limit: f64 },
+}
+
+impl Budget {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Budget::Tokens { .. } => "floor_budget",
+            Budget::Cost { .. } => "cost_budget",
+        }
+    }
+
+    /// One sentence, with the count.
+    pub fn reason(&self) -> String {
+        match self {
+            Budget::Tokens { used, limit } => format!("the team has used {} work tokens, over the budget of {}", tok(*used), tok(*limit)),
+            Budget::Cost { used, limit } => format!("the team has used about {}, over the cost budget of {}", usd(*used), usd(*limit)),
+        }
+    }
+
+    /// Why a task waits, and the way out. Without the count: the count moves while agents
+    /// finish their turns, and a waiting task's reason must not change with it.
+    pub fn hold(&self) -> String {
+        let which = match self {
+            Budget::Tokens { limit, .. } => format!("the token budget of {} work tokens", tok(*limit)),
+            Budget::Cost { limit, .. } => format!("the cost budget of {}", usd(*limit)),
+        };
+        format!("paused: {which} is used up; raise it or press Reset counters in Settings → Autonomy & Budgets")
+    }
+}
+
+/// The budget the team is over, tokens first. A limit of 0 is off, and so is every limit of a
+/// breaker that is off.
+pub fn over_budget(cfg: &BreakerConfig, used: Spent) -> Option<Budget> {
+    if !cfg.enabled {
+        return None;
+    }
+    if cfg.token_budget > 0 && used.tokens > cfg.token_budget {
+        return Some(Budget::Tokens { used: used.tokens, limit: cfg.token_budget });
+    }
+    if cfg.cost_budget_usd > 0.0 && used.cost_usd > cfg.cost_budget_usd {
+        return Some(Budget::Cost { used: used.cost_usd, limit: cfg.cost_budget_usd });
+    }
+    None
 }
 
 // ───────────────────────────── the policy ─────────────────────────────
@@ -75,7 +198,7 @@ pub enum BreakerLevel {
     Steering,
     /// Its turn was interrupted and it was told to stop active work.
     Constrained,
-    /// Killed (only with `hard_stop`).
+    /// Killed (only with `hard_stop`, for a limit of its own).
     Stopped,
 }
 
@@ -107,8 +230,8 @@ impl BreakerLevel {
 /// What the breaker looks at for one agent on one beat.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Signals {
-    /// All agents' work tokens together.
-    pub floor_tokens: i64,
+    /// What all agents used together since the last Reset.
+    pub floor: Spent,
     /// Output tokens per minute over the recent window (None: not enough samples, or compacting).
     pub velocity_per_min: Option<i64>,
     pub repeat_run: i64,
@@ -118,7 +241,7 @@ pub struct Signals {
 /// Which limit an agent crossed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Trip {
-    FloorBudget { used: i64, limit: i64 },
+    Budget(Budget),
     RepeatedTool { count: i64, limit: i64 },
     ErrorStorm { count: i64, limit: i64 },
     Velocity { per_min: i64, limit: i64 },
@@ -127,7 +250,7 @@ pub enum Trip {
 impl Trip {
     pub fn kind(&self) -> &'static str {
         match self {
-            Trip::FloorBudget { .. } => "floor_budget",
+            Trip::Budget(b) => b.kind(),
             Trip::RepeatedTool { .. } => "repeated_tool",
             Trip::ErrorStorm { .. } => "error_storm",
             Trip::Velocity { .. } => "velocity",
@@ -137,7 +260,7 @@ impl Trip {
     /// One sentence, the same in the note the agent reads and in the timeline.
     pub fn reason(&self) -> String {
         match self {
-            Trip::FloorBudget { used, limit } => format!("the team has used {} work tokens, over the budget of {}", tok(*used), tok(*limit)),
+            Trip::Budget(b) => b.reason(),
             Trip::RepeatedTool { count, limit } => format!("it ran the same tool call {count} times in a row (limit {limit})"),
             Trip::ErrorStorm { count, limit } => format!("it hit {count} errors in a row (limit {limit})"),
             Trip::Velocity { per_min, limit } => format!("it is producing {} output tokens a minute (limit {})", tok(*per_min), tok(*limit)),
@@ -151,6 +274,10 @@ fn tok(n: i64) -> String {
         10_000.. => format!("{}k", n / 1000),
         _ => n.to_string(),
     }
+}
+
+fn usd(n: f64) -> String {
+    format!("${n:.2}")
 }
 
 /// What the caller must do about the new level.
@@ -172,12 +299,9 @@ pub struct Verdict {
     pub action: Action,
 }
 
-/// The first limit crossed, in order of severity. Limits that are 0 are off.
-fn first_trip(cfg: &BreakerConfig, s: &Signals) -> Option<Trip> {
+/// The first limit of its own the agent crossed, in order of severity. Limits that are 0 are off.
+fn own_trip(cfg: &BreakerConfig, s: &Signals) -> Option<Trip> {
     let on = |limit: i64| limit > 0;
-    if on(cfg.token_budget) && s.floor_tokens > cfg.token_budget {
-        return Some(Trip::FloorBudget { used: s.floor_tokens, limit: cfg.token_budget });
-    }
     if on(cfg.repeated_tool_limit) && s.repeat_run >= cfg.repeated_tool_limit {
         return Some(Trip::RepeatedTool { count: s.repeat_run, limit: cfg.repeated_tool_limit });
     }
@@ -192,6 +316,11 @@ fn first_trip(cfg: &BreakerConfig, s: &Signals) -> Option<Trip> {
 
 /// One agent, one beat. A tripped limit moves it one level up (capped at `Constrained`, or
 /// `Stopped` with `hard_stop`); a healthy beat moves it one level down. Only a move up acts.
+///
+/// A budget alone never goes past `Constrained`, also with `hard_stop`: the budget is the
+/// team's, so the agent cannot get under it, and held it spends nothing. A kill would only
+/// lose its work. So whether its turn runs when the beat comes does not change how it ends.
+/// A stop is for a limit the agent crossed itself, and names that limit.
 pub fn evaluate(cfg: &BreakerConfig, s: &Signals, prev: BreakerLevel) -> Verdict {
     if !cfg.enabled {
         return Verdict { level: BreakerLevel::Healthy, trip: None, action: Action::None };
@@ -199,9 +328,12 @@ pub fn evaluate(cfg: &BreakerConfig, s: &Signals, prev: BreakerLevel) -> Verdict
     if prev == BreakerLevel::Stopped {
         return Verdict { level: prev, trip: None, action: Action::None };
     }
-    let trip = first_trip(cfg, s);
-    let ceiling = if cfg.hard_stop { BreakerLevel::Stopped } else { BreakerLevel::Constrained };
-    let level = if trip.is_some() { prev.up().min(ceiling) } else { prev.down() };
+    let budget = over_budget(cfg, s.floor).map(Trip::Budget);
+    let own = own_trip(cfg, s);
+    let ceiling = if cfg.hard_stop && own.is_some() { BreakerLevel::Stopped } else { BreakerLevel::Constrained };
+    let level = if budget.is_some() || own.is_some() { prev.up().min(ceiling) } else { prev.down() };
+    // The budget first (the note then says to stop, not to try something else), but not on a stop.
+    let trip = if level == BreakerLevel::Stopped { own } else { budget.or(own) };
     let action = match level {
         l if l <= prev => Action::None,
         BreakerLevel::Steering => Action::Steer,
@@ -214,8 +346,13 @@ pub fn evaluate(cfg: &BreakerConfig, s: &Signals, prev: BreakerLevel) -> Verdict
 /// The note an agent reads when it is steered or constrained.
 pub fn note(level: BreakerLevel, trip: &Trip) -> String {
     let why = trip.reason();
-    match level {
-        BreakerLevel::Steering => format!(
+    match (level, trip) {
+        // Nothing is wrong with its approach: the budget is the team's.
+        (BreakerLevel::Steering, Trip::Budget(_)) => format!(
+            "[Codly circuit breaker] Heads up: {why}. Bring the step you are on to a safe stop and say where you are. \
+             Do not start new work."
+        ),
+        (BreakerLevel::Steering, _) => format!(
             "[Codly circuit breaker] Heads up: {why}. Re-check your approach: stop repeating what is not working, \
              say what is blocking you, and try something different."
         ),
@@ -241,9 +378,12 @@ pub fn resume_note(unread: Option<&Trip>) -> String {
 #[derive(Debug, Default)]
 struct AgentTrack {
     level: Option<BreakerLevel>,
-    /// Work tokens of runs that restarted its counters, plus the current run's.
-    banked: i64,
-    current: i64,
+    /// Work tokens since the last Reset, over all its runs.
+    work: i64,
+    /// The current run's own totals, as its CLI last reported them.
+    run: Spent,
+    /// Between a turn's start (or its first tool call) and its end.
+    in_turn: bool,
     /// (time, cumulative output tokens) of the current run, newest last.
     samples: VecDeque<(i64, i64)>,
     /// The output count when the turn in progress started.
@@ -255,10 +395,6 @@ struct AgentTrack {
 }
 
 impl AgentTrack {
-    fn work(&self) -> i64 {
-        self.banked + self.current
-    }
-
     /// Output tokens per minute over the window ending now.
     fn velocity(&self, now: i64) -> Option<i64> {
         if self.compacting_since.is_some_and(|t| now - t < COMPACT_GRACE_MS) {
@@ -285,33 +421,44 @@ pub struct Transition {
 #[derive(Debug, Default)]
 pub struct Tracker {
     agents: BTreeMap<Id, AgentTrack>,
-    /// Work tokens of agents that exited: they still count against the floor budget.
-    retired: i64,
+    /// What everyone used since the last Reset. Agents that exited still count.
+    floor: Spent,
 }
 
 impl Tracker {
-    pub fn observe(&mut self, agent: &str, now: i64, kind: &EventKind) {
+    /// A tracker that goes on from a saved count (the app was restarted).
+    pub fn resumed(floor: Spent) -> Tracker {
+        Tracker { agents: BTreeMap::new(), floor }
+    }
+
+    /// Fold one event in. Returns what it added to the count: a usage report's new tokens and
+    /// cost, nothing for any other event.
+    pub fn observe(&mut self, agent: &str, now: i64, kind: &EventKind) -> Spent {
         if let EventKind::Exited { .. } = kind {
-            if let Some(t) = self.agents.remove(agent) {
-                self.retired += t.work();
-            }
-            return;
+            self.agents.remove(agent);
+            return Spent::default();
         }
         let t = self.agents.entry(agent.to_string()).or_default();
+        let mut added = Spent::default();
         match kind {
             EventKind::UsageUpdated { usage } => {
-                let work = usage.input_tokens + usage.output_tokens + usage.cache_write_tokens;
-                if work < t.current {
-                    t.banked += t.current; // a new run: its counters started over
+                let run = Spent::of(usage);
+                if run.tokens < t.run.tokens {
+                    t.run = Spent::default(); // a new run: its counters started over
                     t.samples.clear();
                 }
-                t.current = work;
+                added = Spent { tokens: run.tokens - t.run.tokens, cost_usd: (run.cost_usd - t.run.cost_usd).max(0.0) };
+                t.run = run;
+                t.work += added.tokens;
+                self.floor.add(added);
                 t.samples.push_back((now, usage.output_tokens));
                 while t.samples.front().is_some_and(|(ts, _)| now - ts > WINDOW_MS * 2) {
                     t.samples.pop_front();
                 }
             }
+            EventKind::TurnStarted { .. } => t.in_turn = true,
             EventKind::ToolStarted { name, input, .. } => {
+                t.in_turn = true;
                 t.compacting_since = None;
                 let mut h = DefaultHasher::new();
                 name.hash(&mut h);
@@ -337,6 +484,7 @@ impl Tracker {
                     let step = t.samples[n - 1].1 - t.samples[n - 2].1;
                     t.samples.iter_mut().take(n - 1).for_each(|s| s.1 += step);
                 }
+                t.in_turn = false;
                 t.compacting_since = None;
                 t.last_tool = None;
                 t.repeat_run = 0;
@@ -346,11 +494,12 @@ impl Tracker {
             }
             _ => {}
         }
+        added
     }
 
-    /// Work tokens of everyone, including agents that exited.
-    pub fn floor_tokens(&self) -> i64 {
-        self.retired + self.agents.values().map(AgentTrack::work).sum::<i64>()
+    /// What everyone used since the last Reset, including agents that exited.
+    pub fn floor(&self) -> Spent {
+        self.floor
     }
 
     pub fn level(&self, agent: &str) -> BreakerLevel {
@@ -359,28 +508,34 @@ impl Tracker {
 
     /// (agent, level, work tokens) for every agent seen.
     pub fn snapshot(&self) -> Vec<(Id, BreakerLevel, i64)> {
-        self.agents.iter().map(|(id, t)| (id.clone(), t.level.unwrap_or(BreakerLevel::Healthy), t.work())).collect()
+        self.agents.iter().map(|(id, t)| (id.clone(), t.level.unwrap_or(BreakerLevel::Healthy), t.work)).collect()
     }
 
-    /// Forget all counters and levels (the user pressed Reset).
+    /// Forget all counters and levels (the user pressed Reset). A run that goes on keeps what
+    /// its CLI reported so far, so only what it uses from now on is counted.
     pub fn reset(&mut self) {
-        self.retired = 0;
+        self.floor = Spent::default();
         for t in self.agents.values_mut() {
-            *t = AgentTrack { level: Some(BreakerLevel::Healthy), ..Default::default() };
+            *t = AgentTrack { level: Some(BreakerLevel::Healthy), run: t.run, in_turn: t.in_turn, ..Default::default() };
         }
     }
 
     /// One beat: evaluate every agent that is not `exempt` (the Lead: it only talks to you).
     /// Returns the agents whose level changed.
+    ///
+    /// Over a budget, an agent with no turn running is left as it is: a note would start a
+    /// turn, and that turn spends more. Its level waits with it, so a worker you resume is not
+    /// held a second time for the same budget.
     pub fn beat(&mut self, cfg: &BreakerConfig, now: i64, exempt: &dyn Fn(&str) -> bool) -> Vec<Transition> {
-        let floor_tokens = self.floor_tokens();
+        let floor = self.floor;
+        let over = over_budget(cfg, floor).is_some();
         let mut out = vec![];
         for (id, t) in self.agents.iter_mut() {
-            if exempt(id) {
+            if exempt(id) || (over && !t.in_turn) {
                 continue;
             }
             let prev = t.level.unwrap_or(BreakerLevel::Healthy);
-            let signals = Signals { floor_tokens, velocity_per_min: t.velocity(now), repeat_run: t.repeat_run, error_run: t.error_run };
+            let signals = Signals { floor, velocity_per_min: t.velocity(now), repeat_run: t.repeat_run, error_run: t.error_run };
             let v = evaluate(cfg, &signals, prev);
             t.level = Some(v.level);
             if v.level != prev {
@@ -398,7 +553,16 @@ mod tests {
     use serde_json::json;
 
     fn cfg() -> BreakerConfig {
-        BreakerConfig { enabled: true, token_budget: 0, velocity_per_min: 0, repeated_tool_limit: 4, error_storm_limit: 3, hard_stop: false }
+        BreakerConfig { enabled: true, token_budget: 0, cost_budget_usd: 0.0, velocity_per_min: 0, repeated_tool_limit: 4, error_storm_limit: 3, hard_stop: false }
+    }
+    fn used(tokens: i64, cost_usd: f64) -> Spent {
+        Spent { tokens, cost_usd }
+    }
+    fn turn_start() -> EventKind {
+        EventKind::TurnStarted { input: None }
+    }
+    fn cost(input: i64, cost_usd: f64) -> EventKind {
+        EventKind::UsageUpdated { usage: Usage { input_tokens: input, cost_usd: Some(cost_usd), ..Default::default() } }
     }
     fn looping() -> Signals {
         Signals { repeat_run: 4, ..Default::default() }
@@ -450,6 +614,24 @@ mod tests {
     }
 
     #[test]
+    fn a_budget_alone_never_kills_also_with_hard_stop() {
+        let c = BreakerConfig { hard_stop: true, token_budget: 1000, ..cfg() };
+        let over = Signals { floor: used(5000, 0.0), ..Default::default() };
+        let v = evaluate(&c, &over, BreakerLevel::Steering);
+        assert_eq!((v.level, v.action), (BreakerLevel::Constrained, Action::Constrain));
+        let v = evaluate(&c, &over, BreakerLevel::Constrained);
+        assert_eq!((v.level, v.action), (BreakerLevel::Constrained, Action::None), "the agent cannot get the team under the budget");
+        assert_eq!(v.trip.as_ref().map(Trip::kind), Some("floor_budget"));
+        // Over the budget and in a loop of its own: the stop is for the loop, and says so.
+        let v = evaluate(&c, &Signals { repeat_run: 4, ..over.clone() }, BreakerLevel::Constrained);
+        assert_eq!((v.level, v.action), (BreakerLevel::Stopped, Action::Stop));
+        assert_eq!(v.trip, Some(Trip::RepeatedTool { count: 4, limit: 4 }));
+        // Below the stop, the budget is named first.
+        let v = evaluate(&c, &Signals { repeat_run: 4, ..over }, BreakerLevel::Healthy);
+        assert_eq!((v.level, v.trip.as_ref().map(Trip::kind)), (BreakerLevel::Steering, Some("floor_budget")));
+    }
+
+    #[test]
     fn recovers_one_level_per_healthy_beat() {
         let c = cfg();
         let v = evaluate(&c, &Signals::default(), BreakerLevel::Constrained);
@@ -466,17 +648,18 @@ mod tests {
 
     #[test]
     fn each_limit_trips_and_zero_means_off() {
-        let c = BreakerConfig { token_budget: 1000, velocity_per_min: 500, ..cfg() };
-        let trip = |s: Signals| first_trip(&c, &s).map(|t| t.kind());
-        assert_eq!(trip(Signals { floor_tokens: 1001, ..Default::default() }), Some("floor_budget"));
-        assert_eq!(trip(Signals { floor_tokens: 1000, ..Default::default() }), None, "at the budget is fine");
+        let c = BreakerConfig { token_budget: 1000, cost_budget_usd: 2.0, velocity_per_min: 500, ..cfg() };
+        let trip = |s: Signals| evaluate(&c, &s, BreakerLevel::Healthy).trip.map(|t| t.kind());
+        assert_eq!(trip(Signals { floor: used(1001, 0.0), ..Default::default() }), Some("floor_budget"));
+        assert_eq!(trip(Signals { floor: used(1000, 2.0), ..Default::default() }), None, "at the budget is fine");
+        assert_eq!(trip(Signals { floor: used(10, 2.01), ..Default::default() }), Some("cost_budget"));
         assert_eq!(trip(Signals { repeat_run: 4, ..Default::default() }), Some("repeated_tool"));
         assert_eq!(trip(Signals { error_run: 3, ..Default::default() }), Some("error_storm"));
         assert_eq!(trip(Signals { velocity_per_min: Some(501), ..Default::default() }), Some("velocity"));
         assert_eq!(trip(Signals { velocity_per_min: None, ..Default::default() }), None);
-        let off = BreakerConfig { token_budget: 0, velocity_per_min: 0, repeated_tool_limit: 0, error_storm_limit: 0, ..c };
-        let all = Signals { floor_tokens: i64::MAX, velocity_per_min: Some(i64::MAX), repeat_run: 99, error_run: 99 };
-        assert_eq!(first_trip(&off, &all), None);
+        let off = BreakerConfig { token_budget: 0, cost_budget_usd: 0.0, velocity_per_min: 0, repeated_tool_limit: 0, error_storm_limit: 0, ..c };
+        let all = Signals { floor: used(i64::MAX, f64::MAX), velocity_per_min: Some(i64::MAX), repeat_run: 99, error_run: 99 };
+        assert_eq!(evaluate(&off, &all, BreakerLevel::Healthy).trip, None);
     }
 
     #[test]
@@ -487,12 +670,25 @@ mod tests {
         assert!(steer.contains("8 times in a row") && steer.contains("try something different"));
         assert!(constrain.contains("Stop active work now"));
         assert_ne!(steer, constrain);
+        // Over a budget nothing is wrong with the agent's approach: the note says to stop, not to try something else.
+        let budget = note(BreakerLevel::Steering, &Trip::Budget(Budget::Tokens { used: 1_200_000, limit: 1_000_000 }));
+        assert!(budget.contains("1.2M work tokens, over the budget of 1.0M") && budget.contains("Do not start new work"), "{budget}");
+        assert!(!budget.contains("try something different"));
     }
 
     #[test]
     fn config_is_clamped() {
-        let c = BreakerConfig { token_budget: -5, velocity_per_min: -1, repeated_tool_limit: 1, error_storm_limit: -2, ..cfg() }.normalized();
+        let c = BreakerConfig { token_budget: -5, cost_budget_usd: -1.5, velocity_per_min: -1, repeated_tool_limit: 1, error_storm_limit: -2, ..cfg() }.normalized();
         assert_eq!((c.token_budget, c.velocity_per_min, c.repeated_tool_limit, c.error_storm_limit), (0, 0, 3, 0));
+        assert_eq!(c.cost_budget_usd, 0.0);
+        assert_eq!(BreakerConfig { cost_budget_usd: f64::NAN, ..cfg() }.normalized().cost_budget_usd, 0.0);
+    }
+
+    #[test]
+    fn settings_saved_before_the_cost_budget_still_load() {
+        let old = r#"{"enabled":true,"token_budget":5000,"velocity_per_min":60000,"repeated_tool_limit":8,"error_storm_limit":5,"hard_stop":true}"#;
+        let c: BreakerConfig = serde_json::from_str(old).unwrap();
+        assert_eq!((c.token_budget, c.cost_budget_usd, c.hard_stop), (5000, 0.0, true));
     }
 
     #[test]
@@ -610,21 +806,118 @@ mod tests {
         let mut t = Tracker::default();
         t.observe("a", 1, &usage(4000, 1000));
         t.observe("b", 1, &usage(3000, 1000));
-        assert_eq!(t.floor_tokens(), 9000);
+        assert_eq!(t.floor().tokens, 9000);
         assert!(t.beat(&c, 10, &|_| false).is_empty());
         t.observe("a", 2, &EventKind::Exited { code: Some(0) });
+        t.observe("a", 3, &turn_start());
+        t.observe("b", 3, &turn_start());
         t.observe("a", 3, &usage(500, 100)); // a started over: counters restart
-        t.observe("b", 3, &usage(500, 100)); // b's run restarted too: banks 4000
-        // 5000 retired + a's new run 600 + b's banked 4000 and new run 600
-        assert_eq!(t.floor_tokens(), 5000 + 600 + 4000 + 600);
-        assert_eq!(t.beat(&c, 20, &|_| false).len(), 2, "over the budget: everyone is steered");
+        t.observe("b", 3, &usage(500, 100)); // b's run restarted too: its 4000 stay counted
+        // a's first run 5000 and new run 600, b's first run 4000 and new run 600
+        assert_eq!(t.floor().tokens, 5000 + 600 + 4000 + 600);
+        assert_eq!(t.beat(&c, 20, &|_| false).len(), 2, "over the budget: everyone at work is steered");
+    }
+
+    #[test]
+    fn a_usage_report_adds_only_what_is_new() {
+        let mut t = Tracker::default();
+        assert_eq!(t.observe("a", 1, &cost(1000, 0.5)), used(1000, 0.5));
+        assert_eq!(t.observe("a", 2, &cost(1500, 0.75)), used(500, 0.25), "a run's counts are totals: the difference is new");
+        assert_eq!(t.observe("a", 3, &turn_start()), Spent::default(), "only usage reports count");
+        assert_eq!(t.observe("a", 4, &cost(200, 0.125)), used(200, 0.125), "a new run starts from zero");
+        assert_eq!(t.observe("b", 5, &usage(300, 0)), used(300, 0.0), "no cost reported is no cost");
+        assert_eq!(t.floor(), used(2000, 0.875));
+    }
+
+    #[test]
+    fn the_cost_budget_trips_like_the_token_budget() {
+        let c = BreakerConfig { cost_budget_usd: 1.0, ..cfg() };
+        let mut t = Tracker::default();
+        t.observe("a", 1, &turn_start());
+        t.observe("a", 2, &cost(100, 1.0));
+        assert!(t.beat(&c, 10, &|_| false).is_empty(), "at the budget is fine");
+        t.observe("a", 3, &cost(200, 1.5));
+        let tr = t.beat(&c, 20, &|_| false);
+        assert_eq!(tr[0].trip, Some(Trip::Budget(Budget::Cost { used: 1.5, limit: 1.0 })));
+        assert_eq!(tr[0].trip.as_ref().unwrap().reason(), "the team has used about $1.50, over the cost budget of $1.00");
+    }
+
+    #[test]
+    fn over_budget_names_the_budget_and_the_way_out() {
+        let c = BreakerConfig { token_budget: 1_000_000, cost_budget_usd: 5.0, ..cfg() };
+        assert_eq!(over_budget(&c, used(1_000_000, 5.0)), None);
+        let tokens = over_budget(&c, used(1_200_000, 9.0)).unwrap();
+        assert_eq!(tokens, Budget::Tokens { used: 1_200_000, limit: 1_000_000 }, "tokens first");
+        assert_eq!(tokens.hold(), "paused: the token budget of 1.0M work tokens is used up; raise it or press Reset counters in Settings → Autonomy & Budgets");
+        let cost = over_budget(&c, used(10, 5.01)).unwrap();
+        assert_eq!(cost.hold(), "paused: the cost budget of $5.00 is used up; raise it or press Reset counters in Settings → Autonomy & Budgets");
+        // The reason a waiting task shows does not move with the count.
+        assert_eq!(over_budget(&c, used(1_900_000, 0.0)).unwrap().hold(), tokens.hold());
+        assert_eq!(over_budget(&BreakerConfig { enabled: false, ..c }, used(i64::MAX, f64::MAX)), None, "a breaker that is off holds nothing");
+    }
+
+    #[test]
+    fn over_a_budget_an_agent_with_no_turn_running_is_not_woken() {
+        let c = BreakerConfig { token_budget: 1000, ..cfg() };
+        let mut t = Tracker::default();
+        t.observe("busy", 1, &turn_start());
+        t.observe("busy", 2, &usage(5000, 0));
+        t.observe("idle", 1, &turn_start());
+        t.observe("idle", 2, &usage(10, 0));
+        t.observe("idle", 3, &turn_done(TurnStatus::Completed));
+        let tr = t.beat(&c, 10, &|_| false);
+        assert_eq!(tr.iter().map(|x| x.agent.as_str()).collect::<Vec<_>>(), ["busy"], "a note to the idle one would start a turn");
+        assert_eq!(t.beat(&c, 20, &|_| false)[0].to, BreakerLevel::Constrained);
+        // Constrained, its turn ends. Its level waits while it is idle: when you resume it, it is
+        // not held a second time for the same budget.
+        t.observe("busy", 21, &turn_done(TurnStatus::Interrupted));
+        assert!(t.beat(&c, 30, &|_| false).is_empty());
+        assert_eq!(t.level("busy"), BreakerLevel::Constrained);
+        t.observe("busy", 31, &turn_start());
+        assert!(t.beat(&c, 40, &|_| false).is_empty());
+        // The idle one starts a turn while the team is over: now it is steered.
+        t.observe("idle", 41, &turn_start());
+        let tr = t.beat(&c, 50, &|_| false);
+        assert_eq!((tr[0].agent.as_str(), tr[0].action), ("idle", Action::Steer));
+    }
+
+    #[test]
+    fn with_hard_stop_a_budget_holds_every_worker_the_same_way() {
+        let c = BreakerConfig { hard_stop: true, token_budget: 1000, ..cfg() };
+        let mut t = Tracker::default();
+        for id in ["quick", "slow"] {
+            t.observe(id, 1, &turn_start());
+            t.observe(id, 2, &usage(5000, 0));
+        }
+        assert_eq!(t.beat(&c, 10, &|_| false).len(), 2);
+        assert_eq!(t.beat(&c, 20, &|_| false).iter().filter(|x| x.action == Action::Constrain).count(), 2);
+        // Both answer the note in a new turn. One is done before the next beat, one is not.
+        for id in ["quick", "slow"] {
+            t.observe(id, 21, &turn_done(TurnStatus::Interrupted));
+            t.observe(id, 22, &turn_start());
+        }
+        t.observe("quick", 23, &turn_done(TurnStatus::Completed));
+        assert!(t.beat(&c, 30, &|_| false).is_empty(), "no kill: the one still in its turn ends like the other");
+        t.observe("slow", 31, &turn_done(TurnStatus::Completed));
+        assert!(t.beat(&c, 40, &|_| false).is_empty());
+        assert_eq!((t.level("quick"), t.level("slow")), (BreakerLevel::Constrained, BreakerLevel::Constrained));
+        // A worker that goes on in a loop of its own while the team is over is stopped for the loop.
+        t.observe("slow", 41, &turn_start());
+        for i in 0..4 {
+            t.observe("slow", 42 + i, &tool("cargo test"));
+        }
+        let tr = t.beat(&c, 50, &|_| false);
+        assert_eq!(tr.len(), 1);
+        assert_eq!((tr[0].agent.as_str(), tr[0].action, tr[0].trip.as_ref().map(Trip::kind)), ("slow", Action::Stop, Some("repeated_tool")));
     }
 
     #[test]
     fn the_lead_is_exempt_but_its_tokens_count() {
         let c = BreakerConfig { token_budget: 1000, ..cfg() };
         let mut t = Tracker::default();
+        t.observe("lead", 1, &turn_start());
         t.observe("lead", 1, &usage(5000, 0));
+        t.observe("w", 1, &turn_start());
         t.observe("w", 1, &usage(10, 0));
         let tr = t.beat(&c, 10, &|id| id == "lead");
         assert_eq!(tr.len(), 1);
@@ -636,11 +929,50 @@ mod tests {
     fn reset_clears_levels_and_counters() {
         let c = BreakerConfig { token_budget: 100, ..cfg() };
         let mut t = Tracker::default();
+        t.observe("a", 1, &turn_start());
         t.observe("a", 1, &usage(500, 0));
         t.beat(&c, 10, &|_| false);
         assert_eq!(t.level("a"), BreakerLevel::Steering);
         t.reset();
-        assert_eq!((t.floor_tokens(), t.level("a")), (0, BreakerLevel::Healthy));
+        assert_eq!((t.floor().tokens, t.level("a")), (0, BreakerLevel::Healthy));
         assert!(t.beat(&c, 20, &|_| false).is_empty());
+        // Its run goes on: only what it uses after the reset counts, not the run's total again.
+        t.observe("a", 30, &usage(560, 0));
+        assert_eq!(t.floor().tokens, 60);
+        assert!(t.beat(&c, 40, &|_| false).is_empty());
+    }
+
+    #[test]
+    fn a_restart_goes_on_from_the_saved_count() {
+        let c = BreakerConfig { token_budget: 1000, ..cfg() };
+        let mut t = Tracker::resumed(used(900, 0.25));
+        assert_eq!(over_budget(&c, t.floor()), None);
+        t.observe("a", 1, &cost(200, 0.25)); // a new run after the restart
+        assert_eq!(t.floor(), used(1100, 0.5));
+        assert!(over_budget(&c, t.floor()).is_some(), "what was used before the restart still counts");
+    }
+
+    #[test]
+    fn runs_add_up_and_a_day_starts_from_zero() {
+        let report = |input, output, cache_write, cost_usd| Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: 9_999,
+            cache_write_tokens: cache_write,
+            cost_usd,
+            ..Default::default()
+        };
+        let runs = [report(100, 20, 5, Some(0.5)), report(1000, 200, 0, None), report(1, 1, 1, Some(0.25))];
+        let total: Spent = runs.iter().map(Spent::of).sum();
+        assert_eq!(total, used(125 + 1200 + 3, 0.75), "cache reads are not work, and a run with no cost adds none");
+        assert_eq!(std::iter::empty::<Spent>().sum::<Spent>(), Spent::default());
+
+        let mut today = Today::default();
+        today.add("2026-11-01", used(100, 0.5));
+        today.add("2026-11-01", used(50, 0.25));
+        assert_eq!(today.on("2026-11-01"), used(150, 0.75));
+        assert_eq!(today.on("2026-11-02"), Spent::default(), "yesterday's count is not today's");
+        today.add("2026-11-02", used(7, 0.0));
+        assert_eq!(today.on("2026-11-02"), used(7, 0.0));
     }
 }

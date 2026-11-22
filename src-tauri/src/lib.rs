@@ -125,6 +125,7 @@ pub fn run() {
             commands::set_breaker_config,
             commands::breaker_status,
             commands::reset_breaker,
+            commands::plan_spent,
             commands::interrupt_agent,
             agent_controls::agent_control,
             agent_controls::set_agent_block_tools,
@@ -345,6 +346,10 @@ async fn notify_loop<R: tauri::Runtime>(app: tauri::AppHandle<R>, core: Arc<Core
                 if decision_type == "watchdog" && matches!(detail["action"].as_str(), Some("flagged" | "idle" | "interrupted" | "stopped")) =>
             {
                 ("An agent needs a look".to_string(), truncate(summary, 160))
+            }
+            // A budget is used up: no new task starts until you raise it or reset the count.
+            EventKind::Decision { decision_type, summary, detail, .. } if decision_type == "breaker" && detail["action"] == "budget" => {
+                ("Budget reached".to_string(), truncate(summary, 160))
             }
             // Codly blocked a task, or a plan failed: that work waits for you.
             _ => match stop {

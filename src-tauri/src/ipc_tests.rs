@@ -67,6 +67,10 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::undo_merge,
             commands::repo_sync,
             commands::worktree_setup,
+            commands::breaker_config,
+            commands::set_breaker_config,
+            commands::breaker_status,
+            commands::plan_spent,
             commands::list_memories,
             commands::add_memory,
             commands::list_triples,
@@ -214,6 +218,21 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "worktree_setup", json!({ "set": { "allow": "abc" } })).unwrap_err();
     assert!(e.to_string().contains("no .codly/setup.sh"), "{e}");
     assert_eq!(invoke(&wv, "worktree_setup", json!({ "set": { "allow": null } })).unwrap()["on"], false);
+
+    // Budgets: the limits and the status with the fields Settings reads, and a plan's total by
+    // the key the plan cards send.
+    let cfg = invoke(&wv, "breaker_config", json!({})).unwrap();
+    assert_eq!((&cfg["token_budget"], &cfg["cost_budget_usd"]), (&json!(0), &json!(0.0)), "{cfg}");
+    let mut wanted = cfg.clone();
+    wanted["token_budget"] = json!(2_000_000);
+    wanted["cost_budget_usd"] = json!(7.5);
+    let saved = invoke(&wv, "set_breaker_config", json!({ "config": wanted })).unwrap();
+    assert_eq!((&saved["token_budget"], &saved["cost_budget_usd"]), (&json!(2_000_000), &json!(7.5)), "{saved}");
+    let status = invoke(&wv, "breaker_status", json!({})).unwrap();
+    assert_eq!(status["used"], json!({ "tokens": 0, "cost_usd": 0.0 }), "{status}");
+    assert!(status["today"]["tokens"] == 0 && status["hold"].is_null(), "{status}");
+    let e = invoke(&wv, "plan_spent", json!({ "planId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

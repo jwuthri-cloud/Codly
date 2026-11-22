@@ -706,6 +706,47 @@ impl Store {
         Ok(conn.query_row(&latest_task_run_sql(), params![task_id, role], run_from_row).optional()?)
     }
 
+    /// The last usage report of each run that worked on a task (its worker and reviewer runs).
+    /// A run's counts are totals, so its last report is what the run used.
+    pub fn task_run_usage(&self, task_id: &str) -> Result<Vec<Usage>> {
+        let conn = self.conn();
+        // With a lone MAX(id), SQLite takes `payload` from the row that holds the maximum. The
+        // task's own index is named: the other candidate, `event_type`, walks every usage report.
+        let mut st = conn.prepare_cached(
+            "SELECT payload, MAX(id) FROM event INDEXED BY event_task
+             WHERE task_id = ?1 AND type = 'usage_updated' GROUP BY run_id",
+        )?;
+        let rows = st.query_map([task_id], |r| r.get::<_, String>(0))?;
+        let mut out = vec![];
+        for payload in rows {
+            if let Ok(EventKind::UsageUpdated { usage }) = serde_json::from_str::<EventKind>(&payload?) {
+                out.push(usage);
+            }
+        }
+        Ok(out)
+    }
+
+    /// What an agent's runs on one provider session cost together: the cost in the last usage
+    /// report of each run (a run's cost starts from zero), added up.
+    pub fn session_cost(&self, agent_id: &str, session_id: &str) -> Result<f64> {
+        let conn = self.conn();
+        // The agent's own index is named, as in `task_run_usage`: one walk over its events.
+        let mut st = conn.prepare_cached(
+            "SELECT payload, MAX(id) FROM event INDEXED BY event_agent
+             WHERE agent_id = ?1 AND type = 'usage_updated'
+               AND run_id IN (SELECT id FROM run WHERE agent_id = ?1 AND session_id = ?2)
+             GROUP BY run_id",
+        )?;
+        let rows = st.query_map(params![agent_id, session_id], |r| r.get::<_, String>(0))?;
+        let mut total = 0.0;
+        for payload in rows {
+            if let Ok(EventKind::UsageUpdated { usage }) = serde_json::from_str::<EventKind>(&payload?) {
+                total += usage.cost_usd.unwrap_or(0.0);
+            }
+        }
+        Ok(total)
+    }
+
     /// Mark a run's status; terminal statuses also stamp `ended_at`.
     pub fn set_run_status(&self, id: &str, status: &str) -> Result<()> {
         let ended = matches!(status, "completed" | "failed" | "cancelled" | "lost").then(now_ms);
@@ -1546,5 +1587,71 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(plan.iter().any(|step| step.contains("event_agent")), "{plan:?}");
+    }
+
+    #[test]
+    fn a_tasks_usage_is_the_last_report_of_each_of_its_runs() {
+        let store = Store::open_in_memory().unwrap();
+        let w = ws(&store);
+        let report = |task: &str, run: &str, input: i64| {
+            let usage = Usage { input_tokens: input, cost_usd: Some(input as f64 / 1000.0), ..Default::default() };
+            let ev = EventRow { task_id: Some(task.into()), run_id: Some(run.into()), ..row(EventKind::UsageUpdated { usage }) };
+            store.append_event(Some(&w.id), &ev).unwrap();
+        };
+        report("t1", "worker-1", 100);
+        report("t1", "worker-1", 400); // the same run, later: its counts are totals
+        report("t2", "other", 9_000);
+        report("t1", "reviewer", 50);
+        report("t1", "worker-2", 30); // a retry: a new run starts from zero
+        let mut used: Vec<(i64, Option<f64>)> = store.task_run_usage("t1").unwrap().into_iter().map(|u| (u.input_tokens, u.cost_usd)).collect();
+        used.sort_by_key(|u| u.0);
+        assert_eq!(used, [(30, Some(0.03)), (50, Some(0.05)), (400, Some(0.4))]);
+        assert!(store.task_run_usage("no-such-task").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_sessions_cost_is_the_total_of_its_runs() {
+        let store = Store::open_in_memory().unwrap();
+        let w = ws(&store);
+        // Runs only: their agents are not rows here.
+        store.conn().execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        let run = |id: &str, agent: &str, session: &str| {
+            let run = RunRow {
+                id: id.into(),
+                agent_id: agent.into(),
+                task_id: None,
+                role: Role::Lead,
+                provider: Provider::Opencode,
+                model: None,
+                cwd: "/w".into(),
+                session_id: Some(session.into()),
+                account: None,
+                status: "completed".into(),
+                raw_log: String::new(),
+                report: None,
+                started_at: now_ms(),
+                ended_at: None,
+            };
+            store.insert_run(&run).unwrap();
+        };
+        let report = |agent: &str, run: &str, cost_usd: Option<f64>| {
+            let usage = Usage { cost_usd, ..Default::default() };
+            let ev = EventRow { agent_id: Some(agent.into()), run_id: Some(run.into()), ..row(EventKind::UsageUpdated { usage }) };
+            store.append_event(Some(&w.id), &ev).unwrap();
+        };
+        run("r1", "ana", "ses-1");
+        run("r2", "ana", "ses-1");
+        run("r3", "ana", "ses-2");
+        run("r4", "ana", "ses-1");
+        run("r5", "ben", "ses-9");
+        report("ana", "r1", Some(0.125));
+        report("ana", "r1", Some(0.25)); // the same run, later: its cost is a total
+        report("ana", "r2", Some(0.5)); // the session resumed: a new run starts from zero
+        report("ana", "r3", Some(8.0)); // another session
+        report("ana", "r4", None); // a run with no cost reported adds none
+        report("ben", "r5", Some(16.0)); // another agent
+        assert_eq!(store.session_cost("ana", "ses-1").unwrap(), 0.75);
+        assert_eq!(store.session_cost("ana", "ses-2").unwrap(), 8.0);
+        assert_eq!(store.session_cost("ana", "no-such-session").unwrap(), 0.0);
     }
 }

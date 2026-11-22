@@ -36,6 +36,9 @@ pub struct SchedInput<'a> {
     /// Ready tasks whose worker failed a moment ago: task → the time (ms) before which it
     /// does not start again (`retry.rs`).
     pub not_before: &'a HashMap<Id, i64>,
+    /// Why no task may start right now, as the waiting tasks show it (`breaker::Budget::hold`:
+    /// a token or cost budget is used up). None: tasks start.
+    pub hold: Option<&'a str>,
 }
 
 /// Park an account once this fraction of one of its usage windows is spent (C17).
@@ -281,6 +284,10 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
         };
         if settings.paused {
             actions.push(wait("paused: no new tasks start until you resume".into()));
+            continue;
+        }
+        if let Some(why) = input.hold {
+            actions.push(wait(why.to_string()));
             continue;
         }
         if free == 0 {

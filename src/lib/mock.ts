@@ -325,6 +325,8 @@ export class MockTransport implements Transport {
       case 'reset_breaker':
         this.breaker.reset();
         return null;
+      case 'plan_spent':
+        return this.breaker.planSpent(String(a.planId));
       case 'interrupt_agent':
         story.interrupt(String(a.agentId));
         return null;

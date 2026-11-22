@@ -3,19 +3,23 @@
   worktree, so Autonomous lets it change anything there without asking. Unset follows Settings.
 -->
 <script lang="ts">
+  import type { Agent } from '../lib/gen/Agent';
   import type { ApprovalMode } from '../lib/gen/ApprovalMode';
   import { setRequestPrefs } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
   import { PERMISSIONS } from './LeadControls.svelte';
+  import UsageChip from './UsageChip.svelte';
 
   interface Props {
     thread: string;
     /** A plan worker's chat: the picker is its request's, shared by every agent on that plan. */
     request?: boolean;
+    /** The agent you talk to here: its context meter and cost show beside the picker. */
+    agent: Agent | null;
   }
-  let { thread, request = false }: Props = $props();
+  let { thread, request = false, agent }: Props = $props();
 
   const own = $derived(store.requestPrefs[thread]?.approval_mode ?? null);
   const perm = $derived<ApprovalMode>(own ?? store.settings.approval_mode);
@@ -33,6 +37,7 @@
   <button class="chip" bind:this={btn} aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)} data-tip={request ? 'How much every agent on this request asks you before it acts' : 'How much this agent asks you before it acts'}>
     <Icon name="lock" size={13} />{label}{#if request}<span class="sub">· whole request</span>{:else if !own}<span class="sub">· Settings</span>{/if}<Icon name="chevron-down" size={12} />
   </button>
+  <UsageChip {agent} />
 </div>
 {#if open && btn}<Menu anchor={btn} items={items} onclose={() => (open = false)} width={300} />{/if}
 

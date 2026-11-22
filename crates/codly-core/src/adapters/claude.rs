@@ -1535,6 +1535,7 @@ mod tests {
             bin: PathBuf::from("claude"),
             env: HashMap::new(),
             session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
             system_prompt: "You are a Codly worker.".into(),
             read_only,
             mcp: Some(McpLaunch { command: "/Applications/Codly.app/Contents/MacOS/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "t".into())] }),

@@ -467,6 +467,7 @@ impl Inner {
         let accounts = self.account_states();
         let now = now_ms();
         let not_before = lock(&self.retries).holds(now);
+        let hold = self.budget_hold();
         let input = SchedInput {
             tasks: &tasks,
             plans: &plans,
@@ -478,6 +479,7 @@ impl Inner {
             now,
             elsewhere: &elsewhere,
             not_before: &not_before,
+            hold: hold.as_deref(),
         };
         let actions = scheduler::schedule(&input);
         let stuck = scheduler::stuck_plans(&input, &actions);

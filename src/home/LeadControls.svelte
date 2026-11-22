@@ -30,6 +30,7 @@
   import { EFFORTS, findModels, joinModel, splitModel } from '../lib/util/team';
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
+  import UsageChip from './UsageChip.svelte';
 
   interface Props {
     thread: string;
@@ -117,6 +118,7 @@
   <button class="chip" bind:this={modelBtn} aria-haspopup="menu" aria-expanded={open === 'model'} onclick={() => (open = open === 'model' ? null : 'model')} data-tip="The Lead's CLI, model and thinking for this request">
     <span class="sub">{PROVIDER_LABEL[cli]} ·</span>{model.name || 'default'}{#if model.effort}<span class="sub">· {model.effort === 'xhigh' ? 'extra high' : model.effort}</span>{/if}<Icon name="chevron-down" size={12} />
   </button>
+  <UsageChip agent={store.threadAgent(thread)} />
 </div>
 {#if open === 'mode' && modeBtn}<Menu anchor={modeBtn} items={modeItems} onclose={() => (open = null)} width={340} />{/if}
 {#if open === 'model' && modelBtn}<Menu anchor={modelBtn} items={modelItems} onclose={() => ((open = null), (query = ''))} width={260} bind:search={() => (models.length > SHOWN ? query : null), (v) => (query = v ?? '')} searchPlaceholder="Search models" />{/if}

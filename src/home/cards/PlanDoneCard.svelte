@@ -5,8 +5,10 @@
 <script lang="ts">
   import { keepBranch, mergePlan } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
+  import { planSpent, spentVersion } from '../../lib/state/spent.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
+  import { PLAN_SPENT_TIP, spentLine } from '../../lib/util/cost';
   import { shortSha } from '../../lib/util/format';
   import { idVar, GLOSSARY } from '../../lib/util/labels';
   import ArtifactThumb from '../../components/ArtifactThumb.svelte';
@@ -20,6 +22,11 @@
   const plan = $derived(store.planMap.get(planId) ?? null);
   const tasks = $derived(store.tasks.filter((t) => t.plan_id === planId).sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true })));
   const stat = $derived(diffstats.plan[planId] ?? null);
+  // What the plan's tasks used in all (its runs are over: asked once, and again if a task changes state).
+  const spent = $derived(planSpent.plan[planId] ?? null);
+  $effect(() => {
+    if (plan) planSpent.ensure(planId, spentVersion(tasks.map((t) => t.status), false, 0));
+  });
   const arts = $derived(store.artifacts.filter((a) => a.task_id && tasks.some((t) => t.id === a.task_id)));
   const merged = $derived.by(() => {
     void store.rev;
@@ -48,6 +55,7 @@
       {#if stat}<span class="add">+{stat.added}</span> <span class="del">−{stat.removed}</span> across {stat.files} files ·{/if}
       {tasks.filter((t) => t.status === 'done').length} of {tasks.length} tasks merged into <code data-tip={GLOSSARY.integration}>{plan.integration_branch ?? 'the integration branch'}</code>
     </p>
+    {#if spent?.tokens}<p class="used num"><span data-tip={PLAN_SPENT_TIP}>Used {spentLine(spent)}</span></p>{/if}
     <ul class="tasks">
       {#each tasks as t (t.id)}
         {@const a = t.assignee ? store.agentMap.get(t.assignee) : null}
@@ -89,6 +97,7 @@
   h3 { font-size: var(--d-md); line-height: 1.12; }
   .stats { font-size: var(--t-md); color: var(--ink-2); }
   .stats code { font-size: 11.5px; color: var(--ink-2); }
+  .used { margin-top: -8px; font-size: var(--t-sm); color: var(--ink-3); }
   .add { color: var(--ok); }
   .del { color: var(--bad); }
   .tasks { display: flex; flex-direction: column; }

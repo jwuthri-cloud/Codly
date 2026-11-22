@@ -56,6 +56,14 @@ impl Inner {
             .or_else(|| cli.path.as_ref().map(PathBuf::from))
             .ok_or_else(|| anyhow!("{} binary not found", provider.label()))?;
         let (byok_key, byok_command) = self.byok_for(provider).await?;
+        // An ACP agent reports its session's cost as a running total. The adapter takes off what
+        // the session's earlier runs cost, so a resumed session is not counted a second time.
+        let session_cost_usd = match &req.session {
+            SessionMode::Resume { session_id } if !matches!(provider, Provider::Claude | Provider::Codex) => {
+                self.store.session_cost(&req.agent.id, session_id)?
+            }
+            _ => 0.0,
+        };
         let mut env = guard("env::child_env", || {
             Ok(crate::env::child_env_with(&self.base_env, provider, byok_key.as_ref().map(|k| k.expose())))
         })
@@ -173,6 +181,7 @@ impl Inner {
             bin,
             env,
             session: req.session,
+            session_cost_usd,
             system_prompt: req.system_prompt,
             read_only: req.read_only,
             mcp: Some(mcp.launch(&self.cfg.app_exe, &token)),

@@ -310,6 +310,7 @@ impl Actor {
                 let r = self.call("session/resume", json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp }), lines).await?;
                 if r.is_ok() {
                     self.system_prompt = None; // the resumed conversation already has it
+                    self.norm.cost_before = self.spec.session_cost_usd;
                 }
                 r.map(|mut v| {
                     v["sessionId"] = json!(session_id);
@@ -322,6 +323,7 @@ impl Actor {
                 self.replaying = false;
                 if r.is_ok() {
                     self.system_prompt = None;
+                    self.norm.cost_before = self.spec.session_cost_usd;
                 }
                 r.map(|mut v| {
                     v["sessionId"] = json!(session_id);
@@ -733,6 +735,9 @@ pub struct AcpNormalizer {
     tools: HashMap<String, ToolState>,
     approvals: HashMap<Id, PendingPermission>,
     usage: Usage,
+    /// What the session cost before this run: set when a session is resumed, 0 for a new one.
+    /// `usage_update.cost` is the session's running total, and a run reports its own cost.
+    pub cost_before: f64,
     turn_started_at: Option<Instant>,
     pub interrupt_requested: bool,
 }
@@ -752,9 +757,21 @@ impl AcpNormalizer {
             tools: HashMap::new(),
             approvals: HashMap::new(),
             usage: Usage::default(),
+            cost_before: 0.0,
             turn_started_at: None,
             interrupt_requested: false,
         }
+    }
+
+    /// This run's part of the session's running cost.
+    fn run_cost(&mut self, session_total: f64) -> f64 {
+        // A total under what the session cost before this run: the agent started its count
+        // over, so all of it is this run's. (A billionth of a dollar under is rounding: the
+        // cost before is a sum of earlier runs.)
+        if session_total < self.cost_before - 1e-9 {
+            self.cost_before = 0.0;
+        }
+        (session_total - self.cost_before).max(0.0)
     }
 
     fn set_status(&mut self, s: AgentStatus, out: &mut Vec<EventKind>) {
@@ -855,7 +872,8 @@ impl AcpNormalizer {
                 self.usage.context_used = u["used"].as_i64().or(self.usage.context_used);
                 self.usage.context_window = u["size"].as_i64().or(self.usage.context_window);
                 if u["cost"]["currency"] == "USD" {
-                    self.usage.cost_usd = u["cost"]["amount"].as_f64();
+                    let cost = u["cost"]["amount"].as_f64().map(|total| self.run_cost(total));
+                    self.usage.cost_usd = cost;
                 }
                 out.push(EventKind::UsageUpdated { usage: self.usage.clone() });
             }
@@ -1306,6 +1324,34 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, EventKind::ToolCompleted { exit_code: Some(0), output: Some(o), .. } if o.contains("hello.txt"))));
     }
 
+    /// `usage_update.cost` is the session's running total (docs/research/cli-others-acp.md
+    /// §1.6). A run on a resumed session reports only what it added.
+    #[test]
+    fn a_resumed_sessions_cost_starts_from_zero_for_the_run() {
+        let new = || AcpNormalizer::new(Provider::Opencode, "a", "r", PathBuf::from("/w"));
+        let cost = |norm: &mut AcpNormalizer, total: f64| {
+            let update = json!({ "sessionUpdate": "usage_update", "used": 15040, "size": 200000, "cost": { "amount": total, "currency": "USD" } });
+            let events = norm.on_update(&update);
+            events.iter().find_map(|e| if let EventKind::UsageUpdated { usage } = e { usage.cost_usd } else { None }).unwrap()
+        };
+        // A new session: the total is the run's.
+        let mut norm = new();
+        assert_eq!((cost(&mut norm, 0.25), cost(&mut norm, 0.75)), (0.25, 0.75));
+        // Resumed: its earlier runs cost 0.75 together, and Codly counted that then.
+        let mut norm = new();
+        norm.cost_before = 0.75;
+        assert_eq!(cost(&mut norm, 0.75), 0.0, "nothing new yet");
+        assert_eq!((cost(&mut norm, 1.0), cost(&mut norm, 1.25)), (0.25, 0.5));
+        // The cost before is a sum of earlier runs: its rounding is not a count that started over.
+        let mut norm = new();
+        norm.cost_before = 0.1 + 0.2;
+        assert_eq!(cost(&mut norm, 0.3), 0.0);
+        // An agent that starts its count over on a resume: all it reports is this run's.
+        let mut norm = new();
+        norm.cost_before = 0.75;
+        assert_eq!((cost(&mut norm, 0.125), cost(&mut norm, 0.5)), (0.125, 0.5));
+    }
+
     /// A tool request is named by its free-text title; the approval rules get the kind too.
     #[test]
     fn tool_permissions_keep_the_protocol_kind() {
@@ -1407,6 +1453,7 @@ mod tests {
             bin: PathBuf::from("gemini"),
             env: HashMap::new(),
             session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
             system_prompt: String::new(),
             read_only: false,
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "t".into())] }),

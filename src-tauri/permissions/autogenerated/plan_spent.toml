@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-spent"
+description = "Enables the plan_spent command without any pre-configured scope."
+commands.allow = ["plan_spent"]
+
+[[permission]]
+identifier = "deny-plan-spent"
+description = "Denies the plan_spent command without any pre-configured scope."
+commands.deny = ["plan_spent"]

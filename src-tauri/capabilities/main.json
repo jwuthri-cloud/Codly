@@ -50,6 +50,7 @@
     "allow-set-breaker-config",
     "allow-breaker-status",
     "allow-reset-breaker",
+    "allow-plan-spent",
     "allow-move-task",
     "allow-recheck-task",
     "allow-accept-task",

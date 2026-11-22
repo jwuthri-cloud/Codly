@@ -200,6 +200,7 @@ async fn main() {
         bin,
         env: codly_core::env::child_env(&base, args.provider),
         session: SessionMode::New { session_id: None },
+        session_cost_usd: 0.0,
         system_prompt: "You are a Codly smoke-test agent. Follow the user's instructions exactly and keep replies short.".into(),
         read_only: false,
         mcp,

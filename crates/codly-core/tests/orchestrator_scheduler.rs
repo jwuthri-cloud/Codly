@@ -113,6 +113,7 @@ struct World {
     now: i64,
     elsewhere: Vec<Agent>,
     not_before: HashMap<Id, i64>,
+    hold: Option<String>,
 }
 
 impl World {
@@ -128,6 +129,7 @@ impl World {
             now: 1_000_000,
             elsewhere: vec![],
             not_before: HashMap::new(),
+            hold: None,
         }
     }
     fn input(&self) -> SchedInput<'_> {
@@ -142,6 +144,7 @@ impl World {
             now: self.now,
             elsewhere: &self.elsewhere,
             not_before: &self.not_before,
+            hold: self.hold.as_deref(),
         }
     }
     fn run(&self) -> Vec<Action> {
@@ -605,6 +608,30 @@ fn paused_starts_nothing_and_says_why() {
     assert!(waits(&a).iter().all(|(_, why)| why.starts_with("paused")), "{:?}", waits(&a));
     w.settings.paused = false;
     assert_eq!(starts(&w.run()).len(), 2);
+}
+
+/// A budget that is used up starts nothing, however many slots are free, and every ready task
+/// says which budget and the way out. Tasks whose dependencies are done still become ready, so
+/// they start as soon as the budget has room.
+#[test]
+fn a_used_up_budget_starts_nothing_and_says_the_way_out() {
+    let hold = "paused: the token budget of 1.0M work tokens is used up; raise it or press Reset counters in Settings → Autonomy & Budgets";
+    let mut tasks = ready(2);
+    tasks.push(task("done", "p", TaskStatus::Done, &["d/**"], &[]));
+    tasks.push(task("next", "p", TaskStatus::Pending, &["n/**"], &["done"]));
+    let mut w = World::new(tasks);
+    w.hold = Some(hold.into());
+    let a = w.run();
+    assert!(starts(&a).is_empty(), "{a:?}");
+    assert_eq!(waits(&a).len(), 3);
+    assert!(waits(&a).iter().all(|(_, why)| why == hold), "{:?}", waits(&a));
+    assert!(a.iter().any(|x| matches!(x, Action::MakeReady { task_id } if task_id == "next")));
+    // You paused Codly yourself: that is what the tasks say.
+    w.settings.paused = true;
+    assert!(waits(&w.run()).iter().all(|(_, why)| why == "paused: no new tasks start until you resume"));
+    w.settings.paused = false;
+    w.hold = None;
+    assert_eq!(starts(&w.run()).len(), 3);
 }
 
 fn member(id: &str, name: &str) -> Agent {
