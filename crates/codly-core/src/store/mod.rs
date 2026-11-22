@@ -166,8 +166,9 @@ impl Store {
     /// An `approval_requested` row carries the approval as it is now (its answer may be in a
     /// newer page, which the caller already has).
     pub fn thread_events(&self, workspace_id: &str, thread: &str, owner: Option<&str>, before: Option<i64>, limit: i64) -> Result<Vec<EventRow>> {
-        /// A message's time is taken just before its event's: the guard below allows a minute
-        /// between the two clocks before it would skip a message.
+        /// A message's time is taken just before its event's. The walk for a request's messages
+        /// ends at the first event this much older than the thread's first message: a minute
+        /// between the two clocks before it would miss a message.
         const CLOCK_SLACK_MS: i64 = 60_000;
         let (before, limit) = (before.unwrap_or(i64::MAX), limit.clamp(1, 5000));
         let request = is_lead_thread(thread);
@@ -204,27 +205,34 @@ impl Store {
             }
             if request {
                 // No index finds a thread's `chat` events, so this walks the workspace's events
-                // backwards. It stops where the page ends (a full page), and it is skipped when
-                // the thread has no message as old as the cursor (a new request in an old repo).
+                // backwards. It stops where the page ends (a full page), after `limit` messages,
+                // or at the events from before the thread's first message, whichever is first.
                 let page_end = if rows.len() as i64 >= limit { rows.last().map_or(0, |r| r.id) } else { 0 };
-                let cursor_ts: Option<i64> = conn.query_row("SELECT ts FROM event WHERE id < ?1 ORDER BY id DESC LIMIT 1", [before], |r| r.get(0)).optional()?;
-                let older_messages = match cursor_ts {
-                    Some(ts) => conn.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM chat WHERE workspace_id = ?1 AND thread = ?2 AND ts <= ?3)",
-                        params![workspace_id, thread, ts.saturating_add(CLOCK_SLACK_MS)],
-                        |r| r.get::<_, bool>(0),
-                    )?,
-                    None => false,
-                };
-                if older_messages {
-                    let mut st = conn.prepare_cached(
-                        "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event
-                         WHERE workspace_id = ?1 AND id < ?3 AND id > ?4 AND type = 'chat'
-                           AND json_extract(payload, '$.message.id') IN (SELECT id FROM chat WHERE workspace_id = ?1 AND thread = ?2)
-                         ORDER BY id DESC LIMIT ?5",
+                let first_message: Option<i64> =
+                    conn.query_row("SELECT MIN(ts) FROM chat WHERE workspace_id = ?1 AND thread = ?2", params![workspace_id, thread], |r| r.get(0))?;
+                if let Some(first_message) = first_message {
+                    // On the way only a `chat` row has its payload read; the rows found are read whole after.
+                    let mut walk = conn.prepare_cached(
+                        "SELECT id, ts,
+                                CASE WHEN type = 'chat' AND json_extract(payload, '$.message.id') IN (SELECT id FROM chat WHERE workspace_id = ?1 AND thread = ?2)
+                                     THEN 1 ELSE 0 END
+                         FROM event WHERE workspace_id = ?1 AND id < ?3 AND id > ?4
+                         ORDER BY id DESC",
                     )?;
-                    let found = st.query_map(params![workspace_id, thread, before, page_end, limit], event_from_row)?;
-                    rows.extend(found.collect::<rusqlite::Result<Vec<_>>>()?);
+                    let mut walked = walk.query(params![workspace_id, thread, before, page_end])?;
+                    let mut messages: Vec<i64> = vec![];
+                    while (messages.len() as i64) < limit
+                        && let Some(r) = walked.next()?
+                        && r.get::<_, i64>(1)? >= first_message.saturating_sub(CLOCK_SLACK_MS)
+                    {
+                        if r.get(2)? {
+                            messages.push(r.get(0)?);
+                        }
+                    }
+                    let mut whole = conn.prepare_cached("SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE id = ?1")?;
+                    for id in messages {
+                        rows.push(whole.query_row([id], event_from_row)?);
+                    }
                     newest_first(&mut rows);
                 }
             }
@@ -1264,6 +1272,21 @@ mod tests {
         t.store.move_chats(&t.ws, "lead", "closed:lead:1").unwrap();
         let new = t.say("lead", "user");
         assert_eq!(t.page("lead", None, None, 50), vec![new]);
+    }
+
+    #[test]
+    fn the_walk_for_a_requests_messages_ends_at_its_first_message() {
+        let t = Threads::new();
+        // Seen through a row that real data never has: the event of one of the thread's messages,
+        // ten minutes older than every message of the thread. The walk ends before that row
+        // (and so before every event of the repo's life from before this request).
+        let message = ChatMessage { id: new_id(), thread: "lead:x".into(), author: "user".into(), text: "hi".into(), attachment: None, ts: now_ms() };
+        let stray = EventRow { id: 0, ts: message.ts - 600_000, agent_id: None, task_id: None, run_id: None, workspace_id: None, kind: EventKind::Chat { message } };
+        t.store.append_event(Some(&t.ws), &stray).unwrap();
+        let said = t.say("lead:x", "user");
+        assert_eq!(t.page("lead:x", None, None, 50), vec![said]);
+        // The peek of a thread with nothing older (one row asked, no owner): nothing, and no further.
+        assert!(t.page("lead:x", None, Some(said), 1).is_empty());
     }
 
     #[test]

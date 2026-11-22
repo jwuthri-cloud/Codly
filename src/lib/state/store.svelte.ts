@@ -204,10 +204,6 @@ const upsert = <T extends { id: string }>(list: T[], item: T): T[] => {
   return next;
 };
 
-/** The oldest event an agent's transcript rows come from (Infinity: it shows none). */
-const oldestShown = (l: AgentLive | undefined): number =>
-  Math.min(l?.segments[0]?.eventId ?? Infinity, l?.messages[0]?.eventId ?? Infinity, l?.reasoning[0]?.eventId ?? Infinity);
-
 /** The finished step of a task an event stands for (a commit, a check, a review, a merge). */
 const markOf = (ev: EventRow): TaskMark | null => {
   const k = ev.kind;
@@ -288,6 +284,9 @@ class CodlyStore {
   sessionStart = 0;
 
   // history before what a snapshot holds, loaded on request (per thread)
+  /** The oldest event the held state was built from (the start of the last snapshot that took
+   *  the place of everything). The log may have been trimmed past it since. */
+  private origin = 0;
   /** Per thread that was asked: is there earlier history, is a page loading. */
   earlier = $state.raw<Record<string, Earlier>>({});
   /** Per thread loaded further back: how far (an event id), and for which owner. */
@@ -399,20 +398,25 @@ class CodlyStore {
     this.artifacts = [...(s.artifacts ?? [])].sort((a, b) => a.created_at - b.created_at);
   }
 
-  /** The events between what is held and a new snapshot of the same office, oldest first.
+  /** The events between what is held and a new snapshot of the same office, oldest first, up
+   *  to the snapshot's cursor. The core reads its cursor first and its events last, so while
+   *  agents work a snapshot also holds rows above the cursor: those come again as deltas, after
+   *  the snapshot's lists are in, and are left to that (taken here, they would be applied twice).
    *  Null: the snapshot cannot be merged (another office, nothing held yet, or too far behind)
    *  and takes the place of what is held. */
   private async missedSince(s: Snapshot): Promise<EventRow[] | null> {
     if (this.held === undefined || this.held !== (s.workspace?.id ?? null) || s.as_of < this.lastId) return null;
-    const fresh = s.events.filter((e) => e.id > this.lastId).sort((a, b) => a.id - b.id);
+    const rows = [...s.events].sort((a, b) => a.id - b.id);
+    const missed = (e: EventRow) => e.id > this.lastId && e.id <= s.as_of;
+    const fresh = rows.filter(missed);
     // The snapshot's events reach back to ours: nothing is missing in between.
-    if (fresh.length < s.events.length || !fresh.length) return fresh;
+    if (!rows.length || rows[0].id <= this.lastId) return fresh;
     try {
-      const page = await api.events(null, fresh[0].id, LOG_CAP); // newest first
+      const page = await api.events(null, rows[0].id, LOG_CAP); // newest first
       const between = page.filter((e) => e.id > this.lastId);
       // A full page and still no row of ours: too far behind to catch up row by row.
       if (between.length === page.length && page.length >= LOG_CAP) return null;
-      return [...between.reverse(), ...fresh];
+      return [...between.reverse().filter(missed), ...fresh];
     } catch (e) {
       console.error('[codly] could not read the events missed before a snapshot; loading it anew', e);
       return null;
@@ -459,8 +463,10 @@ class CodlyStore {
     this.decisions = [];
     this.taskMarks = {};
     this.planMerges = {};
-    const evs = [...s.events].sort((a, b) => a.id - b.id);
+    // Up to the cursor: the rows above it come as deltas (see `missedSince`).
+    const evs = s.events.filter((e) => e.id <= s.as_of).sort((a, b) => a.id - b.id);
     this.events = evs.slice(-LOG_CAP);
+    this.origin = evs[0]?.id ?? s.as_of + 1;
     this.sessionStart = evs[0]?.ts ?? Date.now();
     // Replay the log into the derived structures only: entities are already current.
     for (const ev of evs) this.derive(ev, true);
@@ -895,7 +901,9 @@ class CodlyStore {
   }
 
   /** Load a thread's history before what is shown: one page, or as many as it takes to reach
-   *  back past what is on screen (rows the log trimmed), so a thread never gets shorter. */
+   *  back to where the held state starts (events the log trimmed since). The owner's state is
+   *  built again from the events held and loaded, so they must cover all it was built from:
+   *  then the thread, and what its agent shows (session, files, to-do), never get shorter. */
   async loadEarlier(thread: string): Promise<void> {
     if (this.earlier[thread]?.loading) return;
     const epoch = this.epoch;
@@ -903,7 +911,6 @@ class CodlyStore {
     // From now on the owner's events are kept apart from the capped log: what is loaded for
     // it is never trimmed away again.
     if (owner && !this.deep.has(owner)) this.deep.set(owner, this.events.filter((e) => e.agent_id === owner));
-    const shown = owner ? oldestShown(this.live[owner]) : Infinity;
     const at = this.paged.get(thread);
     let before = at && at.owner === owner ? at.before : this.floor();
     let more = true;
@@ -916,7 +923,7 @@ class CodlyStore {
         rows.push(...page);
         more = page.length >= EARLIER_PAGE;
         if (page.length) before = page[page.length - 1].id;
-      } while (more && before > shown);
+      } while (more && before > this.origin);
     } catch (e) {
       if (epoch === this.epoch) this.setEarlier(thread, { more: true, loading: false });
       throw e;

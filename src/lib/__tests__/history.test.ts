@@ -43,6 +43,8 @@ const said = (id: number, item: string) => at(id, { type: 'message', item_id: it
 const thought = (id: number) => at(id, { type: 'reasoning', item_id: `r${id}`, text: 'hm' });
 const started = (id: number, call: string) =>
   at(id, { type: 'tool_started', call_id: call, name: 'Read', activity: 'read', target: { path: 'a.ts', paths: [], command: null, query: null, url: null, server: null, tool: null }, input: {}, confidence: 'observed' });
+const session = (id: number) => at(id, { type: 'session_started', provider: 'claude', model: 'opus', cwd: '/code/w', cli_version: null, session_id: null, tools: [] });
+const changed = (id: number, path: string) => at(id, { type: 'files_changed', call_id: null, paths: [path], source: 'git' });
 const completed = (id: number, call: string) => at(id, { type: 'tool_completed', call_id: call, ok: true, exit_code: null, tests_passed: null, tests_failed: null, output: null });
 const message = (id: string, thread: string, ts: number): ChatMessage => ({ id, thread, author: 'user', text: id, attachment: null, ts });
 const chat = (id: number, thread: string) => at(id, { type: 'chat', message: message(`c${id}`, thread, 1000 + id) }, { agent_id: null });
@@ -77,6 +79,21 @@ describe('a resync', () => {
     expect(messages()).toEqual(['m1', 'm2']);
     expect(approvals()).toEqual([['ap1', 'approved']]);
     expect(store.taskMarks.t1.map((m) => m.eventId)).toEqual([6]);
+  });
+
+  it('leaves the events above the snapshot’s cursor to the deltas, so each one is told once', async () => {
+    const first = await sync(snap({ events: [said(1, 'm1')] }));
+    const told: number[] = [];
+    const off = store.onEvent((e) => told.push(e.id));
+    // The core reads its cursor (2), then its lists, then its events: a call ran meanwhile.
+    await sync(snap({ workspace: first.workspace, as_of: 2, events: [said(1, 'm1'), said(2, 'm2'), started(3, 'c1'), completed(4, 'c1')] }));
+    expect(told).toEqual([2]);
+    apply(started(3, 'c1'), completed(4, 'c1')); // the same two rows, as the deltas they also are
+    off();
+
+    expect(told).toEqual([2, 3, 4]);
+    expect(store.events.map((e) => e.id)).toEqual([1, 2, 3, 4]);
+    expect(store.live.lead1.segments.map((s) => [s.callId, s.end])).toEqual([['c1', 1004]]);
   });
 
   it('reads the events between what is held and the snapshot when the snapshot starts after them', async () => {
@@ -116,6 +133,14 @@ describe('a snapshot', () => {
     await sync(snap({ approvals: [approval('ap2')], events: [asked(1, approval('ap1')), answered(2, 'ap1', 'denied'), asked(3, approval('ap2'))] }));
     expect(approvals()).toEqual([['ap2', 'pending'], ['ap1', 'denied']]);
   });
+
+  it('leaves its events above its cursor to the deltas: no row twice', async () => {
+    await sync(snap({ as_of: 1, events: [said(1, 'm1'), started(2, 'c1'), completed(3, 'c1')] }));
+    expect(store.events.map((e) => e.id)).toEqual([1]);
+    apply(started(2, 'c1'), completed(3, 'c1'));
+    expect(store.events.map((e) => e.id)).toEqual([1, 2, 3]);
+    expect(store.live.lead1.segments.map((s) => s.callId)).toEqual(['c1']);
+  });
 });
 
 describe('load earlier', () => {
@@ -149,14 +174,22 @@ describe('load earlier', () => {
     expect(approvals()).toEqual([['ap0', 'denied']]);
   });
 
-  it('reaches back past what is on screen when the log was trimmed, so the thread never gets shorter', async () => {
-    await sync(snap({ events: [said(100, 'old'), said(2000, 'new')] }));
+  it('reaches back to where the held state starts when the log was trimmed, so nothing gets shorter', async () => {
+    await sync(snap({ events: [session(90), changed(95, 'old.ts'), said(100, 'old'), said(2000, 'new')] }));
     store.events = store.events.slice(-1); // a long session: the log keeps its newest events only
-    const full = Array.from({ length: 500 }, (_, i) => thought(1999 - i));
-    const page = vi.spyOn(api, 'threadEvents').mockResolvedValueOnce(full).mockResolvedValueOnce([said(100, 'old'), said(50, 'older')]);
+    const thoughts = (newest: number, n: number) => Array.from({ length: n }, (_, i) => thought(newest - i));
+    // Two full pages (the second ends on the oldest row shown), then the rest.
+    const page = vi
+      .spyOn(api, 'threadEvents')
+      .mockResolvedValueOnce(thoughts(1999, 500))
+      .mockResolvedValueOnce([...thoughts(1499, 499), said(100, 'old')])
+      .mockResolvedValueOnce([changed(95, 'old.ts'), session(90), said(50, 'older')]);
     await store.loadEarlier('lead');
-    expect(page.mock.calls.map((c) => c[2])).toEqual([2000, 1500]);
+    expect(page.mock.calls.map((c) => c[2])).toEqual([2000, 1500, 100]);
     expect(messages()).toEqual(['older', 'old', 'new']);
+    // What the agent's state had from before the oldest row shown is still there.
+    expect(store.live.lead1.session?.model).toBe('opus');
+    expect(Object.keys(store.live.lead1.files)).toEqual(['old.ts']);
   });
 
   it('is offered again for rows a cap took off the screen', async () => {
