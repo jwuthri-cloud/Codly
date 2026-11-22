@@ -115,11 +115,12 @@
     if (!scroller) return;
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth && !ui.reducedMotion ? 'smooth' : 'auto' });
   }
-  // A row grows without a change of the list (a message being written, a card that gets a
-  // line): the height of the list says when to follow, at most once per frame.
+  // A message or a thought being written grows its row without a change of the list: while the
+  // thread's agent writes, the height of the list says when to follow, at most once per frame.
+  // Not at any other time: a row you open yourself also grows the list, and must stay in place.
   let list: HTMLOListElement | undefined = $state();
   $effect(() => {
-    if (!list) return;
+    if (!list || !streams) return;
     const grown = new ResizeObserver(() => atBottom && toBottom());
     grown.observe(list);
     return () => grown.disconnect();

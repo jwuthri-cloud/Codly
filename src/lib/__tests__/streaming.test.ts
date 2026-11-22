@@ -46,12 +46,29 @@ describe('the store, per agent', () => {
   it('a batch moves the versions of the agents it is about, and of no other', () => {
     apply(word('w1', 'i1', 'word'));
     expect(store.liveRevBy.get('w1')).toBe(1);
-    expect(store.revBy.get('w1')).toBeUndefined();
-    expect(store.liveRevBy.get('l1')).toBeUndefined();
+    expect(store.revBy.get('w1')).toBe(0);
+    expect(store.liveRevBy.get('l1')).toBe(0);
     apply(...read('l1', 'c1', 'a.ts'), word('w1', 'i1', ' more'));
     expect(store.revBy.get('l1')).toBe(1); // once per batch, not per event
     expect(store.liveRevBy.get('w1')).toBe(2);
-    expect(store.liveRevBy.get('l1')).toBeUndefined();
+    expect(store.liveRevBy.get('l1')).toBe(0);
+  });
+
+  // A panel that reads a version that is not there runs again on every agent's batch.
+  it('an agent has both its versions from the moment it is known, and a new snapshot starts them again', () => {
+    const versions = () => [store.revBy, store.liveRevBy].map((by) => Object.fromEntries(by));
+    expect(versions()).toEqual([{ l1: 0, w1: 0 }, { l1: 0, w1: 0 }]);
+
+    const hired = mkAgent('w2', 'Bo', 'codex', 'worker', 2, 'idle');
+    apply(ev('w2', { type: 'agent_changed', agent: hired }), word('w1', 'i1', 'word'));
+    expect(versions()).toEqual([{ l1: 0, w1: 0, w2: 1 }, { l1: 0, w1: 1, w2: 0 }]);
+    store.upsertAgent(mkAgent('w3', 'Cy', 'gemini', 'worker', 3, 'idle'));
+    expect(versions()).toEqual([{ l1: 0, w1: 0, w2: 1, w3: 0 }, { l1: 0, w1: 1, w2: 0, w3: 0 }]);
+
+    // Back from a hidden period: the same office, with the agents it has now.
+    const snap = { as_of: id, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [lead, hired], plans: [], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [] };
+    (store as unknown as { mergeSnapshot(s: Snapshot, missed: EventRow[]): void }).mergeSnapshot(snap as unknown as Snapshot, []);
+    expect(versions()).toEqual([{ l1: 0, w2: 0 }, { l1: 0, w2: 0 }]);
   });
 
   it('a list a panel holds is never changed by a later batch', () => {

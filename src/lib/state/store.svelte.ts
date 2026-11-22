@@ -493,8 +493,7 @@ class CodlyStore {
     this.liveOut = new Map();
     this.rev++;
     this.liveRev++;
-    this.revBy.clear();
-    this.liveRevBy.clear();
+    this.resetRevs();
   }
 
   private applySnapshot(s: Snapshot) {
@@ -523,8 +522,7 @@ class CodlyStore {
     this.settle();
     this.rev++;
     this.liveRev++;
-    this.revBy.clear();
-    this.liveRevBy.clear();
+    this.resetRevs();
     this.epoch++;
   }
 
@@ -567,6 +565,21 @@ class CodlyStore {
 
   private bump(by: SvelteMap<string, number>, agents: Iterable<string>) {
     for (const id of agents) by.set(id, (by.get(id) ?? 0) + 1);
+  }
+
+  /** An agent has an entry in `revBy` and `liveRevBy` from the moment it is known. A panel that
+   *  reads an entry that is not there is told of every change of the map (that is how a
+   *  `SvelteMap` lets it see the entry appear), so it would run again on every agent's batch. */
+  private seedRevs(id: string) {
+    for (const by of [this.revBy, this.liveRevBy]) if (!by.has(id)) by.set(id, 0);
+  }
+
+  /** A snapshot took the place of what the per-agent versions count: they start again, and
+   *  every panel that read one runs again. */
+  private resetRevs() {
+    this.revBy.clear();
+    this.liveRevBy.clear();
+    for (const a of this.agents) this.seedRevs(a.id);
   }
 
   /** The agent's segments, to change in place: copied once per batch, so a list that a panel
@@ -628,6 +641,7 @@ class CodlyStore {
       case 'agent_changed':
         // A let-go consultant or a member who left the team leaves the board.
         this.agents = k.agent.archived ? this.agents.filter((a) => a.id !== k.agent.id) : upsert(this.agents, k.agent);
+        this.seedRevs(k.agent.id);
         break;
       case 'decision': {
         // Transferred to another of your offices: it leaves this one's crew (and walks out).
@@ -1202,6 +1216,7 @@ class CodlyStore {
   }
   upsertAgent(a: Agent) {
     this.agents = upsert(this.agents, a);
+    this.seedRevs(a.id);
   }
   upsertMemory(m: Memory) {
     this.memories = upsert(this.memories, m);
