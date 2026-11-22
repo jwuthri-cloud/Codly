@@ -1,6 +1,7 @@
 //! The scheduler recovers by itself, with fake agents in place of the CLIs: a worker that does
 //! not start or that exits is started again after a wait, and only a cause you must fix or a
-//! third failure in a row blocks its task; a session out of context starts again as a new one;
+//! third failure in a row blocks its task (a turn the worker completes ends the row); a session
+//! out of context starts again as a new one;
 //! a plan that cannot go on says so once and can finish with what is merged; a task and the
 //! tasks that wait for it are cancelled together; after a restart of Codly a task that was in
 //! its checks is checked again with no worker turn; and a plan you merged with git is noticed.
@@ -56,6 +57,8 @@ fn claude() -> CliInfo {
 enum End {
     /// It writes `<name of its worktree folder>.txt` (what the tasks here ask for) and completes.
     Done,
+    /// It completes with nothing written: the task's check fails, and Codly asks for a fix.
+    Idle,
     /// The turn fails with this error as its result, as the Claude CLI reports one.
     Fail(&'static str),
     /// The CLI dies mid-turn: exit code 1.
@@ -163,6 +166,7 @@ impl Spawner for Fake {
                             std::fs::write(spec.cwd.join(format!("{name}.txt")), "done\n").unwrap();
                             done(TurnStatus::Completed, None);
                         }
+                        End::Idle => done(TurnStatus::Completed, None),
                         End::Fail(error) => done(TurnStatus::Failed, Some(error)),
                         End::Crash => return send(EventKind::Exited { code: Some(1) }),
                     }
@@ -178,14 +182,16 @@ fn works() -> (Starts, Script) {
     (Arc::new(|_: &SpawnSpec, _: usize| None::<&'static str>), Arc::new(|_: usize| End::Done))
 }
 
+/// A plan task that writes `<its key>.txt`, checked with `test -f`.
+fn plan_task(id: &str, deps: &[&str]) -> Value {
+    json!({ "id": id, "title": format!("Write {id}.txt"), "goal": format!("Create {id}.txt"), "consultant": { "title": "Backend" },
+            "acceptance_criteria": [format!("{id}.txt exists")], "write_scope": [format!("{id}.txt")], "depends_on": deps,
+            "verify": [format!("test -f {id}.txt")], "size": "M" })
+}
+
 /// A plan of three tasks, each writing `<its key>.txt`: t1 alone, t2 alone, t3 after t2.
 fn three_task_plan() -> Value {
-    let task = |id: &str, deps: &[&str]| {
-        json!({ "id": id, "title": format!("Write {id}.txt"), "goal": format!("Create {id}.txt"), "consultant": { "title": "Backend" },
-                "acceptance_criteria": [format!("{id}.txt exists")], "write_scope": [format!("{id}.txt")], "depends_on": deps,
-                "verify": [format!("test -f {id}.txt")], "size": "M" })
-    };
-    json!({ "summary": "Write three files", "tasks": [task("t1", &[]), task("t2", &[]), task("t3", &["t2"])] })
+    json!({ "summary": "Write three files", "tasks": [plan_task("t1", &[]), plan_task("t2", &[]), plan_task("t3", &["t2"])] })
 }
 
 const SHORT: Duration = Duration::from_millis(100);
@@ -373,6 +379,34 @@ async fn crashes_are_counted_in_a_row_not_over_the_life_of_the_task() {
         assert!(matches!(&seen.runs[1].1, SessionMode::Resume { .. }), "{:?}", seen.runs);
         assert!(seen.prompts[1].contains("the worker exited unexpectedly (exit 1)"), "{}", seen.prompts[1]);
     }
+    core.shutdown().await;
+}
+
+/// Two crashes, a turn that completes (its check fails: a fix round), then a crash in the fix
+/// round. That crash is the first of a new row, not the third of the old one: the worker ran
+/// in between, so the task is not blocked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_the_worker_completes_ends_the_row_of_crashes() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|n: usize| match n {
+        0 | 1 | 3 => End::Crash,
+        2 => End::Idle,
+        _ => End::Done,
+    });
+    let plan = json!({ "summary": "Write one file", "tasks": [plan_task("t1", &[])] });
+    let (core, seen, _) = start(dir.path(), works().0, script, plan).await;
+    core.send_chat("lead", "Write one file").await.unwrap();
+    let plan = wait_for("the plan", async || core.snapshot().await.unwrap().plans.first().cloned()).await;
+    core.run_plan(&plan.id).await.unwrap();
+    let task = task_by_key(&core, "t1").await;
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    let crash = |n: u32| format!("the worker exited unexpectedly (exit 1); Codly starts it again in a moment (retry {n} of 2)");
+    assert_eq!(decisions(&core, "retry").await, [crash(1), crash(2), crash(1)]);
+    assert!(!statuses(&core, &task.id).await.contains(&TaskStatus::Blocked));
+    // The crash in the fix round came after the check that failed.
+    let fix = seen.lock().unwrap().prompts[3].clone();
+    assert!(fix.contains("test -f t1.txt"), "{fix}");
     core.shutdown().await;
 }
 

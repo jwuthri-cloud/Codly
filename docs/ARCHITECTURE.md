@@ -148,7 +148,8 @@ failure in a row blocks the task with the error. If you resume the worker, or a 
 a message completes, before that wait is over, the worker is asked to continue then: neither is
 gated. A worker that crashes mid-turn, or that does not start, is started again after a wait (5 s,
 then 30 s); its third failure in a row blocks the task, and so does, at once, a cause only you
-can fix (a CLI that is not installed or not signed in). A session that ran out of context starts
+can fix (a CLI that is not installed or not signed in). A turn the worker completes ends the row,
+time does not. A session that ran out of context starts
 again as a new session. A worker the circuit breaker constrains is paused
 until you resume it (one you hold already reads why on your Resume); a breaker stop says so on the
 task.

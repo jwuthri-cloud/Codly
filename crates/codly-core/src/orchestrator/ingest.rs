@@ -386,9 +386,11 @@ impl Inner {
                 // completed while a failed turn's continue prompt is still owed answered something
                 // else (a message from you, a note): the worker goes on with its work instead.
                 TurnStatus::Completed => {
+                    let task = ctx.task_id.clone().unwrap_or_default();
+                    // Its worker runs: a failure after this turn is the first of a new row (`retry.rs`).
+                    lock(&self.retries).forget(&task);
                     if self.is_quiet(&ctx.agent_id) && !self.continue_failed_turn(&ctx.agent_id) && !self.control_holding(&ctx.agent_id) {
                         let me = self.clone();
-                        let task = ctx.task_id.clone().unwrap_or_default();
                         tokio::spawn(async move { me.gate(task).await });
                     }
                 }

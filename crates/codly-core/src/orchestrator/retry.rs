@@ -1,8 +1,10 @@
 //! Worker retries: a worker that could not start, that exited by itself, or whose session ran
 //! out of context is started again after a wait, and its task says why meanwhile. Failures in
 //! a row are counted per task here, apart from `Task::attempt` (which counts every start: after
-//! a restart of Codly, a usage-limit hand-off, your own Retry). A cause only you can fix, and
-//! one failure too many, block the task.
+//! a restart of Codly, a usage-limit hand-off, your own Retry). A row ends when the worker
+//! completes a turn (the restart worked), not with time: a worker that fails again and again
+//! with no turn completed in between is stopped, however long each run lasted. A cause only you
+//! can fix, and one failure too many, block the task.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -16,9 +18,6 @@ use crate::model::*;
 /// The waits before a failed worker starts again, one per retry. The failure after the last
 /// retry blocks the task.
 pub(super) const WORKER_RETRY_WAITS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(30)];
-
-/// Failures further apart than this are not in a row: the count starts again.
-const IN_A_ROW_MS: i64 = 10 * 60_000;
 
 /// How a task's worker failed.
 pub(super) enum Failure {
@@ -90,12 +89,9 @@ fn in_secs(wait: Duration) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct Failed {
-    /// Failures in a row.
+struct Failed {
+    /// Failures in a row: since the worker last completed a turn.
     n: u32,
-    /// When the last one was (ms).
-    at: i64,
     /// Its next start waits until then (ms).
     not_before: i64,
 }
@@ -115,37 +111,29 @@ impl Default for Retries {
 }
 
 impl Retries {
-    /// One more failure of the task's worker at `now`: its number in the row, the wait before
-    /// its next start (None: that was one too many, and the row ends), and what was on record
-    /// before (for `restore`).
-    fn fail(&mut self, task_id: &str, now: i64) -> (u32, Option<Duration>, Option<Failed>) {
-        let before = self.failed.get(task_id).copied();
-        let n = before.filter(|f| now - f.at <= IN_A_ROW_MS).map_or(1, |f| f.n + 1);
-        let wait = self.waits.get(n as usize - 1).copied();
+    /// The next failure of the task's worker: its number in the row, and the wait before its
+    /// next start (None: that one is one too many).
+    fn next(&self, task_id: &str) -> (u32, Option<Duration>) {
+        let n = self.failed.get(task_id).map_or(1, |f| f.n + 1);
+        (n, self.waits.get(n as usize - 1).copied())
+    }
+
+    /// That failure happened at `now`: the task waits, or (no wait) its row ends.
+    fn record(&mut self, task_id: &str, n: u32, wait: Option<Duration>, now: i64) {
         match wait {
-            Some(w) => self.failed.insert(task_id.to_string(), Failed { n, at: now, not_before: now + w.as_millis() as i64 }),
-            None => self.failed.remove(task_id),
-        };
-        (n, wait, before)
-    }
-
-    /// Take a failure back: the task was not this worker's to fail any more.
-    fn restore(&mut self, task_id: &str, before: Option<Failed>) {
-        match before {
-            Some(f) => self.failed.insert(task_id.to_string(), f),
+            Some(w) => self.failed.insert(task_id.to_string(), Failed { n, not_before: now + w.as_millis() as i64 }),
             None => self.failed.remove(task_id),
         };
     }
 
-    /// Your Retry: the task starts now, with a new row.
+    /// The row ends: the worker completed a turn, the task is done, or you chose Retry (the
+    /// task then starts now).
     pub(super) fn forget(&mut self, task_id: &str) {
         self.failed.remove(task_id);
     }
 
-    /// Task → the time before which it does not start again, for the scheduler. Rows that
-    /// ended long ago are dropped here.
-    pub(super) fn holds(&mut self, now: i64) -> HashMap<Id, i64> {
-        self.failed.retain(|_, f| now - f.at <= IN_A_ROW_MS);
+    /// Task → the time before which it does not start again, for the scheduler.
+    pub(super) fn holds(&self, now: i64) -> HashMap<Id, i64> {
         self.failed.iter().filter(|(_, f)| f.not_before > now).map(|(id, f)| (id.clone(), f.not_before)).collect()
     }
 
@@ -169,42 +157,40 @@ impl Inner {
     pub(super) fn worker_failed(self: &Arc<Self>, task_id: &str, agent_id: &str, failure: Failure) -> bool {
         let Ok(task) = self.task(task_id) else { return false };
         let (full, what) = (failure.context_full(), failure.what());
-        let (n, wait, before, retries) = {
+        // One step under the lock, from the count to the task's write: a second report of the
+        // same failure (the exit of a run, and its brief that did not go out) finds the task
+        // moved and counts nothing. A scheduling pass reads the tasks before the holds, so it
+        // never sees this task Ready without its wait.
+        let (n, wait, reason) = {
             let mut r = lock(&self.retries);
-            let retries = r.waits.len();
-            if failure.needs_you() {
-                (1, None, r.failed.remove(task_id), retries)
-            } else {
-                let (n, wait, before) = r.fail(task_id, now_ms());
-                (n, wait, before, retries)
+            let (n, wait) = if failure.needs_you() { (1, None) } else { r.next(task_id) };
+            let reason = match wait {
+                Some(w) => {
+                    let next = if full { "starts a new session" } else { "starts it again" };
+                    format!("{what}; Codly {next} in {} (retry {n} of {})", in_secs(w), r.waits.len())
+                }
+                None if n == 1 => format!("blocked: {what}"),
+                None => format!("blocked: the worker failed {n} times in a row (last: {what}); fix the cause, then Retry"),
+            };
+            // Checked in the write: only a task this worker still runs is its to fail.
+            let mut mine = false;
+            let written = self.update_task(task_id, |t| {
+                mine = matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) && t.assignee.as_deref() == Some(agent_id);
+                if mine {
+                    t.status = if wait.is_some() { TaskStatus::Ready } else { TaskStatus::Blocked };
+                    t.status_reason = Some(reason.clone());
+                }
+                Ok(())
+            });
+            if !mine || written.is_err() {
+                return false;
             }
+            r.record(task_id, n, wait, now_ms());
+            if full {
+                r.fresh.insert(task_id.to_string());
+            }
+            (n, wait, reason)
         };
-        let reason = match wait {
-            Some(w) => {
-                let next = if full { "starts a new session" } else { "starts it again" };
-                format!("{what}; Codly {next} in {} (retry {n} of {retries})", in_secs(w))
-            }
-            None if n == 1 => format!("blocked: {what}"),
-            None => format!("blocked: the worker failed {n} times in a row (last: {what}); fix the cause, then Retry"),
-        };
-        // Recorded before the task is Ready, so no scheduling pass starts it early. Checked in
-        // the write: only a task this worker still runs is its to fail.
-        let mut moved = false;
-        let _ = self.update_task(task_id, |t| {
-            moved = matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) && t.assignee.as_deref() == Some(agent_id);
-            if moved {
-                t.status = if wait.is_some() { TaskStatus::Ready } else { TaskStatus::Blocked };
-                t.status_reason = Some(reason.clone());
-            }
-            Ok(())
-        });
-        if !moved {
-            lock(&self.retries).restore(task_id, before);
-            return false;
-        }
-        if full {
-            lock(&self.retries).fresh.insert(task_id.to_string());
-        }
         // A run of this task that is still up (its turn failed, or its brief did not go out)
         // stops, and the agent is free for the retry.
         self.release_worker(agent_id, task_id);
@@ -245,47 +231,113 @@ impl super::Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrator::{Core, CoreConfig, StartOptions, row};
 
     const S: i64 = 1_000;
+    const MIN: i64 = 60 * S;
+
+    /// One more failure of the task's worker at `now`, counted as `worker_failed` does.
+    fn fail(r: &mut Retries, task_id: &str, now: i64) -> (u32, Option<Duration>) {
+        let (n, wait) = r.next(task_id);
+        r.record(task_id, n, wait, now);
+        (n, wait)
+    }
 
     #[test]
     fn a_row_of_failures_waits_longer_each_time_then_ends() {
         let mut r = Retries::default();
-        assert_eq!(r.fail("t", 0), (1, Some(Duration::from_secs(5)), None));
+        assert_eq!(r.next("t"), (1, Some(Duration::from_secs(5))));
+        assert!(r.failed.is_empty(), "looking at the next failure counts nothing");
+        assert_eq!(fail(&mut r, "t", 0), (1, Some(Duration::from_secs(5))));
         assert_eq!(r.holds(S), HashMap::from([("t".to_string(), 5 * S)]), "it does not start before its wait is over");
         assert!(r.holds(5 * S).is_empty(), "then it may start");
-        let (n, wait, before) = r.fail("t", 6 * S);
-        assert_eq!((n, wait), (2, Some(Duration::from_secs(30))));
-        assert_eq!(before.map(|f| f.n), Some(1));
+        assert_eq!(fail(&mut r, "t", 6 * S), (2, Some(Duration::from_secs(30))));
         // The third failure in a row is one too many: no wait, and the row ends.
-        assert_eq!(r.fail("t", 40 * S).1, None);
-        assert_eq!(r.fail("t", 41 * S).0, 1, "after a block the count starts again");
+        assert_eq!(fail(&mut r, "t", 40 * S), (3, None));
+        assert_eq!(fail(&mut r, "t", 41 * S).0, 1, "after a block the count starts again");
     }
 
+    /// A worker that dies after 11 minutes of work each time is stopped at its third failure:
+    /// time alone never ends a row.
     #[test]
-    fn failures_far_apart_are_not_in_a_row() {
+    fn failures_far_apart_are_still_in_a_row() {
         let mut r = Retries::default();
-        r.fail("t", 0);
-        assert_eq!(r.fail("t", IN_A_ROW_MS + 1).0, 1);
-        assert_eq!(r.fail("t", IN_A_ROW_MS + 2).0, 2);
-        // Another task has its own row, and old rows are dropped.
-        assert_eq!(r.fail("u", IN_A_ROW_MS + 3).0, 1);
-        r.holds(3 * IN_A_ROW_MS);
+        assert_eq!(fail(&mut r, "t", 0).0, 1);
+        assert_eq!(fail(&mut r, "t", 11 * MIN).0, 2);
+        assert_eq!(fail(&mut r, "t", 22 * MIN), (3, None));
         assert!(r.failed.is_empty());
     }
 
     #[test]
-    fn a_failure_can_be_taken_back_and_your_retry_starts_at_once() {
+    fn a_completed_turn_or_your_retry_ends_the_row() {
         let mut r = Retries::default();
-        let (_, _, before) = r.fail("t", 0);
-        r.restore("t", before);
-        assert!(r.holds(1).is_empty() && r.failed.is_empty());
-        r.fail("t", 0);
-        let (_, _, before) = r.fail("t", S);
-        r.restore("t", before);
-        assert_eq!(r.failed["t"].n, 1, "the earlier failure stays on record");
+        fail(&mut r, "t", 0);
+        fail(&mut r, "t", S);
+        assert_eq!(fail(&mut r, "u", S).0, 1, "another task has its own row");
         r.forget("t");
-        assert!(r.holds(S).is_empty());
+        assert_eq!(r.holds(2 * S).keys().collect::<Vec<_>>(), ["u"], "no wait is left over");
+        assert_eq!(fail(&mut r, "t", 2 * S).0, 1, "the next failure is the first of a new row");
+        assert_eq!(r.next("u").0, 2);
+    }
+
+    /// A run that exits right after its handshake is reported twice: by its exit, and by its
+    /// brief that did not go out. The first report moves the task; the second one finds a task
+    /// that is not this run's to fail any more, and counts nothing.
+    #[tokio::test]
+    async fn a_second_report_of_the_same_failure_counts_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: root.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let inner = &core.inner;
+        // An office with no folder: no scheduling pass touches its task.
+        let ws = Workspace {
+            id: new_id(),
+            repo_path: root.path().join("gone").to_string_lossy().into_owned(),
+            name: "repo".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: now_ms(),
+        };
+        inner.store.upsert_workspace(&ws).unwrap();
+        let ada = inner.create_agent(&ws.id, "Ada", Provider::Claude, Role::Worker, 0, None).unwrap();
+        let task = Task {
+            id: new_id(),
+            plan_id: None,
+            key: "a1".into(),
+            title: "Write the greeting".into(),
+            goal: "Create a text file".into(),
+            acceptance: vec![],
+            write_scope: vec![],
+            verify: vec![],
+            depends_on: vec![],
+            status: TaskStatus::Running,
+            assignee: Some(ada.id.clone()),
+            agent_hint: None,
+            account_hint: None,
+            consultant: None,
+            fresh_session: false,
+            branch: None,
+            worktree: None,
+            attempt: 1,
+            status_reason: None,
+            summary: None,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        };
+        inner.emit(Some(&ws.id), row(None, Some(&task.id), None, EventKind::TaskChanged { task: task.clone() })).unwrap();
+
+        assert!(inner.worker_failed(&task.id, &ada.id, Failure::Exit { code: Some(1), error: None }));
+        assert!(!inner.worker_failed(&task.id, &ada.id, Failure::Start("that agent is not running".into())));
+        let now = inner.task(&task.id).unwrap();
+        assert_eq!(
+            (now.status, now.status_reason.as_deref()),
+            (TaskStatus::Ready, Some("the worker exited unexpectedly (exit 1); Codly starts it again in 5 s (retry 1 of 2)"))
+        );
+        let r = lock(&inner.retries);
+        assert_eq!(r.next(&task.id).0, 2, "one failure is on record");
+        assert!(r.holds(now_ms()).contains_key(&task.id), "and its wait stands");
     }
 
     #[test]

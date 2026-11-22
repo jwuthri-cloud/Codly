@@ -1170,6 +1170,7 @@ impl Inner {
         self.release_worker(&worker, &task.id);
         lock(&self.fix_rounds).remove(&task.id);
         lock(&self.pending_feedback).remove(&task.id);
+        lock(&self.retries).forget(&task.id);
         self.store.kv_write(&[(checks_key(&task.id), None)])?;
         // A merged, clean worktree is disposable; anything else is kept.
         if merged.is_some()
