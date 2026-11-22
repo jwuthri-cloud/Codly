@@ -259,7 +259,7 @@ impl Inner {
         let short = plan_short(&plan);
         let branch = format!("codly/{short}/integration");
         let wt = self.worktree_root(&ws).join(&short).join("integration");
-        let (base, base_branch, fresh) = {
+        let (base, base_branch) = {
             let _g = self.repo_lock.lock().await;
             let head = self
                 .git
@@ -276,16 +276,31 @@ impl Inner {
             }
             let fresh = !wt.exists();
             self.git.worktree_add(&repo, &wt, &branch, &base).await?;
-            (base, base_branch, fresh)
+            if fresh {
+                self.mark_new_worktree(&wt)?;
+            }
+            (base, base_branch)
         };
-        if fresh {
-            self.bootstrap_worktree(&ws, &repo, &wt, None).await; // integration checks need deps too
+        // Integration checks need deps too. A setup script that fails stops the start here.
+        // The plan keeps the base its branch was cut from, so running it again goes on from it.
+        if let Err(e) = self.prepare_worktree(&ws, &wt, None, Some(&plan.thread)).await {
+            self.update_plan(plan_id, |p| {
+                p.base_commit = Some(base.clone());
+                p.base_branch = base_branch.clone();
+                Ok(())
+            })?;
+            return Err(e);
         }
         let wt_s = wt.to_string_lossy().into_owned();
+        let mut started = false;
         self.update_plan(plan_id, |p| {
-            if !matches!(p.status, PlanStatus::AwaitingApproval | PlanStatus::Planning) {
-                bail!("the plan was changed meanwhile");
+            match p.status {
+                PlanStatus::AwaitingApproval | PlanStatus::Planning => {}
+                // A second Run plan waited for the first one's worktree setup: the plan runs.
+                PlanStatus::Running | PlanStatus::Integrating => return Ok(()),
+                _ => bail!("the plan was changed meanwhile"),
             }
+            started = true;
             p.status = PlanStatus::Running;
             p.base_commit = Some(base.clone());
             p.base_branch = base_branch.clone();
@@ -293,6 +308,9 @@ impl Inner {
             p.integration_worktree = Some(wt_s.clone());
             Ok(())
         })?;
+        if !started {
+            return Ok(());
+        }
         let current = base_branch.unwrap_or_else(|| "HEAD".into());
         self.decide(
             Some(&ws.id),
@@ -644,16 +662,20 @@ impl Inner {
         let member = agent.member.is_some().then(|| self.team_member(&agent)).flatten();
         // A team member works in its own stable worktree, switched to the task's branch.
         let (wt, switch_note) = if agent.member.is_some() {
-            self.switch_member_worktree(&ws, &agent, &task.key, &branch, &start).await?
+            let switched = self.switch_member_worktree(&ws, &agent, &task.key, &branch, &start).await?;
+            // New at the member's first task: prepared on that task's branch.
+            self.prepare_worktree(&ws, &switched.0, Some(task_id), None).await?;
+            switched
         } else {
-            let fresh = !wt.exists();
             {
                 let _g = self.repo_lock.lock().await;
+                let fresh = !wt.exists();
                 self.git.worktree_add(&repo, &wt, &branch, &start).await?;
+                if fresh {
+                    self.mark_new_worktree(&wt)?;
+                }
             }
-            if fresh {
-                self.bootstrap_worktree(&ws, &repo, &wt, Some(task_id)).await;
-            }
+            self.prepare_worktree(&ws, &wt, Some(task_id), None).await?;
             (wt, None)
         };
         if self.store.task_commits(task_id)?.0.is_none() {
@@ -775,39 +797,6 @@ impl Inner {
         lock(&self.retries).started(task_id);
         self.send_prompt(agent_id, prompt)?;
         self.clear_feedback(task_id)
-    }
-
-    /// Give a new worktree what git does not carry (CRITIQUE G9): the checkout's installed
-    /// dependencies and local env files, as APFS clones (`cp -c`: copy-on-write, near-free).
-    /// Only paths the repo ignores are copied, so none of them can end up in a Codly commit.
-    /// ponytail: a fixed list; per-repo setup scripts and port blocks come when users ask.
-    pub(super) async fn bootstrap_worktree(&self, ws: &Workspace, repo: &Path, wt: &Path, task_id: Option<&str>) {
-        const SEED: &[&str] = &["node_modules", ".venv", "venv", ".env", ".env.local", ".env.development.local", ".env.test.local"];
-        let mut copied = vec![];
-        for rel in SEED {
-            let (src, dst) = (repo.join(rel), wt.join(rel));
-            if !src.exists() || dst.exists() || !self.git.is_ignored(repo, rel).await.unwrap_or(false) {
-                continue;
-            }
-            let cp = tokio::process::Command::new("/bin/cp")
-                .arg("-cR")
-                .arg(&src)
-                .arg(&dst)
-                .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output();
-            match tokio::time::timeout(Duration::from_secs(120), cp).await {
-                Ok(Ok(out)) if out.status.success() => copied.push(rel.to_string()),
-                Ok(Ok(out)) => {
-                    tracing::info!("could not clone {rel} into {}: {}", wt.display(), String::from_utf8_lossy(&out.stderr).trim())
-                }
-                _ => tracing::info!("cloning {rel} into {} failed or timed out", wt.display()),
-            }
-        }
-        if !copied.is_empty() {
-            let summary = format!("seeded the new worktree with {} from your checkout (APFS clones, git-ignored)", copied.join(", "));
-            let _ = self.decide(Some(&ws.id), task_id, "context", summary, json!({ "worktree": wt.to_string_lossy(), "copied": copied }));
-        }
     }
 
     /// Task brief + pointer pack (logged as a Retrieval event) + memory pack + what the

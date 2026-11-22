@@ -158,6 +158,7 @@
     "allow-byok-clear-key",
     "allow-diagnostics",
     "allow-cancel-task-tree",
-    "allow-finish-plan"
+    "allow-finish-plan",
+    "allow-worktree-setup"
   ]
 }

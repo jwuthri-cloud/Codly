@@ -19,6 +19,8 @@ import type { ArchivePolicy } from './gen/ArchivePolicy';
 import type { Connection } from './gen/Connection';
 import type { ConnectionSecret } from './gen/ConnectionSecret';
 import type { SweepReport } from './gen/SweepReport';
+import type { SetupChoice } from './gen/SetupChoice';
+import type { WorktreeSetup } from './gen/WorktreeSetup';
 import type { RepoSync } from './gen/RepoSync';
 import type { MergeWarning } from './gen/MergeWarning';
 import type { ByokSource } from './gen/ByokSource';
@@ -427,6 +429,8 @@ export const api = {
   boardSweep: () => call<SweepReport>('board_sweep'),
   /** Archived tasks whose text matches `query` (all when empty). */
   boardArchive: (query: string | null = null) => call<ArchivedItem[]>('board_archive', { query }),
+  /** What a new worktree of the open repo gets; pass `set` to turn its setup script on (for the text you read) or off. */
+  worktreeSetup: (set: SetupChoice | null = null) => call<WorktreeSetup>('worktree_setup', { set }),
   /** Default MCP servers for new agents, with their switches and whether each key is stored. */
   listConnections: () => call<Connection[]>('list_connections'),
   /** Switch a server and/or store its key (Keychain; `value: null` removes it). Applies to the next spawn. */

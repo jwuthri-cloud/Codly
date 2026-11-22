@@ -242,7 +242,8 @@ impl Inner {
         path.starts_with(self.team_root(ws))
     }
 
-    /// The member's stable worktree, created (detached at HEAD, deps seeded) on first use.
+    /// The member's stable worktree, created (detached at HEAD) on first use. Its first task
+    /// prepares it (copied files, ports, setup script: `worktree_setup`).
     pub(super) async fn member_worktree(&self, ws: &Workspace, agent: &Agent) -> Result<PathBuf> {
         let id = agent.member.as_deref().ok_or_else(|| anyhow!("{} is not on the team", agent.name))?;
         let wt = self.team_root(ws).join(id);
@@ -253,7 +254,7 @@ impl Inner {
                 let _g = self.repo_lock.lock().await;
                 self.git.worktree_add_detached(&repo, &wt, &head).await?;
             }
-            self.bootstrap_worktree(ws, &repo, &wt, None).await;
+            self.mark_new_worktree(&wt)?;
         }
         Ok(wt)
     }

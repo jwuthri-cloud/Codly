@@ -67,6 +67,7 @@ impl Inner {
         if let Some(acct) = &info {
             crate::env::apply_account(&mut env, provider, acct.home.as_deref());
         }
+        env.extend(self.worktree_env(&req.cwd)); // CODLY_PORT_BASE of a Codly worktree
         let mcp = self.mcp.get().ok_or_else(|| anyhow!("the Codly MCP server is not running"))?.clone();
         let run_id = new_id();
         let dir = self.data("runs").join(&run_id);

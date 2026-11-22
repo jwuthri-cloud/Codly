@@ -859,7 +859,7 @@ pub fn login_command(provider: Provider, home: Option<&str>) -> Option<String> {
     })
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-~+".contains(c)) {
         s.to_string()
     } else {

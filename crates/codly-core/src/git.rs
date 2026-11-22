@@ -368,9 +368,35 @@ impl Git {
         self.ok(repo, &["diff", "--no-color", "--no-ext-diff", "--find-renames", "-U3", &range], true).await
     }
 
-    /// Is `rel` ignored by the repository's ignore rules (so `add -A` never picks it up)?
-    pub async fn is_ignored(&self, repo: &Path, rel: &str) -> Result<bool> {
-        Ok(self.run(repo, &["check-ignore", "-q", "--no-index", rel], true).await?.ok)
+    /// The untracked paths the repository's ignore rules hide (so `add -A` never picks them
+    /// up), relative to `repo`. A folder that is ignored as a whole is one entry ending in
+    /// `/`: git does not look inside it.
+    pub async fn ignored(&self, repo: &Path) -> Result<Vec<String>> {
+        let all = split_z(&self.ok(repo, &["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], true).await?);
+        // git also names a folder that only holds ignored files, just before those files. No
+        // rule ignores that folder itself, so only its files are kept.
+        let holds_next = |i: usize, path: &str| path.ends_with('/') && all.get(i + 1).is_some_and(|next| next.starts_with(path));
+        Ok(all.iter().enumerate().filter(|(i, path)| !holds_next(*i, path)).map(|(_, path)| path.clone()).collect())
+    }
+
+    /// The files inside `dirs`, folders of `repo` that `ignored` lists as one entry each.
+    pub async fn ignored_files(&self, repo: &Path, dirs: &[&str]) -> Result<Vec<String>> {
+        let specs: Vec<String> = dirs.iter().map(|dir| format!(":(literal){dir}")).collect();
+        let mut args = vec!["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--"];
+        args.extend(specs.iter().map(String::as_str));
+        Ok(split_z(&self.ok(repo, &args, true).await?))
+    }
+
+    /// Do the ignore rules of the checkout `wt` hide `rel` (so `add -A` there never picks it
+    /// up)? `dir` = `rel` is a folder. The path does not have to exist there yet.
+    pub async fn is_ignored(&self, wt: &Path, rel: &str, dir: bool) -> Result<bool> {
+        let path = if dir { format!("{rel}/") } else { rel.to_string() };
+        let out = self.run(wt, &["check-ignore", "-q", "--no-index", "--", &path], true).await?;
+        // Exit 1 with no message = not ignored; anything else is git's own failure.
+        if !out.ok && !out.stderr.trim().is_empty() {
+            return Err(out.err("check-ignore"));
+        }
+        Ok(out.ok)
     }
 
     pub async fn ls_files(&self, repo: &Path) -> Result<Vec<String>> {
@@ -1146,5 +1172,51 @@ mod tests {
         assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.is_err());
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "a new file of mine\n");
         assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()), "the merge is still there");
+    }
+
+    /// What a new worktree lacks: the ignored paths, a folder ignored as a whole as one entry.
+    #[tokio::test]
+    async fn ignored_lists_ignored_untracked_paths_and_whole_folders_once() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        std::fs::write(repo.join(".gitignore"), "node_modules/\n.env\nlocal.json\n").unwrap();
+        std::fs::create_dir_all(repo.join("pkg/node_modules/dep")).unwrap();
+        std::fs::write(repo.join("pkg/index.js"), "tracked\n").unwrap();
+        std::fs::write(repo.join("pkg/local.json"), "{}\n").unwrap();
+        std::fs::write(repo.join("pkg/node_modules/dep/a.js"), "a\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-qm", "ignore rules"]);
+        std::fs::create_dir_all(repo.join("node_modules/dep")).unwrap();
+        std::fs::write(repo.join("node_modules/dep/a.js"), "a\n").unwrap();
+        std::fs::write(repo.join(".env"), "A=1\n").unwrap();
+        std::fs::write(repo.join("notes.txt"), "untracked, not ignored\n").unwrap();
+        // A folder that only holds ignored files is not ignored itself: its files are listed.
+        std::fs::create_dir_all(repo.join("fresh")).unwrap();
+        std::fs::write(repo.join("fresh/local.json"), "{}\n").unwrap();
+
+        assert_eq!(git.ignored(&repo).await.unwrap(), [".env", "fresh/local.json", "node_modules/", "pkg/local.json", "pkg/node_modules/"]);
+        assert_eq!(git.ignored_files(&repo, &["node_modules/", "pkg/node_modules/"]).await.unwrap(), ["node_modules/dep/a.js", "pkg/node_modules/dep/a.js"]);
+    }
+
+    /// The rules of the checkout that is asked decide, also for a path that is not there yet.
+    #[tokio::test]
+    async fn is_ignored_reads_the_rules_of_the_checkout_it_is_asked_about() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        std::fs::write(repo.join(".gitignore"), "node_modules/\n/secrets/\n.env\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-qm", "ignore rules"]);
+        let wt = repo.parent().unwrap().join("wt");
+        git.worktree_add(&repo, &wt, "codly/test/ignore", "HEAD").await.unwrap();
+        // A rule you did not commit: your checkout has it, the worktree does not.
+        std::fs::write(repo.join(".gitignore"), "node_modules/\n/secrets/\n.env\nconfig/local.json\n").unwrap();
+
+        for (rel, dir) in [("node_modules", true), ("packages/a/node_modules", true), ("secrets/dev.env", false), (".env", false)] {
+            assert!(git.is_ignored(&wt, rel, dir).await.unwrap(), "{rel}");
+        }
+        assert!(!git.is_ignored(&wt, "node_modules", false).await.unwrap(), "the rule names a folder");
+        assert!(!git.is_ignored(&wt, "src", true).await.unwrap());
+        assert!(git.is_ignored(&repo, "config/local.json", false).await.unwrap());
+        assert!(!git.is_ignored(&wt, "config/local.json", false).await.unwrap(), "the worktree's own rules decide");
     }
 }

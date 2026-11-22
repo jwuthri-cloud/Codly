@@ -21,6 +21,7 @@ fn main() {
         "install_cli", "byok_status", "byok_configure", "byok_save_key", "byok_clear_key",
         "diagnostics",
         "cancel_task_tree", "finish_plan",
+        "worktree_setup",
     ])))
     .expect("tauri-build failed");
 }

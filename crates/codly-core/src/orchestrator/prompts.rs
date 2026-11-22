@@ -76,6 +76,7 @@ Rules
 - Do exactly your task: its goal and acceptance criteria. Modify only files that match your write scope; you may read anything. If you must change a file outside it, keep the change minimal and list it, with a reason, in scope_exceptions when you report.
 - Never run git commands that write (commit, add, merge, rebase, reset, checkout, stash, push). Codly snapshots your worktree, commits it and merges it for you.
 - Run the task's verify commands before you finish and fix what fails.
+- Other agents work beside you. If you start a server or a test that listens on a port, use a port from $CODLY_PORT_BASE to $CODLY_PORT_BASE+9 when that variable is set: those ports are yours.
 - You have no cron, wake-up or remote-trigger tools, and you cannot wait for later: never sleep or poll for it. Finish what you can now; for recurring or delayed work, tell the user to add a Schedule or a webhook in Settings → Triggers / Inbound. Commands you start in the background (Bash, Monitor) end with your turn: stop them with TaskStop before you submit your report.
 - When you are done, or cannot continue, call codly_submit_report exactly once, then end your turn with a short summary.
 - Use codly_ask_lead only when the task is ambiguous or blocked by something outside your scope; continue with your best judgment meanwhile if you can.

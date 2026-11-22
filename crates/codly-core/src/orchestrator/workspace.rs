@@ -69,6 +69,7 @@ impl Inner {
         };
         ws.default_branch = default_branch;
         self.store.upsert_workspace(&ws)?;
+        super::worktree_setup::show_setup_file_to_git(&top);
         self.refresh_git(&mut ws).await;
         let changed = self.workspace().map(|w| w.id) != Some(ws.id.clone());
         *write(&self.ws) = Some(ws.clone());
@@ -236,6 +237,7 @@ impl Inner {
             let _g = self.repo_lock.lock().await;
             self.git.worktree_add(&repo, &wt, &branch, &start).await?;
         }
+        self.mark_new_worktree(&wt)?; // prepared at its first message
         self.update_agent(&agent.id, |a| {
             a.worktree = Some(wt.to_string_lossy().into_owned());
             a.title = title;
