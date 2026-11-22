@@ -4,7 +4,8 @@
   `@agent` to talk to one agent 1:1 (the thread switches and shows as a chip); `@` mid-sentence
   mentions an agent or a file of the repo (its path, which the agent reads), `#` refers to a task.
   `/` alone on the line lists Codly's own actions (new request, stop, mode, model, clear…) and ↵
-  runs one; it is not sent. A CLI's own slash commands are not offered: Codly cannot run them.
+  runs one; it is not sent. One that cannot run right now (stop, with nothing running) says why
+  and is not sent either. A CLI's own slash commands are not offered: Codly cannot run them.
   Esc on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
   draft (text and files) is kept when the composer leaves the screen, and Edit on an earlier
   message does not replace it.
@@ -132,7 +133,7 @@
   type Opt = { id: string; label: string; sub: string } & (
     | { kind: 'agent'; agentId: string; insert: string }
     | { kind: 'task' | 'file'; insert: string }
-    | { kind: 'command'; icon: string; hint: string; run: () => void }
+    | { kind: 'command'; icon: string; hint: string; run: (() => void) | null }
   );
   const SHOWN = 6;
   let mention = $state<Trigger | null>(null);
@@ -163,19 +164,30 @@
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
     files = [];
   }
-  /** What `/` offers: actions Codly has, for the conversation you are in. */
+  /**
+   * What `/` offers: Codly's actions. Every name is listed in every conversation, so that a
+   * known name is never sent to the agent as a message; an action that cannot run here or
+   * right now says why instead.
+   */
   const commands = $derived.by((): SlashCommand[] => {
+    const inRequest = 'Only in a request';
     const list: SlashCommand[] = [{ name: 'new', label: 'New request', hint: 'Its own Lead, in parallel', icon: 'plus', run: () => ui.newRequest() }];
-    if (isBusy) list.push({ name: 'stop', label: `Stop ${agent?.name ?? 'the agent'}`, hint: 'Ends the running turn', icon: 'stop', run: () => void stopThread(thread) });
-    if (!oneToOne) {
-      for (const m of MODES) list.push({ name: m.id, label: `${m.label} mode`, hint: m.hint, icon: m.icon, run: () => void setRequestPrefs(thread, { mode: m.id }) });
-      list.push({ name: 'model', label: 'Model', hint: 'The Lead’s CLI, model and thinking', icon: 'sparkle', run: () => lead?.showModels() });
-      const p = plan;
-      if (p?.integration_branch) list.push({ name: 'diff', label: 'View the changes', hint: 'What this request’s plan changed', icon: 'diff', run: () => ui.openDiff({ kind: 'plan', id: p.id }) });
-    } else if (agent?.role === 'solo') {
-      const a = agent;
-      list.push({ name: 'model', label: 'Model', hint: `${a.name}’s model`, icon: 'sparkle', run: () => (ui.modelDialog = { provider: a.provider, agentId: a.id }) });
+    const stop = { name: 'stop', label: `Stop ${agent?.name ?? 'the agent'}`, icon: 'stop' };
+    list.push(isBusy ? { ...stop, hint: 'Ends the running turn', run: () => void stopThread(thread) } : { ...stop, off: 'Nothing is running' });
+    for (const m of MODES) {
+      const mode = { name: m.id, label: `${m.label} mode`, icon: m.icon };
+      list.push(oneToOne ? { ...mode, off: inRequest } : { ...mode, hint: m.hint, run: () => void setRequestPrefs(thread, { mode: m.id }) });
     }
+    const model = { name: 'model', label: 'Model', icon: 'sparkle' };
+    const a = agent;
+    if (!oneToOne) list.push({ ...model, hint: 'The Lead’s CLI, model and thinking', run: () => lead?.showModels() });
+    else if (a?.role === 'solo') list.push({ ...model, hint: `${a.name}’s model`, run: () => (ui.modelDialog = { provider: a.provider, agentId: a.id }) });
+    else list.push({ ...model, off: 'Not for this agent' });
+    const diff = { name: 'diff', label: 'View the changes', icon: 'diff' };
+    const p = plan;
+    if (oneToOne) list.push({ ...diff, off: inRequest });
+    else if (p?.integration_branch) list.push({ ...diff, hint: 'What this request’s plan changed', run: () => ui.openDiff({ kind: 'plan', id: p.id }) });
+    else list.push({ ...diff, off: 'This request has no changes yet' });
     list.push(
       { name: 'clear', label: 'Clear the draft', hint: 'The text and the attached files', icon: 'trash', run: clearDraft },
       { name: 'closed', label: 'Closed requests', hint: 'Read them again', icon: 'clock', run: () => ui.openThread(CLOSED_LIST) },
@@ -188,7 +200,7 @@
   const options = $derived.by((): Opt[] => {
     const m = mention;
     if (!m) return [];
-    if (m.trigger === '/') return filterSlash(commands, m.query).map((c): Opt => ({ id: `/${c.name}`, kind: 'command', label: c.label, sub: `/${c.name}`, icon: c.icon, hint: c.hint, run: c.run }));
+    if (m.trigger === '/') return filterSlash(commands, m.query).map((c): Opt => ({ id: `/${c.name}`, kind: 'command', label: c.label, sub: `/${c.name}`, icon: c.icon, ...('off' in c ? { hint: c.off, run: null } : { hint: c.hint, run: c.run }) }));
     const best = (pool: Opt[]): Opt[] =>
       pool
         .map((o) => ({ o, m: fuzzy(m.query, o.label) }))
@@ -217,6 +229,8 @@
     if (!mention || !ta) return;
     const end = ta.selectionStart ?? text.length;
     if (o.kind === 'command') {
+      // It cannot run right now: its row says why, and the line stays as typed.
+      if (!o.run) return;
       // The line was only the action's name: it runs, and nothing is sent.
       mention = null;
       text = '';
@@ -356,7 +370,7 @@
         {#if o.kind === 'agent' && i === 0 && mention?.atStart}<li class="mh eyebrow">Talk 1:1 with</li>{/if}
         {#if o.kind === 'file' && options[i - 1]?.kind !== 'file'}<li class="mh eyebrow">Files</li>{/if}
         <li>
-          <button class="opt" class:active={i === mi} role="option" aria-selected={i === mi} onpointerenter={() => (mi = i)} onmousedown={(e) => { e.preventDefault(); pick(o); }}>
+          <button class="opt" class:active={i === mi} class:off={o.kind === 'command' && !o.run} role="option" aria-selected={i === mi} aria-disabled={o.kind === 'command' && !o.run} onpointerenter={() => (mi = i)} onmousedown={(e) => { e.preventDefault(); pick(o); }}>
             {#if o.kind === 'agent'}<Portrait agent={store.agentMap.get(o.agentId)} size={20} />{:else}<Icon name={o.kind === 'command' ? o.icon : o.kind === 'file' ? 'file' : 'plan'} size={14} />{/if}
             <span class="ol truncate">{o.label}{#if o.kind === 'command'}<span class="oh">{o.hint}</span>{/if}</span>
             <span class="os truncate">{o.sub}</span>
@@ -437,5 +451,6 @@
   .opt :global(svg) { color: var(--ink-2); }
   .ol { flex: 1; font-weight: var(--w-med); }
   .oh { margin-left: 8px; font-weight: var(--w-reg); color: var(--ink-3); }
+  .opt.off .ol, .opt.off :global(svg) { color: var(--ink-3); }
   .os { max-width: 60%; font-size: var(--t-sm); color: var(--ink-3); }
 </style>

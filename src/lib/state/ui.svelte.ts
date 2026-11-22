@@ -119,6 +119,8 @@ class Ui {
   draftRequests = $state<{ thread: string; ts: number }[]>([]);
   /** Requests you just closed, per office, while Undo is still on offer: not tabs any more, not closed yet. */
   closingRequests = $state<{ office: string | null; thread: string }[]>([]);
+  /** Bumped when the core has closed a request: the closed requests' list is read again. */
+  closedRev = $state(0);
   /** Bumped to focus the composer (New request, palette…). */
   composerFocus = $state(0);
   /** ⌘F: the find bar over the open conversation; `findFocus` is bumped to focus its field again. */
@@ -279,6 +281,11 @@ class Ui {
     if (planId) this.planId = planId;
     if (thread && isRequestThread(thread)) this.request = thread;
     this.go('plan');
+  }
+
+  /** A conversation is on screen (Home, not the full office or the map): ⌘F can find text in it. */
+  get canFind(): boolean {
+    return this.room === 'home' && this.mode !== 'office' && this.mode !== 'map';
   }
 
   /** ⌘F on Home: find text in the conversation on screen. */

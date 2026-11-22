@@ -54,17 +54,22 @@ export function rankFiles(paths: string[], query: string, limit: number): string
     .map((f) => f.path);
 }
 
-/** One of Codly's actions in the `/` menu. `name` is what you type after the slash. */
-export type SlashCommand = { name: string; label: string; hint: string; icon: string; run: () => void };
+/**
+ * One of Codly's actions in the `/` menu. `name` is what you type after the slash. An action
+ * that cannot run here or right now has `off`, the reason, in place of what it does: it is
+ * still listed, so its name is never sent to the agent as a message.
+ */
+export type SlashCommand = { name: string; label: string; icon: string } & ({ hint: string; run: () => void } | { off: string });
 
 /**
  * The actions that match what is typed after `/`: those whose name starts with it first, in
  * the list's order, then those that hold it in their name or label. Nothing typed: all of them.
+ * In each case the actions that cannot run now come last.
  */
-export function filterSlash<T extends { name: string; label: string }>(commands: T[], query: string): T[] {
+export function filterSlash<T extends { name: string; label: string; off?: string }>(commands: T[], query: string): T[] {
   const q = query.toLowerCase();
-  if (!q) return commands;
   const starts = commands.filter((c) => c.name.startsWith(q));
-  const holds = commands.filter((c) => !c.name.startsWith(q) && (c.name.includes(q) || c.label.toLowerCase().includes(q)));
-  return [...starts, ...holds];
+  const holds = q ? commands.filter((c) => !c.name.startsWith(q) && (c.name.includes(q) || c.label.toLowerCase().includes(q))) : [];
+  const found = [...starts, ...holds];
+  return [...found.filter((c) => c.off === undefined), ...found.filter((c) => c.off !== undefined)];
 }

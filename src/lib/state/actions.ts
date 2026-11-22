@@ -21,6 +21,7 @@ import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { withModel } from '../util/team';
 import { accounts } from './accounts.svelte';
 import { diffstats } from './diffstats.svelte';
+import { flushClosing } from './closing';
 import { busy } from './queue';
 import { requests } from './requests.svelte';
 import { noteStop, stopping } from './stops';
@@ -47,6 +48,8 @@ export async function openWorkspace(path?: string) {
   }
   const repo = path ?? (await api.pickFolder());
   if (!repo) return;
+  // Requests closed a moment ago are closed for good first, while their office is the open one.
+  await flushClosing();
   const ws = await attempt('open the repository', () => api.openWorkspace(repo), 'Pick the folder that contains .git.');
   if (!ws) return;
   store.setWorkspace(ws);

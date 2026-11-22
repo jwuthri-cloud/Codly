@@ -115,4 +115,26 @@ describe('filterSlash', () => {
   it('what matches no action lists none, so the line is sent as text', () => {
     expect(names('usr')).toEqual([]);
   });
+
+  describe('an action that cannot run right now', () => {
+    // Nothing is running, and the request's plan has changed nothing yet.
+    const idle = [
+      { name: 'new', label: 'New request' },
+      { name: 'stop', label: 'Stop Mira', off: 'Nothing is running' },
+      { name: 'diff', label: 'View the changes', off: 'This request has no changes yet' },
+      { name: 'settings', label: 'Settings' },
+    ];
+    const found = (q: string) => filterSlash(idle, q).map((c) => (c.off ? `${c.name} (${c.off})` : c.name));
+
+    it('is still found by its name, with the reason: the name is known, so it is not sent as text', () => {
+      expect(found('stop')).toEqual(['stop (Nothing is running)']);
+      expect(found('sto')).toEqual(['stop (Nothing is running)']);
+      expect(found('diff')).toEqual(['diff (This request has no changes yet)']);
+    });
+
+    it('comes after the actions that can run, so ↵ on a few letters runs one of those', () => {
+      expect(found('')).toEqual(['new', 'settings', 'stop (Nothing is running)', 'diff (This request has no changes yet)']);
+      expect(found('s')).toEqual(['settings', 'new', 'stop (Nothing is running)', 'diff (This request has no changes yet)']); // "changes" holds an s
+    });
+  });
 });

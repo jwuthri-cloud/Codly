@@ -133,7 +133,7 @@ export function installKeys(): () => void {
         return;
       }
       // Find in the conversation on screen (also while typing: the composer is where you are).
-      if (k === 'f' && !overlay && workspaceOpen() && ui.room === 'home' && ui.mode !== 'office' && ui.mode !== 'map') {
+      if (k === 'f' && !overlay && workspaceOpen() && ui.canFind) {
         e.preventDefault();
         ui.openFind();
         return;
@@ -166,7 +166,8 @@ export function installKeys(): () => void {
         (e.target as HTMLElement).blur();
         return;
       }
-      // One step per press: close, deselect, leave the full office, then stop the running turn.
+      // One step per press: close, deselect, leave the full office, close the find bar, leave a
+      // closed request, and only then stop the running turn.
       const step = escStep({
         repeat: e.repeat,
         artifactOpen: !!ui.artifactOpen,
@@ -175,14 +176,14 @@ export function installKeys(): () => void {
         room: ui.room,
         popupOpen: !!document.querySelector('[role="dialog"], [role="menu"]'),
         inOffice: !!(e.target as HTMLElement).closest?.('[role="application"]'),
+        findOpen: ui.findOpen,
+        readingClosed: isClosedThread(ui.thread),
       });
       if (step === 'close-artifact') ui.artifactOpen = null;
       else if (step === 'deselect') ui.selection = null;
       else if (step === 'leave-office') ui.mode = 'blend';
-      // Before a turn is stopped: the find bar closes, and a closed request you are reading
-      // goes back to your requests.
-      else if (step === 'stop' && ui.findOpen) ui.findOpen = false;
-      else if (step === 'stop' && isClosedThread(ui.thread)) ui.openRequest(ui.request);
+      else if (step === 'close-find') ui.findOpen = false;
+      else if (step === 'leave-closed') ui.openRequest(ui.request);
       else if (step === 'stop') stopThread(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
       return;
     }

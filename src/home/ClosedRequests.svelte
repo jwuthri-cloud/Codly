@@ -2,9 +2,11 @@
   The requests you closed, to read again. Closing a request stops its Lead and cancels its
   unfinished plans, but nothing that was said is deleted: Codly keeps it under an archive
   thread. This view lists them, newest first, and shows one as it was. It is read-only: there
-  is no composer, and a closed request does not start again. ⌘F finds text in it.
+  is no composer, and a closed request does not start again. ⌘F finds text in it. A request
+  closed while this view is open joins the list as soon as the core has closed it.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { api } from '../lib/api';
   import type { ClosedRequest } from '../lib/gen/ClosedRequest';
   import type { ClosedTranscript } from '../lib/gen/ClosedTranscript';
@@ -51,6 +53,14 @@
     list = null;
     read = null;
     load();
+  });
+  // A request you closed a moment ago is not closed until the time for Undo is up (see
+  // lib/state/closing.ts): when the core has closed it, the list is read again and shows it.
+  let landed = ui.closedRev;
+  $effect(() => {
+    if (ui.closedRev === landed) return;
+    landed = ui.closedRev;
+    untrack(load);
   });
 
   const row = $derived(listing ? null : (list?.find((c) => c.thread === thread) ?? null));
