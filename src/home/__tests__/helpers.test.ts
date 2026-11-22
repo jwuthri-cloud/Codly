@@ -24,7 +24,8 @@ const ev = (ts: number, kind: EventKind): EventRow => ({ id: ++id, ts, agent_id:
 const target = { path: null, paths: [], command: null, query: null, url: null, server: null, tool: null };
 const started = (ts: number, call: string, name: string, activity: 'delegate' | 'execute') =>
   ev(ts, { type: 'tool_started', call_id: call, name, activity, target: activity === 'execute' ? { ...target, command: 'echo hi' } : target, input: {}, confidence: 'observed' });
-const completed = (ts: number, call: string) => ev(ts, { type: 'tool_completed', call_id: call, ok: true, output: null, exit_code: null, duration_ms: null, tests_passed: null, tests_failed: null });
+const completed = (ts: number, call: string, ok = true) =>
+  ev(ts, { type: 'tool_completed', call_id: call, ok, output: null, exit_code: ok ? null : 1, duration_ms: null, tests_passed: null, tests_failed: null });
 const helper = (ts: number, call: string, status: string) => ev(ts, { type: 'sub_agent', call_id: call, description: 'Run echo hi via Bash', status });
 const SAID_NOTHING = { name: null, step: null, tool_call_id: null, tool_uses: null, tokens: null, report: null };
 type Said = { name: string; step: string; tool_call_id: string; tool_uses: number; tokens: number; report: string };
@@ -91,6 +92,56 @@ describe('a helper in the conversation', () => {
     expect(h.status).toBe('stopped');
     expect(helperState(h, row.segs[0])).toBe('failed');
     expect(helperTitle(h, 'failed')).toBe('Helper stopped');
+  });
+});
+
+/** The other recorded order (recording `subagent-stdin-closed`): the helper's call starts before the turn ends. */
+function launchEarly() {
+  apply(
+    ev(10, { type: 'turn_started', input: 'Have a subagent run the tests' }),
+    helper(11, 'toolu-1', 'running'),
+    started(11, 'toolu-1', 'Agent', 'delegate'),
+    completed(12, 'toolu-1'),
+    started(13, 'toolu-2', 'Bash', 'execute'),
+    progress(13, 'toolu-1', { tool_call_id: 'toolu-2' }),
+    started(13, 'toolu-3', 'Bash', 'execute'), // a call of the agent's own, cut off by the end of the turn
+    ev(14, { type: 'turn_completed', status: 'completed', result_text: null, duration_ms: null }),
+  );
+}
+const callOf = (call: string) => works().flatMap((r) => r.segs).find((s) => s.callId === call);
+
+describe("a helper's call that is open when the turn ends", () => {
+  it('stays open, and its result says how it went', () => {
+    launchEarly();
+    expect(callOf('toolu-2')).toMatchObject({ parent: 'toolu-1', end: null, ok: null });
+    expect(callOf('toolu-3')).toMatchObject({ end: 14, ok: null }); // the agent's own call ends with its turn
+    expect(store.now('l1')?.seg?.callId).toBe('toolu-2');
+
+    apply(completed(40, 'toolu-2', false));
+    expect(callOf('toolu-2')).toMatchObject({ end: 40, ok: false, exitCode: 1 });
+    expect(store.now('l1')).toBeNull();
+  });
+
+  it('ends with its helper when no result came', () => {
+    launchEarly();
+    apply(helper(30, 'toolu-1', 'stopped'));
+    expect(callOf('toolu-2')).toMatchObject({ end: 30, ok: null });
+    // A result that comes after that changes nothing.
+    apply(completed(40, 'toolu-2', false));
+    expect(callOf('toolu-2')).toMatchObject({ end: 30, ok: null });
+  });
+
+  it('ends with the turn when its helper is over with that turn', () => {
+    // A helper whose `Agent` call waited for it: the adapter says "stopped" right after the turn's end.
+    launchEarly();
+    apply(helper(14, 'toolu-1', 'stopped'));
+    expect(callOf('toolu-2')).toMatchObject({ end: 14, ok: null });
+  });
+
+  it('ends when the process is gone', () => {
+    launchEarly();
+    apply(ev(20, { type: 'exited', code: 1 }));
+    expect(callOf('toolu-2')).toMatchObject({ end: 20, ok: null });
   });
 });
 

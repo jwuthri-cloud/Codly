@@ -174,7 +174,8 @@
       const e = store.events[i];
       if (e.agent_id !== agent.id && !(task && e.task_id === task.id && e.kind.type === 'decision')) continue;
       const t = e.kind.type;
-      if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed' || t === 'control_changed') continue;
+      // (a helper's progress is no step of its own: its calls and its end are rows already)
+      if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed' || t === 'control_changed' || t === 'sub_agent_progress') continue;
       if (filter === 'tools' && t !== 'tool_started' && t !== 'tool_completed') continue;
       if (filter === 'files' && t !== 'files_changed' && !(t === 'tool_started' && ['read', 'edit', 'create', 'delete'].includes((e.kind as { activity: string }).activity))) continue;
       if (filter === 'decisions' && t !== 'decision') continue;

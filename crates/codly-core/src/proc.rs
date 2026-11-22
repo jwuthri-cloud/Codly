@@ -116,14 +116,20 @@ pub enum Inbound {
     Eof,
 }
 
-/// [`spawn_reader`] + raw log + JSON parse: every line is appended to `raw` before parsing.
+/// [`spawn_reader`] + raw log + JSON parse: every line is appended to `raw`, also one that is
+/// not JSON. The adapter gets the line as it is; the log gets it without the MCP server
+/// configs in it (`without_mcp_configs`).
 pub fn spawn_json_reader<R: AsyncRead + Unpin + Send + 'static>(r: R, raw: Arc<RawLog>) -> tokio::sync::mpsc::UnboundedReceiver<Inbound> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     spawn_reader(r, move |rec| {
         let item = match rec {
             Record::Line(b) => {
-                raw.inbound(b);
-                match serde_json::from_slice::<Value>(b) {
+                let parsed = serde_json::from_slice::<Value>(b);
+                match parsed.as_ref().ok().and_then(without_mcp_configs) {
+                    Some(safe) => raw.inbound(safe.to_string().as_bytes()),
+                    None => raw.inbound(b),
+                }
+                match parsed {
                     Ok(v) => Inbound::Json(v),
                     Err(_) => Inbound::Text(String::from_utf8_lossy(b).into_owned()),
                 }
@@ -202,8 +208,8 @@ pub fn exit_code(status: std::process::ExitStatus) -> Option<i64> {
 /// before parsing so a run can be replayed and re-normalized after mapping fixes.
 /// Inbound lines are stored verbatim; lines Codly wrote to the CLI are stored as
 /// `{"codly_sent":<line>}` and Codly's own notes as `{"codly_note":"..."}`, so the file stays NDJSON.
-/// The file is owner-only, and the keys in what Codly sends to a CLI are left out of it
-/// (`write_json`).
+/// The file is owner-only, and the keys of MCP servers are left out of it: in what Codly sends
+/// to a CLI (`write_json`) and in what a CLI says about its servers (`spawn_json_reader`).
 pub struct RawLog {
     file: Mutex<File>,
 }
@@ -301,6 +307,32 @@ pub fn without_mcp_secrets(msg: &Value) -> Option<Value> {
                 Some(Value::Array(env)) => env.iter_mut().filter_map(|e| e.get_mut("value")).for_each(|v| *v = REDACTED.into()),
                 _ => {}
             }
+        }
+    }
+    Some(safe)
+}
+
+/// Where the Claude CLI's answer to an `mcp_status` control request lists the MCP servers of
+/// the session, each with its `config`.
+const MCP_STATUS_SERVERS: &str = "/response/response/mcpServers";
+
+/// A copy of an inbound line for the raw log, with the `config` of every MCP server in it
+/// replaced. The CLI gives each server's config as the user wrote it: for a remote server
+/// that is its URL and its request headers (an `Authorization` key), and a command line can
+/// carry a key too. Codly reads the name, the status and the error of a server, never its
+/// config, so the whole config is left out, whatever is in it. None when `line` is not such
+/// an answer (almost every line), so nothing is copied.
+pub fn without_mcp_configs(line: &Value) -> Option<Value> {
+    line.pointer(MCP_STATUS_SERVERS)?;
+    let mut safe = line.clone();
+    let servers: Vec<&mut Value> = match safe.pointer_mut(MCP_STATUS_SERVERS) {
+        Some(Value::Array(list)) => list.iter_mut().collect(),
+        Some(Value::Object(map)) => map.values_mut().collect(),
+        _ => return None,
+    };
+    for server in servers {
+        if let Some(config) = server.get_mut("config") {
+            *config = REDACTED.into();
         }
     }
     Some(safe)
@@ -531,6 +563,50 @@ mod tests {
         // Only the owner reads the log.
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// What the Claude CLI answers to `mcp_status` holds every server's config; the adapter
+    /// gets the answer as it is, the raw log gets it without the configs.
+    #[tokio::test]
+    async fn server_configs_reach_the_adapter_but_not_the_raw_log() {
+        const BEARER: &str = "Bearer header-value-of-the-test";
+        const ARG_KEY: &str = "arg-value-of-the-test";
+        // The recorded answer (docs/research/fixtures/claude-2.1.311/broken-mcp.ndjson), with a
+        // key in a server's command line and a remote server beside it. The config of a remote
+        // server is in no recording (`url` and `headers` here are the fields of the user's own
+        // MCP config file): the log must not depend on what a config holds.
+        let answer = serde_json::json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "codly-mcp-status", "response": { "mcpServers": [
+            { "name": "exits-at-once", "status": "failed", "error": "Connection closed", "config": { "type": "stdio", "command": "/usr/bin/false", "args": ["--api-key", ARG_KEY] }, "transport": "stdio", "scope": "dynamic", "source": "dynamic" },
+            { "name": "remote", "status": "failed", "error": "Connection closed", "config": { "type": "http", "url": "https://mcp.example.com/mcp", "headers": { "Authorization": BEARER } }, "transport": "http", "scope": "user", "source": "user" },
+        ] } } });
+        // A line that only talks about servers, and one that is not JSON: both stay as they are.
+        let init = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"remote","status":"failed","source":"user"}]}"#;
+        let banner = "warning: config.mcpServers is deprecated";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runs/r1/raw.ndjson");
+        let stdout = format!("{init}\n{answer}\n{banner}\n");
+        assert!(stdout.contains(BEARER) && stdout.contains(ARG_KEY), "the test answer holds both keys");
+        let mut lines = spawn_json_reader(std::io::Cursor::new(stdout.into_bytes()), Arc::new(RawLog::open(&path).unwrap()));
+        // The adapter got every line whole.
+        assert!(matches!(lines.recv().await, Some(Inbound::Json(v)) if v == serde_json::from_str::<Value>(init).unwrap()));
+        assert!(matches!(lines.recv().await, Some(Inbound::Json(v)) if v == answer));
+        assert!(matches!(lines.recv().await, Some(Inbound::Text(t)) if t == banner));
+        assert!(matches!(lines.recv().await, Some(Inbound::Eof)));
+        // The log has the answer with each config hidden, and what the normalizer reads kept.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(BEARER) && !text.contains(ARG_KEY) && !text.contains("mcp.example.com"), "{text}");
+        let logged: Vec<&str> = text.lines().collect();
+        assert_eq!(logged.len(), 3, "{text}");
+        assert_eq!(logged[0], init);
+        assert_eq!(logged[2], banner);
+        let mut hidden = answer.clone();
+        for server in hidden["response"]["response"]["mcpServers"].as_array_mut().unwrap() {
+            server["config"] = "***".into();
+        }
+        assert_eq!(serde_json::from_str::<Value>(logged[1]).unwrap(), hidden);
+        // A line without that list is logged as it is, with no copy made.
+        assert_eq!(without_mcp_configs(&serde_json::from_str(init).unwrap()), None);
     }
 
     #[tokio::test]

@@ -730,17 +730,22 @@ class CodlyStore {
   }
 
   /** `shared`: also drop the live output of the calls that are closed (they were cut off, and
-   *  their output is in no later event). */
-  private closeOpen(l: AgentLive, ts: number, shared: boolean) {
-    const ids = Object.keys(l.open);
+   *  their output is in no later event). `only`: the calls to close (all of them when left out). */
+  private closeOpen(l: AgentLive, ts: number, shared: boolean, only?: (seg: Seg) => boolean) {
+    const ids = Object.keys(l.open).filter((id) => {
+      const seg = l.segments[l.open[id]];
+      return !only || !seg || only(seg);
+    });
     if (!ids.length) return;
     const segs = this.segsOf(l);
+    const open = { ...l.open };
     for (const id of ids) {
-      const i = l.open[id];
+      const i = open[id];
       if (segs[i] && segs[i].end == null) segs[i] = { ...segs[i], end: ts };
       if (shared) this.liveOut.delete(id);
+      delete open[id];
     }
-    l.open = {};
+    l.open = open;
   }
 
   /** What the agent was writing (a reply, a thought) will not be finished: it leaves the screen. */
@@ -817,7 +822,10 @@ class CodlyStore {
           if (l.turn) l.turn = { ...l.turn, endedAt: ev.ts, status: k.status };
           const t = l.turns;
           if (t.length && t[t.length - 1].end == null) l.turns = [...t.slice(0, -1), { ...t[t.length - 1], end: ev.ts }];
-          this.closeOpen(l, ev.ts, !into);
+          // A helper that is still at work goes on after the turn: a call of its own stays
+          // open until its result comes, or until the helper is over (`sub_agent`, `exited`).
+          const atWork = new Set(l.subagents.filter((s) => s.status === 'running').map((s) => s.callId));
+          this.closeOpen(l, ev.ts, !into, (seg) => seg.parent == null || !atWork.has(seg.parent));
           if (!into) this.dropStreams(aid);
         }
         break;
@@ -967,6 +975,8 @@ class CodlyStore {
             callId: k.call_id, description: k.description, status: k.status, startedAt: prev?.startedAt ?? ev.ts, ts: ev.ts,
           };
           l.subagents = [...l.subagents.filter((x) => x.callId !== k.call_id), next].slice(-20);
+          // The helper is over: a call of its own that is still open gets no result any more.
+          if (k.status !== 'running') this.closeOpen(l, ev.ts, !into, (seg) => seg.parent === k.call_id);
         }
         break;
       case 'sub_agent_progress':
