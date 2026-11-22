@@ -38,6 +38,8 @@ const LOG_LEN: usize = 50;
 struct Entry {
     name: String,
     enabled: bool,
+    /// The user lets this endpoint run plans without asking (`InboundMessage::auto_run`).
+    auto_run: bool,
     secret: Secret,
     hits: VecDeque<Instant>,
     received: i64,
@@ -46,7 +48,7 @@ struct Entry {
 
 #[derive(Debug, PartialEq)]
 pub enum Verdict {
-    Accepted { name: String },
+    Accepted { name: String, auto_run: bool },
     /// Unknown endpoint, wrong secret or no secret: indistinguishable on purpose.
     Denied,
     /// Right secret, but the endpoint is switched off.
@@ -67,8 +69,8 @@ impl Table {
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn put(&self, id: &str, name: &str, enabled: bool, secret: Secret) {
-        self.entries().insert(id.into(), Entry { name: name.into(), enabled, secret, hits: VecDeque::new(), received: 0, last_at: None });
+    pub fn put(&self, id: &str, name: &str, enabled: bool, auto_run: bool, secret: Secret) {
+        self.entries().insert(id.into(), Entry { name: name.into(), enabled, auto_run, secret, hits: VecDeque::new(), received: 0, last_at: None });
     }
     pub fn remove(&self, id: &str) {
         self.entries().remove(id);
@@ -79,6 +81,11 @@ impl Table {
     pub fn set_enabled(&self, id: &str, on: bool) {
         if let Some(e) = self.entries().get_mut(id) {
             e.enabled = on;
+        }
+    }
+    pub fn set_auto_run(&self, id: &str, on: bool) {
+        if let Some(e) = self.entries().get_mut(id) {
+            e.auto_run = on;
         }
     }
     pub fn any_enabled(&self) -> bool {
@@ -112,7 +119,7 @@ impl Table {
             return Verdict::Limited;
         }
         e.hits.push_back(now);
-        Verdict::Accepted { name: e.name.clone() }
+        Verdict::Accepted { name: e.name.clone(), auto_run: e.auto_run }
     }
 
     fn accepted(&self, id: &str) {
@@ -286,8 +293,8 @@ async fn handle(stream: &mut TcpStream, table: &Table, sink: &Sink) -> Result<()
         .or_else(|| head.headers.get("x-codly-secret").map(String::as_str))
         .map(str::trim)
         .unwrap_or("");
-    let name = match table.authorize(id, presented, Instant::now()) {
-        Verdict::Accepted { name } => name,
+    let (name, auto_run) = match table.authorize(id, presented, Instant::now()) {
+        Verdict::Accepted { name, auto_run } => (name, auto_run),
         Verdict::Denied => {
             if let Some(name) = table.name(id) {
                 table.record(&name, "wrong secret", 0);
@@ -324,7 +331,7 @@ async fn handle(stream: &mut TcpStream, table: &Table, sink: &Sink) -> Result<()
 
     let content_type = head.headers.get("content-type").map(String::as_str).unwrap_or("");
     let Some(text) = message_text(&body, content_type) else { return Err(Reply(400, "the message is empty")) };
-    let msg = InboundMessage { source: format!("webhook “{name}”"), text };
+    let msg = InboundMessage { source: format!("webhook “{name}”"), text, auto_run };
     match tokio::time::timeout(Duration::from_secs(5), sink(msg)).await {
         Ok(Ok(())) => {
             table.accepted(id);
@@ -404,15 +411,19 @@ mod tests {
 
     fn table() -> Table {
         let t = Table::default();
-        t.put("wh_a", "alerts", true, Secret::new("s3cret"));
-        t.put("wh_off", "quiet", false, Secret::new("other"));
+        t.put("wh_a", "alerts", true, false, Secret::new("s3cret"));
+        t.put("wh_off", "quiet", false, false, Secret::new("other"));
         t
     }
 
     #[test]
     fn authorize_denies_unknown_wrong_and_empty_alike() {
         let (t, now) = (table(), Instant::now());
-        assert_eq!(t.authorize("wh_a", "s3cret", now), Verdict::Accepted { name: "alerts".into() });
+        assert_eq!(t.authorize("wh_a", "s3cret", now), Verdict::Accepted { name: "alerts".into(), auto_run: false });
+        // The endpoint's own switch travels with each message it accepts, from the moment it is set.
+        t.set_auto_run("wh_a", true);
+        assert_eq!(t.authorize("wh_a", "s3cret", now), Verdict::Accepted { name: "alerts".into(), auto_run: true });
+        t.set_auto_run("wh_a", false);
         assert_eq!(t.authorize("wh_a", "s3cre", now), Verdict::Denied);
         assert_eq!(t.authorize("wh_a", "", now), Verdict::Denied);
         assert_eq!(t.authorize("wh_nope", "s3cret", now), Verdict::Denied);
@@ -437,7 +448,7 @@ mod tests {
     #[test]
     fn an_endpoint_without_a_secret_authenticates_nobody() {
         let t = Table::default();
-        t.put("wh_x", "broken", true, Secret::new(""));
+        t.put("wh_x", "broken", true, false, Secret::new(""));
         assert_eq!(t.authorize("wh_x", "", Instant::now()), Verdict::Denied);
         assert_eq!(t.authorize("wh_x", "\0unknown", Instant::now()), Verdict::Denied);
     }

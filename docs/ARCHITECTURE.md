@@ -58,7 +58,9 @@ a second `codly serve`, but not to the network: nobody would see the link it pri
 
 `/api/voice/ws` is passed
 through to an optional voice relay on the same machine (`voice/relay.py`, OpenAI Realtime);
-without the relay the call fails with "the voice relay is not running".
+without the relay the call fails with "the voice relay is not running". The relay takes a call
+only from `codly serve`: it must carry the token the relay wrote for this user at its start
+(`~/.config/codly/voice-<port>.token`) and no browser `Origin`.
 
 Logs go to stdout and to `<data dir>/logs/codly.log` (src-tauri/src/logging.rs: 5 MB, one older
 file kept; a panic hook writes the place and backtrace). Settings → Troubleshooting builds a
@@ -189,7 +191,9 @@ dir still ask).
 and a network mode that gates every
 inbound path. `inbound/` has the sources: a loopback webhook listener (one secret per endpoint,
 created switched off) and Slack over Socket Mode (config and gating exist; the socket is not
-connected yet). Inbound text reaches the Lead wrapped as untrusted outside input. Secrets live in the
+connected yet). An inbound message is never the user's: the thread stores and shows it under its
+source's name, the Lead reads it as quoted untrusted data, and a plan made after it waits for Run plan
+unless you let that endpoint run plans without asking (off for every new endpoint). Secrets live in the
 Keychain. `dictation.rs` is opt-in voice input: a clip goes to Groq Whisper with your own key and the
 transcript lands in the composer draft, never auto-sent.
 

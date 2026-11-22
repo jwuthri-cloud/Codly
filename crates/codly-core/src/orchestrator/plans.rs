@@ -93,12 +93,23 @@ impl Inner {
             self.cancel_plan_inner(&old, "superseded by a newer plan from the Lead").await?;
         }
 
+        // Messages from outside Codly (a webhook, Slack) that came in after the user's last own
+        // words: the plan may answer them, so it carries no "user's words", and it waits for
+        // Run plan unless each of them came from an endpoint the user lets run plans alone.
+        let outside = self.store.inbound_since_user(Some(&ws.id), &thread)?;
+        let outside_waits = outside.iter().any(|m| crate::inbound::needs_ok(m.attachment.as_ref()));
+        let request = if outside.is_empty() {
+            self.store.last_chat_by(Some(&ws.id), &thread, "user")?.unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         let plan_id = new_id();
         let plan = Plan {
             id: plan_id.clone(),
             workspace_id: ws.id.clone(),
             thread: thread.clone(),
-            request: self.store.last_chat_by(Some(&ws.id), &thread, "user")?.unwrap_or_default(),
+            request,
             summary: valid.plan.summary.clone(),
             assumptions: valid.plan.assumptions.clone(),
             open_questions: valid.plan.open_questions.clone(),
@@ -143,9 +154,10 @@ impl Inner {
                 updated_at: now + i as i64,
             })
             .collect();
-        // Auto and Direct requests run at once (unless the plan has questions for the user).
+        // Auto and Direct requests run at once (unless the plan has questions for the user, or
+        // may answer a message from outside that the user has not said OK to).
         let runs_at_once = matches!(mode, LeadMode::Auto | LeadMode::Direct);
-        let auto = runs_at_once && valid.plan.open_questions.is_empty();
+        let auto = runs_at_once && !outside_waits && valid.plan.open_questions.is_empty();
         let plan_json = serde_json::to_value(&valid.plan)?;
         let rows = self.store.tx(|tx| {
             let mut out = vec![];
@@ -170,7 +182,12 @@ impl Inner {
                 ),
                 json!({ "rule": "validated", "tasks": tasks.iter().map(|t| &t.key).collect::<Vec<_>>(), "fixes": valid.fixes.len() }),
             ));
-            if runs_at_once && !auto {
+            if runs_at_once && outside_waits {
+                decisions.push((
+                    "not auto-running: a message from outside Codly came in after your last one, so the plan waits for you".into(),
+                    json!({ "rule": "inbound", "sources": outside.iter().filter_map(|m| m.attachment.as_ref()?["inbound"]["source"].as_str()).collect::<Vec<_>>() }),
+                ));
+            } else if runs_at_once && !auto {
                 decisions.push(("not auto-running: the plan has open questions for you".into(), json!({ "rule": "open_questions" })));
             }
             for (summary, mut detail) in decisions {
@@ -986,6 +1003,8 @@ impl Inner {
     }
 
     async fn recover_inner(&self) -> Result<()> {
+        // No run of this start exists yet: every MCP config file under runs/ is a leftover with keys in it.
+        crate::adapters::claude::remove_stale_mcp_configs(&self.data("runs"));
         // One bad row must not leave everything after it stuck: each item recovers on its own.
         let each = |what: &str, id: &str, res: Result<()>| {
             if let Err(e) = res {

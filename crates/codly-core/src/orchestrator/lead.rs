@@ -17,8 +17,9 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
 use super::runs::{RunReq, new_session};
-use super::{Inner, guard, lock, names, prompts};
+use super::{Core, Inner, guard, lock, names, prompts};
 use crate::adapters::SessionMode;
+use crate::inbound::InboundMessage;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
 
@@ -31,6 +32,33 @@ pub(super) const MAX_LIVE_LEADS: usize = 3;
 /// The request thread a Lead serves (Lead rows written before threads existed serve "lead").
 pub(super) fn thread_of(lead: &Agent) -> &str {
     lead.thread.as_deref().unwrap_or("lead")
+}
+
+/// Who a turn in a chat thread is from: you, or something outside Codly (a webhook, Slack).
+pub(super) enum Said<'a> {
+    User(&'a str),
+    Outside(&'a InboundMessage),
+}
+
+impl Core {
+    /// A message from outside Codly (a webhook, Slack) for `thread`: "lead" or "lead:<id>" for
+    /// that request's Lead, "agent:<id>" for one agent. It is not the user's message: the
+    /// thread stores and shows it under its source's name, the agent reads it as quoted data,
+    /// and a plan made after it waits for Run plan (`Inner::submit_plan_inner`).
+    /// Returns once the message is recorded and handed over, like `send_chat`.
+    pub async fn send_inbound(&self, thread: &str, msg: &InboundMessage) -> Result<()> {
+        if msg.text.trim().is_empty() {
+            bail!("empty message");
+        }
+        if is_lead_thread(thread) {
+            if thread.strip_prefix("lead:").is_some_and(|id| id.trim().is_empty()) {
+                bail!("unknown thread {thread}");
+            }
+            return self.inner.inbound_to_lead(&self.inner.require_ws()?, thread, msg).await;
+        }
+        let Some(agent_id) = thread.strip_prefix("agent:") else { bail!("unknown thread {thread}") };
+        self.inner.chat_agent_from(agent_id, Said::Outside(msg)).await
+    }
 }
 
 #[derive(Default)]
@@ -469,6 +497,14 @@ impl Inner {
         self.send_to_lead(ws, thread, body, None).await
     }
 
+    /// A message from outside Codly for the Lead of `thread`: recorded under its source's name
+    /// (a Codly line with an `inbound` attachment, never a "user" message), and handed to the
+    /// Lead as quoted data.
+    async fn inbound_to_lead(self: &Arc<Self>, ws: &Workspace, thread: &str, msg: &InboundMessage) -> Result<()> {
+        self.chat(Some(&ws.id), thread, "codly", &msg.shown(), Some(msg.attachment()))?;
+        self.send_to_lead(ws, thread, format!("\n{}", prompts::inbound_message(&msg.source, &msg.text)), None).await
+    }
+
     /// Close a request: stop and archive its Lead, cancel its unfinished plans, and move its
     /// messages and plans to an archive thread ("closed:<thread>:<ms>") so it leaves the tabs.
     /// Nothing is deleted: history, branches and worktrees stay. The same thread id can be
@@ -603,6 +639,11 @@ impl Inner {
     /// 1:1 chat: a turn in that agent's own session — queued if it is busy, steering a
     /// worker mid-task — spawned (or resumed) if it is not running.
     pub(super) async fn chat_agent(self: &Arc<Self>, agent_id: &str, text: &str) -> Result<()> {
+        self.chat_agent_from(agent_id, Said::User(text)).await
+    }
+
+    /// `chat_agent` for a turn that is yours or came from outside Codly (`Said`).
+    pub(super) async fn chat_agent_from(self: &Arc<Self>, agent_id: &str, said: Said<'_>) -> Result<()> {
         let agent = self.agent(agent_id)?;
         let ws_id = self.store.agent_workspace(agent_id)?;
         if agent.role == Role::Lead {
@@ -611,11 +652,23 @@ impl Inner {
                 Some(id) => self.store.workspace(id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
                 None => self.require_ws()?,
             };
-            return self.chat_lead_in(&ws, thread_of(&agent), text).await;
+            return match said {
+                Said::User(text) => self.chat_lead_in(&ws, thread_of(&agent), text).await,
+                Said::Outside(msg) => self.inbound_to_lead(&ws, thread_of(&agent), msg).await,
+            };
         }
         let thread = format!("agent:{agent_id}");
-        self.chat(ws_id.as_deref(), &thread, "user", text, None)?;
-        let prompt = format!("[User] {text}");
+        let prompt = match said {
+            Said::User(text) => {
+                self.chat(ws_id.as_deref(), &thread, "user", text, None)?;
+                format!("[User] {text}")
+            }
+            // Not your message: recorded under its source's name, read as quoted data.
+            Said::Outside(msg) => {
+                self.chat(ws_id.as_deref(), &thread, "codly", &msg.shown(), Some(msg.attachment()))?;
+                prompts::inbound_message(&msg.source, &msg.text)
+            }
+        };
         let stopping = lock(&self.live).get(agent_id).map(|l| l.stopping);
         match stopping {
             Some(false) => return self.send_prompt(agent_id, prompt),

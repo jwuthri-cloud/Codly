@@ -219,8 +219,10 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   that agents start with (through `npx` or `uvx`), to push when you press Push, and for two features that
   are off until you turn them on: dictation (audio goes to Groq with your key) and Show Claude usage.
   The voice relay in `voice/` talks to OpenAI, and only if you run it.
-- Inbound webhooks listen on this Mac only (loopback) and are created switched off. `codly serve` also
-  listens on this Mac only, unless you pass `--host`.
+- Inbound webhooks listen on this Mac only (loopback) and are created switched off. A webhook message
+  shows under its endpoint's name, not as yours, and a plan made from it waits for Run plan unless you
+  let that endpoint run plans without asking. `codly serve` also listens on this Mac only, unless you
+  pass `--host`.
 
 Provider terms change. Check them before heavy parallel use.
 

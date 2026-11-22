@@ -177,7 +177,8 @@ pub fn parse_envelope(raw: &str, cfg: &SlackConfig, seen: &mut Seen) -> Parsed {
     if text.is_empty() {
         return drop("empty");
     }
-    Parsed { ack, message: Some(InboundMessage { source: format!("Slack user {user} in {channel}"), text }), dropped: None }
+    // Slack has no "run plans without asking" switch: what it starts always waits for the user.
+    Parsed { ack, message: Some(InboundMessage { source: format!("Slack user {user} in {channel}"), text, auto_run: false }), dropped: None }
 }
 
 /// `<@U123> do the thing` → `do the thing` (the bot's own mention is not part of the request).

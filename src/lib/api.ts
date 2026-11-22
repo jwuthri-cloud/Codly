@@ -412,7 +412,8 @@ export const api = {
   inboundState: () => call<InboundState>('inbound_state'),
   /** A new endpoint, switched off, with its secret (shown to the user once). */
   inboundCreateWebhook: (name: string) => call<NewWebhook>('inbound_create_webhook', { name }),
-  inboundSetWebhook: (id: string, enabled: boolean) => call<InboundState>('inbound_set_webhook', { id, enabled }),
+  /** One endpoint's two switches: on or off, and whether a plan made from its messages may run without your Run plan click. */
+  inboundSetWebhook: (id: string, enabled: boolean, autoRun: boolean) => call<InboundState>('inbound_set_webhook', { id, enabled, autoRun }),
   inboundRevokeWebhook: (id: string) => call<InboundState>('inbound_revoke_webhook', { id }),
   /** Who answers inbound messages ("lead" or "agent:<id>") and the listener's port. */
   inboundSetSettings: (answerer: string, port: number) => call<InboundState>('inbound_set_settings', { answerer, port }),

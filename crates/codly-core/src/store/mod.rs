@@ -634,6 +634,26 @@ impl Store {
         Ok(s.and_then(|s| serde_json::from_str::<ChatMessage>(&s).ok()).map(|m| m.text))
     }
 
+    /// The messages of `thread` that came from outside Codly (a webhook, Slack: an `inbound`
+    /// attachment) after the user's last own message there, newest first. The read stops at
+    /// that message, so its cost follows what came in since, not the length of the thread.
+    pub fn inbound_since_user(&self, workspace_id: Option<&str>, thread: &str) -> Result<Vec<ChatMessage>> {
+        let conn = self.conn();
+        let mut newest_first = conn.prepare_cached("SELECT json FROM chat WHERE workspace_id IS ?1 AND thread = ?2 ORDER BY ts DESC, rowid DESC")?;
+        let mut rows = newest_first.query(params![workspace_id, thread])?;
+        let mut out = vec![];
+        while let Some(row) = rows.next()? {
+            let Ok(m) = serde_json::from_str::<ChatMessage>(&row.get::<_, String>(0)?) else { continue };
+            if m.author == "user" {
+                break;
+            }
+            if crate::inbound::is_inbound(m.attachment.as_ref()) {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn task_workspace(&self, id: &str) -> Result<Option<String>> {
         Ok(self.conn().query_row("SELECT workspace_id FROM task WHERE id = ?1", [id], |r| r.get(0)).optional()?)
     }
