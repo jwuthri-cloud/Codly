@@ -1129,6 +1129,26 @@ export class Story {
     return this.landStopped(t, false);
   }
 
+  /** Send back, from a task's diff. Like the core: the comments go to the task's worker (the demo's
+   *  worker goes on with its script), a stopped task starts again, and a done task takes none. */
+  sendBackTask(id: string, comments: string): Task {
+    const sim = this.sim;
+    const t = sim.tasks.get(id);
+    const text = comments.trim();
+    if (!t) throw new Error('Unknown task');
+    if (!text) throw new Error('there is no comment to send');
+    if (t.status === 'done') throw new Error(`${t.key} is done and its work is merged; ask for the changes in a new request`);
+    if (t.status === 'cancelled') throw new Error(`${t.key} is cancelled; reopen it first`);
+    if (t.status === 'pending') throw new Error(`${t.key} has not started yet`);
+    if (t.status === 'merging') throw new Error(`Codly is working on ${t.key} right now; send your comments again in a moment`);
+    const stopped = t.status === 'blocked' || t.status === 'failed';
+    const asked = { status: 'changes_requested' as const, status_reason: 'you asked for changes; Codly checks the work again when its worker is done' };
+    const next = stopped ? this.moveTask(id, 'ready') : t.status === 'ready' ? t : sim.patchTask(id, asked);
+    if (t.assignee) sim.chat(`agent:${t.assignee}`, 'user', text);
+    sim.decision('review', 'human', `You sent ${t.key} back with review comments`, { task: t.key, comments: text }, { task: id });
+    return next;
+  }
+
   /** Like the core: only a blocked or failed task. `only` says which tasks the card's action is for. */
   private stoppedTask(id: string, only: string): Task {
     const t = this.sim.tasks.get(id);

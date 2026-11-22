@@ -458,6 +458,8 @@ export class MockTransport implements Transport {
         return story.taskDiff(String(a.taskId));
       case 'plan_diff':
         return story.planDiff(String(a.planId));
+      case 'send_back_task':
+        return story.sendBackTask(String(a.taskId), String(a.comments));
       case 'get_events': {
         const agentId = a.agentId as string | null;
         const thread = (a.thread as string | null) ?? null;

@@ -253,6 +253,12 @@ pub async fn plan_diff(state: State<'_, AppState>, plan_id: String) -> R<String>
     state.core().await?.plan_diff(&plan_id).await.map_err(err)
 }
 
+/// Send back: the review comments on a task's diff go to the agent that did the work.
+#[tauri::command]
+pub async fn send_back_task(state: State<'_, AppState>, task_id: String, comments: String) -> R<Task> {
+    state.core().await?.send_back_task(&task_id, &comments).await.map_err(err)
+}
+
 /// `into`: the branch the user confirmed after `merge_plan_warning`.
 #[tauri::command]
 pub async fn merge_plan(state: State<'_, AppState>, plan_id: String, into: Option<String>) -> R<String> {

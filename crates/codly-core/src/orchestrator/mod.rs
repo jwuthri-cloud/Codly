@@ -963,6 +963,15 @@ impl Core {
         self.inner.plan_diff(plan_id).await
     }
 
+    /// Send back, from a task's diff: your review comments (one message: for each, the file
+    /// and line, the quoted line, the comment) go to the agent that did the work. A worker
+    /// still on the task reads them after its current turn and the gate checks its work again;
+    /// a blocked or failed task starts again with them. Refused for a done task: its work is
+    /// merged, so the changes are a new request.
+    pub async fn send_back_task(&self, task_id: &str, comments: &str) -> anyhow::Result<Task> {
+        self.inner.send_back_task(task_id, comments).await
+    }
+
     /// Merge the plan's integration branch into the user's current branch (refuses if the
     /// main checkout is dirty, or is not on the branch the plan started from). Returns the new
     /// HEAD sha.

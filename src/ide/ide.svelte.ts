@@ -1,11 +1,12 @@
 // State of the workspace IDE overlay. One agent at a time: closing the overlay only hides it
-// (tabs and unsaved edits stay), opening another agent starts clean. Every file operation goes
-// through the core, which confines it to the agent's worktree; nothing here touches a path
-// except as a root-relative string.
+// (tabs and unsaved edits stay), opening another agent starts clean, and is refused while the
+// one it is on has unsaved edits. Every file operation goes through the core, which confines
+// it to the agent's worktree; nothing here touches a path except as a root-relative string.
 import { api } from '../lib/api';
 import type { IdeChange } from '../lib/gen/IdeChange';
 import type { IdeEntry } from '../lib/gen/IdeEntry';
 import type { IdeInfo } from '../lib/gen/IdeInfo';
+import { store } from '../lib/state/store.svelte';
 import { toast } from '../lib/state/toasts.svelte';
 
 export type Rail = 'explorer' | 'search' | 'source';
@@ -36,9 +37,21 @@ class Ide {
     return this.tabs.find((t) => t.id === this.active) ?? HOME;
   }
 
-  /** Open the IDE on an agent's workspace. */
-  async open(agentId: string) {
+  /** Open the IDE on an agent's workspace. False: it stays on the agent it is on, whose unsaved
+   *  edits the switch would drop (a toast says so, and shows them). */
+  async open(agentId: string): Promise<boolean> {
     if (agentId !== this.agentId) {
+      const unsaved = this.dirtyCount;
+      if (unsaved) {
+        const name = (this.agentId ? store.agentMap.get(this.agentId)?.name : null) ?? this.info?.agent_name ?? 'another agent';
+        toast({
+          kind: 'attention',
+          title: `Save your edits in ${name}’s workspace first`,
+          body: `${unsaved === 1 ? '1 file is' : `${unsaved} files are`} not saved there, and the editor shows one workspace at a time. Save ${unsaved === 1 ? 'it' : 'them'}, or close ${unsaved === 1 ? 'its tab' : 'their tabs'} to drop the edits.`,
+          action: { label: 'Show them', run: () => (this.visible = true) },
+        });
+        return false;
+      }
       this.agentId = agentId;
       this.info = null;
       this.tabs = [HOME];
@@ -50,6 +63,7 @@ class Ide {
     }
     this.visible = true;
     await Promise.all([this.refreshInfo(), this.loadDir(''), this.refreshChanges()]);
+    return true;
   }
 
   close() {
@@ -58,7 +72,7 @@ class Ide {
 
   /** Open the IDE on an agent's worktree, on the file at `path` (root-relative or absolute). */
   async openPath(agentId: string, path: string, line: number | null = null) {
-    await this.open(agentId);
+    if (!(await this.open(agentId))) return;
     const root = this.info?.root.replace(/\/+$/, '');
     let rel = path;
     if (path.startsWith('/')) {
