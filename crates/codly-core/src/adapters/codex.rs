@@ -14,7 +14,9 @@
 //! args, env, default_tools_approval_mode}`, `features.memories` and `memories.*` are valid.
 //!
 //! A prompt sent while a turn runs is steered into it (`turn/steer`), so it does not get a
-//! `TurnStarted`/`TurnCompleted` of its own.
+//! `TurnStarted`/`TurnCompleted` of its own: a `PromptSteered` says it was delivered. Codex
+//! may report the turn's end before it answers the steer: the adapter keeps that end back
+//! until the answer, so a `PromptSteered` always comes before its turn's `TurnCompleted`.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -37,6 +39,12 @@ use crate::proc::{self, RawLog, Record, StderrTail};
 
 /// Notifications Codly never uses (opted out in `initialize`).
 const OPT_OUT: &[&str] = &["remoteControl/status/changed"];
+
+/// The account's usage windows. Codex sends it after every model response, changed or not.
+const RATE_LIMITS: &str = "account/rateLimits/updated";
+/// An unchanged `RATE_LIMITS` reading is passed on again after this long: a window without a
+/// reset time counts only while it was seen recently.
+const LIMITS_REFRESH_MS: i64 = 60_000;
 
 /// One app-server per sign-in: its CODEX_HOME (None = unset) holds the account's auth and
 /// threads, and its thread-less notifications (rate limits) concern that account only.
@@ -126,6 +134,19 @@ struct State {
     pending: HashMap<i64, Waiter>,
     /// threadId → the agent that owns it
     routes: HashMap<String, Route>,
+    /// The last `RATE_LIMITS` params passed on to the agents, and when.
+    last_limits: Option<(Value, i64)>,
+}
+
+impl State {
+    /// Is this `RATE_LIMITS` reading worth passing on: a new one, or the same one seen long ago?
+    fn limits_news(&mut self, params: &Value, now: i64) -> bool {
+        if self.last_limits.as_ref().is_some_and(|(last, at)| last == params && now - at < LIMITS_REFRESH_MS) {
+            return false;
+        }
+        self.last_limits = Some((params.clone(), now));
+        true
+    }
 }
 
 struct AppServer {
@@ -266,6 +287,15 @@ impl AppServer {
                 } else if tid.is_some() {
                     // A thread nobody owns (any more): its `turn/completed` must not end another agent's turn.
                     self.bootstrap_raw.inbound(bytes);
+                } else if method == "account/updated" {
+                    // Who is signed in: this server's own state, nothing for an agent to report.
+                    self.bootstrap_raw.inbound(bytes);
+                    if let Some(billing) = params["authMode"].as_str().and_then(auth_mode_billing) {
+                        self.info.lock().unwrap().billing = billing;
+                    }
+                } else if method == RATE_LIMITS && !st.routes.is_empty() && !st.limits_news(&params, now_ms()) {
+                    // The reading the agents already have: in the raw log once, reported by nobody.
+                    self.bootstrap_raw.inbound(bytes);
                 } else {
                     // Thread-less notifications (account rate limits, warnings) concern every agent.
                     let routes: Vec<Route> = st.routes.values().cloned().collect();
@@ -345,6 +375,16 @@ impl AppServer {
 /// `account/read` when nobody is signed in and the model provider needs an OpenAI sign-in.
 fn signed_out(account: &Value) -> bool {
     account["account"].is_null() && account["requiresOpenaiAuth"] == true
+}
+
+/// Who pays under an `account/updated.authMode`. None = a mode Codly does not know: the
+/// billing `account/read` gave stays.
+fn auth_mode_billing(mode: &str) -> Option<Billing> {
+    match mode {
+        "chatgpt" => Some(Billing::Subscription),
+        "apikey" => Some(Billing::ApiKey),
+        _ => None,
+    }
 }
 
 async fn server_for(servers: &Servers, spec: &SpawnSpec, raw: &Arc<RawLog>) -> anyhow::Result<Arc<AppServer>> {
@@ -467,6 +507,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         interrupt_after_start: false,
         steer_queue: Vec::new(),
         queue: VecDeque::new(),
+        held: Vec::new(),
         stage: Stage::Running,
         deadline: None,
     };
@@ -536,6 +577,9 @@ struct CodexAgent {
     steer_queue: Vec<String>,
     /// Prompts that could not be steered (the turn ended first): new turns.
     queue: VecDeque<String>,
+    /// A `turn/completed` that came while a `turn/steer` was unanswered, and the notifications
+    /// after it: handled, in order, once the last steer is answered.
+    held: Vec<(String, Value)>,
     stage: Stage,
     deadline: Option<tokio::time::Instant>,
 }
@@ -650,16 +694,49 @@ impl CodexAgent {
             // The turn ended before the steer landed: run it as the next turn instead.
             (Pending::Steer(text), Err(_)) => {
                 self.queue.push_back(text);
+                self.release_held().await;
                 if self.active_turn.is_none() && !self.turn_pending {
                     self.next_turn().await;
                 }
             }
+            // In the running turn now: it gets no turn events, so say it was delivered.
+            (Pending::Steer(text), Ok(_)) => {
+                self.emit(EventKind::PromptSteered { input: text });
+                self.release_held().await;
+            }
             (Pending::Unsubscribe, _) => self.finish(),
-            (Pending::Steer(_) | Pending::Interrupt, _) => {}
+            (Pending::Interrupt, _) => {}
         }
     }
 
+    fn steer_unanswered(&self) -> bool {
+        self.pending.values().any(|p| matches!(p, Pending::Steer(_)))
+    }
+
+    /// Codex answers a steer and ends a turn on two streams, in no fixed order. A turn's end
+    /// that comes before the answer waits for it: a `PromptSteered` after its `TurnCompleted`
+    /// would tell Codly the agent ended its turn with a prompt still to come, and no later
+    /// turn would end to say it is done. What follows the end waits behind it, to stay in order.
     async fn on_notification(&mut self, method: &str, params: &Value) {
+        if !self.held.is_empty() || (method == "turn/completed" && self.steer_unanswered()) {
+            self.held.push((method.to_owned(), params.clone()));
+            return;
+        }
+        self.handle_notification(method, params).await;
+    }
+
+    /// Every steer is answered (Codex answers each request, and a server that exits fails the
+    /// open ones): handle what waited for that.
+    async fn release_held(&mut self) {
+        if self.steer_unanswered() {
+            return;
+        }
+        for (method, params) in std::mem::take(&mut self.held) {
+            self.handle_notification(&method, &params).await;
+        }
+    }
+
+    async fn handle_notification(&mut self, method: &str, params: &Value) {
         let events = self.norm.on_notification(method, params);
         self.emit_all(events);
         if method == "turn/completed" {
@@ -867,6 +944,8 @@ pub struct CodexNormalizer {
     baseline: Option<[i64; 4]>,
     retries: i64,
     turn_announced: bool,
+    /// Between a turn's start and its `turn/completed`.
+    in_turn: bool,
     pub interrupt_requested: bool,
 }
 
@@ -889,6 +968,7 @@ impl CodexNormalizer {
             baseline: None,
             retries: 0,
             turn_announced: false,
+            in_turn: false,
             interrupt_requested: false,
         }
     }
@@ -914,6 +994,7 @@ impl CodexNormalizer {
     pub fn turn_started(&mut self, text: &str) -> Vec<EventKind> {
         let mut out = vec![EventKind::TurnStarted { input: Some(text.to_string()) }];
         self.turn_announced = true;
+        self.in_turn = true;
         self.interrupt_requested = false;
         self.last_final = None;
         self.set_status(AgentStatus::Thinking, &mut out);
@@ -924,6 +1005,7 @@ impl CodexNormalizer {
     pub fn turn_failed(&mut self) -> Vec<EventKind> {
         let mut out = vec![EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: None, duration_ms: None }];
         self.turn_announced = false;
+        self.in_turn = false;
         self.set_status(AgentStatus::Idle, &mut out);
         out
     }
@@ -937,6 +1019,7 @@ impl CodexNormalizer {
                 if !std::mem::take(&mut self.turn_announced) {
                     out.push(EventKind::TurnStarted { input: None });
                 }
+                self.in_turn = true;
                 self.set_status(AgentStatus::Thinking, &mut out);
             }
             "turn/completed" => {
@@ -957,6 +1040,7 @@ impl CodexNormalizer {
                 self.waiting = false;
                 self.interrupt_requested = false;
                 self.turn_announced = false;
+                self.in_turn = false;
                 out.push(EventKind::TurnCompleted { status, result_text: self.last_final.take(), duration_ms: turn["durationMs"].as_i64() });
                 self.set_status(AgentStatus::Idle, &mut out);
             }
@@ -1003,22 +1087,23 @@ impl CodexNormalizer {
                 out.push(EventKind::PlanUpdated { steps });
             }
             "thread/tokenUsage/updated" => out.push(self.usage_update(&p["tokenUsage"])),
-            "account/rateLimits/updated" => self.rate_limits(&p["rateLimits"], &mut out),
+            RATE_LIMITS => self.rate_limits(&p["rateLimits"], &mut out),
             "error" => {
                 let err = &p["error"];
                 let message = err["message"].as_str().unwrap_or("Codex error").to_string();
                 let info = &err["codexErrorInfo"];
-                if info == "usageLimitExceeded" || info == "rateLimitExceeded" {
-                    self.set_status(AgentStatus::RateLimited, &mut out);
-                }
-                if info == "usageLimitExceeded" && p["willRetry"] != true {
-                    // The account's quota is spent (no window in this error).
-                    out.push(EventKind::RateLimit { window: "usage".into(), used_fraction: None, resets_at: None, status: Some("rejected".into()) });
-                }
                 if p["willRetry"] == true {
+                    // Codex tries again by itself: a limit it retries is not a limit reached.
                     self.retries += 1;
                     out.push(EventKind::Retrying { attempt: self.retries, reason: message });
                 } else {
+                    if info == "usageLimitExceeded" || info == "rateLimitExceeded" {
+                        self.set_status(AgentStatus::RateLimited, &mut out);
+                    }
+                    if info == "usageLimitExceeded" {
+                        // The account's quota is spent (no window in this error).
+                        out.push(EventKind::RateLimit { window: "usage".into(), used_fraction: None, resets_at: None, status: Some("rejected".into()) });
+                    }
                     out.push(EventKind::Error { message, fatal: false });
                 }
             }
@@ -1208,6 +1293,15 @@ impl CodexNormalizer {
 
     fn rate_limits(&mut self, rl: &Value, out: &mut Vec<EventKind>) {
         let reached = !rl["rateLimitReachedType"].is_null();
+        // The status before the windows: they are the account's real reading and have the last
+        // word on it (an allowed window lifts the park a bare RateLimited status sets).
+        if reached {
+            self.set_status(AgentStatus::RateLimited, out);
+        } else if self.status == Some(AgentStatus::RateLimited) {
+            // The limit lifted: back to work mid-turn, free otherwise.
+            let s = if self.in_turn { self.busy_status() } else { AgentStatus::Idle };
+            self.set_status(s, out);
+        }
         let full = |key: &str| rl[key]["usedPercent"].as_f64().is_some_and(|p| p >= 100.0);
         // The window that is full is the one that was reached (both, if neither says so).
         let any_full = full("primary") || full("secondary");
@@ -1228,9 +1322,6 @@ impl CodexNormalizer {
                 resets_at: w["resetsAt"].as_i64().map(|s| s * 1000),
                 status: Some(if reached && (full(key) || !any_full) { "rejected" } else { "allowed" }.into()),
             });
-        }
-        if reached {
-            self.set_status(AgentStatus::RateLimited, out);
         }
     }
 
@@ -1584,6 +1675,11 @@ mod tests {
         assert!(matches!(&ev[0], EventKind::ToolOutput { call_id, chunk } if call_id == "c1" && chunk == "line\n"));
         let ev = norm.on_notification("error", &json!({ "error": { "message": "overloaded" }, "willRetry": true }));
         assert!(matches!(&ev[0], EventKind::Retrying { attempt: 1, .. }));
+        // A rate limit Codex retries by itself is not a limit reached: nothing parks the account.
+        for info in ["rateLimitExceeded", "usageLimitExceeded"] {
+            let ev = norm.on_notification("error", &json!({ "error": { "message": "429", "codexErrorInfo": info }, "willRetry": true }));
+            assert!(matches!(&ev[..], [EventKind::Retrying { reason, .. }] if reason == "429"), "{ev:?}");
+        }
         let ev = norm.on_notification("error", &json!({ "error": { "message": "limit", "codexErrorInfo": "usageLimitExceeded" }, "willRetry": false }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::StatusChanged { status: AgentStatus::RateLimited })));
         assert!(ev.iter().any(|e| matches!(e, EventKind::RateLimit { window, status: Some(s), .. } if window == "usage" && s == "rejected")));
@@ -1616,6 +1712,32 @@ mod tests {
                            "result": { "content": [{ "type": "text", "text": "posted" }] }, "error": null, "durationMs": 12 });
         let ev = norm.on_notification("item/completed", &json!({ "item": done }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::ToolCompleted { ok: true, output: Some(o), duration_ms: Some(12), .. } if o == "posted")));
+    }
+
+    /// The account's limit reaches every agent on it, the idle ones too: they are free again
+    /// when a reading says the limit lifted, not only at their next turn.
+    #[test]
+    fn a_lifted_limit_frees_the_agent() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        let rl = |reached: bool| {
+            let (kind, used) = if reached { (json!("rate_limit_reached"), 100.0) } else { (Value::Null, 3.0) };
+            json!({ "rateLimits": { "rateLimitReachedType": kind, "primary": { "usedPercent": used, "windowDurationMins": 300, "resetsAt": 1 } } })
+        };
+        let statuses = |ev: &[EventKind]| -> Vec<AgentStatus> {
+            ev.iter().filter_map(|e| if let EventKind::StatusChanged { status } = e { Some(*status) } else { None }).collect()
+        };
+        let ev = norm.on_notification(RATE_LIMITS, &rl(true));
+        // the status first: the window after it is the real reading, with the last word on the account
+        assert!(matches!(&ev[..], [EventKind::StatusChanged { status: AgentStatus::RateLimited }, EventKind::RateLimit { status: Some(s), .. }] if s == "rejected"), "{ev:?}");
+        assert_eq!(statuses(&norm.on_notification(RATE_LIMITS, &rl(false))), [AgentStatus::Idle]);
+        assert!(statuses(&norm.on_notification(RATE_LIMITS, &rl(false))).is_empty(), "an agent that was not limited keeps its status");
+        // mid-turn it goes back to work, not to idle
+        norm.turn_started("go");
+        norm.on_notification(RATE_LIMITS, &rl(true));
+        assert_eq!(statuses(&norm.on_notification(RATE_LIMITS, &rl(false))), [AgentStatus::Thinking]);
+        norm.on_notification("turn/completed", &json!({ "turn": { "status": "completed" } }));
+        norm.on_notification(RATE_LIMITS, &rl(true));
+        assert_eq!(statuses(&norm.on_notification(RATE_LIMITS, &rl(false))), [AgentStatus::Idle], "the turn is over");
     }
 
     #[test]
@@ -1735,6 +1857,7 @@ mod tests {
             interrupt_after_start: false,
             steer_queue: Vec::new(),
             queue: VecDeque::new(),
+            held: Vec::new(),
             stage: Stage::Running,
             deadline: None,
         };
@@ -1769,6 +1892,112 @@ mod tests {
         server.route_line(br#"{"method":"account/rateLimits/updated","params":{"rateLimits":{}}}"#);
         let limits = Some("account/rateLimits/updated".to_string());
         assert_eq!((got(&mut agents[0]), got(&mut agents[1])), (limits.clone(), limits));
+    }
+
+    /// Codex repeats the account's usage after every model response. Each agent would record
+    /// every copy: only a reading that says something new is passed on.
+    #[tokio::test]
+    async fn an_unchanged_rate_limit_reading_is_passed_on_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let mut agents = Vec::new();
+        for tid in ["t1", "t2"] {
+            let (tx, rx) = mpsc::unbounded_channel();
+            server.state.lock().unwrap().routes.insert(tid.into(), Route { tx, raw: server.bootstrap_raw.clone() });
+            agents.push(rx);
+        }
+        // how many notifications each agent got since the last look
+        let mut got = || -> Vec<usize> { agents.iter_mut().map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).count()).collect() };
+        // `emittedAtMs` differs on every line: only the reading itself (`params`) is compared
+        let reading = |used: u32, reached: &str, at: u32| {
+            format!(r#"{{"method":"account/rateLimits/updated","params":{{"rateLimits":{{"primary":{{"usedPercent":{used}}},"rateLimitReachedType":{reached}}}}},"emittedAtMs":{at}}}"#)
+        };
+        server.route_line(reading(4, "null", 1).as_bytes());
+        assert_eq!(got(), [1, 1], "the first reading reaches every agent");
+        server.route_line(reading(4, "null", 2).as_bytes());
+        server.route_line(reading(4, "null", 3).as_bytes());
+        assert_eq!(got(), [0, 0], "the same reading again reaches nobody");
+        server.route_line(reading(5, "null", 4).as_bytes());
+        assert_eq!(got(), [1, 1], "more usage is news");
+        server.route_line(reading(5, r#""rate_limit_reached""#, 5).as_bytes());
+        assert_eq!(got(), [1, 1], "so is a limit reached at the same usage");
+        // a minute on, the same reading counts again (a window without a reset time goes stale)
+        server.state.lock().unwrap().last_limits.as_mut().unwrap().1 -= LIMITS_REFRESH_MS;
+        server.route_line(reading(5, r#""rate_limit_reached""#, 6).as_bytes());
+        assert_eq!(got(), [1, 1]);
+
+        // who is signed in is the server's to know: no agent reports it
+        server.route_line(br#"{"method":"account/updated","params":{"authMode":"chatgpt","planType":"plus"}}"#);
+        assert_eq!(got(), [0, 0]);
+        assert_eq!(server.info.lock().unwrap().billing, Billing::Subscription);
+        server.route_line(br#"{"method":"account/updated","params":{"authMode":"a mode from the future"}}"#);
+        assert_eq!(server.info.lock().unwrap().billing, Billing::Subscription, "an unknown mode changes nothing");
+    }
+
+    /// A steered prompt gets no turn of its own. The adapter says it was delivered, or Codly
+    /// would wait for that turn and never see the agent as done.
+    #[tokio::test]
+    async fn a_steered_prompt_is_reported_as_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.thread_id, agent.active_turn) = (Some("t".into()), Some("u".into()));
+        agent.pending.insert(7, Pending::Steer("also run the tests".into()));
+        agent.on_response(7, Ok(json!({ "turnId": "u" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::PromptSteered { input }] if input == "also run the tests"), "{kinds:?}");
+
+        // Codex refused it (the turn was ending): not delivered yet, it waits for a turn of its own
+        agent.pending.insert(8, Pending::Steer("and the docs".into()));
+        agent.on_response(8, Err(json!({ "message": "no active turn to steer" })), &mut None).await;
+        assert!(emitted(&mut events).is_empty());
+        assert_eq!(agent.queue, ["and the docs"]);
+    }
+
+    /// Codex may report a turn's end before it answers a steer sent into that turn. Codly
+    /// must hear "delivered" first: after the turn's end it would wait for a turn that never
+    /// comes, and the task would never reach its gate.
+    #[tokio::test]
+    async fn a_turn_end_waits_for_the_steer_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let done = json!({ "threadId": "t", "turn": { "status": "completed" } });
+        let ended = |k: &[EventKind]| {
+            matches!(k, [EventKind::TurnCompleted { status: TurnStatus::Completed, .. }, EventKind::StatusChanged { status: AgentStatus::Idle }])
+        };
+
+        // accepted: delivered, then the turn ends
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.thread_id, agent.active_turn) = (Some("t".into()), Some("u".into()));
+        agent.pending.insert(7, Pending::Steer("also run the tests".into()));
+        agent.on_notification("turn/completed", &done).await;
+        // what Codex sends after the end stays behind it
+        agent.on_notification("thread/status/changed", &json!({ "threadId": "t", "status": { "type": "idle" } })).await;
+        assert!(emitted(&mut events).is_empty());
+        assert!(agent.active_turn.is_some());
+        agent.on_response(7, Ok(json!({ "turnId": "u" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::PromptSteered { input }, end @ ..] if input == "also run the tests" && ended(end)), "{kinds:?}");
+        assert!(agent.active_turn.is_none() && agent.held.is_empty());
+
+        // two steers: the end waits for the last answer. That one is refused (the turn was
+        // over), so its prompt starts the next turn, after the end.
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.thread_id, agent.active_turn) = (Some("t".into()), Some("u".into()));
+        agent.pending.insert(7, Pending::Steer("also run the tests".into()));
+        agent.pending.insert(8, Pending::Steer("and the docs".into()));
+        agent.on_notification("turn/completed", &done).await;
+        agent.on_response(7, Ok(json!({ "turnId": "u" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::PromptSteered { .. }]), "{kinds:?}");
+        agent.on_response(8, Err(json!({ "message": "no active turn to steer" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        // the fake server takes no write: the next turn's `turn/start` shows as this error
+        assert!(
+            matches!(&kinds[..], [end @ .., EventKind::Error { message, fatal: false }] if ended(end) && message.starts_with("turn/start:")),
+            "{kinds:?}"
+        );
+        assert!(agent.queue.is_empty());
     }
 
     /// The spawner gave up after 60 s and failed the run itself: the adapter stays silent.

@@ -21,9 +21,18 @@ pub const UNKNOWN_USED: f64 = 0.5;
 /// A window without a reset time counts for this long after it was seen.
 const STALE_MS: i64 = 30 * 60_000;
 
+/// The window recorded (by `ingest`) for an agent that says only "rate limited": no window
+/// name and no reset time, so it parks the account for `STALE_MS` unless a reading lifts it.
+const UNNAMED_LIMIT: &str = "limit";
+
 /// "rejected" / "limited" / "exceeded": the provider refuses work until the window resets.
 pub fn rejected(status: Option<&str>) -> bool {
     matches!(status, Some("rejected" | "limited" | "exceeded"))
+}
+
+/// "allowed" / "allowed_warning": the provider takes work on this window.
+fn allowed(status: Option<&str>) -> bool {
+    status.is_some_and(|s| s.starts_with("allowed"))
 }
 
 /// A window that still applies: before its reset, or (no reset time) seen recently.
@@ -34,7 +43,9 @@ pub fn live(w: &UsageWindow, now: i64) -> bool {
 /// Record one `RateLimit` reading in an account's windows (one entry per window name, the
 /// latest wins, sorted by name). A reading that says the limit is reached counts as 100%; one
 /// without a fraction keeps the window's last live fraction, or is not recorded at all
-/// (unknown stays unknown). Returns the window's used fraction, if known.
+/// (unknown stays unknown). A window the provider reports as allowed also ends the park of
+/// an unnamed limit: the real reading has the last word. Returns the window's used fraction,
+/// if known.
 pub fn record_window(
     windows: &mut Vec<UsageWindow>,
     window: &str,
@@ -43,6 +54,9 @@ pub fn record_window(
     status: Option<&str>,
     now: i64,
 ) -> Option<f64> {
+    if window != UNNAMED_LIMIT && allowed(status) {
+        windows.retain(|w| w.window != UNNAMED_LIMIT);
+    }
     let prev = windows.iter().position(|w| w.window == window);
     let used = if rejected(status) {
         1.0
@@ -342,6 +356,34 @@ mod tests {
         assert_eq!(ws.len(), 2);
         // Out-of-range values are clamped.
         assert_eq!(record_window(&mut ws, "overage", Some(1.7), None, None, now), Some(1.0));
+    }
+
+    /// An agent that says only "rate limited" (a Codex error, Claude's `rate_limit` retry)
+    /// parks its account with no reset time. A retried 429 must not keep it parked for the
+    /// full 30 minutes: the next reading that says the provider takes work lifts it.
+    #[test]
+    fn an_allowed_reading_lifts_the_park_of_an_unnamed_limit() {
+        let now = 1_000 * H;
+        let mut ws = vec![];
+        record_window(&mut ws, UNNAMED_LIMIT, Some(1.0), None, Some("rejected"), now);
+        assert!(load(&ws, now).parked.is_some());
+        // A reading with no verdict, or of a window that is itself refused, lifts nothing.
+        record_window(&mut ws, "seven_day", Some(0.4), Some(now + 48 * H), None, now + 1);
+        record_window(&mut ws, "five_hour", Some(1.0), Some(now + 2 * H), Some("rejected"), now + 1);
+        assert!(ws.iter().any(|w| w.window == UNNAMED_LIMIT));
+        // The provider takes work again: only the real windows are left.
+        record_window(&mut ws, "five_hour", Some(0.3), Some(now + 2 * H), Some("allowed"), now + 2);
+        assert_eq!(ws.iter().map(|w| w.window.as_str()).collect::<Vec<_>>(), ["five_hour", "seven_day"]);
+        assert_eq!(load(&ws, now + 2), Load { used: Some(0.4), parked: None });
+        // So does a window whose own usage is unknown (it is not recorded, but it spoke).
+        record_window(&mut ws, UNNAMED_LIMIT, Some(1.0), None, Some("rejected"), now + 3);
+        assert_eq!(record_window(&mut ws, "seven_day_opus", None, None, Some("allowed_warning"), now + 4), None);
+        assert_eq!(load(&ws, now + 4).parked, None);
+        // A window of a full account that is allowed while another is refused: still parked, by the real one.
+        record_window(&mut ws, UNNAMED_LIMIT, Some(1.0), None, Some("rejected"), now + 5);
+        record_window(&mut ws, "five_hour", Some(1.0), Some(now + 2 * H), Some("rejected"), now + 5);
+        record_window(&mut ws, "seven_day", Some(0.4), Some(now + 48 * H), Some("allowed"), now + 5);
+        assert_eq!(load(&ws, now + 5).parked.as_deref(), Some("5h limit reached, resets in 2h"));
     }
 
     #[test]

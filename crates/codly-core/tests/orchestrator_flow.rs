@@ -1554,6 +1554,53 @@ async fn a_user_steer_during_the_gate_is_committed_before_merging() {
     core.shutdown().await;
 }
 
+/// Codex puts a prompt that arrives while a turn runs into that turn: no turn of its own, only
+/// a `PromptSteered`. A worker that got a message while it started (it follows the brief, into
+/// the brief's turn) must still be seen as done when that one turn ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_prompt_steered_into_the_running_turn_does_not_hold_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            // Like the Codex adapter: the next prompt lands in this turn.
+            let next = tokio::time::timeout(Duration::from_secs(5), async { turn.cmds.lock().await.recv().await }).await;
+            let Ok(Some(AgentCmd::Prompt(text))) = next else { return };
+            turn.emit(EventKind::PromptSteered { input: text });
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote hello.txt." })).await;
+        })
+    });
+    let up = Arc::new(tokio::sync::Notify::new());
+    let spawner = Slow(FakeSpawner { log: log.clone(), lead: planning_lead(), worker }, Role::Worker, up.clone());
+    let codex = CliInfo { provider: Provider::Codex, ..claude() };
+    let core = start_with_clis(dir.path(), spawner, vec![claude(), codex]).await;
+    let settings = Settings { auto_run_plans: true, lead_followups: false, worker_providers: vec![Provider::Codex], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let worker_id = wait_for("the worker's process to start", 20, async || {
+        let log = log.lock().unwrap();
+        let at = log.spawns.iter().position(|s| s.0 == Role::Worker)?;
+        Some(log.runs[at].0.clone())
+    })
+    .await;
+    // Sent during the handshake: it goes out right behind the brief.
+    core.send_chat(&format!("agent:{worker_id}"), "keep the greeting lowercase").await.unwrap();
+    up.notify_one();
+    let (task, plan) = wait_for("the plan to finish", 30, async || {
+        task_status(&core).await.filter(|(_, p)| matches!(p.status, PlanStatus::Done | PlanStatus::Failed))
+    })
+    .await;
+    assert_eq!((task.status, plan.status), (TaskStatus::Done, PlanStatus::Done));
+    assert_eq!(turns_of(&log, &worker_id).len(), 1, "one turn took both prompts");
+    let events = core.events(None, None, 3000).await.unwrap();
+    assert!(events.iter().any(|e| matches!(&e.kind, EventKind::AgentChanged { agent } if agent.id == worker_id && agent.provider == Provider::Codex)));
+    assert!(events.iter().any(|e| matches!(&e.kind, EventKind::PromptSteered { input } if input.contains("keep the greeting lowercase"))));
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_vendor_review_requests_changes_then_approves() {
     let dir = tempfile::tempdir().unwrap();

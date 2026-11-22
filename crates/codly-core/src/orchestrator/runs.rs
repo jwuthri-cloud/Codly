@@ -239,7 +239,9 @@ impl Inner {
     }
 
     /// Send a user turn to a live agent. Claude and ACP adapters queue it behind a running
-    /// turn (it gets its own TurnStarted/TurnCompleted); Codex steers it into the running turn.
+    /// turn (it gets its own TurnStarted/TurnCompleted); Codex steers it into the running turn
+    /// (PromptSteered). Which of the two happens is the adapter's call, so every prompt counts
+    /// as queued until one of those events says where it went.
     pub(super) fn send_prompt(&self, agent_id: &str, text: String) -> Result<()> {
         // A pending "stop after this step" or a pause holds every prompt until the resume.
         let Some(text) = self.route_prompt(agent_id, text) else { return Ok(()) };
@@ -250,10 +252,7 @@ impl Inner {
         if l.stopping {
             bail!("that agent is shutting down; send your message again in a moment");
         }
-        let steer = l.provider == Provider::Codex && l.turn_active;
-        if !steer {
-            l.queued += 1;
-        }
+        l.queued += 1;
         l.last_prompt = text.lines().find(|s| !s.trim().is_empty()).map(|s| s.trim().to_string());
         // Still in its handshake: it goes out once the CLI is up, behind the run's first prompt.
         if let Some(waiting) = &mut l.starting {
