@@ -10,6 +10,8 @@ import type { RepoEntry } from './gen/RepoEntry';
 import type { Digest } from './gen/Digest';
 import type { DictationStatus } from './gen/DictationStatus';
 import type { AgentGit } from './gen/AgentGit';
+import type { AgentCheckpoints } from './gen/AgentCheckpoints';
+import type { CheckpointRestore } from './gen/CheckpointRestore';
 import type { Blocker } from './gen/Blocker';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { BreakerConfig } from './gen/BreakerConfig';
@@ -382,6 +384,10 @@ export const api = {
   dictationTranscribe: (audio: string, mime: string) => call<string>('dictation_transcribe', { audio, mime }),
   /** Read-only git state (status, branches, recent log) of an agent's worktree. */
   agentGit: (agentId: string) => call<AgentGit>('agent_git', { agentId }),
+  /** An agent's checkpoints: the files of its worktree before each of its turns, newest first. */
+  agentCheckpoints: (agentId: string) => call<AgentCheckpoints>('agent_checkpoints', { agentId }),
+  /** Put the files of the agent's worktree back to a checkpoint. Files only; it can be undone. */
+  restoreCheckpoint: (agentId: string, checkpoint: number) => call<CheckpointRestore>('restore_checkpoint', { agentId, checkpoint }),
   /** Schedules and network mode, with the log of what triggers did. */
   triggers: () => call<TriggersConfig>('get_triggers'),
   /** Save them; the core keeps its own clocks and log, and returns what it stored. */

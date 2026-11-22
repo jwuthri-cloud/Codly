@@ -238,6 +238,14 @@ they are build output or third-party code in most repos. If one holds your own c
   member is on other work, the task goes back in line for it and keeps your choice.
 - Clean-room profile for untrusted repos (`--setting-sources`, `--strict-mcp-config`).
 - Never deletes a dirty or unmerged worktree, and keeps the branch.
+- Checkpoints (`orchestrator/checkpoints.rs`): before each turn of a worker or a 1:1 agent, Codly
+  keeps the files of the agent's worktree (tracked and untracked, not ignored) as a commit under
+  a private ref, `refs/codly/checkpoints/<agent>/<n>`: on no branch, the last 50 per agent, and
+  neither HEAD nor the worktree's index moves. "Restore files to this point" in the agent's Git
+  tab first keeps the present files (so a restore can be undone), then puts the files back. It
+  changes files only: the conversation inside the CLI stays, and the agent's next prompt says
+  what was put back. It is refused while the agent's turn runs, and it never runs in your own
+  checkout: an agent hired with Git isolation off has no checkpoints.
 - The user's branch: Codly commits and merges by itself only on `codly/…` branches. Four
   commands change the user's branch or its remote (commits, merges, push), each behind a
   button: `merge_plan` and `merge_agent` (merge into the checked-out branch),
@@ -286,6 +294,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       breaker.rs breaker_run.rs           circuit breaker: policy and enforcement
                       team.rs hires.rs careers.rs         standing team and consultants, hired agents, XP and offers
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
+                      checkpoints.rs                      an agent's files before each turn (private refs); restore
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files

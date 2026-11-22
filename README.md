@@ -210,6 +210,10 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
   access, which approves it.
 - Codly removes a worktree only when it is clean and merged. It keeps the branch.
+- Before each turn of an agent, Codly keeps the files of the agent's worktree as a checkpoint (a commit
+  under a private ref, on no branch). **Restore files to this point**, in the agent's Git tab, puts the
+  files back and can be undone. It changes files only: the agent still remembers its later turns. An agent
+  with Git isolation off has no checkpoints, because Codly never puts files back in your own folder.
 
 **The network**
 

@@ -16,11 +16,13 @@
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - `breaker_run` circuit breaker enforcement (policy in `breaker`): steer, constrain, stop
 //! - `wallet`   the player's coins (🪙) across every repo, Build/Buy, developer grants
+//! - `checkpoints` an agent's files before each turn (private refs), "Restore files to this point"
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
 pub mod approvals;
 pub mod agent_git;
+pub mod checkpoints;
 pub mod breaker;
 mod breaker_run;
 mod careers;
