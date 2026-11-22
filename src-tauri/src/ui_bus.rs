@@ -122,3 +122,119 @@ impl UiBus {
         buf.push(ev);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use tokio::sync::mpsc;
+
+    /// An event as the core sends it (`kind` in its JSON form).
+    fn ev(id: i64, agent: &str, kind: Value) -> EventRow {
+        serde_json::from_value(json!({ "id": id, "ts": 0, "agent_id": agent, "task_id": null, "run_id": null, "kind": kind })).unwrap()
+    }
+    fn text(agent: &str, item: &str, text: &str) -> EventRow {
+        ev(0, agent, json!({ "type": "text_delta", "item_id": item, "text": text }))
+    }
+    fn thought(agent: &str, item: &str, text: &str) -> EventRow {
+        ev(0, agent, json!({ "type": "reasoning_delta", "item_id": item, "text": text }))
+    }
+    fn output(call: &str, chunk: &str) -> EventRow {
+        ev(0, "a1", json!({ "type": "tool_output", "call_id": call, "chunk": chunk }))
+    }
+    /// A stored event: the answer to an approval.
+    fn answered(id: i64) -> EventRow {
+        ev(id, "a1", json!({ "type": "approval_resolved", "approval_id": "ap1", "status": "approved", "by": "user" }))
+    }
+
+    /// A batch in short: streamed text by item or call, stored events by id and type.
+    fn shape(events: &[EventRow]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| match &e.kind {
+                EventKind::TextDelta { item_id, text } => format!("{item_id}:{text}"),
+                EventKind::ReasoningDelta { item_id, text } => format!("{item_id}?{text}"),
+                EventKind::ToolOutput { call_id, chunk } => format!("{call_id}>{chunk}"),
+                kind => format!("#{} {}", e.id, kind.type_name()),
+            })
+            .collect()
+    }
+
+    /// The next batch a browser tab gets.
+    async fn next(batches: &mut mpsc::UnboundedReceiver<UiBatch>) -> UiBatch {
+        tokio::time::timeout(Duration::from_secs(10), batches.recv()).await.expect("a batch within ten seconds").expect("the bus is still there")
+    }
+
+    #[test]
+    fn streamed_text_is_joined_per_item_and_no_event_changes_place() {
+        let bus = UiBus::new();
+        let mut buf = Vec::new();
+        let events = [
+            text("a1", "m1", "He"),
+            text("a1", "m1", "llo"),
+            output("c1", "$ ls\n"),
+            output("c1", "src\n"),
+            answered(7),
+            text("a1", "m1", "!"), // after a stored event: not joined across it
+            text("a2", "m1", "another agent's item"),
+            text("a2", "m2", "x"),
+            thought("a2", "m2", "h"),
+            thought("a2", "m2", "m"),
+            output("c2", "y"),
+        ];
+        for e in events {
+            bus.push(&mut buf, e);
+        }
+        assert_eq!(shape(&buf), ["m1:Hello", "c1>$ ls\nsrc\n", "#7 approval_resolved", "m1:!", "m1:another agent's item", "m2:x", "m2?hm", "c2>y"]);
+    }
+
+    #[test]
+    fn a_hidden_window_gets_no_streamed_text_but_every_stored_event() {
+        let bus = UiBus::new();
+        bus.visible.store(false, Ordering::Relaxed);
+        let mut buf = Vec::new();
+        for e in [text("a1", "m1", "He"), output("c1", "src\n"), answered(7), thought("a1", "m1", "hm")] {
+            bus.push(&mut buf, e);
+        }
+        assert_eq!(shape(&buf), ["#7 approval_resolved"]);
+        // A browser tab on `codly serve` is watching, whatever the window does.
+        bus.add_web(Box::new(|_| true));
+        bus.push(&mut buf, text("a1", "m1", "llo"));
+        assert_eq!(shape(&buf), ["#7 approval_resolved", "m1:llo"]);
+    }
+
+    #[tokio::test]
+    async fn a_burst_is_one_batch_and_lost_events_ask_for_a_fresh_snapshot() {
+        let bus = UiBus::new();
+        let (tx, mut batches) = mpsc::unbounded_channel();
+        bus.add_web(Box::new(move |b| tx.send(b.clone()).is_ok()));
+        let (events, rx) = broadcast::channel(4);
+        tokio::spawn(bus.clone().pump(rx));
+
+        for e in [text("a1", "m1", "He"), text("a1", "m1", "llo"), answered(7)] {
+            events.send(e).unwrap();
+        }
+        let batch = next(&mut batches).await;
+        assert_eq!(shape(&batch.events), ["m1:Hello", "#7 approval_resolved"]);
+        assert!(!batch.resync);
+
+        // More events than the channel holds before the pump runs again: the first two are
+        // lost, and the batch tells the UI to take a fresh snapshot.
+        for id in 1..=6 {
+            events.send(answered(id)).unwrap();
+        }
+        let batch = next(&mut batches).await;
+        assert!(batch.resync);
+        assert_eq!(shape(&batch.events), ["#3 approval_resolved", "#4 approval_resolved", "#5 approval_resolved", "#6 approval_resolved"]);
+
+        // A tab that went away is forgotten with the next batch.
+        drop(batches);
+        events.send(answered(9)).unwrap();
+        let forgotten = async {
+            while !bus.web.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), forgotten).await.expect("the closed tab is dropped");
+    }
+}
