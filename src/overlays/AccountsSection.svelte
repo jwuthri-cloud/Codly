@@ -15,7 +15,7 @@
   import { accounts } from '../lib/state/accounts.svelte';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
-  import { ACCOUNT_VAR, asConfigs, derivedLabel, HOME_SUGGESTION, moveItem, normalizeHome, parked, resetLabel, supportsAccounts, usable, validHome } from '../lib/util/accounts';
+  import { ACCOUNT_VAR, asConfigs, derivedLabel, HOME_SUGGESTION, moveItem, normalizeHome, parked, problemText, resetLabel, supportsAccounts, usable, validHome } from '../lib/util/accounts';
   import { PROVIDER_LABEL } from '../lib/util/labels';
   import { tildify } from '../lib/util/sanitize';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -172,8 +172,6 @@
   });
   const leadChoices = $derived(accounts.multi.has(leadProvider) ? listOf(leadProvider).filter(usable) : []);
 
-  /** The problem line, unless it only repeats the login command shown below it. */
-  const problemText = (a: AccountInfo) => (a.problem && !(a.login_command && a.problem.includes(a.login_command)) ? a.problem : null);
 </script>
 
 <section>

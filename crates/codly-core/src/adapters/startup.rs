@@ -71,19 +71,48 @@ pub(crate) fn uses_own_key(spec: &SpawnSpec) -> bool {
     spec.byok_command.is_some() || crate::byok::Vendor::of(spec.provider).is_some_and(|v| spec.env.contains_key(v.env_var()))
 }
 
+/// The sign-in of the user's shell that this run carries, as the names of its variables
+/// ("CLAUDE_CODE_USE_BEDROCK"): `env::apply_shell_auth` left them in the run's env (Settings →
+/// Safety, "Use my shell's Claude sign-in"). None for a run that signs in as the CLI does.
+pub(crate) fn shell_sign_in(spec: &SpawnSpec) -> Option<String> {
+    if spec.provider != Provider::Claude {
+        return None;
+    }
+    env::shell_auth_names(&spec.env)
+}
+
+/// "Claude Code is not signed in: the sign-in your shell selects (…) was not accepted", for a
+/// run on the shell's sign-in (`shell_sign_in`): the sign-in command would not help there.
+fn shell_sign_in_refused(provider: Provider, names: &str) -> String {
+    format!("{} is not signed in: {}", provider.label(), env::shell_auth_refused(names))
+}
+
+/// What a signed-out run tells the user to do: the sign-in command of its account, or, on the
+/// shell's sign-in, to look at that.
+pub(crate) fn sign_in_advice(spec: &SpawnSpec) -> String {
+    match shell_sign_in(spec) {
+        Some(names) => shell_sign_in_refused(spec.provider, &names),
+        None => not_signed_in(spec.provider, account_home(spec), None),
+    }
+}
+
 /// What to do about a start-up failure, read from the CLI's own `text` (stderr or a protocol
 /// error); `version` is the CLI's, when the handshake got far enough to learn it.
 /// - an option was rejected, or the version is below the minimum: update the CLI;
 /// - the text says signed out: the sign-in command. Not with `own_key`: there the credential
-///   is the user's API key, and signing in would not help.
-fn advice(provider: Provider, text: &str, version: Option<&str>, home: Option<&str>, own_key: bool) -> Option<String> {
+///   is the user's API key, and signing in would not help. With `shell` (`shell_sign_in`), the
+///   sign-in is the one the user's shell selects: the advice names its variables instead.
+fn advice(provider: Provider, text: &str, version: Option<&str>, home: Option<&str>, own_key: bool, shell: Option<&str>) -> Option<String> {
     let text = text.to_lowercase();
     let says = |patterns: &[&str]| patterns.iter().any(|p| text.contains(p));
     if says(&REJECTED) {
         return env::update_advice(provider).map(|update| format!("this {} does not accept an option Codly needs. {update}", provider.label()));
     }
     if says_signed_out(&text) {
-        return (!own_key).then(|| not_signed_in(provider, home, None));
+        return (!own_key).then(|| match shell {
+            Some(names) => shell_sign_in_refused(provider, names),
+            None => not_signed_in(provider, home, None),
+        });
     }
     let version = version?;
     env::update_to(provider, version)?;
@@ -94,7 +123,7 @@ fn advice(provider: Provider, text: &str, version: Option<&str>, home: Option<&s
 /// unchanged otherwise (also when it already is that advice).
 pub(crate) fn explain(spec: &SpawnSpec, version: Option<&str>, raw: anyhow::Error) -> anyhow::Error {
     let text = format!("{raw:#}");
-    match advice(spec.provider, &text, version, account_home(spec), uses_own_key(spec)) {
+    match advice(spec.provider, &text, version, account_home(spec), uses_own_key(spec), shell_sign_in(spec).as_deref()) {
         Some(advice) if !text.contains(&advice) => raw.context(advice),
         _ => raw,
     }
@@ -149,27 +178,27 @@ mod tests {
 
     #[test]
     fn a_rejected_option_means_update_the_cli() {
-        let update = |p, text| advice(p, text, None, None, false).unwrap();
+        let update = |p, text| advice(p, text, None, None, false, None).unwrap();
         // commander (Claude Code), clap (Codex), yargs (Gemini CLI)
         let claude = update(Provider::Claude, "error: unknown option '--tools'");
         assert_eq!(claude, "this Claude Code does not accept an option Codly needs. Update Claude Code to 2.1.302 or later: run `claude update` in a terminal");
         assert!(update(Provider::Claude, "error: option '--permission-mode <mode>' argument 'manual' is invalid. Allowed choices are default, plan.").contains("claude update"));
         assert!(update(Provider::Codex, "error: unrecognized subcommand 'app-server'").contains("Update Codex to 0.161.0 or later"));
         assert!(update(Provider::Gemini, "Unknown arguments: acp, skip-trust").contains("Update Gemini CLI to 0.62.0 or later"));
-        assert_eq!(advice(Provider::Cursor, "error: unknown option '--acp'", None, None, false), None, "no minimum version, no advice");
+        assert_eq!(advice(Provider::Cursor, "error: unknown option '--acp'", None, None, false, None), None, "no minimum version, no advice");
     }
 
     #[test]
     fn signed_out_text_becomes_the_sign_in_command() {
-        let said = |p, text| advice(p, text, None, None, false);
+        let said = |p, text| advice(p, text, None, None, false, None);
         assert_eq!(said(Provider::Claude, "Invalid API key · Please run /login").as_deref(), Some("Claude Code is not signed in: run `claude auth login` in a terminal"));
         assert_eq!(said(Provider::Codex, "Not logged in").as_deref(), Some("Codex is not signed in: run `codex login` in a terminal"));
         assert!(said(Provider::Gemini, "Please set an Auth method in your settings.json").unwrap().contains("run `gemini` in a terminal"));
         // The account's own home goes into the command.
-        let work = advice(Provider::Claude, "OAuth token has expired", None, Some("/Users/x/.claude-work"), false).unwrap();
+        let work = advice(Provider::Claude, "OAuth token has expired", None, Some("/Users/x/.claude-work"), false, None).unwrap();
         assert_eq!(work, "Claude Code is not signed in: run `CLAUDE_CONFIG_DIR=/Users/x/.claude-work claude auth login` in a terminal");
         // With your own API key, signing in is not the fix: the CLI's words stand alone.
-        assert_eq!(advice(Provider::Claude, "Invalid API key", None, None, true), None);
+        assert_eq!(advice(Provider::Claude, "Invalid API key", None, None, true, None), None);
         assert_eq!(said(Provider::Claude, "ENOSPC: no space left on device"), None);
 
         assert_eq!(not_signed_in(Provider::Opencode, None, Some("Run `opencode auth login` in the terminal")), "OpenCode is not signed in: Run `opencode auth login` in the terminal");
@@ -178,10 +207,10 @@ mod tests {
 
     #[test]
     fn a_known_old_version_is_blamed_only_when_nothing_else_explains() {
-        let old = advice(Provider::Codex, "invalid params: unknown field `threadSource`", Some("0.150.2"), None, false).unwrap();
+        let old = advice(Provider::Codex, "invalid params: unknown field `threadSource`", Some("0.150.2"), None, false, None).unwrap();
         assert_eq!(old, "Codex 0.150.2 is older than Codly supports. Update Codex to 0.161.0 or later: run `npm install -g @openai/codex@latest` in a terminal");
-        assert_eq!(advice(Provider::Codex, "invalid params", Some("0.161.0"), None, false), None, "a supported version: the CLI's words stand alone");
-        assert!(advice(Provider::Codex, "Not logged in", Some("0.150.2"), None, false).unwrap().contains("codex login"), "what the CLI says comes first");
+        assert_eq!(advice(Provider::Codex, "invalid params", Some("0.161.0"), None, false, None), None, "a supported version: the CLI's words stand alone");
+        assert!(advice(Provider::Codex, "Not logged in", Some("0.150.2"), None, false, None).unwrap().contains("codex login"), "what the CLI says comes first");
     }
 
     #[test]
@@ -205,5 +234,31 @@ mod tests {
         let command = SpawnSpec { byok_command: Some("op read key".into()), ..spec(Provider::Codex, &[]) };
         assert!(uses_own_key(&command));
         assert!(!uses_own_key(&spec(Provider::Gemini, &[("GEMINI_API_KEY", "x")])), "no BYOK for Gemini");
+    }
+
+    /// A run on the sign-in of the user's shell (Bedrock, Vertex or a token) is not sent to
+    /// `claude auth login`: the advice names the variable that selects the sign-in.
+    #[test]
+    fn a_run_on_the_shells_sign_in_is_not_sent_to_the_login_command() {
+        let bedrock = spec(Provider::Claude, &[("CLAUDE_CODE_USE_BEDROCK", "1"), ("CLAUDE_CONFIG_DIR", "/Users/x/.claude-work")]);
+        assert_eq!(shell_sign_in(&bedrock).as_deref(), Some("CLAUDE_CODE_USE_BEDROCK"));
+        let says = "Claude Code is not signed in: the sign-in your shell selects (CLAUDE_CODE_USE_BEDROCK) was not accepted. \
+                    Run `claude auth status` in a terminal to see why";
+        assert_eq!(sign_in_advice(&bedrock), says);
+        let e = explain(&bedrock, None, anyhow!("claude exited during startup (code 1): 401 Unauthorized"));
+        assert_eq!(e.to_string(), says);
+        assert!(!format!("{e:#}").contains("auth login"), "{e:#}");
+        assert!(format!("{e:#}").ends_with("401 Unauthorized"), "the CLI's words stay: {e:#}");
+
+        let token = spec(Provider::Claude, &[("CLAUDE_CODE_OAUTH_TOKEN", "test-token"), ("CLAUDE_CODE_USE_VERTEX", "")]);
+        assert_eq!(shell_sign_in(&token).as_deref(), Some("CLAUDE_CODE_OAUTH_TOKEN"), "an empty variable selects nothing");
+        let e = explain(&token, None, anyhow!("OAuth token has expired"));
+        assert!(e.to_string().contains("(CLAUDE_CODE_OAUTH_TOKEN)") && !e.to_string().contains("test-token"), "{e}");
+
+        // Without such a variable, and for another CLI: the sign-in command, as before.
+        let plain = spec(Provider::Claude, &[]);
+        assert_eq!((shell_sign_in(&plain), sign_in_advice(&plain).as_str()), (None, "Claude Code is not signed in: run `claude auth login` in a terminal"));
+        let codex = spec(Provider::Codex, &[("CLAUDE_CODE_USE_BEDROCK", "1")]);
+        assert_eq!((shell_sign_in(&codex), sign_in_advice(&codex).as_str()), (None, "Codex is not signed in: run `codex login` in a terminal"));
     }
 }

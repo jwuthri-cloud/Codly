@@ -128,6 +128,7 @@ fn the_sandbox_and_the_shell_sign_in_are_documented() {
     for needle in [
         "not a sandbox",
         "sandbox claude's shell",
+        "the approval card names the host",
         "gemini, opencode, cursor and copilot agents have no os sandbox",
         "use my shell's claude sign-in",
         "claude_code_use_bedrock",

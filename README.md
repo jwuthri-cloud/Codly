@@ -276,10 +276,13 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   its own OS sandbox:
   - A sandboxed command can write only in the agent's folder (its worktree), a temporary folder and the
     repository's git data. It can still read your other files.
-  - Its network access follows Claude Code's own sandbox settings (the hosts that your Claude Code
-    settings allow). Codly adds no host and no folder.
+  - It can reach only the hosts that your Claude Code settings allow. Codly adds no host and no folder.
+    When a command wants another host, Codly asks you, in every approval mode except Full access: the
+    approval card names the host. If you allow it, the host stays allowed for the rest of that agent's
+    session, for every later command (a `git push` or an upload too).
   - Sandboxed commands run without asking, in every approval mode: the approval rules do not see them.
-    This includes git commands that change the repository (a commit, a branch, the stash).
+    This includes git commands that change the repository (a commit, a branch, the stash), and a push
+    or an upload to a host that is allowed.
   - A command that Claude wants to run outside the sandbox asks you first, in every approval mode except
     Full access. The approval card says that it runs outside the sandbox.
   - The sandbox covers shell commands only. File edits and tool servers (MCP) are not sandboxed: they go

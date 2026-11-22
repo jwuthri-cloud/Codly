@@ -99,6 +99,11 @@ fn default_mcp_allowed(spec: &SpawnSpec) -> Vec<String> {
 /// risk to the user, in every approval mode but Full access, and no saved rule covers it.
 pub const UNSANDBOXED: &str = "runs outside the sandbox";
 
+/// The tool name of the sandbox's own request: a sandboxed command wants to reach a host that
+/// Claude Code's settings do not allow (`input.host`). Read in the 2.1.311 bundle, not
+/// recorded (docs/research/cli-claude-stream-json-2.1.311.md §9).
+const SANDBOX_NETWORK: &str = "SandboxNetworkAccess";
+
 /// The run's `--settings` document: it goes above the user's own settings files and below
 /// managed ones. None when Codly sets nothing.
 /// - `apiKeyHelper`: the BYOK token command (byok.rs). Claude runs it for its API key and
@@ -109,7 +114,8 @@ pub const UNSANDBOXED: &str = "runs outside the sandbox";
 ///   sends no permission request, and a write outside the working directory fails; a command
 ///   the model wants to run outside the sandbox still asks, marked `sandboxOverride`
 ///   (`UNSANDBOXED`). Codly passes no list of folders or hosts: the CLI's defaults and the
-///   user's own Claude Code settings decide them. `failIfUnavailable` is in the CLI's
+///   user's own Claude Code settings decide them, and for a host they do not allow the CLI
+///   asks Codly (`SANDBOX_NETWORK`), which asks the user. `failIfUnavailable` is in the CLI's
 ///   settings schema; what it does is from the CLI's documentation, not recorded: where
 ///   Claude Code cannot sandbox, it does not start, instead of running unsandboxed.
 pub fn settings_json(spec: &SpawnSpec) -> Option<Value> {
@@ -708,7 +714,8 @@ pub struct ClaudeNormalizer {
     worker: bool,
     session_id: String,
     model: Option<String>,
-    /// "Claude Code is not signed in: run `…` in a terminal", for this run's account.
+    /// "Claude Code is not signed in: run `…` in a terminal", for this run's account; on the
+    /// sign-in of the user's shell, what to look at instead (`startup::sign_in_advice`).
     sign_in: String,
     /// The run pays with the user's own API key or token command: signing in is no fix.
     own_key: bool,
@@ -752,7 +759,7 @@ impl ClaudeNormalizer {
             worker: spec.role == Role::Worker,
             session_id,
             model: classify::split_model_effort(spec.model.as_deref()).0,
-            sign_in: startup::not_signed_in(Provider::Claude, startup::account_home(spec), None),
+            sign_in: startup::sign_in_advice(spec),
             own_key: startup::uses_own_key(spec),
             requested_tools: tools_for(spec).iter().map(|t| t.to_string()).collect(),
             status: None,
@@ -1418,7 +1425,10 @@ impl ClaudeNormalizer {
     fn approval_requested(&mut self, request_id: String, req: &Value, out: &mut Vec<EventKind>) {
         let tool = req["tool_name"].as_str().unwrap_or("").to_string();
         let input = req["input"].clone();
-        let suggestions = req["permission_suggestions"].as_array().cloned().unwrap_or_default();
+        // A host request of the sandbox has one answer, allow or deny. The CLI keeps an allowed
+        // host for the rest of its session whatever the scope, so "once" and "for this session"
+        // would be the same, and the rule it suggests (a domain rule) is not passed back.
+        let suggestions = if tool == SANDBOX_NETWORK { vec![] } else { req["permission_suggestions"].as_array().cloned().unwrap_or_default() };
         let cwd = self.cwd.clone();
         let mut risks: Vec<String> = Vec::new();
         let subject = match tool.as_str() {
@@ -1435,15 +1445,25 @@ impl ClaudeNormalizer {
                 ApprovalSubject::FileChange { paths, diff: edit_preview(&tool, &input) }
             }
             "AskUserQuestion" => ApprovalSubject::Question { questions: input["questions"].clone() },
+            SANDBOX_NETWORK => {
+                // The command that wants the host is sandboxed and was never shown to the
+                // rules: this request is the only place where its network access can ask.
+                risks.push(match input["host"].as_str() {
+                    Some(host) if !host.is_empty() => format!("network ({host})"),
+                    _ => "network".into(),
+                });
+                ApprovalSubject::Tool { name: tool.clone(), input: input.clone() }
+            }
             _ => ApprovalSubject::Tool { name: tool.clone(), input: input.clone() },
         };
         // `blocked_path` is the path the call touches (set even inside the worktree, live 2.1.309)
         if req["blocked_path"].as_str().is_some_and(|p| classify::outside(p, &cwd, &cwd)) && !risks.iter().any(|r| r == "outside worktree") {
             risks.push("outside worktree".into());
         }
-        // The shell is sandboxed and the model asks to run this command outside it
-        // (`dangerouslyDisableSandbox`, recorded on 2.1.311).
-        if req["decision_reason_type"].as_str() == Some("sandboxOverride") {
+        // The model asks to run this command outside the shell sandbox: the flag in its input,
+        // or the reason the CLI gives for the request (both in the 2.1.311 recordings). Each
+        // one is enough: only one case is recorded, so the reason may not come with every flag.
+        if input["dangerouslyDisableSandbox"].as_bool() == Some(true) || req["decision_reason_type"].as_str() == Some("sandboxOverride") {
             risks.push(UNSANDBOXED.into());
         }
         let choices = if tool == "AskUserQuestion" {
@@ -1718,6 +1738,64 @@ mod tests {
             assert!(rule_offer(&a, &ctx(mode)).is_empty(), "{mode:?}: no rule to save");
         }
         assert!(matches!(evaluate(&a, &ctx(ApprovalMode::Full)), Verdict::Allow { .. }));
+
+        // The flag alone, without the CLI's reason, and the reason alone: each one asks.
+        let mut flag_only = harmless.clone();
+        flag_only["request"].as_object_mut().unwrap().remove("decision_reason_type");
+        let mut reason_only = harmless.clone();
+        reason_only["request"]["input"].as_object_mut().unwrap().remove("dangerouslyDisableSandbox");
+        for request in [flag_only, reason_only] {
+            let a = approval_of(&norm.on_message(&request));
+            assert_eq!(a.risks, vec![UNSANDBOXED.to_string()], "{request}");
+            assert!(matches!(evaluate(&a, &ctx(ApprovalMode::Autonomous)), Verdict::Ask { .. }), "{request}");
+        }
+        // Neither: an ordinary request, which Autonomous allows.
+        let mut ordinary = harmless.clone();
+        ordinary["request"].as_object_mut().unwrap().remove("decision_reason_type");
+        ordinary["request"]["input"].as_object_mut().unwrap().remove("dangerouslyDisableSandbox");
+        let a = approval_of(&norm.on_message(&ordinary));
+        assert!(a.risks.is_empty(), "{:?}", a.risks);
+        assert!(matches!(evaluate(&a, &ctx(ApprovalMode::Autonomous)), Verdict::Allow { .. }));
+    }
+
+    /// A sandboxed command sends no request of its own, so the host it reaches for is the
+    /// user's to decide: the sandbox's host request asks in every approval mode but Full
+    /// access, with the host on the card and one answer (allow or deny).
+    #[test]
+    fn a_host_the_sandbox_does_not_allow_always_asks() {
+        use crate::model::ApprovalMode;
+        use crate::orchestrator::approvals::{PolicyCtx, Verdict, evaluate, rule_offer};
+        // Written from the request that the 2.1.311 bundle builds (StructuredIO
+        // `createSandboxAskCallback`), not from a recording. Codly reads `tool_name`,
+        // `input.host` and `description`; the rule's tool name here is a placeholder.
+        let request = json!({ "type": "control_request", "request_id": "req-7", "request": {
+            "subtype": "can_use_tool", "tool_name": "SandboxNetworkAccess", "input": { "host": "example.com" },
+            "permission_suggestions": [{ "type": "addRules", "rules": [{ "toolName": "WebFetch", "ruleContent": "domain:example.com" }], "behavior": "allow", "destination": "session" }],
+            "tool_use_id": "toolu-7", "description": "Allow network connection to example.com?"
+        }});
+        let solo = spec(Role::Solo, false);
+        let mut norm = ClaudeNormalizer::new(&solo, "s".into());
+        let a = approval_of(&norm.on_message(&request));
+        assert!(matches!(&a.subject, ApprovalSubject::Tool { name, input } if name == "SandboxNetworkAccess" && *input == json!({ "host": "example.com" })));
+        assert_eq!(a.risks, vec!["network (example.com)".to_string()]);
+        assert_eq!(a.reason.as_deref(), Some("Allow network connection to example.com?"));
+        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel], "no session or permanent grant");
+        let ctx = |mode| PolicyCtx { mode, worktree: Some(solo.cwd.as_path()), verify: &[], read_only: false, edits: true };
+        for mode in [ApprovalMode::Balanced, ApprovalMode::Strict, ApprovalMode::Autonomous] {
+            assert!(matches!(evaluate(&a, &ctx(mode)), Verdict::Ask { .. }), "{mode:?}");
+            assert!(rule_offer(&a, &ctx(mode)).is_empty(), "{mode:?}: no rule to save");
+        }
+        assert!(matches!(evaluate(&a, &ctx(ApprovalMode::Full)), Verdict::Allow { .. }));
+        // The answer carries no permission rule: the CLI's suggestion is not passed back.
+        let (reply, _) = norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).unwrap();
+        assert_eq!(reply["response"]["response"], json!({ "behavior": "allow", "updatedInput": { "host": "example.com" } }));
+
+        // A request that names no host still asks.
+        let mut nameless = request.clone();
+        nameless["request"]["input"] = json!({});
+        let a = approval_of(&norm.on_message(&nameless));
+        assert_eq!(a.risks, vec!["network".to_string()]);
+        assert!(matches!(evaluate(&a, &ctx(ApprovalMode::Autonomous)), Verdict::Ask { .. }));
     }
 
     #[test]
@@ -2204,6 +2282,16 @@ mod tests {
         work.turn_started("f");
         let ev = work.on_message(&json!({ "type": "system", "subtype": "api_retry", "attempt": 1, "error": "authentication_failed" }));
         assert_eq!(errors(&ev), [("Claude Code is not signed in: run `CLAUDE_CONFIG_DIR=/Users/x/.claude-work claude auth login` in a terminal, then try again", true)]);
+        // On the sign-in of the user's shell (Settings → Safety), the login command is not the fix.
+        let mut token = spec(Role::Worker, false);
+        token.env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "test-token".into());
+        let mut token = ClaudeNormalizer::new(&token, "s".into());
+        token.turn_started("f");
+        let ev = token.on_message(&json!({ "type": "result", "subtype": "success", "is_error": true, "result": "OAuth token has expired" }));
+        assert_eq!(
+            errors(&ev),
+            [("Claude Code is not signed in: the sign-in your shell selects (CLAUDE_CODE_OAUTH_TOKEN) was not accepted. Run `claude auth status` in a terminal to see why, then try again", false)]
+        );
     }
 
     #[test]

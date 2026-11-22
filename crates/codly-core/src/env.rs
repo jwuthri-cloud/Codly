@@ -757,6 +757,20 @@ fn shell_auth_vars(base: &HashMap<String, String>) -> Vec<(&'static str, &str)> 
     CLAUDE_SHELL_AUTH.into_iter().filter_map(|k| base.get(k).filter(|v| !v.is_empty()).map(|v| (k, v.as_str()))).collect()
 }
 
+/// The names of the `CLAUDE_SHELL_AUTH` variables that `env` sets, as "A, B". None without
+/// one. For a child env: Some = the run signs in as the user's shell does (`apply_shell_auth`).
+pub(crate) fn shell_auth_names(env: &HashMap<String, String>) -> Option<String> {
+    let names: Vec<&str> = shell_auth_vars(env).into_iter().map(|(k, _)| k).collect();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// What to say when Claude Code refuses the sign-in of the user's shell (`names`, from
+/// `shell_auth_names`). `claude auth login` is not the fix there: it signs in a subscription,
+/// and Claude Code keeps using what the variables select.
+pub(crate) fn shell_auth_refused(names: &str) -> String {
+    format!("the sign-in your shell selects ({names}) was not accepted. Run `claude auth status` in a terminal to see why")
+}
+
 /// Leave the sign-in the user's shell selects in a Claude child env: the `CLAUDE_SHELL_AUTH`
 /// variables, with the shell's own values, after the scrub took them out. Every other
 /// CLAUDE_CODE_* variable stays out, and another CLI gets nothing. Codly does not make, save
@@ -778,16 +792,9 @@ fn shell_auth_advice(provider: Provider, base: &HashMap<String, String>, kept: b
     if provider != Provider::Claude {
         return None;
     }
-    let names: Vec<&str> = shell_auth_vars(base).into_iter().map(|(k, _)| k).collect();
-    if names.is_empty() {
-        return None;
-    }
-    let names = names.join(", ");
+    let names = shell_auth_names(base)?;
     Some(if kept {
-        format!(
-            "not signed in: Claude Code does not accept the sign-in your shell selects ({names}). \
-             Run `claude auth status` in a terminal to see why"
-        )
+        format!("not signed in: {}", shell_auth_refused(&names))
     } else {
         format!(
             "not signed in: your shell sets {names}, and Codly takes that out of an agent's environment. Turn on \
@@ -1070,7 +1077,9 @@ async fn accounts_with(
                 },
                 _ => p,
             }),
-            login_command: login_command(c.provider, c.home.as_deref()),
+            // With the shell's sign-in kept, the login command signs in nothing an agent uses.
+            login_command: login_command(c.provider, c.home.as_deref())
+                .filter(|_| !(shell_auth && c.provider == Provider::Claude && shell_auth_names(base).is_some())),
             home: c.home,
             limits: vec![],
         });
@@ -1457,6 +1466,16 @@ esac
         }
         let accounts = detect_accounts(&base, std::slice::from_ref(&off), &[], true, false).await;
         assert_eq!((accounts[0].logged_in, accounts[0].problem.as_deref()), (Some(false), Some(problem.as_str())));
+        assert_eq!(accounts[0].login_command.as_deref(), Some("claude auth login"));
+        // The switch on and Claude Code still signed out (not probed again here): the shell's
+        // sign-in is what failed, so no login command is offered.
+        let refused = detect_accounts(&base, std::slice::from_ref(&off), &[], false, true).await;
+        assert_eq!(refused[0].logged_in, Some(false));
+        assert_eq!(
+            refused[0].problem.as_deref(),
+            Some("not signed in: the sign-in your shell selects (CLAUDE_CODE_USE_BEDROCK) was not accepted. Run `claude auth status` in a terminal to see why")
+        );
+        assert_eq!(refused[0].login_command, None);
 
         let on = detect(Provider::Claude, &base, home, true).await;
         assert_eq!((on.logged_in, on.billing, on.plan.as_deref()), (Some(true), Billing::ThirdParty, Some("bedrock")));

@@ -285,12 +285,19 @@ they are build output or third-party code in most repos. If one holds your own c
   do not see it, in any approval mode; a write outside the working directory fails; a command
   the model wants to run outside the sandbox sends `can_use_tool` with `decision_reason_type:
   "sandboxOverride"`, which the adapter marks with the risk "runs outside the sandbox": it asks
-  the user in every mode but Full access, and no saved rule covers it. Codly passes no write
-  folders and no hosts: the CLI's defaults (per its documentation: the working directory, a
-  temporary folder and a worktree's shared `.git` for writes; an empty list of hosts) and the
-  user's own Claude Code settings decide them. Not recorded: the network rules in `-p` mode,
-  `failIfUnavailable` (asked for so that Claude Code does not start where it cannot sandbox),
-  and Linux. The sandbox wraps the shell only: file edits, MCP servers and Codly's own verify
+  the user in every mode but Full access, and no saved rule covers it. The same risk is set
+  when the request's input has `dangerouslyDisableSandbox: true` without that reason. Codly
+  passes no write folders and no hosts: the CLI's defaults (per its documentation: the working
+  directory, a temporary folder and a worktree's shared `.git` for writes; an empty list of
+  hosts) and the user's own Claude Code settings decide them. For a host they do not allow,
+  the CLI asks the host app: `can_use_tool` with `tool_name: "SandboxNetworkAccess"` and
+  `input.host` (read in the 2.1.311 bundle, not recorded). The adapter gives it the risk
+  "network (<host>)", so it asks the user in every mode but Full access, and offers allow or
+  deny only: on allow the CLI keeps the host for the rest of its session. A sandboxed command
+  itself is never seen by the rules, so this request is the only check on what it sends
+  (a push, an upload). Not recorded: the network rules in `-p` mode, `failIfUnavailable`
+  (asked for so that Claude Code does not start where it cannot sandbox), and Linux. The
+  sandbox wraps the shell only: file edits, MCP servers and Codly's own verify
   commands are outside it. ACP agents (Gemini, OpenCode, Cursor, Copilot) have no OS sandbox.
 - Child environments (`env.rs`): every `CLAUDE_CODE_*` variable of a parent Claude Code session
   and every API-key variable that would switch billing is removed. Two opt-in exceptions: the
