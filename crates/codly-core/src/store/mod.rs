@@ -1106,6 +1106,7 @@ mod tests {
             open_questions: vec![],
             status: PlanStatus::AwaitingApproval,
             base_commit: None,
+            base_branch: None,
             integration_branch: None,
             integration_worktree: None,
             merged_sha: None,

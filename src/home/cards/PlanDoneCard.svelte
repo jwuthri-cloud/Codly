@@ -78,7 +78,7 @@
         <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {/if}
     </footer>
-    {#if !kept}<RepoSyncBar refresh={merged?.sha ?? busy} />{/if}
+    {#if !kept}<RepoSyncBar refresh={merged?.sha ?? busy} {planId} />{/if}
   </article>
 {/if}
 

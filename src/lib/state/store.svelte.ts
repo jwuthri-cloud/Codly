@@ -1142,6 +1142,11 @@ class CodlyStore {
     this.planMerges = { ...this.planMerges, [planId]: { sha, ts: Date.now() } };
     this.rev++;
   }
+  /** The plan's merge was undone: this session no longer counts it as merged. */
+  unmarkPlanMerged(planId: string) {
+    this.planMerges = Object.fromEntries(Object.entries(this.planMerges).filter(([id]) => id !== planId));
+    this.rev++;
+  }
 }
 
 export const store = new CodlyStore();

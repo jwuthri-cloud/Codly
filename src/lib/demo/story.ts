@@ -254,7 +254,7 @@ export class Story {
     const now = sim.now();
     const plan = sim.putPlan({
       id: uid('p-'), workspace_id: sim.workspace!.id, thread: r.thread, request: r.words.join('\n\n'), ...o,
-      status: 'planning', base_commit: null, integration_branch: null, integration_worktree: null, merged_sha: null, kept: false, created_at: now, updated_at: now,
+      status: 'planning', base_commit: null, base_branch: null, integration_branch: null, integration_worktree: null, merged_sha: null, kept: false, created_at: now, updated_at: now,
     });
     r.planId = plan.id;
     this.specOfPlan.set(plan.id, spec);
@@ -492,7 +492,7 @@ export class Story {
     if (!plan || !spec || plan.status !== 'awaiting_approval') throw new Error('This plan is not waiting to run.');
     const base = sim.workspace?.head ?? sha();
     const branch = `${BRANCH[spec]}/integration`;
-    sim.patchPlan(planId, { status: 'running', base_commit: base, integration_branch: branch, integration_worktree: `${WORKTREES}/${spec}-integration` });
+    sim.patchPlan(planId, { status: 'running', base_commit: base, base_branch: 'main', integration_branch: branch, integration_worktree: `${WORKTREES}/${spec}-integration` });
     sim.decision('integration_branch', 'rule', `Created ${branch} from main @ ${base.slice(0, 7)}`, { plan_id: planId, base });
     const tasks = [...sim.tasks.values()].filter((t) => t.plan_id === planId);
     for (const t of tasks) {
@@ -1031,6 +1031,15 @@ export class Story {
     sim.patchPlan(planId, { merged_sha: head });
     sim.decision('merge_plan', 'human', `You merged ${plan.integration_branch} into ${sim.workspace?.current_branch ?? 'main'} @ ${head.slice(0, 7)}`, { plan_id: planId, sha: head });
     return head;
+  }
+
+  /** Undo merge: the plan is done and not merged again; its work stays on the integration branch. */
+  undoMerge(planId: string) {
+    const sim = this.sim;
+    const plan = sim.plans.get(planId);
+    if (!plan) throw new Error('Unknown plan');
+    sim.patchPlan(planId, { merged_sha: null });
+    sim.decision('undo_merge', 'human', `You undid the merge of ${plan.integration_branch} into ${sim.workspace?.current_branch ?? 'main'}`, { plan_id: planId });
   }
 
   // ───────────── board ─────────────

@@ -27,6 +27,8 @@ import type { TaskStatus } from './gen/TaskStatus';
 import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 import type { RequestPrefs } from './gen/RequestPrefs';
+import type { LastMerge } from './gen/LastMerge';
+import type { RepoSync } from './gen/RepoSync';
 import { mockAgentGit } from './demo/agentgit';
 import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
@@ -132,6 +134,14 @@ export class MockTransport implements Transport {
   /** BYOK demo state. Keys are never stored, only whether one was "saved". */
   /** Demo repo: whether Push was clicked. */
   private demoPushed = false;
+  /** Demo repo: the last merge into main, until it is undone. */
+  private demoMerge: Omit<LastMerge, 'blocked'> | null = null;
+  /** The demo repo: a clean checkout, two merges not pushed yet (the real one runs git). */
+  private demoSync(): RepoSync {
+    const pushed = this.demoPushed;
+    const last_merge = this.demoMerge && { ...this.demoMerge, blocked: pushed ? 'the merge is already on origin/main' : null };
+    return { branch: 'main', upstream: 'origin/main', ahead: pushed ? 0 : 2, behind: 0, dirty: [], last_merge };
+  }
   private byokSaved: Record<Vendor, boolean> = { anthropic: false, openai: false, openrouter: false };
   private triggers: TriggersConfig | null = null;
   private breaker: MockBreaker;
@@ -252,18 +262,35 @@ export class MockTransport implements Transport {
       case 'close_thread':
         story.closeThread(String(a.thread));
         return null;
-      case 'merge_plan':
-        return story.mergePlan(String(a.planId));
-      // The demo repo: a clean checkout, two merges not pushed yet (the real one runs git).
-      case 'merge_agent':
-        return Math.random().toString(16).slice(2, 12).padEnd(10, '0');
+      case 'merge_plan': {
+        const sha = story.mergePlan(String(a.planId));
+        this.demoMerge = { sha, branch: 'main', plan_id: String(a.planId), agent_id: null };
+        this.demoPushed = false;
+        return sha;
+      }
+      case 'merge_plan_warning':
+        return null; // the demo repo stays on main, where every plan starts
+      case 'merge_agent': {
+        const sha = Math.random().toString(16).slice(2, 12).padEnd(10, '0');
+        this.demoMerge = { sha, branch: 'main', plan_id: null, agent_id: String(a.agentId) };
+        this.demoPushed = false;
+        return sha;
+      }
+      case 'undo_merge': {
+        const m = this.demoMerge;
+        if (!m || m.sha !== a.sha) throw new Error('That is not the last merge Codly made into your branch.');
+        if (this.demoPushed) throw new Error('The merge cannot be undone: the merge is already on origin/main.');
+        if (m.plan_id) story.undoMerge(m.plan_id);
+        this.demoMerge = null;
+        return this.demoSync();
+      }
       case 'repo_sync':
-        return { branch: 'main', upstream: 'origin/main', ahead: this.demoPushed ? 0 : 2, behind: 0, dirty: [] };
+        return this.demoSync();
       case 'commit_checkout':
         return Math.random().toString(16).slice(2, 12).padEnd(10, '0');
       case 'push_checkout':
         this.demoPushed = true;
-        return { branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0, dirty: [] };
+        return this.demoSync();
       case 'keep_plan':
       case 'pin_memory':
         return null; // ponytail: the mock keeps these as UI state only

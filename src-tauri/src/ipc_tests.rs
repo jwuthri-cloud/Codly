@@ -56,6 +56,10 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::move_task,
             commands::recheck_task,
             commands::accept_task,
+            commands::merge_plan,
+            commands::merge_plan_warning,
+            commands::undo_merge,
+            commands::repo_sync,
             commands::list_memories,
             commands::add_memory,
             commands::list_triples,
@@ -148,6 +152,17 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert_eq!(invoke(&wv, "byok_status", json!({})).unwrap()["vendors"][1]["source"]["kind"], "command");
     assert!(invoke(&wv, "byok_save_key", json!({ "vendor": "anthropic", "key": "two words" })).is_err());
     invoke(&wv, "byok_configure", json!({ "vendor": "openai", "source": { "kind": "off" } })).unwrap();
+
+    // Merging and its undo, with the keys the frontend sends. Nothing was merged here, so there
+    // is nothing to undo, and a sha the app never showed is refused.
+    let sync = invoke(&wv, "repo_sync", json!({})).unwrap();
+    assert!(sync["branch"] == "main" && sync["last_merge"].is_null(), "{sync}");
+    let e = invoke(&wv, "undo_merge", json!({ "sha": "abc1234" })).unwrap_err();
+    assert!(e.to_string().contains("not the last merge"), "{e}");
+    let e = invoke(&wv, "merge_plan_warning", json!({ "planId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
+    let e = invoke(&wv, "merge_plan", json!({ "planId": "nope", "into": null })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

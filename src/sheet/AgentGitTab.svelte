@@ -64,7 +64,7 @@
       <button class="icon-btn" aria-label="Refresh" data-tip="Refresh" disabled={busy} onclick={() => load(agent.id)}><Icon name="refresh" size={13} /></button>
     </span>
   </div>
-  {#if agent.role === 'solo'}<RepoSyncBar refresh={merges} />{/if}
+  {#if agent.role === 'solo'}<RepoSyncBar refresh={merges} agentId={agent.id} />{/if}
   {#if error}
     <p class="small bad">{error}</p>
   {:else if !view}

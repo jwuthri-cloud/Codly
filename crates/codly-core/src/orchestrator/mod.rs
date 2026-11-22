@@ -915,9 +915,28 @@ impl Core {
     }
 
     /// Merge the plan's integration branch into the user's current branch (refuses if the
-    /// main checkout is dirty). Returns the new HEAD sha.
+    /// main checkout is dirty, or is not on the branch the plan started from). Returns the new
+    /// HEAD sha.
     pub async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<String> {
-        self.inner.merge_plan(plan_id).await
+        self.inner.merge_plan(plan_id, None).await
+    }
+
+    /// What to tell the user before merging the plan, when the checked-out branch is not the
+    /// one the plan started from (None: nothing to confirm).
+    pub async fn merge_plan_warning(&self, plan_id: &str) -> anyhow::Result<Option<MergeWarning>> {
+        self.inner.merge_plan_warning(plan_id).await
+    }
+
+    /// `merge_plan` after the user saw `merge_plan_warning` and chose to go on: merges into
+    /// `branch`, and only if that is still the checked-out branch.
+    pub async fn merge_plan_into(&self, plan_id: &str, branch: &str) -> anyhow::Result<String> {
+        self.inner.merge_plan(plan_id, Some(branch)).await
+    }
+
+    /// Undo the last merge Codly made into the user's branch, named by its commit `sha` (from
+    /// `repo_sync`). Only while that is safe; otherwise the error says why not.
+    pub async fn undo_merge(&self, sha: &str) -> anyhow::Result<RepoSync> {
+        self.inner.undo_merge(sha).await
     }
 
     /// Merge a solo agent's branch into the user's current branch (same dirty-checkout rule as a

@@ -31,6 +31,7 @@ fn plan(id: &str, status: PlanStatus, created_at: i64) -> Plan {
         open_questions: vec![],
         status,
         base_commit: None,
+        base_branch: None,
         integration_branch: None,
         integration_worktree: None,
         merged_sha: None,

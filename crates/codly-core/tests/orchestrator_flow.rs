@@ -541,6 +541,131 @@ async fn single_task_plan_runs_end_to_end() {
     core.shutdown().await;
 }
 
+/// A plan that started on another branch than the one checked out at merge time is merged only
+/// after the user confirms that branch; the merge is then on record and Undo merge takes it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_asks_before_merging_into_another_branch_and_its_merge_can_be_undone() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    // The plan starts on a feature branch that is one commit ahead of main.
+    sh(&repo, &["checkout", "-q", "-b", "feature-x"]);
+    std::fs::write(repo.join("feature.txt"), "wip\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    sh(&repo, &["commit", "-qm", "feature work"]);
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created hello.txt." })).await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { log, lead: planning_lead(), worker }).await;
+    let settings = Settings { auto_run_plans: true, lead_followups: false, worker_providers: vec![Provider::Claude], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let plan = wait_for("the plan to finish", 30, async || {
+        core.snapshot().await.unwrap().plans.into_iter().find(|p| p.status == PlanStatus::Done)
+    })
+    .await;
+    assert_eq!(plan.base_branch.as_deref(), Some("feature-x"));
+    assert_eq!(core.merge_plan_warning(&plan.id).await.unwrap(), None, "still on the branch it started from");
+
+    // You switch to main and press Merge: nothing is merged until you say so.
+    sh(&repo, &["checkout", "-q", "main"]);
+    let main = sh(&repo, &["rev-parse", "HEAD"]);
+    let warning = core.merge_plan_warning(&plan.id).await.unwrap().unwrap();
+    assert_eq!(warning.target, "main");
+    assert_eq!(warning.message, "This plan started from feature-x. Merging it into main also brings 1 commit from feature-x that main does not have.");
+    let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
+    assert!(err.contains("This plan started from feature-x") && err.contains("Nothing was merged"), "{err}");
+    // A yes to another branch than the one checked out now does not count.
+    let err = core.merge_plan_into(&plan.id, "feature-x").await.unwrap_err().to_string();
+    assert!(err.contains("your checkout is on main now, not feature-x"), "{err}");
+    assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), main);
+
+    // You go on: merged, with the feature commit, and on record as the last merge.
+    let sha = core.merge_plan_into(&plan.id, "main").await.unwrap();
+    assert!(repo.join("hello.txt").exists() && repo.join("feature.txt").exists());
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    assert!(!integ_wt.exists());
+    let last = core.repo_sync().await.unwrap().last_merge.unwrap();
+    assert_eq!((last.sha.as_str(), last.branch.as_str(), last.plan_id.as_deref(), last.blocked), (sha.as_str(), "main", Some(plan.id.as_str()), None));
+
+    // You tidy up meanwhile: git lets you delete the plan's branch, it is merged.
+    let integ_branch = plan.integration_branch.clone().unwrap();
+    let work = sh(&repo, &["rev-parse", &integ_branch]);
+    sh(&repo, &["branch", "-q", "-d", &integ_branch]);
+    assert_eq!(core.repo_sync().await.unwrap().last_merge.unwrap().blocked, None, "Undo puts the branch back itself");
+
+    // Undo merge: main is back, the plan is done and not merged, its work on its branch again.
+    let sync = core.undo_merge(&sha).await.unwrap();
+    assert_eq!(sync.last_merge, None);
+    assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), main);
+    assert!(!repo.join("hello.txt").exists() && !repo.join("feature.txt").exists());
+    let s = core.snapshot().await.unwrap();
+    let undone = s.plans.iter().find(|p| p.id == plan.id).unwrap();
+    assert_eq!((undone.status, undone.merged_sha.as_deref()), (PlanStatus::Done, None));
+    assert_eq!(sh(&repo, &["rev-parse", &integ_branch]), work, "the deleted branch is back at the merged work");
+    assert!(integ_wt.join("hello.txt").exists(), "its integration worktree is back");
+    let said = format!("Its branch {integ_branch} had been deleted, so Codly put it back; you can merge it again.");
+    assert!(chats(&s, "lead").iter().any(|c| c.text.starts_with("Undid the merge of \"Add a hello file\"") && c.text.ends_with(&said)));
+    assert!(core.undo_merge(&sha).await.is_err(), "a merge is undone once");
+
+    // Back on the branch it started from, it merges without a question.
+    sh(&repo, &["checkout", "-q", "feature-x"]);
+    core.merge_plan(&plan.id).await.unwrap();
+    assert!(repo.join("hello.txt").exists());
+    core.shutdown().await;
+}
+
+/// A solo agent's merge takes everything in its worktree, also what its last turn left
+/// uncommitted (a stopped turn, a crashed run), and Undo merge takes that merge back only while
+/// the user's checkout is clean.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_solo_merge_takes_uncommitted_work_and_can_be_undone() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start(dir.path(), FakeSpawner { log, lead: idle.clone(), worker: idle }).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let wt = PathBuf::from(solo.worktree.clone().unwrap());
+    std::fs::write(wt.join("notes.txt"), "from the agent\n").unwrap();
+    let before = sh(&repo, &["rev-parse", "HEAD"]);
+
+    let sha = core.merge_agent(&solo.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("notes.txt")).unwrap(), "from the agent\n", "the uncommitted work is merged too");
+    assert_eq!(sh(&wt, &["status", "--porcelain"]), "", "Codly committed it in the agent's worktree first");
+    let last = core.repo_sync().await.unwrap().last_merge.unwrap();
+    assert_eq!((last.sha.as_str(), last.branch.as_str(), last.agent_id.as_deref(), last.plan_id, last.blocked), (sha.as_str(), "main", Some(solo.id.as_str()), None, None));
+
+    // Not while your checkout has uncommitted changes: Undo says so, and nothing moves.
+    std::fs::write(repo.join("README.md"), "mine\n").unwrap();
+    let blocked = core.repo_sync().await.unwrap().last_merge.unwrap().blocked.unwrap();
+    assert!(blocked.contains("uncommitted changes in README.md"), "{blocked}");
+    let err = core.undo_merge(&sha).await.unwrap_err().to_string();
+    assert!(err.contains("cannot be undone") && err.contains("README.md"), "{err}");
+    assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), sha);
+    assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "mine\n");
+    sh(&repo, &["checkout", "--", "README.md"]);
+    assert!(core.undo_merge("0000000").await.is_err(), "only the merge the user saw");
+
+    core.undo_merge(&sha).await.unwrap();
+    assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), before);
+    assert!(!repo.join("notes.txt").exists());
+    assert_eq!(std::fs::read_to_string(wt.join("notes.txt")).unwrap(), "from the agent\n", "the agent's branch keeps the work");
+    let s = core.snapshot().await.unwrap();
+    let said = "The work is still on its branch; you can merge it again.";
+    assert!(chats(&s, &format!("agent:{}", solo.id)).iter().any(|c| c.text.starts_with("Undid the merge") && c.text.ends_with(said)));
+
+    // The same work can be merged again.
+    core.merge_agent(&solo.id).await.unwrap();
+    assert!(repo.join("notes.txt").exists());
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn verify_failure_gets_one_fix_round_and_a_lesson() {
     let dir = tempfile::tempdir().unwrap();

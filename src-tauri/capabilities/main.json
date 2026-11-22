@@ -53,6 +53,8 @@
     "allow-task-diff",
     "allow-plan-diff",
     "allow-merge-plan",
+    "allow-merge-plan-warning",
+    "allow-undo-merge",
     "allow-merge-agent",
     "allow-repo-sync",
     "allow-commit-checkout",

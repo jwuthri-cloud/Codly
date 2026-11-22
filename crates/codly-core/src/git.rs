@@ -10,6 +10,10 @@
 //! The final merge into the user's own branch (`merge(.., internal = false)`, used by
 //! `merge_plan`) runs the user's hooks and signing config: that commit is theirs.
 //!
+//! The user's checkout is theirs too: Codly never merges into it while they are in the middle
+//! of a merge, rebase or cherry-pick of their own, only aborts a merge it started itself, and
+//! takes a merge back (`undo_merge`) only while that loses nothing.
+//!
 //! An agent can edit everything in its worktree, its `.git` pointer file included: pointed at
 //! a repository it wrote, git would read that repository's config (`core.fsmonitor`, filter
 //! drivers) and run its programs as Codly, outside any sandbox. `check_worktree` refuses a
@@ -400,6 +404,79 @@ impl Git {
         Ok(split_z(&self.ok(wt, &["diff", "--name-only", "--diff-filter=U", "-z"], true).await?))
     }
 
+    /// What the checkout is in the middle of ("a merge", "a rebase"…), if anything.
+    pub async fn in_progress(&self, wt: &Path) -> Result<Option<&'static str>> {
+        const MARKS: [(&str, &str); 5] = [
+            ("MERGE_HEAD", "a merge"),
+            ("rebase-merge", "a rebase"),
+            ("rebase-apply", "a rebase"),
+            ("CHERRY_PICK_HEAD", "a cherry-pick"),
+            ("REVERT_HEAD", "a revert"),
+        ];
+        let dir = self.git_path(wt, "--git-dir").await?;
+        Ok(MARKS.iter().find(|(mark, _)| dir.join(mark).exists()).map(|(_, what)| *what))
+    }
+
+    /// Is `wt` in the middle of merging `tip`? In the user's checkout (`internal` = false) that
+    /// is the only merge Codly may abort; in its own worktrees any merge is Codly's.
+    async fn merging(&self, wt: &Path, tip: &str, internal: bool) -> bool {
+        matches!(self.rev_parse(wt, "MERGE_HEAD").await, Ok(Some(head)) if internal || head == tip)
+    }
+
+    /// Is `rev` on a local branch other than `except`?
+    async fn on_another_branch(&self, repo: &Path, rev: &str, except: &str) -> Result<bool> {
+        let heads = self.read(repo, &["for-each-ref", "--contains", rev, "--format=%(refname)", "refs/heads"]).await?;
+        Ok(heads.lines().filter_map(|r| r.strip_prefix("refs/heads/")).any(|b| b != except))
+    }
+
+    /// Why the merge commit `merged` of `source`, made on `branch` on top of `before`, cannot be
+    /// taken back right now; None when it can. Taking it back moves `branch` to `before`, so it
+    /// is only safe while nothing else depends on the merge: the checkout is still on `branch`
+    /// at that very commit, no remote branch has it, the merged work stays on a branch, and no
+    /// tracked file has uncommitted changes. Every way out it names keeps undo possible: a
+    /// commit on top of the merge (also one that finishes an operation in progress) ends it.
+    pub async fn undo_merge_blocker(&self, repo: &Path, branch: &str, merged: &str, before: &str, source: &str) -> Result<Option<String>> {
+        if let Some(op) = self.in_progress(repo).await? {
+            return Ok(Some(format!(
+                "your checkout has {op} in progress; abort it first (finishing it would put a commit on top of the merge and make undo impossible)"
+            )));
+        }
+        match self.current_branch(repo).await? {
+            Some(b) if b == branch => {}
+            Some(b) => return Ok(Some(format!("your checkout is on {b} now, not {branch}"))),
+            None => return Ok(Some(format!("your checkout is not on {branch} now"))),
+        }
+        let head = self.head(repo).await?.unwrap_or_default();
+        if head != merged {
+            return Ok(Some(format!("{branch} has changed since this merge (it is at {} now)", short(&head))));
+        }
+        let on_top = self.rev_parse(repo, &format!("{merged}^1")).await?.as_deref() == Some(before);
+        let Some(work) = self.rev_parse(repo, &format!("{merged}^2")).await?.filter(|_| on_top) else {
+            return Ok(Some(format!("{} is not a merge made on top of {}", short(merged), short(before))));
+        };
+        let remotes = self.read(repo, &["for-each-ref", "--contains", merged, "--format=%(refname)", "refs/remotes"]).await?;
+        let pushed = remotes.lines().filter_map(|r| r.strip_prefix("refs/remotes/")).find(|r| !r.ends_with("/HEAD"));
+        if let Some(remote) = pushed {
+            return Ok(Some(format!("the merge is already on {remote}; undo it there with git revert -m 1 {}", short(merged))));
+        }
+        // A deleted `source` is put back by the undo itself. One that points somewhere else now
+        // cannot be: without another branch at the merged work, only `branch` still holds it.
+        if !self.on_another_branch(repo, &work, branch).await? && self.branch_exists(repo, source).await? {
+            return Ok(Some(format!(
+                "{source} was moved and no other branch has the merged work, so undoing would leave that work on no branch; keep it first with git branch <new name> {}",
+                short(&work)
+            )));
+        }
+        let dirty = self.changed_paths(repo, &["HEAD"]).await?;
+        if !dirty.is_empty() {
+            return Ok(Some(format!(
+                "your checkout has uncommitted changes in {}; put them aside with git stash first (a commit on top of the merge would make undo impossible)",
+                name_list(&dirty)
+            )));
+        }
+        Ok(None)
+    }
+
     // ───────────── writes ─────────────
 
     /// A worktree on no branch (detached at `rev`): a team member's home between tasks.
@@ -560,12 +637,18 @@ impl Git {
 
     /// Merge `branch` into the worktree's HEAD with a merge commit. On conflict the merge is
     /// aborted and the conflicting paths returned. `internal` = a Codly checkpoint merge
-    /// (hooks and signing off, see the module doc); false for the user's own branch.
+    /// (hooks and signing off, see the module doc); false for the user's own branch, which is
+    /// refused while the user is in the middle of a merge, rebase or cherry-pick there.
     pub async fn merge(&self, wt: &Path, branch: &str, message: &str, internal: bool) -> Result<MergeOutcome> {
         let tip = self.rev_parse(wt, branch).await?.ok_or_else(|| anyhow!("unknown branch {branch}"))?;
         if self.is_ancestor(wt, &tip, "HEAD").await? {
             let sha = self.head(wt).await?.unwrap_or(tip);
             return Ok(MergeOutcome::AlreadyMerged { sha });
+        }
+        // `git merge` would fail there, and aborting "the" merge would throw away the conflict
+        // resolutions the user has not committed yet.
+        if !internal && let Some(op) = self.in_progress(wt).await? {
+            bail!("your checkout has {op} in progress; finish or abort it, then merge again (nothing was changed)");
         }
         let mut args = if internal { self.internal_flags(wt).await? } else { self.identity_flags(wt).await? };
         args.extend(["merge", "--no-ff", "--no-edit", "-m", message].map(String::from));
@@ -578,8 +661,8 @@ impl Git {
             Ok(out) => out,
             // Killed mid-merge (a slow hook hit the timeout): don't leave the checkout half-merged.
             Err(e) => {
-                let aborted = self.abort_merge(wt).await;
-                let note = if aborted.is_err() { "the merge is still in progress: run `git merge --abort`" } else { "the merge was aborted, nothing changed" };
+                let left = self.merging(wt, &tip, internal).await && self.ok(wt, &["merge", "--abort"], false).await.is_err();
+                let note = if left { "the merge is still in progress: run `git merge --abort`" } else { "the merge was aborted, nothing changed" };
                 bail!("{e:#} ({note})");
             }
         };
@@ -587,7 +670,7 @@ impl Git {
             let sha = self.head(wt).await?.ok_or_else(|| anyhow!("merge produced no HEAD"))?;
             return Ok(MergeOutcome::Merged { sha });
         }
-        if self.in_merge(wt).await {
+        if self.merging(wt, &tip, internal).await {
             let files = self.unmerged_files(wt).await.unwrap_or_default();
             let messages = out.stdout.trim().to_string();
             self.ok(wt, &["merge", "--abort"], false).await?;
@@ -627,12 +710,45 @@ impl Git {
         self.ok(wt, &["merge", "--abort"], false).await?;
         Ok(true)
     }
+
+    /// Take back the merge commit `merged` of `source` in the user's checkout: `branch` goes
+    /// back to `before`, the commit it was at. Refused with the reason unless
+    /// `undo_merge_blocker` finds it safe. The merged work always stays on a branch: when
+    /// `source` was deleted after the merge and no other branch has the work, `source` is put
+    /// back first (returns true). `reset --keep` moves the branch and the merged files only, and
+    /// stops instead of overwriting anything that is not committed.
+    pub async fn undo_merge(&self, repo: &Path, branch: &str, merged: &str, before: &str, source: &str) -> Result<bool> {
+        if let Some(why) = self.undo_merge_blocker(repo, branch, merged, before, source).await? {
+            bail!("the merge cannot be undone: {why}");
+        }
+        let work = format!("{merged}^2");
+        let restored = !self.on_another_branch(repo, &work, branch).await?;
+        if restored {
+            self.create_branch(repo, source, &work).await?;
+        }
+        self.ok(repo, &["reset", "--keep", "--quiet", before], false).await?;
+        Ok(restored)
+    }
 }
 
 /// The last `max` characters of `s`.
 fn tail_chars(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max { s.to_string() } else { format!("…{}", s.chars().skip(n - max).collect::<String>()) }
+}
+
+/// A commit id as people read it.
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(10)]
+}
+
+/// "a.rs, b.rs, c.rs and 9 more".
+pub(crate) fn name_list<S: AsRef<str>>(files: &[S]) -> String {
+    let shown: Vec<&str> = files.iter().take(3).map(AsRef::as_ref).collect();
+    match files.len().saturating_sub(3) {
+        0 => shown.join(", "),
+        more => format!("{} and {more} more", shown.join(", ")),
+    }
 }
 
 fn split_z(s: &str) -> Vec<String> {
@@ -805,5 +921,230 @@ mod tests {
         assert!(err.contains("hook") && err.contains("lint failed: b.txt"), "{err}");
         assert!(!git.in_merge(&repo).await, "the merge was aborted");
         assert!(matches!(git.merge(&repo, "feature", "merge feature", true).await.unwrap(), MergeOutcome::Merged { .. }));
+    }
+
+    /// A commit on a new branch `name` (from main) that sets `file` (None deletes it); back on
+    /// main afterwards.
+    fn branch_with(repo: &Path, name: &str, file: &str, content: Option<&str>) {
+        sh(repo, &["checkout", "-q", "-b", name, "main"]);
+        match content {
+            Some(c) => std::fs::write(repo.join(file), c).unwrap(),
+            None => std::fs::remove_file(repo.join(file)).unwrap(),
+        }
+        sh(repo, &["add", "-A"]);
+        sh(repo, &["commit", "-qm", name]);
+        sh(repo, &["checkout", "-q", "main"]);
+    }
+
+    /// A commit on the checked-out branch that sets `file`.
+    fn commit_file(repo: &Path, file: &str, content: &str) {
+        std::fs::write(repo.join(file), content).unwrap();
+        sh(repo, &["add", "-A"]);
+        sh(repo, &["commit", "-qm", file]);
+    }
+
+    /// Runs git and expects it to stop (a conflict).
+    fn stops(repo: &Path, args: &[&str]) {
+        let out = Command::new("git").arg("-C").arg(repo).args(args).env("LC_ALL", "C").output().unwrap();
+        assert!(!out.status.success(), "git {args:?} was expected to stop on a conflict");
+    }
+
+    /// The user is resolving a merge of their own: Codly's merge into their checkout is refused
+    /// before git runs, and their merge and the resolution they have not committed stay.
+    #[tokio::test]
+    async fn a_merge_the_user_has_in_progress_is_left_alone() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        branch_with(&repo, "theirs", "a.txt", Some("theirs\n"));
+        branch_with(&repo, "plan", "b.txt", Some("b\n"));
+        commit_file(&repo, "a.txt", "mine\n");
+        stops(&repo, &["merge", "theirs"]);
+        let theirs = git.rev_parse(&repo, "theirs").await.unwrap();
+        std::fs::write(repo.join("a.txt"), "resolved by hand\n").unwrap();
+
+        let err = git.merge(&repo, "plan", "merge plan", false).await.unwrap_err().to_string();
+        assert!(err.contains("a merge in progress") && err.contains("nothing was changed"), "{err}");
+        assert_eq!(git.rev_parse(&repo, "MERGE_HEAD").await.unwrap(), theirs, "their merge is still in progress");
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "resolved by hand\n");
+        assert!(!repo.join("b.txt").exists(), "nothing of the plan was merged");
+
+        // Once they conclude it, the same merge goes through.
+        sh(&repo, &["commit", "-qam", "merge theirs"]);
+        assert!(matches!(git.merge(&repo, "plan", "merge plan", false).await.unwrap(), MergeOutcome::Merged { .. }));
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "resolved by hand\n");
+        assert!(repo.join("b.txt").exists());
+    }
+
+    /// The same for a cherry-pick the user stopped in: no merge on top of it.
+    #[tokio::test]
+    async fn a_cherry_pick_in_progress_blocks_the_merge() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        branch_with(&repo, "theirs", "a.txt", Some("theirs\n"));
+        branch_with(&repo, "plan", "b.txt", Some("b\n"));
+        commit_file(&repo, "a.txt", "mine\n");
+        stops(&repo, &["cherry-pick", "theirs"]);
+        assert_eq!(git.in_progress(&repo).await.unwrap(), Some("a cherry-pick"));
+        let err = git.merge(&repo, "plan", "merge plan", false).await.unwrap_err().to_string();
+        assert!(err.contains("a cherry-pick in progress"), "{err}");
+        sh(&repo, &["cherry-pick", "--abort"]);
+        assert_eq!(git.in_progress(&repo).await.unwrap(), None);
+    }
+
+    /// Undo merge: the branch goes back to the commit before the merge, the merged work stays
+    /// on its own branch, and files that are not committed are never touched.
+    #[tokio::test]
+    async fn undo_merge_puts_the_branch_back() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        branch_with(&repo, "plan", "b.txt", Some("b\n"));
+        commit_file(&repo, "c.txt", "c\n");
+        let before = git.head(&repo).await.unwrap().unwrap();
+        let MergeOutcome::Merged { sha } = git.merge(&repo, "plan", "merge plan", false).await.unwrap() else { panic!("expected a merge") };
+        std::fs::write(repo.join("notes.txt"), "not committed\n").unwrap();
+        assert_eq!(git.undo_merge_blocker(&repo, "main", &sha, &before, "plan").await.unwrap(), None);
+
+        assert!(!git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap(), "no branch had to be put back");
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(before.as_str()));
+        assert_eq!(git.current_branch(&repo).await.unwrap().as_deref(), Some("main"));
+        assert!(!repo.join("b.txt").exists(), "the merged file is gone from the checkout");
+        assert!(repo.join("c.txt").exists());
+        assert_eq!(std::fs::read_to_string(repo.join("notes.txt")).unwrap(), "not committed\n", "untracked files stay");
+        assert!(!git.dirty(&repo, false).await.unwrap());
+        assert!(git.diff(&repo, "main", "plan").await.unwrap().contains("+b"), "the work is still on its branch");
+
+        // Undone once: the same undo is refused, and the merge can be made again.
+        let again = git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap_err().to_string();
+        assert!(again.contains("main has changed since this merge"), "{again}");
+        assert!(matches!(git.merge(&repo, "plan", "merge plan", false).await.unwrap(), MergeOutcome::Merged { .. }));
+    }
+
+    /// Undo merge is refused, with the reason, whenever it could lose or rewrite something:
+    /// uncommitted changes, a later commit, another branch checked out, a merge already pushed.
+    #[tokio::test]
+    async fn undo_merge_says_why_it_is_not_safe() {
+        let (d, repo) = repo();
+        let remote = d.path().join("remote.git");
+        sh(d.path(), &["init", "-q", "--bare", "-b", "main", &remote.to_string_lossy()]);
+        sh(&repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
+        let git = Git::from_process_env();
+        git.push(&repo, "origin", "main").await.unwrap();
+        branch_with(&repo, "plan", "b.txt", Some("b\n"));
+        commit_file(&repo, "c.txt", "c\n");
+        let before = git.head(&repo).await.unwrap().unwrap();
+        let MergeOutcome::Merged { sha } = git.merge(&repo, "plan", "merge plan", false).await.unwrap() else { panic!("expected a merge") };
+        let why = async || git.undo_merge_blocker(&repo, "main", &sha, &before, "plan").await.unwrap().unwrap_or_default();
+        assert_eq!(why().await, "", "an unpushed merge at the tip of a clean checkout can be undone");
+
+        // A tracked file with uncommitted changes, staged or not.
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        let dirty = "your checkout has uncommitted changes in a.txt; put them aside with git stash first (a commit on top of the merge would make undo impossible)";
+        assert_eq!(why().await, dirty);
+        sh(&repo, &["add", "a.txt"]);
+        let err = git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap_err().to_string();
+        assert!(err.contains("cannot be undone") && err.contains("uncommitted changes in a.txt"), "{err}");
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()), "nothing moved");
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "edited\n");
+        // The way out it names keeps undo possible.
+        sh(&repo, &["stash", "-q"]);
+        assert_eq!(why().await, "");
+        sh(&repo, &["stash", "pop", "-q"]);
+        sh(&repo, &["reset", "-q", "--hard"]);
+
+        // The wrong commit to go back to.
+        let wrong = git.rev_parse(&repo, "plan").await.unwrap().unwrap();
+        let odd = git.undo_merge_blocker(&repo, "main", &sha, &wrong, "plan").await.unwrap().unwrap();
+        assert!(odd.contains("is not a merge made on top of"), "{odd}");
+
+        // Another branch checked out, at the same commit.
+        sh(&repo, &["checkout", "-q", "-b", "other"]);
+        assert_eq!(why().await, "your checkout is on other now, not main");
+        sh(&repo, &["checkout", "-q", "--detach"]);
+        assert_eq!(why().await, "your checkout is not on main now");
+        sh(&repo, &["checkout", "-q", "main"]);
+
+        // A merge of their own in progress.
+        branch_with(&repo, "theirs", "d.txt", Some("d\n"));
+        sh(&repo, &["merge", "-q", "--no-ff", "--no-commit", "theirs"]);
+        let merging = "your checkout has a merge in progress; abort it first (finishing it would put a commit on top of the merge and make undo impossible)";
+        assert_eq!(why().await, merging);
+        sh(&repo, &["merge", "--abort"]);
+        assert_eq!(why().await, "", "after the abort it names, the merge can still be undone");
+
+        // Pushed: undoing it here would rewrite what the remote already has.
+        git.push(&repo, "origin", "main").await.unwrap();
+        let pushed = why().await;
+        assert!(pushed.starts_with("the merge is already on origin/main; undo it there with git revert -m 1 "), "{pushed}");
+
+        // A commit after the merge.
+        commit_file(&repo, "a.txt", "later\n");
+        let moved = why().await;
+        assert!(moved.starts_with("main has changed since this merge (it is at "), "{moved}");
+        assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.is_err());
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "later\n");
+    }
+
+    /// The merged branch was deleted after the merge (git allows it: it is merged). Undo puts it
+    /// back at the merged work first, so that work is never left on no branch.
+    #[tokio::test]
+    async fn undo_merge_puts_a_deleted_branch_back() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        branch_with(&repo, "plan", "b.txt", Some("b\n"));
+        commit_file(&repo, "c.txt", "c\n");
+        let before = git.head(&repo).await.unwrap().unwrap();
+        let work = git.rev_parse(&repo, "plan").await.unwrap();
+        let MergeOutcome::Merged { sha } = git.merge(&repo, "plan", "merge plan", false).await.unwrap() else { panic!("expected a merge") };
+        sh(&repo, &["branch", "-q", "-d", "plan"]);
+        assert_eq!(git.undo_merge_blocker(&repo, "main", &sha, &before, "plan").await.unwrap(), None);
+
+        assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap(), "the branch was put back");
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(before.as_str()));
+        assert_eq!(git.rev_parse(&repo, "plan").await.unwrap(), work, "the work is on its branch again");
+        assert!(matches!(git.merge(&repo, "plan", "merge plan", false).await.unwrap(), MergeOutcome::Merged { .. }));
+    }
+
+    /// The merged branch points somewhere else now, so undo cannot put it back: refused while
+    /// no other branch has the merged work, and fine once one does.
+    #[tokio::test]
+    async fn undo_merge_never_leaves_the_work_on_no_branch() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        branch_with(&repo, "plan", "b.txt", Some("b\n"));
+        commit_file(&repo, "c.txt", "c\n");
+        let before = git.head(&repo).await.unwrap().unwrap();
+        let work = git.rev_parse(&repo, "plan").await.unwrap().unwrap();
+        let MergeOutcome::Merged { sha } = git.merge(&repo, "plan", "merge plan", false).await.unwrap() else { panic!("expected a merge") };
+        sh(&repo, &["branch", "-q", "-f", "plan", &before]);
+
+        let why = git.undo_merge_blocker(&repo, "main", &sha, &before, "plan").await.unwrap().unwrap();
+        let keep = format!("keep it first with git branch <new name> {}", short(&work));
+        assert!(why.starts_with("plan was moved and no other branch has the merged work") && why.ends_with(&keep), "{why}");
+        assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.is_err());
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()), "the merge is still there");
+
+        sh(&repo, &["branch", "-q", "kept", &work]);
+        assert!(!git.undo_merge(&repo, "main", &sha, &before, "plan").await.unwrap(), "kept has the work: nothing to put back");
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(before.as_str()));
+        assert_eq!(git.rev_parse(&repo, "plan").await.unwrap().as_deref(), Some(before.as_str()), "plan stays where the user moved it");
+        assert_eq!(git.rev_parse(&repo, "kept").await.unwrap().as_deref(), Some(work.as_str()));
+    }
+
+    /// The merge deleted a file and the user has since made a new, uncommitted file of that
+    /// name: undo would have to bring the old one back over it, so git stops and the file stays.
+    #[tokio::test]
+    async fn undo_merge_never_overwrites_an_untracked_file() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        branch_with(&repo, "plan", "a.txt", None);
+        commit_file(&repo, "c.txt", "c\n");
+        let before = git.head(&repo).await.unwrap().unwrap();
+        let MergeOutcome::Merged { sha } = git.merge(&repo, "plan", "merge plan", false).await.unwrap() else { panic!("expected a merge") };
+        assert!(!repo.join("a.txt").exists());
+        std::fs::write(repo.join("a.txt"), "a new file of mine\n").unwrap();
+
+        assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.is_err());
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "a new file of mine\n");
+        assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()), "the merge is still there");
     }
 }
