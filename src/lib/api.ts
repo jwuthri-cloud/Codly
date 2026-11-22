@@ -19,6 +19,9 @@ import type { ArchivePolicy } from './gen/ArchivePolicy';
 import type { Connection } from './gen/Connection';
 import type { ConnectionSecret } from './gen/ConnectionSecret';
 import type { SweepReport } from './gen/SweepReport';
+import type { StorageCleanup } from './gen/StorageCleanup';
+import type { StoragePolicy } from './gen/StoragePolicy';
+import type { StorageReport } from './gen/StorageReport';
 import type { RepoSync } from './gen/RepoSync';
 import type { MergeWarning } from './gen/MergeWarning';
 import type { ByokSource } from './gen/ByokSource';
@@ -428,6 +431,18 @@ export const api = {
   /** Switch a server and/or store its key (Keychain; `value: null` removes it). Applies to the next spawn. */
   updateConnection: (id: string, enabled: boolean | null, secret: ConnectionSecret | null = null) =>
     call<Connection[]>('update_connection', { id, enabled, secret }),
+  /** What Codly keeps on disk and in each repository: worktrees, `codly/…` branches, run logs. Measures every worktree, so it can take a while. */
+  storageReport: () => call<StorageReport>('storage_report'),
+  /** How long run logs are kept and whether Codly cleans up after finished plans; pass `policy` to change them. */
+  storagePolicy: (policy: StoragePolicy | null = null) => call<StoragePolicy>('storage_policy', { policy }),
+  /** Remove what has nothing to lose, now: merged, clean worktrees and merged branches of finished work, old run logs. */
+  storageClean: () => call<StorageCleanup>('storage_clean'),
+  /** Delete one of Codly's worktrees (`head`: the commit the list showed). A dirty or unmerged one needs `force` and keeps its branch unless `deleteBranch`. */
+  storageDeleteWorktree: (officeId: string, path: string, head: string | null, force: boolean, deleteBranch: boolean) =>
+    call<null>('storage_delete_worktree', { officeId, path, head, force, deleteBranch }),
+  /** Delete a `codly/…` branch that no worktree has checked out. Commits that no other branch has need `force`. */
+  storageDeleteBranch: (officeId: string, branch: string, head: string, force: boolean) =>
+    call<null>('storage_delete_branch', { officeId, branch, head, force }),
   /** Onboarding: run the vendor's install or update line for a CLI in a visible terminal (attach with `ptyAttach`). The core picks the text from (provider, rung); nothing typed here is ever run. */
   installCli: (provider: Provider, rung: InstallRung) => call<InstallRun>('install_cli', { provider, rung }),
   /** Your own API credentials per vendor (opt-in): Anthropic → Claude, OpenAI → Codex, OpenRouter → OpenCode.

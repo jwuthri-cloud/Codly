@@ -23,7 +23,7 @@ Munder Difflin). Fixtures captured from the real CLIs: `docs/research/fixtures/`
 | Supervisor | the **Lead**: a real CLI agent (read-only) that chats with you and submits plans through `codly_submit_plan`; Codly enforces the DAG, scopes, leases, gates | Munder's supervisor rules were prompt-only and unenforced |
 | Isolation | one git worktree + branch per task, branched from the plan's integration branch; **Codly commits**, agents never do | Codex sandbox makes `.git` read-only (CRITIQUE W2) |
 | Merge | serial merge queue into `codly/<plan>/integration`, `git merge-tree` pre-check; Codly merges into the user's branch and pushes it only when the user presses the button | agents-backend §6.8 |
-| Storage | one SQLite (rusqlite bundled, WAL); `event` table is the source of truth; raw provider lines in `runs/<id>/raw.ndjson` | replayable timeline and world |
+| Storage | one SQLite (rusqlite bundled, WAL); `event` table is the source of truth; raw provider lines in `runs/<id>/raw.ndjson`, deleted 30 days after the run's last line (Settings → Storage) | replayable timeline and world |
 | Retrieval | per-repo FTS5 over paths, regex symbols and contextual 60-line chunks (path + enclosing symbols prefixed) → RRF → agreement confidence → **pointer pack** (≤ 1.2k tokens) + `codly_search` | commit-replay Hit@5 0.66–0.84 on 4 real repos vs 0.25–0.32 naive grep on 3 of them (0.69 on pi-mono); `examples/bench_localize.rs` |
 | Memory | scoped memories (global / project = shared, agent = private, task), FTS5; temporal knowledge triples, many derived from real events | the user's "shared + single memory, triplets, RAG" |
 | World | three.js (`src/office/`: engine, reducer, sims, traits, breakroom); characters and the building are drawn in code, furniture models and sounds are third-party CC0 / CC BY assets (`public/furniture`, `public/audio`, credits in each folder); A*, DOM text overlay; frames on demand: about 30 fps while the World is on screen (agents breathe and take breaks), none when nothing moves (Reduce Motion) | design-world §9; Munder's PixiJS floor never idles and ships non-redistributable LimeZu tiles |
@@ -237,7 +237,13 @@ they are build output or third-party code in most repos. If one holds your own c
   failure stays in its record. A team member's task shares the member's worktree: while the
   member is on other work, the task goes back in line for it and keeps your choice.
 - Clean-room profile for untrusted repos (`--setting-sources`, `--strict-mcp-config`).
-- Never deletes a dirty or unmerged worktree, and keeps the branch.
+- By itself, Codly removes a worktree only when it is clean and merged, and deletes a
+  `codly/…` branch only when its work is merged and its plan is over (merged, cancelled or
+  failed) for a day: the housekeeping sweep, which can be switched off. A dirty or unmerged
+  worktree, a branch with commits of its own, a plan that waits for Merge and one you chose
+  to keep are never touched by it. You delete those in Settings → Storage, after a confirm
+  that names what is lost; the branch stays unless you tick it too. Every removal is a
+  `storage` decision with the commit it was at.
 - The user's branch: Codly commits and merges by itself only on `codly/…` branches. Four
   commands change the user's branch or its remote (commits, merges, push), each behind a
   button: `merge_plan` and `merge_agent` (merge into the checked-out branch),
@@ -287,7 +293,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       team.rs hires.rs careers.rs         standing team and consultants, hired agents, XP and offers
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
-                      housekeeping.rs                     glue for housekeeping/
+                      housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
   store/            SQLite: schema.sql, later migrations (m2…m4), typed queries
   git.rs            worktrees, commits, merges, push (shells out to the user's git)
@@ -300,7 +306,8 @@ crates/codly-core/src/    the engine: no Tauri dependency
   dictation.rs      opt-in: Free Flow dictation through Groq Whisper (key in the Keychain)
   inbound/          webhook listener, Slack source (not connected yet), secrets.rs (Keychain)
   triggers.rs       schedules and network mode: pure policy
-  housekeeping/     archive.rs (board archiving), connections.rs (agents' default tool servers)
+  housekeeping/     archive.rs (board archiving), connections.rs (agents' default tool servers),
+                    storage.rs (worktrees, `codly/…` branches, run logs: what is left, what may go)
   skills.rs         skills manager: scan, bundled catalog, install (git clone), uninstall
   install.rs        onboarding: install commands per CLI, run in a visible terminal
   ide.rs            confined file operations for the workspace IDE

@@ -3,7 +3,11 @@
 //!   tasks and pending questions and copies archived tasks to the archive file, and a slow
 //!   background loop runs it;
 //! - default MCP servers: the switches live in `kv`, keys in the Keychain, and
-//!   `prepare_default_mcp` writes the enabled servers into a run's directory at spawn.
+//!   `prepare_default_mcp` writes the enabled servers into a run's directory at spawn;
+//! - storage (`storage.rs`): what Codly left on disk and in each repository, the user's own
+//!   deletes, and the pass of the same background loop that removes what has nothing to lose.
+
+mod storage;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -106,7 +110,7 @@ impl Inner {
     }
 }
 
-/// Sweep the board once soon after start, then every half hour.
+/// Sweep the board and the storage once soon after start, then every half hour.
 pub(super) async fn sweeper(inner: Arc<Inner>) {
     tokio::time::sleep(Duration::from_secs(20)).await;
     loop {
@@ -121,6 +125,9 @@ pub(super) async fn sweeper(inner: Arc<Inner>) {
             {
                 tracing::warn!("board sweep of {} failed: {e}", ws.name);
             }
+        }
+        for problem in inner.storage_sweep_at(now_ms()).await.problems {
+            tracing::warn!("storage sweep: {problem}");
         }
         tokio::time::sleep(SWEEP_EVERY).await;
     }

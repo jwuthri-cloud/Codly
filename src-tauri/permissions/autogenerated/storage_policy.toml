@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-storage-policy"
+description = "Enables the storage_policy command without any pre-configured scope."
+commands.allow = ["storage_policy"]
+
+[[permission]]
+identifier = "deny-storage-policy"
+description = "Denies the storage_policy command without any pre-configured scope."
+commands.deny = ["storage_policy"]

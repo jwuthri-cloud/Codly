@@ -22,6 +22,7 @@
   import ConnectionsSection from './ConnectionsSection.svelte';
   import DeveloperSection from './DeveloperSection.svelte';
   import HousekeepingSection from './HousekeepingSection.svelte';
+  import StorageSection from './StorageSection.svelte';
   import TeamSection from './TeamSection.svelte';
   import TriggersSection from './TriggersSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -234,6 +235,7 @@
     </section>
 
     <HousekeepingSection />
+    <StorageSection />
 
     <section>
       <h3 class="eyebrow">Troubleshooting</h3>

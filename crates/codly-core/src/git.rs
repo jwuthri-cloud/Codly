@@ -782,6 +782,70 @@ impl Git {
     }
 }
 
+/// A local branch as Settings → Storage lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchInfo {
+    /// Short name ("codly/plan-1a2b/t1").
+    pub name: String,
+    pub head: String,
+    /// When its last commit was made (unix ms).
+    pub committed_at: i64,
+}
+
+/// Reads and deletes for Settings → Storage (`housekeeping/storage.rs`): what Codly left in a
+/// repository, and what would be lost with it.
+impl Git {
+    /// Every local branch under `codly/`.
+    pub async fn codly_branches(&self, repo: &Path) -> Result<Vec<BranchInfo>> {
+        let out = self.read(repo, &["for-each-ref", "--format=%(objectname) %(committerdate:unix) %(refname)", "refs/heads/codly/"]).await?;
+        Ok(out
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, ' ');
+                let (head, secs, name) = (parts.next()?, parts.next()?, parts.next()?.strip_prefix("refs/heads/")?);
+                Some(BranchInfo { name: name.to_string(), head: head.to_string(), committed_at: secs.parse::<i64>().ok()? * 1000 })
+            })
+            .collect())
+    }
+
+    /// How many commits `rev` has that none of `others` has. 0 = `rev` is contained in one of
+    /// them: nothing is lost when only they stay. With no `others`, every commit counts.
+    pub async fn commits_only_on(&self, repo: &Path, rev: &str, others: &[String]) -> Result<u32> {
+        let mut args = vec!["rev-list", "--count", rev, "--not"];
+        args.extend(others.iter().map(String::as_str));
+        Ok(self.read(repo, &args).await?.trim().parse()?)
+    }
+
+    /// How many commits `rev` has that no local branch has: what goes with a worktree that is
+    /// on no branch.
+    pub async fn commits_on_no_branch(&self, repo: &Path, rev: &str) -> Result<u32> {
+        Ok(self.read(repo, &["rev-list", "--count", rev, "--not", "--branches"]).await?.trim().parse()?)
+    }
+
+    /// When the commit `rev` was made (unix ms).
+    pub async fn committed_at(&self, repo: &Path, rev: &str) -> Result<i64> {
+        Ok(self.read(repo, &["log", "-1", "--format=%ct", rev]).await?.trim().parse::<i64>()? * 1000)
+    }
+
+    /// The uncommitted files of a worktree: changed tracked files and untracked files that are
+    /// not ignored (what `dirty(.., true)` counts). Call `check_worktree` first.
+    pub async fn dirty_paths(&self, wt: &Path) -> Result<Vec<String>> {
+        let out = self.read(wt, &["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--no-renames"]).await?;
+        // One entry is "XY <path>".
+        Ok(out.split('\0').filter_map(|entry| entry.get(3..)).filter(|path| !path.is_empty()).map(String::from).collect())
+    }
+
+    /// Delete the local branch `branch` if it is still at `head`. Refused when it moved since,
+    /// and when a worktree has it checked out.
+    pub async fn delete_branch(&self, repo: &Path, branch: &str, head: &str) -> Result<()> {
+        if self.worktrees(repo).await?.iter().any(|w| w.branch.as_deref() == Some(branch)) {
+            bail!("{branch} is checked out in a worktree; keeping it");
+        }
+        let r = format!("refs/heads/{branch}");
+        self.ok(repo, &["update-ref", "-d", &r, head], false).await.map(drop)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

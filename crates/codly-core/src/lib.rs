@@ -25,7 +25,8 @@
 //! - `lot`          build mode's lots: the ready-made Studio and Garage, a repo's first lot, checks
 //! - `price`        build mode's price table
 //! - `repos`        the git repositories under a folder, for the browser's "Open repository" picker
-//! - `housekeeping` board archiving, and the default MCP servers of new agents (keys in the Keychain)
+//! - `housekeeping` board archiving, the default MCP servers of new agents (keys in the Keychain),
+//!   and storage: what Codly leaves on disk and in a repository, and what may be removed
 //! - `blockers`     "ask me" cards: a decision an agent needs from you
 //! - `career`       XP, ranks, skills and traits from real events: pure functions
 

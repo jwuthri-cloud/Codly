@@ -71,6 +71,11 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::message_graph,
             commands::memory_file,
             commands::save_memory_file,
+            commands::storage_report,
+            commands::storage_policy,
+            commands::storage_clean,
+            commands::storage_delete_worktree,
+            commands::storage_delete_branch,
             crate::onboarding_commands::install_cli,
             crate::onboarding_commands::byok_status,
             crate::onboarding_commands::byok_configure,
@@ -116,6 +121,20 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("only a blocked or failed task"), "{e}");
     let e = invoke(&wv, "accept_task", json!({ "taskId": task["id"] })).unwrap_err();
     assert!(e.to_string().contains("can be merged anyway"), "{e}");
+
+    // Settings → Storage: the office is listed, the rules are saved, and a delete names its
+    // office, the path and the commit the list showed. Nothing here is Codly's to delete.
+    let storage = invoke(&wv, "storage_report", json!({})).unwrap();
+    assert!(storage["offices"][0]["office_id"] == ws["id"] && storage["offices"][0]["worktrees"].is_array() && storage["logs"]["bytes"].is_number(), "{storage}");
+    assert_eq!(invoke(&wv, "storage_policy", json!({ "policy": null })).unwrap(), json!({ "log_days": 30, "clean_merged": true }));
+    assert_eq!(invoke(&wv, "storage_policy", json!({ "policy": { "log_days": 7, "clean_merged": false } })).unwrap()["log_days"], 7);
+    let cleaned = invoke(&wv, "storage_clean", json!({})).unwrap();
+    assert_eq!(cleaned, json!({ "worktrees": 0, "branches": 0, "logs": 0, "bytes": 0, "problems": [] }));
+    let own = json!({ "officeId": ws["id"], "path": repo.to_str().unwrap(), "head": null, "force": true, "deleteBranch": true });
+    let e = invoke(&wv, "storage_delete_worktree", own).unwrap_err();
+    assert!(e.to_string().contains("not one of Codly's worktrees"), "{e}");
+    let e = invoke(&wv, "storage_delete_branch", json!({ "officeId": ws["id"], "branch": "main", "head": "abc1234", "force": true })).unwrap_err();
+    assert!(e.to_string().contains("not one of Codly's branches"), "{e}");
 
     let m = invoke(&wv, "add_memory", json!({ "text": "We use pnpm.", "scope": "project", "kind": "decision" })).unwrap();
     assert_eq!(m["kind"], "decision");
