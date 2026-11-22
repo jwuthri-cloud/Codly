@@ -310,6 +310,10 @@ impl Index {
 
 /// Read one file and decide what the index should do with it.
 fn process(f: &walk::Found, prev: Option<&FileState>, opts: &IndexOptions) -> Outcome {
+    // Rejected by name (images, lockfiles, bundles): no need to read it.
+    if let Some(reason) = lang::skip_by_name(&f.rel) {
+        return Outcome::Skipped { path: f.rel.clone(), mtime_ns: f.mtime_ns, bytes: f.bytes as i64, reason };
+    }
     let bytes = match std::fs::read(&f.abs) {
         Ok(b) => b,
         Err(_) => return Outcome::Gone(f.rel.clone()), // vanished since the walk
@@ -336,11 +340,16 @@ fn write_batch(conn: &mut Connection, batch: Vec<Outcome>) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Paths equal to ?1 or in the range [?2, ?3). A range uses the path index of both tables; a
+/// LIKE prefix cannot (LIKE ignores case, the index does not), so it read every row.
+const PATHS_UNDER_SQL: &str = "SELECT path FROM files WHERE path = ?1 OR (path >= ?2 AND path < ?3)
+     UNION SELECT path FROM skipped WHERE path = ?1 OR (path >= ?2 AND path < ?3)";
+
 /// Stored paths equal to `rel` or below it (`rel/…`): what a deleted directory held.
 fn paths_under(conn: &Connection, rel: &str) -> anyhow::Result<Vec<String>> {
-    let esc: String = rel.chars().flat_map(|c| if matches!(c, '%' | '_' | '\\') { vec!['\\', c] } else { vec![c] }).collect();
-    let mut stmt = conn.prepare_cached("SELECT path FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' UNION SELECT path FROM skipped WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'")?;
-    let rows = stmt.query_map(rusqlite::params![rel, format!("{esc}/%")], |r| r.get::<_, String>(0))?;
+    // Everything below `rel` sorts from `rel/` up to `rel0`: `0` is the byte after `/`.
+    let mut stmt = conn.prepare_cached(PATHS_UNDER_SQL)?;
+    let rows = stmt.query_map(rusqlite::params![rel, format!("{rel}/"), format!("{rel}0")], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
@@ -385,5 +394,39 @@ mod tests {
     #[test]
     fn normalizes_dotdot() {
         assert_eq!(normalize(Path::new("/a/b/../c/./d")), PathBuf::from("/a/c/d"));
+    }
+
+    #[test]
+    fn paths_under_is_an_index_range_and_takes_names_literally() {
+        let d = tempfile::tempdir().unwrap();
+        let conn = store::open_writer(&d.path().join("i.sqlite"), &IndexOptions::default()).unwrap();
+        let plan = crate::store::query_plan(&conn, PATHS_UNDER_SQL);
+        assert!(!plan.lines().any(|l| l.starts_with("SCAN")), "{plan}");
+
+        for p in ["a_b", "a_b/x.rs", "a_b/deep/y.rs", "a_b0", "a_b.rs", "axb/z.rs", "A_B/case.rs", "100%/w.rs", "100x/v.rs"] {
+            conn.execute("INSERT INTO files(path, bytes, lines, mtime_ns, hash) VALUES (?1, 0, 0, 0, 0)", [p]).unwrap();
+        }
+        conn.execute("INSERT INTO skipped(path, mtime_ns, bytes, reason) VALUES ('a_b/logo.png', 0, 0, 'binary'), ('axb/logo.png', 0, 0, 'binary')", []).unwrap();
+        let under = |rel: &str| {
+            let mut got = paths_under(&conn, rel).unwrap();
+            got.sort();
+            got
+        };
+        // `_` and `%` are plain characters, and a sibling that only shares the prefix is not below.
+        assert_eq!(under("a_b"), ["a_b", "a_b/deep/y.rs", "a_b/logo.png", "a_b/x.rs"]);
+        assert_eq!(under("100%"), ["100%/w.rs"]);
+        assert!(under("a").is_empty());
+    }
+
+    #[test]
+    fn a_file_rejected_by_its_name_is_not_read() {
+        // The path does not exist: reading it would report the file as gone.
+        let f = walk::Found { rel: "assets/logo.png".into(), abs: PathBuf::from("/nonexistent/assets/logo.png"), mtime_ns: 7, bytes: 4096 };
+        match process(&f, None, &IndexOptions::default()) {
+            Outcome::Skipped { path, mtime_ns, bytes, reason } => {
+                assert_eq!((path.as_str(), mtime_ns, bytes, reason), ("assets/logo.png", 7, 4096, "binary"));
+            }
+            _ => panic!("expected a skip by name"),
+        }
     }
 }
