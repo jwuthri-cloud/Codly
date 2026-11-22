@@ -419,6 +419,8 @@ impl Core {
         self.inner.snapshot().await
     }
 
+    /// Look for the CLIs again and ask each who is signed in. The onboarding polls this, so it
+    /// never asks for a quota (`Inner::pull_quota` reads a credential).
     pub async fn redetect_clis(&self) -> anyhow::Result<Vec<CliInfo>> {
         let i = &self.inner;
         if !i.fixed_clis {
@@ -430,11 +432,12 @@ impl Core {
     }
 
     /// Every sign-in of every installed CLI, in your order, with the usage windows its agents
-    /// last reported (`limits`). `refresh` = ask each CLI again who is signed in, and each
-    /// Claude sign-in for its quota (≤ 10 s).
+    /// last reported (`limits`). `refresh` = ask each CLI again who is signed in and, only with
+    /// `Settings.read_claude_quota` on, ask Anthropic for each Claude sign-in's quota (≤ 10 s).
     pub async fn accounts(&self, refresh: bool) -> anyhow::Result<Vec<AccountInfo>> {
         if refresh {
             self.inner.redetect_accounts(false).await;
+            self.inner.pull_quota().await;
         }
         Ok(self.inner.accounts())
     }

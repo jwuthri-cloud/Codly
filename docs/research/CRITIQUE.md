@@ -308,6 +308,7 @@ Each row gives the call and the evidence behind it.
 ### D1. Product and legal guardrails (P0)
 
 - **Codly never touches credentials.** The user installs and logs in to each CLI. Codly spawns the **unmodified** binaries. It never reads keychains or token files, never mints or stores OAuth tokens, and never proxies or resells.
+  - *Update, 2026-11-22:* the app now has exceptions to this rule. One is a read of the Claude Code sign-in token that is off until the user turns it on (Settings → Accounts, "Show Claude usage before an agent runs"). The others are keys the user gives to Codly, kept in the Keychain. The README section "Subscriptions and safety" lists them.
 - **Legal review before a public release** must cover:
   - Anthropic's Commercial Terms obligation for products that "run Claude Code";
   - its name and logo rules: say "runs Claude Code" in plain text only, and never use Claude Code or Anthropic names or logos in Codly's own name, logo or sprites;

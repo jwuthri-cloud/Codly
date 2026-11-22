@@ -1656,6 +1656,12 @@ pub struct Settings {
     /// Account the Lead runs on (None = the one with the most quota left).
     #[serde(default)]
     pub lead_account: Option<String>,
+    /// Ask Anthropic for each Claude sign-in's usage (what `/usage` shows) when Accounts are
+    /// refreshed. This reads the sign-in's OAuth token (login Keychain, else its
+    /// `.credentials.json`) and sends it to api.anthropic.com (`quota.rs`). Off = Codly never
+    /// reads that token: usage comes only from what running agents report.
+    #[serde(default)]
+    pub read_claude_quota: bool,
     pub approval_mode: ApprovalMode,
     /// Run plans without waiting for the "Run plan" click.
     pub auto_run_plans: bool,
@@ -1706,6 +1712,7 @@ impl Default for Settings {
             accounts: vec![],
             account_strategy: AccountStrategy::Spread,
             lead_account: None,
+            read_claude_quota: false,
             approval_mode: ApprovalMode::Balanced,
             auto_run_plans: false,
             review_gate: false,

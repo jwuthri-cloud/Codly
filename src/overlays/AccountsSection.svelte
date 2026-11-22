@@ -36,8 +36,16 @@
     await refreshAccounts(true);
     refreshing = false;
   }
-  // Re-checks every sign-in and pulls its quota, so accounts no agent ran on show it too.
+  // Re-checks every sign-in. Only with "Show Claude usage" on does the core also ask Anthropic
+  // for each Claude sign-in's quota, so accounts no agent ran on show it too.
   onMount(() => void refresh());
+
+  // ── Claude usage (opt-in: the core reads the Claude Code sign-in token for it) ──
+  const hasClaude = $derived(accounts.list.some((a) => a.provider === 'claude'));
+  async function setReadQuota(on: boolean) {
+    await updateSettings({ read_claude_quota: on });
+    if (on && store.settings.read_claude_quota) await refresh();
+  }
 
   // ── edits (each one saves the CLI's whole list, in order) ──
   function save(p: Provider, list: AccountInfo[], probe = false) {
@@ -316,6 +324,16 @@
         </select>
       </div>
     {/if}
+  {/if}
+  {#if hasClaude}
+    <!-- Not a <label>: only the switch itself turns this on, never a click on the text. -->
+    <div class="row">
+      <div class="r-text">
+        <span class="r-title">Show Claude usage before an agent runs</span>
+        <span class="desc">Off: a Claude sign-in shows its usage once an agent has run on it. On: each time Codly checks your sign-ins (here, or when you open an agent), it reads the Claude Code sign-in token from your Keychain (or the sign-in’s <code>.credentials.json</code> file) and sends it to api.anthropic.com to ask for your usage, as <code>/usage</code> does. The token is not stored or logged. Check Anthropic’s terms first: they may not allow another app to use this token.</span>
+      </div>
+      <input type="checkbox" class="switch" checked={s.read_claude_quota} aria-label="Show Claude usage before an agent runs" onchange={(e) => setReadQuota(e.currentTarget.checked)} />
+    </div>
   {/if}
   <div class="row">
     <div class="r-text"><span class="r-title">Workers per account</span><span class="desc">At most this many at once on one sign-in, so no subscription hits its rate limit.</span></div>
