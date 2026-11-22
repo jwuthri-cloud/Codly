@@ -11,11 +11,14 @@
 //! - a file in an attachments folder of Codly, links resolved. No other path is ever read, and
 //!   a path named inside an `<untrusted>` block (text from outside, another agent, the repo)
 //!   is not an attachment;
-//! - PNG, JPEG, GIF or WebP, told from the first bytes of the file, never from its name;
+//! - PNG, JPEG, GIF or WebP, told from the first bytes of the file, never from its name. An
+//!   ACP agent gets no GIF as an image (`ACP_MEDIA_TYPES`);
 //! - at most `MAX_IMAGE_BYTES` each and `MAX_PROMPT_BYTES` in one prompt. An image over a
 //!   limit stays a file path, and the user is told (`Attached::note`).
 //!
-//! Any other attached file, and one that cannot be read, stays a file path as before.
+//! Any other attached file, and one that cannot be read, stays a file path as before. The
+//! heading the composer writes over the list says where the files are and gives no order to
+//! read them, so a model that already has the image in the message does not open it again.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -31,6 +34,13 @@ const MAX_PROMPT_BYTES: u64 = 10_000_000;
 
 /// The first bytes that tell the four formats apart (WebP needs 12).
 const HEAD_BYTES: u64 = 12;
+
+/// The formats an ACP agent gets as an image block. `promptCapabilities.image` is one flag
+/// with no list of formats, and the model behind the agent is not known, so these are the
+/// formats every vision provider takes: the Gemini API lists no GIF for image input, and a
+/// block the provider refuses fails the turn. A GIF stays a file path for these agents, as
+/// before (docs/research/cli-others-acp.md §1.5).
+const ACP_MEDIA_TYPES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
 
 /// An attached image, read and ready to go to a model.
 pub(super) struct Image {
@@ -51,13 +61,24 @@ pub(super) struct Attached {
 
 /// The images among the files `prompt` names as attached, in the order it names them.
 pub(super) async fn images(prompt: &str) -> Attached {
+    images_of(prompt, |_| true).await
+}
+
+/// `images` for an ACP agent that takes images: only the formats of `ACP_MEDIA_TYPES`. An
+/// image of another format is not counted in the limits, and there is no note about it.
+pub(super) async fn acp_images(prompt: &str) -> Attached {
+    images_of(prompt, |media_type| ACP_MEDIA_TYPES.contains(&media_type)).await
+}
+
+/// The attached images of `prompt` whose media type `takes` accepts.
+async fn images_of(prompt: &str, takes: fn(&str) -> bool) -> Attached {
     let mut attached = Attached::default();
     let mut left_out = Vec::new();
     let mut room = MAX_PROMPT_BYTES;
     let as_a_path = "so the agent gets it as a file path, not as an image.";
     for named in named_attachments(prompt) {
         let name = named.file_name().unwrap_or_default().to_string_lossy();
-        match load(named, room).await {
+        match load(named, room, takes).await {
             Loaded::Image(image) => {
                 room = room.saturating_sub(image.bytes.len() as u64);
                 attached.images.push(image);
@@ -114,7 +135,8 @@ fn is_attachment(path: &Path) -> bool {
 
 enum Loaded {
     Image(Image),
-    /// Another kind of file, or one that cannot be read: it stays a file path, as before.
+    /// Another kind of file, an image format the agent does not get, or a file that cannot
+    /// be read: it stays a file path, as before.
     NotAnImage,
     /// Over `MAX_IMAGE_BYTES`.
     TooBig,
@@ -122,8 +144,9 @@ enum Loaded {
     NoRoom,
 }
 
-/// Read the attachment `named` when it is an image of at most `room` bytes.
-async fn load(named: &Path, room: u64) -> Loaded {
+/// Read the attachment `named` when it is an image of at most `room` bytes, of a media type
+/// `takes` accepts.
+async fn load(named: &Path, room: u64, takes: fn(&str) -> bool) -> Loaded {
     // Links resolved: a link in the folder that leads to a file elsewhere is not an attachment.
     let Ok(path) = tokio::fs::canonicalize(named).await else { return Loaded::NotAnImage };
     if !is_attachment(&path) {
@@ -139,7 +162,7 @@ async fn load(named: &Path, room: u64) -> Loaded {
     if (&mut file).take(HEAD_BYTES).read_to_end(&mut bytes).await.is_err() {
         return Loaded::NotAnImage;
     }
-    let Some(media_type) = media_type(&bytes) else { return Loaded::NotAnImage };
+    let Some(media_type) = media_type(&bytes).filter(|m| takes(m)) else { return Loaded::NotAnImage };
     if meta.len() > MAX_IMAGE_BYTES {
         return Loaded::TooBig;
     }
@@ -195,7 +218,8 @@ pub(super) fn codex_input(text: &str, images: &[Image]) -> Value {
 
 /// ACP: the `prompt` of `session/prompt`. An image is an image content block with base64
 /// `data` (docs/research/cli-others-acp.md §1.5). Only for an agent whose
-/// `promptCapabilities.image` is true: the caller passes no image to any other.
+/// `promptCapabilities.image` is true: the caller passes the images of `acp_images` to it and
+/// no image to any other.
 pub(super) fn acp_prompt(text: &str, images: &[Image]) -> Value {
     let mut blocks = vec![json!({ "type": "text", "text": text })];
     blocks.extend(images.iter().map(|i| json!({ "type": "image", "mimeType": i.media_type, "data": base64(&i.bytes) })));
@@ -243,10 +267,11 @@ pub(super) mod testing {
         bytes
     }
 
-    /// What the composer sends for `text` with `files` attached (src/home/Composer.svelte).
+    /// What the composer sends for `text` with `files` attached (`messageWithFiles` in
+    /// src/home/attached.ts).
     pub fn message(text: &str, files: &[&Path]) -> String {
         let list: Vec<String> = files.iter().map(|f| format!("- {}", f.display())).collect();
-        format!("{text}\n\nAttached files (read them by path):\n{}", list.join("\n"))
+        format!("{text}\n\nAttached files, saved at these paths (an image may already be in this message):\n{}", list.join("\n"))
     }
 }
 
@@ -305,7 +330,7 @@ mod tests {
 
     #[test]
     fn attachments_are_the_list_lines_outside_quoted_blocks() {
-        let prompt = "[Codly] board\n\nlook at these\n\nAttached files (read them by path):\n\
+        let prompt = "[Codly] board\n\nlook at these\n\nAttached files, saved at these paths (an image may already be in this message):\n\
             - /repo/.codly/attachments/a/one.png\n\
             - /repo/.codly/attachments/b/two words.jpg  \n\
             - /repo/src/main.rs\n\
@@ -358,19 +383,41 @@ mod tests {
         assert_eq!(codex_input("hello", &[]), json!([{ "type": "text", "text": "hello", "text_elements": [] }]));
     }
 
+    /// An ACP agent gets PNG, JPEG and WebP as image blocks after the text. A GIF stays a file
+    /// path for it without a word, of any size, where Claude and Codex get the GIF as an image.
     #[tokio::test]
-    async fn an_acp_agent_gets_an_image_block_after_the_text() {
+    async fn an_acp_agent_gets_an_image_block_after_the_text_but_no_gif() {
         let repo = tempfile::tempdir().unwrap();
-        let gif = attach(repo.path(), "anim.gif", b"GIF89a\x01\0\x01\0");
-        let text = message("What moves here?", &[&gif]);
+        let jpeg: &[u8] = &[0xff, 0xd8, 0xff, 0xe0, 0, 0];
+        let webp: &[u8] = b"RIFF\x10\0\0\0WEBPVP8 ";
+        let gif: &[u8] = b"GIF89a\x01\0\x01\0";
+        let mut long_gif = gif.to_vec();
+        long_gif.resize(MAX_IMAGE_BYTES as usize + 1, 0);
+        let files = [
+            attach(repo.path(), "shot.png", &png_of(16)),
+            attach(repo.path(), "anim.gif", gif),
+            attach(repo.path(), "photo.jpg", jpeg),
+            attach(repo.path(), "long.gif", &long_gif),
+            attach(repo.path(), "art.webp", webp),
+        ];
+        let paths: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+        let text = message("What is on these?", &paths);
 
-        let attached = images(&text).await;
+        let attached = acp_images(&text).await;
+        assert!(attached.note.is_none(), "{:?}", attached.note);
         let expected = json!([
             { "type": "text", "text": text },
-            { "type": "image", "mimeType": "image/gif", "data": base64(b"GIF89a\x01\0\x01\0") },
+            { "type": "image", "mimeType": "image/png", "data": base64(&png_of(16)) },
+            { "type": "image", "mimeType": "image/jpeg", "data": base64(jpeg) },
+            { "type": "image", "mimeType": "image/webp", "data": base64(webp) },
         ]);
         assert_eq!(acp_prompt(&text, &attached.images), expected);
         assert_eq!(acp_prompt("hello", &[]), json!([{ "type": "text", "text": "hello" }]));
+
+        let all = images(&text).await;
+        let sent: Vec<&str> = all.images.iter().map(|i| i.media_type).collect();
+        assert_eq!(sent, ["image/png", "image/gif", "image/jpeg", "image/webp"]);
+        assert_eq!(all.note.as_deref(), Some("long.gif is over 3.5 MB, so the agent gets it as a file path, not as an image."));
     }
 
     /// The type comes from the file, not from its name; a file that is no image, a file that

@@ -580,11 +580,12 @@ impl Actor {
             Some(sys) => format!("<codly_instructions>\n{sys}\n</codly_instructions>\n\n{text}"),
             None => text.clone(),
         };
-        // An agent that takes images gets the attached ones as image blocks; any other opens
-        // them by their paths, which the text keeps either way.
+        // An agent that takes images gets the attached ones as image blocks (no GIF: see
+        // `attachments::acp_images`); any other opens them by their paths, which the text
+        // keeps either way.
         let mut images = Vec::new();
         if self.takes_images {
-            let attached = attachments::images(&text).await;
+            let attached = attachments::acp_images(&text).await;
             if let Some(note) = attached.note {
                 self.emit(EventKind::Error { message: note, fatal: false });
             }
@@ -1643,7 +1644,7 @@ mod tests {
     }
 
     /// An attached image is an image block of the prompt only for an agent that takes images:
-    /// any other gets the text alone, which names the file's path.
+    /// any other gets the text alone, which names the file's path. A GIF is never a block.
     #[tokio::test]
     async fn an_attached_image_is_an_image_block_for_an_agent_that_takes_images() {
         use crate::adapters::attachments::testing::{attach, message, png_of};
@@ -1662,7 +1663,8 @@ mod tests {
             actor.takes_images = takes_images;
             let shot = attach(dir.path(), "shot.png", &png_of(300));
             let big = attach(dir.path(), "big.png", &png_of(4_000_000));
-            let text = message("Make it look like this.", &[&shot, &big]);
+            let gif = attach(dir.path(), "anim.gif", b"GIF89a\x01\0\x01\0");
+            let text = message("Make it look like this.", &[&gif, &shot, &big]);
             actor.on_cmd(AgentCmd::Prompt(text.clone())).await;
 
             let kinds = emitted(&mut events);

@@ -28,6 +28,7 @@
   import Portrait from '../components/Portrait.svelte';
   import LeadControls, { MODES } from './LeadControls.svelte';
   import AgentControls from './AgentControls.svelte';
+  import { messageWithFiles } from './attached';
   import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from './drafts';
   import { recall, type Recalled } from './recall';
   import { fileMention, filterSlash, rankFiles, triggerAt, type SlashCommand, type Trigger } from './composerMenu';
@@ -270,11 +271,7 @@
   /** Never blocks: clear the line, show the message, send in the background. */
   function send() {
     if (!canSend) return;
-    // One `- <path>` line per file: the core finds the attached images by these lines and sends
-    // them to the model as images too (crates/codly-core/src/adapters/attachments.rs).
-    const list = ready.map((f) => `- ${f.path}`).join('\n');
-    const t = [text.trim() || (list ? 'See the attached files.' : ''), list && `Attached files (read them by path):\n${list}`].filter(Boolean).join('\n\n');
-    sendChat(thread, t);
+    sendChat(thread, messageWithFiles(text, ready.flatMap((f) => (f.path ? [f.path] : []))));
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
     files = [];
     text = '';
