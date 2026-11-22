@@ -903,7 +903,16 @@ impl AcpNormalizer {
                 }
                 ApprovalSubject::FileChange { paths, diff: render_diffs(&merged) }
             }
-            _ => ApprovalSubject::Tool { name: if title.is_empty() { kind.to_string() } else { title.clone() }, input: merged["rawInput"].clone() },
+            _ => {
+                // The title is free text: the approval rules also get the protocol kind.
+                let mut input = match merged["rawInput"].clone() {
+                    Value::Object(o) => Value::Object(o),
+                    Value::Null => json!({}),
+                    other => json!({ "input": other }),
+                };
+                input[classify::ACP_KIND] = json!(kind);
+                ApprovalSubject::Tool { name: if title.is_empty() { kind.to_string() } else { title.clone() }, input }
+            }
         };
         let mut options: Vec<(ApprovalChoice, String)> = Vec::new();
         for o in p["options"].as_array().into_iter().flatten() {
@@ -1187,6 +1196,25 @@ mod tests {
         assert_eq!(t.iter().map(|x| (x.1.as_str(), x.2)).collect::<Vec<_>>(), vec![("write", ActivityKind::Edit), ("bash", ActivityKind::Read)]);
         assert!(events.iter().any(|e| matches!(e, EventKind::FilesChanged { paths, .. } if paths[0].ends_with("hello.txt"))));
         assert!(events.iter().any(|e| matches!(e, EventKind::ToolCompleted { exit_code: Some(0), output: Some(o), .. } if o.contains("hello.txt"))));
+    }
+
+    /// A tool request is named by its free-text title; the approval rules get the kind too.
+    #[test]
+    fn tool_permissions_keep_the_protocol_kind() {
+        let mut norm = AcpNormalizer::new(Provider::Opencode, "a", "r", PathBuf::from("/w"));
+        norm.turn_started("go");
+        let mut ask = |id: &str, title: &str, kind: &str, raw: Value| {
+            let req = json!({ "sessionId": "s", "toolCall": { "toolCallId": id, "title": title, "kind": kind, "status": "pending", "rawInput": raw },
+                              "options": [{ "optionId": "once", "name": "Allow once", "kind": "allow_once" }] });
+            let ev = norm.on_permission(&json!(1), &req);
+            ev.iter().find_map(|e| if let EventKind::ApprovalRequested { approval } = e { Some(approval.subject.clone()) } else { None }).unwrap()
+        };
+        let fetch = ask("t1", "https://example.com/?q=1", "fetch", json!({ "url": "https://example.com/?q=1" }));
+        assert!(matches!(&fetch, ApprovalSubject::Tool { name, input } if name == "https://example.com/?q=1" && input[classify::ACP_KIND] == "fetch" && input["url"].is_string()));
+        let read = ask("t2", "read", "read", Value::Null);
+        assert!(matches!(&read, ApprovalSubject::Tool { name, input } if name == "read" && *input == json!({ "_kind": "read" })));
+        let other = ask("t3", "list", "other", json!("raw text"));
+        assert!(matches!(&other, ApprovalSubject::Tool { input, .. } if *input == json!({ "_kind": "other", "input": "raw text" })));
     }
 
     #[test]

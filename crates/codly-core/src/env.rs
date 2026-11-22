@@ -547,8 +547,23 @@ fn scrubbed(key: &str, provider: Provider) -> bool {
 /// Claude agents also get CLAUDE_CODE_DISABLE_AUTO_MEMORY=1: auto memory is one directory
 /// per repository, shared by every worktree, so parallel workers would race on one
 /// MEMORY.md (memory-knowledge §5.6); Codly's own memory replaces it.
+///
+/// Every agent's git runs with `core.fsmonitor=false`, as Codly's own git does (`git.rs`): a
+/// repository inside the worktree (a bare one in a cloned repo, or one the agent wrote) cannot
+/// make `git status` start the program its config names. Other settings of such a repository
+/// (filters, `diff.external`) still apply; `approvals.rs` asks before git runs in one.
 pub fn child_env(base: &HashMap<String, String>, provider: Provider) -> HashMap<String, String> {
     child_env_with(base, provider, None)
+}
+
+/// Add one git setting through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`
+/// (git 2.31 and later): it beats every config file. It goes after the pairs the user's shell
+/// already set, never over them.
+fn git_config(env: &mut HashMap<String, String>, key: &str, value: &str) {
+    let n = env.get("GIT_CONFIG_COUNT").and_then(|c| c.parse::<usize>().ok()).unwrap_or(0);
+    env.insert(format!("GIT_CONFIG_KEY_{n}"), key.into());
+    env.insert(format!("GIT_CONFIG_VALUE_{n}"), value.into());
+    env.insert("GIT_CONFIG_COUNT".into(), (n + 1).to_string());
 }
 
 /// `child_env` plus the opt-in key of this CLI's own vendor (`byok.rs`: ANTHROPIC_API_KEY for
@@ -558,6 +573,7 @@ pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, byok_k
     let mut env: HashMap<String, String> =
         base.iter().filter(|(k, _)| !scrubbed(k, provider)).map(|(k, v)| (k.clone(), v.clone())).collect();
     env.insert("TERM".into(), "dumb".into());
+    git_config(&mut env, "core.fsmonitor", "false");
     match provider {
         Provider::Claude => {
             env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
@@ -953,6 +969,20 @@ mod tests {
         assert!(!gemini.contains_key("GEMINI_API_KEY"));
         let opencode = child_env(&base, Provider::Opencode);
         assert!(!opencode.contains_key("OPENAI_API_KEY") && !opencode.contains_key("ANTHROPIC_API_KEY"));
+    }
+
+    /// An agent's git never starts a repository's fsmonitor program; the user's own
+    /// GIT_CONFIG_* pairs stay.
+    #[test]
+    fn child_env_turns_git_fsmonitor_off() {
+        let env = child_env(&HashMap::new(), Provider::Claude);
+        assert_eq!((env["GIT_CONFIG_COUNT"].as_str(), env["GIT_CONFIG_KEY_0"].as_str(), env["GIT_CONFIG_VALUE_0"].as_str()), ("1", "core.fsmonitor", "false"));
+
+        let base: HashMap<String, String> =
+            [("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "user.name"), ("GIT_CONFIG_VALUE_0", "Me")].map(|(k, v)| (k.to_string(), v.to_string())).into();
+        let env = child_env(&base, Provider::Codex);
+        assert_eq!((env["GIT_CONFIG_KEY_0"].as_str(), env["GIT_CONFIG_VALUE_0"].as_str()), ("user.name", "Me"));
+        assert_eq!((env["GIT_CONFIG_COUNT"].as_str(), env["GIT_CONFIG_KEY_1"].as_str(), env["GIT_CONFIG_VALUE_1"].as_str()), ("2", "core.fsmonitor", "false"));
     }
 
     /// Base URLs and Vertex/ADC switches move billing off the user's plan like a key does.

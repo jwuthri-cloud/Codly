@@ -1591,10 +1591,12 @@ pub enum ApprovalMode {
     Balanced,
     /// Ask for every command and edit the CLI would ask about.
     Strict,
-    /// Allow everything that stays inside the agent's worktree.
+    /// Allow everything in which the rules see no risk (they read the command line, not what
+    /// a script does: this is not a sandbox).
     Autonomous,
     /// Auto-approve everything, risky commands included, except the hard floors: questions,
-    /// permission changes, writes by read-only agents and Codly's own data dir still ask.
+    /// permission changes, changes to the agent's own CLI settings, writes by read-only agents
+    /// and Codly's own data dir still ask.
     Full,
 }
 

@@ -92,8 +92,8 @@
   const MODES: { id: ApprovalMode; title: string; body: string }[] = [
     { id: 'balanced', title: 'Balanced', body: 'Codly’s rules settle the obvious cases; anything risky (rm -rf, git push, outside the worktree, network installs) asks you.' },
     { id: 'strict', title: 'Ask first', body: 'Every command and edit the CLI would ask about comes to you.' },
-    { id: 'autonomous', title: 'Autonomous', body: 'Anything that stays inside the agent’s worktree is allowed. Risky commands still ask.' },
-    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, Codly’s private data and read-only agents still ask.' },
+    { id: 'autonomous', title: 'Autonomous', body: 'Commands and edits run without asking unless Codly sees a risk in them (rm -rf, git push, network, paths outside the worktree). Codly reads the command, not what a script or program does once it runs.' },
+    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, changes to an agent’s own CLI settings, Codly’s private data and read-only agents still ask.' },
   ];
   let confirmFull = $state(false);
   function pickMode(m: ApprovalMode) {

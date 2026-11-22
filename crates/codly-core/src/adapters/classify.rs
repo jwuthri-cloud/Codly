@@ -723,24 +723,229 @@ fn normalize(p: &Path) -> PathBuf {
     }
 }
 
-/// Is `path` (absolute, or relative to `cwd`) outside `root`? `~` paths count as outside.
+/// `p` (absolute) with its symlinks resolved, as the kernel resolves it when a program opens
+/// it. What is not on disk yet is appended as written. A dangling link is followed to where it
+/// points: writing through it creates that file.
+pub(crate) fn real_path(p: &Path) -> PathBuf {
+    if p.is_relative() {
+        return p.to_path_buf(); // nothing says what it is relative to
+    }
+    resolve_links(p, 0)
+}
+
+fn resolve_links(p: &Path, depth: u8) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(p) {
+        return real;
+    }
+    let parts: Vec<Component> = p.components().collect();
+    // The longest prefix that is on disk, then the rest as written.
+    for n in (1..parts.len()).rev() {
+        let Ok(mut out) = std::fs::canonicalize(parts[..n].iter().collect::<PathBuf>()) else { continue };
+        let mut rest = parts[n..].iter();
+        if depth < 8
+            && let Some(Component::Normal(name)) = parts.get(n)
+            && let Ok(target) = std::fs::read_link(out.join(name))
+        {
+            out = resolve_links(&out.join(target), depth + 1);
+            rest.next();
+        }
+        for c in rest {
+            match c {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        return out;
+    }
+    p.to_path_buf()
+}
+
+/// Is `path` (absolute, or relative to `cwd`) outside `root`? `~` paths count as outside, and
+/// so does a path that leaves `root` through a symlink (`docs/ref -> ~`), whether `..` is read
+/// before the link is followed (as `cd` does) or after (as the kernel does).
 pub fn outside(path: &str, cwd: &Path, root: &Path) -> bool {
     if path.starts_with('~') {
         return true;
     }
     let p = Path::new(path);
     let abs = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
-    !normalize(&abs).starts_with(normalize(root))
+    let plain = normalize(&abs);
+    if !plain.starts_with(normalize(root)) {
+        return true;
+    }
+    let real_root = normalize(&real_path(root));
+    let leaves = |p: &Path| !normalize(&real_path(p)).starts_with(&real_root);
+    leaves(&plain) || (plain != abs && leaves(&abs))
 }
 
 const HARMLESS_PATHS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/tty", "/dev/zero", "/dev/random", "/dev/urandom"];
 
-fn looks_like_path(a: &str) -> bool {
-    a.starts_with('/') || a.starts_with('~') || a == ".." || a.starts_with("../") || a.contains("/../")
+// Risk labels the approval rules (`orchestrator/approvals.rs`) share with the card hints.
+/// The agent's own CLI settings would change (permission rules, hooks, MCP servers).
+pub const AGENT_SETTINGS: &str = "changes agent settings";
+/// The environment or a file that usually holds secrets would be shown to the model.
+pub const SECRETS: &str = "may show secrets";
+/// git's own files would change: its config and hooks name programs that git runs.
+pub const GIT_INTERNALS: &str = "git internals";
+
+/// Key under which an ACP tool request carries its protocol `kind` in the approval's input:
+/// the title that names the request is free text.
+pub const ACP_KIND: &str = "_kind";
+
+/// Why a change to `path` needs you, if it does. `AGENT_SETTINGS`: a CLI's own settings inside
+/// a project (permission rules, hooks, MCP servers), which the agent's next run, or your own
+/// CLI after a merge, loads without asking. `GIT_INTERNALS`: anything under `.git`. Names
+/// compare without case, as the macOS filesystem does. Inside `root` (the worktree) only the
+/// part below it counts: a worktree may itself live under such a directory
+/// (`.claude/worktrees/x`).
+pub(crate) fn guarded_path(path: &str, root: &Path) -> Option<&'static str> {
+    const DIRS: &[&str] = &[".claude", ".codex", ".gemini", ".opencode", ".cursor"];
+    const FILES: &[&str] = &[".mcp.json", "opencode.json", "opencode.jsonc"];
+    let is = |names: &[&str], s: &str| names.iter().any(|n| n.eq_ignore_ascii_case(s));
+    let path = Path::new(path).strip_prefix(root).ok().and_then(Path::to_str).unwrap_or(path);
+    if path.split('/').any(|s| is(DIRS, s)) || is(FILES, basename(path)) {
+        Some(AGENT_SETTINGS)
+    } else if path.split('/').any(|s| s.eq_ignore_ascii_case(".git")) {
+        Some(GIT_INTERNALS)
+    } else {
+        None
+    }
+}
+
+/// A file that usually holds secrets: `.env` and its variants, a private key, a credentials
+/// file. `.env.example` and its kin are templates.
+pub(crate) fn secret_file(path: &str) -> bool {
+    const NAMES: &[&str] = &[".envrc", ".netrc", ".pypirc", ".git-credentials", ".dev.vars", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+    const TEMPLATES: &[&str] = &["example", "sample", "template", "dist"];
+    let name = basename(path).to_ascii_lowercase();
+    if NAMES.contains(&name.as_str()) || [".pem", ".key", ".p12", ".pfx"].iter().any(|e| name.ends_with(e)) {
+        return true;
+    }
+    // `.env`, `.env.local`, `.env*`; not `.environment`
+    name.strip_prefix(".env")
+        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_alphanumeric()) && !TEMPLATES.iter().any(|t| rest.ends_with(t)))
+}
+
+/// Programs that cannot write to a file they are given by name.
+const READERS: &[&str] = &[
+    "cat", "head", "tail", "nl", "wc", "ls", "stat", "du", "grep", "egrep", "fgrep", "rg", "diff", "cmp", "jq", "test", "[", "realpath",
+    "readlink", "basename", "dirname", "echo", "printf",
+];
+/// Programs that cannot show what a file holds.
+const BLIND: &[&str] =
+    &["ls", "test", "[", "stat", "touch", "mkdir", "chmod", "cp", "mv", "cd", "realpath", "readlink", "basename", "dirname", "echo", "printf"];
+/// `find` actions that write, delete or run a program.
+const FIND_ACTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"];
+/// Programs whose first operand is a pattern or a script, not a file (`grep '.env' src`),
+/// unless an option gives it (`-e`, `-f`).
+const PATTERN_FIRST: &[&str] = &["grep", "egrep", "fgrep", "rg", "ag", "jq", "sed", "awk"];
+
+/// jq's `env` builtin or `$ENV` in a filter (`.env` and `"env"` are plain data).
+fn jq_reads_env(filter: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    filter.contains("$ENV")
+        || filter.match_indices("env").any(|(i, _)| {
+            !filter[..i].ends_with(|c: char| word(c) || ".$\"".contains(c)) && !filter[i + 3..].starts_with(|c: char| word(c) || c == '"')
+        })
+}
+
+/// What one simple command (`prog` is its basename) may expose, in any approval mode: the
+/// environment or a secrets file shown to the model (`SECRETS`), the agent's own settings or
+/// git's files changed (see `guarded_path`, also for `root`). The check reads names only: a
+/// script the command runs, or a glob, can still reach these files.
+pub(crate) fn exposure<S: AsRef<str>>(prog: &str, args: &[S], root: &Path) -> Vec<&'static str> {
+    let args: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
+    // The pattern of a search is not a file name.
+    let by_option = |a: &&str| match a.strip_prefix("--") {
+        // getopt takes any unambiguous abbreviation (`--reg=x` is `--regexp=x`)
+        Some(long) => {
+            let name = long.split('=').next().unwrap_or(long);
+            !name.is_empty() && ["regexp", "expression", "file", "from-file", "source"].iter().any(|o| o.starts_with(name) || name.starts_with(o))
+        }
+        None => a.starts_with('-') && a.contains(['e', 'f']),
+    };
+    let pattern = (PATTERN_FIRST.contains(&prog) && !args.iter().any(by_option)).then(|| args.iter().position(|a| !a.starts_with('-'))).flatten();
+    // Each argument and the value of `--flag=value`, except that pattern and what an option
+    // leaves out (`--exclude=.claude`, `--ignore-pattern=.env`).
+    let excludes = |a: &str| {
+        a.split_once('=').is_some_and(|(flag, _)| flag.starts_with('-') && (flag.contains("exclude") || flag.contains("ignore")))
+    };
+    let values = || {
+        args.iter()
+            .enumerate()
+            .filter(|&(i, a)| Some(i) != pattern && !excludes(*a))
+            .flat_map(|(_, a)| [Some(*a), a.split_once('=').map(|(_, v)| v)])
+            .flatten()
+    };
+    let plain_find = prog == "find" && !args.iter().any(|a| FIND_ACTIONS.contains(a));
+    let mut out = vec![];
+    if !READERS.contains(&prog) && !plain_find {
+        for why in values().filter_map(|v| guarded_path(v, root)) {
+            if !out.contains(&why) {
+                out.push(why);
+            }
+        }
+    }
+    let prints_env = match prog {
+        "printenv" => true,
+        // With no name these builtins list every variable and its value.
+        "set" => args.is_empty(),
+        "export" | "declare" | "typeset" | "readonly" => args.iter().all(|a| a.starts_with('-')),
+        "jq" => args.iter().any(|a| jq_reads_env(a)),
+        _ => false,
+    };
+    if prints_env || (!BLIND.contains(&prog) && !plain_find && values().any(secret_file)) {
+        out.push(SECRETS);
+    }
+    out
+}
+
+/// Test runners and checkers that npm publishes under the name of their command, so
+/// `npx <name>` runs the project's own copy when it is installed.
+pub(crate) const NPX_RUNNERS: &[&str] =
+    &["jest", "vitest", "mocha", "ava", "tap", "playwright", "tsc", "eslint", "svelte-check", "vue-tsc", "pyright", "stylelint", "biome", "prettier"];
+
+/// The runner `npx <args>` names (bunx and `npm exec` take the same arguments), when it is one
+/// of `NPX_RUNNERS` and npx's own options, those before the name, neither add a package
+/// (`-p x`, `--package=x`) nor run a shell string (`-c`, `--call`).
+pub(crate) fn npx_runner<S: AsRef<str>>(args: &[S]) -> Option<&str> {
+    for a in args.iter().map(AsRef::as_ref) {
+        if !a.starts_with('-') {
+            return NPX_RUNNERS.contains(&a).then_some(a);
+        }
+        if a.starts_with("-p") || a.starts_with("--package") || a == "-c" || a.starts_with("--call") {
+            return None;
+        }
+    }
+    None
+}
+
+/// Does `npx <args>` run a tool the project already has: an `npx_runner` with an entry in
+/// `node_modules/.bin`, in `dir` or a parent up to `root`? Anything else npx downloads from the
+/// registry and runs, without a prompt when there is no terminal.
+pub(crate) fn npx_runs_local<S: AsRef<str>>(args: &[S], dir: &Path, root: &Path) -> bool {
+    npx_runner(args).is_some_and(|tool| {
+        dir.ancestors().take_while(|d| d.starts_with(root)).any(|d| d.join("node_modules/.bin").join(tool).symlink_metadata().is_ok())
+    })
+}
+
+/// `uv run` with packages or an index added on the command line (`--with=x`, `--index-url`):
+/// uv downloads them and runs their code.
+pub(crate) fn uv_run_fetches<S: AsRef<str>>(args: &[S]) -> bool {
+    const FETCH: &[&str] = &["--with", "-w", "--index", "--extra-index-url", "--default-index", "--find-links"];
+    args.iter()
+        .map(AsRef::as_ref)
+        .skip_while(|a| *a != "run")
+        .skip(1)
+        .take_while(|a| a.starts_with('-'))
+        .any(|a| FETCH.iter().any(|f| a.starts_with(f)))
 }
 
 /// Inferred risk hints for an approval card: "outside worktree", "deletes files",
-/// "network", "git push", "sudo", "pipes to shell".
+/// "network", "git push", "sudo", "pipes to shell", `AGENT_SETTINGS`, `SECRETS`.
 pub fn risk_hints(command: &str, cwd: Option<&Path>, worktree: &Path) -> Vec<String> {
     let mut hints: Vec<&'static str> = Vec::new();
     hints_into(command, cwd.unwrap_or(worktree), worktree, 0, &mut hints);
@@ -791,11 +996,23 @@ fn hints_into(command: &str, cwd: &Path, worktree: &Path, depth: u8, hints: &mut
         if wrappers.iter().any(|a| matches!(basename(a), "sudo" | "doas")) || argv.first().is_some_and(|a| basename(a) == "su") {
             add("sudo", hints);
         }
-        let Some(a0) = argv.first().map(|a| basename(a)) else { continue };
+        for why in seg.redirects.iter().filter_map(|r| guarded_path(r, worktree)) {
+            add(why, hints);
+        }
+        let Some(a0) = argv.first().map(|a| basename(a)) else {
+            // `env` with no command prints the environment
+            if command_start(full) == Some(full.len()) && full.iter().any(|a| basename(a) == "env") {
+                add(SECRETS, hints);
+            }
+            continue;
+        };
         let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
         let sub = args.iter().find(|a| !a.starts_with('-')).copied();
         if seg.piped_in && SHELLS.contains(&a0) {
             add("pipes to shell", hints);
+        }
+        for h in exposure(a0, &args, worktree) {
+            add(h, hints);
         }
         // `bash -lc 'git push'` inside a longer command: check what it runs.
         if SHELLS.contains(&a0)
@@ -813,13 +1030,18 @@ fn hints_into(command: &str, cwd: &Path, worktree: &Path, depth: u8, hints: &mut
                 Some("clone" | "fetch" | "pull" | "ls-remote" | "submodule") => add("network", hints),
                 _ => {}
             },
-            "curl" | "wget" | "ssh" | "scp" | "sftp" | "rsync" | "nc" | "ncat" | "telnet" | "ftp" | "http" | "https" | "xh" | "gh" | "npx" | "bunx" => {
-                add("network", hints)
-            }
+            "curl" | "wget" | "ssh" | "scp" | "sftp" | "rsync" | "nc" | "ncat" | "telnet" | "ftp" | "http" | "https" | "xh" | "gh" | "uvx" | "tox"
+            | "nox" => add("network", hints),
+            "npx" | "bunx" if !npx_runs_local(&args, &cur_dir, worktree) => add("network", hints),
+            "uv" if uv_run_fetches(&args) => add("network", hints),
             "npm" | "pnpm" | "yarn" | "bun" if matches!(sub, Some("install" | "i" | "add" | "ci" | "update" | "upgrade" | "dlx" | "x" | "publish")) => {
                 add("network", hints)
             }
             "npm" | "pnpm" | "yarn" | "bun" if sub == Some("exec") && package_flag(&args) => add("network", hints),
+            // `npm exec` is npx: it downloads what the project does not have.
+            "npm" if sub == Some("exec") && !npx_runs_local(args.split(|a| *a == "exec").nth(1).unwrap_or_default(), &cur_dir, worktree) => {
+                add("network", hints)
+            }
             "pip" | "pip3" | "gem" | "brew" | "uv" | "poetry" | "cargo" | "go" | "composer" | "bundle" | "docker"
                 if matches!(sub, Some("install" | "add" | "get" | "sync" | "update" | "upgrade" | "fetch" | "pull" | "push" | "login" | "require" | "download")) =>
             {
@@ -839,7 +1061,8 @@ fn hints_into(command: &str, cwd: &Path, worktree: &Path, depth: u8, hints: &mut
         }
         let path_args = args.iter().map(|a| a.split_once('=').map_or(*a, |(_, v)| v)).chain(seg.redirects.iter().map(String::as_str));
         for a in path_args {
-            if looks_like_path(a) && !HARMLESS_PATHS.contains(&a) && outside(a, &cur_dir, worktree) {
+            // Every word that is not an option: a plain relative name can leave through a symlink.
+            if !a.starts_with('-') && !HARMLESS_PATHS.contains(&a) && outside(a, &cur_dir, worktree) {
                 add("outside worktree", hints);
             }
         }
@@ -1152,7 +1375,7 @@ mod tests {
         assert_eq!(h("npm install left-pad"), ["network"]);
         assert_eq!(h("git fetch origin"), ["network"]);
         assert_eq!(h("cat /etc/passwd"), ["outside worktree"]);
-        assert_eq!(h("cat ~/.ssh/id_rsa"), ["outside worktree"]);
+        assert_eq!(h("cat ~/.ssh/id_rsa"), [SECRETS, "outside worktree"]);
         assert_eq!(h("cp a.txt ../other/a.txt"), ["outside worktree"]);
         assert_eq!(h("echo x > /tmp/out.txt"), ["outside worktree"]);
         assert!(h("cd .. && ls").contains(&"outside worktree".to_string()));
@@ -1165,6 +1388,144 @@ mod tests {
         for want in ["sudo", "deletes files", "outside worktree", "git push", "network", "pipes to shell"] {
             assert!(all.contains(&want.to_string()), "{want} missing from {all:?}");
         }
+    }
+
+    /// The card names what the approval rules ask about: secrets shown, agent settings changed.
+    #[test]
+    fn hints_name_secrets_and_agent_settings() {
+        let wt = Path::new("/w/tree");
+        let h = |c: &str| risk_hints(c, Some(wt), wt);
+        for c in ["printenv", "env", "env | sort", "export -p", "set", "jq -n env", "cat .env", "grep KEY config/.env.local", "cat certs/tls.key"] {
+            assert_eq!(h(c), [SECRETS], "{c}");
+        }
+        for c in [
+            "echo '{}' > .claude/settings.local.json",
+            "tee .mcp.json",
+            "cp x .codex/config.toml",
+            "mkdir -p .gemini",
+            "cd .opencode",
+            "sed -i s/ask/allow/ opencode.json",
+        ] {
+            assert_eq!(h(c), [AGENT_SETTINGS], "{c}");
+        }
+        for c in [
+            "cat .env.example",
+            "cp .env.example .env",
+            "ls -la .env",
+            "echo .env >> .gitignore",
+            "grep -rn '.env' src",
+            "rg -n 'process.env' src",
+            "jq '.env' package.json",
+            "find . -name '.env*'",
+            "env FOO=1 make",
+            "set -e",
+            "export FOO=bar",
+            "cat .claude/settings.json",
+            "ls .claude",
+            "grep -r allow .claude",
+            "tar --exclude=.claude -czf out.tgz src",
+            "git status",
+            "cargo test",
+            "pnpm test",
+            "pytest -q",
+        ] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        // Only what is below the worktree counts: the worktree may live under `.claude/`.
+        let nested = Path::new("/repo/.claude/worktrees/t1");
+        assert!(risk_hints("cargo test --manifest-path /repo/.claude/worktrees/t1/Cargo.toml", Some(nested), nested).is_empty());
+        assert_eq!(guarded_path("/repo/.claude/worktrees/t1/.claude/settings.json", nested), Some(AGENT_SETTINGS));
+        assert_eq!(guarded_path("/repo/.claude/worktrees/t1/src/a.rs", nested), None);
+        for (path, why) in [
+            (".Claude/settings.local.json", Some(AGENT_SETTINGS)),
+            ("sub/opencode.jsonc", Some(AGENT_SETTINGS)),
+            (".git/hooks/pre-commit", Some(GIT_INTERNALS)),
+            ("src/claude/settings.json", None),
+            ("CLAUDE.md", None),
+            (".gitignore", None),
+            (".github/workflows/ci.yml", None),
+        ] {
+            assert_eq!(guarded_path(path, wt), why, "{path}");
+        }
+        for c in ["cp hook.sh .git/hooks/pre-commit", "echo x >> .git/config", "tee .git/info/exclude"] {
+            assert_eq!(h(c), [GIT_INTERNALS], "{c}");
+        }
+        for c in ["cat .git/HEAD", "ls .git", "find . -name '*.rs' -not -path './.git/*'", "tar --exclude=.git -czf out.tgz src"] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        for (file, secret) in [
+            (".env", true),
+            ("app/.env.production", true),
+            (".env*", true),
+            (".envrc", true),
+            ("deploy/id_ed25519", true),
+            ("server.pem", true),
+            (".env.example", false),
+            (".env.local.sample", false),
+            (".environment", false),
+            ("src/env.rs", false),
+            ("process.env", false),
+        ] {
+            assert_eq!(secret_file(file), secret, "{file}");
+        }
+    }
+
+    /// npx, uvx and their kin download and run a package unless the project has the tool.
+    #[test]
+    fn hints_tell_a_local_tool_from_a_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path();
+        std::fs::create_dir_all(wt.join("node_modules/.bin")).unwrap();
+        std::fs::write(wt.join("node_modules/.bin/vitest"), "").unwrap();
+        std::fs::create_dir_all(wt.join("web")).unwrap();
+        let h = |c: &str| risk_hints(c, Some(wt), wt);
+        for c in ["npx vitest run", "bunx vitest", "npm exec vitest run", "cd web && npx vitest run", "pnpm exec vitest run", "uv run pytest"] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        for c in [
+            "npx jest",
+            "npx pytest",
+            "npx -p evil vitest",
+            "npx vitest@latest",
+            "npm exec jest",
+            "uvx ruff check",
+            "uv run --with=evil pytest",
+            "tox",
+            "nox",
+        ] {
+            assert_eq!(h(c), ["network"], "{c}");
+        }
+        assert_eq!(npx_runner(&["tsc", "-p", "tsconfig.json"]), Some("tsc"), "options after the name are the tool's");
+        assert_eq!(npx_runner(&["-c", "vitest"]), None);
+    }
+
+    /// A path that leaves the worktree through a symlink is outside, as written or resolved.
+    #[test]
+    fn symlinks_are_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top = tmp.path().canonicalize().unwrap();
+        let wt = top.join("wt");
+        std::fs::create_dir_all(wt.join("docs")).unwrap();
+        std::fs::create_dir_all(top.join("home")).unwrap();
+        std::fs::write(top.join("home/key"), "secret").unwrap();
+        std::fs::write(wt.join("docs/a.md"), "x").unwrap();
+        std::os::unix::fs::symlink(top.join("home"), wt.join("docs/ref")).unwrap();
+        std::os::unix::fs::symlink("a.md", wt.join("docs/alias.md")).unwrap();
+        std::os::unix::fs::symlink(top.join("home/new"), wt.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(&wt, top.join("wt-link")).unwrap();
+        for p in ["docs/ref/key", "docs/ref", "docs/ref/../home/key", "missing/../docs/ref/key", "dangling", "docs/ref/not-yet"] {
+            assert!(outside(p, &wt, &wt), "{p}");
+        }
+        for p in ["docs/a.md", "docs/alias.md", "docs/not-yet.md", "docs/../docs/a.md"] {
+            assert!(!outside(p, &wt, &wt), "{p}");
+        }
+        assert_eq!(real_path(&wt.join("dangling")), top.join("home/new"));
+        assert_eq!(real_path(&wt.join("docs/ref/not-yet/x")), top.join("home/not-yet/x"));
+        // the worktree reached through a link is still the worktree
+        let via = top.join("wt-link");
+        assert!(!outside("docs/a.md", &via, &via) && outside("docs/ref/key", &via, &via));
+        assert_eq!(risk_hints("cat docs/ref/key", Some(&wt), &wt), ["outside worktree"]);
+        assert!(risk_hints("cat docs/alias.md", Some(&wt), &wt).is_empty());
     }
 
     /// Reviewer-verified: a wrapper or a nested shell hid the push from the approval card.
