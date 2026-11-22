@@ -244,8 +244,9 @@ they are build output or third-party code in most repos. If one holds your own c
   neither HEAD nor the worktree's index moves. "Restore files to this point" in the agent's Git
   tab first keeps the present files (so a restore can be undone), then puts the files back. It
   changes files only: the conversation inside the CLI stays, and the agent's next prompt says
-  what was put back. It is refused while the agent's turn runs, and it never runs in your own
-  checkout: an agent hired with Git isolation off has no checkpoints.
+  what was put back. It is refused while a turn runs in that worktree (whoever the agent is) or
+  Codly checks a task there, and it never runs in your own checkout: an agent hired with Git
+  isolation off has no checkpoints.
 - The user's branch: Codly commits and merges by itself only on `codly/…` branches. Four
   commands change the user's branch or its remote (commits, merges, push), each behind a
   button: `merge_plan` and `merge_agent` (merge into the checked-out branch),

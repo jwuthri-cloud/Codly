@@ -1,7 +1,8 @@
 //! Checkpoints end to end, with a fake agent in place of the CLI: the files of a 1:1 agent's
 //! worktree are kept before each turn, "Restore files to this point" puts them back and can be
-//! undone, the agent is told with its next prompt, a running turn refuses the restore, and an
-//! agent that works in the project folder itself has no checkpoints at all.
+//! undone, the agent is told with its next prompt, a running turn refuses the restore (also the
+//! turn of another agent in the same worktree), and an agent that works in the project folder
+//! itself has no checkpoints at all.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,6 +14,7 @@ use codly_core::hire::{HireManifest, SCHEMA};
 use codly_core::model::*;
 use codly_core::orchestrator::checkpoints::CheckpointKind;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
+use codly_core::store::Store;
 use tokio::sync::{Notify, mpsc};
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -238,8 +240,8 @@ async fn files_go_back_to_before_a_turn_and_the_agent_is_told() {
     o.turn(&id, &wt, "and on", &[]).await;
     {
         let seen = o.seen.lock().unwrap();
-        let note = "[Codly] The user put the files in your worktree back to how they were before your turn that started with \
-                    <untrusted>now break it</untrusted>. 3 files changed: README.md, a.txt, c.txt.";
+        let note = "[Codly] The user put the files in your worktree back to how they were before the turn that started with \
+                    <untrusted>now break it</untrusted>. 3 files changed: <untrusted>README.md, a.txt, c.txt</untrusted>.";
         assert!(seen.prompts[2].starts_with(note) && seen.prompts[2].contains("\n\n[User] go on"), "{}", seen.prompts[2]);
         assert!(!seen.prompts[3].contains("put the files") && seen.prompts[3].starts_with("[User] and on"), "{}", seen.prompts[3]);
         assert!(!seen.prompts[1].contains("put the files"));
@@ -261,6 +263,64 @@ async fn files_go_back_to_before_a_turn_and_the_agent_is_told() {
     o.finish(&id, &wt).await;
     assert!(o.core.restore_checkpoint(&id, 999).await.unwrap_err().to_string().starts_with("that point is gone"));
     assert!(o.core.agent_checkpoints("nobody").await.is_err());
+    o.core.shutdown().await;
+}
+
+/// After a task went on to another worker, the first worker's row still shows the worktree the
+/// second one works in. Restore is about the worktree: the first worker's points put no file
+/// back under the second one's turn or under Codly's checks there, and after a restore the
+/// agent that works there is told too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_restore_under_another_agent_at_work_in_the_same_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = office(dir.path()).await;
+    let ada = o.core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let bo = o.core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let wt = PathBuf::from(bo.worktree.clone().unwrap());
+    o.turn(&bo.id, &wt, "add the form", &[("a.txt", Some("1\n"))]).await;
+
+    // That state, made by hand: Ada's row shows Bo's worktree, and the point before Bo's
+    // turn is one of hers too.
+    let store = Store::open(&dir.path().join("data/codly.sqlite")).unwrap();
+    let mut row = store.agent(&ada.id).unwrap().unwrap();
+    row.worktree = bo.worktree.clone();
+    store.with(|db| codly_core::store::save_live_agent(db, &row)).unwrap();
+    git(&o.repo, &["update-ref", &format!("refs/codly/checkpoints/{}/1", ada.id), &format!("refs/codly/checkpoints/{}/1", bo.id)]);
+    assert_eq!(o.points(&ada.id).await, [(1, CheckpointKind::Turn, "add the form".to_string(), files(&["a.txt"]))]);
+
+    // Bo's turn runs: Ada is at rest, the worktree is not.
+    o.start_turn(&bo.id, "go on", &[]).await;
+    let e = o.core.restore_checkpoint(&ada.id, 1).await.unwrap_err().to_string();
+    assert_eq!(e, format!("{} is working in this worktree; restore files when its turn ends", bo.name));
+    assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "1\n", "nothing changed");
+    o.finish(&bo.id, &wt).await;
+
+    // Codly checks a task in that worktree, whoever it is assigned to.
+    let ws = store.agent_workspace(&bo.id).unwrap().unwrap();
+    let mut task = o.core.create_task("Check the form", "").await.unwrap();
+    let mut set = |status| {
+        task.status = status;
+        task.worktree = bo.worktree.clone();
+        let kind = EventKind::TaskChanged { task: task.clone() };
+        store.append_event(Some(ws.as_str()), &EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: Some(task.id.clone()), run_id: None, workspace_id: None, kind }).unwrap();
+    };
+    set(TaskStatus::Verifying);
+    let e = o.core.restore_checkpoint(&ada.id, 1).await.unwrap_err().to_string();
+    assert!(e.starts_with("Codly is checking task ") && e.ends_with("; restore files when the checks are done"), "{e}");
+    assert!(wt.join("a.txt").exists(), "nothing changed");
+    set(TaskStatus::Cancelled);
+
+    // At rest: the files go back, and Bo, who works there, reads of it in its next prompt.
+    let done = o.core.restore_checkpoint(&ada.id, 1).await.unwrap();
+    assert_eq!(done.files, files(&["a.txt"]));
+    assert!(!wt.join("a.txt").exists());
+    o.turn(&bo.id, &wt, "and on", &[]).await;
+    let seen = o.seen.lock().unwrap();
+    let told = seen.prompts.last().unwrap();
+    let note = "[Codly] The user put the files in your worktree back to how they were before the turn that started with \
+                <untrusted>add the form</untrusted>. 1 file changed: <untrusted>a.txt</untrusted>.";
+    assert!(told.starts_with(note) && told.contains("\n\n[User] and on"), "{told}");
+    drop(seen);
     o.core.shutdown().await;
 }
 

@@ -793,6 +793,20 @@ impl Git {
 /// A private index file; removed when dropped.
 struct ScratchIndex(PathBuf);
 
+/// The files of a worktree as git read them at one moment (`Git::snapshot`): `tree` names
+/// them, and the private index they are staged in is what `Git::restore_tree` starts from.
+pub struct Snapshot {
+    index: ScratchIndex,
+    tree: String,
+}
+
+impl Snapshot {
+    /// The tree of everything that was in the worktree then.
+    pub fn tree(&self) -> &str {
+        &self.tree
+    }
+}
+
 impl Drop for ScratchIndex {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -830,11 +844,19 @@ impl Git {
         Ok(out.stdout)
     }
 
-    /// The tree of everything in the worktree now (tracked and untracked files, no ignored
-    /// one). Writes objects only: files and folders that did not change are already stored.
-    pub async fn worktree_tree(&self, wt: &Path) -> Result<String> {
+    /// Everything in the worktree now (tracked and untracked files, no ignored one), read once.
+    /// This is the slow part of a checkpoint: git reads every file that changed. It writes
+    /// objects only: files and folders that did not change are already stored.
+    pub async fn snapshot(&self, wt: &Path) -> Result<Snapshot> {
         let index = self.stage_apart(wt).await?;
-        Ok(self.on_index(wt, &index, &["write-tree"]).await?.trim().to_string())
+        let tree = self.on_index(wt, &index, &["write-tree"]).await?.trim().to_string();
+        Ok(Snapshot { index, tree })
+    }
+
+    /// The tree of everything in the worktree now (`snapshot`, for a caller that restores
+    /// nothing).
+    pub async fn worktree_tree(&self, wt: &Path) -> Result<String> {
+        Ok(self.snapshot(wt).await?.tree)
     }
 
     /// A commit of `tree` on top of `parent` that no branch points at. An internal checkpoint:
@@ -865,10 +887,11 @@ impl Git {
     /// Put the worktree's files back to `tree`: files that changed or were deleted since come
     /// back, files that are not in `tree` are removed, and ignored files are left alone. HEAD,
     /// the branch and the worktree's own index stay as they are, so the difference shows as
-    /// uncommitted changes. Take `worktree_tree` first if the present state must be kept.
-    pub async fn restore_tree(&self, wt: &Path, tree: &str) -> Result<()> {
-        let index = self.stage_apart(wt).await?;
-        self.on_index(wt, &index, &["read-tree", "--reset", "-u", tree]).await.map(drop)
+    /// uncommitted changes. `present` is the worktree as it is (`snapshot`): its tree is what
+    /// to keep if the present state must not be lost, and with the files already read, this
+    /// call only writes the files that differ.
+    pub async fn restore_tree(&self, wt: &Path, present: Snapshot, tree: &str) -> Result<()> {
+        self.on_index(wt, &present.index, &["read-tree", "--reset", "-u", tree]).await.map(drop)
     }
 }
 
@@ -1322,7 +1345,9 @@ mod tests {
         let admin = git.git_path(&wt, "--git-dir").await.unwrap();
         let index = std::fs::read(admin.join("index")).unwrap();
 
-        git.restore_tree(&wt, &before).await.unwrap();
+        let present = git.snapshot(&wt).await.unwrap();
+        assert_eq!(present.tree(), after);
+        git.restore_tree(&wt, present, &before).await.unwrap();
         assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "a changed\n");
         assert_eq!(std::fs::read_to_string(wt.join("b.txt")).unwrap(), "b\n", "a deleted file is back");
         assert_eq!(std::fs::read_to_string(wt.join("new/untracked.txt")).unwrap(), "untracked\n", "also one that was never committed");
@@ -1335,7 +1360,8 @@ mod tests {
         assert!(git.dirty(&wt, true).await.unwrap(), "the difference from HEAD shows as uncommitted changes");
 
         // Undo: back to the state that the restore replaced.
-        git.restore_tree(&wt, &after).await.unwrap();
+        let present = git.snapshot(&wt).await.unwrap();
+        git.restore_tree(&wt, present, &after).await.unwrap();
         assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "a changed again\n");
         assert!(!wt.join("b.txt").exists() && !wt.join("new").exists());
         assert_eq!(std::fs::read_to_string(wt.join("later/made.txt")).unwrap(), "made later\n");

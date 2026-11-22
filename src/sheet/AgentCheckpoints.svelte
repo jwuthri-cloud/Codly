@@ -3,19 +3,26 @@
   turn, and "Restore files to this point". A restore changes files only (the agent still
   remembers the later turns, and Codly tells it what was put back), asks first, and can be
   undone: the files as they were just before become the newest point.
+
+  Reading the list starts git in the worktree, so it is read when the tab opens and when the Git
+  tab reads the worktree again while the agent rests (its turn ended, you pressed Refresh, files
+  were put back), one read at a time. It is not read on each step of a turn: the agent's files
+  are half-written then, and nothing can be restored anyway.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { api } from '../lib/api';
   import type { Agent } from '../lib/gen/Agent';
   import type { AgentCheckpoints } from '../lib/gen/AgentCheckpoints';
   import type { Checkpoint } from '../lib/gen/Checkpoint';
   import { ui } from '../lib/state/ui.svelte';
   import { ago, plural } from '../lib/util/format';
+  import { oneAtATime } from '../lib/util/oneAtATime';
   import Icon from '../components/Icon.svelte';
 
   interface Props {
     agent: Agent;
-    /** Changes each time the Git tab has read the worktree again: this list re-reads it too. */
+    /** Changes each time the Git tab has read the worktree again (see the note on top). */
     refresh: unknown;
     /** Files were put back: the Git tab reads the worktree again. */
     onrestored: () => void;
@@ -30,7 +37,10 @@
   /** What the last restore did, until the next one. */
   let done = $state<string | null>(null);
 
-  async function load(id: string) {
+  const resting = $derived(['idle', 'done', 'failed', 'offline'].includes(agent.status));
+
+  const load = oneAtATime(async () => {
+    const id = agent.id;
     try {
       const v = await api.agentCheckpoints(id);
       if (id === agent.id) {
@@ -40,15 +50,16 @@
     } catch (e) {
       if (id === agent.id) error = e instanceof Error ? e.message : String(e);
     }
-  }
-  // When opened, and each time the Git tab reloads: the agent changed, its status did (a turn
-  // started or ended), you pressed Refresh, or files were put back.
+  });
+  // Only `refresh` starts a read. The agent object is new on every step of its turn (each tool
+  // call, each usage report): that alone must not start git.
   $effect(() => {
     void refresh;
-    void load(agent.id);
+    untrack(() => {
+      if (resting || !view) void load();
+    });
   });
 
-  const resting = $derived(['idle', 'done', 'failed', 'offline'].includes(agent.status));
   const title = (c: Checkpoint) => (c.kind === 'restore' ? `Before you restored “${c.label}”` : c.label);
   const names = (c: Checkpoint) => c.files.join('\n') + (c.changed > c.files.length ? `\n… and ${c.changed - c.files.length} more` : '');
 
@@ -62,7 +73,7 @@
       onrestored();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-      void load(agent.id); // the point may be gone, or the agent at work again
+      void load(); // the point may be gone, or the agent at work again
     } finally {
       asking = null;
       busy = false;
@@ -78,6 +89,7 @@
     <p class="small">None yet. Codly keeps the files as they are before each turn of {agent.name}, so you can put them back.</p>
   {:else}
     <p class="small">The files before each turn of {agent.name}. A restore changes files only; {agent.name} still remembers the later turns.</p>
+    {#if !resting}<p class="small">{agent.name} is working. This list is read again when its turn ends.</p>{/if}
     <ul class="points">
       {#each view.checkpoints as c (c.n)}
         <li>
