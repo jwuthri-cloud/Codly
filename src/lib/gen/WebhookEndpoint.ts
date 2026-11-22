@@ -12,4 +12,9 @@ received: number, last_received_at: number | null,
 /**
  * Its secret is gone from the Keychain: it cannot authenticate anyone. Revoke it.
  */
-broken: boolean, };
+broken: boolean, 
+/**
+ * You let this endpoint run plans without asking: in a request that runs plans at once, a
+ * plan made from its messages starts without your Run plan click. Off unless you set it.
+ */
+auto_run: boolean, };

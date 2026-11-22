@@ -156,11 +156,11 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         SessionMode::Resume { session_id } => session_id.clone(),
     };
     let raw = Arc::new(RawLog::open(&spec.raw_log).with_context(|| format!("cannot open raw log {}", spec.raw_log.display()))?);
-    let mcp_path = match mcp_config(&spec) {
-        Some(doc) => Some(write_private(&spec.raw_log.with_file_name("claude-mcp.json"), &doc.to_string())?),
+    let mcp_file = match mcp_config(&spec) {
+        Some(doc) => Some(PrivateFile::write(&spec.raw_log.with_file_name(MCP_CONFIG_FILE), &doc.to_string())?),
         None => None,
     };
-    let args = build_args(&spec, &session_id, mcp_path.as_deref());
+    let args = build_args(&spec, &session_id, mcp_file.as_ref().map(|f| f.0.as_path()));
     startup::check_cwd(&spec.cwd)?;
     let mut child = proc::command(&spec.bin, &args, &spec.cwd, &spec.env)
         .spawn()
@@ -195,6 +195,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         deadline: None,
         start_failed: false,
         interrupt_failed: false,
+        _mcp_file: mcp_file,
     };
     tokio::spawn(actor.run(cmds, lines, exit_rx, ready_tx));
     match tokio::time::timeout(INIT_TIMEOUT, ready_rx).await {
@@ -208,19 +209,54 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     }
 }
 
-/// Write `contents` to `path` readable by the user only.
-fn write_private(path: &Path, contents: &str) -> anyhow::Result<PathBuf> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("cannot write {}", path.display()))?;
-    f.write_all(contents.as_bytes())?;
-    Ok(path.to_path_buf())
+/// Name of the `--mcp-config` document in a run's folder.
+const MCP_CONFIG_FILE: &str = "claude-mcp.json";
+
+/// A file with this run's keys in it (the `--mcp-config` document: the run's Codly token and
+/// the user's Connection keys). Only the user can read it, and it is removed when this value
+/// is dropped: when the run is over, or when its start failed.
+struct PrivateFile(PathBuf);
+
+impl PrivateFile {
+    fn write(path: &Path, contents: &str) -> anyhow::Result<PrivateFile> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        let file = PrivateFile(path.to_path_buf());
+        f.write_all(contents.as_bytes())?;
+        Ok(file)
+    }
+}
+
+impl Drop for PrivateFile {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.0)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("cannot remove {}: {e}", self.0.display());
+        }
+    }
+}
+
+/// Remove the `--mcp-config` documents that earlier runs left under `runs_dir`: a run whose
+/// end Codly did not see (a crash, a version that kept the file) cannot remove its own. For
+/// the start of the app, before any run.
+pub fn remove_stale_mcp_configs(runs_dir: &Path) {
+    let Ok(runs) = std::fs::read_dir(runs_dir) else { return };
+    for run in runs.flatten() {
+        let file = run.path().join(MCP_CONFIG_FILE);
+        if let Err(e) = std::fs::remove_file(&file)
+            && !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)
+        {
+            tracing::warn!("cannot remove {}: {e}", file.display());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -252,6 +288,8 @@ struct Actor {
     start_failed: bool,
     /// An interrupt got no result within `INTERRUPT_TIMEOUT`, so the process is being ended.
     interrupt_failed: bool,
+    /// Held, never read: dropping the actor removes the file (`PrivateFile`).
+    _mcp_file: Option<PrivateFile>,
 }
 
 impl Actor {
@@ -1593,6 +1631,31 @@ mod tests {
         let cfg = mcp_config(&s).unwrap();
         assert_eq!(cfg["mcpServers"]["codly"]["alwaysLoad"], true);
         assert_eq!(cfg["mcpServers"]["codly"]["env"]["CODLY_MCP_TOKEN"], "t");
+    }
+
+    /// The file with a run's keys is the user's alone and does not outlive the run; what an
+    /// earlier Codly left behind goes at the next start.
+    #[test]
+    fn the_mcp_config_file_is_private_and_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        std::fs::create_dir_all(runs.join("r1")).unwrap();
+        let path = runs.join("r1").join(MCP_CONFIG_FILE);
+        let file = PrivateFile::write(&path, &mcp_config(&spec(Role::Worker, false)).unwrap().to_string()).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("CODLY_MCP_TOKEN"));
+        drop(file); // the run is over
+        assert!(!path.exists());
+
+        std::fs::create_dir_all(runs.join("r2")).unwrap();
+        std::fs::write(runs.join("r1").join(MCP_CONFIG_FILE), "{}").unwrap();
+        std::fs::write(runs.join("r2").join("raw.ndjson"), "{}\n").unwrap();
+        std::fs::write(runs.join("not-a-run"), "").unwrap();
+        remove_stale_mcp_configs(&runs);
+        assert!(!runs.join("r1").join(MCP_CONFIG_FILE).exists());
+        assert!(runs.join("r2").join("raw.ndjson").exists(), "nothing else is touched");
+        remove_stale_mcp_configs(&dir.path().join("missing")); // no runs yet: nothing to do
     }
 
     #[test]

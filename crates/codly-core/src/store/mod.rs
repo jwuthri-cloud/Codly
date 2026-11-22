@@ -634,6 +634,28 @@ impl Store {
         Ok(s.and_then(|s| serde_json::from_str::<ChatMessage>(&s).ok()).map(|m| m.text))
     }
 
+    /// The messages of `thread` that came from outside Codly (a webhook, Slack: an `inbound`
+    /// attachment) after the user's last own words there, newest first. The user's own words
+    /// are a message they wrote, or a schedule of theirs that fired (`triggers::is_schedule`).
+    /// The read stops at them, so its cost follows what came in since, not the length of the
+    /// thread.
+    pub fn inbound_since_user(&self, workspace_id: Option<&str>, thread: &str) -> Result<Vec<ChatMessage>> {
+        let conn = self.conn();
+        let mut newest_first = conn.prepare_cached("SELECT json FROM chat WHERE workspace_id IS ?1 AND thread = ?2 ORDER BY ts DESC, rowid DESC")?;
+        let mut rows = newest_first.query(params![workspace_id, thread])?;
+        let mut out = vec![];
+        while let Some(row) = rows.next()? {
+            let Ok(m) = serde_json::from_str::<ChatMessage>(&row.get::<_, String>(0)?) else { continue };
+            if m.author == "user" || crate::triggers::is_schedule(m.attachment.as_ref()) {
+                break;
+            }
+            if crate::inbound::is_inbound(m.attachment.as_ref()) {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn task_workspace(&self, id: &str) -> Result<Option<String>> {
         Ok(self.conn().query_row("SELECT workspace_id FROM task WHERE id = ?1", [id], |r| r.get(0)).optional()?)
     }
@@ -1285,6 +1307,41 @@ mod tests {
         store.append_event(None, &resolved(ApprovalStatus::Cancelled, "provider")).unwrap();
         let got = store.approval(&a.id).unwrap().unwrap();
         assert_eq!((got.status, got.decided_by.as_deref()), (ApprovalStatus::Cancelled, Some("provider")));
+    }
+
+    /// Outside messages count from the user's last own words: a message they wrote, or a
+    /// schedule of theirs that fired. Another thread's lines and Codly's other lines do not count.
+    #[test]
+    fn inbound_messages_are_read_back_to_your_last_own_words() {
+        let store = Store::open_in_memory().unwrap();
+        let inbound = |source: &str| Some(serde_json::json!({ "inbound": { "source": source, "auto_run": false } }));
+        let schedule = Some(serde_json::json!({ "schedule": "s1" }));
+        let mut ts = 0;
+        let mut say = |thread: &str, author: &str, attachment: Option<Value>| {
+            ts += 1;
+            let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: format!("m{ts}"), attachment, ts };
+            store.append_event(None, &row(EventKind::Chat { message })).unwrap();
+        };
+        let since = |thread: &str| -> Vec<String> {
+            let found = store.inbound_since_user(None, thread).unwrap();
+            found.iter().map(|m| m.attachment.as_ref().unwrap()["inbound"]["source"].as_str().unwrap().to_string()).collect()
+        };
+
+        say("lead", "codly", inbound("old"));
+        say("lead", "user", None);
+        assert!(since("lead").is_empty(), "your message came after it");
+        say("lead", "codly", inbound("a"));
+        say("lead", "codly", Some(serde_json::json!({ "plan_id": "p1" })));
+        say("lead:2", "user", None);
+        say("lead", "codly", inbound("b"));
+        assert_eq!(since("lead"), vec!["b", "a"], "newest first, back to your message");
+        assert!(since("lead:2").is_empty());
+
+        // Your schedule fires: what came in before it no longer counts, what comes in after does.
+        say("lead", "codly", schedule);
+        assert!(since("lead").is_empty());
+        say("lead", "codly", inbound("c"));
+        assert_eq!(since("lead"), vec!["c"]);
     }
 
     #[test]

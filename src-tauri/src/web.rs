@@ -222,9 +222,33 @@ fn voice_port() -> u16 {
     std::env::var("CODLY_VOICE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8766)
 }
 
+/// Where the relay leaves its token at each start (`voice/guard.py`, `token_path`): a file of
+/// this machine's user, one per port.
+fn voice_token_path(home: &Path, port: u16) -> std::path::PathBuf {
+    home.join(".config/codly").join(format!("voice-{port}.token"))
+}
+
+/// The relay's token, read for each call so a relay that started again is followed. None when
+/// the file is missing or does not hold a token.
+fn voice_token(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let token = text.trim();
+    (token.len() >= 32 && token.bytes().all(|b| b.is_ascii_hexdigit())).then(|| token.to_string())
+}
+
+/// The handshake `codly serve` sends to the relay in the browser's place. It carries the relay's
+/// token and no `Origin`: the relay refuses a handshake without the first or with the second, so
+/// a web page or another program that finds the relay's port cannot open a voice session.
+fn relay_handshake(port: u16, key: &str, version: &str, token: &str) -> String {
+    format!(
+        "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: {version}\r\nX-Codly-Voice-Token: {token}\r\n\r\n"
+    )
+}
+
 /// The voice WebSocket: the handshake is replayed to the relay on 127.0.0.1, its `101` goes back to
 /// the browser, then bytes are copied both ways. Only Codly's authenticated, same-origin page gets
-/// here (`handle` checks the cookie and the origin first), so the relay needs no auth of its own.
+/// here (`handle` checks the cookie and the origin first); the relay checks that the call comes
+/// from here (`relay_handshake`).
 async fn voice(req: Request<Incoming>) -> Res {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let h = req.headers();
@@ -236,11 +260,11 @@ async fn voice(req: Request<Incoming>) -> Res {
         Ok(s) => s,
         Err(_) => return text(StatusCode::BAD_GATEWAY, &format!("the voice relay is not running on port {port} (start it with voice/start.sh)")),
     };
-    let handshake = format!(
-        "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: {}\r\n\r\n",
-        key.to_str().unwrap_or_default(),
-        version.to_str().unwrap_or_default(),
-    );
+    let token = std::env::var_os("HOME").and_then(|home| voice_token(&voice_token_path(Path::new(&home), port)));
+    let Some(token) = token else {
+        return text(StatusCode::BAD_GATEWAY, &format!("the voice relay on port {port} left no token for Codly (start it again with voice/start.sh)"));
+    };
+    let handshake = relay_handshake(port, key.to_str().unwrap_or_default(), version.to_str().unwrap_or_default(), &token);
     if upstream.write_all(handshake.as_bytes()).await.is_err() {
         return text(StatusCode::BAD_GATEWAY, "the voice relay closed the connection");
     }
@@ -489,6 +513,34 @@ mod tests {
         assert!(h(&[("host", "127.0.0.1:4280"), ("origin", "http://127.0.0.1:4280")]));
         assert!(!h(&[("host", "127.0.0.1:4280"), ("origin", "http://127.0.0.1:3000")]));
         assert!(h(&[("host", "127.0.0.1:4280")]), "no Origin: a same-origin GET");
+    }
+
+    /// The relay lets in only a handshake with its token and without an Origin: this is the one
+    /// `codly serve` sends, whatever the browser sent.
+    #[test]
+    fn the_relay_handshake_carries_the_token_and_no_origin() {
+        let h = relay_handshake(8766, "nonce", "13", &"ab".repeat(32));
+        assert!(h.starts_with("GET /ws HTTP/1.1\r\nHost: 127.0.0.1:8766\r\n") && h.ends_with("\r\n\r\n"), "{h}");
+        assert!(h.contains(&format!("\r\nX-Codly-Voice-Token: {}\r\n", "ab".repeat(32))), "{h}");
+        assert!(h.contains("\r\nSec-WebSocket-Key: nonce\r\n") && h.contains("\r\nSec-WebSocket-Version: 13\r\n"), "{h}");
+        assert!(!h.to_ascii_lowercase().contains("origin") && !h.to_ascii_lowercase().contains("cookie"), "{h}");
+    }
+
+    #[test]
+    fn the_relay_token_is_read_from_the_users_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = voice_token_path(dir.path(), 9000);
+        assert_eq!(path, dir.path().join(".config/codly/voice-9000.token"), "the name voice/guard.py writes");
+        assert_eq!(voice_token(&path), None, "no relay has started");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let token = "0f".repeat(32);
+        std::fs::write(&path, format!("{token}\n")).unwrap();
+        assert_eq!(voice_token(&path), Some(token.clone()));
+        // Not a token: too short, or text that would add a header line of its own.
+        std::fs::write(&path, "abc123").unwrap();
+        assert_eq!(voice_token(&path), None);
+        std::fs::write(&path, format!("{token}\r\nOrigin: x")).unwrap();
+        assert_eq!(voice_token(&path), None);
     }
 
     #[test]

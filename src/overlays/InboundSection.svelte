@@ -3,11 +3,15 @@
   listener, one secret per endpoint, each created switched off, each revocable) and Slack (the
   settings are kept; the connection is not built yet, and this says so). Also: who answers
   inbound messages. A secret is shown once, right after creating its endpoint, and never again.
+  A plan the Lead makes from an inbound message waits for Run plan, unless you let that endpoint
+  run plans without asking: the switch says what that hands over. An agent picked to answer
+  instead of the Lead makes no plan, so nothing waits: its row says so.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { InboundState } from '../lib/gen/InboundState';
   import type { NewWebhook } from '../lib/gen/NewWebhook';
+  import type { WebhookEndpoint } from '../lib/gen/WebhookEndpoint';
   import { api } from '../lib/api';
   import { copyText } from '../lib/state/actions';
   import { Loader } from '../lib/state/loader.svelte';
@@ -53,10 +57,15 @@
     name = '';
     await load();
   }
-  async function toggle(id: string, on: boolean) {
-    const s = await run(on ? 'switch it on' : 'switch it off', () => api.inboundSetWebhook(id, on));
+  async function toggle(e: WebhookEndpoint, on: boolean) {
+    const s = await run(on ? 'switch it on' : 'switch it off', () => api.inboundSetWebhook(e.id, on, e.auto_run));
     if (s) inbound.set(s);
     else await load(); // the switch snaps back
+  }
+  async function setAutoRun(e: WebhookEndpoint, on: boolean) {
+    const s = await run('save', () => api.inboundSetWebhook(e.id, e.enabled, on));
+    if (s) inbound.set(s);
+    else await load(); // the box snaps back
   }
   async function revoke(id: string) {
     if (confirming !== id) {
@@ -125,7 +134,8 @@
   <p class="desc">
     Anyone holding an endpoint’s URL and secret can post a message to the Lead. Each endpoint has its own secret, starts switched off, and can be revoked on its own.
     The listener only accepts connections from this Mac (127.0.0.1) and only runs while an endpoint is on; to reach it from elsewhere, run a tunnel yourself.
-    Messages reach the Lead marked as outside input.
+    A message shows in the thread under its endpoint’s name, and the Lead reads it as outside input, not as your words.
+    A plan the Lead makes from it waits for you to click Run plan, unless you let that endpoint run plans without asking.
   </p>
 
   {#if st}
@@ -175,7 +185,7 @@
               {:else}
                 <button class="btn sm ghost rm" onclick={() => revoke(e.id)}><Icon name="trash" size={13} />Revoke</button>
               {/if}
-              <input type="checkbox" class="switch" checked={e.enabled} disabled={busy || e.broken} aria-label={`${e.name} on`} onchange={(ev) => toggle(e.id, ev.currentTarget.checked)} />
+              <input type="checkbox" class="switch" checked={e.enabled} disabled={busy || e.broken} aria-label={`${e.name} on`} onchange={(ev) => toggle(e, ev.currentTarget.checked)} />
             </div>
             <div class="e-url">
               <code class="mono small">{e.url}</code>
@@ -184,6 +194,17 @@
             <span class="muted small">
               {e.enabled ? 'On' : 'Off'} · {e.received} received{e.last_received_at ? `, last ${ago(e.last_received_at)}` : ''}
             </span>
+            <label class="e-auto small">
+              <input type="checkbox" checked={e.auto_run} disabled={busy || e.broken} onchange={(ev) => setAutoRun(e, ev.currentTarget.checked)} />
+              <span>
+                Run plans without asking.
+                {#if e.auto_run}
+                  <span class="warn">In an Auto or Direct request, a plan made from this endpoint’s messages starts at once. Anyone who can post here, or who writes what gets posted here, can start work on your Mac.</span>
+                {:else}
+                  <span class="muted">Off: a plan made from this endpoint’s messages waits for your Run plan click.</span>
+                {/if}
+              </span>
+            </label>
           </li>
         {/each}
       </ul>
@@ -199,7 +220,13 @@
     <div class="row">
       <div class="r-text">
         <span class="r-title">Who answers inbound messages</span>
-        <span class="desc">The Lead, unless you pick one agent to take them all.</span>
+        <span class="desc">
+          The Lead, unless you pick one agent to take them all.
+          <span class:warn={st.answerer !== 'lead'}>
+            An agent you pick gets each message at once, in its own chat. It is told to report and not to obey, but it makes no plan: nothing waits for
+            Run plan, the “Run plans without asking” switches do nothing, and it can act under its own approval mode.
+          </span>
+        </span>
       </div>
       <select class="input sel" value={st.answerer} aria-label="Who answers inbound messages" onchange={(e) => setAnswerer(e.currentTarget.value)}>
         <option value="lead">The Lead</option>
@@ -284,6 +311,8 @@
   .e-name { font-weight: var(--w-semi); }
   .e-url { display: flex; align-items: center; gap: 4px; min-width: 0; }
   .e-url code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+  .e-auto { display: flex; align-items: flex-start; gap: 8px; line-height: var(--lh-sm); color: var(--ink-2); }
+  .e-auto input { margin-top: 2px; flex-shrink: 0; }
   .rm { color: var(--ink-3); }
   .rm:hover { color: var(--bad); background: var(--bad-soft); }
   .new { display: flex; gap: 8px; }

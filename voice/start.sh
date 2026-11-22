@@ -2,6 +2,8 @@
 # (Re)start the voice relay in the background, next to `codly serve` (which proxies /api/voice/ws to it).
 #   voice/start.sh                 # port 8766
 #   CODLY_VOICE_PORT=9000 voice/start.sh   # then start codly serve with the same CODLY_VOICE_PORT
+# The relay writes a token to ~/.config/codly/voice-<port>.token at each start; `codly serve`, run by
+# the same user, reads it for each call. Nothing else can open a voice session.
 set -euo pipefail
 cd "$(dirname "$0")"
 . ~/.config/wif/openai.env   # OPENAI_IDENTITY_PROVIDER_ID, OPENAI_SERVICE_ACCOUNT_ID (identifiers, not secrets)

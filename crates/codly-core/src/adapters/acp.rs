@@ -15,6 +15,9 @@
 //! - OpenCode allows edits and shell without asking by default; Codly forces "ask" through
 //!   `OPENCODE_CONFIG_CONTENT`. Gemini gets a policy file that keeps workers out of its own
 //!   memory/settings files (memory-knowledge §5.6).
+//! - The session's permission mode is Codly's choice, never the user's CLI settings': a
+//!   read-only run is put in the agent's `plan` mode and a Gemini worker in `default` (ask
+//!   first). A session that does not take its mode is not started (`mode_call`).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -167,9 +170,9 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         interrupt_failed: false,
     };
     tokio::spawn(actor.run(cmds, lines, exit_rx, ready_tx));
-    // The handshake is two calls in a row (initialize, then the session), each with its own
-    // deadline: wait for both, so the actor's own error always comes first.
-    match tokio::time::timeout(HANDSHAKE_TIMEOUT * 2 + Duration::from_secs(5), ready_rx).await {
+    // The handshake is up to three calls in a row (initialize, the session, its mode), each
+    // with its own deadline: wait for all of them, so the actor's own error always comes first.
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT * 3 + Duration::from_secs(5), ready_rx).await {
         Ok(Ok(Ok(()))) => Ok(AgentHandle { agent_id, run_id, tx }),
         Ok(Ok(Err(e))) => Err(e),
         Ok(Err(_)) => Err(anyhow!("ACP adapter stopped during startup")),
@@ -182,7 +185,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
 
 enum Pending {
     Prompt,
-    /// best-effort config calls; errors become non-fatal Error events
+    /// best-effort config calls (the model); errors become non-fatal Error events
     Config(&'static str),
 }
 
@@ -375,13 +378,16 @@ impl Actor {
                 None => self.emit(EventKind::Error { message: effort_not_set(self.spec.provider, &effort), fatal: false }),
             }
         }
-        if self.spec.read_only {
-            if let Some((config_id, value)) = pick_option(&session["configOptions"], "mode", "plan") {
-                let id = self.request("session/set_config_option", json!({ "sessionId": sid, "configId": config_id, "value": value })).await;
-                self.pending.insert(id, Pending::Config("mode"));
-            } else if session["modes"]["availableModes"].as_array().is_some_and(|m| m.iter().any(|x| x["id"] == "plan")) {
-                let id = self.request("session/set_mode", json!({ "sessionId": sid, "modeId": "plan" })).await;
-                self.pending.insert(id, Pending::Config("mode"));
+        // The mode is waited for: a session left in another mode must not get a prompt.
+        if let Some(call) = mode_call(self.spec.provider, self.spec.read_only, &session) {
+            let (method, params, mode) = match call {
+                ModeCall::Option { config_id, value } => {
+                    ("session/set_config_option", json!({ "sessionId": sid, "configId": config_id, "value": value }), value)
+                }
+                ModeCall::Mode(mode) => ("session/set_mode", json!({ "sessionId": sid, "modeId": mode }), mode.to_string()),
+            };
+            if let Err(e) = self.call(method, params, lines).await? {
+                bail!(mode_refused(self.spec.provider, &mode, &err_msg(&e)));
             }
         }
         let current = session["configOptions"]
@@ -703,6 +709,36 @@ fn pick_option(options: &Value, category: &str, want: &str) -> Option<(String, S
     }
     let value = values.iter().find(|v| **v == want).or_else(|| values.iter().find(|v| v.ends_with(&format!("/{want}"))))?;
     Some((opt["id"].as_str()?.to_string(), value.to_string()))
+}
+
+/// How the handshake puts a session in the permission mode Codly needs.
+#[derive(Debug, PartialEq)]
+enum ModeCall {
+    /// `session/set_config_option` on the `mode` option (OpenCode).
+    Option { config_id: String, value: String },
+    /// `session/set_mode` (Gemini, Cursor).
+    Mode(&'static str),
+}
+
+/// The mode call a session needs after `session/new|load|resume` answered with `session`;
+/// None when it is where Codly wants it. The agent's own settings never decide:
+/// - a read-only run goes to the agent's `plan` mode. OpenCode without that option needs no
+///   call: its launch config already denies edits and commands (`launch`);
+/// - a Gemini worker goes to `default` (ask before edits and commands) unless the session says
+///   it is there: in `autoEdit` or `yolo` it would act without a request Codly can answer.
+fn mode_call(provider: Provider, read_only: bool, session: &Value) -> Option<ModeCall> {
+    if read_only {
+        if let Some((config_id, value)) = pick_option(&session["configOptions"], "mode", "plan") {
+            return Some(ModeCall::Option { config_id, value });
+        }
+        return (provider != Provider::Opencode).then_some(ModeCall::Mode("plan"));
+    }
+    (provider == Provider::Gemini && session["modes"]["currentModeId"] != "default").then_some(ModeCall::Mode("default"))
+}
+
+/// Why a run did not start: the agent would not take the mode of `mode_call`.
+fn mode_refused(provider: Provider, mode: &str, why: &str) -> String {
+    format!("{} did not switch to its \"{mode}\" mode, so Codly did not start it: in another mode it can change files without asking you ({why})", provider.label())
 }
 
 // ───────────────────────────── normalization (pure) ─────────────────────────────
@@ -1437,6 +1473,41 @@ mod tests {
         // What the user reads: Codly's own command where it knows one, the agent's words otherwise.
         assert_eq!(startup::not_signed_in(Provider::Gemini, Some("/Users/x/.gemini-perso"), auth_how(&gemini).as_deref()), "Gemini CLI is not signed in: run `GEMINI_CLI_HOME=/Users/x/.gemini-perso gemini` in a terminal");
         assert_eq!(startup::not_signed_in(Provider::Opencode, None, auth_how(&opencode).as_deref()), "OpenCode is not signed in: Run `opencode auth login` in the terminal");
+    }
+
+    /// The session's mode after the handshake is Codly's choice, whatever the agent starts in.
+    #[test]
+    fn sessions_are_put_in_the_mode_codly_needs() {
+        // Gemini's real `session/new` answer: default, autoEdit, yolo, plan; it starts in default.
+        let gemini = fixture("acp-gemini.jsonl").into_iter().find(|l| l["msg"]["result"]["modes"].is_object()).unwrap()["msg"]["result"].clone();
+        assert_eq!(gemini["modes"]["currentModeId"], "default");
+        assert_eq!(mode_call(Provider::Gemini, false, &gemini), None, "already asks first");
+        assert_eq!(mode_call(Provider::Gemini, true, &gemini), Some(ModeCall::Mode("plan")));
+        // The user's Gemini settings start it elsewhere: a worker is brought back to ask-first.
+        for started_in in ["autoEdit", "yolo", "plan"] {
+            let mut s = gemini.clone();
+            s["modes"]["currentModeId"] = json!(started_in);
+            assert_eq!(mode_call(Provider::Gemini, false, &s), Some(ModeCall::Mode("default")), "{started_in}");
+            assert_eq!(mode_call(Provider::Gemini, true, &s), Some(ModeCall::Mode("plan")), "{started_in}");
+        }
+        // An answer that names no mode (a resumed session) is not taken on trust.
+        assert_eq!(mode_call(Provider::Gemini, false, &json!({ "sessionId": "s" })), Some(ModeCall::Mode("default")));
+
+        // OpenCode: the standard `mode` option; its launch config asks or denies by itself.
+        let opencode = json!({ "configOptions": [{ "id": "mode", "category": "mode", "currentValue": "build", "options": [{ "value": "build" }, { "value": "plan" }] }] });
+        assert_eq!(mode_call(Provider::Opencode, true, &opencode), Some(ModeCall::Option { config_id: "mode".into(), value: "plan".into() }));
+        assert_eq!(mode_call(Provider::Opencode, false, &opencode), None);
+        assert_eq!(mode_call(Provider::Opencode, true, &json!({})), None, "edit and bash are denied at launch");
+
+        // Any other agent in a read-only role must take `plan`, offered or not: the call fails the start otherwise.
+        assert_eq!(mode_call(Provider::Cursor, true, &json!({})), Some(ModeCall::Mode("plan")));
+        assert_eq!(mode_call(Provider::Copilot, true, &json!({ "modes": { "availableModes": [{ "id": "agent" }], "currentModeId": "agent" } })), Some(ModeCall::Mode("plan")));
+        assert_eq!(mode_call(Provider::Cursor, false, &json!({})), None);
+
+        assert_eq!(
+            mode_refused(Provider::Gemini, "plan", "Invalid or unavailable mode: plan"),
+            "Gemini CLI did not switch to its \"plan\" mode, so Codly did not start it: in another mode it can change files without asking you (Invalid or unavailable mode: plan)"
+        );
     }
 
     #[test]

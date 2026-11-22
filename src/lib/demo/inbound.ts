@@ -1,6 +1,7 @@
 // Mock of the inbound hub (webhooks, Slack) for `pnpm dev`: the same rules as the Rust core
-// (new endpoints are off, the listener is "on" only while one is, the secret is returned once and
-// never kept), with a fake delivery log. No real server runs in the browser.
+// (new endpoints are off and do not run plans without asking, the listener is "on" only while one
+// is on, the secret is returned once and never kept), with a fake delivery log. No real server
+// runs in the browser.
 import type { InboundState } from '../gen/InboundState';
 import type { SlackUpdate } from '../gen/SlackUpdate';
 import type { WebhookEndpoint } from '../gen/WebhookEndpoint';
@@ -43,12 +44,13 @@ export function inboundMock(cmd: string, a: Record<string, unknown>): unknown {
       const name = String(a.name ?? '').trim();
       if (!name || name.length > 60) throw new Error('give the endpoint a short name (1 to 60 characters)');
       const id = `wh_${hex(12)}`;
-      const e: WebhookEndpoint = { id, name, enabled: false, created_at: Date.now(), url: url(id), received: 0, last_received_at: null, broken: false };
+      const e: WebhookEndpoint = { id, name, enabled: false, created_at: Date.now(), url: url(id), received: 0, last_received_at: null, broken: false, auto_run: false };
       state.endpoints.push(e);
       return { endpoint: { ...e }, secret: `cwh_${hex(64)}` };
     }
     case 'inbound_set_webhook': {
       const e = find();
+      e.auto_run = !!a.autoRun;
       e.enabled = !!a.enabled;
       if (e.enabled && !state.deliveries.length) {
         // Something to look at: a message that came in just now.

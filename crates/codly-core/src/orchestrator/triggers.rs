@@ -3,7 +3,8 @@
 //! decisions are pure and live in `crate::triggers`; this file only reads the world, asks
 //! them, and acts.
 //!
-//! - A schedule posts its prompt in the first request's thread (author "codly") and hands
+//! - A schedule posts its prompt in the first request's thread (author "codly", with a
+//!   `schedule` attachment: the line is your own words, see `triggers::is_schedule`) and hands
 //!   the same text to that Lead as a turn. With no repo open it waits (it is not "missed").
 
 use std::path::Path;
@@ -82,7 +83,7 @@ impl Inner {
     async fn fire_schedule(self: &Arc<Self>, ws: &Workspace, s: &Schedule) -> anyhow::Result<()> {
         let thread = "lead";
         let text = format!("Scheduled “{}”: {}", s.name, s.prompt);
-        self.chat(Some(&ws.id), thread, "codly", &text, None)?;
+        self.chat(Some(&ws.id), thread, "codly", &text, Some(schedule_attachment(s)))?;
         self.send_to_lead(ws, thread, text, None).await
     }
 }
@@ -121,6 +122,13 @@ impl Core {
             }
             old.clone()
         })
+    }
+
+    /// One pass of the schedule loop, now: every due schedule fires (tests; the loop does one
+    /// pass every 30 s).
+    #[doc(hidden)]
+    pub async fn fire_due_schedules(&self) -> anyhow::Result<()> {
+        self.inner.trigger_pass().await
     }
 
     /// May `peer` do `action` on this machine right now? The one gate every inbound path asks.

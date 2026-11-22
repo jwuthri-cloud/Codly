@@ -202,6 +202,8 @@ pub fn exit_code(status: std::process::ExitStatus) -> Option<i64> {
 /// before parsing so a run can be replayed and re-normalized after mapping fixes.
 /// Inbound lines are stored verbatim; lines Codly wrote to the CLI are stored as
 /// `{"codly_sent":<line>}` and Codly's own notes as `{"codly_note":"..."}`, so the file stays NDJSON.
+/// The file is owner-only, and the keys in what Codly sends to a CLI are left out of it
+/// (`write_json`).
 pub struct RawLog {
     file: Mutex<File>,
 }
@@ -213,7 +215,8 @@ impl RawLog {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
         Ok(RawLog { file: Mutex::new(file) })
     }
 
@@ -242,10 +245,14 @@ impl RawLog {
     }
 }
 
-/// Serialize `msg`, log it as outbound, and write it as one NDJSON line.
+/// Serialize `msg`, log it as outbound, and write it as one NDJSON line. The CLI gets the
+/// message as it is; the log gets it without the keys in it (`without_mcp_secrets`).
 pub async fn write_json<W: AsyncWrite + Unpin>(w: &mut W, raw: &RawLog, msg: &Value) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(msg)?;
-    raw.outbound(&line);
+    match without_mcp_secrets(msg) {
+        Some(safe) => raw.outbound(&serde_json::to_vec(&safe)?),
+        None => raw.outbound(&line),
+    }
     line.push(b'\n');
     w.write_all(&line).await?;
     w.flush().await
@@ -263,6 +270,40 @@ pub async fn write_json_within<W: AsyncWrite + Unpin>(w: &mut W, raw: &RawLog, m
         Ok(written) => written,
         Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("the CLI did not read its input within {} s", limit.as_secs()))),
     }
+}
+
+/// What the raw log shows in place of a key.
+const REDACTED: &str = "***";
+
+/// Where an outbound message lists the MCP servers of a session, with their environment: ACP
+/// `session/new|load|resume` (a list of servers, env as `[{name, value}]`) and Codex
+/// `thread/start|resume` (a map of servers, env as a map).
+const MCP_SERVER_LISTS: [&str; 2] = ["/params/mcpServers", "/params/config/mcp_servers"];
+
+/// A copy of `msg` for the raw log, with every MCP server's environment values replaced:
+/// they hold this run's Codly token and the user's Connection keys (a GitHub token, a database
+/// URL), which live in the Keychain and must not be copied to disk. None when `msg` lists no
+/// MCP server (almost every message), so nothing is copied.
+pub fn without_mcp_secrets(msg: &Value) -> Option<Value> {
+    if MCP_SERVER_LISTS.iter().all(|at| msg.pointer(at).is_none()) {
+        return None;
+    }
+    let mut safe = msg.clone();
+    for at in MCP_SERVER_LISTS {
+        let servers: Vec<&mut Value> = match safe.pointer_mut(at) {
+            Some(Value::Array(list)) => list.iter_mut().collect(),
+            Some(Value::Object(map)) => map.values_mut().collect(),
+            _ => continue,
+        };
+        for server in servers {
+            match server.get_mut("env") {
+                Some(Value::Object(env)) => env.values_mut().for_each(|v| *v = REDACTED.into()),
+                Some(Value::Array(env)) => env.iter_mut().filter_map(|e| e.get_mut("value")).for_each(|v| *v = REDACTED.into()),
+                _ => {}
+            }
+        }
+    }
+    Some(safe)
 }
 
 /// The last `cap` bytes a child wrote to stderr. The drain task keeps reading forever, so a
@@ -419,6 +460,76 @@ mod tests {
         drop(w);
         let line = reader.await.unwrap();
         assert_eq!(serde_json::from_slice::<Value>(&line).unwrap(), msg);
+    }
+
+    /// The spec of a run whose codly server carries a token and nothing else.
+    fn spec_with_token(provider: crate::model::Provider, token: &str) -> crate::adapters::SpawnSpec {
+        use crate::adapters::{McpLaunch, SessionMode, SpawnSpec};
+        SpawnSpec {
+            agent_id: "a".into(),
+            run_id: "r".into(),
+            provider,
+            role: crate::model::Role::Worker,
+            model: None,
+            cwd: "/w".into(),
+            bin: "cli".into(),
+            env: HashMap::new(),
+            session: SessionMode::New { session_id: None },
+            system_prompt: String::new(),
+            read_only: false,
+            mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), token.into())] }),
+            use_user_setup: false,
+            raw_log: "/nonexistent/r/raw.ndjson".into(),
+            byok_command: None,
+        }
+    }
+
+    /// What each adapter really sends at session start carries the keys; the raw log must not.
+    #[tokio::test]
+    async fn keys_reach_the_cli_but_not_the_raw_log() {
+        use crate::model::Provider;
+        const TOKEN: &str = "tok-5f1e2d3c4b5a";
+        const PAT: &str = "ghp_connectionSecret0123456789";
+        // ACP `session/new`, with a Connection server beside codly's (as `acp::mcp_servers` builds them).
+        let mut servers = crate::adapters::acp::mcp_servers(&spec_with_token(Provider::Gemini, TOKEN));
+        servers.as_array_mut().unwrap().push(serde_json::json!({
+            "name": "github", "command": "npx", "args": ["-y", "server-github"],
+            "env": [{ "name": "GITHUB_PERSONAL_ACCESS_TOKEN", "value": PAT }],
+        }));
+        let acp = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": "/w", "mcpServers": servers } });
+        // Codex `thread/start`, the same way (as `codex::thread_request` builds it).
+        let (method, mut params) = crate::adapters::codex::thread_request(&spec_with_token(Provider::Codex, TOKEN), None, None);
+        params["config"]["mcp_servers"]["github"] = serde_json::json!({ "command": "npx", "args": [], "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": PAT } });
+        let codex = serde_json::json!({ "id": 2, "method": method, "params": params });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runs/r1/raw.ndjson");
+        let log = RawLog::open(&path).unwrap();
+        let mut sent = Vec::new();
+        for msg in [&acp, &codex] {
+            assert!(msg.to_string().contains(TOKEN) && msg.to_string().contains(PAT), "the test message holds both keys: {msg}");
+            write_json(&mut sent, &log, msg).await.unwrap();
+        }
+        // The CLI got every byte.
+        let sent = String::from_utf8(sent).unwrap();
+        let lines: Vec<Value> = sent.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines, [acp.clone(), codex.clone()]);
+        // The log has the same messages with the values hidden, and nothing else changed.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(TOKEN) && !text.contains(PAT), "{text}");
+        let logged: Vec<Value> = text.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"].clone()).collect();
+        assert_eq!(logged[0]["params"]["mcpServers"][0]["env"], serde_json::json!([{ "name": "CODLY_MCP_TOKEN", "value": "***" }]));
+        assert_eq!(logged[0]["params"]["mcpServers"][1]["env"][0], serde_json::json!({ "name": "GITHUB_PERSONAL_ACCESS_TOKEN", "value": "***" }));
+        assert_eq!(logged[0]["params"]["mcpServers"][1]["args"], acp["params"]["mcpServers"][1]["args"]);
+        assert_eq!(logged[1]["params"]["config"]["mcp_servers"]["codly"]["env"], serde_json::json!({ "CODLY_MCP_TOKEN": "***" }));
+        assert_eq!(logged[1]["params"]["config"]["mcp_servers"]["github"]["env"], serde_json::json!({ "GITHUB_PERSONAL_ACCESS_TOKEN": "***" }));
+        assert_eq!(logged[1]["params"]["cwd"], codex["params"]["cwd"]);
+        // A message without servers is logged as it is, with no copy made.
+        let prompt = serde_json::json!({ "id": 3, "method": "session/prompt", "params": { "prompt": [{ "type": "text", "text": "env: {}" }] } });
+        assert_eq!(without_mcp_secrets(&prompt), None);
+        // Only the owner reads the log.
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[tokio::test]
