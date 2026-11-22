@@ -244,10 +244,11 @@ fn leases_block_overlapping_scopes() {
     assert_eq!(starts(&a)[0].0, "t3");
 }
 
-/// A worker that asked you something waits for the answer with its process running: the
-/// answer puts its task straight back to Running, so the task keeps its files and its slot.
+/// A worker that asked you something waits for the answer with its process running: its task
+/// keeps its files, but no worker slot (nobody works on it), so open questions never stop
+/// the other tasks.
 #[test]
-fn a_blocked_task_with_a_live_worker_keeps_its_slot() {
+fn a_task_that_waits_for_your_answer_keeps_its_files_but_no_slot() {
     let mut asked = task("t1", "p", TaskStatus::Blocked, &["a/**"], &[]);
     asked.assignee = Some("w1".into());
     let mut w = World::new(vec![asked, task("t2", "p", TaskStatus::Ready, &["a/ui/**"], &[]), task("t3", "p", TaskStatus::Ready, &["b/**"], &[])]);
@@ -259,10 +260,14 @@ fn a_blocked_task_with_a_live_worker_keeps_its_slot() {
     let a = w.run();
     let wt = waits(&a);
     assert_eq!(wt.len(), 1, "{wt:?}");
-    assert!(wt[0].0 == "t2" && wt[0].1.contains("overlaps running task t1"), "{wt:?}");
+    assert_eq!(wt[0], ("t2".to_string(), "waiting: write scope 'a/ui/**' overlaps task t1 ('a/**'), which waits for your answer".to_string()));
     assert_eq!(starts(&a).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["t3"]);
+    // With one slot in all, and one per account: t3 still starts, on the account of t1's worker.
     w.settings.max_parallel = 1;
-    assert_eq!(waits(&w.run())[1], ("t3".to_string(), "waiting: all 1 worker slots are busy".to_string()));
+    w.settings.max_per_provider = 1;
+    let a = w.run();
+    assert_eq!(starts(&a).iter().map(|s| (s.0.as_str(), s.1)).collect::<Vec<_>>(), [("t3", Provider::Claude)]);
+    assert_eq!(waits(&a).len(), 1, "only t2 waits, for the files: {:?}", waits(&a));
     // Stopped, or its worker gone: a blocked task holds nothing.
     w.busy.clear();
     assert_eq!(starts(&w.run()).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["t2"]);

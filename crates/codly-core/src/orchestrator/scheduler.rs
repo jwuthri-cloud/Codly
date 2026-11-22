@@ -118,8 +118,9 @@ pub fn is_active(s: TaskStatus) -> bool {
     matches!(s, TaskStatus::Running | TaskStatus::Verifying | TaskStatus::Reviewing | TaskStatus::ChangesRequested | TaskStatus::Merging)
 }
 
-/// A blocked task whose worker (`assignee`) is still live on it holds its slot and lease too:
-/// the worker asked you something, and your answer puts the task straight back to Running.
+/// A blocked task whose worker (`assignee`) is still live on it keeps its write-scope lease:
+/// the worker asked you something, and no other task may change its files while it waits.
+/// It holds no worker slot: nobody works on it until you answer.
 pub fn held(t: &Task, assignee: Option<&Agent>, busy: &HashSet<Id>) -> bool {
     t.status == TaskStatus::Blocked && assignee.is_some_and(|a| busy.contains(&a.id) && a.task_id.as_deref() == Some(t.id.as_str()))
 }
@@ -196,11 +197,18 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
     // Agent → the active task it works on (why an assigned task waits).
     let mut doing: HashMap<Id, String> = HashMap::new();
     let worker = |t: &Task| t.assignee.as_deref().and_then(|id| agent_by_id.get(id)).copied();
+    // Tasks that wait for your answer (`held`): a lease and a busy worker, but no slot.
+    let mut asked: HashSet<&str> = HashSet::new();
     for t in input.tasks.iter().filter(|t| is_active(t.status) || held(t, worker(t), input.busy)) {
-        active += 1;
+        let works = is_active(t.status);
+        if works {
+            active += 1;
+        } else {
+            asked.insert(t.key.as_str());
+        }
         leases.push((t.key.clone(), t.write_scope.clone()));
         if let Some(a) = t.assignee.as_deref().and_then(|id| agent_by_id.get(id)) {
-            if let Some(acc) = accounts.of_agent(a) {
+            if works && let Some(acc) = accounts.of_agent(a) {
                 *per.entry(acc.id.clone()).or_default() += 1;
             }
             busy.insert(a.id.clone());
@@ -280,7 +288,8 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
             continue;
         }
         if let Some((key, (a, b))) = leases.iter().find_map(|(k, s)| scope::overlap(&t.write_scope, s).map(|o| (k, o))) {
-            actions.push(wait(format!("waiting: write scope '{a}' overlaps running task {key} ('{b}')")));
+            let (what, why) = if asked.contains(key.as_str()) { ("task", ", which waits for your answer") } else { ("running task", "") };
+            actions.push(wait(format!("waiting: write scope '{a}' overlaps {what} {key} ('{b}'){why}")));
             continue;
         }
         let ctx = RouteCtx {

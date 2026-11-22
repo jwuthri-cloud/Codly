@@ -8,7 +8,12 @@
 //! - a team member's stopped task can be checked or merged anyway after the member's worktree
 //!   moved on to its next task;
 //! - a merge conflict has its own rounds (two used fix rounds do not fail the task), and a
-//!   task that fails with conflict markers is not left in the middle of a merge.
+//!   task that fails with conflict markers is not left in the middle of a merge;
+//! - a worker whose turn ends with no report is asked for it once before its work is checked;
+//! - a turn that failed while the work was reviewed is not checked when the review ends: the
+//!   worker is asked to continue first, and a turn that ended on the usage limit (nobody is
+//!   asked to continue) does not leave the task waiting;
+//! - after a context compaction the next prompt to the worker carries its task again.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -61,12 +66,22 @@ struct FakeTurn {
     spec: Arc<SpawnSpec>,
     prompt: String,
     events: mpsc::UnboundedSender<AdapterEvent>,
+    /// Set by `fail`: the turn ends as failed, with this error.
+    error: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeTurn {
-    fn say(&self, text: &str) {
-        let kind = EventKind::Message { item_id: new_id(), text: text.into(), phase: MessagePhase::Final };
+    fn emit(&self, kind: EventKind) {
         let _ = self.events.send(AdapterEvent { agent_id: self.spec.agent_id.clone(), run_id: self.spec.run_id.clone(), kind });
+    }
+
+    fn say(&self, text: &str) {
+        self.emit(EventKind::Message { item_id: new_id(), text: text.into(), phase: MessagePhase::Final });
+    }
+
+    /// The turn ends on this error instead of completing.
+    fn fail(&self, error: &str) {
+        *self.error.lock().unwrap() = Some(error.into());
     }
 
     /// Call a codly_* tool exactly like the stdio bridge does.
@@ -135,8 +150,11 @@ impl Spawner for FakeSpawner {
                             turns.lock().unwrap().push((spec2.role, spec2.agent_id.clone(), text.clone()));
                             send(EventKind::TurnStarted { input: Some(text.clone()) });
                             send(EventKind::StatusChanged { status: AgentStatus::Thinking });
-                            behavior(FakeTurn { spec: spec2.clone(), prompt: text, events: events.clone() }).await;
-                            send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(5) });
+                            let error = Arc::new(Mutex::new(None));
+                            behavior(FakeTurn { spec: spec2.clone(), prompt: text, events: events.clone(), error: error.clone() }).await;
+                            let result_text = error.lock().unwrap().take();
+                            let status = if result_text.is_some() { TurnStatus::Failed } else { TurnStatus::Completed };
+                            send(EventKind::TurnCompleted { status, result_text, duration_ms: Some(5) });
                             send(EventKind::StatusChanged { status: AgentStatus::Idle });
                         }
                         AgentCmd::Shutdown => {
@@ -701,5 +719,218 @@ async fn a_task_out_of_conflict_rounds_waits_for_you_with_no_merge_started() {
     assert_eq!(asked(), 4);
     let last = worker_prompts(&turns).into_iter().rfind(|p| p.contains(CONFLICT)).unwrap();
     assert!(last.contains("(round 1/3)"), "{last}");
+    core.shutdown().await;
+}
+
+/// How Codly asks a worker for a report it did not give.
+const NO_REPORT: &str = "You ended your turn without a report";
+const HELLO_CHECK: &str = "grep -q hello hello.txt";
+
+fn hello_plan() -> Value {
+    json!({ "summary": "Add a hello file", "tasks": [task("t1", "hello.txt", HELLO_CHECK)] })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_that_ends_without_a_report_is_asked_for_it_before_its_work_is_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    // The first turn ends early: half the file, no report. Asked for its report, the worker finishes.
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains(NO_REPORT) {
+                turn.write("hello.txt", "hello\n");
+                turn.done().await;
+            } else {
+                turn.write("hello.txt", "hel");
+            }
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { lead: lead_with(hello_plan()), worker, turns: turns.clone() }, auto()).await;
+
+    wait_plan(&core, PlanStatus::Done).await;
+    let prompts = worker_prompts(&turns);
+    assert!(prompts.len() == 2 && prompts[1].contains(NO_REPORT), "the brief, then one question about the report: {prompts:?}");
+    let all = events(&core).await;
+    assert_eq!(verified(&all), [(HELLO_CHECK.to_string(), true)], "the half-done file was never checked, so no fix round was spent");
+    let said = decisions(&all);
+    assert!(said.iter().any(|d| d.1 == "t1: the worker ended its turn without a report; Codly asked for it"), "{said:?}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_that_never_reports_is_asked_once_and_then_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    let worker: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.write("hello.txt", "hello\n") }));
+    let core = start(dir.path(), FakeSpawner { lead: lead_with(hello_plan()), worker, turns: turns.clone() }, auto()).await;
+
+    wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(task_by_key(&core, "t1").await.unwrap().status, TaskStatus::Done);
+    let prompts = worker_prompts(&turns);
+    assert!(prompts.len() == 2 && prompts[1].contains(NO_REPORT), "asked once, then its work is checked as it is: {prompts:?}");
+    assert_eq!(verified(&events(&core).await), [(HELLO_CHECK.to_string(), true)]);
+    core.shutdown().await;
+}
+
+/// The reviewer approves, the first time only when the test ends that review (`end`); every
+/// other agent is `worker`.
+fn with_held_review(end: Arc<tokio::sync::Notify>, worker: Behavior) -> Behavior {
+    let first = Arc::new(AtomicBool::new(true));
+    Arc::new(move |turn: FakeTurn| {
+        let (end, first, worker) = (end.clone(), first.clone(), worker.clone());
+        Box::pin(async move {
+            if turn.spec.role != Role::Reviewer {
+                return worker(turn).await;
+            }
+            if first.swap(false, Ordering::SeqCst) {
+                end.notified().await;
+            }
+            let criteria = json!([{ "criterion": "hello.txt is right", "met": true }]);
+            turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
+        })
+    })
+}
+
+/// Wait until t1's work is read by its reviewer, then send its worker a message from you.
+async fn message_in_review(core: &Core, turns: &Turns, text: &str) {
+    let reading = || turns.lock().unwrap().iter().any(|t| t.0 == Role::Reviewer);
+    let t = wait_for("the review", 40, async || task_by_key(core, "t1").await.filter(|t| reading() && t.status == TaskStatus::Reviewing)).await;
+    core.send_chat(&format!("agent:{}", t.assignee.unwrap()), text).await.unwrap();
+}
+
+/// hello.txt as the plan's branch has it after the merge.
+async fn merged_hello(core: &Core) -> String {
+    let plan = core.snapshot().await.unwrap().plans.remove(0);
+    std::fs::read_to_string(PathBuf::from(plan.integration_worktree.unwrap()).join("hello.txt")).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_that_failed_during_the_review_is_not_checked_when_the_review_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    let reviewed = Arc::new(tokio::sync::Notify::new());
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains(BRIEF) {
+                turn.write("hello.txt", "hello\n");
+                turn.done().await;
+            } else if turn.prompt.contains("second line") {
+                // Your message: the turn fails with the file half-written.
+                turn.write("hello.txt", "half\n");
+                turn.fail("API Error: 529 Overloaded");
+            } else if turn.prompt.contains("Your last turn on task") {
+                turn.write("hello.txt", "hello\nworld\n");
+            }
+        })
+    });
+    let spawner = FakeSpawner { lead: lead_with(hello_plan()), worker: with_held_review(reviewed.clone(), worker), turns: turns.clone() };
+    let core = start(dir.path(), spawner, Settings { review_gate: true, ..auto() }).await;
+    // A wait no test reaches: only the review's end asks the worker to continue.
+    core.set_turn_retry_waits(vec![Duration::from_secs(600); 2]);
+
+    // You message the worker while its work is read, and that turn fails.
+    message_in_review(&core, &turns, "also add a second line").await;
+    wait_for("Codly to see the failed turn", 20, async || {
+        decisions(&events(&core).await).iter().any(|d| d.1.contains("Codly asks it to continue")).then_some(())
+    })
+    .await;
+
+    // The review ends before the worker went on. The half-written file is not checked: the
+    // worker is asked to continue now, and the end of that turn is checked.
+    reviewed.notify_one();
+    wait_plan(&core, PlanStatus::Done).await;
+    let all = events(&core).await;
+    assert_eq!(verified(&all), vec![(HELLO_CHECK.to_string(), true); 2], "the half-written file never reached a check");
+    assert!(!decisions(&all).iter().any(|d| d.1.contains("fix round")), "{:?}", decisions(&all));
+    let asked = worker_prompts(&turns).iter().filter(|p| p.contains("Your last turn on task")).count();
+    assert_eq!(asked, 1, "the worker was asked to continue, once");
+    assert_eq!(merged_hello(&core).await, "hello\nworld\n");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_that_ended_on_the_usage_limit_during_the_review_does_not_leave_the_task_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    let reviewed = Arc::new(tokio::sync::Notify::new());
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains(BRIEF) {
+                turn.write("hello.txt", "hello\n");
+                turn.done().await;
+            } else {
+                // Your message: after one more line the account's usage limit ends the turn.
+                turn.write("hello.txt", "hello\nworld\n");
+                turn.emit(EventKind::StatusChanged { status: AgentStatus::RateLimited });
+                turn.fail("You have hit your usage limit");
+            }
+        })
+    });
+    let spawner = FakeSpawner { lead: lead_with(hello_plan()), worker: with_held_review(reviewed.clone(), worker), turns: turns.clone() };
+    let core = start(dir.path(), spawner, Settings { review_gate: true, ..auto() }).await;
+
+    message_in_review(&core, &turns, "also add a second line").await;
+    wait_for("Codly to see the failed turn", 20, async || {
+        events(&core).await.iter().any(|e| matches!(e.kind, EventKind::TurnCompleted { status: TurnStatus::Failed, .. })).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A worker at its limit is not asked to continue, so no later turn would move the task on:
+    // when the review ends, the work is checked as that turn left it.
+    reviewed.notify_one();
+    wait_plan(&core, PlanStatus::Done).await;
+    let all = events(&core).await;
+    assert_eq!(verified(&all), vec![(HELLO_CHECK.to_string(), true); 2], "checked once more when the review ended");
+    let said = decisions(&all);
+    assert!(!said.iter().any(|d| d.1.contains("Codly asks it to continue")), "{said:?}");
+    let prompts = worker_prompts(&turns);
+    assert_eq!(prompts.len(), 2, "the brief and your message, nothing else: {prompts:?}");
+    assert_eq!(merged_hello(&core).await, "hello\nworld\n");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_a_compaction_the_next_prompt_carries_the_task_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    // The worker's context is compacted in its first turn, and its file fails the check twice.
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("fix round 2/2") {
+                turn.write("hello.txt", "hello\n");
+            } else if turn.prompt.contains("fix round 1/2") {
+                turn.write("hello.txt", "still no\n");
+            } else {
+                turn.emit(EventKind::Compacting { pre_tokens: Some(180_000), post_tokens: Some(20_000) });
+                turn.write("hello.txt", "no\n");
+            }
+            turn.done().await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { lead: lead_with(hello_plan()), worker, turns: turns.clone() }, auto()).await;
+
+    wait_plan(&core, PlanStatus::Done).await;
+    let prompts = worker_prompts(&turns);
+    assert_eq!(prompts.len(), 3, "the brief and two fix rounds: {prompts:?}");
+    // The first prompt after the compaction carries the task again, after the gate's feedback.
+    let again = "Your context was compacted since you last read your task";
+    let (feedback, task) = prompts[1].split_once(again).unwrap_or_else(|| panic!("the task is not there again: {}", prompts[1]));
+    assert!(feedback.contains("fix round 1/2"), "{feedback}");
+    for part in [
+        "[Codly] Task t1: Create hello.txt",
+        "hello.txt is right",
+        "You may modify ONLY these repo-relative paths: hello.txt.",
+        HELLO_CHECK,
+        "Do not commit, branch, merge or push",
+        "codly_submit_report",
+    ] {
+        assert!(task.contains(part), "`{part}` is missing: {task}");
+    }
+    // Nothing was compacted since: the next prompt is the feedback alone.
+    assert!(prompts[2].contains("fix round 2/2") && !prompts[2].contains(again), "{}", prompts[2]);
+    let said = decisions(&events(&core).await);
+    let sent_again = said.iter().filter(|d| d.1 == "t1: the worker's context was compacted; its next prompt carries the task again").count();
+    assert_eq!(sent_again, 1, "{said:?}");
     core.shutdown().await;
 }

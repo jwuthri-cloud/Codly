@@ -279,6 +279,10 @@ async fn decisions(core: &Core, kind: &str) -> Vec<String> {
         .collect()
 }
 
+/// The worker of these tests never calls codly_submit_report: before Codly checks its work, it
+/// asks the worker for the report, once per run.
+const NO_REPORT: &str = "You ended your turn without a report";
+
 fn write_hello(turn: &Turn, text: &str) {
     std::fs::write(turn.cwd.join("hello.txt"), text).unwrap();
 }
@@ -300,9 +304,11 @@ async fn a_turn_that_ends_short_is_continued(status: TurnStatus, result: Option<
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     {
         let seen = seen.lock().unwrap();
-        assert_eq!((seen.runs, seen.prompts.len()), (1, 2), "the same session goes on: {:?}", seen.prompts);
+        // The brief, the continue prompt, then (this worker never reports) one question about its report.
+        assert_eq!((seen.runs, seen.prompts.len()), (1, 3), "the same session goes on: {:?}", seen.prompts);
         let again = &seen.prompts[1];
         assert!(again.contains("Your last turn on task") && again.contains(said), "{again}");
+        assert!(seen.prompts[2].contains(NO_REPORT), "{}", seen.prompts[2]);
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the half-done work was never committed or checked");
     let retries = decisions(&core, "retry").await;
@@ -371,8 +377,9 @@ async fn a_crash_mid_turn_restarts_the_worker_and_is_not_gated() {
     tokio::time::sleep(Duration::from_millis(400)).await;
     {
         let seen = seen.lock().unwrap();
-        assert_eq!((seen.runs, seen.prompts.len()), (2, 2), "{:?}", seen.prompts);
+        assert_eq!((seen.runs, seen.prompts.len()), (2, 3), "{:?}", seen.prompts);
         assert!(seen.prompts[1].contains("exited unexpectedly") && !seen.prompts[1].contains("Your last turn on task"), "{}", seen.prompts[1]);
+        assert!(seen.prompts[2].contains(NO_REPORT), "{}", seen.prompts[2]);
     }
     core.shutdown().await;
 }
@@ -457,8 +464,9 @@ async fn your_resume_after_a_failed_turn_continues_the_work_and_does_not_check_i
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     {
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.prompts.len(), 2, "{:?}", seen.prompts);
+        assert_eq!(seen.prompts.len(), 3, "{:?}", seen.prompts);
         assert!(seen.prompts[1].contains("Your last turn on task"), "{}", seen.prompts[1]);
+        assert!(seen.prompts[2].contains(NO_REPORT), "{}", seen.prompts[2]);
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the resume did not check the half-done work");
     core.shutdown().await;
@@ -480,9 +488,10 @@ async fn a_turn_that_answers_you_after_a_failed_turn_is_not_checked_as_the_work(
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     {
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.prompts.len(), 3, "{:?}", seen.prompts);
+        assert_eq!(seen.prompts.len(), 4, "{:?}", seen.prompts);
         assert!(seen.prompts[1].contains("use plain words"), "{}", seen.prompts[1]);
         assert!(seen.prompts[2].contains("Your last turn on task"), "{}", seen.prompts[2]);
+        assert!(seen.prompts[3].contains(NO_REPORT), "{}", seen.prompts[3]);
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the answer to the note did not send the half-done work to the gate");
     core.shutdown().await;
@@ -599,7 +608,8 @@ async fn a_worker_you_hold_that_the_breaker_constrains_gets_no_note_to_answer() 
     {
         let seen = seen.lock().unwrap();
         assert!(!seen.prompts.iter().any(|p| p.contains("Stop active work now")), "no summary turn to gate: {:?}", seen.prompts);
-        let back = seen.prompts.last().unwrap();
+        // The last prompt before the question about its report (`NO_REPORT`).
+        let back = seen.prompts.iter().rfind(|p| !p.contains(NO_REPORT)).unwrap();
         assert!(back.contains("The user resumed you. The breaker stopped your work: it hit 2 errors in a row"), "{back}");
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the half-done work was never committed or checked");

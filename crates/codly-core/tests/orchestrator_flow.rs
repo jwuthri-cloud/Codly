@@ -1448,18 +1448,22 @@ async fn an_answer_for_a_worker_that_is_shutting_down_restarts_its_task_with_it(
             }
         })
     });
-    let spawner = SlowStop(FakeSpawner { log, lead: planning_lead(), worker }, Duration::from_millis(500));
+    let spawner = SlowStop(FakeSpawner { log: log.clone(), lead: planning_lead(), worker }, Duration::from_millis(500));
     let core = start(dir.path(), spawner).await;
     core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     core.send_chat("lead", "Please add a hello file").await.unwrap();
     let (task, _) = wait_for("the worker's question", 20, async || task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Blocked)).await;
     let card = core.list_blockers().await.unwrap().into_iter().next().unwrap();
-    core.stop_agent(task.assignee.as_deref().unwrap()).await.unwrap();
+    let worker = task.assignee.clone().unwrap();
+    core.stop_agent(&worker).await.unwrap();
     // Its process is still shutting down and takes no more prompts; a card is answered only once.
     core.answer_blocker(&card.id, "Use Stripe").await.unwrap();
-    let (task, _) = task_status(&core).await.unwrap();
-    assert!(task.goal.contains("Use Stripe"), "the answer goes into the task for its next run: {}", task.goal);
+    // The answer is kept for the task's next run: the restarted worker reads it first.
+    let answer = "[User] Answer to your question \"Which provider?\": Use Stripe";
+    wait_for("the restarted worker to get the answer", 20, async || turns_of(&log, &worker).iter().any(|t| t.starts_with(answer)).then_some(())).await;
+    let runs = log.lock().unwrap().runs.iter().filter(|r| r.0 == worker).count();
+    assert_eq!(runs, 2, "a new run of the task took the answer");
     core.shutdown().await;
 }
 
