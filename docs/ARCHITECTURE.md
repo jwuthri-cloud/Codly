@@ -193,7 +193,9 @@ inbound path. `inbound/` has the sources: a loopback webhook listener (one secre
 created switched off) and Slack over Socket Mode (config and gating exist; the socket is not
 connected yet). An inbound message is never the user's: the thread stores and shows it under its
 source's name, the Lead reads it as quoted untrusted data, and a plan made after it waits for Run plan
-unless you let that endpoint run plans without asking (off for every new endpoint). Secrets live in the
+unless you let that endpoint run plans without asking (off for every new endpoint). Your next message
+in the thread, or a schedule of yours that fires there, ends the wait for the plans that follow. One
+agent picked to answer instead of the Lead makes no plan, so this gate does not cover it. Secrets live in the
 Keychain. `dictation.rs` is opt-in voice input: a clip goes to Groq Whisper with your own key and the
 transcript lands in the composer draft, never auto-sent.
 

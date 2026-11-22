@@ -94,8 +94,9 @@ impl Inner {
         }
 
         // Messages from outside Codly (a webhook, Slack) that came in after the user's last own
-        // words: the plan may answer them, so it carries no "user's words", and it waits for
-        // Run plan unless each of them came from an endpoint the user lets run plans alone.
+        // words (a message they wrote, or a schedule of theirs that fired): the plan may answer
+        // them, so it carries no "user's words", and it waits for Run plan unless each of them
+        // came from an endpoint the user lets run plans alone.
         let outside = self.store.inbound_since_user(Some(&ws.id), &thread)?;
         let outside_waits = outside.iter().any(|m| crate::inbound::needs_ok(m.attachment.as_ref()));
         let request = if outside.is_empty() {
@@ -209,7 +210,13 @@ impl Inner {
             "Plan ready: {} ({n} task{}).{}",
             plan.summary,
             if n == 1 { "" } else { "s" },
-            if auto { " Running it now." } else { " Review it on the board, then click Run plan." }
+            if auto {
+                " Running it now."
+            } else if runs_at_once && outside_waits {
+                " A message from outside Codly came in, so it waits for you: review it on the board, then click Run plan."
+            } else {
+                " Review it on the board, then click Run plan."
+            }
         );
         self.chat(Some(&ws.id), &thread, "codly", &text, Some(json!({ "plan_id": plan_id })))?;
         if auto {

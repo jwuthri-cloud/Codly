@@ -499,10 +499,11 @@ impl Inner {
 
     /// A message from outside Codly for the Lead of `thread`: recorded under its source's name
     /// (a Codly line with an `inbound` attachment, never a "user" message), and handed to the
-    /// Lead as quoted data.
+    /// Lead as quoted data. The Lead is told that it may plan the work only when the message's
+    /// source is one the user lets run plans without asking (`auto_run`).
     async fn inbound_to_lead(self: &Arc<Self>, ws: &Workspace, thread: &str, msg: &InboundMessage) -> Result<()> {
         self.chat(Some(&ws.id), thread, "codly", &msg.shown(), Some(msg.attachment()))?;
-        self.send_to_lead(ws, thread, format!("\n{}", prompts::inbound_message(&msg.source, &msg.text)), None).await
+        self.send_to_lead(ws, thread, format!("\n{}", prompts::inbound_message(&msg.source, &msg.text, msg.auto_run)), None).await
     }
 
     /// Close a request: stop and archive its Lead, cancel its unfinished plans, and move its
@@ -663,10 +664,12 @@ impl Inner {
                 self.chat(ws_id.as_deref(), &thread, "user", text, None)?;
                 format!("[User] {text}")
             }
-            // Not your message: recorded under its source's name, read as quoted data.
+            // Not your message: recorded under its source's name, read as quoted data. One
+            // agent makes no plan, so no Run plan click stands between it and the work: it is
+            // told to report and suggest, whatever the endpoint's "Run plans without asking".
             Said::Outside(msg) => {
                 self.chat(ws_id.as_deref(), &thread, "codly", &msg.shown(), Some(msg.attachment()))?;
-                prompts::inbound_message(&msg.source, &msg.text)
+                prompts::inbound_message(&msg.source, &msg.text, false)
             }
         };
         let stopping = lock(&self.live).get(agent_id).map(|l| l.stopping);

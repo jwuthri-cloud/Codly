@@ -9,6 +9,7 @@
 //! from `Settings` so a bad trigger never resets your settings.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use ts_rs::TS;
 
 use crate::model::{Id, new_id};
@@ -47,6 +48,18 @@ impl Default for Schedule {
     fn default() -> Self {
         Schedule { id: String::new(), name: String::new(), prompt: String::new(), every_minutes: 60, enabled: true, created_at: 0, last_fired_at: None, workspace_id: None }
     }
+}
+
+/// What is kept with the chat line a schedule posts when it fires (`ChatMessage::attachment`).
+pub fn schedule_attachment(s: &Schedule) -> Value {
+    json!({ "schedule": s.id })
+}
+
+/// Whether a chat message's attachment says a schedule posted it. Only the user writes
+/// schedules (Settings → Triggers), so such a line is the user's own words, written ahead of
+/// time: for a plan it counts like a message they typed, not like one from outside Codly.
+pub fn is_schedule(attachment: Option<&Value>) -> bool {
+    attachment.is_some_and(|a| a["schedule"].is_string())
 }
 
 /// When a schedule next runs (ms): one interval after it last fired, or was created.
@@ -234,6 +247,17 @@ mod tests {
 
     fn sched(every: i64, created: i64, fired: Option<i64>) -> Schedule {
         Schedule { id: "s1".into(), name: "n".into(), prompt: "review".into(), every_minutes: every, created_at: created, last_fired_at: fired, ..Default::default() }
+    }
+
+    /// The chat line of a schedule is told from every other line by its attachment alone.
+    #[test]
+    fn a_schedule_line_is_known_by_its_attachment() {
+        let att = schedule_attachment(&sched(60, 0, None));
+        assert_eq!(att, json!({ "schedule": "s1" }));
+        assert!(is_schedule(Some(&att)));
+        for other in [Some(json!({ "plan_id": "p1" })), Some(json!({ "inbound": { "source": "x", "auto_run": true } })), Some(json!({ "schedule": true })), None] {
+            assert!(!is_schedule(other.as_ref()), "{other:?}");
+        }
     }
 
     #[test]

@@ -3,8 +3,9 @@
   listener, one secret per endpoint, each created switched off, each revocable) and Slack (the
   settings are kept; the connection is not built yet, and this says so). Also: who answers
   inbound messages. A secret is shown once, right after creating its endpoint, and never again.
-  A plan made from an inbound message waits for Run plan, unless you let that endpoint run plans
-  without asking: the switch says what that hands over.
+  A plan the Lead makes from an inbound message waits for Run plan, unless you let that endpoint
+  run plans without asking: the switch says what that hands over. An agent picked to answer
+  instead of the Lead makes no plan, so nothing waits: its row says so.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -134,7 +135,7 @@
     Anyone holding an endpoint’s URL and secret can post a message to the Lead. Each endpoint has its own secret, starts switched off, and can be revoked on its own.
     The listener only accepts connections from this Mac (127.0.0.1) and only runs while an endpoint is on; to reach it from elsewhere, run a tunnel yourself.
     A message shows in the thread under its endpoint’s name, and the Lead reads it as outside input, not as your words.
-    A plan made from it waits for you to click Run plan, unless you let that endpoint run plans without asking.
+    A plan the Lead makes from it waits for you to click Run plan, unless you let that endpoint run plans without asking.
   </p>
 
   {#if st}
@@ -219,7 +220,13 @@
     <div class="row">
       <div class="r-text">
         <span class="r-title">Who answers inbound messages</span>
-        <span class="desc">The Lead, unless you pick one agent to take them all.</span>
+        <span class="desc">
+          The Lead, unless you pick one agent to take them all.
+          <span class:warn={st.answerer !== 'lead'}>
+            An agent you pick gets each message at once, in its own chat. It is told to report and not to obey, but it makes no plan: nothing waits for
+            Run plan, the “Run plans without asking” switches do nothing, and it can act under its own approval mode.
+          </span>
+        </span>
       </div>
       <select class="input sel" value={st.answerer} aria-label="Who answers inbound messages" onchange={(e) => setAnswerer(e.currentTarget.value)}>
         <option value="lead">The Lead</option>
