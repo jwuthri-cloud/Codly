@@ -53,12 +53,15 @@ that window (same handlers, same ACL), and the two Channels become server-sent e
 and kept in the data dir, is traded once for an HttpOnly cookie. Pages carry the window's
 content security policy and `nosniff`, no-referrer and no-framing headers. Another `--host` is
 refused without `--allow-remote` (plain HTTP, and a page can open a terminal); a served-to-the-
-network run gets a token of its own that is never kept.
+network run gets a token of its own that is never kept. An app that is already open serves for
+a second `codly serve`, but not to the network: nobody would see the link it prints.
 
 Logs go to stdout and to `<data dir>/logs/codly.log` (src-tauri/src/logging.rs: 5 MB, one older
 file kept; a panic hook writes the place and backtrace). Settings → Troubleshooting builds a
 report from the shell side (src-tauri/src/diagnostics.rs), so it works when the core did not
-start, and scrubs tokens, emails and folder names from it.
+start, and scrubs tokens, keys, emails and paths under the home folder from it (repository and
+agent names stay). The file takes debug lines from Codly's own crates only (`CODLY_LOG=debug`):
+a library's debug output stays on stdout.
 
 PATH: GUI apps get launchd's minimal PATH, so Codly captures the login shell env once
 (`$SHELL -ilc '/usr/bin/env -0'`, 5 s timeout) and resolves each CLI on it at every spawn.

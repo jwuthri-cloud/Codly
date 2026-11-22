@@ -9,6 +9,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use tracing::Level;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::prelude::*;
 
 /// The folder of the log files, inside the app's data dir.
@@ -80,15 +82,19 @@ impl Write for SinkWriter {
     }
 }
 
+/// What the log file takes of the lines `CODLY_LOG` lets through: all of Codly's own, and of
+/// a library (hyper, reqwest, wry…) only `info` and above. Nobody checked what their debug
+/// lines say, and the file ends up in bug reports.
+fn file_takes(level: &Level, target: &str) -> bool {
+    *level <= Level::INFO || target.starts_with("codly")
+}
+
 /// Starts logging to stdout and to the log file, and makes every panic log itself. Call it
 /// first. `CODLY_LOG` sets the level (default `info`).
 pub fn init() {
     let filter = tracing_subscriber::EnvFilter::try_from_env("CODLY_LOG").unwrap_or_else(|_| "info".into());
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(|| SinkWriter))
-        .init();
+    let file = tracing_subscriber::fmt::layer().with_ansi(false).with_writer(|| SinkWriter).with_filter(filter_fn(|meta| file_takes(meta.level(), meta.target())));
+    tracing_subscriber::registry().with(filter).with(tracing_subscriber::fmt::layer()).with(file).init();
 
     // The release build keeps function names (`strip = "debuginfo"`), so the backtrace is readable.
     let print = std::panic::take_hook();
@@ -190,6 +196,19 @@ mod tests {
         std::fs::write(tmp.path().join(OLD_FILE), "one\ntwo\n").unwrap();
         assert_eq!(last_lines(tmp.path(), 3).unwrap(), ["two", "three", "four"]);
         assert_eq!(last_lines(tmp.path(), 9).unwrap(), ["one", "two", "three", "four"]);
+    }
+
+    #[test]
+    fn the_log_file_takes_debug_lines_from_codly_only() {
+        for target in ["codly_core::index::query", "codly_lib::web", "hyper::proto::h1::io", "reqwest::connect"] {
+            for level in [Level::ERROR, Level::WARN, Level::INFO] {
+                assert!(file_takes(&level, target), "{level} {target}");
+            }
+        }
+        for level in [Level::DEBUG, Level::TRACE] {
+            assert!(file_takes(&level, "codly_core::index::query") && file_takes(&level, "codly_lib::web"), "{level}");
+            assert!(!file_takes(&level, "hyper::proto::h1::io") && !file_takes(&level, "reqwest::connect"), "{level}");
+        }
     }
 
     #[test]

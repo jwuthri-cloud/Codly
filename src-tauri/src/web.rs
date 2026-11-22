@@ -73,7 +73,8 @@ const REMOTE_RISK: &str = "Anyone who can reach this Mac and sees the link can o
 pub fn remote_warning(s: &Serve) -> String {
     format!(
         "Warning: Codly is open to your network on {}:{port} over plain HTTP.\n{REMOTE_RISK}\n\
-         The link works until Codly stops. Safer: an SSH tunnel to the default host: ssh -L {port}:127.0.0.1:{port} <this Mac>",
+         The link works until Codly stops. Safer: an SSH tunnel to the default host: ssh -L {port}:127.0.0.1:{port} <this Mac>\n\
+         If the Codly app is already open, nothing is served: quit it, then run this again.",
         s.host,
         port = s.port
     )
@@ -507,6 +508,7 @@ mod tests {
         assert!(from_args(&a("codly serve --allow-remote --host 192.168.1.20")).unwrap().unwrap().remote, "in any order");
         let w = remote_warning(&s);
         assert!(w.starts_with("Warning: Codly is open to your network on 0.0.0.0:9000 over plain HTTP.") && w.contains("open terminals"), "{w}");
+        assert!(w.ends_with("If the Codly app is already open, nothing is served: quit it, then run this again."), "{w}");
     }
 
     #[test]

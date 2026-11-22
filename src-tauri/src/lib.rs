@@ -52,10 +52,16 @@ pub fn run() {
     let app = tauri::Builder::default()
         // must be registered first (plugins run in registration order)
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // `codly serve` while the app runs: this app serves too, and opens the browser.
-            if let Ok(Some(s)) = web::from_args(&argv) {
-                tauri::async_runtime::spawn(web::run(app.clone(), s, true));
-                return;
+            match web::from_args(&argv) {
+                // `codly serve` while the app runs: this app serves too, and opens the browser.
+                Ok(Some(s)) if !s.remote => {
+                    tauri::async_runtime::spawn(web::run(app.clone(), s, true));
+                    return;
+                }
+                // Not to the network: nobody sees the link this app would print, and its token
+                // is never kept. `web::remote_warning` told the terminal to quit Codly first.
+                Ok(Some(_)) => tracing::warn!("codly serve --allow-remote was not started: Codly is already open. Quit it, then run the command again."),
+                _ => {}
             }
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();

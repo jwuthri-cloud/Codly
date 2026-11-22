@@ -137,19 +137,21 @@ the open app serves too and opens the link in your browser.
 agents, and the traffic is plain HTTP, so to reach it from another machine use an SSH tunnel:
 `ssh -L 4280:127.0.0.1:4280 <this Mac>`, then open the link on that machine. `--host <address>`
 with an address other machines can reach is refused unless you add `--allow-remote`; the link
-then works for anyone on your network until Codly stops. `codly --help` lists every command and
+then works for anyone on your network until Codly stops. Quit the app first: an app that is
+already open does not serve to the network. `codly --help` lists every command and
 `codly --version` prints the version.
 
 ## Troubleshooting
 
 Settings → General → Troubleshooting collects what a bug report needs: the Codly version, your
-system, your agent CLIs and the last log lines. Tokens, keys, email addresses and the names of
-your folders are taken out; read it, then paste it in the issue. The same button is on the
-“Codly couldn’t start” screen.
+system, your agent CLIs and the last log lines. Tokens, keys, email addresses and paths under your
+home folder are taken out. Repository and agent names can remain: read it, then paste it in the
+issue. The same button is on the “Codly couldn’t start” screen.
 
 The log file is `~/Library/Application Support/dev.codly.desktop/logs/codly.log` (at most 5 MB;
 the file before it is `codly.1.log`). An internal error (a panic) writes its place and backtrace
-there. To log more, start Codly with `CODLY_LOG=debug`.
+there. To log more, start Codly with `CODLY_LOG=debug`: the file then also takes Codly's own
+debug lines (those of the libraries it uses go to the terminal only).
 
 ## Project layout
 

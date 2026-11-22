@@ -1,8 +1,9 @@
 //! Settings → Troubleshooting: the text a user pastes in a bug report. It says which Codly,
 //! which system, which agent CLIs and what the log said last. Codly's log lines say what
 //! happened, never a prompt or file contents; what can still be private in them and in error
-//! texts (a token, a key, an email address, the name of a folder of yours) is taken out here.
-//! The report is built on the shell side, so it also answers when the core did not start.
+//! texts (a token, a key, an email address, a path under your home folder) is taken out here.
+//! Names stay: a repository, an agent, a folder outside the home folder. The report is built on
+//! the shell side, so it also answers when the core did not start.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -152,27 +153,25 @@ fn scrub(text: &str, home: Option<&Path>, data_dir: &Path) -> String {
 }
 
 /// Every path under `root` becomes `label`, the first `keep` names after it and "…" for the
-/// rest: "<data>/worktrees/…". A path ends at a space, a quote or a bracket, so of a folder
-/// named "My Repo" the word "Repo" stays.
+/// rest: "<data>/worktrees/…". `path_after` says where each path ends.
 fn hide_paths(text: &str, root: &str, label: &str, keep: usize) -> String {
     let root = root.trim_end_matches('/');
     if root.is_empty() {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(i) = rest.find(root) {
-        let after = &rest[i + root.len()..];
-        let end = after.find(|c: char| c.is_whitespace() || "\"'`()[]<>,;".contains(c)).unwrap_or(after.len());
-        // "…/repo: not a git repository": the colon belongs to the sentence.
-        let path = after[..end].trim_end_matches([':', '.']);
+    // `text[..done]` is in `out`; the next `root` is looked for from `from`.
+    let (mut done, mut from) = (0, 0);
+    while let Some(i) = text[from..].find(root).map(|i| from + i) {
+        let after = i + root.len();
+        let quote = text[..i].chars().next_back().filter(|c| QUOTES.contains(c));
+        let path = path_after(&text[after..], root, quote);
         // "/Users/ana" must not match inside "/Users/anabel".
         if !path.is_empty() && !path.starts_with('/') {
-            out.push_str(&rest[..i + root.len()]);
-            rest = after;
+            from = after;
             continue;
         }
-        out.push_str(&rest[..i]);
+        out.push_str(&text[done..i]);
         out.push_str(label);
         let names: Vec<&str> = path.split('/').filter(|n| !n.is_empty()).collect();
         for name in names.iter().take(keep) {
@@ -182,10 +181,41 @@ fn hide_paths(text: &str, root: &str, label: &str, keep: usize) -> String {
         if names.len() > keep {
             out.push_str("/…");
         }
-        rest = &after[path.len()..];
+        done = after + path.len();
+        from = done;
     }
-    out.push_str(rest);
+    out.push_str(&text[done..]);
     out
+}
+
+const QUOTES: [char; 3] = ['"', '\'', '`'];
+
+/// The part of `after` (the text behind a `root`) that is still that path. `quote`: the quote
+/// sign in front of `root`, if there is one. A folder name can hold spaces, so a space does not
+/// end a path. Of a last name with spaces and no quotes around the path, the words after the
+/// first stay: "Repo" of "…/My Repo is not a git repository".
+fn path_after<'a>(after: &'a str, root: &str, quote: Option<char>) -> &'a str {
+    let line = after.lines().next().unwrap_or_default();
+    if !line.starts_with('/') {
+        // `root` itself ("home is /Users/ana."), or another name ("/Users/anabel").
+        let end = line.find(|c: char| c.is_whitespace() || "\"'`()[]<>,;".contains(c)).unwrap_or(line.len());
+        return line[..end].trim_end_matches([':', '.']);
+    }
+    // In quotes, the path is all of what they hold.
+    if let Some(end) = quote.and_then(|q| line.find(q)) {
+        return &line[..end];
+    }
+    // The sentence goes on at a quote, at "<data>", at ": " and at the next path under `root`.
+    let mut end = line.find(['"', '\'', '`', '<', '>']).unwrap_or(line.len());
+    for stop in [": ", root] {
+        end = line[1..end].find(stop).map_or(end, |i| i + 1);
+    }
+    // Before that, the path ends with the last word that holds a `/`.
+    let span = &line[..end];
+    let last = span.rfind('/').unwrap_or(0);
+    let end = span[last..].find(char::is_whitespace).map_or(span.len(), |i| last + i);
+    // "(see …/repo)." and "…/repo: not a git repository": the signs belong to the sentence.
+    span[..end].trim_end_matches([':', '.', ',', ';', ')', ']'])
 }
 
 /// Where a secret's value may follow its name: `token=…`, `"password": "…"`, `Bearer …`.
@@ -292,6 +322,23 @@ mod tests {
         assert_eq!(clean(&format!("keeping {DATA}/worktrees/acme-t12/src: it has changes")), "keeping <data>/worktrees/…: it has changes");
         assert_eq!(clean(&format!("cannot open `{DATA}/codly.sqlite`")), "cannot open `<data>/codly.sqlite`");
         assert_eq!(clean("/Users/anabel/notes is not yours"), "/Users/anabel/notes is not yours");
+        assert_eq!(clean("(see /Users/ana/work/repo), then /Users/ana and /Users/ana-old."), "(see ~/…), then ~ and /Users/ana-old.");
+    }
+
+    #[test]
+    fn a_space_in_a_folder_name_does_not_end_the_path() {
+        assert_eq!(clean("/Users/ana/Client Work/acme-secret/repo: not a git repository"), "~/…: not a git repository");
+        assert_eq!(clean("indexed 12 files in /Users/ana/Client Work/acme-secret/repo"), "indexed 12 files in ~/…");
+        assert_eq!(clean("renamed /Users/ana/My Docs/a.txt to /Users/ana/My Docs/b.txt (2 files)"), "renamed ~/… to ~/… (2 files)");
+        assert_eq!(clean(&format!("copied /Users/ana/My Docs/a.txt to {DATA}/worktrees/acme-t12/a.txt")), "copied ~/… to <data>/worktrees/…");
+        // In quotes, the path is all of what they hold.
+        assert_eq!(clean(r#"skipped path="/Users/ana/My Projects/Client Work" kind=repo"#), r#"skipped path="~/…" kind=repo"#);
+        assert_eq!(clean("fatal: '/Users/ana/Client Work' does not appear to be a git repository"), "fatal: '~/…' does not appear to be a git repository");
+        // A word with a `/` later in the sentence is taken for a part of the path: more is hidden, never less.
+        assert_eq!(clean("/Users/ana/My Repo has no branch codly/t12: skipped"), "~/…: skipped");
+        // What stays: the last words of a last name with spaces, when no quotes hold the path.
+        assert_eq!(clean("/Users/ana/work/My Repo is not a git repository"), "~/… Repo is not a git repository");
+        assert_eq!(clean("one /Users/ana/a b\ntwo /Users/ana/c d/e"), "one ~/… b\ntwo ~/…");
     }
 
     #[test]

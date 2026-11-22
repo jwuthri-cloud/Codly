@@ -78,7 +78,7 @@ export interface Diagnostics {
   version: string;
   /** The log file, to show in Finder; null when the app could not open one. */
   log_file: string | null;
-  /** Plain text: version, system, agent CLIs and the last log lines; tokens, emails and folder names are taken out. */
+  /** Plain text: version, system, agent CLIs and the last log lines. Tokens, keys, emails and paths under the home folder are taken out; repository and agent names can remain. */
   report: string;
 }
 

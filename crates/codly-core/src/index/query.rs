@@ -969,7 +969,8 @@ pub(crate) fn search(conn: &Connection, query: &str, k: usize, t: &Tuning) -> an
     features.phase_ms[5] = t_cit.elapsed().as_secs_f64() * 1000.0;
     let fallback_rg =
         if matches!(confidence, Confidence::Low | Confidence::Medium) { rg_patterns(&parsed.terms, &hy.rare) } else { Vec::new() };
-    tracing::debug!(query, ?confidence, agree5, p_hit, citations = cits.len(), "index search");
+    // Not the query: it can be the text of a task, and the app's log file ends up in bug reports.
+    tracing::debug!(query_chars = query.chars().count(), ?confidence, agree5, p_hit, citations = cits.len(), "index search");
     Ok(Ranked {
         result: SearchResult {
             query: query.to_string(),
