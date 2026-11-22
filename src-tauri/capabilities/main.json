@@ -147,6 +147,7 @@
     "allow-set-agent-tired",
     "allow-bigger-model",
     "allow-install-cli",
+    "allow-retry-core",
     "allow-byok-status",
     "allow-byok-configure",
     "allow-byok-save-key",

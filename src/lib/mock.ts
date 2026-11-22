@@ -52,14 +52,16 @@ import type { MemoryFile } from './gen/MemoryFile';
 const memoryFiles = new Map<string, MemoryFile>();
 import { inboundMock } from './demo/inbound';
 
+/** The demo Mac has npm, and every installed CLI is new enough. */
+const HERE = { npm_available: true, update_to: null };
 /** The core's trusted install table (crates/codly-core/src/install.rs), for the browser demo. */
 const INSTALL: Record<Provider, InstallHint> = {
-  claude: { npm: 'npm install -g @anthropic-ai/claude-code', native: 'curl -fsSL https://claude.ai/install.sh | bash', login: 'claude auth login', docs: 'https://docs.claude.com/en/docs/claude-code/setup' },
-  codex: { npm: 'npm install -g @openai/codex', native: null, login: 'codex login', docs: 'https://github.com/openai/codex' },
-  gemini: { npm: 'npm install -g @google/gemini-cli', native: null, login: 'gemini', docs: 'https://github.com/google-gemini/gemini-cli' },
-  opencode: { npm: 'npm install -g opencode-ai@latest', native: 'curl -fsSL https://opencode.ai/install | bash', login: null, docs: 'https://opencode.ai/docs' },
-  cursor: { npm: null, native: 'curl https://cursor.com/install -fsS | bash', login: null, docs: 'https://cursor.com/cli' },
-  copilot: { npm: 'npm install -g @github/copilot', native: null, login: null, docs: 'https://github.com/github/copilot-cli' },
+  claude: { npm: 'npm install -g @anthropic-ai/claude-code', native: 'curl -fsSL https://claude.ai/install.sh | bash', login: 'claude auth login', docs: 'https://docs.claude.com/en/docs/claude-code/setup', update: 'claude update', ...HERE },
+  codex: { npm: 'npm install -g @openai/codex', native: null, login: 'codex login', docs: 'https://github.com/openai/codex', update: 'npm install -g @openai/codex@latest', ...HERE },
+  gemini: { npm: 'npm install -g @google/gemini-cli', native: null, login: 'gemini', docs: 'https://github.com/google-gemini/gemini-cli', update: 'npm install -g @google/gemini-cli@latest', ...HERE },
+  opencode: { npm: 'npm install -g opencode-ai@latest', native: 'curl -fsSL https://opencode.ai/install | bash', login: null, docs: 'https://opencode.ai/docs', update: 'opencode upgrade', ...HERE },
+  cursor: { npm: null, native: 'curl https://cursor.com/install -fsS | bash', login: null, docs: 'https://cursor.com/cli', update: null, ...HERE },
+  copilot: { npm: 'npm install -g @github/copilot', native: null, login: null, docs: 'https://github.com/github/copilot-cli', update: null, ...HERE },
 };
 
 /** `?onboard=1`: a machine with none of the CLIs installed, so the quest has something to do. */
@@ -195,6 +197,7 @@ export class MockTransport implements Transport {
     const story = this.story;
     switch (cmd) {
       case 'ui_set_visible':
+      case 'retry_core': // the demo's core never fails to start
         return null;
       case 'detect_clis':
         // Like the core: a CLI's badge says so while its vendor's own credential is in use.
@@ -459,7 +462,7 @@ export class MockTransport implements Transport {
         // Only the table's constants run, chosen by (provider, rung), as in the core.
         const hint = INSTALL[a.provider as Provider];
         const rung = a.rung as InstallRung;
-        const command = rung === 'npm' || rung === 'native' ? hint?.[rung] : undefined;
+        const command = rung === 'npm' || rung === 'native' || rung === 'update' ? hint?.[rung] : undefined;
         if (!command) throw new Error(`there is no ${String(a.rung)} installer for ${String(a.provider)}`);
         const id = `pty-${++this.ptySeq}`;
         this.ptys.set(id, new FakeShell(HOME, sim));

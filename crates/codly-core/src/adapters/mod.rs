@@ -33,6 +33,7 @@ pub mod acp;
 pub mod claude;
 pub mod classify;
 pub mod codex;
+mod startup;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

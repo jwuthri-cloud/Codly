@@ -1,4 +1,4 @@
-//! Onboarding: how to install each agent CLI, and the one-click "Run it for me".
+//! Onboarding: how to install and update each agent CLI, and the one-click "Run it for me".
 //!
 //! Safety rule, enforced here rather than left to the UI: the only text that ever reaches the
 //! terminal is a constant from `ROWS`, picked by (provider, rung). The UI sends two enums, never
@@ -16,13 +16,14 @@ use ts_rs::TS;
 use crate::model::{InstallHint, Provider};
 use crate::pty::PtyManager;
 
-/// Which installer to run: the npm package, or the vendor's own script.
+/// Which line to run: the npm package, the vendor's own script, or the update of an installed CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum InstallRung {
     Npm,
     Native,
+    Update,
 }
 
 /// A started install: the terminal to attach to (`pty_attach`) and the exact line it was given.
@@ -38,35 +39,54 @@ struct Row {
     npm: Option<&'static str>,
     /// Posix shell only (`curl … | bash`).
     native: Option<&'static str>,
+    /// Brings an installed CLI to its latest version.
+    update: Option<&'static str>,
     docs: &'static str,
 }
 
 /// The whole trust surface. Each line is typed by hand from the vendor's own install docs.
+/// A CLI has an update line when it has a minimum version (`env::MIN_VERSIONS`).
 const ROWS: [Row; 6] = [
     Row {
         provider: Provider::Claude,
         npm: Some("npm install -g @anthropic-ai/claude-code"),
         native: Some("curl -fsSL https://claude.ai/install.sh | bash"),
+        update: Some("claude update"),
         docs: "https://docs.claude.com/en/docs/claude-code/setup",
     },
-    Row { provider: Provider::Codex, npm: Some("npm install -g @openai/codex"), native: None, docs: "https://github.com/openai/codex" },
+    Row {
+        provider: Provider::Codex,
+        npm: Some("npm install -g @openai/codex"),
+        native: None,
+        update: Some("npm install -g @openai/codex@latest"),
+        docs: "https://github.com/openai/codex",
+    },
     Row {
         provider: Provider::Gemini,
         npm: Some("npm install -g @google/gemini-cli"),
         native: None,
+        update: Some("npm install -g @google/gemini-cli@latest"),
         docs: "https://github.com/google-gemini/gemini-cli",
     },
     Row {
         provider: Provider::Opencode,
         npm: Some("npm install -g opencode-ai@latest"),
         native: Some("curl -fsSL https://opencode.ai/install | bash"),
+        update: Some("opencode upgrade"),
         docs: "https://opencode.ai/docs",
     },
-    Row { provider: Provider::Cursor, npm: None, native: Some("curl https://cursor.com/install -fsS | bash"), docs: "https://cursor.com/cli" },
+    Row {
+        provider: Provider::Cursor,
+        npm: None,
+        native: Some("curl https://cursor.com/install -fsS | bash"),
+        update: None,
+        docs: "https://cursor.com/cli",
+    },
     Row {
         provider: Provider::Copilot,
         npm: Some("npm install -g @github/copilot"),
         native: None,
+        update: None,
         docs: "https://github.com/github/copilot-cli",
     },
 ];
@@ -75,7 +95,8 @@ fn row(provider: Provider) -> &'static Row {
     ROWS.iter().find(|r| r.provider == provider).expect("every provider has a row")
 }
 
-/// What to show for `provider`: the install lines, the sign-in command and the docs link.
+/// What to show for `provider`: the install and update lines, the sign-in command and the docs
+/// link. What only this machine can tell (`npm_available`, `update_to`) is left to detection.
 pub fn hint(provider: Provider) -> InstallHint {
     let r = row(provider);
     InstallHint {
@@ -83,6 +104,9 @@ pub fn hint(provider: Provider) -> InstallHint {
         native: r.native.map(str::to_owned),
         login: crate::env::login_command(provider, None),
         docs: r.docs.to_owned(),
+        update: r.update.map(str::to_owned),
+        npm_available: false,
+        update_to: None,
     }
 }
 
@@ -94,11 +118,12 @@ pub fn command_for(provider: Provider, rung: InstallRung, posix: bool) -> Result
         InstallRung::Npm => r.npm.ok_or_else(|| anyhow::anyhow!("{} has no npm package; use its own installer", provider.label())),
         InstallRung::Native if !posix => bail!("the {} installer is a shell script and runs on macOS and Linux only", provider.label()),
         InstallRung::Native => r.native.ok_or_else(|| anyhow::anyhow!("{} has no installer script; use npm", provider.label())),
+        InstallRung::Update => r.update.ok_or_else(|| anyhow::anyhow!("Codly has no update command for {}; see its docs", provider.label())),
     }
 }
 
-/// Open a visible login-shell terminal in `cwd` (with the login env, so `npm` and `curl` are
-/// found) and type the constant for (provider, rung) into it.
+/// Open a visible login-shell terminal in `cwd` (with the login env, so `npm`, `curl` and the
+/// CLI itself are found) and type the constant for (provider, rung) into it.
 pub fn start(pty: &PtyManager, cwd: &Path, env: &HashMap<String, String>, provider: Provider, rung: InstallRung) -> Result<InstallRun> {
     let command = command_for(provider, rung, cfg!(unix))?;
     start_line(pty, cwd, env, command)
@@ -121,7 +146,7 @@ mod tests {
     use super::*;
 
     fn all_lines() -> Vec<&'static str> {
-        ROWS.iter().flat_map(|r| [r.npm, r.native]).flatten().collect()
+        ROWS.iter().flat_map(|r| [r.npm, r.native, r.update]).flatten().collect()
     }
 
     #[test]
@@ -135,6 +160,11 @@ mod tests {
         assert_eq!(h(Provider::Opencode).native.as_deref(), Some("curl -fsSL https://opencode.ai/install | bash"));
         assert_eq!(h(Provider::Copilot).npm.as_deref(), Some("npm install -g @github/copilot"));
         assert_eq!((h(Provider::Cursor).npm, h(Provider::Cursor).native.as_deref()), (None, Some("curl https://cursor.com/install -fsS | bash")));
+        assert_eq!(h(Provider::Claude).update.as_deref(), Some("claude update"));
+        assert_eq!(h(Provider::Codex).update.as_deref(), Some("npm install -g @openai/codex@latest"));
+        assert_eq!(h(Provider::Gemini).update.as_deref(), Some("npm install -g @google/gemini-cli@latest"));
+        assert_eq!(h(Provider::Opencode).update.as_deref(), Some("opencode upgrade"));
+        assert_eq!((h(Provider::Cursor).update, h(Provider::Copilot).update), (None, None));
         // Sign-in comes from the existing login_command.
         assert_eq!(h(Provider::Claude).login.as_deref(), Some("claude auth login"));
         assert_eq!(h(Provider::Cursor).login, None);
@@ -144,7 +174,7 @@ mod tests {
     }
 
     /// Nothing in the table can chain, substitute, redirect or background: the only
-    /// metacharacter is the `|` of the two `curl … | bash` lines (and the dot-less package names).
+    /// metacharacter is the `|` of the `curl … | bash` lines (and the dot-less package names).
     #[test]
     fn hint_table_has_no_shell_metacharacters() {
         for line in all_lines() {
@@ -157,7 +187,8 @@ mod tests {
                 assert!(line.ends_with(" | bash"), "{line:?}");
             } else {
                 assert_eq!(pipes, 0, "{line:?}");
-                assert!(line.starts_with("npm install -g "), "{line:?}");
+                // npm, or a CLI's own update command.
+                assert!(line.starts_with("npm install -g ") || ["claude update", "opencode upgrade"].contains(&line), "{line:?}");
             }
             assert!(line.chars().all(|c| c.is_ascii() && !c.is_control()), "{line:?}");
         }
@@ -179,6 +210,20 @@ mod tests {
         assert!(command_for(Provider::Claude, InstallRung::Native, false).unwrap_err().to_string().contains("macOS and Linux"));
         // npm works wherever npm does.
         assert!(command_for(Provider::Claude, InstallRung::Npm, false).is_ok());
+        assert_eq!(command_for(Provider::Claude, InstallRung::Update, true).unwrap(), "claude update");
+        assert!(command_for(Provider::Cursor, InstallRung::Update, true).unwrap_err().to_string().contains("no update command"));
+    }
+
+    /// 'Install for me' must never dead-end: every CLI installs by npm or by its own script, and
+    /// a CLI with a minimum version can be updated.
+    #[test]
+    fn every_provider_can_be_installed_and_an_old_one_updated() {
+        for p in Provider::ALL {
+            let h = hint(p);
+            assert!(h.npm.is_some() || h.native.is_some(), "{p:?} has no way in");
+            assert_eq!(h.update.is_some(), crate::env::min_version(p).is_some(), "{p:?}: an update line goes with a minimum version");
+            assert!(!h.npm_available && h.update_to.is_none(), "{p:?}: the table knows nothing about this machine");
+        }
     }
 
     /// The UI picks a rung by name; anything else fails to deserialize, so no text can ride along.
@@ -186,6 +231,7 @@ mod tests {
     fn unknown_rung_is_rejected() {
         assert_eq!(serde_json::from_str::<InstallRung>("\"npm\"").unwrap(), InstallRung::Npm);
         assert_eq!(serde_json::from_str::<InstallRung>("\"native\"").unwrap(), InstallRung::Native);
+        assert_eq!(serde_json::from_str::<InstallRung>("\"update\"").unwrap(), InstallRung::Update);
         for bad in ["\"brew\"", "\"npm; rm -rf ~\"", "\"\"", "\"NPM\"", "1"] {
             assert!(serde_json::from_str::<InstallRung>(bad).is_err(), "{bad}");
         }
@@ -196,7 +242,7 @@ mod tests {
     fn only_constants_reach_the_pty() {
         let table = all_lines();
         for p in Provider::ALL {
-            for rung in [InstallRung::Npm, InstallRung::Native] {
+            for rung in [InstallRung::Npm, InstallRung::Native, InstallRung::Update] {
                 if let Ok(cmd) = command_for(p, rung, true) {
                     assert!(table.contains(&cmd), "{cmd}");
                 }

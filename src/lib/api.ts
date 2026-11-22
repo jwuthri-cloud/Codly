@@ -188,6 +188,8 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 }
 
 export const api = {
+  /** "Try again" on the start-up error screen: start the core again if its start failed. Subscribe again after it. */
+  retryCore: () => call<void>('retry_core'),
   setVisible: (visible: boolean) => call<void>('ui_set_visible', { visible }),
   detectClis: () => call<CliInfo[]>('detect_clis'),
   /** Every sign-in of every installed CLI, with quota windows. `refresh` re-probes sign-in state. */
@@ -400,7 +402,7 @@ export const api = {
   /** Switch a server and/or store its key (Keychain; `value: null` removes it). Applies to the next spawn. */
   updateConnection: (id: string, enabled: boolean | null, secret: ConnectionSecret | null = null) =>
     call<Connection[]>('update_connection', { id, enabled, secret }),
-  /** Onboarding: run the vendor's install line for a CLI in a visible terminal (attach with `ptyAttach`). The core picks the text from (provider, rung); nothing typed here is ever run. */
+  /** Onboarding: run the vendor's install or update line for a CLI in a visible terminal (attach with `ptyAttach`). The core picks the text from (provider, rung); nothing typed here is ever run. */
   installCli: (provider: Provider, rung: InstallRung) => call<InstallRun>('install_cli', { provider, rung }),
   /** Your own API credentials per vendor (opt-in): Anthropic → Claude, OpenAI → Codex, OpenRouter → OpenCode.
    *  A key goes in once and never comes back: every reply is a status. */

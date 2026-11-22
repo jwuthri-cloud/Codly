@@ -3,6 +3,7 @@
 
 mod agent_controls;
 mod ask_me;
+mod boot;
 mod commands;
 mod dictation;
 mod ide_commands;
@@ -19,7 +20,7 @@ use std::sync::Arc;
 
 use codly_core::blockers::{BlockerSeverity, BlockerStatus};
 use codly_core::model::{Approval, EventKind, PlanStatus, TaskStatus};
-use codly_core::{Core, CoreConfig};
+use codly_core::Core;
 use tauri::{Manager, RunEvent};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{OnceCell, watch};
@@ -67,6 +68,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState { core: core_rx, bus: bus.clone(), pty: Default::default(), shell_env: OnceCell::new() })
         .manage(inbound::InboundHandle { hub: hub_rx })
+        .manage(boot::Boot { core: core_tx, hub: hub_tx, bus })
         .setup(move |app| {
             // The window starts hidden (tauri.conf.json): `codly serve` keeps it so, and out of the Dock.
             match serve {
@@ -86,26 +88,11 @@ pub fn run() {
                     });
                 }
             }
-            let data_dir = app.path().app_data_dir()?;
-            let inbound_dir = data_dir.clone();
-            let app_exe = std::env::current_exe()?;
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let started = Core::start(CoreConfig { data_dir, app_exe }).await.map_err(|e| format!("{e:#}"));
-                if let Ok(core) = &started {
-                    // A new consultant's job offer stays up in the office this long (you may pick).
-                    core.set_hiring_window(std::time::Duration::from_secs(30));
-                    tauri::async_runtime::spawn(bus.clone().pump(core.subscribe()));
-                    tauri::async_runtime::spawn(notify_loop(handle, core.clone()));
-                    let _ = hub_tx.send(inbound::start(core.clone(), inbound_dir).await);
-                } else if let Err(e) = &started {
-                    tracing::error!("core failed to start: {e}");
-                }
-                let _ = core_tx.send(Some(started));
-            });
+            boot::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            boot::retry_core,
             commands::ui_subscribe,
             commands::ui_set_visible,
             commands::detect_clis,
@@ -258,7 +245,7 @@ pub fn run() {
 
 /// Native notifications come from Rust: the webview may be suspended while hidden, and an
 /// approval must never wait silently. Only when the window is not focused.
-async fn notify_loop(app: tauri::AppHandle, core: Arc<Core>) {
+async fn notify_loop<R: tauri::Runtime>(app: tauri::AppHandle<R>, core: Arc<Core>) {
     let mut rx = core.subscribe();
     // Approvals not answered yet. The broker allows most of them by itself right away: only one
     // it leaves to you ("asking you: …") is worth a notification.

@@ -13,6 +13,7 @@
   import { skillsUi } from './lib/state/skills.svelte';
   import IdeOverlay from './ide/IdeOverlay.svelte';
   import EmptyState from './components/EmptyState.svelte';
+  import Logo from './components/Logo.svelte';
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
   import DragGhost from './components/DragGhost.svelte';
@@ -50,14 +51,23 @@
 </script>
 
 {#if !store.ready}
-  <div class="boot" data-tauri-drag-region></div>
+  <!-- The core reads the login shell and asks each CLI who is signed in: seconds, with a slow shell
+       start-up file. Shown after a moment, so a fast start does not flash it. -->
+  <div class="boot center" data-tauri-drag-region>
+    <div class="starting" role="status">
+      <Logo size={40} />
+      <p class="serif">Starting Codly…</p>
+      <p class="what">Reading your shell setup and checking your agent CLIs.</p>
+      <p class="what slow">Still working. A slow shell start-up file (like <code>.zshrc</code>) can make this take a few more seconds.</p>
+    </div>
+  </div>
 {:else if store.workspace}
   <Shell />
 {:else if store.error}
   <!-- The first snapshot never arrived: say why, instead of an empty Welcome. -->
-  <div class="boot fail" data-tauri-drag-region>
+  <div class="boot center" data-tauri-drag-region>
     <EmptyState title="Codly couldn’t start." body={store.error}>
-      <button class="btn primary" onclick={() => store.connect()}>Try again</button>
+      <button class="btn primary" onclick={() => store.retry()}>Try again</button>
     </EmptyState>
   </div>
 {:else if ui.onboarded}
@@ -80,5 +90,10 @@
 
 <style>
   .boot { position: fixed; inset: 0; background: var(--night); }
-  .boot.fail { display: grid; place-items: center; }
+  .boot.center { display: grid; place-items: center; }
+  .starting { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px; text-align: center; animation: fade-in var(--d-4) var(--ease-out) 600ms both; }
+  .starting .serif { margin-top: 6px; font-size: var(--d-sm); color: var(--ink-1); }
+  .what { font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-3); max-width: 46ch; }
+  .what.slow { animation: fade-in var(--d-4) var(--ease-out) 8s both; }
+  .what code { font-size: 0.9em; color: var(--ink-2); }
 </style>

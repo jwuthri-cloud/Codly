@@ -306,7 +306,8 @@ fn uri_decode(s: &str) -> String {
 
 #[tauri::command]
 pub async fn pty_open(state: State<'_, AppState>, cwd: Option<String>) -> R<String> {
-    let env = state.shell_env().await.clone();
+    let mut env = state.shell_env().await.clone();
+    codly_core::env::refresh_path(&mut env); // a CLI installed since the env was captured is found (the sign-in terminal)
     let cwd = cwd
         .filter(|c| std::path::Path::new(c).is_dir())
         .or_else(|| env.get("HOME").cloned())
