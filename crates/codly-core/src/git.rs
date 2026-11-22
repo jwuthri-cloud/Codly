@@ -188,26 +188,27 @@ impl Git {
             cmd.env("GIT_INDEX_FILE", index);
         }
         let limit = if long_running(args) { self.long } else { self.quick };
-        let child = cmd.spawn().map_err(|e| anyhow!("cannot run git ({}): {e}", self.bin.display()))?;
-        let pid = child.id();
-        let mut output = Box::pin(child.wait_with_output());
-        let out = match tokio::time::timeout(limit, &mut output).await {
-            Ok(out) => out?,
-            Err(_) => {
-                // Not reaped yet, so the pid is still git's. Asked to stop first: git then removes
-                // its lock files (a killed one leaves them, and every later call fails on them).
-                // Dropping `output` kills it if it has not stopped by then.
-                if let Some(pid) = pid {
-                    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGTERM);
-                    let _ = tokio::time::timeout(GIT_STOP_GRACE, &mut output).await;
-                }
-                bail!("git {} {TIMED_OUT} {}s", subcommand(args), limit.as_secs());
+        let mut child = cmd.spawn().map_err(|e| anyhow!("cannot run git ({}): {e}", self.bin.display()))?;
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let ended = tokio::time::timeout(limit, async { tokio::try_join!(child.wait(), read_all(stdout), read_all(stderr)) }).await;
+        let Ok(ended) = ended else {
+            // Asked to stop first: git then removes its lock files (a killed one leaves them, and
+            // every later call fails on them). Only a git that still runs is asked: `id` is None
+            // once git ended and was reaped, and its pid may be another process's by then (what
+            // git left running, a hook's background job or a shared ssh connection, can hold the
+            // pipes open long after git). Dropping `child` kills a git that has not stopped by
+            // the end of the grace.
+            if let Some(pid) = child.id() {
+                let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGTERM);
+                let _ = tokio::time::timeout(GIT_STOP_GRACE, child.wait()).await;
             }
+            bail!("git {} {TIMED_OUT} {}s", subcommand(args), limit.as_secs());
         };
+        let (status, stdout, stderr) = ended?;
         Ok(Out {
-            ok: out.status.success(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            ok: status.success(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
         })
     }
 
@@ -836,6 +837,17 @@ impl Git {
         self.ok(repo, &["reset", "--keep", "--quiet", before], false).await?;
         Ok(restored)
     }
+}
+
+/// Everything a child writes to one of its pipes, until every process that holds the pipe has
+/// closed it.
+async fn read_all(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut out = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut out).await?;
+    }
+    Ok(out)
 }
 
 /// The git subcommand of `args`, after the `-c name=value` pairs before it.
@@ -1705,6 +1717,22 @@ mod tests {
         assert!(stopped.exists(), "it was asked to stop, not killed at once");
         assert!(!lock.exists(), "so it removed its lock file");
         assert!(started.elapsed() < Duration::from_secs(15), "the `sleep 30` was not waited for");
+    }
+
+    /// Git ended and left something running that holds its pipes (a hook's background job, a
+    /// shared ssh connection): the call still runs out of time, but git's process id is no
+    /// longer git's, so nothing is asked to stop and nothing is waited for.
+    #[tokio::test]
+    async fn a_git_that_ended_is_not_asked_to_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("git");
+        executable(&fake, "#!/bin/sh\nsleep 6 &\nexit 0\n");
+        let mut git = Git::new(fake, std::env::vars().collect());
+        git.quick = Duration::from_secs(1);
+        let started = std::time::Instant::now();
+        let e = git.ok(dir.path(), &["-c", "core.fsmonitor=false", "status"], true).await.unwrap_err();
+        assert_eq!(e.to_string(), "git status timed out after 1s");
+        assert!(started.elapsed() < git.quick + GIT_STOP_GRACE, "no process was given the time to stop: {:?}", started.elapsed());
     }
 
     /// Another git process holds the index lock: the call changes nothing and fails in a way

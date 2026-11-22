@@ -70,8 +70,9 @@ agent names stay). The file takes debug lines from Codly's own crates only (`COD
 a library's debug output stays on stdout.
 
 Long runs. Agents are children of the app, so they stop when it quits or the Mac sleeps. While
-work is under way (`Core::activity`: an agent in a turn, a gate, a plan that goes on by itself)
-the shell holds `/usr/bin/caffeinate -i -w <pid>` (src-tauri/src/awake.rs, Settings → Long
+work is under way (`Core::activity`: an agent in a turn, a gate, a plan that goes on by itself;
+not work that waits for you: an approval, a paused worker, a budget that is used up) the shell
+holds `/usr/bin/caffeinate -i -w <pid>` (src-tauri/src/awake.rs, Settings → Long
 runs, on by default): no idle sleep, and the helper ends with Codly; closing the lid still
 sleeps. A quit you ask for while work is under way is questioned once (src-tauri/src/quit.rs,
 same Settings section). After a restart a resumed worker's first prompt says what Codly sees in

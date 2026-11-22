@@ -6,7 +6,8 @@
 //! tasks that wait for it are cancelled together; after a restart of Codly a task that was in
 //! its checks is checked again with no worker turn, and a worker that is resumed is told what
 //! Codly sees in its worktree; a lock file another git process holds for a moment does not block
-//! a task; the work under way is counted for the shell; and a plan you merged with git is noticed.
+//! a task; the work under way is counted for the shell, and work that waits for you (an approval,
+//! a pause, a budget that is used up) is not; and a plan you merged with git is noticed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,6 +17,7 @@ use std::time::Duration;
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
 use codly_core::model::*;
 use codly_core::orchestrator::activity::Activity;
+use codly_core::orchestrator::breaker::BreakerConfig;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use codly_core::store::{RunRow, Store};
 use serde_json::{Value, json};
@@ -71,7 +73,14 @@ enum End {
     Locked,
     /// As `Done`, once the test lets the turn end.
     Hold(Arc<tokio::sync::Notify>),
+    /// As `Done`, once you allowed the command it asks to run.
+    Ask,
+    /// As `Done`, and the turn reports `TURN_TOKENS` work tokens.
+    Spend,
 }
+
+/// What a turn that ends as `End::Spend` uses.
+const TURN_TOKENS: i64 = 5000;
 
 /// Decides how the worker's `n`-th turn (over every run of the test) ends.
 type Script = Arc<dyn Fn(usize) -> End + Send + Sync>;
@@ -192,6 +201,34 @@ impl Spawner for Fake {
                             work();
                             done(TurnStatus::Completed, None);
                         }
+                        End::Ask => {
+                            let approval = Approval {
+                                id: new_id(),
+                                agent_id: spec.agent_id.clone(),
+                                run_id: spec.run_id.clone(),
+                                task_id: None,
+                                call_id: Some("bash-1".into()),
+                                subject: ApprovalSubject::Command { command: "npm publish".into(), cwd: None },
+                                reason: None,
+                                choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny],
+                                risks: vec![],
+                                status: ApprovalStatus::Pending,
+                                decided_by: None,
+                                created_at: now_ms(),
+                            };
+                            send(EventKind::ApprovalRequested { approval });
+                            // The answer arrives as the next command.
+                            if !matches!(rx.recv().await, Some(AgentCmd::Approval { .. })) {
+                                return send(EventKind::Exited { code: Some(1) });
+                            }
+                            work();
+                            done(TurnStatus::Completed, None);
+                        }
+                        End::Spend => {
+                            work();
+                            send(EventKind::UsageUpdated { usage: Usage { input_tokens: TURN_TOKENS, ..Default::default() } });
+                            done(TurnStatus::Completed, None);
+                        }
                         End::Idle => done(TurnStatus::Completed, None),
                         End::Fail(error) => done(TurnStatus::Failed, Some(error)),
                         End::Crash => return send(EventKind::Exited { code: Some(1) }),
@@ -306,12 +343,36 @@ async fn said(core: &Core) -> Vec<String> {
     core.snapshot().await.unwrap().chats.into_iter().filter(|c| c.thread == "lead" && c.author == "codly").map(|c| c.text).collect()
 }
 
-/// Ask the Lead for the three-task plan and run it.
-async fn run_three_task_plan(core: &Core) -> Plan {
-    core.send_chat("lead", "Write three files").await.unwrap();
+/// Ask the Lead for its plan (the one the test gave `start`) and run it.
+async fn run_the_plan(core: &Core, request: &str) -> Plan {
+    core.send_chat("lead", request).await.unwrap();
     let plan = wait_for("the plan", async || core.snapshot().await.unwrap().plans.first().cloned()).await;
     core.run_plan(&plan.id).await.unwrap();
     plan
+}
+
+/// Ask the Lead for the three-task plan and run it.
+async fn run_three_task_plan(core: &Core) -> Plan {
+    run_the_plan(core, "Write three files").await
+}
+
+/// A plan of one task, t1.
+fn one_task_plan() -> Value {
+    json!({ "summary": "Write one file", "tasks": [plan_task("t1", &[])] })
+}
+
+/// Wait until nothing is under way: no agent works, no check runs, no plan goes on by itself.
+async fn nothing_under_way(core: &Core) {
+    wait_for("the work to wait for you", async || (!core.activity().unwrap().busy()).then_some(())).await;
+}
+
+/// Wait until the plan's task `key` is done.
+async fn plan_task_done(core: &Core, key: &str) {
+    wait_for("the task to end", async || Some(task_by_key(core, key).await).filter(|t| t.status == TaskStatus::Done)).await;
+}
+
+async fn plan_status(core: &Core, id: &str) -> PlanStatus {
+    core.snapshot().await.unwrap().plans.into_iter().find(|p| p.id == id).expect("the plan is in the office").status
 }
 
 const HANDSHAKE: &str = "the agent did not finish the handshake";
@@ -706,6 +767,78 @@ async fn the_work_under_way_is_counted_while_an_agent_is_in_a_turn() {
     let task = task_ended(&core, &task.id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     wait_for("the work to end", async || (!core.activity().unwrap().busy()).then_some(())).await;
+    core.shutdown().await;
+}
+
+/// A worker that asks before it runs a command stands still until you answer: its turn, its
+/// task and its plan are not work under way, so the Mac may sleep and a quit stops nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_that_waits_for_your_answer_is_not_work_under_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|n: usize| if n == 0 { End::Ask } else { End::Done });
+    let (core, _, _) = start(dir.path(), works().0, script, one_task_plan()).await;
+    let plan = run_the_plan(&core, "Write one file").await;
+    let ask = wait_for("the worker's question", async || core.snapshot().await.unwrap().approvals.into_iter().next()).await;
+    nothing_under_way(&core).await;
+    assert_eq!(task_by_key(&core, "t1").await.status, TaskStatus::Running, "the task is still its worker's");
+    assert_eq!(plan_status(&core, &plan.id).await, PlanStatus::Running);
+
+    // Your answer: the turn goes on, and the task is finished.
+    core.resolve_approval(&ask.id, ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).await.unwrap();
+    plan_task_done(&core, "t1").await;
+    core.shutdown().await;
+}
+
+/// A worker you paused waits for your Resume. The step it finishes first is still work; after
+/// it, its task stays in work on the board and nothing goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_you_paused_is_not_work_under_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let go = Arc::new(tokio::sync::Notify::new());
+    let script: Script = {
+        let go = go.clone();
+        Arc::new(move |n: usize| if n == 0 { End::Hold(go.clone()) } else { End::Done })
+    };
+    let (core, seen, _) = start(dir.path(), works().0, script, one_task_plan()).await;
+    let plan = run_the_plan(&core, "Write one file").await;
+    wait_for("the worker's turn", async || (seen.lock().unwrap().prompts.len() == 1).then_some(())).await;
+    let worker = task_by_key(&core, "t1").await.assignee.expect("the task has its worker");
+    assert!(core.stop_agent_after_step(&worker).await.unwrap().stop_requested);
+    assert!(core.activity().unwrap().busy(), "the step under way is work");
+    go.notify_one();
+    wait_for("the pause", async || core.agent_control(&worker).await.unwrap().paused.then_some(())).await;
+    nothing_under_way(&core).await;
+    assert_eq!(task_by_key(&core, "t1").await.status, TaskStatus::Running, "the task is still its worker's");
+    assert_eq!(plan_status(&core, &plan.id).await, PlanStatus::Running);
+
+    core.resume_agent(&worker).await.unwrap();
+    plan_task_done(&core, "t1").await;
+    core.shutdown().await;
+}
+
+/// Past a budget no task starts until you raise it or reset the counters: a plan whose next
+/// task waits for that is not work under way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_that_waits_for_the_budget_is_not_work_under_way() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first turn of the first task takes the team over the budget.
+    let script: Script = Arc::new(|n: usize| if n == 0 { End::Spend } else { End::Done });
+    let two_tasks = json!({ "summary": "Write two files", "tasks": [plan_task("t1", &[]), plan_task("t2", &["t1"])] });
+    let (core, _, _) = start(dir.path(), works().0, script, two_tasks).await;
+    core.set_breaker_config(BreakerConfig { token_budget: TURN_TOKENS / 5, ..Default::default() }).await.unwrap();
+    let plan = run_the_plan(&core, "Write two files").await;
+    wait_for("the second task to wait for the budget", async || {
+        let t2 = task_by_key(&core, "t2").await;
+        let why = t2.status_reason.as_deref().unwrap_or_default();
+        (t2.status == TaskStatus::Ready && why.starts_with("paused: the token budget")).then_some(())
+    })
+    .await;
+    nothing_under_way(&core).await;
+    assert_eq!(plan_status(&core, &plan.id).await, PlanStatus::Running);
+
+    // Reset: the count starts over, and the plan goes on.
+    core.reset_breaker().await.unwrap();
+    plan_task_done(&core, "t2").await;
     core.shutdown().await;
 }
 
