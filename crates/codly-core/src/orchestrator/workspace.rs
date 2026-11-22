@@ -69,6 +69,7 @@ impl Inner {
         };
         ws.default_branch = default_branch;
         self.store.upsert_workspace(&ws)?;
+        super::worktree_setup::show_setup_file_to_git(&top);
         self.refresh_git(&mut ws).await;
         let changed = self.workspace().map(|w| w.id) != Some(ws.id.clone());
         *write(&self.ws) = Some(ws.clone());

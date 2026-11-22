@@ -1269,7 +1269,8 @@ async fn a_running_task_can_be_stopped_from_the_board() {
 
 /// The repo's setup script fails in the plan's integration worktree: the plan does not start
 /// and says why. Fixed and turned on again, the plan starts from where its branch was cut, and
-/// the task's worktree is set up, with ports of its own, before its worker's first turn.
+/// the task's worktree is set up, with ports of its own, before its worker's first turn. The
+/// task's verify command gets those ports too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failing_setup_script_holds_the_plan_until_it_is_fixed() {
     let dir = tempfile::tempdir().unwrap();
@@ -1288,8 +1289,16 @@ async fn a_failing_setup_script_holds_the_plan_until_it_is_fixed() {
             turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created hello.txt." })).await;
         })
     });
-    let core = start(dir.path(), FakeSpawner { log, lead: planning_lead(), worker }).await;
-    let settings = Settings { auto_run_plans: true, lead_followups: false, worker_providers: vec![Provider::Claude], ..Default::default() };
+    // Full access: the approval rules hold a check with a `$` expansion in the other modes.
+    let lead = planning_lead_with(&["hello.txt"], "test -n \"$CODLY_PORT_BASE\" && grep -q hello hello.txt");
+    let core = start(dir.path(), FakeSpawner { log, lead, worker }).await;
+    let settings = Settings {
+        auto_run_plans: true,
+        lead_followups: false,
+        approval_mode: ApprovalMode::Full,
+        worker_providers: vec![Provider::Claude],
+        ..Default::default()
+    };
     core.update_settings(settings).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     let turn_on = async || {
@@ -1306,6 +1315,9 @@ async fn a_failing_setup_script_holds_the_plan_until_it_is_fixed() {
     })
     .await;
     assert!(said.text.contains(".codly/setup.sh exited with code 2: no lockfile"), "{}", said.text);
+    let chats = core.snapshot().await.unwrap().chats;
+    let waits = |c: &&ChatMessage| c.author == "codly" && c.text == "Setting up the new worktree: running .codly/setup.sh (up to 10 min).";
+    assert!(chats.iter().find(waits).is_some_and(|c| c.thread == said.thread && c.ts <= said.ts), "the wait is said in the plan's thread before it: {chats:?}");
     let (_, plan) = task_status(&core).await.unwrap();
     assert_eq!(plan.status, PlanStatus::AwaitingApproval);
     assert!(seen.lock().unwrap().is_empty(), "no worker starts in a worktree that is not set up");
@@ -1318,7 +1330,10 @@ async fn a_failing_setup_script_holds_the_plan_until_it_is_fixed() {
     let err = core.run_plan(&plan.id).await.unwrap_err().to_string();
     assert!(err.contains("changed since you turned it on"), "the new text does not run before you read it: {err}");
     turn_on().await;
-    core.run_plan(&plan.id).await.unwrap();
+    // A second Run plan while the first one sets the worktree up waits for it, then finds the plan started.
+    let (first, second) = tokio::join!(core.run_plan(&plan.id), core.run_plan(&plan.id));
+    first.unwrap();
+    second.unwrap();
     let (_, plan) = wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
     assert_eq!(plan.base_commit.as_deref(), Some(base.as_str()), "the plan's branch was cut before your commit");
     let seen = seen.lock().unwrap().clone();
@@ -3159,6 +3174,9 @@ async fn a_team_member_keeps_its_session_and_worktree_across_tasks() {
                 turn.say("I created a.txt and b.txt.");
                 return;
             }
+            // The member's worktree is made ready at its first task, like a task's own.
+            assert!(turn.spec.cwd.join("node_modules/dep/index.js").exists(), "deps copied into the member's worktree");
+            assert!(turn.spec.env.contains_key("CODLY_PORT_BASE"), "the member's worktree has ports of its own");
             let file = if turn.prompt.contains("Task t1: Create a.txt") { "a.txt" } else { "b.txt" };
             turn.write(file, "x\n");
             turn.tool("codly_submit_report", json!({ "status": "done", "summary": format!("Created {file}.") })).await;

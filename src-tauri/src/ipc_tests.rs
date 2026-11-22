@@ -167,7 +167,7 @@ fn commands_round_trip_with_frontend_arg_names() {
 
     // New worktrees: no setup script in this repo, so nothing is on and nothing can be turned on.
     let setup = invoke(&wv, "worktree_setup", json!({ "set": null })).unwrap();
-    assert_eq!(setup, json!({ "script": null, "sha": null, "risks": [], "on": false, "changed": false, "include": [] }));
+    assert_eq!(setup, json!({ "script": null, "sha": null, "risks": [], "on": false, "changed": false, "problem": null, "include": [] }));
     let e = invoke(&wv, "worktree_setup", json!({ "set": { "allow": "abc" } })).unwrap_err();
     assert!(e.to_string().contains("no .codly/setup.sh"), "{e}");
     assert_eq!(invoke(&wv, "worktree_setup", json!({ "set": { "allow": null } })).unwrap()["on"], false);

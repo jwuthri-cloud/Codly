@@ -137,6 +137,12 @@ async fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
 async fn a_reviewed_manifest_becomes_an_isolated_agent_with_a_standing_goal() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
+    // Installed deps, ignored by a committed rule: git does not put them in a new worktree.
+    std::fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "ignore rules"]);
+    std::fs::create_dir_all(repo.join("node_modules/dep")).unwrap();
+    std::fs::write(repo.join("node_modules/dep/index.js"), "module.exports = 1;\n").unwrap();
     let (core, log) = start(dir.path()).await;
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
 
@@ -158,6 +164,7 @@ async fn a_reviewed_manifest_becomes_an_isolated_agent_with_a_standing_goal() {
         assert!(matches!(&l.spawns[0].1, SessionMode::Resume { session_id } if session_id == "c84b6b3f-0a5e"), "{:?}", l.spawns[0].1);
         assert!(l.spawns[0].0.to_string_lossy().contains("/solo/"));
     }
+    assert!(wt.join("node_modules/dep/index.js").exists(), "the worktree is made ready at the agent's first message");
     // The goal is on every prompt, not just the first.
     core.send_chat(&format!("agent:{}", a.id), "and again").await.unwrap();
     wait_until("the second prompt", || log.lock().unwrap().prompts.len() == 2).await;

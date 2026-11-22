@@ -233,13 +233,17 @@ they are build output or third-party code in most repos. If one holds your own c
   worker's code, unsandboxed.
 - A new worktree (`worktree_setup.rs`) gets, once: copies of the checkout's git-ignored files
   that the built-in list (`node_modules`, `.venv`, `venv`, root `.env` files) or the repo's
-  `.worktreeinclude` (gitignore syntax) names, never a tracked or a non-ignored file; a block
+  `.worktreeinclude` (gitignore syntax) names, never a tracked file, and only a path that the
+  worktree's own branch ignores too (`git check-ignore` there before each copy: the snapshot
+  is `git add -A`, and an ignore rule that is not committed is not in the worktree); a block
   of 10 ports in `CODLY_PORT_BASE` (setup script, verify commands, the agent); and the repo's
   `.codly/setup.sh`. That script is code from the repo: it is off until the user turns it on
   in Settings, which shows its text and what the risk rules see in it, and Codly runs only
   the exact text that was turned on (a changed file waits for the user again). It runs like
-  a verify command (`/bin/sh`, scrubbed env, 10 min), unsandboxed. If it fails, the plan does
-  not start or the task is blocked with its last line; a 1:1 agent is told in its chat.
+  a verify command (scrubbed env, 10 min), unsandboxed, from a private copy of that text
+  started by the program its `#!` line names (`/bin/sh` without one). A chat line (a plan, a
+  1:1 agent) or a Decision (a task) says that it runs. If it fails, the plan does not start
+  or the task is blocked with its last line; a 1:1 agent is told in its chat.
 - The gate is fair to the worker: a merge conflict has its own rounds (3) apart from the fix
   rounds, and a check that runs out of time (Settings, 10 min by default) blocks the task for
   you. From its card you re-run the checks or, when its checks stopped it, merge anyway; the

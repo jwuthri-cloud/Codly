@@ -646,13 +646,13 @@ impl Inner {
             Role::Solo => {
                 let (branch, wt) = self.solo_worktree(&ws, &agent);
                 let repo = PathBuf::from(&ws.repo_path);
-                let fresh = !wt.exists();
-                if fresh {
+                if !wt.exists() {
                     let start = self.git.head(&repo).await?.ok_or_else(|| anyhow!("the repository has no commits yet"))?;
                     let _g = self.repo_lock.lock().await;
                     self.git.worktree_add(&repo, &wt, &branch, &start).await?;
+                    self.mark_new_worktree(&wt)?;
                 }
-                self.prepare_solo_worktree(&ws, &agent, &wt, fresh).await;
+                self.prepare_solo_worktree(&ws, &agent, &wt).await;
                 RunReq {
                     agent: agent.clone(),
                     role: Role::Solo,

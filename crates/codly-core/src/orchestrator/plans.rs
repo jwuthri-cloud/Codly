@@ -232,7 +232,7 @@ impl Inner {
         let short = plan_short(&plan);
         let branch = format!("codly/{short}/integration");
         let wt = self.worktree_root(&ws).join(&short).join("integration");
-        let (base, base_branch, fresh) = {
+        let (base, base_branch) = {
             let _g = self.repo_lock.lock().await;
             let head = self
                 .git
@@ -249,11 +249,14 @@ impl Inner {
             }
             let fresh = !wt.exists();
             self.git.worktree_add(&repo, &wt, &branch, &base).await?;
-            (base, base_branch, fresh)
+            if fresh {
+                self.mark_new_worktree(&wt)?;
+            }
+            (base, base_branch)
         };
         // Integration checks need deps too. A setup script that fails stops the start here.
         // The plan keeps the base its branch was cut from, so running it again goes on from it.
-        if let Err(e) = self.prepare_worktree(&ws, &wt, fresh, None).await {
+        if let Err(e) = self.prepare_worktree(&ws, &wt, None, Some(&plan.thread)).await {
             self.update_plan(plan_id, |p| {
                 p.base_commit = Some(base.clone());
                 p.base_branch = base_branch.clone();
@@ -262,10 +265,15 @@ impl Inner {
             return Err(e);
         }
         let wt_s = wt.to_string_lossy().into_owned();
+        let mut started = false;
         self.update_plan(plan_id, |p| {
-            if !matches!(p.status, PlanStatus::AwaitingApproval | PlanStatus::Planning) {
-                bail!("the plan was changed meanwhile");
+            match p.status {
+                PlanStatus::AwaitingApproval | PlanStatus::Planning => {}
+                // A second Run plan waited for the first one's worktree setup: the plan runs.
+                PlanStatus::Running | PlanStatus::Integrating => return Ok(()),
+                _ => bail!("the plan was changed meanwhile"),
             }
+            started = true;
             p.status = PlanStatus::Running;
             p.base_commit = Some(base.clone());
             p.base_branch = base_branch.clone();
@@ -273,6 +281,9 @@ impl Inner {
             p.integration_worktree = Some(wt_s.clone());
             Ok(())
         })?;
+        if !started {
+            return Ok(());
+        }
         let current = base_branch.unwrap_or_else(|| "HEAD".into());
         self.decide(
             Some(&ws.id),
@@ -614,15 +625,18 @@ impl Inner {
         let (wt, switch_note) = if agent.member.is_some() {
             let switched = self.switch_member_worktree(&ws, &agent, &task.key, &branch, &start).await?;
             // New at the member's first task: prepared on that task's branch.
-            self.prepare_worktree(&ws, &switched.0, false, Some(task_id)).await?;
+            self.prepare_worktree(&ws, &switched.0, Some(task_id), None).await?;
             switched
         } else {
-            let fresh = !wt.exists();
             {
                 let _g = self.repo_lock.lock().await;
+                let fresh = !wt.exists();
                 self.git.worktree_add(&repo, &wt, &branch, &start).await?;
+                if fresh {
+                    self.mark_new_worktree(&wt)?;
+                }
             }
-            self.prepare_worktree(&ws, &wt, fresh, Some(task_id)).await?;
+            self.prepare_worktree(&ws, &wt, Some(task_id), None).await?;
             (wt, None)
         };
         if self.store.task_commits(task_id)?.0.is_none() {

@@ -1064,7 +1064,7 @@ impl Core {
         sweep_attachments(&attachments, std::time::Duration::from_secs(7 * 24 * 3600)).await;
         let dir = attachments.join(new_id());
         tokio::fs::create_dir_all(&dir).await.context("create the attachments folder")?;
-        tokio::fs::write(root.join(".gitignore"), "*\n!/setup.sh\n").await.context("write .codly/.gitignore")?;
+        tokio::fs::write(root.join(".gitignore"), worktree_setup::CODLY_IGNORE).await.context("write .codly/.gitignore")?;
         let path = dir.join(attachment_name(name));
         tokio::fs::write(&path, bytes).await.context("save the file")?;
         Ok(path.to_string_lossy().into_owned())

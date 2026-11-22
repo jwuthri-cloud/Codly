@@ -22,10 +22,16 @@ risks: Array<string>,
  */
 on: boolean, 
 /**
- * You turned on another text: the script changed since. It does not run, and a new
- * worktree's task waits, until you turn it on again or off.
+ * You turned on another text: the script changed since (or Codly cannot read it any
+ * more, see `problem`). It does not run, and a new worktree's task waits, until you turn
+ * it on again or off.
  */
 changed: boolean, 
+/**
+ * Why Codly does not run the file that is there (a link, not a file, too long, not
+ * text). `script` and `sha` are None then.
+ */
+problem: string | null, 
 /**
  * The lines of the repo's `.worktreeinclude` (no comments, no blank lines).
  */
