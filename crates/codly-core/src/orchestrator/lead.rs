@@ -607,7 +607,7 @@ impl Inner {
     /// the user's message, one line each, agent-written ones marked as such.
     /// ponytail: built here from `search_memories` because `memory_pack` has no budget
     /// parameter (see CONTRACT REQUESTS); switch once it does.
-    fn lead_memory_pack(&self, ws: &Workspace, thread: &str, text: &str) -> Option<String> {
+    pub(super) fn lead_memory_pack(&self, ws: &Workspace, thread: &str, text: &str) -> Option<String> {
         let lead = self.find_lead(&ws.id, thread);
         let view = MemoryView { workspace_id: Some(&ws.id), agent_id: lead.as_ref().map(|l| l.id.as_str()), task_ids: &[] };
         let found = self.store.with(|db| guard("memory", || memory::search_memories(db, &view, text, None, 40))).ok()?;

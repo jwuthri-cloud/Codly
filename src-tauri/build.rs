@@ -27,6 +27,7 @@ fn main() {
         "worktree_setup",
         "closed_requests", "closed_request",
         "pull_request", "draft_pull_request", "create_pull_request", "push_pr_branch", "refresh_pull_request",
+        "start_from_github",
     ])))
     .expect("tauri-build failed");
 }

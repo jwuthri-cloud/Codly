@@ -1,0 +1,6 @@
+[
+  { "name": "build", "bucket": "pass" },
+  { "name": "lint", "bucket": "fail" },
+  { "name": "deploy", "bucket": "cancel" },
+  { "name": "e2e", "bucket": "pending" }
+]

@@ -102,6 +102,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             crate::pr_commands::create_pull_request,
             crate::pr_commands::push_pr_branch,
             crate::pr_commands::refresh_pull_request,
+            crate::pr_commands::start_from_github,
         ])
         .build(tauri::generate_context!(test = true))
         .unwrap();
@@ -267,6 +268,15 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "refresh_pull_request", json!({ "source": { "kind": "agent", "id": "nope" } })).unwrap_err();
     assert!(e.to_string().contains("has not opened a pull request"), "{e}");
     assert!(invoke(&wv, "draft_pull_request", json!({ "source": { "kind": "branch", "id": "main" } })).is_err(), "only a plan or a solo agent");
+
+    // "From issue…" / "From pull request…", with the keys the dialog sends. The core answers
+    // before gh is asked: a 1:1 chat is not a request, and a sentence is not a link or a number.
+    let from = |thread: &str, kind: &str, reference: &str| json!({ "thread": thread, "kind": kind, "reference": reference, "note": "" });
+    let e = invoke(&wv, "start_from_github", from("agent:nope", "issue", "12")).unwrap_err();
+    assert!(e.to_string().contains("agent:nope is not a request"), "{e}");
+    let e = invoke(&wv, "start_from_github", from("lead", "pull_request", "fix the login bug")).unwrap_err();
+    assert!(e.to_string().contains("is not a GitHub pull request"), "{e}");
+    assert!(invoke(&wv, "start_from_github", from("lead", "commit", "12")).is_err(), "only an issue or a pull request");
 
     // Checkpoints, with the keys the Git tab sends: the core answers (no agent here), not the
     // argument check.

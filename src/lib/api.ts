@@ -32,6 +32,8 @@ import type { StoragePolicy } from './gen/StoragePolicy';
 import type { StorageReport } from './gen/StorageReport';
 import type { RepoSync } from './gen/RepoSync';
 import type { MergeWarning } from './gen/MergeWarning';
+import type { Intake } from './gen/Intake';
+import type { IntakeKind } from './gen/IntakeKind';
 import type { PrConfirm } from './gen/PrConfirm';
 import type { PrDraft } from './gen/PrDraft';
 import type { PrPushed } from './gen/PrPushed';
@@ -390,6 +392,8 @@ export const api = {
   pushPrBranch: (source: PrSource, confirm: PrConfirm) => call<PrPushed>('push_pr_branch', { source, confirm }),
   /** Read the pull request's checks again: one `gh pr checks` call. */
   refreshPullRequest: (source: PrSource) => call<PullRequest>('refresh_pull_request', { source }),
+  /** "From issue…" / "From pull request…": read it with your own `gh` and start work on it in the request `thread`. Writes nothing to GitHub. */
+  startFromGithub: (thread: string, kind: IntakeKind, reference: string, note: string) => call<Intake>('start_from_github', { thread, kind, reference, note }),
   keepPlan: (planId: string) => call<Plan>('keep_plan', { planId }),
   events: (agentId: string | null, before: number | null, limit = 500) =>
     call<EventRow[]>('get_events', { agentId, before, limit }),

@@ -1,0 +1,62 @@
+{
+  "author": { "id": "MDQ6VXNlcjE=", "is_bot": false, "login": "octocat", "name": "The Octocat" },
+  "baseRefName": "main",
+  "body": "Reads the theme from the cookie on load.",
+  "comments": [
+    {
+      "id": "IC_kwDOC1",
+      "author": { "login": "dave" },
+      "authorAssociation": "CONTRIBUTOR",
+      "body": "Can this go into 2.4?",
+      "createdAt": "2026-11-05T12:00:00Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/acme/web/pull/7#issuecomment-4",
+      "viewerDidAuthor": false
+    }
+  ],
+  "headRefName": "fix/dark-mode",
+  "isCrossRepository": true,
+  "labels": [],
+  "number": 7,
+  "reviews": [
+    {
+      "id": "PRR_kwDOD1",
+      "author": { "login": "alice" },
+      "authorAssociation": "MEMBER",
+      "body": "Please keep the old cookie name working.",
+      "submittedAt": "2026-11-05T09:00:00Z",
+      "includesCreatedEdit": false,
+      "reactionGroups": [],
+      "state": "CHANGES_REQUESTED",
+      "commit": { "oid": "5f0c1d2e3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d" }
+    },
+    {
+      "id": "PRR_kwDOD2",
+      "author": { "login": "bob" },
+      "authorAssociation": "MEMBER",
+      "body": "",
+      "submittedAt": "2026-11-05T09:30:00Z",
+      "includesCreatedEdit": false,
+      "reactionGroups": [],
+      "state": "COMMENTED",
+      "commit": { "oid": "5f0c1d2e3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d" }
+    },
+    {
+      "id": "PRR_kwDOD3",
+      "author": { "login": "carol" },
+      "authorAssociation": "MEMBER",
+      "body": "",
+      "submittedAt": "2026-11-05T10:00:00Z",
+      "includesCreatedEdit": false,
+      "reactionGroups": [],
+      "state": "APPROVED",
+      "commit": { "oid": "5f0c1d2e3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d" }
+    }
+  ],
+  "state": "OPEN",
+  "title": "Keep dark mode across reloads",
+  "url": "https://github.com/acme/web/pull/7"
+}

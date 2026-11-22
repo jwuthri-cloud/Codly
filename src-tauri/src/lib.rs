@@ -268,6 +268,7 @@ pub fn run() {
             pr_commands::create_pull_request,
             pr_commands::push_pr_branch,
             pr_commands::refresh_pull_request,
+            pr_commands::start_from_github,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

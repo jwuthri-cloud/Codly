@@ -12,7 +12,9 @@
   import SkillsManager from './overlays/SkillsManager.svelte';
   import { skillsUi } from './lib/state/skills.svelte';
   import PullRequestDialog from './overlays/PullRequestDialog.svelte';
+  import IntakeDialog from './overlays/IntakeDialog.svelte';
   import { prUi } from './lib/state/pullRequest.svelte';
+  import { intakeUi } from './lib/state/intake.svelte';
   import IdeOverlay from './ide/IdeOverlay.svelte';
   import DiagnosticsReport from './components/DiagnosticsReport.svelte';
   import EmptyState from './components/EmptyState.svelte';
@@ -89,6 +91,7 @@
 {#if ui.repoPickerOpen}<RepoPicker />{/if}
 {#if skillsUi.open}<SkillsManager />{/if}
 {#if prUi.dialog}<PullRequestDialog />{/if}
+{#if intakeUi.dialog}<IntakeDialog />{/if}
 <IdeOverlay />
 <Toasts />
 <TooltipHost />

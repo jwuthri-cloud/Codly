@@ -9,6 +9,8 @@
 //! - `gh` runs with the user's login environment and its own sign-in: Codly stores no token;
 //! - without a usable `gh` the branch can still be pushed, and the compare page is offered;
 //! - the dialog says how many of the user's own unpushed commits the branch would carry;
+//! - a plan whose request started from an issue ends its drafted description with
+//!   "Closes #N" (`intake::link_line`); the user can edit it like the rest of the draft;
 //! - a pull request's state and checks are read when the user asks (`gh pr view`, `gh pr
 //!   checks`): there is no polling.
 //!
@@ -27,15 +29,15 @@ use tokio::io::AsyncWriteExt;
 use ts_rs::TS;
 
 use super::agent_git::{GitLogEntry, parse_log};
-use super::{Core, Inner, prompts, row};
+use super::{Core, Inner, intake, prompts, row};
 use crate::model::*;
 use crate::store;
 
 /// Codly's own branches: the only ones this step pushes.
 const OWN_PREFIX: &str = "codly/";
 /// `gh auth status` asks the host whether the sign-in still works.
-const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
-const GH_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
+pub(super) const GH_TIMEOUT: Duration = Duration::from_secs(60);
 const TITLE_MAX: usize = 120;
 const GOAL_MAX: usize = 4000;
 /// GitHub refuses a longer description.
@@ -147,21 +149,21 @@ pub struct PrPushed {
 
 /// `host/owner/repository`, as `gh --repo` takes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RepoSlug {
-    host: String,
-    owner: String,
-    repo: String,
+pub(super) struct RepoSlug {
+    pub(super) host: String,
+    pub(super) owner: String,
+    pub(super) repo: String,
 }
 
 impl RepoSlug {
-    fn arg(&self) -> String {
+    pub(super) fn arg(&self) -> String {
         format!("{}/{}/{}", self.host, self.owner, self.repo)
     }
 }
 
 /// The repository a remote address names: `git@host:owner/repo.git`, `ssh://git@host/owner/repo`
 /// or `https://host/owner/repo`. None for a local path, and for an address with other parts.
-fn parse_remote(url: &str) -> Option<RepoSlug> {
+pub(super) fn parse_remote(url: &str) -> Option<RepoSlug> {
     let url = url.trim();
     let (authority, path) = match url.split_once("://") {
         Some((scheme, rest)) if matches!(scheme, "https" | "http" | "ssh" | "git" | "git+ssh") => rest.split_once('/')?,
@@ -187,7 +189,7 @@ fn url_path(s: &str) -> String {
     s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-fn auth_args(host: &str) -> Vec<String> {
+pub(super) fn auth_args(host: &str) -> Vec<String> {
     ["auth", "status", "--hostname", host].map(String::from).to_vec()
 }
 
@@ -202,7 +204,7 @@ fn state_args(url: &str) -> Vec<String> {
     ["pr", "view", url, "--json", "state"].map(String::from).to_vec()
 }
 
-fn checks_args(url: &str) -> Vec<String> {
+pub(super) fn checks_args(url: &str) -> Vec<String> {
     ["pr", "checks", url, "--json", "name,bucket"].map(String::from).to_vec()
 }
 
@@ -238,7 +240,7 @@ struct GhCheck {
 }
 
 /// Count what `gh pr checks --json name,bucket` printed.
-fn parse_checks(stdout: &str, now: i64) -> Result<PrChecks> {
+pub(super) fn parse_checks(stdout: &str, now: i64) -> Result<PrChecks> {
     let list: Vec<GhCheck> = serde_json::from_str(stdout.trim())?;
     let mut checks = PrChecks { read_at: now, ..Default::default() };
     for c in list {
@@ -259,20 +261,20 @@ fn parse_checks(stdout: &str, now: i64) -> Result<PrChecks> {
 }
 
 /// `gh` on the login PATH.
-fn gh_bin(env: &HashMap<String, String>) -> Option<PathBuf> {
+pub(super) fn gh_bin(env: &HashMap<String, String>) -> Option<PathBuf> {
     let cwd = env.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
     which::which_in("gh", Some(env.get("PATH")?), cwd).ok()
 }
 
-struct GhOut {
-    ok: bool,
-    stdout: String,
-    stderr: String,
+pub(super) struct GhOut {
+    pub(super) ok: bool,
+    pub(super) stdout: String,
+    pub(super) stderr: String,
 }
 
 impl GhOut {
     /// What gh said went wrong.
-    fn said(&self) -> &str {
+    pub(super) fn said(&self) -> &str {
         let err = self.stderr.trim();
         if err.is_empty() { self.stdout.trim() } else { err }
     }
@@ -447,7 +449,7 @@ impl Inner {
 
     /// The remote a pull request into `base` goes to: the one `base` tracks, else `origin`,
     /// else the only one there is.
-    async fn pr_remote(&self, repo: &Path, base: &str) -> Result<String> {
+    pub(super) async fn pr_remote(&self, repo: &Path, base: &str) -> Result<String> {
         let remotes = self.remotes(repo).await?;
         // `git config --get` fails for a key that is not set: the branch tracks nothing then.
         let tracked = self.git.read(repo, &["config", "--get", &format!("branch.{base}.remote")]).await.ok().map(|r| r.trim().to_string());
@@ -470,11 +472,11 @@ impl Inner {
 
     /// None when the remote's address is not `host/owner/repository` (a local path, a host
     /// with groups): `gh` cannot be pointed at it.
-    async fn remote_slug(&self, repo: &Path, remote: &str) -> Option<RepoSlug> {
+    pub(super) async fn remote_slug(&self, repo: &Path, remote: &str) -> Option<RepoSlug> {
         parse_remote(&self.git.read(repo, &["remote", "get-url", remote]).await.ok()?)
     }
 
-    async fn run_gh(&self, gh: &Path, cwd: &Path, args: &[String], stdin: Option<&str>, limit: Duration) -> Result<GhOut> {
+    pub(super) async fn run_gh(&self, gh: &Path, cwd: &Path, args: &[String], stdin: Option<&str>, limit: Duration) -> Result<GhOut> {
         let mut cmd = tokio::process::Command::new(gh);
         cmd.args(args)
             .current_dir(cwd)
@@ -646,6 +648,14 @@ impl Inner {
             }
         };
         let slug = self.remote_slug(&head.repo, &remote).await;
+        // A plan whose request started from an issue or a pull request names it at the end.
+        let body = match &head.owner {
+            Owner::Plan(plan) => match self.plan_intake(plan)? {
+                Some(started) => format!("{body}\n{}\n", intake::link_line(&started, slug.as_ref())),
+                None => body,
+            },
+            Owner::Agent(..) => body,
+        };
         let mut gh_problem = self.gh_problem(&head.repo, &remote, slug.as_ref()).await;
         // A pull request on record may be merged or closed by now. Ask, so the dialog does not
         // say that new commits join it when they would not.
@@ -1440,6 +1450,47 @@ esac
         sh(&b.repo, &["remote", "remove", "upstream"]);
         let draft = b.core.draft_pull_request(&source).await.unwrap();
         assert_eq!((draft.remote.as_str(), draft.warning.as_deref()), ("first", None));
+        b.core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_plan_started_from_an_issue_names_it_in_the_description() {
+        use super::intake::{IntakeKind, IntakeSource};
+        let b = Bench::new(false).await;
+        let plan = b.done_plan().await;
+        let source = PrSource::Plan(plan.id.clone());
+        let i = &b.core.inner;
+        let ws = i.require_ws().unwrap();
+        let plain = b.core.draft_pull_request(&source).await.unwrap().body;
+        assert!(!plain.contains("Closes") && !plain.contains("Related to"), "{plain}");
+
+        // The user's "From issue…" message in the plan's request, as `Core::start_from_github` leaves it.
+        let from = |kind: IntakeKind, repo: &str, number: u32, ts: i64| {
+            let path = if kind == IntakeKind::Issue { "issues" } else { "pull" };
+            let url = format!("https://github.com/acme/{repo}/{path}/{number}");
+            let started = IntakeSource { kind, host: "github.com".into(), owner: "acme".into(), repo: repo.into(), number, url, title: "Dark mode resets".into() };
+            let message = ChatMessage { id: new_id(), thread: "lead".into(), author: "user".into(), text: "Work on it.".into(), attachment: Some(json!({ "intake": started })), ts };
+            i.emit(Some(&ws.id), row(None, None, None, EventKind::Chat { message })).unwrap();
+        };
+        let body = async || b.core.draft_pull_request(&source).await.unwrap().body;
+
+        // A message that came after the plan was made is not what the plan answers.
+        from(IntakeKind::Issue, "web", 99, plan.created_at + 1);
+        assert_eq!(body().await, plain);
+        // The request started from an issue of the repository the pull request goes to.
+        from(IntakeKind::Issue, "web", 12, plan.created_at - 500);
+        assert_eq!(body().await, format!("{plain}\nCloses #12\n"));
+        assert!(!body().await.contains("Dark mode resets"), "the title on GitHub is not copied into the description");
+        // The newest one before the plan counts: here an issue of another repository, then a pull request.
+        from(IntakeKind::Issue, "api", 3, plan.created_at - 400);
+        assert_eq!(body().await, format!("{plain}\nCloses acme/api#3\n"));
+        from(IntakeKind::PullRequest, "web", 7, plan.created_at - 300);
+        assert_eq!(body().await, format!("{plain}\nRelated to #7\n"));
+
+        // An earlier plan of the request that is done delivered what was asked: this plan is new work.
+        let earlier = Plan { id: "plan-0".into(), created_at: plan.created_at - 100, ..plan.clone() };
+        i.emit(Some(&ws.id), row(None, None, None, EventKind::PlanChanged { plan: earlier })).unwrap();
+        assert_eq!(body().await, plain);
         b.core.shutdown().await;
     }
 }
