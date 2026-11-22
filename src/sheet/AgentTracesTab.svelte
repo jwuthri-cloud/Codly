@@ -11,14 +11,15 @@
   }
   let { agent }: Props = $props();
 
+  // Built from this agent's events only, so only when one of them arrives.
   const calls = $derived.by(() => {
-    void store.rev;
+    void store.revBy.get(agent.id);
     return buildTraces(store.events, agent.id);
   });
   const sum = $derived(summarize(calls));
   const shown = $derived(calls.slice(-200).reverse());
   /** Longest known call: the bars are relative to it. */
-  const slowest = $derived(Math.max(1, ...calls.map((c) => c.durationMs ?? 0)));
+  const slowest = $derived(calls.reduce((ms, c) => Math.max(ms, c.durationMs ?? 0), 1));
 </script>
 
 {#if calls.length}

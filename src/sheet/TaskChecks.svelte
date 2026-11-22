@@ -19,8 +19,8 @@
 
   type Check = { cmd: string; state: 'running' | 'pass' | 'fail' | 'none' | 'wait'; detail: string; by: 'codly' | 'agent' | null; since?: number };
   const checks = $derived.by((): Check[] => {
-    void store.rev;
-    void store.liveRev;
+    // The task's finished steps (replaced on change) and its assignee's own tool calls.
+    if (task.assignee) void store.revBy.get(task.assignee);
     const marks = store.taskMarks[task.id] ?? [];
     const segs: Seg[] = task.assignee ? (store.live[task.assignee]?.segments ?? []).filter((s) => s.taskId === task.id && (s.activity === 'test' || s.activity === 'execute')) : [];
     return task.verify.map((cmd): Check => {

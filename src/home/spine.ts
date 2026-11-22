@@ -3,6 +3,11 @@
 // approvals from the agents on its plan where they happened, questions they asked its Lead,
 // task-done and plan-done cards. A 1:1 thread = the same for one agent.
 // Each request is its own thread: another request's plan, approvals and cards never show here.
+//
+// The list is built again only when something of this thread changed (`buildSpine`), and a row
+// that did not change keeps its object (`keepRows`), so the screen updates that row alone. A
+// message or a thought being written does not build the list again on each new word: its row
+// reads the words as they are now (`streamText`, `thinkingText`).
 import type { Approval } from '../lib/gen/Approval';
 import type { ChatMessage } from '../lib/gen/ChatMessage';
 import type { MessagePhase } from '../lib/gen/MessagePhase';
@@ -23,11 +28,15 @@ export type Item =
       agentId: string;
       text: string;
       phase: MessagePhase;
+      /** It is being written: `text` is what it said when the row was made, `streamText` what it says now. */
       streaming: boolean;
+      /** It shows who speaks: consecutive messages from the same agent share one header. */
+      header: boolean;
       /** Which card rides under this message. */
       card: { type: 'plan' | 'plan-done'; planId: string } | null;
       replyTo: string | null;
     }
+  // `thinking`: the thought being written, as it was when the row was made (`thinkingText`: as it is now).
   | { kind: 'work'; key: string; ts: number; agentId: string; segs: Seg[]; thoughts: Thought[]; thinking: string | null }
   | { kind: 'approval'; key: string; ts: number; approval: Approval }
   | { kind: 'ask'; key: string; ts: number; agentId: string; msg: ChatMessage }
@@ -46,6 +55,15 @@ export type Item =
     };
 
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
+/** `norm` of a message's text, worked out once (a message object is never changed). */
+const normed = new WeakMap<{ text: string }, string>();
+const normOf = (m: { text: string }): string => {
+  let n = normed.get(m);
+  if (n === undefined) normed.set(m, (n = norm(m.text)));
+  return n;
+};
+/** A streamed message keeps one key, made from its item id, from its first word to its end. */
+const SAY = 'say:';
 
 export function attachmentOf(att: JsonValue | null | undefined): Record<string, unknown> | null {
   return att && typeof att === 'object' && !Array.isArray(att) ? (att as Record<string, unknown>) : null;
@@ -68,7 +86,7 @@ export function buildSpine(thread: string): Item[] {
   const chats = store.chats.filter((c) => c.thread === thread);
   // A message keeps one key from its first streamed word to its final chat row (no remount).
   const itemOf = new Map<string, string>();
-  if (owner) for (const m of store.live[owner.id]?.messages ?? []) itemOf.set(norm(m.text), m.itemId);
+  if (owner) for (const m of store.live[owner.id]?.messages ?? []) itemOf.set(normOf(m), m.itemId);
   const seenPlans = new Set<string>();
   // The first message that mentions a plan carries its card; a later one, once the plan is
   // done, carries the plan-done card. Codly itself posts "Plan ready" / "Plan done" lines.
@@ -93,9 +111,9 @@ export function buildSpine(thread: string): Item[] {
     else {
       const card = cardFor(m.attachment);
       const a = attachmentOf(m.attachment);
-      const itemId = m.author === owner?.id ? itemOf.get(norm(m.text)) : undefined;
+      const itemId = m.author === owner?.id ? itemOf.get(normOf(m)) : undefined;
       items.push({
-        kind: 'say', key: itemId ? `say:${itemId}` : `c:${m.id}`, ts: m.ts, agentId: m.author, text: m.text, phase: 'final', streaming: false, card,
+        kind: 'say', key: itemId ? SAY + itemId : `c:${m.id}`, ts: m.ts, agentId: m.author, text: m.text, phase: 'final', streaming: false, header: true, card,
         replyTo: a && typeof a.reply_to === 'string' ? a.reply_to : null,
       });
     }
@@ -109,13 +127,13 @@ export function buildSpine(thread: string): Item[] {
 
   if (owner) {
     const live = store.live[owner.id];
-    const chatTexts = new Set(chats.filter((c) => c.author === owner.id).map((c) => norm(c.text)));
+    const chatTexts = new Set(chats.filter((c) => c.author === owner.id).map(normOf));
     type W = { ts: number; seg?: Seg; thought?: Thought };
     const work: W[] = [];
     if (live) {
       for (const m of live.messages) {
-        if (chatTexts.has(norm(m.text))) continue;
-        items.push({ kind: 'say', key: `say:${m.itemId}`, ts: m.ts, agentId: owner.id, text: m.text, phase: m.phase, streaming: false, card: null, replyTo: null });
+        if (chatTexts.has(normOf(m))) continue;
+        items.push({ kind: 'say', key: SAY + m.itemId, ts: m.ts, agentId: owner.id, text: m.text, phase: m.phase, streaming: false, header: true, card: null, replyTo: null });
       }
       for (const s of live.segments) work.push({ ts: s.start, seg: s });
       for (const r of live.reasoning) work.push({ ts: r.ts, thought: r });
@@ -124,7 +142,7 @@ export function buildSpine(thread: string): Item[] {
     let thinkingTs = 0;
     for (const s of store.streams.values()) {
       if (s.agentId !== owner.id) continue;
-      if (s.kind === 'text') items.push({ kind: 'say', key: `say:${s.itemId}`, ts: s.ts, agentId: owner.id, text: s.text, phase: 'unknown', streaming: true, card: null, replyTo: null });
+      if (s.kind === 'text') items.push({ kind: 'say', key: SAY + s.itemId, ts: s.ts, agentId: owner.id, text: s.text, phase: 'unknown', streaming: true, header: true, card: null, replyTo: null });
       else {
         thinking = s.text;
         thinkingTs = s.ts;
@@ -136,9 +154,12 @@ export function buildSpine(thread: string): Item[] {
     work.sort((a, b) => a.ts - b.ts);
     let group: Item & { kind: 'work' } | null = null;
     let groupEnd = Infinity;
+    // Both lists are in time order: the next anchor is found by walking on, never from the start.
+    let next = 0;
     for (const w of work) {
       if (!group || w.ts >= groupEnd) {
-        groupEnd = anchors.find((t) => t > w.ts) ?? Infinity;
+        while (next < anchors.length && anchors[next] <= w.ts) next++;
+        groupEnd = anchors[next] ?? Infinity;
         group = { kind: 'work', key: `w:${w.seg?.callId ?? w.thought?.itemId}`, ts: w.ts, agentId: owner.id, segs: [], thoughts: [], thinking: null };
         items.push(group);
       }
@@ -146,9 +167,9 @@ export function buildSpine(thread: string): Item[] {
       if (w.thought) group.thoughts.push(w.thought);
     }
     if (thinking != null) {
-      const last = items.filter((i): i is Item & { kind: 'work' } => i.kind === 'work').sort((a, b) => b.ts - a.ts)[0];
+      // The newest work row is the last one made (each starts after the one before).
       const lastAnchor = anchors[anchors.length - 1] ?? 0;
-      if (last && last.ts > lastAnchor) last.thinking = thinking;
+      if (group && group.ts > lastAnchor) group.thinking = thinking;
       else items.push({ kind: 'work', key: `t:live:${owner.id}`, ts: thinkingTs, agentId: owner.id, segs: [], thoughts: [], thinking });
     }
 
@@ -177,5 +198,81 @@ export function buildSpine(thread: string): Item[] {
   }
 
   items.sort((a, b) => a.ts - b.ts || RANK[a.kind] - RANK[b.kind]);
+  // Who speaks is shown once for messages in a row (a work row between two does not count).
+  let before: Item | null = null;
+  for (const it of items) {
+    if (it.kind === 'work') continue;
+    if (it.kind === 'say') it.header = !(before?.kind === 'say' && before.agentId === it.agentId && it.ts - before.ts < 180_000);
+    before = it;
+  }
   return items;
+}
+
+/** The same value, the same list of the same objects, or an object with the same fields. */
+function sameField(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+  const x = a as Record<string, unknown>;
+  const y = b as Record<string, unknown>;
+  const keys = Object.keys(x);
+  return keys.length === Object.keys(y).length && keys.every((k) => x[k] === y[k]);
+}
+
+/** Both rows are being written and `field` holds their words so far. The row reads the words
+ *  itself (`streamText`, `thinkingText`), so more words make no new row. */
+const written = (a: Item, b: Item, field: string): boolean =>
+  (field === 'text' && a.kind === 'say' && b.kind === 'say' && a.streaming && b.streaming) ||
+  (field === 'thinking' && a.kind === 'work' && b.kind === 'work' && a.thinking != null && b.thinking != null);
+
+/** Two rows that show the same thing. */
+function sameRow(a: Item, b: Item): boolean {
+  const x = a as Record<string, unknown>;
+  const y = b as Record<string, unknown>;
+  for (const k in x) if (!sameField(x[k], y[k]) && !written(a, b, k)) return false;
+  return true;
+}
+
+/**
+ * `next` with the rows of `prev` put back where they show the same thing, so a keyed list
+ * updates only the rows that changed. When no row changed, the result is `prev` itself.
+ */
+export function keepRows(prev: Item[], next: Item[]): Item[] {
+  const was = new Map(prev.map((it) => [it.key, it]));
+  let same = prev.length === next.length;
+  const rows = next.map((it, i) => {
+    const old = was.get(it.key);
+    const row = old && sameRow(old, it) ? old : it;
+    if (row !== prev[i]) same = false;
+    return row;
+  });
+  return same ? prev : rows;
+}
+
+/**
+ * Which messages and thoughts the agent is writing right now (not their words). Read it in a
+ * `$derived`: it changes when one starts or ends, which is when its thread is built again.
+ */
+export function openStreams(agentId: string): string {
+  void store.revBy.get(agentId);
+  void store.liveRevBy.get(agentId);
+  let open = '';
+  for (const s of store.streams.values()) if (s.agentId === agentId) open += `${s.kind} ${s.itemId} ${s.ts}\n`;
+  return open;
+}
+
+/** The words of a message, as they are now. A row reads this, so a new word changes that row only. */
+export function streamText(it: Item & { kind: 'say' }): string {
+  if (!it.streaming) return it.text;
+  void store.liveRevBy.get(it.agentId);
+  return store.streams.get(it.key.slice(SAY.length))?.text ?? it.text;
+}
+
+/** The thought the agent of a work row is writing, as it is now (null: the row shows none). */
+export function thinkingText(it: Item & { kind: 'work' }): string | null {
+  if (it.thinking == null) return null;
+  void store.liveRevBy.get(it.agentId);
+  let text = it.thinking;
+  for (const s of store.streams.values()) if (s.agentId === it.agentId && s.kind === 'reasoning') text = s.text;
+  return text;
 }

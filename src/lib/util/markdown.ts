@@ -3,6 +3,7 @@
 import DOMPurify from 'dompurify';
 import { Marked } from 'marked';
 import { isTauriApp } from '../api';
+import type { Blocks } from './mdstream';
 import { clean } from './sanitize';
 
 const md = new Marked({ gfm: true, breaks: false, async: false });
@@ -33,6 +34,17 @@ export function renderMarkdown(src: string): string {
     ALLOWED_TAGS,
     ALLOWED_ATTR: ['href', 'target', 'rel', 'type', 'checked', 'disabled', 'align', 'start'],
   });
+}
+
+/** The top-level blocks of a markdown text, as `renderMarkdown` reads them (for `mdstream`). */
+export function markdownBlocks(src: string): Blocks {
+  const tokens = md.lexer(src);
+  // Every link definition is in `links`; raw HTML is a token, in a block or inside a line.
+  let entangled = Object.keys(tokens.links).length > 0;
+  md.walkTokens(tokens, (t) => {
+    if (t.type === 'html') entangled = true;
+  });
+  return { blocks: tokens.map((t) => ({ type: t.type, raw: t.raw })), entangled };
 }
 
 /** Open http(s) links from rendered markdown in the system browser (Tauri) or a new tab. */

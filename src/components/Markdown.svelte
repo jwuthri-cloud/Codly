@@ -1,7 +1,20 @@
-<!-- Sanitized markdown (marked → DOMPurify). Links open in the system browser; a code block has a Copy button. -->
+<!--
+  Sanitized markdown (marked → DOMPurify). Links open in the system browser; a code block has a Copy button.
+  A finished message is parsed once (its HTML is kept, so a thread opened again parses nothing).
+  A message being written keeps the blocks that are finished and parses only the one being
+  written: a new word neither parses the whole message again nor replaces what you selected.
+-->
+<script lang="ts" module>
+  import { textCache } from '../lib/util/textCache';
+
+  /** Finished messages: text → HTML with Copy buttons. The same text always gives the same HTML. */
+  const finished = textCache(500, 2_000_000);
+</script>
+
 <script lang="ts">
   import { copyText } from '../lib/state/actions';
-  import { openExternal, renderMarkdown } from '../lib/util/markdown';
+  import { markdownBlocks, openExternal, renderMarkdown } from '../lib/util/markdown';
+  import { streamRenderer } from '../lib/util/mdstream';
   import { codeToCopy, withCopyButtons } from './codeblocks';
 
   interface Props {
@@ -14,14 +27,13 @@
   // The caret rides inline at the end of the streamed text (a private-use marker survives
   // markdown + sanitizing and is swapped for a span afterwards).
   const CARET = '\uE000';
-  // The conversation hands every message a fresh item on each streamed batch: an unchanged
-  // string stops at these two, so only the streaming message is parsed again.
+  // A parent may hand over the same text again: an unchanged string stops at these two.
   const src = $derived(text);
   const live = $derived(streaming);
+  const stream = streamRenderer((s) => renderMarkdown(s).replace(CARET, '<span class="caret" aria-hidden="true"></span>'), markdownBlocks);
+  const parts = $derived(live ? stream(src, CARET) : null);
   // Copy waits for the whole message: a block still being written is not worth copying.
-  const html = $derived(
-    live ? renderMarkdown(src + CARET).replace(CARET, '<span class="caret" aria-hidden="true"></span>') : withCopyButtons(renderMarkdown(src)),
-  );
+  const html = $derived(live ? '' : finished(src, (s) => withCopyButtons(renderMarkdown(s))));
 
   function click(e: MouseEvent) {
     const copy = (e.target as HTMLElement).closest('button.copy');
@@ -40,7 +52,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="md selectable" class:streaming class:brief onclick={click}>{@html html}</div>
+<div class="md selectable" class:streaming class:brief onclick={click}>{#if parts}{#each parts.done as part, i (i)}{@html part}{/each}{@html parts.tail}{:else}{@html html}{/if}</div>
 
 <style>
   .md { font-size: var(--t-lg); line-height: var(--lh-lg); color: var(--ink-1); overflow-wrap: anywhere; }

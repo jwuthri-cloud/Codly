@@ -29,7 +29,7 @@
   import Composer from './Composer.svelte';
   import LoadEarlier from './LoadEarlier.svelte';
   import NextRow from './NextRow.svelte';
-  import { buildSpine, type Item } from './spine';
+  import { buildSpine, keepRows, openStreams, streamText, thinkingText, type Item } from './spine';
   import { copyText, resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
   import { busy, queued, type Sent } from '../lib/state/queue';
   import { isRequestThread } from '../lib/state/ui.svelte';
@@ -41,11 +41,16 @@
 
   const owner = $derived(store.threadAgent(thread));
   const isRequest = $derived(isRequestThread(thread));
+  // The rows are built again when something of this thread changed: a message, an approval, a
+  // task, a stored event of its agent, a message or a thought its agent starts or ends. A row
+  // that shows the same thing keeps its object, so only the rows that changed are updated.
+  // Another agent's stream, and each new word of what this one writes, build nothing.
+  const streams = $derived(owner ? openStreams(owner.id) : '');
+  let rows: Item[] = [];
   const items = $derived.by((): Item[] => {
-    void store.rev;
-    void store.liveRev;
-    void store.outbox;
-    return buildSpine(thread);
+    void streams;
+    if (owner) void store.revBy.get(owner.id);
+    return (rows = keepRows(rows, buildSpine(thread)));
   });
 
   // ── your messages that wait for the agent's current turn to end ──
@@ -71,18 +76,6 @@
     for (let i = items.length - 1; i >= 0; i--) if (items[i].kind === 'user' || items[i].kind === 'say') return i;
     return -1;
   });
-
-  /** Consecutive messages from the same agent share one header. */
-  function showHeader(i: number): boolean {
-    const it = items[i];
-    if (it.kind !== 'say') return false;
-    for (let j = i - 1; j >= 0; j--) {
-      const p = items[j];
-      if (p.kind === 'work') continue;
-      return !(p.kind === 'say' && p.agentId === it.agentId && it.ts - p.ts < 180_000);
-    }
-    return true;
-  }
 
   function mentionParts(text: string): { t: string; agent?: string; task?: string }[] {
     return text.split(/([@#][\w.-]+)/g).filter(Boolean).map((t) => {
@@ -122,6 +115,16 @@
     if (!scroller) return;
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth && !ui.reducedMotion ? 'smooth' : 'auto' });
   }
+  // A message or a thought being written grows its row without a change of the list: while the
+  // thread's agent writes, the height of the list says when to follow, at most once per frame.
+  // Not at any other time: a row you open yourself also grows the list, and must stay in place.
+  let list: HTMLOListElement | undefined = $state();
+  $effect(() => {
+    if (!list || !streams) return;
+    const grown = new ResizeObserver(() => atBottom && toBottom());
+    grown.observe(list);
+    return () => grown.disconnect();
+  });
   $effect(() => {
     void items;
     // Rows that came in above ("Load earlier") are not new activity.
@@ -189,7 +192,7 @@
         <EmptyState title="{owner?.name ?? 'This agent'} is listening." body="Messages here go straight to this agent, outside any plan." />
       {/if}
     {:else}
-      <ol class="items">
+      <ol class="items" bind:this={list}>
         {#each items as it, i (it.key)}
           <li class="it k-{it.kind}">
             {#if it.kind === 'user'}
@@ -224,7 +227,7 @@
               {:else}<p class="sys">{it.text}<time class="num">{clock(it.ts)}</time></p>{/if}
             {:else if it.kind === 'say'}
               {@const a = store.agentMap.get(it.agentId)}
-              {#if showHeader(i)}
+              {#if it.header}
                 <div class="who">
                   <button class="face" onclick={() => a && ui.selectAgent(a.id)} aria-label="Open {a?.name ?? 'agent'}"><Portrait agent={a} size={22} /></button>
                   <span class="name">{a?.name ?? 'Agent'}</span>
@@ -233,7 +236,7 @@
                 </div>
               {/if}
               <div class="say" class:commentary={it.phase === 'commentary'}>
-                <Markdown text={it.text} streaming={it.streaming} />
+                <Markdown text={streamText(it)} streaming={it.streaming} />
               </div>
               {#if it.card?.type === 'plan'}<div class="card-gap"><PlanCard planId={it.card.planId} /></div>
               {:else if it.card?.type === 'plan-done'}<div class="card-gap"><PlanDoneCard planId={it.card.planId} /></div>{/if}
@@ -246,7 +249,7 @@
               {@const again = it.retry}
               <TroubleRow agentId={it.agentId} eventId={it.eventId} ts={it.ts} what={it.what} reason={it.reason} onretry={again && i > lastSaid && !isBusy ? () => sendChat(thread, again) : undefined} />
             {:else if it.kind === 'work'}
-              <WorkRow segs={it.segs} thoughts={it.thoughts} thinking={it.thinking} />
+              <WorkRow segs={it.segs} thoughts={it.thoughts} thinking={thinkingText(it)} />
             {:else if it.kind === 'approval'}
               <ApprovalCard approval={it.approval} />
             {:else if it.kind === 'ask'}
