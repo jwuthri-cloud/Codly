@@ -8,7 +8,9 @@
 //!   waits holds no worker slot (scheduler.rs), only its files. If the worker's process is
 //!   gone, or no worker slot is free when you reply, the task goes back to `Ready` with your
 //!   answer kept in the store (`add_feedback`): the worker's next run of the task, in the
-//!   session it had, reads it first.
+//!   session it had, reads it first. A session that starts new on the task later (a hand-off
+//!   to another provider, another agent or account) reads what you said in its brief
+//!   (`answers_given`).
 //! - A card still open after `REMIND_AFTER_DAYS` is flagged (`reminded_at`) so the UI can nag.
 //!
 //! State is event-sourced (`crate::blockers`); this file is the orchestration around it.
@@ -139,20 +141,17 @@ impl Inner {
             bail!("write an answer first");
         }
         let answer = prompts::clip(answer, MAX_ANSWER);
-        let b = self.close_blocker(id, BlockerStatus::Answered, Some(answer.clone()))?;
-        let text = format!("Answer to your question \"{}\": {answer}", b.title);
-        self.resume(&b, text).await?;
+        let b = self.close_blocker(id, BlockerStatus::Answered, Some(answer))?;
+        if let Some(text) = told(&b) {
+            self.resume(&b, text).await?;
+        }
         Ok(b)
     }
 
     /// Dismiss a card without an answer. A blocked agent is told to use its best judgment.
     pub(super) async fn dismiss_blocker(self: &Arc<Self>, id: &str) -> Result<Blocker> {
         let b = self.close_blocker(id, BlockerStatus::Dismissed, None)?;
-        if b.severity == BlockerSeverity::Blocking {
-            let text = format!(
-                "The user skipped your question \"{}\". Continue with your best judgment and note the assumption in your report.",
-                b.title
-            );
+        if let Some(text) = told(&b) {
             self.resume(&b, text).await?;
         }
         Ok(b)
@@ -257,6 +256,46 @@ impl Inner {
             .count();
         Ok(active.len() < settings.max_parallel.max(1) as usize && on_account < settings.max_per_provider.max(1) as usize)
     }
+
+    /// What you said to the questions of a task, for the brief of a worker session that never
+    /// read it: after a hand-off to another provider, or a retry on another agent or account,
+    /// the session that got your answer is not the one that goes on. `waiting` is what the same
+    /// prompt already carries (`Inner::feedback`): an answer in there is not said twice.
+    pub(super) fn answers_given(&self, ws: &str, task_id: &str, waiting: Option<&str>) -> Result<Option<String>> {
+        let cards = self.store.with(|db| blockers::list(db, Some(ws)))?;
+        Ok(answers_text(&cards, task_id, waiting))
+    }
+}
+
+/// What the asker is told when its card is closed: your answer, or that you skipped a question
+/// its task waited for. None = nothing to tell (an open card, a heads-up you dismissed).
+fn told(b: &Blocker) -> Option<String> {
+    match (b.status, &b.answer) {
+        (BlockerStatus::Answered, Some(answer)) => Some(format!("Answer to your question \"{}\": {answer}", b.title)),
+        (BlockerStatus::Dismissed, _) if b.severity == BlockerSeverity::Blocking => Some(format!(
+            "The user skipped your question \"{}\". Continue with your best judgment and note the assumption in your report.",
+            b.title
+        )),
+        _ => None,
+    }
+}
+
+/// `Inner::answers_given` over the cards of the task's office, oldest question first.
+fn answers_text(cards: &[Blocker], task_id: &str, waiting: Option<&str>) -> Option<String> {
+    let said: Vec<String> = cards
+        .iter()
+        .filter(|b| b.task_id.as_deref() == Some(task_id))
+        .filter_map(told)
+        .filter(|t| !waiting.is_some_and(|w| w.contains(t.as_str())))
+        .map(|t| format!("- {t}"))
+        .collect();
+    if said.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Codly] An earlier run of this task asked the user questions. What the user said still stands:\n{}",
+        said.join("\n")
+    ))
 }
 
 fn reply(severity: BlockerSeverity) -> Value {
@@ -308,5 +347,57 @@ mod tests {
     fn replies_tell_a_blocked_agent_to_stop_and_a_heads_up_to_carry_on() {
         assert!(reply(BlockerSeverity::Blocking)["note"].as_str().unwrap().contains("end your turn"));
         assert_eq!(reply(BlockerSeverity::HeadsUp)["status"], "noted");
+    }
+
+    fn card(task: &str, title: &str, severity: BlockerSeverity, status: BlockerStatus, answer: Option<&str>) -> Blocker {
+        Blocker {
+            id: new_id(),
+            workspace_id: Some("w1".into()),
+            agent_id: "worker".into(),
+            task_id: Some(task.into()),
+            thread: "lead".into(),
+            title: title.into(),
+            body: "What is needed and why.".into(),
+            severity,
+            status,
+            answer: answer.map(String::from),
+            created_at: 1,
+            updated_at: 1,
+            answered_at: None,
+            reminded_at: None,
+        }
+    }
+
+    #[test]
+    fn a_new_session_reads_what_you_said_to_the_questions_of_its_task() {
+        use BlockerSeverity::{Blocking, HeadsUp};
+        use BlockerStatus::{Answered, Dismissed, Open};
+        let cards = [
+            card("t1", "Which greeting?", Blocking, Answered, Some("casual please")),
+            card("t1", "Which port?", Blocking, Dismissed, None),
+            card("t1", "Tests are slow", HeadsUp, Answered, Some("skip the slow ones")),
+            // Nothing to tell: still open, a heads-up you dismissed, another task's question.
+            card("t1", "Which database?", Blocking, Open, None),
+            card("t1", "FYI", HeadsUp, Dismissed, None),
+            card("t2", "Which color?", Blocking, Answered, Some("blue")),
+        ];
+        let text = answers_text(&cards, "t1", None).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("[Codly] An earlier run of this task asked the user questions."), "{text}");
+        assert_eq!(
+            lines[1..],
+            [
+                "- Answer to your question \"Which greeting?\": casual please",
+                "- The user skipped your question \"Which port?\". Continue with your best judgment and note the assumption in your report.",
+                "- Answer to your question \"Tests are slow\": skip the slow ones",
+            ]
+        );
+
+        // An answer the same prompt already carries (it still waits for the task's next run) is not said twice.
+        let waiting = "[User] Answer to your question \"Which greeting?\": casual please\n\n[Codly] Claude Code hit its usage limit.";
+        let rest = answers_text(&cards, "t1", Some(waiting)).unwrap();
+        assert!(!rest.contains("Which greeting?") && rest.contains("Which port?"), "{rest}");
+        assert_eq!(answers_text(&cards, "t3", None), None, "a task that asked nothing gets no note");
+        assert_eq!(answers_text(&cards[..1], "t1", Some(waiting)), None, "nothing left to say");
     }
 }

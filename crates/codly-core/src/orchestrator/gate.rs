@@ -1112,14 +1112,18 @@ impl Inner {
     /// Before a reviewed task merges: did its worker get a turn since the review started (a
     /// message from you, or from the Lead)? The review never saw that work, and merging now
     /// would leave it out and shut the worker down mid-turn. The task goes back to Running:
-    /// the turn's end, or the gate started here when it is already over, checks it again
-    /// (a turn that failed is over too, but only the turn that continues it is checked).
+    /// the turn's end, or the gate started here when it is already over, checks it again.
+    /// A turn that failed is over too, but it is not the worker's finish: the prompt that asks
+    /// the worker to continue, if Codly still owes it (ingest.rs `turn_failed`), goes out now,
+    /// and the end of that turn is checked. With nothing owed (the turn ended on the usage
+    /// limit, or was interrupted) the work is checked as it is: nothing else moves the task on.
     /// By its turns, not by a dirty worktree: verify commands leave files behind too.
     fn steered_in_review(self: &Arc<Self>, task: &Task, review: &crate::store::RunRow) -> Result<bool> {
         let worker = task.assignee.clone().unwrap_or_default();
         let turn_since = |e: &EventRow| e.agent_id.as_deref() == Some(worker.as_str()) && e.ts >= review.started_at;
         // Only a run of this task counts: after your own pass the agent may be on other work.
-        let quiet = !self.works_on(&worker, &task.id) || self.is_quiet(&worker);
+        let on_task = self.works_on(&worker, &task.id);
+        let quiet = !on_task || self.is_quiet(&worker);
         if quiet && !self.store.task_events(&task.id, "turn_started")?.iter().any(turn_since) {
             return Ok(false);
         }
@@ -1128,12 +1132,11 @@ impl Inner {
             t.status_reason = Some("the worker got a new message; re-checking when it finishes".into());
             Ok(())
         })?;
-        // Not after a turn that failed: that turn is not the worker's finish. Codly asks the
-        // worker to continue (ingest.rs `turn_failed`), and the end of that turn runs the gate.
-        let failed = lock(&self.live)
-            .get(&worker)
-            .is_some_and(|l| l.task_id.as_deref() == Some(task.id.as_str()) && l.failed_turns > 0);
-        if !failed {
+        // Asked now, not after its wait: a turn that ended since (interrupted, or on the usage
+        // limit) took that wait's place, and then nothing else would send the prompt. A run in
+        // a turn sends it by itself when that turn completes.
+        let continued = on_task && quiet && self.continue_failed_turn(&worker);
+        if !continued {
             tokio::spawn(self.clone().gate(task.id.clone()));
         }
         Ok(true)

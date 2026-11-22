@@ -4,6 +4,7 @@
 //! A heads-up card does not stop the worker, and dismissing a blocking card unblocks it too.
 //! A task that waits holds no worker slot, and an answer for a worker that is gone (Codly
 //! restarted) or that has no slot to go on in is kept for the worker's next run of the task.
+//! A worker that takes the task over in a new session reads what you said in its brief.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,9 +60,12 @@ struct FakeTurn {
 }
 
 impl FakeTurn {
-    fn say(&self, text: &str) {
-        let kind = EventKind::Message { item_id: new_id(), text: text.into(), phase: MessagePhase::Final };
+    fn emit(&self, kind: EventKind) {
         let _ = self.events.send(AdapterEvent { agent_id: self.spec.agent_id.clone(), run_id: self.spec.run_id.clone(), kind });
+    }
+
+    fn say(&self, text: &str) {
+        self.emit(EventKind::Message { item_id: new_id(), text: text.into(), phase: MessagePhase::Final });
     }
 
     /// Call a codly_* tool exactly like the stdio bridge does.
@@ -168,8 +172,12 @@ fn lead_with(plan: Value) -> Behavior {
 }
 
 async fn start(root: &Path, spawner: FakeSpawner) -> Arc<Core> {
+    start_with(root, spawner, vec![claude()]).await
+}
+
+async fn start_with(root: &Path, spawner: FakeSpawner, clis: Vec<CliInfo>) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(clis), index: false };
     Core::start_with(cfg, opts).await.unwrap()
 }
 
@@ -424,6 +432,61 @@ async fn your_answer_survives_a_restart_and_reaches_the_restarted_worker() {
     plan_done(&core).await;
     let seen = turns_of(&turns, worker.as_deref());
     assert!(seen.len() == before + 1 && seen[before].starts_with(ANSWER), "{seen:?}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn your_answer_reaches_the_worker_that_takes_the_task_over_in_a_new_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    // The Claude worker asks. It reads your answer, and its account runs out before the work is
+    // done. The Codex worker that takes the task over never saw the question (`taken_over`:
+    // the first prompt it gets).
+    let taken_over = Arc::new(Mutex::new(None::<String>));
+    let worker = |first: Arc<Mutex<Option<String>>>| -> Behavior {
+        Arc::new(move |turn: FakeTurn| {
+            let first = first.clone();
+            Box::pin(async move {
+                if turn.spec.provider == Provider::Codex {
+                    let _ = first.lock().unwrap().get_or_insert_with(|| turn.prompt.clone());
+                    std::fs::write(turn.spec.cwd.join("hello.txt"), "hello\n").unwrap();
+                    turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created hello.txt.", "files_changed": ["hello.txt"] })).await;
+                } else if turn.prompt.contains("Answer to your question") {
+                    turn.emit(EventKind::StatusChanged { status: AgentStatus::RateLimited });
+                } else {
+                    turn.tool("codly_ask_user", json!({ "title": "Which greeting?", "question": "Formal or casual hello?" })).await;
+                }
+            })
+        })
+    };
+    let turns: Turns = Arc::new(Mutex::new(vec![]));
+    let spawner = || FakeSpawner { lead: planning_lead(), worker: worker(taken_over.clone()), turns: turns.clone() };
+    let clis = || vec![claude(), CliInfo { provider: Provider::Codex, ..claude() }];
+    let core = start_with(dir.path(), spawner(), clis()).await;
+    let settings =
+        Settings { auto_run_plans: true, lead_followups: false, worker_providers: vec![Provider::Claude, Provider::Codex], ..Default::default() };
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.send_chat("lead", "Please add a hello file").await.unwrap();
+    let card = wait_for("the blocking card", 30, async || open_card(&core).await).await;
+    let asker = task_of(&core).await.assignee;
+
+    // You quit Codly with the question open and answer it the next day: the worker that asked
+    // is restarted and reads your answer. Nothing waits for the task's next run after that.
+    core.shutdown().await;
+    drop(core);
+    let core = start_with(dir.path(), spawner(), clis()).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core.answer_blocker(&card.id, "casual please").await.unwrap();
+
+    // Its account is on its limit: the task goes to the other provider, in a new session.
+    plan_done(&core).await;
+    let asked = turns_of(&turns, asker.as_deref());
+    assert!(asked.last().is_some_and(|t| t.starts_with(ANSWER)), "the worker that asked read your answer: {asked:?}");
+    let brief = taken_over.lock().unwrap().clone().expect("the other provider took the task over");
+    assert!(brief.contains("[Codly] Task t1:"), "a new session starts from the brief: {brief}");
+    assert!(brief.contains("- Answer to your question \"Which greeting?\": casual please"), "your answer is not in it: {brief}");
+    assert!(brief.contains("hit its usage limit"), "{brief}");
     core.shutdown().await;
 }
 

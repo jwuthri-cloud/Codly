@@ -10,7 +10,9 @@
 //! - a merge conflict has its own rounds (two used fix rounds do not fail the task), and a
 //!   task that fails with conflict markers is not left in the middle of a merge;
 //! - a worker whose turn ends with no report is asked for it once before its work is checked;
-//! - a turn that failed while the work was reviewed is not checked when the review ends;
+//! - a turn that failed while the work was reviewed is not checked when the review ends: the
+//!   worker is asked to continue first, and a turn that ended on the usage limit (nobody is
+//!   asked to continue) does not leave the task waiting;
 //! - after a context compaction the next prompt to the worker carries its task again.
 
 use std::collections::HashMap;
@@ -770,23 +772,46 @@ async fn a_worker_that_never_reports_is_asked_once_and_then_checked() {
     core.shutdown().await;
 }
 
+/// The reviewer approves, the first time only when the test ends that review (`end`); every
+/// other agent is `worker`.
+fn with_held_review(end: Arc<tokio::sync::Notify>, worker: Behavior) -> Behavior {
+    let first = Arc::new(AtomicBool::new(true));
+    Arc::new(move |turn: FakeTurn| {
+        let (end, first, worker) = (end.clone(), first.clone(), worker.clone());
+        Box::pin(async move {
+            if turn.spec.role != Role::Reviewer {
+                return worker(turn).await;
+            }
+            if first.swap(false, Ordering::SeqCst) {
+                end.notified().await;
+            }
+            let criteria = json!([{ "criterion": "hello.txt is right", "met": true }]);
+            turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
+        })
+    })
+}
+
+/// Wait until t1's work is read by its reviewer, then send its worker a message from you.
+async fn message_in_review(core: &Core, turns: &Turns, text: &str) {
+    let reading = || turns.lock().unwrap().iter().any(|t| t.0 == Role::Reviewer);
+    let t = wait_for("the review", 40, async || task_by_key(core, "t1").await.filter(|t| reading() && t.status == TaskStatus::Reviewing)).await;
+    core.send_chat(&format!("agent:{}", t.assignee.unwrap()), text).await.unwrap();
+}
+
+/// hello.txt as the plan's branch has it after the merge.
+async fn merged_hello(core: &Core) -> String {
+    let plan = core.snapshot().await.unwrap().plans.remove(0);
+    std::fs::read_to_string(PathBuf::from(plan.integration_worktree.unwrap()).join("hello.txt")).unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_turn_that_failed_during_the_review_is_not_checked_when_the_review_ends() {
     let dir = tempfile::tempdir().unwrap();
     let turns = Turns::default();
-    // The first review ends when the test says so.
     let reviewed = Arc::new(tokio::sync::Notify::new());
-    let (wait, first) = (reviewed.clone(), Arc::new(AtomicBool::new(true)));
-    let agents: Behavior = Arc::new(move |turn: FakeTurn| {
-        let (wait, first) = (wait.clone(), first.clone());
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
         Box::pin(async move {
-            if turn.spec.role == Role::Reviewer {
-                if first.swap(false, Ordering::SeqCst) {
-                    wait.notified().await;
-                }
-                let criteria = json!([{ "criterion": "hello.txt is right", "met": true }]);
-                turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
-            } else if turn.prompt.contains(BRIEF) {
+            if turn.prompt.contains(BRIEF) {
                 turn.write("hello.txt", "hello\n");
                 turn.done().await;
             } else if turn.prompt.contains("second line") {
@@ -798,43 +823,70 @@ async fn a_turn_that_failed_during_the_review_is_not_checked_when_the_review_end
             }
         })
     });
-    let spawner = FakeSpawner { lead: lead_with(hello_plan()), worker: agents, turns: turns.clone() };
+    let spawner = FakeSpawner { lead: lead_with(hello_plan()), worker: with_held_review(reviewed.clone(), worker), turns: turns.clone() };
     let core = start(dir.path(), spawner, Settings { review_gate: true, ..auto() }).await;
-    // A wait no test reaches: only another turn's end asks the worker to continue.
+    // A wait no test reaches: only the review's end asks the worker to continue.
     core.set_turn_retry_waits(vec![Duration::from_secs(600); 2]);
-    let reading = || turns.lock().unwrap().iter().any(|t| t.0 == Role::Reviewer);
-    let t = wait_for("the review", 40, async || task_by_key(&core, "t1").await.filter(|t| reading() && t.status == TaskStatus::Reviewing)).await;
 
     // You message the worker while its work is read, and that turn fails.
-    let thread = format!("agent:{}", t.assignee.clone().unwrap());
-    core.send_chat(&thread, "also add a second line").await.unwrap();
+    message_in_review(&core, &turns, "also add a second line").await;
     wait_for("Codly to see the failed turn", 20, async || {
         decisions(&events(&core).await).iter().any(|d| d.1.contains("Codly asks it to continue")).then_some(())
     })
     .await;
 
-    // The review ends before the worker went on: the half-written file is not checked.
+    // The review ends before the worker went on. The half-written file is not checked: the
+    // worker is asked to continue now, and the end of that turn is checked.
     reviewed.notify_one();
-    wait_for("the task to wait for the worker", 20, async || {
-        task_by_key(&core, "t1").await.filter(|t| t.status == TaskStatus::Running && t.status_reason.as_deref().is_some_and(|r| r.contains("new message")))
-    })
-    .await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    let so_far = events(&core).await;
-    assert_eq!(verified(&so_far), [(HELLO_CHECK.to_string(), true)], "only the work of the first turn was checked");
-    assert!(!decisions(&so_far).iter().any(|d| d.1.contains("fix round")), "{:?}", decisions(&so_far));
-    assert_eq!(task_by_key(&core, "t1").await.unwrap().status, TaskStatus::Running);
-
-    // Another turn ends: Codly asks the worker to continue, and that turn's end is checked.
-    core.send_chat(&thread, "go on").await.unwrap();
     wait_plan(&core, PlanStatus::Done).await;
     let all = events(&core).await;
     assert_eq!(verified(&all), vec![(HELLO_CHECK.to_string(), true); 2], "the half-written file never reached a check");
     assert!(!decisions(&all).iter().any(|d| d.1.contains("fix round")), "{:?}", decisions(&all));
-    assert!(worker_prompts(&turns).iter().any(|p| p.contains("Your last turn on task")), "the worker was asked to continue");
-    let plan = core.snapshot().await.unwrap().plans.remove(0);
-    let merged = std::fs::read_to_string(PathBuf::from(plan.integration_worktree.unwrap()).join("hello.txt")).unwrap();
-    assert_eq!(merged, "hello\nworld\n");
+    let asked = worker_prompts(&turns).iter().filter(|p| p.contains("Your last turn on task")).count();
+    assert_eq!(asked, 1, "the worker was asked to continue, once");
+    assert_eq!(merged_hello(&core).await, "hello\nworld\n");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_that_ended_on_the_usage_limit_during_the_review_does_not_leave_the_task_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    let reviewed = Arc::new(tokio::sync::Notify::new());
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains(BRIEF) {
+                turn.write("hello.txt", "hello\n");
+                turn.done().await;
+            } else {
+                // Your message: after one more line the account's usage limit ends the turn.
+                turn.write("hello.txt", "hello\nworld\n");
+                turn.emit(EventKind::StatusChanged { status: AgentStatus::RateLimited });
+                turn.fail("You have hit your usage limit");
+            }
+        })
+    });
+    let spawner = FakeSpawner { lead: lead_with(hello_plan()), worker: with_held_review(reviewed.clone(), worker), turns: turns.clone() };
+    let core = start(dir.path(), spawner, Settings { review_gate: true, ..auto() }).await;
+
+    message_in_review(&core, &turns, "also add a second line").await;
+    wait_for("Codly to see the failed turn", 20, async || {
+        events(&core).await.iter().any(|e| matches!(e.kind, EventKind::TurnCompleted { status: TurnStatus::Failed, .. })).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A worker at its limit is not asked to continue, so no later turn would move the task on:
+    // when the review ends, the work is checked as that turn left it.
+    reviewed.notify_one();
+    wait_plan(&core, PlanStatus::Done).await;
+    let all = events(&core).await;
+    assert_eq!(verified(&all), vec![(HELLO_CHECK.to_string(), true); 2], "checked once more when the review ended");
+    let said = decisions(&all);
+    assert!(!said.iter().any(|d| d.1.contains("Codly asks it to continue")), "{said:?}");
+    let prompts = worker_prompts(&turns);
+    assert_eq!(prompts.len(), 2, "the brief and your message, nothing else: {prompts:?}");
+    assert_eq!(merged_hello(&core).await, "hello\nworld\n");
     core.shutdown().await;
 }
 

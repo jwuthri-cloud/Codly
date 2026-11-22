@@ -639,6 +639,8 @@ impl Inner {
         });
         // Taken for good only when the brief goes out: a start that stops short keeps it for the retry.
         let feedback = self.feedback(task_id)?;
+        // For a session that is new to the task: what you said to the task's questions.
+        let answers = self.answers_given(&ws.id, task_id, feedback.as_deref())?;
         // A member continues its own conversation on a new task (unless the Lead asked for a
         // fresh one), when that conversation lives on this account.
         let own = match (&member, &agent.session_id) {
@@ -711,17 +713,11 @@ impl Inner {
             (Start::OwnSession, f) => {
                 let brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), false).await;
                 let next = prompts::member_next_task(&brief, &branch, switch_note.as_deref());
-                match f {
-                    Some(f) => format!("{next}\n\n{f}"),
-                    None => next,
-                }
+                [Some(next), answers, f].into_iter().flatten().collect::<Vec<_>>().join("\n\n")
             }
             (Start::New, f) => {
                 let brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), true).await;
-                match f {
-                    Some(f) => format!("{brief}\n\n{f}"),
-                    None => brief,
-                }
+                [Some(brief), answers, f].into_iter().flatten().collect::<Vec<_>>().join("\n\n")
             }
         };
         if stale() {
