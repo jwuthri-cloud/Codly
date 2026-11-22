@@ -17,6 +17,8 @@
 //! - `delete_worktree` and `delete_branch` (the user's own click) refuse to lose anything unless
 //!   `force` says the user confirmed it, and a forced delete keeps the branch unless the user
 //!   asked for it too;
+//! - a worktree is judged with the record of its folder and the record of the branch it has
+//!   checked out (`Owners::worktree`): a lock on either keeps the folder and the branch;
 //! - a run's folder is removed by `prune_runs` only when nothing was written there for the
 //!   whole retention time and the run is not in `keep`.
 //!
@@ -211,8 +213,16 @@ impl Owners {
         self.worktrees.entry(canonical(path)).or_default().locked = Some(why);
     }
 
-    fn worktree(&self, path: &Path) -> Owner {
-        self.worktrees.get(&canonical(path)).cloned().unwrap_or_default()
+    /// What is known about the worktree at `path` that has `branch` checked out: the record
+    /// of the folder, joined with the record of that branch. A team member's folder has no
+    /// task record of its own: the task it holds is known by its branch. A folder without a
+    /// record of its own is never finished.
+    fn worktree(&self, path: &Path, branch: Option<&str>) -> Owner {
+        let folder = self.worktrees.get(&canonical(path)).cloned().unwrap_or_default();
+        match branch.and_then(|name| self.branches.get(name)) {
+            Some(held) => folder.join(held.clone()),
+            None => folder,
+        }
     }
 
     fn branch(&self, name: &str) -> Owner {
@@ -245,7 +255,7 @@ impl Site<'_> {
     /// The branches whose content is safe without Codly: the one the user has checked out and
     /// the default branch.
     async fn kept_branches(&self) -> Result<Vec<String>> {
-        let mut kept: Vec<String> = self.git.current_branch(self.repo).await?.into_iter().collect();
+        let mut kept: Vec<String> = self.git.checked_out_branch(self.repo).await?.into_iter().collect();
         let default = self.git.default_branch(self.repo).await?;
         if !kept.contains(&default) && self.git.branch_exists(self.repo, &default).await? {
             kept.push(default);
@@ -331,7 +341,7 @@ impl Site<'_> {
         mine.sort_by(|a, b| a.path.cmp(&b.path));
         let mut worktrees = vec![];
         for w in &mine {
-            worktrees.push(self.judge_worktree(w, &kept, &owners.worktree(&w.path)).await);
+            worktrees.push(self.judge_worktree(w, &kept, &owners.worktree(&w.path, w.branch.as_deref())).await);
         }
         let mut branches = vec![];
         for b in self.git.codly_branches(self.repo).await? {
@@ -365,7 +375,7 @@ impl Site<'_> {
         let mut removed = vec![];
         for w in worktrees {
             let path = PathBuf::from(&w.path);
-            if !owners.worktree(&path).finished || w.locked.is_some() || w.state != WorkState::Merged {
+            if !owners.worktree(&path, w.branch.as_deref()).finished || w.locked.is_some() || w.state != WorkState::Merged {
                 continue;
             }
             match self.remove_worktree(&w, false, true).await {
@@ -410,7 +420,7 @@ impl Site<'_> {
         let Some(info) = self.worktrees().await?.0.into_iter().find(|w| canonical(&w.path) == want) else {
             bail!("{} is not one of Codly's worktrees of this repository", path.display());
         };
-        let w = self.judge_worktree(&info, &self.kept_branches().await?, &owners.worktree(&info.path)).await;
+        let w = self.judge_worktree(&info, &self.kept_branches().await?, &owners.worktree(&info.path, info.branch.as_deref())).await;
         if let Some(why) = &w.locked {
             bail!("it cannot be deleted now: {why}");
         }
@@ -720,6 +730,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_folder_is_judged_with_the_record_of_the_branch_it_holds() {
+        let f = Fixture::new();
+        let integration = f.worktree("plan/integration", "main").await;
+        // A team member's folder has no task record: the task is known by the branch it holds.
+        let home = f.root.join("team/ana");
+        f.git.worktree_add(&f.repo, &home, "codly/plan/t3", "main").await.unwrap();
+        f.commit(&home, "t3.txt");
+        sh(&integration, &["merge", "-q", "--no-ff", "-m", "merge t3", "codly/plan/t3"]);
+        let head = f.git.head(&home).await.unwrap();
+        let records = |locked: Option<&str>| {
+            let mut owners = Owners::default();
+            owners.add_worktree(&home, Owner { label: Some("Ana's own folder".into()), ..Default::default() });
+            let task = Owner { locked: locked.map(String::from), merged_into: Some("codly/plan/integration".into()), ..finished() };
+            owners.add_branch("codly/plan/t3", task);
+            owners
+        };
+
+        // The task's plan still runs: its lock and its plan's branch count for the folder too.
+        let owners = records(Some("its plan is not finished"));
+        let (listed, _) = f.site().inspect(&owners).await.unwrap();
+        let w = named(&listed, "ana");
+        assert_eq!((w.state, w.owner.as_deref(), w.locked.as_deref()), (WorkState::Merged, Some("Ana's own folder"), Some("its plan is not finished")));
+        std::fs::write(home.join("draft.txt"), "x").unwrap();
+        for (force, with_branch) in [(false, false), (true, false), (true, true)] {
+            let err = f.site().delete_worktree(&owners, &home, head.as_deref(), force, with_branch).await.unwrap_err().to_string();
+            assert!(err.contains("its plan is not finished"), "{err}");
+        }
+        assert!(home.join("draft.txt").exists() && f.has_branch("codly/plan/t3").await);
+        std::fs::remove_file(home.join("draft.txt")).unwrap();
+
+        // The plan is over. The folder itself is never finished, so the sweep leaves it; you
+        // can delete it, and it has nothing to lose: its commit is in the plan's branch.
+        let owners = records(None);
+        assert!(f.site().sweep(&owners).await.unwrap().is_empty());
+        let removed = f.site().delete_worktree(&owners, &home, head.as_deref(), false, false).await.unwrap();
+        assert_eq!(removed.branch.as_deref(), Some("codly/plan/t3"));
+        assert!(!home.exists() && !f.has_branch("codly/plan/t3").await);
+    }
+
+    #[tokio::test]
+    async fn a_branch_named_like_a_folder_a_file_or_a_tag_is_read_as_the_branch() {
+        let f = Fixture::new();
+        // You work on the branch "docs" in a repository that has a folder "docs/".
+        sh(&f.repo, &["switch", "-q", "-c", "docs"]);
+        std::fs::create_dir(f.repo.join("docs")).unwrap();
+        f.commit(&f.repo, "docs/guide.md");
+        let merged = f.worktree("merged", "HEAD").await;
+        f.commit(&merged, "m.txt");
+        sh(&f.repo, &["merge", "-q", "--no-ff", "-m", "merge", "codly/merged"]);
+        let unmerged = f.worktree("unmerged", "HEAD").await;
+        f.commit(&unmerged, "u.txt");
+        sh(&f.repo, &["branch", "codly/old", "HEAD"]);
+        // A tag "docs" at an older commit, and a built program "main" next to the branch "main".
+        sh(&f.repo, &["tag", "docs", "refs/heads/main"]);
+        std::fs::write(f.repo.join("main"), "binary").unwrap();
+
+        let mut owners = Owners::default();
+        owners.add_worktree(&merged, finished());
+        owners.add_worktree(&unmerged, finished());
+        owners.add_branch("codly/old", finished());
+        let (listed, branches) = f.site().inspect(&owners).await.unwrap();
+        assert!(listed.iter().all(|w| w.locked.is_none()), "{listed:?}");
+        assert_eq!(named(&listed, "merged").state, WorkState::Merged, "the branch docs has its commit; the tag docs does not");
+        assert_eq!((named(&listed, "unmerged").state, named(&listed, "unmerged").unmerged_commits), (WorkState::Unmerged, 1));
+        assert_eq!(branches.iter().map(|b| (b.name.as_str(), b.unmerged_commits)).collect::<Vec<_>>(), [("codly/old", 0)]);
+
+        let removed = f.site().sweep(&owners).await.unwrap();
+        assert_eq!(removed.iter().map(|r| r.branch.as_deref()).collect::<Vec<_>>(), [Some("codly/merged"), Some("codly/old")]);
+        assert!(unmerged.exists() && f.has_branch("codly/unmerged").await);
+    }
+
+    #[tokio::test]
     async fn branches_without_a_worktree_go_only_when_merged_and_finished() {
         let f = Fixture::new();
         for name in ["codly/done", "codly/unmerged", "codly/unknown", "codly/busy", "feature"] {
@@ -837,7 +919,7 @@ mod tests {
         let path = Path::new("/nowhere/wt");
         owners.add_worktree(path, Owner { label: Some("Task t1".into()), ..finished() });
         owners.add_worktree(path, Owner { locked: Some("task t2 is not finished".into()), ..Default::default() });
-        let joined = owners.worktree(path);
+        let joined = owners.worktree(path, None);
         assert_eq!((joined.finished, joined.label.as_deref(), joined.locked.as_deref()), (false, Some("Task t1"), Some("task t2 is not finished")));
     }
 

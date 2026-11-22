@@ -808,23 +808,36 @@ impl Git {
             .collect())
     }
 
-    /// How many commits `rev` has that none of `others` has. 0 = `rev` is contained in one of
-    /// them: nothing is lost when only they stay. With no `others`, every commit counts.
+    /// The branch checked out in `dir`, by its name under `refs/heads/` (None: on no branch).
+    /// `current_branch` gives the name the way git shortens it: "heads/x" when a tag is also
+    /// named x.
+    pub async fn checked_out_branch(&self, dir: &Path) -> Result<Option<String>> {
+        let out = self.run(dir, &["symbolic-ref", "--quiet", "HEAD"], true).await?;
+        Ok(if out.ok { out.stdout.trim().strip_prefix("refs/heads/").map(String::from) } else { None })
+    }
+
+    /// How many commits `rev` has that none of the local branches `others` has. 0 = `rev` is
+    /// contained in one of them: nothing is lost when only they stay. With no `others`, every
+    /// commit counts.
     pub async fn commits_only_on(&self, repo: &Path, rev: &str, others: &[String]) -> Result<u32> {
+        // Full ref names, and "--" to end the revisions: a branch can have the name of a tag,
+        // or of a file or a folder in the checkout, and git refuses a name that is two things.
+        let others: Vec<String> = others.iter().map(|branch| format!("refs/heads/{branch}")).collect();
         let mut args = vec!["rev-list", "--count", rev, "--not"];
         args.extend(others.iter().map(String::as_str));
+        args.push("--");
         Ok(self.read(repo, &args).await?.trim().parse()?)
     }
 
     /// How many commits `rev` has that no local branch has: what goes with a worktree that is
     /// on no branch.
     pub async fn commits_on_no_branch(&self, repo: &Path, rev: &str) -> Result<u32> {
-        Ok(self.read(repo, &["rev-list", "--count", rev, "--not", "--branches"]).await?.trim().parse()?)
+        Ok(self.read(repo, &["rev-list", "--count", rev, "--not", "--branches", "--"]).await?.trim().parse()?)
     }
 
     /// When the commit `rev` was made (unix ms).
     pub async fn committed_at(&self, repo: &Path, rev: &str) -> Result<i64> {
-        Ok(self.read(repo, &["log", "-1", "--format=%ct", rev]).await?.trim().parse::<i64>()? * 1000)
+        Ok(self.read(repo, &["log", "-1", "--format=%ct", rev, "--"]).await?.trim().parse::<i64>()? * 1000)
     }
 
     /// The uncommitted files of a worktree: changed tracked files and untracked files that are
@@ -1210,5 +1223,32 @@ mod tests {
         assert!(git.undo_merge(&repo, "main", &sha, &before, "plan").await.is_err());
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "a new file of mine\n");
         assert_eq!(git.head(&repo).await.unwrap().as_deref(), Some(sha.as_str()), "the merge is still there");
+    }
+
+    /// A branch can have the name of a folder or a file in the checkout, or of a tag. The
+    /// storage reads still mean the branch, and git does not stop on a name that is two things.
+    #[tokio::test]
+    async fn storage_reads_take_a_branch_name_for_the_branch_only() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        let base = git.head(&repo).await.unwrap().unwrap();
+        sh(&repo, &["switch", "-q", "-c", "docs"]);
+        std::fs::create_dir(repo.join("docs")).unwrap();
+        commit_file(&repo, "docs/guide.md", "guide\n");
+        let head = git.head(&repo).await.unwrap().unwrap();
+        // A tag named like the checked-out branch, and a built program named like the default one.
+        sh(&repo, &["tag", "docs", &base]);
+        std::fs::write(repo.join("main"), "binary").unwrap();
+
+        assert_eq!(git.checked_out_branch(&repo).await.unwrap().as_deref(), Some("docs"));
+        assert_eq!(git.commits_only_on(&repo, &head, &["main".to_string()]).await.unwrap(), 1);
+        let kept = ["docs".to_string(), "main".to_string()];
+        assert_eq!(git.commits_only_on(&repo, &head, &kept).await.unwrap(), 0, "the branch docs has the commit; the tag docs does not");
+        assert_eq!(git.commits_only_on(&repo, &head, &[]).await.unwrap(), 2);
+        assert_eq!(git.commits_on_no_branch(&repo, &head).await.unwrap(), 0);
+        assert!(git.committed_at(&repo, &head).await.unwrap() > 0);
+
+        sh(&repo, &["switch", "-q", "--detach"]);
+        assert_eq!(git.checked_out_branch(&repo).await.unwrap(), None);
     }
 }

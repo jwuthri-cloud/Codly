@@ -584,6 +584,60 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_team_members_folder_stays_while_it_holds_a_task_of_an_unfinished_plan() {
+        let (_dir, core, ws, repo) = start().await;
+        let inner = &core.inner;
+        let p = plan(&core, &ws, &repo, "p5", PlanStatus::Running).await;
+        let integration = PathBuf::from(p.integration_worktree.clone().unwrap());
+        // A team member works in its own folder, switched to the task's branch. The task is
+        // blocked and no agent is live on it (Codly was restarted).
+        let home = inner.worktree_root(&ws).join("team").join("ana");
+        inner.git.worktree_add(&repo, &home, "codly/p5/t3", "main").await.unwrap();
+        let t = core.create_task("Task t3", "do a part").await.unwrap();
+        inner
+            .update_task_as(&t.id, true, |t| {
+                t.plan_id = Some(p.id.clone());
+                t.key = "t3".into();
+                t.branch = Some("codly/p5/t3".into());
+                t.worktree = Some(home.to_string_lossy().into_owned());
+                t.status = TaskStatus::Blocked;
+                Ok(())
+            })
+            .unwrap();
+        let path = home.to_string_lossy().into_owned();
+        let listed = |report: StorageReport| {
+            let office = report.offices.into_iter().find(|o| o.office_id == ws.id).unwrap();
+            office.worktrees.into_iter().find(|w| w.branch.as_deref() == Some("codly/p5/t3")).unwrap()
+        };
+
+        // Clean, with no commit of its own: git alone would let one click take the folder and
+        // the branch of the running task.
+        let w = listed(core.storage().await.unwrap());
+        assert_eq!((w.state, w.locked.as_deref()), (WorkState::Merged, Some("its plan is not finished")));
+        let err = core.delete_worktree(&ws.id, &path, w.head.as_deref(), false, false).await.unwrap_err().to_string();
+        assert!(err.contains("its plan is not finished"), "{err}");
+
+        // With work in it, a confirm does not take it either, with or without its branch.
+        commit(&home, "t3.txt");
+        std::fs::write(home.join("draft.txt"), "not committed").unwrap();
+        let head = inner.git.head(&home).await.unwrap();
+        for delete_branch in [false, true] {
+            let err = core.delete_worktree(&ws.id, &path, head.as_deref(), true, delete_branch).await.unwrap_err().to_string();
+            assert!(err.contains("its plan is not finished"), "{err}");
+        }
+        assert_eq!(std::fs::read_to_string(home.join("draft.txt")).unwrap(), "not committed");
+        assert!(has_branch(&core, &repo, "codly/p5/t3").await);
+        assert_eq!(core.clean_storage().await, StorageCleanup::default());
+
+        // What the plan's branch already has is not "not merged".
+        std::fs::remove_file(home.join("draft.txt")).unwrap();
+        sh(&integration, &["merge", "-q", "--no-ff", "-m", "merge t3", "codly/p5/t3"]);
+        let w = listed(core.storage().await.unwrap());
+        assert_eq!((w.state, w.unmerged_commits), (WorkState::Merged, 0));
+        assert!(home.exists() && storage_decisions(&core, Some(&ws.id)).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn old_run_logs_go_with_the_sweep_and_a_running_run_keeps_its_folder() {
         let (dir, core, ws, _repo) = start().await;
         let inner = &core.inner;
