@@ -71,7 +71,8 @@ you. Approve once, allow for the session, or deny.
 4. **Land the work.** When a worker finishes, Codly commits, re-runs the verify commands, checks the write
    scope, optionally asks a reviewer from another vendor, and merges into the plan's integration branch.
    Agents never commit on their own.
-5. **You merge.** Review the diff and merge it into your branch. Codly never pushes.
+5. **You merge.** Review the diff and merge it into your branch. Codly pushes your branch only when you
+   press Push.
 
 Agents coordinate through Codly's MCP tools, so every exchange is typed, validated and visible. Every
 agent gets `codly_get_task`, `codly_board`, `codly_search`, `codly_memory_search`, `codly_memory_write`,
@@ -136,21 +137,72 @@ the open app serves too and opens the link in your browser.
 ## Project layout
 
 - `crates/codly-core/`: the engine, with no Tauri dependency. Orchestrator (Lead, team, planner, scheduler,
-  merge queue, approval broker, triggers), agent adapters, SQLite store, code index, memory, inbound
+  merge queue, approval broker, triggers), agent adapters, SQLite store, git, code index, memory, inbound
   sources and the MCP server.
-- `src-tauri/`: the macOS shell (Tauri 2) that hosts the engine.
-- `src/`: the Svelte 5 UI: the Workspace, the World (`src/office/`, three.js) and onboarding.
+- `src-tauri/`: the macOS shell (Tauri 2) that hosts the engine, and `codly serve` (the same UI in a
+  browser).
+- `src/`: the Svelte 5 UI: the Workspace, the World (`src/office/`, three.js), the neighbourhood map
+  (`src/world/`), Settings (`src/overlays/`) and onboarding.
+- `public/`: the office's furniture models and sounds. These are third-party assets (CC0 and CC BY);
+  each folder has its licence or credits file.
 - `site/`: the landing page and the live demo build.
+- `scripts/`: `install-app.sh` builds Codly.app and installs it in /Applications; `kaykit-clips.py`
+  converts animation clips for the World.
+- `voice/`: experimental and optional. A Python relay that lets you talk to an agent out loud through
+  OpenAI Realtime, used only by `codly serve`. Its start script needs the author's own OpenAI workload
+  identity, so nobody else can run it as it is. Without the relay everything else works; a voice call
+  fails with "the voice relay is not running".
+- `research-skills/`: optional skills for research work. They are not part of the app; you install them
+  by hand with `research-skills/install.sh`.
 - `docs/`: architecture, design notes and the research behind them.
+
+The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 
 ## Subscriptions and safety
 
-- Codly spawns the unmodified CLIs you installed and signed in to. It never reads, stores or proxies your
-  credentials.
+**Your sign-ins and keys**
+
+- Codly spawns the unmodified CLIs you installed and signed in to. It does not proxy them. To see who is
+  signed in, it runs the CLI's own status command (Claude Code, Codex) or reads the CLI's settings file
+  (Gemini: the sign-in method and the account email, no token).
+- Codly does not read your CLIs' sign-in tokens, with one exception that is off until you turn it on:
+  **Show Claude usage before an agent runs** (Settings → Accounts). With it on, each time Codly checks
+  your sign-ins it reads the Claude Code sign-in token (from the Keychain, or from the sign-in's
+  `.credentials.json` file) and sends it to `api.anthropic.com` to ask for your usage, as `/usage` does.
+  Codly does not store or log the token. Check Anthropic's terms first: they may not allow another app to
+  use this token. With it off, a sign-in shows its usage once an agent has run on it.
+- Keys that you give to Codly are stored in the macOS Keychain, not in Codly's settings or database: your
+  own API keys (Settings → API keys; each one goes to one CLI only), the Groq key for dictation, webhook
+  secrets and Slack tokens, and the keys of the tool servers you switch on for agents.
 - Each agent shows a billing badge (subscription, API key or third party). API-key variables that would
-  silently switch billing are removed from agent environments.
-- Codly never pushes, and it merges only into integration branches you review.
-- Provider terms change. Check them before heavy parallel use.
+  silently switch billing are removed from agent environments, unless you turned on your own API key for
+  that vendor.
+
+**Your repository**
+
+- Codly commits and merges by itself only on its own `codly/…` branches: a task's branch, then the
+  plan's integration branch after the task's checks pass.
+- Codly changes your branch only when you press a button: **Merge** (a plan's integration branch, or one
+  agent's branch, into the branch you have checked out), **Commit** (your own uncommitted changes) and
+  **Push** (the branch you have checked out, to its remote, through your own SSH agent).
+- One kind of agent edits your project folder directly: an agent that you hire with **Git isolation**
+  switched off. The hire screen warns you about it.
+- An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
+  access, which approves it.
+- Codly removes a worktree only when it is clean and merged. It keeps the branch.
+
+**The network**
+
+- There are no Codly servers: no account, nothing to sync. Your CLIs talk to their own providers as
+  before.
+- Codly itself goes online only to install a CLI or a skill when you click, to fetch the tool servers
+  that agents start with (through `npx` or `uvx`), to push when you press Push, and for two features that
+  are off until you turn them on: dictation (audio goes to Groq with your key) and Show Claude usage.
+  The voice relay in `voice/` talks to OpenAI, and only if you run it.
+- Inbound webhooks listen on this Mac only (loopback) and are created switched off. `codly serve` also
+  listens on this Mac only, unless you pass `--host`.
+
+Provider terms change. Check them before heavy parallel use.
 
 ## Docs
 

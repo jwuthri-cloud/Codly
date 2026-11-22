@@ -51,6 +51,7 @@ export const DEFAULT_SETTINGS: Settings = {
   accounts: [],
   account_strategy: 'spread',
   lead_account: null,
+  read_claude_quota: false,
   approval_mode: 'balanced',
   auto_run_plans: false,
   review_gate: false,

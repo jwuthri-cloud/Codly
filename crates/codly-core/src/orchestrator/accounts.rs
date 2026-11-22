@@ -165,6 +165,20 @@ pub(super) async fn detect(
     }
 }
 
+/// The Claude sign-ins (id, config home) whose OAuth token Codly may read to ask for their
+/// quota. None unless the user switched `read_claude_quota` on, and never a sign-in the user
+/// switched off or one known to be signed out.
+fn quota_targets(settings: &Settings, accounts: &[AccountInfo]) -> Vec<(String, Option<String>)> {
+    if !settings.read_claude_quota {
+        return vec![];
+    }
+    accounts
+        .iter()
+        .filter(|a| a.provider == Provider::Claude && a.enabled && a.logged_in != Some(false))
+        .map(|a| (a.id.clone(), a.home.clone()))
+        .collect()
+}
+
 impl Inner {
     /// The registry, each account with its last-reported usage windows.
     pub(super) fn accounts(&self) -> Vec<AccountInfo> {
@@ -193,19 +207,25 @@ impl Inner {
         if let Some(found) = detect(&self.base_env, &self.clis(), &configs, !self.fixed_clis, known).await {
             *write(&self.accounts) = found;
         }
-        if !reuse && !self.fixed_clis {
-            self.pull_quota().await;
-        }
         self.kick();
     }
 
-    /// Ask each signed-in Claude account for its quota (what `/usage` shows), so accounts no
-    /// agent has run on yet have it too.
-    async fn pull_quota(&self) {
+    /// Ask Anthropic for the quota of each Claude account in `quota_targets` (what `/usage`
+    /// shows), so accounts no agent has run on yet have it too. This is the only place Codly
+    /// reads a CLI's own credential (`crate::quota`), so it does nothing unless the user
+    /// switched it on. Fixed CLIs (tests) never read one.
+    pub(super) async fn pull_quota(&self) {
+        if self.fixed_clis {
+            return;
+        }
+        let targets = quota_targets(&self.settings(), &read(&self.accounts));
+        if targets.is_empty() {
+            return;
+        }
         let user_home = self.base_env.get("HOME").cloned().unwrap_or_default();
         let mut set = tokio::task::JoinSet::new();
-        for a in read(&self.accounts).iter().filter(|a| a.provider == Provider::Claude && a.logged_in != Some(false)) {
-            let (id, home, user_home) = (a.id.clone(), a.home.clone(), user_home.clone());
+        for (id, home) in targets {
+            let user_home = user_home.clone();
             set.spawn(async move { (id, crate::quota::claude(home.as_deref(), &user_home).await) });
         }
         for (id, readings) in set.join_all().await {
@@ -213,6 +233,7 @@ impl Inner {
                 self.record_usage(&id, &r.window, Some(r.used_fraction), r.resets_at, r.status.as_deref());
             }
         }
+        self.kick();
     }
 
     /// The login shell's sign-in of a provider (None = no account detected for it).
@@ -367,5 +388,47 @@ mod tests {
         let s = state_of(&a, now);
         assert_eq!((s.used, s.parked.as_deref()), (0.9, Some("90% of 5h used, resets in 1h")));
         assert_eq!(window_name("seven_day_opus"), "7d opus");
+    }
+
+    fn account(id: &str, provider: Provider, home: Option<&str>) -> AccountInfo {
+        AccountInfo {
+            id: id.into(),
+            provider,
+            home: home.map(String::from),
+            label: "default".into(),
+            enabled: true,
+            primary: home.is_none(),
+            configured: false,
+            logged_in: Some(true),
+            billing: Billing::Subscription,
+            plan: None,
+            identity: None,
+            problem: None,
+            login_command: None,
+            limits: vec![],
+        }
+    }
+
+    #[test]
+    fn claude_tokens_are_read_only_after_the_user_switched_it_on() {
+        let work = "/h/.claude-work";
+        let accounts = [
+            account("claude", Provider::Claude, None),
+            account("claude:/h/.claude-work", Provider::Claude, Some(work)),
+            AccountInfo { logged_in: Some(false), ..account("claude:/h/.claude-out", Provider::Claude, Some("/h/.claude-out")) },
+            AccountInfo { enabled: false, ..account("claude:/h/.claude-off", Provider::Claude, Some("/h/.claude-off")) },
+            account("codex", Provider::Codex, None),
+        ];
+        // Off by default, also for settings saved before the switch existed.
+        assert!(!Settings::default().read_claude_quota);
+        let mut saved = serde_json::to_value(Settings::default()).unwrap();
+        saved.as_object_mut().unwrap().remove("read_claude_quota").unwrap();
+        let old: Settings = serde_json::from_value(saved).unwrap();
+        assert!(!old.read_claude_quota);
+        assert!(quota_targets(&old, &accounts).is_empty(), "no credential is read by default");
+
+        // On: Claude sign-ins Codly may use, never one switched off or signed out, never another CLI.
+        let on = Settings { read_claude_quota: true, ..Settings::default() };
+        assert_eq!(quota_targets(&on, &accounts), [("claude".to_string(), None), ("claude:/h/.claude-work".to_string(), Some(work.to_string()))]);
     }
 }

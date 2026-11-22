@@ -1,6 +1,11 @@
 //! The quota of a Claude sign-in, read the way Claude Code's `/usage` reads it: the sign-in's
 //! OAuth token (login Keychain on macOS, `<home>/.credentials.json` elsewhere) against
-//! `api/oauth/usage`. The token goes to curl on stdin, never argv, and never leaves this module.
+//! `api/oauth/usage`. The token goes to curl on stdin, never argv, and never leaves this module:
+//! it is not stored and not logged.
+//!
+//! This is the one place Codly reads a CLI's own credential, so it is opt-in: the only caller
+//! (`orchestrator/accounts.rs` `pull_quota`) runs it when the user refreshes Accounts with
+//! `Settings.read_claude_quota` on (off by default), and never from the onboarding.
 
 use std::process::Stdio;
 use std::time::Duration;

@@ -23,7 +23,14 @@ accounts: Array<AccountConfig>, account_strategy: AccountStrategy,
 /**
  * Account the Lead runs on (None = the one with the most quota left).
  */
-lead_account: string | null, approval_mode: ApprovalMode, 
+lead_account: string | null, 
+/**
+ * Ask Anthropic for each Claude sign-in's usage (what `/usage` shows) when Accounts are
+ * refreshed. This reads the sign-in's OAuth token (login Keychain, else its
+ * `.credentials.json`) and sends it to api.anthropic.com (`quota.rs`). Off = Codly never
+ * reads that token: usage comes only from what running agents report.
+ */
+read_claude_quota: boolean, approval_mode: ApprovalMode, 
 /**
  * Run plans without waiting for the "Run plan" click.
  */
