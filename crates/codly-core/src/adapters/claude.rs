@@ -479,6 +479,7 @@ struct ToolInfo {
 
 struct PendingApproval {
     request_id: String,
+    tool_use_id: Option<String>,
     tool_name: String,
     input: Value,
     suggestions: Vec<Value>,
@@ -489,6 +490,94 @@ struct PlanItem {
     id: String,
     text: String,
     status: String,
+}
+
+/// An API failure Codly can explain: what happened and what to do about it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ApiFailure {
+    SignedOut,
+    OrgNotAllowed,
+    Billing,
+    OnHold,
+    ModelNotFound,
+    CloudCredentials,
+    RateLimit,
+    Overloaded,
+    ServerError,
+}
+
+impl ApiFailure {
+    /// From the CLI's own category (`system/api_retry.error`), else from the HTTP status
+    /// (`api_retry.error_status`, `result.api_error_status`).
+    fn of(kind: &str, status: Option<i64>) -> Option<Self> {
+        Some(match (kind, status) {
+            ("authentication_failed", _) => Self::SignedOut,
+            ("oauth_org_not_allowed", _) => Self::OrgNotAllowed,
+            ("billing_error", _) => Self::Billing,
+            ("account_on_hold", _) => Self::OnHold,
+            ("model_not_found", _) => Self::ModelNotFound,
+            ("cloud_credential_error", _) => Self::CloudCredentials,
+            ("rate_limit", _) => Self::RateLimit,
+            ("overloaded", _) => Self::Overloaded,
+            ("server_error", _) => Self::ServerError,
+            (_, Some(401)) => Self::SignedOut,
+            (_, Some(402)) => Self::Billing,
+            (_, Some(429)) => Self::RateLimit,
+            (_, Some(529)) => Self::Overloaded,
+            (_, Some(500..=599)) => Self::ServerError,
+            _ => return None,
+        })
+    }
+
+    /// Waiting cannot fix it: the user must act.
+    fn needs_you(self) -> bool {
+        !matches!(self, Self::RateLimit | Self::Overloaded | Self::ServerError)
+    }
+}
+
+/// Why Claude retries an API call, for the `Retrying` row: "Anthropic's servers are
+/// overloaded; next try in 5 s (10 tries at most)".
+fn retry_reason(kind: &str, failure: Option<ApiFailure>, v: &Value) -> String {
+    let mut reason = match failure {
+        Some(ApiFailure::RateLimit) => "the usage limit is reached".to_string(),
+        Some(ApiFailure::Overloaded) => "Anthropic's servers are overloaded".to_string(),
+        Some(ApiFailure::ServerError) => "Anthropic's servers had an error".to_string(),
+        _ if kind == "unknown" => "an API error".to_string(),
+        // "invalid request", "max output tokens"
+        _ => kind.replace('_', " "),
+    };
+    if let Some(ms) = v["retry_delay_ms"].as_i64() {
+        reason.push_str(&format!("; next try in {} s", (ms.max(0) + 999) / 1000));
+    }
+    if let Some(max) = v["max_retries"].as_i64() {
+        reason.push_str(&format!(" ({max} tries at most)"));
+    }
+    reason
+}
+
+/// Token counts of API calls, as the `usage` objects of the stream give them.
+#[derive(Clone, Copy, Default)]
+struct Tokens {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+}
+
+impl Tokens {
+    fn of(u: &Value) -> Self {
+        let n = |k: &str| u[k].as_i64().unwrap_or(0);
+        Tokens { input: n("input_tokens"), output: n("output_tokens"), cache_read: n("cache_read_input_tokens"), cache_write: n("cache_creation_input_tokens") }
+    }
+
+    fn plus(self, o: Tokens) -> Tokens {
+        Tokens {
+            input: self.input + o.input,
+            output: self.output + o.output,
+            cache_read: self.cache_read + o.cache_read,
+            cache_write: self.cache_write + o.cache_write,
+        }
+    }
 }
 
 static TASK_CREATED_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| Regex::new(r"^Task #(\S+) created successfully").unwrap());
@@ -502,6 +591,10 @@ pub struct ClaudeNormalizer {
     cwd: PathBuf,
     session_id: String,
     model: Option<String>,
+    /// "Claude Code is not signed in: run `…` in a terminal", for this run's account.
+    sign_in: String,
+    /// The run pays with the user's own API key or token command: signing in is no fix.
+    own_key: bool,
     requested_tools: Vec<String>,
     status: Option<AgentStatus>,
     init_seen: bool,
@@ -514,7 +607,18 @@ pub struct ClaudeNormalizer {
     plan: Vec<PlanItem>,
     pending_creates: HashMap<String, String>,
     approvals: HashMap<Id, PendingApproval>,
+    /// Tool calls denied in Codly: Claude's `permission_denied` line for them says nothing new.
+    user_denied: HashSet<String>,
+    /// The API failure Claude last retried, until an API call answers.
+    api_failure: Option<ApiFailure>,
+    /// The last error and the last message of this turn: a failed turn says its reason once.
+    turn_error: Option<String>,
+    turn_text: Option<String>,
     usage: Usage,
+    /// This turn's tokens as the stream reports them: its finished API calls, and the call
+    /// in progress. `usage` gets the turn's own numbers from its `result`.
+    turn_live: Tokens,
+    call_live: Tokens,
     last_context: Option<i64>,
     /// Set by the actor when Codly interrupted the turn (maps the next result to Interrupted).
     pub interrupt_requested: bool,
@@ -530,6 +634,8 @@ impl ClaudeNormalizer {
             cwd: spec.cwd.clone(),
             session_id,
             model: classify::split_model_effort(spec.model.as_deref()).0,
+            sign_in: startup::not_signed_in(Provider::Claude, startup::account_home(spec), None),
+            own_key: startup::uses_own_key(spec),
             requested_tools: tools_for(spec).iter().map(|t| t.to_string()).collect(),
             status: None,
             init_seen: false,
@@ -540,7 +646,13 @@ impl ClaudeNormalizer {
             plan: Vec::new(),
             pending_creates: HashMap::new(),
             approvals: HashMap::new(),
+            user_denied: HashSet::new(),
+            api_failure: None,
+            turn_error: None,
+            turn_text: None,
             usage: Usage::default(),
+            turn_live: Tokens::default(),
+            call_live: Tokens::default(),
             last_context: None,
             interrupt_requested: false,
             outbox: Vec::new(),
@@ -551,6 +663,63 @@ impl ClaudeNormalizer {
         if self.status != Some(s) {
             self.status = Some(s);
             out.push(EventKind::StatusChanged { status: s });
+        }
+    }
+
+    /// An `Error` event, remembered as the last thing this turn reported.
+    fn problem(&mut self, message: String, fatal: bool, out: &mut Vec<EventKind>) {
+        self.turn_error = Some(message.clone());
+        out.push(EventKind::Error { message, fatal });
+    }
+
+    /// One line for the user: what failed and what to do.
+    fn explain(&self, failure: ApiFailure) -> String {
+        match failure {
+            ApiFailure::SignedOut if self.own_key => "Claude did not accept your API key or token: check it in Settings → API keys, then try again".into(),
+            ApiFailure::SignedOut => format!("{}, then try again", self.sign_in),
+            ApiFailure::OrgNotAllowed => "Claude does not let this account's organization use Claude Code: sign in with another account, then try again".into(),
+            ApiFailure::Billing => "Claude reports a billing problem on this account: check your plan or your credits, then try again".into(),
+            ApiFailure::OnHold => "This Claude account is on hold: check the account with Anthropic, then try again".into(),
+            ApiFailure::ModelNotFound => match &self.model {
+                Some(m) => format!("The model {m} is not available on this account: pick another model for this agent"),
+                None => "This agent's model is not available on this account: pick another model for this agent".into(),
+            },
+            ApiFailure::CloudCredentials => "Claude could not use your cloud credentials (Bedrock or Vertex): renew them, then try again".into(),
+            ApiFailure::RateLimit => "Claude's usage limit is reached: wait for it to reset, then try again".into(),
+            ApiFailure::Overloaded => "Anthropic's servers are overloaded: wait a moment, then try again".into(),
+            ApiFailure::ServerError => "Anthropic's servers had an error: wait a moment, then try again".into(),
+        }
+    }
+
+    /// Why a failed turn failed, with what to do when Codly knows it: the API failure Claude
+    /// was retrying, else the result's HTTP status, else the CLI's own words (`result`, or
+    /// `errors` without its diagnostic lines).
+    fn failure_reason(&self, v: &Value, retried: Option<ApiFailure>) -> Option<String> {
+        let raw = v["result"].as_str().map(str::trim).filter(|r| !r.is_empty());
+        let failure = retried
+            .or_else(|| ApiFailure::of("", v["api_error_status"].as_i64()))
+            .or_else(|| raw.filter(|r| startup::says_signed_out(r)).map(|_| ApiFailure::SignedOut));
+        if let Some(f) = failure {
+            return Some(self.explain(f));
+        }
+        if let Some(r) = raw {
+            return Some(r.to_string());
+        }
+        let errors: Vec<&str> =
+            v["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|e| !e.starts_with("[ede_diagnostic]")).collect();
+        (!errors.is_empty()).then(|| errors.join("; "))
+    }
+
+    /// The run's totals with this turn's API calls so far, as the stream reported them.
+    fn live_usage(&self) -> Usage {
+        let turn = self.turn_live.plus(self.call_live);
+        Usage {
+            input_tokens: self.usage.input_tokens + turn.input,
+            output_tokens: self.usage.output_tokens + turn.output,
+            cache_read_tokens: self.usage.cache_read_tokens + turn.cache_read,
+            cache_write_tokens: self.usage.cache_write_tokens + turn.cache_write,
+            context_used: self.last_context.or(self.usage.context_used),
+            ..self.usage.clone()
         }
     }
 
@@ -589,6 +758,9 @@ impl ClaudeNormalizer {
     pub fn turn_started(&mut self, text: &str) -> Vec<EventKind> {
         let mut out = vec![EventKind::TurnStarted { input: Some(text.to_string()) }];
         self.interrupt_requested = false;
+        self.api_failure = None;
+        self.turn_error = None;
+        self.turn_text = None;
         self.set_status(AgentStatus::Thinking, &mut out);
         out
     }
@@ -623,16 +795,47 @@ impl ClaudeNormalizer {
                 Some(_) => out.push(EventKind::Unknown { raw_type: "system/status".into() }),
             },
             "api_retry" => {
-                let reason = v["error"].as_str().unwrap_or("unknown").to_string();
-                if matches!(reason.as_str(), "authentication_failed" | "billing_error" | "account_on_hold" | "oauth_org_not_allowed") {
-                    out.push(EventKind::Error { message: format!("Claude API error: {reason}"), fatal: true });
-                } else {
-                    if reason == "rate_limit" {
-                        self.set_status(AgentStatus::RateLimited, out);
+                let kind = v["error"].as_str().unwrap_or("unknown");
+                let failure = ApiFailure::of(kind, v["error_status"].as_i64());
+                self.api_failure = failure;
+                match failure {
+                    // Waiting cannot fix these: say what to do, once (Claude's own tries end
+                    // in a failed turn).
+                    Some(f) if f.needs_you() => {
+                        let message = self.explain(f);
+                        if self.turn_error.as_deref() != Some(message.as_str()) {
+                            self.problem(message, true, out);
+                        }
                     }
-                    out.push(EventKind::Retrying { attempt: v["attempt"].as_i64().unwrap_or(1), reason });
+                    _ => {
+                        if failure == Some(ApiFailure::RateLimit) {
+                            self.set_status(AgentStatus::RateLimited, out);
+                        }
+                        out.push(EventKind::Retrying { attempt: v["attempt"].as_i64().unwrap_or(1), reason: retry_reason(kind, failure, v) });
+                    }
                 }
             }
+            "permission_denied" => {
+                // The denied call still ends as a failed tool result: this line says that
+                // Claude Code refused it by itself (a rule, a hook, its permission mode). A
+                // call denied in Codly needs no second line.
+                if !v["tool_use_id"].as_str().is_some_and(|id| self.user_denied.contains(id)) {
+                    let tool = v["tool_name"].as_str().filter(|t| !t.is_empty()).unwrap_or("a tool");
+                    let message = match v["message"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
+                        Some(m) => format!("Claude Code denied {tool} without asking: {m}"),
+                        None => format!("Claude Code denied {tool} without asking"),
+                    };
+                    self.problem(message, false, out);
+                }
+            }
+            "model_refusal_fallback" => self.problem("The model refused this request: Claude Code goes on with its fallback model".into(), false, out),
+            "model_refusal_no_fallback" => {
+                self.problem("The model refused this request, and Claude Code has no fallback model to go on with".into(), false, out)
+            }
+            // Bookkeeping the timeline has no use for (the user's hooks, command lists, the
+            // session title, the CLI's own summaries): known lines, kept in the raw log only.
+            "hook_started" | "hook_progress" | "hook_response" | "commands_changed" | "session_title_changed" | "background_tasks_changed"
+            | "files_persisted" | "post_turn_summary" => {}
             "compact_boundary" => {
                 let m = &v["compact_metadata"];
                 out.push(EventKind::Compacting { pre_tokens: m["pre_tokens"].as_i64(), post_tokens: m["post_tokens"].as_i64() });
@@ -678,15 +881,25 @@ impl ClaudeNormalizer {
         let has = |t: &str| tools.iter().any(|x| x == t || (t == "Agent" && x == "Task"));
         let missing: Vec<&str> = self.requested_tools.iter().map(String::as_str).filter(|t| !has(t) && !OPTIONAL_TOOLS.contains(t)).collect();
         if !tools.is_empty() && !missing.is_empty() {
-            out.push(EventKind::Error { message: format!("Claude did not enable requested tools: {}", missing.join(", ")), fatal: false });
+            let message = format!("Claude did not enable requested tools: {}", missing.join(", "));
+            self.problem(message, false, out);
         }
+        // The user's own servers (Connections, their Claude setup) that did not start: one
+        // line for all of them. A server that still connects, or that waits for a sign-in the
+        // user never made, is no failure of this run.
+        let mut failed = Vec::new();
         for s in v["mcp_servers"].as_array().into_iter().flatten() {
-            if s["name"] == "codly" && s["status"] != "connected" {
-                out.push(EventKind::Error {
-                    message: format!("codly MCP server is {}", s["status"].as_str().unwrap_or("unavailable")),
-                    fatal: false,
-                });
+            let status = s["status"].as_str().unwrap_or("unavailable");
+            if s["name"] == "codly" {
+                if status != "connected" {
+                    self.problem(format!("codly MCP server is {status}"), false, out);
+                }
+            } else if status == "failed" {
+                failed.push(s["name"].as_str().unwrap_or("unnamed"));
             }
+        }
+        if !failed.is_empty() {
+            self.problem(format!("These MCP servers did not start, so the agent works without their tools in this run: {}", failed.join(", ")), false, out);
         }
     }
 
@@ -698,7 +911,12 @@ impl ClaudeNormalizer {
         let msg_id = v["api_message_id"].as_str().or(ev["message"]["id"].as_str()).unwrap_or("").to_string();
         let index = ev["index"].as_u64().unwrap_or(0);
         match ev["type"].as_str().unwrap_or("") {
-            "message_start" => self.flush_text(MessagePhase::Unknown, out),
+            "message_start" => {
+                // An API call answers: the failure Claude retried before it is over.
+                self.api_failure = None;
+                self.turn_live = self.turn_live.plus(std::mem::take(&mut self.call_live));
+                self.flush_text(MessagePhase::Unknown, out)
+            }
             "content_block_start" => {
                 let cb = &ev["content_block"];
                 let ty = cb["type"].as_str().unwrap_or("").to_string();
@@ -718,6 +936,10 @@ impl ClaudeNormalizer {
                 let u = &ev["usage"];
                 if u.is_object() {
                     self.last_context = Some(context_tokens(u));
+                    // Usage as the turn goes, one update per API call: the context meter and
+                    // the circuit breaker see a long turn while it runs.
+                    self.call_live = Tokens::of(u);
+                    out.push(EventKind::UsageUpdated { usage: self.live_usage() });
                 }
                 let phase = match ev["delta"]["stop_reason"].as_str() {
                     Some("end_turn") => MessagePhase::Final,
@@ -754,6 +976,7 @@ impl ClaudeNormalizer {
 
     fn flush_text(&mut self, phase: MessagePhase, out: &mut Vec<EventKind>) {
         for (item_id, text) in self.pending_text.drain(..) {
+            self.turn_text = Some(text.trim().to_string());
             out.push(EventKind::Message { item_id, text, phase });
         }
     }
@@ -980,10 +1203,16 @@ impl ClaudeNormalizer {
                 window = Some(window.map_or(w, |x: i64| x.max(w)));
             }
         }
-        self.usage.input_tokens += input;
-        self.usage.output_tokens += output;
-        self.usage.cache_read_tokens += cache_r;
-        self.usage.cache_write_tokens += cache_w;
+        // The stream already reported this turn's own API calls; the result has the last word
+        // (it adds the subagents' calls, which the circuit breaker keeps out of its velocity:
+        // they are work of the whole turn). A streamed call that the result leaves out must
+        // not make the totals go back: the circuit breaker reads a falling count as a new run.
+        let live = self.live_usage();
+        self.usage.input_tokens = (self.usage.input_tokens + input).max(live.input_tokens);
+        self.usage.output_tokens = (self.usage.output_tokens + output).max(live.output_tokens);
+        self.usage.cache_read_tokens = (self.usage.cache_read_tokens + cache_r).max(live.cache_read_tokens);
+        self.usage.cache_write_tokens = (self.usage.cache_write_tokens + cache_w).max(live.cache_write_tokens);
+        (self.turn_live, self.call_live) = (Tokens::default(), Tokens::default());
         self.usage.cost_usd = Some(self.usage.cost_usd.unwrap_or(0.0) + cost.max(0.0));
         let last_iter = v["usage"]["iterations"].as_array().and_then(|a| a.last()).map(context_tokens);
         self.usage.context_used = last_iter.or(self.last_context).or(self.usage.context_used);
@@ -1001,14 +1230,28 @@ impl ClaudeNormalizer {
         } else {
             TurnStatus::Failed
         };
+        // A failed turn says why, once: not again when its last error or its last message
+        // already is that line.
+        let retried = self.api_failure.take();
+        let reason = if status == TurnStatus::Failed { self.failure_reason(v, retried) } else { None };
+        if let Some(reason) = &reason {
+            let said = match &self.turn_error {
+                Some(error) => error == reason,
+                None => self.turn_text.as_deref() == Some(reason.as_str()),
+            };
+            if !said {
+                self.problem(reason.clone(), false, out);
+            }
+        }
         out.push(EventKind::TurnCompleted {
             status,
-            result_text: v["result"].as_str().map(str::to_owned),
+            result_text: reason.or_else(|| v["result"].as_str().map(str::to_owned)),
             duration_ms: v["duration_ms"].as_i64(),
         });
         self.interrupt_requested = false;
         self.blocks.clear();
         self.tools.clear();
+        self.user_denied.clear();
         self.set_status(AgentStatus::Idle, out);
     }
 
@@ -1110,7 +1353,8 @@ impl ClaudeNormalizer {
             decided_by: None,
             created_at: now_ms(),
         };
-        self.approvals.insert(approval.id.clone(), PendingApproval { request_id, tool_name: tool, input, suggestions });
+        let tool_use_id = approval.call_id.clone();
+        self.approvals.insert(approval.id.clone(), PendingApproval { request_id, tool_use_id, tool_name: tool, input, suggestions });
         out.push(EventKind::ApprovalRequested { approval });
         self.set_status(AgentStatus::WaitingApproval, out);
     }
@@ -1120,6 +1364,11 @@ impl ClaudeNormalizer {
     pub fn answer(&mut self, approval_id: &str, d: &ApprovalDecision) -> Option<(Value, Vec<EventKind>)> {
         let p = self.approvals.remove(approval_id)?;
         let mut out = Vec::new();
+        if matches!(d.choice, ApprovalChoice::Deny | ApprovalChoice::Cancel)
+            && let Some(id) = &p.tool_use_id
+        {
+            self.user_denied.insert(id.clone());
+        }
         let response = match d.choice {
             ApprovalChoice::AllowOnce | ApprovalChoice::AllowSession | ApprovalChoice::AllowAlways => {
                 let mut input = p.input.clone();
@@ -1352,11 +1601,13 @@ mod tests {
         assert_eq!(msg, Some(("msg_011CgPgZ5DraWXssRR4rfPzQ:0".into(), "DONE".into(), MessagePhase::Final)));
 
         assert!(events.iter().any(|e| matches!(e, EventKind::RateLimit { window, .. } if window == "five_hour")));
-        let usage = events.iter().find_map(|e| match e {
-            EventKind::UsageUpdated { usage } => Some(usage.clone()),
-            _ => None,
-        });
-        let usage = usage.expect("UsageUpdated");
+        // Usage after each of the two API calls, then the result's own numbers: the same totals.
+        let usages: Vec<Usage> = events.iter().filter_map(|e| if let EventKind::UsageUpdated { usage } = e { Some(usage.clone()) } else { None }).collect();
+        assert_eq!(usages.len(), 3);
+        assert_eq!((usages[0].input_tokens, usages[0].output_tokens, usages[0].cache_read_tokens, usages[0].cache_write_tokens), (2, 122, 12037, 15990));
+        assert_eq!(usages[0].context_used, Some(2 + 122 + 12037 + 15990));
+        assert_eq!((usages[1].input_tokens, usages[1].output_tokens, usages[1].cache_read_tokens, usages[1].cache_write_tokens), (4, 127, 40064, 16221));
+        let usage = usages[2].clone();
         assert_eq!((usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens), (4, 127, 40064, 16221));
         assert_eq!(usage.context_used, Some(2 + 28027 + 231 + 5));
         assert_eq!(usage.context_window, Some(1_000_000));
@@ -1368,8 +1619,9 @@ mod tests {
         // order: tool started before completed before turn completed
         let pos = |n: &str| names.iter().position(|x| *x == n).unwrap();
         assert!(pos("tool_started") < pos("tool_completed") && pos("tool_completed") < pos("message") && pos("message") < pos("turn_completed"));
-        // hooks are known-unknowns, not dropped
-        assert!(events.iter().any(|e| matches!(e, EventKind::Unknown { raw_type } if raw_type == "system/hook_started")));
+        // The user's hooks are bookkeeping Codly knows: they stay in the raw log and make no
+        // "unknown" rows (the one exception to "an unknown line is never dropped").
+        assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { raw_type } if raw_type.starts_with("system/hook_"))));
     }
 
     /// Live 2.1.309 capture (adapter_smoke --interrupt-at-approval): TaskCreate ×2, a Bash
@@ -1399,7 +1651,14 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, EventKind::ToolCompleted { ok: false, .. })));
         assert!(events.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Interrupted, .. })));
         assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { raw_type } if raw_type == "user")));
+        // (an interrupted turn is no failure: its diagnostic `errors` line is not shown)
         assert!(!events.iter().any(|e| matches!(e, EventKind::Error { .. })), "all requested tools were enabled");
+        // Usage arrives during the turn, after each API call; the result confirms the totals.
+        let end = events.iter().position(|e| matches!(e, EventKind::TurnCompleted { .. })).unwrap();
+        let usages: Vec<Usage> = events[..end].iter().filter_map(|e| if let EventKind::UsageUpdated { usage } = e { Some(usage.clone()) } else { None }).collect();
+        let tokens = |u: &Usage| (u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens);
+        assert_eq!(usages.iter().map(tokens).collect::<Vec<_>>(), [(2, 299, 13025, 3685), (4, 385, 29735, 4141), (4, 385, 29735, 4141)]);
+        assert_eq!(usages[0].context_used, Some(2 + 299 + 13025 + 3685));
     }
 
     #[test]
@@ -1411,8 +1670,8 @@ mod tests {
             _ => None,
         });
         assert_eq!(msg, Some(("pong".into(), MessagePhase::Final)));
-        assert!(events.iter().any(|e| matches!(e, EventKind::Unknown { raw_type } if raw_type == "system/post_turn_summary")));
-        assert!(events.iter().any(|e| matches!(e, EventKind::Unknown { raw_type } if raw_type == "system/commands_changed")));
+        // post_turn_summary, commands_changed and the hooks are known bookkeeping: no rows.
+        assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { raw_type } if raw_type.starts_with("system/"))), "{events:?}");
         assert!(events.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Completed, .. })));
     }
 
@@ -1626,10 +1885,215 @@ mod tests {
         let ev = norm.on_message(&json!({ "type": "result", "subtype": "success", "is_error": true, "result": "API Error: 500" }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Failed, .. })));
         let ev = norm.on_message(&json!({ "type": "system", "subtype": "api_retry", "attempt": 2, "error": "overloaded" }));
-        assert!(matches!(&ev[0], EventKind::Retrying { attempt: 2, reason } if reason == "overloaded"));
+        assert!(matches!(&ev[0], EventKind::Retrying { attempt: 2, reason } if reason == "Anthropic's servers are overloaded"));
         let ev = norm.on_message(&json!({ "type": "system", "subtype": "api_retry", "attempt": 1, "error": "authentication_failed" }));
         assert!(matches!(&ev[0], EventKind::Error { fatal: true, .. }));
         let ev = norm.on_message(&json!({ "type": "brand_new_type" }));
         assert!(matches!(&ev[0], EventKind::Unknown { raw_type } if raw_type == "brand_new_type"));
+    }
+
+    fn errors(events: &[EventKind]) -> Vec<(&str, bool)> {
+        events.iter().filter_map(|e| if let EventKind::Error { message, fatal } = e { Some((message.as_str(), *fatal)) } else { None }).collect()
+    }
+
+    fn failed_with(events: &[EventKind]) -> Option<&str> {
+        events.iter().find_map(|e| match e {
+            EventKind::TurnCompleted { status: TurnStatus::Failed, result_text, .. } => Some(result_text.as_deref().unwrap_or("")),
+            _ => None,
+        })
+    }
+
+    const SIGN_IN: &str = "Claude Code is not signed in: run `claude auth login` in a terminal, then try again";
+
+    #[test]
+    fn a_failed_turn_says_why_once() {
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "s".into());
+        let failed = |result: Value| {
+            let mut v = json!({ "type": "result", "subtype": "error_during_execution", "is_error": true });
+            v.as_object_mut().unwrap().extend(result.as_object().unwrap().clone());
+            v
+        };
+        // No `result` text: the CLI's `errors`, without its diagnostic lines.
+        norm.turn_started("a");
+        let ev = norm.on_message(&failed(json!({ "errors": ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use", "the request was aborted"] })));
+        assert_eq!(errors(&ev), [("the request was aborted", false)]);
+        assert_eq!(failed_with(&ev), Some("the request was aborted"));
+        let end = ev.iter().position(|e| matches!(e, EventKind::TurnCompleted { .. })).unwrap();
+        assert!(matches!(ev[end - 1], EventKind::Error { .. }), "the reason comes before the turn's end: {ev:?}");
+        // Only a diagnostic line: nothing to say.
+        norm.turn_started("b");
+        let ev = norm.on_message(&failed(json!({ "errors": ["[ede_diagnostic] result_type=user"] })));
+        assert!(errors(&ev).is_empty());
+        assert_eq!(failed_with(&ev), Some(""));
+
+        // The CLI's own words stay when Codly knows nothing better.
+        norm.turn_started("c");
+        let ev = norm.on_message(&json!({ "type": "result", "subtype": "success", "is_error": true, "result": "API Error: 400 prompt is too long" }));
+        assert_eq!(errors(&ev), [("API Error: 400 prompt is too long", false)]);
+        assert_eq!(failed_with(&ev), Some("API Error: 400 prompt is too long"));
+        // Said by the agent's last message already: not said again as an error.
+        norm.turn_started("d");
+        norm.on_message(&json!({ "type": "assistant", "parent_tool_use_id": null, "message": { "id": "m1", "content": [{ "type": "text", "text": "API Error: 400 prompt is too long" }] } }));
+        let ev = norm.on_message(&json!({ "type": "result", "subtype": "success", "is_error": true, "result": "API Error: 400 prompt is too long" }));
+        assert!(errors(&ev).is_empty(), "{ev:?}");
+        assert_eq!(failed_with(&ev), Some("API Error: 400 prompt is too long"));
+
+        // The HTTP status of the result, in plain words with what to do.
+        norm.turn_started("e");
+        let ev = norm.on_message(&json!({ "type": "result", "subtype": "success", "is_error": true, "api_error_status": 529, "result": "API Error: 529 overloaded_error" }));
+        assert_eq!(errors(&ev), [("Anthropic's servers are overloaded: wait a moment, then try again", false)]);
+        assert_eq!(failed_with(&ev), Some("Anthropic's servers are overloaded: wait a moment, then try again"));
+
+        // "Please run /login" is no command of Codly: the sign-in command instead.
+        norm.turn_started("f");
+        let ev = norm.on_message(&json!({ "type": "result", "subtype": "success", "is_error": true, "result": "Invalid API key · Please run /login" }));
+        assert_eq!(errors(&ev), [(SIGN_IN, false)]);
+        assert_eq!(failed_with(&ev), Some(SIGN_IN));
+        // With the user's own API key, signing in is not the fix.
+        let mut keyed = spec(Role::Worker, false);
+        keyed.env.insert("ANTHROPIC_API_KEY".into(), "sk-ant-test".into());
+        let mut own = ClaudeNormalizer::new(&keyed, "s".into());
+        own.turn_started("f");
+        let ev = own.on_message(&json!({ "type": "result", "subtype": "success", "is_error": true, "api_error_status": 401, "result": "Invalid API key" }));
+        assert_eq!(errors(&ev), [("Claude did not accept your API key or token: check it in Settings → API keys, then try again", false)]);
+        // The account's own home goes into the command.
+        let mut work = spec(Role::Worker, false);
+        work.env.insert("CLAUDE_CONFIG_DIR".into(), "/Users/x/.claude-work".into());
+        let mut work = ClaudeNormalizer::new(&work, "s".into());
+        work.turn_started("f");
+        let ev = work.on_message(&json!({ "type": "system", "subtype": "api_retry", "attempt": 1, "error": "authentication_failed" }));
+        assert_eq!(errors(&ev), [("Claude Code is not signed in: run `CLAUDE_CONFIG_DIR=/Users/x/.claude-work claude auth login` in a terminal, then try again", true)]);
+    }
+
+    #[test]
+    fn api_retries_say_what_happens_and_what_to_do() {
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "s".into());
+        let retry = |fields: Value| {
+            let mut v = json!({ "type": "system", "subtype": "api_retry" });
+            v.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            v
+        };
+        // Signed out: one line with the command, however often Claude retries, and the failed
+        // turn does not say it again.
+        norm.turn_started("a");
+        let ev = norm.on_message(&retry(json!({ "attempt": 1, "error": "authentication_failed", "error_status": 401 })));
+        assert_eq!(errors(&ev), [(SIGN_IN, true)]);
+        assert!(norm.on_message(&retry(json!({ "attempt": 2, "error": "authentication_failed" }))).is_empty());
+        let ev = norm.on_message(&json!({ "type": "result", "subtype": "success", "is_error": true, "result": "Invalid API key · Please run /login" }));
+        assert!(errors(&ev).is_empty(), "{ev:?}");
+        assert_eq!(failed_with(&ev), Some(SIGN_IN));
+
+        // What only you can fix stops the wait, with what to do.
+        norm.turn_started("b");
+        for (kind, says) in [
+            ("billing_error", "Claude reports a billing problem on this account: check your plan or your credits, then try again"),
+            ("account_on_hold", "This Claude account is on hold: check the account with Anthropic, then try again"),
+            ("oauth_org_not_allowed", "Claude does not let this account's organization use Claude Code: sign in with another account, then try again"),
+            ("model_not_found", "The model haiku is not available on this account: pick another model for this agent"),
+            ("cloud_credential_error", "Claude could not use your cloud credentials (Bedrock or Vertex): renew them, then try again"),
+        ] {
+            let ev = norm.on_message(&retry(json!({ "attempt": 1, "error": kind })));
+            assert_eq!(errors(&ev), [(says, true)], "{kind}");
+        }
+
+        // What Claude retries by itself: why, when the next try is, and how many there are.
+        let ev = norm.on_message(&retry(json!({ "attempt": 2, "max_retries": 10, "retry_delay_ms": 4200, "error": "overloaded", "error_status": 529 })));
+        assert!(matches!(&ev[..], [EventKind::Retrying { attempt: 2, reason }] if reason == "Anthropic's servers are overloaded; next try in 5 s (10 tries at most)"), "{ev:?}");
+        let ev = norm.on_message(&retry(json!({ "attempt": 1, "error": "unknown", "error_status": 503 })));
+        assert!(matches!(&ev[..], [EventKind::Retrying { reason, .. }] if reason == "Anthropic's servers had an error"), "{ev:?}");
+        let ev = norm.on_message(&retry(json!({ "attempt": 1, "error": "invalid_request" })));
+        assert!(matches!(&ev[..], [EventKind::Retrying { reason, .. }] if reason == "invalid request"), "{ev:?}");
+        let ev = norm.on_message(&retry(json!({ "attempt": 1, "error": "unknown" })));
+        assert!(matches!(&ev[..], [EventKind::Retrying { reason, .. }] if reason == "an API error"), "{ev:?}");
+        let ev = norm.on_message(&retry(json!({ "attempt": 3, "error": "rate_limit" })));
+        assert!(matches!(&ev[..], [EventKind::StatusChanged { status: AgentStatus::RateLimited }, EventKind::Retrying { attempt: 3, reason }] if reason == "the usage limit is reached"), "{ev:?}");
+        // Claude gives up on the limit: the failed turn says what to do.
+        let ev = norm.on_message(&json!({ "type": "result", "subtype": "success", "is_error": true, "result": "API Error: 429" }));
+        assert_eq!(failed_with(&ev), Some("Claude's usage limit is reached: wait for it to reset, then try again"));
+
+        // A retry that worked explains nothing about a later failure.
+        norm.turn_started("c");
+        norm.on_message(&retry(json!({ "attempt": 1, "error": "overloaded" })));
+        norm.on_message(&json!({ "type": "stream_event", "parent_tool_use_id": null, "event": { "type": "message_start", "message": { "id": "m2" } } }));
+        let ev = norm.on_message(&json!({ "type": "result", "subtype": "error_during_execution", "is_error": true, "errors": ["the request was aborted"] }));
+        assert_eq!(failed_with(&ev), Some("the request was aborted"));
+    }
+
+    #[test]
+    fn known_system_lines_are_shown_as_what_they_are() {
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "s".into());
+        norm.turn_started("go");
+        let system = |subtype: &str, fields: Value| {
+            let mut v = json!({ "type": "system", "subtype": subtype });
+            v.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            v
+        };
+        // Claude Code refused a call by itself (a rule, a hook, its mode).
+        let ev = norm.on_message(&system("permission_denied", json!({ "tool_name": "Bash", "tool_use_id": "toolu_9", "decision_reason_type": "rule", "message": "Permission to use Bash has been denied." })));
+        assert_eq!(errors(&ev), [("Claude Code denied Bash without asking: Permission to use Bash has been denied.", false)]);
+        let ev = norm.on_message(&system("permission_denied", json!({ "tool_use_id": "toolu_8" })));
+        assert_eq!(errors(&ev), [("Claude Code denied a tool without asking", false)]);
+        // A call you denied in Codly: its card already says so.
+        let a = approval_of(&norm.on_message(&can_use_tool("Bash", json!({ "command": "ls" }), json!([]))));
+        norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::Deny, message: None, answers: None }).unwrap();
+        let ev = norm.on_message(&system("permission_denied", json!({ "tool_name": "Bash", "tool_use_id": "toolu_1", "message": "The user denied this action." })));
+        assert!(ev.is_empty(), "{ev:?}");
+
+        let ev = norm.on_message(&system("model_refusal_fallback", json!({})));
+        assert_eq!(errors(&ev), [("The model refused this request: Claude Code goes on with its fallback model", false)]);
+        let ev = norm.on_message(&system("model_refusal_no_fallback", json!({})));
+        assert_eq!(errors(&ev), [("The model refused this request, and Claude Code has no fallback model to go on with", false)]);
+
+        // Bookkeeping lines make no rows; a subtype Codly does not know still does.
+        for subtype in ["hook_started", "hook_progress", "hook_response", "commands_changed", "session_title_changed", "background_tasks_changed", "files_persisted", "post_turn_summary"] {
+            assert!(norm.on_message(&system(subtype, json!({}))).is_empty(), "{subtype}");
+        }
+        let ev = norm.on_message(&system("brand_new_subtype", json!({})));
+        assert!(matches!(&ev[..], [EventKind::Unknown { raw_type }] if raw_type == "system/brand_new_subtype"));
+
+        // The user's own MCP servers that did not start: one line. One that still connects,
+        // or that waits for a sign-in (a connector the user never signed in to), is no failure.
+        let ev = norm.on_message(&system("init", json!({ "tools": [], "mcp_servers": [
+            { "name": "codly", "status": "connected" }, { "name": "context7", "status": "failed" }, { "name": "linear", "status": "needs-auth" },
+            { "name": "slow", "status": "pending" }, { "name": "git", "status": "connected" }, { "name": "docs", "status": "failed" }
+        ] })));
+        assert_eq!(errors(&ev), [("These MCP servers did not start, so the agent works without their tools in this run: context7, docs", false)]);
+    }
+
+    #[test]
+    fn usage_follows_the_turn_and_never_goes_back() {
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "s".into());
+        let stream = |parent: Value, event: Value| json!({ "type": "stream_event", "parent_tool_use_id": parent, "event": event });
+        let start = |norm: &mut ClaudeNormalizer| norm.on_message(&stream(Value::Null, json!({ "type": "message_start", "message": { "id": "m" } })));
+        let delta = |norm: &mut ClaudeNormalizer, parent: Value, output: i64| {
+            let usage = json!({ "input_tokens": 10, "output_tokens": output, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 5 });
+            norm.on_message(&stream(parent, json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" }, "usage": usage })))
+        };
+        let tokens = |ev: &[EventKind]| {
+            ev.iter().find_map(|e| if let EventKind::UsageUpdated { usage } = e { Some((usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens)) } else { None })
+        };
+        let result = |norm: &mut ClaudeNormalizer, input: i64, output: i64| {
+            let model = json!({ "inputTokens": input, "outputTokens": output, "cacheReadInputTokens": 100, "cacheCreationInputTokens": 5, "costUSD": 0.01 });
+            norm.on_message(&json!({ "type": "result", "subtype": "success", "result": "ok", "model_usage_since_last_result": { "m": model } }))
+        };
+
+        norm.turn_started("go");
+        start(&mut norm);
+        // One API call counts once, however often it reports its (growing) usage.
+        assert_eq!(tokens(&delta(&mut norm, Value::Null, 25)), Some((10, 25, 100, 5)));
+        assert_eq!(tokens(&delta(&mut norm, Value::Null, 40)), Some((10, 40, 100, 5)));
+        start(&mut norm);
+        assert_eq!(tokens(&delta(&mut norm, Value::Null, 60)), Some((20, 100, 200, 10)));
+        // A subagent's stream is not the agent's own: its calls arrive with the result.
+        assert_eq!(tokens(&delta(&mut norm, json!("toolu_agent"), 999)), None);
+        // The result counts less than the stream did (a call it leaves out): the totals stay,
+        // so the circuit breaker does not see a new run.
+        assert_eq!(tokens(&result(&mut norm, 10, 40)), Some((20, 100, 200, 10)));
+
+        // The next turn starts from there; a result that counts more (subagents) wins.
+        norm.turn_started("again");
+        start(&mut norm);
+        assert_eq!(tokens(&delta(&mut norm, Value::Null, 7)), Some((30, 107, 300, 15)));
+        assert_eq!(tokens(&result(&mut norm, 30, 50)), Some((50, 150, 300, 15)));
     }
 }

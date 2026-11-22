@@ -284,6 +284,7 @@ impl Inner {
                 if let Err(e) = self.spawn_run(req(SessionMode::Resume { session_id: s.clone() })).await {
                     tracing::warn!("resuming {} failed ({e}); starting a new session", lead.name);
                     self.spawn_run(req(new_session(provider))).await?;
+                    self.resume_failed(&lead, Role::Lead, Some(&ws.id), None, &e);
                 }
             }
             None => {
@@ -683,7 +684,9 @@ impl Inner {
             Err(e) if resumed => {
                 tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
                 self.update_agent(agent_id, |a| a.session_id = None)?;
-                return Box::pin(self.chat_agent_spawn_fresh(agent_id, prompt)).await;
+                Box::pin(self.chat_agent_spawn_fresh(agent_id, prompt)).await?;
+                self.resume_failed(&agent, agent.role, Some(&ws.id), None, &e);
+                return Ok(());
             }
             Err(e) => return Err(e),
         }

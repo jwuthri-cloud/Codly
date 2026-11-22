@@ -246,6 +246,8 @@ struct AgentTrack {
     current: i64,
     /// (time, cumulative output tokens) of the current run, newest last.
     samples: VecDeque<(i64, i64)>,
+    /// The output count when the turn in progress started.
+    turn_base: Option<i64>,
     last_tool: Option<u64>,
     repeat_run: i64,
     error_run: i64,
@@ -323,8 +325,18 @@ impl Tracker {
             EventKind::ToolCompleted { ok: true, .. } | EventKind::Message { .. } => t.error_run = 0,
             EventKind::Error { .. } | EventKind::Retrying { .. } => t.error_run += 1,
             EventKind::Compacting { .. } => t.compacting_since = Some(now),
+            EventKind::TurnStarted { .. } => t.turn_base = Some(t.samples.back().map_or(0, |s| s.1)),
             // A turn that ended is a loop that ended (also after our own interrupt).
             EventKind::TurnCompleted { status, .. } => {
+                // The usage a turn ends with can hold work its stream never showed (Claude
+                // adds its subagents' calls there): tokens of the whole turn, not of its last
+                // seconds. When the turn counted its output as it ran, that last step is no
+                // burst: the samples before it move up by it, so the velocity does not see it.
+                let n = t.samples.len();
+                if let Some(base) = t.turn_base.take() && n > 1 && t.samples[n - 2].1 > base {
+                    let step = t.samples[n - 1].1 - t.samples[n - 2].1;
+                    t.samples.iter_mut().take(n - 1).for_each(|s| s.1 += step);
+                }
                 t.compacting_since = None;
                 t.last_tool = None;
                 t.repeat_run = 0;
@@ -547,6 +559,38 @@ mod tests {
         t.observe("a", 1_000, &EventKind::Compacting { pre_tokens: None, post_tokens: None });
         t.observe("a", 30_000, &usage(2000, 20_000));
         assert!(t.beat(&c, 30_000, &|_| false).is_empty(), "compaction bursts are not a runaway");
+    }
+
+    #[test]
+    fn the_usage_a_turn_ends_with_is_not_a_burst_when_the_turn_counted_as_it_ran() {
+        let c = BreakerConfig { velocity_per_min: 60_000, ..cfg() };
+        let start = EventKind::TurnStarted { input: None };
+        // A Claude turn: its own calls are counted as they end, its subagents work for
+        // minutes, and the result adds their 50k output tokens one second after the last call.
+        let mut t = Tracker::default();
+        t.observe("a", 0, &start);
+        t.observe("a", 1_000, &usage(0, 500));
+        t.observe("a", 200_000, &usage(0, 1_000));
+        t.observe("a", 201_000, &usage(0, 51_000));
+        t.observe("a", 201_000, &turn_done(TurnStatus::Completed));
+        assert_eq!(t.agents["a"].velocity(215_000), Some(0), "50k tokens of a 3-minute turn are not 200k a minute");
+        assert!(t.beat(&c, 215_000, &|_| false).is_empty());
+        assert_eq!(t.floor_tokens(), 51_000, "the budget counts them all the same");
+        // The next turn is measured from the full count, not from the count before that step.
+        t.observe("a", 220_000, &start);
+        t.observe("a", 231_000, &usage(0, 81_000));
+        assert_eq!(t.agents["a"].velocity(231_000), Some(30_000 * 60_000 / 31_000));
+
+        // A turn that reports its output only when it ends is measured from turn to turn, as
+        // before: here the context readings during the turn carry no output.
+        let mut t = Tracker::default();
+        t.observe("b", 0, &usage(0, 1_000));
+        t.observe("b", 1_000, &start);
+        t.observe("b", 10_000, &usage(0, 1_000));
+        t.observe("b", 30_000, &usage(0, 41_000));
+        t.observe("b", 30_000, &turn_done(TurnStatus::Completed));
+        assert_eq!(t.agents["b"].velocity(30_000), Some(80_000));
+        assert_eq!(t.beat(&c, 30_000, &|_| false)[0].trip.as_ref().map(Trip::kind), Some("velocity"));
     }
 
     #[test]

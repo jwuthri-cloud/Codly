@@ -241,6 +241,23 @@ impl Inner {
         e
     }
 
+    /// A resume failed and a new session took its place: the agent no longer knows what was
+    /// said before. Say so where its conversation is (a Lead's request thread, the agent's
+    /// own thread otherwise), with the reason, and record it.
+    pub(super) fn resume_failed(&self, agent: &Agent, role: Role, ws: Option<&str>, task_id: Option<&str>, error: &anyhow::Error) {
+        let why = super::prompts::clip(&error.to_string().split_whitespace().collect::<Vec<_>>().join(" "), 300);
+        let text = format!(
+            "{}'s earlier conversation could not be resumed ({why}). A new one started: {} does not know what was said before.",
+            agent.name, agent.name
+        );
+        let thread = match role {
+            Role::Lead => super::lead::thread_of(agent).to_string(),
+            _ => format!("agent:{}", agent.id),
+        };
+        let _ = self.chat(ws, &thread, "codly", &text, None);
+        let _ = self.decide(ws, task_id, "retry", text, serde_json::json!({ "agent": agent.id, "error": why }));
+    }
+
     /// Send a user turn to a live agent. Claude and ACP adapters queue it behind a running
     /// turn (it gets its own TurnStarted/TurnCompleted); Codex steers it into the running turn
     /// (PromptSteered). Which of the two happens is the adapter's call, so every prompt counts

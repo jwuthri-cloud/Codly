@@ -697,6 +697,7 @@ impl Inner {
                 Err(e) => {
                     tracing::warn!("resuming {} on {} failed ({e}); starting a new session", agent.name, task.key);
                     self.spawn_run(req(new_session(agent.provider))).await?;
+                    self.resume_failed(&agent, Role::Worker, Some(&ws.id), Some(task_id), &e);
                     Start::New
                 }
             },
