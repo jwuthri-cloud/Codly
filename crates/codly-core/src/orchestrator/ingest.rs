@@ -650,6 +650,8 @@ impl Inner {
             Verdict::Allow { choice, rule } if mode != base => Verdict::Allow { choice, rule: format!("{rule} (trusted Senior)") },
             v => v,
         };
+        // What the rules would ask you about, a rule you saved for this repo may answer.
+        let verdict = self.with_saved_rules(ws, approval, &pctx, verdict);
         let subject = serde_json::to_value(&approval.subject).unwrap_or_default();
         let detail =
             |rule: &str| json!({ "approval_id": approval.id, "mode": mode, "rule": rule, "subject": subject, "read_only": read_only });

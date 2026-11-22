@@ -3,13 +3,19 @@
   words), inferred risks, and only the choices the provider offered. The oldest visible request
   takes the keyboard: ⌘↵ once · ⌥⌘↵ session · ⌘⌫ deny · ⇧⌘⌫ deny with a note.
   Questions (AskUserQuestion / requestUserInput) render as a choice to answer.
+  The same command asked by several agents is one card (`twins`): one answer goes to all.
+  "Always allow in this repo" saves a rule in Codly for every agent of the repo; the card
+  offers it only when the core says the request can be saved (never for what Codly always asks).
 -->
 <script lang="ts">
   import { tick } from 'svelte';
   import type { Approval } from '../../lib/gen/Approval';
   import type { ApprovalChoice } from '../../lib/gen/ApprovalChoice';
+  import type { ApprovalRuleKind } from '../../lib/gen/ApprovalRuleKind';
+  import type { ApprovalRuleOffer } from '../../lib/gen/ApprovalRuleOffer';
   import type { JsonValue } from '../../lib/gen/serde_json/JsonValue';
-  import { copyText, resolveApproval } from '../../lib/state/actions';
+  import { api } from '../../lib/api';
+  import { copyText, resolveApprovals, saveApprovalRule } from '../../lib/state/actions';
   import { keyTargetApproval } from '../../lib/state/keys';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
@@ -25,10 +31,14 @@
   interface Props {
     approval: Approval;
     showAgent?: boolean;
+    /** Other agents' requests that wait for the same answer: this card answers them too. */
+    twins?: Approval[];
   }
-  let { approval, showAgent = true }: Props = $props();
+  let { approval, showAgent = true, twins = [] }: Props = $props();
 
   const agent = $derived(store.agentMap.get(approval.agent_id) ?? null);
+  /** Who else asked the same, by name. */
+  const others = $derived([...new Set(twins.filter((t) => t.agent_id !== approval.agent_id).map((t) => store.agentMap.get(t.agent_id)?.name ?? 'an agent'))]);
   const task = $derived(approval.task_id ? (store.taskMap.get(approval.task_id) ?? null) : null);
   const pending = $derived(approval.status === 'pending');
   const subject = $derived(approval.subject);
@@ -44,7 +54,9 @@
   const headline = $derived.by(() => {
     const who = agent?.name ?? 'An agent';
     switch (subject.kind) {
-      case 'command': return `${who} wants to run a command`;
+      case 'command':
+        if (others.length) return `${who} and ${others.length === 1 ? others[0] : `${others.length} others`} want to run the same command`;
+        return `${who} wants to run a command`;
       case 'file_change': return `${who} wants to change ${subject.paths.length === 1 ? 'a file' : `${subject.paths.length} files`}`;
       case 'tool': return `${who} wants to use ${oneLine(subject.name, 40)}`;
       case 'question': return `${who} asks you`;
@@ -82,9 +94,42 @@
   async function decide(choice: ApprovalChoice, message: string | null = null, answers: JsonValue | null = null) {
     if (!pending || busy || !offered.has(choice)) return;
     busy = true;
-    await resolveApproval(approval.id, choice, message, answers);
+    await resolveApprovals([approval, ...twins].map((a) => a.id), choice, message, answers);
     busy = false;
     noteOpen = false;
+  }
+
+  // ── "Always allow in this repo" ──
+  // What the core lets this request be saved as. It records that when its rules decide to ask
+  // you, which can be a moment after the card shows: read it again once that decision is in.
+  let ruleOffer = $state<ApprovalRuleOffer | null>(null);
+  const rulePrefix = $derived(ruleOffer?.prefix ?? null);
+  const ruleExact = $derived(ruleOffer?.exact ?? null);
+  const brokerAsked = $derived.by(() => {
+    void store.rev;
+    return store.decisions.some((d) => d.type === 'approval_policy' && (d.detail as { approval_id?: unknown } | null)?.approval_id === approval.id);
+  });
+  $effect(() => {
+    if (!pending || subject.kind !== 'command') return;
+    void brokerAsked;
+    let stale = false;
+    api.approvalRuleOffer(approval.id).then(
+      (o) => {
+        if (!stale) ruleOffer = o;
+      },
+      () => {
+        /* the choice stays hidden: the other answers work without it */
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  });
+  async function saveRule(kind: ApprovalRuleKind) {
+    if (!pending || busy) return;
+    busy = true;
+    await saveApprovalRule(approval.id, kind);
+    busy = false;
   }
   function openNote() {
     if (!offered.has('deny')) return;
@@ -98,7 +143,7 @@
     }
   });
   $effect(() => {
-    if (ui.revealApproval === approval.id && el) {
+    if (el && (ui.revealApproval === approval.id || twins.some((t) => t.id === ui.revealApproval))) {
       ui.revealApproval = null;
       el.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' });
     }
@@ -166,6 +211,7 @@
         {#if inside === true}<span class="ok"><Icon name="check" size={11} stroke={2.2} />inside {agent?.name}’s worktree</span>
         {:else if inside === false}<span class="bad"><Icon name="alert" size={11} />outside the worktree</span>{/if}
       </div>
+      {#if others.length}<p class="same">Also asked by {others.join(', ')}, each in the same folder of its own worktree. Your answer goes to all of them.</p>{/if}
     {:else if subject.kind === 'file_change'}
       <ul class="paths">{#each subject.paths as p (p)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
       {#if subject.diff}<pre class="diff selectable">{subject.diff}</pre>{/if}
@@ -222,6 +268,13 @@
         {/each}
         {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={openNote}>Deny with a note…{#if isKeyTarget}<span class="k">⇧⌘⌫</span>{/if}</button>{/if}
       </footer>
+      {#if rulePrefix || ruleExact}
+        <div class="always">
+          <span class="a-l" data-tip="Codly approves this request and stops asking about it, for every agent in this repo. Remove the rule in Settings → Safety.">Always allow in this repo, for every agent:</span>
+          {#if rulePrefix}<button class="btn sm" disabled={busy} onclick={() => saveRule('prefix')}>Commands that start with <code>{rulePrefix}</code></button>{/if}
+          {#if ruleExact}<button class="btn sm" disabled={busy} onclick={() => saveRule('exact')}>This exact command</button>{/if}
+        </div>
+      {/if}
     {/if}
     <Why lines={why} />
   </article>
@@ -248,6 +301,10 @@
   .risks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .risk { height: 22px; padding: 0 9px; border-radius: var(--r-full); font-size: var(--t-sm); line-height: 22px; color: var(--ink-2); background: var(--surface-2); }
   footer { display: flex; flex-wrap: wrap; gap: 6px; }
+  .same { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); margin-top: -4px; }
+  .always { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--ink-3); }
+  .a-l { margin-right: 2px; }
+  .always code { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-1); }
   .note { display: flex; gap: 6px; }
   .note .input { flex: 1; }
   .paths { display: flex; flex-direction: column; gap: 4px; }

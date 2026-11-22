@@ -16,6 +16,7 @@
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
   import AccountsSection from './AccountsSection.svelte';
   import ApiKeysSection from './ApiKeysSection.svelte';
+  import ApprovalRulesSection from './ApprovalRulesSection.svelte';
   import FreeFlowSection from './FreeFlowSection.svelte';
   import BreakerSection from './BreakerSection.svelte';
   import InboundSection from './InboundSection.svelte';
@@ -292,6 +293,8 @@
       </div>
       {#if confirmFull}<FullAccessConfirm onconfirm={() => ((confirmFull = false), set({ approval_mode: 'full' }))} oncancel={() => (confirmFull = false)} />{/if}
     </section>
+
+    <ApprovalRulesSection />
 
     <section>
       <h3 class="eyebrow">Review</h3>

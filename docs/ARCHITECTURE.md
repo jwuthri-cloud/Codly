@@ -209,6 +209,18 @@ not what a script or program then does, so this is not a sandbox) and **Full acc
 changes, changes to the agent's own CLI settings, writes by read-only agents and Codly's own data
 dir still ask).
 
+**Saved rules** (`orchestrator/approval_rules.rs`): "Always allow in this repo" on an approval card
+saves a rule in Codly's store (table `approval_rule`; not in the repo, not in a worktree) that the
+broker follows for every agent of that repo. A rule is the exact command, or the first words of one
+plain command (`cargo test`): a longer line that chains, pipes or substitutes anything never matches
+a prefix, and neither does a second target (`make docs deploy`) or a form that reaches past the
+agent's own worktree and branch (`git checkout -B main`). A rule covers a package download into
+the project and a git command that changes the repository (the exact command also covers other
+network use); deletes, `git push`, `sudo`, a pipe into a shell, secrets, paths outside the
+worktree (an install for the whole machine too: `npm install -g`), a publish, a change to your own
+account or settings (`cargo login`) and what cannot be checked always ask, and so do strict mode
+and read-only agents. Settings → Safety lists the rules; removing one makes Codly ask again.
+
 **Triggers and inbound** (Settings → Triggers / Inbound). `triggers.rs` holds the pure policy and
 `orchestrator/triggers.rs` the loop: schedules that send a prompt to the Lead on a repeating clock
 and a network mode that gates every
@@ -323,6 +335,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       gate.rs rebrief.rs                  commit → verify → scope → review → merge queue; a worker's task
                                                           again after a context compaction
                       approvals.rs controls.rs ask_me.rs  approval policy, live agent controls, "ask me" cards
+                      approval_rules.rs                   "always allow in this repo": saved approval rules
                       breaker.rs breaker_run.rs           circuit breaker: policy and enforcement
                       watchdog.rs                         silent turns and idle workers: flag, interrupt, stop
                       interrupts.rs                       who asked for an interrupt; what follows when the CLI does not stop

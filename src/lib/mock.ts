@@ -8,6 +8,7 @@
 // the public site demo).
 // Also answers `repo_map` (a ~300-file acme/web) and `read_artifact` (the bytes agents produced).
 import { isSiteDemo, type Transport, type UiBatch } from './api';
+import type { ApprovalRuleKind } from './gen/ApprovalRuleKind';
 import type { BreakerConfig } from './gen/BreakerConfig';
 import type { CliInfo } from './gen/CliInfo';
 import type { Placed } from './gen/Placed';
@@ -41,6 +42,7 @@ import { WorktreeDemo } from './demo/worktree';
 import type { SetupChoice } from './gen/SetupChoice';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
+import { MockApprovalRules } from './demo/approvalRules';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { MockControls } from './demo/controls';
@@ -148,6 +150,7 @@ export class MockTransport implements Transport {
   private byokSaved: Record<Vendor, boolean> = { anthropic: false, openai: false, openrouter: false };
   private triggers: TriggersConfig | null = null;
   private breaker: MockBreaker;
+  private approvalRules: MockApprovalRules;
   private askMe!: MockAskMe;
   private hk: HousekeepingDemo | undefined;
   private worktrees = new WorktreeDemo();
@@ -167,6 +170,7 @@ export class MockTransport implements Transport {
     );
     this.story = new Story(this.sim);
     this.breaker = new MockBreaker(this.sim);
+    this.approvalRules = new MockApprovalRules(this.sim, this.story);
     this.ctl = new MockControls(this.sim);
     this.askMe = new MockAskMe(this.sim);
     const now = this.sim.now();
@@ -303,6 +307,15 @@ export class MockTransport implements Transport {
         story.resolveApproval(String(a.approvalId), d.choice, d.message, d.answers);
         return null;
       }
+      case 'approval_rule_offer':
+        return this.approvalRules.offer(String(a.approvalId));
+      case 'add_approval_rule':
+        return this.approvalRules.add(String(a.approvalId), a.kind as ApprovalRuleKind);
+      case 'approval_rules':
+        return this.approvalRules.list();
+      case 'remove_approval_rule':
+        this.approvalRules.remove(String(a.ruleId));
+        return null;
       case 'breaker_config':
         return this.breaker.cfg;
       case 'set_breaker_config':

@@ -125,6 +125,31 @@ pub async fn resolve_approval(state: State<'_, AppState>, approval_id: String, d
     state.core().await?.resolve_approval(&approval_id, decision).await.map_err(err)
 }
 
+/// What a waiting request can be saved as ("Always allow in this repo"): nothing for the
+/// kinds of request Codly always asks about.
+#[tauri::command]
+pub async fn approval_rule_offer(state: State<'_, AppState>, approval_id: String) -> R<ApprovalRuleOffer> {
+    state.core().await?.approval_rule_offer(&approval_id).map_err(err)
+}
+
+/// Save a rule from a waiting request, and answer the requests it covers. The rule's text
+/// comes from the request, never from the caller.
+#[tauri::command]
+pub async fn add_approval_rule(state: State<'_, AppState>, approval_id: String, kind: ApprovalRuleKind) -> R<ApprovalRule> {
+    state.core().await?.add_approval_rule(&approval_id, kind).map_err(err)
+}
+
+/// The open repo's saved rules (Settings → Approvals).
+#[tauri::command]
+pub async fn approval_rules(state: State<'_, AppState>) -> R<Vec<ApprovalRule>> {
+    state.core().await?.approval_rules().map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_approval_rule(state: State<'_, AppState>, rule_id: String) -> R<()> {
+    state.core().await?.remove_approval_rule(&rule_id).map_err(err)
+}
+
 #[tauri::command]
 pub async fn interrupt_agent(state: State<'_, AppState>, agent_id: String) -> R<()> {
     state.core().await?.interrupt_agent(&agent_id).await.map_err(err)

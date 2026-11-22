@@ -13,6 +13,7 @@ import type { ChatMessage } from '../lib/gen/ChatMessage';
 import type { MessagePhase } from '../lib/gen/MessagePhase';
 import type { JsonValue } from '../lib/gen/serde_json/JsonValue';
 import { store, type Outgoing, type Seg, type Thought } from '../lib/state/store.svelte';
+import { groupSame } from '../lib/state/approvalGroups';
 import { isSlotNote } from '../lib/state/queue';
 import { stoppedByYou } from '../lib/state/stops';
 import { isRequestThread } from '../lib/state/ui.svelte';
@@ -38,7 +39,7 @@ export type Item =
     }
   // `thinking`: the thought being written, as it was when the row was made (`thinkingText`: as it is now).
   | { kind: 'work'; key: string; ts: number; agentId: string; segs: Seg[]; thoughts: Thought[]; thinking: string | null }
-  | { kind: 'approval'; key: string; ts: number; approval: Approval }
+  | { kind: 'approval'; key: string; ts: number; approval: Approval; /** Other agents' requests that wait for the same answer. */ twins: Approval[] }
   | { kind: 'ask'; key: string; ts: number; agentId: string; msg: ChatMessage }
   | { kind: 'task-done'; key: string; ts: number; taskId: string }
   | {
@@ -183,10 +184,9 @@ export function buildSpine(thread: string): Item[] {
   }
 
   // ── approvals, where they happened (a worker's land in its plan's request) ──
-  for (const ap of store.approvals) {
-    if (isLead ? store.approvalThread(ap) !== thread : ap.agent_id !== owner?.id) continue;
-    items.push({ kind: 'approval', key: `a:${ap.id}`, ts: ap.created_at, approval: ap });
-  }
+  // The same waiting request from several agents is one card, where the first one asked.
+  const here = store.approvals.filter((ap) => (isLead ? store.approvalThread(ap) === thread : ap.agent_id === owner?.id));
+  for (const { approval: ap, twins } of groupSame(here)) items.push({ kind: 'approval', key: `a:${ap.id}`, ts: ap.created_at, approval: ap, twins });
 
   // ── finished tasks (observed in this session) ──
   for (const t of store.tasks) {
