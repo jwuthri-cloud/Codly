@@ -95,6 +95,11 @@ fn commands_round_trip_with_frontend_arg_names() {
             crate::onboarding_commands::byok_configure,
             crate::onboarding_commands::byok_save_key,
             crate::diagnostics::diagnostics,
+            crate::pr_commands::pull_request,
+            crate::pr_commands::draft_pull_request,
+            crate::pr_commands::create_pull_request,
+            crate::pr_commands::push_pr_branch,
+            crate::pr_commands::refresh_pull_request,
         ])
         .build(tauri::generate_context!(test = true))
         .unwrap();
@@ -245,6 +250,21 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(status["today"]["tokens"] == 0 && status["hold"].is_null(), "{status}");
     let e = invoke(&wv, "plan_spent", json!({ "planId": "nope" })).unwrap_err();
     assert!(e.to_string().contains("unknown plan"), "{e}");
+
+    // The pull-request step, with the keys the frontend sends. No plan ran here: nothing is on
+    // record, nothing can be drafted, and nothing is pushed.
+    let source = json!({ "kind": "plan", "id": "nope" });
+    let confirm = json!({ "remote": "origin", "branch": "codly/x/integration", "base": "main" });
+    assert!(invoke(&wv, "pull_request", json!({ "source": source })).unwrap().is_null());
+    let e = invoke(&wv, "draft_pull_request", json!({ "source": source })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
+    let e = invoke(&wv, "create_pull_request", json!({ "source": source, "confirm": confirm, "title": "T", "body": "B" })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
+    let e = invoke(&wv, "push_pr_branch", json!({ "source": source, "confirm": confirm })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
+    let e = invoke(&wv, "refresh_pull_request", json!({ "source": { "kind": "agent", "id": "nope" } })).unwrap_err();
+    assert!(e.to_string().contains("has not opened a pull request"), "{e}");
+    assert!(invoke(&wv, "draft_pull_request", json!({ "source": { "kind": "branch", "id": "main" } })).is_err(), "only a plan or a solo agent");
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

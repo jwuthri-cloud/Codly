@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-push-pr-branch"
+description = "Enables the push_pr_branch command without any pre-configured scope."
+commands.allow = ["push_pr_branch"]
+
+[[permission]]
+identifier = "deny-push-pr-branch"
+description = "Denies the push_pr_branch command without any pre-configured scope."
+commands.deny = ["push_pr_branch"]

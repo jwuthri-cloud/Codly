@@ -14,6 +14,7 @@
   import ArtifactThumb from '../../components/ArtifactThumb.svelte';
   import Icon from '../../components/Icon.svelte';
   import RepoSyncBar from '../../components/RepoSyncBar.svelte';
+  import PullRequestStep from '../../components/PullRequestStep.svelte';
 
   interface Props {
     planId: string;
@@ -87,6 +88,7 @@
       {/if}
     </footer>
     {#if !kept}<RepoSyncBar refresh={merged?.sha ?? busy} {planId} />{/if}
+    {#if plan.integration_branch}<PullRequestStep source={{ kind: 'plan', id: planId }} canPush={!merged} />{/if}
   </article>
 {/if}
 

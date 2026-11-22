@@ -9,6 +9,7 @@
   import { store } from '../lib/state/store.svelte';
   import Icon from '../components/Icon.svelte';
   import RepoSyncBar from '../components/RepoSyncBar.svelte';
+  import PullRequestStep from '../components/PullRequestStep.svelte';
 
   interface Props {
     agent: Agent;
@@ -65,6 +66,8 @@
     </span>
   </div>
   {#if agent.role === 'solo'}<RepoSyncBar refresh={merges} agentId={agent.id} />{/if}
+  <!-- Only for Codly's own branch: the core pushes no other one from here. -->
+  {#if agent.role === 'solo' && view?.branch?.startsWith('codly/')}<PullRequestStep source={{ kind: 'agent', id: agent.id }} wait={resting ? null : 'Wait until its turn ends'} />{/if}
   {#if error}
     <p class="small bad">{error}</p>
   {:else if !view}

@@ -172,6 +172,11 @@
     "allow-diagnostics",
     "allow-cancel-task-tree",
     "allow-finish-plan",
-    "allow-worktree-setup"
+    "allow-worktree-setup",
+    "allow-pull-request",
+    "allow-draft-pull-request",
+    "allow-create-pull-request",
+    "allow-push-pr-branch",
+    "allow-refresh-pull-request"
   ]
 }

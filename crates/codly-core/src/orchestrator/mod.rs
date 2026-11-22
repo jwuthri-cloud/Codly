@@ -46,6 +46,7 @@ pub mod planner;
 mod plans;
 pub mod prompts;
 mod retry;
+pub mod pull_request;
 mod runs;
 pub mod scheduler;
 pub mod scope;

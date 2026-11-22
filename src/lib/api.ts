@@ -30,6 +30,11 @@ import type { StoragePolicy } from './gen/StoragePolicy';
 import type { StorageReport } from './gen/StorageReport';
 import type { RepoSync } from './gen/RepoSync';
 import type { MergeWarning } from './gen/MergeWarning';
+import type { PrConfirm } from './gen/PrConfirm';
+import type { PrDraft } from './gen/PrDraft';
+import type { PrPushed } from './gen/PrPushed';
+import type { PrSource } from './gen/PrSource';
+import type { PullRequest } from './gen/PullRequest';
 import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
@@ -372,6 +377,17 @@ export const api = {
   commitCheckout: (message: string) => call<string>('commit_checkout', { message }),
   /** Push your checked-out branch to its remote. */
   pushCheckout: () => call<RepoSync>('push_checkout'),
+  /** The pull request Codly opened for a plan or a solo agent, as last read (null: none). No network. */
+  pullRequest: (source: PrSource) => call<PullRequest | null>('pull_request', { source }),
+  /** What Create pull request would send: remote, branch, base, a drafted title and description. Sends nothing. */
+  draftPullRequest: (source: PrSource) => call<PrDraft>('draft_pull_request', { source }),
+  /** Push the Codly branch you confirmed and open a pull request with your own `gh`. */
+  createPullRequest: (source: PrSource, confirm: PrConfirm, title: string, body: string) =>
+    call<PullRequest>('create_pull_request', { source, confirm, title, body }),
+  /** Push the Codly branch you confirmed, without a pull request. */
+  pushPrBranch: (source: PrSource, confirm: PrConfirm) => call<PrPushed>('push_pr_branch', { source, confirm }),
+  /** Read the pull request's checks again: one `gh pr checks` call. */
+  refreshPullRequest: (source: PrSource) => call<PullRequest>('refresh_pull_request', { source }),
   keepPlan: (planId: string) => call<Plan>('keep_plan', { planId }),
   events: (agentId: string | null, before: number | null, limit = 500) =>
     call<EventRow[]>('get_events', { agentId, before, limit }),
