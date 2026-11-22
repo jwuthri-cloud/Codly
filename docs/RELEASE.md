@@ -13,7 +13,9 @@ A release is two files, `Codly_<version>_aarch64.dmg` (Apple Silicon) and `Codly
 The workflow was written from the Tauri and GitHub Actions documentation. It has not run yet, and
 it could not be tested before it was merged. Run it once by hand (see
 [Try the build without a release](#try-the-build-without-a-release)) and fix what fails before you
-push the first tag. Remove this section after the first release.
+push the first tag. A run by hand does not reach the last job, the one that writes the draft
+release: that job runs for the first time on your first tag. Remove this section after the first
+release.
 
 ## The version
 
@@ -56,16 +58,20 @@ When something goes wrong:
   and tag again.
 - **A build fails.** Fix it on `main`, delete the tag, and tag the new commit. If the cause was
   not the code (a network error, Apple's service), choose Re-run failed jobs instead.
-- **A run for a tag that already has a draft** replaces the files of the draft and keeps its
-  notes. Delete the draft first if you want new notes.
+- **A run for a tag that already has a draft** (Re-run all jobs on the tag's run) replaces the
+  files of the draft and keeps its notes. Delete the draft first if you want new notes. The line
+  "This build is not signed" is part of the notes, and it is written only when the draft is made.
+  So after you turn signing on or off, delete the draft before the re-run, or edit that line by
+  hand: the run prints a warning that says which of the two the new files are.
 - **A run for a tag that is already published** stops: a published release is never changed. Use
   a new version.
 
 ## Try the build without a release
 
-Actions → Release → Run workflow, on any branch. This builds the two `.dmg` files and keeps them
-as artifacts of the run (at the bottom of the run's page). It makes no tag and no release. Use it
-to test a change to the workflow or a new set of signing secrets.
+Actions → Release → Run workflow, on any branch or tag. This builds the two `.dmg` files and keeps
+them as artifacts of the run (at the bottom of the run's page). It makes no tag and no release,
+and it does not change the draft of a tag you run it on: only a pushed tag writes a release. Use
+it to test a change to the workflow or a new set of signing secrets.
 
 ## Test a draft
 
@@ -123,8 +129,9 @@ Then delete `certificate.p12` and `certificate-base64.txt`. Never commit them.
 
 These are the variables Tauri reads at build time
 ([Tauri: macOS code signing](https://v2.tauri.app/distribute/sign/macos/)). Nothing in the
-repository changes when you turn signing on: add the secrets, run the workflow by hand, and test
-the `.dmg` files as a draft. The run also checks that Apple's notarization ticket is on the app
+repository changes when you turn signing on: add the secrets, run the workflow by hand, download
+the `.dmg` files from the run's artifacts with a browser, and test them as you
+[test a draft](#test-a-draft). The run also checks that Apple's notarization ticket is on the app
 ("Check the notarization ticket").
 
 To go back to unsigned builds, delete all six secrets.

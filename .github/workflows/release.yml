@@ -3,7 +3,8 @@
 # docs/RELEASE.md.
 #
 #   push a tag v<version>   -> build, then a draft release (nothing is public until you publish it)
-#   "Run workflow" by hand  -> build only: the .dmg files are artifacts of the run
+#   "Run workflow" by hand  -> build only, on a branch or on a tag: the .dmg files are artifacts
+#                              of the run, and no release is made or changed
 name: Release
 
 on:
@@ -155,7 +156,9 @@ jobs:
   publish:
     name: Draft release
     needs: build
-    if: github.ref_type == 'tag'
+    # Only a pushed tag writes a release. "Run workflow" on a tag is also a run for a tag, so the
+    # event is part of the test.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # The only job that may write, and it has no Apple secret.
@@ -178,18 +181,27 @@ jobs:
 
       # A draft: nobody else sees it until you publish it on the Releases page. A second run for
       # the same tag replaces the files of the draft; it never touches a published release.
+      # The notes of a draft are yours to edit, so a second run leaves them alone. They were
+      # written for the first build: when signing was turned on or off since, the run warns that
+      # the line about signing is now wrong.
       - name: Create or update the draft release
         run: |
+          unsigned_note="This build is not signed with an Apple Developer ID, so macOS asks before it opens Codly the first time. How to open it: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$TAG/README.md#download"
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$draft" != "true" ]; then
               echo "::error::The release $TAG is already published. This run does not change a published release: use a new version."
               exit 1
             fi
             gh release upload "$TAG" --clobber Codly_*.dmg SHA256SUMS.txt
+            if [ "$SIGNED" = "true" ]; then
+              echo "::warning::The draft $TAG has new files and its old notes. The new files are signed and notarized: if the notes say the build is not signed, remove that line before you publish."
+            else
+              echo "::warning::The draft $TAG has new files and its old notes. The new files are not signed with an Apple Developer ID: if the notes do not say so, add this line before you publish: $unsigned_note"
+            fi
           else
             args=(--draft --verify-tag --title "Codly ${TAG#v}" --generate-notes)
             if [ "$SIGNED" != "true" ]; then
-              args+=(--notes "This build is not signed with an Apple Developer ID, so macOS asks before it opens Codly the first time. How to open it: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$TAG/README.md#download")
+              args+=(--notes "$unsigned_note")
             fi
             gh release create "$TAG" "${args[@]}" Codly_*.dmg SHA256SUMS.txt
           fi
