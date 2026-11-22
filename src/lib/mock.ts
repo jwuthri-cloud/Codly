@@ -407,6 +407,10 @@ export class MockTransport implements Transport {
         return story.createTask(String(a.title), String(a.goal ?? ''));
       case 'move_task':
         return story.moveTask(String(a.taskId), a.status as TaskStatus);
+      case 'cancel_task_tree':
+        return story.cancelTaskTree(String(a.taskId));
+      case 'finish_plan':
+        return story.finishPlan(String(a.planId));
       case 'recheck_task':
         return story.recheckTask(String(a.taskId));
       case 'accept_task':

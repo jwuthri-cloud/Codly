@@ -11,6 +11,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::approvals::{self, PolicyCtx, Verdict};
+use super::retry::{self, Failure};
 use super::{Inner, guard, lead, lock, prompts, read, row, scheduler, write};
 use crate::adapters::{AdapterEvent, AgentCmd};
 use crate::{career, memory};
@@ -493,6 +494,15 @@ impl Inner {
             Some(e) => prompts::clip(&e, 200),
             None => "the CLI gave no reason".to_string(),
         };
+        // A full session fails every next turn the same way: the task starts again in a new
+        // one, as a failure of its worker (`retry.rs`). Not for a task in its gate: that
+        // worker goes on below.
+        if status != TurnStatus::MaxTurns
+            && retry::context_full(&what)
+            && self.worker_failed(&task_id, &ctx.agent_id, Failure::ContextFull(what.clone()))
+        {
+            return;
+        }
         let ws = ctx.ws.as_deref();
         let waits = read(&self.turn_retry_waits).clone();
         let detail = json!({ "plan_id": t.plan_id, "turn": status, "error": what, "failed_turns": failures });
@@ -733,49 +743,21 @@ impl Inner {
         if !stopping && !starting && let Some(task_id) = ctx.task_id.clone() {
             let me = self.clone();
             let (role, agent_id, run) = (ctx.role, ctx.agent_id.clone(), ctx.run_id.clone());
-            tokio::spawn(async move { me.task_run_lost(task_id, role, agent_id, run, code).await });
+            let error = removed.and_then(|l| l.last_error);
+            tokio::spawn(async move { me.task_run_lost(task_id, role, agent_id, run, code, error).await });
         }
         self.kick();
     }
 
-    /// A task's worker or reviewer exited without Codly asking it to.
-    async fn task_run_lost(self: Arc<Self>, task_id: Id, role: Role, agent_id: Id, run_id: Id, code: Option<i64>) {
+    /// A task's worker or reviewer exited without Codly asking it to. `error`: the last error
+    /// its CLI reported.
+    async fn task_run_lost(self: Arc<Self>, task_id: Id, role: Role, agent_id: Id, run_id: Id, code: Option<i64>, error: Option<String>) {
         let Ok(t) = self.task(&task_id) else { return };
-        let ws = self.store.task_workspace(&task_id).ok().flatten();
         match role {
             Role::Reviewer if t.status == TaskStatus::Reviewing => self.review_done(task_id, run_id).await,
-            Role::Worker if matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) => {
-                let code = code.map_or("signal".to_string(), |c| c.to_string());
-                let give_up = t.attempt >= 3;
-                let reason = if give_up {
-                    format!("blocked: the worker exited unexpectedly {} times (last exit {code}); check the CLI and its run log", t.attempt)
-                } else {
-                    format!("the worker exited unexpectedly ({code}); restarting it")
-                };
-                let moved = self.update_task(&task_id, |t| {
-                    t.status = if give_up { TaskStatus::Blocked } else { TaskStatus::Ready };
-                    t.status_reason = Some(reason.clone());
-                    Ok(())
-                });
-                let _ = self.update_agent(&agent_id, |a| {
-                    if a.task_id.as_deref() == Some(task_id.as_str()) {
-                        a.task_id = None;
-                    }
-                });
-                if moved.is_err() {
-                    return; // stopped or cancelled by you meanwhile: that stands, and nothing is retried
-                }
-                let _ = self.decide(
-                    ws.as_deref(),
-                    Some(&task_id),
-                    "retry",
-                    reason.clone(),
-                    json!({ "plan_id": t.plan_id, "exit": code, "attempt": t.attempt }),
-                );
-                if give_up && let Some(ws) = ws {
-                    self.lead_followup(&ws, &self.task_thread(&t), &format!("Task {} \"{}\" is {reason}.", t.key, t.title)).await;
-                }
-                self.kick();
+            // The worker starts again after a wait; its third failure in a row blocks the task.
+            Role::Worker => {
+                self.worker_failed(&task_id, &agent_id, Failure::Exit { code, error });
             }
             _ => {}
         }

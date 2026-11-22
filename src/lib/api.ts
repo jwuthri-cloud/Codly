@@ -318,6 +318,10 @@ export const api = {
   setAgentLook: (agentId: string, lookSeed: string) => call<Agent>('set_agent_look', { agentId, lookSeed }),
   createTask: (title: string, goal: string) => call<Task>('create_task', { title, goal }),
   moveTask: (taskId: string, status: TaskStatus) => call<Task>('move_task', { taskId, status }),
+  /** Cancel a task together with every task that waits for it (they could never start). Returns them, the task first. */
+  cancelTaskTree: (taskId: string) => call<Task[]>('cancel_task_tree', { taskId }),
+  /** Keep what is merged: a running plan finishes with its merged tasks; its other tasks are cancelled. */
+  finishPlan: (planId: string) => call<Plan>('finish_plan', { planId }),
   /** Run a blocked or failed task's checks again, with no worker turn. `allow` names the risky commands you OK'd.
    *  Returns the commands that still need your OK (then nothing ran); none = the checks are running, or the task
    *  is Ready again for a team member that is on other work in the same worktree. */

@@ -156,6 +156,8 @@
     "allow-byok-configure",
     "allow-byok-save-key",
     "allow-byok-clear-key",
-    "allow-diagnostics"
+    "allow-diagnostics",
+    "allow-cancel-task-tree",
+    "allow-finish-plan"
   ]
 }

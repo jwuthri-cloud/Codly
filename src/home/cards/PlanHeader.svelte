@@ -4,6 +4,7 @@
   waits for you), and who is on it.
   Click → the plan's checklist in the conversation; the arrow opens the Plan room.
   While it runs, Cancel plan stops every worker (it asks first, like the Plan room).
+  A plan that cannot go on by itself says "Needs you": its card has the ways out.
 -->
 <script lang="ts">
   import { cancelPlan } from '../../lib/state/actions';
@@ -11,6 +12,7 @@
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
+  import { stuckPlan } from '../../lib/util/plan';
   import Icon from '../../components/Icon.svelte';
   import Portrait from '../../components/Portrait.svelte';
 
@@ -27,8 +29,11 @@
   const target = $derived(store.workspace?.current_branch ?? 'main');
   /** Approvals and questions its agents wait on: a task held by one still counts as running. */
   const waiting = $derived(requests.get(plan?.thread || 'lead')?.waiting ?? 0);
+  /** Running, but only you can move it on: a task stopped, and the rest waits for it. */
+  const stuck = $derived(plan ? stuckPlan(plan, tasks) : null);
   const status = $derived(
     waiting ? `${waiting === 1 ? 'Waiting for you' : `${waiting} waiting for you`} · ${done} of ${tasks.length} done`
+    : stuck ? `Needs you · ${done} of ${tasks.length} done`
     : finished ? (done === tasks.length ? `All ${tasks.length} merged · ready for ${target}` : `${done} of ${tasks.length} done · ready for ${target}`)
     : plan?.status === 'integrating' ? `${done} of ${tasks.length} done · integrating`
     : `${done} of ${tasks.length} done${live ? ` · ${live} working` : ''}`,
@@ -48,7 +53,7 @@
 </script>
 
 {#if plan}
-  <div class="ph" class:finished class:wait={waiting > 0}>
+  <div class="ph" class:finished class:wait={waiting > 0 || !!stuck}>
     <button class="main" onclick={() => (ui.revealPlan = planId)} aria-label="Show the plan: {plan.summary}, {status}">
       <span class="title serif truncate">{plan.summary}</span>
       <span class="bar" aria-hidden="true">

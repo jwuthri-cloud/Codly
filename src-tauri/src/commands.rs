@@ -175,6 +175,19 @@ pub async fn move_task(state: State<'_, AppState>, task_id: String, status: Task
     state.core().await?.move_task(&task_id, status).await.map_err(err)
 }
 
+/// Cancel a task together with every task that waits for it. Answers them as they are now,
+/// the task first.
+#[tauri::command]
+pub async fn cancel_task_tree(state: State<'_, AppState>, task_id: String) -> R<Vec<Task>> {
+    state.core().await?.cancel_task_tree(&task_id).await.map_err(err)
+}
+
+/// Keep what is merged: a running plan finishes with its merged tasks, the others are cancelled.
+#[tauri::command]
+pub async fn finish_plan(state: State<'_, AppState>, plan_id: String) -> R<Plan> {
+    state.core().await?.finish_plan(&plan_id).await.map_err(err)
+}
+
 /// Re-run a blocked or failed task's checks. Answers the risky commands that need the
 /// user's OK first (then nothing ran); `allow` names the ones the user OK'd.
 #[tauri::command]

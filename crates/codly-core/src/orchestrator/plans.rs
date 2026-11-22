@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use super::planner::{self, PlanInput};
+use super::retry::Failure;
 use super::runs::{RunReq, new_session};
 use super::scheduler::{self, Action, AgentPick, SchedInput};
 use super::{Inner, careers, guard, lead, lock, names, prompts, read, row, workspace, write};
@@ -46,6 +47,32 @@ fn plan_short(p: &Plan) -> String {
         return s.to_string();
     }
     format!("{}-{}", names::slug(&p.summary, 24), &p.id[p.id.len().saturating_sub(4)..])
+}
+
+/// The last look for plans merged outside Codly in one office, and what it looked at.
+pub(super) struct MergeLook {
+    /// The finished plans that were not merged and not kept.
+    open: Vec<Id>,
+    /// Where your branch was (`head_stamp`).
+    head: Option<(u64, std::time::SystemTime)>,
+    at: i64,
+}
+
+impl MergeLook {
+    /// Is this look worth making, `last` being the one before? Yes when your branch moved or
+    /// the plans that wait changed. A repo whose branch cannot be watched is looked at once a
+    /// minute.
+    fn due(&self, last: Option<&MergeLook>) -> bool {
+        last.is_none_or(|l| l.open != self.open || l.head != self.head || (self.head.is_none() && self.at - l.at >= 60_000))
+    }
+}
+
+/// When your branch last moved, read from the file of HEAD's reflog (no git process): its size
+/// and time change with every commit, merge, pull, reset and checkout. None: there is no such
+/// file to read (a repo without reflogs, or a checkout whose `.git` is a file).
+fn head_stamp(repo: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let log = std::fs::metadata(repo.join(".git").join("logs").join("HEAD")).ok()?;
+    Some((log.len(), log.modified().ok()?))
 }
 
 impl Inner {
@@ -405,10 +432,14 @@ impl Inner {
         self.sync_team(&ws)?;
         let tasks = self.store.tasks(&ws.id)?;
         self.sweep_staff(&ws, &tasks, &self.store.agents(&ws.id)?)?;
-        if let Err(e) = self.notice_outside_merges(&ws).await {
-            tracing::debug!("checking for merges outside Codly: {e}");
+        let mut plans = self.store.plans(&ws.id, 100)?;
+        if self.outside_merges_due(ws, &plans) {
+            if let Err(e) = self.notice_outside_merges(&ws).await {
+                tracing::debug!("checking for merges outside Codly: {e}");
+                lock(&self.merge_looks).remove(&ws.id); // not looked: the next pass tries again
+            }
+            plans = self.store.plans(&ws.id, 100)?;
         }
-        let plans = self.store.plans(&ws.id, 100)?;
         let agents = self.store.agents(&ws.id)?;
         let clis = self.clis();
         let mut settings = self.settings();
@@ -416,7 +447,9 @@ impl Inner {
         // A quiet 1:1 chat does not keep an agent from its task (it is stopped for it).
         let busy: HashSet<Id> = self.busy_agents();
         let accounts = self.account_states();
-        let actions = scheduler::schedule(&SchedInput {
+        let now = now_ms();
+        let not_before = lock(&self.retries).holds(now);
+        let input = SchedInput {
             tasks: &tasks,
             plans: &plans,
             agents: &agents,
@@ -424,9 +457,12 @@ impl Inner {
             settings: &settings,
             busy: &busy,
             accounts: &accounts,
-            now: now_ms(),
+            now,
             elsewhere: &elsewhere,
-        });
+            not_before: &not_before,
+        };
+        let actions = scheduler::schedule(&input);
+        let stuck = scheduler::stuck_plans(&input, &actions);
         let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
         for a in actions {
             match a {
@@ -480,7 +516,27 @@ impl Inner {
                 }
             }
         }
-        Ok(())
+        // A plan that only you can move on says so, once, in its thread.
+        self.tell_stuck(ws, &plans, &tasks, &stuck)
+    }
+
+    /// Is a look for plans you merged without Codly due? Each look runs git once or twice per
+    /// finished plan that is not merged, so an idle office looks only when something changed:
+    /// your branch moved, or another plan waits to be merged.
+    fn outside_merges_due(&self, ws: &Workspace, plans: &[Plan]) -> bool {
+        let open: Vec<Id> =
+            plans.iter().filter(|p| p.status == PlanStatus::Done && p.merged_sha.is_none() && !p.kept).map(|p| p.id.clone()).collect();
+        let mut looks = lock(&self.merge_looks);
+        if open.is_empty() {
+            looks.remove(&ws.id);
+            return false;
+        }
+        let look = MergeLook { open, head: head_stamp(Path::new(&ws.repo_path)), at: now_ms() };
+        let due = look.due(looks.get(&ws.id));
+        if due {
+            looks.insert(ws.id.clone(), look);
+        }
+        due
     }
 
     /// Persist the scheduler's choice before any side effect, then start the run.
@@ -566,25 +622,8 @@ impl Inner {
         if self.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        let reason = format!("blocked: could not start the worker: {e}");
-        let _ = self.update_task(&task_id, |t| {
-            if t.status == TaskStatus::Running {
-                t.status = TaskStatus::Blocked;
-                t.status_reason = Some(reason.clone());
-            }
-            Ok(())
-        });
-        let _ = self.update_agent(&agent_id, |a| {
-            if a.task_id.as_deref() == Some(task_id.as_str()) {
-                a.task_id = None;
-            }
-        });
-        let ws = self.store.task_workspace(&task_id).ok().flatten();
-        let _ = self.decide(ws.as_deref(), Some(&task_id), "schedule", reason.clone(), json!({ "error": e.to_string() }));
-        if let (Some(ws), Ok(t)) = (ws, self.task(&task_id)) {
-            self.lead_followup(&ws, &self.task_thread(&t), &format!("Task {} \"{}\" is {reason}.", t.key, t.title)).await;
-        }
-        self.kick();
+        // Tried again after a wait, unless only you can fix the cause (`retry.rs`).
+        self.worker_failed(&task_id, &agent_id, Failure::Start(e.to_string()));
     }
 
     async fn try_start_worker(self: &Arc<Self>, task_id: &str, agent_id: &str, account: &str, why: Option<&str>) -> Result<()> {
@@ -631,8 +670,12 @@ impl Inner {
         // retry). A session only exists in its account's config home; on another account the
         // worker starts over in a new session (the worktree keeps its work).
         let primary = self.primary_account(agent.provider);
+        // Its last session ran out of context: this run starts a new one, from the brief and
+        // the work in the worktree. A member's own long conversation is not resumed either.
+        let fresh = lock(&self.retries).fresh(task_id);
         let prev = self.store.latest_task_run(task_id, Some(Role::Worker))?.filter(|r| {
-            r.agent_id == agent.id
+            !fresh
+                && r.agent_id == agent.id
                 && r.provider == agent.provider
                 && r.session_id.is_some()
                 && r.account.clone().or_else(|| primary.clone()).as_deref().is_none_or(|a| a == account)
@@ -642,6 +685,7 @@ impl Inner {
         // A member continues its own conversation on a new task (unless the Lead asked for a
         // fresh one), when that conversation lives on this account.
         let own = match (&member, &agent.session_id) {
+            _ if fresh => None,
             (Some(_), Some(s)) if prev.is_none() && !task.fresh_session && self.agent_account(&agent).is_none_or(|a| a == account) => {
                 Some(s.clone())
             }
@@ -717,7 +761,10 @@ impl Inner {
                 }
             }
             (Start::New, f) => {
-                let brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), true).await;
+                let mut brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), true).await;
+                if fresh {
+                    brief = format!("{brief}\n\n{}", prompts::new_session_note());
+                }
                 match f {
                     Some(f) => format!("{brief}\n\n{f}"),
                     None => brief,
@@ -729,6 +776,7 @@ impl Inner {
             return Ok(());
         }
         lock(&self.pending_feedback).remove(task_id);
+        lock(&self.retries).started(task_id);
         self.send_prompt(agent_id, prompt)
     }
 
@@ -905,6 +953,7 @@ impl Inner {
         }
         if to == Ready {
             lock(&self.fix_rounds).remove(task_id); // a retry gets fresh fix rounds
+            lock(&self.retries).forget(task_id); // and starts now, with its worker's failures forgotten
         }
         let was = t;
         let t = self.update_task_as(task_id, true, |t| {
@@ -979,13 +1028,36 @@ impl Inner {
     /// Runs left `starting`/`running` by a crash become `lost` and the process groups they
     /// left running are killed; every pending approval expires; their tasks go back to ready,
     /// keeping the assignee, so the scheduler resumes the same agent with the stored session id.
-    pub(super) async fn recover(&self) {
-        if let Err(e) = self.recover_inner().await {
-            tracing::warn!("crash recovery incomplete: {e}");
+    /// A task whose worker had finished its turn (Codly was checking, reviewing or merging
+    /// the work) gets no worker turn: its gate runs again.
+    pub(super) async fn recover(self: &Arc<Self>) {
+        match self.recover_inner().await {
+            Ok(regate) => {
+                for task_id in regate {
+                    tokio::spawn(self.clone().gate(task_id));
+                }
+            }
+            Err(e) => tracing::warn!("crash recovery incomplete: {e}"),
         }
     }
 
-    async fn recover_inner(&self) -> Result<()> {
+    /// Had the task's worker ended its last turn, completed, with no turn started after it?
+    /// Then its work was whole when Codly stopped, and only the gate is left to do.
+    fn worker_turn_ended(&self, t: &Task) -> bool {
+        let last = |ty: &str| {
+            let of_worker = |e: &EventRow| e.agent_id.is_some() && e.agent_id == t.assignee;
+            self.store.task_events(&t.id, ty).ok().and_then(|events| events.into_iter().filter(of_worker).next_back())
+        };
+        match (last("turn_started"), last("turn_completed")) {
+            (Some(started), Some(ended)) => {
+                ended.id > started.id && matches!(ended.kind, EventKind::TurnCompleted { status: TurnStatus::Completed, .. })
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns the tasks whose gate runs again (see `recover`).
+    async fn recover_inner(&self) -> Result<Vec<Id>> {
         // One bad row must not leave everything after it stuck: each item recovers on its own.
         let each = |what: &str, id: &str, res: Result<()>| {
             if let Err(e) = res {
@@ -1043,12 +1115,27 @@ impl Inner {
             each("approval", &a.id, res.map(drop));
         }
         let active = [TaskStatus::Running, TaskStatus::Verifying, TaskStatus::Reviewing, TaskStatus::ChangesRequested, TaskStatus::Merging];
+        let mut regate = vec![];
         for t in self.store.tasks_with_status(&active)? {
+            // In its checks, review or merge, with the worker's turn over and its worktree
+            // still there: the gate runs again from the work as it is (as Running: the gate
+            // takes it from there). Anything else is resumed by its worker.
+            let gate_only = matches!(t.status, TaskStatus::Verifying | TaskStatus::Reviewing | TaskStatus::Merging)
+                && t.worktree.as_deref().is_some_and(|w| Path::new(w).is_dir())
+                && self.worker_turn_ended(&t);
             let res = self.update_task(&t.id, |t| {
-                t.status = TaskStatus::Ready;
-                t.status_reason = Some("resuming after Codly restarted".into());
+                if gate_only {
+                    t.status = TaskStatus::Running;
+                    t.status_reason = Some("checking the work again after Codly restarted".into());
+                } else {
+                    t.status = TaskStatus::Ready;
+                    t.status_reason = Some("resuming after Codly restarted".into());
+                }
                 Ok(())
             });
+            if gate_only && res.is_ok() {
+                regate.push(t.id.clone());
+            }
             each("task", &t.id, res.map(drop));
         }
         for a in self.store.all_agents()? {
@@ -1081,7 +1168,7 @@ impl Inner {
                 each("plan", &p.id, res.map(drop));
             }
         }
-        Ok(())
+        Ok(regate)
     }
 
     // ───────────── plan completion ─────────────
@@ -1214,5 +1301,39 @@ impl Inner {
         )?;
         self.lead_followup(&ws.id, &plan.thread, &text).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn look(open: &[&str], head: Option<u64>, at: i64) -> MergeLook {
+        MergeLook { open: open.iter().map(|id| id.to_string()).collect(), head: head.map(|len| (len, std::time::UNIX_EPOCH)), at }
+    }
+
+    #[test]
+    fn a_look_for_outside_merges_is_due_only_when_something_changed() {
+        let first = look(&["p1"], Some(100), 0);
+        assert!(first.due(None), "the first look");
+        assert!(!look(&["p1"], Some(100), 600_000).due(Some(&first)), "nothing moved: no git runs, however long it lasts");
+        assert!(look(&["p1"], Some(180), 5_000).due(Some(&first)), "your branch moved");
+        assert!(look(&["p1", "p2"], Some(100), 5_000).due(Some(&first)), "another plan waits to be merged");
+        // No reflog to watch: once a minute.
+        let blind = look(&["p1"], None, 0);
+        assert!(!look(&["p1"], None, 59_000).due(Some(&blind)));
+        assert!(look(&["p1"], None, 60_000).due(Some(&blind)));
+    }
+
+    #[test]
+    fn the_head_stamp_follows_the_reflog_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(head_stamp(dir.path()), None, "no reflog, no stamp");
+        let logs = dir.path().join(".git").join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("HEAD"), "a\n").unwrap();
+        let before = head_stamp(dir.path()).expect("a reflog gives a stamp");
+        std::fs::write(logs.join("HEAD"), "a\nb\n").unwrap();
+        assert_ne!(head_stamp(dir.path()), Some(before));
     }
 }
