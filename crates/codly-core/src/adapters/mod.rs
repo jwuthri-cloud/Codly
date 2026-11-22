@@ -8,6 +8,8 @@
 //!   prompt; the orchestrator sends `AgentCmd::Prompt`.
 //! - Every raw stdout line is appended to `spec.raw_log` BEFORE parsing.
 //! - Unknown provider messages become `EventKind::Unknown`; nothing is dropped silently.
+//!   Bookkeeping lines an adapter knows by name (Claude's hooks, command lists, summaries)
+//!   make no event: the raw log keeps them.
 //! - Approvals: on a provider permission request the adapter generates a Codly approval id,
 //!   remembers the provider request id, and emits `ApprovalRequested`. The orchestrator
 //!   replies with `AgentCmd::Approval`. If the provider cancels, emit `ApprovalResolved`

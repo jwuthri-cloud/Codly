@@ -342,6 +342,17 @@ impl Actor {
                 }
             }
         }
+        // A reasoning effort ("model:high") goes to the agent's own option when it offers one.
+        // Without one the agent runs with its default: say so, once per run.
+        if let Some(effort) = classify::split_model_effort(self.spec.model.as_deref()).1 {
+            match pick_option(&session["configOptions"], "thought_level", &effort) {
+                Some((config_id, value)) => {
+                    let id = self.request("session/set_config_option", json!({ "sessionId": sid, "configId": config_id, "value": value })).await;
+                    self.pending.insert(id, Pending::Config("reasoning effort"));
+                }
+                None => self.emit(EventKind::Error { message: effort_not_set(self.spec.provider, &effort), fatal: false }),
+            }
+        }
         if self.spec.read_only {
             if let Some((config_id, value)) = pick_option(&session["configOptions"], "mode", "plan") {
                 let id = self.request("session/set_config_option", json!({ "sessionId": sid, "configId": config_id, "value": value })).await;
@@ -616,6 +627,11 @@ fn auth_how(init: &Value) -> Option<String> {
     }
     let names: Vec<&str> = methods.iter().filter_map(|m| m["name"].as_str()).collect();
     (!names.is_empty()).then(|| format!("sign in with its CLI in a terminal first ({})", names.join(", ")))
+}
+
+/// What the user reads when an agent has no option for the reasoning effort Codly was given.
+fn effort_not_set(provider: Provider, effort: &str) -> String {
+    format!("{} has no \"{effort}\" reasoning effort to set over ACP: it runs with its own default", provider.label())
 }
 
 /// (configId, value) of the `category` select option matching `want` (exact, or as the
@@ -1361,6 +1377,13 @@ mod tests {
         assert_eq!(pick_option(&opts, "model", "big-pickle"), Some(("model".into(), "opencode/big-pickle".into())));
         assert_eq!(pick_option(&opts, "model", "openai/gpt-4.1"), Some(("model".into(), "openai/gpt-4.1".into())));
         assert_eq!(pick_option(&opts, "model", "nope"), None);
+        // A reasoning effort is set through the agent's `thought_level` option; an agent
+        // without one (Gemini has no config options), or without that level, is told apart.
+        let opts = json!([{ "id": "model", "category": "model", "options": [{ "value": "high" }] }, { "id": "effort", "category": "thought_level", "options": [{ "value": "low" }, { "value": "high" }] }]);
+        assert_eq!(pick_option(&opts, "thought_level", "high"), Some(("effort".into(), "high".into())));
+        assert_eq!(pick_option(&opts, "thought_level", "xhigh"), None);
+        assert_eq!(pick_option(&Value::Null, "thought_level", "high"), None);
+        assert_eq!(effort_not_set(Provider::Gemini, "high"), "Gemini CLI has no \"high\" reasoning effort to set over ACP: it runs with its own default");
         assert_eq!(tool_name("read_file__read_file_1792964533840_0", Some("README.md")).as_deref(), Some("read_file"));
         assert_eq!(tool_name("ccd5e765-06b2", Some("read")).as_deref(), Some("read"));
         assert_eq!(tool_name("ccd5e765-06b2", Some("git status --short")), None);

@@ -28,6 +28,12 @@ const SIGNED_OUT: [&str; 8] = [
     "set an auth method",
 ];
 
+/// Does `text` (a CLI's own words) say that nobody is signed in, or that the sign-in expired?
+pub(crate) fn says_signed_out(text: &str) -> bool {
+    let text = text.to_lowercase();
+    SIGNED_OUT.iter().any(|p| text.contains(p))
+}
+
 /// A process exit as text: "code 1", or "killed by a signal" when there is no code.
 pub(crate) fn exit_text(code: Option<i64>) -> String {
     code.map_or_else(|| "killed by a signal".into(), |c| format!("code {c}"))
@@ -76,7 +82,7 @@ fn advice(provider: Provider, text: &str, version: Option<&str>, home: Option<&s
     if says(&REJECTED) {
         return env::update_advice(provider).map(|update| format!("this {} does not accept an option Codly needs. {update}", provider.label()));
     }
-    if says(&SIGNED_OUT) {
+    if says_signed_out(&text) {
         return (!own_key).then(|| not_signed_in(provider, home, None));
     }
     let version = version?;
