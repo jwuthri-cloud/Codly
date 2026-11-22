@@ -10,6 +10,7 @@
   import { acceptTask, moveTask, recheckTask } from '../lib/state/actions';
   import { diffstats, statLine } from '../lib/state/diffstats.svelte';
   import { narrate } from '../lib/state/narration';
+  import { review, reviewKey } from '../lib/state/review.svelte';
   import { store } from '../lib/state/store.svelte';
   import { accounts } from '../lib/state/accounts.svelte';
   import { ui } from '../lib/state/ui.svelte';
@@ -42,6 +43,8 @@
     return store.taskMarks[task.id] ?? [];
   });
   const stat = $derived(diffstats.task[task.id] ?? null);
+  /** Review comments you wrote on its diff and did not send back yet. */
+  const unsent = $derived(review.comments(reviewKey({ kind: 'task', id: task.id })).length);
   const arts = $derived(store.artifacts.filter((a) => a.task_id === task.id));
   const why = $derived.by((): WhyLine[] => {
     void store.rev;
@@ -94,7 +97,7 @@
     <h2 class="serif">{task.title}</h2>
     <p class="status st-{task.status}">{TASK_STATUS_LABEL[task.status]}{task.status_reason ? ` — ${task.status_reason}` : ''}</p>
     <div class="acts">
-      {#if marks.length || task.status === 'done'}<button class="btn sm" onclick={() => ui.openDiff({ kind: 'task', id: task.id })}><Icon name="diff" size={13} />View changes</button>{/if}
+      {#if marks.length || task.status === 'done'}<button class="btn sm" onclick={() => ui.openDiff({ kind: 'task', id: task.id })} data-tip="Read the diff, comment on lines and send the task back"><Icon name="diff" size={13} />View changes{#if unsent}<span class="k">{unsent} {unsent === 1 ? 'comment' : 'comments'} not sent</span>{/if}</button>{/if}
       {#each LEGAL[task.status] ?? [] as l (l.to)}<button class="btn sm ghost" onclick={() => moveTask(task.id, l.to)}>{l.label}</button>{/each}
       {#if stopped}
         {#if task.verify.length}<button class="btn sm ghost" onclick={() => recheck()}>Re-run checks</button>{/if}

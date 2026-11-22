@@ -327,6 +327,9 @@ export const api = {
   assignTask: (taskId: string, agentId: string | null) => call<Task>('assign_task', { taskId, agentId }),
   taskDiff: (taskId: string) => call<string>('task_diff', { taskId }),
   planDiff: (planId: string) => call<string>('plan_diff', { planId }),
+  /** Send back: the review comments on a task's diff, as one message, go to the agent that did the work.
+   *  Refused for a done task (its work is merged: the changes are a new request). */
+  sendBackTask: (taskId: string, comments: string) => call<Task>('send_back_task', { taskId, comments }),
   /** Merge a plan into your checked-out branch. `into`: the branch you confirmed after `mergePlanWarning`. */
   mergePlan: (planId: string, into: string | null = null) => call<string>('merge_plan', { planId, into }),
   /** What to confirm before merging a plan: your checkout is not on the branch it started from (null: nothing). */

@@ -141,6 +141,7 @@ pub fn run() {
             commands::assign_task,
             commands::task_diff,
             commands::plan_diff,
+            commands::send_back_task,
             commands::merge_plan,
             commands::merge_plan_warning,
             commands::undo_merge,

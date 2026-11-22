@@ -19,10 +19,12 @@ import { PROVIDER_LABEL, TASK_STATUS_LABEL } from '../util/labels';
 import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { withModel } from '../util/team';
+import { followUpRequest, reviewMessage } from '../util/review';
 import { accounts } from './accounts.svelte';
 import { diffstats } from './diffstats.svelte';
 import { busy } from './queue';
 import { requests } from './requests.svelte';
+import { review, reviewKey } from './review.svelte';
 import { noteStop, stopping } from './stops';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
@@ -301,6 +303,36 @@ export async function acceptTask(taskId: string) {
   const ws = store.workspace?.id;
   const t = await attempt('merge the task', () => api.acceptTask(taskId));
   if (t && store.isOpen(ws)) store.upsertTask(t);
+}
+
+/**
+ * Send back: every comment you wrote on a diff, as one message (file, line, the quoted line, the
+ * comment). A task that is not done gets them through the core: its worker reads them and Codly
+ * checks the work again. Merged or finished work (a done task, a whole plan) opens a new request
+ * with the comments ready to send. `paths`: the diff's files, in order. True: the comments left
+ * the diff; false: they stay on it (nothing to send, or the core refused and a toast says why).
+ */
+export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, paths: string[]): Promise<boolean> {
+  const key = reviewKey(target);
+  const list = review.comments(key);
+  const task = target.kind === 'task' ? (store.taskMap.get(target.id) ?? null) : null;
+  const planId = target.kind === 'plan' ? target.id : task?.plan_id;
+  const plan = (planId && store.planMap.get(planId)) || null;
+  if (!list.length || (!task && !plan)) return false;
+  if (task && task.status !== 'done') {
+    const ws = store.workspace?.id;
+    const t = await attempt('send your comments back', () => api.sendBackTask(task.id, reviewMessage(list, paths)), 'your comments stay on the diff.');
+    if (!t) return false;
+    if (store.isOpen(ws)) store.upsertTask(t);
+    review.clear(key);
+    const who = (t.assignee && store.agentMap.get(t.assignee)?.name) || 'its worker';
+    toast({ kind: 'success', title: `${t.key} sent back to ${who}`, body: list.length === 1 ? '1 comment' : `${list.length} comments` });
+    return true;
+  }
+  ui.newRequest();
+  ui.seedComposer(ui.request, followUpRequest(task, plan, list, paths));
+  review.clear(key);
+  return true;
 }
 
 export async function assignTask(taskId: string, agentId: string | null) {

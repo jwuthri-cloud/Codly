@@ -56,6 +56,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::move_task,
             commands::recheck_task,
             commands::accept_task,
+            commands::send_back_task,
             commands::merge_plan,
             commands::merge_plan_warning,
             commands::undo_merge,
@@ -116,6 +117,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("only a blocked or failed task"), "{e}");
     let e = invoke(&wv, "accept_task", json!({ "taskId": task["id"] })).unwrap_err();
     assert!(e.to_string().contains("can be merged anyway"), "{e}");
+    // The diff's Send back: review comments go to a task that can still take them.
+    let e = invoke(&wv, "send_back_task", json!({ "taskId": task["id"], "comments": "1. `a.txt:1`\n   Rename it." })).unwrap_err();
+    assert!(e.to_string().contains("is cancelled; reopen it first"), "{e}");
 
     let m = invoke(&wv, "add_memory", json!({ "text": "We use pnpm.", "scope": "project", "kind": "decision" })).unwrap();
     assert_eq!(m["kind"], "decision");

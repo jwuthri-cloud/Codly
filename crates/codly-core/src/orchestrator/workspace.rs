@@ -411,6 +411,110 @@ impl Inner {
         self.git.diff(repo, base, branch).await
     }
 
+    /// Send back, from the diff: your review comments on a task go to the agent that did the
+    /// work, as one message, the way the gate sends a reviewer's feedback back.
+    /// - Its worker still runs the task: it reads them after its current turn, the task is
+    ///   Changes requested, and the gate checks the work again when that turn ends.
+    /// - The task is stopped (blocked, failed) or waits to start: its next run starts with them.
+    /// New work you asked for gets new fix rounds. A done task takes none: its work is merged,
+    /// so the changes are a new request.
+    pub(super) async fn send_back_task(&self, task_id: &str, comments: &str) -> anyhow::Result<Task> {
+        use TaskStatus::*;
+        let comments = comments.trim();
+        if comments.is_empty() {
+            bail!("there is no comment to send");
+        }
+        let t = self.task(task_id)?;
+        let ws = self.store.task_workspace(task_id)?;
+        let prompt = review_comments(&t, comments);
+        // What you asked is in the worker's own conversation, where you can read it again.
+        let note = |worker: &str| self.chat(ws.as_deref(), &format!("agent:{worker}"), "user", comments, None);
+        let open = |s: TaskStatus| matches!(s, Running | ChangesRequested | Verifying | Reviewing);
+        let worker = t.assignee.clone().filter(|a| lock(&self.live).get(a).is_some_and(|l| l.task_id.as_deref() == Some(task_id) && !l.stopping));
+        let (sent, how) = match (t.status, worker) {
+            (Done, _) => bail!("{} is done and its work is merged; ask for the changes in a new request", t.key),
+            (Cancelled, _) => bail!("{} is cancelled; reopen it first", t.key),
+            (Pending, _) => bail!("{} has not started yet", t.key),
+            (s, Some(worker)) if open(s) => {
+                note(&worker)?;
+                self.send_prompt(&worker, prompt)?;
+                lock(&self.fix_rounds).remove(task_id);
+                // The worker has a turn to come, and its end runs the gate whatever the task
+                // says by now: a pass that is under way sees the new message and stops short.
+                let t = self.update_task(task_id, |t| {
+                    if open(t.status) {
+                        t.status = ChangesRequested;
+                        t.status_reason = Some("you asked for changes; Codly checks the work again when its worker is done".into());
+                    }
+                    Ok(())
+                })?;
+                (t, "its worker reads them now")
+            }
+            // No run of the task to hand them to, and what Codly does with it right now (a
+            // worker that starts, your own re-check, a merge) would not see them.
+            (Running | ChangesRequested | Verifying | Reviewing | Merging, _) => {
+                bail!("Codly is working on {} right now; send your comments again in a moment", t.key)
+            }
+            (Blocked | Failed, _) => {
+                // Kept before the task can start again: its next run takes them as its prompt.
+                let before = self.keep_feedback(task_id, &prompt);
+                if let Err(e) = self.move_task(task_id, Ready).await {
+                    let mut waiting = lock(&self.pending_feedback);
+                    match before {
+                        Some(b) => waiting.insert(task_id.to_string(), b),
+                        None => waiting.remove(task_id),
+                    };
+                    return Err(e);
+                }
+                if let Some(worker) = &t.assignee {
+                    note(worker)?;
+                }
+                let t = self.update_task(task_id, |t| {
+                    if t.status == Ready {
+                        t.status_reason = Some("you asked for changes; its worker starts again with your comments".into());
+                    }
+                    Ok(())
+                })?;
+                (t, "its next run starts with them")
+            }
+            (Ready, _) => {
+                // A task starts under the scheduler's lock: still Ready here, its start reads them.
+                let _g = self.sched_lock.lock().await;
+                let now = self.task(task_id)?;
+                if now.status != Ready {
+                    bail!("{} has just started; send your comments again in a moment", t.key);
+                }
+                self.keep_feedback(task_id, &prompt);
+                if let Some(worker) = &t.assignee {
+                    note(worker)?;
+                }
+                (now, "its next run starts with them")
+            }
+        };
+        self.decide_by(
+            ws.as_deref(),
+            Some(task_id),
+            "review",
+            "human",
+            format!("you sent {} back with review comments; {how}", t.key),
+            json!({ "plan_id": t.plan_id, "comments": comments }),
+        )?;
+        Ok(sent)
+    }
+
+    /// Keep feedback for a task's next worker run, after what already waits there (the gate's
+    /// own feedback, a hand-off note). Returns what waited before.
+    fn keep_feedback(&self, task_id: &str, text: &str) -> Option<String> {
+        let mut waiting = lock(&self.pending_feedback);
+        let before = waiting.get(task_id).cloned();
+        let all = match &before {
+            Some(b) => format!("{b}\n\n{text}"),
+            None => text.to_string(),
+        };
+        waiting.insert(task_id.to_string(), all);
+        before
+    }
+
     /// Plans you merged without Codly (git on the command line, another tool): a done plan whose
     /// integration branch is already in your branch counts as merged, and its integration
     /// worktree goes, as after a merge from the app.
@@ -883,6 +987,16 @@ pub(super) fn orphans(snapshot: &[Proc], wanted: &[(i32, i64)]) -> Vec<i32> {
         }
     }
     found
+}
+
+/// What a worker reads when you send its task back from the diff. The header is Codly's; the
+/// comments are yours (each one: the file and line, the quoted line, what you wrote).
+fn review_comments(t: &Task, comments: &str) -> String {
+    format!(
+        "[Codly] The user reviewed your work on task {} \"{}\" and sent it back with the comments below. Address every comment, \
+         stay within your task, re-run the verify commands and call codly_submit_report again.\n\n{comments}",
+        t.key, t.title
+    )
 }
 
 fn expand_home(p: &str) -> PathBuf {

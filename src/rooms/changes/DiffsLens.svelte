@@ -4,15 +4,23 @@
   diffstat, then the files with +/−; right: unified view with line numbers. ] / [ jump between
   files. Plans already in your branch (merged from Codly or by hand) or kept on their own branch
   sit under Merged, with their tasks.
+  It is also where you review: comment on a line or a file, tick files as viewed, open one in
+  the editor, and Send back gives all your comments to the agent that did the work (a new
+  request, for work that is merged or finished).
 -->
 <script lang="ts">
+  import { ide } from '../../ide/ide.svelte';
   import { api } from '../../lib/api';
-  import { mergePlan } from '../../lib/state/actions';
+  import type { Agent } from '../../lib/gen/Agent';
+  import type { Task } from '../../lib/gen/Task';
+  import { mergePlan, sendBack } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
+  import { review, reviewKey } from '../../lib/state/review.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
-  import { diffStats, parseDiff, type DiffFile } from '../../lib/util/diff';
+  import { diffStats, type DiffFile } from '../../lib/util/diff';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
+  import { editorPlace, heavy, HEAVY_LABEL, parseDiffKeeping, type DiffParts, type ReviewComment } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
@@ -66,11 +74,21 @@
     else ui.diffTarget = { kind: 'plan', id: id === 'merged' ? merged[0].id : id };
   }
 
-  let files = $state<DiffFile[]>([]);
+  // Raw: the parsed diff is only ever replaced, and a deep proxy over every line of a large
+  // diff is slow to read.
+  let files = $state.raw<DiffFile[]>([]);
   let loading = $state(false);
   let error = $state<string | null>(null);
-  let collapsed = $state<Record<string, boolean>>({});
+  /** Files you opened (false) or closed (true) by hand. The others are open, unless you ticked
+   *  them as viewed or they are heavy (a lockfile, generated, large). */
+  let closed = $state<Record<string, boolean>>({});
   let active = $state<string | null>(null);
+  /** The diff on screen: its name (`reviewKey`), its text, and each file's part of it, parsed. */
+  let drawn: { key: string; text: string; parts: DiffParts } | null = null;
+  const key = $derived(target ? reviewKey(target) : '');
+  const isClosed = (f: DiffFile) => closed[f.path] ?? (review.viewed(key, f) || heavy(f) != null);
+  const setClosed = (path: string, on: boolean) => (closed = { ...closed, [path]: on });
+  let main = $state<HTMLElement | null>(null);
 
   const version = $derived.by(() => {
     if (!target) return '';
@@ -89,12 +107,23 @@
     void retry;
     if (!t) return;
     const my = ++seq;
+    const name = reviewKey(t);
+    // Another diff: the one on screen goes at once, so no comment lands on a diff you left.
+    if (drawn?.key !== name) {
+      drawn = null;
+      files = [];
+    }
     loading = true;
     (t.kind === 'plan' ? api.planDiff(t.id) : api.taskDiff(t.id))
       .then((text) => {
         if (my !== seq) return;
-        files = parseDiff(text);
         error = null;
+        // The same text again (a task changed status, the code did not): nothing to draw.
+        if (drawn?.text === text) return;
+        // Files whose part of the text did not change keep their objects, so only the others are drawn again.
+        const parsed = parseDiffKeeping(text, drawn?.parts ?? new Map());
+        drawn = { key: name, text, parts: parsed.parts };
+        files = parsed.files;
         if (!files.find((f) => f.path === active)) active = files[0]?.path ?? null;
       })
       .catch((e) => my === seq && (error = e instanceof Error ? e.message : String(e)))
@@ -102,21 +131,67 @@
   });
   const totals = $derived(diffStats(files));
 
-  /** Which task (and agent) wrote a file: from Codly's commits. */
-  function ownerOf(path: string) {
+  const targetTask = $derived(target?.kind === 'task' ? (store.taskMap.get(target.id) ?? null) : null);
+  /** Which task (and agent) wrote each file: from Codly's commits, then from what its agent
+   *  changes now. One pass for the whole diff; the first task of the scope that has a file owns it. */
+  const owners = $derived.by(() => {
     void store.rev;
-    const scope = target?.kind === 'plan' ? store.tasks.filter((t) => t.plan_id === target.id) : target ? [store.taskMap.get(target.id)].filter((t) => !!t) : [];
+    const out = new Map<string, { task: Task; agent: Agent | null }>();
+    const scope = target?.kind === 'plan' ? store.tasks.filter((t) => t.plan_id === target.id) : targetTask ? [targetTask] : [];
     for (const t of scope) {
-      const hit = (store.taskMarks[t!.id] ?? []).some((m) => m.files?.includes(path)) || (t!.assignee && store.live[t!.assignee]?.files[path]?.modified);
-      if (hit) return { task: t!, agent: t!.assignee ? store.agentMap.get(t!.assignee) : null };
+      const owner = { task: t, agent: (t.assignee && store.agentMap.get(t.assignee)) || null };
+      const own = (path: string) => out.has(path) || out.set(path, owner);
+      for (const m of store.taskMarks[t.id] ?? []) m.files?.forEach(own);
+      const live = t.assignee ? store.live[t.assignee]?.files : null;
+      if (live) for (const [path, f] of Object.entries(live)) if (f.modified) own(path);
     }
-    return null;
-  }
+    return out;
+  });
   function jump(path: string) {
     active = path;
-    collapsed = { ...collapsed, [path]: false };
+    setClosed(path, false);
     document.getElementById(`diff-${path}`)?.scrollIntoView({ block: 'start', behavior: ui.reducedMotion ? 'auto' : 'smooth' });
   }
+
+  // ───────────── review: comments, viewed, the editor ─────────────
+
+  const NONE: ReviewComment[] = [];
+  const comments = $derived(review.comments(key));
+  const byFile = $derived.by(() => {
+    const out = new Map<string, ReviewComment[]>();
+    for (const c of comments) out.set(c.path, [...(out.get(c.path) ?? []), c]);
+    return out;
+  });
+  const viewedCount = $derived(files.filter((f) => review.viewed(key, f)).length);
+  function setViewed(f: DiffFile, on: boolean) {
+    review.setViewed(key, f, on);
+    setClosed(f.path, on); // a file you have read folds away; unticking opens it again
+  }
+  /** Where a file opens in the editor: the worktree of the task that wrote it, or your
+   *  repository once the plan is merged (see `editorPlace`). */
+  function placeOf(path: string) {
+    const task = targetTask ?? owners.get(path)?.task ?? null;
+    const planId = target?.kind === 'plan' ? target.id : task?.plan_id;
+    const plan = (planId && store.planMap.get(planId)) || null;
+    const worker = (task?.assignee && store.agentMap.get(task.assignee)) || null;
+    return editorPlace(task, plan, worker, store.leadOf(plan?.thread ?? 'lead') ?? store.leads[0] ?? null);
+  }
+  // A task that is not done takes the comments itself; merged or finished work gets a new request.
+  const toWorker = $derived(!!targetTask && targetTask.status !== 'done');
+  const workerName = $derived((targetTask?.assignee && store.agentMap.get(targetTask.assignee)?.name) || 'its worker');
+  let sending = $state(false);
+  async function send() {
+    if (!target || sending) return;
+    sending = true;
+    await sendBack(target, files.map((f) => f.path));
+    sending = false;
+  }
+  /** Discard asks once more: the comments are not kept anywhere else. */
+  let discarding = $state(false);
+  $effect(() => {
+    void comments;
+    discarding = false;
+  });
   function onKey(e: KeyboardEvent) {
     const el = e.target as HTMLElement;
     if (el.closest('input, textarea') || e.metaKey || e.ctrlKey || !files.length) return;
@@ -183,13 +258,16 @@
         {/each}
       {/if}
       {#if files.length}
-        <p class="eyebrow files-h">{files.length} files · <span class="num"><span class="add">+{totals.added}</span> <span class="del">−{totals.removed}</span></span></p>
+        <p class="eyebrow files-h">{files.length} files · <span class="num"><span class="add">+{totals.added}</span> <span class="del">−{totals.removed}</span></span>{#if viewedCount} · {viewedCount} viewed{/if}</p>
         <ul class="files">
           {#each files as f (f.path)}
-            {@const o = ownerOf(f.path)}
+            {@const o = owners.get(f.path)}
+            {@const n = byFile.get(f.path)?.length ?? 0}
             <li>
-              <button class="fl" class:on={active === f.path} style:--hue={o?.agent ? idVar(o.agent.color) : 'var(--line-3)'} onclick={() => jump(f.path)} onpointerenter={() => ui.setHover({ path: f.path })} onpointerleave={() => ui.setHover(null)} data-tip={f.path}>
+              <button class="fl" class:on={active === f.path} class:seen={review.viewed(key, f)} style:--hue={o?.agent ? idVar(o.agent.color) : 'var(--line-3)'} onclick={() => jump(f.path)} onpointerenter={() => ui.setHover({ path: f.path })} onpointerleave={() => ui.setHover(null)} data-tip={f.path}>
                 <span class="dot"></span><span class="f-n truncate">{f.path.split('/').pop()}</span>
+                {#if n}<span class="f-c num" aria-label="{n} {n === 1 ? 'comment' : 'comments'} not sent">{n}</span>{/if}
+                {#if review.viewed(key, f)}<span class="f-v" aria-label="Viewed"><Icon name="check" size={11} stroke={2} /></span>{/if}
                 <span class="f-s num"><span class="add">+{f.added}</span> <span class="del">−{f.removed}</span></span>
               </button>
             </li>
@@ -197,15 +275,45 @@
         </ul>
       {/if}
     </aside>
-    <div class="main">
+    <div class="main" bind:this={main}>
       {#if error}<p class="err">Couldn’t load the diff: {error}<button class="btn sm" disabled={loading} onclick={() => retry++}>Try again</button></p>
       {:else if loading && !files.length}<EmptyState compact title="Loading the diff…" />
       {:else if !files.length && !loading}<EmptyState compact title="No changes in this scope yet." />
       {:else}
         {#each files as f (f.path)}
-          {@const o = ownerOf(f.path)}
-          <DiffView file={f} hue={o?.agent ? idVar(o.agent.color) : 'var(--line-3)'} who={target.kind === 'plan' && o ? `${o.task.key} · ${o.agent?.name ?? ''}` : undefined} collapsed={!!collapsed[f.path]} ontoggle={() => (collapsed = { ...collapsed, [f.path]: !collapsed[f.path] })} />
+          {@const o = owners.get(f.path)}
+          {@const why = heavy(f)}
+          {@const place = placeOf(f.path)}
+          {@const editor = place.agentId}
+          <DiffView
+            file={f}
+            hue={o?.agent ? idVar(o.agent.color) : 'var(--line-3)'}
+            who={target.kind === 'plan' && o ? `${o.task.key} · ${o.agent?.name ?? ''}` : undefined}
+            kind={why ? HEAVY_LABEL[why] : undefined}
+            root={main}
+            collapsed={isClosed(f)}
+            ontoggle={() => setClosed(f.path, !isClosed(f))}
+            comments={byFile.get(f.path) ?? NONE}
+            oncomment={(at, text) => review.comment(key, at, text)}
+            viewed={review.viewed(key, f)}
+            onviewed={(on) => setViewed(f, on)}
+            openTip={place.tip}
+            onopen={editor ? () => void ide.openPath(editor, f.path) : undefined}
+          />
         {/each}
+      {/if}
+      <!-- Also when the diff did not load or is empty by now: what you wrote is never out of reach. -->
+      {#if comments.length}
+        <div class="review" role="region" aria-label="Your review">
+          <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {toWorker ? `Send back gives them to ${workerName}; Codly checks the work again after the changes.` : 'This work is finished: Send back opens a new request with your comments, ready to send.'}</p>
+          {#if discarding}
+            <button class="btn sm danger" onclick={() => review.clear(key)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
+            <button class="btn sm ghost" onclick={() => (discarding = false)}>Keep</button>
+          {:else}
+            <button class="btn sm ghost" onclick={() => (discarding = true)}>Discard</button>
+            <button class="btn sm primary" disabled={sending} onclick={send}><Icon name="send" size={13} />Send back</button>
+          {/if}
+        </div>
       {/if}
     </div>
   </div>
@@ -235,8 +343,15 @@
   .files { display: flex; flex-direction: column; gap: 1px; }
   .fl { height: 30px; font-size: var(--t-sm); }
   .f-n { flex: 1; font-family: var(--font-mono); font-size: 11.5px; }
+  .fl.seen .f-n { color: var(--ink-3); }
+  .f-c { min-width: 16px; height: 16px; padding: 0 4px; border-radius: var(--r-full); background: var(--amber-soft); color: var(--amber-ink); font-size: var(--t-xs); line-height: 16px; text-align: center; }
+  .f-v { display: inline-flex; color: var(--ok); }
   .add { color: var(--ok); }
   .del { color: var(--bad); }
   .main { flex: 1; min-width: 0; overflow-y: auto; padding: 4px 24px 24px 6px; display: flex; flex-direction: column; gap: 12px; }
   .err { display: flex; align-items: center; gap: 10px; color: var(--bad); font-size: var(--t-sm); padding: 20px; }
+  /* Your comments wait here, in view under the files, until you send them back. */
+  .review { position: sticky; bottom: 0; z-index: 2; flex-shrink: 0; margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 10px 12px 10px 14px; border-radius: var(--r-md); background: var(--glass-solid); box-shadow: inset 0 0 0 1px var(--line-2), inset 3px 0 0 var(--amber); }
+  .r-t { flex: 1; min-width: 0; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); }
+  .r-t b { color: var(--ink-1); font-weight: var(--w-semi); }
 </style>
