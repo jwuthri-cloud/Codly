@@ -69,6 +69,17 @@ start, and scrubs tokens, keys, emails and paths under the home folder from it (
 agent names stay). The file takes debug lines from Codly's own crates only (`CODLY_LOG=debug`):
 a library's debug output stays on stdout.
 
+Native notifications come from the shell (src-tauri/src/notify.rs), not the webview, which may
+be suspended while hidden. `Notifier::notice` turns an event into a notice of one of eight
+kinds (needs your approval, asks you a question, plan finished, plan failed or stuck, task
+blocked or failed, agent stalled or held back, budget reached, a solo agent's work ready to
+merge); each thing is told once. Notices of one kind within 3 s show as one notification.
+Settings → Notifications (`Settings.notifications`) has a switch per kind and "only when Codly
+is not in front" (on by default). The notification plugin reports no click on the desktop, so
+a click is read from its effect: when the window comes to the front within 30 s of a
+notification shown behind it, the shell sends `open-notice` and the UI opens what the
+notification names (src/lib/state/openNotice.ts).
+
 PATH: GUI apps get launchd's minimal PATH, so Codly captures the login shell env once
 (`$SHELL -ilc '/usr/bin/env -0'`, 5 s timeout) and resolves each CLI on it at every spawn.
 Child envs are scrubbed of variables that silently change billing or session behaviour
@@ -408,6 +419,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
   ide.rs            confined file operations for the workspace IDE
   repos.rs          the git repositories under a folder, for `codly serve`'s repository picker
   blockers.rs       "ask me" cards (codly_ask_user)
+  notifications.rs  Settings → Notifications: one switch per kind of notification
   hire.rs           hire manifests
   career.rs         XP, ranks, traits: pure functions
   lot.rs price.rs   build mode: the ready-made lots, the price table
@@ -423,6 +435,7 @@ src-tauri/src/            the macOS shell
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
   onboarding_commands.rs pr_commands.rs    the other commands, one file per topic
   ui_bus.rs         one ordered Channel of coalesced event batches per webview
+  notify.rs         native notifications: event → notice, one per kind within a few seconds, the switches
   web.rs            `codly serve`: the same UI over HTTP; passes /api/voice/ws to the voice relay
   ipc_tests.rs      the real commands through Tauri's IPC layer (mock runtime)
 src-tauri/                build.rs (command list), capabilities/ and permissions/ (ACL), tests/acl.rs

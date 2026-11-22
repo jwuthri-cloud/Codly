@@ -20,6 +20,7 @@
   import FreeFlowSection from './FreeFlowSection.svelte';
   import BreakerSection from './BreakerSection.svelte';
   import InboundSection from './InboundSection.svelte';
+  import NotificationsSection from './NotificationsSection.svelte';
   import ConnectionsSection from './ConnectionsSection.svelte';
   import DeveloperSection from './DeveloperSection.svelte';
   import HousekeepingSection from './HousekeepingSection.svelte';
@@ -235,6 +236,8 @@
         <input type="range" class="volume" min="0" max="100" step="5" value={Math.round(volume * 100)} disabled={!soundOn} aria-label="Office sound volume" oninput={(e) => sound.setVolume(+(e.currentTarget as HTMLInputElement).value / 100)} />
       </div>
     </section>
+
+    <NotificationsSection />
 
     <HousekeepingSection />
     <StorageSection />
