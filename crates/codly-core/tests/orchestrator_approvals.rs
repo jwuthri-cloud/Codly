@@ -185,7 +185,9 @@ fn a_trusted_junior_edits_its_worktree_but_commands_still_ask() {
     let junior = |a: &Approval, mode| evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: true });
     let edit = approval(ApprovalSubject::FileChange { paths: vec![format!("{WT}/src/a.ts")], diff: None });
     assert!(!allowed(&eval(&edit, ApprovalMode::Balanced)), "untrusted: balanced asks");
-    assert!(allowed(&junior(&edit, ApprovalMode::Balanced)));
+    // The decision names your trust in the agent sheet's words, not a rank: any rank can have it.
+    let v = junior(&edit, ApprovalMode::Balanced);
+    assert!(matches!(&v, Verdict::Allow { rule, .. } if rule == "edits inside its worktree (you trust it to edit on its own)"), "{v:?}");
     let escape = approval(ApprovalSubject::FileChange { paths: vec!["/etc/hosts".into()], diff: None });
     assert!(reason(junior(&escape, ApprovalMode::Balanced)).contains("outside worktree"));
     assert!(!allowed(&junior(&cmd("rm -rf build"), ApprovalMode::Balanced)), "commands still ask");

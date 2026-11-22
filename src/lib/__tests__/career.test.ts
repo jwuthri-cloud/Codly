@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canTrust, clashes, contextLabel, emptyCareer, makeApplicants, rankFor, rankProgress, TRUST, trustOf } from '../util/career';
+import { canTrust, clashes, contextLabel, emptyCareer, makeApplicants, raisesTrust, rankFor, rankProgress, TRUST, trustOf } from '../util/career';
 import { demoBiggerModel, demoTrust } from '../demo/office';
 import type { Sim } from '../demo/sim';
 import type { Agent } from '../gen/Agent';
@@ -60,6 +60,21 @@ describe('trust is a safety setting, not a rank', () => {
     expect(trustOf('junior').allows).toContain('Balanced');
     expect(trustOf('senior').allows).toContain('Balanced');
     expect(trustOf('staff').allows).toContain('without the cross-vendor review');
+  });
+
+  it('each level’s sentence stands alone: a toast, a tooltip and the office show it without the list', () => {
+    for (const t of TRUST) expect(t.allows).not.toMatch(/\b(above|below)\b/i);
+    // The top level: working alone needs Balanced permissions, the review is skipped whatever they are.
+    expect(trustOf('staff').allows).toBe(
+      'Where permissions are Balanced, it works inside its own worktree without asking (risky actions still ask). Whatever the permissions, its work merges without the cross-vendor review.',
+    );
+  });
+
+  it('a change is a raise only when it gives more than the agent has', () => {
+    expect(raisesTrust('intern', 'junior')).toBe(true);
+    expect(raisesTrust('junior', 'staff')).toBe(true);
+    expect(raisesTrust('senior', 'senior')).toBe(false);
+    expect(raisesTrust('staff', 'intern')).toBe(false);
   });
 
   it('only agents that write on their own can be trusted', () => {

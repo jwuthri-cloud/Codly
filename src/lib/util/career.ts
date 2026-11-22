@@ -72,12 +72,13 @@ export const titleOf = (c: Career) => (c.legend ? 'Legend' : rankLabel(c.rank));
 
 /** How much you let an agent do without asking (`career.trust`, mirror of `career::trust_allows`):
  *  a safety setting you set per agent, whatever its rank. The levels reuse the rank names in
- *  saved data and each includes the ones below it. `allows` says when a level changes anything. */
+ *  saved data and each includes the ones below it. `allows` says when a level changes anything,
+ *  in a sentence that stands alone: a toast, a tooltip and the office show it without the list. */
 export const TRUST: { level: Rank; label: string; allows: string }[] = [
   { level: 'intern', label: 'No extra trust', allows: 'It asks as your permissions say, like every other agent.' },
   { level: 'junior', label: 'Edits on its own', allows: 'Where permissions are Balanced, it edits files inside its own worktree without asking. Commands still ask.' },
   { level: 'senior', label: 'Works on its own', allows: 'Where permissions are Balanced, it works inside its own worktree without asking. Risky actions still ask.' },
-  { level: 'staff', label: 'Works on its own, no review', allows: 'It works on its own as above, and its work merges without the cross-vendor review.' },
+  { level: 'staff', label: 'Works on its own, no review', allows: 'Where permissions are Balanced, it works inside its own worktree without asking (risky actions still ask). Whatever the permissions, its work merges without the cross-vendor review.' },
 ];
 export const trustOf = (level: Rank) => TRUST.find((t) => t.level === level) ?? TRUST[0];
 /** Only an agent that writes on its own can be trusted: the Lead and reviewers always ask. */
@@ -89,6 +90,8 @@ export const WANT_XP = 25;
 const order = (r: Rank) => RANKS.findIndex((x) => x.rank === r);
 /** At or above (mirror of `Rank`'s order). */
 export const atLeast = (r: Rank, min: Rank) => order(r) >= order(min);
+/** Whether a change of trust gives the agent more than it has (the agent sheet asks first). */
+export const raisesTrust = (from: Rank, to: Rank) => order(to) > order(from);
 
 export const rankLabel = (r: Rank) => RANKS.find((x) => x.rank === r)?.label ?? 'Intern';
 
