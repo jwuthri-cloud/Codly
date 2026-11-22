@@ -92,6 +92,10 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::storage_delete_branch,
             commands::agent_checkpoints,
             commands::restore_checkpoint,
+            crate::takeover_commands::agent_takeover,
+            crate::takeover_commands::take_over_agent,
+            crate::takeover_commands::open_takeover_terminal,
+            crate::takeover_commands::give_back_agent,
             crate::onboarding_commands::install_cli,
             crate::onboarding_commands::byok_status,
             crate::onboarding_commands::byok_configure,
@@ -276,6 +280,13 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
     let e = invoke(&wv, "restore_checkpoint", json!({ "agentId": "nope", "checkpoint": -1 })).unwrap_err();
     assert!(!e.to_string().contains("unknown agent"), "a negative number is refused before the core is asked: {e}");
+
+    // "Open in my terminal", with the key the agent sheet sends: the core answers (no agent
+    // here), not the argument check, and no terminal opens for an agent that is not in one.
+    for cmd in ["agent_takeover", "take_over_agent", "open_takeover_terminal", "give_back_agent"] {
+        let e = invoke(&wv, cmd, json!({ "agentId": "nope" })).unwrap_err();
+        assert!(e.to_string().contains("unknown agent nope"), "{cmd}: {e}");
+    }
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

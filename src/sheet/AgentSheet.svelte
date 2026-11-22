@@ -30,6 +30,7 @@
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
   import AgentControls from './AgentControls.svelte';
+  import AgentTakeover from './AgentTakeover.svelte';
   import AgentTrust from './AgentTrust.svelte';
   import TaskChecks from './TaskChecks.svelte';
   import AgentTabs from './AgentTabs.svelte';
@@ -256,7 +257,7 @@
     if (!working) interrupting = false;
   });
   const moreItems = $derived<MenuItem[]>([
-    { label: 'Open a terminal in its worktree', icon: 'terminal', disabled: !agent.worktree, run: () => { ui.terminalCwd = agent.worktree; ui.go('terminal'); } },
+    { label: 'Open a terminal in its worktree', icon: 'terminal', disabled: !agent.worktree, run: () => { ui.terminalTakeover = null; ui.terminalCwd = agent.worktree; ui.go('terminal'); } },
     { label: 'Copy worktree path', icon: 'copy', disabled: !agent.worktree, run: () => copyText(agent.worktree ?? '', 'Path copied') },
     { label: 'Change model…', icon: 'sparkle', disabled: agent.role !== 'solo', run: () => (ui.modelDialog = { provider: agent.provider, agentId: agent.id }) },
     { kind: 'separator' },
@@ -340,6 +341,9 @@
     {#if canTrust(agent.role)}<AgentTrust {agent} />{/if}
 
     <AgentControls {agent} />
+
+    <!-- The Lead works through Codly's own tools, which a terminal does not have: it never goes. -->
+    {#if agent.role !== 'lead'}<AgentTakeover {agent} />{/if}
 
     <Section id="task" title="Task" summary={task ? `${task.key} · ${task.title}` : 'None'}>
       {#if task}

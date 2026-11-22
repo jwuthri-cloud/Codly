@@ -46,6 +46,7 @@ import type { ClosedTranscript } from './gen/ClosedTranscript';
 import type { InstallRun } from './gen/InstallRun';
 import type { InstallRung } from './gen/InstallRung';
 import type { ControlState } from './gen/ControlState';
+import type { TakeoverState } from './gen/TakeoverState';
 import type { EventRow } from './gen/EventRow';
 import type { IdeChange } from './gen/IdeChange';
 import type { IdeEntry } from './gen/IdeEntry';
@@ -264,6 +265,14 @@ export const api = {
   stopAgentAfterStep: (agentId: string) => call<ControlState>('stop_agent_after_step', { agentId }),
   resumeAgent: (agentId: string) => call<ControlState>('resume_agent', { agentId }),
   steerAgent: (agentId: string, text: string) => call<ControlState>('steer_agent', { agentId, text }),
+  /** "Open in my terminal" (agent sheet). Is the agent in your terminal, and if not, may it go there now? */
+  agentTakeover: (agentId: string) => call<TakeoverState>('agent_takeover', { agentId }),
+  /** Codly stops its own process for the agent's session and starts none until `giveBackAgent`. */
+  takeOverAgent: (agentId: string) => call<TakeoverState>('take_over_agent', { agentId }),
+  /** A terminal (attach with `ptyAttach`) in the worktree of an agent that is in your terminal, with the CLI's resume command typed, not run. */
+  openTakeoverTerminal: (agentId: string) => call<string>('open_takeover_terminal', { agentId }),
+  /** Closes that terminal; the agent's next message or task resumes the same session in Codly. */
+  giveBackAgent: (agentId: string) => call<TakeoverState>('give_back_agent', { agentId }),
   hireAgent: (provider: Provider, model: string | null = null, title: string | null = null) => call<Agent>('hire_agent', { provider, model, title }),
   listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
   // Add-agent wizard: the core judges hire manifests (import, AI draft) and starts the confirmed one.

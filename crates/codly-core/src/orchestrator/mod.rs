@@ -23,6 +23,7 @@
 //! - `wallet`   the player's coins (🪙) across every repo, Build/Buy, developer grants
 //! - `worktree_setup` a new worktree made ready: copied ignored files, a port block, the setup script
 //! - `checkpoints` an agent's files before each turn (private refs), "Restore files to this point"
+//! - `takeover` "Open in my terminal": an idle agent's CLI session goes to you, and comes back
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
@@ -64,6 +65,7 @@ pub mod watchdog;
 mod interrupts;
 mod rebrief;
 pub mod worktree_setup;
+pub mod takeover;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

@@ -20,6 +20,12 @@ export type Session = {
 
 export const sessions = new Map<string, Session>();
 
+/** The session of an agent that is in your terminal: its own, apart from a plain shell in the same worktree. */
+export const takeoverKey = (agentId: string) => `takeover:${agentId}`;
+
+/** A session under a key of its own, on a terminal that `open` starts. Without it: one login shell per folder. */
+export type OwnTerminal = { key: string; open: () => Promise<string> };
+
 export function xtermTheme(): ITheme {
   const t = (n: string) => tokenHex(n);
   const dark = document.documentElement.dataset.theme !== 'light';
@@ -48,8 +54,8 @@ export function xtermTheme(): ITheme {
   };
 }
 
-export async function openSession(cwd: string | null, label: string): Promise<Session> {
-  const key = cwd ?? '(repo)';
+export async function openSession(cwd: string | null, label: string, own?: OwnTerminal): Promise<Session> {
+  const key = own?.key ?? cwd ?? '(repo)';
   const existing = sessions.get(key);
   if (existing && !existing.exited) return existing;
 
@@ -73,7 +79,7 @@ export async function openSession(cwd: string | null, label: string): Promise<Se
   el.style.width = '100%';
   term.open(el);
 
-  const ptyId = await api.ptyOpen(cwd);
+  const ptyId = await (own ? own.open() : api.ptyOpen(cwd));
   const s: Session = { key, cwd, label, ptyId, term, fit, el, webgl: null, exited: false };
   sessions.set(key, s);
   await api.ptyAttach(ptyId, (bytes) => term.write(bytes));

@@ -40,6 +40,8 @@ impl Inner {
     /// Start a CLI run. The run row is written before spawning, so events the adapter emits
     /// during its handshake are already attributable to this run.
     pub(super) async fn spawn_run(self: &Arc<Self>, req: RunReq) -> Result<Id> {
+        // Its session is open in your terminal (takeover.rs): a second process would corrupt it.
+        self.not_in_terminal(&req.agent)?;
         let provider = req.agent.provider;
         let cli = self.clis().into_iter().find(|c| c.provider == provider);
         let Some(cli) = cli.filter(|c| c.path.is_some()) else { bail!("{} is not installed", provider.label()) };
