@@ -19,6 +19,7 @@ fn main() {
         "board_policy", "board_sweep", "board_archive", "list_connections", "update_connection",
         "save_attachment", "hire_draft", "trust_agent", "office_digest", "set_agent_home", "note_rest", "note_hangout", "set_agent_tired", "bigger_model",
         "install_cli", "byok_status", "byok_configure", "byok_save_key", "byok_clear_key",
+        "diagnostics",
     ])))
     .expect("tauri-build failed");
 }

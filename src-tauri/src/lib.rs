@@ -3,7 +3,9 @@
 
 mod agent_controls;
 mod ask_me;
+pub mod cli;
 mod commands;
+mod diagnostics;
 mod dictation;
 mod ide_commands;
 mod inbound;
@@ -11,6 +13,7 @@ mod hire_commands;
 mod onboarding_commands;
 #[cfg(test)]
 mod ipc_tests;
+mod logging;
 mod ui_bus;
 mod web;
 
@@ -29,9 +32,7 @@ use ui_bus::UiBus;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("CODLY_LOG").unwrap_or_else(|_| "info".into()))
-        .init();
+    logging::init();
 
     let serve = match web::from_args(&std::env::args().collect::<Vec<_>>()) {
         Ok(s) => s,
@@ -40,6 +41,10 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    // Said here, in the terminal you typed it in: an app that already runs serves for this one.
+    if let Some(s) = serve.as_ref().filter(|s| s.remote) {
+        eprintln!("{}", web::remote_warning(s));
+    }
     let (core_tx, core_rx) = watch::channel(None);
     let (hub_tx, hub_rx) = watch::channel(None);
     let bus = UiBus::new();
@@ -241,9 +246,19 @@ pub fn run() {
             onboarding_commands::byok_configure,
             onboarding_commands::byok_save_key,
             onboarding_commands::byok_clear_key,
+            diagnostics::diagnostics,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
+
+    // The data dir is known from here on: the lines logged so far waited in memory.
+    match app.path().app_data_dir() {
+        Ok(dir) => match logging::open(&dir.join(logging::DIR)) {
+            Ok(()) => tracing::info!("Codly {} started", cli::VERSION),
+            Err(e) => tracing::warn!("no log file in {}: {e}", dir.display()),
+        },
+        Err(e) => tracing::warn!("no log file: {e}"),
+    }
 
     app.run(|handle, event| {
         if let RunEvent::Exit = event {

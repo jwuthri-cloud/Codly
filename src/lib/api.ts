@@ -73,6 +73,15 @@ import type { MessageGraph } from './gen/MessageGraph';
 
 export type UiBatch = { events: EventRow[]; resync?: boolean };
 
+/** What to attach to a bug report (src-tauri/src/diagnostics.rs). */
+export interface Diagnostics {
+  version: string;
+  /** The log file, to show in Finder; null when the app could not open one. */
+  log_file: string | null;
+  /** Plain text: version, system, agent CLIs and the last log lines; tokens, emails and folder names are taken out. */
+  report: string;
+}
+
 export interface Transport {
   /** Install the batch sink first, then resolve with a snapshot. Drop events with id <= snapshot.as_of (id 0 = ephemeral, always apply). */
   subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot>;
@@ -408,6 +417,8 @@ export const api = {
   byokConfigure: (vendor: Vendor, source: ByokSource) => call<ByokStatus>('byok_configure', { vendor, source }),
   byokSaveKey: (vendor: Vendor, key: string) => call<ByokStatus>('byok_save_key', { vendor, key }),
   byokClear: (vendor: Vendor) => call<ByokStatus>('byok_clear_key', { vendor }),
+  /** The report for a bug report. It answers when the core did not start too; it probes the CLIs, so it takes a few seconds. */
+  diagnostics: () => call<Diagnostics>('diagnostics'),
   /** Native folder picker (Tauri dialog plugin); in the browser a path prompt (repositories open through
    *  the repository picker instead, `openWorkspace`). Null if cancelled. */
   pickFolder: async (): Promise<string | null> => {

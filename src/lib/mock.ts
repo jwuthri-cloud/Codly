@@ -530,6 +530,22 @@ export class MockTransport implements Transport {
       case 'list_connections':
       case 'update_connection':
         return (this.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
+      case 'diagnostics':
+        // The shape of the app's report (src-tauri/src/diagnostics.rs), about the scripted session.
+        return {
+          version: 'demo',
+          log_file: null,
+          report: [
+            'Codly demo',
+            'System: your browser',
+            'Core: scripted demo session',
+            '',
+            'Agent CLIs',
+            ...sim.clis.map((c) => (c.path ? `- ${c.provider} ${c.version ?? 'version unknown'} (${c.transport})` : `- ${c.provider}: not installed`)),
+            '',
+            'No log file: the demo has no app behind it.',
+          ].join('\n'),
+        };
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }
