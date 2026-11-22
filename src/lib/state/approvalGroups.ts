@@ -1,13 +1,29 @@
-// Requests that wait for the same answer: the same command, with the same risks and the same
-// choices, asked by several agents of one conversation. The conversation shows them as one
-// card, and one answer goes to all of them.
+// Requests that wait for the same answer: the same command in the same place of each agent's
+// worktree, with the same risks and the same choices, asked by several agents of one
+// conversation. The conversation shows them as one card, and one answer goes to all of them.
 import type { Approval } from '../gen/Approval';
+import { store } from './store.svelte';
+
+/** Where a command runs, seen from the worktree of the agent that asked ('' is its root);
+ *  null when the request does not say, or the place is not inside that worktree. */
+function placeInWorktree(a: Approval): string | null {
+  const cwd = a.subject.kind === 'command' ? a.subject.cwd : null;
+  const root = store.agentMap.get(a.agent_id)?.worktree;
+  if (!cwd || !root) return null;
+  const trim = (p: string) => p.replace(/\/+$/, '');
+  const [dir, base] = [trim(cwd), trim(root)];
+  if (dir === base) return '';
+  return dir.startsWith(`${base}/`) ? dir.slice(base.length + 1) : null;
+}
 
 /** What makes two waiting requests the same question; null for a request that stands alone
- *  (answered ones, questions, file changes, tools: their cards differ in more than the agent). */
+ *  (answered ones, questions, file changes, tools: their cards differ in more than the agent;
+ *  a command whose place in the worktree is not known: the card shows one directory only). */
 export function sameQuestion(a: Approval): string | null {
   if (a.status !== 'pending' || a.subject.kind !== 'command') return null;
-  return JSON.stringify([a.subject.command, [...a.risks].sort(), [...a.choices].sort()]);
+  const place = placeInWorktree(a);
+  if (place === null) return null;
+  return JSON.stringify([a.subject.command, place, [...a.risks].sort(), [...a.choices].sort()]);
 }
 
 export type ApprovalGroup = { approval: Approval; twins: Approval[] };

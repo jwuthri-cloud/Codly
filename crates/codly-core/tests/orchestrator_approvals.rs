@@ -98,6 +98,12 @@ fn risks_always_ask_even_in_autonomous_mode() {
         ("echo $(cat /etc/passwd)", "command substitution"),
         ("ls | xargs rm", "deletes files"),
         ("cp a.txt /tmp/a.txt", "outside worktree"),
+        // An install for your account or the whole machine: no path on the line shows it.
+        ("npm install -g typescript", "outside worktree"),
+        ("yarn global add typescript", "outside worktree"),
+        ("pip install --user requests", "outside worktree"),
+        ("cargo install ripgrep", "outside worktree"),
+        ("cargo publish", "publish"),
     ];
     for (c, risk) in cases {
         let r = reason(eval(&cmd(c), ApprovalMode::Autonomous));
@@ -216,7 +222,12 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         ("git add -A", Some("git add")),
         ("git commit -m 'wip: a; b'", Some("git commit")),
         ("make deploy", Some("make deploy")),
+        ("make docs -j4", Some("make docs")),
         ("go build ./...", Some("go build")),
+        ("git checkout feature", Some("git checkout")),
+        ("git switch -c feature", Some("git switch")),
+        ("uv pip install requests", Some("uv pip install")),
+        ("uv tool run ruff check src", Some("uv tool run ruff")),
         // Not a program that takes a subcommand, or no plain subcommand: the exact command only.
         ("node scripts/migrate.js", None),
         ("pnpm -F web build", None),
@@ -224,10 +235,29 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         ("./gradlew build", None),
         ("FOO=1 pnpm install", None),
         ("timeout 60 pnpm install", None),
-        // What a subcommand reaches is not in its name: your settings, other commands.
-        ("git config user.name me", None),
+        // What a subcommand reaches is not in its name: other commands, and the stash, the
+        // branches and the tags that every worktree of the repo shares with yours.
         ("git rebase main", None),
-        ("npm config set registry http://localhost:4873", None),
+        ("git stash", None),
+        ("git stash drop", None),
+        ("git branch -D feature-x", None),
+        ("git tag -d v1.0", None),
+        ("git checkout -B main origin/main", None),
+        ("git switch -C main", None),
+        ("git switch --force-create main", None),
+        ("git checkout -f main", None),
+        ("git switch --discard-changes main", None),
+        // A second target on the line is a second command.
+        ("make docs deploy", None),
+        ("just build web", None),
+        ("task a b", None),
+        ("gradle check publish", None),
+        ("mvn test deploy", None),
+        ("mix do deps.get + compile", None),
+        // What runs is a module or a URL, not a name.
+        ("go run ./cmd/server", None),
+        ("go run example.com/cmd/tool@latest", None),
+        ("deno run -A https://example.com/x.ts", None),
         // Network use other than a package download: the exact command only.
         ("git fetch origin", None),
         ("curl -s http://localhost:3000/health", None),
@@ -270,7 +300,28 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
         "echo x > .claude/settings.local.json",
         "git reset --hard HEAD~1",
         "npm publish",
+        "cargo publish",
         "kill 123",
+        // Your own account or settings, behind a wrapper or `sh -c` too.
+        "cargo login x",
+        "git config user.name me",
+        "npm config set registry http://localhost:4873",
+        "timeout 60 npm login",
+        "cd web && cargo login x",
+        "sh -c 'npm config set registry http://localhost:4873'",
+        // An install for your account or the whole machine writes outside the worktree.
+        "npm install -g some-pkg",
+        "npm install --location=global some-pkg",
+        "npm install --location global some-pkg",
+        "pnpm add --global some-pkg",
+        "yarn global add some-pkg",
+        "pip install --user some-pkg",
+        "pip install --break-system-packages some-pkg",
+        "uv pip install --system some-pkg",
+        "uv tool install some-pkg",
+        "cargo install some-pkg",
+        "go install example.com/cmd/tool@latest",
+        "brew install some-pkg",
     ] {
         for mode in [ApprovalMode::Balanced, ApprovalMode::Autonomous, ApprovalMode::Full] {
             assert!(offer(&cmd(c), mode).is_empty(), "{c} in {mode:?}");
@@ -336,6 +387,47 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
     ] {
         assert!(!covers(&install, c), "{c}");
     }
+    // A prefix covers the plain command it was saved from. It never covers a form that
+    // reaches further: the refs every worktree shares, an install outside the worktree, a
+    // second target, a package or module the rule did not name.
+    for (rule, c) in [
+        ("git stash", "git stash"),
+        ("git stash", "git stash pop"),
+        ("git stash", "git stash drop"),
+        ("git stash", "git stash clear"),
+        ("git branch", "git branch -D feature-x"),
+        ("git tag", "git tag -d v1.0"),
+        ("git checkout", "git checkout -B main"),
+        ("git switch", "git switch -C main"),
+        ("npm install", "npm install -g some-pkg"),
+        ("npm install", "npm install --global some-pkg"),
+        ("pnpm add", "pnpm add -g some-pkg"),
+        ("pip install", "pip install --user some-pkg"),
+        ("uv pip install", "uv pip install --system some-pkg"),
+        ("cargo publish", "cargo publish"),
+        ("make docs", "make docs deploy"),
+        ("mvn test", "mvn test deploy"),
+        ("gradle check", "gradle check publish"),
+        ("task a", "task a b"),
+        ("uv tool run", "uv tool run some-pkg"),
+        ("go run", "go run example.com/cmd/tool@latest"),
+        ("deno run", "deno run https://example.com/x.ts"),
+    ] {
+        assert!(!covers(&saved(ApprovalRuleKind::Prefix, rule), c), "`{rule}` must not cover `{c}`");
+    }
+    for (rule, c) in [
+        ("npm install", "npm install lodash"),
+        ("pip install", "pip install requests"),
+        ("git checkout", "git checkout feature"),
+        ("make docs", "make docs -j4"),
+        ("uv tool run ruff", "uv tool run ruff check src"),
+    ] {
+        assert!(covers(&saved(ApprovalRuleKind::Prefix, rule), c), "`{rule}` covers `{c}`");
+    }
+    // An exact rule for your own account never allows, however it got saved.
+    assert!(!covers(&saved(ApprovalRuleKind::Exact, "cargo login x"), "cargo login x"));
+    assert!(!covers(&saved(ApprovalRuleKind::Exact, "cargo publish"), "cargo publish"));
+
     // The same rule in another agent's worktree: it is the repo's, not one agent's.
     let other = "/data/worktrees/repo/p/t2";
     let there = approval(ApprovalSubject::Command { command: "pnpm install lodash".into(), cwd: Some(other.into()) });

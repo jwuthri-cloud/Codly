@@ -211,7 +211,7 @@
         {#if inside === true}<span class="ok"><Icon name="check" size={11} stroke={2.2} />inside {agent?.name}’s worktree</span>
         {:else if inside === false}<span class="bad"><Icon name="alert" size={11} />outside the worktree</span>{/if}
       </div>
-      {#if others.length}<p class="same">Also asked by {others.join(', ')}, each in its own worktree. Your answer goes to all of them.</p>{/if}
+      {#if others.length}<p class="same">Also asked by {others.join(', ')}, each in the same folder of its own worktree. Your answer goes to all of them.</p>{/if}
     {:else if subject.kind === 'file_change'}
       <ul class="paths">{#each subject.paths as p (p)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
       {#if subject.diff}<pre class="diff selectable">{subject.diff}</pre>{/if}

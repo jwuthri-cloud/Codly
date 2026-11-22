@@ -20,8 +20,9 @@
 //! 5. What the rules above would ask you about, a rule you saved for the repo ("always allow
 //!    in this repo", `rule_offer`) may answer instead: the exact command, or one plain command
 //!    that starts with the saved words (`cargo test`). A saved rule covers a package download
-//!    and a git command that changes the repository; the exact command also covers other
-//!    network use. Every other risk still asks, and so do strict mode and read-only agents.
+//!    into the project and a git command that changes the repository; the exact command also
+//!    covers other network use. Every other risk still asks, and so do strict mode, read-only
+//!    agents and a command that changes your own account or settings (`cargo login`).
 //!
 //! What the rules cannot see: they read the command line, not what a program does. A script,
 //! an interpreter (`python x.py`, `node -e …`), `make` or a test the agent wrote can do anything
@@ -138,8 +139,10 @@ pub fn with_trust(mode: ApprovalMode, trusted: bool) -> ApprovalMode {
 ///   check paths against and a one-time allow to answer with.
 /// - Every risk of the request must be one a rule may cover: `PACKAGE_INSTALL`,
 ///   `NPX_DOWNLOAD`, `GIT_WRITE`, and for the exact command any other "network". A delete, a
-///   push, sudo, a pipe into a shell, a secret, a path outside the worktree, a change to an
-///   agent's settings and what cannot be checked are never covered.
+///   push, sudo, a pipe into a shell, a secret, a path outside the worktree (an install for
+///   the whole machine too), a change to an agent's settings and what cannot be checked are
+///   never covered.
+/// - A command that changes your own account or settings (`OWN_ACCOUNT`) is never saved.
 /// - The prefix is for one plain command only (`rule_prefix`): a longer line that chains or
 ///   substitutes anything offers at most itself, as the exact command.
 pub fn rule_offer(a: &Approval, ctx: &PolicyCtx) -> ApprovalRuleOffer {
@@ -154,7 +157,7 @@ pub fn rule_offer(a: &Approval, ctx: &PolicyCtx) -> ApprovalRuleOffer {
     let download = detected.iter().any(|r| r == PACKAGE_INSTALL || r == NPX_DOWNLOAD) && !detected.iter().any(|r| r == "network");
     let by_prefix = |r: &String| [PACKAGE_INSTALL, NPX_DOWNLOAD, GIT_WRITE].contains(&r.as_str()) || (r == "network" && download);
     let by_exact = |r: &String| r == "network" || by_prefix(r);
-    if !a.risks.iter().chain(&detected).all(by_exact) {
+    if !a.risks.iter().chain(&detected).all(by_exact) || own_account(command, 0) {
         return none;
     }
     let prefix = if a.risks.iter().chain(&detected).all(by_prefix) { rule_prefix(command) } else { None };
@@ -167,24 +170,57 @@ const SUBCOMMAND_TOOLS: &[&str] = &[
     "gradle", "mvn", "dotnet", "swift", "deno", "mix",
 ];
 
-/// git subcommands a prefix may cover: what they change stays in the repository and on its
-/// branch. `config` writes outside it, `rebase`, `bisect` or `submodule` run other commands,
-/// and `reset` can drop the commits Codly made.
-const GIT_PREFIXES: &[&str] =
-    &["add", "commit", "stash", "checkout", "switch", "restore", "branch", "tag", "merge", "cherry-pick", "revert", "mv", "apply"];
+/// git subcommands a prefix may cover: what they change stays in the agent's worktree and on
+/// its branch. `stash`, `branch` and `tag` are not here: the stash, the branches and the tags
+/// belong to every worktree of the repository, yours included (`git stash drop`,
+/// `git branch -D x`). `rebase`, `bisect` or `submodule` run other commands, and `reset` can
+/// drop the commits Codly made.
+const GIT_PREFIXES: &[&str] = &["add", "commit", "checkout", "switch", "restore", "merge", "cherry-pick", "revert", "mv", "apply"];
 
-/// Subcommands that change your own account or settings: never a prefix.
-const NO_PREFIX: &[&str] = &["config", "login", "logout", "publish"];
+/// `git checkout -B x` and `git switch -C x` move a branch that exists already (yours, or
+/// another worktree's); `-f` and `--discard-changes` drop work that is not committed. A
+/// prefix never covers those.
+fn git_forced(sub: &str, rest: &[Word]) -> bool {
+    matches!(sub, "checkout" | "switch")
+        && rest.iter().map(|w| w.text.as_str()).any(|a| match a.strip_prefix("--") {
+            Some(long) => long.starts_with("force") || long.starts_with("discard"),
+            None => a.starts_with('-') && a.contains(['B', 'C', 'f']),
+        })
+}
 
-/// Does `program subcommand` only say that something runs, so the next word names what
-/// (`npm run build`, `uv run pytest`, `pnpm dlx create-vite`)?
-fn names_what_runs(prog: &str, sub: &str) -> bool {
-    match prog {
-        "npm" | "pnpm" | "yarn" | "bun" => ["run", "run-script", "exec", "dlx", "x", "create", "init"].contains(&sub),
-        "uv" => ["run", "pip", "tool"].contains(&sub),
-        "poetry" => sub == "run",
-        "bundle" => sub == "exec",
-        "deno" => sub == "task",
+/// Programs that run every target named on the line (`make docs deploy`, `mvn test deploy`):
+/// the prefix is for a line with one target, so it never covers a second one.
+const MANY_TARGETS: &[&str] = &["make", "just", "task", "gradle", "mvn"];
+
+/// Subcommands that change your own account or settings, or publish under your name: never
+/// saved as a rule, the exact command included (a `cargo login <token>` rule would keep the
+/// token and show it in Settings).
+const OWN_ACCOUNT: &[&str] = &["config", "login", "logout", "publish"];
+
+/// Does the line run one of the `OWN_ACCOUNT` subcommands (`cargo login x`,
+/// `npm config set …`, `git config …`), behind a wrapper or `sh -c` too?
+fn own_account(cmd: &str, depth: u8) -> bool {
+    parse(cmd).segments.iter().any(|seg| {
+        let texts: Vec<String> = seg.iter().map(|w| w.text.clone()).collect();
+        let Some((prog, args)) = classify::command_start(&texts).and_then(|i| texts[i..].split_first()) else { return false };
+        let prog = basename(prog);
+        if classify::SHELLS.contains(&prog) {
+            // Deeper than this, `command_risks` says "runs dynamic code": nothing is offered.
+            return matches!(classify::shell_run(args), ShellRun::Command(inner) if depth < 3 && own_account(inner, depth + 1));
+        }
+        let sub = if prog == "git" { git_sub(args).0 } else { first_non_flag(args) };
+        SUBCOMMAND_TOOLS.contains(&prog) && sub.is_some_and(|s| OWN_ACCOUNT.contains(&s))
+    })
+}
+
+/// Do these words only say that something runs, so the next word names what
+/// (`npm run build`, `uv run pytest`, `pnpm dlx create-vite`, `uv tool run ruff`)? `go run`
+/// and `deno run` take a module or a URL from the network as well as a local file.
+fn names_what_runs(words: &[&str]) -> bool {
+    match words {
+        ["npm" | "pnpm" | "yarn" | "bun", sub] => ["run", "run-script", "exec", "dlx", "x", "create", "init"].contains(sub),
+        ["uv", sub] => ["run", "pip", "tool"].contains(sub),
+        ["uv", "tool", "run"] | ["poetry", "run"] | ["bundle", "exec"] | ["deno", "task" | "run"] | ["go", "run"] => true,
         _ => false,
     }
 }
@@ -193,7 +229,9 @@ fn names_what_runs(prog: &str, sub: &str) -> bool {
 /// `npm run build` for `npm run build -- --watch`. Only for one plain command: no chain,
 /// pipe, substitution or redirect to a file, no `$` expansion, no `VAR=x`, wrapper or path in
 /// front of the program. The words of the prefix are plain names, so no option and no path
-/// is ever part of a rule.
+/// is ever part of a rule. A command the prefix must not cover gives no prefix here, so it
+/// offers no rule that an earlier, plainer command saved (`git checkout -B main`,
+/// `make docs deploy`).
 /// ponytail: a line that only pipes the command into a filter (`pnpm install 2>&1 | tail -5`)
 /// offers the exact line alone; give it the prefix once risks are known per simple command.
 fn rule_prefix(cmd: &str) -> Option<String> {
@@ -208,11 +246,16 @@ fn rule_prefix(cmd: &str) -> Option<String> {
     let mut words = seg.iter();
     let prog = words.next().filter(|w| !w.glob && SUBCOMMAND_TOOLS.contains(&w.text.as_str()))?.text.as_str();
     let sub = words.next().filter(name)?.text.as_str();
-    if NO_PREFIX.contains(&sub) || (prog == "git" && !GIT_PREFIXES.contains(&sub)) {
+    let rest = &seg[2..];
+    if prog == "git" && (!GIT_PREFIXES.contains(&sub) || git_forced(sub, rest)) {
+        return None;
+    }
+    // `mix do a + b` runs several tasks, as a second target does.
+    if (MANY_TARGETS.contains(&prog) && rest.iter().any(|w| !w.text.starts_with('-'))) || (prog == "mix" && sub == "do") {
         return None;
     }
     let mut prefix = vec![prog, sub];
-    if names_what_runs(prog, sub) {
+    while names_what_runs(&prefix) {
         prefix.push(words.next().filter(name)?.text.as_str());
     }
     Some(prefix.join(" "))
@@ -674,6 +717,30 @@ fn call_flag(args: &[String]) -> bool {
     options(args).any(|a| a == "-c" || a.starts_with("--call"))
 }
 
+/// Does a package command install for your account or the whole machine, not into the project
+/// (`npm install -g x`, `yarn global add x`, `pip install --user x`, `cargo install x`,
+/// `brew install x`)? It writes outside the worktree, and no path on the line shows it.
+fn installs_outside(prog: &str, args: &[String]) -> bool {
+    /// What `gem`, `pipx`, `uv tool` and the system package managers do to the machine.
+    const CHANGES: &[&str] = &["install", "reinstall", "upgrade", "update", "remove", "uninstall"];
+    let flag = |flags: &[&str]| options(args).any(|o| flags.contains(&o));
+    let mut words = args.iter().map(String::as_str).filter(|a| !a.starts_with('-'));
+    let sub = words.next().unwrap_or("");
+    match prog {
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            sub == "global"
+                || flag(&["-g", "--global", "--location=global"])
+                || args.windows(2).any(|w| w[0] == "--location" && w[1] == "global")
+        }
+        "pip" | "pip3" => flag(&["--user", "--break-system-packages"]),
+        "uv" => flag(&["--system", "--break-system-packages"]) || (sub == "tool" && words.next().is_some_and(|x| CHANGES.contains(&x))),
+        "cargo" | "go" => sub == "install",
+        "composer" => sub == "global",
+        "gem" | "pipx" | "brew" | "apt" | "apt-get" | "yum" | "dnf" => CHANGES.contains(&sub),
+        _ => false,
+    }
+}
+
 /// Directories a git command is pointed at before its subcommand, seen from `start`: each
 /// `-C dir` (relative to the one before), `--git-dir` and `--work-tree`.
 fn git_dirs(args: &[String], start: &Path) -> Vec<PathBuf> {
@@ -844,6 +911,9 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
             for r in classify::exposure(&prog, a, root) {
                 add(r);
             }
+            if installs_outside(&prog, a) {
+                add("outside worktree");
+            }
             match prog.as_str() {
                 "sudo" | "doas" | "su" => add("sudo"),
                 p if DELETES.contains(&p) => add("deletes files"),
@@ -906,9 +976,11 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
                 }
                 // uvx runs a package from PyPI; tox and nox install what their config lists.
                 "uvx" | "tox" | "nox" => add(PACKAGE_INSTALL),
-                "cargo" if first_non_flag(a).is_some_and(|x| ["install", "add", "publish", "remove", "update", "login"].contains(&x)) => {
-                    add(PACKAGE_INSTALL)
-                }
+                "cargo" => match first_non_flag(a).unwrap_or("") {
+                    "publish" => add("publish"),
+                    "install" | "add" | "remove" | "update" | "login" => add(PACKAGE_INSTALL),
+                    _ => {}
+                },
                 "go" if first_non_flag(a).is_some_and(|x| ["get", "install"].contains(&x)) => add(PACKAGE_INSTALL),
                 _ => {}
             }
