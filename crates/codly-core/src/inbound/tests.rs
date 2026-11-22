@@ -81,7 +81,13 @@ async fn a_new_endpoint_is_off_and_the_listener_runs_only_while_one_is_on() {
 
     h.set_webhook_enabled(&w.endpoint.id, false).unwrap();
     assert!(!h.state().listening);
-    assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err(), "the port is closed again");
+    // The listener's task closes the socket a moment after the switch.
+    let closed = async {
+        while TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(5), closed).await.is_ok(), "the port is closed again");
 }
 
 #[tokio::test]

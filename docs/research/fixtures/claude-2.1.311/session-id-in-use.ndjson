@@ -1,0 +1,4 @@
+{"_note":"claude 2.1.311, recorded 2026-11-22. Lines without a leading _ key are CLI stdout lines. Ids, paths and account fields are placeholders; slash_commands, skills, plugins, agents, commands, models and usage reports are shortened. See NOTES.md.","_argv":["claude","-p","--input-format","stream-json","--output-format","stream-json","--verbose","--include-partial-messages","--permission-prompt-tool","stdio","--permission-mode","acceptEdits","--model","haiku","--strict-mcp-config","--setting-sources","local","--session-id","sess-1","--tools","Bash"],"_cwd":"/tmp/work/smoke"}
+{"_stderr":"Error: Session ID sess-1 is already in use.","_t":0.114}
+{"_meta":{"closing_stdin":true,"alive_before_close":false},"_t":4.014}
+{"_meta":{"exit_code":1},"_t":4.324}
