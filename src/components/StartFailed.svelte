@@ -1,8 +1,9 @@
 <!--
   The start-up error screen: why Codly could not start, "Try again", and something to attach to
   a bug report. When the database is the reason (`start_problem` in src-tauri/src/boot.rs) it
-  also offers to start from the last backup, to show the data folder, and to start with no
-  data. The app moves the database aside for these; it is never deleted.
+  also offers to start from the last backup the app offers (its message says why when it offers
+  none), to show the data folder, and to start with no data. The app moves the database aside
+  for these; it is never deleted.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -28,10 +29,10 @@
     <div class="notes">
       {#if last}
         <p>The last backup is from {fullDate(last.created_at)} ({bytes(last.bytes)}). What you did in Codly after that is not in it.</p>
-      {:else if p.start_empty}
-        <p>There is no backup to start from.</p>
       {/if}
-      {#if p.start_empty}<p>The database Codly cannot use is kept: it is moved aside in the data folder, not deleted.</p>{/if}
+      {#if p.start_empty}
+        <p>The database Codly cannot use is kept: it is moved aside in the data folder, not deleted. A start with no data moves its backups aside with it.</p>
+      {/if}
       {#if recovery.failed}<p class="bad" role="alert">That did not work: {recovery.failed}</p>{/if}
     </div>
     {#if last}

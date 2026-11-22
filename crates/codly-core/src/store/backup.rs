@@ -5,13 +5,16 @@
 //! - `update`: before an update of Codly changes the data (a migration), made by `Store::open`;
 //! - `daily`: once a day while the app runs (`Store::backup_if_due`, the background sweep).
 //!
-//! The last `KEEP_UPDATE` and `KEEP_DAILY` of each kind are kept.
+//! The last `KEEP_UPDATE` and `KEEP_DAILY` of each kind are kept. An update that fails is tried
+//! again on the same data: its copy is made once, not once per attempt.
 //!
 //! A database that cannot be used makes `Store::open` fail with a `StoreError`. `problem` turns
 //! a failed start into what the start-up screen shows, and `recover` moves the file aside
-//! (it is never deleted) and puts a copy, or nothing, in its place.
+//! (it is never deleted) and puts a copy, or nothing, in its place. A start with no data moves
+//! the copies aside too (`backups.before-<time>/`): the copies of the new, empty database
+//! never push out the last copies of the old data.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -39,7 +42,10 @@ pub enum StoreError {
          Install the newer Codly again, or start from a backup made before the update."
     )]
     Newer { found: i64, supported: i64 },
-    #[error("Codly could not update its data for this version ({detail}). The data is unchanged.")]
+    #[error(
+        "Codly could not update its data for this version ({detail}). The data is unchanged, and the version of Codly you had before still opens it. \
+         Starting from a backup would not help: the same update would fail on it."
+    )]
     UpdateFailed { detail: String },
     #[error(
         "Codly could not copy its data before updating it ({detail}). The data is unchanged. \
@@ -88,7 +94,8 @@ pub struct StartProblem {
     pub message: String,
     /// The database file ("Open the data folder" shows it in Finder).
     pub database: String,
-    /// The copies this version of Codly can start from, newest first.
+    /// The copies this version of Codly can start from, newest first. Empty when the update of
+    /// the data failed: the same update would fail on a copy.
     pub backups: Vec<DbBackup>,
     /// Starting with no data is a way out. False when the database itself is fine and only
     /// its copy before an update could not be made.
@@ -114,6 +121,11 @@ fn parse_name(name: &str) -> Option<(i64, i64, BackupKind)> {
         _ => return None,
     };
     parts.next().is_none().then_some((created_at, schema, kind))
+}
+
+/// `name` is a copy that was not finished: `codly-<unix ms>-v<data version>-<kind>.part`.
+fn unfinished(name: &str) -> bool {
+    name.strip_suffix(".part").is_some_and(|stem| parse_name(&format!("{stem}.sqlite")).is_some())
 }
 
 /// The copies in `dir`, newest first. A file that is not a finished copy is not listed.
@@ -158,23 +170,82 @@ pub(super) fn read_error(e: rusqlite::Error) -> anyhow::Error {
     if damaged(&e) { StoreError::Damaged { detail: e.to_string() }.into() } else { anyhow::Error::new(e).context("read codly.sqlite") }
 }
 
+/// Remove the copies in `dir` that were cut short (the app quit, the disk was full): nothing
+/// lists them, and nothing else removes them. One copy is written at a time, so none of them
+/// is in progress.
+fn remove_unfinished(dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        if unfinished(&entry.file_name().to_string_lossy())
+            && let Err(e) = std::fs::remove_file(entry.path())
+        {
+            tracing::warn!("the unfinished backup {} was not removed: {e}", entry.path().display());
+        }
+    }
+    Ok(())
+}
+
+/// The two files hold the same bytes.
+fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
+    const CHUNK: u64 = 1 << 16;
+    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let (mut left, mut right) = (vec![], vec![]);
+    loop {
+        left.clear();
+        right.clear();
+        a.by_ref().take(CHUNK).read_to_end(&mut left)?;
+        b.by_ref().take(CHUNK).read_to_end(&mut right)?;
+        if left != right {
+            return Ok(false);
+        }
+        if left.is_empty() {
+            return Ok(true);
+        }
+    }
+}
+
+/// The copy from before an update that already holds the bytes of `part`, a new one of the
+/// same size: the update failed and is tried again on the same data. `VACUUM INTO` writes the
+/// same data to the same bytes.
+fn same_copy(dir: &Path, part: &Path, new: &DbBackup) -> Option<DbBackup> {
+    list(dir).into_iter().filter(|b| b.kind == BackupKind::Update && b.schema == new.schema && b.bytes == new.bytes).find(|b| {
+        same_bytes(part, Path::new(&b.path)).unwrap_or_else(|e| {
+            tracing::warn!("the backup {} could not be compared: {e}", b.path);
+            false
+        })
+    })
+}
+
+/// Write the database `conn` has open to `part`, then give it its name (`copy.path`). A copy
+/// from before an update that is already in `dir` is kept as it is, and returned.
+fn finish(conn: &Connection, dir: &Path, part: &Path, mut copy: DbBackup) -> Result<DbBackup> {
+    conn.execute("VACUUM INTO ?1", [part.to_string_lossy().as_ref()])?;
+    let file = std::fs::File::open(part)?;
+    file.sync_all()?;
+    copy.bytes = file.metadata()?.len() as i64;
+    if copy.kind == BackupKind::Update
+        && let Some(same) = same_copy(dir, part, &copy)
+    {
+        std::fs::remove_file(part)?;
+        return Ok(same);
+    }
+    std::fs::rename(part, &copy.path)?;
+    Ok(copy)
+}
+
 /// Write a copy of the database `conn` has open into `dir`, then drop the copies of its kind
-/// that are past the number kept.
+/// that are past the number kept. A copy that could not be finished leaves no file.
 fn write(conn: &Connection, dir: &Path, kind: BackupKind, now: i64) -> Result<DbBackup> {
     std::fs::create_dir_all(dir)?;
+    remove_unfinished(dir)?;
     let schema: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let path = dir.join(file_name(now, schema, kind));
     // Written under another name first: a copy that was cut short is never listed.
     let part = path.with_extension("part");
-    match std::fs::remove_file(&part) {
-        Err(e) if e.kind() != ErrorKind::NotFound => return Err(anyhow::Error::new(e).context(format!("remove {}", part.display()))),
+    let copy = DbBackup { path: path.to_string_lossy().into_owned(), kind, created_at: now, schema, bytes: 0 };
+    let copy = finish(conn, dir, &part, copy).inspect_err(|_| match std::fs::remove_file(&part) {
+        Err(e) if e.kind() != ErrorKind::NotFound => tracing::warn!("the unfinished backup {} was not removed: {e}", part.display()),
         _ => {}
-    }
-    conn.execute("VACUUM INTO ?1", [part.to_string_lossy().as_ref()])?;
-    let file = std::fs::File::open(&part)?;
-    file.sync_all()?;
-    let bytes = file.metadata()?.len() as i64;
-    std::fs::rename(&part, &path)?;
+    })?;
     let keep = match kind {
         BackupKind::Daily => KEEP_DAILY,
         BackupKind::Update => KEEP_UPDATE,
@@ -184,7 +255,7 @@ fn write(conn: &Connection, dir: &Path, kind: BackupKind, now: i64) -> Result<Db
             tracing::warn!("the old backup {} was not removed: {e}", old.path);
         }
     }
-    Ok(DbBackup { path: path.to_string_lossy().into_owned(), kind, created_at: now, schema, bytes })
+    Ok(copy)
 }
 
 /// Bring the database file `db`, open on `conn`, to the data version of `migrations`. One
@@ -204,7 +275,8 @@ pub(super) fn update(conn: &mut Connection, db: &Path, migrations: &Migrations<'
     if pending == 0 {
         return Ok(());
     }
-    // A new database has nothing to copy.
+    // A new database has nothing to copy. An update that is tried again after it failed finds
+    // its copy already there (`finish`).
     if found > 0 {
         write(conn, &dir(db), BackupKind::Update, crate::model::now_ms()).map_err(|e| match e.downcast_ref::<rusqlite::Error>() {
             Some(sql) if damaged(sql) => StoreError::Damaged { detail: sql.to_string() },
@@ -243,16 +315,24 @@ impl Store {
 /// What to show when a start failed with `err`. None = the failure is not about the database
 /// file `db`.
 pub fn problem(db: &Path, err: &anyhow::Error) -> Option<StartProblem> {
-    let (message, way_out) = match err.chain().find_map(|cause| cause.downcast_ref::<StoreError>()) {
-        Some(e) => (e.to_string(), !matches!(e, StoreError::BackupFailed { .. })),
+    let found = err.chain().find_map(|cause| cause.downcast_ref::<StoreError>());
+    let message = match found {
+        Some(e) => e.to_string(),
         // Damage that only a later read found (the settings, the runs to recover).
         None => {
             let sql = err.chain().filter_map(|cause| cause.downcast_ref::<rusqlite::Error>()).find(|e| damaged(e))?;
-            (StoreError::Damaged { detail: sql.to_string() }.to_string(), true)
+            StoreError::Damaged { detail: sql.to_string() }.to_string()
         }
     };
-    let backups = if way_out { usable(&dir(db)) } else { vec![] };
-    Some(StartProblem { message, database: db.to_string_lossy().into_owned(), backups, start_empty: way_out })
+    // The database is fine when only its copy before an update could not be made.
+    let start_empty = !matches!(found, Some(StoreError::BackupFailed { .. }));
+    // The data is fine when its update failed, and a copy holds the same data or older data:
+    // the update would fail on it again, and each start from one would leave one more
+    // database moved aside. No copy is offered then.
+    let from_copy = start_empty && !matches!(found, Some(StoreError::UpdateFailed { .. }));
+    let backups = if from_copy { usable(&dir(db)) } else { vec![] };
+    let message = if from_copy && backups.is_empty() { format!("{message} There is no backup to start from.") } else { message };
+    Some(StartProblem { message, database: db.to_string_lossy().into_owned(), backups, start_empty })
 }
 
 /// `<path><suffix>`: the `-wal` and `-shm` files SQLite keeps beside a database.
@@ -264,7 +344,10 @@ fn beside(path: &Path, suffix: &str) -> PathBuf {
 
 /// Move the database file `db` aside and start from `backup`, or with no data (None). The
 /// file is kept, with its `-wal` and `-shm`, as `<name>.broken-<now>.sqlite` in the same
-/// folder: where it was moved to is returned. Nothing may have `db` open.
+/// folder: where it was moved to is returned. A start with no data also moves the copies of
+/// the database aside, as `backups.before-<now>/`: they are the last readable copies of the old
+/// data, and the copies of the new database must not count against them. Nothing may have
+/// `db` open.
 pub fn recover(db: &Path, backup: Option<&Path>, now: i64) -> Result<PathBuf> {
     let restored = db.with_extension("restore");
     if let Some(from) = backup {
@@ -277,11 +360,30 @@ pub fn recover(db: &Path, backup: Option<&Path>, now: i64) -> Result<PathBuf> {
     }
     let stem = db.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let aside = db.with_file_name(format!("{stem}.broken-{now}.sqlite"));
+    // The copies leave the rotation before the database leaves its place: no state has a new
+    // database beside the copies of the old one.
+    let (copies, kept) = (dir(db), db.with_file_name(format!("{DIR}.before-{now}")));
+    if backup.is_none() {
+        match std::fs::rename(&copies, &kept) {
+            Err(e) if e.kind() != ErrorKind::NotFound => return Err(anyhow::Error::new(e).context(format!("move {} aside", copies.display()))),
+            _ => {}
+        }
+    }
     // The database first: when that fails, nothing has changed.
     for suffix in ["", "-wal", "-shm"] {
         let (from, to) = (beside(db, suffix), beside(&aside, suffix));
         match std::fs::rename(&from, &to) {
-            Err(e) if e.kind() != ErrorKind::NotFound => return Err(anyhow::Error::new(e).context(format!("move {} aside", from.display()))),
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                // The database stays, so its copies go back to where a start looks for them.
+                if suffix.is_empty()
+                    && backup.is_none()
+                    && let Err(back) = std::fs::rename(&kept, &copies)
+                    && back.kind() != ErrorKind::NotFound
+                {
+                    tracing::warn!("the backups stay in {}: {back}", kept.display());
+                }
+                return Err(anyhow::Error::new(e).context(format!("move {} aside", from.display())));
+            }
             _ => {}
         }
     }
@@ -329,6 +431,7 @@ mod tests {
         assert_eq!(std::fs::read(&db).unwrap(), garbage, "a failed start leaves the file alone");
         let shown = problem(&db, &err).unwrap();
         assert!(shown.message.starts_with("Codly's database is damaged and cannot be read"), "{}", shown.message);
+        assert!(shown.message.ends_with("There is no backup to start from."), "{}", shown.message);
         assert_eq!((shown.database.as_str(), shown.backups.len(), shown.start_empty), (db.to_str().unwrap(), 0, true));
         // A failure that is not about the database has no such screen.
         assert_eq!(problem(&db, &anyhow::anyhow!("no login shell")), None);
@@ -362,12 +465,14 @@ mod tests {
 
         let err = Store::open_with(&db, &failing_v2()).err().expect("the update fails");
         assert!(matches!(store_error(&err), StoreError::UpdateFailed { .. }), "{err:#}");
-        let shown = problem(&db, &err).unwrap();
-        assert!(shown.message.contains("could not update its data") && shown.start_empty, "{}", shown.message);
         // The copy was made before the update ran, at the version the data had.
-        let [copy] = shown.backups.as_slice() else { panic!("one copy from before the update: {:?}", shown.backups) };
+        let [copy]: [DbBackup; 1] = list(&dir(&db)).try_into().unwrap_or_else(|all| panic!("one copy from before the update: {all:?}"));
         assert_eq!((copy.kind, copy.schema), (BackupKind::Update, 1));
         assert!(copy.bytes > 0 && Path::new(&copy.path).starts_with(tmp.path().join("backups")));
+        // It holds the data the update fails on, so it is not offered as a way out.
+        let shown = problem(&db, &err).unwrap();
+        assert!(shown.message.contains("could not update its data") && shown.message.ends_with("the same update would fail on it."), "{}", shown.message);
+        assert_eq!((shown.backups.len(), shown.start_empty), (0, true));
         // The update changed a row before it failed: none of it stayed.
         assert_eq!(notes(&Store::open_with(&db, &v1()).unwrap()), ["kept"]);
 
@@ -435,6 +540,115 @@ mod tests {
     }
 
     #[test]
+    fn an_update_that_fails_again_on_the_same_data_makes_no_second_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("codly.sqlite");
+        {
+            let store = Store::open_with(&db, &v1()).unwrap();
+            store.conn().execute("INSERT INTO note (text) VALUES ('kept')", []).unwrap();
+            // Two copies from before earlier updates.
+            write(&store.conn(), &dir(&db), BackupKind::Update, 1).unwrap();
+            store.conn().execute("INSERT INTO note (text) VALUES ('more')", []).unwrap();
+            write(&store.conn(), &dir(&db), BackupKind::Update, 2).unwrap();
+            store.conn().execute("INSERT INTO note (text) VALUES ('newest')", []).unwrap();
+        }
+        let copies = || list(&dir(&db)).into_iter().map(|b| b.created_at).collect::<Vec<_>>();
+
+        // "Try again", three times: one copy of the data, and the copy from before the update
+        // before this one is still there.
+        for _ in 0..3 {
+            let err = Store::open_with(&db, &failing_v2()).err().expect("the update fails");
+            assert!(matches!(store_error(&err), StoreError::UpdateFailed { .. }), "{err:#}");
+        }
+        let [first, older]: [i64; 2] = copies().try_into().unwrap_or_else(|all| panic!("the copy of this update and the one before it: {all:?}"));
+        assert!(first > 2 && older == 2, "{first} {older}");
+        assert_eq!(std::fs::read_dir(dir(&db)).unwrap().count(), 2, "no unfinished copy is left");
+
+        // The data changed (the Codly from before the update ran again): that is a new copy.
+        Store::open_with(&db, &v1()).unwrap().conn().execute("INSERT INTO note (text) VALUES ('later')", []).unwrap();
+        // Copies are named by the millisecond.
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(Store::open_with(&db, &failing_v2()).is_err());
+        let [second, kept]: [i64; 2] = copies().try_into().unwrap_or_else(|all| panic!("two copies: {all:?}"));
+        assert!(second > first && kept == first, "{second} {kept} {first}");
+    }
+
+    #[test]
+    fn a_copy_that_was_cut_short_leaves_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("codly.sqlite");
+        let store = Store::open(&db).unwrap();
+        let backups = dir(&db);
+        std::fs::create_dir_all(&backups).unwrap();
+        let names = || {
+            let mut names: Vec<String> = std::fs::read_dir(&backups).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            names.sort();
+            names
+        };
+        // The app quit while it wrote a copy, at another time than the next one.
+        std::fs::write(backups.join("codly-5-v1-daily.part"), b"half a copy").unwrap();
+        // Not a file of Codly's: left alone.
+        std::fs::write(backups.join("notes.part"), b"mine").unwrap();
+        // The next copy cannot get its name: a folder is in its place.
+        let in_the_way = file_name(DAY_MS, latest_schema().unwrap(), BackupKind::Daily);
+        std::fs::create_dir(backups.join(&in_the_way)).unwrap();
+
+        assert!(store.backup_if_due(DAY_MS).is_err());
+        assert_eq!(names(), [in_the_way.clone(), "notes.part".to_string()], "neither the old unfinished copy nor the new one is left");
+        assert!(store.backups().is_empty());
+
+        let copy = store.backup_if_due(2 * DAY_MS).unwrap().expect("no copy yet: one is due");
+        assert_eq!(names(), [file_name(2 * DAY_MS, copy.schema, BackupKind::Daily), in_the_way, "notes.part".to_string()]);
+    }
+
+    #[test]
+    fn a_start_with_no_data_keeps_the_copies_of_the_old_data_out_of_the_rotation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("codly.sqlite");
+        let old: Vec<String> = {
+            let store = Store::open(&db).unwrap();
+            store.kv_set("k", "old data").unwrap();
+            for day in 0..KEEP_DAILY as i64 {
+                assert!(store.backup_if_due(day * DAY_MS).unwrap().is_some());
+            }
+            store.backups().iter().map(|b| Path::new(&b.path).file_name().unwrap().to_string_lossy().into_owned()).collect()
+        };
+        assert_eq!(old.len(), KEEP_DAILY);
+        std::fs::write(&db, b"this is not a database ".repeat(64)).unwrap();
+
+        // A database that cannot be moved keeps its copies where a start finds them.
+        std::fs::create_dir_all(tmp.path().join("codly.broken-7.sqlite").join("in the way")).unwrap();
+        assert!(recover(&db, None, 7).is_err());
+        assert_eq!(list(&dir(&db)).len(), KEEP_DAILY);
+        assert!(!tmp.path().join("backups.before-7").exists());
+
+        // "Start with no data": the copies are moved aside with the database.
+        let now = 10 * DAY_MS;
+        recover(&db, None, now).unwrap();
+        let kept = tmp.path().join(format!("backups.before-{now}"));
+        assert!(!dir(&db).exists() && kept.is_dir());
+        let fresh = Store::open(&db).unwrap();
+        assert!(fresh.backups().is_empty());
+        // More days than daily copies are kept.
+        for day in 11..=11 + KEEP_DAILY as i64 {
+            assert!(fresh.backup_if_due(day * DAY_MS).unwrap().is_some());
+        }
+        assert_eq!(fresh.backups().len(), KEEP_DAILY);
+        // Every copy of the old data is still there, and still a database with that data.
+        for name in &old {
+            let copy = Connection::open(kept.join(name)).unwrap();
+            assert_eq!(copy.query_row("SELECT value FROM kv WHERE key = 'k'", [], |r| r.get::<_, String>(0)).unwrap(), "old data");
+        }
+
+        // A start from a copy leaves the copies where they are.
+        let from = fresh.backups().remove(0);
+        drop(fresh);
+        recover(&db, Some(Path::new(&from.path)), now + 1).unwrap();
+        assert_eq!(list(&dir(&db)).len(), KEEP_DAILY);
+        assert!(!tmp.path().join(format!("backups.before-{}", now + 1)).exists());
+    }
+
+    #[test]
     fn a_copy_is_made_once_a_day_and_the_last_of_each_kind_are_kept() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("codly.sqlite");
@@ -455,6 +669,7 @@ mod tests {
         }
         // Copies from before an update are counted apart: daily copies never push them out.
         for at in [1, 2, 3] {
+            store.kv_set("k", &format!("before update {at}")).unwrap();
             write(&store.conn(), &dir(&db), BackupKind::Update, at).unwrap();
         }
         let kept: Vec<(BackupKind, i64)> = store.backups().iter().map(|b| (b.kind, b.created_at)).collect();

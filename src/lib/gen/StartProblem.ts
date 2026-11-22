@@ -14,7 +14,8 @@ message: string,
  */
 database: string, 
 /**
- * The copies this version of Codly can start from, newest first.
+ * The copies this version of Codly can start from, newest first. Empty when the update of
+ * the data failed: the same update would fail on a copy.
  */
 backups: Array<DbBackup>, 
 /**

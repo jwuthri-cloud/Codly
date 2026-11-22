@@ -392,7 +392,8 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
   store/            SQLite: schema.sql, later migrations (m2…m4), typed queries; backup.rs: a copy
                     of the database once a day and before a migration (`<data dir>/backups/`), and
-                    the way back from a database that cannot be used (it is moved aside, never deleted)
+                    the way back from a database that cannot be used (it is moved aside, never deleted;
+                    a start with no data moves the copies aside too, as `backups.before-<time>/`)
   git.rs            worktrees, commits, merges, push (shells out to the user's git)
   mcp/              server.rs (Unix socket), bridge.rs (`codly mcp`), tools.rs (tool specs)
   index/            code retrieval: FTS5 over paths, symbols and chunks; pointer packs
