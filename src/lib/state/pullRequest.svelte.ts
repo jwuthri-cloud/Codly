@@ -33,10 +33,16 @@ export async function loadPullRequest(source: PrSource) {
   }
 }
 
-/** Create pull request…: draft it and open the confirm. Nothing leaves this Mac yet. */
+/**
+ * Create pull request… or Push new commits…: draft it and open the confirm. Nothing leaves this
+ * Mac yet. The draft also says where a pull request on record stands now (merged or closed on
+ * GitHub since the last read), and the row shows that.
+ */
 export async function preparePullRequest(source: PrSource): Promise<boolean> {
   try {
     const draft = await api.draftPullRequest(source);
+    const pr = prUi.opened[prKey(source)];
+    if (pr && draft.pr_state) prUi.opened[prKey(source)] = { ...pr, state: draft.pr_state };
     prUi.dialog = { source, draft };
     return true;
   } catch (e) {
@@ -72,14 +78,27 @@ export async function pushPrBranch(source: PrSource, confirm: PrConfirm): Promis
   }
 }
 
-/** Refresh: read the pull request's checks once more. */
+/** Refresh: read the pull request's state and checks once more. */
 export async function refreshPullRequest(source: PrSource) {
   try {
     const pr = await api.refreshPullRequest(source);
     prUi.opened[prKey(source)] = pr;
   } catch (e) {
-    toast({ kind: 'error', title: 'Couldn’t read the checks', body: msg(e) });
+    toast({ kind: 'error', title: 'Couldn’t read the pull request', body: msg(e) });
   }
+}
+
+/**
+ * What the confirm does, from the pull request on record (`pr`) and the draft:
+ * - `create`: push the branch and open a pull request (none is on record, or that one is merged
+ *   or closed by now);
+ * - `join`: push new commits, which join the pull request that gh just said is open;
+ * - `push`: only push. gh cannot open a pull request, or cannot say where the one on record stands.
+ */
+export function confirmMode(pr: PullRequest | null | undefined, draft: PrDraft): 'create' | 'join' | 'push' {
+  if (draft.gh_problem) return 'push';
+  if (!pr || (draft.pr_state && draft.pr_state !== 'open')) return 'create';
+  return draft.pr_state === 'open' ? 'join' : 'push';
 }
 
 /** The checks in one line, the worst news first: "1 failed (lint) · 2 running · 3 passed". */

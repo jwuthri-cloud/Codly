@@ -8,10 +8,12 @@
 //! - nothing is sent when the branch, the remote or the base is not what the user confirmed;
 //! - `gh` runs with the user's login environment and its own sign-in: Codly stores no token;
 //! - without a usable `gh` the branch can still be pushed, and the compare page is offered;
-//! - checks are read with one `gh pr checks` call when the user asks: there is no polling.
+//! - the dialog says how many of the user's own unpushed commits the branch would carry;
+//! - a pull request's state and checks are read when the user asks (`gh pr view`, `gh pr
+//!   checks`): there is no polling.
 //!
-//! Every `gh` argv comes from a builder (`auth_args`, `create_args`, `checks_args`), so a test
-//! can check what would run without running `gh`.
+//! Every `gh` argv comes from a builder (`auth_args`, `create_args`, `state_args`,
+//! `checks_args`), so a test can check what would run without running `gh`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -75,8 +77,12 @@ pub struct PrDraft {
     pub body: String,
     /// Why `gh` cannot open the pull request (None: it can). The branch can still be pushed.
     pub gh_problem: Option<String>,
-    /// Something to know about `base` before sending (it is not on the remote).
+    /// Something to know about `base` before sending: it is not on the remote, or the push
+    /// would also carry commits of the user's own branch that the remote does not have.
     pub warning: Option<String>,
+    /// Where the pull request on record stands, read just now (None: there is none, or `gh`
+    /// could not say). New commits join it only while it is open.
+    pub pr_state: Option<PrState>,
 }
 
 /// What the user confirmed: nothing is sent when the repository no longer matches it.
@@ -88,6 +94,17 @@ pub struct PrConfirm {
     pub base: String,
 }
 
+/// Where a pull request stands on its host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PrState {
+    Open,
+    Merged,
+    /// Closed without a merge.
+    Closed,
+}
+
 /// A pull request Codly opened, as last read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -97,6 +114,8 @@ pub struct PullRequest {
     pub branch: String,
     pub base: String,
     pub created_at: i64,
+    /// As of the last read: when it was opened, on Refresh, and when the dialog opens.
+    pub state: PrState,
     /// Its checks as of the last Refresh (None: not read yet).
     pub checks: Option<PrChecks>,
 }
@@ -179,6 +198,10 @@ fn create_args(slug: &RepoSlug, base: &str, head: &str, title: &str) -> Vec<Stri
     ["pr", "create", "--repo", &repo, "--base", base, "--head", head, "--title", title, "--body-file", "-"].map(String::from).to_vec()
 }
 
+fn state_args(url: &str) -> Vec<String> {
+    ["pr", "view", url, "--json", "state"].map(String::from).to_vec()
+}
+
 fn checks_args(url: &str) -> Vec<String> {
     ["pr", "checks", url, "--json", "name,bucket"].map(String::from).to_vec()
 }
@@ -190,6 +213,21 @@ fn pr_url(text: &str) -> Option<String> {
         .rev()
         .find(|w| w.starts_with("https://") && w.contains("/pull/") && w.chars().all(|c| c.is_ascii_graphic()))
         .map(String::from)
+}
+
+/// The state in what `gh pr view --json state` printed.
+fn parse_state(stdout: &str) -> Result<PrState> {
+    #[derive(Deserialize)]
+    struct View {
+        state: String,
+    }
+    let view: View = serde_json::from_str(stdout.trim())?;
+    match view.state.as_str() {
+        "OPEN" => Ok(PrState::Open),
+        "MERGED" => Ok(PrState::Merged),
+        "CLOSED" => Ok(PrState::Closed),
+        other => bail!("gh named a pull request state Codly does not know: {other}"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -323,6 +361,12 @@ fn agent_body(name: &str, request: &str, commits: &[GitLogEntry]) -> String {
     }
     out.push_str(&format!("## Checks\n\nNo checks ran in Codly: {name} worked alone, outside a plan.\n"));
     out
+}
+
+/// The push would carry `count` commits that are not the branch's own work.
+fn unpushed_warning(count: u32, remote: &str, base: &str) -> String {
+    let commits = if count == 1 { "1 commit".to_string() } else { format!("{count} commits") };
+    format!("This also sends {commits} from your own branch that {remote}/{base} does not have yet. The pull request will show them too.")
 }
 
 /// A branch name the user typed as the base. It becomes a `gh` argument and part of a ref.
@@ -476,6 +520,70 @@ impl Inner {
         }
     }
 
+    /// Where the pull request stands, from one `gh pr view` call.
+    async fn read_state(&self, gh: &Path, repo: &Path, url: &str) -> Result<PrState> {
+        let out = self.run_gh(gh, repo, &state_args(url), None, GH_TIMEOUT).await?;
+        if !out.ok {
+            bail!("gh could not read the pull request: {}", out.said().trim_end_matches('.'));
+        }
+        parse_state(&out.stdout)
+    }
+
+    /// `git rev-list --count` of a set of revisions.
+    async fn count_commits(&self, repo: &Path, revs: &[&str]) -> Result<u32> {
+        let mut args = vec!["rev-list", "--count"];
+        args.extend_from_slice(revs);
+        Ok(self.git.read(repo, &args).await?.trim().parse()?)
+    }
+
+    /// How many commits the head's branch has that `base` lacks on its remote, as last
+    /// fetched. None: the remote has no such branch.
+    async fn ahead_of(&self, head: &Head, base: &str) -> Result<Option<u32>> {
+        let remote = self.pr_remote(&head.repo, base).await?;
+        let on_remote = format!("refs/remotes/{remote}/{base}");
+        if self.git.rev_parse(&head.repo, &on_remote).await?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(self.count_commits(&head.repo, &[head.branch.as_str(), "--not", on_remote.as_str()]).await?))
+    }
+
+    /// The base drafted for a solo agent's pull request. Its branch started from what the user
+    /// had checked out, and Merge goes there too: so the checked-out branch when the remote
+    /// has it, unless the default branch is nearer to the agent's branch (fewer commits apart).
+    async fn agent_base(&self, head: &Head) -> Result<String> {
+        let default = head.ws.default_branch.clone();
+        let current = self.git.current_branch(&head.repo).await?.filter(|c| *c != default && !c.starts_with(OWN_PREFIX));
+        let Some(current) = current else { return Ok(default) };
+        let Some(from_current) = self.ahead_of(head, &current).await? else { return Ok(default) };
+        Ok(match self.ahead_of(head, &default).await? {
+            Some(from_default) if from_default < from_current => default,
+            _ => current,
+        })
+    }
+
+    /// How many commits the push would send that are not this branch's own work: the commits
+    /// of the user's branch it started from that `remote_base` (the base on the remote, as
+    /// last fetched) does not have. A plan knows the commit it started from. A solo agent's
+    /// branch shares them with the local base, or with the branch that is checked out.
+    async fn unpushed_below(&self, head: &Head, base: &str, remote_base: &str) -> Result<u32> {
+        let starts = match &head.owner {
+            Owner::Plan(Plan { base_commit: Some(start), .. }) => vec![start.clone()],
+            _ => {
+                let mut shared = vec![];
+                for theirs in [format!("refs/heads/{base}"), "HEAD".to_string()] {
+                    shared.extend(self.git.merge_base(&head.repo, &theirs, &head.branch).await?);
+                }
+                shared
+            }
+        };
+        if starts.is_empty() {
+            return Ok(0);
+        }
+        let mut revs: Vec<&str> = starts.iter().map(String::as_str).collect();
+        revs.extend(["--not", remote_base]);
+        self.count_commits(&head.repo, &revs).await
+    }
+
     /// The checks Codly ran for a plan, each with the result of its last run: every finished
     /// task's verify commands, then the plan's integration checks.
     fn plan_checks(&self, plan: &Plan, tasks: &[Task]) -> Result<Vec<Check>> {
@@ -509,17 +617,18 @@ impl Inner {
         Ok(checks)
     }
 
-    /// What Create pull request would send. Reads the repository and asks `gh` whether it is
-    /// signed in; changes nothing.
+    /// What Create pull request would send. Reads the repository, and asks `gh` whether it is
+    /// signed in and where a pull request on record stands. Nothing is sent and the repository
+    /// is not changed; only Codly's note of that pull request's state is brought up to date.
     async fn draft_pull_request(&self, source: &PrSource) -> Result<PrDraft> {
         let head = self.pr_head(source).await?;
-        let started_from = match &head.owner {
-            Owner::Plan(plan) => plan.base_branch.clone(),
-            Owner::Agent(..) => None,
+        let base = match &head.owner {
+            Owner::Plan(plan) => plan.base_branch.clone().unwrap_or_else(|| head.ws.default_branch.clone()),
+            Owner::Agent(..) => self.agent_base(&head).await?,
         };
-        let base = started_from.unwrap_or_else(|| head.ws.default_branch.clone());
         let remote = self.pr_remote(&head.repo, &base).await?;
-        let on_remote = self.git.rev_parse(&head.repo, &format!("refs/remotes/{remote}/{base}")).await?.is_some();
+        let remote_base = format!("refs/remotes/{remote}/{base}");
+        let on_remote = self.git.rev_parse(&head.repo, &remote_base).await?.is_some();
         let (title, body) = match &head.owner {
             Owner::Plan(plan) => {
                 let tasks = self.store.plan_tasks(&plan.id)?;
@@ -528,7 +637,7 @@ impl Inner {
             Owner::Agent(agent, _) => {
                 let request = self.store.last_chat_by(Some(&head.ws.id), &format!("agent:{}", agent.id), "user")?.unwrap_or_default();
                 // Its commits that the base does not have, when the base is known here.
-                let from = if on_remote { Some(format!("refs/remotes/{remote}/{base}")) } else { self.git.rev_parse(&head.repo, &base).await? };
+                let from = if on_remote { Some(remote_base.clone()) } else { self.git.rev_parse(&head.repo, &base).await? };
                 let commits = match from {
                     Some(from) => parse_log(&self.git.read(&head.repo, &["log", "-n30", "--format=%h%x1f%an%x1f%ct%x1f%s", &format!("{from}..{}", head.branch)]).await?),
                     None => vec![],
@@ -537,9 +646,32 @@ impl Inner {
             }
         };
         let slug = self.remote_slug(&head.repo, &remote).await;
-        let gh_problem = self.gh_problem(&head.repo, &remote, slug.as_ref()).await;
-        let warning = (!on_remote).then(|| format!("{base} is not on {remote} (as last fetched). Push it first, or name another base."));
-        Ok(PrDraft { remote, branch: head.branch, base, title, body, gh_problem, warning })
+        let mut gh_problem = self.gh_problem(&head.repo, &remote, slug.as_ref()).await;
+        // A pull request on record may be merged or closed by now. Ask, so the dialog does not
+        // say that new commits join it when they would not.
+        let mut pr_state = None;
+        if gh_problem.is_none()
+            && let Some(mut pr) = self.pull_request(source)?
+            && let Some(gh) = gh_bin(&self.base_env)
+        {
+            match self.read_state(&gh, &head.repo, &pr.url).await {
+                Ok(state) => {
+                    pr.state = state;
+                    self.store.kv_set(&source.key(), &serde_json::to_string(&pr)?)?;
+                    pr_state = Some(state);
+                }
+                Err(e) => gh_problem = Some(format!("Codly does not know whether the pull request it opened is still open: {e}.")),
+            }
+        }
+        let warning = if !on_remote {
+            Some(format!("{base} is not on {remote} (as last fetched). Push it first, or name another base."))
+        } else {
+            match self.unpushed_below(&head, &base, &remote_base).await? {
+                0 => None,
+                count => Some(unpushed_warning(count, &remote, &base)),
+            }
+        };
+        Ok(PrDraft { remote, branch: head.branch, base, title, body, gh_problem, warning, pr_state })
     }
 
     /// Nothing is sent unless the repository still is what the user confirmed.
@@ -623,7 +755,16 @@ impl Inner {
         let url = if out.ok { pr_url(&out.stdout) } else { pr_url(&out.stderr).filter(|_| out.stderr.contains("already exists")) };
         let Some(url) = url else { bail!("{pushed}: {}.{by_hand}", out.said().trim_end_matches('.')) };
 
-        let pr = PullRequest { url, remote: confirm.remote.clone(), branch: head.branch.clone(), base: confirm.base.clone(), created_at: now_ms(), checks: None };
+        // gh opened it just now, or named the one that is open for this branch.
+        let pr = PullRequest {
+            url,
+            remote: confirm.remote.clone(),
+            branch: head.branch.clone(),
+            base: confirm.base.clone(),
+            created_at: now_ms(),
+            state: PrState::Open,
+            checks: None,
+        };
         self.store.kv_set(&source.key(), &serde_json::to_string(&pr)?)?;
         let ws_id = Some(head.ws.id.as_str());
         let summary = format!("you opened a pull request for {} into {}: {}", pr.branch, pr.base, pr.url);
@@ -651,7 +792,7 @@ impl Inner {
         Ok(PrPushed { remote: confirm.remote.clone(), branch: head.branch, compare_url })
     }
 
-    /// Read the pull request's checks once, with `gh pr checks`.
+    /// Read the pull request's state and its checks once: `gh pr view`, then `gh pr checks`.
     async fn refresh_pull_request(&self, source: &PrSource) -> Result<PullRequest> {
         let mut pr = self.pull_request(source)?.ok_or_else(|| anyhow!("Codly has not opened a pull request from here yet"))?;
         let ws_id = match source {
@@ -663,8 +804,10 @@ impl Inner {
             None => None,
         }
         .ok_or_else(|| anyhow!("unknown workspace"))?;
-        let gh = gh_bin(&self.base_env).ok_or_else(|| anyhow!("the GitHub CLI (gh) is not installed, so the checks cannot be read"))?;
-        let out = self.run_gh(&gh, Path::new(&ws.repo_path), &checks_args(&pr.url), None, GH_TIMEOUT).await?;
+        let gh = gh_bin(&self.base_env).ok_or_else(|| anyhow!("the GitHub CLI (gh) is not installed, so the pull request cannot be read"))?;
+        let repo = Path::new(&ws.repo_path);
+        pr.state = self.read_state(&gh, repo, &pr.url).await?;
+        let out = self.run_gh(&gh, repo, &checks_args(&pr.url), None, GH_TIMEOUT).await?;
         let checks = match parse_checks(&out.stdout, now_ms()) {
             Ok(checks) => checks,
             // gh's answer for a pull request that has no check yet.
@@ -684,7 +827,8 @@ impl Core {
     }
 
     /// What Create pull request would send, for the confirm: remote, branch, base, and a
-    /// title and description drafted from the plan. Nothing is pushed.
+    /// title and description drafted from the plan, and the state of a pull request that is
+    /// on record. Nothing is pushed.
     pub async fn draft_pull_request(&self, source: &PrSource) -> Result<PrDraft> {
         self.inner.draft_pull_request(source).await
     }
@@ -699,7 +843,7 @@ impl Core {
         self.inner.push_pr_branch(source, confirm).await
     }
 
-    /// Read the checks of the pull request again (one `gh pr checks` call).
+    /// Read the pull request's state and checks again (one `gh pr view`, one `gh pr checks`).
     pub async fn refresh_pull_request(&self, source: &PrSource) -> Result<PullRequest> {
         self.inner.refresh_pull_request(source).await
     }
@@ -741,6 +885,7 @@ mod tests {
             create_args(&slug(), "main", "codly/add-hello-ab12/integration", "Add a hello file"),
             ["pr", "create", "--repo", "github.com/acme/web", "--base", "main", "--head", "codly/add-hello-ab12/integration", "--title", "Add a hello file", "--body-file", "-"]
         );
+        assert_eq!(state_args("https://github.com/acme/web/pull/7"), ["pr", "view", "https://github.com/acme/web/pull/7", "--json", "state"]);
         assert_eq!(checks_args("https://github.com/acme/web/pull/7"), ["pr", "checks", "https://github.com/acme/web/pull/7", "--json", "name,bucket"]);
         // The page to open a pull request by hand: on GitHub only, branch names escaped.
         assert_eq!(
@@ -765,6 +910,21 @@ mod tests {
         assert_eq!(checks, PrChecks { passed: 1, failed: 2, pending: 1, skipped: 1, failing: vec!["lint".into(), "deploy".into()], read_at: 42 });
         assert_eq!(parse_checks("[]", 1).unwrap(), PrChecks { read_at: 1, ..Default::default() });
         assert!(parse_checks("no checks reported on the 'codly/x' branch", 1).is_err());
+
+        for (state, read) in [("OPEN", PrState::Open), ("MERGED", PrState::Merged), ("CLOSED", PrState::Closed)] {
+            assert_eq!(parse_state(&format!("{{\"state\":\"{state}\"}}\n")).unwrap(), read);
+        }
+        assert!(parse_state(r#"{"state":"DRAFT"}"#).unwrap_err().to_string().contains("does not know: DRAFT"));
+        assert!(parse_state("no pull requests found").is_err());
+    }
+
+    #[test]
+    fn the_warning_counts_the_commits_that_go_with_the_branch() {
+        assert_eq!(
+            unpushed_warning(1, "origin", "main"),
+            "This also sends 1 commit from your own branch that origin/main does not have yet. The pull request will show them too."
+        );
+        assert!(unpushed_warning(12, "upstream", "release/1.x").starts_with("This also sends 12 commits from your own branch that upstream/release/1.x does not"));
     }
 
     #[test]
@@ -798,8 +958,9 @@ mod tests {
 
     /// What stands in for `gh`: it writes down each call (its arguments, one per line, then
     /// `--`) and what `pr create` got on stdin, and answers as gh does. `auth status` fails
-    /// while a `signed-out` file is next to it, and `pr create` finds a pull request open
-    /// already while an `exists` file is.
+    /// while a `signed-out` file is next to it, `pr create` finds a pull request open already
+    /// while an `exists` file is, and `pr view` answers with the state written in a `state`
+    /// file (OPEN without one; it fails on the state GONE).
     const FAKE_GH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" -- >> "$dir/gh.calls"
@@ -814,6 +975,11 @@ case "$1 $2" in
       exit 1
     fi
     echo "https://github.com/acme/web/pull/7" ;;
+  "pr view")
+    state=OPEN
+    if [ -e "$dir/state" ]; then read -r state < "$dir/state"; fi
+    if [ "$state" = GONE ]; then echo "GraphQL: Could not resolve to a PullRequest." >&2; exit 1; fi
+    echo "{\"state\":\"$state\"}" ;;
   "pr checks")
     echo '[{"name":"build","bucket":"pass"},{"name":"lint","bucket":"fail"},{"name":"e2e","bucket":"pending"}]' ;;
 esac
@@ -827,7 +993,8 @@ esac
         remote: PathBuf,
         /// The only folder on the core's PATH: git, and the stand-in `gh` when there is one.
         bin: PathBuf,
-        /// The commit `main` is at, here and on the remote.
+        /// The commit the user's checkout is at, where plans and agents start: `main` as the
+        /// remote has it, until `local_commit` adds to it.
         base: String,
     }
 
@@ -864,6 +1031,14 @@ esac
             let core = Core::start_with(CoreConfig { data_dir: root.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
             core.open_workspace(repo.to_str().unwrap()).await.unwrap();
             Bench { _root: root, core, repo, remote, bin, base }
+        }
+
+        /// A commit of the user's own on the checked-out branch. It is not pushed.
+        fn local_commit(&mut self, file: &str) {
+            std::fs::write(self.repo.join(file), "mine\n").unwrap();
+            sh(&self.repo, &["add", file]);
+            sh(&self.repo, &["commit", "-qm", file]);
+            self.base = sh(&self.repo, &["rev-parse", "HEAD"]);
         }
 
         /// The calls the stand-in `gh` got, each as its argument list.
@@ -920,11 +1095,12 @@ esac
             plan
         }
 
-        /// A solo agent in its own worktree, on its own `codly/solo/…` branch.
-        async fn solo(&self) -> (Agent, PathBuf) {
+        /// A solo agent in its own worktree, on its own `codly/solo/…` branch, started from
+        /// the user's checkout.
+        async fn solo(&self, name: &str) -> (Agent, PathBuf) {
             let i = &self.core.inner;
             let ws = i.require_ws().unwrap();
-            let agent = i.create_agent(&ws.id, "Ada", Provider::Claude, Role::Solo, 0, None).unwrap();
+            let agent = i.create_agent(&ws.id, name, Provider::Claude, Role::Solo, 0, None).unwrap();
             let (branch, wt) = i.solo_worktree(&ws, &agent);
             i.git.worktree_add(&self.repo, &wt, &branch, &self.base).await.unwrap();
             let agent = i.update_agent(&agent.id, |a| a.worktree = Some(wt.to_string_lossy().into_owned())).unwrap();
@@ -974,6 +1150,7 @@ esac
         let pr = b.core.create_pull_request(&source, &confirm, "Add hello", "My words.\n").await.unwrap();
         assert_eq!(pr.url, "https://github.com/acme/web/pull/7");
         assert_eq!((pr.remote.as_str(), pr.branch.as_str(), pr.base.as_str(), &pr.checks), ("origin", branch.as_str(), "main", &None));
+        assert_eq!(pr.state, PrState::Open);
         assert_eq!(sh(&b.remote, &["rev-parse", &branch]), sh(&b.repo, &["rev-parse", &branch]));
         assert_eq!(sh(&b.remote, &["rev-parse", "main"]), b.base, "the user's branch is not pushed");
         assert_eq!(b.gh_calls().last().unwrap(), &create_args(&slug(), "main", &branch, "Add hello"));
@@ -984,12 +1161,14 @@ esac
         let said = "Opened a pull request for \"Add a hello file\" into main: https://github.com/acme/web/pull/7";
         assert!(chats.iter().any(|c| c.thread == "lead" && c.author == "codly" && c.text == said), "{chats:?}");
 
-        // Refresh reads the checks once.
+        // Refresh reads the state and the checks once.
+        let before = b.gh_calls().len();
         let read = b.core.refresh_pull_request(&source).await.unwrap();
         let checks = read.checks.clone().unwrap();
         assert_eq!((checks.passed, checks.failed, checks.pending, checks.skipped), (1, 1, 1, 0));
         assert_eq!(checks.failing, ["lint"]);
-        assert_eq!(b.gh_calls().last().unwrap(), &checks_args(&pr.url));
+        assert_eq!(read.state, PrState::Open);
+        assert_eq!(b.gh_calls()[before..], [state_args(&pr.url), checks_args(&pr.url)]);
         assert_eq!(b.core.pull_request(&source).await.unwrap(), Some(read));
 
         // A branch that has its pull request already: gh names it, and that is the answer.
@@ -1002,7 +1181,7 @@ esac
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn without_gh_a_solo_agents_branch_is_pushed_and_never_forced() {
         let b = Bench::new(false).await;
-        let (agent, wt) = b.solo().await;
+        let (agent, wt) = b.solo("Ada").await;
         let i = &b.core.inner;
         let ws = i.require_ws().unwrap();
         i.chat(Some(&ws.id), &format!("agent:{}", agent.id), "user", "Add notes for the release\nKeep them short.", None).unwrap();
@@ -1054,6 +1233,213 @@ esac
         let e = b.core.push_pr_branch(&source, &PrConfirm { branch: "feature".into(), ..confirm }).await.unwrap_err().to_string();
         assert!(e.contains("pushes only those"), "{e}");
         assert!(!b.remote_branches().contains(&"feature".to_string()));
+        b.core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_merged_or_closed_pull_request_makes_room_for_a_new_one() {
+        let b = Bench::new(true).await;
+        let plan = b.done_plan().await;
+        let source = PrSource::Plan(plan.id.clone());
+        let draft = b.core.draft_pull_request(&source).await.unwrap();
+        assert_eq!(draft.pr_state, None, "no pull request is on record yet");
+        let confirm = PrConfirm { remote: draft.remote.clone(), branch: draft.branch.clone(), base: draft.base.clone() };
+        let pr = b.core.create_pull_request(&source, &confirm, "Add hello", "").await.unwrap();
+
+        // While it is open, the dialog can say that new commits join it.
+        let draft = b.core.draft_pull_request(&source).await.unwrap();
+        assert_eq!((draft.pr_state, draft.gh_problem.as_deref()), (Some(PrState::Open), None));
+        assert_eq!(b.gh_calls().last().unwrap(), &state_args(&pr.url), "one gh pr view call says where it stands");
+
+        // Merged or closed on GitHub: the draft finds out, and the record says so.
+        for (said, state) in [("MERGED", PrState::Merged), ("CLOSED", PrState::Closed)] {
+            std::fs::write(b.bin.join("state"), said).unwrap();
+            let draft = b.core.draft_pull_request(&source).await.unwrap();
+            assert_eq!((draft.pr_state, draft.gh_problem.as_deref()), (Some(state), None));
+            assert_eq!(b.core.pull_request(&source).await.unwrap().unwrap().state, state);
+        }
+        // Refresh reads the state too.
+        std::fs::write(b.bin.join("state"), "MERGED").unwrap();
+        assert_eq!(b.core.refresh_pull_request(&source).await.unwrap().state, PrState::Merged);
+
+        // gh cannot say where it stands: nothing is claimed, and the record keeps the last answer.
+        std::fs::write(b.bin.join("state"), "GONE").unwrap();
+        let draft = b.core.draft_pull_request(&source).await.unwrap();
+        assert_eq!(draft.pr_state, None);
+        assert_eq!(
+            draft.gh_problem.as_deref(),
+            Some("Codly does not know whether the pull request it opened is still open: gh could not read the pull request: GraphQL: Could not resolve to a PullRequest.")
+        );
+        assert_eq!(b.core.pull_request(&source).await.unwrap().unwrap().state, PrState::Merged);
+        let e = b.core.refresh_pull_request(&source).await.unwrap_err().to_string();
+        assert!(e.starts_with("gh could not read the pull request"), "{e}");
+
+        // More work on the branch, then Create again: the new pull request takes the place of
+        // the merged one on record.
+        let wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+        std::fs::write(wt.join("more.txt"), "more\n").unwrap();
+        b.core.inner.git.commit_all(&wt, "codly(t3): more").await.unwrap().unwrap();
+        let next = b.core.create_pull_request(&source, &confirm, "Add more", "").await.unwrap();
+        assert_eq!(next.state, PrState::Open);
+        assert!(next.created_at >= pr.created_at);
+        assert_eq!(b.core.pull_request(&source).await.unwrap(), Some(next));
+        assert_eq!(sh(&b.remote, &["rev-parse", &confirm.branch]), sh(&wt, &["rev-parse", "HEAD"]));
+        b.core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_draft_says_how_many_of_the_users_unpushed_commits_go_too() {
+        let mut b = Bench::new(false).await;
+        // An earlier plan was merged into main and not pushed; the next plan starts there.
+        b.local_commit("mine-1.txt");
+        let plan = b.done_plan().await;
+        let plan = PrSource::Plan(plan.id);
+        let one = "This also sends 1 commit from your own branch that origin/main does not have yet. The pull request will show them too.";
+        assert_eq!(b.core.draft_pull_request(&plan).await.unwrap().warning.as_deref(), Some(one));
+
+        // A solo agent that starts on a branch of the user's that was never pushed.
+        sh(&b.repo, &["switch", "-q", "-c", "topic"]);
+        b.local_commit("mine-2.txt");
+        let (agent, _wt) = b.solo("Ada").await;
+        let agent = PrSource::Agent(agent.id);
+        let draft = b.core.draft_pull_request(&agent).await.unwrap();
+        assert_eq!(draft.base, "main", "topic is not on the remote, so it is no base");
+        let two = "This also sends 2 commits from your own branch that origin/main does not have yet. The pull request will show them too.";
+        assert_eq!(draft.warning.as_deref(), Some(two));
+
+        // Once main is pushed, the plan's branch carries only its own work; the agent's still
+        // carries the commit on topic.
+        sh(&b.repo, &["push", "-q", "origin", "main"]);
+        assert_eq!(b.core.draft_pull_request(&plan).await.unwrap().warning, None);
+        assert_eq!(b.core.draft_pull_request(&agent).await.unwrap().warning.as_deref(), Some(one));
+        assert_eq!(b.remote_branches(), ["main"], "a draft sends nothing");
+        b.core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_solo_agents_draft_goes_into_the_branch_it_started_from() {
+        let mut b = Bench::new(false).await;
+        // The remote has release (old), main (one commit later) and develop (one more).
+        sh(&b.repo, &["branch", "release"]);
+        b.local_commit("main.txt");
+        sh(&b.repo, &["switch", "-q", "-c", "develop"]);
+        b.local_commit("develop.txt");
+        for branch in ["release", "main", "develop"] {
+            sh(&b.repo, &["push", "-q", "origin", branch]);
+        }
+        let (agent, wt) = b.solo("Ada").await;
+        std::fs::write(wt.join("notes.txt"), "from the agent\n").unwrap();
+        b.core.inner.git.commit_all(&wt, "codly(solo/Ada): notes").await.unwrap().unwrap();
+        let source = PrSource::Agent(agent.id);
+
+        // The checkout is on develop, where the agent started: that is the base, and the
+        // description lists the agent's commit only.
+        let draft = b.core.draft_pull_request(&source).await.unwrap();
+        assert_eq!((draft.remote.as_str(), draft.base.as_str(), draft.warning.as_deref()), ("origin", "develop", None));
+        assert!(draft.body.contains("## Commits\n\n- codly(solo/Ada): notes ("), "{}", draft.body);
+        assert!(!draft.body.contains("develop.txt"), "{}", draft.body);
+
+        // A checked-out branch that is farther from the agent's work than the default branch is
+        // not the base, and neither is one the remote does not have.
+        sh(&b.repo, &["switch", "-q", "release"]);
+        assert_eq!(b.core.draft_pull_request(&source).await.unwrap().base, "main");
+        sh(&b.repo, &["switch", "-q", "-c", "topic", "develop"]);
+        assert_eq!(b.core.draft_pull_request(&source).await.unwrap().base, "main");
+        b.core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_is_pushed_for_a_busy_agent_a_running_plan_or_an_empty_branch() {
+        let b = Bench::new(true).await;
+        let i = &b.core.inner;
+        let ws = i.require_ws().unwrap();
+        let (agent, wt) = b.solo("Ada").await;
+        let source = PrSource::Agent(agent.id.clone());
+        let draft = b.core.draft_pull_request(&source).await.unwrap();
+        let confirm = PrConfirm { remote: draft.remote.clone(), branch: draft.branch.clone(), base: draft.base.clone() };
+
+        // A branch with nothing the base lacks: there is nothing to push.
+        let e = b.core.push_pr_branch(&source, &confirm).await.unwrap_err().to_string();
+        assert!(e.contains(&format!("main on origin already has everything on {}, so there is nothing to push", draft.branch)), "{e}");
+        assert_eq!(b.remote_branches(), ["main"]);
+
+        // An agent in the middle of a turn: nothing is committed for it and nothing is sent.
+        std::fs::write(wt.join("notes.txt"), "half written\n").unwrap();
+        i.update_agent(&agent.id, |a| {
+            a.status = AgentStatus::Working;
+            a.run_id = Some("run-1".into());
+        })
+        .unwrap();
+        let e = b.core.create_pull_request(&source, &confirm, "Notes", "").await.unwrap_err().to_string();
+        assert!(e.contains("Ada is still working"), "{e}");
+        let e = b.core.push_pr_branch(&source, &confirm).await.unwrap_err().to_string();
+        assert!(e.contains("Ada is still working"), "{e}");
+        assert_eq!(sh(&wt, &["status", "--porcelain"]), "?? notes.txt");
+        assert_eq!(b.remote_branches(), ["main"]);
+        i.update_agent(&agent.id, |a| {
+            a.status = AgentStatus::Idle;
+            a.run_id = None;
+        })
+        .unwrap();
+
+        // A remote whose address names no host/owner/repository: gh cannot be pointed at it, so
+        // Create sends nothing, also with gh installed and signed in.
+        sh(&b.repo, &["remote", "set-url", "origin", &b.remote.to_string_lossy()]);
+        let local = b.core.draft_pull_request(&source).await.unwrap();
+        assert_eq!(local.gh_problem.as_deref(), Some("The address of origin is not a host/owner/repository that gh can use."));
+        let e = b.core.create_pull_request(&source, &confirm, "Notes", "").await.unwrap_err().to_string();
+        assert!(e.contains("is not a host/owner/repository that gh can use; nothing was pushed"), "{e}");
+        assert_eq!(b.remote_branches(), ["main"]);
+        assert!(b.gh_calls().iter().all(|call| call[..2] == ["auth", "status"]), "{:?}", b.gh_calls());
+        sh(&b.repo, &["remote", "set-url", "origin", "https://github.com/acme/web.git"]);
+
+        // The agent's work, pushed and then merged into main on the remote (as a fetch would
+        // show it): a second push has nothing to send.
+        b.core.push_pr_branch(&source, &confirm).await.unwrap();
+        let tip = sh(&wt, &["rev-parse", "HEAD"]);
+        assert_eq!(sh(&b.remote, &["rev-parse", &draft.branch]), tip);
+        sh(&b.repo, &["update-ref", "refs/remotes/origin/main", &tip]);
+        let e = b.core.push_pr_branch(&source, &confirm).await.unwrap_err().to_string();
+        assert!(e.contains("so there is nothing to push"), "{e}");
+
+        // A plan that is not at rest (its tasks are still being merged and checked).
+        let mut plan = b.done_plan().await;
+        plan.status = PlanStatus::Integrating;
+        let source = PrSource::Plan(plan.id.clone());
+        let confirm = PrConfirm { remote: "origin".into(), branch: plan.integration_branch.clone().unwrap(), base: "main".into() };
+        i.emit(Some(&ws.id), row(None, None, None, EventKind::PlanChanged { plan })).unwrap();
+        let e = b.core.draft_pull_request(&source).await.unwrap_err().to_string();
+        assert!(e.contains("the plan is still running"), "{e}");
+        let e = b.core.push_pr_branch(&source, &confirm).await.unwrap_err().to_string();
+        assert!(e.contains("the plan is still running"), "{e}");
+        assert!(!b.remote_branches().contains(&confirm.branch));
+        b.core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_remote_is_the_one_the_base_tracks_else_origin_else_the_only_one() {
+        let b = Bench::new(false).await;
+        let plan = b.done_plan().await;
+        let source = PrSource::Plan(plan.id);
+        assert_eq!(b.core.draft_pull_request(&source).await.unwrap().remote, "origin");
+
+        // The remote the base tracks comes before origin.
+        sh(&b.repo, &["remote", "add", "upstream", "https://github.com/acme/upstream.git"]);
+        sh(&b.repo, &["config", "branch.main.remote", "upstream"]);
+        let draft = b.core.draft_pull_request(&source).await.unwrap();
+        assert_eq!(draft.remote, "upstream");
+        assert_eq!(draft.warning.as_deref(), Some("main is not on upstream (as last fetched). Push it first, or name another base."));
+
+        // Several remotes, none tracked and none named origin: Codly does not guess.
+        sh(&b.repo, &["config", "--unset", "branch.main.remote"]);
+        sh(&b.repo, &["remote", "rename", "origin", "first"]);
+        let e = b.core.draft_pull_request(&source).await.unwrap_err().to_string();
+        assert!(e.contains("has 2 remotes") && e.contains("none is named origin; set the upstream of main"), "{e}");
+
+        // The only remote there is, whatever its name.
+        sh(&b.repo, &["remote", "remove", "upstream"]);
+        let draft = b.core.draft_pull_request(&source).await.unwrap();
+        assert_eq!((draft.remote.as_str(), draft.warning.as_deref()), ("first", None));
         b.core.shutdown().await;
     }
 }

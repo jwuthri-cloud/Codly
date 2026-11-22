@@ -7,12 +7,24 @@ import type { PrDraft } from '../gen/PrDraft';
 import type { PrSource } from '../gen/PrSource';
 import type { PullRequest } from '../gen/PullRequest';
 import type { Task } from '../gen/Task';
-import { checksLine, checksState, createPullRequest, loadPullRequest, preparePullRequest, prKey, prUi, pushPrBranch, refreshPullRequest } from '../state/pullRequest.svelte';
+import {
+  checksLine,
+  checksState,
+  confirmMode,
+  createPullRequest,
+  loadPullRequest,
+  preparePullRequest,
+  prKey,
+  prUi,
+  pushPrBranch,
+  refreshPullRequest,
+} from '../state/pullRequest.svelte';
 import { toasts } from '../state/toasts.svelte';
 
 const plan: PrSource = { kind: 'plan', id: 'p1' };
 const confirm = { remote: 'origin', branch: 'codly/dark-mode-ab12/integration', base: 'main' };
-const pr: PullRequest = { url: 'https://github.com/acme/web/pull/7', ...confirm, created_at: 1, checks: null };
+const pr: PullRequest = { url: 'https://github.com/acme/web/pull/7', ...confirm, created_at: 1, state: 'open', checks: null };
+const drafted: PrDraft = { ...confirm, title: 'Dark mode', body: '## Goal', gh_problem: null, warning: null, pr_state: null };
 const checks = (c: Partial<PrChecks>): PrChecks => ({ passed: 0, failed: 0, pending: 0, skipped: 0, failing: [], read_at: 1, ...c });
 const said = () => toasts.list.map((t) => [t.kind, t.title, t.body]);
 
@@ -25,22 +37,44 @@ describe('the pull-request step', () => {
   });
 
   it('Create pull request… only drafts: nothing is pushed before the confirm', async () => {
-    const draft: PrDraft = { ...confirm, title: 'Dark mode', body: '## Goal', gh_problem: null, warning: null };
-    const drafted = vi.spyOn(api, 'draftPullRequest').mockResolvedValue(draft);
+    const core = vi.spyOn(api, 'draftPullRequest').mockResolvedValue(drafted);
     const created = vi.spyOn(api, 'createPullRequest');
     const pushed = vi.spyOn(api, 'pushPrBranch');
     expect(await preparePullRequest(plan)).toBe(true);
-    expect(drafted).toHaveBeenCalledWith(plan);
-    expect(prUi.dialog).toEqual({ source: plan, draft });
+    expect(core).toHaveBeenCalledWith(plan);
+    expect(prUi.dialog).toEqual({ source: plan, draft: drafted });
     expect(created).not.toHaveBeenCalled();
     expect(pushed).not.toHaveBeenCalled();
 
     // A draft that cannot be made opens no dialog and says why.
     prUi.dialog = null;
-    drafted.mockRejectedValue(new Error('this repository has no remote yet'));
+    core.mockRejectedValue(new Error('this repository has no remote yet'));
     expect(await preparePullRequest(plan)).toBe(false);
     expect(prUi.dialog).toBeNull();
     expect(said()).toEqual([['error', 'Couldn’t prepare the pull request', 'this repository has no remote yet']]);
+  });
+
+  it('a pull request that was merged or closed makes room for a new one', async () => {
+    // Open as gh just said: new commits join it. Not asked (no pull request on record): create.
+    expect(confirmMode(null, drafted)).toBe('create');
+    expect(confirmMode(pr, { ...drafted, pr_state: 'open' })).toBe('join');
+    expect(confirmMode({ ...pr, state: 'merged' }, { ...drafted, pr_state: 'merged' })).toBe('create');
+    expect(confirmMode({ ...pr, state: 'closed' }, { ...drafted, pr_state: 'closed' })).toBe('create');
+    // gh cannot open one, or cannot say where the one on record stands: only a push, no claim.
+    expect(confirmMode(null, { ...drafted, gh_problem: 'gh is not installed' })).toBe('push');
+    expect(confirmMode(pr, { ...drafted, gh_problem: 'Codly does not know whether the pull request it opened is still open' })).toBe('push');
+    expect(confirmMode(pr, drafted)).toBe('push');
+
+    // The row learns the state the draft read, before the dialog opens.
+    prUi.opened[prKey(plan)] = pr;
+    vi.spyOn(api, 'draftPullRequest').mockResolvedValue({ ...drafted, pr_state: 'merged' });
+    expect(await preparePullRequest(plan)).toBe(true);
+    expect(prUi.opened[prKey(plan)]).toEqual({ ...pr, state: 'merged' });
+    expect(confirmMode(prUi.opened[prKey(plan)], prUi.dialog!.draft)).toBe('create');
+    // A draft that could not ask leaves the last answer as it is.
+    vi.spyOn(api, 'draftPullRequest').mockResolvedValue(drafted);
+    expect(await preparePullRequest(plan)).toBe(true);
+    expect(prUi.opened[prKey(plan)]?.state).toBe('merged');
   });
 
   it('a pull request shows only once the core has opened it, with what you confirmed', async () => {
@@ -67,21 +101,22 @@ describe('the pull-request step', () => {
     expect(said()).toContainEqual(['error', `Couldn’t push ${confirm.branch}`, 'Codly never force-pushes, so nothing was sent']);
   });
 
-  it('the record is read without gh, and the checks only on Refresh', async () => {
+  it('the record is read without gh, and the state and checks only on Refresh', async () => {
     const record = vi.spyOn(api, 'pullRequest').mockResolvedValue(pr);
-    const refresh = vi.spyOn(api, 'refreshPullRequest').mockResolvedValue({ ...pr, checks: checks({ passed: 2 }) });
+    const refresh = vi.spyOn(api, 'refreshPullRequest').mockResolvedValue({ ...pr, state: 'merged', checks: checks({ passed: 2 }) });
     await loadPullRequest(plan);
     expect(record).toHaveBeenCalledWith(plan);
     expect(refresh).not.toHaveBeenCalled();
     expect(prUi.opened[prKey(plan)]?.checks).toBeNull();
     await refreshPullRequest(plan);
     expect(prUi.opened[prKey(plan)]?.checks?.passed).toBe(2);
+    expect(prUi.opened[prKey(plan)]?.state).toBe('merged');
 
     // A refresh that fails keeps the last answer and says why.
-    refresh.mockRejectedValue(new Error('gh could not read the checks: HTTP 502'));
+    refresh.mockRejectedValue(new Error('gh could not read the pull request: HTTP 502'));
     await refreshPullRequest(plan);
     expect(prUi.opened[prKey(plan)]?.checks?.passed).toBe(2);
-    expect(said()).toEqual([['error', 'Couldn’t read the checks', 'gh could not read the checks: HTTP 502']]);
+    expect(said()).toEqual([['error', 'Couldn’t read the pull request', 'gh could not read the pull request: HTTP 502']]);
   });
 
   it('the checks read as one line, the worst news first', () => {
@@ -115,13 +150,15 @@ describe('the demo’s pull requests', () => {
       body: '## Goal\n\nPlease add a dark mode\n\n## Tasks\n\n- **t1** Theme tokens (done)\n- **t2** Toggle (changes requested)\n\n## Checks\n\n- t1: `pnpm test theme` passed\n',
       gh_problem: null,
       warning: null,
+      pr_state: null,
     });
     expect(demo.handle('pull_request', args, world)).toBeNull();
     expect(demo.handle('push_pr_branch', args, world)).toEqual({ remote: 'origin', branch: confirm.branch, compare_url: `https://github.com/acme/web/compare/main...${confirm.branch}?expand=1` });
     expect(demo.handle('pull_request', args, world)).toBeNull();
 
     const made = demo.handle('create_pull_request', args, world) as PullRequest;
-    expect(made).toEqual({ url: 'https://github.com/acme/web/pull/213', ...confirm, created_at: 1000, checks: null });
+    expect(made).toEqual({ url: 'https://github.com/acme/web/pull/213', ...confirm, created_at: 1000, state: 'open', checks: null });
+    expect((demo.handle('draft_pull_request', args, world) as PrDraft).pr_state).toBe('open');
     expect(demo.handle('create_pull_request', args, world)).toEqual(made);
     expect(demo.handle('pull_request', args, world)).toEqual(made);
     const first = demo.handle('refresh_pull_request', args, world) as PullRequest;

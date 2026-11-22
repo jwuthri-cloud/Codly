@@ -247,15 +247,18 @@ they are build output or third-party code in most repos. If one holds your own c
   with force) to the user's remote: `create_pull_request`, which then opens the pull request
   with the user's `gh` and its sign-in (Codly stores no token), and `push_pr_branch`, the way
   without `gh`. Both run from a dialog that names the remote, the branch and the base, and
-  send nothing when the repository no longer matches it. Codly never pushes on its own.
+  send nothing when the repository no longer matches it. The dialog also says how many of the
+  user's own unpushed commits the branch starts from, since they go with it. Codly never pushes
+  on its own.
 - The workspace IDE saves files where its agent works (`ide_write`, `ide_create`): in the
   agent's worktree, or in the user's checkout when the agent has none (the Lead, or an agent
   hired with Git isolation off). It never commits.
 - Codly's own network use: CLI installers and skill installs (`git clone` of a catalog entry)
   when the user clicks, agents' default tool servers fetched by `npx`/`uvx`, Groq dictation and
   the Claude usage read when switched on, `git push` on Push and on Create pull request, and
-  the user's `gh` for the pull-request step (`gh auth status` for the dialog, `gh pr create`,
-  and `gh pr checks` once per Refresh: no polling). Inbound webhooks and
+  the user's `gh` for the pull-request step (`gh auth status` for the dialog, plus `gh pr view`
+  when a pull request is on record; `gh pr create`; `gh pr view` and `gh pr checks` once per
+  Refresh: no polling). Inbound webhooks and
   `codly serve` listen on 127.0.0.1 (`codly serve --host` changes that).
 
 ## 7. Deliberately deferred (ponytail list)

@@ -209,7 +209,9 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 - **Create pull request** pushes one of Codly's own `codly/…` branches (a plan's, or one agent's), never
   a branch of yours and never with force. It asks first and names the remote, the branch and the base.
   Your own `gh` opens the pull request with its sign-in: Codly stores no GitHub token. Without `gh` you
-  can still push the branch and open the compare page in your browser.
+  can still push the branch and open the compare page in your browser. A Codly branch starts from your
+  branch: when yours has commits that the remote does not have yet, they go with the push, and the
+  dialog says how many before you confirm.
 - One kind of agent edits your project folder directly: an agent that you hire with **Git isolation**
   switched off. The hire screen warns you about it.
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
@@ -222,7 +224,7 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   before.
 - Codly itself goes online only to install a CLI or a skill when you click, to fetch the tool servers
   that agents start with (through `npx` or `uvx`), to push when you press Push or Create pull request
-  (your `gh` then opens the pull request, and reads its checks when you press Refresh), and for two
+  (your `gh` then opens the pull request, and reads its state and checks when you press Refresh), and for two
   features that
   are off until you turn them on: dictation (audio goes to Groq with your key) and Show Claude usage.
   The voice relay in `voice/` talks to OpenAI, and only if you run it.

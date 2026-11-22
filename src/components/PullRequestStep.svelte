@@ -1,8 +1,9 @@
 <!--
   The step after the work is done: a pull request for a plan's branch, or a solo agent's.
   Create pull request… drafts it and opens the confirm; nothing is sent before you say so there.
-  Once one is open: its link, its checks as last read, and Refresh, which reads them once.
-  Codly does not watch the checks, and never pushes on its own.
+  Once one is open: its link, its checks as last read, and Refresh, which reads its state and
+  checks once. When it is merged or closed, Create pull request… comes back for the next one.
+  Codly does not watch the pull request, and never pushes on its own.
 -->
 <script lang="ts">
   import type { PrSource } from '../lib/gen/PrSource';
@@ -48,7 +49,7 @@
   {@const url = pr.url}
   <div class="pr">
     <div class="row">
-      <span class="what"><Icon name="merge" size={12} />Pull request into <code>{pr.base}</code>:</span>
+      <span class="what"><Icon name="merge" size={12} />Pull request into <code>{pr.base}</code>{pr.state === 'open' ? '' : ` (${pr.state})`}:</span>
       <button class="link truncate" onclick={() => openExternal(url)} data-tip="Open in your browser">{url.replace(/^https:\/\//, '')}</button>
     </div>
     <div class="row">
@@ -56,7 +57,9 @@
         Checks: {pr.checks ? `${checksLine(pr.checks)} · read ${ago(pr.checks.read_at, ui.now)}` : 'not read yet'}
       </span>
       <button class="btn sm ghost" disabled={busy} onclick={refresh}><Icon name="refresh" size={12} />Refresh</button>
-      {#if canPush}<button class="btn sm" disabled={busy || !!wait} data-tip={wait} onclick={prepare}>Push new commits…</button>{/if}
+      {#if canPush}
+        <button class="btn sm" disabled={busy || !!wait} data-tip={wait} onclick={prepare}>{pr.state === 'open' ? 'Push new commits…' : 'Create pull request…'}</button>
+      {/if}
     </div>
   </div>
 {:else if pr === null && canPush}

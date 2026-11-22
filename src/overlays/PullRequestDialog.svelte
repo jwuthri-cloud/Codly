@@ -2,19 +2,22 @@
   The confirm before anything is sent for a pull request. It names the remote, the Codly branch
   that is pushed and the base, and shows the title and description Codly drafted from the plan,
   for you to edit. When gh cannot open the pull request it says why and offers Push branch, then
-  the compare page. When the branch has its pull request already, it only pushes the new commits.
+  the compare page. When the branch has a pull request that is still open, it only pushes the new
+  commits; when that one is merged or closed by now, it opens a new one.
 -->
 <script lang="ts">
   import type { PrPushed } from '../lib/gen/PrPushed';
-  import { createPullRequest, prKey, prUi, pushPrBranch } from '../lib/state/pullRequest.svelte';
+  import { confirmMode, createPullRequest, prKey, prUi, pushPrBranch } from '../lib/state/pullRequest.svelte';
   import { openExternal } from '../lib/util/markdown';
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
 
   const { source, draft } = prUi.dialog!;
-  const open = prUi.opened[prKey(source)] ?? null;
-  // Push only: the branch has its pull request (new commits join it), or gh cannot open one.
-  const pushOnly = !!open || !!draft.gh_problem;
+  const record = prUi.opened[prKey(source)] ?? null;
+  const mode = confirmMode(record, draft);
+  const pushOnly = mode !== 'create';
+  // The pull request the push adds to: open as gh just said (join), or as last read (push).
+  const open = pushOnly && record?.state === 'open' ? record : null;
   let base = $state(open?.base ?? draft.base);
   let title = $state(draft.title);
   let body = $state(draft.body);
@@ -36,14 +39,18 @@
   <form onsubmit={submit}>
     <div class="body">
       <p class="desc">
-        {#if open}
+        {#if mode === 'join'}
           Codly pushes the new commits on this branch. They join the pull request that is open.
-        {:else if draft.gh_problem}
+        {:else if open}
+          Codly pushes this branch. If its pull request is still open, the new commits join it.
+        {:else if pushOnly}
           Codly pushes this branch. You open the pull request in your browser.
+        {:else if record}
+          The pull request from before is {record.state}. Codly pushes this branch and opens a new one with your own gh sign-in.
         {:else}
           Codly pushes this branch and opens a pull request with your own gh sign-in.
         {/if}
-        Nothing else is pushed, and never with force.
+        No other branch is pushed, and never with force.
       </p>
       <dl class="where">
         <dt class="eyebrow">Remote</dt>
@@ -52,7 +59,7 @@
         <dd><code>{draft.branch}</code></dd>
         <dt class="eyebrow">Base</dt>
         <dd>
-          {#if open}
+          {#if mode === 'join'}
             <code>{base}</code>
           {:else}
             <input bind:value={base} aria-label="Base branch" spellcheck="false" autocomplete="off" disabled={busy} />
@@ -60,7 +67,7 @@
         </dd>
       </dl>
       {#if draft.warning && base.trim() === draft.base}<p class="note">{draft.warning}</p>{/if}
-      {#if !open && draft.gh_problem}<p class="note">{draft.gh_problem}</p>{/if}
+      {#if draft.gh_problem}<p class="note">{draft.gh_problem}</p>{/if}
       {#if !pushOnly}
         <label class="field">
           <span class="eyebrow">Title</span>
@@ -75,7 +82,7 @@
         <p class="sent">
           <Icon name="check" size={13} stroke={2} />
           <span>{pushed.branch} is on {pushed.remote}.{#if !open && !pushed.compare_url} Open the pull request on your git host.{/if}</span>
-          {#if !open && pushed.compare_url}
+          {#if mode !== 'join' && pushed.compare_url}
             {@const url = pushed.compare_url}
             <button type="button" class="btn sm" onclick={() => openExternal(url)}><Icon name="external" size={12} />Open the compare page</button>
           {/if}

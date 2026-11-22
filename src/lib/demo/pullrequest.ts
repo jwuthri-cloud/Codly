@@ -7,6 +7,7 @@ import type { PrConfirm } from '../gen/PrConfirm';
 import type { PrDraft } from '../gen/PrDraft';
 import type { PrPushed } from '../gen/PrPushed';
 import type { PrSource } from '../gen/PrSource';
+import type { PrState } from '../gen/PrState';
 import type { PullRequest } from '../gen/PullRequest';
 import type { Task } from '../gen/Task';
 import { mockAgentGit } from './agentgit';
@@ -16,7 +17,8 @@ export type DemoWorld = { plans: Map<string, Plan>; tasks: Map<string, Task>; ag
 
 const REPO_URL = 'https://github.com/acme/web';
 
-function draft(source: PrSource, world: DemoWorld): PrDraft {
+/** `pr_state`: where the pull request "opened" for this source stands (null: there is none). */
+function draft(source: PrSource, world: DemoWorld, pr_state: PrState | null): PrDraft {
   if (source.kind === 'plan') {
     const plan = world.plans.get(source.id);
     if (!plan?.integration_branch) throw new Error('the plan never ran, so it has no branch to push');
@@ -25,14 +27,14 @@ function draft(source: PrSource, world: DemoWorld): PrDraft {
     // In the story every finished task passed its checks.
     const checks = tasks.filter((t) => t.status === 'done').flatMap((t) => t.verify.map((cmd) => `- ${t.key}: \`${cmd}\` passed`));
     const body = `## Goal\n\n${plan.request || plan.summary}\n\n## Tasks\n\n${lines.join('\n')}\n\n## Checks\n\n${checks.length ? checks.join('\n') : 'No checks ran for this plan.'}\n`;
-    return { remote: 'origin', branch: plan.integration_branch, base: plan.base_branch ?? 'main', title: plan.summary, body, gh_problem: null, warning: null };
+    return { remote: 'origin', branch: plan.integration_branch, base: plan.base_branch ?? 'main', title: plan.summary, body, gh_problem: null, warning: null, pr_state };
   }
   const agent = world.agents.get(source.id);
   const git = mockAgentGit(agent, world.now());
   if (!agent || !git.branch) throw new Error('this agent has no worktree yet, so there is nothing to push');
   const commits = git.log.filter((c) => c.author === agent.name);
   const body = `## Commits\n\n${commits.map((c) => `- ${c.subject} (${c.sha})`).join('\n')}\n\n## Checks\n\nNo checks ran in Codly: ${agent.name} worked alone, outside a plan.\n`;
-  return { remote: 'origin', branch: git.branch, base: 'main', title: commits[0].subject, body, gh_problem: null, warning: null };
+  return { remote: 'origin', branch: git.branch, base: 'main', title: commits[0].subject, body, gh_problem: null, warning: null, pr_state };
 }
 
 export class PullRequestDemo {
@@ -48,10 +50,10 @@ export class PullRequestDemo {
       case 'pull_request':
         return this.opened.get(key) ?? null;
       case 'draft_pull_request':
-        return draft(source, world);
+        return draft(source, world, this.opened.get(key)?.state ?? null);
       case 'create_pull_request': {
         // As gh does: a branch that has its pull request gets that one back.
-        const pr = this.opened.get(key) ?? { url: `${REPO_URL}/pull/${this.number++}`, ...confirm, created_at: world.now(), checks: null };
+        const pr: PullRequest = this.opened.get(key) ?? { url: `${REPO_URL}/pull/${this.number++}`, ...confirm, created_at: world.now(), state: 'open', checks: null };
         this.opened.set(key, pr);
         return pr;
       }
