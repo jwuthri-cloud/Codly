@@ -86,7 +86,7 @@ pub struct IntakeSource {
     pub title: String,
 }
 
-/// What the Lead got, for the user.
+/// What the Lead got, for the user. The user's message is in the request when this is returned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Intake {
@@ -99,6 +99,9 @@ pub struct Intake {
     pub failing_checks: u32,
     /// What was left out or could not be read, and what stands out (a closed issue).
     pub notes: Vec<String>,
+    /// Why the Lead could not start, after the user's message was recorded: the Lead did not
+    /// read the text from GitHub, and the request says why too. None: the Lead has it.
+    pub lead_problem: Option<String>,
 }
 
 // ───────────── what the user named ─────────────
@@ -478,7 +481,8 @@ impl Inner {
 
     /// Start a request from an issue or a pull request: read it, record the user's message
     /// with the link, and hand both to the Lead of `thread`. Nothing is recorded when it
-    /// cannot be read.
+    /// cannot be read, or when no agent CLI can be the Lead. From the recorded message on,
+    /// this call does not fail: a Lead that could not start is told in `lead_problem`.
     async fn start_from_github(self: &Arc<Self>, thread: &str, kind: IntakeKind, reference: &str, note: &str) -> Result<Intake> {
         if !is_lead_thread(thread) || thread.strip_prefix("lead:").is_some_and(|id| id.trim().is_empty()) {
             bail!("{thread} is not a request; start from an issue or a pull request in a request to the Lead");
@@ -495,6 +499,8 @@ impl Inner {
         let gh = gh_bin(&self.base_env).ok_or_else(|| {
             anyhow!("The GitHub CLI (gh) is not installed. To start from an issue or a pull request, install it (brew install gh) and sign in (gh auth login).")
         })?;
+        // Before gh is asked and anything is recorded: the request needs a CLI for its Lead.
+        self.lead_provider_for(&ws.id, thread).map_err(|e| anyhow!("The Lead cannot start: {e}"))?;
         let (read, unread) = self.read_github(&gh, &repo, &target).await?;
 
         let source = IntakeSource {
@@ -514,8 +520,11 @@ impl Inner {
             Some(pack) => format!("{pack}\n\n{turn}"),
             None => format!("\n{turn}"),
         };
-        self.send_to_lead(&ws, thread, body, None).await?;
-        Ok(Intake { source, comments: read.comments, review_comments: read.review_comments, failing_checks: read.failing_checks, notes: read.notes })
+        // The message is in the thread now. When the Lead cannot start, `send_to_lead` says so
+        // in the thread ("The Lead could not start: …"); the caller gets the same reason, and
+        // the request it has to show.
+        let lead_problem = self.send_to_lead(&ws, thread, body, None).await.err().map(|e| e.to_string());
+        Ok(Intake { source, comments: read.comments, review_comments: read.review_comments, failing_checks: read.failing_checks, notes: read.notes, lead_problem })
     }
 
     /// The issue or pull request a plan's request started from: the newest "From issue…" /
@@ -554,7 +563,8 @@ impl Core {
     /// user's own `gh` and start work on it in the request `thread` ("lead" or "lead:<id>").
     /// `reference` is a link or a number; `note` is what the user adds in their own words
     /// (may be empty). The Lead gets GitHub's text as quoted data, capped in size. Returns
-    /// once the message is recorded and handed over, like `send_chat`.
+    /// once the message is recorded and handed over, like `send_chat`. An error means that
+    /// nothing was recorded; a Lead that could not start after that is `Intake::lead_problem`.
     pub async fn start_from_github(&self, thread: &str, kind: IntakeKind, reference: &str, note: &str) -> Result<Intake> {
         self.inner.start_from_github(thread, kind, reference, note).await
     }

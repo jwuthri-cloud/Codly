@@ -2,7 +2,7 @@
 import type { IntakeSource } from "./IntakeSource";
 
 /**
- * What the Lead got, for the user.
+ * What the Lead got, for the user. The user's message is in the request when this is returned.
  */
 export type Intake = { source: IntakeSource, 
 /**
@@ -20,4 +20,9 @@ failing_checks: number,
 /**
  * What was left out or could not be read, and what stands out (a closed issue).
  */
-notes: Array<string>, };
+notes: Array<string>, 
+/**
+ * Why the Lead could not start, after the user's message was recorded: the Lead did not
+ * read the text from GitHub, and the request says why too. None: the Lead has it.
+ */
+lead_problem: string | null, };

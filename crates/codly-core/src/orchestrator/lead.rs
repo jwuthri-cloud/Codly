@@ -139,7 +139,7 @@ impl Inner {
     }
 
     /// The request's own CLI when it picked one and it is usable, else the Settings one.
-    fn lead_provider_for(&self, ws_id: &str, thread: &str) -> Result<Provider> {
+    pub(super) fn lead_provider_for(&self, ws_id: &str, thread: &str) -> Result<Provider> {
         let own = self.store.request_prefs(ws_id, thread).ok().and_then(|p| p.provider);
         match own {
             Some(p) if self.provider_usable(p, false) => Ok(p),

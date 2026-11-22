@@ -32,5 +32,6 @@ export function demoIntake(a: Record<string, unknown>, say: (thread: string, tex
     review_comments: pull ? 2 : 0,
     failing_checks: pull ? 1 : 0,
     notes: [],
+    lead_problem: null,
   };
 }

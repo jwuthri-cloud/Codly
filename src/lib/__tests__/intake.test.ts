@@ -3,7 +3,7 @@ import { api } from '../api';
 import { demoIntake } from '../demo/intake';
 import type { ChatMessage } from '../gen/ChatMessage';
 import type { Intake } from '../gen/Intake';
-import { intakeSummary, intakeThread, startFromGithub } from '../state/intake.svelte';
+import { intakeSummary, intakeThread, intakeUi, startFromGithub } from '../state/intake.svelte';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
@@ -14,6 +14,7 @@ const issue: Intake = {
   review_comments: 0,
   failing_checks: 0,
   notes: [],
+  lead_problem: null,
 };
 const pull: Intake = {
   source: { ...issue.source, kind: 'pull_request', number: 7, url: 'https://github.com/acme/web/pull/7', title: 'Keep dark\nmode across reloads' },
@@ -21,6 +22,7 @@ const pull: Intake = {
   review_comments: 2,
   failing_checks: 1,
   notes: ['Codly could not read the checks: timeout.'],
+  lead_problem: null,
 };
 const asked = (thread: string): ChatMessage => ({ id: `${thread}-1`, thread, author: 'user', text: 'Fix A', attachment: null, ts: 1 });
 const said = () => toasts.list.map((t) => [t.kind, t.title, t.body]);
@@ -32,6 +34,7 @@ describe('From issue… / From pull request…', () => {
     store.chats = [];
     ui.draftRequests = [];
     ui.openRequest('lead');
+    intakeUi.dialog = null;
   });
 
   it('goes to the request you are on while nothing was asked in it, else to a new one', () => {
@@ -76,6 +79,49 @@ describe('From issue… / From pull request…', () => {
     expect(ui.request).toBe('lead');
     expect(ui.draftRequests).toEqual([]);
     expect(said()).toEqual([]);
+  });
+
+  it('opens the request and says so when the Lead could not start after the read', async () => {
+    store.chats = [asked('lead')];
+    const core = vi.spyOn(api, 'startFromGithub').mockResolvedValue({ ...pull, notes: [], lead_problem: 'Claude Code is not installed.' });
+    // Your message is in the request: it is not a failure of the dialog.
+    expect(await startFromGithub('pull_request', '7', '')).toBeNull();
+    const thread = core.mock.calls[0][0];
+    expect(ui.request).toBe(thread);
+    expect(ui.draftRequests.map((d) => d.thread)).toEqual([thread]);
+    // An error toast stays until you close it, and does not say that the Lead has it.
+    expect(said()).toEqual([
+      [
+        'error',
+        'Pull request #7 did not reach the Lead',
+        'The Lead could not start: Claude Code is not installed. Your message is in the request. Start from the pull request again when this is fixed.',
+      ],
+    ]);
+  });
+
+  it('keeps the dialog open while the read runs, which cannot be stopped', async () => {
+    intakeUi.dialog = 'issue';
+    let answer!: (i: Intake) => void;
+    vi.spyOn(api, 'startFromGithub').mockReturnValue(new Promise<Intake>((done) => (answer = done)));
+    const started = startFromGithub('issue', '12', '');
+    expect(intakeUi.busy).toBe(true);
+    intakeUi.close(); // Cancel, Esc, × or a click beside the dialog
+    expect(intakeUi.dialog).toBe('issue');
+    answer(issue);
+    expect(await started).toBeNull();
+    expect(intakeUi.busy).toBe(false);
+    intakeUi.close();
+    expect(intakeUi.dialog).toBeNull();
+  });
+
+  it('lets you close the dialog again after a read that failed', async () => {
+    intakeUi.dialog = 'pull_request';
+    vi.spyOn(api, 'startFromGithub').mockRejectedValue('gh could not read pull request #7 of acme/web: timeout');
+    expect(await startFromGithub('pull_request', '7', '')).toBe('gh could not read pull request #7 of acme/web: timeout');
+    expect(intakeUi.busy).toBe(false);
+    expect(intakeUi.dialog).toBe('pull_request');
+    intakeUi.close();
+    expect(intakeUi.dialog).toBeNull();
   });
 });
 

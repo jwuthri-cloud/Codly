@@ -2,7 +2,8 @@
   "From issue…" / "From pull request…": asks for a GitHub link or a number, and for what you
   want to add in your own words. Codly reads it with your own gh sign-in and gives it to a
   request's Lead; the text from GitHub is quoted for the Lead as data. When it cannot be read,
-  the dialog stays open and says why, and nothing is sent.
+  the dialog stays open and says why, and nothing is sent. While the read runs the dialog cannot
+  be closed: the read cannot be stopped, and its end is told here or in the request it opens.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -13,18 +14,16 @@
   const pull = kind === 'pull_request';
   let reference = $state('');
   let note = $state('');
-  let busy = $state(false);
+  const busy = $derived(intakeUi.busy);
   let problem = $state<string | null>(null);
   let field: HTMLInputElement | undefined = $state();
-  const close = () => (intakeUi.dialog = null);
+  const close = () => intakeUi.close();
   onMount(() => field?.focus());
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     if (busy || !reference.trim()) return;
-    busy = true;
     problem = await startFromGithub(kind, reference, note);
-    busy = false;
     if (!problem) close();
   }
 </script>
@@ -53,7 +52,7 @@
       {#if problem}<p class="note" role="alert">{problem}</p>{/if}
     </div>
     <footer>
-      <button type="button" class="btn sm ghost" onclick={close}>Cancel</button>
+      <button type="button" class="btn sm ghost" disabled={busy} onclick={close}>Cancel</button>
       <button type="submit" class="btn sm primary" disabled={busy || !reference.trim()}>{busy ? 'Reading from GitHub…' : 'Start'}</button>
     </footer>
   </form>

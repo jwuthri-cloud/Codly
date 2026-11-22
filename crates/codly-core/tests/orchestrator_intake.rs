@@ -1,7 +1,8 @@
 //! "From issue…" and "From pull request…" through the Core, with a fake Lead and a stand-in
 //! `gh` in a temp git repo: the issue is read with `gh`, the thread gets the user's message
 //! with the link and no text from GitHub, the Lead reads GitHub's text as quoted data, a plan
-//! made from it carries the user's words, and nothing is recorded when it cannot be read.
+//! made from it carries the user's words, nothing is recorded when it cannot be read, and a
+//! Lead that cannot start after the read is told in the request and to the caller.
 //!
 //! The gh answers are the hand-written fixtures in tests/fixtures/gh (see its README): they
 //! follow the fields gh documents, and are not recordings.
@@ -9,6 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -94,11 +96,15 @@ type Turns = Arc<Mutex<Vec<(Role, String)>>>;
 type Answers = Arc<Mutex<Vec<String>>>;
 
 /// A Lead that answers every turn with a one-task plan and notes what Codly said about it.
-/// No other agent runs here: no plan is started.
+/// No other agent runs here: no plan is started. While `broken` is set, no agent starts.
 struct FakeSpawner {
     turns: Turns,
     answers: Answers,
+    broken: Arc<AtomicBool>,
 }
+
+/// What a start says while the spawner is broken.
+const NO_START: &str = "the CLI did not answer";
 
 /// Call a codly_* tool exactly like the stdio bridge does.
 async fn tool(spec: &SpawnSpec, name: &str, args: Value) -> Value {
@@ -114,7 +120,11 @@ async fn tool(spec: &SpawnSpec, name: &str, args: Value) -> Value {
 impl Spawner for FakeSpawner {
     fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
         let (turns, answers) = (self.turns.clone(), self.answers.clone());
+        let broken = self.broken.load(Ordering::SeqCst);
         Box::pin(async move {
+            if broken {
+                return Err(anyhow::anyhow!(NO_START));
+            }
             let session = match &spec.session {
                 SessionMode::New { session_id } => session_id.clone().unwrap_or_else(|| format!("fake-{}", spec.run_id)),
                 SessionMode::Resume { session_id } => session_id.clone(),
@@ -189,13 +199,21 @@ struct World {
     core: Arc<Core>,
     turns: Turns,
     answers: Answers,
+    /// Set it, and no agent starts from then on.
+    broken: Arc<AtomicBool>,
     /// The only folder on the core's PATH: git, and the stand-in `gh` when there is one.
     bin: PathBuf,
     _dir: tempfile::TempDir,
 }
 
-/// A core on a temp repo where plans wait for Run plan, with a `gh` on its PATH only if `gh` is set.
+/// A core on a temp repo where plans wait for Run plan, with a `gh` on its PATH only if `gh` is
+/// set, and a Claude Code that can be the Lead.
 async fn world(gh: bool) -> World {
+    world_with(gh, vec![claude()]).await
+}
+
+/// The same with the agent CLIs `clis` on this machine.
+async fn world_with(gh: bool, clis: Vec<CliInfo>) -> World {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
@@ -213,14 +231,15 @@ async fn world(gh: bool) -> World {
     env.insert("PATH".into(), bin.to_string_lossy().into_owned());
 
     let (turns, answers): (Turns, Answers) = Default::default();
-    let spawner = FakeSpawner { turns: turns.clone(), answers: answers.clone() };
+    let broken = Arc::new(AtomicBool::new(false));
+    let spawner = FakeSpawner { turns: turns.clone(), answers: answers.clone(), broken: broken.clone() };
     let cfg = CoreConfig { data_dir: dir.path().join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(env), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(env), clis: Some(clis), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     let settings = Settings { auto_run_plans: false, lead_followups: false, worker_providers: vec![Provider::Claude], ..Default::default() };
     core.update_settings(settings).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
-    World { core, turns, answers, bin, _dir: dir }
+    World { core, turns, answers, broken, bin, _dir: dir }
 }
 
 impl World {
@@ -272,6 +291,7 @@ async fn an_issue_becomes_a_request_with_its_text_quoted_for_the_lead() {
     assert_eq!(intake.source, source);
     assert_eq!((intake.comments, intake.review_comments, intake.failing_checks), (2, 0, 0), "the comment GitHub hides is left out");
     assert_eq!(intake.notes, Vec::<String>::new());
+    assert_eq!(intake.lead_problem, None);
     // One read, of the repository this project's remote names.
     assert_eq!(w.gh_calls(), [["issue", "view", "12", "--repo", "github.com/acme/web", "--json", "number,title,body,state,url,author,labels,comments"]]);
 
@@ -383,5 +403,38 @@ async fn nothing_is_recorded_when_it_cannot_be_read() {
     let e = w.core.start_from_github("lead", IntakeKind::Issue, "12", "").await.unwrap_err().to_string();
     assert!(e.starts_with("The GitHub CLI (gh) is not installed. To start from an issue or a pull request, install it"), "{e}");
     assert!(w.chats().await.iter().all(|c| c.author != "user"));
+    w.core.shutdown().await;
+
+    // Without an agent CLI that can be the Lead: gh is not asked.
+    let w = world_with(true, vec![]).await;
+    let e = w.core.start_from_github("lead", IntakeKind::Issue, "12", "").await.unwrap_err().to_string();
+    assert!(e.starts_with("The Lead cannot start: no signed-in agent CLI found"), "{e}");
+    assert_eq!(w.gh_calls(), Vec::<Vec<String>>::new());
+    assert!(w.chats().await.iter().all(|c| c.author != "user"), "nothing is in the thread");
+    w.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lead_that_cannot_start_is_told_in_the_request_and_to_the_caller() {
+    let w = world(true).await;
+    w.broken.store(true, Ordering::SeqCst);
+    // The issue was read and the message is recorded: the call does not fail.
+    let intake = w.core.start_from_github("lead:i12", IntakeKind::Issue, "12", "").await.unwrap();
+    assert_eq!((intake.source.number, intake.comments), (12, 2));
+    let problem = intake.lead_problem.expect("the Lead could not start");
+    assert!(problem.contains(NO_START), "{problem}");
+
+    // The request holds the user's message with the link, then why the Lead does not answer.
+    let chats = w.chats().await;
+    let said: Vec<(&str, &str)> = chats.iter().filter(|c| c.thread == "lead:i12").map(|c| (c.author.as_str(), c.text.as_str())).collect();
+    let why = format!("The Lead could not start: {problem}");
+    assert_eq!(said, [("user", "Work on issue #12 of acme/web (https://github.com/acme/web/issues/12)."), ("codly", why.as_str())]);
+    assert_eq!(chats.iter().find(|c| c.author == "user").unwrap().attachment.as_ref().unwrap()["intake"]["number"], 12);
+    assert!(w.turns.lock().unwrap().is_empty(), "the Lead read nothing");
+
+    // Once agents start again, the next message in that request reaches its Lead.
+    w.broken.store(false, Ordering::SeqCst);
+    w.core.send_chat("lead:i12", "Try again.").await.unwrap();
+    assert!(w.lead_turn(1).await.ends_with("Try again."));
     w.core.shutdown().await;
 }
