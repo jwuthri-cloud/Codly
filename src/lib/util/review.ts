@@ -13,9 +13,11 @@ export type ReviewComment = Anchor & { text: string };
 
 /** The place of a comment on the whole file. */
 export const FILE_PLACE = 'file';
-/** One comment per place: this names the place inside its file. */
+/** This names a place inside its file. */
 export const placeId = (a: Pick<Anchor, 'line' | 'side'>): string => (a.line == null ? FILE_PLACE : `${a.side}:${a.line}`);
-const sameSpot = (a: Anchor, b: Anchor) => a.path === b.path && placeId(a) === placeId(b);
+/** One comment per place as you saw it: a line that reads differently by now is another place,
+ *  so a new comment there does not replace the one you wrote on the old line. */
+const sameSpot = (a: Anchor, b: Anchor) => a.path === b.path && placeId(a) === placeId(b) && a.quote === b.quote;
 
 export const fileAnchor = (path: string): Anchor => ({ path, line: null, side: null, quote: null });
 
@@ -37,6 +39,35 @@ export function withComment(list: ReviewComment[], at: Anchor, text: string): Re
   const rest = list.filter((c) => !sameSpot(c, at));
   const t = text.trim();
   return t ? [...rest, { ...at, text: t }] : rest;
+}
+
+/** A file's comments by where they sit in its diff now. `placed` (place → comment): on the file,
+ *  or on a line the diff still shows as you quoted it. `lost`: on a line that left the diff or
+ *  reads differently by now (the worker changed the file since); no line of the diff is theirs. */
+export function placeComments(f: DiffFile, list: ReviewComment[]): { placed: Map<string, ReviewComment>; lost: ReviewComment[] } {
+  const placed = new Map<string, ReviewComment>();
+  const onLines = list.filter((c) => c.line != null);
+  const onFile = list.find((c) => c.line == null);
+  if (onFile) placed.set(FILE_PLACE, onFile);
+  if (!onLines.length) return { placed, lost: onLines };
+  const wanted = new Set(onLines.map(placeId));
+  for (const hunk of f.hunks) {
+    for (const l of hunk.lines) {
+      const place = linePlace(l);
+      if (!place || !wanted.has(place)) continue;
+      const quote = lineAnchor(f.path, l).quote;
+      const c = onLines.find((c) => placeId(c) === place && c.quote === quote);
+      if (c) placed.set(place, c);
+    }
+  }
+  return { placed, lost: onLines.filter((c) => placed.get(placeId(c)) !== c) };
+}
+
+/** The comments on files that are not in the diff (`paths`: its files): a file the worker
+ *  changed back, or removed from its work, since you wrote them. */
+export function offDiff(list: ReviewComment[], paths: string[]): ReviewComment[] {
+  const inDiff = new Set(paths);
+  return list.filter((c) => !inDiff.has(c.path));
 }
 
 /** Reading order: the diff's file order; in a file, its own comment first, then by line (a removed

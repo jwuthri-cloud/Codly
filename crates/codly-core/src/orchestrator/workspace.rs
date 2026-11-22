@@ -414,7 +414,8 @@ impl Inner {
     /// Send back, from the diff: your review comments on a task go to the agent that did the
     /// work, as one message, the way the gate sends a reviewer's feedback back.
     /// - Its worker still runs the task: it reads them after its current turn, the task is
-    ///   Changes requested, and the gate checks the work again when that turn ends.
+    ///   Changes requested, and the gate checks the work again when that turn ends. A review
+    ///   that is under way stops: it reads the work as it was before.
     /// - The task is stopped (blocked, failed) or waits to start: its next run starts with them.
     /// New work you asked for gets new fix rounds. A done task takes none: its work is merged,
     /// so the changes are a new request.
@@ -436,19 +437,38 @@ impl Inner {
             (Cancelled, _) => bail!("{} is cancelled; reopen it first", t.key),
             (Pending, _) => bail!("{} has not started yet", t.key),
             (s, Some(worker)) if open(s) => {
+                // A reviewer that has no brief yet cannot be stopped below: the gate could not
+                // give it the brief any more, and would block the task.
+                if self.reviewers_of(task_id).iter().any(|(_, briefed)| !briefed) {
+                    bail!("a review of {} is starting right now; send your comments again in a moment", t.key);
+                }
                 note(&worker)?;
                 self.send_prompt(&worker, prompt)?;
                 lock(&self.fix_rounds).remove(task_id);
                 // The worker has a turn to come, and its end runs the gate whatever the task
                 // says by now: a pass that is under way sees the new message and stops short.
+                let mut in_review = false;
                 let t = self.update_task(task_id, |t| {
                     if open(t.status) {
+                        in_review = t.status == Reviewing;
                         t.status = ChangesRequested;
                         t.status_reason = Some("you asked for changes; Codly checks the work again when its worker is done".into());
                     }
                     Ok(())
                 })?;
-                (t, "its worker reads them now")
+                // The review under way reads the work as it was before your comments, and its
+                // verdict could land on the review of the new work. It stops, now that the task
+                // has left Reviewing (its end is no verdict): the gate starts a new one.
+                let mut stopped = false;
+                if in_review {
+                    for (reviewer, briefed) in self.reviewers_of(task_id) {
+                        if briefed {
+                            self.release_worker(&reviewer, task_id);
+                            stopped = true;
+                        }
+                    }
+                }
+                (t, if stopped { "its worker reads them now, and the review that was under way stopped" } else { "its worker reads them now" })
             }
             // No run of the task to hand them to, and what Codly does with it right now (a
             // worker that starts, your own re-check, a merge) would not see them.
@@ -500,6 +520,16 @@ impl Inner {
             json!({ "plan_id": t.plan_id, "comments": comments }),
         )?;
         Ok(sent)
+    }
+
+    /// The agents with a live reviewer run of a task, and whether each has its brief (false: the
+    /// run is still starting).
+    fn reviewers_of(&self, task_id: &str) -> Vec<(Id, bool)> {
+        lock(&self.live)
+            .iter()
+            .filter(|(_, l)| l.role == Role::Reviewer && l.task_id.as_deref() == Some(task_id) && !l.stopping)
+            .map(|(agent, l)| (agent.clone(), l.starting.is_none() && (l.turn_active || l.queued > 0 || l.turns > 0)))
+            .collect()
     }
 
     /// Keep feedback for a task's next worker run, after what already waits there (the gate's

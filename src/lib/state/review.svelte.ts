@@ -1,8 +1,8 @@
-// Your review of a diff, for this session: the comments you wrote and did not send yet, and the
-// files you ticked as viewed. Kept per diff (a task's or a plan's), in memory only: a restart
-// starts clean, and sending the comments clears them.
+// Your review of a diff, for this session: the comments you wrote and did not send yet, the
+// files you ticked as viewed, and the files you opened or folded. Kept per diff (a task's or a
+// plan's), in memory only: a restart starts clean, and sending the comments clears them.
 import type { DiffFile } from '../util/diff';
-import { fileMark, withComment, type Anchor, type ReviewComment } from '../util/review';
+import { fileMark, heavy, withComment, type Anchor, type ReviewComment } from '../util/review';
 
 /** A diff's name here: "task:<id>" or "plan:<id>". */
 export const reviewKey = (t: { kind: 'plan' | 'task'; id: string }): string => `${t.kind}:${t.id}`;
@@ -14,6 +14,8 @@ class Review {
   private drafts = $state.raw<Record<string, ReviewComment[]>>({});
   /** Diff → path → the mark of the file's diff when you ticked it (`fileMark`). */
   private seen = $state.raw<Record<string, Record<string, string>>>({});
+  /** Diff → path → a file you opened (false) or folded (true) by hand. */
+  private folds = $state.raw<Record<string, Record<string, boolean>>>({});
   /** A file's mark is computed once: a parsed file never changes. */
   private marks = new WeakMap<DiffFile, string>();
 
@@ -43,9 +45,25 @@ class Review {
     return m != null && m === this.mark(f);
   }
 
+  /** Ticking folds the file away, until its diff changes; unticking opens it. */
   setViewed(key: string, f: DiffFile, on: boolean) {
     const rest = without(this.seen[key] ?? {}, f.path);
     this.seen = { ...this.seen, [key]: on ? { ...rest, [f.path]: this.mark(f) } : rest };
+    // From a tick on, the tick decides: a fold kept by hand would keep the file folded when it
+    // changes later and is not viewed any more.
+    const byHand = without(this.folds[key] ?? {}, f.path);
+    this.folds = { ...this.folds, [key]: on ? byHand : { ...byHand, [f.path]: false } };
+  }
+
+  /** Is the file folded in this diff? As you left it by hand; else a file you ticked as viewed
+   *  and a heavy one (a lockfile, generated, large) are folded, and the others are open. */
+  folded(key: string, f: DiffFile): boolean {
+    return this.folds[key]?.[f.path] ?? (this.viewed(key, f) || heavy(f) != null);
+  }
+
+  /** Open (false) or fold (true) a file by hand. */
+  fold(key: string, path: string, on: boolean) {
+    this.folds = { ...this.folds, [key]: { ...this.folds[key], [path]: on } };
   }
 }
 

@@ -11,7 +11,7 @@ import { ui } from '../state/ui.svelte';
 import { parseDiff, type DiffFile } from '../util/diff';
 import {
   editorPlace, fileAnchor, fileMark, firstLines, followUpRequest, heavy, inOrder, LARGE_FILE, lineAnchor, lineCount, linePlace,
-  linesToDraw, parseDiffKeeping, placeId, reviewMessage, withComment, type ReviewComment,
+  linesToDraw, offDiff, parseDiffKeeping, placeComments, placeId, reviewMessage, withComment, type ReviewComment,
 } from '../util/review';
 
 const A = `diff --git a/src/a.ts b/src/a.ts
@@ -61,6 +61,31 @@ describe('where a comment sits', () => {
     // The same place in another file is another place too.
     expect(withComment(list, { ...onNew, path: 'b.txt' }, 'Other file.')).toHaveLength(4);
   });
+
+  it('a comment sits on its line only while the diff shows the line as you quoted it', () => {
+    const onKeep = { ...lineAnchor('src/a.ts', keep), text: 'Keep it.' };
+    const onFresh = { ...lineAnchor('src/a.ts', fresh), text: 'Name it better.' };
+    const onFile = { ...fileAnchor('src/a.ts'), text: 'Split this file.' };
+    const list = [onKeep, onFresh, onFile];
+    const before = placeComments(fileA, list);
+    expect([...before.placed]).toEqual([['file', onFile], ['new:10', onKeep], ['new:11', onFresh]]);
+    expect(before.lost).toEqual([]);
+    // The worker changed line 11 since: your comment is not drawn on the code that is there now.
+    const [changed] = parseDiff(A.replace('const fresh = 2;', 'const next = 2;'));
+    const after = placeComments(changed, list);
+    expect([...after.placed]).toEqual([['file', onFile], ['new:10', onKeep]]);
+    expect(after.lost).toEqual([onFresh]);
+    // A comment on the line as it reads now is a new one: it does not replace the old one.
+    const again = withComment(list, lineAnchor('src/a.ts', changed.hunks[0].lines[2]), 'Better.');
+    expect(again.map((c) => c.text)).toEqual(['Keep it.', 'Name it better.', 'Split this file.', 'Better.']);
+    expect(placeComments(changed, again).lost).toEqual([onFresh]);
+    // Removing the old one takes only it.
+    expect(withComment(again, onFresh, '').map((c) => c.text)).toEqual(['Keep it.', 'Split this file.', 'Better.']);
+    // The lines left the diff: only the comment on the file still has a place.
+    const gone = placeComments({ ...fileA, hunks: [] }, list);
+    expect([...gone.placed]).toEqual([['file', onFile]]);
+    expect(gone.lost).toEqual([onKeep, onFresh]);
+  });
 });
 
 describe('the message Send back builds', () => {
@@ -75,6 +100,12 @@ describe('the message Send back builds', () => {
 
   it('reads in the order of the diff: file by file, the file comment first, then line by line', () => {
     expect(inOrder(list, paths).map((c) => c.text.split('\n')[0])).toEqual(['Three is missing.', 'Split this file.', 'Why remove it?', 'Call it `next`.', 'Left the diff.']);
+  });
+
+  it('finds the comments on files that left the diff', () => {
+    expect(offDiff(list, paths).map((c) => c.text)).toEqual(['Left the diff.']);
+    expect(offDiff(list, [...paths, 'gone.md'])).toEqual([]);
+    expect(offDiff(list, [])).toHaveLength(5);
   });
 
   it('has, for each comment, the file and line, the quoted line and the comment', () => {
@@ -225,6 +256,40 @@ describe('your review of a diff, for the session', () => {
     expect(review.viewed(reviewKey({ kind: 'plan', id: 'p1' }), b)).toBe(false);
     review.setViewed(key, b, false);
     expect(review.viewed(key, b)).toBe(false);
+  });
+
+  it('a ticked file folds away, and opens again when its diff changes', () => {
+    const mine = reviewKey({ kind: 'task', id: 'folds' });
+    const plan = reviewKey({ kind: 'plan', id: 'folds' });
+    const [b] = parseDiff(B);
+    expect(review.folded(mine, b)).toBe(false);
+    // Folded by hand, then ticked: from the tick on, the tick decides.
+    review.fold(mine, 'b.txt', true);
+    review.setViewed(mine, b, true);
+    expect(review.folded(mine, b)).toBe(true);
+    // The same file in the plan's diff is not viewed there, so it is open there.
+    expect(review.folded(plan, b)).toBe(false);
+    // The worker changed the file: it is not viewed any more, and open to be read again.
+    const [changed] = parseDiff(B.replace('+two', '+2'));
+    expect(review.viewed(mine, changed)).toBe(false);
+    expect(review.folded(mine, changed)).toBe(false);
+    // A viewed file opened by hand stays open; unticking opens a file too.
+    review.setViewed(mine, changed, true);
+    review.fold(mine, 'b.txt', false);
+    expect(review.folded(mine, changed)).toBe(false);
+    review.setViewed(mine, changed, true);
+    expect(review.folded(mine, changed)).toBe(true);
+    review.setViewed(mine, changed, false);
+    expect(review.folded(mine, changed)).toBe(false);
+  });
+
+  it('a lockfile opens folded until you open it, in that diff only', () => {
+    const mine = reviewKey({ kind: 'task', id: 'folds' });
+    const lock: DiffFile = { ...parseDiff(B)[0], path: 'Cargo.lock' };
+    expect(review.folded(mine, lock)).toBe(true);
+    review.fold(mine, 'Cargo.lock', false);
+    expect(review.folded(mine, lock)).toBe(false);
+    expect(review.folded(reviewKey({ kind: 'plan', id: 'folds' }), lock)).toBe(true);
   });
 });
 

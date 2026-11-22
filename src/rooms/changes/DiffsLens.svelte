@@ -6,7 +6,8 @@
   sit under Merged, with their tasks.
   It is also where you review: comment on a line or a file, tick files as viewed, open one in
   the editor, and Send back gives all your comments to the agent that did the work (a new
-  request, for work that is merged or finished).
+  request, for work that is merged or finished). A comment on a file that left the diff since
+  stays in the bar above Send back, where you can read and remove it.
 -->
 <script lang="ts">
   import { ide } from '../../ide/ide.svelte';
@@ -20,7 +21,7 @@
   import { ui } from '../../lib/state/ui.svelte';
   import { diffStats, type DiffFile } from '../../lib/util/diff';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
-  import { editorPlace, heavy, HEAVY_LABEL, parseDiffKeeping, type DiffParts, type ReviewComment } from '../../lib/util/review';
+  import { editorPlace, heavy, HEAVY_LABEL, offDiff, parseDiffKeeping, placeId, type DiffParts, type ReviewComment } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
@@ -79,15 +80,12 @@
   let files = $state.raw<DiffFile[]>([]);
   let loading = $state(false);
   let error = $state<string | null>(null);
-  /** Files you opened (false) or closed (true) by hand. The others are open, unless you ticked
-   *  them as viewed or they are heavy (a lockfile, generated, large). */
-  let closed = $state<Record<string, boolean>>({});
   let active = $state<string | null>(null);
   /** The diff on screen: its name (`reviewKey`), its text, and each file's part of it, parsed. */
   let drawn: { key: string; text: string; parts: DiffParts } | null = null;
+  /** The diff whose files are on screen (its `reviewKey`); null while another one loads. */
+  let loaded = $state<string | null>(null);
   const key = $derived(target ? reviewKey(target) : '');
-  const isClosed = (f: DiffFile) => closed[f.path] ?? (review.viewed(key, f) || heavy(f) != null);
-  const setClosed = (path: string, on: boolean) => (closed = { ...closed, [path]: on });
   let main = $state<HTMLElement | null>(null);
 
   const version = $derived.by(() => {
@@ -112,12 +110,14 @@
     if (drawn?.key !== name) {
       drawn = null;
       files = [];
+      loaded = null;
     }
     loading = true;
     (t.kind === 'plan' ? api.planDiff(t.id) : api.taskDiff(t.id))
       .then((text) => {
         if (my !== seq) return;
         error = null;
+        loaded = name;
         // The same text again (a task changed status, the code did not): nothing to draw.
         if (drawn?.text === text) return;
         // Files whose part of the text did not change keep their objects, so only the others are drawn again.
@@ -149,7 +149,7 @@
   });
   function jump(path: string) {
     active = path;
-    setClosed(path, false);
+    review.fold(key, path, false);
     document.getElementById(`diff-${path}`)?.scrollIntoView({ block: 'start', behavior: ui.reducedMotion ? 'auto' : 'smooth' });
   }
 
@@ -162,11 +162,9 @@
     for (const c of comments) out.set(c.path, [...(out.get(c.path) ?? []), c]);
     return out;
   });
+  /** Comments on files that left the diff since you wrote them: no file on screen shows them. */
+  const gone = $derived(loaded === key && !error ? offDiff(comments, files.map((f) => f.path)) : NONE);
   const viewedCount = $derived(files.filter((f) => review.viewed(key, f)).length);
-  function setViewed(f: DiffFile, on: boolean) {
-    review.setViewed(key, f, on);
-    setClosed(f.path, on); // a file you have read folds away; unticking opens it again
-  }
   /** Where a file opens in the editor: the worktree of the task that wrote it, or your
    *  repository once the plan is merged (see `editorPlace`). */
   function placeOf(path: string) {
@@ -291,12 +289,12 @@
             who={target.kind === 'plan' && o ? `${o.task.key} · ${o.agent?.name ?? ''}` : undefined}
             kind={why ? HEAVY_LABEL[why] : undefined}
             root={main}
-            collapsed={isClosed(f)}
-            ontoggle={() => setClosed(f.path, !isClosed(f))}
+            collapsed={review.folded(key, f)}
+            ontoggle={() => review.fold(key, f.path, !review.folded(key, f))}
             comments={byFile.get(f.path) ?? NONE}
             oncomment={(at, text) => review.comment(key, at, text)}
             viewed={review.viewed(key, f)}
-            onviewed={(on) => setViewed(f, on)}
+            onviewed={(on) => review.setViewed(key, f, on)}
             openTip={place.tip}
             onopen={editor ? () => void ide.openPath(editor, f.path) : undefined}
           />
@@ -305,14 +303,28 @@
       <!-- Also when the diff did not load or is empty by now: what you wrote is never out of reach. -->
       {#if comments.length}
         <div class="review" role="region" aria-label="Your review">
-          <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {toWorker ? `Send back gives them to ${workerName}; Codly checks the work again after the changes.` : 'This work is finished: Send back opens a new request with your comments, ready to send.'}</p>
-          {#if discarding}
-            <button class="btn sm danger" onclick={() => review.clear(key)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
-            <button class="btn sm ghost" onclick={() => (discarding = false)}>Keep</button>
-          {:else}
-            <button class="btn sm ghost" onclick={() => (discarding = true)}>Discard</button>
-            <button class="btn sm primary" disabled={sending} onclick={send}><Icon name="send" size={13} />Send back</button>
+          {#if gone.length}
+            <ul class="gone" aria-label="Comments on files that left the diff">
+              {#each gone as c (c.path + ' ' + placeId(c) + c.quote)}
+                <li>
+                  <p class="g-w"><span class="mono">{c.path}{c.line == null ? '' : `:${c.line}`}</span> is not in this diff any more. Send back still sends your comment{c.quote == null ? '' : ', with the line as it was'}.</p>
+                  {#if c.quote != null}<p class="g-q">{c.quote}</p>{/if}
+                  <p class="g-t">{c.text}</p>
+                  <button class="btn sm ghost" onclick={() => review.comment(key, c, '')}>Remove</button>
+                </li>
+              {/each}
+            </ul>
           {/if}
+          <div class="r-row">
+            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {toWorker ? `Send back gives them to ${workerName}; Codly checks the work again after the changes.` : 'This work is finished: Send back opens a new request with your comments, ready to send.'}</p>
+            {#if discarding}
+              <button class="btn sm danger" onclick={() => review.clear(key)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
+              <button class="btn sm ghost" onclick={() => (discarding = false)}>Keep</button>
+            {:else}
+              <button class="btn sm ghost" onclick={() => (discarding = true)}>Discard</button>
+              <button class="btn sm primary" disabled={sending} onclick={send}><Icon name="send" size={13} />Send back</button>
+            {/if}
+          </div>
         </div>
       {/if}
     </div>
@@ -351,7 +363,16 @@
   .main { flex: 1; min-width: 0; overflow-y: auto; padding: 4px 24px 24px 6px; display: flex; flex-direction: column; gap: 12px; }
   .err { display: flex; align-items: center; gap: 10px; color: var(--bad); font-size: var(--t-sm); padding: 20px; }
   /* Your comments wait here, in view under the files, until you send them back. */
-  .review { position: sticky; bottom: 0; z-index: 2; flex-shrink: 0; margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 10px 12px 10px 14px; border-radius: var(--r-md); background: var(--glass-solid); box-shadow: inset 0 0 0 1px var(--line-2), inset 3px 0 0 var(--amber); }
+  .review { position: sticky; bottom: 0; z-index: 2; flex-shrink: 0; margin-top: auto; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 10px 14px; border-radius: var(--r-md); background: var(--glass-solid); box-shadow: inset 0 0 0 1px var(--line-2), inset 3px 0 0 var(--amber); }
+  .r-row { display: flex; align-items: center; gap: 8px; }
+  /* Comments on files that left the diff: no file shows them, so they are listed here. */
+  .gone { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
+  .gone li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 2px 8px; padding: 8px 10px; border-radius: var(--r-sm); background: var(--amber-soft); font-size: var(--t-sm); line-height: var(--lh-sm); }
+  .gone li > p { grid-column: 1; min-width: 0; overflow-wrap: anywhere; }
+  .gone li > button { grid-column: 2; grid-row: 1; }
+  .g-w { color: var(--ink-2); }
+  .g-q { font-family: var(--font-mono); font-size: 11.5px; white-space: pre; overflow-x: auto; color: var(--ink-2); }
+  .g-t { white-space: pre-wrap; color: var(--ink-1); }
   .r-t { flex: 1; min-width: 0; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); }
   .r-t b { color: var(--ink-1); font-weight: var(--w-semi); }
 </style>

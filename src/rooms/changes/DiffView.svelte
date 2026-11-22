@@ -1,12 +1,14 @@
 <!-- Unified diff for one file: hunk headers, old/new line numbers, +/− gutters, and the hue of
      the agent that wrote it along the edge. Dense on purpose: this is where scanning matters.
      In the Changes room it is also where you review: a comment on a line or on the file, a
-     "viewed" tick, and the file in the editor. A large diff stays fast: a file builds its lines
-     only when it comes near the visible part, and at most LINE_STEP of them at a time. -->
+     "viewed" tick, and the file in the editor. A comment whose line the worker changed since
+     stays under the file's name, where you can read and remove it. A large diff stays fast: a
+     file builds its lines only when it comes near the visible part, and at most LINE_STEP of
+     them at a time. -->
 <script lang="ts">
   import type { DiffFile } from '../../lib/util/diff';
   import { ui } from '../../lib/state/ui.svelte';
-  import { fileAnchor, FILE_PLACE, firstLines, lineAnchor, lineCount, linePlace, linesToDraw, LINE_STEP, placeId, type Anchor, type ReviewComment } from '../../lib/util/review';
+  import { fileAnchor, FILE_PLACE, firstLines, lineAnchor, lineCount, linePlace, linesToDraw, LINE_STEP, placeComments, placeId, type Anchor, type ReviewComment } from '../../lib/util/review';
   import Icon from '../../components/Icon.svelte';
 
   interface Props {
@@ -45,7 +47,11 @@
     io.observe(section);
     return () => io.disconnect();
   });
-  const notes = $derived(new Map(comments.map((c) => [placeId(c), c])));
+  const sorted = $derived(placeComments(file, comments));
+  /** The comments that sit on the file or on a line of its diff, by place. */
+  const notes = $derived(sorted.placed);
+  /** The comments whose line left the diff or reads differently by now: listed under the name. */
+  const lost = $derived(sorted.lost);
   let limit = $state(LINE_STEP);
   const total = $derived(lineCount(file));
   const drawn = $derived(linesToDraw(file, limit, notes));
@@ -112,6 +118,14 @@
     {#if onviewed}<label class="viewed" data-tip="Tick the files you have read. A file that changes later is unticked."><input type="checkbox" checked={viewed} onchange={(e) => onviewed?.(e.currentTarget.checked)} />Viewed</label>{/if}
   </header>
   {#if editingId === FILE_PLACE || notes.has(FILE_PLACE)}{@render note(onFile)}{/if}
+  {#each lost as c (placeId(c) + c.quote)}
+    <div class="note of-file">
+      <p class="note-w">Line {c.line} changed or left the diff after you wrote this. Send back still sends your comment, with the line as it was:</p>
+      <p class="note-q">{c.quote}</p>
+      <p class="note-t">{c.text}</p>
+      <div class="note-acts"><button class="btn sm ghost" onclick={() => oncomment?.(c, '')}>Remove</button></div>
+    </div>
+  {/each}
   {#if !collapsed}
     {#if file.status === 'binary'}
       <p class="binary">Binary file, not shown.</p>
@@ -184,6 +198,8 @@
   .note.of-file { margin: 8px 14px; width: auto; }
   .note textarea { width: 100%; font-size: var(--t-sm); line-height: var(--lh-sm); }
   .note-t { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-1); }
+  .note-w { color: var(--ink-2); }
+  .note-q { font-family: var(--font-mono); font-size: 11.5px; white-space: pre; overflow-x: auto; color: var(--ink-2); }
   .note-acts { display: flex; justify-content: flex-end; gap: 6px; }
   .more { position: sticky; left: 0; display: flex; align-items: center; gap: 10px; padding: 8px 14px; font-family: var(--font-ui); font-size: var(--t-sm); color: var(--ink-3); }
   .binary { padding: 14px; color: var(--ink-3); font-size: var(--t-sm); }
