@@ -1,12 +1,12 @@
 <!--
-  Try the work before you merge it: a plan's integration worktree, or an agent's worktree.
+  Try the work before you merge it: a plan's integration worktree, or a solo agent's worktree.
   Run… shows the command kept for this repo (none the first time) and runs it when you press
   Run on that text; nothing is guessed, and nothing runs by itself. The output is shown while
   the command runs. Stop ends it with everything it started; so do a merge of this work and
   quitting Codly. Open in terminal is Codly's own terminal in that folder.
 -->
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { ide } from '../ide/ide.svelte';
   import type { PreviewSource } from '../lib/gen/PreviewSource';
   import { loadPreview, previewKey, previewUi, startPreview, stopPreview } from '../lib/state/preview.svelte';
@@ -32,6 +32,9 @@
   const run = $derived(shown?.view.run ?? null);
   const live = $derived(!!run && run.ended === null);
   const port = $derived(shown?.view.port_base ?? null);
+  // As values of their own: `shown` and `run` are new objects at every answer.
+  const runId = $derived(run?.id ?? null);
+  const printed = $derived(run?.printed ?? 0);
   /** The Run… form is open. */
   let asking = $state(false);
   let command = $state('');
@@ -41,19 +44,27 @@
   let log = $state<HTMLPreElement>();
   let field = $state<HTMLInputElement>();
 
+  // Read it when this step appears, and again for another plan or agent. The read is not
+  // tracked: it reads `previewUi.shown` and writes it, so a tracked one starts itself again
+  // without end.
   $effect(() => {
     void key;
-    void loadPreview(source);
+    untrack(() => void loadPreview(source));
   });
   $effect(() => {
     if (!live) return;
     const timer = setInterval(() => void loadPreview(source), REFRESH_MS);
     return () => clearInterval(timer);
   });
-  // New output: keep the last line in view.
-  $effect(() => {
-    void shown?.lines.length;
-    if (log) log.scrollTop = log.scrollHeight;
+  // New output keeps the last line in view only while you are there (measured before the new
+  // lines land), so you can scroll back while the command runs. A new run starts at its end.
+  let followed: string | null = null;
+  $effect.pre(() => {
+    void printed;
+    const box = untrack(() => log);
+    const stick = !box || runId !== followed || box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+    followed = runId;
+    if (stick) void tick().then(() => log && (log.scrollTop = log.scrollHeight));
   });
 
   function ask() {
@@ -98,6 +109,9 @@
     <p class="hint">
       Codly runs this text in the worktree, as your terminal would, and keeps it for this repo. <code>$CODLY_PORT_BASE</code>
       {port === null ? 'is a port' : `is ${port}, a port`} of this worktree’s own: start your dev server on it, so it does not collide with the one of your checkout.
+      {source.kind === 'agent'
+        ? 'Files the command writes become part of this agent’s work, unless git ignores them.'
+        : 'Files the command writes are not merged with the plan. If git does not ignore them, Codly keeps this worktree after the merge.'}
     </p>
   {/if}
   {#if run && run.id !== closed}

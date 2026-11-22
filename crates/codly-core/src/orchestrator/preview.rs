@@ -8,8 +8,12 @@
 //!   with `--port $CODLY_PORT_BASE` does not collide with the one of your checkout.
 //! - It leads a process group of its own, and the whole group ends with it: on Stop, when
 //!   that work is merged, when its worktree is removed and when Codly quits (SIGTERM, then
-//!   SIGKILL after `STOP_GRACE`). A command that ends by itself takes along what it left in
-//!   the background.
+//!   SIGKILL for what is left of the group after `STOP_GRACE`). A command that ends by itself
+//!   takes along what it left in the background.
+//! - A finished plan and a solo agent's own worktree only. A task's worktree is the gate's:
+//!   it commits everything in it and checks the files, so a file your command wrote there
+//!   would go into the task's commit. In a solo agent's worktree it does go into the agent's
+//!   next commit, and the page says so before you run.
 //! - One preview per worktree. Its output lives in memory only (the last `MAX_LINES` lines).
 //!
 //! ponytail: a preview does not outlive a crash of Codly cleanly: its processes go on until
@@ -22,7 +26,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use nix::sys::signal::Signal;
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -35,7 +40,7 @@ use super::{Core, Inner, lock, prompts};
 use crate::adapters::classify::strip_ansi;
 use crate::model::*;
 
-/// After SIGTERM, how long the command has to end before SIGKILL.
+/// After SIGTERM, how long the command and everything it started have to end before SIGKILL.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 /// How often a running preview looks whether its worktree is still there.
 const WORKTREE_LOOK: Duration = Duration::from_secs(2);
@@ -241,10 +246,6 @@ fn command_key(ws: &Workspace) -> String {
     format!("{COMMAND_PREFIX}{}", ws.id)
 }
 
-fn signal(pgid: i32, sig: Signal) {
-    let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pgid), sig);
-}
-
 async fn pump(mut from: impl tokio::io::AsyncRead + Unpin, run: Arc<Run>) {
     let mut buf = [0u8; 8192];
     let mut lines = Lines::default();
@@ -308,13 +309,16 @@ async fn supervise(run: Arc<Run>, mut child: tokio::process::Child, pgid: i32, w
         }
     };
     if cut.is_some() {
-        signal(pgid, Signal::SIGTERM);
-        let _ = tokio::time::timeout(STOP_GRACE, child.wait()).await;
+        // The grace time is the whole group's, not the shell's alone: `cd web && pnpm dev` is a
+        // shell that ends at once and a server that needs a moment to clean up. The shell is
+        // waited for meanwhile: until then it counts as a member of the group.
+        let _ = tokio::join!(crate::proc::kill_group(pgid, STOP_GRACE), child.wait());
+    } else {
+        // What a command that ended by itself left in the background would hold the ports. At
+        // once, as the gate does after a verify command: the group's id is the command's
+        // process id, which the system gives to another process later.
+        let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
     }
-    // Always: what ignored SIGTERM, and what a command that ended by itself left in the
-    // background, would hold the ports. At once, as the gate does after a verify command: the
-    // group's id is the command's process id, which the system gives to another process later.
-    signal(pgid, Signal::SIGKILL);
     let status = child.wait().await;
     let ended = match (cut, status) {
         (Some(why), _) => why.to_string(),
@@ -381,8 +385,16 @@ impl Inner {
                 let wt = agent.worktree.clone().ok_or_else(|| anyhow!("{} has no worktree yet, so there is nothing to try", agent.name))?;
                 let ws_id = self.store.agent_workspace(id)?.ok_or_else(|| anyhow!("{} is in no office", agent.name))?;
                 let ws = self.store.workspace(&ws_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
-                let own = Path::new(&wt) != Path::new(&ws.repo_path);
-                let wait = (!own).then(|| format!("{} works in your project folder itself: run the command in your own terminal", agent.name));
+                let wait = if Path::new(&wt) == Path::new(&ws.repo_path) {
+                    Some(format!("{} works in your project folder itself: run the command in your own terminal", agent.name))
+                } else if agent.role != Role::Solo || !Path::new(&wt).starts_with(self.worktree_root(&ws).join("solo")) {
+                    // The gate commits everything in a task's worktree and checks the files. A
+                    // solo agent that took a task is in that task's worktree, not in its own
+                    // (`solo/<name>`, see `solo_worktree`).
+                    Some("only a solo agent's own work can be tried this way; a task's work is tried with its plan, when the plan is done".to_string())
+                } else {
+                    None
+                };
                 Ok(Place { ws, wt: PathBuf::from(wt), label: format!("{}'s worktree", agent.name), wait })
             }
         }
@@ -672,6 +684,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn what_the_command_started_has_the_grace_time_to_clean_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = temp_repo(dir.path(), "repo");
+        let (core, ws) = start(&dir.path().join("data"), &repo).await;
+        let (source, wt) = plan(&core, &ws, "gh78", PlanStatus::Done).await;
+
+        // As `cd web && pnpm dev`: a shell that ends at SIGTERM, and under it a server that
+        // cleans up first (here: 0.3 s of work, then a file).
+        let command = r#"sh -c 'trap "sleep 0.3; echo bye > done.txt; exit 0" TERM; echo ready; while :; do sleep 0.05; done' & wait"#;
+        run_in(&core, &source, command).await.unwrap();
+        until(&core, &source, |run| run.lines.contains(&"ready".to_string())).await;
+        let asked = tokio::time::Instant::now();
+        let stopped = core.preview(&source, Some(PreviewAction::Stop), None).await.unwrap().run.unwrap();
+        assert_eq!(stopped.ended.as_deref(), Some("stopped"));
+        assert_eq!(std::fs::read_to_string(wt.join("done.txt")).ok().as_deref(), Some("bye\n"), "the server was not killed while it cleaned up");
+        assert!(asked.elapsed() < STOP_GRACE, "Stop does not wait longer than the group lives: {:?}", asked.elapsed());
+        core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_preview_ends_when_its_work_is_merged_or_its_worktree_is_removed() {
         let dir = tempfile::tempdir().unwrap();
         let repo = temp_repo(dir.path(), "repo");
@@ -689,16 +721,20 @@ mod tests {
         let e = run_in(&core, &source, "echo again").await.unwrap_err();
         assert!(e.to_string().contains("is gone"), "{e}");
 
-        // A solo agent: the same at its merge; the agent keeps its worktree.
+        // A solo agent: its preview ends before Codly commits the worktree for the merge, so
+        // nothing writes there meanwhile. This command writes a new file every 20 ms. The
+        // agent keeps its worktree.
         let (ada, ada_wt) = solo(&core, &ws, "ada").await;
         let ada_source = PreviewSource::Agent(ada.id.clone());
         std::fs::write(ada_wt.join("ada.txt"), "work\n").unwrap();
-        run_in(&core, &ada_source, "echo up; sleep 300").await.unwrap();
-        until(&core, &ada_source, |run| run.lines.contains(&"up".to_string())).await;
+        run_in(&core, &ada_source, "i=0; while :; do i=$((i+1)); echo $i > made-$i.txt; sleep 0.02; done").await.unwrap();
+        until(&core, &ada_source, |_| ada_wt.join("made-1.txt").exists()).await;
         core.merge_agent(&ada.id).await.unwrap();
         let run = core.preview(&ada_source, None, None).await.unwrap().run.unwrap();
         assert_eq!(run.ended.as_deref(), Some("stopped"));
         assert!(ada_wt.is_dir());
+        assert_eq!(sh(&ada_wt, &["status", "--porcelain"]), "", "no file was written after the commit");
+        assert!(repo.join("made-1.txt").exists(), "what the command wrote is part of the merged work");
 
         // A worktree removed in any other way: the preview notices and ends.
         run_in(&core, &ada_source, "echo up; sleep 300").await.unwrap();
@@ -749,6 +785,14 @@ mod tests {
         assert_eq!(refused(&core, &PreviewSource::Agent(new.id.clone()), "pnpm dev").await, "Ada has no worktree yet, so there is nothing to try");
         inner.update_agent(&new.id, |a| a.worktree = Some(ws.repo_path.clone())).unwrap();
         assert_eq!(refused(&core, &PreviewSource::Agent(new.id), "pnpm dev").await, "Ada works in your project folder itself: run the command in your own terminal");
+        // A task's worktree is the gate's: not for its worker, and not for a solo agent that took the task.
+        let task_wt = inner.worktree_root(&ws).join("ab12").join("t1").to_string_lossy().into_owned();
+        for (name, role) in [("Bo", Role::Worker), ("Cy", Role::Solo)] {
+            let agent = inner.create_agent(&ws.id, name, Provider::Claude, role, 0, None).unwrap();
+            inner.update_agent(&agent.id, |a| a.worktree = Some(task_wt.clone())).unwrap();
+            let e = refused(&core, &PreviewSource::Agent(agent.id), "pnpm dev").await;
+            assert!(e.starts_with("only a solo agent's own work can be tried this way"), "{name}: {e}");
+        }
 
         // Nothing ran, and a refused command is not kept either.
         let view = core.preview(&done, None, None).await.unwrap();

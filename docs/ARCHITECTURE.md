@@ -141,13 +141,14 @@ one the plan started from. The last merge Codly made there can be taken back wit
 that merge commit, no remote branch has it, and no tracked file has uncommitted changes. The
 merged work always stays on a branch: if its branch was deleted since, the undo puts it back.
 
-**Try it before you merge.** A finished plan's card and an agent's Git tab have Run… and Open in
-terminal (`preview.rs`). Run… runs a command the user typed, in the plan's integration worktree or
-the agent's worktree, with the user's login environment and the worktree's `CODLY_PORT_BASE`; the
-last command is kept per repo and shown again, never guessed, and each run is a Decision. The
-command leads its own process group, which ends on Stop, when that work is merged, when the
-worktree is removed and when Codly quits (SIGTERM, SIGKILL 2 s later). Its output is kept in
-memory only. A crash of Codly leaves the command running.
+**Try it before you merge.** A finished plan's card and a solo agent's Git tab have Run… and Open
+in terminal (`preview.rs`). Run… runs a command the user typed, in the plan's integration worktree
+or the solo agent's worktree, with the user's login environment and the worktree's
+`CODLY_PORT_BASE`; the last command is kept per repo and shown again, never guessed, and each run
+is a Decision. A task's worktree is refused: the gate commits everything in it. The command leads
+its own process group, which ends on Stop, when the worktree is removed, when Codly quits, and
+before a merge of that work commits anything (SIGTERM, then SIGKILL for what is left of the group
+2 s later). Its output is kept in memory only. A crash of Codly leaves the command running.
 
 Every routing, scheduling, gate and merge choice is written to the `decision` table and
 emitted as an event, so "Why did Codex get this task?" always has an answer.

@@ -638,6 +638,9 @@ impl Inner {
         }
         let branch = self.git.current_branch(&wt).await?.ok_or_else(|| anyhow!("{}'s worktree is on a detached HEAD", agent.name))?;
         let ws_id = Some(ws.id.as_str());
+        // A command you ran to try this work ends first: nothing writes into the worktree
+        // while Codly commits and merges it.
+        super::preview::stop_in(&wt).await;
         let _g = self.repo_lock.lock().await;
         self.git.check_worktree(&repo, &wt).await?;
         let message = format!("codly(solo/{}): before merge", agent.name);
@@ -674,8 +677,6 @@ impl Inner {
             None => vec![],
         };
         drop(_g);
-        // The work is in your branch now: a command you ran to try it ends.
-        super::preview::stop_in(&wt).await;
         self.reindex_after_merge(&ws.id, touched);
         if let Some(w) = write(&self.ws).as_mut().filter(|w| w.id == ws.id) {
             w.head = Some(sha.clone());

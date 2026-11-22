@@ -67,8 +67,8 @@
       <button class="icon-btn" aria-label="Refresh" data-tip="Refresh" disabled={busy} onclick={() => load(agent.id)}><Icon name="refresh" size={13} /></button>
     </span>
   </div>
-  <!-- A worktree of its own only: in your project folder, your own terminal is the place. -->
-  {#if view?.worktree && view.worktree !== store.workspace?.repo_path}<PreviewStep source={{ kind: 'agent', id: agent.id }} worktree={view.worktree} agentId={agent.id} />{/if}
+  <!-- A solo agent's own worktree only: a task's worktree is the gate's (also while a solo agent has the task), and in your project folder your own terminal is the place. -->
+  {#if agent.role === 'solo' && !agent.task_id && view?.worktree && view.worktree !== store.workspace?.repo_path}<PreviewStep source={{ kind: 'agent', id: agent.id }} worktree={view.worktree} agentId={agent.id} />{/if}
   {#if agent.role === 'solo'}<RepoSyncBar refresh={merges} agentId={agent.id} />{/if}
   <!-- Only for Codly's own branch: the core pushes no other one from here. -->
   {#if agent.role === 'solo' && view?.branch?.startsWith('codly/')}<PullRequestStep source={{ kind: 'agent', id: agent.id }} wait={resting ? null : 'Wait until its turn ends'} />{/if}
