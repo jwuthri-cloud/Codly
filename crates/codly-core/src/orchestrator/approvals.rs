@@ -30,7 +30,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
 
-use crate::adapters::classify::{self, ShellRun};
+use crate::adapters::classify::{self, ShellRun, first_non_flag, git_read_only, git_sub, has, options, read_only};
 use crate::mcp::tools;
 use crate::model::*;
 
@@ -568,52 +568,6 @@ fn basename(p: &str) -> &str {
     p.rsplit('/').next().unwrap_or(p)
 }
 
-fn has(args: &[String], flags: &[&str]) -> bool {
-    args.iter().any(|a| flags.contains(&a.as_str()) || flags.iter().any(|f| f.starts_with("--") && a.starts_with(&format!("{f}="))))
-}
-
-/// Options before `--`.
-fn options(args: &[String]) -> impl Iterator<Item = &str> {
-    args.iter().map(String::as_str).take_while(|a| *a != "--").filter(|a| a.starts_with('-') && *a != "-")
-}
-
-/// A short-option cluster (`-o`, `-ro`, `-ofile`) holds one of `letters`.
-fn short_flag(args: &[String], letters: &str) -> bool {
-    options(args).filter(|a| !a.starts_with("--")).any(|a| a[1..].contains(|c| letters.contains(c)))
-}
-
-/// `--name`, `--name=value` or an abbreviation of it (getopt_long and git accept unambiguous
-/// prefixes: `--out=f` is `--output=f`).
-fn long_flag(args: &[String], names: &[&str]) -> bool {
-    options(args)
-        .filter_map(|a| a.strip_prefix("--"))
-        .map(|a| a.split('=').next().unwrap_or(a))
-        .any(|n| !n.is_empty() && names.iter().any(|x| x.starts_with(n)))
-}
-
-/// Operands (non-option arguments), skipping the value of the short options in `valued`.
-fn operands<'a>(args: &'a [String], valued: &str) -> Vec<&'a str> {
-    let (mut out, mut i, mut done) = (vec![], 0, false);
-    while let Some(a) = args.get(i).map(String::as_str) {
-        i += 1;
-        if done || a == "-" || !a.starts_with('-') {
-            out.push(a);
-        } else if a == "--" {
-            done = true;
-        } else if !a.starts_with("--")
-            && let Some(j) = a[1..].find(|c| valued.contains(c))
-            && j + 2 == a.len()
-        {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn first_non_flag(args: &[String]) -> Option<&str> {
-    args.iter().map(String::as_str).find(|a| !a.starts_with('-'))
-}
-
 /// `--package=x` / `-p x` on npx, bunx or `npm exec`: installs and runs that registry package.
 fn package_flag(args: &[String]) -> bool {
     options(args).any(|a| a.starts_with("--package") || (a.starts_with("-p") && !a.starts_with("--")))
@@ -622,22 +576,6 @@ fn package_flag(args: &[String]) -> bool {
 /// `npx -c 'cmd'` / `npm exec --call 'cmd'`: runs a shell command string.
 fn call_flag(args: &[String]) -> bool {
     options(args).any(|a| a == "-c" || a.starts_with("--call"))
-}
-
-/// The git subcommand, skipping global options (`-C dir`, `-c k=v`, `--no-pager`…).
-fn git_sub(args: &[String]) -> (Option<&str>, &[String]) {
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        if a == "-C" || a == "-c" || a == "--git-dir" || a == "--work-tree" || a == "--namespace" {
-            i += 2;
-        } else if a.starts_with('-') {
-            i += 1;
-        } else {
-            return (Some(a), &args[i + 1..]);
-        }
-    }
-    (None, &[])
 }
 
 /// Directories a git command is pointed at before its subcommand, seen from `start`: each
@@ -666,25 +604,26 @@ const NETWORK: &[&str] =
 const DELETES: &[&str] = &["rm", "rmdir", "unlink", "shred", "srm", "trash"];
 const HARMLESS_PATHS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr"];
 
-/// Values a word may stand for: itself, an option's value glued to its flag (`-f/etc/hosts`,
-/// `--file=/etc/hosts`, `FOO=~/x`), the parts of a brace list (`{a,/etc/x}`), and `~` entries
-/// of a `:` list (`PATH=x:~/bin`).
-fn path_candidates(t: &str) -> Vec<&str> {
-    let mut out = vec![t];
-    if let Some((_, v)) = t.split_once('=') {
-        out.push(v);
-    }
-    if t.starts_with('-') {
-        let v = t.trim_start_matches('-').trim_start_matches(|c: char| c.is_ascii_alphabetic());
-        if !v.is_empty() {
-            out.push(v);
+/// Values a word may stand for: each alternative of its brace lists (`{a,/etc/x}`,
+/// `src/{a,b}/x`) and, for each, an option's value glued to its flag (`-f/etc/hosts`,
+/// `--file=/etc/hosts`, `FOO=~/x`) and the `~` entries of a `:` list (`PATH=x:~/bin`). None
+/// when the alternatives are too many to list: the word may name anything.
+fn path_candidates(t: &str) -> Option<Vec<String>> {
+    let mut out = vec![];
+    for t in classify::braces(t)? {
+        if let Some((_, v)) = t.split_once('=') {
+            out.push(v.to_string());
         }
+        if t.starts_with('-') {
+            let v = t.trim_start_matches('-').trim_start_matches(|c: char| c.is_ascii_alphabetic());
+            if !v.is_empty() {
+                out.push(v.to_string());
+            }
+        }
+        out.extend(t.split(':').skip(1).filter(|p| p.starts_with('~')).map(str::to_owned));
+        out.push(t);
     }
-    if t.contains('{') {
-        out.extend(t.split(['{', ',', '}']));
-    }
-    out.extend(t.split(':').skip(1).filter(|p| p.starts_with('~')));
-    out
+    Some(out)
 }
 
 fn path_outside(v: &str, base: Option<&Path>, root: Option<&Path>) -> bool {
@@ -703,7 +642,7 @@ fn path_outside(v: &str, base: Option<&Path>, root: Option<&Path>) -> bool {
 /// Could this argument name something outside the worktree? A `$` expansion is unknown, so
 /// it could (`cat $HOME/.profile`).
 fn word_outside(w: &Word, base: Option<&Path>, root: Option<&Path>) -> bool {
-    w.var || path_candidates(&w.text).into_iter().any(|v| path_outside(v, base, root))
+    w.var || path_candidates(&w.text).is_none_or(|values| values.iter().any(|v| path_outside(v, base, root)))
 }
 
 /// The same for a command name: `/usr/bin/git` is fine, `~/bin/x`, `../../x.sh` and `$X` are not.
@@ -724,7 +663,7 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
     }
     let base = cwd.or(worktree);
     let root = worktree.unwrap_or(Path::new(""));
-    let codly_data = |w: &Word| path_candidates(&w.text).into_iter().any(|v| private_path(v, base, worktree));
+    let codly_data = |w: &Word| path_candidates(&w.text).is_none_or(|values| values.iter().any(|v| private_path(v, base, worktree)));
     for w in &p.writes {
         if word_outside(w, base, worktree) {
             add("outside worktree");
@@ -732,7 +671,7 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
         if codly_data(w) {
             add(CODLY_DATA);
         }
-        for why in path_candidates(&w.text).into_iter().filter_map(|v| classify::guarded_path(v, root)) {
+        for why in classify::guarded_word(&w.text, root) {
             add(why);
         }
     }
@@ -877,25 +816,6 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
     risks
 }
 
-fn git_read_only(sub: &str, rest: &[String]) -> bool {
-    match sub {
-        "" | "status" | "diff" | "log" | "show" | "blame" | "grep" | "ls-files" | "ls-tree" | "rev-parse" | "describe" | "shortlog"
-        | "cat-file" | "version" | "rev-list" | "merge-base" | "name-rev" | "whatchanged" | "show-ref" | "for-each-ref"
-        | "count-objects" => true,
-        // `git help -w` starts a browser
-        "help" => rest.iter().all(|a| !a.starts_with('-')),
-        "reflog" => !first_non_flag(rest).is_some_and(|a| ["expire", "delete", "drop", "write"].contains(&a)),
-        "branch" | "tag" => rest
-            .iter()
-            .all(|a| ["-a", "-r", "-l", "--list", "-v", "-vv", "--all", "--show-current", "--contains", "--merged"].contains(&a.as_str())),
-        "remote" => rest.iter().all(|a| a == "-v" || a == "show" || a == "get-url"),
-        "config" => has(rest, &["--get", "--list", "-l", "--get-all", "--get-regexp"]),
-        "stash" => rest.first().is_some_and(|a| a == "list" || a == "show"),
-        "worktree" => rest.first().is_some_and(|a| a == "list"),
-        _ => false,
-    }
-}
-
 // ───────────────────────────── balanced mode ─────────────────────────────
 
 /// Test runners and checkers that are not npm packages (those are `classify::NPX_RUNNERS`):
@@ -979,282 +899,14 @@ pub fn classify_command(cmd: &str, verify: &[String]) -> Option<&'static str> {
     Some(kind)
 }
 
-fn read_only(prog: &str, args: &[String]) -> bool {
-    const RO: &[&str] = &[
-        "ls",
-        "cat",
-        "head",
-        "tail",
-        "wc",
-        "grep",
-        "egrep",
-        "fgrep",
-        "pwd",
-        "echo",
-        "printf",
-        "which",
-        "type",
-        "whereis",
-        "stat",
-        "du",
-        "df",
-        "cut",
-        "tr",
-        "diff",
-        "cmp",
-        "comm",
-        "basename",
-        "dirname",
-        "realpath",
-        "readlink",
-        "true",
-        "false",
-        "test",
-        "[",
-        "nl",
-        "column",
-        "hexdump",
-        "od",
-        "strings",
-        "sha1sum",
-        "sha256sum",
-        "shasum",
-        "md5",
-        "md5sum",
-        "cksum",
-        "uname",
-        "whoami",
-        "id",
-        "seq",
-        "cd",
-    ];
-    // ponytail: `ack` (a project `.ackrc` can set --pager) and `hostname NAME` are not here;
-    // they ask. `printenv` is not here either: it shows every secret of your shell profile.
-    match prog {
-        p if RO.contains(&p) => true,
-        // a filter file cannot be checked for `env` (`classify::exposure` reads inline filters)
-        "jq" => !short_flag(args, "f") && !long_flag(args, &["from-file"]),
-        // Options that write a file or run a program:
-        "sort" => !short_flag(args, "oT") && !long_flag(args, &["output", "compress-program", "temporary-directory"]),
-        // the second operand is the output file
-        "uniq" => operands(args, "fsw").len() <= 1,
-        "xxd" => operands(args, "cglosn").len() <= 1,
-        // -o writes the listing, -R writes 00Tree.html into every directory
-        "tree" => !short_flag(args, "oR"),
-        "fd" => !short_flag(args, "xX") && !long_flag(args, &["exec", "exec-batch"]),
-        "rg" => !long_flag(args, &["pre", "pre-glob", "hostname-bin"]),
-        "ag" => !long_flag(args, &["pager"]),
-        "file" => !short_flag(args, "C") && !long_flag(args, &["compile"]),
-        "date" => !short_flag(args, "s") && !long_flag(args, &["set"]) && operands(args, "").iter().all(|a| a.starts_with('+')),
-        "find" => !has(args, &["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]),
-        "sed" => sed_read_only(args),
-        "git" => git_read_only_cmd(args),
-        _ => false,
-    }
-}
-
-/// `git …` that only reads: no `-c core.pager=…` / `--config-env` / `--exec-path` (they make
-/// any subcommand run a program), no `--git-dir` / `--work-tree` (another repository's config
-/// can do the same; `-C dir` is checked on disk, see `nested_repo`), no `--output=<file>`, no
-/// `git grep -O<pager>`.
-fn git_read_only_cmd(args: &[String]) -> bool {
-    let mut i = 0;
-    while let Some(a) = args.get(i).map(String::as_str).filter(|a| a.starts_with('-')) {
-        if ["-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"].iter().any(|f| a.starts_with(f)) {
-            return false;
-        }
-        i += if matches!(a, "-C" | "--git-dir" | "--work-tree" | "--namespace") { 2 } else { 1 };
-    }
-    let (sub, rest) = git_sub(args);
-    let sub = sub.unwrap_or("");
-    if long_flag(rest, &["output"]) || (sub == "grep" && (short_flag(rest, "O") || long_flag(rest, &["open-files-in-pager"]))) {
-        return false;
-    }
-    git_read_only(sub, rest)
-}
-
-/// sed without in-place edits (`-i`, `-ni`, `--in-place`), script files (`-f`) or script
-/// commands that write, read or run (`w`, `W`, `r`, `R`, `e`, `s///w`, `s///e`).
-fn sed_read_only(args: &[String]) -> bool {
-    let mut scripts: Vec<&str> = vec![];
-    let mut files: Vec<&str> = vec![];
-    let (mut i, mut done) = (0, false);
-    while let Some(a) = args.get(i).map(String::as_str) {
-        i += 1;
-        if done || a == "-" || !a.starts_with('-') {
-            files.push(a);
-            continue;
-        }
-        if a == "--" {
-            done = true;
-            continue;
-        }
-        if let Some(long) = a.strip_prefix("--") {
-            let (name, value) = long.split_once('=').map_or((long, None), |(n, v)| (n, Some(v)));
-            match (name, value) {
-                ("expression", Some(v)) => scripts.push(v),
-                ("expression", None) => match args.get(i) {
-                    Some(v) => {
-                        scripts.push(v);
-                        i += 1;
-                    }
-                    None => return false,
-                },
-                ("quiet" | "silent" | "regexp-extended" | "separate" | "sandbox" | "debug" | "posix" | "null-data" | "zero-terminated"
-                | "unbuffered", None) => {}
-                // --in-place, --file, abbreviations of either, anything unknown
-                _ => return false,
-            }
-            continue;
-        }
-        for (j, c) in a[1..].char_indices() {
-            match c {
-                'n' | 's' | 'E' | 'r' | 'u' | 'z' => {}
-                'e' => {
-                    let rest = &a[2 + j..];
-                    if !rest.is_empty() {
-                        scripts.push(rest);
-                    } else if let Some(v) = args.get(i) {
-                        scripts.push(v);
-                        i += 1;
-                    } else {
-                        return false;
-                    }
-                    break;
-                }
-                // i: in place; f: script file; l: a flag in BSD sed but takes a value in GNU sed
-                _ => return false,
-            }
-        }
-    }
-    if scripts.is_empty() {
-        let Some(s) = files.first() else { return false };
-        scripts.push(s);
-    }
-    scripts.iter().all(|s| sed_script_read_only(s))
-}
-
-/// Walk a sed script command by command. Anything not understood counts as not read-only.
-fn sed_script_read_only(script: &str) -> bool {
-    let c: Vec<char> = script.chars().collect();
-    let n = c.len();
-    let mut i = 0;
-    let blank = |i: &mut usize| {
-        while *i < n && (c[*i] == ' ' || c[*i] == '\t') {
-            *i += 1;
-        }
-    };
-    // `/re/`, `\%re%`: index after the closing delimiter
-    let regex = |mut i: usize, delim: char| -> Option<usize> {
-        while i < n && c[i] != delim {
-            if c[i] == '\\' {
-                i += 1;
-            }
-            i += 1;
-        }
-        (i < n).then_some(i + 1)
-    };
-    // One address: a line number, `first~step`, `$`, `/re/` or `\cREc` (+ GNU `I`/`M`), or
-    // after a comma GNU `+N` / `~N`.
-    let address = |mut i: usize| -> Option<usize> {
-        match c.get(i) {
-            Some(d) if d.is_ascii_digit() || *d == '+' || *d == '~' => {
-                i += 1;
-                while i < n && (c[i].is_ascii_digit() || c[i] == '~') {
-                    i += 1;
-                }
-                Some(i)
-            }
-            Some('$') => Some(i + 1),
-            Some('/') => regex(i + 1, '/').map(|mut j| {
-                while j < n && (c[j] == 'I' || c[j] == 'M') {
-                    j += 1;
-                }
-                j
-            }),
-            Some('\\') => {
-                let d = *c.get(i + 1)?;
-                regex(i + 2, d).map(|mut j| {
-                    while j < n && (c[j] == 'I' || c[j] == 'M') {
-                        j += 1;
-                    }
-                    j
-                })
-            }
-            _ => Some(i),
-        }
-    };
-    loop {
-        while i < n && (c[i].is_whitespace() || c[i] == ';') {
-            i += 1;
-        }
-        if i >= n {
-            return true;
-        }
-        let Some(j) = address(i) else { return false };
-        i = j;
-        blank(&mut i);
-        if i < n && c[i] == ',' {
-            i += 1;
-            blank(&mut i);
-            let Some(j) = address(i) else { return false };
-            i = j;
-        }
-        while i < n && (c[i] == '!' || c[i] == ' ' || c[i] == '\t') {
-            i += 1;
-        }
-        let Some(&cmd) = c.get(i) else { return false };
-        i += 1;
-        match cmd {
-            '{' | '}' | '=' | 'd' | 'D' | 'g' | 'G' | 'h' | 'H' | 'n' | 'N' | 'p' | 'P' | 'x' | 'z' | 'F' => {}
-            // optional numeric argument
-            'l' | 'L' | 'q' | 'Q' => {
-                blank(&mut i);
-                while i < n && c[i].is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            // a label, up to `;` or the end of the line
-            ':' | 'b' | 't' | 'T' | 'v' => {
-                while i < n && c[i] != ';' && c[i] != '\n' {
-                    i += 1;
-                }
-            }
-            '#' => {
-                while i < n && c[i] != '\n' {
-                    i += 1;
-                }
-            }
-            // text to the end of the line, continued by a trailing backslash
-            'a' | 'i' | 'c' => {
-                while i < n && !(c[i] == '\n' && c[i - 1] != '\\') {
-                    i += 1;
-                }
-            }
-            's' | 'y' => {
-                let Some(&delim) = c.get(i) else { return false };
-                if delim == '\\' || delim == '\n' {
-                    return false;
-                }
-                let Some(j) = regex(i + 1, delim).and_then(|j| regex(j, delim)) else { return false };
-                i = j;
-                if cmd == 's' {
-                    while i < n && !matches!(c[i], ';' | '\n' | '}') {
-                        if !(c[i].is_ascii_digit() || matches!(c[i], 'g' | 'p' | 'i' | 'I' | 'm' | 'M' | ' ' | '\t')) {
-                            return false; // `w file`, `e`, anything unknown
-                        }
-                        i += 1;
-                    }
-                }
-            }
-            // w W r R e, anything else
-            _ => return false,
-        }
-    }
-}
-
 fn test_runner(prog: &str, args: &[String]) -> bool {
-    let words: Vec<&str> = args.iter().map(String::as_str).filter(|a| !a.starts_with('-')).collect();
+    // Not the options, and not the env file a program is told to load (`uv run --env-file .env pytest`).
+    let words: Vec<&str> = args
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| !a.starts_with('-') && !(*i > 0 && args[i - 1] == "--env-file"))
+        .map(|(_, a)| a.as_str())
+        .collect();
     let writes = has(args, &["--fix", "--write", "-w", "--watch", "--update-snapshots", "-u"]);
     if writes {
         return false;
@@ -1446,6 +1098,8 @@ mod tests {
             "cat ~root/.profile",
             "PATH=bin:~/bin make",
             "cat {a,/etc/hosts}",
+            "cat src/{a,../../x}/y",
+            "cat {,/}etc/hosts",
             "cat =ls",
             "cd && cat .profile",
             "cd - && ls",
@@ -1455,7 +1109,16 @@ mod tests {
         ] {
             assert!(risks(c).iter().any(|r| r == "outside worktree"), "{c}: {:?}", risks(c));
         }
-        for c in ["cat src/a.rs", "rg 'x$' src", "git diff HEAD~1..HEAD", "echo \"$?\"", "/usr/bin/git status", "find . -exec grep -l x {} +"] {
+        for c in [
+            "cat src/a.rs",
+            "rg 'x$' src",
+            "git diff HEAD~1..HEAD",
+            "echo \"$?\"",
+            "/usr/bin/git status",
+            "find . -exec grep -l x {} +",
+            "mkdir -p src/{a,b}/c",
+            "touch src/{a,b}/{x,y}.rs",
+        ] {
             assert!(!risks(c).iter().any(|r| r == "outside worktree"), "{c}: {:?}", risks(c));
         }
     }
@@ -1578,13 +1241,43 @@ mod tests {
             "pytest -q tests/test_env.py",
             "uv run pytest -q",
             "go test ./...",
+            // reads and tests that only name an agent's settings, `.git` or an env file
+            "[[ -d .git ]] && git status",
+            "tree -a -I .git",
+            "fd -H -E .git foo",
+            "git diff -- .claude/skills/x.md",
+            "git log --oneline -- .cursor/rules",
+            "sed -n 1,20p .claude/settings.json",
+            "node --env-file=.env.test --test",
+            "uv run --env-file .env pytest",
+            // patterns that name every file, or none of the guarded ones
+            "cat *",
+            "grep -n foo *",
+            "wc -l src/*.rs",
+            "ls src/{a,b}.rs",
+            "grep -e '.e*' src/a.rs",
         ] {
             let v = eval_in(&root, ApprovalMode::Balanced, false, command(c, &root));
             assert!(matches!(v, Verdict::Allow { .. }), "{c}: {v:?}");
         }
         // A worker allowed to work alone also sets a project up without a prompt.
-        for c in ["cp .env.example .env", "echo .env >> .gitignore", "tar --exclude=.claude -czf out.tgz src", "node scripts/gen.js"] {
+        for c in [
+            "cp .env.example .env",
+            "echo .env >> .gitignore",
+            "tar --exclude=.claude -czf out.tgz src",
+            "node scripts/gen.js",
+            "[[ -f .env ]] || cp .env.example .env",
+            "bash -c 'cp .env.example ./.env'",
+            "mkdir -p src/{a,b}/{x,y}",
+            "chmod 644 *.json",
+            "sed -i -e 's/.*/x/' notes.txt",
+        ] {
             let v = eval_in(&root, ApprovalMode::Autonomous, false, command(c, &root));
+            assert!(matches!(v, Verdict::Allow { .. }), "{c}: {v:?}");
+        }
+        // Reading an agent's settings is no reason to stop a worker with full access.
+        for c in ["git diff -- .claude/skills/x.md", "sed -n 1,20p .claude/settings.json", "tree -a -I .git"] {
+            let v = eval_in(&root, ApprovalMode::Full, false, command(c, &root));
             assert!(matches!(v, Verdict::Allow { .. }), "{c}: {v:?}");
         }
     }
@@ -1606,6 +1299,15 @@ mod tests {
             "touch .Claude/settings.local.json",
             "bash -c 'echo x > .claude/settings.json'",
             "rm .mcp.json",
+            // The name behind a pattern, a brace list or an option it is glued to.
+            "cd .cl* && echo '{\"permissions\":{\"allow\":[\"Bash\"]}}' > settings.local.json",
+            "mkdir -p .{claude,x}",
+            "sort -o.claude/settings.local.json x",
+            "sort ''{-o,.claude/settings.local.json} x",
+            "echo x > .cl*/settings.local.json",
+            "cp x.json .c[l]aude/settings.json",
+            "tee .{mcp,x}.json",
+            "sed -i s/ask/allow/ o*.json",
         ] {
             for mode in [ApprovalMode::Balanced, ApprovalMode::Autonomous, ApprovalMode::Full] {
                 let v = eval_in(wt, mode, false, command(c, wt));
@@ -1660,6 +1362,13 @@ mod tests {
             "cat deploy/id_ed25519",
             "sort < .env",
             "bash -c 'cat .env'",
+            // The shell turns these into `.env` or a private key.
+            "cat .e*",
+            "cat .e{nv,x}",
+            "cat .[e]nv",
+            "cat -- .en?",
+            "head -3 id_*",
+            "grep -f.env src/a.rs",
         ] {
             for (mode, read_only) in [(ApprovalMode::Balanced, false), (ApprovalMode::Autonomous, false), (ApprovalMode::Balanced, true)] {
                 let v = eval_in(wt, mode, read_only, command(c, wt));

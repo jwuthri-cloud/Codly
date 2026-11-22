@@ -556,14 +556,16 @@ pub fn child_env(base: &HashMap<String, String>, provider: Provider) -> HashMap<
     child_env_with(base, provider, None)
 }
 
-/// Add one git setting through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`
-/// (git 2.31 and later): it beats every config file. It goes after the pairs the user's shell
-/// already set, never over them.
-fn git_config(env: &mut HashMap<String, String>, key: &str, value: &str) {
-    let n = env.get("GIT_CONFIG_COUNT").and_then(|c| c.parse::<usize>().ok()).unwrap_or(0);
-    env.insert(format!("GIT_CONFIG_KEY_{n}"), key.into());
-    env.insert(format!("GIT_CONFIG_VALUE_{n}"), value.into());
-    env.insert("GIT_CONFIG_COUNT".into(), (n + 1).to_string());
+/// Add one git setting (`setting` is `key=value`, without a `'`) through
+/// `GIT_CONFIG_PARAMETERS`, where git itself keeps its `-c key=value` options: it beats every
+/// config file. It goes after what the user's shell already put there, never over it. One
+/// variable, with no KEY in its name: of the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+/// `GIT_CONFIG_VALUE_n` triple, a filter that drops `*KEY*` names (Codex's
+/// `shell_environment_policy` excludes, a secrets scrubber) removes one part, and git then
+/// refuses to run at all.
+fn git_config(env: &mut HashMap<String, String>, setting: &str) {
+    let params = env.entry("GIT_CONFIG_PARAMETERS".into()).or_default();
+    *params = format!("{} '{setting}'", params.trim()).trim_start().to_string();
 }
 
 /// `child_env` plus the opt-in key of this CLI's own vendor (`byok.rs`: ANTHROPIC_API_KEY for
@@ -573,7 +575,7 @@ pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, byok_k
     let mut env: HashMap<String, String> =
         base.iter().filter(|(k, _)| !scrubbed(k, provider)).map(|(k, v)| (k.clone(), v.clone())).collect();
     env.insert("TERM".into(), "dumb".into());
-    git_config(&mut env, "core.fsmonitor", "false");
+    git_config(&mut env, "core.fsmonitor=false");
     match provider {
         Provider::Claude => {
             env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
@@ -971,18 +973,43 @@ mod tests {
         assert!(!opencode.contains_key("OPENAI_API_KEY") && !opencode.contains_key("ANTHROPIC_API_KEY"));
     }
 
-    /// An agent's git never starts a repository's fsmonitor program; the user's own
-    /// GIT_CONFIG_* pairs stay.
+    /// An agent's git never starts a repository's fsmonitor program; the user's own git
+    /// settings stay. The setting travels in one variable that a `*KEY*` / `*SECRET*` /
+    /// `*TOKEN*` filter keeps: half of a KEY/VALUE pair makes every git command fail.
     #[test]
     fn child_env_turns_git_fsmonitor_off() {
         let env = child_env(&HashMap::new(), Provider::Claude);
-        assert_eq!((env["GIT_CONFIG_COUNT"].as_str(), env["GIT_CONFIG_KEY_0"].as_str(), env["GIT_CONFIG_VALUE_0"].as_str()), ("1", "core.fsmonitor", "false"));
+        assert_eq!(env["GIT_CONFIG_PARAMETERS"], "'core.fsmonitor=false'");
+        for name in env.keys().filter(|k| k.starts_with("GIT_")) {
+            assert!(!["KEY", "SECRET", "TOKEN"].iter().any(|word| name.contains(word)), "{name}");
+        }
 
-        let base: HashMap<String, String> =
-            [("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "user.name"), ("GIT_CONFIG_VALUE_0", "Me")].map(|(k, v)| (k.to_string(), v.to_string())).into();
+        let base: HashMap<String, String> = [
+            ("GIT_CONFIG_PARAMETERS", "'user.name=Me'"),
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "user.email"),
+            ("GIT_CONFIG_VALUE_0", "me@example.com"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .into();
         let env = child_env(&base, Provider::Codex);
-        assert_eq!((env["GIT_CONFIG_KEY_0"].as_str(), env["GIT_CONFIG_VALUE_0"].as_str()), ("user.name", "Me"));
-        assert_eq!((env["GIT_CONFIG_COUNT"].as_str(), env["GIT_CONFIG_KEY_1"].as_str(), env["GIT_CONFIG_VALUE_1"].as_str()), ("2", "core.fsmonitor", "false"));
+        assert_eq!(env["GIT_CONFIG_PARAMETERS"], "'user.name=Me' 'core.fsmonitor=false'");
+        assert_eq!((env["GIT_CONFIG_COUNT"].as_str(), env["GIT_CONFIG_KEY_0"].as_str(), env["GIT_CONFIG_VALUE_0"].as_str()), ("1", "user.email", "me@example.com"));
+
+        // git reads it: the setting, and the ones that were there before.
+        let git = |env: &HashMap<String, String>, key: &str| {
+            let out = std::process::Command::new("git")
+                .args(["config", "--get", key])
+                .envs(env)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(git(&env, "core.fsmonitor"), "false");
+        assert_eq!(git(&env, "user.name"), "Me");
+        assert_eq!(git(&env, "user.email"), "me@example.com");
     }
 
     /// Base URLs and Vertex/ADC switches move billing off the user's plan like a key does.
