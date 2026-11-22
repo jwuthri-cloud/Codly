@@ -40,15 +40,16 @@
   let { agent }: Props = $props();
 
   const n = $derived(narrate(agent.id));
+  // What follows is this agent's own: it reads this agent's versions, so the sheet works out
+  // nothing when another agent streams. (A delta changes no `live` record, only streams and output.)
   const live = $derived.by(() => {
-    void store.rev;
-    void store.liveRev;
+    void store.revBy.get(agent.id);
     const l = store.live[agent.id];
     return l ? { ...l } : null;
   });
   const now = $derived.by(() => {
-    void store.rev;
-    void store.liveRev;
+    void store.revBy.get(agent.id);
+    void store.liveRevBy.get(agent.id);
     return store.now(agent.id);
   });
   const task = $derived(agent.task_id ? (store.taskMap.get(agent.task_id) ?? null) : null);
@@ -136,7 +137,7 @@
 
   // ── live output ──
   const liveOut = $derived.by(() => {
-    void store.liveRev;
+    void store.liveRevBy.get(agent.id);
     const seg = now?.seg;
     if (seg) {
       const o = store.liveOut.get(seg.callId);
