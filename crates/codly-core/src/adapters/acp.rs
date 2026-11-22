@@ -1574,6 +1574,7 @@ mod tests {
             bin: PathBuf::from("gemini"),
             env: HashMap::new(),
             session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
             system_prompt: String::new(),
             read_only: false,
             mcp: None,

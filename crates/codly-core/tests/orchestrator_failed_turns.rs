@@ -691,9 +691,10 @@ async fn a_silent_turn_is_flagged_then_interrupted_and_continued() {
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     {
         let seen = seen.lock().unwrap();
-        assert_eq!((seen.runs, seen.prompts.len()), (1, 2), "the same session goes on: {:?}", seen.prompts);
+        assert_eq!((seen.runs, seen.prompts.len()), (1, 3), "the same session goes on: {:?}", seen.prompts);
         let again = &seen.prompts[1];
         assert!(again.contains("gave no output for") && again.contains("so Codly interrupted it"), "{again}");
+        assert!(seen.prompts[2].contains(NO_REPORT), "{}", seen.prompts[2]);
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the work of the silent turn was not checked before it was finished");
     let said = decisions(&core, "watchdog").await;
@@ -724,9 +725,10 @@ async fn a_turn_that_stays_silent_is_stopped_and_its_task_goes_back_in_line() {
     assert_eq!(task.attempt, 2);
     {
         let seen = seen.lock().unwrap();
-        assert_eq!((seen.runs, seen.prompts.len()), (2, 3), "one chance to continue, then a restart: {:?}", seen.prompts);
+        assert_eq!((seen.runs, seen.prompts.len()), (2, 4), "one chance to continue, then a restart: {:?}", seen.prompts);
         assert!(seen.prompts[1].contains("so Codly interrupted it"), "{}", seen.prompts[1]);
         assert!(seen.prompts[2].contains("You are back on task"), "{}", seen.prompts[2]);
+        assert!(seen.prompts[3].contains(NO_REPORT), "{}", seen.prompts[3]);
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the work of the silent turns was never committed or checked");
     let said = decisions(&core, "watchdog").await;
@@ -761,9 +763,10 @@ async fn a_silent_turn_that_does_not_stop_loses_its_process_and_its_task_goes_ba
     {
         let seen = seen.lock().unwrap();
         // The continue prompt waits for the interrupted turn to end in time, and it did not.
-        assert_eq!((seen.runs, seen.prompts.len()), (2, 2), "the worker was restarted: {:?}", seen.prompts);
+        assert_eq!((seen.runs, seen.prompts.len()), (2, 3), "the worker was restarted: {:?}", seen.prompts);
         let back = &seen.prompts[1];
         assert!(back.contains("You are back on task") && back.contains("gave no output for") && back.contains("Codly stopped it and restarts it"), "{back}");
+        assert!(seen.prompts[2].contains(NO_REPORT), "{}", seen.prompts[2]);
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the work of the silent turn was never committed or checked");
     let said = decisions(&core, "watchdog").await;

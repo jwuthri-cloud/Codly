@@ -362,13 +362,14 @@ impl Inner {
 
     /// Stop an agent's live run and wait (≤ 5 s) for its process to exit. False = still running.
     pub(super) async fn stop_and_wait(&self, agent_id: &str) -> bool {
-        if self.stop_run(agent_id) {
-            for _ in 0..100 {
-                if !self.is_live(agent_id) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+        // A run that was told to stop before has closed its inbox while its process exits:
+        // the request does not reach it, and it is waited for all the same.
+        self.stop_run(agent_id);
+        for _ in 0..100 {
+            if !self.is_live(agent_id) {
+                break;
             }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         !self.is_live(agent_id)
     }

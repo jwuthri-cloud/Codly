@@ -382,15 +382,16 @@ async fn crashes_are_counted_in_a_row_not_over_the_life_of_the_task() {
     core.shutdown().await;
 }
 
-/// Two crashes, a turn that completes (its check fails: a fix round), then a crash in the fix
-/// round. That crash is the first of a new row, not the third of the old one: the worker ran
-/// in between, so the task is not blocked.
+/// Two crashes, a turn that completes with no report (Codly asks for it, and the worker has
+/// nothing to add), a check that fails (a fix round), then a crash in the fix round. That
+/// crash is the first of a new row, not the third of the old one: the worker ran in between,
+/// so the task is not blocked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_turn_the_worker_completes_ends_the_row_of_crashes() {
     let dir = tempfile::tempdir().unwrap();
     let script: Script = Arc::new(|n: usize| match n {
-        0 | 1 | 3 => End::Crash,
-        2 => End::Idle,
+        0 | 1 | 4 => End::Crash,
+        2 | 3 => End::Idle,
         _ => End::Done,
     });
     let plan = json!({ "summary": "Write one file", "tasks": [plan_task("t1", &[])] });
@@ -405,7 +406,7 @@ async fn a_turn_the_worker_completes_ends_the_row_of_crashes() {
     assert_eq!(decisions(&core, "retry").await, [crash(1), crash(2), crash(1)]);
     assert!(!statuses(&core, &task.id).await.contains(&TaskStatus::Blocked));
     // The crash in the fix round came after the check that failed.
-    let fix = seen.lock().unwrap().prompts[3].clone();
+    let fix = seen.lock().unwrap().prompts[4].clone();
     assert!(fix.contains("test -f t1.txt"), "{fix}");
     core.shutdown().await;
 }

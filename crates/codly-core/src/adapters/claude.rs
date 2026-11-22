@@ -2248,6 +2248,7 @@ mod tests {
             deadline: None,
             start_failed: false,
             interrupt_failed: false,
+            _mcp_file: None,
         };
         (actor, events_rx, child)
     }

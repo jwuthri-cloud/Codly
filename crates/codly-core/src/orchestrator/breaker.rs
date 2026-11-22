@@ -456,7 +456,10 @@ impl Tracker {
                     t.samples.pop_front();
                 }
             }
-            EventKind::TurnStarted { .. } => t.in_turn = true,
+            EventKind::TurnStarted { .. } => {
+                t.in_turn = true;
+                t.turn_base = Some(t.samples.back().map_or(0, |s| s.1));
+            }
             EventKind::ToolStarted { name, input, .. } => {
                 t.in_turn = true;
                 t.compacting_since = None;
@@ -472,7 +475,6 @@ impl Tracker {
             EventKind::ToolCompleted { ok: true, .. } | EventKind::Message { .. } => t.error_run = 0,
             EventKind::Error { .. } | EventKind::Retrying { .. } => t.error_run += 1,
             EventKind::Compacting { .. } => t.compacting_since = Some(now),
-            EventKind::TurnStarted { .. } => t.turn_base = Some(t.samples.back().map_or(0, |s| s.1)),
             // A turn that ended is a loop that ended (also after our own interrupt).
             EventKind::TurnCompleted { status, .. } => {
                 // The usage a turn ends with can hold work its stream never showed (Claude
@@ -771,7 +773,7 @@ mod tests {
         t.observe("a", 201_000, &turn_done(TurnStatus::Completed));
         assert_eq!(t.agents["a"].velocity(215_000), Some(0), "50k tokens of a 3-minute turn are not 200k a minute");
         assert!(t.beat(&c, 215_000, &|_| false).is_empty());
-        assert_eq!(t.floor_tokens(), 51_000, "the budget counts them all the same");
+        assert_eq!(t.floor().tokens, 51_000, "the budget counts them all the same");
         // The next turn is measured from the full count, not from the count before that step.
         t.observe("a", 220_000, &start);
         t.observe("a", 231_000, &usage(0, 81_000));

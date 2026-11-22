@@ -487,13 +487,12 @@ impl Inner {
             }
             (Blocked | Failed, _) => {
                 // Kept before the task can start again: its next run takes them as its prompt.
-                let before = self.keep_feedback(task_id, &prompt);
+                let before = self.keep_feedback(task_id, &prompt)?;
                 if let Err(e) = self.move_task(task_id, Ready).await {
-                    let mut waiting = lock(&self.pending_feedback);
-                    match before {
-                        Some(b) => waiting.insert(task_id.to_string(), b),
-                        None => waiting.remove(task_id),
-                    };
+                    self.clear_feedback(task_id)?;
+                    if let Some(b) = before {
+                        self.add_feedback(task_id, &b)?;
+                    }
                     return Err(e);
                 }
                 if let Some(worker) = &t.assignee {
@@ -514,7 +513,7 @@ impl Inner {
                 if now.status != Ready {
                     bail!("{} has just started; send your comments again in a moment", t.key);
                 }
-                self.keep_feedback(task_id, &prompt);
+                self.add_feedback(task_id, &prompt)?;
                 if let Some(worker) = &t.assignee {
                     note(worker)?;
                 }
@@ -544,15 +543,10 @@ impl Inner {
 
     /// Keep feedback for a task's next worker run, after what already waits there (the gate's
     /// own feedback, a hand-off note). Returns what waited before.
-    fn keep_feedback(&self, task_id: &str, text: &str) -> Option<String> {
-        let mut waiting = lock(&self.pending_feedback);
-        let before = waiting.get(task_id).cloned();
-        let all = match &before {
-            Some(b) => format!("{b}\n\n{text}"),
-            None => text.to_string(),
-        };
-        waiting.insert(task_id.to_string(), all);
-        before
+    fn keep_feedback(&self, task_id: &str, text: &str) -> anyhow::Result<Option<String>> {
+        let before = self.feedback(task_id)?;
+        self.add_feedback(task_id, text)?;
+        Ok(before)
     }
 
     /// Plans you merged without Codly (git on the command line, another tool): a done plan whose

@@ -475,6 +475,7 @@ mod tests {
             bin: "cli".into(),
             env: HashMap::new(),
             session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
             system_prompt: String::new(),
             read_only: false,
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), token.into())] }),
