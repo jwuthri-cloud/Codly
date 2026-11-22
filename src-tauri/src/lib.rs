@@ -4,7 +4,9 @@
 mod agent_controls;
 mod ask_me;
 mod boot;
+pub mod cli;
 mod commands;
+mod diagnostics;
 mod dictation;
 mod ide_commands;
 mod inbound;
@@ -12,6 +14,7 @@ mod hire_commands;
 mod onboarding_commands;
 #[cfg(test)]
 mod ipc_tests;
+mod logging;
 mod ui_bus;
 mod web;
 
@@ -30,9 +33,7 @@ use ui_bus::UiBus;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("CODLY_LOG").unwrap_or_else(|_| "info".into()))
-        .init();
+    logging::init();
 
     let serve = match web::from_args(&std::env::args().collect::<Vec<_>>()) {
         Ok(s) => s,
@@ -41,6 +42,10 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    // Said here, in the terminal you typed it in: an app that already runs serves for this one.
+    if let Some(s) = serve.as_ref().filter(|s| s.remote) {
+        eprintln!("{}", web::remote_warning(s));
+    }
     let (core_tx, core_rx) = watch::channel(None);
     let (hub_tx, hub_rx) = watch::channel(None);
     let bus = UiBus::new();
@@ -48,10 +53,16 @@ pub fn run() {
     let app = tauri::Builder::default()
         // must be registered first (plugins run in registration order)
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // `codly serve` while the app runs: this app serves too, and opens the browser.
-            if let Ok(Some(s)) = web::from_args(&argv) {
-                tauri::async_runtime::spawn(web::run(app.clone(), s, true));
-                return;
+            match web::from_args(&argv) {
+                // `codly serve` while the app runs: this app serves too, and opens the browser.
+                Ok(Some(s)) if !s.remote => {
+                    tauri::async_runtime::spawn(web::run(app.clone(), s, true));
+                    return;
+                }
+                // Not to the network: nobody sees the link this app would print, and its token
+                // is never kept. `web::remote_warning` told the terminal to quit Codly first.
+                Ok(Some(_)) => tracing::warn!("codly serve --allow-remote was not started: Codly is already open. Quit it, then run the command again."),
+                _ => {}
             }
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
@@ -228,9 +239,19 @@ pub fn run() {
             onboarding_commands::byok_configure,
             onboarding_commands::byok_save_key,
             onboarding_commands::byok_clear_key,
+            diagnostics::diagnostics,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
+
+    // The data dir is known from here on: the lines logged so far waited in memory.
+    match app.path().app_data_dir() {
+        Ok(dir) => match logging::open(&dir.join(logging::DIR)) {
+            Ok(()) => tracing::info!("Codly {} started", cli::VERSION),
+            Err(e) => tracing::warn!("no log file in {}: {e}", dir.display()),
+        },
+        Err(e) => tracing::warn!("no log file: {e}"),
+    }
 
     app.run(|handle, event| {
         if let RunEvent::Exit = event {

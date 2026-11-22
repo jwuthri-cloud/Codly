@@ -69,6 +69,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             crate::onboarding_commands::byok_status,
             crate::onboarding_commands::byok_configure,
             crate::onboarding_commands::byok_save_key,
+            crate::diagnostics::diagnostics,
         ])
         .build(tauri::generate_context!(test = true))
         .unwrap();
@@ -76,6 +77,15 @@ fn commands_round_trip_with_frontend_arg_names() {
 
     let clis = invoke(&wv, "detect_clis", json!({})).unwrap();
     assert!(clis.as_array().unwrap().len() >= 4, "{clis}");
+
+    // Settings → Troubleshooting: the report names the app, the core's state and every CLI.
+    let d = invoke(&wv, "diagnostics", json!({})).unwrap();
+    assert_eq!(d["version"], crate::cli::VERSION);
+    let report = d["report"].as_str().unwrap();
+    assert!(report.starts_with(&format!("Codly {}\nSystem: ", crate::cli::VERSION)) && report.contains("\nCore: running\n"), "{report}");
+    assert_eq!(report.lines().filter(|l| l.starts_with("- ")).count(), clis.as_array().unwrap().len(), "one line per CLI: {report}");
+    // This test opens no log file, and the report says so instead of leaving the part out.
+    assert!(d["log_file"].is_null() && report.contains("\nNo log file"), "{report}");
 
     // One account per installed CLI at least (its primary sign-in), the same either way.
     let installed = clis.as_array().unwrap().iter().filter(|c| !c["path"].is_null()).count();

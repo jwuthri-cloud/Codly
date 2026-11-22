@@ -2,7 +2,8 @@
 //! through Tauri's own IPC dispatch on the (hidden) main webview, so a browser runs exactly
 //! the handlers and ACL the window does. The UI bus and terminals, which use Channels in the
 //! window, are server-sent events here. Auth: the printed link carries a token, traded once
-//! for an HttpOnly cookie.
+//! for an HttpOnly cookie. It listens on this Mac only unless `--allow-remote` says otherwise:
+//! the traffic is plain HTTP, and a page can open a terminal.
 
 use std::convert::Infallible;
 use std::io::{Read, Write};
@@ -17,6 +18,7 @@ use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, Incoming};
+use hyper::header::HeaderValue;
 use hyper::{Method, Request, Response, StatusCode, header};
 use hyper_util::rt::TokioIo;
 use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponse, InvokeResponseBody};
@@ -26,28 +28,61 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::commands::AppState;
 
-const USAGE: &str = "usage: codly serve [--port N] [--host ADDR]";
+const USAGE: &str = "usage: codly serve [--port N] [--host ADDR] [--allow-remote]";
 
 pub struct Serve {
     pub host: String,
     pub port: u16,
+    /// Other machines can reach `host` (you passed `--allow-remote`).
+    pub remote: bool,
 }
 
-/// `codly serve [--port N] [--host ADDR]` (argv includes the program); None otherwise.
+/// `codly serve [--port N] [--host ADDR] [--allow-remote]` (argv includes the program); None
+/// otherwise. A host that other machines can reach is refused without `--allow-remote`.
 pub fn from_args(args: &[String]) -> Result<Option<Serve>, String> {
     if args.get(1).map(String::as_str) != Some("serve") {
         return Ok(None);
     }
-    let mut s = Serve { host: "127.0.0.1".into(), port: 4280 };
+    let mut s = Serve { host: "127.0.0.1".into(), port: 4280, remote: false };
+    let mut allow_remote = false;
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--port" => s.port = it.next().and_then(|p| p.parse().ok()).ok_or(USAGE)?,
             "--host" => s.host = it.next().cloned().ok_or(USAGE)?,
+            "--allow-remote" => allow_remote = true,
             other => return Err(format!("unknown option {other}; {USAGE}")),
         }
     }
+    s.remote = !is_loopback(&s.host);
+    if s.remote && !allow_remote {
+        return Err(format!(
+            "codly serve: --host {} would open Codly to your network over plain HTTP.\n{REMOTE_RISK}\n\
+             Safer: keep the default host and reach it through a tunnel: ssh -L {port}:127.0.0.1:{port} <this Mac>\n\
+             To go on anyway, add --allow-remote.",
+            s.host,
+            port = s.port
+        ));
+    }
     Ok(Some(s))
+}
+
+const REMOTE_RISK: &str = "Anyone who can reach this Mac and sees the link can open terminals and control your agents, and the traffic is not encrypted.";
+
+/// What `codly serve --host <addr> --allow-remote` says before it goes on.
+pub fn remote_warning(s: &Serve) -> String {
+    format!(
+        "Warning: Codly is open to your network on {}:{port} over plain HTTP.\n{REMOTE_RISK}\n\
+         The link works until Codly stops. Safer: an SSH tunnel to the default host: ssh -L {port}:127.0.0.1:{port} <this Mac>\n\
+         If the Codly app is already open, nothing is served: quit it, then run this again.",
+        s.host,
+        port = s.port
+    )
+}
+
+/// A host that only this Mac can reach.
+fn is_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 static SERVING: AtomicBool = AtomicBool::new(false);
@@ -66,11 +101,17 @@ pub async fn run(app: AppHandle, s: Serve, open: bool) {
 }
 
 async fn serve(app: AppHandle, s: Serve, open: bool) -> anyhow::Result<()> {
-    let token = token(&app.path().app_data_dir()?)?;
+    // A link that crossed the network must not work for ever: only this Mac gets the kept token.
+    let token = if s.remote { new_token()? } else { token(&app.path().app_data_dir()?)? };
     let listener = tokio::net::TcpListener::bind((s.host.as_str(), s.port))
         .await
         .with_context(|| format!("could not listen on {}:{} (is another app using it? try --port)", s.host, s.port))?;
-    let url = format!("http://{}:{}/?token={token}", s.host, s.port);
+    if s.remote {
+        tracing::warn!("codly serve is open to the network on {}:{} over plain HTTP (--allow-remote)", s.host, s.port);
+    }
+    // An IPv6 address goes in brackets in a link.
+    let host = if s.host.contains(':') { format!("[{}]", s.host) } else { s.host.clone() };
+    let url = format!("http://{host}:{}/?token={token}", s.port);
     println!("Codly is running at {url}\nPress Ctrl+C to stop.");
     if open {
         let _ = std::process::Command::new("open").arg(&url).spawn();
@@ -97,18 +138,41 @@ fn token(data_dir: &Path) -> anyhow::Result<String> {
     {
         return Ok(t.trim().to_string());
     }
-    let mut b = [0u8; 24];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
-    let t: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let t = new_token()?;
     std::fs::create_dir_all(data_dir)?;
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?.write_all(t.as_bytes())?;
     Ok(t)
 }
 
+fn new_token() -> anyhow::Result<String> {
+    let mut b = [0u8; 24];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
 type Res = Response<BoxBody<Bytes, Infallible>>;
 
 async fn handle(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
+    let path = req.uri().path().to_string();
+    let mut res = route(app, token, req).await;
+    secure(&mut res, &path);
+    res
+}
+
+/// Headers every answer carries: no type guessing, no referrer (the first link holds the
+/// token), no framing by another page, and nothing from the API or the token trade is stored.
+fn secure(res: &mut Res, path: &str) {
+    let h = res.headers_mut();
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    if path.starts_with("/api/") || h.contains_key(header::SET_COOKIE) {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+}
+
+async fn route(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
     let path = req.uri().path().to_string();
     let cookie = format!("codly_token={token}");
     // The printed link: trade the token for a cookie and drop it from the address bar.
@@ -135,7 +199,8 @@ async fn handle(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
             let cmd = p["/api/cmd/".len()..].to_string();
             command(&app, cmd, req).await
         }
-        (&Method::GET, p) => asset(&app, p),
+        (&Method::GET, WEB_FLAG) => reply(StatusCode::OK, "text/javascript", Bytes::from_static(b"window.__CODLY_WEB__=true")),
+        (&Method::GET, p) => asset(&app, p, req.headers().get(header::HOST).and_then(|v| v.to_str().ok())),
         _ => text(StatusCode::NOT_FOUND, "not found"),
     }
 }
@@ -289,17 +354,69 @@ fn pty(app: &AppHandle, id: &str) -> Res {
     }
 }
 
+/// The script that tells the UI to talk to this server (`isWebApp` in src/lib/api.ts). A file
+/// of its own, not an inline script: the page's content security policy refuses those.
+const WEB_FLAG: &str = "/codly-web.js";
+
 /// The UI the window loads; index.html tells it to talk to this server.
-fn asset(app: &AppHandle, path: &str) -> Res {
+fn asset(app: &AppHandle, path: &str, host: Option<&str>) -> Res {
     let path = if path == "/" { "index.html" } else { path.trim_start_matches('/') };
     let Some(a) = app.asset_resolver().get(path.to_string()) else { return text(StatusCode::NOT_FOUND, "not found") };
-    if path == "index.html" {
-        let html = String::from_utf8_lossy(&a.bytes).replacen("<head>", "<head><script>window.__CODLY_WEB__=true</script>", 1);
-        return reply(StatusCode::OK, &a.mime_type, html.into());
-    }
     // Tauri's resolver calls what it doesn't know (3D models) text/html.
     let mime = if a.mime_type.starts_with("text/html") && !path.ends_with(".html") { "application/octet-stream" } else { &a.mime_type };
-    reply(StatusCode::OK, mime, a.bytes.into())
+    let body: Bytes = if path == "index.html" { web_index(&String::from_utf8_lossy(&a.bytes)).into() } else { a.bytes.into() };
+    let mut res = reply(StatusCode::OK, mime, body);
+    // The window gets the page's policy from Tauri (tauri.conf.json); a browser gets it here.
+    if let Some(csp) = &a.csp_header {
+        match HeaderValue::from_str(&web_csp(csp, host)) {
+            Ok(csp) => drop(res.headers_mut().insert(header::CONTENT_SECURITY_POLICY, csp)),
+            Err(e) => return text(StatusCode::INTERNAL_SERVER_ERROR, &format!("the page's content security policy is not a valid header: {e}")),
+        }
+    }
+    res
+}
+
+fn web_index(html: &str) -> String {
+    html.replacen("<head>", &format!("<head><script src=\"{WEB_FLAG}\"></script>"), 1)
+}
+
+/// The window's content security policy, for a browser: Tauri's own schemes go (a browser has
+/// no `ipc:` or `asset:`), what only the browser UI loads stays allowed, and no other page may
+/// put the app in a frame.
+fn web_csp(csp: &str, host: Option<&str>) -> String {
+    const TAURI_ONLY: [&str; 4] = ["ipc:", "http://ipc.localhost", "asset:", "http://asset.localhost"];
+    // Next to the nonces and hashes Tauri lists for the page's scripts: `WEB_FLAG` is a file of
+    // the page's own, and the voice worklet is loaded from a blob (src/lib/state/voice.svelte.ts).
+    const SCRIPTS: [&str; 2] = ["'self'", "blob:"];
+    // Only a plain `host[:port]` may go into the header.
+    let host = host.filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b)));
+    let mut directives: Vec<(&str, Vec<String>)> = Vec::new();
+    for directive in csp.split(';') {
+        let mut words = directive.split_ascii_whitespace();
+        match words.next() {
+            None | Some("frame-ancestors") => {}
+            Some(name) => directives.push((name, words.filter(|s| !TAURI_ONLY.contains(s)).map(String::from).collect())),
+        }
+    }
+    if !directives.iter().any(|(name, _)| *name == "script-src") {
+        directives.push(("script-src", Vec::new()));
+    }
+    for (name, sources) in &mut directives {
+        match (*name, host) {
+            ("script-src", _) => {
+                for s in SCRIPTS {
+                    if !sources.iter().any(|x| x == s) {
+                        sources.push(s.into());
+                    }
+                }
+            }
+            // The voice WebSocket: older browsers do not count `ws:` on the same host as 'self'.
+            ("connect-src", Some(host)) => sources.push(format!("ws://{host}")),
+            _ => {}
+        }
+    }
+    directives.push(("frame-ancestors", vec!["'none'".into()]));
+    directives.iter().map(|(name, sources)| format!("{name} {}", sources.join(" "))).collect::<Vec<_>>().join("; ")
 }
 
 fn sse(event: &str, data: &str) -> Bytes {
@@ -364,9 +481,77 @@ mod tests {
         assert!(from_args(&a("codly mcp")).unwrap().is_none());
         let s = from_args(&a("codly serve")).unwrap().unwrap();
         assert_eq!((s.host.as_str(), s.port), ("127.0.0.1", 4280));
-        let s = from_args(&a("codly serve --port 9000 --host 0.0.0.0")).unwrap().unwrap();
-        assert_eq!((s.host.as_str(), s.port), ("0.0.0.0", 9000));
+        assert!(!s.remote);
+        let s = from_args(&a("codly serve --port 9000 --host localhost")).unwrap().unwrap();
+        assert_eq!((s.host.as_str(), s.port), ("localhost", 9000));
         assert!(from_args(&a("codly serve --port x")).is_err());
         assert!(from_args(&a("codly serve --nope")).is_err());
+    }
+
+    #[test]
+    fn only_this_mac_unless_you_allow_the_network() {
+        let a = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        // Hosts only this Mac can reach need no flag, and keep the token of the install.
+        for host in ["127.0.0.1", "127.0.0.2", "localhost", "LOCALHOST", "::1"] {
+            let s = from_args(&a(&format!("codly serve --host {host}"))).unwrap().unwrap();
+            assert!(!s.remote, "{host}");
+        }
+        assert!(!from_args(&a("codly serve --allow-remote")).unwrap().unwrap().remote, "the flag alone opens nothing");
+        // Any other host is refused, with the reason and the way on.
+        for host in ["0.0.0.0", "192.168.1.20", "::", "my-mac.local"] {
+            let Err(e) = from_args(&a(&format!("codly serve --port 9000 --host {host}"))) else { panic!("{host} was accepted") };
+            assert!(e.contains(&format!("--host {host}")) && e.contains("plain HTTP") && e.contains("--allow-remote"), "{e}");
+            assert!(e.contains("ssh -L 9000:127.0.0.1:9000"), "{e}");
+        }
+        let s = from_args(&a("codly serve --port 9000 --host 0.0.0.0 --allow-remote")).unwrap().unwrap();
+        assert_eq!((s.host.as_str(), s.port, s.remote), ("0.0.0.0", 9000, true));
+        assert!(from_args(&a("codly serve --allow-remote --host 192.168.1.20")).unwrap().unwrap().remote, "in any order");
+        let w = remote_warning(&s);
+        assert!(w.starts_with("Warning: Codly is open to your network on 0.0.0.0:9000 over plain HTTP.") && w.contains("open terminals"), "{w}");
+        assert!(w.ends_with("If the Codly app is already open, nothing is served: quit it, then run this again."), "{w}");
+    }
+
+    #[test]
+    fn every_answer_carries_the_security_headers() {
+        let headers = |mut res: Res, path: &str| {
+            secure(&mut res, path);
+            res.headers().clone()
+        };
+        let get = |h: &hyper::HeaderMap, k: header::HeaderName| h.get(k).map(|v| v.to_str().unwrap().to_string());
+        let page = headers(text(StatusCode::OK, "hello"), "/");
+        assert_eq!(get(&page, header::X_CONTENT_TYPE_OPTIONS).as_deref(), Some("nosniff"));
+        assert_eq!(get(&page, header::REFERRER_POLICY).as_deref(), Some("no-referrer"));
+        assert_eq!(get(&page, header::X_FRAME_OPTIONS).as_deref(), Some("DENY"));
+        assert_eq!(get(&page, header::CACHE_CONTROL), None, "the UI's files may be cached");
+        // The API, its event streams and the token trade are never stored.
+        assert_eq!(get(&headers(text(StatusCode::OK, "{}"), "/api/cmd/list_repos"), header::CACHE_CONTROL).as_deref(), Some("no-store"));
+        let (_tx, rx) = mpsc::unbounded_channel();
+        assert_eq!(get(&headers(stream(rx), "/api/events"), header::CACHE_CONTROL).as_deref(), Some("no-store"));
+        let trade = Response::builder().status(StatusCode::SEE_OTHER).header(header::SET_COOKIE, "codly_token=t").body(full(Bytes::new())).unwrap();
+        assert_eq!(get(&headers(trade, "/"), header::CACHE_CONTROL).as_deref(), Some("no-store"));
+    }
+
+    #[test]
+    fn the_browser_gets_the_window_policy() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let window = conf["app"]["security"]["csp"].as_str().expect("the app has a content security policy");
+        assert_eq!(
+            web_csp(window, Some("127.0.0.1:4280")),
+            "default-src 'self'; connect-src 'self' ws://127.0.0.1:4280; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; \
+             font-src 'self' data:; worker-src 'self' blob:; frame-src blob:; object-src blob:; script-src 'self' blob:; frame-ancestors 'none'"
+        );
+        // What Tauri adds for the page's own scripts stays; the flag script and the voice worklet are allowed.
+        let csp = web_csp("default-src 'self'; script-src 'self' 'nonce-123' 'sha256-abc='; frame-ancestors *", None);
+        assert_eq!(csp, "default-src 'self'; script-src 'self' 'nonce-123' 'sha256-abc=' blob:; frame-ancestors 'none'");
+        assert_eq!(web_csp("script-src 'nonce-123'", None), "script-src 'nonce-123' 'self' blob:; frame-ancestors 'none'");
+        // A Host header is the client's text: only a plain host goes into the policy.
+        assert_eq!(web_csp("connect-src 'self'", Some("evil.test; script-src *")), "connect-src 'self'; script-src 'self' blob:; frame-ancestors 'none'");
+        assert_eq!(web_csp("connect-src 'self'", Some("[::1]:4280")), "connect-src 'self' ws://[::1]:4280; script-src 'self' blob:; frame-ancestors 'none'");
+    }
+
+    #[test]
+    fn the_page_learns_it_is_served_without_an_inline_script() {
+        let html = web_index("<!doctype html><html><head><title>Codly</title></head><body></body></html>");
+        assert_eq!(html, "<!doctype html><html><head><script src=\"/codly-web.js\"></script><title>Codly</title></head><body></body></html>");
     }
 }

@@ -151,6 +151,7 @@
     "allow-byok-status",
     "allow-byok-configure",
     "allow-byok-save-key",
-    "allow-byok-clear-key"
+    "allow-byok-clear-key",
+    "allow-diagnostics"
   ]
 }

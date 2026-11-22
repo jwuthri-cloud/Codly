@@ -12,6 +12,7 @@
   import SkillsManager from './overlays/SkillsManager.svelte';
   import { skillsUi } from './lib/state/skills.svelte';
   import IdeOverlay from './ide/IdeOverlay.svelte';
+  import DiagnosticsReport from './components/DiagnosticsReport.svelte';
   import EmptyState from './components/EmptyState.svelte';
   import Logo from './components/Logo.svelte';
   import Toasts from './components/Toasts.svelte';
@@ -68,6 +69,8 @@
   <div class="boot center" data-tauri-drag-region>
     <EmptyState title="Codly couldn’t start." body={store.error}>
       <button class="btn primary" onclick={() => store.retry()}>Try again</button>
+      <!-- Something to attach to a bug report: it is built without the core that just failed. -->
+      <DiagnosticsReport />
     </EmptyState>
   </div>
 {:else if ui.onboarded}

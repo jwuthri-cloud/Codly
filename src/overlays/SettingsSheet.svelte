@@ -25,6 +25,7 @@
   import TeamSection from './TeamSection.svelte';
   import TriggersSection from './TriggersSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
+  import DiagnosticsReport from '../components/DiagnosticsReport.svelte';
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
   import FullAccessConfirm from '../onboarding/FullAccessConfirm.svelte';
@@ -225,6 +226,12 @@
     </section>
 
     <HousekeepingSection />
+
+    <section>
+      <h3 class="eyebrow">Troubleshooting</h3>
+      <p class="desc">For a bug report: the Codly version, your system, your agent CLIs and the last log lines. Tokens, keys, email addresses and paths under your home folder are taken out. Repository and agent names can remain: read it before you share it.</p>
+      <DiagnosticsReport preview />
+    </section>
     {:else if tab === 'team'}
     <TeamSection />
 

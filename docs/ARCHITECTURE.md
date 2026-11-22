@@ -50,9 +50,22 @@ Codly.app (Tauri, one process)
 server on 127.0.0.1: `POST /api/cmd/<name>` runs a command through Tauri's own IPC dispatch on
 that window (same handlers, same ACL), and the two Channels become server-sent events
 (`/api/events` for the UI bus, `/api/pty/<id>` for a terminal). A token, printed in the link
-and kept in the data dir, is traded once for an HttpOnly cookie. `/api/voice/ws` is passed
+and kept in the data dir, is traded once for an HttpOnly cookie. Pages carry the window's
+content security policy and `nosniff`, no-referrer and no-framing headers. Another `--host` is
+refused without `--allow-remote` (plain HTTP, and a page can open a terminal); a served-to-the-
+network run gets a token of its own that is never kept. An app that is already open serves for
+a second `codly serve`, but not to the network: nobody would see the link it prints.
+
+`/api/voice/ws` is passed
 through to an optional voice relay on the same machine (`voice/relay.py`, OpenAI Realtime);
 without the relay the call fails with "the voice relay is not running".
+
+Logs go to stdout and to `<data dir>/logs/codly.log` (src-tauri/src/logging.rs: 5 MB, one older
+file kept; a panic hook writes the place and backtrace). Settings → Troubleshooting builds a
+report from the shell side (src-tauri/src/diagnostics.rs), so it works when the core did not
+start, and scrubs tokens, keys, emails and paths under the home folder from it (repository and
+agent names stay). The file takes debug lines from Codly's own crates only (`CODLY_LOG=debug`):
+a library's debug output stays on stdout.
 
 PATH: GUI apps get launchd's minimal PATH, so Codly captures the login shell env once
 (`$SHELL -ilc '/usr/bin/env -0'`, 5 s timeout) and resolves each CLI on it at every spawn.
