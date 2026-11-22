@@ -3,6 +3,7 @@
 // crates/codly-core/src/housekeeping/storage.rs (the tested original): a cleanup removes only
 // what is finished, merged, clean and not in use; a dirty or unmerged worktree goes only with
 // `force`, and keeps its branch unless the branch is asked for too.
+import type { DbBackup } from '../gen/DbBackup';
 import type { StorageCleanup } from '../gen/StorageCleanup';
 import type { StoragePolicy } from '../gen/StoragePolicy';
 import type { StorageReport } from '../gen/StorageReport';
@@ -10,7 +11,8 @@ import type { StoredBranch } from '../gen/StoredBranch';
 import type { StoredWorktree } from '../gen/StoredWorktree';
 
 const DAY = 86_400_000;
-const ROOT = '~/Library/Application Support/dev.codly.desktop/worktrees/demo-1a2b3c';
+const DATA = '~/Library/Application Support/dev.codly.desktop';
+const ROOT = `${DATA}/worktrees/demo-1a2b3c`;
 /** Bytes of one run log in the demo. */
 const LOG = 1_400_000;
 
@@ -23,6 +25,8 @@ export class StorageDemo {
   private branches: Kept<StoredBranch>[];
   /** When each run log was last written. */
   private logs: number[];
+  /** Copies of the database, newest first: the last daily ones and one from before an update. */
+  private backups: DbBackup[];
 
   constructor(now: number) {
     const wt = (name: string, owner: string, days: number, size: number, more: Partial<Kept<StoredWorktree>>): Kept<StoredWorktree> => ({
@@ -51,6 +55,8 @@ export class StorageDemo {
       { name: 'codly/export-csv-77ab/integration', head: 'c3d4e5f60718293a4b5c6d7e8f9012345678a1b2', owner: 'Plan: Export to CSV', unmerged_commits: 2, locked: null, last_commit_at: now - 19 * DAY, finished: true },
     ];
     this.logs = Array.from({ length: 46 }, (_, i) => now - i * 1.5 * DAY);
+    const copy = (kind: DbBackup['kind'], at: number, schema: number, size: number): DbBackup => ({ path: `${DATA}/backups/codly-${at}-v${schema}-${kind}.sqlite`, kind, created_at: at, schema, bytes: size });
+    this.backups = [copy('daily', now - 0.2 * DAY, 6, 48e6), copy('daily', now - 1.2 * DAY, 6, 47e6), copy('daily', now - 2.2 * DAY, 6, 45e6), copy('update', now - 9 * DAY, 5, 31e6)];
   }
 
   handle(cmd: string, a: Record<string, unknown>, now: number): unknown {
@@ -79,6 +85,7 @@ export class StorageDemo {
       offices: [{ office_id: 'demo', name: 'demo', repo_path: '~/code/demo', worktrees: this.worktrees.map(strip), branches: this.branches.map(strip), problem: null }],
       logs: { items: this.logs.length, bytes: this.logs.length * LOG },
       artifacts: { items: 37, bytes: 61e6 },
+      backups: this.backups,
     };
   }
 

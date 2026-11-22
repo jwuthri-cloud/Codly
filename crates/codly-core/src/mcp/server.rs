@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -15,6 +16,8 @@ use crate::adapters::McpLaunch;
 pub struct McpServer {
     sock_path: PathBuf,
     tokens: Mutex<HashMap<String, ToolCtx>>,
+    /// How long a call to a tool may take before its caller is answered anyway.
+    time_limit: fn(&str) -> Duration,
 }
 
 /// macOS caps `sun_path` at 104 bytes; fall back to /tmp for long data dirs. /tmp is shared:
@@ -45,6 +48,11 @@ fn ours(meta: &std::fs::Metadata) -> bool {
 
 impl McpServer {
     pub async fn start(preferred_sock: PathBuf, handler: ToolHandler) -> anyhow::Result<Arc<Self>> {
+        Self::start_with(preferred_sock, handler, tools::time_limit).await
+    }
+
+    /// `start` with the time limit of each tool given (tests: a tool that never answers).
+    async fn start_with(preferred_sock: PathBuf, handler: ToolHandler, time_limit: fn(&str) -> Duration) -> anyhow::Result<Arc<Self>> {
         let sock_path = socket_path(&preferred_sock);
         // A stale socket from a crashed run would make bind fail. Only remove our own sockets,
         // never files.
@@ -61,7 +69,7 @@ impl McpServer {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
         }
-        let server = Arc::new(McpServer { sock_path, tokens: Mutex::new(HashMap::new()) });
+        let server = Arc::new(McpServer { sock_path, tokens: Mutex::new(HashMap::new()), time_limit });
         let accept = server.clone();
         tokio::spawn(async move {
             loop {
@@ -142,9 +150,22 @@ impl McpServer {
             return json!({ "ok": false, "error": format!("tool {tool} is not available to this agent") });
         }
         let args = req.get("args").cloned().unwrap_or(json!({}));
-        match handler(ctx, tool, args).await {
-            Ok(result) => json!({ "ok": true, "result": result }),
-            Err(error) => json!({ "ok": false, "error": error }),
+        let limit = (self.time_limit)(&tool);
+        // The call runs as a task of its own: when the limit passes, the caller is answered
+        // and the call still runs to its end. Cutting it in the middle could leave half of
+        // its work behind (a plan without its tasks).
+        let call = tokio::spawn(handler(ctx, tool.clone(), args));
+        match tokio::time::timeout(limit, call).await {
+            Ok(Ok(Ok(result))) => json!({ "ok": true, "result": result }),
+            Ok(Ok(Err(error))) => json!({ "ok": false, "error": error }),
+            Ok(Err(e)) => {
+                tracing::error!("the MCP tool {tool} stopped: {e}");
+                json!({ "ok": false, "error": format!("{tool} failed inside Codly; read codly_board before you try it again") })
+            }
+            Err(_) => {
+                tracing::warn!("the MCP tool {tool} did not answer within {limit:?}");
+                json!({ "ok": false, "error": tools::slow_answer(limit) })
+            }
         }
     }
 }
@@ -198,5 +219,49 @@ mod tests {
         assert_eq!(bad["ok"], false);
         let list = call(json!({ "token": token, "tool": "__list" })).await;
         assert!(list["result"].as_array().unwrap().len() >= 9);
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_never_answers_does_not_hang_its_caller() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        let handler: ToolHandler = Arc::new(move |_ctx, tool, _args| {
+            let done = done.clone();
+            Box::pin(async move {
+                match tool.as_str() {
+                    "codly_board" => std::future::pending().await,
+                    // Slower than the limit, but it ends.
+                    "codly_post_note" => {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        done.store(true, Ordering::SeqCst);
+                        Ok(json!("noted"))
+                    }
+                    _ => Ok(json!("here")),
+                }
+            })
+        });
+        let srv = McpServer::start_with(dir.path().join("t.sock"), handler, |_| Duration::from_millis(50)).await.unwrap();
+        let token = srv.register(ToolCtx { agent_id: "a1".into(), run_id: "r1".into(), task_id: None, role: Role::Worker });
+
+        // One connection, as the bridge of one agent uses it, call after call.
+        let stream = UnixStream::connect(srv.sock_path()).await.unwrap();
+        let (r, mut w) = stream.into_split();
+        let mut lines = BufReader::new(r).lines();
+        let mut answers = vec![];
+        for tool in ["codly_board", "codly_get_task", "codly_post_note"] {
+            w.write_all(format!("{}\n", json!({ "token": token, "tool": tool, "args": {} })).as_bytes()).await.unwrap();
+            let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await.expect("the server answers").unwrap().unwrap();
+            answers.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+        let slow = json!({ "ok": false, "error": tools::slow_answer(Duration::from_millis(50)) });
+        assert_eq!(answers[0], slow, "the caller of a tool that hangs is answered");
+        assert_eq!(answers[1], json!({ "ok": true, "result": "here" }), "the same connection serves the next call");
+        // A call that is only slow is not cut: its work is done after its caller was answered.
+        assert_eq!(answers[2], slow);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(finished.load(Ordering::SeqCst), "the slow call ran to its end");
     }
 }

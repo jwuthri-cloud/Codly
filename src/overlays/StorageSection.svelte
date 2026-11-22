@@ -3,7 +3,8 @@
   Run logs have a time limit. Worktrees and codly/… branches of finished, merged work are
   cleaned up by the core: a day after the plan ended, or at once with "Clean up now". The list
   is loaded when you ask for it, because it measures every worktree. A delete that loses work
-  asks first and names what is lost; the core refuses it without that confirm.
+  asks first and names what is lost; the core refuses it without that confirm. The list also
+  shows the backups of Codly's own database (the core makes and removes them).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -15,7 +16,7 @@
   import { Loader } from '../lib/state/loader.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { ago, plural } from '../lib/util/format';
-  import { branchLossText, bytes, cleanupText, lossText, stateText } from '../lib/util/storage';
+  import { backupText, branchLossText, bytes, cleanupText, lossText, stateText } from '../lib/util/storage';
   import Icon from '../components/Icon.svelte';
   import LoadError from '../components/LoadError.svelte';
 
@@ -149,6 +150,26 @@
   {/if}
 
   {#if r}
+    <div class="office">
+      <div class="o-head"><span class="o-name">Backups of Codly’s data</span></div>
+      <p class="desc">Codly copies its database once a day and before an update changes it, and keeps the last few of each. If the database is ever damaged, Codly offers to start from the newest copy.</p>
+      {#if r.backups.length}
+        <ul class="items" aria-label="Backups of Codly’s data">
+          {#each r.backups as b (b.path)}
+            <li>
+              <div class="i-top">
+                <span class="i-name" title={b.path}>{backupText(b)}</span>
+                <span class="grow"></span>
+                <span class="muted small num">{bytes(b.bytes)}</span>
+              </div>
+              <span class="muted small">made {ago(b.created_at)}</span>
+            </li>
+          {/each}
+        </ul>
+      {:else}
+        <p class="desc">No backup yet. The first one is made a moment after Codly starts.</p>
+      {/if}
+    </div>
     {#each r.offices as o (o.office_id)}
       <div class="office">
         <div class="o-head"><span class="o-name">{o.name}</span><span class="muted small path">{o.repo_path}</span></div>

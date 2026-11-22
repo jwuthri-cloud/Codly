@@ -390,7 +390,9 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
-  store/            SQLite: schema.sql, later migrations (m2…m4), typed queries
+  store/            SQLite: schema.sql, later migrations (m2…m4), typed queries; backup.rs: a copy
+                    of the database once a day and before a migration (`<data dir>/backups/`), and
+                    the way back from a database that cannot be used (it is moved aside, never deleted)
   git.rs            worktrees, commits, merges, push (shells out to the user's git)
   mcp/              server.rs (Unix socket), bridge.rs (`codly mcp`), tools.rs (tool specs)
   index/            code retrieval: FTS5 over paths, symbols and chunks; pointer packs
@@ -416,7 +418,8 @@ crates/codly-core/        build.rs (builds in the ready-made lots), skills/catal
 src-tauri/src/            the macOS shell
   main.rs lib.rs    entry point; window, plugins, the command list
   cli.rs            what `codly <arguments>` asks for, decided before a window or a server starts
-  boot.rs           starts the core, and starts it again after a failed start (`retry_core`)
+  boot.rs           starts the core, and starts it again after a failed start (`retry_core`); when
+                    the database cannot be used: `start_problem`, `recover_database`
   logging.rs        the log file (`<data dir>/logs/codly.log`) and the panic hook
   diagnostics.rs    Settings → Troubleshooting: the scrubbed report for a bug report
   commands.rs       most Tauri commands: thin wrappers over Core

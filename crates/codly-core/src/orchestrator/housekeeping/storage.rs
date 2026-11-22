@@ -255,7 +255,7 @@ impl Core {
     }
 
     /// What Codly holds on disk and in each repository: worktrees with their state and size,
-    /// `codly/…` branches without a worktree, run logs and artifact copies.
+    /// `codly/…` branches without a worktree, run logs, artifact copies and database backups.
     pub async fn storage(&self) -> anyhow::Result<StorageReport> {
         let mut offices = vec![];
         for office in self.inner.store.offices()? {
@@ -265,6 +265,7 @@ impl Core {
             offices,
             logs: storage::measure(self.inner.data("runs")).await,
             artifacts: storage::measure(self.inner.data("artifacts")).await,
+            backups: self.inner.store.backups(),
         })
     }
 
@@ -520,6 +521,15 @@ mod tests {
         assert_eq!((branch.name.as_str(), branch.unmerged_commits, branch.owner.as_deref()), ("codly/p1/t2", 0, Some("Task t2: Task t2")));
         core.delete_branch(&ws.id, &branch.name, &branch.head, false).await.unwrap();
         assert!(!inner.git.branch_exists(&repo, "codly/p1/t2").await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_report_lists_the_copies_of_the_database() {
+        let (_dir, core, _ws, _repo) = start().await;
+        assert!(core.storage().await.unwrap().backups.is_empty());
+        let copy = core.inner.store.backup_if_due(now_ms()).unwrap().expect("no copy yet: one is due");
+        assert!(copy.bytes > 0);
+        assert_eq!(core.storage().await.unwrap().backups, [copy]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

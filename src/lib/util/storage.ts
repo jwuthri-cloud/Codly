@@ -1,6 +1,7 @@
 // Words for Settings → Storage: sizes, what state a worktree is in, and what a delete would
 // lose. The core decides what may go (crates/codly-core/src/housekeeping/storage.rs); this
 // only says it.
+import type { DbBackup } from '../gen/DbBackup';
 import type { StorageCleanup } from '../gen/StorageCleanup';
 import type { StoredBranch } from '../gen/StoredBranch';
 import type { StoredWorktree } from '../gen/StoredWorktree';
@@ -12,6 +13,9 @@ export function bytes(n: number): string {
   if (n < 1e9) return `${Math.round(n / 1e6)} MB`;
   return `${(n / 1e9).toFixed(1)} GB`;
 }
+
+/** What a copy of Codly's database is: made once a day, or before an update changed the data. */
+export const backupText = (b: Pick<DbBackup, 'kind'>): string => (b.kind === 'daily' ? 'Daily copy' : 'Copy from before an update');
 
 /** One line for the list: "Merged, clean", "3 files not committed, 2 commits not merged". */
 export function stateText(w: Pick<StoredWorktree, 'state' | 'dirty_count' | 'unmerged_commits'>): string {

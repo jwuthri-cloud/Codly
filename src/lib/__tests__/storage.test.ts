@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { StorageDemo } from '../demo/storage';
 import type { StorageCleanup } from '../gen/StorageCleanup';
 import type { StorageReport } from '../gen/StorageReport';
-import { branchLossText, bytes, cleanupText, lossText, stateText } from '../util/storage';
+import { backupText, branchLossText, bytes, cleanupText, lossText, stateText } from '../util/storage';
 
 describe('storage words', () => {
   it('sizes read as in Finder', () => {
@@ -30,6 +30,11 @@ describe('storage words', () => {
     expect(branchLossText({ unmerged_commits: 3 })).toBe('You lose 3 commits that no other branch has.');
   });
 
+  it('a backup says when Codly made it', () => {
+    expect(backupText({ kind: 'daily' })).toBe('Daily copy');
+    expect(backupText({ kind: 'update' })).toBe('Copy from before an update');
+  });
+
   it('a cleanup says what went', () => {
     const none: StorageCleanup = { worktrees: 0, branches: 0, logs: 0, bytes: 0, problems: [] };
     expect(cleanupText(none)).toBe('Nothing to clean up.');
@@ -54,6 +59,16 @@ describe('the demo follows the core’s storage rules', () => {
     expect(after.worktrees).toHaveLength(before.worktrees.length - 1);
     expect(after.branches.map((b) => b.unmerged_commits)).toEqual([2]);
     expect((d.handle('storage_clean', {}, NOW) as StorageCleanup).worktrees).toBe(0);
+  });
+
+  it('the report lists the backups of the database, newest first, and a cleanup leaves them', () => {
+    const d = new StorageDemo(NOW);
+    const backups = () => (d.handle('storage_report', {}, NOW) as StorageReport).backups;
+    const before = backups();
+    expect(before.map((b) => b.kind)).toEqual(['daily', 'daily', 'daily', 'update']);
+    expect(before.map((b) => b.created_at)).toEqual([...before.map((b) => b.created_at)].sort((a, b) => b - a));
+    d.handle('storage_clean', {}, NOW);
+    expect(backups()).toEqual(before);
   });
 
   it('logs stay for ever when the limit is 0', () => {
