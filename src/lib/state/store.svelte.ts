@@ -375,7 +375,8 @@ class CodlyStore {
         this.lastId = ev.id;
         this.events.push(ev);
         persisted = true;
-      } else live = true;
+      } else if (this.staleAgent(ev)) continue;
+      else live = true;
       if (!this.sessionStart) this.sessionStart = ev.ts;
       this.applyEntity(ev);
       this.derive(ev, false);
@@ -387,6 +388,16 @@ class CodlyStore {
   }
 
   // ───────────── entities (only from live events, never from snapshot replay) ─────────────
+
+  /** An agent's live change (id 0: what it is doing now, its usage; the log keeps no row of it)
+   *  that is older than the agent we hold. One that waited for a snapshot must not undo it, or
+   *  bring back an agent that was let go meanwhile. */
+  private staleAgent(ev: EventRow): boolean {
+    if (ev.id !== 0 || ev.kind.type !== 'agent_changed') return false;
+    const agent = ev.kind.agent;
+    const known = this.agents.find((a) => a.id === agent.id);
+    return !known || known.updated_at > agent.updated_at;
+  }
 
   private patchAgent(id: string | null, patch: Partial<Agent>) {
     if (!id) return;

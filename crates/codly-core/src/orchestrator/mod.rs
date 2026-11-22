@@ -408,7 +408,8 @@ impl Core {
         Ok(Arc::new(Core { inner }))
     }
 
-    /// Live stream of every event: persisted rows (id > 0) and ephemeral deltas (id = 0).
+    /// Live stream of every event: persisted rows (id > 0), and with id = 0 the ephemeral
+    /// deltas and an agent's live changes (its activity and usage: `update_agent`).
     pub fn subscribe(&self) -> broadcast::Receiver<EventRow> {
         self.inner.bus.subscribe()
     }
@@ -1016,6 +1017,20 @@ fn refresh_career(a: &mut Agent) {
     crate::career::refresh(&mut a.career, hired, now_ms());
 }
 
+/// Agent fields that follow every tool call: what it is doing right now, and its usage.
+/// `update_agent` shows a change to these alone live and keeps it out of the event log.
+const LIVE_AGENT_FIELDS: [&str; 3] = ["activity", "activity_label", "usage"];
+
+/// An agent (as JSON) without its live fields: the part whose changes the event log records.
+fn without_live_fields(mut agent: Value) -> Value {
+    if let Some(fields) = agent.as_object_mut() {
+        for name in LIVE_AGENT_FIELDS {
+            fields.remove(name);
+        }
+    }
+    agent
+}
+
 /// Whether an agent is at home now, and until when ("14:05", your local clock).
 pub(crate) fn at_home(a: &Agent, now: i64) -> Option<String> {
     let until = a.away_until.filter(|t| *t > now)?;
@@ -1198,18 +1213,38 @@ impl Inner {
         )
     }
 
+    /// Load-modify-save an agent atomically, like `update_row`. A change to `LIVE_AGENT_FIELDS`
+    /// only (every tool call makes two) is saved on the agent row and broadcast with id 0, but
+    /// adds no `agent_changed` row to the event log: the tool and usage events that caused it
+    /// are already there, and a full Agent per tool call would bury them.
     fn update_agent(&self, id: &str, f: impl FnOnce(&mut Agent)) -> anyhow::Result<Agent> {
-        self.update_row(
-            "agent",
-            id,
-            |a| {
-                f(a);
-                refresh_career(a);
-                Ok(())
-            },
-            |a: &Agent| row(Some(&a.id), a.task_id.as_deref(), a.run_id.as_deref(), EventKind::AgentChanged { agent: a.clone() }),
-            |a| a.updated_at = now_ms(),
-        )
+        let (agent, ev, ws) = self.store.tx(|tx| {
+            let (json, ws): (String, Option<String>) = tx
+                .query_row("SELECT json, workspace_id FROM agent WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .ok_or_else(|| anyhow!("unknown agent {id}"))?;
+            let mut a: Agent = serde_json::from_str(&json)?;
+            let before = serde_json::to_value(&a)?;
+            f(&mut a);
+            refresh_career(&mut a);
+            let after = serde_json::to_value(&a)?;
+            if after == before {
+                return Ok((a, None, ws));
+            }
+            // Strictly later than the last change, so the UI can tell which of two is newer.
+            a.updated_at = now_ms().max(a.updated_at + 1);
+            let mut ev = row(Some(&a.id), a.task_id.as_deref(), a.run_id.as_deref(), EventKind::AgentChanged { agent: a.clone() });
+            if without_live_fields(after) == without_live_fields(before) {
+                store::save_live_agent(tx, &a)?;
+            } else {
+                ev.id = store::insert_event(tx, ws.as_deref(), &ev)?;
+            }
+            Ok((a, Some(ev), ws))
+        })?;
+        if let Some(ev) = ev {
+            self.publish(ws.as_deref(), &ev);
+        }
+        Ok(agent)
     }
 
     fn update_plan(&self, id: &str, f: impl FnOnce(&mut Plan) -> anyhow::Result<()>) -> anyhow::Result<Plan> {
@@ -1427,5 +1462,78 @@ mod attachment_tests {
         assert_eq!(attachment_name(".env"), "env");
         assert_eq!(attachment_name(""), "file");
         assert_eq!(attachment_name("a$b`c.txt"), "a_b_c.txt");
+    }
+}
+
+#[cfg(test)]
+mod live_agent_tests {
+    use super::*;
+
+    /// The newest `agent_changed` of `id` waiting on the bus: (event id, the agent it carries).
+    fn changed(bus: &mut broadcast::Receiver<EventRow>, id: &str) -> Option<(i64, Agent)> {
+        let mut last = None;
+        while let Ok(ev) = bus.try_recv() {
+            if let EventKind::AgentChanged { agent } = ev.kind
+                && agent.id == id
+            {
+                last = Some((ev.id, agent));
+            }
+        }
+        last
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tool_call_changes_the_agent_without_a_row_in_the_log() {
+        let root = tempfile::tempdir().unwrap();
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: root.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let inner = &core.inner;
+        let ws = Workspace {
+            id: new_id(),
+            repo_path: "/tmp/repo".into(),
+            name: "repo".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: now_ms(),
+        };
+        inner.store.upsert_workspace(&ws).unwrap();
+        let hired = inner.create_agent(&ws.id, "Ada", Provider::Claude, Role::Worker, 0, None).unwrap();
+        let agent_rows = || {
+            let events = inner.store.events(Some(&ws.id), Some(&hired.id), None, 100).unwrap();
+            events.iter().filter(|e| e.kind.type_name() == "agent_changed").count()
+        };
+        assert_eq!(agent_rows(), 1, "the hire is on record");
+        let mut bus = core.subscribe();
+
+        // What a tool call and a usage report do: the screen follows, the log does not grow.
+        inner
+            .update_agent(&hired.id, |a| {
+                a.activity = Some(ActivityKind::Edit);
+                a.activity_label = Some("app.ts".into());
+                a.usage.input_tokens = 9;
+            })
+            .unwrap();
+        assert_eq!(agent_rows(), 1);
+        let saved = inner.store.agent(&hired.id).unwrap().unwrap();
+        assert_eq!((saved.activity_label.as_deref(), saved.usage.input_tokens), (Some("app.ts"), 9));
+        assert!(saved.updated_at > hired.updated_at);
+        let (id, shown) = changed(&mut bus, &hired.id).expect("the change is broadcast");
+        assert_eq!((id, shown.activity_label.as_deref(), shown.updated_at), (0, Some("app.ts"), saved.updated_at));
+
+        // Nothing changed: nothing saved, nothing sent.
+        inner.update_agent(&hired.id, |_| {}).unwrap();
+        assert_eq!(inner.store.agent(&hired.id).unwrap().unwrap().updated_at, saved.updated_at);
+        assert!(changed(&mut bus, &hired.id).is_none());
+
+        // A status is on record, and its row carries the live fields as they are now.
+        inner.update_agent(&hired.id, |a| a.status = AgentStatus::Working).unwrap();
+        assert_eq!(agent_rows(), 2);
+        let (id, shown) = changed(&mut bus, &hired.id).unwrap();
+        assert!(id > 0);
+        assert_eq!((shown.status, shown.activity_label.as_deref()), (AgentStatus::Working, Some("app.ts")));
+        assert!(shown.updated_at > saved.updated_at);
+        core.shutdown().await;
     }
 }

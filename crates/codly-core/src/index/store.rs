@@ -10,9 +10,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::parse::ParsedFile;
 
-/// Bump when the table layout or what goes into the terms changes: the index is a cache,
-/// so an old one is dropped and rebuilt.
-const SCHEMA_VERSION: &str = "3";
+/// Bump when the table layout, what goes into the terms or which files are left out changes:
+/// the index is a cache, so an old one is dropped and rebuilt. (Skipped files are remembered
+/// by mtime and size, so a file an older rule rejected would otherwise stay out.)
+const SCHEMA_VERSION: &str = "4";
 
 #[derive(Debug, Clone, Copy)]
 pub struct IndexOptions {

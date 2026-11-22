@@ -4,6 +4,8 @@
 //! The `event` table is the source of truth. `insert_event` appends a row and updates the
 //! projection it implies (agent, plan, task, chat, approval, decision) in the same
 //! transaction, so a crash can never leave a projection ahead of or behind its log.
+//! One exception, `save_live_agent`: an agent's activity and usage change at every tool call
+//! and are saved on its row without an `agent_changed` event.
 //! Memories and triples are written by `crate::memory` inside the caller's transaction.
 //!
 //! ponytail: one `Mutex<Connection>` shared by readers and the writer instead of a batching
@@ -23,7 +25,7 @@ use serde_json::Value;
 use crate::model::*;
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql")), M::up(include_str!("m3_memory_data.sql")), M::up(include_str!("m4_workspace_closed.sql"))])
+    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql")), M::up(include_str!("m3_memory_data.sql")), M::up(include_str!("m4_workspace_closed.sql")), M::up(include_str!("m5_lookup_indexes.sql"))])
 }
 
 /// One agent process lifetime (`run` table). Not a UI type: the UI sees runs through events.
@@ -151,11 +153,8 @@ impl Store {
     /// Artifacts announced by `artifact_added` events, newest first.
     pub fn artifacts(&self, workspace_id: Option<&str>, limit: i64) -> Result<Vec<Artifact>> {
         let conn = self.conn();
-        let mut st = conn.prepare_cached(
-            "SELECT payload FROM event WHERE type = 'artifact_added' AND (?1 IS NULL OR workspace_id = ?1)
-             ORDER BY id DESC LIMIT ?2",
-        )?;
-        let rows = st.query_map(params![workspace_id, limit], |r| r.get::<_, String>(0))?;
+        let mut st = conn.prepare_cached(EVENTS_OF_TYPE_SQL)?;
+        let rows = st.query_map(params!["artifact_added", workspace_id, limit], |r| r.get::<_, String>(0))?;
         let mut out = vec![];
         for p in rows {
             if let Ok(EventKind::ArtifactAdded { artifact }) = serde_json::from_str::<EventKind>(&p?) {
@@ -168,13 +167,7 @@ impl Store {
     /// One recorded artifact by id (the only files `read_artifact` may serve).
     pub fn artifact(&self, id: &str) -> Result<Option<Artifact>> {
         let conn = self.conn();
-        let payload: Option<String> = conn
-            .query_row(
-                "SELECT payload FROM event WHERE type = 'artifact_added' AND json_extract(payload, '$.artifact.id') = ?1 LIMIT 1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let payload: Option<String> = conn.query_row(ARTIFACT_SQL, [id], |r| r.get(0)).optional()?;
         Ok(payload.and_then(|p| match serde_json::from_str::<EventKind>(&p) {
             Ok(EventKind::ArtifactAdded { artifact }) => Some(artifact),
             _ => None,
@@ -185,11 +178,8 @@ impl Store {
     /// blackboard that does not depend on the memory module's FTS tables.
     pub fn memory_events(&self, workspace_id: Option<&str>, limit: i64) -> Result<Vec<Memory>> {
         let conn = self.conn();
-        let mut st = conn.prepare_cached(
-            "SELECT payload FROM event WHERE type = 'memory_added' AND (?1 IS NULL OR workspace_id = ?1)
-             ORDER BY id DESC LIMIT ?2",
-        )?;
-        let rows = st.query_map(params![workspace_id, limit], |r| r.get::<_, String>(0))?;
+        let mut st = conn.prepare_cached(EVENTS_OF_TYPE_SQL)?;
+        let rows = st.query_map(params!["memory_added", workspace_id, limit], |r| r.get::<_, String>(0))?;
         let mut out = vec![];
         for p in rows {
             if let Ok(EventKind::MemoryAdded { memory }) = serde_json::from_str::<EventKind>(&p?) {
@@ -384,7 +374,7 @@ impl Store {
     /// Every workspace with its crew (agents on the team, the Lead aside), its tasks in flight
     /// and what waits for you there, most recently opened first. `needs_you` counts approvals
     /// and plans here; the open blocking questions are added by the one caller that serves the
-    /// field (`Inner::offices`): they cost a scan of the event log, too much for every caller.
+    /// field (`Inner::offices`): they cost a read of every blocker event, too much for every caller.
     pub fn offices(&self) -> Result<Vec<Office>> {
         let conn = self.conn();
         let sql = format!(
@@ -519,9 +509,7 @@ impl Store {
     /// A task's events of one type, oldest first (e.g. its `verified` results).
     pub fn task_events(&self, task_id: &str, ty: &str) -> Result<Vec<EventRow>> {
         let conn = self.conn();
-        let mut st = conn.prepare_cached(
-            "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE task_id = ?1 AND type = ?2 ORDER BY id",
-        )?;
+        let mut st = conn.prepare_cached(TASK_EVENTS_SQL)?;
         let rows = st.query_map(params![task_id, ty], event_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -609,13 +597,7 @@ impl Store {
     pub fn latest_task_run(&self, task_id: &str, role: Option<Role>) -> Result<Option<RunRow>> {
         let conn = self.conn();
         let role = role.map(|r| enum_str(&r));
-        Ok(conn
-            .query_row(
-                &format!("{RUN_COLS} WHERE task_id = ?1 AND (?2 IS NULL OR role = ?2) ORDER BY started_at DESC, rowid DESC LIMIT 1"),
-                params![task_id, role],
-                run_from_row,
-            )
-            .optional()?)
+        Ok(conn.query_row(&latest_task_run_sql(), params![task_id, role], run_from_row).optional()?)
     }
 
     /// Mark a run's status; terminal statuses also stamp `ended_at`.
@@ -666,31 +648,28 @@ impl Store {
     }
 
     /// The last `per_thread` messages of every open thread (closed requests' are left out), in
-    /// chronological order.
+    /// chronological order. Reads the tail of each thread from the index, never its whole
+    /// history: the cost follows what is returned, not how long the office has been open.
     pub fn recent_chats(&self, workspace_id: Option<&str>, per_thread: i64) -> Result<Vec<ChatMessage>> {
         let conn = self.conn();
-        let mut st = conn.prepare_cached(
-            "SELECT json FROM (
-               SELECT json, ts, ROW_NUMBER() OVER (PARTITION BY thread ORDER BY ts DESC, rowid DESC) AS rn
-               FROM chat WHERE workspace_id IS ?1 AND thread NOT LIKE 'closed:%')
-             WHERE rn <= ?2 ORDER BY ts, rn DESC",
-        )?;
-        let rows = st.query_map(params![workspace_id, per_thread], |r| r.get::<_, String>(0))?;
-        decode_all(rows)
+        let mut threads = conn.prepare_cached(CHAT_THREADS_SQL)?;
+        let mut tail = conn.prepare_cached(CHAT_TAIL_SQL)?;
+        let mut rows: Vec<(i64, i64, String)> = vec![];
+        for thread in threads.query_map(params![workspace_id], |r| r.get::<_, String>(0))? {
+            let thread = thread?;
+            for row in tail.query_map(params![workspace_id, thread, per_thread], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+                rows.push(row?);
+            }
+        }
+        // Messages of the same millisecond keep the order they were written in.
+        rows.sort_unstable_by_key(|(ts, rowid, _)| (*ts, *rowid));
+        decode_all(rows.into_iter().map(|(_, _, json)| Ok(json)))
     }
 
     /// Record how a decision turned out (calibration log, agents-backend §5.6).
     pub fn set_decision_outcome(&self, id: &str, outcome: &str) -> Result<()> {
         self.conn().execute("UPDATE decision SET outcome = ?2 WHERE id = ?1", params![id, outcome])?;
         Ok(())
-    }
-
-    /// (type, summary, outcome) of a task's decisions, oldest first.
-    pub fn task_decisions(&self, task_id: &str) -> Result<Vec<(String, String, Option<String>)>> {
-        let conn = self.conn();
-        let mut st = conn.prepare_cached("SELECT type, summary, outcome FROM decision WHERE task_id = ?1 ORDER BY created_at, rowid")?;
-        let rows = st.query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ───────────── helpers ─────────────
@@ -735,6 +714,19 @@ pub fn insert_event(db: &Connection, workspace_id: Option<&str>, row: &EventRow)
     let id = db.last_insert_rowid();
     project(db, workspace_id, row)?;
     Ok(id)
+}
+
+/// Save an agent whose change the event log does not keep: what it is doing right now and
+/// its usage follow every tool call, and the tool and usage events they come from are already
+/// in the log. The one projection write that has no event row of its own.
+pub fn save_live_agent(db: &Connection, agent: &Agent) -> Result<()> {
+    let n = db
+        .prepare_cached("UPDATE agent SET json = ?2, updated_at = ?3 WHERE id = ?1")?
+        .execute(params![agent.id, serde_json::to_string(agent)?, agent.updated_at])?;
+    if n == 0 {
+        return Err(anyhow!("unknown agent {}", agent.id));
+    }
+    Ok(())
 }
 
 fn project(db: &Connection, ws: Option<&str>, row: &EventRow) -> Result<()> {
@@ -853,6 +845,29 @@ fn project(db: &Connection, ws: Option<&str>, row: &EventRow) -> Result<()> {
 const RUN_COLS: &str =
     "SELECT id, agent_id, task_id, role, provider, model, cwd, session_id, status, raw_log, report_json, started_at, ended_at, account FROM run";
 
+// The reads below must stay on an index: the tables they read grow for as long as Codly is
+// used. `reads_that_grow_with_history_use_an_index` checks the plan of each.
+
+/// Payloads of one kind of event (?1), newest first, of a workspace (?2, NULL = all), at most ?3.
+const EVENTS_OF_TYPE_SQL: &str = "SELECT payload FROM event WHERE type = ?1 AND (?2 IS NULL OR workspace_id = ?2) ORDER BY id DESC LIMIT ?3";
+
+/// One artifact by id. Spelled as the `event_artifact` index is (m5), or SQLite will not use it.
+const ARTIFACT_SQL: &str = "SELECT payload FROM event WHERE type = 'artifact_added' AND json_extract(payload, '$.artifact.id') = ?1 LIMIT 1";
+
+/// A task's events of one type. `+type` keeps SQLite on the task's own events (`event_task`)
+/// instead of every event of that type ever written (`event_type`).
+const TASK_EVENTS_SQL: &str = "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE task_id = ?1 AND +type = ?2 ORDER BY id";
+
+/// Open threads of a workspace: answered from the `chat_thread` index alone.
+const CHAT_THREADS_SQL: &str = "SELECT DISTINCT thread FROM chat WHERE workspace_id IS ?1 AND thread NOT LIKE 'closed:%'";
+
+/// The newest ?3 messages of one thread, as (ts, rowid, json).
+const CHAT_TAIL_SQL: &str = "SELECT ts, rowid, json FROM chat WHERE workspace_id IS ?1 AND thread = ?2 ORDER BY ts DESC, rowid DESC LIMIT ?3";
+
+fn latest_task_run_sql() -> String {
+    format!("{RUN_COLS} WHERE task_id = ?1 AND (?2 IS NULL OR role = ?2) ORDER BY started_at DESC, rowid DESC LIMIT 1")
+}
+
 fn run_from_row(r: &rusqlite::Row) -> rusqlite::Result<RunRow> {
     let role: String = r.get(3)?;
     let provider: String = r.get(4)?;
@@ -923,6 +938,15 @@ fn migrate_settings(mut v: serde_json::Value) -> serde_json::Value {
         o.insert("byok".into(), serde_json::json!({ "openrouter": { "kind": "key" } }));
     }
     v
+}
+
+/// The plan SQLite chose for `sql`, one step per line (tests: does a read stay on an index?).
+#[cfg(test)]
+pub(crate) fn query_plan(conn: &Connection, sql: &str) -> String {
+    let mut st = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let nulls = vec![rusqlite::types::Null; st.parameter_count()];
+    let steps: Vec<String> = st.query_map(rusqlite::params_from_iter(nulls), |r| r.get(3)).unwrap().map(Result::unwrap).collect();
+    steps.join("\n")
 }
 
 #[cfg(test)]
@@ -1056,5 +1080,100 @@ mod tests {
         }
         let texts: Vec<_> = store.recent_chats(None, 2).unwrap().into_iter().map(|m| m.text).collect();
         assert_eq!(texts, vec!["m1", "m2", "m3"]);
+    }
+
+    #[test]
+    fn recent_chats_leave_closed_threads_and_other_offices_out() {
+        let store = Store::open_in_memory().unwrap();
+        let here = ws(&store);
+        let there = Workspace { id: new_id(), repo_path: "/tmp/other".into(), ..here.clone() };
+        store.upsert_workspace(&there).unwrap();
+        // (office, thread, text, ts); two messages share a millisecond.
+        for (w, thread, text, ts) in [
+            (&here, "lead", "first", 5),
+            (&here, "agent:x", "second", 5),
+            (&here, "closed:lead:1", "archived", 6),
+            (&there, "lead", "elsewhere", 7),
+            (&here, "lead", "third", 8),
+        ] {
+            let message = ChatMessage { id: new_id(), thread: thread.into(), author: "user".into(), text: text.into(), attachment: None, ts };
+            store.append_event(Some(&w.id), &row(EventKind::Chat { message })).unwrap();
+        }
+        let texts: Vec<_> = store.recent_chats(Some(&here.id), 10).unwrap().into_iter().map(|m| m.text).collect();
+        assert_eq!(texts, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn events_of_one_type_are_read_newest_first() {
+        let store = Store::open_in_memory().unwrap();
+        let w = ws(&store);
+        let artifact = |title: &str| Artifact {
+            id: new_id(),
+            kind: ArtifactKind::Image,
+            mime: "image/png".into(),
+            path: format!("{title}.png"),
+            abs_path: format!("/tmp/repo/{title}.png"),
+            title: title.into(),
+            bytes: 1,
+            agent_id: None,
+            task_id: None,
+            caption: None,
+            created_at: now_ms(),
+        };
+        let (a, b) = (artifact("a"), artifact("b"));
+        for art in [&a, &b] {
+            store.append_event(Some(&w.id), &row(EventKind::ArtifactAdded { artifact: art.clone() })).unwrap();
+            store.append_event(Some(&w.id), &row(EventKind::TurnStarted { input: None })).unwrap();
+        }
+        let titles = |ws: Option<&str>, limit| store.artifacts(ws, limit).unwrap().into_iter().map(|x| x.title).collect::<Vec<_>>();
+        assert_eq!(titles(Some(&w.id), 10), ["b", "a"]);
+        assert_eq!(titles(None, 1), ["b"]);
+        assert!(titles(Some("another-office"), 10).is_empty());
+        assert_eq!(store.artifact(&a.id).unwrap().unwrap().title, "a");
+        assert!(store.artifact("unknown").unwrap().is_none());
+        assert!(store.memory_events(Some(&w.id), 10).unwrap().is_empty(), "artifacts are not memories");
+    }
+
+    #[test]
+    fn reads_that_grow_with_history_use_an_index() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        // The read goes through `index`, with no table scan and (`sorted`) no sort afterwards.
+        let check = |sql: &str, index: &str, sorted: bool| {
+            let plan = query_plan(&conn, sql);
+            let ok = plan.contains(index) && !plan.lines().any(|l| l.starts_with("SCAN")) && !(sorted && plan.contains("TEMP B-TREE"));
+            assert!(ok, "{sql}\n{plan}");
+        };
+        check(EVENTS_OF_TYPE_SQL, "event_type", true);
+        check(ARTIFACT_SQL, "event_artifact", false);
+        check(TASK_EVENTS_SQL, "event_task", true);
+        check(&latest_task_run_sql(), "run_task", true);
+        check(CHAT_THREADS_SQL, "chat_thread", false);
+        check(CHAT_TAIL_SQL, "chat_thread", true);
+        // The open questions the office tabs poll (`blockers::list`).
+        check("SELECT payload FROM event WHERE type = 'blocker_changed' AND (?1 IS NULL OR workspace_id = ?1) ORDER BY id", "event_type", true);
+    }
+
+    #[test]
+    fn an_existing_database_gets_the_lookup_indexes() {
+        // A database as the version before left it, with history in it.
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 4).unwrap();
+        conn.execute_batch(
+            r#"INSERT INTO event (ts, type, payload) VALUES
+                 (1, 'artifact_added', '{"type":"artifact_added","artifact":{"id":"a1"}}'),
+                 (2, 'turn_started', '{"type":"turn_started","input":null}');"#,
+        )
+        .unwrap();
+        let store = Store::init(conn).unwrap();
+        let conn = store.conn();
+        let indexes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('event_type', 'event_artifact', 'run_task')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(indexes, 3);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM event", [], |r| r.get::<_, i64>(0)).unwrap(), 2, "history is untouched");
+        // A row written before the index existed is found through it.
+        let found: String = conn.query_row(ARTIFACT_SQL, ["a1"], |r| r.get(0)).unwrap();
+        assert!(found.contains("a1"));
     }
 }

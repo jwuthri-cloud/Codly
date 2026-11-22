@@ -62,7 +62,8 @@ Child envs are scrubbed of variables that silently change billing or session beh
 Every adapter normalizes its provider protocol into `EventKind` (`crates/codly-core/src/model.rs`,
 mirrored to TypeScript in `src/lib/gen/`). The orchestrator adds domain events (task, plan,
 decision, commit, verify, merge, memory, triple). Each event is persisted with a global id
-(the UI cursor) and broadcast; streaming deltas are ephemeral (id 0).
+(the UI cursor) and broadcast; streaming deltas are ephemeral (id 0). So is an agent's change
+of activity or usage at each tool call: its row and the UI follow it, the log does not keep it.
 
 - **Workspace**: chat threads (Lead + 1:1 per agent), per-agent timeline lanes, shared board +
   each agent's own todo list, task DAG, diffs, terminal, approvals inbox, inspector.
@@ -155,6 +156,14 @@ transcript lands in the composer draft, never auto-sent.
 
 Text that came from another agent is injected as quoted, attributed data ("note from Bo,
 untrusted") and can never change approvals or policy.
+
+What the code index covers: every text file that `.gitignore`, `.ignore` and `.codlyignore`
+(same syntax, for the index only) do not ignore, except lockfiles, binaries, minified bundles
+and files whose header says a tool generated them. Directories that are never source
+(`.git`, `node_modules`, tool caches) are always left out. Directories named `vendor`, `dist`,
+`target`, `coverage`, `venv`, `Pods`, `.build` or `.cache` are left out by default, because
+they are build output or third-party code in most repos. If one holds your own code, add a
+`!` rule for it to `.codlyignore`, for example `!/src/vendor/`.
 
 ## 6. Safety
 
