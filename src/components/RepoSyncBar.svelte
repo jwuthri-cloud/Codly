@@ -1,19 +1,24 @@
 <!--
-  Your checkout against its remote, and the two git steps Codly can do for you there: commit
-  your own uncommitted changes (they block a merge that touches the same files), and push your
-  branch once merges have landed on it. Codly never pushes on its own.
+  Your checkout against its remote, and the git steps Codly can do for you there: commit your
+  own uncommitted changes (they block a merge that touches the same files), push your branch
+  once merges have landed on it, and undo the merge this bar sits with while that is still safe
+  (it is the last one, not pushed, nothing committed after it). Codly never pushes on its own.
 -->
 <script lang="ts">
   import { api } from '../lib/api';
   import type { RepoSync } from '../lib/gen/RepoSync';
-  import { commitCheckout, pushCheckout } from '../lib/state/actions';
+  import { commitCheckout, pushCheckout, undoMerge } from '../lib/state/actions';
+  import { shortSha } from '../lib/util/format';
   import Icon from './Icon.svelte';
 
   interface Props {
     /** Changes when something may have moved the checkout (a merge): the bar re-reads it. */
     refresh?: unknown;
+    /** The plan, or the solo agent, this bar sits with: Undo merge shows for its merge only. */
+    planId?: string | null;
+    agentId?: string | null;
   }
-  let { refresh = null }: Props = $props();
+  let { refresh = null, planId = null, agentId = null }: Props = $props();
 
   let sync = $state<RepoSync | null>(null);
   let busy = $state(false);
@@ -34,6 +39,10 @@
 
   const remote = $derived(sync?.upstream ?? `origin/${sync?.branch ?? ''}`);
   const toPush = $derived(!!sync?.branch && (sync.ahead > 0 || !sync.upstream));
+  const merge = $derived.by(() => {
+    const m = sync?.last_merge;
+    return m && ((planId && m.plan_id === planId) || (agentId && m.agent_id === agentId)) ? m : null;
+  });
 
   async function commit() {
     if (!message.trim()) return;
@@ -53,10 +62,29 @@
     else await load();
     busy = false;
   }
+
+  async function undo() {
+    if (!merge) return;
+    busy = true;
+    const s = await undoMerge(merge);
+    if (s) sync = s;
+    else await load();
+    busy = false;
+  }
 </script>
 
-{#if sync && (sync.dirty.length || toPush || sync.behind)}
+{#if sync && (sync.dirty.length || toPush || sync.behind || merge)}
   <div class="sync">
+    {#if merge}
+      <div class="row">
+        {#if merge.blocked}
+          <span class="what"><Icon name="merge" size={12} />This merge can’t be undone here: {merge.blocked}.</span>
+        {:else}
+          <span class="what"><Icon name="merge" size={12} />You can still undo the merge at {shortSha(merge.sha)}: {merge.branch} goes back to where it was.</span>
+          <button class="btn sm" disabled={busy} onclick={undo}>Undo merge</button>
+        {/if}
+      </div>
+    {/if}
     {#if sync.dirty.length}
       <div class="row">
         <span class="what" data-tip={sync.dirty.join('\n')}><Icon name="file" size={12} />{sync.dirty.length} uncommitted {sync.dirty.length === 1 ? 'file' : 'files'} in your checkout</span>

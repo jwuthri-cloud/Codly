@@ -104,6 +104,7 @@ impl Inner {
             open_questions: valid.plan.open_questions.clone(),
             status: PlanStatus::AwaitingApproval,
             base_commit: None,
+            base_branch: None,
             integration_branch: None,
             integration_worktree: None,
             merged_sha: None,
@@ -231,23 +232,24 @@ impl Inner {
         let short = plan_short(&plan);
         let branch = format!("codly/{short}/integration");
         let wt = self.worktree_root(&ws).join(&short).join("integration");
-        let (base, fresh) = {
+        let (base, base_branch, fresh) = {
             let _g = self.repo_lock.lock().await;
             let head = self
                 .git
                 .head(&repo)
                 .await?
                 .ok_or_else(|| anyhow!("the repository has no commits yet; make a first commit, then run the plan"))?;
-            let base = match plan.base_commit.clone() {
-                Some(b) if self.git.branch_exists(&repo, &branch).await? => b,
-                _ => head,
+            // A plan that already has its base keeps the branch it started from, too.
+            let (base, base_branch) = match plan.base_commit.clone() {
+                Some(b) if self.git.branch_exists(&repo, &branch).await? => (b, plan.base_branch.clone()),
+                _ => (head, self.git.current_branch(&repo).await?),
             };
             if !self.git.branch_exists(&repo, &branch).await? {
                 self.git.create_branch(&repo, &branch, &base).await?;
             }
             let fresh = !wt.exists();
             self.git.worktree_add(&repo, &wt, &branch, &base).await?;
-            (base, fresh)
+            (base, base_branch, fresh)
         };
         if fresh {
             self.bootstrap_worktree(&ws, &repo, &wt, None).await; // integration checks need deps too
@@ -259,11 +261,12 @@ impl Inner {
             }
             p.status = PlanStatus::Running;
             p.base_commit = Some(base.clone());
+            p.base_branch = base_branch.clone();
             p.integration_branch = Some(branch.clone());
             p.integration_worktree = Some(wt_s.clone());
             Ok(())
         })?;
-        let current = self.git.current_branch(&repo).await.ok().flatten().unwrap_or_else(|| "HEAD".into());
+        let current = base_branch.unwrap_or_else(|| "HEAD".into());
         self.decide(
             Some(&ws.id),
             None,

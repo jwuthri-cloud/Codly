@@ -142,6 +142,8 @@ pub fn run() {
             commands::task_diff,
             commands::plan_diff,
             commands::merge_plan,
+            commands::merge_plan_warning,
+            commands::undo_merge,
             commands::merge_agent,
             commands::repo_sync,
             commands::commit_checkout,

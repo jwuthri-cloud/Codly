@@ -8,10 +8,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{Inner, guard, lock, names, prompts, row, scheduler, write};
 use crate::adapters::AgentCmd;
+use crate::git::{MergeOutcome, name_list};
 use crate::index::Index;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
@@ -19,6 +21,23 @@ use crate::store;
 
 /// Answering an approval is read-check-write over the event log: one at a time.
 static RESOLVING: Mutex<()> = Mutex::new(());
+
+/// The last merge Codly made into the user's branch in one office (kv `last_merge:<office>`):
+/// what Undo merge takes back. The next merge replaces it; an undo removes it.
+#[derive(Serialize, Deserialize)]
+struct MergeRecord {
+    /// The merge commit.
+    sha: String,
+    /// Where the branch was before the merge: Undo goes back here.
+    before: String,
+    branch: String,
+    plan_id: Option<Id>,
+    agent_id: Option<Id>,
+}
+
+fn last_merge_key(ws_id: &str) -> String {
+    format!("last_merge:{ws_id}")
+}
 
 impl Inner {
     // ───────────── workspace ─────────────
@@ -448,24 +467,33 @@ impl Inner {
     }
 
     /// Merge a solo agent's branch (`codly/solo/<slug>`) into the user's checked-out branch, like
-    /// a plan. The agent keeps its worktree and goes on working from its own branch.
+    /// a plan. The agent keeps its worktree and goes on working from its own branch. Everything
+    /// in its worktree is merged: what its last turn left uncommitted (a turn you stopped, a
+    /// run that crashed) is committed first.
     pub(super) async fn merge_agent(&self, agent_id: &str) -> anyhow::Result<String> {
         let agent = self.agent(agent_id)?;
         if agent.role != Role::Solo {
             bail!("only a solo agent's branch can be merged this way; a task's work merges with its plan");
         }
-        if agent.run_id.is_some() && !matches!(agent.status, AgentStatus::Idle | AgentStatus::Done | AgentStatus::Failed | AgentStatus::Offline) {
+        // A stopped agent counts as working until its process is gone: it may still write files.
+        let resting = matches!(agent.status, AgentStatus::Idle | AgentStatus::Done | AgentStatus::Failed | AgentStatus::Offline);
+        if (agent.run_id.is_some() && !resting) || !self.is_quiet(agent_id) {
             bail!("{} is still working; merge when its turn ends (Codly commits its work then)", agent.name);
         }
-        let wt = agent.worktree.clone().ok_or_else(|| anyhow!("{} has no worktree yet, so there is nothing to merge", agent.name))?;
+        let wt = PathBuf::from(agent.worktree.clone().ok_or_else(|| anyhow!("{} has no worktree yet, so there is nothing to merge", agent.name))?);
         let ws = self.require_ws()?;
         let repo = PathBuf::from(&ws.repo_path);
-        let branch = self
-            .git
-            .current_branch(Path::new(&wt))
-            .await?
-            .ok_or_else(|| anyhow!("{}'s worktree is on a detached HEAD", agent.name))?;
+        if wt == repo {
+            bail!("{} works in your project folder itself, so it has no branch of its own to merge", agent.name);
+        }
+        let branch = self.git.current_branch(&wt).await?.ok_or_else(|| anyhow!("{}'s worktree is on a detached HEAD", agent.name))?;
+        let ws_id = Some(ws.id.as_str());
         let _g = self.repo_lock.lock().await;
+        self.git.check_worktree(&repo, &wt).await?;
+        let message = format!("codly(solo/{}): before merge", agent.name);
+        if let Some(c) = self.git.commit_all(&wt, &message).await? {
+            self.emit(ws_id, row(Some(agent_id), None, None, EventKind::Committed { sha: c.sha, files: c.files, message }))?;
+        }
         let target = self
             .git
             .current_branch(&repo)
@@ -479,12 +507,15 @@ impl Inner {
         let before = self.git.head(&repo).await?;
         let msg = format!("Merge {}'s work ({branch})", agent.name);
         let sha = match self.git.merge(&repo, &branch, &msg, false).await? {
-            crate::git::MergeOutcome::Merged { sha } | crate::git::MergeOutcome::AlreadyMerged { sha } => sha,
-            crate::git::MergeOutcome::Conflict { files, .. } => {
+            MergeOutcome::Merged { sha } => {
+                self.record_merge(&ws.id, &sha, before.as_deref(), &target, None, Some(agent_id))?;
+                sha
+            }
+            MergeOutcome::AlreadyMerged { sha } => sha,
+            MergeOutcome::Conflict { files, .. } => {
                 bail!("merging into {target} conflicts in {}; the merge was aborted and your branch is unchanged", files.join(", "))
             }
         };
-        let ws_id = Some(ws.id.as_str());
         self.emit(ws_id, row(Some(agent_id), None, None, EventKind::Merged { sha: sha.clone(), branch: target.clone() }))?;
         self.decide_by(ws_id, Some(agent_id), "merge", "human", format!("you merged {branch} into {target}"), json!({ "agent_id": agent_id, "sha": sha }))?;
         self.chat(ws_id, &format!("agent:{agent_id}"), "codly", &format!("Merged {}'s work into {target} ({}).", agent.name, &sha[..sha.len().min(10)]), None)?;
@@ -500,16 +531,97 @@ impl Inner {
         Ok(sha)
     }
 
-    /// Where the checkout stands against its upstream, and its uncommitted tracked files.
+    /// Where the checkout stands against its upstream, its uncommitted tracked files, and
+    /// whether the last merge Codly made here can still be undone.
     pub(super) async fn repo_sync(&self) -> anyhow::Result<RepoSync> {
-        let repo = PathBuf::from(self.require_ws()?.repo_path);
+        let ws = self.require_ws()?;
+        let repo = PathBuf::from(&ws.repo_path);
         let branch = self.git.current_branch(&repo).await?;
         let (upstream, ahead, behind) = match self.git.ahead_behind(&repo).await? {
             Some((u, a, b)) => (Some(u), a, b),
             None => (None, 0, 0),
         };
         let dirty = self.git.changed_paths(&repo, &["HEAD"]).await.unwrap_or_default();
-        Ok(RepoSync { branch, upstream, ahead, behind, dirty })
+        let last_merge = match self.last_merge(&ws.id)? {
+            Some(m) => {
+                let blocked = self.git.undo_merge_blocker(&repo, &m.branch, &m.sha, &m.before).await?;
+                Some(LastMerge { sha: m.sha, branch: m.branch, plan_id: m.plan_id, agent_id: m.agent_id, blocked })
+            }
+            None => None,
+        };
+        Ok(RepoSync { branch, upstream, ahead, behind, dirty, last_merge })
+    }
+
+    fn last_merge(&self, ws_id: &str) -> anyhow::Result<Option<MergeRecord>> {
+        Ok(self.store.kv_get(&last_merge_key(ws_id))?.map(|v| serde_json::from_str(&v)).transpose()?)
+    }
+
+    /// Remember a merge commit Codly just made on the user's branch, for Undo merge. A branch
+    /// that had no commit before the merge (`before` = None) has nothing to go back to.
+    fn record_merge(&self, ws_id: &str, sha: &str, before: Option<&str>, branch: &str, plan_id: Option<&str>, agent_id: Option<&str>) -> anyhow::Result<()> {
+        let Some(before) = before else { return Ok(()) };
+        let record = MergeRecord {
+            sha: sha.into(),
+            before: before.into(),
+            branch: branch.into(),
+            plan_id: plan_id.map(Into::into),
+            agent_id: agent_id.map(Into::into),
+        };
+        self.store.kv_set(&last_merge_key(ws_id), &serde_json::to_string(&record)?)
+    }
+
+    /// Undo the last merge Codly made into the user's branch (`sha` = the merge the user saw):
+    /// the branch goes back to the commit before it, and the merged work stays on its own
+    /// branch, ready to merge again. Refused with the reason when it is not safe any more (see
+    /// `Git::undo_merge_blocker`).
+    pub(super) async fn undo_merge(&self, sha: &str) -> anyhow::Result<RepoSync> {
+        let ws = self.require_ws()?;
+        let repo = PathBuf::from(&ws.repo_path);
+        let ws_id = Some(ws.id.as_str());
+        let _g = self.repo_lock.lock().await;
+        let m = self
+            .last_merge(&ws.id)?
+            .filter(|m| m.sha == sha)
+            .ok_or_else(|| anyhow!("that is not the last merge Codly made into your branch, so it cannot be undone here"))?;
+        self.git.undo_merge(&repo, &m.branch, &m.sha, &m.before).await?;
+        self.store.kv_write(&[(last_merge_key(&ws.id), None)])?;
+        let back = format!("{} is back at {}", m.branch, &m.before[..m.before.len().min(10)]);
+        if let Some(plan_id) = m.plan_id.as_deref() {
+            let p = self.update_plan(plan_id, |p| {
+                if p.merged_sha.as_deref() == Some(sha) {
+                    p.merged_sha = None;
+                }
+                Ok(())
+            })?;
+            // Done and not merged again: its integration worktree comes back (the merge removed it).
+            if let (Some(wt), Some(branch)) = (p.integration_worktree.as_deref(), p.integration_branch.as_deref())
+                && let Err(e) = self.git.worktree_add(&repo, Path::new(wt), branch, branch).await
+            {
+                tracing::info!("not restoring {wt}: {e}");
+            }
+            let text = format!("Undid the merge of \"{}\": {back}. The work is still on its branch; you can merge it again.", p.summary);
+            self.chat(ws_id, &p.thread, "codly", &text, Some(json!({ "plan_id": p.id })))?;
+        }
+        if let Some(agent_id) = m.agent_id.as_deref() {
+            let name = self.agent(agent_id).map(|a| a.name).unwrap_or_else(|_| "the agent".into());
+            let text = format!("Undid the merge of {name}'s work: {back}. The work is still on its branch; you can merge it again.");
+            self.chat(ws_id, &format!("agent:{agent_id}"), "codly", &text, None)?;
+        }
+        self.decide_by(
+            ws_id,
+            None,
+            "undo_merge",
+            "human",
+            format!("you undid the last merge: {back}"),
+            json!({ "plan_id": m.plan_id, "agent_id": m.agent_id, "sha": m.sha, "before": m.before }),
+        )?;
+        let touched = self.git.changed_paths(&repo, &[m.before.as_str(), m.sha.as_str()]).await.unwrap_or_default();
+        drop(_g);
+        self.reindex_after_merge(&ws.id, touched);
+        if let Some(w) = write(&self.ws).as_mut().filter(|w| w.id == ws.id) {
+            w.head = Some(m.before.clone());
+        }
+        self.repo_sync().await
     }
 
     /// Commit the user's changes to tracked files in their checkout (their hooks apply).
@@ -561,7 +673,39 @@ impl Inner {
         }
     }
 
-    pub(super) async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<String> {
+    /// What the user should know before the plan is merged into the checked-out branch: it is
+    /// not the branch the plan started from, or it no longer has the commit the plan started
+    /// at. None when the plan started here (and on a detached HEAD, which the merge refuses).
+    pub(super) async fn merge_plan_warning(&self, plan_id: &str) -> anyhow::Result<Option<MergeWarning>> {
+        let p = self.plan(plan_id)?;
+        let ws = self.store.workspace(&p.workspace_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
+        let repo = PathBuf::from(&ws.repo_path);
+        match self.git.current_branch(&repo).await? {
+            Some(target) => self.other_branch_warning(&repo, &p, &target).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn other_branch_warning(&self, repo: &Path, p: &Plan, target: &str) -> anyhow::Result<Option<MergeWarning>> {
+        let Some(base) = p.base_commit.as_deref() else { return Ok(None) };
+        let from = p.base_branch.as_deref().filter(|b| *b != target);
+        // Commits the plan was built on that the checked-out branch does not have: the merge
+        // would bring them along.
+        let extra = self.git.read(repo, &["rev-list", "--count", &format!("HEAD..{base}")]).await?.trim().parse::<u32>()?;
+        let commits = if extra == 1 { "1 commit".to_string() } else { format!("{extra} commits") };
+        let message = match (from, extra) {
+            (None, 0) => return Ok(None),
+            (Some(from), 0) => format!("This plan started from {from}, and your checkout is on {target} now."),
+            (Some(from), _) => format!("This plan started from {from}. Merging it into {target} also brings {commits} from {from} that {target} does not have."),
+            (None, _) => format!("{target} does not have the commit this plan started from. Merging also brings {commits} that {target} does not have."),
+        };
+        Ok(Some(MergeWarning { target: target.into(), message }))
+    }
+
+    /// Merge the plan's integration branch into the checked-out branch. `into` = the branch the
+    /// user confirmed after `merge_plan_warning`; without it, a branch the plan did not start
+    /// from is refused.
+    pub(super) async fn merge_plan(&self, plan_id: &str, into: Option<&str>) -> anyhow::Result<String> {
         let p = self.plan(plan_id)?;
         if matches!(p.status, PlanStatus::Running | PlanStatus::Integrating) {
             bail!("the plan is still running; wait until it is done (or cancel it)");
@@ -576,11 +720,26 @@ impl Inner {
             .current_branch(&repo)
             .await?
             .ok_or_else(|| anyhow!("your checkout is on a detached HEAD; switch to a branch first"))?;
+        match into {
+            Some(confirmed) if confirmed != target => {
+                bail!("your checkout is on {target} now, not {confirmed}; nothing was merged")
+            }
+            Some(_) => {}
+            None => {
+                if let Some(w) = self.other_branch_warning(&repo, &p, &target).await? {
+                    bail!("{} Nothing was merged: merge again and confirm {target} to go on.", w.message);
+                }
+            }
+        }
         let before = self.git.head(&repo).await?;
         let msg = format!("Merge Codly plan: {}", prompts::clip(&p.summary, 72));
         let sha = match self.git.merge(&repo, &branch, &msg, false).await? {
-            crate::git::MergeOutcome::Merged { sha } | crate::git::MergeOutcome::AlreadyMerged { sha } => sha,
-            crate::git::MergeOutcome::Conflict { files, .. } => {
+            MergeOutcome::Merged { sha } => {
+                self.record_merge(&ws.id, &sha, before.as_deref(), &target, Some(&p.id), None)?;
+                sha
+            }
+            MergeOutcome::AlreadyMerged { sha } => sha,
+            MergeOutcome::Conflict { files, .. } => {
                 bail!("merging into {target} conflicts in {}; the merge was aborted and your branch is unchanged", files.join(", "))
             }
         };
@@ -706,15 +865,6 @@ pub(super) fn orphans(snapshot: &[Proc], wanted: &[(i32, i64)]) -> Vec<i32> {
         }
     }
     found
-}
-
-/// "a.rs, b.rs, c.rs and 9 more".
-fn name_list<S: AsRef<str>>(files: &[S]) -> String {
-    let shown: Vec<&str> = files.iter().take(3).map(AsRef::as_ref).collect();
-    match files.len().saturating_sub(3) {
-        0 => shown.join(", "),
-        more => format!("{} and {more} more", shown.join(", ")),
-    }
 }
 
 fn expand_home(p: &str) -> PathBuf {

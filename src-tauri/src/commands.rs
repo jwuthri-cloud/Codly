@@ -190,9 +190,25 @@ pub async fn plan_diff(state: State<'_, AppState>, plan_id: String) -> R<String>
     state.core().await?.plan_diff(&plan_id).await.map_err(err)
 }
 
+/// `into`: the branch the user confirmed after `merge_plan_warning`.
 #[tauri::command]
-pub async fn merge_plan(state: State<'_, AppState>, plan_id: String) -> R<String> {
-    state.core().await?.merge_plan(&plan_id).await.map_err(err)
+pub async fn merge_plan(state: State<'_, AppState>, plan_id: String, into: Option<String>) -> R<String> {
+    let core = state.core().await?;
+    match into {
+        Some(branch) => core.merge_plan_into(&plan_id, &branch).await,
+        None => core.merge_plan(&plan_id).await,
+    }
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn merge_plan_warning(state: State<'_, AppState>, plan_id: String) -> R<Option<codly_core::model::MergeWarning>> {
+    state.core().await?.merge_plan_warning(&plan_id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn undo_merge(state: State<'_, AppState>, sha: String) -> R<codly_core::model::RepoSync> {
+    state.core().await?.undo_merge(&sha).await.map_err(err)
 }
 
 #[tauri::command]

@@ -1,6 +1,7 @@
 // User intents → core commands. Every action reports failure as a toast that says how to get
 // out, and applies command results the core does not echo as events (workspace, settings).
 import type { RepoSync } from '../gen/RepoSync';
+import type { LastMerge } from '../gen/LastMerge';
 import { SvelteSet } from 'svelte/reactivity';
 import { api, isTauriApp } from '../api';
 import type { Agent } from '../gen/Agent';
@@ -190,12 +191,24 @@ export async function closeRequest(thread: string): Promise<boolean> {
   return true;
 }
 
-export async function mergePlan(planId: string) {
+/** Merge a done plan into your checked-out branch. When that is not the branch the plan started
+ *  from, nothing is merged yet: a toast says what the merge would bring and offers to go on
+ *  (`into` is then the branch you confirmed). */
+export async function mergePlan(planId: string, into: string | null = null) {
   const plan = store.planMap.get(planId);
-  const target = store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'your branch';
+  if (!into) {
+    const warning = await attempt('merge the plan', () => api.mergePlanWarning(planId));
+    if (warning === undefined) return;
+    if (warning) {
+      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, warning.target) };
+      toast({ kind: 'attention', title: `Merge into ${warning.target}?`, body: warning.message, action: goOn, duration: 0 });
+      return;
+    }
+  }
+  const target = into ?? store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'your branch';
   const id = toast({ kind: 'progress', title: `Merging into ${target}…` });
   try {
-    const sha = await api.mergePlan(planId);
+    const sha = await api.mergePlan(planId, into);
     store.markPlanMerged(planId, sha);
     toastsUpdate(id, { kind: 'success', title: `Merged into ${target}`, body: `${plan?.summary ?? 'Plan'} · ${shortSha(sha)}` });
   } catch (e) {
@@ -218,6 +231,21 @@ export async function mergeAgent(agentId: string): Promise<boolean> {
   } catch (e) {
     toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${target}`, body: msg(e) });
     return false;
+  }
+}
+
+/** Undo the last merge Codly made into your branch: the branch goes back to where it was, and
+ *  the merged work stays on its own branch. A refusal says why (pushed, later commits…). */
+export async function undoMerge(merge: LastMerge): Promise<RepoSync | undefined> {
+  const id = toast({ kind: 'progress', title: `Undoing the merge into ${merge.branch}…` });
+  try {
+    const s = await api.undoMerge(merge.sha);
+    if (merge.plan_id) store.unmarkPlanMerged(merge.plan_id);
+    toastsUpdate(id, { kind: 'success', title: 'Merge undone', body: `${merge.branch} is back to where it was before the merge.` });
+    return s;
+  } catch (e) {
+    toastsUpdate(id, { kind: 'error', title: 'Couldn’t undo the merge', body: msg(e) });
+    return undefined;
   }
 }
 

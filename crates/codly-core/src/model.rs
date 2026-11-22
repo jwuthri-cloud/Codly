@@ -929,6 +929,10 @@ pub struct Plan {
     pub open_questions: Vec<String>,
     pub status: PlanStatus,
     pub base_commit: Option<String>,
+    /// The branch that was checked out when the plan started (None: a detached HEAD, or a plan
+    /// from before this was recorded). Merging into another branch asks first.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     pub integration_branch: Option<String>,
     pub integration_worktree: Option<String>,
     /// Set when the user merged the integration branch into their branch.
@@ -1723,6 +1727,34 @@ pub struct RepoSync {
     pub behind: u32,
     /// Tracked files with uncommitted changes.
     pub dirty: Vec<String>,
+    /// The last merge Codly made into your branch here, until it is undone or the next one.
+    pub last_merge: Option<LastMerge>,
+}
+
+/// A merge Codly made into the user's branch, and whether Undo merge can still take it back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LastMerge {
+    /// The merge commit.
+    pub sha: String,
+    /// The branch it went into.
+    pub branch: String,
+    /// The plan that was merged, or…
+    pub plan_id: Option<Id>,
+    /// …the solo agent whose branch was merged.
+    pub agent_id: Option<Id>,
+    /// Why it cannot be undone right now (None: it can).
+    pub blocked: Option<String>,
+}
+
+/// What the user should know before a plan is merged: the checked-out branch is not the one
+/// the plan started from. Merging goes on only when they name `target` to confirm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MergeWarning {
+    /// The checked-out branch the merge would go into.
+    pub target: String,
+    pub message: String,
 }
 
 /// Everything the UI needs on (re)connect. Deltas with `id <= as_of` are dropped.

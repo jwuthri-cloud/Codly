@@ -6,7 +6,7 @@ fn main() {
         "ui_subscribe", "ui_set_visible", "detect_clis", "list_accounts", "recent_workspaces", "list_repos", "open_workspace", "update_settings",
         "send_chat", "run_plan", "cancel_plan", "close_thread", "resolve_approval", "interrupt_agent", "stop_agent", "hire_agent", "list_models", "set_agent_model", "set_agent_look", "set_workspace_team", "set_request_prefs",
         "breaker_config", "set_breaker_config", "breaker_status", "reset_breaker",
-        "create_task", "move_task", "assign_task", "task_diff", "plan_diff", "merge_plan", "merge_agent", "repo_sync", "commit_checkout", "push_checkout", "get_events", "search_code",
+        "create_task", "move_task", "assign_task", "task_diff", "plan_diff", "merge_plan", "merge_plan_warning", "undo_merge", "merge_agent", "repo_sync", "commit_checkout", "push_checkout", "get_events", "search_code",
         "list_memories", "add_memory", "delete_memory", "list_triples", "repo_map", "read_artifact", "keep_plan", "pin_memory", "pty_open", "pty_attach", "pty_write",
         "pty_resize", "pty_close",
         "dictation_status", "dictation_configure", "dictation_save_key", "dictation_clear_key", "dictation_transcribe",

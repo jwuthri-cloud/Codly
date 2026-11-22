@@ -10,7 +10,12 @@ thread: string,
 /**
  * The user's words, verbatim.
  */
-request: string, summary: string, assumptions: Array<string>, open_questions: Array<string>, status: PlanStatus, base_commit: string | null, integration_branch: string | null, integration_worktree: string | null, 
+request: string, summary: string, assumptions: Array<string>, open_questions: Array<string>, status: PlanStatus, base_commit: string | null, 
+/**
+ * The branch that was checked out when the plan started (None: a detached HEAD, or a plan
+ * from before this was recorded). Merging into another branch asks first.
+ */
+base_branch: string | null, integration_branch: string | null, integration_worktree: string | null, 
 /**
  * Set when the user merged the integration branch into their branch.
  */

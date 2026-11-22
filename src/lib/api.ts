@@ -20,6 +20,7 @@ import type { Connection } from './gen/Connection';
 import type { ConnectionSecret } from './gen/ConnectionSecret';
 import type { SweepReport } from './gen/SweepReport';
 import type { RepoSync } from './gen/RepoSync';
+import type { MergeWarning } from './gen/MergeWarning';
 import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
@@ -308,7 +309,12 @@ export const api = {
   assignTask: (taskId: string, agentId: string | null) => call<Task>('assign_task', { taskId, agentId }),
   taskDiff: (taskId: string) => call<string>('task_diff', { taskId }),
   planDiff: (planId: string) => call<string>('plan_diff', { planId }),
-  mergePlan: (planId: string) => call<string>('merge_plan', { planId }),
+  /** Merge a plan into your checked-out branch. `into`: the branch you confirmed after `mergePlanWarning`. */
+  mergePlan: (planId: string, into: string | null = null) => call<string>('merge_plan', { planId, into }),
+  /** What to confirm before merging a plan: your checkout is not on the branch it started from (null: nothing). */
+  mergePlanWarning: (planId: string) => call<MergeWarning | null>('merge_plan_warning', { planId }),
+  /** Undo the last merge Codly made into your branch (`sha` from `repoSync().last_merge`). */
+  undoMerge: (sha: string) => call<RepoSync>('undo_merge', { sha }),
   /** Merge a solo agent's branch into your checked-out branch. Returns the new HEAD sha. */
   mergeAgent: (agentId: string) => call<string>('merge_agent', { agentId }),
   /** Your checkout against its remote: ahead/behind and uncommitted tracked files. */
