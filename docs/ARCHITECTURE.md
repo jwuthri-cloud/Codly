@@ -187,10 +187,13 @@ untrusted") and can never change approvals or policy.
 - Clean-room profile for untrusted repos (`--setting-sources`, `--strict-mcp-config`).
 - Never deletes a dirty or unmerged worktree, and keeps the branch.
 - The user's branch: Codly commits and merges by itself only on `codly/…` branches. Four
-  commands write to the user's checkout or its remote, each behind a button: `merge_plan` and
-  `merge_agent` (merge into the checked-out branch), `commit_checkout` (the user's own
-  changes) and `push_checkout` (`git push` of the checked-out branch, with the user's SSH
-  agent). Codly never pushes on its own.
+  commands change the user's branch or its remote (commits, merges, push), each behind a
+  button: `merge_plan` and `merge_agent` (merge into the checked-out branch),
+  `commit_checkout` (the user's own changes) and `push_checkout` (`git push` of the
+  checked-out branch, with the user's SSH agent). Codly never pushes on its own.
+- The workspace IDE saves files where its agent works (`ide_write`, `ide_create`): in the
+  agent's worktree, or in the user's checkout when the agent has none (the Lead, or an agent
+  hired with Git isolation off). It never commits.
 - Codly's own network use: CLI installers and skill installs (`git clone` of a catalog entry)
   when the user clicks, agents' default tool servers fetched by `npx`/`uvx`, Groq dictation and
   the Claude usage read when switched on, and `git push` on Push. Inbound webhooks and

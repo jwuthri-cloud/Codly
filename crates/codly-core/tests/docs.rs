@@ -34,15 +34,53 @@ fn entries(dir: &Path) -> Vec<String> {
     names
 }
 
+/// The names that the code map lists under `header`: the first column of the lines indented
+/// by two spaces, up to the next line at column 0. Descriptions and deeper lines (a wrapped
+/// description, the orchestrator sub-list) do not count, so a name in another block, or one
+/// that is the end of a longer name, cannot stand in for a missing line.
+fn listed<'a>(map: &'a str, header: &str) -> Vec<&'a str> {
+    map.lines()
+        .skip_while(|line| line.split(' ').next() != Some(header))
+        .skip(1)
+        .take_while(|line| line.starts_with(' '))
+        .filter_map(|line| line.strip_prefix("  ").filter(|entry| !entry.starts_with(' ')))
+        .flat_map(|entry| entry.split("  ").next().unwrap_or_default().split_whitespace())
+        .collect()
+}
+
 #[test]
 fn code_map_lists_the_engine_the_shell_and_the_ui() {
     let start = ARCHITECTURE.find("## 8. Code map").expect("ARCHITECTURE.md has a section 8, Code map");
     let map = &ARCHITECTURE[start..];
     let map = &map[..map.find("## 9.").expect("section 9 follows the code map")];
     for dir in ["crates/codly-core/src", "src-tauri/src", "src"] {
-        let missing: Vec<String> = entries(&repo().join(dir)).into_iter().filter(|name| !map.contains(name.as_str())).collect();
+        let names = listed(map, &format!("{dir}/"));
+        assert!(!names.is_empty(), "docs/ARCHITECTURE.md section 8 has no `{dir}/` block");
+        let missing: Vec<String> = entries(&repo().join(dir)).into_iter().filter(|name| !names.contains(&name.as_str())).collect();
         assert!(missing.is_empty(), "docs/ARCHITECTURE.md section 8 does not list these entries of {dir}: {missing:?}. Add a line for each.");
     }
+}
+
+/// The cases a search of the whole section let through: each name below is in the map, but
+/// not as an entry of the block that is asked for.
+#[test]
+fn a_name_counts_only_as_an_entry_of_its_own_block() {
+    let map = "\
+crates/codly-core/src/    the engine
+  model.rs          contract (ts-rs -> src/lib/gen), not git.rs
+  orchestrator/     the facade:
+                      agent_git.rs ide.rs    Git tab; IDE facade
+  lot.rs price.rs   build mode
+crates/codly-core/        build.rs
+src-tauri/src/            the shell
+  main.rs lib.rs    entry point
+  hire_commands.rs ide_commands.rs
+src/                      the app
+  lib/              api.ts
+";
+    assert_eq!(listed(map, "crates/codly-core/src/"), ["model.rs", "orchestrator/", "lot.rs", "price.rs"]);
+    assert_eq!(listed(map, "src-tauri/src/"), ["main.rs", "lib.rs", "hire_commands.rs", "ide_commands.rs"]);
+    assert_eq!(listed(map, "src/"), ["lib/"]);
 }
 
 /// Sentences that were true once. Codly now has a Push button, merges into the branch you have
