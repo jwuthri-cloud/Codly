@@ -216,8 +216,14 @@ pub async fn push_checkout(state: State<'_, AppState>) -> R<codly_core::model::R
 }
 
 #[tauri::command]
-pub async fn get_events(state: State<'_, AppState>, agent_id: Option<String>, before: Option<i64>, limit: i64) -> R<Vec<EventRow>> {
-    state.core().await?.events(agent_id.as_deref(), before, limit.clamp(1, 5000)).await.map_err(err)
+pub async fn get_events(state: State<'_, AppState>, agent_id: Option<String>, thread: Option<String>, before: Option<i64>, limit: i64) -> R<Vec<EventRow>> {
+    let (core, limit) = (state.core().await?, limit.clamp(1, 5000));
+    match thread {
+        // One conversation's page: `agent_id` is the agent the thread belongs to.
+        Some(thread) => core.thread_events(&thread, agent_id.as_deref(), before, limit).await,
+        None => core.events(agent_id.as_deref(), before, limit).await,
+    }
+    .map_err(err)
 }
 
 #[tauri::command]

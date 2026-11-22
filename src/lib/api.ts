@@ -320,6 +320,10 @@ export const api = {
   keepPlan: (planId: string) => call<Plan>('keep_plan', { planId }),
   events: (agentId: string | null, before: number | null, limit = 500) =>
     call<EventRow[]>('get_events', { agentId, before, limit }),
+  /** One page of a conversation's history before event `before`, newest first: the events of the
+   *  agent it belongs to (`agentId`), its messages, and its tasks' approvals and results. */
+  threadEvents: (thread: string, agentId: string | null, before: number, limit: number) =>
+    call<EventRow[]>('get_events', { agentId, thread, before, limit }),
   search: (query: string) => call<SearchResult>('search_code', { query }),
   memories: (query: string | null = null, scope: MemoryScope | null = null) =>
     call<Memory[]>('list_memories', { query, scope }),
