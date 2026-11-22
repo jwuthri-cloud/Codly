@@ -105,7 +105,8 @@ impl Inner {
         match &r.kind {
             EventKind::TurnCompleted { .. } => self.control_turn_done(&ctx.agent_id),
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
-            EventKind::TurnStarted { .. } => self.checkpoint_turn(&ctx.agent_id, &ctx.run_id), // the files before the turn
+            EventKind::TurnStarted { input } => self.checkpoint_turn(&ctx.agent_id, &ctx.run_id, input.is_some()), // the files before the turn
+            EventKind::PromptSteered { .. } => self.restore_note_read(&ctx.agent_id), // the note came with that prompt
             _ => {}
         }
         if let Err(e) = self.project_agent(&ctx, &r.kind) {

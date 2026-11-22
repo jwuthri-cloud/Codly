@@ -12,7 +12,7 @@ import type { Task } from '../gen/Task';
 import type { Workspace } from '../gen/Workspace';
 import { installNotifications } from '../state/notify';
 import { offices } from '../state/offices.svelte';
-import { STEER_GRACE, waitingOf, type Sent, type Turn } from '../state/queue';
+import { busyHint, queuedHint, sendNowTip, steerHint, STEER_GRACE, waitingOf, type Sent, type Turn } from '../state/queue';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 
@@ -77,6 +77,26 @@ describe('waitingOf', () => {
     expect(keys(r)).toEqual(['a', 'b']);
     // Once the Lead starts, the note no longer holds anything.
     expect(waitingOf([turn(600, null, 'a')], [msg('a', 100)], 700, { ts: 105 }).slot).toBe(false);
+  });
+});
+
+describe('where a waiting message goes, in words', () => {
+  it('Claude Code and Codex read it during the turn that runs', () => {
+    for (const provider of ['claude', 'codex'] as const) {
+      expect(queuedHint('Ada', provider)).toBe('Ada reads it after its current step');
+      expect(sendNowTip('Ada', provider)).toBe('Stop what Ada is doing so it reads this now');
+      expect(busyHint('Ada', provider)).toBe('Ada is mid-turn — it reads your message after its current step');
+      expect(steerHint(provider)).toBe('Arrives as context during its current turn, or as its next turn');
+    }
+  });
+
+  it('the other CLIs run it as the next turn', () => {
+    for (const provider of ['gemini', 'opencode', undefined] as const) {
+      expect(queuedHint('Ada', provider)).toBe('runs when Ada finishes this turn');
+      expect(sendNowTip('Ada', provider)).toBe('Interrupt Ada’s turn so this runs next');
+      expect(busyHint('Ada', provider)).toBe('Ada is mid-turn — your message queues and runs next');
+      expect(steerHint(provider)).toBe('Arrives as context on its next turn');
+    }
   });
 });
 

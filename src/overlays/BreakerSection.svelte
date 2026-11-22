@@ -1,6 +1,7 @@
 <!--
   Settings → Autonomy & Budgets: the circuit breaker. A floor-wide guard against runaway agents
-  and spend. When an agent crosses a limit Codly first steers it (a note in its next turn), then
+  and spend. When an agent crosses a limit Codly first steers it (a note it reads during its
+  current turn or as its next one, as its CLI allows), then
   constrains it (interrupts and tells it to stop), and only with "Hard stop" kills it (never
   for a budget alone). Limits save at once; 0 turns a limit off. Every step lands on the
   agent's timeline as a decision.
@@ -83,7 +84,7 @@
   <section>
     <h3 class="eyebrow">Autonomy & Budgets</h3>
     <p class="desc">
-      A guard against runaway agents and spend. Over a limit, an agent is first <b>steered</b> (a note in its next turn), then <b>constrained</b>
+      A guard against runaway agents and spend. Over a limit, an agent is first <b>steered</b> (a note in its current or next turn), then <b>constrained</b>
       (interrupted and told to stop), and with Hard stop <b>stopped</b>. One step every 30 seconds; it steps back down as the agent recovers. The Lead is exempt.
     </p>
 

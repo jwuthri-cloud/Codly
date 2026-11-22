@@ -1,6 +1,7 @@
-// Never blocking: you can always send. A message to an agent whose turn is running waits in
-// Codly's queue and runs as that agent's next turn. This works out, for one thread, which of
-// your messages are still waiting (from the agent's turns), in order.
+// Never blocking: you can always send. A message to an agent whose turn is running waits:
+// Claude Code and Codex read it during that turn (after the step they are in), the other CLIs
+// run it as the agent's next turn. This works out, for one thread, which of your messages are
+// still waiting (from the agent's turns), in order, and says in words where they go.
 //
 // A queued message is delivered by the first later `turn_started` whose prompt contains it
 // (Codly wraps your words, it never rewrites them); a turn with no recorded prompt takes the
@@ -9,6 +10,7 @@
 // has been idle a few seconds, nothing it was sent is still waiting.
 // When every Lead slot is busy, Codly says so in the thread ("Queued: …", author codly): what
 // you sent since the request's last turn waits for a free Lead (nothing to interrupt yet).
+import type { Provider } from '../gen/Provider';
 import { store } from './store.svelte';
 import { ui } from './ui.svelte';
 
@@ -71,6 +73,25 @@ export function queued(thread: string, sent: Sent[]): Map<string, Waiting> {
   waiting.forEach((m, i) => out.set(m.key, { position: i + 1, total: waiting.length, agentId: slot ? null : agent!.id, reason }));
   return out;
 }
+
+/** Claude Code and Codex take a message into the turn that runs; the other CLIs run it as the next turn. */
+const readsMidTurn = (provider: Provider | undefined) => provider === 'claude' || provider === 'codex';
+
+/** Where the first waiting message goes: the words after "Queued — ". */
+export const queuedHint = (name: string, provider: Provider | undefined) =>
+  readsMidTurn(provider) ? `${name} reads it after its current step` : `runs when ${name} finishes this turn`;
+
+/** What "Send now" costs: the tip of the button on the first waiting message. */
+export const sendNowTip = (name: string, provider: Provider | undefined) =>
+  readsMidTurn(provider) ? `Stop what ${name} is doing so it reads this now` : `Interrupt ${name}’s turn so this runs next`;
+
+/** The composer's placeholder while the agent is in a turn. */
+export const busyHint = (name: string, provider: Provider | undefined) =>
+  readsMidTurn(provider) ? `${name} is mid-turn — it reads your message after its current step` : `${name} is mid-turn — your message queues and runs next`;
+
+/** When a steer note reaches the agent. */
+export const steerHint = (provider: Provider | undefined) =>
+  readsMidTurn(provider) ? 'Arrives as context during its current turn, or as its next turn' : 'Arrives as context on its next turn';
 
 /** Whether a thread's agent is in a turn right now (your next message would queue). */
 export function busy(thread: string): boolean {
