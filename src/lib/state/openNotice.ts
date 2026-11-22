@@ -1,11 +1,18 @@
 // A notification of your system names something: an approval, a plan, a task, an agent. A click
 // on it brings Codly to the front, and the app then says what it named (src-tauri/src/notify.rs,
-// the `open-notice` event). This opens it, in its office.
+// the `open-notice` event). This opens it.
+//
+// The app does not see the click itself: it sees Codly come to the front while the notification
+// is on screen. You may as well be back for your own reasons. So what is in the office you look
+// at opens, and what is in another office only gets a toast whose Review takes you there: a
+// guess must not move you out of the office you work in.
 import { isTauriApp } from '../api';
+import type { Office } from '../gen/Office';
 import { openWorkspace } from './actions';
 import { blockers } from './blockers.svelte';
 import { offices } from './offices.svelte';
 import { store } from './store.svelte';
+import { toast, toasts } from './toasts.svelte';
 import { ui } from './ui.svelte';
 
 /** What a notification names (`Target` in src-tauri/src/notify.rs). */
@@ -21,15 +28,43 @@ export type NoticeTarget = {
   | { kind: 'budgets' }
 );
 
-/** Open what a notification names: switch to its office first when it is another one. */
+/** What the toast for another office says the notification named there, after the office's name. */
+const ELSEWHERE: Record<NoticeTarget['kind'], string> = {
+  approval: 'an approval waits for you',
+  questions: 'a question waits for you',
+  plan: 'a plan needs a look',
+  task: 'a task stopped',
+  agent: 'an agent needs a look',
+  budgets: 'a budget is reached',
+};
+
+/** A toast on screen already offers the way to that office: this file's, or the one for what
+ *  waits for you there (state/notify.ts). Both read "<office>: …" with a Review button. */
+const pointedAt = (office: Office) => toasts.list.some((x) => x.action?.label === 'Review' && x.title.startsWith(`${office.name}: `));
+
+/** Open what a notification names. In another office: offer the way there, and stay. */
 export async function openNotice(t: NoticeTarget) {
-  if (t.workspace_id && !store.isOpen(t.workspace_id)) {
-    await offices.refresh();
-    const office = offices.others.find((o) => o.id === t.workspace_id);
-    if (!office) return; // an office you closed since: nowhere to take you
-    await openWorkspace(office.repo_path);
-    if (!store.isOpen(office.id)) return; // it did not open: that toast says why
-  }
+  if (!t.workspace_id || store.isOpen(t.workspace_id)) return show(t);
+  await offices.refresh();
+  const office = offices.others.find((o) => o.id === t.workspace_id);
+  if (!office) return; // an office you closed since: nowhere to take you
+  if (pointedAt(office)) return;
+  toast({
+    kind: 'attention',
+    title: `${office.name}: ${ELSEWHERE[t.kind]}`,
+    action: {
+      label: 'Review',
+      run: async () => {
+        await openWorkspace(office.repo_path);
+        if (!store.isOpen(office.id)) return; // it did not open: that toast says why
+        show(t); // after the switch, which ends on the first request
+      },
+    },
+  });
+}
+
+/** Show it, in the office that is open. */
+function show(t: NoticeTarget) {
   switch (t.kind) {
     case 'approval': {
       const approval = store.approvals.find((a) => a.id === t.id);

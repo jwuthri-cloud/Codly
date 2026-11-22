@@ -17,7 +17,7 @@
   <h3 class="eyebrow">Notifications</h3>
   <p class="desc">
     Codly tells you through your system’s notifications when something needs you. Several of one kind within a few seconds show as one.
-    Click a notification soon after it shows, and Codly opens what it names.
+    Click a notification while it is on screen, and Codly opens what it names. For another office, it shows a Review button that takes you there.
   </p>
   {#each [NOTIFY_WHEN, ...NOTIFY_KINDS] as s (s.key)}
     <label class="row toggle">

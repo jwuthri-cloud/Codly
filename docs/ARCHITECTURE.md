@@ -76,9 +76,11 @@ blocked or failed, agent stalled or held back, budget reached, a solo agent's wo
 merge); each thing is told once. Notices of one kind within 3 s show as one notification.
 Settings → Notifications (`Settings.notifications`) has a switch per kind and "only when Codly
 is not in front" (on by default). The notification plugin reports no click on the desktop, so
-a click is read from its effect: when the window comes to the front within 30 s of a
-notification shown behind it, the shell sends `open-notice` and the UI opens what the
-notification names (src/lib/state/openNotice.ts).
+a click is read from its effect: when the window comes to the front within 8 s of a
+notification shown behind it (about as long as its banner is on screen), the shell sends
+`open-notice` and the UI opens what the notification names (src/lib/state/openNotice.ts). That
+is a guess, so the UI never switches office on it: for another office it shows a toast whose
+Review goes there.
 
 PATH: GUI apps get launchd's minimal PATH, so Codly captures the login shell env once
 (`$SHELL -ilc '/usr/bin/env -0'`, 5 s timeout) and resolves each CLI on it at every spawn.

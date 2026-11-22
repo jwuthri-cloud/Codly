@@ -9,6 +9,7 @@ import { blockers } from '../state/blockers.svelte';
 import { offices } from '../state/offices.svelte';
 import { openNotice } from '../state/openNotice';
 import { store } from '../state/store.svelte';
+import { toast, toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
 
 // Opening another office is the real action's job (a snapshot, its memories): here it only switches.
@@ -16,6 +17,7 @@ vi.mock('../state/actions', async (original) => ({ ...(await original<typeof imp
 
 const office = (id: string) => ({ id, name: id, repo_path: `/code/${id}` }) as Workspace;
 const other = (id: string) => ({ id, name: id, repo_path: `/code/${id}`, crew: 1, working: 1, needs_you: 1, home: [] }) satisfies Office;
+const said = () => toasts.list.map((t) => [t.kind, t.title, t.action?.label]);
 
 describe('opening what a notification names', () => {
   beforeEach(() => {
@@ -27,6 +29,7 @@ describe('opening what a notification names', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.mocked(openWorkspace).mockReset();
+    for (const t of toasts.list) toasts.dismiss(t.id);
     store.setWorkspace(null);
     store.agents = [];
     store.plans = [];
@@ -84,21 +87,59 @@ describe('opening what a notification names', () => {
     expect(openWorkspace).not.toHaveBeenCalled();
   });
 
-  it('what is in another office opens that office first', async () => {
+  // The click is a guess (Codly came to the front while the notification showed): it must not
+  // take you out of the office you work in.
+  it('what is in another office stays there: a toast offers the way', async () => {
+    offices.others = [other('b')];
+    ui.selectAgent('w1'); // your place in office a
+    await openNotice({ workspace_id: 'b', kind: 'task', id: 't7' });
+    expect(openWorkspace).not.toHaveBeenCalled();
+    expect(store.workspace?.id).toBe('a');
+    expect(ui.selection).toMatchObject({ kind: 'agent', id: 'w1' });
+    expect(said()).toEqual([['attention', 'b: a task stopped', 'Review']]);
+  });
+
+  it('Review on that toast opens the office, then what the notification names', async () => {
     offices.others = [other('b')];
     await openNotice({ workspace_id: 'b', kind: 'task', id: 't7' });
+    await toasts.list[0].action!.run();
     expect(openWorkspace).toHaveBeenCalledWith('/code/b');
     expect(store.workspace?.id).toBe('b');
     expect(ui.selection).toMatchObject({ kind: 'task', id: 't7' });
   });
 
-  it('an office that is gone, or that did not open, leaves the screen as it is', async () => {
-    await openNotice({ workspace_id: 'gone', kind: 'task', id: 't7' });
+  it('the toast says what kind of thing waits in the other office', async () => {
+    offices.others = [other('b'), other('c'), other('d'), other('e')];
+    const titles: string[] = [];
+    for (const [ws, t] of [
+      ['b', { kind: 'approval', id: 'ap1', agent_id: 'w1' }],
+      ['c', { kind: 'questions' }],
+      ['d', { kind: 'plan', id: 'p1' }],
+      ['e', { kind: 'agent', id: 'w1' }],
+    ] as const) {
+      await openNotice({ workspace_id: ws, ...t });
+      titles.push(toasts.list[toasts.list.length - 1].title);
+    }
+    expect(titles).toEqual(['b: an approval waits for you', 'c: a question waits for you', 'd: a plan needs a look', 'e: an agent needs a look']);
     expect(openWorkspace).not.toHaveBeenCalled();
-    expect(ui.selection).toBeNull();
+  });
+
+  it('an office a toast already points at gets no second toast', async () => {
+    offices.others = [other('b')];
+    // What waits for you in another office has its toast already (state/notify.ts).
+    toast({ kind: 'attention', title: 'b: An agent needs your approval', action: { label: 'Review', run: () => {} } });
+    await openNotice({ workspace_id: 'b', kind: 'approval', id: 'ap1', agent_id: 'w1' });
+    await openNotice({ workspace_id: 'b', kind: 'task', id: 't7' });
+    expect(said()).toEqual([['attention', 'b: An agent needs your approval', 'Review']]);
+  });
+
+  it('an office that is gone has no toast, and one that did not open leaves the screen as it is', async () => {
+    await openNotice({ workspace_id: 'gone', kind: 'task', id: 't7' });
+    expect(said()).toEqual([]);
     offices.others = [other('b')];
     vi.mocked(openWorkspace).mockImplementation(async () => {}); // the core refused: its toast says why
     await openNotice({ workspace_id: 'b', kind: 'task', id: 't7' });
+    await toasts.list[0].action!.run();
     expect(store.workspace?.id).toBe('a');
     expect(ui.selection).toBeNull();
   });

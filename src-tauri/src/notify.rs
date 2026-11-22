@@ -6,9 +6,9 @@
 //! one switch per kind, and one for "only when Codly is not in front" (`shows`).
 //!
 //! The notification plugin does not report a click on the desktop. A click brings Codly to the
-//! front, so when the window comes to the front soon after a notification, the UI is told what
-//! that notification names and opens it (`Shown`, the `open-notice` event, and
-//! src/lib/state/openNotice.ts).
+//! front, so when the window comes to the front while a notification is still on screen, the UI
+//! is told what that notification names and opens it (`Shown`, the `open-notice` event, and
+//! src/lib/state/openNotice.ts). That is a guess: the UI never leaves your office on it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -28,9 +28,11 @@ use tokio::time::{Instant, sleep_until};
 const GROUP_WINDOW: Duration = Duration::from_secs(3);
 /// The lines one notification shows for the notices it stands for; the rest is counted.
 const GROUP_LINES: usize = 3;
-/// Coming to Codly within this time of a notification opens what it names. Later, you are back
-/// for your own reasons, and the screen stays where you left it.
-const OPEN_WITHIN: Duration = Duration::from_secs(30);
+/// Coming to Codly within this time of a notification opens what it names: a banner stays on
+/// screen for about 5 seconds, and a click on it needs a moment to bring the window forward.
+/// Later there was no banner to click: you are back for your own reasons, and the screen stays
+/// where you left it.
+const OPEN_WITHIN: Duration = Duration::from_secs(8);
 /// The event that tells the UI what to open (payload: `Target`).
 const OPEN_EVENT: &str = "open-notice";
 
@@ -378,7 +380,7 @@ impl Shown {
     }
 
     /// What to open now that Codly came to the front: what the last notification names, if it
-    /// was shown a moment ago. Either way it is forgotten.
+    /// may still be on screen. Either way it is forgotten.
     pub fn take(&mut self, now: Instant) -> Option<Target> {
         let (target, at) = self.0.take()?;
         (now.duration_since(at) <= OPEN_WITHIN).then_some(target)
@@ -853,16 +855,18 @@ mod tests {
     }
 
     #[test]
-    fn coming_back_soon_after_a_notification_opens_what_it_names_once() {
+    fn coming_back_while_a_notification_shows_opens_what_it_names_once() {
         let t0 = Instant::now();
         let target = in_ws(What::Task { id: "t".to_string() }).unwrap();
         let mut shown = Shown::default();
         assert_eq!(shown.take(t0), None, "no notification: nothing to open");
         shown.set(target.clone(), t0);
-        assert_eq!(shown.take(t0 + OPEN_WITHIN), Some(target.clone()));
-        assert_eq!(shown.take(t0 + OPEN_WITHIN), None, "opened once");
+        assert_eq!(shown.take(t0 + Duration::from_secs(5)), Some(target.clone()), "a click on the banner");
+        assert_eq!(shown.take(t0 + Duration::from_secs(5)), None, "opened once");
+        shown.set(target.clone(), t0);
+        assert_eq!(shown.take(t0 + OPEN_WITHIN), Some(target.clone()), "a click as the banner leaves");
         shown.set(target, t0);
-        assert_eq!(shown.take(t0 + OPEN_WITHIN + Duration::from_secs(1)), None, "back much later: the screen stays where you left it");
+        assert_eq!(shown.take(t0 + Duration::from_secs(20)), None, "the banner is long gone: you are back for your own reasons, and the screen stays");
         assert_eq!(shown.take(t0), None, "and it is forgotten");
     }
 
