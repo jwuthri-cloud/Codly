@@ -44,6 +44,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     let core: Arc<Core> = rt
         .block_on(Core::start(CoreConfig { data_dir: tmp.path().join("data"), app_exe: std::env::current_exe().unwrap() }))
         .unwrap();
+    // The CLIs here are the machine's real ones. A refresh of the accounts must not start a
+    // signed-in Codex and ask OpenAI for its usage from a test.
+    core.set_codex_usage_reads(false);
     let (_tx, rx) = watch::channel(Some(Ok(core)));
     let app = mock_builder()
         .manage(AppState { core: rx, bus: UiBus::new(), pty: Default::default(), shell_env: OnceCell::new() })

@@ -282,7 +282,10 @@ they are build output or third-party code in most repos. If one holds your own c
   own CLI settings, git inside a nested repository → ask you, except in Full access, which
   approves them), then you. No silent timeouts; choices mirror the provider's. The rules read
   the command line only: what a test, a script or an interpreter does once it runs is not
-  checked (only Codex has an OS sandbox).
+  checked (only Codex has an OS sandbox). A Codex agent's command reaches the broker only
+  when Codex asks to leave its sandbox. With `codex_network_access` on, a command that needs
+  the network (`git push`, `curl | sh`, a package download) runs inside the sandbox with no
+  request, so these rules do not see it.
 - The gate runs the plan's verify and integration commands (the Lead wrote them) through the
   same risk rules: one with a risk is not run until you allow it on its task (an integration
   check is refused: the plan is still done, and its message names the check to run yourself).

@@ -18,8 +18,9 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 
-use super::{AppServer, SERVERS, ServerKey, Servers, auth_tag, server_for};
+use super::{AppServer, SERVERS, ServerKey, ServerMsg, Servers, auth_tag, server_for};
 use crate::adapters::{SessionMode, SpawnSpec, startup};
 use crate::model::{ModelOption, Provider, Role};
 use crate::proc::RawLog;
@@ -221,10 +222,14 @@ pub fn parse_own_mcp_servers(response: &Value) -> Vec<String> {
     names
 }
 
-/// The MCP servers a thread in `cwd` would start from the user's own Codex config.
+/// The MCP servers a thread in `cwd` would start from the user's own Codex config. The answer
+/// is that whole config, with the keys of its MCP servers and model providers: the raw log
+/// gets the server names only, as it gets no key of what Codly sends (`proc::write_json`).
 pub(super) async fn own_mcp_servers(server: &AppServer, cwd: &Path, raw: &Arc<RawLog>) -> anyhow::Result<Vec<String>> {
     let (method, params) = config_read_request(cwd);
-    Ok(parse_own_mcp_servers(&server.call(method, params, raw, ANSWER_TIMEOUT).await?))
+    let names = parse_own_mcp_servers(&server.call_unlogged(method, params, raw, ANSWER_TIMEOUT).await?);
+    raw.note(&format!("config/read: your own Codex config starts the MCP servers {names:?}"));
+    Ok(names)
 }
 
 // ───────────────────────────── compaction ─────────────────────────────
@@ -235,24 +240,26 @@ pub fn compact_request(thread_id: &str) -> (&'static str, Value) {
     ("thread/compact/start", json!({ "threadId": thread_id }))
 }
 
-/// Ask `server` to compact a thread. The thread is marked first, so its agent knows the turn
-/// Codex then starts for what it is (`CodexAgent::foreign_turn`) however fast it starts.
-async fn compact_on(server: &AppServer, thread_id: &str, raw: &Arc<RawLog>) -> anyhow::Result<()> {
-    server.state.lock().unwrap().compacting.insert(thread_id.to_string());
-    let (method, params) = compact_request(thread_id);
-    let asked = server.call(method, params, raw, ANSWER_TIMEOUT).await;
-    if asked.is_err() {
-        server.state.lock().unwrap().compacting.remove(thread_id);
+/// Ask the agent that owns a thread on `server` to have it compacted. The agent sends the
+/// request itself (`CodexAgent::compact`): only it knows whether a turn of its own runs or is
+/// about to, and it holds the prompts that come until the compaction has ended.
+pub(super) async fn compact_on(server: &AppServer, thread_id: &str) -> anyhow::Result<()> {
+    let route = server.state.lock().unwrap().routes.get(thread_id).cloned();
+    let route = route.ok_or_else(|| anyhow!("its conversation is not open on the Codex server"))?;
+    let (reply, answer) = oneshot::channel();
+    route.tx.send(ServerMsg::Compact(reply)).map_err(|_| anyhow!("the agent stopped"))?;
+    match tokio::time::timeout(ANSWER_TIMEOUT, answer).await {
+        Ok(Ok(asked)) => asked,
+        Ok(Err(_)) => Err(anyhow!("the agent stopped")),
+        Err(_) => Err(anyhow!("Codex did not answer within {} s", ANSWER_TIMEOUT.as_secs())),
     }
-    asked.map(|_| ())
 }
 
 /// Ask Codex to compact a thread's history now. Ok = Codex took the request; the compaction
 /// itself is reported by the thread's own events.
 pub async fn compact_thread(q: &AccountQuery, thread_id: &str) -> anyhow::Result<()> {
-    let raw = q.raw()?;
     let server = running_server(&SERVERS, q).await.ok_or_else(|| anyhow!("its Codex server is not running"))?;
-    compact_on(&server, thread_id, &raw).await
+    compact_on(&server, thread_id).await
 }
 
 #[cfg(test)]
@@ -435,8 +442,6 @@ mod tests {
     *'"model/list"'*'"cursor":"p2"'*) echo x >> asked-models; echo "{\"id\":$id,\"result\":{\"data\":[{\"model\":\"gpt-6-luna\",\"displayName\":\"Luna\",\"hidden\":false,\"isDefault\":false,\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"low\",\"description\":\"\"}],\"defaultReasoningEffort\":\"low\"}],\"nextCursor\":null}}" ;;
     *'"model/list"'*) echo x >> asked-models; echo "{\"id\":$id,\"result\":{\"data\":[{\"model\":\"gpt-6.1-sol\",\"displayName\":\"Sol\",\"hidden\":false,\"isDefault\":true,\"supportedReasoningEfforts\":[],\"defaultReasoningEffort\":\"medium\"}],\"nextCursor\":\"p2\"}}" ;;
     *'"account/rateLimits/read"'*) echo "{\"id\":$id,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":7,\"windowDurationMins\":300,\"resetsAt\":null},\"secondary\":null,\"rateLimitReachedType\":null}}}" ;;
-    *'"thread/compact/start"'*'"th-1"'*) echo "{\"id\":$id,\"result\":{}}" ;;
-    *'"thread/compact/start"'*) echo "{\"id\":$id,\"error\":{\"code\":-32600,\"message\":\"thread not found: th-9\"}}" ;;
   esac
 done
 "#,
@@ -461,12 +466,9 @@ done
         let limits = parse_rate_limits(&server.call(method, params, &raw, ANSWER_TIMEOUT).await.unwrap()).unwrap();
         assert_eq!(limits, [Reading { window: "five_hour".into(), used_fraction: 0.07, resets_at: None, status: Some("allowed".into()) }]);
 
-        // a compaction Codex takes is marked on its thread until its turn starts; one it
-        // refuses is not, and Codex's own words reach the caller
-        compact_on(&server, "th-1", &raw).await.unwrap();
-        let e = compact_on(&server, "th-9", &raw).await.unwrap_err();
-        assert_eq!(e.to_string(), "thread/compact/start failed: thread not found: th-9");
-        assert_eq!(server.state.lock().unwrap().compacting.iter().collect::<Vec<_>>(), ["th-1"]);
+        // a compaction goes through the agent that owns the thread: none owns one here
+        let e = compact_on(&server, "th-1").await.unwrap_err();
+        assert_eq!(e.to_string(), "its conversation is not open on the Codex server");
 
         // a question the server never answers is forgotten when its wait ends, so the server
         // does not look in use for good

@@ -247,6 +247,9 @@ struct Inner {
     hiring_window_ms: std::sync::atomic::AtomicU64,
     /// Model names per CLI (`Inner::cli_model_names`), for the Lead's consultant choices.
     models: Mutex<HashMap<Provider, Vec<String>>>,
+    /// A refresh of the accounts also reads each Codex sign-in's usage (`pull_codex_limits`).
+    /// On; `Core::set_codex_usage_reads` switches it off for tests beside a real Codex.
+    codex_usage_reads: AtomicBool,
     /// Circuit breaker: its settings and the per-agent signals.
     breaker: Mutex<breaker_run::Runtime>,
     /// How long Codly waits before it asks a worker whose turn failed to continue: one wait
@@ -423,6 +426,7 @@ impl Core {
             offers: Mutex::new(HashMap::new()),
             hiring_window_ms: std::sync::atomic::AtomicU64::new(0),
             models: Mutex::new(HashMap::new()),
+            codex_usage_reads: AtomicBool::new(true),
             breaker,
             turn_retry_waits: RwLock::new(ingest::TURN_RETRY_WAITS.to_vec()),
             retries: Mutex::new(retry::Retries::default()),

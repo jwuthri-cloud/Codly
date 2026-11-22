@@ -7,6 +7,7 @@
 //! reason), `limit_targets` (whose usage is read) and `compact_refusal` (when a compaction may
 //! not start).
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -52,8 +53,13 @@ pub fn codex_catalog(asked: Result<Vec<ModelOption>>) -> ModelCatalog {
 const LIMITS_FRESH_MS: i64 = 60_000;
 
 /// The Codex sign-ins whose usage Codly reads now: those it may run agents on, that are
-/// signed in, and that have no reading younger than `LIMITS_FRESH_MS`.
-pub fn limit_targets(accounts: &[AccountInfo], now: i64) -> Vec<AccountInfo> {
+/// signed in, and that have no reading younger than `LIMITS_FRESH_MS`. None when the agents
+/// pay with your own API credentials (`own_key`, BYOK): the windows are the ChatGPT plan's,
+/// and the agents do not draw from them.
+pub fn limit_targets(accounts: &[AccountInfo], own_key: bool, now: i64) -> Vec<AccountInfo> {
+    if own_key {
+        return Vec::new();
+    }
     let fresh = |a: &AccountInfo| a.limits.iter().any(|w| now - w.seen_at < LIMITS_FRESH_MS);
     accounts.iter().filter(|a| a.provider == Provider::Codex && a.enabled && a.logged_in == Some(true) && !fresh(a)).cloned().collect()
 }
@@ -68,8 +74,9 @@ pub struct RunNow {
 }
 
 /// Why `name`'s conversation cannot be compacted now, or None. Codex compacts in a turn of its
-/// own, which must not run into the agent's work. The adapter keeps that turn out of the
-/// agent's own turns (`codex.rs`, `foreign_turn`); a run on a task is still refused, so that a
+/// own, which must not run into the agent's work. This is the first look: a turn can start
+/// right after it, so the agent's adapter has the last word and keeps that turn out of the
+/// agent's own turns (`codex.rs`, `Compaction`). A run on a task is still refused, so that a
 /// compaction Codex reports in another way than expected cannot send a worker to the gate.
 pub fn compact_refusal(name: &str, provider: Provider, run: Option<RunNow>) -> Option<String> {
     if provider != Provider::Codex {
@@ -83,12 +90,15 @@ pub fn compact_refusal(name: &str, provider: Provider, run: Option<RunNow>) -> O
     }
 }
 
+/// Your own API credentials for Codex (BYOK), as `Inner::byok_for` gives them: a saved key,
+/// or the command that mints a token.
+type CodexByok = (Option<crate::inbound::secrets::Secret>, Option<String>);
+
 impl Inner {
     /// What a question to the app-server of one Codex sign-in needs: the binary, env and BYOK
     /// command `spawn_run` gives that sign-in's agents. `account` None = no account detected
-    /// for Codex (the login shell's sign-in). The bool says whether the agents pay with your
-    /// own API credentials (BYOK).
-    async fn codex_query(&self, account: Option<&AccountInfo>) -> Result<(AccountQuery, bool)> {
+    /// for Codex (the login shell's sign-in).
+    fn codex_query(&self, account: Option<&AccountInfo>, (key, byok_command): &CodexByok) -> Result<AccountQuery> {
         // Tests fix the CLI list and run no real CLI.
         if self.fixed_clis {
             bail!("the CLI list is fixed, so no CLI is asked");
@@ -97,21 +107,19 @@ impl Inner {
         let bin = crate::env::resolve_bin(Provider::Codex, &self.base_env)
             .or_else(|| cli_path.map(std::path::PathBuf::from))
             .ok_or_else(|| anyhow!("Codex is not installed"))?;
-        let (key, byok_command) = self.byok_for(Provider::Codex).await?;
-        let own_key = key.is_some() || byok_command.is_some();
         let mut env = crate::env::child_env_with(&self.base_env, Provider::Codex, key.as_ref().map(|k| k.expose()));
         if let Some(a) = account {
             crate::env::apply_account(&mut env, Provider::Codex, a.home.as_deref());
         }
         let raw_log = self.data("runs").join(query_log()).join("raw.ndjson");
-        Ok((AccountQuery { bin, env, byok_command, raw_log }, own_key))
+        Ok(AccountQuery { bin, env, byok_command: byok_command.clone(), raw_log })
     }
 
     /// The models Codex's own picker lists, asked from the app-server of the sign-in a new
     /// session would run on.
     async fn codex_models(&self) -> Result<Vec<ModelOption>> {
         let account = self.choose_account(Provider::Codex, self.settings().account_strategy).and_then(|id| self.account(&id));
-        let (q, _) = self.codex_query(account.as_ref()).await?;
+        let q = self.codex_query(account.as_ref(), &self.byok_for(Provider::Codex).await?)?;
         ask(async move { codex::models(&q).await }).await
     }
 
@@ -142,17 +150,23 @@ impl Inner {
     /// `/status` shows), so a sign-in no agent ran on since Codly started has its real usage,
     /// and one that recovered is not left parked on an old reading. Codex reads them with its
     /// own sign-in: Codly sees no credential. A sign-in whose server does not run gets one
-    /// (it stays for its next agent). Nothing is read with your own API key (BYOK): the
-    /// windows are the ChatGPT plan's, and the agents do not draw from them.
+    /// (it stays for its next agent). Whose usage is read: `limit_targets`.
     pub(super) async fn pull_codex_limits(&self) {
-        if self.fixed_clis {
+        if self.fixed_clis || !self.codex_usage_reads.load(Ordering::Relaxed) {
             return;
         }
+        let byok = match self.byok_for(Provider::Codex).await {
+            Ok(byok) => byok,
+            Err(e) => {
+                tracing::warn!("Codex usage not read: {e:#}");
+                return;
+            }
+        };
+        let own_key = byok.0.is_some() || byok.1.is_some();
         let mut set = tokio::task::JoinSet::new();
-        for account in limit_targets(&self.accounts(), now_ms()) {
-            let q = match self.codex_query(Some(&account)).await {
-                Ok((_, true)) => return,
-                Ok((q, false)) => q,
+        for account in limit_targets(&self.accounts(), own_key, now_ms()) {
+            let q = match self.codex_query(Some(&account), &byok) {
+                Ok(q) => q,
                 Err(e) => {
                     tracing::warn!("Codex usage not read: {e:#}");
                     return;
@@ -174,8 +188,9 @@ impl Inner {
     }
 
     /// Ask Codex to compact an agent's conversation now (`thread/compact/start`). Only between
-    /// turns and off a task (`compact_refusal`). Ok = Codex took the request; the compaction
-    /// shows in the agent's history as Codex reports it.
+    /// turns and off a task (`compact_refusal`, then the agent's adapter: a prompt can reach
+    /// the agent while this runs). Ok = Codex took the request; the compaction shows in the
+    /// agent's history as Codex reports it.
     async fn compact_agent(&self, agent_id: &str) -> Result<()> {
         let agent = self.agent(agent_id).map_err(|_| anyhow!("unknown agent"))?;
         let run = lock(&self.live).get(agent_id).map(|l| {
@@ -188,8 +203,8 @@ impl Inner {
         let (_, account, ws) = run.ok_or_else(|| anyhow!("{} is not running", agent.name))?;
         let Some(thread) = agent.session_id.clone() else { bail!("{} has no conversation to compact yet", agent.name) };
         let account = account.and_then(|id| self.account(&id));
-        let (q, _) = self.codex_query(account.as_ref()).await?;
-        ask(async move { codex::compact_thread(&q, &thread).await }).await.map_err(|e| anyhow!("Codex did not start the compaction: {e:#}"))?;
+        let q = self.codex_query(account.as_ref(), &self.byok_for(Provider::Codex).await?)?;
+        ask(async move { codex::compact_thread(&q, &thread).await }).await.map_err(|e| anyhow!("{} was not compacted: {e:#}", agent.name))?;
         // The History shows who asked; what Codex then does is in its own events.
         let kind = EventKind::Decision {
             id: new_id(),
@@ -221,9 +236,18 @@ impl super::Core {
         self.inner.model_catalog(provider).await
     }
 
-    /// Model names for a picker (empty when the CLI lists none): the names of `model_catalog`.
+    /// Model names for a picker that shows no source (empty when the CLI takes any name): the
+    /// CLI's own list, or the error. Never Codly's built-in Codex list: only `model_catalog`
+    /// offers it, with the reason.
     pub async fn list_models(&self, provider: Provider) -> Result<Vec<String>> {
-        Ok(self.inner.model_catalog(provider).await?.models.into_iter().map(|m| m.id).collect())
+        self.inner.cli_model_names(provider).await
+    }
+
+    /// Switch the usage read of `accounts(refresh)` on or off (on at start). The read starts
+    /// each Codex sign-in's app-server, which asks OpenAI with that sign-in: a test that runs
+    /// on a machine with a real Codex switches it off.
+    pub fn set_codex_usage_reads(&self, on: bool) {
+        self.inner.codex_usage_reads.store(on, Ordering::Relaxed);
     }
 
     /// Compact a running Codex agent's conversation now, between its turns.
@@ -278,8 +302,10 @@ mod tests {
             account("claude", Provider::Claude, true, Some(true)),
         ];
         let now = 1_800_000_000_000;
-        let ids = |accounts: &[AccountInfo]| -> Vec<String> { limit_targets(accounts, now).into_iter().map(|a| a.id).collect() };
+        let ids = |accounts: &[AccountInfo]| -> Vec<String> { limit_targets(accounts, false, now).into_iter().map(|a| a.id).collect() };
         assert_eq!(ids(&accounts), ["codex"], "never a sign-in you switched off, one that is signed out or unchecked, or another CLI's");
+        // your own API key pays (BYOK): the plan's windows are not the agents', and nothing is read
+        assert!(limit_targets(&accounts, true, now).is_empty());
 
         // a reading from the last minute is not asked for again; an older one is
         let seen = |ago_ms: i64| UsageWindow { window: "five_hour".into(), used_fraction: 0.2, resets_at: None, status: None, seen_at: now - ago_ms };
