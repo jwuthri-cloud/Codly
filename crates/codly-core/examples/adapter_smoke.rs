@@ -205,6 +205,7 @@ async fn main() {
         read_only: false,
         mcp,
         use_user_setup: false,
+        sandbox_network: false,
         raw_log: raw_log.clone(),
         byok_command: None,
     };

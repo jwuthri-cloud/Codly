@@ -126,8 +126,9 @@
   const PLAN_TOGGLES = [
     ['auto_run_plans', 'Run plans without asking', 'New requests start in Auto instead of Plan (switch per request under the composer, or ⇧⇥). You can still cancel at any time.'],
     ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
-    ['use_my_claude_setup', 'Use my Claude Code setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings. Applies to agents started after the change; approvals still go through Codly.'],
+    ['use_my_claude_setup', 'Use my own CLI setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings. Codex agents also start the MCP servers of your Codex config. Off: agents get Codly’s tools and your Connections only. Applies to agents started after the change; approvals still go through Codly.'],
   ];
+  const SANDBOX_TOGGLES = [['codex_network_access', 'Let Codex agents use the network', 'Commands a Codex agent runs in its sandbox can reach the internet (package installs, downloads) without asking you. Off: each one asks first. Applies to agents started after the change.']];
   const OFFICE_TOGGLES = [['game_rules', 'Office rules affect work', 'Agents can be at home or tired, and new hires wait for a job offer.']];
   const REVIEW_TOGGLES = [['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.']];
   // Seconds; the value in use is always one of the choices.
@@ -297,6 +298,11 @@
     </section>
 
     <ApprovalRulesSection />
+
+    <section>
+      <h3 class="eyebrow">Sandbox</h3>
+      {@render toggles(SANDBOX_TOGGLES)}
+    </section>
 
     <section>
       <h3 class="eyebrow">Review</h3>

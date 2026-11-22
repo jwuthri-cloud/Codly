@@ -336,9 +336,7 @@ impl Inner {
         for p in CONSULTANT_CLIS.into_iter().filter(|p| self.cli_usable(*p) && !lock(&self.models).contains_key(p)) {
             let me = self.clone();
             tokio::spawn(async move {
-                let key = me.byok_for(p).await.ok().and_then(|(key, _)| key);
-                let job = crate::env::list_models(p, &me.base_env, key.as_ref().map(|k| k.expose()));
-                let models = match tokio::time::timeout(Duration::from_secs(10), job).await {
+                let models = match tokio::time::timeout(Duration::from_secs(10), me.cli_model_names(p)).await {
                     Ok(Ok(m)) => m,
                     _ => vec![],
                 };

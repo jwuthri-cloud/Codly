@@ -51,6 +51,7 @@ import { MockApprovalRules } from './demo/approvalRules';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { MockControls } from './demo/controls';
+import { demoCatalog } from './demo/models';
 import { Story } from './demo/story';
 import { saveTriggers, seedTriggers } from './demo/triggers';
 import type { TriggersConfig } from './gen/TriggersConfig';
@@ -108,6 +109,7 @@ const SETTINGS: Settings = {
   review_gate: false,
   lead_followups: true,
   use_my_claude_setup: true,
+  codex_network_access: false,
   paused: false,
   paused_offices: [],
   game_rules: false,
@@ -373,10 +375,14 @@ export class MockTransport implements Transport {
         return this.ctl.resume(String(a.agentId));
       case 'steer_agent':
         return this.ctl.steer(String(a.agentId), String(a.text ?? ''));
+      case 'compact_agent':
+        return this.ctl.compact(String(a.agentId));
       case 'hire_agent':
         return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':
-        return a.provider === 'claude' ? ['sonnet', 'opus', 'haiku', 'fable'] : a.provider === 'codex' ? ['gpt-5.5-codex', 'gpt-5.5-mini'] : [];
+        return demoCatalog(a.provider as Provider).models.map((m) => m.id);
+      case 'model_catalog':
+        return demoCatalog(a.provider as Provider);
       case 'hire_review':
         return reviewHire(String(a.raw));
       case 'hire_launch_preview':

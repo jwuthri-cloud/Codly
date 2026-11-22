@@ -1,12 +1,13 @@
 <!--
   Live controls for one running agent. Enforced by the core (orchestrator/controls.rs), not by
   asking nicely: blocked tools are denied, a stop waits for the step to end, a steer note is an
-  ordinary prompt tagged as context, and kill ends the process.
+  ordinary prompt tagged as context, and kill ends the process. A Codex agent can also be asked
+  to compact its conversation between turns (Codex does it; the core says when it may start).
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
   import { stopAgent } from '../lib/state/actions';
-  import { controls, resumeAgent, setBlockTools, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
+  import { compactAgent, controls, resumeAgent, setBlockTools, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
   import Icon from '../components/Icon.svelte';
   import Section from '../components/Section.svelte';
 
@@ -23,6 +24,16 @@
   let note = $state('');
   let sending = $state(false);
   let confirmKill = $state(false);
+  let compacting = $state(false);
+  // The core has the last word (a turn may start meanwhile); this only keeps the button honest.
+  const inTurn = $derived(['starting', 'thinking', 'working', 'waiting_approval'].includes(agent.status));
+  const compactWhy = $derived(agent.task_id ? 'It is on a task. Compact it between tasks.' : inTurn ? 'Wait until its turn ends.' : null);
+
+  async function compact() {
+    compacting = true;
+    await compactAgent(agent.id, agent.name);
+    compacting = false;
+  }
 
   async function send() {
     const text = note.trim();
@@ -71,6 +82,16 @@
           <button class="btn sm" onclick={() => stopAfterStep(agent.id)}><Icon name="pause" size={12} />Stop after step</button>
         {/if}
       </div>
+
+      {#if agent.provider === 'codex'}
+        <div class="row">
+          <span class="txt">
+            <b>Compact conversation</b>
+            <span class="sub">{compactWhy ?? 'Codex sums up the conversation so far to free context. Use it between turns of a long-lived agent.'}</span>
+          </span>
+          <button class="btn sm" disabled={!!compactWhy || compacting} onclick={compact}><Icon name="layers" size={12} />Compact now</button>
+        </div>
+      {/if}
 
       <div class="steer">
         <b>Steer note</b>

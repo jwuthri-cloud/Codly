@@ -193,6 +193,11 @@ pub async fn list_models(state: State<'_, AppState>, provider: Provider) -> R<Ve
 }
 
 #[tauri::command]
+pub async fn model_catalog(state: State<'_, AppState>, provider: Provider) -> R<ModelCatalog> {
+    state.core().await?.model_catalog(provider).await.map_err(err)
+}
+
+#[tauri::command]
 pub async fn set_agent_model(state: State<'_, AppState>, agent_id: String, model: Option<String>) -> R<Agent> {
     state.core().await?.set_agent_model(&agent_id, model).await.map_err(err)
 }

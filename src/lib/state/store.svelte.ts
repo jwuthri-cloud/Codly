@@ -78,6 +78,7 @@ export const DEFAULT_SETTINGS: Settings = {
   review_gate: false,
   lead_followups: true,
   use_my_claude_setup: true,
+  codex_network_access: false,
   paused: false,
   paused_offices: [],
   game_rules: false,

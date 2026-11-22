@@ -1,6 +1,7 @@
 <!--
-  Switch a 1:1 agent to another model. The list is the CLI's own catalog (OpenCode lists every
-  provider you have a key for, Codex its models, Claude its aliases); any other name can be typed.
+  Switch a 1:1 agent to another model and thinking effort. The list is the CLI's catalog
+  (`api.modelCatalog`): Codex's own models with the efforts each one takes, what OpenCode
+  prints, Claude's aliases. A line says where the list comes from; any other name can be typed.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -8,20 +9,30 @@
   import { setAgentModel } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
+  import type { ModelCatalog } from '../lib/gen/ModelCatalog';
   import { PROVIDER_LABEL } from '../lib/util/labels';
+  import { effortLabel, effortsFor, keptEffort, optionLabel, optionOf, sourceNote } from '../lib/util/models';
+  import { joinModel, splitModel } from '../lib/util/team';
   import Dialog from '../components/Dialog.svelte';
 
   const { agentId, provider } = ui.modelDialog!;
   const agent = store.agents.find((a) => a.id === agentId) ?? null;
-  let models = $state<string[]>([]);
+  let catalog = $state<ModelCatalog | null>(null);
   let loading = $state(true);
   let problem = $state<string | null>(null);
-  let model = $state(agent?.model ?? '');
+  const current = splitModel(agent?.model ?? null);
+  let model = $state(current.name);
+  let effort = $state(current.effort);
   let busy = $state(false);
 
+  const models = $derived(catalog?.models ?? []);
+  const efforts = $derived(effortsFor(catalog, provider, model.trim()));
+  const defaultEffort = $derived(optionOf(catalog, model.trim())?.default_effort ?? null);
+  const note = $derived(sourceNote(catalog, PROVIDER_LABEL[provider]));
+
   api
-    .listModels(provider)
-    .then((list) => (models = list))
+    .modelCatalog(provider)
+    .then((c) => (catalog = c))
     .catch((e) => (problem = String(e)))
     .finally(() => (loading = false));
 
@@ -35,7 +46,8 @@
     e.preventDefault();
     if (!agent) return;
     busy = true;
-    const done = await setAgentModel(agent, model.trim() || null);
+    // An effort the chosen model does not take is not sent: the model runs with its default.
+    const done = await setAgentModel(agent, joinModel(model, keptEffort(catalog, provider, model.trim(), effort)));
     busy = false;
     if (done) close();
   }
@@ -50,10 +62,20 @@
           <span class="eyebrow">Model</span>
           <input list="model-options" bind:value={model} placeholder={loading ? 'Loading models…' : 'CLI default'} spellcheck="false" autocomplete="off" />
           <datalist id="model-options">
-            {#each models as m (m)}<option value={m}></option>{/each}
+            {#each models as m (m.id)}<option value={m.id}>{optionLabel(m)}</option>{/each}
           </datalist>
         </label>
+        {#if efforts.length}
+          <label class="field">
+            <span class="eyebrow">Thinking effort</span>
+            <select value={keptEffort(catalog, provider, model.trim(), effort)} onchange={(e) => (effort = e.currentTarget.value)}>
+              <option value="">{defaultEffort ? `Default (${effortLabel(defaultEffort)})` : 'Default'}</option>
+              {#each efforts as e (e)}<option value={e}>{effortLabel(e)}</option>{/each}
+            </select>
+          </label>
+        {/if}
         {#if problem}<p class="muted small">Couldn’t load the model list ({problem}). You can still type a name.</p>{/if}
+        {#if note}<p class="muted small">{note}</p>{/if}
         {#if !loading && !problem && !models.length}<p class="muted small">This CLI doesn’t list its models. Type a name, or leave it empty.</p>{/if}
       </div>
       <footer>

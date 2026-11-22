@@ -122,6 +122,17 @@ export class MockControls {
     return this.publish(id);
   }
 
+  /** Compact now: only a Codex agent between turns and off a task, as in the core. */
+  compact(id: string): null {
+    const a = this.agent(id);
+    if (a.provider !== 'codex') throw new Error(`Only a Codex agent can be compacted from here.`);
+    if (this.sim.actor(id).inTurn) throw new Error(`${a.name} is working. Compact it when its turn ends.`);
+    if (a.task_id) throw new Error(`${a.name} is on a task. Compact it between tasks.`);
+    this.note(id, `you asked Codex to compact ${a.name}’s conversation`);
+    this.sim.emit({ type: 'compacting', pre_tokens: null, post_tokens: null }, { agent: id });
+    return null;
+  }
+
   /** The note reaches the agent on its next turn: it acknowledges it in its own thread. */
   private async deliver(id: string, text: string) {
     const act = this.sim.actor(id);

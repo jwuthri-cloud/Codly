@@ -13,12 +13,19 @@
 //! `thread/start.config` objects are read as dotted `-c` keys; `mcp_servers.codly.{command,
 //! args, env, default_tools_approval_mode}`, `features.memories` and `memories.*` are valid.
 //!
+//! Questions that are no part of a run (the models, the account's usage, a compaction, the
+//! user's own MCP servers) are in `account.rs`.
+//!
 //! A prompt sent while a turn runs is steered into it (`turn/steer`), so it does not get a
 //! `TurnStarted`/`TurnCompleted` of its own: a `PromptSteered` says it was delivered. Codex
 //! may report the turn's end before it answers the steer: the adapter keeps that end back
 //! until the answer, so a `PromptSteered` always comes before its turn's `TurnCompleted`.
 
-use std::collections::{HashMap, VecDeque};
+mod account;
+
+pub use account::{AccountQuery, compact_thread, models, rate_limits};
+
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -33,7 +40,7 @@ use super::classify::{self, OUTPUT_MAX};
 use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, startup};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, Billing, EventKind,
-    Id, MessagePhase, PlanStep, Provider, TurnStatus, Usage, new_id, now_ms,
+    Id, MessagePhase, ModelOption, PlanStep, Provider, TurnStatus, Usage, new_id, now_ms,
 };
 use crate::proc::{self, RawLog, Record, StderrTail};
 
@@ -142,6 +149,9 @@ struct State {
     routes: HashMap<String, Route>,
     /// The last `RATE_LIMITS` params passed on to the agents, and when.
     last_limits: Option<(Value, i64)>,
+    /// Threads a compaction was asked for (`account::compact_thread`) whose turn has not
+    /// started yet: the next turn Codex starts there by itself is that compaction.
+    compacting: HashSet<String>,
 }
 
 impl State {
@@ -172,6 +182,8 @@ struct AppServer {
     info: StdMutex<ServerInfo>,
     /// Raw log of the agent that started the server: lines that belong to nobody else.
     bootstrap_raw: Arc<RawLog>,
+    /// The model list this server gave (`account::models`), asked once.
+    models: Mutex<Option<Vec<ModelOption>>>,
 }
 
 impl AppServer {
@@ -196,6 +208,7 @@ impl AppServer {
             stderr: StderrTail::spawn(child.stderr.take().context("no stderr")?, 64 << 10),
             info: StdMutex::new(ServerInfo { cli_version: None, billing: Billing::Unknown }),
             bootstrap_raw: raw.clone(),
+            models: Mutex::new(None),
         });
         let reader = server.clone();
         proc::spawn_reader(child.stdout.take().context("no stdout")?, move |rec| reader.on_record(rec));
@@ -406,17 +419,24 @@ impl AppServer {
 
     async fn call(&self, method: &str, params: Value, raw: &Arc<RawLog>, timeout: Duration) -> anyhow::Result<Value> {
         let (tx, rx) = oneshot::channel();
-        self.request(method, params, Waiter::Oneshot(tx, raw.clone()), raw).await?;
+        let id = self.request(method, params, Waiter::Oneshot(tx, raw.clone()), raw).await?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => Err(anyhow!("{method} failed: {}", e["message"].as_str().map(str::to_owned).unwrap_or_else(|| e.to_string()))),
             Ok(Err(_)) => Err(anyhow!("codex app-server exited during {method}")),
-            Err(_) => Err(anyhow!("codex app-server did not answer {method} within {} s", timeout.as_secs())),
+            Err(_) => {
+                // Nobody waits any more: a request left here would make the server look in use
+                // for good (`give_up_if_unused`).
+                self.state.lock().unwrap().pending.remove(&id);
+                Err(anyhow!("codex app-server did not answer {method} within {} s", timeout.as_secs()))
+            }
         }
     }
 
     fn unroute(&self, thread_id: &str) {
-        self.state.lock().unwrap().routes.remove(thread_id);
+        let mut st = self.state.lock().unwrap();
+        st.routes.remove(thread_id);
+        st.compacting.remove(thread_id);
     }
 
     /// Close stdin (the server exits on EOF), then SIGTERM → SIGKILL if it lingers. A write
@@ -487,8 +507,10 @@ pub async fn shutdown_server() {
     set.join_all().await;
 }
 
-/// `thread/start` (or `thread/resume`) and its params for one agent.
-pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str>) -> (&'static str, Value) {
+/// `thread/start` (or `thread/resume`) and its params for one agent. `own_servers` = the MCP
+/// servers of the user's own Codex config that this thread must not start (`use_user_setup`
+/// off; `account::own_mcp_servers`).
+pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str>, own_servers: &[String]) -> (&'static str, Value) {
     let mut config = json!({
         "model_reasoning_summary": "auto",
         // Codly keeps its own memory; Codly threads must not feed the user's Codex memories
@@ -513,6 +535,16 @@ pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str
             }
             config["mcp_servers"][&x.name] = server;
         }
+    }
+    // A `-c` key is merged into the user's config, so `enabled` alone switches the user's own
+    // entry off for this thread. A server Codly passes itself under the same name stays.
+    for name in own_servers {
+        if config["mcp_servers"].get(name).is_none() {
+            config["mcp_servers"][name] = json!({ "enabled": false });
+        }
+    }
+    if spec.sandbox_network && !spec.read_only {
+        config["sandbox_workspace_write"] = json!({ "network_access": true });
     }
     let mut p = json!({
         "cwd": spec.cwd,
@@ -547,7 +579,20 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     let (msg_tx, msgs) = mpsc::unbounded_channel();
     let route = Route { tx: msg_tx, raw: raw.clone() };
     let (model, effort) = classify::split_model_effort(spec.model.as_deref());
-    let (method, params) = thread_request(&spec, model.as_deref(), effort.as_deref());
+    let own_servers = if spec.use_user_setup {
+        Vec::new()
+    } else {
+        match account::own_mcp_servers(&server, &spec.cwd, &raw).await {
+            Ok(names) => names,
+            // The thread still starts, with the user's servers, and says so.
+            Err(e) => {
+                let message = format!("Codly could not read your Codex config ({e:#}), so your own MCP servers may start with this agent.");
+                let _ = events.send(AdapterEvent { agent_id: spec.agent_id.clone(), run_id: spec.run_id.clone(), kind: EventKind::Error { message, fatal: false } });
+                Vec::new()
+            }
+        }
+    };
+    let (method, params) = thread_request(&spec, model.as_deref(), effort.as_deref(), &own_servers);
     let start_id = server.request(method, params, Waiter::Agent { route: route.clone(), register: true }, &raw).await?;
 
     let (tx, cmds) = mpsc::unbounded_channel();
@@ -567,6 +612,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         norm: CodexNormalizer::new(&spec.agent_id, &spec.run_id, spec.cwd.clone(), resumed),
         pending: HashMap::new(),
         active_turn: None,
+        foreign_turn: false,
         turn_pending: false,
         interrupt_after_start: false,
         steer_queue: Vec::new(),
@@ -639,6 +685,10 @@ struct CodexAgent {
     norm: CodexNormalizer,
     pending: HashMap<i64, Pending>,
     active_turn: Option<String>,
+    /// `active_turn` is the turn Codex compacts the thread in (`account::compact_thread`),
+    /// which Codly did not start. It answers no prompt, so it is no turn of the agent: its
+    /// start and end are not reported as one.
+    foreign_turn: bool,
     /// `turn/start` sent, its response (the turn id) not yet back.
     turn_pending: bool,
     interrupt_after_start: bool,
@@ -810,10 +860,22 @@ impl CodexAgent {
     }
 
     async fn handle_notification(&mut self, method: &str, params: &Value) {
-        let events = self.norm.on_notification(method, params);
+        let mut events = self.norm.on_notification(method, params);
+        // The turn of a compaction that was asked for (`account::compact_thread`): Codly did
+        // not start it, and it runs on the thread all the same. A prompt sent now is steered at
+        // it; Codex refuses that for such a turn, so the prompt waits for the turn's end and
+        // gets a turn of its own. An interrupt or a shutdown stops it like any turn.
+        if method == "turn/started" && self.stage == Stage::Running && self.active_turn.is_none() && !self.turn_pending && self.compaction_asked() {
+            self.active_turn = params["turn"]["id"].as_str().map(str::to_owned);
+            self.foreign_turn = self.active_turn.is_some();
+        }
+        if self.foreign_turn {
+            events.retain(|e| !matches!(e, EventKind::TurnStarted { .. } | EventKind::TurnCompleted { .. }));
+        }
         self.emit_all(events);
         if method == "turn/completed" {
             self.active_turn = None;
+            self.foreign_turn = false;
             self.answered_in_time();
             match self.stage {
                 Stage::Interrupting => self.unsubscribe().await,
@@ -821,6 +883,12 @@ impl CodexAgent {
                 _ => {}
             }
         }
+    }
+
+    /// Was a compaction asked for on this thread and not started yet? Asked once: the answer
+    /// takes the request off the server's list.
+    fn compaction_asked(&self) -> bool {
+        self.thread_id.as_ref().is_some_and(|tid| self.server.state.lock().unwrap().compacting.remove(tid))
     }
 
     async fn on_cmd(&mut self, cmd: AgentCmd) {
@@ -991,13 +1059,14 @@ impl CodexAgent {
             self.server.unroute(tid);
         }
         let open = self.active_turn.take().is_some() || std::mem::take(&mut self.turn_pending);
+        let foreign = std::mem::take(&mut self.foreign_turn);
         if self.started {
             let events = self.norm.cancel_all_approvals();
             self.emit_all(events);
             // Once unrouted, Codex's own `turn/completed` cannot reach us: close the turn here.
             // Interrupted, not Failed: this is a shutdown Codly asked for, and a failed turn
             // would send a stopped worker to the gate.
-            if open {
+            if open && !foreign {
                 self.emit(EventKind::TurnCompleted { status: TurnStatus::Interrupted, result_text: None, duration_ms: None });
             }
             self.emit(EventKind::StatusChanged { status: AgentStatus::Offline });
@@ -1019,7 +1088,7 @@ impl CodexAgent {
         }
         let cancelled = self.norm.cancel_all_approvals();
         self.emit_all(cancelled);
-        if self.active_turn.is_some() || self.turn_pending {
+        if (self.active_turn.is_some() && !self.foreign_turn) || self.turn_pending {
             self.emit(EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: Some("codex app-server exited".into()), duration_ms: None });
         }
         let detail = if stderr.is_empty() { String::new() } else { format!(": {stderr}") };
@@ -1885,6 +1954,7 @@ mod tests {
             read_only: false,
             mcp: None,
             use_user_setup: false,
+            sandbox_network: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: cmd.map(str::to_owned),
         };
@@ -1927,11 +1997,12 @@ mod tests {
             read_only: false,
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "tok".into())] }),
             use_user_setup: false,
+            sandbox_network: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: None,
         };
         let (model, effort) = classify::split_model_effort(spec.model.as_deref());
-        let (m, p) = thread_request(&spec, model.as_deref(), effort.as_deref());
+        let (m, p) = thread_request(&spec, model.as_deref(), effort.as_deref(), &[]);
         assert_eq!(m, "thread/start");
         assert_eq!(p["model"], "gpt-6-luna");
         assert_eq!(p["approvalPolicy"], "on-request");
@@ -1945,9 +2016,29 @@ mod tests {
         let mut ro = spec.clone();
         ro.read_only = true;
         ro.session = SessionMode::Resume { session_id: "th-1".into() };
-        let (m, p) = thread_request(&ro, None, None);
+        let (m, p) = thread_request(&ro, None, None, &[]);
         assert_eq!((m, &p["threadId"], &p["sandbox"]), ("thread/resume", &json!("th-1"), &json!("read-only")));
         assert!(p.get("threadSource").is_none() && p.get("model").is_none());
+        assert!(p["config"].get("sandbox_workspace_write").is_none(), "the sandbox keeps the network closed unless you open it");
+
+        // "Use my setup" off: each server of the user's own config is switched off for the
+        // thread (`mcp_servers.<name>.enabled`); Codly's own server keeps its definition.
+        let own = ["linear".to_string(), "codly".to_string()];
+        let (_, p) = thread_request(&spec, None, None, &own);
+        assert_eq!(p["config"]["mcp_servers"]["linear"], json!({ "enabled": false }));
+        assert_eq!(p["config"]["mcp_servers"]["codly"]["command"], "/x/codly");
+        assert!(p["config"]["mcp_servers"]["codly"].get("enabled").is_none());
+        // ... also for an agent that has no Codly server
+        let bare = SpawnSpec { mcp: None, ..spec.clone() };
+        assert_eq!(thread_request(&bare, None, None, &own).1["config"]["mcp_servers"], json!({ "codly": { "enabled": false }, "linear": { "enabled": false } }));
+        assert!(thread_request(&bare, None, None, &[]).1["config"].get("mcp_servers").is_none());
+
+        // Settings → "Let Codex agents use the network": the workspace sandbox opens the
+        // network (`sandbox_workspace_write.network_access`); a read-only agent has no such sandbox.
+        let net = SpawnSpec { sandbox_network: true, ..spec.clone() };
+        assert_eq!(thread_request(&net, None, None, &[]).1["config"]["sandbox_workspace_write"], json!({ "network_access": true }));
+        let net_ro = SpawnSpec { sandbox_network: true, ..ro.clone() };
+        assert!(thread_request(&net_ro, None, None, &[]).1["config"].get("sandbox_workspace_write").is_none());
     }
 
     /// An app-server with no process behind it: lines are fed by hand, every write fails.
@@ -1964,6 +2055,7 @@ mod tests {
             stderr: StderrTail::default(),
             info: StdMutex::new(ServerInfo { cli_version: None, billing: Billing::Unknown }),
             bootstrap_raw: Arc::new(RawLog::open(&dir.join("raw.ndjson")).unwrap()),
+            models: Mutex::new(None),
         })
     }
 
@@ -1985,6 +2077,7 @@ mod tests {
             norm: CodexNormalizer::new("a", "r", PathBuf::from("/w"), false),
             pending: HashMap::from([(0, Pending::Thread)]),
             active_turn: None,
+            foreign_turn: false,
             turn_pending: false,
             interrupt_after_start: false,
             steer_queue: Vec::new(),
@@ -2064,6 +2157,65 @@ mod tests {
         assert_eq!(server.info.lock().unwrap().billing, Billing::Subscription);
         server.route_line(br#"{"method":"account/updated","params":{"authMode":"a mode from the future"}}"#);
         assert_eq!(server.info.lock().unwrap().billing, Billing::Subscription, "an unknown mode changes nothing");
+    }
+
+    /// The turn of a compaction that was asked for (`thread/compact/start`) is the thread's
+    /// running turn: a prompt sent meanwhile is steered at it, and an interrupt or a shutdown
+    /// stops it. It is no turn of the agent: Codly hears its status, not a turn's start and
+    /// end (a worker's turn end runs the gate, a Lead's forwards its reply).
+    #[tokio::test]
+    async fn a_compaction_turn_runs_on_the_thread_but_is_no_turn_of_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let (mut agent, mut events) = fake_agent(&server);
+        agent.pending.clear();
+        agent.thread_id = Some("t".into());
+        // TurnStartedNotification { threadId, turn: Turn }, written from the codex-cli 0.166.0
+        // protocol types.
+        let started = |id: &str| {
+            json!({ "threadId": "t", "turn": { "id": id, "rootTurnId": null, "items": [], "itemsView": "full", "status": "inProgress", "error": null, "startedAt": 1, "completedAt": null, "durationMs": null } })
+        };
+        let ask_compaction = || server.state.lock().unwrap().compacting.insert("t".into());
+        ask_compaction();
+        agent.on_notification("turn/started", &started("u-compact")).await;
+        assert_eq!(agent.active_turn.as_deref(), Some("u-compact"));
+        assert!(server.state.lock().unwrap().compacting.is_empty(), "one request, one turn");
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::StatusChanged { status: AgentStatus::Thinking }]), "{kinds:?}");
+        agent.on_notification("item/started", &json!({ "threadId": "t", "turnId": "u-compact", "item": { "type": "contextCompaction", "id": "i1" } })).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::Compacting { .. }]), "{kinds:?}");
+        // its end frees the thread for the next turn
+        agent.on_notification("turn/completed", &json!({ "threadId": "t", "turn": { "id": "u-compact", "status": "completed" } })).await;
+        assert_eq!((agent.active_turn.as_deref(), agent.foreign_turn), (None, false));
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::StatusChanged { status: AgentStatus::Idle }]), "{kinds:?}");
+
+        // a turn Codly started keeps the id the answer to its `turn/start` gives, and is reported
+        agent.turn_pending = true;
+        agent.on_notification("turn/started", &started("u-early")).await;
+        assert_eq!((agent.active_turn.as_deref(), agent.foreign_turn), (None, false));
+        assert!(matches!(&emitted(&mut events)[..], [EventKind::TurnStarted { input: None }, EventKind::StatusChanged { status: AgentStatus::Thinking }]));
+        (agent.turn_pending, agent.active_turn) = (false, Some("u-mine".into()));
+        agent.on_notification("turn/completed", &json!({ "threadId": "t", "turn": { "id": "u-mine", "status": "completed" } })).await;
+        assert!(emitted(&mut events).iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Completed, .. })));
+
+        // a turn nobody asked for is reported as before
+        agent.on_notification("turn/started", &started("u-unknown")).await;
+        assert_eq!((agent.active_turn.as_deref(), agent.foreign_turn), (None, false));
+        assert!(matches!(&emitted(&mut events)[..], [EventKind::TurnStarted { input: None }, ..]));
+        agent.on_notification("turn/completed", &json!({ "threadId": "t", "turn": { "id": "u-unknown", "status": "completed" } })).await;
+        emitted(&mut events);
+
+        // a server that exits during a compaction ends no turn of the agent
+        ask_compaction();
+        agent.on_notification("turn/started", &started("u-compact-2")).await;
+        assert!(agent.foreign_turn);
+        emitted(&mut events);
+        agent.server_exited(Some(1), "", &mut None);
+        let kinds = emitted(&mut events);
+        assert!(!kinds.iter().any(|e| matches!(e, EventKind::TurnCompleted { .. })), "{kinds:?}");
+        assert!(matches!(kinds.last(), Some(EventKind::Exited { code: Some(1) })), "{kinds:?}");
     }
 
     /// A steered prompt gets no turn of its own. The adapter says it was delivered, or Codly
@@ -2323,6 +2475,7 @@ mod tests {
             read_only: false,
             mcp: None,
             use_user_setup: false,
+            sandbox_network: false,
             raw_log: cwd.join("raw.ndjson"),
             byok_command: None,
             cwd,

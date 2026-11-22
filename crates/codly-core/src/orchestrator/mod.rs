@@ -33,6 +33,7 @@ pub mod checkpoints;
 pub mod breaker;
 mod breaker_run;
 mod careers;
+pub mod codex_account;
 pub use breaker_run::{AgentBreaker, BreakerStatus};
 mod controls;
 mod ask_me;
@@ -244,7 +245,7 @@ struct Inner {
     offers: Mutex<HashMap<Id, JobOffer>>,
     /// How long a job offer stays up (ms); 0 = hire at once (the default, and in tests).
     hiring_window_ms: std::sync::atomic::AtomicU64,
-    /// Model names per CLI (`env::list_models`), for the Lead's consultant choices.
+    /// Model names per CLI (`Inner::cli_model_names`), for the Lead's consultant choices.
     models: Mutex<HashMap<Provider, Vec<String>>>,
     /// Circuit breaker: its settings and the per-agent signals.
     breaker: Mutex<breaker_run::Runtime>,
@@ -473,12 +474,13 @@ impl Core {
     }
 
     /// Every sign-in of every installed CLI, in your order, with the usage windows its agents
-    /// last reported (`limits`). `refresh` = ask each CLI again who is signed in and, only with
+    /// last reported (`limits`). `refresh` = ask each CLI again who is signed in, ask each Codex
+    /// sign-in's app-server for its usage windows (≤ 15 s) and, only with
     /// `Settings.read_claude_quota` on, ask Anthropic for each Claude sign-in's quota (≤ 10 s).
     pub async fn accounts(&self, refresh: bool) -> anyhow::Result<Vec<AccountInfo>> {
         if refresh {
             self.inner.redetect_accounts(false).await;
-            self.inner.pull_quota().await;
+            tokio::join!(self.inner.pull_quota(), self.inner.pull_codex_limits());
         }
         Ok(self.inner.accounts())
     }
@@ -894,14 +896,6 @@ impl Core {
     /// Switch a 1:1 agent to another model (None = the CLI's default).
     pub async fn set_agent_model(&self, agent_id: &str, model: Option<String>) -> anyhow::Result<Agent> {
         self.inner.set_agent_model(agent_id, model).await
-    }
-
-    /// Models a CLI can run, for the start-agent picker (empty when it takes any name).
-    pub async fn list_models(&self, provider: Provider) -> anyhow::Result<Vec<String>> {
-        let key = self.inner.byok_for(provider).await.ok().and_then(|(key, _)| key);
-        crate::env::list_models(provider, &self.inner.base_env, key.as_ref().map(|k| k.expose()))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
     }
 
     /// A BYOK key or source changed: forget the model lists of the CLIs it concerns and ask them

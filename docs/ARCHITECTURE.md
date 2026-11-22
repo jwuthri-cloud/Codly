@@ -198,8 +198,9 @@ scopes are leased globally, so parallel plans never edit the same files at once.
 **Several accounts per CLI.** Each sign-in is its own config dir (`CLAUDE_CONFIG_DIR`,
 `CODEX_HOME`, `GEMINI_CLI_HOME`; Codex gets one app-server per `CODEX_HOME`), listed in
 Settings → Accounts. Agents' `RateLimit` events feed each account's usage windows (persisted);
-with `read_claude_quota` on, a refresh also asks Anthropic for the windows of each Claude
-sign-in Codly may use (§2, Credentials).
+a refresh also asks each signed-in Codex account's app-server for them (`account/rateLimits/read`:
+Codex reads them with its own sign-in, Codly sees no credential), and with `read_claude_quota`
+on it asks Anthropic for the windows of each Claude sign-in Codly may use (§2, Credentials).
 Slots are per account; an account at ≥ 85% of a window is parked. The scheduler sends a task
 to the account the Lead pinned it to (`account` in the plan, only when the user names one,
 from the Accounts line of its board), else by strategy: Spread (most quota left) or In order.
@@ -272,7 +273,8 @@ they are build output or third-party code in most repos. If one holds your own c
 
 - Agents run unmodified CLIs signed in by you. Codly does not read their sign-in tokens unless
   you turn on `read_claude_quota`; keys you give Codly are in the Keychain (§2, Credentials).
-- Worktree isolation; Codex `workspace-write` sandbox; Claude workers in `acceptEdits` with
+- Worktree isolation; Codex `workspace-write` sandbox (its network stays closed unless you
+  turn on `codex_network_access`); Claude workers in `acceptEdits` with
   shell commands routed to the broker; Lead and reviewers read-only. The exception is an agent
   hired with Git isolation off: it edits the user's checkout directly (the wizard warns).
 - Approval broker: rules (path outside worktree, symlinks followed; `rm -rf`, `git push`,
@@ -368,11 +370,14 @@ crates/codly-core/src/    the engine: no Tauri dependency
   env.rs            login-shell env, CLI and sign-in detection, scrubbed child envs
   proc.rs           process groups, bounded NDJSON reader, shutdown ladder
   adapters/         claude.rs (stream-json + control), codex.rs (app-server), acp.rs, classify.rs;
+                    codex/account.rs = questions to a Codex sign-in outside a run (models, usage
+                    windows, the user's own MCP servers, compaction);
                     testdata/ = the recorded transcripts that the tests replay
   orchestrator/     the Core facade (mod.rs) and what is behind it:
                       lead.rs prompts.rs names.rs         Leads and 1:1 chats, every word said to an agent, names
                       planner.rs plans.rs scope.rs        plan validation, plans and tasks, write scopes
                       scheduler.rs accounts.rs            routing; sign-ins, usage windows, account choice
+                      codex_account.rs                    model catalogs, Codex usage read, "Compact now"
                       retry.rs stuck.rs                   worker retries with a wait; plans that cannot go on by themselves
                       runs.rs ingest.rs                   agent runs; the one event pipeline
                       gate.rs rebrief.rs                  commit → verify → scope → review → merge queue; a worker's task

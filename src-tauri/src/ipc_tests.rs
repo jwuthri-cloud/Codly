@@ -102,6 +102,8 @@ fn commands_round_trip_with_frontend_arg_names() {
             crate::pr_commands::create_pull_request,
             crate::pr_commands::push_pr_branch,
             crate::pr_commands::refresh_pull_request,
+            commands::model_catalog,
+            crate::agent_controls::compact_agent,
         ])
         .build(tauri::generate_context!(test = true))
         .unwrap();
@@ -276,6 +278,16 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
     let e = invoke(&wv, "restore_checkpoint", json!({ "agentId": "nope", "checkpoint": -1 })).unwrap_err();
     assert!(!e.to_string().contains("unknown agent"), "a negative number is refused before the core is asked: {e}");
+
+    // The model pickers and the agent panel's Compact, with the keys the frontend sends. Claude
+    // has no list to ask for, so its catalog is Codly's own and no CLI runs here.
+    let catalog = invoke(&wv, "model_catalog", json!({ "provider": "claude" })).unwrap();
+    assert_eq!((&catalog["source"], &catalog["problem"]), (&json!("built_in"), &Value::Null), "{catalog}");
+    let first = &catalog["models"][0];
+    assert!(first["id"].is_string() && first["name"].is_string() && first["efforts"].is_array() && first["is_default"] == false, "{catalog}");
+    assert!(invoke(&wv, "model_catalog", json!({})).is_err(), "provider is required");
+    let e = invoke(&wv, "compact_agent", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent"), "{e}");
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

@@ -1,5 +1,5 @@
 //! Per-agent live controls (agent panel): thin wrappers over `Core`'s block-tools, stop-after-
-//! step, resume and steer-note calls. Kill is the existing `stop_agent` command.
+//! step, resume, steer-note and compact calls. Kill is the existing `stop_agent` command.
 
 use codly_core::model::ControlState;
 use tauri::State;
@@ -35,4 +35,9 @@ pub async fn resume_agent(state: State<'_, AppState>, agent_id: String) -> R<Con
 #[tauri::command]
 pub async fn steer_agent(state: State<'_, AppState>, agent_id: String, text: String) -> R<ControlState> {
     state.core().await?.steer_agent(&agent_id, &text).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn compact_agent(state: State<'_, AppState>, agent_id: String) -> R<()> {
+    state.core().await?.compact_agent(&agent_id).await.map_err(err)
 }

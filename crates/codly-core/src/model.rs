@@ -1774,10 +1774,15 @@ pub struct Settings {
     /// API-key variable is scrubbed from the agents' env.
     #[serde(default)]
     pub byok: crate::byok::ByokSettings,
-    /// Claude agents also load your own Claude Code setup: your MCP servers, plugins, skills
-    /// and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
+    /// Agents also load your own CLI setup. Claude: your MCP servers, plugins, skills and the
+    /// repo's `.claude` settings. Codex: the MCP servers of your Codex config. Off = Codly's
+    /// own tools and Connections only.
     #[serde(default = "yes")]
     pub use_my_claude_setup: bool,
+    /// Commands a Codex agent runs in its workspace sandbox may use the network without
+    /// asking (package installs, fetches). Off = each one asks first.
+    #[serde(default)]
+    pub codex_network_access: bool,
     /// Pause (the office's speed control): no new task starts; running ones finish.
     #[serde(default)]
     pub paused: bool,
@@ -1843,6 +1848,7 @@ impl Default for Settings {
             team: vec![],
             byok: Default::default(),
             use_my_claude_setup: true,
+            codex_network_access: false,
             paused: false,
             paused_offices: vec![],
             game_rules: false,
@@ -1980,4 +1986,53 @@ impl ControlState {
     pub fn is_default(&self) -> bool {
         *self == ControlState::default()
     }
+}
+
+// ───────────────────────────── model catalog ─────────────────────────────
+
+/// One model a CLI can run, as a model picker shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelOption {
+    /// The name the CLI takes for this model.
+    pub id: String,
+    /// The CLI's own display name; the id when it gives none.
+    pub name: String,
+    /// The model the CLI runs when none is chosen.
+    pub is_default: bool,
+    /// The thinking-effort levels this model takes, in the CLI's order. Empty = the CLI did
+    /// not say.
+    pub efforts: Vec<String>,
+    /// The effort this model runs with when none is chosen.
+    pub default_effort: Option<String>,
+}
+
+impl ModelOption {
+    /// A model known by its name only.
+    pub fn named(id: impl Into<String>) -> ModelOption {
+        let id = id.into();
+        ModelOption { name: id.clone(), id, is_default: false, efforts: vec![], default_effort: None }
+    }
+}
+
+/// Where a `ModelCatalog` comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ModelSource {
+    /// The CLI's own list, asked now.
+    Cli,
+    /// Codly's built-in list: the CLI has no list, or it could not be asked (`problem`).
+    BuiltIn,
+}
+
+/// The models of one CLI, for the hire wizard and the model dialog. Any other name can still
+/// be typed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelCatalog {
+    pub models: Vec<ModelOption>,
+    pub source: ModelSource,
+    /// Why the CLI's own list is not shown, in the CLI's or Codly's words.
+    pub problem: Option<String>,
 }

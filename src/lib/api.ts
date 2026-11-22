@@ -46,6 +46,7 @@ import type { ClosedTranscript } from './gen/ClosedTranscript';
 import type { InstallRun } from './gen/InstallRun';
 import type { InstallRung } from './gen/InstallRung';
 import type { ControlState } from './gen/ControlState';
+import type { ModelCatalog } from './gen/ModelCatalog';
 import type { EventRow } from './gen/EventRow';
 import type { IdeChange } from './gen/IdeChange';
 import type { IdeEntry } from './gen/IdeEntry';
@@ -264,8 +265,12 @@ export const api = {
   stopAgentAfterStep: (agentId: string) => call<ControlState>('stop_agent_after_step', { agentId }),
   resumeAgent: (agentId: string) => call<ControlState>('resume_agent', { agentId }),
   steerAgent: (agentId: string, text: string) => call<ControlState>('steer_agent', { agentId, text }),
+  /** Ask Codex to compact a running agent's conversation now. Resolves when Codex took the request. */
+  compactAgent: (agentId: string) => call<void>('compact_agent', { agentId }),
   hireAgent: (provider: Provider, model: string | null = null, title: string | null = null) => call<Agent>('hire_agent', { provider, model, title }),
   listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
+  /** A CLI's models with the thinking efforts each one takes, and where the list comes from. */
+  modelCatalog: (provider: Provider) => call<ModelCatalog>('model_catalog', { provider }),
   // Add-agent wizard: the core judges hire manifests (import, AI draft) and starts the confirmed one.
   hireReview: (raw: string) => call<HireReview>('hire_review', { raw }),
   hireLaunchPreview: (provider: string, model: string | null, command: string | null) => call<LaunchPreview>('hire_launch_preview', { provider, model, command }),
