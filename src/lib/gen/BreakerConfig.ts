@@ -27,6 +27,7 @@ repeated_tool_limit: number,
  */
 error_storm_limit: number, 
 /**
- * Kill the agent as the last step. Off: the breaker never goes beyond constraining.
+ * Kill the agent as the last step, when it is over a limit of its own (loop, errors,
+ * velocity). Off: the breaker never goes beyond constraining. A budget never kills.
  */
 hard_stop: boolean, };

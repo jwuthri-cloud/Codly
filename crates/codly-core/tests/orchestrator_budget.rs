@@ -1,15 +1,16 @@
 //! A budget that is used up stops spend. With a fake agent in place of the CLI, on ad-hoc tasks:
 //! past the token budget the scheduler starts no task, the waiting tasks say which budget and
 //! the way out, you are told once, the count is the same after a restart, and Reset lets the
-//! waiting tasks start.
+//! waiting tasks start. And a resumed OpenCode session is told what it cost before, so its cost
+//! is not counted a second time.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SpawnSpec};
+use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
 use codly_core::model::*;
 use codly_core::orchestrator::breaker::BreakerConfig;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
@@ -37,9 +38,9 @@ fn temp_repo(root: &Path) -> PathBuf {
     repo
 }
 
-fn claude() -> CliInfo {
+fn cli(provider: Provider) -> CliInfo {
     CliInfo {
-        provider: Provider::Claude,
+        provider,
         path: Some("/usr/bin/true".into()),
         version: Some("fake".into()),
         logged_in: Some(true),
@@ -47,7 +48,7 @@ fn claude() -> CliInfo {
         plan: None,
         problem: None,
         transport: "fake".into(),
-        install: codly_core::env::install_hint(Provider::Claude),
+        install: codly_core::env::install_hint(provider),
         default_model: None,
     }
 }
@@ -115,13 +116,13 @@ async fn wait_for<T>(what: &str, mut f: impl AsyncFnMut() -> Option<T>) -> T {
 
 /// A core on `dir`'s data (a second call is the app started again), with the repo open.
 async fn start(dir: &Path, repo: &Path, runs: &Arc<AtomicUsize>) -> Arc<Core> {
+    start_with(dir, repo, Arc::new(Fake { runs: runs.clone() }), Provider::Claude).await
+}
+
+/// The same, with `spawner` in place of the one installed CLI, `provider`.
+async fn start_with(dir: &Path, repo: &Path, spawner: Arc<dyn Spawner>, provider: Provider) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions {
-        spawner: Some(Arc::new(Fake { runs: runs.clone() })),
-        env: Some(std::env::vars().collect()),
-        clis: Some(vec![claude()]),
-        index: false,
-    };
+    let opts = StartOptions { spawner: Some(spawner), env: Some(std::env::vars().collect()), clis: Some(vec![cli(provider)]), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     core.update_settings(Settings { lead_followups: false, ..Default::default() }).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
@@ -202,4 +203,93 @@ async fn past_the_budget_no_task_starts_also_after_a_restart() {
     assert_eq!(said(&core, "The budget has room again").await.len(), 1);
     assert!(core.breaker_status().await.unwrap().today.tokens >= before.today.tokens, "today's total is not a budget: Reset keeps it");
     core.shutdown().await;
+}
+
+/// What one turn of the fake OpenCode agent costs.
+const TURN_COST: f64 = 0.25;
+
+/// An agent that keeps one provider session: every prompt is one turn that costs `TURN_COST`.
+/// As the adapters do, each run reports its own cost, from zero.
+struct Talker {
+    /// What each run was told its session cost before it.
+    told: Arc<Mutex<Vec<f64>>>,
+    /// The turns of all runs together.
+    turns: Arc<AtomicUsize>,
+}
+
+impl Spawner for Talker {
+    fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
+        self.told.lock().unwrap().push(spec.session_cost_usd);
+        let turns = self.turns.clone();
+        Box::pin(async move {
+            let (tx, mut rx) = mpsc::unbounded_channel::<AgentCmd>();
+            let handle = AgentHandle { agent_id: spec.agent_id.clone(), run_id: spec.run_id.clone(), tx };
+            let send = {
+                let (agent_id, run_id) = (spec.agent_id.clone(), spec.run_id.clone());
+                move |kind| {
+                    let _ = events.send(AdapterEvent { agent_id: agent_id.clone(), run_id: run_id.clone(), kind });
+                }
+            };
+            let session_id = match &spec.session {
+                SessionMode::Resume { session_id } => session_id.clone(),
+                SessionMode::New { .. } => "ses-1".to_string(),
+            };
+            send(EventKind::SessionStarted {
+                provider: spec.provider,
+                model: None,
+                cwd: spec.cwd.to_string_lossy().into_owned(),
+                cli_version: None,
+                session_id: Some(session_id),
+                billing: Billing::ApiKey,
+                tools: vec![],
+            });
+            tokio::spawn(async move {
+                let mut cost = 0.0;
+                while let Some(cmd) = rx.recv().await {
+                    match cmd {
+                        AgentCmd::Prompt(text) => {
+                            send(EventKind::TurnStarted { input: Some(text) });
+                            send(EventKind::Message { item_id: new_id(), text: "ok".into(), phase: MessagePhase::Final });
+                            cost += TURN_COST;
+                            turns.fetch_add(1, Ordering::SeqCst);
+                            send(EventKind::UsageUpdated { usage: Usage { cost_usd: Some(cost), ..Default::default() } });
+                            send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("ok".into()), duration_ms: Some(1) });
+                        }
+                        AgentCmd::Shutdown => return send(EventKind::Exited { code: Some(0) }),
+                        AgentCmd::Interrupt | AgentCmd::Approval { .. } => {}
+                    }
+                }
+            });
+            Ok(handle)
+        })
+    }
+}
+
+/// An OpenCode agent reports its session's cost as a running total, so the adapter must know
+/// what the session cost before a run. Here the Lead runs on OpenCode and resumes its session
+/// after each restart: every run is told what the runs before it cost together.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resumed_opencode_session_is_told_what_it_cost_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let turns = Arc::new(AtomicUsize::new(0));
+    let mut before = vec![];
+    for say in ["hi", "back", "again"] {
+        let spawner = Arc::new(Talker { told: told.clone(), turns: turns.clone() });
+        let core = start_with(dir.path(), &repo, spawner, Provider::Opencode).await;
+        // The Lead is the only agent: what the team used so far is what its session cost.
+        let cost = core.breaker_status().await.unwrap().used.cost_usd;
+        before.push(cost);
+        core.send_chat("lead", say).await.unwrap();
+        wait_for("the Lead's turn to be counted", async || {
+            let used = core.breaker_status().await.unwrap().used.cost_usd;
+            (used > cost && used == turns.load(Ordering::SeqCst) as f64 * TURN_COST).then_some(())
+        })
+        .await;
+        core.shutdown().await;
+    }
+    assert_eq!(*told.lock().unwrap(), before, "each run is told what the session cost before it");
+    assert_eq!(before[0], 0.0, "a new session cost nothing before");
+    assert!(before[1] > 0.0 && before[2] > before[1], "the cost of every earlier run, not only of the last: {before:?}");
 }

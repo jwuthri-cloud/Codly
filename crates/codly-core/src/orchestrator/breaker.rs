@@ -2,8 +2,9 @@
 //! against runaway agents and spend. No IO, no clock, no locks, so every rule is unit-tested.
 //!
 //! - `evaluate`  one agent, one beat: signals + its previous level → the next level and what
-//!   to do about it. Steer first, then constrain, then (only with `hard_stop`) stop; one level
-//!   per beat, never a jump to a kill; one level back down per healthy beat.
+//!   to do about it. Steer first, then constrain, then (only with `hard_stop`, and only for a
+//!   limit the agent crossed itself) stop; one level per beat, never a jump to a kill; one
+//!   level back down per healthy beat. A budget alone never kills.
 //! - `Tracker`   folds the event stream (usage, tool calls, errors, compaction) into those
 //!   signals and runs `evaluate` for every agent on each beat.
 //! - `over_budget`  the budget the whole team is over. The scheduler starts no task past it,
@@ -50,7 +51,8 @@ pub struct BreakerConfig {
     pub repeated_tool_limit: i64,
     /// Errors in a row (no success in between).
     pub error_storm_limit: i64,
-    /// Kill the agent as the last step. Off: the breaker never goes beyond constraining.
+    /// Kill the agent as the last step, when it is over a limit of its own (loop, errors,
+    /// velocity). Off: the breaker never goes beyond constraining. A budget never kills.
     pub hard_stop: bool,
 }
 
@@ -93,7 +95,8 @@ pub struct Spent {
 }
 
 impl Spent {
-    /// One run's total. A run's counts only grow, so its last usage report is its total.
+    /// One run's total. A run's counts start from zero and only grow (every adapter reports
+    /// them so), so its last usage report is its total.
     pub fn of(u: &Usage) -> Spent {
         Spent { tokens: u.input_tokens + u.output_tokens + u.cache_write_tokens, cost_usd: u.cost_usd.unwrap_or(0.0).max(0.0) }
     }
@@ -195,7 +198,7 @@ pub enum BreakerLevel {
     Steering,
     /// Its turn was interrupted and it was told to stop active work.
     Constrained,
-    /// Killed (only with `hard_stop`).
+    /// Killed (only with `hard_stop`, for a limit of its own).
     Stopped,
 }
 
@@ -296,12 +299,9 @@ pub struct Verdict {
     pub action: Action,
 }
 
-/// The first limit crossed, in order of severity. Limits that are 0 are off.
-fn first_trip(cfg: &BreakerConfig, s: &Signals) -> Option<Trip> {
+/// The first limit of its own the agent crossed, in order of severity. Limits that are 0 are off.
+fn own_trip(cfg: &BreakerConfig, s: &Signals) -> Option<Trip> {
     let on = |limit: i64| limit > 0;
-    if let Some(budget) = over_budget(cfg, s.floor) {
-        return Some(Trip::Budget(budget));
-    }
     if on(cfg.repeated_tool_limit) && s.repeat_run >= cfg.repeated_tool_limit {
         return Some(Trip::RepeatedTool { count: s.repeat_run, limit: cfg.repeated_tool_limit });
     }
@@ -316,6 +316,11 @@ fn first_trip(cfg: &BreakerConfig, s: &Signals) -> Option<Trip> {
 
 /// One agent, one beat. A tripped limit moves it one level up (capped at `Constrained`, or
 /// `Stopped` with `hard_stop`); a healthy beat moves it one level down. Only a move up acts.
+///
+/// A budget alone never goes past `Constrained`, also with `hard_stop`: the budget is the
+/// team's, so the agent cannot get under it, and held it spends nothing. A kill would only
+/// lose its work. So whether its turn runs when the beat comes does not change how it ends.
+/// A stop is for a limit the agent crossed itself, and names that limit.
 pub fn evaluate(cfg: &BreakerConfig, s: &Signals, prev: BreakerLevel) -> Verdict {
     if !cfg.enabled {
         return Verdict { level: BreakerLevel::Healthy, trip: None, action: Action::None };
@@ -323,9 +328,12 @@ pub fn evaluate(cfg: &BreakerConfig, s: &Signals, prev: BreakerLevel) -> Verdict
     if prev == BreakerLevel::Stopped {
         return Verdict { level: prev, trip: None, action: Action::None };
     }
-    let trip = first_trip(cfg, s);
-    let ceiling = if cfg.hard_stop { BreakerLevel::Stopped } else { BreakerLevel::Constrained };
-    let level = if trip.is_some() { prev.up().min(ceiling) } else { prev.down() };
+    let budget = over_budget(cfg, s.floor).map(Trip::Budget);
+    let own = own_trip(cfg, s);
+    let ceiling = if cfg.hard_stop && own.is_some() { BreakerLevel::Stopped } else { BreakerLevel::Constrained };
+    let level = if budget.is_some() || own.is_some() { prev.up().min(ceiling) } else { prev.down() };
+    // The budget first (the note then says to stop, not to try something else), but not on a stop.
+    let trip = if level == BreakerLevel::Stopped { own } else { budget.or(own) };
     let action = match level {
         l if l <= prev => Action::None,
         BreakerLevel::Steering => Action::Steer,
@@ -594,6 +602,24 @@ mod tests {
     }
 
     #[test]
+    fn a_budget_alone_never_kills_also_with_hard_stop() {
+        let c = BreakerConfig { hard_stop: true, token_budget: 1000, ..cfg() };
+        let over = Signals { floor: used(5000, 0.0), ..Default::default() };
+        let v = evaluate(&c, &over, BreakerLevel::Steering);
+        assert_eq!((v.level, v.action), (BreakerLevel::Constrained, Action::Constrain));
+        let v = evaluate(&c, &over, BreakerLevel::Constrained);
+        assert_eq!((v.level, v.action), (BreakerLevel::Constrained, Action::None), "the agent cannot get the team under the budget");
+        assert_eq!(v.trip.as_ref().map(Trip::kind), Some("floor_budget"));
+        // Over the budget and in a loop of its own: the stop is for the loop, and says so.
+        let v = evaluate(&c, &Signals { repeat_run: 4, ..over.clone() }, BreakerLevel::Constrained);
+        assert_eq!((v.level, v.action), (BreakerLevel::Stopped, Action::Stop));
+        assert_eq!(v.trip, Some(Trip::RepeatedTool { count: 4, limit: 4 }));
+        // Below the stop, the budget is named first.
+        let v = evaluate(&c, &Signals { repeat_run: 4, ..over }, BreakerLevel::Healthy);
+        assert_eq!((v.level, v.trip.as_ref().map(Trip::kind)), (BreakerLevel::Steering, Some("floor_budget")));
+    }
+
+    #[test]
     fn recovers_one_level_per_healthy_beat() {
         let c = cfg();
         let v = evaluate(&c, &Signals::default(), BreakerLevel::Constrained);
@@ -611,7 +637,7 @@ mod tests {
     #[test]
     fn each_limit_trips_and_zero_means_off() {
         let c = BreakerConfig { token_budget: 1000, cost_budget_usd: 2.0, velocity_per_min: 500, ..cfg() };
-        let trip = |s: Signals| first_trip(&c, &s).map(|t| t.kind());
+        let trip = |s: Signals| evaluate(&c, &s, BreakerLevel::Healthy).trip.map(|t| t.kind());
         assert_eq!(trip(Signals { floor: used(1001, 0.0), ..Default::default() }), Some("floor_budget"));
         assert_eq!(trip(Signals { floor: used(1000, 2.0), ..Default::default() }), None, "at the budget is fine");
         assert_eq!(trip(Signals { floor: used(10, 2.01), ..Default::default() }), Some("cost_budget"));
@@ -621,7 +647,7 @@ mod tests {
         assert_eq!(trip(Signals { velocity_per_min: None, ..Default::default() }), None);
         let off = BreakerConfig { token_budget: 0, cost_budget_usd: 0.0, velocity_per_min: 0, repeated_tool_limit: 0, error_storm_limit: 0, ..c };
         let all = Signals { floor: used(i64::MAX, f64::MAX), velocity_per_min: Some(i64::MAX), repeat_run: 99, error_run: 99 };
-        assert_eq!(first_trip(&off, &all), None);
+        assert_eq!(evaluate(&off, &all, BreakerLevel::Healthy).trip, None);
     }
 
     #[test]
@@ -809,6 +835,36 @@ mod tests {
         t.observe("idle", 41, &turn_start());
         let tr = t.beat(&c, 50, &|_| false);
         assert_eq!((tr[0].agent.as_str(), tr[0].action), ("idle", Action::Steer));
+    }
+
+    #[test]
+    fn with_hard_stop_a_budget_holds_every_worker_the_same_way() {
+        let c = BreakerConfig { hard_stop: true, token_budget: 1000, ..cfg() };
+        let mut t = Tracker::default();
+        for id in ["quick", "slow"] {
+            t.observe(id, 1, &turn_start());
+            t.observe(id, 2, &usage(5000, 0));
+        }
+        assert_eq!(t.beat(&c, 10, &|_| false).len(), 2);
+        assert_eq!(t.beat(&c, 20, &|_| false).iter().filter(|x| x.action == Action::Constrain).count(), 2);
+        // Both answer the note in a new turn. One is done before the next beat, one is not.
+        for id in ["quick", "slow"] {
+            t.observe(id, 21, &turn_done(TurnStatus::Interrupted));
+            t.observe(id, 22, &turn_start());
+        }
+        t.observe("quick", 23, &turn_done(TurnStatus::Completed));
+        assert!(t.beat(&c, 30, &|_| false).is_empty(), "no kill: the one still in its turn ends like the other");
+        t.observe("slow", 31, &turn_done(TurnStatus::Completed));
+        assert!(t.beat(&c, 40, &|_| false).is_empty());
+        assert_eq!((t.level("quick"), t.level("slow")), (BreakerLevel::Constrained, BreakerLevel::Constrained));
+        // A worker that goes on in a loop of its own while the team is over is stopped for the loop.
+        t.observe("slow", 41, &turn_start());
+        for i in 0..4 {
+            t.observe("slow", 42 + i, &tool("cargo test"));
+        }
+        let tr = t.beat(&c, 50, &|_| false);
+        assert_eq!(tr.len(), 1);
+        assert_eq!((tr[0].agent.as_str(), tr[0].action, tr[0].trip.as_ref().map(Trip::kind)), ("slow", Action::Stop, Some("repeated_tool")));
     }
 
     #[test]

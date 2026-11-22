@@ -72,6 +72,10 @@ pub struct SpawnSpec {
     /// Complete child environment (captured login env, scrubbed). Use `env_clear().envs(..)`.
     pub env: HashMap<String, String>,
     pub session: SessionMode,
+    /// What the earlier runs on the resumed session cost together, as Codly counted them (0 for
+    /// a new session). For ACP agents: they report a session's cost as a running total, and the
+    /// adapter takes this off, so a run's cost starts from zero as with every other CLI.
+    pub session_cost_usd: f64,
     /// Static role rules, appended to the CLI's own system prompt where supported
     /// (Claude `--append-system-prompt`, Codex `developerInstructions`); for ACP agents
     /// the adapter prepends it to the first prompt.

@@ -1,8 +1,9 @@
 <!--
   Settings → Autonomy & Budgets: the circuit breaker. A floor-wide guard against runaway agents
   and spend. When an agent crosses a limit Codly first steers it (a note in its next turn), then
-  constrains it (interrupts and tells it to stop), and only with "Hard stop" kills it. Limits
-  save at once; 0 turns a limit off. Every step lands on the agent's timeline as a decision.
+  constrains it (interrupts and tells it to stop), and only with "Hard stop" kills it (never
+  for a budget alone). Limits save at once; 0 turns a limit off. Every step lands on the
+  agent's timeline as a decision.
 
   The two budgets (tokens, cost) also stop new work: past one, no task starts until you raise
   it or press Reset counters, and the section says so. What was used is kept when you quit;
@@ -130,7 +131,7 @@
         <span class="unit">errors</span>
       </div>
       <label class="row toggle">
-        <div class="r-text"><span class="r-title">Hard stop</span><span class="desc">Kill an agent that is still over a limit after being constrained. Off: the breaker never goes past constraining. A stopped task is blocked until you move it to Ready.</span></div>
+        <div class="r-text"><span class="r-title">Hard stop</span><span class="desc">Kill an agent that is still over a limit of its own (token velocity, repeated tool call, error storm) after being constrained. A used-up budget never kills: the agent stays constrained. Off: the breaker never goes past constraining. A stopped task is blocked until you move it to Ready.</span></div>
         <input type="checkbox" class="switch" checked={cfg.hard_stop} disabled={!cfg.enabled} onchange={(e) => save({ hard_stop: e.currentTarget.checked })} />
       </label>
     </div>
