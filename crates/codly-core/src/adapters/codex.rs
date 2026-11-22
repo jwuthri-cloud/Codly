@@ -14,7 +14,9 @@
 //! args, env, default_tools_approval_mode}`, `features.memories` and `memories.*` are valid.
 //!
 //! A prompt sent while a turn runs is steered into it (`turn/steer`), so it does not get a
-//! `TurnStarted`/`TurnCompleted` of its own: a `PromptSteered` says it was delivered.
+//! `TurnStarted`/`TurnCompleted` of its own: a `PromptSteered` says it was delivered. Codex
+//! may report the turn's end before it answers the steer: the adapter keeps that end back
+//! until the answer, so a `PromptSteered` always comes before its turn's `TurnCompleted`.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -495,6 +497,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         interrupt_after_start: false,
         steer_queue: Vec::new(),
         queue: VecDeque::new(),
+        held: Vec::new(),
         stage: Stage::Running,
         deadline: None,
     };
@@ -564,6 +567,9 @@ struct CodexAgent {
     steer_queue: Vec<String>,
     /// Prompts that could not be steered (the turn ended first): new turns.
     queue: VecDeque<String>,
+    /// A `turn/completed` that came while a `turn/steer` was unanswered, and the notifications
+    /// after it: handled, in order, once the last steer is answered.
+    held: Vec<(String, Value)>,
     stage: Stage,
     deadline: Option<tokio::time::Instant>,
 }
@@ -678,18 +684,49 @@ impl CodexAgent {
             // The turn ended before the steer landed: run it as the next turn instead.
             (Pending::Steer(text), Err(_)) => {
                 self.queue.push_back(text);
+                self.release_held().await;
                 if self.active_turn.is_none() && !self.turn_pending {
                     self.next_turn().await;
                 }
             }
             // In the running turn now: it gets no turn events, so say it was delivered.
-            (Pending::Steer(text), Ok(_)) => self.emit(EventKind::PromptSteered { input: text }),
+            (Pending::Steer(text), Ok(_)) => {
+                self.emit(EventKind::PromptSteered { input: text });
+                self.release_held().await;
+            }
             (Pending::Unsubscribe, _) => self.finish(),
             (Pending::Interrupt, _) => {}
         }
     }
 
+    fn steer_unanswered(&self) -> bool {
+        self.pending.values().any(|p| matches!(p, Pending::Steer(_)))
+    }
+
+    /// Codex answers a steer and ends a turn on two streams, in no fixed order. A turn's end
+    /// that comes before the answer waits for it: a `PromptSteered` after its `TurnCompleted`
+    /// would tell Codly the agent ended its turn with a prompt still to come, and no later
+    /// turn would end to say it is done. What follows the end waits behind it, to stay in order.
     async fn on_notification(&mut self, method: &str, params: &Value) {
+        if !self.held.is_empty() || (method == "turn/completed" && self.steer_unanswered()) {
+            self.held.push((method.to_owned(), params.clone()));
+            return;
+        }
+        self.handle_notification(method, params).await;
+    }
+
+    /// Every steer is answered (Codex answers each request, and a server that exits fails the
+    /// open ones): handle what waited for that.
+    async fn release_held(&mut self) {
+        if self.steer_unanswered() {
+            return;
+        }
+        for (method, params) in std::mem::take(&mut self.held) {
+            self.handle_notification(&method, &params).await;
+        }
+    }
+
+    async fn handle_notification(&mut self, method: &str, params: &Value) {
         let events = self.norm.on_notification(method, params);
         self.emit_all(events);
         if method == "turn/completed" {
@@ -1810,6 +1847,7 @@ mod tests {
             interrupt_after_start: false,
             steer_queue: Vec::new(),
             queue: VecDeque::new(),
+            held: Vec::new(),
             stage: Stage::Running,
             deadline: None,
         };
@@ -1904,6 +1942,52 @@ mod tests {
         agent.on_response(8, Err(json!({ "message": "no active turn to steer" })), &mut None).await;
         assert!(emitted(&mut events).is_empty());
         assert_eq!(agent.queue, ["and the docs"]);
+    }
+
+    /// Codex may report a turn's end before it answers a steer sent into that turn. Codly
+    /// must hear "delivered" first: after the turn's end it would wait for a turn that never
+    /// comes, and the task would never reach its gate.
+    #[tokio::test]
+    async fn a_turn_end_waits_for_the_steer_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let done = json!({ "threadId": "t", "turn": { "status": "completed" } });
+        let ended = |k: &[EventKind]| {
+            matches!(k, [EventKind::TurnCompleted { status: TurnStatus::Completed, .. }, EventKind::StatusChanged { status: AgentStatus::Idle }])
+        };
+
+        // accepted: delivered, then the turn ends
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.thread_id, agent.active_turn) = (Some("t".into()), Some("u".into()));
+        agent.pending.insert(7, Pending::Steer("also run the tests".into()));
+        agent.on_notification("turn/completed", &done).await;
+        // what Codex sends after the end stays behind it
+        agent.on_notification("thread/status/changed", &json!({ "threadId": "t", "status": { "type": "idle" } })).await;
+        assert!(emitted(&mut events).is_empty());
+        assert!(agent.active_turn.is_some());
+        agent.on_response(7, Ok(json!({ "turnId": "u" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::PromptSteered { input }, end @ ..] if input == "also run the tests" && ended(end)), "{kinds:?}");
+        assert!(agent.active_turn.is_none() && agent.held.is_empty());
+
+        // two steers: the end waits for the last answer. That one is refused (the turn was
+        // over), so its prompt starts the next turn, after the end.
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.thread_id, agent.active_turn) = (Some("t".into()), Some("u".into()));
+        agent.pending.insert(7, Pending::Steer("also run the tests".into()));
+        agent.pending.insert(8, Pending::Steer("and the docs".into()));
+        agent.on_notification("turn/completed", &done).await;
+        agent.on_response(7, Ok(json!({ "turnId": "u" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::PromptSteered { .. }]), "{kinds:?}");
+        agent.on_response(8, Err(json!({ "message": "no active turn to steer" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        // the fake server takes no write: the next turn's `turn/start` shows as this error
+        assert!(
+            matches!(&kinds[..], [end @ .., EventKind::Error { message, fatal: false }] if ended(end) && message.starts_with("turn/start:")),
+            "{kinds:?}"
+        );
+        assert!(agent.queue.is_empty());
     }
 
     /// The spawner gave up after 60 s and failed the run itself: the adapter stays silent.
