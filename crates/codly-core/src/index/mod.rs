@@ -7,7 +7,10 @@
 //! Layout: `walk` finds files (`ignore`), `parse` turns one into symbols + chunks +
 //! terms (`terms` splits identifiers, `symbols` extracts definitions, `lang` filters),
 //! `store` owns the schema and writes, `query` ranks, `pack` renders the prompt block.
+//! `fresh` knows how far the index is behind the files, and `worktree` what differs in the
+//! worktree an agent asks from: both end up as `SearchResult::warnings`.
 
+mod fresh;
 mod lang;
 mod pack;
 mod parse;
@@ -16,12 +19,14 @@ mod store;
 mod symbols;
 pub(crate) mod terms;
 mod walk;
+mod worktree;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use rusqlite::{Connection, OptionalExtension};
@@ -30,7 +35,9 @@ use crate::model::SearchResult;
 
 pub use query::{Features, Tuning};
 pub use store::IndexOptions;
+pub use worktree::WorktreeView;
 
+use fresh::Fresh;
 use store::{FileState, Outcome};
 
 /// Files written per transaction during a refresh.
@@ -38,16 +45,17 @@ const BATCH: usize = 200;
 
 /// Per-repo code index. One `Index` covers one checkout.
 // ponytail: agents work in git worktrees; the spec's "delta overlay per worktree" (base ∪
-// overlay − tombstones) is not built. An `Index` per worktree root works today and costs a
-// second cold index; the overlay is the upgrade once that hurts.
+// overlay − tombstones) is not built. A search asked from a worktree says which files differ
+// there (`WorktreeView`) and does not search them; the overlay is the upgrade.
 ///
 /// `Send + Sync`: reads and writes use separate connections (WAL), so a
-/// search never waits for a refresh in progress; it sees the batches committed so far.
+/// search never waits for a refresh in progress; it sees the batches committed so far, and
+/// its result says that the index is behind (`SearchResult::warnings`).
 pub struct Index {
     /// Canonical repo root (what the walker yields paths under).
     root: PathBuf,
     /// The root as the caller spelled it (`/var/…` for the canonical `/private/var/…`):
-    /// watchers and git report paths either way.
+    /// callers and git report paths either way.
     raw_root: PathBuf,
     opts: IndexOptions,
     writer: Mutex<Connection>,
@@ -55,6 +63,9 @@ pub struct Index {
     // upgrade if the MCP server ever fans out many agents at once.
     reader: Mutex<Connection>,
     tuning: Mutex<Tuning>,
+    fresh: Mutex<Fresh>,
+    /// Signalled when a refresh ends.
+    refreshed: Condvar,
 }
 
 impl Index {
@@ -70,6 +81,7 @@ impl Index {
         let root = repo_root.canonicalize().with_context(|| format!("repo root {}", repo_root.display()))?;
         let writer = store::open_writer(db_path, opts)?;
         let reader = store::open_reader(db_path)?;
+        let fresh = Fresh { refreshed_at: store::refreshed_at(&writer)?, ..Fresh::default() };
         Ok(Index {
             root,
             raw_root: repo_root.to_path_buf(),
@@ -77,13 +89,100 @@ impl Index {
             writer: Mutex::new(writer),
             reader: Mutex::new(reader),
             tuning: Mutex::new(Tuning::default()),
+            fresh: Mutex::new(fresh),
+            refreshed: Condvar::new(),
         })
+    }
+
+    /// The canonical root of the checkout this index covers.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Is `dir` inside the checkout this index covers (so its files are the indexed ones)?
+    pub fn covers(&self, dir: &Path) -> bool {
+        dir.canonicalize().is_ok_and(|d| d.starts_with(&self.root))
     }
 
     /// Incremental (re)index: walk with `ignore`, skip unchanged files (mtime+size), parse,
     /// chunk, extract symbols, write in batched transactions. Blocking; call from
     /// `spawn_blocking`. Returns the number of files (re)indexed.
     pub fn refresh(&self) -> anyhow::Result<usize> {
+        claim_refresh(&mut self.fresh_state());
+        self.refresh_claimed()
+    }
+
+    /// `refresh`, unless one ended less than `every` ago: the walk reads no file content, but
+    /// it visits every file, so a search asks for it at most that often. When a refresh is in
+    /// progress, wait for it instead of starting another, until it has run for `wait`.
+    /// Blocking. If the index is still behind afterwards (a long first build, an error), the
+    /// search results say so.
+    pub fn refresh_if_due(&self, every: Duration, wait: Duration) -> anyhow::Result<()> {
+        let mut state = self.fresh_state();
+        let running_since = state.running_since;
+        if let Some(since) = running_since {
+            let left = wait.saturating_sub(since.elapsed());
+            drop(self.refreshed.wait_timeout_while(state, left, |s| s.running > 0));
+            return Ok(());
+        }
+        if state.checked.is_some_and(|at| at.elapsed() < every) {
+            return Ok(());
+        }
+        claim_refresh(&mut state);
+        drop(state);
+        self.refresh_claimed().map(|_| ())
+    }
+
+    fn fresh_state(&self) -> MutexGuard<'_, Fresh> {
+        // Plain data: a panic elsewhere leaves it usable.
+        self.fresh.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Run a refresh that `claim_refresh` counted, and record how it ended (also on a panic).
+    fn refresh_claimed(&self) -> anyhow::Result<usize> {
+        struct Claim<'a> {
+            index: &'a Index,
+            /// When the files were read, or why they were not; None = the refresh panicked.
+            outcome: Option<Result<i64, String>>,
+        }
+        impl Drop for Claim<'_> {
+            fn drop(&mut self) {
+                let mut state = self.index.fresh_state();
+                state.running -= 1;
+                if state.running == 0 {
+                    state.running_since = None;
+                }
+                state.checked = Some(Instant::now());
+                match self.outcome.take() {
+                    Some(Ok(at)) => {
+                        state.refreshed_at = Some(at);
+                        state.error = None;
+                    }
+                    Some(Err(e)) => state.error = Some(e),
+                    None => state.error = Some("the refresh stopped on an internal error".to_string()),
+                }
+                drop(state);
+                self.index.refreshed.notify_all();
+            }
+        }
+        let mut claim = Claim { index: self, outcome: None };
+        let result = self.read_files();
+        claim.outcome = Some(match &result {
+            Ok((_, at)) => Ok(*at),
+            Err(e) => Err(format!("{e:#}")),
+        });
+        result.map(|(n, _)| n)
+    }
+
+    /// The refresh itself. Returns the number of files (re)indexed and when it started: the
+    /// index then holds the files as they were at that time.
+    fn read_files(&self) -> anyhow::Result<(usize, i64)> {
+        let at = crate::model::now_ms();
+        // A checkout that is not there (an unmounted disk, a moved folder) is an error, not
+        // a repository whose files were all deleted.
+        if !self.root.is_dir() {
+            anyhow::bail!("{} is not there", self.root.display());
+        }
         let mut conn = self.writer.lock().map_err(|_| anyhow::anyhow!("index writer poisoned"))?;
         let (known, skipped) = store::load_state(&conn)?;
         let found = walk::walk(&self.root, None);
@@ -111,10 +210,11 @@ impl Index {
             }
             let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE); PRAGMA optimize;");
         }
-        Ok(n)
+        store::set_refreshed_at(&conn, at)?;
+        Ok((n, at))
     }
 
-    /// Re-index specific changed paths (from the fs watcher or a commit). Blocking.
+    /// Re-index specific changed paths (the files a merge touched). Blocking.
     pub fn update_paths(&self, paths: &[PathBuf]) -> anyhow::Result<()> {
         if paths.is_empty() {
             return Ok(());
@@ -225,14 +325,28 @@ impl Index {
 
     /// Hybrid search. `k` = max citations.
     pub fn search(&self, query: &str, k: usize) -> anyhow::Result<SearchResult> {
-        Ok(self.ranked(query, k)?.result)
+        Ok(self.answer(query, k, None)?.result)
+    }
+
+    /// `search` for an agent that works in a worktree: matches in files the worktree does not
+    /// have are left out, matches in files that differ there are marked, and the result names
+    /// the files that are new there (they are not searched).
+    pub fn search_in(&self, view: &WorktreeView, query: &str, k: usize) -> anyhow::Result<SearchResult> {
+        Ok(self.answer(query, k, Some(view))?.result)
     }
 
     /// ≤ ~1.2k-token pointer pack for a task prompt: one line per citation
     /// (`[C1] path:12-70 symbol — why (confidence)`), or a short "search yourself with:
     /// rg …" hint when confidence is low. Returns (pack text, the result it came from).
     pub fn pointer_pack(&self, query: &str) -> anyhow::Result<(String, SearchResult)> {
-        let ranked = self.ranked(query, 10)?;
+        let ranked = self.answer(query, 10, None)?;
+        let text = pack::render(&ranked);
+        Ok((text, ranked.result))
+    }
+
+    /// `pointer_pack` for a task that runs in a worktree (see `search_in`).
+    pub fn pointer_pack_in(&self, view: &WorktreeView, query: &str) -> anyhow::Result<(String, SearchResult)> {
+        let ranked = self.answer(query, 10, Some(view))?;
         let text = pack::render(&ranked);
         Ok((text, ranked.result))
     }
@@ -306,6 +420,42 @@ impl Index {
         let conn = self.reader.lock().map_err(|_| anyhow::anyhow!("index reader poisoned"))?;
         query::search(&conn, query, k, &tuning)
     }
+
+    /// A ranked answer that tells the truth about the files the asker sees: seen from `view`
+    /// if the asker works in a worktree, and with a warning when the index is behind the files.
+    fn answer(&self, query: &str, k: usize, view: Option<&WorktreeView>) -> anyhow::Result<query::Ranked> {
+        let mut ranked = match view {
+            Some(view) => {
+                let k = k.clamp(1, 60);
+                // Twice as many candidates: the ones the worktree does not have are left out.
+                let mut ranked = self.ranked(query, 2 * k)?;
+                view.apply(self, &mut ranked, k);
+                ranked
+            }
+            None => self.ranked(query, k)?,
+        };
+        if let Some(behind) = self.fresh_state().warning(crate::model::now_ms()) {
+            ranked.result.warnings.insert(0, behind);
+        }
+        Ok(ranked)
+    }
+
+    /// Has the index seen this repo-relative path in the checkout (indexed it, or left it out
+    /// for its content)?
+    fn knows(&self, rel_path: &str) -> bool {
+        let Ok(conn) = self.reader.lock() else { return false };
+        conn.prepare_cached("SELECT 1 FROM files WHERE path = ?1 UNION ALL SELECT 1 FROM skipped WHERE path = ?1 LIMIT 1")
+            .and_then(|mut st| st.query_row([rel_path], |_| Ok(())).optional())
+            .ok()
+            .flatten()
+            .is_some()
+    }
+}
+
+/// Count one more refresh in progress. `Index::refresh_claimed` must follow.
+fn claim_refresh(state: &mut Fresh) {
+    state.running += 1;
+    state.running_since.get_or_insert_with(Instant::now);
 }
 
 /// Read one file and decide what the index should do with it.
@@ -389,6 +539,31 @@ mod tests {
     fn index_is_send_and_sync() {
         fn check<T: Send + Sync>() {}
         check::<Index>();
+    }
+
+    #[test]
+    fn a_search_waits_for_the_refresh_in_progress_and_says_so_when_it_is_not_done() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::write(repo.join("a.rs"), "pub fn early_symbol() {}\n").unwrap();
+        let idx = Index::open(&repo, &d.path().join("i.sqlite")).unwrap();
+        idx.refresh().unwrap();
+        std::fs::write(repo.join("b.rs"), "pub fn late_symbol() {}\n").unwrap();
+
+        // Another caller's refresh is in progress and takes longer than this one waits.
+        claim_refresh(&mut idx.fresh_state());
+        idx.refresh_if_due(Duration::ZERO, Duration::from_millis(20)).unwrap();
+        assert!(!idx.is_indexed("b.rs"), "no second refresh is started next to the one in progress");
+        let r = idx.search("early_symbol", 3).unwrap();
+        assert_eq!(r.citations[0].path, "a.rs", "the search answers from what is indexed");
+        assert!(r.warnings[0].contains("is being updated") && r.warnings[0].contains("ago"), "{:?}", r.warnings);
+
+        // It ends: the new file is there, and nothing is left to warn about.
+        idx.refresh_claimed().unwrap();
+        let r = idx.search("late_symbol", 3).unwrap();
+        assert_eq!(r.citations[0].path, "b.rs");
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     }
 
     #[test]

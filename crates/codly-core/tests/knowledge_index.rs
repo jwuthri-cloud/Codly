@@ -4,7 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use codly_core::index::Index;
+use codly_core::git::Git;
+use codly_core::index::{Index, WorktreeView};
 use codly_core::model::{Confidence, SearchResult};
 
 fn write(root: &Path, rel: &str, body: &str) {
@@ -259,7 +260,7 @@ fn modified_deleted_and_new_files_are_picked_up() {
     assert_eq!(f.index.file_count(), 9);
     assert!(f.index.search("NewServer", 3).unwrap().citations.iter().all(|c| c.path != "pkg/server/server.go"));
 
-    // new file, listed explicitly (what the watcher / a commit gives us)
+    // new file, listed explicitly (what a merge gives us)
     write(r, "src/cache/lru.rs", "/// Least-recently-used cache.\npub struct LruCache {}\n");
     f.index.update_paths(&[r.join("src/cache/lru.rs")]).unwrap();
     assert_eq!(f.index.search("LruCache", 3).unwrap().citations[0].path, "src/cache/lru.rs");
@@ -414,4 +415,178 @@ fn repeated_queries_are_deterministic() {
     let b = f.index.search("session store cache load", 8).unwrap();
     assert_eq!(paths(&a), paths(&b));
     assert_eq!(a.confidence, b.confidence);
+}
+
+// ───────────── the index against the files on disk ─────────────
+
+#[test]
+fn a_new_file_is_found_by_the_next_search_that_is_due() {
+    let f = fixture();
+    let r = f.repo.path();
+    f.index.refresh().unwrap();
+    assert!(f.index.search("UploadClient", 3).unwrap().warnings.is_empty(), "an index that matches the files warns about nothing");
+
+    // Written in an editor while Codly runs: nobody tells the index.
+    write(r, "src/cache/lru.rs", "/// Least-recently-used cache.\npub struct LruCache {}\n");
+    f.index.refresh_if_due(Duration::from_secs(3600), Duration::ZERO).unwrap();
+    assert!(!f.index.is_indexed("src/cache/lru.rs"), "the files were compared a moment ago: not again yet");
+    f.index.refresh_if_due(Duration::ZERO, Duration::ZERO).unwrap();
+    let found = f.index.search("LruCache", 3).unwrap();
+    assert_eq!(found.citations[0].path, "src/cache/lru.rs");
+    assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+}
+
+#[test]
+fn a_result_says_how_old_the_index_is_when_it_could_not_be_refreshed() {
+    let f = fixture();
+    let r = f.repo.path();
+    let stale = f.index.search("UploadClient", 3).unwrap();
+    assert!(stale.warnings[0].contains("has not been updated yet"), "never refreshed: {:?}", stale.warnings);
+    f.index.refresh().unwrap();
+
+    // The checkout goes away (a disk that is unmounted, a folder that is moved).
+    let away = r.with_extension("away");
+    std::fs::rename(r, &away).unwrap();
+    assert!(f.index.refresh_if_due(Duration::ZERO, Duration::ZERO).is_err());
+    let kept = f.index.search("UploadClient", 3).unwrap();
+    assert_eq!(kept.citations[0].path, "src/net/upload.rs", "what was indexed is kept, not thrown away");
+    let w = &kept.warnings[0];
+    assert!(w.contains("could not be updated") && w.contains("is not there") && w.contains("it last read all the files"), "{w}");
+    let (pack, _) = f.index.pointer_pack("fix UploadClient::send retry and backoff").unwrap();
+    assert!(pack.contains("Note: The code index could not be updated"), "a task brief says it too: {pack}");
+
+    // Back again: the next refresh works and the warning goes.
+    std::fs::rename(&away, r).unwrap();
+    f.index.refresh_if_due(Duration::ZERO, Duration::ZERO).unwrap();
+    assert!(f.index.search("UploadClient", 3).unwrap().warnings.is_empty());
+}
+
+#[test]
+fn an_index_opened_again_says_that_it_is_from_an_earlier_run() {
+    let repo = tempfile::tempdir().unwrap();
+    write(repo.path(), "a.rs", "pub fn persisted_symbol() {}\n");
+    let data = tempfile::tempdir().unwrap();
+    let db = data.path().join("i.sqlite");
+    Index::open(repo.path(), &db).unwrap().refresh().unwrap();
+
+    let idx = Index::open(repo.path(), &db).unwrap();
+    let before = idx.search("persisted_symbol", 3).unwrap();
+    assert_eq!(before.confidence, Confidence::Exact);
+    let w = &before.warnings[0];
+    assert!(w.contains("has not been updated yet") && w.contains("it last read all the files") && w.contains("ago"), "{w}");
+    idx.refresh().unwrap();
+    assert!(idx.search("persisted_symbol", 3).unwrap().warnings.is_empty());
+}
+
+// ───────────── a search asked from an agent's worktree ─────────────
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// A git repository (the user's checkout, on `main`) with its index, and a task's worktree
+/// of it on another branch.
+struct Checkouts {
+    _dir: tempfile::TempDir,
+    repo: PathBuf,
+    worktree: PathBuf,
+    index: Index,
+}
+
+fn checkouts() -> Checkouts {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    write(&repo, "src/net/upload.rs", "pub struct UploadClient {\n    base_url: String,\n}\n");
+    write(&repo, "src/web/session.ts", "export class SessionStore {\n  private ttl = 3600;\n}\n");
+    write(&repo, "lib/billing/invoice.py", "class Invoice:\n    def compute_total(self):\n        return 0\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "init"]);
+    let index = Index::open(&repo, &dir.path().join("index.sqlite")).unwrap();
+    index.refresh().unwrap();
+    let worktree = dir.path().join("task-worktree");
+    git(&repo, &["worktree", "add", "-q", "-b", "codly/t1", worktree.to_str().unwrap()]);
+    Checkouts { _dir: dir, repo, worktree, index }
+}
+
+fn marked(r: &SearchResult) -> Vec<&str> {
+    r.citations.iter().filter(|c| c.why.iter().any(|w| w.contains("differs in your worktree"))).map(|c| c.path.as_str()).collect()
+}
+
+#[tokio::test]
+async fn a_search_from_a_worktree_says_what_differs_there() {
+    let c = checkouts();
+    let (repo, wt) = (&c.repo, &c.worktree);
+    assert!(c.index.covers(repo) && c.index.covers(&repo.join("src")) && !c.index.covers(wt));
+    // The task's branch changed one file, removed one and added one; one more file is not
+    // committed yet, and a lockfile is never indexed.
+    write(wt, "src/net/upload.rs", "// Moved down by the task.\n\n\npub struct UploadClient {\n    base_url: String,\n}\n");
+    std::fs::remove_file(wt.join("lib/billing/invoice.py")).unwrap();
+    write(wt, "src/cache/lru.rs", "pub struct LruCache {}\n");
+    git(wt, &["add", "-A"]);
+    git(wt, &["commit", "-qm", "task"]);
+    write(wt, "src/cache/ttl.rs", "pub struct TtlCache {}\n");
+    write(wt, "Cargo.lock", "[[package]]\n");
+    let cli = Git::from_process_env();
+    let view = WorktreeView::read(&cli, repo, wt, Duration::from_secs(60)).await;
+
+    // A file the task changed: cited, and marked, because its lines are the checkout's.
+    let r = c.index.search_in(&view, "UploadClient", 5).unwrap();
+    assert_eq!(r.citations[0].path, "src/net/upload.rs");
+    assert!(r.citations[0].why[0].contains("differs in your worktree: read the file"), "{:?}", r.citations[0].why);
+    assert!(r.warnings.iter().any(|w| w.contains("differ in your worktree") && w.contains("main@")), "{:?}", r.warnings);
+    // The files that exist only there are named: the index cannot search them.
+    let new = r.warnings.iter().find(|w| w.contains("new in your worktree")).expect("the new files are named");
+    assert!(new.contains("src/cache/lru.rs") && new.contains("src/cache/ttl.rs") && !new.contains("Cargo.lock"), "{new}");
+    assert!(!new.contains("upload.rs") && !new.contains("invoice.py"), "changed and removed files are not new: {new}");
+
+    // A file the task removed: its matches are left out, and the result does not stay "exact".
+    assert_eq!(c.index.search("compute_total", 5).unwrap().confidence, Confidence::Exact, "it is there in the checkout");
+    let r = c.index.search_in(&view, "compute_total", 5).unwrap();
+    assert!(!paths(&r).contains(&"lib/billing/invoice.py"), "{:?}", paths(&r));
+    assert_ne!(r.confidence, Confidence::Exact);
+    assert!(r.warnings.iter().any(|w| w.contains("left out")), "{:?}", r.warnings);
+
+    // A file that is the same on both sides: cited as it is.
+    let r = c.index.search_in(&view, "SessionStore", 5).unwrap();
+    assert_eq!(r.citations[0].path, "src/web/session.ts");
+    assert!(marked(&r).is_empty(), "{:?}", r.citations);
+
+    // You edit that file in your checkout and do not commit: now the two differ.
+    write(repo, "src/web/session.ts", "// Sessions.\nexport class SessionStore {\n  private ttl = 60;\n}\n");
+    c.index.refresh().unwrap();
+    let view = WorktreeView::read(&cli, repo, wt, Duration::from_secs(60)).await;
+    let r = c.index.search_in(&view, "SessionStore", 5).unwrap();
+    assert_eq!(marked(&r).first(), Some(&"src/web/session.ts"), "{:?}", r.citations);
+
+    // The pointer pack of a task brief carries the mark and the notes.
+    let (pack, _) = c.index.pointer_pack_in(&view, "UploadClient").unwrap();
+    assert!(pack.contains("[C1] src/net/upload.rs") && pack.contains("differs in your worktree"), "{pack}");
+    assert!(pack.contains("Note: Not searched, because they are new in your worktree: src/cache/lru.rs"), "{pack}");
+    // A pack without pointers says to search with rg, which reads the worktree: no notes.
+    let (pack, r) = c.index.pointer_pack_in(&view, "rotate the signing key credentials").unwrap();
+    assert_eq!(r.confidence, Confidence::Low);
+    assert!(pack.contains("low confidence") && !pack.contains("Note:"), "{pack}");
+
+    // Asked from the checkout itself, nothing is marked.
+    let r = c.index.search("UploadClient", 5).unwrap();
+    assert!(r.warnings.is_empty() && marked(&r).is_empty(), "{r:?}");
+}
+
+#[tokio::test]
+async fn a_worktree_that_git_cannot_compare_is_named_in_the_result() {
+    let c = checkouts();
+    // Not a checkout of this repository.
+    let elsewhere = tempfile::tempdir().unwrap();
+    write(elsewhere.path(), "src/net/upload.rs", "pub struct UploadClient;\n");
+    let view = WorktreeView::read(&Git::from_process_env(), &c.repo, elsewhere.path(), Duration::from_secs(60)).await;
+    let r = c.index.search_in(&view, "UploadClient SessionStore", 5).unwrap();
+    assert_eq!(r.citations[0].path, "src/net/upload.rs");
+    assert!(!paths(&r).contains(&"src/web/session.ts"), "a match in a file that is not there is left out: {:?}", paths(&r));
+    assert!(r.warnings.iter().any(|w| w.contains("could not be compared")), "{:?}", r.warnings);
+    assert!(marked(&r).is_empty(), "nothing is known to differ: {:?}", r.citations);
 }

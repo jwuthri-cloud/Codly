@@ -844,7 +844,7 @@ impl Inner {
             })
             .collect();
         let query = format!("{} {}", task.title, task.goal);
-        let pointer_pack = match self.pointer_pack(&ws.id, &query).await {
+        let pointer_pack = match self.pointer_pack(&ws.id, task.worktree.as_deref().map(Path::new), &query).await {
             Some((text, result)) => {
                 let _ = self.emit(
                     Some(&ws.id),

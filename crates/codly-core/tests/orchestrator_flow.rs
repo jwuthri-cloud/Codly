@@ -4060,6 +4060,57 @@ async fn a_paused_office_starts_nothing_while_the_others_work() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn code_search_follows_the_files_and_says_what_differs_in_a_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let found = Arc::new(Mutex::new(None));
+    let seen = found.clone();
+    // The worker rewrites a file and adds one in its worktree, then searches the code (an index
+    // loads in the background: it asks for up to 5 s), and stays on its task.
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            std::fs::write(turn.spec.cwd.join("README.md"), "A line above.\n\n# demo\n").unwrap();
+            std::fs::write(turn.spec.cwd.join("notes.rs"), "pub fn task_note() {}\n").unwrap();
+            let mut reply = turn.tool("codly_search", json!({ "query": "demo" })).await;
+            for _ in 0..50 {
+                if reply["ok"] == true {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                reply = turn.tool("codly_search", json!({ "query": "demo" })).await;
+            }
+            *seen.lock().unwrap() = Some(reply);
+            std::future::pending::<()>().await;
+        })
+    });
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start_full(dir.path(), FakeSpawner { log, lead: idle, worker }, vec![claude()], true).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let task = core.create_task("Docs", "").await.unwrap();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+
+    // The index covers your checkout: the worker is told which of its files are not the same.
+    let reply = wait_for("the worker's search", 20, async || found.lock().unwrap().clone()).await;
+    let cited = &reply["result"]["citations"][0];
+    assert_eq!(cited["path"], "README.md", "{reply}");
+    assert!(cited["why"][0].as_str().is_some_and(|why| why.contains("differs in your worktree")), "{reply}");
+    let warnings = reply["result"]["warnings"].to_string();
+    assert!(warnings.contains("new in your worktree") && warnings.contains("notes.rs"), "{reply}");
+
+    // You add a file in your checkout while Codly runs: a search finds it without a restart,
+    // and a search from the checkout itself has nothing to warn about.
+    std::fs::write(repo.join("late.rs"), "pub fn late_arrival() {}\n").unwrap();
+    wait_for("the new file in the index", 15, async || {
+        let result = core.search("late_arrival").await.ok()?;
+        (result.citations.iter().any(|c| c.path == "late.rs") && result.warnings.is_empty()).then_some(())
+    })
+    .await;
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_background_office_keeps_its_code_index() {
     let dir = tempfile::tempdir().unwrap();
     let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));

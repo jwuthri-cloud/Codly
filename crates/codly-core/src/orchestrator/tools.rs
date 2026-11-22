@@ -2,12 +2,13 @@
 //! server has already resolved the caller's token and checked the tool against its role.
 //! Results are compact JSON; text another agent wrote carries `"untrusted": true`.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use super::{Inner, guard, prompts};
+use super::{Inner, guard, lock, prompts};
 use crate::mcp::{ToolCtx, ToolHandler, tools as t};
 use crate::memory::{self, MemoryView};
 use crate::model::*;
@@ -38,7 +39,10 @@ impl Inner {
             t::SEARCH => {
                 let q = s(&args, "query").ok_or_else(|| anyhow!("query is required"))?;
                 let k = args.get("k").and_then(Value::as_u64).unwrap_or(8).clamp(1, 20) as usize;
-                Ok(serde_json::to_value(self.search(ws, q, k).await?)?)
+                // Where the caller works: the index covers the user's checkout, and the result
+                // says what differs in the caller's worktree.
+                let dir = self.caller_dir(&ctx.agent_id);
+                Ok(serde_json::to_value(self.search(ws, dir.as_deref(), q, k).await?)?)
             }
             t::MEMORY_SEARCH => self.tool_memory_search(&ctx, ws, &args),
             t::MEMORY_WRITE => self.tool_memory_write(&ctx, ws, &args),
@@ -118,6 +122,12 @@ impl Inner {
             }
             other => bail!("unknown tool {other}"),
         }
+    }
+
+    /// The directory the calling agent works in: its run's, else its worktree.
+    fn caller_dir(&self, agent_id: &str) -> Option<PathBuf> {
+        let live = lock(&self.live).get(agent_id).map(|l| l.cwd.clone());
+        live.or_else(|| self.store.agent(agent_id).ok().flatten()?.worktree.map(PathBuf::from))
     }
 
     fn tool_get_task(&self, ctx: &ToolCtx) -> Result<Value> {

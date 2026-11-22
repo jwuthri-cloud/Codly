@@ -14,13 +14,20 @@ use serde_json::json;
 use super::{Inner, guard, lock, names, prompts, row, scheduler, write};
 use crate::adapters::AgentCmd;
 use crate::git::{MergeOutcome, name_list};
-use crate::index::Index;
+use crate::index::{Index, WorktreeView};
 use crate::memory::{self, MemoryView};
 use crate::model::*;
 use crate::store;
 
 /// Answering an approval is read-check-write over the event log: one at a time.
 static RESOLVING: Mutex<()> = Mutex::new(());
+
+/// A search compares the index with the files on disk first, at most once in this time: the
+/// comparison reads no file content, but it visits every file.
+const INDEX_CHECK_EVERY: Duration = Duration::from_secs(3);
+/// How long a search waits for that, and then for git to compare the asker's worktree with
+/// the checkout. After it the search answers from what it has, and the result says so.
+const INDEX_WAIT: Duration = Duration::from_secs(2);
 
 /// The last merge Codly made into the user's branch in one office (kv `last_merge:<office>`):
 /// what Undo merge takes back. The next merge replaces it; an undo removes it.
@@ -147,19 +154,57 @@ impl Inner {
         });
     }
 
-    /// `ws_id`: the asking agent's office (None = the open one).
-    pub(super) async fn search(&self, ws_id: Option<&str>, query: &str, k: usize) -> anyhow::Result<SearchResult> {
-        let idx = self.index_of(ws_id).ok_or_else(|| anyhow!("the code index is not ready; use grep/rg instead"))?;
-        let q = query.to_string();
-        tokio::task::spawn_blocking(move || guard("code index", || idx.search(&q, k))).await?
+    /// Bring an index up to date with the files on disk before a search: edits in your editor,
+    /// a pull or a branch switch reach it without a restart. Waits `INDEX_WAIT` at most; a
+    /// refresh that takes longer (a first build) goes on, and search results say that the
+    /// index is behind until it ends.
+    async fn freshen(&self, idx: &Arc<Index>) {
+        let index = idx.clone();
+        let job = tokio::task::spawn_blocking(move || guard("code index", || index.refresh_if_due(INDEX_CHECK_EVERY, INDEX_WAIT)));
+        match tokio::time::timeout(INDEX_WAIT, job).await {
+            Ok(Ok(Ok(()))) | Err(_) => {}
+            Ok(Ok(Err(e))) => tracing::warn!("index refresh failed: {e}"),
+            Ok(Err(e)) => tracing::warn!("index refresh failed: {e}"),
+        }
     }
 
-    /// The pointer pack for a task prompt, bounded in time so a long index refresh never
-    /// delays a worker start.
-    pub(super) async fn pointer_pack(&self, ws_id: &str, query: &str) -> Option<(String, SearchResult)> {
-        let idx = self.index_of(Some(ws_id))?;
+    /// What differs in `dir`, where the asker works, from the checkout the index covers. None
+    /// when the asker works in that checkout (the Lead, the app itself).
+    async fn worktree_view(&self, idx: &Index, dir: Option<&Path>) -> Option<WorktreeView> {
+        let dir = dir.filter(|d| !idx.covers(d))?;
+        Some(WorktreeView::read(&self.git, idx.root(), dir, INDEX_WAIT).await)
+    }
+
+    /// `ws_id`: the asking agent's office (None = the open one). `dir`: where the asking agent
+    /// works (None = in the office's checkout).
+    pub(super) async fn search(&self, ws_id: Option<&str>, dir: Option<&Path>, query: &str, k: usize) -> anyhow::Result<SearchResult> {
+        let idx = self.index_of(ws_id).ok_or_else(|| anyhow!("the code index is not ready; use grep/rg instead"))?;
+        self.freshen(&idx).await;
+        let view = self.worktree_view(&idx, dir).await;
         let q = query.to_string();
-        let job = tokio::task::spawn_blocking(move || guard("code index", || idx.pointer_pack(&q)));
+        tokio::task::spawn_blocking(move || {
+            guard("code index", || match &view {
+                Some(view) => idx.search_in(view, &q, k),
+                None => idx.search(&q, k),
+            })
+        })
+        .await?
+    }
+
+    /// The pointer pack for a task prompt, as the task's worktree `dir` sees the code. Bounded
+    /// in time (`INDEX_WAIT` twice, then 3 s for the search), so a long index refresh never
+    /// delays a worker start.
+    pub(super) async fn pointer_pack(&self, ws_id: &str, dir: Option<&Path>, query: &str) -> Option<(String, SearchResult)> {
+        let idx = self.index_of(Some(ws_id))?;
+        self.freshen(&idx).await;
+        let view = self.worktree_view(&idx, dir).await;
+        let q = query.to_string();
+        let job = tokio::task::spawn_blocking(move || {
+            guard("code index", || match &view {
+                Some(view) => idx.pointer_pack_in(view, &q),
+                None => idx.pointer_pack(&q),
+            })
+        });
         match tokio::time::timeout(Duration::from_secs(3), job).await {
             Ok(Ok(Ok(p))) => Some(p),
             Ok(Ok(Err(e))) => {

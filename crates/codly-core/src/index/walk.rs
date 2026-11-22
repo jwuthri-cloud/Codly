@@ -1,5 +1,5 @@
 //! Finding the files to index: `ignore`'s walker (the one ripgrep uses) for a full refresh,
-//! and a single-path ignore check for `update_paths` (watcher events, commits).
+//! and a single-path ignore check for `update_paths` (the files a merge touched).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};

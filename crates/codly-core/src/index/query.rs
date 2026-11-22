@@ -982,6 +982,7 @@ pub(crate) fn search(conn: &Connection, query: &str, k: usize, t: &Tuning) -> an
             citations: cits,
             fallback_rg,
             took_ms: started.elapsed().as_millis() as i64,
+            warnings: Vec::new(),
         },
         meta,
         features,
