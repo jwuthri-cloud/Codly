@@ -8,6 +8,9 @@
 //   the counter inside `$derived.by` and copy what they render. Objects stored in them are
 //   never mutated after being exposed: they are replaced (so keyed `#each` sees a new ref).
 // - The event log is a plain capped array versioned by `rev`.
+// - History never gets shorter: a snapshot holds the newest events only, so a new snapshot of
+//   the open office is merged into what is held (`mergeSnapshot`), and a thread loads what is
+//   older on request (`loadEarlier`).
 import { api, getTransport, type UiBatch } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
@@ -18,6 +21,7 @@ import type { ChatMessage } from '../gen/ChatMessage';
 import type { Citation } from '../gen/Citation';
 import type { CliInfo } from '../gen/CliInfo';
 import type { Confidence } from '../gen/Confidence';
+import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import type { ActivityKind } from '../gen/ActivityKind';
 import type { Memory } from '../gen/Memory';
@@ -41,6 +45,13 @@ export const LOG_CAP = 5000;
 const SEG_CAP = 1500;
 const MSG_CAP = 300;
 const LIVE_OUTPUT_CAP = 24_000;
+/** Events asked for at once when a thread loads earlier history. */
+const EARLIER_PAGE = 500;
+/** Event kinds whose derivation is no part of one agent's own state (`AgentLive`). */
+const SHARED_KINDS: ReadonlySet<EventKind['type']> = new Set([
+  'control_changed', 'text_delta', 'reasoning_delta', 'tool_output', 'rate_limit', 'decision',
+  'approval_requested', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged',
+]);
 
 export const DEFAULT_SETTINGS: Settings = {
   lead_provider: null,
@@ -161,6 +172,8 @@ export type Stream = { itemId: string; agentId: string; kind: 'text' | 'reasonin
 /** A message you sent that the core has not echoed yet (optimistic), or that failed to send. `ws`: the office it was sent in. */
 export type Outgoing = { id: string; thread: string; text: string; ts: number; ws: string | null; error: string | null };
 export type LiveOut = { callId: string; agentId: string; text: string; ts: number };
+/** A thread's history before what is shown: whether there is any, and whether a page is on its way. */
+export type Earlier = { more: boolean; loading: boolean };
 
 const emptyLive = (ts: number): AgentLive => ({
   segments: [],
@@ -191,6 +204,24 @@ const upsert = <T extends { id: string }>(list: T[], item: T): T[] => {
   return next;
 };
 
+/** The finished step of a task an event stands for (a commit, a check, a review, a merge). */
+const markOf = (ev: EventRow): TaskMark | null => {
+  const k = ev.kind;
+  const at = { ts: ev.ts, eventId: ev.id, agentId: ev.agent_id };
+  switch (k.type) {
+    case 'committed':
+      return { ...at, kind: 'committed', text: k.message, ok: true, sha: k.sha, files: k.files };
+    case 'verified':
+      return { ...at, kind: 'verified', text: k.command, ok: k.ok };
+    case 'reviewed':
+      return { ...at, kind: 'reviewed', text: `${k.verdict}: ${k.summary}`, ok: !/reject|change/i.test(k.verdict) };
+    case 'merged':
+      return { ...at, kind: 'merged', text: k.branch, ok: true, sha: k.sha };
+    default:
+      return null;
+  }
+};
+
 const pathsOf = (t: Target): string[] => {
   const out = [...(t.paths ?? [])];
   if (t.path && !out.includes(t.path)) out.unshift(t.path);
@@ -207,6 +238,9 @@ class CodlyStore {
   private syncing = false;
   private lastId = 0;
   private buffered: EventRow[] = [];
+  /** The office whose state is held (undefined: no snapshot yet). A new snapshot of the same
+   *  office is merged into it; another office's replaces it. */
+  private held: string | null | undefined = undefined;
 
   // entities
   clis = $state.raw<CliInfo[]>([]);
@@ -248,6 +282,20 @@ class CodlyStore {
   /** Plans merged into the user's branch (decision `merge_plan`, or a successful merge command). */
   planMerges: Record<string, { sha: string; ts: number }> = {};
   sessionStart = 0;
+
+  // history before what a snapshot holds, loaded on request (per thread)
+  /** The oldest event the held state was built from (the start of the last snapshot that took
+   *  the place of everything). The log may have been trimmed past it since. */
+  private origin = 0;
+  /** Per thread that was asked: is there earlier history, is a page loading. */
+  earlier = $state.raw<Record<string, Earlier>>({});
+  /** Per thread loaded further back: how far (an event id), and for which owner. */
+  private paged = new Map<string, { owner: string | null; before: number }>();
+  /** Per agent whose thread was loaded further back: all its persisted events held, oldest
+   *  first. Kept apart from the capped log, so its history is never trimmed or capped again. */
+  private deep = new Map<string, EventRow[]>();
+  /** Agents with transcript rows dropped by a cap: their threads can load them again. */
+  private clipped = new Set<string>();
   /** The status a task had before the `task_changed` being applied (null: first seen), for listeners. */
   prevTaskStatus: Task['status'] | null = null;
 
@@ -273,7 +321,10 @@ class CodlyStore {
       const t = await getTransport();
       const snap = await t.subscribe((b: UiBatch) => this.onBatch(gen, b));
       if (gen !== this.gen) return;
-      this.applySnapshot(snap);
+      const missed = await this.missedSince(snap);
+      if (gen !== this.gen) return;
+      if (missed) this.mergeSnapshot(snap, missed);
+      else this.applySnapshot(snap);
       const early = this.buffered;
       this.buffered = [];
       this.syncing = false;
@@ -288,7 +339,8 @@ class CodlyStore {
     }
   }
 
-  /** Fresh snapshot (workspace switch, long hidden period). Old-generation batches are ignored. */
+  /** Fresh snapshot (workspace switch, long hidden period). Old-generation batches are ignored.
+   *  For the office already open it is merged into what is held: nothing older is dropped. */
   resync = () => this.connect();
 
   private onBatch(gen: number, b: UiBatch) {
@@ -326,7 +378,8 @@ class CodlyStore {
     }
   }
 
-  private applySnapshot(s: Snapshot) {
+  /** The snapshot's own lists: all but approvals and messages (a merge keeps older ones of ours). */
+  private adopt(s: Snapshot) {
     this.lastId = s.as_of;
     this.clis = s.clis;
     accounts.set(s.accounts ?? []);
@@ -337,22 +390,83 @@ class CodlyStore {
     this.agents = s.agents;
     this.plans = s.plans;
     this.tasks = s.tasks;
-    this.approvals = s.approvals;
-    this.chats = [...s.chats].sort((a, b) => a.ts - b.ts);
     const ws = s.workspace?.id ?? null;
+    this.held = ws;
     this.sent = this.sent.filter((o) => o.ws !== ws || !s.chats.some((c) => c.author === 'user' && c.thread === o.thread && c.text.trim() === o.text && c.ts >= o.ts - 10_000));
     this.memories = s.memories;
     this.triples = s.triples;
     this.artifacts = [...(s.artifacts ?? [])].sort((a, b) => a.created_at - b.created_at);
+  }
+
+  /** The events between what is held and a new snapshot of the same office, oldest first, up
+   *  to the snapshot's cursor. The core reads its cursor first and its events last, so while
+   *  agents work a snapshot also holds rows above the cursor: those come again as deltas, after
+   *  the snapshot's lists are in, and are left to that (taken here, they would be applied twice).
+   *  Null: the snapshot cannot be merged (another office, nothing held yet, or too far behind)
+   *  and takes the place of what is held. */
+  private async missedSince(s: Snapshot): Promise<EventRow[] | null> {
+    if (this.held === undefined || this.held !== (s.workspace?.id ?? null) || s.as_of < this.lastId) return null;
+    const rows = [...s.events].sort((a, b) => a.id - b.id);
+    const missed = (e: EventRow) => e.id > this.lastId && e.id <= s.as_of;
+    const fresh = rows.filter(missed);
+    // The snapshot's events reach back to ours: nothing is missing in between.
+    if (!rows.length || rows[0].id <= this.lastId) return fresh;
+    try {
+      const page = await api.events(null, rows[0].id, LOG_CAP); // newest first
+      const between = page.filter((e) => e.id > this.lastId);
+      // A full page and still no row of ours: too far behind to catch up row by row.
+      if (between.length === page.length && page.length >= LOG_CAP) return null;
+      return [...between.reverse().filter(missed), ...fresh];
+    } catch (e) {
+      console.error('[codly] could not read the events missed before a snapshot; loading it anew', e);
+      return null;
+    }
+  }
+
+  /** A fresh snapshot of the office already held (back from a hidden period, a lagging bus, a
+   *  reconnect). The missed events go through like live ones, then the snapshot's lists take
+   *  the place of ours. Nothing older is dropped, and nothing remounts (`epoch` stays). */
+  private mergeSnapshot(s: Snapshot, missed: EventRow[]) {
+    this.applyEvents(missed);
+    this.adopt(s);
+    // Approvals: the snapshot has the ones that wait. Answered ones are in no snapshot: ours stay.
+    const waiting = new Set(s.approvals.map((a) => a.id));
+    const answered = this.approvals.filter((a) => !waiting.has(a.id) && a.status !== 'pending' && this.hasThread(a));
+    this.approvals = [...answered, ...s.approvals].sort((a, b) => a.created_at - b.created_at);
+    // Messages: the snapshot has the newest of each open thread. Older ones of ours stay. A
+    // thread with none left was closed (its messages moved to its archive without events).
+    const oldest = new Map<string, number>();
+    for (const c of s.chats) oldest.set(c.thread, Math.min(oldest.get(c.thread) ?? Infinity, c.ts));
+    const fresh = new Set(s.chats.map((c) => c.id));
+    for (const c of this.chats) if (!oldest.has(c.thread)) this.dropEarlier(c.thread);
+    const older = this.chats.filter((c) => !fresh.has(c.id) && c.ts <= (oldest.get(c.thread) ?? -Infinity));
+    this.chats = [...older, ...s.chats].sort((a, b) => a.ts - b.ts);
+    // Deltas were dropped while hidden: a half stream would never be whole.
+    this.streams = new Map();
+    this.liveOut = new Map();
+    this.rev++;
+    this.liveRev++;
+  }
+
+  private applySnapshot(s: Snapshot) {
+    this.adopt(s);
+    this.approvals = s.approvals;
+    this.chats = [...s.chats].sort((a, b) => a.ts - b.ts);
     this.rateLimits = [];
+    this.earlier = {};
+    this.paged = new Map();
+    this.deep = new Map();
+    this.clipped = new Set();
     this.live = {};
     this.streams = new Map();
     this.liveOut = new Map();
     this.decisions = [];
     this.taskMarks = {};
     this.planMerges = {};
-    const evs = [...s.events].sort((a, b) => a.id - b.id);
+    // Up to the cursor: the rows above it come as deltas (see `missedSince`).
+    const evs = s.events.filter((e) => e.id <= s.as_of).sort((a, b) => a.id - b.id);
     this.events = evs.slice(-LOG_CAP);
+    this.origin = evs[0]?.id ?? s.as_of + 1;
     this.sessionStart = evs[0]?.ts ?? Date.now();
     // Replay the log into the derived structures only: entities are already current.
     for (const ev of evs) this.derive(ev, true);
@@ -374,6 +488,7 @@ class CodlyStore {
         if (ev.id <= this.lastId) continue;
         this.lastId = ev.id;
         this.events.push(ev);
+        if (ev.agent_id) this.deep.get(ev.agent_id)?.push(ev);
         persisted = true;
       } else if (this.staleAgent(ev)) continue;
       else live = true;
@@ -382,7 +497,10 @@ class CodlyStore {
       this.derive(ev, false);
       this.tell(this.listeners, ev);
     }
-    if (this.events.length > LOG_CAP * 1.2) this.events = this.events.slice(-LOG_CAP);
+    if (this.events.length > LOG_CAP * 1.2) {
+      this.events = this.events.slice(-LOG_CAP);
+      this.forgetEarlier(); // what left the log is earlier history now
+    }
     if (persisted) this.rev++;
     if (live) this.liveRev++;
   }
@@ -499,10 +617,44 @@ class CodlyStore {
     l.open = {};
   }
 
-  private derive(ev: EventRow, replay: boolean) {
+  /** The newest `n` of an agent's rows. An agent whose history was loaded on request keeps all. */
+  private tail<T>(aid: string, list: T[], n: number): T[] {
+    if (list.length <= n || this.deep.has(aid)) return list;
+    this.clip(aid);
+    return list.slice(-n);
+  }
+
+  /** Rows of this agent left the screen to a cap: its threads can load them again. */
+  private clip(aid: string) {
+    if (this.clipped.has(aid)) return;
+    this.clipped.add(aid);
+    this.forgetEarlier();
+  }
+
+  /** A finished step of a task, once, in the order it happened (an older page adds earlier ones). */
+  private addMark(tid: string, mark: TaskMark) {
+    const marks = this.taskMarks[tid] ?? [];
+    if (marks.some((m) => m.eventId === mark.eventId)) return;
+    this.taskMarks = { ...this.taskMarks, [tid]: [...marks, mark].sort((a, b) => a.eventId - b.eventId) };
+  }
+
+  /** An answered approval still has a place to show: its task's request, or its agent's thread.
+   *  (One of an agent that left, with no task, would land in the first request.) */
+  private hasThread(a: Approval): boolean {
+    return a.task_id != null || this.agents.some((x) => x.id === a.agent_id);
+  }
+
+  /** An approval read from history (a snapshot's events, an older page). One we hold is newer. */
+  private pastApproval(a: Approval) {
+    if (this.hasThread(a) && !this.approvals.some((x) => x.id === a.id)) this.approvals = [...this.approvals, a];
+  }
+
+  /** `into`: build that agent's state only (its history, replayed) and touch nothing else. */
+  private derive(ev: EventRow, replay: boolean, into?: AgentLive) {
     const k = ev.kind;
     const aid = ev.agent_id;
-    const l = aid ? this.liveFor(aid) : null;
+    if (into && SHARED_KINDS.has(k.type)) return;
+    const l = into ?? (aid ? this.liveFor(aid) : null);
     if (l) {
       if (!l.segments.length && !l.messages.length) l.firstTs = Math.min(l.firstTs, ev.ts);
       if (ev.id) l.lastTs = ev.ts;
@@ -516,7 +668,8 @@ class CodlyStore {
       case 'turn_started':
         if (l) {
           l.turn = { startedAt: ev.ts, input: k.input, endedAt: null, status: null };
-          l.turns = [...l.turns, { start: ev.ts, end: null, input: k.input }].slice(-200);
+          l.turns = [...l.turns, { start: ev.ts, end: null, input: k.input }];
+          if (aid) l.turns = this.tail(aid, l.turns, 200);
         }
         break;
       case 'turn_completed':
@@ -525,7 +678,7 @@ class CodlyStore {
           const t = l.turns;
           if (t.length && t[t.length - 1].end == null) l.turns = [...t.slice(0, -1), { ...t[t.length - 1], end: ev.ts }];
           this.closeOpen(l, ev.ts);
-          for (const [id, s] of this.streams) if (s.agentId === aid) this.streams.delete(id);
+          if (!into) for (const [id, s] of this.streams) if (s.agentId === aid) this.streams.delete(id);
         }
         break;
       case 'exited':
@@ -555,15 +708,15 @@ class CodlyStore {
         break;
       }
       case 'message':
-        this.streams.delete(k.item_id);
+        if (!into) this.streams.delete(k.item_id);
         if (l && aid) {
           const m: AgentMsg = { itemId: k.item_id, agentId: aid, text: k.text, phase: k.phase, ts: ev.ts, eventId: ev.id };
-          l.messages = [...l.messages.filter((x) => x.itemId !== k.item_id), m].slice(-MSG_CAP);
+          l.messages = this.tail(aid, [...l.messages.filter((x) => x.itemId !== k.item_id), m], MSG_CAP);
         }
         break;
       case 'reasoning':
-        this.streams.delete(k.item_id);
-        if (l) l.reasoning = [...l.reasoning.filter((x) => x.itemId !== k.item_id), { itemId: k.item_id, text: k.text, ts: ev.ts, eventId: ev.id }].slice(-60);
+        if (!into) this.streams.delete(k.item_id);
+        if (l && aid) l.reasoning = this.tail(aid, [...l.reasoning.filter((x) => x.itemId !== k.item_id), { itemId: k.item_id, text: k.text, ts: ev.ts, eventId: ev.id }], 60);
         break;
       case 'tool_started': {
         if (!l || !aid) break;
@@ -579,7 +732,8 @@ class CodlyStore {
           l.segments = segs;
         } else {
           l.segments = [...l.segments, seg];
-          if (l.segments.length > SEG_CAP) {
+          if (l.segments.length > SEG_CAP && !this.deep.has(aid)) {
+            this.clip(aid);
             const drop = l.segments.length - SEG_CAP;
             l.segments = l.segments.slice(drop);
             const open: Record<string, number> = {};
@@ -631,7 +785,7 @@ class CodlyStore {
         const live = this.liveOut.get(k.call_id);
         const text = k.output ?? live?.text ?? '';
         if (text) l.lastOutput = { callId: k.call_id, text, ts: ev.ts, ok: k.ok };
-        this.liveOut.delete(k.call_id);
+        if (!into) this.liveOut.delete(k.call_id);
         break;
       }
       case 'files_changed':
@@ -677,6 +831,16 @@ class CodlyStore {
         if (agent) accounts.observe(agent, k, ev.ts);
         break;
       }
+      case 'approval_requested':
+        // Replay only (a live one is an entity): an approval that no longer waits shows as it
+        // was asked, then as it was answered.
+        if (replay) this.pastApproval(k.approval);
+        break;
+      case 'approval_resolved': {
+        const a = replay ? this.approvals.find((x) => x.id === k.approval_id) : undefined;
+        if (a) this.approvals = upsert(this.approvals, { ...a, status: k.status, decided_by: k.by });
+        break;
+      }
       case 'decision':
         if (k.decision_type === 'merge_plan' && k.detail && typeof k.detail === 'object' && !Array.isArray(k.detail)) {
           const d = k.detail as Record<string, unknown>;
@@ -691,20 +855,122 @@ class CodlyStore {
       case 'verified':
       case 'reviewed':
       case 'merged': {
-        const tid = ev.task_id;
-        if (!tid) break;
-        let mark: TaskMark;
-        if (k.type === 'committed')
-          mark = { kind: 'committed', ts: ev.ts, eventId: ev.id, agentId: aid, text: k.message, ok: true, sha: k.sha, files: k.files };
-        else if (k.type === 'verified')
-          mark = { kind: 'verified', ts: ev.ts, eventId: ev.id, agentId: aid, text: k.command, ok: k.ok };
-        else if (k.type === 'reviewed')
-          mark = { kind: 'reviewed', ts: ev.ts, eventId: ev.id, agentId: aid, text: `${k.verdict}: ${k.summary}`, ok: !/reject|change/i.test(k.verdict) };
-        else mark = { kind: 'merged', ts: ev.ts, eventId: ev.id, agentId: aid, text: k.branch, ok: true, sha: k.sha };
-        this.taskMarks = { ...this.taskMarks, [tid]: [...(this.taskMarks[tid] ?? []), mark] };
+        const mark = markOf(ev);
+        if (ev.task_id && mark) this.addMark(ev.task_id, mark);
         break;
       }
     }
+  }
+
+  // ───────────── history before what is held, loaded on request ─────────────
+
+  /** Every event of this office from this id on is in the log. */
+  private floor(): number {
+    return this.events[0]?.id ?? this.lastId + 1;
+  }
+
+  private setEarlier(thread: string, e: Earlier) {
+    this.earlier = { ...this.earlier, [thread]: e };
+  }
+
+  private dropEarlier(thread: string) {
+    this.paged.delete(thread);
+    if (!(thread in this.earlier)) return;
+    const { [thread]: _, ...rest } = this.earlier;
+    this.earlier = rest;
+  }
+
+  /** Rows left the log or the screen: a thread that was not loaded further back (for the agent
+   *  it has now) is asked again whether it has earlier history. One that is asking right now
+   *  settles that by itself. */
+  private forgetEarlier() {
+    for (const [thread, e] of Object.entries(this.earlier)) {
+      const at = this.paged.get(thread);
+      if (!e.loading && (!at || at.owner !== (this.threadAgent(thread)?.id ?? null))) this.dropEarlier(thread);
+    }
+  }
+
+  /** Find out, once per thread, if it has history before what is held ("Load earlier" shows then). */
+  async peekEarlier(thread: string): Promise<void> {
+    if (this.earlier[thread]) return;
+    const epoch = this.epoch;
+    const floor = this.floor();
+    const owner = this.threadAgent(thread)?.id ?? null;
+    this.setEarlier(thread, { more: false, loading: true });
+    let found: boolean;
+    try {
+      found = (await api.threadEvents(thread, owner, floor, 1)).length > 0;
+    } catch (e) {
+      // The control shows, so a click says what is wrong.
+      console.error('[codly] could not look for earlier history', e);
+      found = true;
+    }
+    if (epoch !== this.epoch) return; // another office's state now
+    // Rows left the log meanwhile: the answer is for another floor, so the thread asks again.
+    if (floor !== this.floor()) this.dropEarlier(thread);
+    else this.setEarlier(thread, { more: found || (owner != null && this.clipped.has(owner)), loading: false });
+  }
+
+  /** Load a thread's history before what is shown: one page, or as many as it takes to reach
+   *  back to where the held state starts (events the log trimmed since). The owner's state is
+   *  built again from the events held and loaded, so they must cover all it was built from:
+   *  then the thread, and what its agent shows (session, files, to-do), never get shorter. */
+  async loadEarlier(thread: string): Promise<void> {
+    if (this.earlier[thread]?.loading) return;
+    const epoch = this.epoch;
+    const owner = this.threadAgent(thread)?.id ?? null;
+    // From now on the owner's events are kept apart from the capped log: what is loaded for
+    // it is never trimmed away again.
+    if (owner && !this.deep.has(owner)) this.deep.set(owner, this.events.filter((e) => e.agent_id === owner));
+    const at = this.paged.get(thread);
+    let before = at && at.owner === owner ? at.before : this.floor();
+    let more = true;
+    const rows: EventRow[] = [];
+    this.setEarlier(thread, { more, loading: true });
+    try {
+      do {
+        const page = await api.threadEvents(thread, owner, before, EARLIER_PAGE); // newest first
+        if (epoch !== this.epoch) return; // another office's state now
+        rows.push(...page);
+        more = page.length >= EARLIER_PAGE;
+        if (page.length) before = page[page.length - 1].id;
+      } while (more && before > this.origin);
+    } catch (e) {
+      if (epoch === this.epoch) this.setEarlier(thread, { more: true, loading: false });
+      throw e;
+    }
+    this.paged.set(thread, { owner, before });
+    this.absorb(thread, owner, rows.reverse());
+    this.setEarlier(thread, { more, loading: false });
+  }
+
+  /** Older rows of a thread, oldest first: its messages, its approvals and its tasks' finished
+   *  steps join what is held; its owner's state is built again from all of the owner's events. */
+  private absorb(thread: string, owner: string | null, rows: EventRow[]) {
+    const known = new Set(this.chats.map((c) => c.id));
+    const said: ChatMessage[] = [];
+    for (const ev of rows) {
+      const k = ev.kind;
+      const mark = markOf(ev);
+      if (k.type === 'chat' && k.message.thread === thread && !known.has(k.message.id)) said.push(k.message);
+      else if (k.type === 'approval_requested') this.pastApproval(k.approval); // the core sends it as it ended
+      else if (mark && ev.task_id) this.addMark(ev.task_id, mark);
+    }
+    if (said.length) this.chats = [...this.chats, ...said].sort((a, b) => a.ts - b.ts);
+    if (owner) {
+      const all = new Map<number, EventRow>();
+      for (const ev of rows) if (ev.agent_id === owner) all.set(ev.id, ev);
+      for (const ev of this.deep.get(owner) ?? []) all.set(ev.id, ev);
+      const log = [...all.values()].sort((a, b) => a.id - b.id);
+      this.deep.set(owner, log);
+      const prev = this.live[owner];
+      const l = emptyLive(prev?.statusSince ?? Date.now());
+      for (const ev of log) this.derive(ev, true, l);
+      // Output that only came as live chunks is in no stored row.
+      if (prev?.lastOutput && (!l.lastOutput || l.lastOutput.ts <= prev.lastOutput.ts)) l.lastOutput = prev.lastOutput;
+      this.live[owner] = l;
+    }
+    this.rev++;
   }
 
   // ───────────── queries used by several panels ─────────────

@@ -381,10 +381,13 @@ export class MockTransport implements Transport {
         return story.planDiff(String(a.planId));
       case 'get_events': {
         const agentId = a.agentId as string | null;
+        const thread = (a.thread as string | null) ?? null;
         const before = a.before as number | null;
         const limit = Number(a.limit ?? 500);
+        // A conversation's page: its agent's events and its messages.
         return sim.log
-          .filter((e) => (!agentId || e.agent_id === agentId) && (before == null || e.id < before))
+          .filter((e) => (thread ? e.agent_id === agentId || (e.kind.type === 'chat' && e.kind.message.thread === thread) : !agentId || e.agent_id === agentId))
+          .filter((e) => before == null || e.id < before)
           .slice(-limit)
           .reverse();
       }

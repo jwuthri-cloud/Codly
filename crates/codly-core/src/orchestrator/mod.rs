@@ -936,6 +936,13 @@ impl Core {
         self.inner.store.events(ws.as_deref(), agent_id, before, limit)
     }
 
+    /// Paged history (newest first) of one conversation of the open repo: `owner` is the agent
+    /// the thread belongs to, if it has one yet (see `Store::thread_events`).
+    pub async fn thread_events(&self, thread: &str, owner: Option<&str>, before: Option<i64>, limit: i64) -> anyhow::Result<Vec<EventRow>> {
+        let ws = self.inner.require_ws()?;
+        self.inner.store.thread_events(&ws.id, thread, owner, before, limit)
+    }
+
     /// Code search over the workspace index (the same engine as the codly_search tool).
     pub async fn search(&self, query: &str) -> anyhow::Result<SearchResult> {
         self.inner.search(None, query, 12).await

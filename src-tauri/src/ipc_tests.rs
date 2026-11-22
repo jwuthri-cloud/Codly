@@ -104,6 +104,9 @@ fn commands_round_trip_with_frontend_arg_names() {
 
     let events = invoke(&wv, "get_events", json!({ "agentId": null, "before": null, "limit": 50 })).unwrap();
     assert!(!events.as_array().unwrap().is_empty());
+    // One conversation's page (the transcript's "Load earlier").
+    let page = invoke(&wv, "get_events", json!({ "agentId": null, "thread": "lead", "before": null, "limit": 50 })).unwrap();
+    assert!(page.is_array(), "{page}");
     invoke(&wv, "recent_workspaces", json!({})).unwrap();
     assert!(invoke(&wv, "list_repos", json!({})).unwrap().is_array());
 

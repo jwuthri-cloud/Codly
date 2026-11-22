@@ -24,6 +24,7 @@
   import TaskDoneCard from './cards/TaskDoneCard.svelte';
   import WorkRow from './cards/WorkRow.svelte';
   import Composer from './Composer.svelte';
+  import LoadEarlier from './LoadEarlier.svelte';
   import NextRow from './NextRow.svelte';
   import { buildSpine, type Item } from './spine';
   import { resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
@@ -91,6 +92,7 @@
   let atBottom = $state(true);
   let unseen = $state(false);
   let lastCount = 0;
+  let lastFirst: string | undefined;
   let lastTop = 0;
   /** Text is streaming into the newest message: it grows below the fold without a new item,
    *  and a smooth scroll to it would end short (so "New activity" jumps there instead). */
@@ -112,8 +114,10 @@
   }
   $effect(() => {
     void items;
-    const grew = items.length > lastCount;
+    // Rows that came in above ("Load earlier") are not new activity.
+    const grew = items.length > lastCount && items[0]?.key === lastFirst;
     lastCount = items.length;
+    lastFirst = items[0]?.key;
     if (atBottom) tick().then(() => toBottom());
     else if (grew || streamingLast) unseen = true;
   });
@@ -157,6 +161,7 @@
   {/if}
 
   <div class="scroll" bind:this={scroller} onscroll={onScroll}>
+    <LoadEarlier {thread} {scroller} />
     {#if !items.length}
       {#if thread === 'lead'}
         <div class="hero">
