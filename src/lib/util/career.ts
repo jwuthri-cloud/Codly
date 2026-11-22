@@ -4,6 +4,7 @@
 import type { Applicant } from '../gen/Applicant';
 import type { Career } from '../gen/Career';
 import type { Rank } from '../gen/Rank';
+import type { Role } from '../gen/Role';
 import { AVATARS } from './hire';
 
 export const RANKS: { rank: Rank; label: string; xp: number }[] = [
@@ -69,12 +70,18 @@ export function contextLabel(tokens: number): string {
 /** "Legend" above Staff (`career.legend`), else the rank. */
 export const titleOf = (c: Career) => (c.legend ? 'Legend' : rankLabel(c.rank));
 
-/** What trusting a rank gives an agent (mirror of `career::PERKS`); you grant it, a promotion offers it. */
-export const PERKS: { rank: Rank; perk: string }[] = [
-  { rank: 'junior', perk: 'Edits files inside its own worktree without asking; commands still ask' },
-  { rank: 'senior', perk: 'Works inside its own worktree without asking; risky actions still ask' },
-  { rank: 'staff', perk: 'Its work merges without the cross-vendor review' },
+/** How much you let an agent do without asking (`career.trust`, mirror of `career::trust_allows`):
+ *  a safety setting you set per agent, whatever its rank. The levels reuse the rank names in
+ *  saved data and each includes the ones below it. `allows` says when a level changes anything. */
+export const TRUST: { level: Rank; label: string; allows: string }[] = [
+  { level: 'intern', label: 'No extra trust', allows: 'It asks as your permissions say, like every other agent.' },
+  { level: 'junior', label: 'Edits on its own', allows: 'Where permissions are Balanced, it edits files inside its own worktree without asking. Commands still ask.' },
+  { level: 'senior', label: 'Works on its own', allows: 'Where permissions are Balanced, it works inside its own worktree without asking. Risky actions still ask.' },
+  { level: 'staff', label: 'Works on its own, no review', allows: 'It works on its own as above, and its work merges without the cross-vendor review.' },
 ];
+export const trustOf = (level: Rank) => TRUST.find((t) => t.level === level) ?? TRUST[0];
+/** Only an agent that writes on its own can be trusted: the Lead and reviewers always ask. */
+export const canTrust = (role: Role) => role === 'worker' || role === 'solo';
 /** Extra XP an Intern or Junior earns from a review by a Senior or Staff (`career::MENTORED_XP`). */
 export const MENTORED_XP = 10;
 /** XP a fulfilled want pays (mirror of `career::WANT_XP`). */

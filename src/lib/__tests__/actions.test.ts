@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
+import type { Agent } from '../gen/Agent';
 import type { LastMerge } from '../gen/LastMerge';
 import type { Memory } from '../gen/Memory';
 import type { Plan } from '../gen/Plan';
 import type { RepoSync } from '../gen/RepoSync';
-import { isStarting, keepBranch, mergePlan, recheckTask, runPlan, togglePinMemory, undoMerge } from '../state/actions';
+import { isStarting, keepBranch, mergePlan, recheckTask, runPlan, setTrust, togglePinMemory, undoMerge } from '../state/actions';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
@@ -128,5 +129,34 @@ describe('merging into your branch', () => {
     expect(await undoMerge(merge)).toEqual(after);
     expect(undo).toHaveBeenLastCalledWith('abc1234def');
     expect(store.mergeOf('p3')).toBeNull();
+  });
+});
+
+describe('setTrust', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const t of toasts.list) toasts.dismiss(t.id);
+  });
+  const ana = (trust: string) => ({ id: 'a1', name: 'Ana', career: { trust } }) as unknown as Agent;
+
+  it('says in plain words what the agent may do now, once the core has saved it', async () => {
+    const core = vi.spyOn(api, 'trustAgent').mockResolvedValue(ana('senior'));
+    expect(await setTrust('a1', 'senior')).toBe(true);
+    expect(core).toHaveBeenCalledWith('a1', 'senior');
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([
+      ['success', 'Ana: works on its own', 'Where permissions are Balanced, it works inside its own worktree without asking. Risky actions still ask.'],
+    ]);
+  });
+
+  it('taking trust back says the agent asks again', async () => {
+    vi.spyOn(api, 'trustAgent').mockResolvedValue(ana('intern'));
+    expect(await setTrust('a1', 'intern')).toBe(true);
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['info', 'Ana: no extra trust', 'It asks as your permissions say, like every other agent.']]);
+  });
+
+  it('a change the core refuses is an error, not a success', async () => {
+    vi.spyOn(api, 'trustAgent').mockRejectedValue(new Error('only a worker or a 1:1 agent can be trusted'));
+    expect(await setTrust('a1', 'staff')).toBe(false);
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t change its trust', 'only a worker or a 1:1 agent can be trusted']]);
   });
 });

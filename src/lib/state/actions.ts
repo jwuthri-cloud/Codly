@@ -11,6 +11,7 @@ import type { HeldCheck } from '../gen/HeldCheck';
 import type { MemoryKind } from '../gen/MemoryKind';
 import type { MemoryScope } from '../gen/MemoryScope';
 import type { Provider } from '../gen/Provider';
+import type { Rank } from '../gen/Rank';
 import type { Settings } from '../gen/Settings';
 import type { TaskStatus } from '../gen/TaskStatus';
 import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
@@ -18,6 +19,7 @@ import type { RequestPrefs } from '../gen/RequestPrefs';
 import { PROVIDER_LABEL, TASK_STATUS_LABEL } from '../util/labels';
 import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
+import { trustOf } from '../util/career';
 import { withModel } from '../util/team';
 import { accounts } from './accounts.svelte';
 import { diffstats } from './diffstats.svelte';
@@ -396,6 +398,15 @@ export async function letGo(agentId: string) {
   if (!a) return;
   if (ui.selection?.kind === 'agent' && ui.selection.id === agentId) ui.select(null);
   toast({ kind: 'success', title: `${a.name} was let go`, body: 'A ghost by the memory archive now, with the same career and memory. Bring them back from there.' });
+}
+
+/** Set how much you trust an agent (`TRUST`): the core saves it and records the change as a decision. */
+export async function setTrust(agentId: string, level: Rank): Promise<boolean> {
+  const a = await attempt('change its trust', () => api.trustAgent(agentId, level));
+  if (!a) return false;
+  const t = trustOf(a.career.trust);
+  toast({ kind: a.career.trust === 'intern' ? 'info' : 'success', title: `${a.name}: ${t.label.toLowerCase()}`, body: t.allows });
+  return true;
 }
 
 export async function addMemory(text: string, scope: MemoryScope, kind: MemoryKind, title: string | null = null, tags: string[] | null = null) {

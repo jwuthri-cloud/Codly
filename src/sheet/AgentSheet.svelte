@@ -29,9 +29,11 @@
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
   import AgentControls from './AgentControls.svelte';
+  import AgentTrust from './AgentTrust.svelte';
   import TaskChecks from './TaskChecks.svelte';
   import AgentTabs from './AgentTabs.svelte';
   import { agentTitle } from '../lib/util/team';
+  import { canTrust, trustOf } from '../lib/util/career';
   import { ide } from '../ide/ide.svelte';
 
   interface Props {
@@ -277,7 +279,13 @@
     <div class="h-text">
       <h2 class="serif">{agent.name}</h2>
       <p class="h-sub">{agentTitle(agent) ? `${agentTitle(agent)} · ` : ''}{PROVIDER_LABEL[agent.provider]} ({COMPANY_LABEL[agent.provider]}){#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{` · ${model}`}</p>
-      <div class="h-tags"><BillingBadge billing={agent.billing} plan={account?.plan ?? cli?.plan} /></div>
+      <div class="h-tags">
+        <BillingBadge billing={agent.billing} plan={account?.plan ?? cli?.plan} />
+        {#if canTrust(agent.role) && agent.career.trust !== 'intern'}
+          {@const trust = trustOf(agent.career.trust)}
+          <button class="trusted" data-tip={trust.allows} onclick={() => (ui.sheetFocus = 'trust')}><Icon name="check" size={11} />Trusted: {trust.label.toLowerCase()}</button>
+        {/if}
+      </div>
     </div>
   </header>
   <div class="h-actions">
@@ -332,6 +340,8 @@
         {/if}
       </Section>
     {/if}
+
+    {#if canTrust(agent.role)}<AgentTrust {agent} />{/if}
 
     <AgentControls {agent} />
 
@@ -492,7 +502,9 @@
   .h-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-right: 30px; }
   h2 { font-size: var(--d-lg); line-height: 1; }
   .h-sub { font-size: var(--t-sm); color: var(--ink-3); }
-  .h-tags { margin-top: 6px; }
+  .h-tags { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .trusted { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px; border-radius: var(--r-full); font-size: var(--t-xs); font-weight: var(--w-med); line-height: 1; white-space: nowrap; color: var(--amber-ink); background: var(--amber-soft); }
+  .trusted:hover { color: var(--ink-1); }
   .h-actions { display: flex; align-items: center; gap: 6px; padding: 6px 22px 12px; }
   .h-actions .icon-btn { margin-left: auto; }
   .confirm { display: flex; align-items: center; gap: 6px; margin: 0 22px 12px; padding: 10px 12px; border-radius: var(--r-md); background: var(--bad-soft); font-size: var(--t-sm); }

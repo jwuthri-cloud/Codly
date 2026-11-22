@@ -15,7 +15,7 @@ import type { LotSlot } from '../gen/LotSlot';
 import type { LotSizeName } from '../gen/LotSizeName';
 import { BY_ID, locked } from '../../office/buy';
 import { bareLot, diff, fit, isBare, keptGifts, landBack, landPrice, lotIds, plotSize, sellValue, TEMPLATES, value } from '../../office/price';
-import { atLeast, emptyCareer, rankFor, rankLabel, staminaOf } from '../util/career';
+import { atLeast, canTrust, emptyCareer, rankFor, rankLabel, staminaOf } from '../util/career';
 import type { Rank } from '../gen/Rank';
 import type { DayReport } from '../gen/DayReport';
 import type { Digest } from '../gen/Digest';
@@ -318,13 +318,27 @@ export function demoLook(sim: Sim, id: string, lookSeed: string): Agent {
   return next;
 }
 
-export function demoTrust(sim: Sim, id: string, rank: Rank): Agent {
+/** What a trust level lets an agent do, as its decision says it (mirror of `career::trust_allows`). */
+const TRUST_ALLOWS: Record<Rank, string | null> = {
+  intern: null,
+  junior: 'edit files inside its own worktree without asking',
+  senior: 'work inside its own worktree without asking',
+  staff: 'work inside its own worktree without asking, and to merge without the cross-vendor review',
+};
+
+/** Set how much you trust an agent: same rules as the core's `set_trust` (any level whatever
+ *  its rank, workers and 1:1 agents only, a change is a decision on the agent). */
+export function demoTrust(sim: Sim, id: string, level: Rank): Agent {
   const a = sim.agents.get(id);
   if (!a) throw new Error('no such agent');
-  const trust = atLeast(rank, a.career.rank) ? a.career.rank : rank;
-  const milestones = atLeast(trust, 'junior') && !atLeast(a.career.trust, trust) ? [...a.career.milestones, { at: sim.now(), text: `Trusted as ${rankLabel(trust)}` }] : a.career.milestones;
-  const next: Agent = { ...a, updated_at: sim.now(), career: { ...a.career, trust, milestones } };
+  if (level !== 'intern' && !canTrust(a.role)) throw new Error(`only a worker or a 1:1 agent can be trusted: ${a.name} always asks before it changes anything`);
+  const from = a.career.trust;
+  if (from === level) return a;
+  const next: Agent = { ...a, updated_at: sim.now(), career: { ...a.career, trust: level } };
   sim.putAgent(next);
+  const what = TRUST_ALLOWS[level];
+  const summary = what ? `you trust ${a.name} to ${what}` : `you took back your trust in ${a.name}: it asks like every other agent`;
+  sim.decision('trust', 'human', summary, { agent: id, name: a.name, from, to: level }, { agent: id });
   return next;
 }
 

@@ -543,8 +543,8 @@ pub struct Career {
     pub milestones: Vec<Milestone>,
     /// Personality (`career::TRAITS` ids). Some change how it works; see `career::TRAITS`.
     pub traits: Vec<String>,
-    /// The rank whose perks you granted (`career::PERKS`), never above `rank`. A promotion only
-    /// offers it; it stays in this repo (an imported agent starts with none).
+    /// How much you let it do without asking (`career::trust_allows`): a safety setting you set,
+    /// whatever its `rank`. It stays in this repo (an imported agent starts with none).
     #[serde(default)]
     pub trust: Rank,
     /// Reviews between it and other agents in this repo, by agent id (both ways). Repo-local:

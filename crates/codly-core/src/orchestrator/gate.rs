@@ -364,7 +364,7 @@ impl Inner {
         // 6. Optional cross-vendor review; it resumes the gate from review_done().
         let staff = self.agent(&worker).is_ok_and(|a| crate::career::trusts(&a.career, Rank::Staff));
         if self.settings().review_gate && !files.is_empty() && staff {
-            self.decide(ws, Some(task_id), "gate", format!("{}: no review, its worker is a trusted Staff", task.key), json!({ "plan_id": task.plan_id }))?;
+            self.decide(ws, Some(task_id), "gate", format!("{}: no review, you trust its worker to merge without one", task.key), json!({ "plan_id": task.plan_id }))?;
         } else if self.settings().review_gate && !files.is_empty() {
             let notes = report["notes_for_reviewer"].as_str().map(String::from);
             return self.start_review(&task, &ws_id, &base_ref, &results, &declared, notes.as_deref()).await;
