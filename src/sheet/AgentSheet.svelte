@@ -16,7 +16,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
   import { clock, clockSec, dur, pct, resetsIn, timer, tokens } from '../lib/util/format';
-  import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
+  import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, subagentMark, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
   import ApprovalCard from '../home/cards/ApprovalCard.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -186,7 +186,7 @@
   function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
     const k = e.kind;
     switch (k.type) {
-      case 'tool_started': return { icon: 'play', text: `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}` };
+      case 'tool_started': return { icon: 'play', text: `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
       case 'tool_completed': return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
       case 'files_changed': return { icon: 'diff', text: `Changed ${k.paths.map(basename).join(', ')}` };
       case 'message': return { icon: 'chat', text: oneLine(k.text, 120) };
@@ -201,6 +201,7 @@
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
       case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
+      case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
       case 'decision': return { icon: 'help', text: k.summary };
       case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${k.files.length} files` };
       case 'verified': return { icon: k.ok ? 'check-circle' : 'x-circle', text: `Verified ${k.command}`, tone: k.ok ? 'good' : 'bad' };
