@@ -2,7 +2,8 @@
 //! place of the CLI, on an ad-hoc task (no verify commands: the gate would pass anything):
 //! a turn that fails or hits its turn limit is continued in the same session, one that keeps
 //! failing blocks the task, a crash restarts the worker, and a worker the circuit breaker
-//! constrains waits for your Resume. A breaker stop says so on the task.
+//! constrains waits for your Resume. Neither your Resume nor a turn that answers a message
+//! sends the unfinished work to the gate. A breaker stop says so on the task.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SpawnSpec};
 use codly_core::model::*;
 use codly_core::orchestrator::breaker::BreakerConfig;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
@@ -54,6 +55,8 @@ fn claude() -> CliInfo {
 enum End {
     /// With this status and result text.
     Turn(TurnStatus, Option<&'static str>),
+    /// As `Turn`, once the test lets it end.
+    Held(Arc<Notify>, TurnStatus, Option<&'static str>),
     /// The CLI dies mid-turn: a failed turn, then an exit with code 1.
     Crash,
     /// It keeps going until Codly interrupts it.
@@ -136,6 +139,10 @@ impl Spawner for Fake {
                             };
                             match end {
                                 End::Turn(status, result) => done(status, result),
+                                End::Held(go, status, result) => {
+                                    go.notified().await;
+                                    done(status, result)
+                                }
                                 End::Crash => {
                                     done(TurnStatus::Failed, Some("the CLI exited before the turn finished"));
                                     send(EventKind::Error { message: "the CLI exited unexpectedly".into(), fatal: true });
@@ -330,6 +337,78 @@ async fn a_crash_mid_turn_restarts_the_worker_and_is_not_gated() {
     core.shutdown().await;
 }
 
+/// A retry wait no test reaches: only something else can ask the worker to continue.
+const LONG_WAIT: Duration = Duration::from_secs(600);
+
+/// A worker whose first turn fails with half the work once the test lets it end, and that
+/// finishes the work only when Codly asks it to continue.
+fn fails_then_continues(go: Arc<Notify>) -> Script {
+    Arc::new(move |turn: &Turn| {
+        if turn.n == 0 {
+            write_hello(turn, "hel");
+            return End::Held(go.clone(), TurnStatus::Failed, Some("API Error: 529 Overloaded"));
+        }
+        if turn.prompt.contains("Your last turn on task") {
+            write_hello(turn, "hello\n");
+        }
+        End::Turn(TurnStatus::Completed, None)
+    })
+}
+
+async fn failed_turn_seen(core: &Core) {
+    wait_for("Codly to see the failed turn", async || (!decisions(core, "retry").await.is_empty()).then_some(())).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn your_resume_after_a_failed_turn_continues_the_work_and_does_not_check_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let go = Arc::new(Notify::new());
+    let (core, seen, task) = start(dir.path(), None, fails_then_continues(go.clone())).await;
+    core.set_turn_retry_waits(vec![LONG_WAIT; 2]);
+    let worker = first_turn_worker(&core, &seen, &task).await;
+    // "Stop after this step", and the step fails.
+    assert!(core.stop_agent_after_step(&worker).await.unwrap().stop_requested);
+    go.notify_one();
+    wait_for("the pause", async || core.agent_control(&worker).await.unwrap().paused.then_some(())).await;
+    failed_turn_seen(&core).await;
+
+    // You resume it before Codly asked it to continue: it goes on, and nothing is checked yet.
+    core.resume_agent(&worker).await.unwrap();
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.prompts.len(), 2, "{:?}", seen.prompts);
+        assert!(seen.prompts[1].contains("Your last turn on task"), "{}", seen.prompts[1]);
+    }
+    assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the resume did not check the half-done work");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_that_answers_you_after_a_failed_turn_is_not_checked_as_the_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let go = Arc::new(Notify::new());
+    let (core, seen, task) = start(dir.path(), None, fails_then_continues(go.clone())).await;
+    core.set_turn_retry_waits(vec![LONG_WAIT; 2]);
+    let worker = first_turn_worker(&core, &seen, &task).await;
+    go.notify_one();
+    failed_turn_seen(&core).await;
+
+    // A note reaches the worker during the wait. Its answer is not the work: it is asked to continue.
+    core.steer_agent(&worker, "use plain words").await.unwrap();
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.prompts.len(), 3, "{:?}", seen.prompts);
+        assert!(seen.prompts[1].contains("use plain words"), "{}", seen.prompts[1]);
+        assert!(seen.prompts[2].contains("Your last turn on task"), "{}", seen.prompts[2]);
+    }
+    assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the answer to the note did not send the half-done work to the gate");
+    core.shutdown().await;
+}
+
 /// Two errors in a row trip the breaker; nothing else does.
 fn error_storm(hard_stop: bool) -> BreakerConfig {
     BreakerConfig { enabled: true, token_budget: 0, velocity_per_min: 0, repeated_tool_limit: 0, error_storm_limit: 2, hard_stop }
@@ -342,8 +421,8 @@ fn stuck(turn: &Turn) -> End {
     End::Interrupted
 }
 
-/// The task's worker, once it is stuck in its first turn.
-async fn stuck_worker(core: &Core, seen: &Mutex<Seen>, task: &Task) -> Id {
+/// The task's worker, once it is in its first turn.
+async fn first_turn_worker(core: &Core, seen: &Mutex<Seen>, task: &Task) -> Id {
     wait_for("the worker's first turn", async || (seen.lock().unwrap().prompts.len() == 1).then_some(())).await;
     task_now(core, &task.id).await.assignee.expect("the task has a worker")
 }
@@ -373,7 +452,7 @@ async fn a_worker_the_breaker_constrains_waits_for_your_resume() {
         End::Turn(TurnStatus::Completed, None) // the breaker's notes: it says where it stands
     });
     let (core, seen, task) = start(dir.path(), Some(error_storm(false)), script).await;
-    let worker = stuck_worker(&core, &seen, &task).await;
+    let worker = first_turn_worker(&core, &seen, &task).await;
     // One level a beat: steered, then constrained (which holds it).
     wait_for("the breaker to constrain it", async || {
         core.breaker_beat().await;
@@ -405,10 +484,54 @@ async fn a_worker_the_breaker_constrains_waits_for_your_resume() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_you_hold_that_the_breaker_constrains_gets_no_note_to_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|turn: &Turn| {
+        if turn.n == 0 {
+            write_hello(turn, "hel");
+            return stuck(turn);
+        }
+        if turn.prompt.contains("The user resumed you") {
+            write_hello(turn, "hello\n");
+        }
+        End::Turn(TurnStatus::Completed, None)
+    });
+    let (core, seen, task) = start(dir.path(), Some(error_storm(false)), script).await;
+    let worker = first_turn_worker(&core, &seen, &task).await;
+    assert!(core.stop_agent_after_step(&worker).await.unwrap().stop_requested);
+    // One level a beat: the steer note is held, then the constrain interrupts the turn and
+    // holds the way back to the task.
+    wait_for("the breaker to interrupt it", async || {
+        core.breaker_beat().await;
+        let control = core.agent_control(&worker).await.unwrap();
+        (control.paused && control.held == 2).then_some(())
+    })
+    .await;
+    let paused = task_now(&core, &task.id).await;
+    assert_eq!(paused.status, TaskStatus::Running, "{:?}", paused.status_reason);
+    let reason = paused.status_reason.clone().unwrap_or_default();
+    assert!(reason.starts_with("paused by the circuit breaker: it hit 2 errors in a row"), "{reason}");
+    assert_eq!(seen.lock().unwrap().prompts.len(), 1, "nothing reached it while you hold it");
+
+    // Your Resume: it reads why it was stopped and goes back to its task; only that is checked.
+    core.resume_agent(&worker).await.unwrap();
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    {
+        let seen = seen.lock().unwrap();
+        assert!(!seen.prompts.iter().any(|p| p.contains("Stop active work now")), "no summary turn to gate: {:?}", seen.prompts);
+        let back = seen.prompts.last().unwrap();
+        assert!(back.contains("The user resumed you. The breaker stopped your work: it hit 2 errors in a row"), "{back}");
+    }
+    assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the half-done work was never committed or checked");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_breaker_stop_is_not_reported_as_yours() {
     let dir = tempfile::tempdir().unwrap();
     let (core, seen, task) = start(dir.path(), Some(error_storm(true)), Arc::new(stuck)).await;
-    let worker = stuck_worker(&core, &seen, &task).await;
+    let worker = first_turn_worker(&core, &seen, &task).await;
     // One level a beat: steered, constrained, then stopped.
     let task = wait_for("the breaker to stop it", async || {
         core.breaker_beat().await;

@@ -112,6 +112,7 @@ impl Inner {
                     answer_only: false,
                     failed_turns: 0,
                     last_error: None,
+                    continue_owed: None,
                 },
             );
         }

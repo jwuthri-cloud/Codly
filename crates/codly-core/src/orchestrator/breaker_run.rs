@@ -6,7 +6,8 @@
 //!
 //! A task's worker that is constrained is also paused ("stop after this step"), so the turn in
 //! which it answers the note never reaches the gate as finished work; Resume sends it back to
-//! the task. A stop says on the task that the breaker did it, and why.
+//! the task. One you hold already gets no note to answer: it reads why on your Resume. A stop
+//! says on the task that the breaker did it, and why.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -94,17 +95,14 @@ impl Inner {
         // Send first, record after: a note that could not be delivered is said so in the event.
         let delivered = match (t.action, &t.trip) {
             (Action::Steer, Some(trip)) => self.send_prompt(&t.agent, breaker::note(BreakerLevel::Steering, trip)).is_ok(),
-            (Action::Constrain, Some(trip)) => {
-                let note = breaker::note(BreakerLevel::Constrained, trip);
-                match work {
-                    // A task's worker is paused too (one you paused already just gets the note, held).
-                    Some(task) if !self.control_holding(&t.agent) => self.breaker_pause(ws.as_deref(), &agent, task, trip, note),
-                    _ => {
-                        let interrupted = lock(&self.live).get(&t.agent).is_some_and(|l| l.handle.send(AgentCmd::Interrupt));
-                        interrupted && self.send_prompt(&t.agent, note).is_ok()
-                    }
+            (Action::Constrain, Some(trip)) => match work {
+                // A task's worker is paused too.
+                Some(task) => self.breaker_pause(ws.as_deref(), &agent, task, trip),
+                None => {
+                    let interrupted = lock(&self.live).get(&t.agent).is_some_and(|l| l.handle.send(AgentCmd::Interrupt));
+                    interrupted && self.send_prompt(&t.agent, breaker::note(BreakerLevel::Constrained, trip)).is_ok()
                 }
-            }
+            },
             (Action::Stop, trip) => {
                 let why = trip.as_ref().map(|x| format!(": {}", x.reason())).unwrap_or_default();
                 let stopped = self.stop_agent_as(&t.agent, &format!("the circuit breaker{why}")).await.is_ok();
@@ -149,23 +147,30 @@ impl Inner {
 
     /// Constrain a task's worker. The turn that answers the note is a summary, not finished
     /// work: the worker is paused before its turn is interrupted, so no turn that ends from
-    /// here on reaches the gate, and the note goes past the pause. Your Resume sends the
-    /// worker back to its task. True = the note was delivered.
-    fn breaker_pause(&self, ws: Option<&str>, agent: &Agent, task: &Task, trip: &Trip, note: String) -> bool {
-        let interrupted = {
+    /// here on reaches the gate, and the note goes past the pause. A worker you hold already
+    /// gets no note: held, it would be answered after your Resume, and that answer would reach
+    /// the gate. Its turn is interrupted, and it reads why when you resume it. Your Resume
+    /// sends the worker back to its task. True = the worker got the note, or will read why on
+    /// your Resume.
+    fn breaker_pause(&self, ws: Option<&str>, agent: &Agent, task: &Task, trip: &Trip) -> bool {
+        let (interrupted, held) = {
             // Under the `live` lock: an exit (which clears the controls) is before or after, not between.
             let live = lock(&self.live);
             let Some(l) = live.get(&agent.id) else { return false };
+            let mut controls = lock(&self.controls);
+            let control = controls.entry(agent.id.clone()).or_default();
+            let held = control.holding();
             // The note is its next turn: the pause holds from now and shows when a turn ends.
-            lock(&self.controls).entry(agent.id.clone()).or_default().request_stop(true);
-            l.handle.send(AgentCmd::Interrupt)
+            control.request_stop(true);
+            (l.handle.send(AgentCmd::Interrupt), held)
         };
         if !interrupted {
             return false; // its process is gone: the exit clears the pause
         }
-        let delivered = self.deliver_prompt(&agent.id, note).is_ok();
+        let note = (!held).then(|| self.deliver_prompt(&agent.id, breaker::note(BreakerLevel::Constrained, trip)));
         // Held until the resume (holding it also tells the UI about the pause).
-        if let Err(e) = self.send_prompt(&agent.id, breaker::RESUME_NOTE.into()) {
+        let resume = self.send_prompt(&agent.id, breaker::resume_note(held.then_some(trip)));
+        if let Err(e) = &resume {
             tracing::debug!("breaker resume note not held: {e}");
         }
         let why = trip.reason();
@@ -181,7 +186,7 @@ impl Inner {
             agent.name, task.key, task.title, agent.name
         );
         let _ = self.chat(ws, &self.task_thread(task), "codly", &text, None);
-        delivered
+        note.unwrap_or(resume).is_ok()
     }
 }
 

@@ -226,9 +226,15 @@ pub fn note(level: BreakerLevel, trip: &Trip) -> String {
     }
 }
 
-/// What a task's worker reads when you resume it after the breaker constrained it.
-pub const RESUME_NOTE: &str = "[Codly circuit breaker] The user resumed you. Continue your task from where you stopped, without \
-     repeating what was not working. Call codly_submit_report when the task is done.";
+/// What a task's worker reads when you resume it after the breaker constrained it. `unread`:
+/// the trip of a worker you held already. It got no constrain note, so it reads why here.
+pub fn resume_note(unread: Option<&Trip>) -> String {
+    let why = unread.map(|trip| format!(" The breaker stopped your work: {}.", trip.reason())).unwrap_or_default();
+    format!(
+        "[Codly circuit breaker] The user resumed you.{why} Continue your task from where you stopped, without \
+         repeating what was not working. Call codly_submit_report when the task is done."
+    )
+}
 
 // ───────────────────────────── the tracker ─────────────────────────────
 

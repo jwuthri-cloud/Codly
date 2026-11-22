@@ -159,6 +159,9 @@ struct Live {
     failed_turns: u32,
     /// The last error the CLI reported in the current or last turn.
     last_error: Option<String>,
+    /// The continue prompt a failed turn still owes this worker. It goes out after the retry
+    /// wait, when another turn completes or when you resume the worker, whichever is first.
+    continue_owed: Option<String>,
 }
 
 /// A member's reply the Lead of `thread` waits for: the reply of turn number `due`.

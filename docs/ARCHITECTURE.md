@@ -107,8 +107,11 @@ emitted as an event, so "Why did Codex get this task?" always has an answer.
 
 **Only a turn that completed is gated.** A worker turn that ends on an error or at its turn limit
 is not finished work: Codly asks the same session to continue (after 15 s, then 60 s), and a third
-failure in a row blocks the task with the error. A crash mid-turn restarts the worker. A worker the
-circuit breaker constrains is paused until you resume it; a breaker stop says so on the task.
+failure in a row blocks the task with the error. If you resume the worker, or a turn that answers
+a message completes, before that wait is over, the worker is asked to continue then: neither is
+gated. A crash mid-turn restarts the worker. A worker the circuit breaker constrains is paused
+until you resume it (one you hold already reads why on your Resume); a breaker stop says so on the
+task.
 
 **Parallel requests.** Each request is its own thread (`lead`, `lead:<id>`) with its own Lead
 session ("Lead", "Lead 2"…, at most 3 live; idle ones pause and resume by session id). Plans,

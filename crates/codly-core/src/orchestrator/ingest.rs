@@ -379,9 +379,11 @@ impl Inner {
             Role::Worker if ctx.task_id.is_some() && self.hit_limit(ctx) => self.hand_off(ctx),
             Role::Worker if ctx.task_id.is_some() => match status {
                 // Gate only when the worker is really done: its turn completed, and no queued
-                // prompt (a user steer, a fix round) is about to start another turn.
+                // prompt (a user steer, a fix round) is about to start another turn. A turn that
+                // completed while a failed turn's continue prompt is still owed answered something
+                // else (a message from you, a note): the worker goes on with its work instead.
                 TurnStatus::Completed => {
-                    if self.is_quiet(&ctx.agent_id) && !self.control_holding(&ctx.agent_id) {
+                    if self.is_quiet(&ctx.agent_id) && !self.continue_failed_turn(&ctx.agent_id) && !self.control_holding(&ctx.agent_id) {
                         let me = self.clone();
                         let task = ctx.task_id.clone().unwrap_or_default();
                         tokio::spawn(async move { me.gate(task).await });
@@ -464,8 +466,10 @@ impl Inner {
     /// A worker's turn ended on an error or at its turn limit. Its work is not finished, so it
     /// never reaches the gate. While the run lives, Codly asks the same session to continue,
     /// once per wait in `turn_retry_waits`; the next failed turn after those blocks the task
-    /// with the error. A run that is exiting (a crash ends its turn first) is left to
-    /// `task_run_lost`, which restarts the worker.
+    /// with the error. The continue prompt is owed from here (`Live::continue_owed`): the
+    /// wait sends it, or `continue_failed_turn` when something else comes first. A run that is
+    /// exiting (a crash ends its turn first) is left to `task_run_lost`, which restarts the
+    /// worker.
     fn turn_failed(self: &Arc<Self>, ctx: &Ctx, status: TurnStatus, result_text: Option<&str>) {
         if self.shutting_down.load(Ordering::SeqCst) {
             return; // quitting ends turns too: the next start resumes the task
@@ -518,6 +522,10 @@ impl Inner {
             self.kick();
             return;
         };
+        match lock(&self.live).get_mut(&ctx.agent_id).filter(|l| l.run_id == ctx.run_id) {
+            Some(l) => l.continue_owed = Some(prompts::turn_failed(&t, &what)),
+            None => return, // the run exited meanwhile: the restart continues the task
+        }
         let reason = format!("the worker's turn failed ({what}); Codly asks it to continue (try {failures} of {})", waits.len());
         let _ = self.update_task(&task_id, |t| {
             if matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) {
@@ -530,19 +538,32 @@ impl Inner {
         let (agent_id, run_id) = (ctx.agent_id.clone(), ctx.run_id.clone());
         tokio::spawn(async move {
             tokio::time::sleep(wait).await;
-            // Still this run, and nothing happened since: no turn ended, runs or is queued (a
-            // message from you gets its own turn, and that turn's end decides). A run that
-            // exited meanwhile was a crash: the restart continues the task.
+            // Still this run, and nothing happened since: no turn ended, runs or is queued. A
+            // turn that came meanwhile (a message from you, a note) sends the prompt when it
+            // completes. A run that exited meanwhile was a crash: the restart continues the task.
             let idle = lock(&me.live)
                 .get(&agent_id)
                 .is_some_and(|l| l.run_id == run_id && !l.stopping && l.turns == turns && !l.turn_active && l.queued == 0);
-            if !idle || !me.task(&task_id).is_ok_and(|t| works_on(&t, &agent_id)) {
-                return;
-            }
-            if let Err(e) = me.send_prompt(&agent_id, prompts::turn_failed(&t, &what)) {
-                tracing::debug!("the worker was not asked to continue: {e}");
+            if idle {
+                me.continue_failed_turn(&agent_id);
             }
         });
+    }
+
+    /// Ask a worker to go on with the work its failed turn left, if that prompt is still owed
+    /// (it is taken: it goes out once). True = it was owed, so the worker's last turn is not
+    /// its finish and the gate must not run. A worker you hold keeps the prompt for your Resume.
+    pub(super) fn continue_failed_turn(&self, agent_id: &str) -> bool {
+        let owed = lock(&self.live).get_mut(agent_id).and_then(|l| Some((l.continue_owed.take()?, l.task_id.clone()?)));
+        let Some((prompt, task_id)) = owed else { return false };
+        // No longer its task to change (you moved it, or it is in its merge): nothing to continue.
+        if !self.task(&task_id).is_ok_and(|t| works_on(&t, agent_id)) {
+            return false;
+        }
+        if let Err(e) = self.send_prompt(agent_id, prompt) {
+            tracing::debug!("the worker was not asked to continue: {e}");
+        }
+        true
     }
 
     /// Codly commits a solo agent's worktree after each turn (C7: agents never commit).

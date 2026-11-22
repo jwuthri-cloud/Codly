@@ -298,9 +298,10 @@ impl Inner {
             }
         }
         // A worker whose last turn was its finish waits at the gate for this moment. (The run's
-        // role: a 1:1 agent on a task works as its worker.)
-        let works = lock(&self.live).get(agent_id).is_some_and(|l| l.role == Role::Worker);
-        if none_held && works && self.is_quiet(agent_id) {
+        // role: a 1:1 agent on a task works as its worker.) One whose turn failed has no finish
+        // to check: it is asked to go on, now if that prompt is still owed, else after its wait.
+        let (works, failed) = lock(&self.live).get(agent_id).map_or((false, false), |l| (l.role == Role::Worker, l.failed_turns > 0));
+        if none_held && works && self.is_quiet(agent_id) && !self.continue_failed_turn(agent_id) && !failed {
             if let Some(task) = agent.task_id.clone() {
                 let me = self.clone();
                 tokio::spawn(async move { me.gate(task).await });
