@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-push-checkout"
+description = "Enables the push_checkout command without any pre-configured scope."
+commands.allow = ["push_checkout"]
+
+[[permission]]
+identifier = "deny-push-checkout"
+description = "Denies the push_checkout command without any pre-configured scope."
+commands.deny = ["push_checkout"]

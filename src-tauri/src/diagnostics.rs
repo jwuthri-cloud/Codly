@@ -384,7 +384,7 @@ mod tests {
             plan: Some("Acme Inc team".into()),
             problem: None,
             transport: "stream-json".into(),
-            install: InstallHint { npm: None, native: None, login: None, docs: String::new() },
+            install: InstallHint { npm: None, native: None, login: None, docs: String::new(), update: None, npm_available: false, update_to: None },
             default_model: None,
         }
     }

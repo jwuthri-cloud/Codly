@@ -313,6 +313,10 @@ crates/codly-core/        build.rs (builds in the ready-made lots), skills/catal
                           tests), examples/ (adapter_smoke.rs and e2e.rs need live CLIs; bench_localize.rs)
 src-tauri/src/            the macOS shell
   main.rs lib.rs    entry point; window, plugins, the command list
+  cli.rs            what `codly <arguments>` asks for, decided before a window or a server starts
+  boot.rs           starts the core, and starts it again after a failed start (`retry_core`)
+  logging.rs        the log file (`<data dir>/logs/codly.log`) and the panic hook
+  diagnostics.rs    Settings → Troubleshooting: the scrubbed report for a bug report
   commands.rs       most Tauri commands: thin wrappers over Core
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
   onboarding_commands.rs    the other commands, one file per topic
