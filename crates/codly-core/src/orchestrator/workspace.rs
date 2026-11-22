@@ -227,15 +227,20 @@ impl Inner {
     }
 
     pub(super) async fn stop_agent(&self, agent_id: &str) -> anyhow::Result<()> {
+        self.stop_agent_as(agent_id, "you").await
+    }
+
+    /// `by` is who stopped it, for the reason on its task: "you", or the circuit breaker and why.
+    pub(super) async fn stop_agent_as(&self, agent_id: &str, by: &str) -> anyhow::Result<()> {
         let agent = self.agent(agent_id)?;
         // The task it holds, as its worker or its reviewer, whatever its own role (a 1:1 agent
         // on staff takes tasks too). The row first: it has the task before a run exists.
         let held = agent.task_id.clone().or_else(|| lock(&self.live).get(agent_id).and_then(|l| l.task_id.clone()));
         if let Some(t) = held.and_then(|id| self.task(&id).ok()) {
             let reason = if t.assignee.as_deref() == Some(agent_id) {
-                format!("stopped by you; move it to Ready to resume with {}", agent.name)
+                format!("stopped by {by}; move it to Ready to resume with {}", agent.name)
             } else {
-                "review stopped by you; Retry to re-check".to_string()
+                format!("review stopped by {by}; Retry to re-check")
             };
             // Checked in the write: a task that reached its merge meanwhile is left to finish.
             let mut blocked = false;

@@ -5,15 +5,27 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::approvals::{self, PolicyCtx, Verdict};
-use super::{Inner, guard, lead, lock, prompts, row, scheduler};
+use super::{Inner, guard, lead, lock, prompts, read, row, scheduler, write};
 use crate::adapters::{AdapterEvent, AgentCmd};
 use crate::{career, memory};
 use crate::model::*;
+
+/// How long Codly waits before it asks a worker whose turn failed to continue, one wait per
+/// retry. The CLI retried the provider by itself before it gave up, so these are long enough
+/// for a short outage to pass. After the last one, the next failed turn blocks the task.
+pub(super) const TURN_RETRY_WAITS: [Duration; 2] = [Duration::from_secs(15), Duration::from_secs(60)];
+
+/// Is `agent_id` the worker of this task, and may its turns still change it? Also in the
+/// task's gate: you can message its worker there. Not in the merge: that work was checked.
+fn works_on(t: &Task, agent_id: &str) -> bool {
+    scheduler::is_active(t.status) && t.status != TaskStatus::Merging && t.assignee.as_deref() == Some(agent_id)
+}
 
 pub(super) async fn run(inner: Arc<Inner>, mut rx: mpsc::UnboundedReceiver<AdapterEvent>) {
     while let Some(ev) = rx.recv().await {
@@ -179,18 +191,25 @@ impl Inner {
                 l.queued = l.queued.saturating_sub(1);
                 l.turn_messages = 0;
                 l.last_text = None;
+                l.last_error = None;
             }
             EventKind::Message { text, .. } if !text.trim().is_empty() => {
                 l.last_text = Some(text.clone());
                 l.turn_messages += 1;
             }
-            EventKind::TurnCompleted { .. } => {
+            EventKind::Error { message, .. } => l.last_error = Some(message.clone()),
+            EventKind::TurnCompleted { status, .. } => {
                 if !l.turn_active {
                     // A turn whose start we never saw still consumed its prompt.
                     l.queued = l.queued.saturating_sub(1);
                 }
                 l.turn_active = false;
                 l.turns += 1;
+                match status {
+                    TurnStatus::Completed => l.failed_turns = 0,
+                    TurnStatus::Failed | TurnStatus::MaxTurns => l.failed_turns += 1,
+                    TurnStatus::Interrupted => {}
+                }
             }
             _ => {}
         }
@@ -316,7 +335,7 @@ impl Inner {
                     let _ = self.chat(ws, &thread(), &ctx.agent_id, t, None);
                 }
                 let reply = last.or_else(|| result_text.clone());
-                self.on_turn_completed(ctx, *status, reply);
+                self.on_turn_completed(ctx, *status, reply, result_text.as_deref());
             }
             EventKind::StatusChanged { status: AgentStatus::RateLimited } => {
                 // Codex usage errors and Claude's rate_limit result report only this: park the
@@ -340,7 +359,7 @@ impl Inner {
         }
     }
 
-    fn on_turn_completed(self: &Arc<Self>, ctx: &Ctx, status: TurnStatus, reply: Option<String>) {
+    fn on_turn_completed(self: &Arc<Self>, ctx: &Ctx, status: TurnStatus, reply: Option<String>, result_text: Option<&str>) {
         if ctx.role != Role::Lead {
             self.forward_answers(&ctx.agent_id, &ctx.run_id, reply.as_deref());
         }
@@ -358,15 +377,21 @@ impl Inner {
                 self.pump_leads(); // an idle Lead can make room for a request that waits
             }
             Role::Worker if ctx.task_id.is_some() && self.hit_limit(ctx) => self.hand_off(ctx),
-            Role::Worker if ctx.task_id.is_some() => {
-                // Gate only when the worker is really done: not interrupted, and no queued
+            Role::Worker if ctx.task_id.is_some() => match status {
+                // Gate only when the worker is really done: its turn completed, and no queued
                 // prompt (a user steer, a fix round) is about to start another turn.
-                if status != TurnStatus::Interrupted && self.is_quiet(&ctx.agent_id) && !self.control_holding(&ctx.agent_id) {
-                    let me = self.clone();
-                    let task = ctx.task_id.clone().unwrap_or_default();
-                    tokio::spawn(async move { me.gate(task).await });
+                TurnStatus::Completed => {
+                    if self.is_quiet(&ctx.agent_id) && !self.control_holding(&ctx.agent_id) {
+                        let me = self.clone();
+                        let task = ctx.task_id.clone().unwrap_or_default();
+                        tokio::spawn(async move { me.gate(task).await });
+                    }
                 }
-            }
+                // An error or the turn limit ended it: the work is not finished, so no gate.
+                TurnStatus::Failed | TurnStatus::MaxTurns => self.turn_failed(ctx, status, result_text),
+                // Whoever interrupted it (you, a control, the circuit breaker) says what is next.
+                TurnStatus::Interrupted => {}
+            },
             Role::Reviewer if ctx.task_id.is_some() => {
                 if self.is_quiet(&ctx.agent_id) {
                     let me = self.clone();
@@ -434,6 +459,90 @@ impl Inner {
         let ws = self.store.task_workspace(&task_id).ok().flatten();
         let _ = self.decide(ws.as_deref(), Some(&task_id), "retry", reason, json!({ "plan_id": t.plan_id, "provider": provider }));
         self.kick();
+    }
+
+    /// A worker's turn ended on an error or at its turn limit. Its work is not finished, so it
+    /// never reaches the gate. While the run lives, Codly asks the same session to continue,
+    /// once per wait in `turn_retry_waits`; the next failed turn after those blocks the task
+    /// with the error. A run that is exiting (a crash ends its turn first) is left to
+    /// `task_run_lost`, which restarts the worker.
+    fn turn_failed(self: &Arc<Self>, ctx: &Ctx, status: TurnStatus, result_text: Option<&str>) {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return; // quitting ends turns too: the next start resumes the task
+        }
+        let task_id = ctx.task_id.clone().unwrap_or_default();
+        let run = lock(&self.live).get(&ctx.agent_id).filter(|l| l.run_id == ctx.run_id && !l.stopping).map(|l| {
+            // Claude gives a failed turn's error as the turn's result; the others send an Error first
+            // (their result is the agent's last message).
+            let result = result_text.filter(|r| l.provider == Provider::Claude && !r.trim().is_empty());
+            (l.failed_turns, l.turns, result.map(String::from).or_else(|| l.last_error.clone()))
+        });
+        let Some((failures, turns, error)) = run else { return };
+        let Ok(t) = self.task(&task_id) else { return };
+        if !works_on(&t, &ctx.agent_id) {
+            return;
+        }
+        let what = match error.map(|e| e.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|e| !e.is_empty()) {
+            _ if status == TurnStatus::MaxTurns => "it reached its turn limit".to_string(),
+            Some(e) => prompts::clip(&e, 200),
+            None => "the CLI gave no reason".to_string(),
+        };
+        let ws = ctx.ws.as_deref();
+        let waits = read(&self.turn_retry_waits).clone();
+        let detail = json!({ "plan_id": t.plan_id, "turn": status, "error": what, "failed_turns": failures });
+        let Some(wait) = waits.get(failures.saturating_sub(1) as usize).copied() else {
+            let reason = format!("blocked: the worker's turn failed {failures} times in a row ({what}); fix the cause, then Retry");
+            // Checked in the write: stopped or cancelled by you meanwhile, or in its merge, it stays as it is.
+            let mut blocked = false;
+            let _ = self.update_task(&task_id, |t| {
+                blocked = works_on(t, &ctx.agent_id);
+                if blocked {
+                    t.status = TaskStatus::Blocked;
+                    t.status_reason = Some(reason.clone());
+                }
+                Ok(())
+            });
+            if !blocked {
+                return;
+            }
+            // Its worker goes (stopping: on_exit will not call task_run_lost), and a reviewer that
+            // was reading it: a Retry starts from the worker's session, with fresh fix rounds.
+            self.release_task_agents(&t);
+            let _ = self.decide(ws, Some(&task_id), "retry", reason, detail);
+            if let Some(ws) = ctx.ws.clone() {
+                let who = self.agent(&ctx.agent_id).map_or_else(|_| "the worker".into(), |a| a.name);
+                let (me, thread) = (self.clone(), self.task_thread(&t));
+                let text = prompts::turns_failed(&t, &who, failures, &what);
+                tokio::spawn(async move { me.lead_followup(&ws, &thread, &text).await });
+            }
+            self.kick();
+            return;
+        };
+        let reason = format!("the worker's turn failed ({what}); Codly asks it to continue (try {failures} of {})", waits.len());
+        let _ = self.update_task(&task_id, |t| {
+            if matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) {
+                t.status_reason = Some(reason.clone());
+            }
+            Ok(())
+        });
+        let _ = self.decide(ws, Some(&task_id), "retry", reason, detail);
+        let me = self.clone();
+        let (agent_id, run_id) = (ctx.agent_id.clone(), ctx.run_id.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            // Still this run, and nothing happened since: no turn ended, runs or is queued (a
+            // message from you gets its own turn, and that turn's end decides). A run that
+            // exited meanwhile was a crash: the restart continues the task.
+            let idle = lock(&me.live)
+                .get(&agent_id)
+                .is_some_and(|l| l.run_id == run_id && !l.stopping && l.turns == turns && !l.turn_active && l.queued == 0);
+            if !idle || !me.task(&task_id).is_ok_and(|t| works_on(&t, &agent_id)) {
+                return;
+            }
+            if let Err(e) = me.send_prompt(&agent_id, prompts::turn_failed(&t, &what)) {
+                tracing::debug!("the worker was not asked to continue: {e}");
+            }
+        });
     }
 
     /// Codly commits a solo agent's worktree after each turn (C7: agents never commit).
@@ -731,5 +840,13 @@ impl Inner {
         }?;
         lock(&self.labels).insert(id.to_string(), l.clone());
         Some(l)
+    }
+}
+
+impl super::Core {
+    /// The waits before Codly asks a worker whose turn failed to continue, one per retry
+    /// (`TURN_RETRY_WAITS` until set; the tests shorten them).
+    pub fn set_turn_retry_waits(&self, waits: Vec<Duration>) {
+        *write(&self.inner.turn_retry_waits) = waits;
     }
 }

@@ -155,6 +155,10 @@ struct Live {
     answers: Vec<Answer>,
     /// Started only to answer the Lead: shut down once every answer went out.
     answer_only: bool,
+    /// Turns in a row that ended on an error or at the turn limit; a completed turn resets it.
+    failed_turns: u32,
+    /// The last error the CLI reported in the current or last turn.
+    last_error: Option<String>,
 }
 
 /// A member's reply the Lead of `thread` waits for: the reply of turn number `due`.
@@ -220,6 +224,9 @@ struct Inner {
     models: Mutex<HashMap<Provider, Vec<String>>>,
     /// Circuit breaker: its settings and the per-agent signals.
     breaker: Mutex<breaker_run::Runtime>,
+    /// How long Codly waits before it asks a worker whose turn failed to continue: one wait
+    /// per retry, then the task is blocked (`ingest::TURN_RETRY_WAITS`; tests shorten them).
+    turn_retry_waits: RwLock<Vec<Duration>>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -387,6 +394,7 @@ impl Core {
             hiring_window_ms: std::sync::atomic::AtomicU64::new(0),
             models: Mutex::new(HashMap::new()),
             breaker,
+            turn_retry_waits: RwLock::new(ingest::TURN_RETRY_WAITS.to_vec()),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);

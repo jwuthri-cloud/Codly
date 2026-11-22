@@ -306,6 +306,12 @@ async fn notify_loop(app: tauri::AppHandle, core: Arc<Core>) {
             EventKind::TaskChanged { task } if task.status == TaskStatus::Failed => {
                 ("Task failed".to_string(), format!("{} — {}", task.key, truncate(&task.title, 80)))
             }
+            // The circuit breaker held an agent back or stopped it: its work waits for you.
+            EventKind::Decision { decision_type, summary, detail, .. }
+                if decision_type == "breaker" && matches!(detail["action"].as_str(), Some("constrained" | "stopped")) =>
+            {
+                ("An agent needs a look".to_string(), truncate(summary, 160))
+            }
             _ => continue,
         };
         let focused = app.get_webview_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);

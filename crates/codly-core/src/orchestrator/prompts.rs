@@ -273,6 +273,19 @@ pub fn continuation(t: &Task, why: Option<&str>) -> String {
     )
 }
 
+/// A turn of the worker ended on an error or at its turn limit; the same session goes on after
+/// a wait. `error` is what the CLI said, quoted as data.
+pub fn turn_failed(t: &Task, error: &str) -> String {
+    format!(
+        "[Codly] Your last turn on task {} \"{}\" stopped before the task was done. What the CLI reported:\n{}\n\
+         Run `git status` and `git diff` in your worktree to see where you are, then continue toward the acceptance \
+         criteria. Do not redo work that is already there, and do not commit. Call codly_submit_report when done.",
+        t.key,
+        t.title,
+        untrusted("CLI error", error, 600)
+    )
+}
+
 pub fn verify_failed(cmd: &str, code: Option<i64>, tail: &str, round: u32, max: u32) -> String {
     let code = code.map_or("was killed (timeout)".to_string(), |c| format!("exited {c}"));
     format!(
@@ -625,6 +638,17 @@ pub fn worker_stopped(t: &Task, status: &str, worker: &str, summary: &str) -> St
     format!("Task {} \"{}\" is {status}; the worker's report:\n{}", t.key, t.title, untrusted(&format!("{worker}, {}", t.key), summary, 600))
 }
 
+/// Follow-up text when a task is blocked because its worker's turns keep failing; what the
+/// CLI said is quoted as data.
+pub fn turns_failed(t: &Task, worker: &str, times: u32, error: &str) -> String {
+    format!(
+        "Task {} \"{}\" is blocked: {worker}'s turn failed {times} times in a row. What the CLI reported:\n{}",
+        t.key,
+        t.title,
+        untrusted(&format!("{worker}, {}", t.key), error, 600)
+    )
+}
+
 /// Follow-up text when the reviewer rejects a task; its summary is quoted as data.
 pub fn review_rejected(t: &Task, summary: &str) -> String {
     format!("Task {} \"{}\" failed: the reviewer rejected it. Its summary:\n{}", t.key, t.title, untrusted("reviewer", summary, 600))
@@ -676,7 +700,8 @@ mod tests {
         let t = task(json!({ "plan_id": "p", "status_reason": format!("blocked (worker): {evil}") }));
         let brief = review_brief(&ReviewBrief { task: &t, diff: "d", verify: &[], worker_notes: None, scope_exceptions: &[evil.to_string()] });
         assert!(brief.find(evil).unwrap() > brief.find("<untrusted from=\"worker\">").unwrap(), "{brief}");
-        for text in [lead_status(&worker_stopped(&t, "blocked", "Bo", evil)), lead_status(&review_rejected(&t, evil))] {
+        let stopped = [worker_stopped(&t, "blocked", "Bo", evil), review_rejected(&t, evil), turns_failed(&t, "Bo", 3, evil)];
+        for text in stopped.iter().map(|s| lead_status(s)).chain([turn_failed(&t, evil)]) {
             let (open, at) = (text.find("<untrusted from=").unwrap(), text.find(evil).unwrap());
             assert!(open < at && at < text.find("</untrusted>").unwrap(), "{text}");
         }

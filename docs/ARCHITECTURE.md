@@ -93,7 +93,7 @@ you ─► Lead (read-only agent: Read/Grep/Glob + codly tools)
           ▼
        worker (worktree, branch codly/<plan>/<key>) ◄─ prompt = task brief + pointer pack
           │                                             + memory pack + dependency notes
-          │ codly_submit_report (or turn end)
+          │ codly_submit_report (or a completed turn's end)
           ▼
        gate: Codly commits → runs verify → scope check → [reviewer, other vendor] → fix loop ≤ 2
           ▼
@@ -104,6 +104,11 @@ you ─► Lead (read-only agent: Read/Grep/Glob + codly tools)
 
 Every routing, scheduling, gate and merge choice is written to the `decision` table and
 emitted as an event, so "Why did Codex get this task?" always has an answer.
+
+**Only a turn that completed is gated.** A worker turn that ends on an error or at its turn limit
+is not finished work: Codly asks the same session to continue (after 15 s, then 60 s), and a third
+failure in a row blocks the task with the error. A crash mid-turn restarts the worker. A worker the
+circuit breaker constrains is paused until you resume it; a breaker stop says so on the task.
 
 **Parallel requests.** Each request is its own thread (`lead`, `lead:<id>`) with its own Lead
 session ("Lead", "Lead 2"…, at most 3 live; idle ones pause and resume by session id). Plans,
