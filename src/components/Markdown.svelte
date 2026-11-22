@@ -1,6 +1,8 @@
-<!-- Sanitized markdown (marked → DOMPurify). Links open in the system browser. -->
+<!-- Sanitized markdown (marked → DOMPurify). Links open in the system browser; a code block has a Copy button. -->
 <script lang="ts">
+  import { copyText } from '../lib/state/actions';
   import { openExternal, renderMarkdown } from '../lib/util/markdown';
+  import { codeToCopy, withCopyButtons } from './codeblocks';
 
   interface Props {
     text: string;
@@ -16,11 +18,18 @@
   // string stops at these two, so only the streaming message is parsed again.
   const src = $derived(text);
   const live = $derived(streaming);
+  // Copy waits for the whole message: a block still being written is not worth copying.
   const html = $derived(
-    live ? renderMarkdown(src + CARET).replace(CARET, '<span class="caret" aria-hidden="true"></span>') : renderMarkdown(src),
+    live ? renderMarkdown(src + CARET).replace(CARET, '<span class="caret" aria-hidden="true"></span>') : withCopyButtons(renderMarkdown(src)),
   );
 
   function click(e: MouseEvent) {
+    const copy = (e.target as HTMLElement).closest('button.copy');
+    if (copy) {
+      const pre = copy.parentElement?.querySelector('pre');
+      if (pre) void copyText(codeToCopy((pre.querySelector(':scope > code') ?? pre).textContent ?? ''), 'Code copied');
+      return;
+    }
     const a = (e.target as HTMLElement).closest('a');
     if (!a) return;
     e.preventDefault();
@@ -46,6 +55,10 @@
   .md :global(code) { font-family: var(--font-mono); font-size: 0.84em; padding: 1px 5px; border-radius: 5px; background: var(--surface-2); color: var(--ink-1); white-space: break-spaces; }
   .md :global(pre) { margin: 8px 0 12px; padding: 12px 14px; border-radius: var(--r-md); background: var(--code-bg); overflow-x: auto; }
   .md :global(pre code) { padding: 0; background: none; font-size: var(--mono); line-height: var(--lh-mono); white-space: pre; }
+  .md :global(.code) { position: relative; }
+  .md :global(.copy) { position: absolute; top: 6px; right: 6px; height: 22px; padding: 0 9px; border-radius: var(--r-full); background: var(--surface-3); color: var(--ink-2); font-size: var(--t-xs); font-weight: var(--w-med); opacity: 0; transition: opacity var(--d-2); user-select: none; -webkit-user-select: none; cursor: pointer; }
+  .md :global(.code:hover .copy), .md :global(.copy:focus-visible) { opacity: 1; }
+  .md :global(.copy:hover) { color: var(--ink-1); }
   .md :global(blockquote) { margin: 8px 0; padding-left: 12px; border-left: 2px solid var(--line-2); color: var(--ink-2); }
   .md :global(h1), .md :global(h2), .md :global(h3) { font-family: var(--font-display); font-weight: 400; margin: 16px 0 6px; line-height: 1.15; }
   .md :global(h1) { font-size: 30px; }

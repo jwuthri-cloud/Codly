@@ -49,10 +49,21 @@
 
   // Each CLI's models, kept: switching CLI in the open menu shows its list at once.
   let modelsOf = $state<Record<string, string[]>>({});
+  /** The CLIs whose model list could not be read: the menu says so and offers to try again. */
+  let modelsFailed = $state<Record<string, boolean>>({});
   const models = $derived(modelsOf[cli] ?? []);
+  function listModels(p: Provider) {
+    api.listModels(p).then(
+      (l) => {
+        modelsOf[p] = l;
+        modelsFailed[p] = false;
+      },
+      () => (modelsFailed[p] = true),
+    );
+  }
   $effect(() => {
     const p = cli;
-    if (!modelsOf[p]) api.listModels(p).then((l) => (modelsOf[p] = l)).catch(() => {});
+    if (!modelsOf[p]) listModels(p);
   });
 
   let open = $state<'mode' | 'model' | null>(null);
@@ -83,6 +94,7 @@
       : []),
     { kind: 'header', label: `${PROVIDER_LABEL[cli]} model` },
     { label: 'Default', checked: !model.name, stay: true, run: () => setModel('', model.effort) },
+    ...(modelsFailed[cli] ? [{ label: 'Couldn’t list the models', hint: 'Try again', icon: 'alert', stay: true, run: () => listModels(cli) }] : []),
     ...[...new Set([...(model.name && !query ? [model.name] : []), ...found.shown])].map((m) => ({ label: m, checked: m === model.name, stay: true, run: () => setModel(m, model.effort) })),
     ...(found.total > found.shown.length ? [{ label: `${found.total - found.shown.length} more`, hint: 'type to search', disabled: true, run: () => {} }] : []),
     ...(query.trim() && !models.includes(query.trim()) ? [{ label: `Use “${query.trim()}”`, stay: true, run: () => setModel(query.trim(), model.effort) }] : []),

@@ -9,7 +9,9 @@ import type { MessagePhase } from '../lib/gen/MessagePhase';
 import type { JsonValue } from '../lib/gen/serde_json/JsonValue';
 import { store, type Outgoing, type Seg, type Thought } from '../lib/state/store.svelte';
 import { isSlotNote } from '../lib/state/queue';
+import { stoppedByYou } from '../lib/state/stops';
 import { isRequestThread } from '../lib/state/ui.svelte';
+import { canRetry, messageOf, troublesOf, type TroubleKind } from './outcomes';
 
 export type Item =
   | { kind: 'user'; key: string; ts: number; msg: ChatMessage; outgoing: Outgoing | null }
@@ -29,7 +31,19 @@ export type Item =
   | { kind: 'work'; key: string; ts: number; agentId: string; segs: Seg[]; thoughts: Thought[]; thinking: string | null }
   | { kind: 'approval'; key: string; ts: number; approval: Approval }
   | { kind: 'ask'; key: string; ts: number; agentId: string; msg: ChatMessage }
-  | { kind: 'task-done'; key: string; ts: number; taskId: string };
+  | { kind: 'task-done'; key: string; ts: number; taskId: string }
+  | {
+      kind: 'trouble';
+      key: string;
+      ts: number;
+      agentId: string;
+      /** The event behind it (Details opens the agent's history there). */
+      eventId: number;
+      what: TroubleKind;
+      reason: string | null;
+      /** Your message to send again (null: sending again cannot help, or no message of yours started that turn). */
+      retry: string | null;
+    };
 
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
 
@@ -43,7 +57,7 @@ export const planIdOf = (att: JsonValue | null | undefined): string | null => {
 
 // Same millisecond: a message's ts is when it finished, a work row's when its first call
 // started, so the message comes first.
-const RANK: Record<Item['kind'], number> = { user: 0, system: 1, say: 2, ask: 2, work: 3, approval: 4, 'task-done': 5 };
+const RANK: Record<Item['kind'], number> = { user: 0, system: 1, say: 2, ask: 2, work: 3, trouble: 4, approval: 5, 'task-done': 6 };
 
 export function buildSpine(thread: string): Item[] {
   const owner = store.threadAgent(thread);
@@ -137,6 +151,14 @@ export function buildSpine(thread: string): Item[] {
       if (last && last.ts > lastAnchor) last.thinking = thinking;
       else items.push({ kind: 'work', key: `t:live:${owner.id}`, ts: thinkingTs, agentId: owner.id, segs: [], thoughts: [], thinking });
     }
+
+    // ── what went wrong, where it happened (added last: a problem never splits a work row) ──
+    const yours = chats.filter((c) => c.author === 'user');
+    for (const t of troublesOf(store.events, owner.id, (start) => stoppedByYou(owner.id, start)))
+      items.push({
+        kind: 'trouble', key: `e:${t.eventId}`, ts: t.ts, agentId: owner.id, eventId: t.eventId, what: t.what, reason: t.reason,
+        retry: canRetry(t.what) ? messageOf(t.turn, yours) : null,
+      });
   }
 
   // ── approvals, where they happened (a worker's land in its plan's request) ──

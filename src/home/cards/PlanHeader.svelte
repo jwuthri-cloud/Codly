@@ -3,8 +3,10 @@
   its agent's hue (live ones carry the aurora), how far along it is (in amber when an agent
   waits for you), and who is on it.
   Click → the plan's checklist in the conversation; the arrow opens the Plan room.
+  While it runs, Cancel plan stops every worker (it asks first, like the Plan room).
 -->
 <script lang="ts">
+  import { cancelPlan } from '../../lib/state/actions';
   import { requests } from '../../lib/state/requests.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
@@ -31,6 +33,18 @@
     : plan?.status === 'integrating' ? `${done} of ${tasks.length} done · integrating`
     : `${done} of ${tasks.length} done${live ? ` · ${live} working` : ''}`,
   );
+  /** Cancelling a running plan stops every worker: ask first. */
+  let confirmCancel = $state(false);
+  let cancelling = $state(false);
+  async function cancel() {
+    cancelling = true;
+    await cancelPlan(planId);
+    cancelling = false;
+    confirmCancel = false;
+  }
+  $effect(() => {
+    if (plan?.status !== 'running') confirmCancel = false;
+  });
 </script>
 
 {#if plan}
@@ -45,9 +59,16 @@
       </span>
       <span class="status num">{status}</span>
     </button>
-    <span class="crew">
-      {#each crew as a (a!.id)}<button class="face" onclick={() => ui.selectAgent(a!.id)} aria-label={a!.name} data-tip={a!.name}><Portrait agent={a} size={22} /></button>{/each}
-    </span>
+    {#if confirmCancel}
+      <span class="ask">Stop every worker?</span>
+      <button class="btn sm danger" disabled={cancelling} onclick={cancel}>{cancelling ? 'Cancelling…' : 'Cancel plan'}</button>
+      <button class="btn ghost sm" disabled={cancelling} onclick={() => (confirmCancel = false)}>Keep</button>
+    {:else}
+      <span class="crew">
+        {#each crew as a (a!.id)}<button class="face" onclick={() => ui.selectAgent(a!.id)} aria-label={a!.name} data-tip={a!.name}><Portrait agent={a} size={22} /></button>{/each}
+      </span>
+      {#if plan.status === 'running'}<button class="btn ghost sm" onclick={() => (confirmCancel = true)}>Cancel plan</button>{/if}
+    {/if}
     <button class="icon-btn sm room" onclick={() => ui.openPlan(planId, plan.thread)} aria-label="Open in the Plan room" data-tip="Plan room" data-tip-kbd="G P"><Icon name="arrow-right" size={13} /></button>
   </div>
 {/if}
@@ -65,6 +86,7 @@
   .finished .status { color: var(--ink-2); }
   .wait .status { color: var(--amber-ink); }
   .crew { display: flex; }
+  .ask { font-size: var(--t-sm); color: var(--ink-2); white-space: nowrap; }
   .room { margin-left: 2px; }
   .face { display: grid; border-radius: 50%; margin-left: -4px; box-shadow: 0 0 0 2px var(--glass-solid); }
   .main:hover .title { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }

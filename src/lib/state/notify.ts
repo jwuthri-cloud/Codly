@@ -69,7 +69,8 @@ export function installNotifications(): () => void {
           toast({ kind: 'error', title: `${k.task.key} failed`, body: k.task.status_reason ?? k.task.title, action: { label: 'Details', run: () => ui.selectTask(k.task.id) } });
         break;
       case 'error':
-        if (k.fatal) {
+        // The conversation says it in full where it happened: a toast only when you are not reading it.
+        if (k.fatal && !(ev.agent_id && watching(store.threadOf(ev.agent_id)))) {
           const a = ev.agent_id ? store.agentMap.get(ev.agent_id) : null;
           toast({ kind: 'error', title: `${a?.name ?? 'An agent'} stopped`, body: oneLine(k.message, 160) });
         }

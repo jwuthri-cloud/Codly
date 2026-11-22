@@ -2,12 +2,14 @@
   The composer: one line that grows. ↵ sends, ⇧↵ breaks the line. It never locks: the message
   shows at once, and if the agent is mid-turn it queues (the conversation says so). Start with
   `@agent` to talk to one agent 1:1 (the thread switches and shows as a chip); `@` mid-sentence
-  mentions, `#` refers to a task.
+  mentions, `#` refers to a task. Esc on an empty line stops the running turn; ↑ on an empty line
+  brings back what you sent. A draft (text and files) is kept when the composer leaves the screen,
+  and Edit on an earlier message does not replace it.
 -->
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { api } from '../lib/api';
-  import { sendChat, setRequestPrefs } from '../lib/state/actions';
+  import { sendChat, setRequestPrefs, stopThread } from '../lib/state/actions';
   import { toast } from '../lib/state/toasts.svelte';
   import { busy } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
@@ -21,29 +23,27 @@
   import Portrait from '../components/Portrait.svelte';
   import LeadControls, { MODES } from './LeadControls.svelte';
   import AgentControls from './AgentControls.svelte';
+  import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from './drafts';
+  import { recall, type Recalled } from './recall';
 
   interface Props {
     thread: string;
   }
   let { thread }: Props = $props();
 
-  const drafts: Record<string, string> = {};
   let text = $state('');
 
   // ── attachments: pasted, dropped or picked files, saved in the repo; the message names their paths ──
-  interface Att { id: number; name: string; path: string | null; url: string | null; failed: boolean }
-  const fileDrafts: Record<string, Att[]> = {};
   let files = $state<Att[]>([]);
   let picker: HTMLInputElement | undefined = $state();
   let dragging = $state(false);
-  let seq = 0;
   const saving = $derived(files.some((f) => !f.path && !f.failed));
   const ready = $derived(files.filter((f) => f.path));
   const canSend = $derived(!saving && (!!text.trim() || ready.length > 0));
 
   function addFiles(list: File[]) {
     for (const f of list) {
-      files.push({ id: ++seq, name: f.name || 'pasted file', path: null, url: f.type.startsWith('image/') ? URL.createObjectURL(f) : null, failed: false });
+      files.push({ id: nextAttId(), name: f.name || 'pasted file', path: null, url: f.type.startsWith('image/') ? URL.createObjectURL(f) : null, failed: false });
       const att = files[files.length - 1];
       api.saveAttachment(f).then(
         (p) => (att.path = p),
@@ -66,27 +66,34 @@
     addFiles(list);
   }
   let ta: HTMLTextAreaElement | undefined = $state();
-  /** Where a draft lives: thread names repeat across offices, so a draft is its office's too. */
-  const slot = $derived(`${store.workspace?.id ?? ''}|${thread}`);
+  const slot = $derived(draftSlot(store.workspace?.id, thread));
   let lastSlot = '';
+  let gone = false;
 
   $effect(() => {
     if (slot !== lastSlot) {
-      if (lastSlot) {
-        drafts[lastSlot] = text;
-        fileDrafts[lastSlot] = files;
-      }
-      text = drafts[slot] ?? '';
-      files = fileDrafts[slot] ?? [];
+      if (lastSlot) saveDraft(lastSlot, text, files);
+      const d = loadDraft(slot);
+      text = d.text;
+      files = d.files;
       lastSlot = slot;
       tick().then(resize);
     }
   });
+  // Leaving the screen (another room, the full office) keeps the draft. `lastSlot`, not `slot`:
+  // an office switch in the same moment must not file it under the new office.
+  onDestroy(() => {
+    gone = true;
+    if (lastSlot) saveDraft(lastSlot, text, files);
+  });
   $effect(() => {
     const seed = ui.composerSeed;
     if (seed && seed.thread === thread) {
-      text = seed.text;
       ui.composerSeed = null;
+      // A message ↑ brought back and left as it was is not a draft.
+      const next = untrack(() => seedDraft(recalled?.text === text ? '' : text, seed));
+      text = next.text;
+      if (next.kept) toast({ kind: 'info', title: 'Clear the composer to edit this message', body: 'What you typed is still there.' });
       tick().then(() => {
         resize();
         ta?.focus();
@@ -185,17 +192,18 @@
     sendChat(thread, t);
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
     files = [];
-    fileDrafts[slot] = [];
     text = '';
-    drafts[slot] = '';
+    saveDraft(slot, '', []);
+    recalled = null;
     mention = null;
     tick().then(resize);
   }
 
   /** A transcript from Free Flow joins the draft for review. It is never sent for you. */
   function dictated(forSlot: string, transcript: string) {
-    if (forSlot !== slot) {
-      drafts[forSlot] = appendTranscript(drafts[forSlot] ?? '', transcript);
+    if (gone || forSlot !== slot) {
+      const d = loadDraft(forSlot);
+      saveDraft(forSlot, appendTranscript(d.text, transcript), d.files);
       return;
     }
     text = appendTranscript(text, transcript);
@@ -206,6 +214,25 @@
     });
   }
 
+  /** The message ↑ brought back (while the line still shows it untouched). */
+  let recalled: Recalled | null = null;
+  /** ↑ / ↓ on an empty line (or on a recalled message you have not edited) walk through what you sent here. */
+  function walk(e: KeyboardEvent): boolean {
+    const at = recalled && recalled.text === text ? recalled.at : null;
+    if (at == null && (text || e.key === 'ArrowDown')) return false;
+    const sent = [...store.chats.filter((c) => c.thread === thread && c.author === 'user'), ...store.outbox.filter((o) => o.thread === thread)].map((m) => m.text);
+    const step = recall(sent, at, e.key === 'ArrowUp' ? 'older' : 'newer');
+    if (!step) return false;
+    e.preventDefault();
+    recalled = step.at == null ? null : { at: step.at, text: step.text };
+    text = step.text;
+    tick().then(() => {
+      resize();
+      ta?.setSelectionRange(text.length, text.length);
+    });
+    return true;
+  }
+
   function key(e: KeyboardEvent) {
     if (e.isComposing) return; // IME: Enter confirms the composition, it doesn't send
     if (mention && options.length) {
@@ -214,6 +241,14 @@
       if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pick(options[mi]); return; }
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); mention = null; return; }
     }
+    // Esc on an empty line stops the running turn (an Esc that cancelled a dictation did its job
+    // already, and the repeats of a held key stop nothing). With text typed, or nothing running,
+    // Esc leaves the field as before.
+    if (e.key === 'Escape' && !e.repeat && !e.defaultPrevented && !text.trim() && stopThread(thread)) {
+      e.preventDefault();
+      return;
+    }
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && walk(e)) return;
     // ⇧⇥ cycles the request's mode, like Claude Code.
     if (e.key === 'Tab' && e.shiftKey && !oneToOne) {
       e.preventDefault();

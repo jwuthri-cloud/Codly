@@ -1,10 +1,11 @@
 // Global keyboard map. ⌘K palette · ⌘1 full office · ⌘2 full work · ⌘. focus · ⌘, settings ·
 // ⌘N new request · ⌘[ / ⌘] previous / next request · ⇧⌘N new task · ⌘O open repo · ⌘↵ the one
 // primary action (approve / run plan) · ⌥⌘↵ allow for the session · ⌘⌫ deny · ⇧⌘⌫ deny with a
-// note · G-sequences to rooms · J/K lists · Esc · ?.
+// note · G-sequences to rooms · J/K lists · Esc (close, deselect, then stop the running turn) · ?.
 // ponytail: hand-rolled instead of tinykeys — one listener, sequences included.
 import type { Approval } from '../gen/Approval';
-import { openWorkspace, resolveApproval, runPlan } from './actions';
+import { openWorkspace, resolveApproval, runPlan, stopThread } from './actions';
+import { escStep } from './esc';
 import { requests } from './requests.svelte';
 import { store } from './store.svelte';
 import { ROOMS, isRequestThread, ui, type Room } from './ui.svelte';
@@ -159,9 +160,20 @@ export function installKeys(): () => void {
         (e.target as HTMLElement).blur();
         return;
       }
-      if (ui.artifactOpen) ui.artifactOpen = null;
-      else if (ui.selection) ui.selection = null;
-      else if (ui.mode === 'office' || ui.mode === 'map') ui.mode = 'blend';
+      // One step per press: close, deselect, leave the full office, then stop the running turn.
+      const step = escStep({
+        repeat: e.repeat,
+        artifactOpen: !!ui.artifactOpen,
+        selection: !!ui.selection,
+        mode: ui.mode,
+        room: ui.room,
+        popupOpen: !!document.querySelector('[role="dialog"], [role="menu"]'),
+        inOffice: !!(e.target as HTMLElement).closest?.('[role="application"]'),
+      });
+      if (step === 'close-artifact') ui.artifactOpen = null;
+      else if (step === 'deselect') ui.selection = null;
+      else if (step === 'leave-office') ui.mode = 'blend';
+      else if (step === 'stop') stopThread(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
       return;
     }
 
@@ -211,13 +223,14 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['⌘K', 'Search and commands'],
       ['⌘1', 'Full office'],
       ['⌘2', 'Full work (hide the office)'],
+      ['⌘3', 'Neighbourhood (all your lots)'],
       ['⌘.', 'Focus: dim the office'],
       ['⌘N', 'New request (its own Lead, in parallel)'],
       ['⌘[ ⌘]', 'Previous · next request'],
       ['⇧⌘N', 'New task'],
       ['⌘O', 'Open repository'],
       ['⌘,', 'Settings'],
-      ['Esc', 'Close · deselect'],
+      ['Esc', 'Close · deselect · stop the running turn'],
       ['?', 'This sheet'],
     ],
   },
@@ -230,6 +243,10 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     items: [
       ['↵', 'Send (queues if the agent is mid-turn)'],
       ['⇧↵', 'New line'],
+      ['Esc', 'Stop the running turn (empty line)'],
+      ['↑', 'Bring back what you sent (empty line)'],
+      ['⇧⇥', 'Next mode: Ask · Plan · Auto · Direct'],
+      ['⌫', 'Back to the request (empty line, 1:1)'],
       ['@', 'Talk to one agent'],
       ['#', 'Mention a task'],
       ['⌘↵', 'Approve once · run the plan'],
@@ -237,6 +254,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['⌘⌫', 'Deny'],
       ['⇧⌘⌫', 'Deny with a note'],
       ['J K', 'Next · previous'],
+      ['[ ]', 'Previous · next file (Changes)'],
     ],
   },
 ];

@@ -10,12 +10,15 @@
   import type { NewWebhook } from '../lib/gen/NewWebhook';
   import { api } from '../lib/api';
   import { copyText } from '../lib/state/actions';
+  import { Loader } from '../lib/state/loader.svelte';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { ago } from '../lib/util/inbound';
   import Icon from '../components/Icon.svelte';
+  import LoadError from '../components/LoadError.svelte';
 
-  let st = $state<InboundState | null>(null);
+  const inbound = new Loader<InboundState>(() => api.inboundState());
+  const st = $derived(inbound.value);
   let fresh = $state<NewWebhook | null>(null); // the secret on screen, once
   let name = $state('');
   let confirming = $state<string | null>(null);
@@ -33,7 +36,7 @@
       busy = false;
     }
   }
-  const load = () => api.inboundState().then((s) => (st = s)).catch(() => {});
+  const load = () => inbound.load();
   onMount(() => {
     void load();
     const t = setInterval(load, 5000); // counts and the delivery log
@@ -52,7 +55,7 @@
   }
   async function toggle(id: string, on: boolean) {
     const s = await run(on ? 'switch it on' : 'switch it off', () => api.inboundSetWebhook(id, on));
-    if (s) st = s;
+    if (s) inbound.set(s);
     else await load(); // the switch snaps back
   }
   async function revoke(id: string) {
@@ -63,17 +66,17 @@
     confirming = null;
     const s = await run('revoke the endpoint', () => api.inboundRevokeWebhook(id));
     if (s) {
-      st = s;
+      inbound.set(s);
       if (fresh?.endpoint.id === id) fresh = null;
     }
   }
   async function setAnswerer(answerer: string) {
     const s = st && (await run('save', () => api.inboundSetSettings(answerer, st!.port)));
-    if (s) st = s;
+    if (s) inbound.set(s);
   }
   async function setPort(v: string) {
     const s = st && (await run('save the port', () => api.inboundSetSettings(st!.answerer, Number(v) || 0)));
-    if (s) st = s;
+    if (s) inbound.set(s);
     else await load();
   }
 
@@ -105,7 +108,7 @@
       }),
     );
     if (!s) return;
-    st = s;
+    inbound.set(s);
     botToken = appToken = '';
     toast({ kind: 'success', title: 'Slack settings saved', body: 'Tokens are in your Keychain. Slack is not connected yet.' });
   }
@@ -113,7 +116,7 @@
     const s = await run('remove the token', () =>
       api.inboundSetSlack({ config: st!.slack.config, bot_token: which === 'bot' ? '' : null, app_token: which === 'app' ? '' : null }),
     );
-    if (s) st = s;
+    if (s) inbound.set(s);
   }
 </script>
 
@@ -126,6 +129,7 @@
   </p>
 
   {#if st}
+    {#if inbound.fails >= 2}<p class="desc warn" role="status">Not updating: {inbound.error}</p>{/if}
     <div class="status" class:bad={!!st.listen_error}>
       <span class="dot" class:live={st.listening}></span>
       {#if st.listen_error}
@@ -218,6 +222,8 @@
         </ul>
       </div>
     {/if}
+  {:else if inbound.error}
+    <LoadError what="the endpoints" error={inbound.error} loading={inbound.loading} onretry={load} />
   {:else}
     <p class="desc">Loading…</p>
   {/if}

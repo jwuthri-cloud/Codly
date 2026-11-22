@@ -33,6 +33,11 @@
     await mergePlan(planId);
     busy = false;
   }
+  async function keep() {
+    busy = true;
+    await keepBranch(planId);
+    busy = false;
+  }
 </script>
 
 {#if plan}
@@ -69,7 +74,7 @@
         <button class="btn ghost sm" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {:else}
         <button class="btn primary" disabled={busy || kept} onclick={merge}><Icon name="merge" size={14} />Merge into {target}</button>
-        <button class="btn" disabled={busy || kept} onclick={() => keepBranch(planId)}>Keep the branch</button>
+        <button class="btn" disabled={busy || kept} onclick={keep}>Keep the branch</button>
         <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {/if}
     </footer>
