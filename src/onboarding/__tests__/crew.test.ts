@@ -43,9 +43,21 @@ describe('an installed CLI with a problem', () => {
 describe('a CLI older than Codly supports', () => {
   const old = cli({ provider: 'codex', version: '0.150.2' }, { update: 'npm install -g @openai/codex@latest', update_to: '0.161.0' });
   it('is told the version to reach and the command that updates it', () => {
-    expect(cliFix(old).update).toEqual({ to: '0.161.0', command: 'npm install -g @openai/codex@latest' });
+    expect(cliFix(old).update).toMatchObject({ to: '0.161.0', command: 'npm install -g @openai/codex@latest' });
     expect(updateNote(old)).toBe('Update Codex to 0.161.0 or later: an older one can fail in the middle of a task.');
     expect(updateNote(cli())).toBeNull();
+  });
+  it('is not offered an npm update line on a Mac without npm', () => {
+    // Codex from Homebrew: "Update" would type `npm …` into a terminal that has no npm.
+    const brewed = cliFix(cli({ ...old, install: { ...old.install, npm_available: false } })).update;
+    expect(brewed).toMatchObject({ to: '0.161.0', command: null });
+    expect(brewed?.how).toContain('Update it the way you installed it');
+  });
+  it('is told that an npm line only updates a copy installed with npm', () => {
+    expect(cliFix(old).update?.how).toContain('installed with npm');
+    // The CLI's own updater needs no npm and no warning.
+    const own = cli({ provider: 'opencode', version: '1.17.2' }, { update: 'opencode upgrade', update_to: '1.18.0', npm_available: false });
+    expect(cliFix(own).update).toEqual({ to: '1.18.0', command: 'opencode upgrade', how: null });
   });
   it('still counts as ready: the minimum is the oldest version tested, not a proven limit', () => {
     expect(cliOk(old)).toBe(true);

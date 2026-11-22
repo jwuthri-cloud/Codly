@@ -35,17 +35,40 @@ export function installPlan(h: InstallHint): { primary: Rung | null; other: Rung
   return native ? { primary: native, other: npm } : { primary: npm, other: null };
 }
 
+/** How to update a CLI that is older than Codly supports. */
+export type UpdateFix = {
+  /** The version it must reach. */
+  to: string;
+  /** The line "Update" runs; null when Codly has none that can run on this Mac. */
+  command: string | null;
+  /** What else to know: the line needs npm and there is none, or it only updates an npm install. */
+  how: string | null;
+};
+
+function updateFix(h: InstallHint): UpdateFix | null {
+  if (!h.update_to) return null;
+  const byNpm = !!h.update?.startsWith('npm ');
+  if (byNpm && !h.npm_available) {
+    return { to: h.update_to, command: null, how: 'Codly cannot update it for you: its update line needs npm, and this Mac has none. Update it the way you installed it (Homebrew, for example).' };
+  }
+  return {
+    to: h.update_to,
+    command: h.update,
+    how: byNpm ? 'This line updates a copy installed with npm. If you installed it another way (Homebrew, for example), update it that way.' : null,
+  };
+}
+
 /**
  * What an installed CLI still needs: `text` says why it is not ready (the core's words),
- * `login` is the sign-in command to offer, `update` the version it must reach and the command
- * that updates it. A CLI that says it is signed in is never offered a sign-in.
+ * `login` is the sign-in command to offer, `update` how to bring an old one up to date. A CLI
+ * that says it is signed in is never offered a sign-in.
  */
-export function cliFix(c: CliInfo): { text: string | null; login: string | null; update: { to: string; command: string | null } | null } {
+export function cliFix(c: CliInfo): { text: string | null; login: string | null; update: UpdateFix | null } {
   const unready = c.logged_in === false || !!c.problem;
   return {
     text: c.problem,
     login: c.path && unready && c.logged_in !== true ? c.install.login : null,
-    update: c.install.update_to ? { to: c.install.update_to, command: c.install.update } : null,
+    update: updateFix(c.install),
   };
 }
 

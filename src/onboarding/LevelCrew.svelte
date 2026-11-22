@@ -97,6 +97,7 @@
           {@const plan = installPlan(c.install)}
           {@const first = plan.primary}
           {@const second = plan.other}
+          {@const npmLine = c.install.npm}
           <div class="acts">
             {#if first}
               <button class="btn sm primary" onclick={() => install(c, first.rung)}><Icon name="play" size={12} />Install for me</button>
@@ -104,13 +105,16 @@
               {#if second}<button class="btn sm ghost" data-tip={second.command} onclick={() => install(c, second.rung)}>Use npm instead</button>{/if}
             {:else}
               <button class="btn sm primary" onclick={() => openExternal(NODE_URL)}><Icon name="external" size={12} />Get Node.js</button>
+              {#if npmLine}<button class="btn sm ghost" onclick={() => copy(npmLine)}><Icon name="copy" size={12} />Copy command</button>{/if}
             {/if}
             <button class="btn sm ghost" onclick={() => openExternal(c.install.docs)}><Icon name="external" size={12} />Docs</button>
           </div>
           {#if first}
             <code class="cmd selectable">{first.command}</code>
           {:else}
-            <p class="fix">{PROVIDER_LABEL[c.provider]} installs with <code>npm</code>, which comes with Node.js, and this Mac has no <code>npm</code> yet. Install Node.js, then check again.</p>
+            <!-- "No npm" can be wrong (a Node.js that Codly does not look for): the line stays in reach. -->
+            <p class="fix">{PROVIDER_LABEL[c.provider]} installs with <code>npm</code>, which comes with Node.js, and Codly found no <code>npm</code> on this Mac. Install Node.js, then check again.{#if npmLine} If you have <code>npm</code> already, run this line in a terminal:{/if}</p>
+            {#if npmLine}<code class="cmd selectable">{npmLine}</code>{/if}
           {/if}
         {:else}
           {@const fix = cliFix(c)}
@@ -132,6 +136,7 @@
           {#if update}
             <p class="fix warn">{updateNote(c)}</p>
             {#if update.command}<code class="cmd selectable">{update.command}</code>{/if}
+            {#if update.how}<p class="fix">{update.how}</p>{/if}
           {/if}
         {/if}
         {#if run?.provider === c.provider}
