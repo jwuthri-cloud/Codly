@@ -106,7 +106,8 @@ pub enum Action {
     },
 }
 
-/// Why a task started for a member at home (the office shows it on its Overtime moodlet).
+/// Why a task started for a member at home, with the office rules on (the office shows it on
+/// its Overtime moodlet).
 pub const CALLED_IN: &str = "called in from home: nobody else was free";
 
 /// Statuses that hold a worker slot and a write-scope lease.
@@ -415,12 +416,14 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
                 None => format!("waiting: {} (assigned) is busy", a.name),
             });
         }
-        // At home (the office's energy): its task waits until it is back, a few minutes. Unless
-        // nobody else on the team is at work: then it is called in, the crew never stops.
-        let home = super::at_home(a, ctx.now);
+        // At home (the office's energy), with the office rules on (`Settings::game_rules`): its
+        // task waits until it is back, a few minutes. Unless nobody else on the team is at work:
+        // then it is called in, the crew never stops. Rules off (the default): it starts now.
+        let rules = ctx.settings.game_rules;
+        let home = super::kept_home(rules, a, ctx.now);
         if let Some(until) = &home
             && ctx.agents.iter().any(|o| {
-                o.id != a.id && o.on_staff() && o.role == Role::Worker && super::at_home(o, ctx.now).is_none()
+                o.id != a.id && o.on_staff() && o.role == Role::Worker && super::kept_home(rules, o, ctx.now).is_none()
             })
         {
             return Err(format!("waiting: {} (assigned) is at home until {until}; it starts when it is back, or call it in", a.name));
@@ -550,15 +553,16 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
 }
 
 /// A free agent on your staff on `provider` (not a team member: those only take tasks assigned
-/// to them): a worker before a solo agent, one whose session is on `account` first, then one at
-/// work, then a rested one.
+/// to them): a worker before a solo agent, one whose session is on `account` first, then (with
+/// the office rules on, `Settings::game_rules`) one at work, then a rested one.
 fn idle_staff<'a>(ctx: &'a RouteCtx, provider: Provider, account: &str) -> Option<&'a Agent> {
     ctx.agents
         .iter()
         .filter(|a| a.on_staff() && a.member.is_none() && a.provider == provider && a.status != AgentStatus::Offline && !ctx.busy.contains(&a.id))
         .min_by_key(|a| {
             let other_account = ctx.accounts.of_agent(a).is_none_or(|x| x.id != account);
-            (a.role != Role::Worker, other_account, super::at_home(a, ctx.now).is_some(), super::tired(a, ctx.now), a.created_at, a.id.clone())
+            let rules = ctx.settings.game_rules;
+            (a.role != Role::Worker, other_account, super::kept_home(rules, a, ctx.now).is_some(), super::tired(rules, a, ctx.now), a.created_at, a.id.clone())
         })
 }
 

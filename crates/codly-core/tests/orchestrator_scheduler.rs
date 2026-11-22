@@ -597,13 +597,47 @@ fn member(id: &str, name: &str) -> Agent {
     m
 }
 
-/// A member at home (the office's energy): its queued task waits until it is back, minutes
-/// later, while someone else is at work; once back it starts.
+/// The office game is for show by default (`Settings::game_rules` off): a task queued for a
+/// member at home starts at once with no call-in, and home or tired never changes who on your
+/// staff gets a task.
+#[test]
+fn home_and_tired_change_nothing_unless_the_office_rules_are_on() {
+    let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    t.assignee = Some("m1".into());
+    let mut w = World::new(vec![t]);
+    assert!(!w.settings.game_rules, "off by default");
+    let mut ana = member("m1", "Ana");
+    ana.away_until = Some(w.now + 10 * 60_000);
+    w.agents = vec![ana, member("m2", "Bo")];
+    let a = w.run();
+    assert!(waits(&a).is_empty(), "{:?}", waits(&a));
+    assert_eq!(starts(&a)[0].2, AgentPick::Existing("m1".into()));
+    assert!(!summary_of(&a, "t1").contains("called in"), "{}", summary_of(&a, "t1"));
+    assert!(a.iter().any(|x| matches!(x, Action::Start { detail, .. } if detail["called_in"] == false)));
+
+    // An unassigned task goes to the oldest idle worker on your staff, at home and tired or not.
+    let mut w = World::new(vec![task("t1", "p", TaskStatus::Ready, &["a/**"], &[])]);
+    let mut home = agent("c1", "Cy", Provider::Claude, Role::Worker);
+    home.created_at = 0;
+    home.away_until = Some(w.now + 60_000);
+    let mut tired = agent("c2", "Bo", Provider::Claude, Role::Worker);
+    tired.tired_since = Some(1);
+    let mut fresh = agent("c3", "Di", Provider::Claude, Role::Worker);
+    fresh.created_at = 2;
+    w.agents = vec![fresh, tired, home];
+    assert_eq!(starts(&w.run())[0].2, AgentPick::Existing("c1".into()), "the oldest, though at home");
+    w.agents.pop();
+    assert_eq!(starts(&w.run())[0].2, AgentPick::Existing("c2".into()), "the next oldest, though tired");
+}
+
+/// With the office rules on, a member at home (the office's energy): its queued task waits until
+/// it is back, minutes later, while someone else is at work; once back it starts.
 #[test]
 fn a_queued_task_waits_for_its_member_at_home_while_others_work() {
     let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
     t.assignee = Some("m1".into());
     let mut w = World::new(vec![t]);
+    w.settings.game_rules = true;
     let mut ana = member("m1", "Ana");
     ana.away_until = Some(w.now + 10 * 60_000);
     w.agents = vec![ana, member("m2", "Bo")];
@@ -626,6 +660,7 @@ fn a_member_at_home_is_called_in_when_nobody_else_is_free() {
     let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
     t.assignee = Some("m1".into());
     let mut w = World::new(vec![t]);
+    w.settings.game_rules = true;
     let mut ana = member("m1", "Ana");
     ana.away_until = Some(w.now + 10 * 60_000);
     let mut bo = member("m2", "Bo");
@@ -650,6 +685,7 @@ fn a_member_at_home_is_called_in_when_nobody_else_is_free() {
 #[test]
 fn the_scheduler_prefers_rested_workers_but_never_refuses_a_tired_one() {
     let mut w = World::new(vec![task("t1", "p", TaskStatus::Ready, &["a/**"], &[])]);
+    w.settings.game_rules = true;
     let mut old = agent("c1", "Bo", Provider::Claude, Role::Worker);
     old.tired_since = Some(1);
     let mut home = agent("c2", "Cy", Provider::Claude, Role::Worker);

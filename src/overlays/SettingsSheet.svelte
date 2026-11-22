@@ -124,6 +124,7 @@
     ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
     ['use_my_claude_setup', 'Use my Claude Code setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings. Applies to agents started after the change; approvals still go through Codly.'],
   ];
+  const OFFICE_TOGGLES = [['game_rules', 'Office rules affect work', 'Agents can be at home or tired, and new hires wait for a job offer.']];
   const REVIEW_TOGGLES = [['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.']];
 </script>
 
@@ -181,6 +182,11 @@
     <section>
       <h3 class="eyebrow">Plans</h3>
       {@render toggles(PLAN_TOGGLES)}
+    </section>
+
+    <section>
+      <h3 class="eyebrow">Office</h3>
+      {@render toggles(OFFICE_TOGGLES)}
     </section>
 
     <section>

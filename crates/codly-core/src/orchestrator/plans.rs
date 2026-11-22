@@ -500,7 +500,8 @@ impl Inner {
                 _ => self.agent(&id)?,
             },
             AgentPick::New { name, color, model } => {
-                // A job offer goes up in the office first; you may pick who gets the job.
+                // With the office rules on, a job offer goes up in the office first; you may pick
+                // who gets the job. Otherwise the consultant is hired at once.
                 let hired = match self.hiring(&ws.id, &self.task(task_id)?, provider, model.clone(), &name, color) {
                     careers::Hiring::Wait => {
                         let why = "waiting: hiring (the job offer is up in the office)".to_string();
@@ -518,11 +519,16 @@ impl Inner {
                 let mut a = self.new_agent(&name, provider, Role::Worker, color, model);
                 a.consultant = true;
                 a.title = title;
+                let offered = hired.is_some();
                 if let Some(h) = hired {
                     a.look_seed = h.avatar;
                     a.career.traits = h.traits;
                 }
-                self.insert_agent(&ws.id, a)?
+                let a = self.insert_agent(&ws.id, a)?;
+                if !offered {
+                    self.announce_hire(&ws.id, task_id, &a);
+                }
+                a
             }
         };
         let mut why = None; // why it was not running: tells a resumed session what happened
@@ -538,7 +544,7 @@ impl Inner {
         })?;
         self.update_agent(&agent.id, |a| {
             a.task_id = Some(task_id.to_string());
-            // Called in from home (the scheduler found nobody else at work): it is back.
+            // It was at home (called in, or the office rules are off): at work, it is back.
             if super::at_home(a, now_ms()).is_some() {
                 a.away_until = None;
             }

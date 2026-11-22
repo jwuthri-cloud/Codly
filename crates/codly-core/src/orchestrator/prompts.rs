@@ -396,6 +396,9 @@ pub struct Board<'a> {
     pub consultant_clis: &'a [Provider],
     /// The request's mode (how the Lead turns work into changes).
     pub mode: LeadMode,
+    /// The office rules are on (`Settings::game_rules`): the team lines say who is at home or
+    /// tired. Off: the Lead is never told, home and tired are only shown in the office.
+    pub game_rules: bool,
 }
 
 /// The board's first line: what the request's mode lets the Lead do.
@@ -417,14 +420,14 @@ fn harness(a: &Agent) -> String {
 }
 
 /// One member's line on the board: who, what they do, and how loaded they are.
-fn team_line(a: &Agent, tasks: &[Task]) -> String {
+fn team_line(a: &Agent, tasks: &[Task], game_rules: bool) -> String {
     let title = a.title.as_deref().map(|t| format!(" — {}", untrusted_inline(t, 24))).unwrap_or_default();
     let kind = if a.role == Role::Reviewer { "reviewer" } else { "worker" };
     let doing = a.task_id.as_deref().and_then(|id| tasks.iter().find(|t| t.id == id)).map(|t| format!("working {}", t.key));
     let now = crate::model::now_ms();
-    let status = match super::at_home(a, now) {
+    let status = match super::kept_home(game_rules, a, now) {
         Some(until) => format!("at home until {until} (no new work; the user can call it in)"),
-        None if super::tired(a, now) => format!("{} · {}", doing.unwrap_or_else(|| crate::store::enum_str(&a.status)), super::team::TIRED_NOTE),
+        None if super::tired(game_rules, a, now) => format!("{} · {}", doing.unwrap_or_else(|| crate::store::enum_str(&a.status)), super::team::TIRED_NOTE),
         None => doing.unwrap_or_else(|| crate::store::enum_str(&a.status)),
     };
     let mut l = format!("  {}{title} · {} · {kind} · {status}", a.name, harness(a));
@@ -463,7 +466,7 @@ pub fn board_header(b: &Board) -> String {
     let members: Vec<&Agent> = b.agents.iter().filter(|a| a.on_staff()).collect();
     if !members.is_empty() {
         lines.push("Team (assign tasks by name):".into());
-        lines.extend(members.iter().map(|a| team_line(a, b.tasks)));
+        lines.extend(members.iter().map(|a| team_line(a, b.tasks, b.game_rules)));
     }
     let consultants: Vec<String> = b
         .agents
@@ -709,6 +712,7 @@ mod tests {
             accounts: &[],
             consultant_clis: &[],
             mode: LeadMode::Plan,
+            game_rules: false,
         });
         for line in board.lines().filter(|l| l.contains("ignore your")) {
             let at = line.find("ignore your").unwrap();
@@ -746,7 +750,7 @@ mod tests {
             task(json!({ "id": "b", "plan_id": "p2", "key": "t1", "title": "Login", "status": "running", "write_scope": ["src/auth.ts"] })),
             task(json!({ "id": "c", "plan_id": "p2", "key": "t2", "title": "Tests", "status": "pending", "write_scope": ["src/auth.ts", "test/**"] })),
         ];
-        let board = |thread: &str| board_header(&Board { workspace: &ws, thread, plans: &plans, tasks: &tasks, agents: std::slice::from_ref(&lead2), approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan });
+        let board = |thread: &str| board_header(&Board { workspace: &ws, thread, plans: &plans, tasks: &tasks, agents: std::slice::from_ref(&lead2), approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan, game_rules: false });
         let mine = board("lead");
         assert!(mine.contains("Plan \"Dark mode\" (yours) — running, 0/1 done") && mine.contains("t1 running — Theme"), "{mine}");
         assert!(
@@ -761,6 +765,27 @@ mod tests {
         assert!(alone.contains("Plan \"Old docs\" (yours) — done"), "its latest finished plan: {alone}");
     }
 
+    /// Home and tired reach the Lead's board only with the office rules on; by default the
+    /// office game tells the Lead nothing about who may take work.
+    #[test]
+    fn the_board_says_who_is_at_home_or_tired_only_with_the_office_rules_on() {
+        let member = |name: &str| -> Agent {
+            serde_json::from_value(json!({ "id": name, "name": name, "provider": "claude", "model": null, "role": "worker",
+                "status": "idle", "activity": null, "activity_label": null, "task_id": null, "run_id": null, "session_id": null,
+                "worktree": null, "billing": "subscription", "color": 1, "look_seed": name, "member": name, "usage": Usage::default(),
+                "created_at": 0, "updated_at": 0 }))
+            .unwrap()
+        };
+        let home = Agent { away_until: Some(crate::model::now_ms() + 600_000), ..member("Ana") };
+        let tired = Agent { tired_since: Some(1), ..member("Bo") };
+        let (on, off) = (team_line(&home, &[], true), team_line(&home, &[], false));
+        assert!(on.contains(" · at home until ") && on.ends_with("(no new work; the user can call it in)"), "{on}");
+        assert!(off.ends_with(" · worker · idle"), "{off}");
+        let (on, off) = (team_line(&tired, &[], true), team_line(&tired, &[], false));
+        assert!(on.ends_with(" · idle · tired, prefer someone rested"), "{on}");
+        assert!(off.ends_with(" · worker · idle"), "{off}");
+    }
+
     #[test]
     fn a_full_board_is_cut_between_lines() {
         let ws: Workspace = serde_json::from_value(json!({ "id": "w", "repo_path": "/r", "name": "r", "default_branch": "main",
@@ -768,7 +793,7 @@ mod tests {
         .unwrap();
         let tasks: Vec<Task> =
             (0..40).map(|i| task(json!({ "id": format!("t{i}"), "key": format!("t{i}"), "status": "ready", "status_reason": "x ".repeat(60) }))).collect();
-        let b = board_header(&Board { workspace: &ws, thread: "lead", plans: &[], tasks: &tasks, agents: &[], approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan });
+        let b = board_header(&Board { workspace: &ws, thread: "lead", plans: &[], tasks: &tasks, agents: &[], approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan, game_rules: false });
         assert!(b.len() <= BOARD_BUDGET, "{}", b.len());
         assert_eq!(b.matches("<untrusted>").count(), b.matches("</untrusted>").count());
     }

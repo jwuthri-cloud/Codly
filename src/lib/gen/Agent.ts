@@ -58,8 +58,9 @@ archived: boolean, usage: Usage,
  */
 career: Career, 
 /**
- * Gone home to rest (the office's energy) until then (ms). The Lead gives it no new work
- * meanwhile; you still can. Its conversation and session are untouched.
+ * Gone home to rest (the office's energy) until then (ms). With the office rules on
+ * (`Settings::game_rules`) the Lead gives it no new work meanwhile; you still can. Its
+ * conversation and session are untouched.
  */
 away_until?: number, 
 /**
@@ -68,6 +69,7 @@ away_until?: number,
 away_since?: number, 
 /**
  * Tired since then (ms): the office's energy fell under 30% (it reports crossing back).
- * Only a hint: the Lead and the scheduler prefer someone rested, never refuse it work.
+ * Only a hint, with the office rules on: the Lead and the scheduler prefer someone rested,
+ * never refuse it work.
  */
 tired_since?: number, created_at: number, updated_at: number, };

@@ -539,7 +539,8 @@ impl Core {
     }
 
     /// How long a job offer stays up in the office before the Lead's pick is hired
-    /// (the app sets 30 s; 0, the default, hires at once).
+    /// (the app sets 30 s; 0, the default, hires at once). Offers are posted only with the
+    /// office rules on (`Settings::game_rules`).
     pub fn set_hiring_window(&self, d: std::time::Duration) {
         self.inner.set_hiring_window(d);
     }
@@ -622,9 +623,10 @@ impl Core {
         Ok(a)
     }
 
-    /// The office sends an agent home to rest until `until` (ms), or calls it back (None). The
-    /// Lead gives an agent at home no new work; nothing else changes (its conversation and
-    /// session stay as they are). The Lead never goes home: you talk to it.
+    /// The office sends an agent home to rest until `until` (ms), or calls it back (None). With
+    /// the office rules on (`Settings::game_rules`) the Lead gives an agent at home no new work;
+    /// otherwise it is only shown. Nothing else changes (its conversation and session stay as
+    /// they are). The Lead never goes home: you talk to it.
     pub fn set_agent_home(&self, agent_id: &str, until: Option<i64>) -> anyhow::Result<Agent> {
         if until.is_some() && self.inner.agent(agent_id)?.role == Role::Lead {
             anyhow::bail!("the Lead never goes home");
@@ -645,7 +647,8 @@ impl Core {
     }
 
     /// The office reports that an agent is tired (its energy fell under 30%) or rested again.
-    /// Only a hint for the Lead's board and the scheduler's tiebreaks: nobody is refused work.
+    /// With the office rules on, a hint for the Lead's board and the scheduler's tiebreaks:
+    /// nobody is refused work.
     pub fn set_agent_tired(&self, agent_id: &str, tired: bool) -> anyhow::Result<Agent> {
         let a = self.inner.agent(agent_id)?;
         if a.tired_since.is_some() == tired {
@@ -1023,9 +1026,19 @@ pub(crate) fn at_home(a: &Agent, now: i64) -> Option<String> {
     Some(local.format("%H:%M").to_string())
 }
 
-/// Tired (the office said so) and not at home: the Lead and the scheduler prefer someone rested.
-pub(crate) fn tired(a: &Agent, now: i64) -> bool {
-    a.tired_since.is_some() && at_home(a, now).is_none()
+/// At home and, with the office rules on (`Settings::game_rules`), kept from new work until then.
+/// Off (the default): home is only shown in the office, never a reason to hold or refuse work.
+pub(crate) fn kept_home(rules: bool, a: &Agent, now: i64) -> Option<String> {
+    if !rules {
+        return None;
+    }
+    at_home(a, now)
+}
+
+/// Tired (the office said so) and not at home, with the office rules on: the Lead and the
+/// scheduler prefer someone rested.
+pub(crate) fn tired(rules: bool, a: &Agent, now: i64) -> bool {
+    rules && a.tired_since.is_some() && at_home(a, now).is_none()
 }
 
 impl Inner {

@@ -68,6 +68,13 @@ paused: boolean,
  */
 paused_offices: Array<string>, 
 /**
+ * The office game changes real work: an agent at home gets no new work from the Lead and
+ * its queued task waits, a tired one is a second choice, a new consultant waits for its job
+ * offer, and the traits rolled for a worker ride on its prompts. Off (the default): the
+ * office only shows all this, and work is never delayed, refused or changed by it.
+ */
+game_rules: boolean, 
+/**
  * The Settings' Developer panel: cheats for testing the game (coins, XP, a fresh office).
  * Cheats flag the wallet for good.
  */

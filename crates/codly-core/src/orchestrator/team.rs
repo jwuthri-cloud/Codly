@@ -358,6 +358,7 @@ impl Inner {
     pub(super) fn team_view(&self, ws_id: &str, agents: &[Agent], tasks: &[Task]) -> Vec<Value> {
         let team = self.effective_team(ws_id);
         let key = |id: &Option<Id>| id.as_deref().and_then(|i| tasks.iter().find(|t| t.id == i)).map(|t| t.key.clone());
+        let (rules, now) = (self.settings().game_rules, now_ms());
         agents
             .iter()
             .filter(|a| a.on_staff() || a.consultant)
@@ -378,8 +379,8 @@ impl Inner {
                     "status": a.status, "task": key(&a.task_id), "queue": queue,
                     "session": { "resumable": a.session_id.is_some(), "context_pct": ctx },
                     "cli_ready": self.cli_usable(a.provider),
-                    "at_home_until": super::at_home(a, now_ms()),
-                    "energy": super::tired(a, now_ms()).then_some(TIRED_NOTE),
+                    "at_home_until": super::kept_home(rules, a, now),
+                    "energy": super::tired(rules, a, now).then_some(TIRED_NOTE),
                 })
             })
             .collect()
@@ -393,14 +394,15 @@ impl Inner {
         let agents = self.store.agents(&ws.id)?;
         let members: Vec<&Agent> = agents.iter().filter(|a| a.on_staff() && a.role != Role::Reviewer).collect();
         let names = || members.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
-        // At home: the Lead gives it no new work (you can call it in), unless the whole team
-        // is home; the game never stops the crew from shipping.
-        let now = now_ms();
+        // At home, with the office rules on (`Settings::game_rules`): the Lead gives it no new
+        // work (you can call it in), unless the whole team is home; the game never stops the
+        // crew from shipping. Rules off (the default): home and tired change nothing here.
+        let (rules, now) = (self.settings().game_rules, now_ms());
         // Rested first: a tired member is only a second choice (never refused).
-        let mut at_work: Vec<&&Agent> = members.iter().filter(|a| super::at_home(a, now).is_none()).collect();
-        at_work.sort_by_key(|a| super::tired(a, now));
+        let mut at_work: Vec<&&Agent> = members.iter().filter(|a| super::kept_home(rules, a, now).is_none()).collect();
+        at_work.sort_by_key(|a| super::tired(rules, a, now));
         let at_work: Vec<String> =
-            at_work.iter().map(|a| if super::tired(a, now) { format!("{} (tired)", a.name) } else { a.name.clone() }).collect();
+            at_work.iter().map(|a| if super::tired(rules, a, now) { format!("{} (tired)", a.name) } else { a.name.clone() }).collect();
         let mut errors = vec![];
         let mut notes = vec![];
         for t in tasks.iter_mut() {
@@ -414,7 +416,7 @@ impl Inner {
                     Some(a) if a.role == Role::Reviewer => {
                         errors.push(format!("task {}: {} reviews code; assign one of: {}", t.id, a.name, names()))
                     }
-                    Some(a) if !at_work.is_empty() && super::at_home(a, now).is_some() => errors.push(format!(
+                    Some(a) if !at_work.is_empty() && super::kept_home(rules, a, now).is_some() => errors.push(format!(
                         "task {}: {}; assign someone at work ({}) or a consultant",
                         t.id,
                         away_note(a, now),
@@ -575,7 +577,7 @@ impl Inner {
                 let names: Vec<&str> = agents.iter().filter(|a| a.member.is_some() || a.consultant).map(|a| a.name.as_str()).collect();
                 anyhow!("no team member or working consultant is called '{to}' (team: {})", if names.is_empty() { "none".into() } else { names.join(", ") })
             })?;
-        if super::at_home(&agent, now_ms()).is_some() {
+        if super::kept_home(self.settings().game_rules, &agent, now_ms()).is_some() {
             bail!("{}", away_note(&agent, now_ms()));
         }
         let hands_off = agent

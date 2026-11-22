@@ -96,6 +96,7 @@ const SETTINGS: Settings = {
   use_my_claude_setup: true,
   paused: false,
   paused_offices: [],
+  game_rules: false,
   developer_mode: false,
   world_ambient: false,
   theme: 'system',

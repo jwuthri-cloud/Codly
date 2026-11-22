@@ -397,7 +397,7 @@ impl Inner {
             agents.iter().filter(|a| a.role == Role::Reviewer && a.member.is_some() && self.cli_usable(a.provider) && idle(a)).collect();
         // At work and rested first: only a tiebreak (the office's energy), never a refusal.
         let now = crate::model::now_ms();
-        members.sort_by_key(|a| (super::at_home(a, now).is_some(), super::tired(a, now)));
+        members.sort_by_key(|a| (super::kept_home(settings.game_rules, a, now).is_some(), super::tired(settings.game_rules, a, now)));
         let member = members.iter().find(|a| Some(a.provider) != worker_provider).or_else(|| members.first()).copied();
         let order: Vec<Provider> = settings.worker_providers.iter().copied().chain(Provider::ALL).collect();
         let other = order.iter().copied().find(|p| Some(*p) != worker_provider && self.cli_usable(*p));
@@ -420,7 +420,7 @@ impl Inner {
         let free = |a: &&Agent| a.role == Role::Reviewer && a.member.is_none() && a.provider == provider && idle(a);
         // The most senior free reviewer: a Senior or Staff mentors juniors (career::mentors);
         // between equals, one at work and rested (the office's energy; never refused).
-        let rested = |a: &&Agent| (a.career.rank, super::at_home(a, now).is_none(), !super::tired(a, now));
+        let rested = |a: &&Agent| (a.career.rank, super::kept_home(settings.game_rules, a, now).is_none(), !super::tired(settings.game_rules, a, now));
         let hire = || {
             let agents = self.store.agents(ws_id)?;
             let name = names::next_name(&agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>());

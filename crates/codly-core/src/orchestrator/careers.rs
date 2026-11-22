@@ -151,13 +151,20 @@ impl Inner {
         self.hiring_window_ms.store(d.as_millis() as u64, Ordering::Relaxed);
     }
 
-    /// For `claim`: post a job offer for this task's new consultant, wait while it is open, and
-    /// hand over the applicant once someone is hired. `name`/`color` are the scheduler's pick,
-    /// the first applicant.
+    /// For `claim`: with the office rules on (`Settings::game_rules`), post a job offer for this
+    /// task's new consultant, wait while it is open, and hand over the applicant once someone is
+    /// hired. `name`/`color` are the scheduler's pick, the first applicant. Rules off (the
+    /// default) or no window: nobody waits, the scheduler's pick is hired at once.
     pub(super) fn hiring(self: &Arc<Self>, ws: &str, task: &Task, provider: Provider, model: Option<String>, name: &str, color: i64) -> Hiring {
         let window = self.hiring_window_ms.load(Ordering::Relaxed);
-        if window == 0 {
-            return Hiring::Now(None);
+        let rules = self.settings().game_rules;
+        if !rules {
+            // The rules were switched off while this task's offer was up: it closes now, on the
+            // Lead's pick.
+            let open = lock(&self.offers).get(&task.id).filter(|o| o.hired.is_none()).map(|o| o.id.clone());
+            if let Some(id) = open {
+                self.close_offer(ws, &id, None);
+            }
         }
         let mut offers = lock(&self.offers);
         if let Some(o) = offers.get(&task.id) {
@@ -169,6 +176,9 @@ impl Inner {
                     Hiring::Now(a)
                 }
             };
+        }
+        if window == 0 || !rules {
+            return Hiring::Now(None);
         }
         let agents = self.store.agents(ws).unwrap_or_default();
         let mut taken: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
@@ -204,6 +214,26 @@ impl Inner {
             me.close_offer(&ws, &offer.id, None);
         });
         Hiring::Wait
+    }
+
+    /// A consultant hired at once (no offer was up): the office still shows who got the job,
+    /// as an offer that is already closed.
+    pub(super) fn announce_hire(&self, ws: &str, task_id: &str, a: &Agent) {
+        let now = now_ms();
+        let hired = Applicant { name: a.name.clone(), color: a.color, avatar: a.look_seed.clone(), traits: a.career.traits.clone(), pitch: String::new() };
+        let offer = JobOffer {
+            id: new_id(),
+            task_id: task_id.to_string(),
+            title: a.title.clone(),
+            provider: a.provider,
+            model: a.model.clone(),
+            applicants: vec![hired],
+            posted_at: now,
+            closes_at: now,
+            hired: Some(0),
+            by_you: false,
+        };
+        let _ = self.emit(Some(ws), super::row(None, Some(task_id), None, EventKind::JobOffer { offer }));
     }
 
     /// Close an open offer: `pick` is your choice; None hires the Lead's pick (the first).

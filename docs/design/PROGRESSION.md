@@ -32,7 +32,9 @@ from the web app.
      or above ~70% context), and the CLI compacts by itself when it runs out of room. The
      timed "compact every 2 h" rule is removed. Going home does not touch the context.
    - "Out of quota" is the real usage limit.
-2. **The game can say no; you can always overrule it.**
+2. **The game can say no; you can always overrule it.** Only with **Settings › Office rules
+   affect work** on (`Settings.game_rules`, off by default). Off, the office only shows home,
+   tired and hires: no plan is refused, no task waits and a new consultant starts at once.
    - An agent at home gets no new work from the Lead, but you can call it in.
    - A locked room changes where an agent *appears* to work, not whether it can.
    - The game never stops the crew from shipping. If everyone is home, the Lead calls back the
