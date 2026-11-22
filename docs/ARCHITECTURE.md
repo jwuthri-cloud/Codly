@@ -163,9 +163,11 @@ never start an agent. See `orchestrator/team.rs`.
 hands the work to a team member or consultant at once).
 
 **Approval modes** (`orchestrator/approvals.rs`): balanced (rules decide the obvious, else ask you),
-strict (ask for everything), autonomous (allow what stays in the agent's worktree) and **Full access**
+strict (ask for everything), autonomous (allow what shows no risk; the rules read the command line,
+not what a script or program then does, so this is not a sandbox) and **Full access**
 (auto-approve everything, risky commands included, except the hard floors: questions, permission
-changes, writes by read-only agents and Codly's own data dir still ask).
+changes, changes to the agent's own CLI settings, writes by read-only agents and Codly's own data
+dir still ask).
 
 **Triggers and inbound** (Settings → Triggers / Inbound). `triggers.rs` holds the pure policy and
 `orchestrator/triggers.rs` the loop: schedules that send a prompt to the Lead on a repeating clock
@@ -203,9 +205,12 @@ they are build output or third-party code in most repos. If one holds your own c
 - Worktree isolation; Codex `workspace-write` sandbox; Claude workers in `acceptEdits` with
   shell commands routed to the broker; Lead and reviewers read-only. The exception is an agent
   hired with Git isolation off: it edits the user's checkout directly (the wizard warns).
-- Approval broker: rules (path outside worktree, `rm -rf`, `git push`, `curl | sh`, `sudo` →
-  ask you, except in Full access, which approves them), then you. No silent timeouts; choices
-  mirror the provider's.
+- Approval broker: rules (path outside worktree, symlinks followed; `rm -rf`, `git push`,
+  `curl | sh`, `sudo`, `npx`/`uvx` downloads, `printenv` and `.env` reads, changes to an agent's
+  own CLI settings, git inside a nested repository → ask you, except in Full access, which
+  approves them), then you. No silent timeouts; choices mirror the provider's. The rules read
+  the command line only: what a test, a script or an interpreter does once it runs is not
+  checked (only Codex has an OS sandbox).
 - Clean-room profile for untrusted repos (`--setting-sources`, `--strict-mcp-config`).
 - Never deletes a dirty or unmerged worktree, and keeps the branch.
 - The user's branch: Codly commits and merges by itself only on `codly/…` branches. Four

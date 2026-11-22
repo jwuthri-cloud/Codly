@@ -58,7 +58,7 @@ fn balanced_allows_reads_tests_and_verify() {
         "npm run test:unit",
         "cargo test -p core",
         "pytest -q tests/test_auth.py",
-        "npx vitest run",
+        "pnpm exec vitest run",
         "go test ./...",
         "ls 2>/dev/null",
     ] {
@@ -110,9 +110,16 @@ fn risks_always_ask_even_in_autonomous_mode() {
     assert!(reason(eval(&hinted, ApprovalMode::Autonomous)).contains("network"), "provider hints count too");
 }
 
+/// The rule names what was checked ("no risk detected"), not a promise that the command
+/// stays inside the worktree: what a script or an interpreter does is not looked into.
 #[test]
-fn autonomous_allows_what_stays_inside_the_worktree() {
-    assert!(allowed(&eval(&cmd("node scripts/gen.js && npm run build"), ApprovalMode::Autonomous)));
+fn autonomous_allows_what_shows_no_risk() {
+    let v = eval(&cmd("node scripts/gen.js && npm run build"), ApprovalMode::Autonomous);
+    assert!(matches!(&v, Verdict::Allow { rule, .. } if rule == "autonomous: no risk detected"), "{v:?}");
+    for c in ["python3 -c 'print(1)'", "node -e 'console.log(1)'", "sh scripts/build.sh", "make"] {
+        assert!(allowed(&eval(&cmd(c), ApprovalMode::Autonomous)), "{c}");
+        assert!(!allowed(&eval(&cmd(c), ApprovalMode::Balanced)), "balanced asks: {c}");
+    }
     let edit = approval(ApprovalSubject::FileChange { paths: vec!["src/a.ts".into(), format!("{WT}/b.ts")], diff: None });
     assert!(allowed(&eval(&edit, ApprovalMode::Autonomous)));
     let escape = approval(ApprovalSubject::FileChange { paths: vec!["/etc/hosts".into()], diff: None });

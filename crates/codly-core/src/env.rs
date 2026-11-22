@@ -686,8 +686,25 @@ fn scrubbed(key: &str, provider: Provider) -> bool {
 /// Claude agents also get CLAUDE_CODE_DISABLE_AUTO_MEMORY=1: auto memory is one directory
 /// per repository, shared by every worktree, so parallel workers would race on one
 /// MEMORY.md (memory-knowledge §5.6); Codly's own memory replaces it.
+///
+/// Every agent's git runs with `core.fsmonitor=false`, as Codly's own git does (`git.rs`): a
+/// repository inside the worktree (a bare one in a cloned repo, or one the agent wrote) cannot
+/// make `git status` start the program its config names. Other settings of such a repository
+/// (filters, `diff.external`) still apply; `approvals.rs` asks before git runs in one.
 pub fn child_env(base: &HashMap<String, String>, provider: Provider) -> HashMap<String, String> {
     child_env_with(base, provider, None)
+}
+
+/// Add one git setting (`setting` is `key=value`, without a `'`) through
+/// `GIT_CONFIG_PARAMETERS`, where git itself keeps its `-c key=value` options: it beats every
+/// config file. It goes after what the user's shell already put there, never over it. One
+/// variable, with no KEY in its name: of the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+/// `GIT_CONFIG_VALUE_n` triple, a filter that drops `*KEY*` names (Codex's
+/// `shell_environment_policy` excludes, a secrets scrubber) removes one part, and git then
+/// refuses to run at all.
+fn git_config(env: &mut HashMap<String, String>, setting: &str) {
+    let params = env.entry("GIT_CONFIG_PARAMETERS".into()).or_default();
+    *params = format!("{} '{setting}'", params.trim()).trim_start().to_string();
 }
 
 /// `child_env` plus the opt-in key of this CLI's own vendor (`byok.rs`: ANTHROPIC_API_KEY for
@@ -700,6 +717,7 @@ pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, byok_k
     // started (in a folder that is new on the PATH) must be found when the CLI runs.
     refresh_path(&mut env);
     env.insert("TERM".into(), "dumb".into());
+    git_config(&mut env, "core.fsmonitor=false");
     match provider {
         Provider::Claude => {
             env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
@@ -1095,6 +1113,45 @@ mod tests {
         assert!(!gemini.contains_key("GEMINI_API_KEY"));
         let opencode = child_env(&base, Provider::Opencode);
         assert!(!opencode.contains_key("OPENAI_API_KEY") && !opencode.contains_key("ANTHROPIC_API_KEY"));
+    }
+
+    /// An agent's git never starts a repository's fsmonitor program; the user's own git
+    /// settings stay. The setting travels in one variable that a `*KEY*` / `*SECRET*` /
+    /// `*TOKEN*` filter keeps: half of a KEY/VALUE pair makes every git command fail.
+    #[test]
+    fn child_env_turns_git_fsmonitor_off() {
+        let env = child_env(&HashMap::new(), Provider::Claude);
+        assert_eq!(env["GIT_CONFIG_PARAMETERS"], "'core.fsmonitor=false'");
+        for name in env.keys().filter(|k| k.starts_with("GIT_")) {
+            assert!(!["KEY", "SECRET", "TOKEN"].iter().any(|word| name.contains(word)), "{name}");
+        }
+
+        let base: HashMap<String, String> = [
+            ("GIT_CONFIG_PARAMETERS", "'user.name=Me'"),
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "user.email"),
+            ("GIT_CONFIG_VALUE_0", "me@example.com"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .into();
+        let env = child_env(&base, Provider::Codex);
+        assert_eq!(env["GIT_CONFIG_PARAMETERS"], "'user.name=Me' 'core.fsmonitor=false'");
+        assert_eq!((env["GIT_CONFIG_COUNT"].as_str(), env["GIT_CONFIG_KEY_0"].as_str(), env["GIT_CONFIG_VALUE_0"].as_str()), ("1", "user.email", "me@example.com"));
+
+        // git reads it: the setting, and the ones that were there before.
+        let git = |env: &HashMap<String, String>, key: &str| {
+            let out = std::process::Command::new("git")
+                .args(["config", "--get", key])
+                .envs(env)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(git(&env, "core.fsmonitor"), "false");
+        assert_eq!(git(&env, "user.name"), "Me");
+        assert_eq!(git(&env, "user.email"), "me@example.com");
     }
 
     /// Base URLs and Vertex/ADC switches move billing off the user's plan like a key does.
