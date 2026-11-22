@@ -1114,6 +1114,12 @@ struct ItemInfo {
 struct Subagent {
     /// Its nickname and role, when Codex gave them.
     name: Option<String>,
+    /// What it was asked to do: the `prompt` of the `spawnAgent` call that names its thread.
+    prompt: Option<String>,
+    /// The key of its row in the agent's list of helpers: the `spawnAgent` call that named its
+    /// thread before the row was first told (one row for the call and its subagent), else
+    /// its thread.
+    row: Option<String>,
     /// Its running turn: stopped when the agent is.
     turn: Option<String>,
     /// Its thread's token totals before this run first heard of them.
@@ -1246,10 +1252,55 @@ impl CodexNormalizer {
         }
     }
 
-    /// The subagent's row in the agent's list of helpers, keyed by its thread.
-    fn subagent_event(&self, thread: &str, status: &str) -> EventKind {
-        let description = self.subagents.get(thread).and_then(|s| s.name.clone()).unwrap_or_default();
-        EventKind::SubAgent { call_id: thread.to_string(), description, status: status.into() }
+    /// The subagent's row in the agent's list of helpers. It says who works and on what, as far
+    /// as Codex told: "Ada (explorer): <prompt>", the name, the prompt, or "Codex subagent".
+    fn subagent_event(&mut self, thread: &str, status: &str) -> EventKind {
+        let sub = self.subagents.entry(thread.to_string()).or_default();
+        let call_id = sub.row.get_or_insert_with(|| thread.to_string()).clone();
+        let description = match (&sub.name, &sub.prompt) {
+            (Some(name), Some(prompt)) => format!("{name}: {prompt}"),
+            (name, prompt) => name.clone().or_else(|| prompt.clone()).unwrap_or_else(|| "Codex subagent".into()),
+        };
+        EventKind::SubAgent { call_id, description, status: status.into() }
+    }
+
+    /// A `spawnAgent` call names the thread it created (`receiverThreadIds`) and what it asked
+    /// of it (`prompt`). A thread whose row was not told yet takes the row of the call: the
+    /// list of helpers then has one row for the call and the subagent it started, not two.
+    fn spawned(&mut self, call: &str, item: &Value) {
+        if item["tool"] != "spawnAgent" {
+            return;
+        }
+        let threads: Vec<&str> = item["receiverThreadIds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let prompt = item["prompt"].as_str().map(str::trim).filter(|p| !p.is_empty()).map(|p| classify::truncate_chars(p, NOTICE_MAX));
+        for thread in &threads {
+            let sub = self.subagents.entry(thread.to_string()).or_default();
+            if sub.prompt.is_none() {
+                sub.prompt = prompt.clone();
+            }
+            // One row cannot stand for two subagents: a call that names several keeps its own.
+            if threads.len() == 1 && sub.row.is_none() {
+                sub.row = Some(call.to_string());
+            }
+        }
+    }
+
+    /// A message of a subagent's thread names the turn it is part of. A thread the agent got
+    /// after its `turn/started` has its running turn from here, so a stop reaches it.
+    fn subagent_in_turn(&mut self, thread: &str, turn: &Value) {
+        if let Some(turn) = turn.as_str() {
+            self.subagents.entry(thread.to_string()).or_default().turn.get_or_insert_with(|| turn.to_string());
+        }
+    }
+
+    /// The status once the agent's own turn is over. Codly takes an agent for free when its
+    /// turn ends, so the status a busy subagent keeps it at is told again, changed or not.
+    fn rest_after_turn(&mut self, out: &mut Vec<EventKind>) {
+        let st = self.idle_status();
+        if st != AgentStatus::Idle {
+            self.status = None;
+        }
+        self.set_status(st, out);
     }
 
     /// The running turns of the agent's subagents: (thread, turn).
@@ -1272,7 +1323,7 @@ impl CodexNormalizer {
         let mut out = vec![EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: None, duration_ms: None }];
         self.turn_announced = false;
         self.in_turn = false;
-        self.set_status(AgentStatus::Idle, &mut out);
+        self.rest_after_turn(&mut out);
         out
     }
 
@@ -1319,6 +1370,7 @@ impl CodexNormalizer {
                 self.set_status(st, &mut out);
             }
             "item/started" | "item/completed" => {
+                self.subagent_in_turn(thread, &p["turnId"]);
                 let item = &p["item"];
                 let (ty, id) = (item["type"].as_str().unwrap_or(""), s(item, "id"));
                 if is_tool_item(ty) {
@@ -1381,8 +1433,7 @@ impl CodexNormalizer {
                 self.turn_announced = false;
                 self.in_turn = false;
                 out.push(EventKind::TurnCompleted { status, result_text: self.last_final.take(), duration_ms: turn["durationMs"].as_i64() });
-                let st = self.idle_status();
-                self.set_status(st, &mut out);
+                self.rest_after_turn(&mut out);
             }
             "thread/status/changed" => match p["status"]["type"].as_str() {
                 Some("active") => {
@@ -1524,6 +1575,7 @@ impl CodexNormalizer {
             }
         }
         if ty == "collabAgentToolCall" {
+            self.spawned(id, item);
             out.push(EventKind::SubAgent { call_id: id.to_string(), description: s(item, "prompt"), status: "started".into() });
         }
         out.push(EventKind::ToolStarted { call_id: id.to_string(), name: ty.to_string(), activity, target: target.clone(), input, confidence: confidence.into() });
@@ -1626,7 +1678,11 @@ impl CodexNormalizer {
             out.push(EventKind::FilesChanged { call_id: Some(id.to_string()), paths, source: "provider".into() });
         }
         if ty == "collabAgentToolCall" {
-            out.push(EventKind::SubAgent { call_id: id.to_string(), description: s(item, "prompt"), status: status.to_string() });
+            self.spawned(id, item);
+            // A subagent that took the call's row and still runs keeps it open: its own end closes it.
+            if !self.subagents.values().any(|sub| sub.row.as_deref() == Some(id) && sub.turn.is_some()) {
+                out.push(EventKind::SubAgent { call_id: id.to_string(), description: s(item, "prompt"), status: status.to_string() });
+            }
         }
         let st = self.resting_status();
         self.set_status(st, out);
@@ -1758,6 +1814,7 @@ impl CodexNormalizer {
         let thread = self.subagent_thread(p).map(str::to_owned);
         let reason = match &thread {
             Some(t) => {
+                self.subagent_in_turn(t, &p["turnId"]);
                 let who = self.subagent_label(t);
                 Some(reason.map_or_else(|| format!("{who} asks for this"), |r| format!("{who}: {r}")))
             }
@@ -1801,7 +1858,9 @@ impl CodexNormalizer {
                 _ => json!({ "action": "cancel" }),
             },
         };
-        if d.choice == ApprovalChoice::Cancel {
+        // "cancel" also stops the turn that asked. Only the agent's own turn is then told as
+        // stopped by the user: a subagent's cancelled card says nothing about that turn.
+        if d.choice == ApprovalChoice::Cancel && p.thread.is_none() {
             self.interrupt_requested = true;
         }
         let mut out = Vec::new();
@@ -1861,7 +1920,7 @@ fn subagent_name(thread: &Value) -> Option<String> {
     }
 }
 
-/// How much of a hook's or a goal's own text a row shows.
+/// How much of a hook's, a goal's or a subagent prompt's own text a row shows.
 const NOTICE_MAX: usize = 300;
 
 /// The row for a hook run that ended (`HookRunSummary`). A hook that ran and said nothing
@@ -1886,12 +1945,12 @@ fn hook_row(run: &Value) -> Option<EventKind> {
             _ => return None,
         },
     };
-    let mut said = entries.iter().map(|(_, text)| *text).collect::<Vec<_>>().join(" ");
-    if said.is_empty() {
-        said = run["statusMessage"].as_str().unwrap_or("").trim().to_string();
-    }
-    let script = run["sourcePath"].as_str().and_then(|p| std::path::Path::new(p).file_name()).map(|f| format!(" ({})", f.to_string_lossy()));
-    let mut text = format!("Codex hook {}{} {did}", run["eventName"].as_str().unwrap_or("?"), script.unwrap_or_default());
+    // `statusMessage` is not what the hook said: it is the progress text of its configuration.
+    let said = entries.iter().map(|(_, text)| *text).collect::<Vec<_>>().join(" ");
+    // The file the hook comes from. The types do not say if that is its script or the file
+    // that declares it, so the row only names it.
+    let source = run["sourcePath"].as_str().and_then(|p| std::path::Path::new(p).file_name()).map(|f| format!(" ({})", f.to_string_lossy()));
+    let mut text = format!("Codex hook {}{} {did}", run["eventName"].as_str().unwrap_or("?"), source.unwrap_or_default());
     if !said.is_empty() {
         text = format!("{text}: {}", classify::truncate_chars(&said, NOTICE_MAX));
     }
@@ -2237,20 +2296,27 @@ mod tests {
         assert_eq!(notices(&norm.on_notification("thread/goal/cleared", &json!({ "threadId": "t" }))), ["Goal cleared"]);
         assert_eq!(notices(&norm.on_notification("thread/goal/updated", &goal("budgetLimited", 50000))).len(), 1, "the same goal set again is news");
 
-        let hook = |status: &str, message: Value, entries: Value| {
+        // `statusMessage` is the progress text of the hook's configuration (ConfiguredHookHandler,
+        // HookMetadata): it is never told as what the hook said.
+        let hook = |status: &str, entries: Value| {
             let run = json!({ "id": "h1", "eventName": "preToolUse", "handlerType": "command", "executionMode": "sync", "scope": "turn",
-                "sourcePath": "/Users/me/.codex/hooks/guard.sh", "source": "user", "displayOrder": 0, "status": status, "statusMessage": message,
+                "sourcePath": "/Users/me/.codex/hooks.json", "source": "user", "displayOrder": 0, "status": status, "statusMessage": "Checking the command",
                 "startedAt": 1, "completedAt": 2, "durationMs": 40, "entries": entries });
             json!({ "threadId": "t", "turnId": "u", "run": run })
         };
-        assert!(norm.on_notification("hook/started", &hook("running", Value::Null, json!([]))).is_empty());
-        assert!(norm.on_notification("hook/completed", &hook("completed", Value::Null, json!([]))).is_empty(), "a hook that ran and said nothing is no row");
-        let ev = norm.on_notification("hook/completed", &hook("blocked", Value::Null, json!([{ "kind": "feedback", "text": "rm -rf is not allowed here" }])));
-        assert_eq!(notices(&ev), ["Codex hook preToolUse (guard.sh) blocked: rm -rf is not allowed here"]);
-        let ev = norm.on_notification("hook/completed", &hook("completed", Value::Null, json!([{ "kind": "context", "text": "Branch: main" }])));
-        assert_eq!(notices(&ev), ["Codex hook preToolUse (guard.sh) added context: Branch: main"]);
-        let ev = norm.on_notification("hook/completed", &hook("failed", json!("exit code 127"), json!([])));
-        assert!(matches!(&ev[..], [EventKind::Error { message, fatal: false }] if message == "Codex hook preToolUse (guard.sh) failed: exit code 127"), "{ev:?}");
+        assert!(norm.on_notification("hook/started", &hook("running", json!([]))).is_empty());
+        assert!(norm.on_notification("hook/completed", &hook("completed", json!([]))).is_empty(), "a hook that ran and said nothing is no row");
+        let ev = norm.on_notification("hook/completed", &hook("blocked", json!([{ "kind": "feedback", "text": "rm -rf is not allowed here" }])));
+        assert_eq!(notices(&ev), ["Codex hook preToolUse (hooks.json) blocked: rm -rf is not allowed here"]);
+        let ev = norm.on_notification("hook/completed", &hook("completed", json!([{ "kind": "context", "text": "Branch: main" }])));
+        assert_eq!(notices(&ev), ["Codex hook preToolUse (hooks.json) added context: Branch: main"]);
+        let ev = norm.on_notification("hook/completed", &hook("failed", json!([{ "kind": "error", "text": "guard.sh: command not found" }])));
+        assert!(
+            matches!(&ev[..], [EventKind::Error { message, fatal: false }] if message == "Codex hook preToolUse (hooks.json) failed: guard.sh: command not found"),
+            "{ev:?}"
+        );
+        let ev = norm.on_notification("hook/completed", &hook("failed", json!([])));
+        assert!(matches!(&ev[..], [EventKind::Error { message, fatal: false }] if message == "Codex hook preToolUse (hooks.json) failed"), "{ev:?}");
     }
 
     /// A Codex subagent works on a thread of its own. No capture has one: the lines are
@@ -2301,10 +2367,14 @@ mod tests {
         let plan = json!({ "threadId": "sub", "turnId": "su1", "explanation": null, "plan": [{ "step": "build", "status": "inProgress" }] });
         assert!(norm.on_notification("turn/plan/updated", &plan).is_empty());
 
-        // The agent's own turn ends first. Its result is not the subagent's last words, the
-        // subagent's card stays open, and the agent still waits on it (no status change).
+        // The agent's own turn ends first. Its result is not the subagent's last words and the
+        // subagent's card stays open. Codly rests an agent when its turn ends, so the agent
+        // says again that it still waits on that card.
         let ev = norm.on_notification("turn/completed", &json!({ "threadId": "main", "turn": { "id": "u1", "status": "completed", "items": [] } }));
-        assert!(matches!(&ev[..], [EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, .. }]), "{ev:?}");
+        assert!(
+            matches!(&ev[..], [EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, .. }, EventKind::StatusChanged { status: AgentStatus::WaitingApproval }]),
+            "{ev:?}"
+        );
 
         // answered under the request's id; the subagent's command still runs
         let (resp, ev) = norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).unwrap();
@@ -2357,8 +2427,87 @@ mod tests {
         assert!(ev.iter().any(|e| matches!(e, EventKind::SubAgent { status, .. } if status == "failed")), "{ev:?}");
         assert!(!ev.iter().any(|e| matches!(e, EventKind::TurnCompleted { .. })), "{ev:?}");
 
-        let ev = norm.on_notification("turn/completed", &json!({ "threadId": "main", "turn": { "id": "u1", "status": "completed", "items": [] } }));
+        // A cancelled card stops the turn that asked. The subagent's is not the agent's: when
+        // the agent's own turn fails later, it is told as failed, with its error.
+        let again = approval_of(&norm.on_request(&json!(3), "item/commandExecution/requestApproval", &ask("sub", "i3")).0);
+        // the request names the subagent's turn: a stop reaches it without its turn/started
+        assert_eq!(norm.subagent_turns(), [("sub".to_string(), "x".to_string())]);
+        let (resp, _) = norm.answer(&again.id, &ApprovalDecision { choice: ApprovalChoice::Cancel, message: None, answers: None }).unwrap();
+        assert_eq!(resp, json!({ "id": 3, "result": { "decision": "cancel" } }));
+        assert!(!norm.interrupt_requested);
+
+        let own_failed = json!({ "id": "u1", "status": "failed", "items": [], "error": { "message": "stream disconnected", "codexErrorInfo": null, "additionalDetails": null } });
+        let ev = norm.on_notification("turn/completed", &json!({ "threadId": "main", "turn": own_failed }));
         assert_eq!(closed(&ev), [own.id.clone()], "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, EventKind::Error { message, fatal: false } if message == "stream disconnected")), "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Failed, .. })), "{ev:?}");
+    }
+
+    /// A subagent has one row in the list of helpers, and the row always says something. A
+    /// thread the agent got late can still be stopped. (Lines written from the codex-cli
+    /// 0.166.0 schema types: the `collabAgentToolCall` and `commandExecution` items of
+    /// ThreadItem, ItemStartedNotification, ItemCompletedNotification, ThreadStartedNotification,
+    /// Thread, TurnStartedNotification, TurnCompletedNotification.)
+    #[test]
+    fn a_subagent_has_one_row_that_says_what_it_does() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        norm.thread = Some("main".into());
+        norm.turn_started("go");
+        let rows = |ev: &[EventKind]| -> Vec<(String, String, String)> {
+            ev.iter()
+                .filter_map(|e| if let EventKind::SubAgent { call_id, description, status } = e { Some((call_id.clone(), description.clone(), status.clone())) } else { None })
+                .collect()
+        };
+        let row = |key: &str, description: &str, status: &str| (key.to_string(), description.to_string(), status.to_string());
+        let spawn = |id: &str, status: &str, threads: Value| {
+            json!({ "type": "collabAgentToolCall", "id": id, "tool": "spawnAgent", "status": status, "senderThreadId": "main", "receiverThreadIds": threads,
+                "prompt": "Find the flaky test", "model": null, "reasoningEffort": null, "agentsStates": {} })
+        };
+        let begun = |thread: &str, turn: &str, item: Value| json!({ "threadId": thread, "turnId": turn, "item": item, "startedAtMs": 1 });
+        let ended = |thread: &str, turn: &str, item: Value| json!({ "threadId": thread, "turnId": turn, "item": item, "completedAtMs": 2 });
+        let turn = |thread: &str, id: &str, status: &str| json!({ "threadId": thread, "turn": { "id": id, "status": status, "items": [] } });
+
+        // The call names its thread when it ends: the subagent takes the call's row.
+        let ev = norm.on_notification("item/started", &begun("main", "u1", spawn("k1", "inProgress", json!([]))));
+        assert_eq!(rows(&ev), [row("k1", "Find the flaky test", "started")]);
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k1", "completed", json!(["s1"]))));
+        assert_eq!(rows(&ev), [row("k1", "Find the flaky test", "completed")]);
+        let thread = json!({ "id": "s1", "parentThreadId": "main", "agentNickname": "Ada", "agentRole": "explorer", "preview": "" });
+        norm.on_notification("thread/started", &json!({ "thread": thread }));
+        let ev = norm.on_notification("turn/started", &turn("s1", "su1", "inProgress"));
+        assert_eq!(rows(&ev), [row("k1", "Ada (explorer): Find the flaky test", "running")]);
+        let ev = norm.on_notification("turn/completed", &turn("s1", "su1", "completed"));
+        assert_eq!(rows(&ev), [row("k1", "Ada (explorer): Find the flaky test", "completed")]);
+
+        // The call names its thread when it starts and ends while the subagent works: the row
+        // stays open until the subagent's turn ends.
+        let ev = norm.on_notification("item/started", &begun("main", "u1", spawn("k2", "inProgress", json!(["s2"]))));
+        assert_eq!(rows(&ev), [row("k2", "Find the flaky test", "started")]);
+        let ev = norm.on_notification("turn/started", &turn("s2", "su2", "inProgress"));
+        assert_eq!(rows(&ev), [row("k2", "Find the flaky test", "running")], "Codex gave it no name: the row says what it was asked");
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k2", "completed", json!(["s2"]))));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        let ev = norm.on_notification("turn/completed", &turn("s2", "su2", "completed"));
+        assert_eq!(rows(&ev), [row("k2", "Find the flaky test", "completed")]);
+
+        // A thread nothing named yet has a row of its own, and the row is not blank. The call
+        // that names it afterwards keeps its own row.
+        let ev = norm.on_notification("turn/started", &turn("s3", "su3", "inProgress"));
+        assert_eq!(rows(&ev), [row("s3", "Codex subagent", "running")]);
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k3", "completed", json!(["s3"]))));
+        assert_eq!(rows(&ev), [row("k3", "Find the flaky test", "started"), row("k3", "Find the flaky test", "completed")]);
+        let ev = norm.on_notification("turn/completed", &turn("s3", "su3", "completed"));
+        assert_eq!(rows(&ev), [row("s3", "Find the flaky test", "completed")]);
+
+        // A thread the agent got after its turn/started: its items name its turn, so a stop
+        // reaches it. And the agent is not free while that subagent works, whatever its own turn does.
+        assert!(norm.subagent_turns().is_empty());
+        let cmd = json!({ "type": "commandExecution", "id": "c4", "pluginId": null, "scriptPath": null, "command": "cargo test", "cwd": "/w", "processId": null,
+            "source": "agent", "status": "inProgress", "commandActions": [], "aggregatedOutput": null, "exitCode": null, "durationMs": null });
+        norm.on_notification("item/started", &begun("s4", "su4", cmd));
+        assert_eq!(norm.subagent_turns(), [("s4".to_string(), "su4".to_string())]);
+        let ev = norm.turn_failed();
+        assert!(matches!(&ev[..], [EventKind::TurnCompleted { status: TurnStatus::Failed, .. }, EventKind::StatusChanged { status: AgentStatus::Working }]), "{ev:?}");
     }
 
     #[test]
