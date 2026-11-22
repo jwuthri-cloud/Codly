@@ -6,19 +6,26 @@ describe('palette confirmation', () => {
   const go = { id: 'go:plan' };
 
   it('a row that cannot be taken back runs on the second Enter only', () => {
-    const first = press(merge, null);
+    const first = press(merge, null, false);
     expect(first).toEqual({ run: false, armed: 'plan:merge:p1' });
-    expect(press(merge, first.armed)).toEqual({ run: true, armed: null });
+    expect(press(merge, first.armed, false)).toEqual({ run: true, armed: null });
+  });
+
+  it('a held Enter or a double-click never confirms: only a new press does', () => {
+    const first = press(merge, null, false);
+    expect(press(merge, first.armed, true)).toEqual({ run: false, armed: 'plan:merge:p1' });
+    expect(press(merge, null, true)).toEqual({ run: false, armed: null });
+    expect(press(merge, first.armed, false)).toEqual({ run: true, armed: null });
   });
 
   it('arming one row never confirms another', () => {
     const deny = { id: 'ap:no:a1', confirm: 'Deny?' };
-    expect(press(deny, 'plan:merge:p1')).toEqual({ run: false, armed: 'ap:no:a1' });
+    expect(press(deny, 'plan:merge:p1', false)).toEqual({ run: false, armed: 'ap:no:a1' });
   });
 
   it('an ordinary row runs at once and lets an armed row go', () => {
-    expect(press(go, null)).toEqual({ run: true, armed: null });
-    expect(press(go, 'plan:merge:p1')).toEqual({ run: true, armed: null });
+    expect(press(go, null, false)).toEqual({ run: true, armed: null });
+    expect(press(go, 'plan:merge:p1', false)).toEqual({ run: true, armed: null });
   });
 
   it('says in full what an approval asks for', () => {

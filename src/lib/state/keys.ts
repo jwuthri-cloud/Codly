@@ -5,6 +5,7 @@
 // ponytail: hand-rolled instead of tinykeys — one listener, sequences included.
 import type { Approval } from '../gen/Approval';
 import { openWorkspace, resolveApproval, runPlan, stopThread } from './actions';
+import { escStep } from './esc';
 import { requests } from './requests.svelte';
 import { store } from './store.svelte';
 import { ROOMS, isRequestThread, ui, type Room } from './ui.svelte';
@@ -159,14 +160,20 @@ export function installKeys(): () => void {
         (e.target as HTMLElement).blur();
         return;
       }
-      if (ui.artifactOpen) ui.artifactOpen = null;
-      else if (ui.selection) ui.selection = null;
-      else if (ui.mode === 'office' || ui.mode === 'map') ui.mode = 'blend';
-      // Nothing left to close: on Home, Esc stops the running turn of the conversation you read.
-      // Not while a popup is open (this Esc closes it), and not from inside the office (Esc there
-      // clears its own selection).
-      else if (ui.room === 'home' && !document.querySelector('[role="dialog"], [role="menu"]') && !(e.target as HTMLElement).closest?.('[role="application"]'))
-        stopThread(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
+      // One step per press: close, deselect, leave the full office, then stop the running turn.
+      const step = escStep({
+        repeat: e.repeat,
+        artifactOpen: !!ui.artifactOpen,
+        selection: !!ui.selection,
+        mode: ui.mode,
+        room: ui.room,
+        popupOpen: !!document.querySelector('[role="dialog"], [role="menu"]'),
+        inOffice: !!(e.target as HTMLElement).closest?.('[role="application"]'),
+      });
+      if (step === 'close-artifact') ui.artifactOpen = null;
+      else if (step === 'deselect') ui.selection = null;
+      else if (step === 'leave-office') ui.mode = 'blend';
+      else if (step === 'stop') stopThread(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
       return;
     }
 

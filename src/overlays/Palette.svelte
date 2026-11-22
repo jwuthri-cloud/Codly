@@ -283,8 +283,9 @@
     tick().then(() => inputEl?.focus());
   }
 
-  function exec(r: Row, alt = false) {
-    const p = press(r, armed);
+  /** `again`: a held ↵ repeating, or a later click of a double-click (see ./palette.ts). */
+  function exec(r: Row, alt: boolean, again: boolean) {
+    const p = press(r, armed, again);
     armed = p.armed;
     if (!p.run) return;
     remember(r.id);
@@ -337,7 +338,7 @@
     } else if (e.key === 'Enter') {
       e.preventDefault();
       const r = withAsk[active];
-      if (r) exec(r, e.metaKey || e.ctrlKey);
+      if (r) exec(r, e.metaKey || e.ctrlKey, e.repeat);
     } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       e.stopPropagation();
@@ -404,7 +405,7 @@
           aria-selected={i === active}
           data-active={i === active}
           onpointermove={() => move(i)}
-          onclick={(e) => exec(r, e.metaKey || e.ctrlKey)}
+          onclick={(e) => exec(r, e.metaKey || e.ctrlKey, e.detail > 1)}
         >
           <span class="lead">
             {#if r.agentId}<Portrait agent={store.agentMap.get(r.agentId)} size={20} />

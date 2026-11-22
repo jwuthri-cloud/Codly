@@ -10,7 +10,7 @@ import { store } from '../../lib/state/store.svelte';
 import { toasts } from '../../lib/state/toasts.svelte';
 import { ui } from '../../lib/state/ui.svelte';
 import { mkAgent } from '../../office/demo/script';
-import { draftSlot, loadDraft, nextAttId, saveDraft, type Att } from '../drafts';
+import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from '../drafts';
 import { canRetry, messageOf, troublesOf, troubleTitle } from '../outcomes';
 import { recall } from '../recall';
 import { buildSpine } from '../spine';
@@ -168,6 +168,16 @@ describe('composer drafts', () => {
 
   it('attachment ids never repeat, so kept files and new ones can share a list', () => {
     expect(new Set([file('a').id, file('b').id, file('c').id]).size).toBe(3);
+  });
+
+  it('Edit on an earlier message never replaces a draft; other seeds do, as before', () => {
+    const edit = { text: 'the old message', keep: true };
+    expect(seedDraft('half a prompt', edit)).toEqual({ text: 'half a prompt', kept: true });
+    expect(seedDraft('', edit)).toEqual({ text: 'the old message', kept: false });
+    expect(seedDraft('  \n', edit)).toEqual({ text: 'the old message', kept: false });
+    // Edit pressed twice on the same message: nothing to warn about.
+    expect(seedDraft('the old message', edit)).toEqual({ text: 'the old message', kept: false });
+    expect(seedDraft('half a prompt', { text: 'Change the plan: ', keep: false })).toEqual({ text: 'Change the plan: ', kept: false });
   });
 });
 

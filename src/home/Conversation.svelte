@@ -210,7 +210,7 @@
               {#if !q && !failed}
                 <div class="acts mine">
                   <button class="act" onclick={() => copyText(it.msg.text, 'Message copied')}><Icon name="copy" size={11} />Copy</button>
-                  <button class="act" onclick={() => ui.seedComposer(thread, it.msg.text)} data-tip="Put it back in the composer, to change and send again">Edit</button>
+                  <button class="act" onclick={() => ui.seedComposer(thread, it.msg.text, true)} data-tip="Put it back in the composer, to change and send again">Edit</button>
                 </div>
               {/if}
             {:else if it.kind === 'system'}

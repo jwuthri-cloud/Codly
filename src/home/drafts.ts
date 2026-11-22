@@ -25,6 +25,15 @@ export function loadDraft(slot: string): Draft {
   return drafts.get(slot) ?? { text: '', files: [] };
 }
 
+/**
+ * What the composer shows when another surface hands it a text (a seed). A seed marked `keep`
+ * gives way to what you are typing: the draft stays (`kept`) and the seed is dropped.
+ */
+export function seedDraft(draft: string, seed: { text: string; keep: boolean }): { text: string; kept: boolean } {
+  const kept = seed.keep && !!draft.trim() && draft !== seed.text;
+  return { text: kept ? draft : seed.text, kept };
+}
+
 /** Keep a draft; an empty one is forgotten. `files` is kept as given, so an upload still on its way lands in it. */
 export function saveDraft(slot: string, text: string, files: Att[]): void {
   if (text || files.length) drafts.set(slot, { text, files });

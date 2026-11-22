@@ -153,7 +153,7 @@ class Ui {
   });
 
   /** Composer draft injected by other surfaces (palette "Ask the Lead…", file mentions). */
-  composerSeed = $state<{ thread: string; text: string; nonce: number } | null>(null);
+  composerSeed = $state<{ thread: string; text: string; keep: boolean; nonce: number } | null>(null);
 
   systemDark = $state(mq('(prefers-color-scheme: dark)')?.matches ?? true);
   reducedMotion = $state(mq('(prefers-reduced-motion: reduce)')?.matches ?? false);
@@ -290,10 +290,11 @@ class Ui {
     if (!this.keptPlans.includes(id)) this.keptPlans = [...this.keptPlans, id];
   }
 
-  seedComposer(thread: string, text: string) {
+  /** `keep`: a draft being typed there is not replaced (the composer says so). */
+  seedComposer(thread: string, text: string, keep = false) {
     if (isRequestThread(thread)) this.request = thread;
     this.thread = thread;
-    this.composerSeed = { thread, text, nonce: Math.random() };
+    this.composerSeed = { thread, text, keep, nonce: Math.random() };
     this.go('home');
     if (this.mode === 'office') this.mode = 'blend';
   }

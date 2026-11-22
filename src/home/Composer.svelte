@@ -3,10 +3,11 @@
   shows at once, and if the agent is mid-turn it queues (the conversation says so). Start with
   `@agent` to talk to one agent 1:1 (the thread switches and shows as a chip); `@` mid-sentence
   mentions, `#` refers to a task. Esc on an empty line stops the running turn; ↑ on an empty line
-  brings back what you sent. A draft (text and files) is kept when the composer leaves the screen.
+  brings back what you sent. A draft (text and files) is kept when the composer leaves the screen,
+  and Edit on an earlier message does not replace it.
 -->
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { api } from '../lib/api';
   import { sendChat, setRequestPrefs, stopThread } from '../lib/state/actions';
   import { toast } from '../lib/state/toasts.svelte';
@@ -22,7 +23,7 @@
   import Portrait from '../components/Portrait.svelte';
   import LeadControls, { MODES } from './LeadControls.svelte';
   import AgentControls from './AgentControls.svelte';
-  import { draftSlot, loadDraft, nextAttId, saveDraft, type Att } from './drafts';
+  import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from './drafts';
   import { recall, type Recalled } from './recall';
 
   interface Props {
@@ -88,8 +89,11 @@
   $effect(() => {
     const seed = ui.composerSeed;
     if (seed && seed.thread === thread) {
-      text = seed.text;
       ui.composerSeed = null;
+      // A message ↑ brought back and left as it was is not a draft.
+      const next = untrack(() => seedDraft(recalled?.text === text ? '' : text, seed));
+      text = next.text;
+      if (next.kept) toast({ kind: 'info', title: 'Clear the composer to edit this message', body: 'What you typed is still there.' });
       tick().then(() => {
         resize();
         ta?.focus();
@@ -238,8 +242,9 @@
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); mention = null; return; }
     }
     // Esc on an empty line stops the running turn (an Esc that cancelled a dictation did its job
-    // already). With text typed, or nothing running, Esc leaves the field as before.
-    if (e.key === 'Escape' && !e.defaultPrevented && !text.trim() && stopThread(thread)) {
+    // already, and the repeats of a held key stop nothing). With text typed, or nothing running,
+    // Esc leaves the field as before.
+    if (e.key === 'Escape' && !e.repeat && !e.defaultPrevented && !text.trim() && stopThread(thread)) {
       e.preventDefault();
       return;
     }
