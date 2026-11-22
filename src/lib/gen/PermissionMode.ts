@@ -2,7 +2,7 @@
 
 /**
  * How a 1:1 Claude agent works with edits: Claude Code's permission mode, which Codly can
- * switch on a live session. Commands and everything else the CLI asks about still go through
- * Codly's approval rules, whichever mode is on.
+ * switch on a live session. A mode changes what the CLI asks Codly about. What it does ask
+ * still goes through Codly's approval rules; what it no longer asks, they never see.
  */
 export type PermissionMode = "ask" | "accept_edits" | "plan";

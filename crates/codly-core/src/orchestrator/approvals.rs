@@ -12,9 +12,10 @@
 //!    that is not read-only, where only touching Codly's own data dir or the agent's own CLI
 //!    settings still asks;
 //! 3. Codly's own MCP tools are allowed in every mode;
-//! 4. then the mode: strict asks for everything else; read-only agents get only reads in
-//!    every other mode; balanced allows read-only actions, the task's own verify commands and
-//!    test runners; autonomous allows anything with no detected risk; full allows everything.
+//! 4. then the mode: strict asks for everything else; read-only agents (a 1:1 Claude agent
+//!    that plans first is one until you accept its plan) get only reads in every other mode;
+//!    balanced allows read-only actions, the task's own verify commands and test runners;
+//!    autonomous allows anything with no detected risk; full allows everything.
 //!
 //! Only `allow_once` is ever chosen automatically, never a session or permanent grant.
 //!
@@ -49,8 +50,8 @@ pub struct PolicyCtx<'a> {
     pub worktree: Option<&'a Path>,
     /// The task's own verify commands (always allowed in balanced mode).
     pub verify: &'a [String],
-    /// Lead, reviewers, between-task chats: only reads are ever auto-allowed, in any mode
-    /// (the Lead's working directory is the user's own checkout).
+    /// Lead, reviewers, between-task chats, a 1:1 agent that plans first: only reads are ever
+    /// auto-allowed, in any mode (the Lead's working directory is the user's own checkout).
     pub read_only: bool,
     /// You trust it to edit on its own (`career::trusts`, Junior): file changes inside the worktree are approved in balanced mode.
     pub edits: bool,

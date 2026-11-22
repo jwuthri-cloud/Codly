@@ -130,6 +130,10 @@ export class MockControls {
     const a = this.sim.agents.get(id);
     if (!a) throw new Error('Unknown agent');
     if (a.role !== 'solo' || a.provider !== 'claude') throw new Error('only a 1:1 Claude agent has a mode to switch');
+    const permissions = this.sim.requestPrefs[`agent:${id}`]?.approval_mode ?? this.sim.settings.approval_mode;
+    if (mode === 'accept_edits' && permissions === 'strict') {
+      throw new Error(`${a.name}'s permissions are "Ask first": every change asks you, so it cannot accept edits by itself. Give it other permissions first.`);
+    }
     if ((a.permission_mode ?? 'ask') === mode) return a;
     this.note(id, `${a.name} now works in the mode "${mode.replace('_', ' ')}"`);
     return this.sim.patchAgent(id, { permission_mode: mode });

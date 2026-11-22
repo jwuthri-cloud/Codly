@@ -47,6 +47,19 @@ describe('Claude session controls', () => {
     expect(PERMISSION_MODES.map((m) => m.id)).toEqual(['ask', 'accept_edits', 'plan']);
   });
 
+  it('says what each mode takes out of your permissions, and what it does not', () => {
+    const hint = (id: string) => PERMISSION_MODES.find((m) => m.id === id)?.hint ?? '';
+    // Recorded (Claude Code 2.1.311): in "accept edits" a shell command that writes a file in
+    // the worktree runs with no request, so Codly's permissions never see it.
+    expect(hint('accept_edits')).toContain('shell commands that change files in its worktree');
+    expect(hint('accept_edits')).toContain('your permissions do not see them');
+    expect(hint('accept_edits')).toContain('Not available with “Ask first” permissions');
+    expect(hint('accept_edits')).not.toContain('Commands still follow your permissions');
+    // "Plan first" promises what the core enforces: only reads are approved before the plan is.
+    expect(hint('plan')).toContain('Codly approves only reads for it, whatever your permissions');
+    expect(hint('plan')).not.toContain('changes nothing');
+  });
+
   it('says how full the context is, with the point where Claude compacts by itself', () => {
     const usage = { used_tokens: 6035, max_tokens: 1_000_000, percent: 1, auto_compact_at: 967_000, parts: [] };
     expect(contextLine(usage)).toBe('6k of 1M tokens (1%) · compacts by itself at 967k');

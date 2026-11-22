@@ -1988,8 +1988,8 @@ impl ControlState {
 }
 
 /// How a 1:1 Claude agent works with edits: Claude Code's permission mode, which Codly can
-/// switch on a live session. Commands and everything else the CLI asks about still go through
-/// Codly's approval rules, whichever mode is on.
+/// switch on a live session. A mode changes what the CLI asks Codly about. What it does ask
+/// still goes through Codly's approval rules; what it no longer asks, they never see.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -1997,9 +1997,12 @@ pub enum PermissionMode {
     /// It asks before every edit (Claude Code's `default`).
     #[default]
     Ask,
-    /// Edits inside its worktree are made without asking (`acceptEdits`).
+    /// Edits inside its worktree are made without asking, and so are shell commands that write
+    /// files there (`acceptEdits`). The approval rules never see those, so the mode is refused
+    /// where your permissions are "ask first" (`ApprovalMode::Strict`).
     AcceptEdits,
-    /// It reads and plans, changes nothing, and shows you its plan (`plan`).
+    /// It reads and plans, and shows you its plan (`plan`). Until you accept the plan, the
+    /// approval rules approve only reads for it, in every approval mode.
     Plan,
 }
 

@@ -16,8 +16,16 @@
 //!
 //! - **Mode** (a 1:1 agent): ask for edits, accept edits, or plan first. It is kept on the
 //!   agent and set again on every run. It changes what the CLI asks about, never what Codly
-//!   answers: every request still goes through the approval broker, a plan is always yours to
-//!   accept, and Codly never asks for a mode that decides in its place.
+//!   answers: every request the CLI sends still goes through the approval broker, and a plan
+//!   is always yours to accept. Two rules keep a mode under your permissions:
+//!   - In "accept edits" the CLI does not ask about edits inside the worktree, nor about shell
+//!     commands that write files there (recorded: `echo hi > inside.txt` ran with no request,
+//!     a `touch` outside the worktree asked; deleting or moving a file with a command was not
+//!     recorded in this mode, and Codly counts it as not asked either). The broker never sees
+//!     those. So the mode is refused where your permissions are "ask first" (strict: every
+//!     change asks you), and it ends when you choose them (`permissions_changed`).
+//!   - In "plan first" the broker approves only reads, in every approval mode, until you accept
+//!     the plan (ingest.rs `broker`).
 //! - **Compact now** (a 1:1 agent): `/compact` as a turn of its own, between turns.
 //! - **Context** reads how full the context is. The model switch (`set_agent_model`, runs.rs)
 //!   uses the same path.
@@ -406,6 +414,12 @@ impl Inner {
         if agent.task_id.is_some() || chat == Some(false) {
             bail!("{} is on a task: its mode can change when the task is done", agent.name);
         }
+        if mode == PermissionMode::AcceptEdits && self.asks_first(agent_id) {
+            bail!(
+                "{}'s permissions are \"Ask first\": every change asks you, so it cannot accept edits by itself. Give it other permissions first.",
+                agent.name
+            );
+        }
         if agent.permission_mode.unwrap_or_default() == mode {
             return Ok(agent);
         }
@@ -425,6 +439,9 @@ impl Inner {
         if agent.provider != Provider::Claude || role != Role::Solo || read_only {
             return;
         }
+        if mode == PermissionMode::AcceptEdits && self.asks_first(&agent.id) {
+            return self.end_accept_edits(agent); // the CLI starts in "ask for edits"
+        }
         let answer = match self.ask_session(&agent.id, SessionRequest::PermissionMode(mode)) {
             Ok(answer) => answer,
             // Stopped while it started: there is no session to set up.
@@ -434,14 +451,62 @@ impl Inner {
         tokio::spawn(async move {
             let Err(e) = Self::session_answer(answer).await else { return };
             // The CLI stayed in "ask for edits", the careful one: the switch shows that, and why.
-            let (ws, run) = match lock(&me.live).get(&id) {
-                Some(l) => (l.workspace_id.clone(), Some(l.run_id.clone())),
-                None => (me.store.agent_workspace(&id).ok().flatten(), None),
-            };
-            let message = format!("{name} could not go back to the mode \"{}\" ({e}). It asks before every edit instead.", mode.label());
-            let _ = me.emit(ws.as_deref(), row(Some(id.as_str()), None, run.as_deref(), EventKind::Error { message, fatal: false }));
+            me.mode_problem(&id, format!("{name} could not go back to the mode \"{}\" ({e}). It asks before every edit instead.", mode.label()));
             let _ = me.update_agent(&id, |a| a.permission_mode = None);
         });
+    }
+
+    /// A mode switch Codly made by itself did not happen: say so in the agent's timeline.
+    fn mode_problem(&self, agent_id: &str, message: String) {
+        let (ws, run) = match lock(&self.live).get(agent_id) {
+            Some(l) => (l.workspace_id.clone(), Some(l.run_id.clone())),
+            None => (self.store.agent_workspace(agent_id).ok().flatten(), None),
+        };
+        let _ = self.emit(ws.as_deref(), row(Some(agent_id), None, run.as_deref(), EventKind::Error { message, fatal: false }));
+    }
+
+    /// Are the permissions of the agent's own conversation "ask first" (strict: every change
+    /// asks you)? The broker reads the same choice for a 1:1 chat.
+    fn asks_first(&self, agent_id: &str) -> bool {
+        let ws = self.store.agent_workspace(agent_id).ok().flatten();
+        self.approval_mode_for(ws.as_deref(), Some(&format!("agent:{agent_id}"))) == ApprovalMode::Strict
+    }
+
+    /// "Accept edits" cannot stay where every change asks you (`asks_first`): the agent's switch
+    /// goes back to "ask for edits", on record. The caller sees to a live session first.
+    fn end_accept_edits(&self, agent: &Agent) {
+        self.control_decision(&agent.id, format!("{} asks for edits again: its permissions are \"Ask first\", where every change asks you", agent.name));
+        if let Err(e) = self.update_agent(&agent.id, |a| a.permission_mode = Some(PermissionMode::Ask)) {
+            tracing::warn!("{}'s mode not recorded: {e}", agent.name);
+        }
+    }
+
+    /// Your permissions changed, in Settings or for one conversation. Where they are now "ask
+    /// first", a 1:1 agent in "accept edits" goes back to "ask for edits": its live
+    /// conversation at once, before its switch says so.
+    pub(super) async fn permissions_changed(&self) {
+        let agents = match self.store.all_agents() {
+            Ok(agents) => agents,
+            Err(e) => return tracing::warn!("permission modes not checked after a change of permissions: {e}"),
+        };
+        for agent in agents.iter().filter(|a| a.permission_mode == Some(PermissionMode::AcceptEdits) && self.asks_first(&a.id)) {
+            // Its run of a task is no conversation in this mode (`restore_permission_mode`).
+            let chat = lock(&self.live).get(&agent.id).is_some_and(|l| l.role == Role::Solo && !l.read_only);
+            if chat {
+                // Starting or shutting down: no session takes the request. A run that is
+                // starting sets no mode (`restore_permission_mode` asks the same question).
+                let Ok(answer) = self.ask_session(&agent.id, SessionRequest::PermissionMode(PermissionMode::Ask)) else { continue };
+                if let Err(e) = Self::session_answer(answer).await {
+                    let message = format!(
+                        "{} did not leave the mode \"accept edits\" ({e}), although its permissions are now \"Ask first\". Stop it: its next run asks for edits.",
+                        agent.name
+                    );
+                    self.mode_problem(&agent.id, message);
+                    continue;
+                }
+            }
+            self.end_accept_edits(agent);
+        }
     }
 
     /// The CLI changed its permission mode by itself (`adapters::permission_mode_changed`):

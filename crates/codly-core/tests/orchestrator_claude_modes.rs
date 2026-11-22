@@ -12,7 +12,7 @@ use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionRequest, 
 use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
@@ -49,13 +49,16 @@ fn claude() -> CliInfo {
 #[derive(Default)]
 struct Seen {
     /// What reached the agent, in order: "prompt:<text>", "mode:<cli name>", "model:<name>",
-    /// "context".
+    /// "context", and the answer to a command it asked about: "allowed:<command>" or
+    /// "denied:<command>".
     log: Vec<String>,
     /// The run id of every spawn, in order.
     runs: Vec<String>,
     shutdowns: u32,
     /// Knob: the CLI refuses a mode switch.
     refuses_modes: bool,
+    /// Ends the turn of a prompt with "HOLD-THE-TURN".
+    release: Arc<Notify>,
 }
 
 impl Seen {
@@ -65,7 +68,10 @@ impl Seen {
 }
 
 /// A fake Claude. A prompt with "slow" takes 300 ms; one with "plan accepted" ends with the
-/// CLI leaving plan mode by itself, as Claude Code does when its plan is accepted.
+/// CLI leaving plan mode by itself, as Claude Code does when its plan is accepted. The turn of
+/// a prompt with "HOLD-THE-TURN" ends when the test says so (`Seen::release`), and one that
+/// ends in "ASK-TO-RUN: <command>" asks to run that command and ends with the answer. Session
+/// requests are answered during such a turn too, as the CLI answers them.
 struct Fake(Arc<Mutex<Seen>>);
 
 impl Spawner for Fake {
@@ -73,13 +79,18 @@ impl Spawner for Fake {
         let seen = self.0.clone();
         Box::pin(async move {
             let (tx, mut rx) = mpsc::unbounded_channel::<AgentCmd>();
+            let (agent_id, run_id) = (spec.agent_id.clone(), spec.run_id.clone());
             let send = {
-                let (agent_id, run_id) = (spec.agent_id.clone(), spec.run_id.clone());
+                let (agent_id, run_id) = (agent_id.clone(), run_id.clone());
                 move |kind| {
                     let _ = events.send(AdapterEvent { agent_id: agent_id.clone(), run_id: run_id.clone(), kind });
                 }
             };
-            seen.lock().unwrap().runs.push(spec.run_id.clone());
+            let release = {
+                let mut s = seen.lock().unwrap();
+                s.runs.push(spec.run_id.clone());
+                s.release.clone()
+            };
             send(EventKind::SessionStarted {
                 provider: spec.provider,
                 model: None,
@@ -90,7 +101,23 @@ impl Spawner for Fake {
                 tools: vec![],
             });
             tokio::spawn(async move {
-                while let Some(cmd) = rx.recv().await {
+                let done = || EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) };
+                // A turn that waits for the test's word.
+                let mut held = false;
+                // The command of a turn that waits for its answer.
+                let mut asked: Option<String> = None;
+                loop {
+                    let cmd = tokio::select! {
+                        cmd = rx.recv() => match cmd {
+                            Some(cmd) => cmd,
+                            None => break,
+                        },
+                        _ = release.notified(), if held => {
+                            held = false;
+                            send(done());
+                            continue;
+                        }
+                    };
                     match cmd {
                         AgentCmd::Prompt(text) => {
                             seen.lock().unwrap().log.push(format!("prompt:{text}"));
@@ -101,7 +128,36 @@ impl Spawner for Fake {
                             if text.contains("plan accepted") {
                                 send(permission_mode_changed(PermissionMode::Ask));
                             }
-                            send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
+                            if let Some((_, command)) = text.rsplit_once("ASK-TO-RUN: ") {
+                                let command = command.trim().to_string();
+                                let approval = Approval {
+                                    id: new_id(),
+                                    agent_id: agent_id.clone(),
+                                    run_id: run_id.clone(),
+                                    task_id: None,
+                                    call_id: Some("c1".into()),
+                                    subject: ApprovalSubject::Command { command: command.clone(), cwd: None },
+                                    reason: None,
+                                    choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny],
+                                    risks: vec![],
+                                    status: ApprovalStatus::Pending,
+                                    decided_by: None,
+                                    created_at: now_ms(),
+                                };
+                                send(EventKind::ApprovalRequested { approval });
+                                asked = Some(command);
+                            } else if text.contains("HOLD-THE-TURN") {
+                                held = true;
+                            } else {
+                                send(done());
+                            }
+                        }
+                        AgentCmd::Approval { decision, .. } => {
+                            if let Some(command) = asked.take() {
+                                let answer = if decision.choice == ApprovalChoice::Deny { "denied" } else { "allowed" };
+                                seen.lock().unwrap().log.push(format!("{answer}:{command}"));
+                                send(done());
+                            }
                         }
                         AgentCmd::Session { request, reply } => {
                             let mut s = seen.lock().unwrap();
@@ -137,7 +193,7 @@ impl Spawner for Fake {
                             send(EventKind::Exited { code: Some(0) });
                             break;
                         }
-                        AgentCmd::Interrupt | AgentCmd::Approval { .. } => {}
+                        AgentCmd::Interrupt => {}
                     }
                 }
             });
@@ -201,6 +257,22 @@ async fn live_agent(dir: &Path, seen: &Arc<Mutex<Seen>>) -> (Arc<Core>, String) 
     let (core, id) = hired_agent(dir, seen).await;
     turn(&core, &id, "hello").await;
     (core, id)
+}
+
+/// Turns of the agent that Codly has seen start.
+async fn turns_started(core: &Core, id: &str) -> usize {
+    let events = core.events(Some(id), None, 500).await.unwrap();
+    events.iter().filter(|e| matches!(e.kind, EventKind::TurnStarted { .. })).count()
+}
+
+/// The modes the CLI was asked for, in order, by the name the CLI gives them.
+fn modes_asked(seen: &Arc<Mutex<Seen>>) -> Vec<String> {
+    seen.lock().unwrap().log.iter().filter_map(|l| l.strip_prefix("mode:").map(String::from)).collect()
+}
+
+/// The last thing that reached the agent.
+fn last_seen(seen: &Arc<Mutex<Seen>>) -> String {
+    seen.lock().unwrap().log.last().cloned().unwrap_or_default()
 }
 
 /// Kill the agent's process and wait until it is gone.
@@ -330,6 +402,172 @@ async fn a_live_claude_agent_changes_its_model_without_a_restart() {
         assert!(!s.log.iter().any(|l| l.starts_with("model:opus")), "{:?}", s.log);
         assert_eq!(s.shutdowns, 1);
     }
+    core.shutdown().await;
+}
+
+/// Before, a model change was refused while a turn ran ("is still working"). Claude Code takes
+/// `set_model` during a turn (recorded), so the switch reaches the session the turn runs in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_switch_reaches_the_live_session_during_a_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let run = agent(&core, &id).await.run_id;
+
+    core.send_chat(&format!("agent:{id}"), "HOLD-THE-TURN").await.unwrap();
+    wait_for("the turn to start", async || (turns_started(&core, &id).await == 2).then_some(())).await;
+
+    let a = core.set_agent_model(&id, Some("sonnet".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("sonnet"));
+    assert_eq!(last_seen(&seen), "model:sonnet", "the session got the model while its turn ran");
+    assert_eq!(turns_done(&core, &id).await, 1, "the turn it was switched in is not over");
+    assert_eq!(seen.lock().unwrap().shutdowns, 0);
+    assert_eq!(agent(&core, &id).await.run_id, run, "the same run goes on");
+
+    // The turn ends as any other, in the same process.
+    seen.lock().unwrap().release.notify_one();
+    settled(&core, &id, 2).await;
+    assert_eq!(agent(&core, &id).await.run_id, run);
+    assert_eq!(seen.lock().unwrap().runs.len(), 1);
+    core.shutdown().await;
+}
+
+/// Before, a 1:1 agent on a task could not change its model ("is on a task": a restart would
+/// strand the task). The live switch needs no restart, so the task's run takes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_1_to_1_agent_on_a_task_changes_its_model_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = hired_agent(dir.path(), &seen).await;
+
+    // A task you give it: it works on it, in a turn that stays open.
+    let task = core.create_task("Say hello", "HOLD-THE-TURN and say hello").await.unwrap();
+    core.assign_task(&task.id, Some(&id)).await.unwrap();
+    wait_for("the agent to work on its task", async || seen.lock().unwrap().prompts().iter().any(|p| p.contains("HOLD-THE-TURN")).then_some(())).await;
+    let before = agent(&core, &id).await;
+    assert_eq!(before.task_id.as_deref(), Some(task.id.as_str()));
+
+    let a = core.set_agent_model(&id, Some("sonnet".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("sonnet"));
+    assert_eq!(last_seen(&seen), "model:sonnet");
+    assert_eq!(seen.lock().unwrap().shutdowns, 0, "the task's run was not stopped");
+    let after = agent(&core, &id).await;
+    assert_eq!((after.run_id, after.task_id), (before.run_id, before.task_id), "the same run, still on its task");
+
+    // The CLI's default model has no live request: on a task that switch is still refused.
+    let e = core.set_agent_model(&id, None).await.unwrap_err().to_string();
+    assert!(e.contains("is on a task"), "{e}");
+    assert_eq!(seen.lock().unwrap().shutdowns, 0);
+    core.shutdown().await;
+}
+
+/// "Plan first" promises that nothing changes before you accept the plan. The approval rules
+/// keep that promise for what the CLI asks about: full access allows a write for an agent that
+/// asks for edits, and only reads for one that plans.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_that_plans_first_gets_only_reads_approved_until_its_plan_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    core.update_settings(Settings { approval_mode: ApprovalMode::Full, ..core.settings() }).await.unwrap();
+
+    // Full access, "ask for edits": the rules allow the write.
+    turn(&core, &id, "ASK-TO-RUN: touch notes.txt").await;
+    assert_eq!(last_seen(&seen), "allowed:touch notes.txt");
+
+    // Plan first: the same write waits for you, and the record says why.
+    core.set_agent_permission_mode(&id, PermissionMode::Plan).await.unwrap();
+    let turns = turns_done(&core, &id).await;
+    core.send_chat(&format!("agent:{id}"), "ASK-TO-RUN: touch notes.txt").await.unwrap();
+    let card = wait_for("the write to wait for you", async || core.snapshot().await.unwrap().approvals.into_iter().next()).await;
+    wait_for("the broker to ask", async || {
+        let events = core.events(None, None, 500).await.unwrap();
+        events
+            .iter()
+            .any(|e| {
+                matches!(&e.kind, EventKind::Decision { summary, detail, .. }
+                if summary.starts_with("asking you") && summary.contains("its mode is \"plan first\"") && detail["approval_id"] == card.id.as_str())
+            })
+            .then_some(())
+    })
+    .await;
+    assert!(last_seen(&seen).starts_with("prompt:"), "the agent has no answer yet");
+    core.resolve_approval(&card.id, ApprovalDecision { choice: ApprovalChoice::Deny, message: None, answers: None }).await.unwrap();
+    settled(&core, &id, turns + 1).await;
+    assert_eq!(last_seen(&seen), "denied:touch notes.txt");
+    // A read is approved as before.
+    turn(&core, &id, "ASK-TO-RUN: cat README.md").await;
+    assert_eq!(last_seen(&seen), "allowed:cat README.md");
+
+    // You accept its plan, Claude Code leaves plan mode by itself: full access counts again.
+    turn(&core, &id, "plan accepted").await;
+    wait_for("the agent's mode to follow the CLI", async || (agent(&core, &id).await.permission_mode == Some(PermissionMode::Ask)).then_some(())).await;
+    turn(&core, &id, "ASK-TO-RUN: touch notes.txt").await;
+    assert_eq!(last_seen(&seen), "allowed:touch notes.txt");
+    core.shutdown().await;
+}
+
+/// In "accept edits" Claude Code does not ask about edits or file-writing shell commands in the
+/// worktree (recorded), so no approval rule sees them. Where your permissions are "ask first"
+/// every change asks you: the mode is refused there, and ends when you choose them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_edits_is_refused_and_ends_where_every_change_asks_you() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let thread = format!("agent:{id}");
+    let mode = async || agent(&core, &id).await.permission_mode;
+
+    // Balanced, the default: the agent may accept edits.
+    core.set_agent_permission_mode(&id, PermissionMode::AcceptEdits).await.unwrap();
+    // "Ask first" in Settings: its live session goes back to "ask for edits" at once, on record.
+    core.update_settings(Settings { approval_mode: ApprovalMode::Strict, ..core.settings() }).await.unwrap();
+    assert_eq!(modes_asked(&seen), ["acceptEdits", "default"]);
+    assert_eq!(mode().await, Some(PermissionMode::Ask));
+    let events = core.events(Some(&id), None, 200).await.unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.kind, EventKind::Decision { decision_type, summary, .. }
+            if decision_type == "agent_control" && summary.contains("asks for edits again") && summary.contains("\"Ask first\""))),
+        "the change is on record"
+    );
+    // Refused while every change asks you, before the CLI is asked. The other modes are not.
+    let e = core.set_agent_permission_mode(&id, PermissionMode::AcceptEdits).await.unwrap_err().to_string();
+    assert!(e.contains("permissions are \"Ask first\"") && e.contains("cannot accept edits by itself"), "{e}");
+    assert_eq!(modes_asked(&seen).len(), 2);
+    core.set_agent_permission_mode(&id, PermissionMode::Plan).await.unwrap();
+    core.set_agent_permission_mode(&id, PermissionMode::Ask).await.unwrap();
+
+    // The conversation's own permissions come before the Settings ones.
+    let own = |mode: ApprovalMode| RequestPrefs { approval_mode: Some(mode), ..Default::default() };
+    core.set_request_prefs(&thread, own(ApprovalMode::Balanced)).await.unwrap();
+    core.set_agent_permission_mode(&id, PermissionMode::AcceptEdits).await.unwrap();
+
+    // A session that does not leave the mode: the switch keeps saying what is true, the
+    // timeline says why, and the next run starts in "ask for edits" and is asked for no mode.
+    seen.lock().unwrap().refuses_modes = true;
+    core.set_request_prefs(&thread, own(ApprovalMode::Strict)).await.unwrap();
+    assert_eq!(mode().await, Some(PermissionMode::AcceptEdits));
+    let events = core.events(Some(&id), None, 200).await.unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.kind, EventKind::Error { message, fatal: false }
+            if message.contains("did not leave the mode \"accept edits\"") && message.contains("the session cannot change its mode"))),
+        "{events:?}"
+    );
+    stop(&core, &id).await;
+    seen.lock().unwrap().refuses_modes = false;
+    let asked = modes_asked(&seen).len();
+    turn(&core, &id, "again").await;
+    assert_eq!(mode().await, Some(PermissionMode::Ask));
+    assert_eq!(modes_asked(&seen).len(), asked);
+
+    // An agent that rests has no session to switch: its switch goes back with your permissions.
+    core.set_request_prefs(&thread, own(ApprovalMode::Balanced)).await.unwrap();
+    core.set_agent_permission_mode(&id, PermissionMode::AcceptEdits).await.unwrap();
+    stop(&core, &id).await;
+    let asked = modes_asked(&seen).len();
+    core.set_request_prefs(&thread, own(ApprovalMode::Strict)).await.unwrap();
+    assert_eq!(mode().await, Some(PermissionMode::Ask));
+    assert_eq!(modes_asked(&seen).len(), asked);
     core.shutdown().await;
 }
 

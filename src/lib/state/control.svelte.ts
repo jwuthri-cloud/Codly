@@ -44,11 +44,24 @@ export const stopAfterStep = (agentId: string) => run('stop it after this step',
 export const resumeAgent = (agentId: string) => run('resume it', agentId, () => api.resumeAgent(agentId));
 export const steerAgent = (agentId: string, text: string) => run('send the steer note', agentId, () => api.steerAgent(agentId, text));
 
-/** How a 1:1 Claude agent works with edits. Commands always follow your permissions. */
+/**
+ * How a 1:1 Claude agent works with edits. The hints say what Codly no longer sees in a mode:
+ * in "accept edits" Claude Code runs edits and file-writing shell commands inside the worktree
+ * without a request, so no permission of yours applies to them (the core refuses the mode under
+ * "Ask first"); in "plan first" the core approves only reads until you accept the plan.
+ */
 export const PERMISSION_MODES: { id: PermissionMode; label: string; hint: string }[] = [
   { id: 'ask', label: 'Ask for edits', hint: 'Every edit follows your permissions first, like a command.' },
-  { id: 'accept_edits', label: 'Accept edits', hint: 'It edits files in its worktree without asking. Commands still follow your permissions.' },
-  { id: 'plan', label: 'Plan first', hint: 'It reads and plans, and changes nothing. Its plan comes to you as a card: accept it or send it back.' },
+  {
+    id: 'accept_edits',
+    label: 'Accept edits',
+    hint: 'Edits, and shell commands that change files in its worktree, run without asking you: your permissions do not see them. Other commands still follow your permissions. Not available with “Ask first” permissions.',
+  },
+  {
+    id: 'plan',
+    label: 'Plan first',
+    hint: 'It reads and plans first. Until you accept its plan, Codly approves only reads for it, whatever your permissions. The plan comes to you as a card: accept it or send it back.',
+  },
 ];
 
 /** Returns whether the agent switched. The agent's own `agent_changed` event carries the new mode. */
