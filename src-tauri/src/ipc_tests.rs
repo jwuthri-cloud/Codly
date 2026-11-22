@@ -13,7 +13,7 @@ use tokio::sync::{OnceCell, watch};
 use crate::commands::{self, AppState};
 use crate::ui_bus::UiBus;
 
-fn invoke(wv: &tauri::WebviewWindow<tauri::test::MockRuntime>, cmd: &str, args: Value) -> Result<Value, Value> {
+pub(crate) fn invoke(wv: &tauri::WebviewWindow<tauri::test::MockRuntime>, cmd: &str, args: Value) -> Result<Value, Value> {
     get_ipc_response(
         wv,
         InvokeRequest {
@@ -121,6 +121,8 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(invoke(&wv, "install_cli", json!({ "provider": "claude", "rung": "npm; rm -rf ~" })).is_err());
     let e = invoke(&wv, "install_cli", json!({ "provider": "cursor", "rung": "npm" })).unwrap_err();
     assert!(e.to_string().contains("no npm package"), "{e}");
+    let e = invoke(&wv, "install_cli", json!({ "provider": "cursor", "rung": "update" })).unwrap_err();
+    assert!(e.to_string().contains("no update command"), "{e}");
     // BYOK: a source persists in Settings; Key needs a saved key; a bad key is refused before it
     // reaches the store; the status names sources and "key saved", never a key.
     assert!(invoke(&wv, "byok_configure", json!({ "vendor": "anthropic", "source": { "kind": "key" } })).is_err());

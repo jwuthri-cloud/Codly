@@ -127,6 +127,25 @@ fn effective_path(current: &str, home: Option<&Path>, nvm_dir: Option<&Path>) ->
     std::env::join_paths(dirs).ok().and_then(|s| s.into_string().ok()).unwrap_or_else(|| current.to_string())
 }
 
+/// `base["PATH"]` as `effective_path` makes it now. The base env is captured once, when Codly
+/// starts, and its PATH has only the fallback folders that existed then. An installer run since
+/// (onboarding's "Install for me", nvm, Homebrew, the Node.js package) may have created
+/// `~/.local/bin`, `~/.nvm/versions/node/*/bin`, `/opt/homebrew/bin` or `/usr/local/bin`:
+/// "Check again" must find the CLI or the npm it put there, without a restart of Codly.
+fn path_now(base: &HashMap<String, String>) -> Option<String> {
+    let home = base.get("HOME").map(PathBuf::from);
+    let nvm = base.get("NVM_DIR").map(PathBuf::from).or_else(|| home.as_ref().map(|h| h.join(".nvm")));
+    Some(effective_path(base.get("PATH")?, home.as_deref(), nvm.as_deref()))
+}
+
+/// Bring `env["PATH"]` up to date (`path_now`) for a process started now: the sign-in or update
+/// line typed into a terminal must find the CLI that was installed a moment ago.
+pub fn refresh_path(env: &mut HashMap<String, String>) {
+    if let Some(path) = path_now(env) {
+        env.insert("PATH".into(), path);
+    }
+}
+
 /// `<nvm>/versions/node/v*/bin`, newest version first.
 fn nvm_bins(nvm_dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(nvm_dir.join("versions/node")) else { return Vec::new() };
@@ -154,13 +173,18 @@ fn bin_names(provider: Provider) -> &'static [&'static str] {
     }
 }
 
-/// Resolve a provider's binary on `base["PATH"]` (re-resolved at every spawn: symlinks move).
+/// Resolve a provider's binary on `base["PATH"]` and the install folders made since
+/// (`path_now`). Re-resolved at every spawn: symlinks move, and a CLI may just have been installed.
 /// Returns the path as found on PATH, not canonicalized, so `~/.local/bin/claude` keeps
 /// following the auto-updater's symlink.
 pub fn resolve_bin(provider: Provider, base: &HashMap<String, String>) -> Option<PathBuf> {
-    let path = base.get("PATH")?;
+    find_on(bin_names(provider), &path_now(base)?, base)
+}
+
+/// The first of `names` that is a program in a folder of `path`.
+fn find_on(names: &[&str], path: &str, base: &HashMap<String, String>) -> Option<PathBuf> {
     let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    bin_names(provider).iter().find_map(|n| which::which_in(n, Some(path), &cwd).ok())
+    names.iter().find_map(|n| which::which_in(n, Some(path), &cwd).ok())
 }
 
 /// Models a CLI can run, for the start-agent picker. Codex and OpenCode print their catalog and
@@ -254,10 +278,11 @@ pub fn transport(provider: Provider) -> &'static str {
 
 /// Detect every provider in parallel (≤ 5 s each): path, `--version`, auth status, billing.
 pub async fn detect_all(base: &HashMap<String, String>) -> Vec<CliInfo> {
+    let path = path_now(base).unwrap_or_default();
     let mut set = tokio::task::JoinSet::new();
     for (i, provider) in Provider::ALL.into_iter().enumerate() {
-        let base = base.clone();
-        set.spawn(async move { (i, detect(provider, &base).await) });
+        let (base, path) = (base.clone(), path.clone());
+        set.spawn(async move { (i, detect(provider, &base, &path).await) });
     }
     let mut out: Vec<(usize, CliInfo)> = set.join_all().await;
     out.sort_by_key(|(i, _)| *i);
@@ -266,7 +291,8 @@ pub async fn detect_all(base: &HashMap<String, String>) -> Vec<CliInfo> {
 
 const DETECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
+/// One provider's CLI, looked up in the folders of `path` (the PATH as it is now, `path_now`).
+async fn detect(provider: Provider, base: &HashMap<String, String>, path: &str) -> CliInfo {
     let mut info = CliInfo {
         provider,
         path: None,
@@ -276,10 +302,11 @@ async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
         plan: None,
         problem: None,
         transport: transport(provider).into(),
-        install: install_hint(provider),
+        // Without npm the `npm install -g …` lines cannot run.
+        install: InstallHint { npm_available: find_on(&["npm"], path, base).is_some(), ..install_hint(provider) },
         default_model: None,
     };
-    let Some(bin) = resolve_bin(provider, base) else {
+    let Some(bin) = find_on(bin_names(provider), path, base) else {
         info.problem = Some(format!(
             "not installed: `{}` was not found on your login shell PATH",
             bin_names(provider)[0]
@@ -297,6 +324,9 @@ async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
         Ok(out) => info.problem = Some(format!("`{} --version` failed: {}", bin_names(provider)[0], first_line(&out.text()))),
         Err(e) => info.problem = Some(format!("`{} --version` {e}", bin_names(provider)[0])),
     }
+    // Older than supported is a notice with an update button, not a `problem`: the minimum is
+    // the oldest version verified, and a slightly older CLI may still work.
+    info.install.update_to = info.version.as_deref().and_then(|v| update_to(provider, v)).map(str::to_owned);
     let ((logged_in, billing, plan, problem), _) = auth;
     info.logged_in = logged_in;
     info.billing = billing;
@@ -319,7 +349,29 @@ impl RunOut {
     }
 }
 
-async fn run(bin: &Path, args: &[&str], env: &HashMap<String, String>, cwd: &Path) -> Result<RunOut, String> {
+/// Why a probe command gave no answer.
+enum RunErr {
+    /// It could not be started: no such file, not a program.
+    Spawn(std::io::Error),
+    TimedOut,
+}
+
+impl std::fmt::Display for RunErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunErr::Spawn(e) => write!(f, "could not run: {e}"),
+            RunErr::TimedOut => write!(f, "timed out after {} s", DETECT_TIMEOUT.as_secs()),
+        }
+    }
+}
+
+impl From<RunErr> for String {
+    fn from(e: RunErr) -> String {
+        e.to_string()
+    }
+}
+
+async fn run(bin: &Path, args: &[&str], env: &HashMap<String, String>, cwd: &Path) -> Result<RunOut, RunErr> {
     let fut = tokio::process::Command::new(bin)
         .args(args)
         .current_dir(cwd)
@@ -334,8 +386,8 @@ async fn run(bin: &Path, args: &[&str], env: &HashMap<String, String>, cwd: &Pat
             stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
         }),
-        Ok(Err(e)) => Err(format!("could not run: {e}")),
-        Err(_) => Err(format!("timed out after {} s", DETECT_TIMEOUT.as_secs())),
+        Ok(Err(e)) => Err(RunErr::Spawn(e)),
+        Err(_) => Err(RunErr::TimedOut),
     }
 }
 
@@ -511,6 +563,93 @@ fn first_line(s: &str) -> String {
     s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no output").chars().take(200).collect()
 }
 
+// ───────────── minimum versions ─────────────
+
+/// The oldest version of each tool that Codly supports, by binary name. For the agent CLIs it
+/// is the oldest version the adapters were verified against (docs/ARCHITECTURE.md §9 and the
+/// "require ≥" lines of docs/research/cli-claude-codex.md; cli-others-acp.md for Gemini and
+/// OpenCode); for git it is the first release with `merge-tree --write-tree`, which the merge
+/// queue needs. This is the only copy: detection, the adapters' start-up errors and the UI all
+/// read it. Cursor and Copilot have no row: no version of theirs was verified.
+pub const MIN_VERSIONS: [(&str, &str); 5] =
+    [("claude", "2.1.302"), ("codex", "0.161.0"), ("gemini", "0.62.0"), ("opencode", "1.18.0"), ("git", "2.38.0")];
+
+fn min_of(tool: &str) -> Option<&'static str> {
+    MIN_VERSIONS.iter().find(|(t, _)| *t == tool).map(|(_, v)| *v)
+}
+
+/// The oldest version of `provider`'s CLI that Codly supports, if one was verified.
+pub fn min_version(provider: Provider) -> Option<&'static str> {
+    min_of(provider.as_str())
+}
+
+/// The leading numbers of a version: "2.1.309" → [2, 1, 309], "v0.63.0-nightly.2" → [0, 63, 0].
+fn version_numbers(version: &str) -> Vec<u64> {
+    let numeric = version.trim_start_matches('v').split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap_or("");
+    numeric.split('.').map_while(|part| part.parse().ok()).collect()
+}
+
+/// Is `version` older than `min`? Missing parts count as 0 ("2.38" = "2.38.0"). A version with
+/// no number in it is never older: there is nothing to compare.
+fn older_than(version: &str, min: &str) -> bool {
+    let (mut v, mut m) = (version_numbers(version), version_numbers(min));
+    if v.is_empty() {
+        return false;
+    }
+    let len = v.len().max(m.len());
+    v.resize(len, 0);
+    m.resize(len, 0);
+    v < m
+}
+
+/// The version an installed CLI must be updated to: its minimum, when `version` is older.
+pub fn update_to(provider: Provider, version: &str) -> Option<&'static str> {
+    min_version(provider).filter(|min| older_than(version, min))
+}
+
+/// "Update Codex to 0.161.0 or later: run `npm install -g @openai/codex@latest` in a terminal".
+/// None for a CLI without a minimum version.
+pub fn update_advice(provider: Provider) -> Option<String> {
+    let min = min_version(provider)?;
+    let how = install_hint(provider).update.map(|cmd| format!(": run `{cmd}` in a terminal")).unwrap_or_default();
+    Some(format!("Update {} to {min} or later{how}", provider.label()))
+}
+
+/// Why this `git` cannot be used, or None when it can: it does not run (not installed; on a
+/// Mac without the Command Line Tools `/usr/bin/git` is a stub), or it is older than the
+/// minimum. Checked when a repository is opened, so the answer is never stale.
+pub async fn git_problem(bin: &Path, base: &HashMap<String, String>) -> Option<String> {
+    let cwd = base.get("HOME").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| PathBuf::from("/"));
+    git_version_problem(run(bin, &["--version"], base, &cwd).await)
+}
+
+/// `git_problem` from the outcome of `git --version` ("git version 2.39.5 (Apple Git-154)").
+/// Only a clear answer blocks a repository. A git that prints something else than a version, or
+/// that is slow to answer (the first run of the Command Line Tools shim can take seconds), is
+/// left alone: the git commands that follow say what is wrong, if anything is.
+fn git_version_problem(out: Result<RunOut, RunErr>) -> Option<String> {
+    let min = min_of("git").expect("git has a row in MIN_VERSIONS");
+    let unusable = |why: String| {
+        format!("Git cannot be used: `git --version` {why}. On a Mac, run `xcode-select --install` in a terminal to install it, then try again")
+    };
+    match out {
+        Ok(out) if out.ok => {
+            let version = parse_version(&out.stdout)?;
+            // Codly picks its git when it starts (Homebrew's first), so a new one needs a restart.
+            older_than(&version, min).then(|| {
+                format!(
+                    "Git {version} is too old: Codly needs Git {min} or later. On a Mac, run `brew install git` in a terminal, \
+                     or update the Command Line Tools in Software Update. Then quit Codly and open it again"
+                )
+            })
+        }
+        // The stub of a Mac without the Command Line Tools exits with an error.
+        Ok(out) => Some(unusable(format!("failed: {}", first_line(&out.text()).trim_end_matches('.')))),
+        Err(e @ RunErr::Spawn(_)) => Some(unusable(e.to_string())),
+        Err(RunErr::TimedOut) => None,
+    }
+}
+
 /// Is `key` removed from `provider`'s child env? Codly-internal markers of a parent Claude
 /// session always go (they hide sessions from `--resume`, change the entrypoint, or force
 /// `--bare`-like behaviour); in subscription mode, so do the keys that would make *this*
@@ -557,6 +696,9 @@ pub fn child_env(base: &HashMap<String, String>, provider: Provider) -> HashMap<
 pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, byok_key: Option<&str>) -> HashMap<String, String> {
     let mut env: HashMap<String, String> =
         base.iter().filter(|(k, _)| !scrubbed(k, provider)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    // A CLI installed by npm is a `#!/usr/bin/env node` shim: a Node.js installed since Codly
+    // started (in a folder that is new on the PATH) must be found when the CLI runs.
+    refresh_path(&mut env);
     env.insert("TERM".into(), "dumb".into());
     match provider {
         Provider::Claude => {
@@ -1000,6 +1142,133 @@ mod tests {
         assert_eq!(gemini_auth(Some("gemini-api-key")).1, Billing::ApiKey);
         assert_eq!(gemini_auth(Some("oauth-personal")).1, Billing::Subscription);
         assert!(gemini_auth(None).3.is_some());
+    }
+
+    #[test]
+    fn an_old_cli_is_told_which_version_to_update_to() {
+        assert_eq!(version_numbers("2.1.309"), [2, 1, 309]);
+        assert_eq!(version_numbers("v0.63.0-nightly.2"), [0, 63, 0]);
+        assert_eq!(version_numbers("1.18"), [1, 18]);
+        assert!(version_numbers("unknown").is_empty());
+
+        assert!(older_than("2.1.99", "2.1.302"), "numbers, not text: 99 < 302");
+        assert!(older_than("0.160.9", "0.161.0"));
+        assert!(older_than("2.37", "2.38.0"), "a missing part counts as 0");
+        assert!(!older_than("2.38", "2.38.0"));
+        assert!(!older_than("2.1.302", "2.1.302"));
+        assert!(!older_than("3.0.0", "2.1.302"));
+        assert!(!older_than("0.161.0-alpha.1", "0.161.0"), "a pre-release counts as its version");
+        assert!(!older_than("nightly", "0.62.0"), "nothing to compare");
+
+        assert_eq!(update_to(Provider::Claude, "2.1.250"), Some("2.1.302"));
+        assert_eq!(update_to(Provider::Claude, "2.1.309"), None);
+        assert_eq!(update_to(Provider::Codex, "0.150.2"), Some("0.161.0"));
+        assert_eq!(update_to(Provider::Gemini, "0.62.0"), None);
+        assert_eq!(update_to(Provider::Opencode, "1.17.9"), Some("1.18.0"));
+        assert_eq!(update_to(Provider::Cursor, "0.0.1"), None, "no verified version, no minimum");
+
+        assert_eq!(update_advice(Provider::Claude).as_deref(), Some("Update Claude Code to 2.1.302 or later: run `claude update` in a terminal"));
+        assert_eq!(update_advice(Provider::Copilot), None);
+        // Every minimum is a full version, and belongs to a CLI or to git.
+        for (tool, min) in MIN_VERSIONS {
+            assert_eq!(version_numbers(min).len(), 3, "{tool}");
+            assert!(tool == "git" || Provider::ALL.iter().any(|p| p.as_str() == tool), "{tool}");
+        }
+    }
+
+    /// The base env is captured when Codly starts. An installer run after that makes
+    /// `~/.local/bin` (Claude Code), `~/.opencode/bin` or a Node.js folder (nvm): "Check again",
+    /// the next terminal and the next CLI run must see it without a restart.
+    #[test]
+    fn a_cli_installed_while_codly_runs_is_found() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        let start_path = home.join("bin").to_str().unwrap().to_string();
+        let mut base: HashMap<String, String> = [("PATH".to_string(), start_path.clone()), ("HOME".to_string(), home.to_str().unwrap().to_string())].into();
+        // Only what is under this $HOME is checked: the machine's own folders may hold anything.
+        let under_home = |path: &str| std::env::split_paths(path).filter(|d| d.starts_with(home)).collect::<Vec<PathBuf>>();
+        assert_eq!(under_home(&path_now(&base).unwrap()), [home.join("bin")]);
+        let program = |rel: &str| {
+            let path = home.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+
+        let claude = program(".local/bin/claude");
+        let opencode = program(".opencode/bin/opencode");
+        assert_eq!(resolve_bin(Provider::Claude, &base), Some(claude));
+        assert_eq!(resolve_bin(Provider::Opencode, &base), Some(opencode));
+        assert_eq!(base["PATH"], start_path, "the captured env itself is not changed");
+
+        // Node.js installed with nvm, then Codex with its npm: both land in a folder that is new.
+        let node_bin = ".nvm/versions/node/v22.9.0/bin";
+        let npm = program(&format!("{node_bin}/npm"));
+        let codex = program(&format!("{node_bin}/codex"));
+        let now = path_now(&base).unwrap();
+        assert_eq!(find_on(&["npm"], &now, &base), Some(npm), "the npm lines can run");
+        assert_eq!(resolve_bin(Provider::Codex, &base), Some(codex));
+        let expected = [home.join("bin"), home.join(".local/bin"), home.join(".opencode/bin"), home.join(node_bin)];
+        // The Codex shim is `#!/usr/bin/env node`: the CLI's own env needs the Node.js folder too.
+        assert_eq!(under_home(child_env(&base, Provider::Codex)["PATH"].as_str()), expected);
+
+        refresh_path(&mut base);
+        assert_eq!(under_home(base["PATH"].as_str()), expected);
+        assert_eq!(std::env::split_paths(&base["PATH"]).next(), Some(home.join("bin")), "what was on the PATH stays first");
+    }
+
+    #[tokio::test]
+    async fn detection_flags_an_old_cli_and_a_missing_npm() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // The fake bin folder is the whole search path, so the machine's own npm is not found.
+        let home = dir.path().to_str().unwrap();
+        let base: HashMap<String, String> = [("PATH", home), ("HOME", home)].into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+
+        script("opencode", "echo 1.17.2");
+        let old = detect(Provider::Opencode, &base, home).await;
+        assert_eq!(old.version.as_deref(), Some("1.17.2"));
+        assert_eq!(old.install.update_to.as_deref(), Some("1.18.0"));
+        assert_eq!(old.install.update.as_deref(), Some("opencode upgrade"));
+        assert_eq!(old.problem, None, "an old CLI is still an installed CLI");
+        assert!(!old.install.npm_available);
+        assert!(!detect(Provider::Codex, &base, home).await.install.npm_available, "also for a CLI that is not installed");
+
+        script("opencode", "echo 1.18.31");
+        script("npm", "exit 0");
+        let new = detect(Provider::Opencode, &base, home).await;
+        assert_eq!(new.install.update_to, None);
+        assert!(new.install.npm_available);
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_old_git_says_what_to_do() {
+        let out = |ok, stdout: &str, stderr: &str| Ok(RunOut { ok, stdout: stdout.into(), stderr: stderr.into() });
+        assert_eq!(git_version_problem(out(true, "git version 2.39.5 (Apple Git-154)\n", "")), None);
+        assert_eq!(git_version_problem(out(true, "git version 2.38.0\n", "")), None);
+        // Apple Git of the Command Line Tools 14.0 to 14.2.
+        let old = git_version_problem(out(true, "git version 2.37.1 (Apple Git-137.1)\n", "")).unwrap();
+        assert!(old.contains("Git 2.37.1 is too old") && old.contains("2.38.0 or later"), "{old}");
+        assert!(old.contains("`brew install git`") && old.contains("Software Update") && old.contains("quit Codly"), "it says what to run: {old}");
+        // A Mac without the Command Line Tools: the stub prints a note and fails.
+        let stub = git_version_problem(out(false, "", "xcode-select: note: No developer tools were found, requesting install.\n")).unwrap();
+        assert!(stub.contains("requesting install. On a Mac, run `xcode-select --install`"), "one full stop between the sentences: {stub}");
+        // A slow answer is not a missing git: the repository is not blocked.
+        assert_eq!(git_version_problem(Err(RunErr::TimedOut)), None);
+        assert_eq!(git_version_problem(out(true, "this is not a version\n", "")), None);
+
+        // No binary at all, through the real probe.
+        let base: HashMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())].into();
+        let gone = git_problem(Path::new("/nonexistent/git"), &base).await.unwrap();
+        assert!(gone.contains("could not run") && gone.contains("`xcode-select --install`"), "{gone}");
     }
 
     #[tokio::test]

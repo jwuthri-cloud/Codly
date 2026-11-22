@@ -28,7 +28,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
-use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
+use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, startup};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, Billing, EventKind,
     Id, MessagePhase, PlanStep, Provider, TurnStatus, Usage, new_id, now_ms,
@@ -184,6 +184,11 @@ impl AppServer {
         };
         server.send(&json!({ "method": "initialized" }), &raw).await?;
         let account = server.call("account/read", json!({ "refreshToken": false }), &raw, Duration::from_secs(15)).await.ok();
+        // Detection can be stale (signed out since): say so now, not as a token error mid-turn.
+        if !startup::uses_own_key(spec) && account.as_ref().is_some_and(signed_out) {
+            server.close().await;
+            return Err(anyhow!(startup::not_signed_in(Provider::Codex, startup::account_home(spec), None)));
+        }
         *server.info.lock().unwrap() = ServerInfo {
             // "codly/0.161.0 (Mac OS 26.5.2; arm64) dumb (codly; 0.1.0)"
             cli_version: init["userAgent"].as_str().and_then(|ua| ua.split_whitespace().next()).and_then(|t| t.split_once('/')).map(|(_, v)| v.to_string()),
@@ -337,6 +342,11 @@ impl AppServer {
     }
 }
 
+/// `account/read` when nobody is signed in and the model provider needs an OpenAI sign-in.
+fn signed_out(account: &Value) -> bool {
+    account["account"].is_null() && account["requiresOpenaiAuth"] == true
+}
+
 async fn server_for(servers: &Servers, spec: &SpawnSpec, raw: &Arc<RawLog>) -> anyhow::Result<Arc<AppServer>> {
     let key: ServerKey = (spec.env.get("CODEX_HOME").cloned(), auth_tag(spec));
     // The list is locked for the lookup only; the start below holds the account's slot.
@@ -428,7 +438,7 @@ pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str
 
 pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> anyhow::Result<AgentHandle> {
     let raw = Arc::new(RawLog::open(&spec.raw_log).with_context(|| format!("cannot open raw log {}", spec.raw_log.display()))?);
-    let server = server_for(&SERVERS, &spec, &raw).await?;
+    let server = server_for(&SERVERS, &spec, &raw).await.map_err(|e| startup::explain(&spec, None, e))?;
     proc::record_group(&spec.raw_log, server.pgid, server.started_ms);
     let (msg_tx, msgs) = mpsc::unbounded_channel();
     let route = Route { tx: msg_tx, raw: raw.clone() };
@@ -464,7 +474,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     tokio::spawn(agent.run(cmds, msgs, ready_tx));
     match tokio::time::timeout(Duration::from_secs(60), ready_rx).await {
         Ok(Ok(Ok(()))) => Ok(AgentHandle { agent_id: spec.agent_id, run_id: spec.run_id, tx }),
-        Ok(Ok(Err(e))) => Err(e),
+        Ok(Ok(Err(e))) => Err(startup::explain(&spec, server.info.lock().unwrap().cli_version.as_deref(), e)),
         Ok(Err(_)) => Err(anyhow!("codex adapter stopped during startup")),
         Err(_) => {
             let _ = tx.send(AgentCmd::Shutdown);
@@ -799,7 +809,7 @@ impl CodexAgent {
     fn server_exited(&mut self, code: Option<i64>, stderr: &str, ready: &mut Option<oneshot::Sender<anyhow::Result<()>>>) {
         self.stage = Stage::Done;
         if let Some(r) = ready.take() {
-            let _ = r.send(Err(anyhow!("codex app-server exited during startup (code {code:?}): {stderr}")));
+            let _ = r.send(Err(anyhow!("codex app-server exited during startup ({}): {stderr}", startup::exit_text(code))));
             return;
         }
         let cancelled = self.norm.cancel_all_approvals();
@@ -1811,6 +1821,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn account_read_tells_a_signed_out_codex() {
+        assert!(signed_out(&json!({ "account": null, "requiresOpenaiAuth": true })));
+        assert!(!signed_out(&json!({ "account": { "type": "chatgpt" }, "requiresOpenaiAuth": true })));
+        assert!(!signed_out(&json!({ "account": null, "requiresOpenaiAuth": false })), "another model provider needs no OpenAI sign-in");
+        assert!(!signed_out(&json!({})), "an answer that does not say is not a sign-out");
+    }
+
+    /// An account whose app-server is a `/bin/sh` that runs `script` (the `app-server` file of
+    /// its cwd, `<dir>/<home>`).
+    fn sh_account(dir: &Path, home: &str, script: &str) -> SpawnSpec {
+        let cwd = dir.join(home);
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("app-server"), script).unwrap();
+        SpawnSpec {
+            agent_id: home.into(),
+            run_id: home.into(),
+            provider: Provider::Codex,
+            role: Role::Worker,
+            model: None,
+            bin: PathBuf::from("/bin/sh"),
+            env: HashMap::from([("CODEX_HOME".to_string(), home.to_string())]),
+            session: SessionMode::New { session_id: None },
+            system_prompt: String::new(),
+            read_only: false,
+            mcp: None,
+            use_user_setup: false,
+            raw_log: cwd.join("raw.ndjson"),
+            byok_command: None,
+            cwd,
+        }
+    }
+
+    /// Detection said signed in, but nobody is any more: the start fails with the command that
+    /// signs this account in, not a token error at the first turn.
+    #[tokio::test]
+    async fn a_signed_out_account_fails_at_start_with_the_sign_in_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = sh_account(
+            dir.path(),
+            "out",
+            r#"while read -r line; do
+  case "$line" in
+    *'"id":0'*) echo '{"id":0,"result":{"userAgent":"codex/0.161.0 (sh)"}}' ;;
+    *'"id":1'*) echo '{"id":1,"result":{"account":null,"requiresOpenaiAuth":true}}' ;;
+  esac
+done
+"#,
+        );
+        let raw = Arc::new(RawLog::open(&dir.path().join("raw.ndjson")).unwrap());
+        let e = server_for(&Servers::default(), &out, &raw).await.map(|_| ()).unwrap_err();
+        assert_eq!(e.to_string(), "Codex is not signed in: run `CODEX_HOME=out codex login` in a terminal");
+    }
+
     /// Two accounts, each with a `/bin/sh` for app-server (it runs the `app-server` script of
     /// its cwd). One never answers `initialize`: the other's agents must not wait behind it.
     /// The list is the test's own: `SERVERS` belongs to the whole process, and a test that
@@ -1818,28 +1882,7 @@ mod tests {
     #[tokio::test]
     async fn a_slow_account_does_not_block_another() {
         let dir = tempfile::tempdir().unwrap();
-        let account = |home: &str, script: &str| {
-            let cwd = dir.path().join(home);
-            std::fs::create_dir_all(&cwd).unwrap();
-            std::fs::write(cwd.join("app-server"), script).unwrap();
-            SpawnSpec {
-                agent_id: home.into(),
-                run_id: home.into(),
-                provider: Provider::Codex,
-                role: Role::Worker,
-                model: None,
-                bin: PathBuf::from("/bin/sh"),
-                env: HashMap::from([("CODEX_HOME".to_string(), home.to_string())]),
-                session: SessionMode::New { session_id: None },
-                system_prompt: String::new(),
-                read_only: false,
-                mcp: None,
-                use_user_setup: false,
-                raw_log: cwd.join("raw.ndjson"),
-                byok_command: None,
-                cwd,
-            }
-        };
+        let account = |home: &str, script: &str| sh_account(dir.path(), home, script);
         let slow = account("slow", ": > up\nwhile read -r line; do :; done\n");
         let fast = account(
             "fast",

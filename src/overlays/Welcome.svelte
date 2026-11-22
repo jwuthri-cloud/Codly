@@ -11,7 +11,7 @@
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { ago } from '../lib/util/format';
-  import { cliOk, cliRank, cliState, codeParts, drone } from '../lib/util/cli';
+  import { cliFix, cliOk, cliRank, cliState, codeParts, drone, updateNote } from '../lib/util/cli';
   import { PROVIDER_LABEL } from '../lib/util/labels';
   import { tildify } from '../lib/util/sanitize';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -106,6 +106,10 @@
                 </div>
                 {#if c.problem}
                   <p class="fix selectable" class:warn={!!c.path}>{#each parts(c.problem) as p, i (i)}{#if p.code}<code>{p.t}</code>{:else}{p.t}{/if}{/each}</p>
+                {/if}
+                {#if c.install.update_to}
+                  {@const update = cliFix(c).update}
+                  <p class="fix warn selectable">{updateNote(c)}{#if update?.command} Run <code>{update.command}</code> in a terminal.{/if}{#if update?.how} {update.how}{/if}</p>
                 {/if}
               </div>
             </li>

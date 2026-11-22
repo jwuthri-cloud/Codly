@@ -25,6 +25,10 @@ impl Inner {
 
     pub(super) async fn open_workspace(self: &Arc<Self>, repo_path: &str) -> anyhow::Result<Workspace> {
         let path = expand_home(repo_path);
+        // Without a usable git every folder reads as "not a git repository": say the real reason.
+        if let Some(problem) = crate::env::git_problem(self.git.bin(), &self.base_env).await {
+            bail!(problem);
+        }
         let top = self.git.toplevel(&path).await.map_err(|_| anyhow!("{repo_path} is not a git repository"))?;
         let top = std::fs::canonicalize(&top).unwrap_or(top);
         let top_s = top.to_string_lossy().into_owned();

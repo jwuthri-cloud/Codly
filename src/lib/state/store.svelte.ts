@@ -339,6 +339,20 @@ class CodlyStore {
     }
   }
 
+  /** "Try again" after a failed start. The app keeps a failed core start, so connecting again
+   *  would only repeat its error: ask the app to start the core again first. */
+  async retry(): Promise<void> {
+    this.ready = false; // the loading screen, while the core starts
+    try {
+      await api.retryCore();
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : String(e);
+      this.ready = true;
+      return;
+    }
+    await this.connect();
+  }
+
   /** Fresh snapshot (workspace switch, long hidden period). Old-generation batches are ignored.
    *  For the office already open it is merged into what is held: nothing older is dropped. */
   resync = () => this.connect();

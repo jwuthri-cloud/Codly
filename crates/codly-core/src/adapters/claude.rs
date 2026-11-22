@@ -25,7 +25,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
-use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
+use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, startup};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, Billing, EventKind,
     Id, MessagePhase, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
@@ -157,6 +157,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         None => None,
     };
     let args = build_args(&spec, &session_id, mcp_path.as_deref());
+    startup::check_cwd(&spec.cwd)?;
     let mut child = proc::command(&spec.bin, &args, &spec.cwd, &spec.env)
         .spawn()
         .with_context(|| format!("failed to start {}", spec.bin.display()))?;
@@ -193,7 +194,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     tokio::spawn(actor.run(cmds, lines, exit_rx, ready_tx));
     match tokio::time::timeout(INIT_TIMEOUT, ready_rx).await {
         Ok(Ok(Ok(()))) => Ok(AgentHandle { agent_id: spec.agent_id, run_id: spec.run_id, tx }),
-        Ok(Ok(Err(e))) => Err(e),
+        Ok(Ok(Err(e))) => Err(startup::explain(&spec, None, e)),
         Ok(Err(_)) => Err(anyhow!("claude adapter stopped during startup")),
         Err(_) => {
             let _ = tx.send(AgentCmd::Shutdown);
@@ -318,7 +319,7 @@ impl Actor {
         let tail = self.stderr.tail(2000);
         if let Some(r) = ready.take() {
             let detail = if tail.is_empty() { String::new() } else { format!(": {tail}") };
-            let _ = r.send(Err(anyhow!("claude exited during startup (code {code:?}){detail}")));
+            let _ = r.send(Err(anyhow!("claude exited during startup ({}){detail}", startup::exit_text(code))));
             return;
         }
         if self.start_failed {

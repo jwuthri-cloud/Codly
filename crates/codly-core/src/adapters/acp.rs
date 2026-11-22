@@ -21,13 +21,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use serde_json::{Value, json};
 use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
-use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
+use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, startup};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, EventKind, Id,
     MessagePhase, PlanStep, Provider, TurnStatus, Usage, new_id, now_ms,
@@ -35,6 +35,9 @@ use crate::model::{
 use crate::proc::{self, Inbound, RawLog, StderrTail};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The only ACP version Codly speaks.
+const PROTOCOL_VERSION: i64 = 1;
 
 /// Keeps Gemini workers out of its own memory and settings (`~/.gemini/GEMINI.md`, the
 /// private MEMORY.md index); 0.62 has no `save_memory` tool any more, older versions do.
@@ -121,6 +124,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     let (args, extra_env) = launch(&spec, policy.as_deref());
     let mut env = spec.env.clone();
     env.extend(extra_env);
+    startup::check_cwd(&spec.cwd)?;
     let mut child = proc::command(&spec.bin, &args, &spec.cwd, &env)
         .spawn()
         .with_context(|| format!("failed to start {}", spec.bin.display()))?;
@@ -267,11 +271,17 @@ impl Actor {
 
     async fn handshake(&mut self, lines: &mut mpsc::UnboundedReceiver<Inbound>) -> anyhow::Result<()> {
         let init = json!({
-            "protocolVersion": 1,
+            "protocolVersion": PROTOCOL_VERSION,
             "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false, "_meta": { "terminal_output_delta": true } },
             "clientInfo": { "name": "codly", "title": "Codly", "version": crate::version() },
         });
-        let init = self.call("initialize", init, lines).await?.map_err(|e| anyhow!("initialize failed: {}", err_msg(&e)))?;
+        // An agent too old for `--acp` exits here with its option parser's error.
+        let init = self
+            .call("initialize", init, lines)
+            .await
+            .and_then(|r| r.map_err(|e| anyhow!("initialize failed: {}", err_msg(&e))))
+            .map_err(|e| startup::explain(&self.spec, None, e))?;
+        check_protocol(self.spec.provider, &init)?;
         let caps = &init["agentCapabilities"];
         let cwd = self.spec.cwd.to_string_lossy().into_owned();
         let mcp = mcp_servers(&self.spec);
@@ -306,10 +316,10 @@ impl Actor {
         };
         let session = session.map_err(|e| {
             if e["code"] == -32000 {
-                let methods: Vec<&str> = init["authMethods"].as_array().into_iter().flatten().filter_map(|m| m["name"].as_str()).collect();
-                anyhow!("not signed in ({}): sign in with the CLI in a terminal first", methods.join(", "))
+                anyhow!(startup::not_signed_in(self.spec.provider, startup::account_home(&self.spec), auth_how(&init).as_deref()))
             } else {
-                anyhow!("could not open a session: {}", err_msg(&e))
+                let version = init["agentInfo"]["version"].as_str();
+                startup::explain(&self.spec, version, anyhow!("could not open a session: {}", err_msg(&e)))
             }
         })?;
         let sid = session["sessionId"].as_str().context("the agent returned no sessionId")?.to_string();
@@ -583,6 +593,29 @@ impl Actor {
 
 fn err_msg(e: &Value) -> String {
     e["message"].as_str().map(str::to_owned).unwrap_or_else(|| e.to_string())
+}
+
+/// An agent that cannot speak the client's protocol version answers `initialize` with the
+/// version it has; the client must then stop. An answer without a version is taken as is.
+fn check_protocol(provider: Provider, init: &Value) -> anyhow::Result<()> {
+    match init["protocolVersion"].as_i64() {
+        Some(v) if v != PROTOCOL_VERSION => {
+            let label = provider.label();
+            bail!("{label} speaks version {v} of the agent protocol (ACP) and Codly speaks version {PROTOCOL_VERSION}: update {label} and Codly to their latest versions")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// How the agent itself says to sign in (`authMethods` of `initialize`): a method's own
+/// description ("Run `opencode auth login` in the terminal"), else the methods' names.
+fn auth_how(init: &Value) -> Option<String> {
+    let methods = init["authMethods"].as_array()?;
+    if let Some(description) = methods.iter().find_map(|m| m["description"].as_str().filter(|d| !d.trim().is_empty())) {
+        return Some(description.to_string());
+    }
+    let names: Vec<&str> = methods.iter().filter_map(|m| m["name"].as_str()).collect();
+    (!names.is_empty()).then(|| format!("sign in with its CLI in a terminal first ({})", names.join(", ")))
 }
 
 /// (configId, value) of the `category` select option matching `want` (exact, or as the
@@ -1230,6 +1263,26 @@ mod tests {
         assert!(matches!(&ev[0], EventKind::PlanUpdated { steps } if steps[0].status == "in_progress"));
         let ev = norm.on_update(&json!({ "sessionUpdate": "something_new" }));
         assert!(matches!(&ev[0], EventKind::Unknown { raw_type } if raw_type == "session/update:something_new"));
+    }
+
+    #[test]
+    fn handshake_errors_say_what_to_do() {
+        // The version: 1 goes on, anything else stops with both names in the message.
+        assert!(check_protocol(Provider::Gemini, &json!({ "protocolVersion": 1 })).is_ok());
+        assert!(check_protocol(Provider::Gemini, &json!({ "agentInfo": {} })).is_ok(), "an answer without a version is taken as is");
+        let e = check_protocol(Provider::Gemini, &json!({ "protocolVersion": 2 })).unwrap_err().to_string();
+        assert_eq!(e, "Gemini CLI speaks version 2 of the agent protocol (ACP) and Codly speaks version 1: update Gemini CLI and Codly to their latest versions");
+
+        // Sign-in: the agent's own words (OpenCode's `initialize`), else the names of its methods.
+        let opencode = json!({ "authMethods": [{ "description": "Run `opencode auth login` in the terminal", "name": "Login with opencode", "id": "opencode-login" }] });
+        assert_eq!(auth_how(&opencode).as_deref(), Some("Run `opencode auth login` in the terminal"));
+        let gemini = json!({ "authMethods": [{ "id": "oauth-personal", "name": "Log in with Google", "description": null }, { "id": "gemini-api-key", "name": "Use Gemini API key" }] });
+        assert_eq!(auth_how(&gemini).as_deref(), Some("sign in with its CLI in a terminal first (Log in with Google, Use Gemini API key)"));
+        assert_eq!(auth_how(&json!({ "authMethods": [] })), None);
+        assert_eq!(auth_how(&json!({})), None);
+        // What the user reads: Codly's own command where it knows one, the agent's words otherwise.
+        assert_eq!(startup::not_signed_in(Provider::Gemini, Some("/Users/x/.gemini-perso"), auth_how(&gemini).as_deref()), "Gemini CLI is not signed in: run `GEMINI_CLI_HOME=/Users/x/.gemini-perso gemini` in a terminal");
+        assert_eq!(startup::not_signed_in(Provider::Opencode, None, auth_how(&opencode).as_deref()), "OpenCode is not signed in: Run `opencode auth login` in the terminal");
     }
 
     #[test]

@@ -115,9 +115,10 @@ pub struct CliInfo {
     pub default_model: Option<String>,
 }
 
-/// How to get one agent CLI onto this machine. Built from constants in `install.rs`, never from
-/// user input; the UI shows these strings and asks `install_cli` to run them (by provider and
-/// rung, not by text).
+/// How to get one agent CLI onto this machine and keep it new enough. The commands are constants
+/// in `install.rs`, never user input; the UI shows these strings and asks `install_cli` to run
+/// them (by provider and rung, not by text). `npm_available` and `update_to` are what detection
+/// found on this machine (`env::detect`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct InstallHint {
@@ -129,6 +130,16 @@ pub struct InstallHint {
     pub login: Option<String>,
     /// The vendor's docs or home page.
     pub docs: String,
+    /// The command that updates an installed CLI, if there is one.
+    #[serde(default)]
+    pub update: Option<String>,
+    /// Is `npm` on the login shell's PATH? False = the `npm` line cannot run here.
+    #[serde(default)]
+    pub npm_available: bool,
+    /// Set when the installed CLI is older than the oldest version Codly supports
+    /// (`env::MIN_VERSIONS`): the version to update to. It still runs; it may fail in odd ways.
+    #[serde(default)]
+    pub update_to: Option<String>,
 }
 
 // ───────────────────────────── accounts ─────────────────────────────
