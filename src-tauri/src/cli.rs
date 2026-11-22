@@ -79,8 +79,14 @@ mod tests {
     }
 
     #[test]
-    fn the_version_is_the_app_bundle_version() {
+    fn the_version_has_one_source() {
+        // The source is [workspace.package] in the root Cargo.toml (docs/RELEASE.md). A second
+        // number in one of these files could disagree with what the app and its report show.
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
-        assert_eq!(conf["version"], VERSION);
+        assert!(conf.get("version").is_none(), "tauri.conf.json must not set a version: without one, the app bundle takes this crate's");
+        let package: serde_json::Value = serde_json::from_str(include_str!("../../package.json")).unwrap();
+        assert!(package.get("version").is_none(), "package.json must not set a version: nothing reads it");
+        assert!(include_str!("../Cargo.toml").contains("\nversion.workspace = true\n"), "src-tauri/Cargo.toml must take the workspace version");
+        assert_eq!(VERSION, codly_core::version(), "the app and the engine have the same version");
     }
 }

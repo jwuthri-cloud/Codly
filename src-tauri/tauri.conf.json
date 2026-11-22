@@ -1,7 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Codly",
-  "version": "0.1.0",
   "identifier": "dev.codly.desktop",
   "build": {
     "frontendDist": "../dist",

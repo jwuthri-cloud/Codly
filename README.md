@@ -109,13 +109,45 @@ and Inbound (webhook and Slack sources for the Lead).
 
 - macOS 14 or later
 - At least one agent CLI, installed and signed in
-- To build from source: Rust 1.90+, Node 22+ and pnpm
 
-## Getting started
+## Install
+
+### Download
+
+Coming with the first release: there is no download yet. Until a release is on the
+[Releases page](https://github.com/jwuthri-cloud/Codly/releases), build Codly from source (below).
+
+When a release is there:
+
+1. Download the `.dmg` for your Mac. The name ends in `_aarch64.dmg` for Apple Silicon (M1 and
+   later) and in `_x64.dmg` for Intel.
+2. Open it and drag Codly to Applications.
+3. Open Codly.
+
+If the release notes say the build is not signed with an Apple Developer ID, macOS stops the first
+open and says it could not check Codly for malware. This means Apple has not checked this build and
+macOS cannot tell you who made it; it does not mean something was found. To open it: close the
+message, open System Settings → Privacy & Security, scroll down and choose Open Anyway next to the
+line about Codly, then Open. Do this right after the first try: the button is there only for a
+while. macOS asks once for each version you download.
+
+To check that a download is the file of the release, download `SHA256SUMS.txt` from the same
+release into the same folder and run:
+
+```bash
+shasum -a 256 -c --ignore-missing SHA256SUMS.txt   # prints "OK" after the file name
+```
+
+Codly does not update itself yet: for a newer version, download it again.
+
+### Build from source
+
+You need Rust 1.90+, Node 22+ and pnpm.
 
 ```bash
 pnpm install
-pnpm tauri dev              # run the desktop app
+pnpm tauri dev              # run the desktop app from the checkout
+scripts/install-app.sh      # or build Codly.app and put it in /Applications
 ```
 
 Other useful commands:
@@ -275,6 +307,7 @@ Provider terms change. Check them before heavy parallel use.
 ## Docs
 
 - [Architecture](docs/ARCHITECTURE.md): decisions, processes, event model, orchestration and memory.
+- [Release](docs/RELEASE.md): how a release is built, signed and published, and where the version is set.
 - [Research](docs/research/): the reports behind each decision, and the consolidated
   [critique](docs/research/CRITIQUE.md).
 

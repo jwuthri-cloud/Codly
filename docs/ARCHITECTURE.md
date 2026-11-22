@@ -447,7 +447,8 @@ voice/                    experimental voice relay (Python, OpenAI Realtime) beh
                           start.sh needs the author's own OpenAI workload identity, so it does not
                           run for anyone else as it is
 research-skills/          optional research skills, installed by hand; not part of the app
-docs/                     this file, design/ (SIMS, PROGRESSION, REDESIGN), research/
+docs/                     this file, RELEASE.md (how a release is built and signed), design/ (SIMS,
+                          PROGRESSION, REDESIGN), research/
 ```
 
 ## 9. Verification
