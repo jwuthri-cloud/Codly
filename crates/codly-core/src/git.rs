@@ -395,6 +395,16 @@ impl Git {
         Ok(split_z(&self.ok(repo, &args, true).await?))
     }
 
+    /// The files git tracks in the checkout `dir` under `paths` (top-level files, or folders
+    /// with everything below them), relative to `dir`. Names compare without case, as the
+    /// macOS filesystem does.
+    pub async fn tracked(&self, dir: &Path, paths: &[&str]) -> Result<Vec<String>> {
+        let specs: Vec<String> = paths.iter().map(|path| format!(":(icase){path}")).collect();
+        let mut args = vec!["ls-files", "-z", "--"];
+        args.extend(specs.iter().map(String::as_str));
+        Ok(split_z(&self.ok(dir, &args, true).await?))
+    }
+
     /// Do the ignore rules of the checkout `wt` hide `rel` (so `add -A` there never picks it
     /// up)? `dir` = `rel` is a folder. The path does not have to exist there yet.
     pub async fn is_ignored(&self, wt: &Path, rel: &str, dir: bool) -> Result<bool> {

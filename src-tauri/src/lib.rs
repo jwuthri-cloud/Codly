@@ -248,6 +248,7 @@ pub fn run() {
             commands::board_sweep,
             commands::board_archive,
             commands::worktree_setup,
+            commands::workspace_trust,
             commands::list_connections,
             commands::update_connection,
             commands::storage_report,

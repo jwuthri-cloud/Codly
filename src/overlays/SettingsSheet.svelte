@@ -27,6 +27,7 @@
   import TeamSection from './TeamSection.svelte';
   import TriggersSection from './TriggersSection.svelte';
   import WorktreeSection from './WorktreeSection.svelte';
+  import TrustSection from './TrustSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
   import DiagnosticsReport from '../components/DiagnosticsReport.svelte';
   import Dialog from '../components/Dialog.svelte';
@@ -97,7 +98,7 @@
     { id: 'balanced', title: 'Balanced', body: 'Codly’s rules settle the obvious cases; anything risky (rm -rf, git push, outside the worktree, network installs) asks you.' },
     { id: 'strict', title: 'Ask first', body: 'Every command and edit the CLI would ask about comes to you.' },
     { id: 'autonomous', title: 'Autonomous', body: 'Commands and edits run without asking unless Codly sees a risk in them (rm -rf, git push, network, paths outside the worktree). Codly reads the command, not what a script or program does once it runs.' },
-    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, changes to an agent’s own CLI settings, Codly’s private data and read-only agents still ask.' },
+    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, changes to an agent’s own CLI settings, Codly’s private data and read-only agents still ask. So does a command that can lose work in your project folder itself, from an agent hired with Git isolation off.' },
   ];
   let confirmFull = $state(false);
   function pickMode(m: ApprovalMode) {
@@ -126,7 +127,7 @@
   const PLAN_TOGGLES = [
     ['auto_run_plans', 'Run plans without asking', 'New requests start in Auto instead of Plan (switch per request under the composer, or ⇧⇥). You can still cancel at any time.'],
     ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
-    ['use_my_claude_setup', 'Use my Claude Code setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings. Applies to agents started after the change; approvals still go through Codly.'],
+    ['use_my_claude_setup', 'Use my Claude Code setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings once you trusted the folder (Safety). Applies to agents started after the change; approvals still go through Codly.'],
   ];
   const OFFICE_TOGGLES = [['game_rules', 'Office rules affect work', 'Agents can be at home or tired, and new hires wait for a job offer.']];
   const REVIEW_TOGGLES = [['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.']];
@@ -311,6 +312,8 @@
         </select>
       </div>
     </section>
+
+    <TrustSection />
 
     <WorktreeSection />
 

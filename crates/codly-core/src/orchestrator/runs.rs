@@ -43,6 +43,8 @@ impl Inner {
         let provider = req.agent.provider;
         let cli = self.clis().into_iter().find(|c| c.provider == provider);
         let Some(cli) = cli.filter(|c| c.path.is_some()) else { bail!("{} is not installed", provider.label()) };
+        // What the folder itself would make the CLI load, and whether you trusted it (trust.rs).
+        let repo_config = self.repo_config(req.workspace_id.as_deref(), &req.cwd, provider).await?;
         let account = match (&req.account, &req.session) {
             (Some(a), _) => Some(a.clone()),
             (None, SessionMode::Resume { .. }) => self.agent_account(&req.agent),
@@ -185,7 +187,8 @@ impl Inner {
             system_prompt: req.system_prompt,
             read_only: req.read_only,
             mcp: Some(mcp.launch(&self.cfg.app_exe, &token)),
-            use_user_setup: self.settings().use_my_claude_setup,
+            use_user_setup: self.settings().use_my_claude_setup && repo_config.project,
+            local_settings: repo_config.local,
             raw_log,
             byok_command,
         };

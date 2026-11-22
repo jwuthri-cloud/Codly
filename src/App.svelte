@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import Shell from './shell/Shell.svelte';
   import Onboarding from './onboarding/Onboarding.svelte';
   import Welcome from './overlays/Welcome.svelte';
@@ -13,6 +13,8 @@
   import { skillsUi } from './lib/state/skills.svelte';
   import PullRequestDialog from './overlays/PullRequestDialog.svelte';
   import { prUi } from './lib/state/pullRequest.svelte';
+  import TrustDialog from './overlays/TrustDialog.svelte';
+  import { workspaceTrust } from './lib/state/workspaceTrust.svelte';
   import IdeOverlay from './ide/IdeOverlay.svelte';
   import DiagnosticsReport from './components/DiagnosticsReport.svelte';
   import EmptyState from './components/EmptyState.svelte';
@@ -31,8 +33,16 @@
 
   onMount(() => {
     store.connect();
+    workspaceTrust.start();
     const off = [installKeys(), installTooltips(), installVisibility(), installNotifications()];
     return () => off.forEach((f) => f());
+  });
+
+  // A repo that opens is asked about once: its own CLI configuration loads only when you trust it.
+  const openRepo = $derived(store.workspace?.id ?? null);
+  $effect(() => {
+    void openRepo;
+    untrack(() => void workspaceTrust.check());
   });
 
   // Theme: always resolved onto [data-theme] ("system" follows the OS live).
@@ -89,6 +99,7 @@
 {#if ui.repoPickerOpen}<RepoPicker />{/if}
 {#if skillsUi.open}<SkillsManager />{/if}
 {#if prUi.dialog}<PullRequestDialog />{/if}
+{#if workspaceTrust.asking}<TrustDialog />{/if}
 <IdeOverlay />
 <Toasts />
 <TooltipHost />

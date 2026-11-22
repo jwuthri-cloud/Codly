@@ -91,8 +91,13 @@ pub struct SpawnSpec {
     pub read_only: bool,
     pub mcp: Option<McpLaunch>,
     /// Claude only: load the user's own Claude Code setup (their MCP servers, plugins, skills,
-    /// project settings) beside Codly's, instead of Codly's servers alone.
+    /// project settings) beside Codly's, instead of Codly's servers alone. Off while the
+    /// folder's own CLI configuration is not trusted (`orchestrator/trust.rs`).
     pub use_user_setup: bool,
+    /// Claude only: load `.claude/settings.local.json` of the working directory. Only in the
+    /// user's own checkout, where that file is theirs or part of what they trusted; never in a
+    /// Codly worktree, where an agent can write it.
+    pub local_settings: bool,
     /// `<data>/runs/<run_id>/raw.ndjson`, append-only.
     pub raw_log: PathBuf,
     /// BYOK token command (byok.rs) the CLI runs itself, re-running it when the token expires:

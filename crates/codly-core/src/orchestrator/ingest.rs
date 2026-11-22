@@ -646,7 +646,9 @@ impl Inner {
                 && self.agent(&ctx.agent_id).is_ok_and(|a| matches!(a.role, Role::Worker | Role::Solo) && career::trusts(&a.career, r))
         };
         let mode = approvals::with_trust(base, trusts(Rank::Senior));
-        let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only, edits: trusts(Rank::Junior) };
+        // Hired with Git isolation off: its folder is your checkout, not a Codly worktree.
+        let own_checkout = ws.and_then(|w| self.store.workspace(w).ok().flatten()).is_some_and(|w| cwd.as_deref() == Some(std::path::Path::new(&w.repo_path)));
+        let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only, edits: trusts(Rank::Junior), own_checkout };
         let verdict = match approvals::evaluate(approval, &pctx) {
             Verdict::Allow { choice, rule } if mode != base => {
                 Verdict::Allow { choice, rule: format!("{rule} (you trust it to work on its own)") }

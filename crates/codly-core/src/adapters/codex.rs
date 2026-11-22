@@ -1885,6 +1885,7 @@ mod tests {
             read_only: false,
             mcp: None,
             use_user_setup: false,
+            local_settings: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: cmd.map(str::to_owned),
         };
@@ -1927,6 +1928,7 @@ mod tests {
             read_only: false,
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "tok".into())] }),
             use_user_setup: false,
+            local_settings: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: None,
         };
@@ -2323,6 +2325,7 @@ mod tests {
             read_only: false,
             mcp: None,
             use_user_setup: false,
+            local_settings: false,
             raw_log: cwd.join("raw.ndjson"),
             byok_command: None,
             cwd,

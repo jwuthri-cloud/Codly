@@ -126,6 +126,7 @@ mod tests {
             read_only: false,
             mcp: None,
             use_user_setup: false,
+            local_settings: false,
             raw_log: "/tmp/raw.ndjson".into(),
             byok_command: None,
         }

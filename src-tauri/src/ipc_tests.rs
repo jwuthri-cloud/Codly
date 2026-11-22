@@ -68,6 +68,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::undo_merge,
             commands::repo_sync,
             commands::worktree_setup,
+            commands::workspace_trust,
             commands::breaker_config,
             commands::set_breaker_config,
             commands::breaker_status,
@@ -237,6 +238,14 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "worktree_setup", json!({ "set": { "allow": "abc" } })).unwrap_err();
     assert!(e.to_string().contains("no .codly/setup.sh"), "{e}");
     assert_eq!(invoke(&wv, "worktree_setup", json!({ "set": { "allow": null } })).unwrap()["on"], false);
+
+    // Workspace trust: this repo has no CLI configuration of its own, so there is nothing to
+    // decide, nothing to trust, and "open without" changes nothing.
+    let nothing = json!({ "state": "nothing", "changed": false, "files": [], "instructions": [], "fingerprint": null, "problem": null });
+    assert_eq!(invoke(&wv, "workspace_trust", json!({ "set": null })).unwrap(), nothing);
+    let e = invoke(&wv, "workspace_trust", json!({ "set": { "trust": "abc" } })).unwrap_err();
+    assert!(e.to_string().contains("changed since you read it"), "{e}");
+    assert_eq!(invoke(&wv, "workspace_trust", json!({ "set": { "trust": null } })).unwrap(), nothing);
 
     // Budgets: the limits and the status with the fields Settings reads, and a plan's total by
     // the key the plan cards send.

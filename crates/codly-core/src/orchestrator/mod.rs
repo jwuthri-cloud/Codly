@@ -23,6 +23,7 @@
 //! - `wallet`   the player's coins (🪙) across every repo, Build/Buy, developer grants
 //! - `worktree_setup` a new worktree made ready: copied ignored files, a port block, the setup script
 //! - `checkpoints` an agent's files before each turn (private refs), "Restore files to this point"
+//! - `trust`    workspace trust: the repo's own CLI configuration loads only once you trusted it
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
 
 pub mod accounts;
@@ -64,6 +65,7 @@ pub mod watchdog;
 mod interrupts;
 mod rebrief;
 pub mod worktree_setup;
+pub mod trust;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

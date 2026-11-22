@@ -9,7 +9,8 @@
 //!    network, push, sudo, git writes, secrets shown to the model, the agent's own CLI
 //!    settings changed, unparseable shell) — goes to you, except in full mode for an agent
 //!    that is not read-only, where only touching Codly's own data dir or the agent's own CLI
-//!    settings still asks;
+//!    settings still asks, and, for an agent that works in your project folder itself (Git
+//!    isolation off), a command that can lose work there (`loses_work`);
 //! 3. Codly's own MCP tools are allowed in every mode;
 //! 4. then the mode: strict asks for everything else; read-only agents get only reads in
 //!    every other mode; balanced allows read-only actions, the task's own verify commands and
@@ -37,7 +38,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
 
-use crate::adapters::classify::{self, ShellRun, first_non_flag, git_read_only, git_sub, has, options, read_only};
+use crate::adapters::classify::{self, ShellRun, first_non_flag, git_read_only, git_sub, has, long_flag, options, read_only, short_flag};
 use crate::mcp::tools;
 use crate::model::*;
 
@@ -52,6 +53,10 @@ pub struct PolicyCtx<'a> {
     pub read_only: bool,
     /// You trust it to edit on its own (`career::trusts`, Junior): file changes inside the worktree are approved in balanced mode.
     pub edits: bool,
+    /// The agent works in your project folder itself (hired with Git isolation off), not in a
+    /// Codly worktree: no branch of its own and no checkpoint stands between a command and
+    /// your work, so full mode still asks before one that can lose it (`loses_work`).
+    pub own_checkout: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +83,11 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
     let floor = |r: &String| r == CODLY_DATA || r == classify::AGENT_SETTINGS;
     if !risks.is_empty() && !(full && !risks.iter().any(floor)) {
         return ask(format!("risk: {}", risks.join(", ")));
+    }
+    // One more floor, in your own project folder only: in a Codly worktree the same command
+    // stays allowed.
+    if full && let Some(loss) = checkout_loss(&a.subject, ctx) {
+        return ask(format!("{loss} in your project folder itself (Git isolation is off): full access still asks"));
     }
     let allow = |rule: String| {
         if a.choices.is_empty() || a.choices.contains(&ApprovalChoice::AllowOnce) {
@@ -142,7 +152,8 @@ pub fn with_trust(mode: ApprovalMode, trusted: bool) -> ApprovalMode {
 ///   push, sudo, a pipe into a shell, a secret, a path outside the worktree (an install for
 ///   the whole machine too), a change to an agent's settings and what cannot be checked are
 ///   never covered.
-/// - A command that changes your own account or settings (`OWN_ACCOUNT`) is never saved.
+/// - A command that changes your own account or settings (`OWN_ACCOUNT`) is never saved, and
+///   neither is one that can lose work in your own project folder (`checkout_loss`).
 /// - The prefix is for one plain command only (`rule_prefix`): a longer line that chains or
 ///   substitutes anything offers at most itself, as the exact command.
 pub fn rule_offer(a: &Approval, ctx: &PolicyCtx) -> ApprovalRuleOffer {
@@ -157,7 +168,7 @@ pub fn rule_offer(a: &Approval, ctx: &PolicyCtx) -> ApprovalRuleOffer {
     let download = detected.iter().any(|r| r == PACKAGE_INSTALL || r == NPX_DOWNLOAD) && !detected.iter().any(|r| r == "network");
     let by_prefix = |r: &String| [PACKAGE_INSTALL, NPX_DOWNLOAD, GIT_WRITE].contains(&r.as_str()) || (r == "network" && download);
     let by_exact = |r: &String| r == "network" || by_prefix(r);
-    if !a.risks.iter().chain(&detected).all(by_exact) || own_account(command, 0) {
+    if !a.risks.iter().chain(&detected).all(by_exact) || own_account(command, 0) || checkout_loss(&a.subject, ctx).is_some() {
         return none;
     }
     let prefix = if a.risks.iter().chain(&detected).all(by_prefix) { rule_prefix(command) } else { None };
@@ -989,6 +1000,112 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
     risks
 }
 
+// ───────────────────────────── your own project folder ─────────────────────────────
+
+/// What `loses_work` names: the reason on the request.
+const REWRITES_HISTORY: &str = "rewrites git history";
+const DISCARDS_WORK: &str = "discards uncommitted work";
+const FORCE_PUSH: &str = "force push";
+const DELETES_FOLDERS: &str = "deletes folders";
+
+/// Folders a build or a package manager fills again: deleting one loses no work.
+const BUILD_DIRS: &[&str] = &[
+    "node_modules", "target", "dist", "build", "out", "coverage", ".next", ".nuxt", ".svelte-kit", ".turbo", ".cache", ".parcel-cache",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", ".gradle",
+];
+
+/// What the request can lose for good when the agent works in your project folder itself
+/// (`PolicyCtx::own_checkout`). None in a Codly worktree: there the agent's own branch and
+/// its checkpoints stand between the command and your work.
+fn checkout_loss(subject: &ApprovalSubject, ctx: &PolicyCtx) -> Option<&'static str> {
+    match subject {
+        ApprovalSubject::Command { command, .. } if ctx.own_checkout => loses_work(command, 0),
+        _ => None,
+    }
+}
+
+/// Does the line run a command that can lose work for good: git history rewritten, work that
+/// is not committed dropped, a force push, a recursive delete outside the build folders?
+/// Behind a wrapper or `sh -c` too. Like every rule here it reads the command line: what a
+/// script does is not looked into.
+fn loses_work(cmd: &str, depth: u8) -> Option<&'static str> {
+    parse(cmd).segments.iter().find_map(|seg| {
+        let texts: Vec<String> = seg.iter().map(|w| w.text.clone()).collect();
+        let (first, rest) = seg.get(classify::command_start(&texts)?..)?.split_first()?;
+        let args: Vec<String> = rest.iter().map(|w| w.text.clone()).collect();
+        match basename(&first.text) {
+            prog if classify::SHELLS.contains(&prog) => match classify::shell_run(&args) {
+                ShellRun::Command(inner) if depth < 3 => loses_work(inner, depth + 1),
+                _ => None,
+            },
+            "git" => git_loss(&args),
+            "rm" if short_flag(&args, "rR") || long_flag(&args, &["recursive"]) => deletes_work(rest.iter().filter(|w| !w.text.starts_with('-'))),
+            // `find` deletes what it finds below the folders it starts from (its words before
+            // the first test), by itself or through `rm`.
+            "find" if has(&args, &["-delete"]) || exec_rm(&args) => deletes_work(rest.iter().take_while(|w| !w.text.starts_with(['-', '(', '!']))),
+            _ => None,
+        }
+    })
+}
+
+/// `find … -exec rm …` (or `-execdir`, `-ok`, `-okdir`).
+fn exec_rm(args: &[String]) -> bool {
+    args.windows(2).any(|w| ["-exec", "-execdir", "-ok", "-okdir"].contains(&w[0].as_str()) && basename(&w[1]) == "rm")
+}
+
+/// A recursive delete of `targets` loses work unless each one is a build folder or inside
+/// one. No target on the line (`xargs rm -rf`) names nothing that can be checked.
+fn deletes_work<'a>(targets: impl Iterator<Item = &'a Word>) -> Option<&'static str> {
+    let mut targets = targets.peekable();
+    (targets.peek().is_none() || !targets.all(in_build_dir)).then_some(DELETES_FOLDERS)
+}
+
+/// Is every path the word can stand for a build folder below where the command runs, or
+/// inside one: a relative path with no `..`, one of whose folders is in `BUILD_DIRS`
+/// (`node_modules`, `./web/dist/assets`)? A `$` expansion, a leading wildcard, `~` and an
+/// absolute path are not.
+fn in_build_dir(w: &Word) -> bool {
+    let inside = |p: &String| !p.starts_with(['/', '~']) && p.split('/').all(|part| part != "..") && p.split('/').any(|part| BUILD_DIRS.contains(&part));
+    !w.var && !w.glob && classify::braces(&w.text).is_some_and(|all| all.iter().all(inside))
+}
+
+/// The git commands that can lose work: commits that leave the branch (history rewritten),
+/// changes that are not committed, the stash, and a push that replaces or deletes what the
+/// remote has.
+fn git_loss(args: &[String]) -> Option<&'static str> {
+    let (sub, rest) = git_sub(args);
+    let first = first_non_flag(rest).unwrap_or("");
+    match sub? {
+        "rebase" | "filter-branch" | "filter-repo" | "update-ref" | "prune" => Some(REWRITES_HISTORY),
+        "commit" if long_flag(rest, &["amend"]) => Some(REWRITES_HISTORY),
+        // -D deletes a branch that is not merged; -M, -C and -f replace one that exists.
+        "branch" if short_flag(rest, "DMCf") || long_flag(rest, &["force"]) => Some(REWRITES_HISTORY),
+        "reflog" if ["expire", "delete", "drop"].contains(&first) => Some(REWRITES_HISTORY),
+        "gc" if long_flag(rest, &["prune"]) => Some(REWRITES_HISTORY),
+        "reset" if long_flag(rest, &["hard", "merge"]) => Some(DISCARDS_WORK),
+        // `git clean -n` only lists.
+        "clean" if !(short_flag(rest, "n") || long_flag(rest, &["dry-run"])) => Some(DISCARDS_WORK),
+        // -B moves a branch that exists; -f and `--` / `.` overwrite changed files.
+        "checkout" if short_flag(rest, "fB") || long_flag(rest, &["force"]) || rest.iter().any(|x| x == "--" || x == ".") => Some(DISCARDS_WORK),
+        "switch" if short_flag(rest, "fC") || long_flag(rest, &["force", "force-create", "discard-changes"]) => Some(DISCARDS_WORK),
+        // `git restore --staged x` only takes x out of the index.
+        "restore" if !(short_flag(rest, "S") || long_flag(rest, &["staged"])) || short_flag(rest, "W") || long_flag(rest, &["worktree"]) => {
+            Some(DISCARDS_WORK)
+        }
+        "stash" if ["drop", "clear"].contains(&first) => Some(DISCARDS_WORK),
+        "worktree" if first == "remove" => Some(DISCARDS_WORK),
+        // A `+ref` replaces the remote's branch, a `:ref` deletes it.
+        "push"
+            if short_flag(rest, "fd")
+                || long_flag(rest, &["force", "force-with-lease", "force-if-includes", "mirror", "delete", "prune"])
+                || rest.iter().any(|x| x.starts_with(['+', ':'])) =>
+        {
+            Some(FORCE_PUSH)
+        }
+        _ => None,
+    }
+}
+
 // ───────────────────────────── balanced mode ─────────────────────────────
 
 /// Test runners and checkers that are not npm packages (those are `classify::NPX_RUNNERS`):
@@ -1372,7 +1489,7 @@ mod tests {
     }
 
     fn eval_in(root: &Path, mode: ApprovalMode, read_only: bool, subject: ApprovalSubject) -> Verdict {
-        evaluate(&approval(subject), &PolicyCtx { mode, worktree: Some(root), verify: &[], read_only, edits: false })
+        evaluate(&approval(subject), &PolicyCtx { mode, worktree: Some(root), verify: &[], read_only, edits: false, own_checkout: false })
     }
 
     fn command(c: &str, cwd: &Path) -> ApprovalSubject {
@@ -1731,7 +1848,7 @@ mod tests {
         };
         let cmd = |c: &str, cwd: &str| approval(ApprovalSubject::Command { command: c.into(), cwd: Some(cwd.into()) });
         let eval = |a: &Approval, read_only| {
-            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only, edits: false })
+            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only, edits: false, own_checkout: false })
         };
         let allowed = |v: Verdict| matches!(v, Verdict::Allow { choice: ApprovalChoice::AllowOnce, .. });
 

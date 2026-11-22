@@ -27,6 +27,8 @@ import type { ConnectionSecret } from './gen/ConnectionSecret';
 import type { SweepReport } from './gen/SweepReport';
 import type { SetupChoice } from './gen/SetupChoice';
 import type { WorktreeSetup } from './gen/WorktreeSetup';
+import type { TrustChoice } from './gen/TrustChoice';
+import type { WorkspaceTrust } from './gen/WorkspaceTrust';
 import type { StorageCleanup } from './gen/StorageCleanup';
 import type { StoragePolicy } from './gen/StoragePolicy';
 import type { StorageReport } from './gen/StorageReport';
@@ -479,6 +481,8 @@ export const api = {
   boardArchive: (query: string | null = null) => call<ArchivedItem[]>('board_archive', { query }),
   /** What a new worktree of the open repo gets; pass `set` to turn its setup script on (for the text you read) or off. */
   worktreeSetup: (set: SetupChoice | null = null) => call<WorktreeSetup>('worktree_setup', { set }),
+  /** What the open repo makes the agent CLIs load by themselves, and your choice; pass `set` to trust the files you read or to open the repo without them. */
+  workspaceTrust: (set: TrustChoice | null = null) => call<WorkspaceTrust>('workspace_trust', { set }),
   /** Default MCP servers for new agents, with their switches and whether each key is stored. */
   listConnections: () => call<Connection[]>('list_connections'),
   /** Switch a server and/or store its key (Keychain; `value: null` removes it). Applies to the next spawn. */
