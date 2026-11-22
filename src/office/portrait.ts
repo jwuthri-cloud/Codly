@@ -3,6 +3,9 @@
 // identity color and role) — for the crew strip, chat and sheets. Synchronous: rendered with
 // a tiny shared WebGL renderer (released a few seconds after the last call, so it never holds
 // a GL context for long), composited on a soft identity-colored disc, cached.
+//
+// This file pulls in three.js, so only the office (already lazy) imports it directly. The rest of
+// the app asks through portraits.svelte.ts, which loads it after the first paint.
 
 import { AmbientLight, DirectionalLight, HemisphereLight, NeutralToneMapping, PerspectiveCamera, Scene, Texture, WebGLRenderer } from 'three';
 import type { Agent } from '../lib/gen/Agent';

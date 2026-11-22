@@ -14,7 +14,7 @@
 </script>
 
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type { Agent } from '../lib/gen/Agent';
   import type { Approval } from '../lib/gen/Approval';
   import type { Artifact } from '../lib/gen/Artifact';
@@ -23,6 +23,7 @@
   import type { Task } from '../lib/gen/Task';
   import type { AccountInfo } from '../lib/gen/AccountInfo';
   import { OfficeEngine, type AgentListItem, type TickerItem } from './engine';
+  import { Ticker } from './scheduler';
   import SimsHud, { type AgentAction } from './SimsHud.svelte';
   import { headline, live, plumbobOf, SimsTracker, type Busy } from './sims';
   import JobBoard from './JobBoard.svelte';
@@ -54,8 +55,13 @@
     /** Light the office for this hour (0..24) instead of your real clock. */
     hour?: number | null;
     reducedMotion: boolean;
-    /** Backdrop mode: dimmed and non-interactive behind work panels. */
+    /** Backdrop mode: dimmed and non-interactive behind work panels. There the office is drawn
+     *  only when something happens, unless `ambient` keeps its idle life going. */
     backdrop: boolean;
+    ambient?: boolean;
+    /** The host covers the office (Work mode, the map): nothing is drawn and the crew's
+     *  home-and-back clock stops until it shows again; then both catch up. */
+    hidden?: boolean;
     onselect: (sel: WorldSelection | null) => void;
     onhover: (sel: WorldSelection | null) => void;
     subscribe: (cb: (ev: EventRow) => void) => () => void;
@@ -119,6 +125,8 @@
     hour = null,
     reducedMotion,
     backdrop,
+    ambient = false,
+    hidden = false,
     onselect,
     onhover,
     subscribe,
@@ -217,6 +225,11 @@
       localStorage.setItem(simsKey, sims.save());
     } catch {}
   }
+  const rest = new Ticker(() => {
+    restTick();
+    if (++saves % 5 === 0) saveRest();
+  }, 2000);
+  let windowHidden = $state(document.visibilityState === 'hidden');
   /** The click menu's Send home and Call in are the office's own; the rest go to the app. */
   function act(id: string, a: AgentAction) {
     if (a === 'home' || a === 'callin') {
@@ -273,6 +286,8 @@
     const e = new OfficeEngine(el, {
       reducedMotion,
       backdrop,
+      ambient,
+      hidden,
       onselect: (s) => {
         onselect(s);
         // A click on an agent in the office opens its click menu (The Sims' pie menu).
@@ -296,12 +311,14 @@
       lot,
     });
     el.classList.toggle('of-backdrop', backdrop);
-    e.setFiles($state.snapshot(files) as RepoFile[] | undefined);
-    e.setAgents($state.snapshot(agents) as Agent[]);
-    e.setTasks($state.snapshot(tasks) as Task[]);
-    e.setArtifacts($state.snapshot(artifacts) as Artifact[]);
+    // The lists go in as they are: the engine and sims.ts only read them (they are replaced,
+    // never changed in place), so nothing is copied.
+    e.setFiles(files);
+    e.setAgents(agents);
+    e.setTasks(tasks);
+    e.setArtifacts(artifacts);
     e.replay(history);
-    sims.setAgents($state.snapshot(agents) as Agent[]);
+    sims.setAgents(agents);
     // Needs drive what an agent does on its break (a tired one naps); what it does refills them.
     e.setNeeds((id) => {
       const s = sims.stats(id, Date.now(), e.agentState(id));
@@ -315,27 +332,37 @@
       try {
         sims.load(localStorage.getItem(simsKey), Date.now());
       } catch {}
-    sims.setTasks($state.snapshot(tasks) as Task[]);
+    sims.setTasks(tasks);
     for (const ev of history) {
       sims.ingest(ev);
       seeOffer(ev);
     }
-    e.setApprovals($state.snapshot(approvals) as Approval[]);
+    e.setApprovals(approvals);
     e.setSelection(selection);
     e.setHover(hover);
     engine = e;
     flushRest();
-    const rest = setInterval(() => {
-      restTick();
-      if (++saves % 5 === 0) saveRest();
-    }, 2000);
+    const onVis = () => (windowHidden = document.visibilityState === 'hidden');
+    document.addEventListener('visibilitychange', onVis);
     return () => {
-      clearInterval(rest);
+      document.removeEventListener('visibilitychange', onVis);
       saveRest();
       if (live.sims === sims) live.sims = null;
       engine = null;
       clearTimeout(announceTimer);
       e.dispose();
+    };
+  });
+
+  // Home and back ticks only while the office can be seen: not in Work mode or on the map, not
+  // while the window is hidden. Seen again, it ticks at once: sims.ts brings energy and morale
+  // up to now from the clock, so the time away is not lost. Hidden, what it knows is saved.
+  $effect(() => {
+    if (!engine || hidden || windowHidden) return;
+    untrack(() => rest.set(true));
+    return () => {
+      rest.set(false);
+      saveRest();
     };
   });
 
@@ -361,26 +388,21 @@
   });
 
   $effect(() => {
-    const snap = $state.snapshot(files) as RepoFile[] | undefined;
-    engine?.setFiles(snap);
+    engine?.setFiles(files);
   });
   $effect(() => {
-    const snap = $state.snapshot(agents) as Agent[];
-    engine?.setAgents(snap);
-    sims.setAgents(snap);
+    engine?.setAgents(agents);
+    sims.setAgents(agents);
   });
   $effect(() => {
-    const snap = $state.snapshot(tasks) as Task[];
-    engine?.setTasks(snap);
-    sims.setTasks(snap);
+    engine?.setTasks(tasks);
+    sims.setTasks(tasks);
   });
   $effect(() => {
-    const snap = $state.snapshot(approvals) as Approval[];
-    engine?.setApprovals(snap);
+    engine?.setApprovals(approvals);
   });
   $effect(() => {
-    const snap = $state.snapshot(artifacts) as Artifact[];
-    engine?.setArtifacts(snap);
+    engine?.setArtifacts(artifacts);
   });
   $effect(() => {
     const s = selection ? { agentId: selection.agentId ?? null, taskId: selection.taskId ?? null, path: selection.path ?? null } : null;
@@ -398,6 +420,12 @@
   });
   $effect(() => {
     engine?.setBackdrop(backdrop);
+  });
+  $effect(() => {
+    engine?.setAmbient(ambient);
+  });
+  $effect(() => {
+    engine?.setHidden(hidden);
   });
   $effect(() => {
     engine?.setNarrate(narrate);
