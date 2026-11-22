@@ -117,3 +117,21 @@ fn the_claude_usage_read_is_documented() {
         }
     }
 }
+
+/// Which agents have an OS sandbox must stay where users look. Autonomous mode is a list of
+/// risky commands, Claude's sandbox is a switch (`Settings.claude_sandbox`), and the shell's
+/// Bedrock, Vertex or token sign-in reaches Claude only with its own switch
+/// (`Settings.claude_shell_auth`).
+#[test]
+fn the_sandbox_and_the_shell_sign_in_are_documented() {
+    let readme = flat(README);
+    for needle in [
+        "not a sandbox",
+        "sandbox claude's shell",
+        "gemini, opencode, cursor and copilot agents have no os sandbox",
+        "use my shell's claude sign-in",
+        "claude_code_use_bedrock",
+    ] {
+        assert!(readme.contains(needle), "README.md must say \"{needle}\": see adapters/claude.rs `settings_json` and env.rs `apply_shell_auth`");
+    }
+}

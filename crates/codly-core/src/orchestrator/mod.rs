@@ -314,9 +314,9 @@ async fn capture_env() -> HashMap<String, String> {
     })
 }
 
-async fn detect_clis(base: &HashMap<String, String>) -> Vec<CliInfo> {
+async fn detect_clis(base: &HashMap<String, String>, shell_auth: bool) -> Vec<CliInfo> {
     let base = base.clone();
-    let job = tokio::spawn(async move { crate::env::detect_all(&base).await });
+    let job = tokio::spawn(async move { crate::env::detect_all(&base, shell_auth).await });
     match tokio::time::timeout(Duration::from_secs(30), job).await {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
@@ -380,10 +380,11 @@ impl Core {
         let fixed_clis = opts.clis.is_some();
         let clis = match opts.clis {
             Some(c) => c,
-            None => detect_clis(&base_env).await,
+            None => detect_clis(&base_env, settings.claude_shell_auth).await,
         };
         // Fixed CLIs (tests) are not probed: every account takes its CLI's state.
-        let accounts = accounts::detect(&base_env, &clis, &settings.accounts, !fixed_clis, None).await.unwrap_or_default();
+        let accounts =
+            accounts::detect(&base_env, &clis, &settings.accounts, !fixed_clis, None, settings.claude_shell_auth).await.unwrap_or_default();
         let quota = accounts::stored_limits(&store);
         let breaker = Mutex::new(breaker_run::Runtime::load(&store));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -465,7 +466,7 @@ impl Core {
     pub async fn redetect_clis(&self) -> anyhow::Result<Vec<CliInfo>> {
         let i = &self.inner;
         if !i.fixed_clis {
-            let clis = detect_clis(&i.base_env).await;
+            let clis = detect_clis(&i.base_env, i.settings().claude_shell_auth).await;
             *write(&i.clis) = clis;
         }
         i.redetect_accounts(false).await;

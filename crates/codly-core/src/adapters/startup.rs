@@ -128,6 +128,7 @@ mod tests {
             use_user_setup: false,
             raw_log: "/tmp/raw.ndjson".into(),
             byok_command: None,
+            sandbox_shell: false,
         }
     }
 

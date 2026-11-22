@@ -277,12 +277,14 @@ pub fn transport(provider: Provider) -> &'static str {
 }
 
 /// Detect every provider in parallel (≤ 5 s each): path, `--version`, auth status, billing.
-pub async fn detect_all(base: &HashMap<String, String>) -> Vec<CliInfo> {
+/// `shell_auth` = `Settings.claude_shell_auth`: Claude is asked with the sign-in the user's
+/// shell selects (`apply_shell_auth`), as its agents will run.
+pub async fn detect_all(base: &HashMap<String, String>, shell_auth: bool) -> Vec<CliInfo> {
     let path = path_now(base).unwrap_or_default();
     let mut set = tokio::task::JoinSet::new();
     for (i, provider) in Provider::ALL.into_iter().enumerate() {
         let (base, path) = (base.clone(), path.clone());
-        set.spawn(async move { (i, detect(provider, &base, &path).await) });
+        set.spawn(async move { (i, detect(provider, &base, &path, shell_auth).await) });
     }
     let mut out: Vec<(usize, CliInfo)> = set.join_all().await;
     out.sort_by_key(|(i, _)| *i);
@@ -292,7 +294,7 @@ pub async fn detect_all(base: &HashMap<String, String>) -> Vec<CliInfo> {
 const DETECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One provider's CLI, looked up in the folders of `path` (the PATH as it is now, `path_now`).
-async fn detect(provider: Provider, base: &HashMap<String, String>, path: &str) -> CliInfo {
+async fn detect(provider: Provider, base: &HashMap<String, String>, path: &str, shell_auth: bool) -> CliInfo {
     let mut info = CliInfo {
         provider,
         path: None,
@@ -315,7 +317,10 @@ async fn detect(provider: Provider, base: &HashMap<String, String>, path: &str) 
     };
     info.path = Some(bin.to_string_lossy().into_owned());
     // Probe with the same scrubbed env the agents get, so billing reflects what they will use.
-    let env = child_env(base, provider);
+    let mut env = child_env(base, provider);
+    if shell_auth {
+        apply_shell_auth(&mut env, base, provider);
+    }
     let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
     let (version, auth, default_model) = tokio::join!(run(&bin, &["--version"], &env, &cwd), auth_status(provider, &bin, &env, &cwd), default_model(provider, &bin, &env, &cwd));
     info.default_model = default_model;
@@ -332,7 +337,10 @@ async fn detect(provider: Provider, base: &HashMap<String, String>, path: &str) 
     info.billing = billing;
     info.plan = plan;
     if info.problem.is_none() {
-        info.problem = problem;
+        info.problem = match (logged_in, login_command(provider, None)) {
+            (Some(false), Some(login)) => shell_auth_advice(provider, base, shell_auth, &login).or(problem),
+            _ => problem,
+        };
     }
     info
 }
@@ -655,8 +663,9 @@ fn git_version_problem(out: Result<RunOut, RunErr>) -> Option<String> {
 /// `--bare`-like behaviour); in subscription mode, so do the keys that would make *this*
 /// provider silently bill an API account instead of the user's plan.
 ///
-/// ponytail: v1 is subscription mode only; a BYOK mode keeps the provider's own key (and
-/// Bedrock/Vertex users' CLAUDE_CODE_USE_* switches) and passes it explicitly.
+/// The two exceptions are opt-in and are set after the scrub: the user's own key for this
+/// CLI's vendor (`child_env_with`), and for Claude the sign-in the user's shell selects
+/// (`apply_shell_auth`).
 fn scrubbed(key: &str, provider: Provider) -> bool {
     if key == "CLAUDECODE" || key.starts_with("CLAUDE_CODE_") || key.starts_with("CLAUDE_AGENT_SDK_") {
         return true;
@@ -732,6 +741,59 @@ pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, byok_k
         env.insert(vendor.env_var().into(), key.into());
     }
     env
+}
+
+/// Variables of the user's shell that give Claude Code another sign-in than `claude auth
+/// login`: Amazon Bedrock, Google Vertex AI, or a long-lived token (`claude setup-token`).
+/// They change who pays as surely as an API key does, so `scrubbed` removes them with the
+/// other CLAUDE_CODE_* variables, and `apply_shell_auth` puts them back only for a user who
+/// asked for it (`Settings.claude_shell_auth`). What these backends need beside the switch
+/// (AWS_REGION, AWS_PROFILE, CLOUD_ML_REGION, ANTHROPIC_VERTEX_PROJECT_ID,
+/// ANTHROPIC_BEDROCK_BASE_URL) is never removed.
+const CLAUDE_SHELL_AUTH: [&str; 3] = ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_OAUTH_TOKEN"];
+
+/// The `CLAUDE_SHELL_AUTH` variables the user's shell sets. An empty value selects nothing.
+fn shell_auth_vars(base: &HashMap<String, String>) -> Vec<(&'static str, &str)> {
+    CLAUDE_SHELL_AUTH.into_iter().filter_map(|k| base.get(k).filter(|v| !v.is_empty()).map(|v| (k, v.as_str()))).collect()
+}
+
+/// Leave the sign-in the user's shell selects in a Claude child env: the `CLAUDE_SHELL_AUTH`
+/// variables, with the shell's own values, after the scrub took them out. Every other
+/// CLAUDE_CODE_* variable stays out, and another CLI gets nothing. Codly does not make, save
+/// or log the token: the user's own variable is passed on as their terminal passes it.
+pub fn apply_shell_auth(env: &mut HashMap<String, String>, base: &HashMap<String, String>, provider: Provider) {
+    if provider != Provider::Claude {
+        return;
+    }
+    for (k, v) in shell_auth_vars(base) {
+        env.insert(k.to_string(), v.to_string());
+    }
+}
+
+/// What a signed-out Claude says when the user's shell selects another sign-in for it
+/// (`CLAUDE_SHELL_AUTH`): `login`, the command that signs in with a subscription, is not the
+/// only thing that can be missing then. `kept` = the probe ran with those variables. None for
+/// another CLI, and when the shell sets none of them.
+fn shell_auth_advice(provider: Provider, base: &HashMap<String, String>, kept: bool, login: &str) -> Option<String> {
+    if provider != Provider::Claude {
+        return None;
+    }
+    let names: Vec<&str> = shell_auth_vars(base).into_iter().map(|(k, _)| k).collect();
+    if names.is_empty() {
+        return None;
+    }
+    let names = names.join(", ");
+    Some(if kept {
+        format!(
+            "not signed in: Claude Code does not accept the sign-in your shell selects ({names}). \
+             Run `claude auth status` in a terminal to see why"
+        )
+    } else {
+        format!(
+            "not signed in: your shell sets {names}, and Codly takes that out of an agent's environment. Turn on \
+             \"Use my shell's Claude sign-in\" in Settings → Safety, or run `{login}` in a terminal"
+        )
+    })
 }
 
 // ───────────── accounts (several sign-ins of one CLI) ─────────────
@@ -873,8 +935,16 @@ pub(crate) fn shell_quote(s: &str) -> String {
 /// out. Without `probe` (fixed CLIs in tests) each provider has its configured accounts and
 /// its primary one, with the CLI's detected state. `limits` are left empty (the orchestrator
 /// fills them). Configured homes are normalized (`~` expanded, no trailing slash).
-pub async fn detect_accounts(base: &HashMap<String, String>, clis: &[CliInfo], configs: &[AccountConfig], probe: bool) -> Vec<AccountInfo> {
-    accounts_with(base, clis, configs, probe, None).await
+/// `shell_auth` = `Settings.claude_shell_auth`: Claude's sign-ins are asked with the sign-in
+/// the user's shell selects (`apply_shell_auth`), as in `detect_all`.
+pub async fn detect_accounts(
+    base: &HashMap<String, String>,
+    clis: &[CliInfo],
+    configs: &[AccountConfig],
+    probe: bool,
+    shell_auth: bool,
+) -> Vec<AccountInfo> {
+    accounts_with(base, clis, configs, probe, None, shell_auth).await
 }
 
 /// `detect_accounts` after a settings change (labels, order, enabled, a new home): the
@@ -886,8 +956,9 @@ pub async fn reconcile_accounts(
     configs: &[AccountConfig],
     probe: bool,
     known: &[AccountInfo],
+    shell_auth: bool,
 ) -> Vec<AccountInfo> {
-    accounts_with(base, clis, configs, probe, Some(known)).await
+    accounts_with(base, clis, configs, probe, Some(known), shell_auth).await
 }
 
 async fn accounts_with(
@@ -896,6 +967,7 @@ async fn accounts_with(
     configs: &[AccountConfig],
     probe: bool,
     known: Option<&[AccountInfo]>,
+    shell_auth: bool,
 ) -> Vec<AccountInfo> {
     struct Candidate {
         provider: Provider,
@@ -950,6 +1022,9 @@ async fn accounts_with(
         }
         let Some(bin) = cli.path.as_ref().map(PathBuf::from) else { continue };
         let mut env = child_env(base, c.provider);
+        if shell_auth {
+            apply_shell_auth(&mut env, base, c.provider);
+        }
         apply_account(&mut env, c.provider, c.home.as_deref());
         let (p, cwd) = (c.provider, cwd.clone());
         set.spawn(async move { (i, auth_status(p, &bin, &env, &cwd).await) });
@@ -989,7 +1064,10 @@ async fn accounts_with(
             plan,
             identity,
             problem: problem.map(|p| match login_command(c.provider, c.home.as_deref()) {
-                Some(cmd) if logged_in == Some(false) => format!("not signed in: run `{cmd}` in a terminal"),
+                Some(cmd) if logged_in == Some(false) => match shell_auth_advice(c.provider, base, shell_auth, &cmd) {
+                    Some(advice) => advice,
+                    None => format!("not signed in: run `{cmd}` in a terminal"),
+                },
                 _ => p,
             }),
             login_command: login_command(c.provider, c.home.as_deref()),
@@ -1178,6 +1256,43 @@ mod tests {
         assert_eq!(child_env(&base, Provider::Claude)["GOOGLE_CLOUD_PROJECT"], "x", "other vendors' settings stay");
     }
 
+    /// The shell's Bedrock, Vertex or token sign-in reaches Claude only when the user asked for
+    /// it. What belongs to a parent Claude Code session never does, and no other CLI gets it.
+    #[test]
+    fn the_shell_sign_in_reaches_claude_only_on_request() {
+        let base: HashMap<String, String> = [
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("CLAUDE_CODE_USE_VERTEX", ""),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "token-from-the-shell"),
+            ("AWS_REGION", "eu-west-1"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_ENTRYPOINT", "cli"),
+            ("CLAUDE_CODE_SSE_PORT", "4242"),
+            ("CLAUDE_AGENT_SDK_VERSION", "0.3"),
+            ("ANTHROPIC_API_KEY", "sk-ant"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let mut claude = child_env(&base, Provider::Claude);
+        for k in CLAUDE_SHELL_AUTH {
+            assert!(!claude.contains_key(k), "{k} reached Claude without the switch");
+        }
+        assert_eq!(claude["AWS_REGION"], "eu-west-1", "the backend's own settings are never removed");
+
+        apply_shell_auth(&mut claude, &base, Provider::Claude);
+        assert_eq!(claude["CLAUDE_CODE_USE_BEDROCK"], "1");
+        assert_eq!(claude["CLAUDE_CODE_OAUTH_TOKEN"], "token-from-the-shell");
+        assert!(!claude.contains_key("CLAUDE_CODE_USE_VERTEX"), "an empty value selects nothing");
+        for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "CLAUDE_AGENT_SDK_VERSION", "ANTHROPIC_API_KEY"] {
+            assert!(!claude.contains_key(k), "{k} leaked");
+        }
+
+        let mut codex = child_env(&base, Provider::Codex);
+        apply_shell_auth(&mut codex, &base, Provider::Codex);
+        assert!(CLAUDE_SHELL_AUTH.iter().all(|k| !codex.contains_key(*k)), "another CLI never gets Claude's sign-in");
+    }
+
     #[test]
     fn versions_and_auth_parsing() {
         assert_eq!(parse_version("2.1.309 (Claude Code)").as_deref(), Some("2.1.309"));
@@ -1291,19 +1406,63 @@ mod tests {
         let base: HashMap<String, String> = [("PATH", home), ("HOME", home)].into_iter().map(|(k, v)| (k.into(), v.into())).collect();
 
         script("opencode", "echo 1.17.2");
-        let old = detect(Provider::Opencode, &base, home).await;
+        let old = detect(Provider::Opencode, &base, home, false).await;
         assert_eq!(old.version.as_deref(), Some("1.17.2"));
         assert_eq!(old.install.update_to.as_deref(), Some("1.18.0"));
         assert_eq!(old.install.update.as_deref(), Some("opencode upgrade"));
         assert_eq!(old.problem, None, "an old CLI is still an installed CLI");
         assert!(!old.install.npm_available);
-        assert!(!detect(Provider::Codex, &base, home).await.install.npm_available, "also for a CLI that is not installed");
+        assert!(!detect(Provider::Codex, &base, home, false).await.install.npm_available, "also for a CLI that is not installed");
 
         script("opencode", "echo 1.18.31");
         script("npm", "exit 0");
-        let new = detect(Provider::Opencode, &base, home).await;
+        let new = detect(Provider::Opencode, &base, home, false).await;
         assert_eq!(new.install.update_to, None);
         assert!(new.install.npm_available);
+    }
+
+    /// The probe runs with the env the agents get. Without the switch the shell's Bedrock
+    /// sign-in is taken out, and the advice names it instead of sending the user to a login
+    /// they do not use; with the switch, Claude is asked as the terminal asks it. The fake
+    /// `claude` answers by the variable alone: what the real CLI prints on Bedrock is not
+    /// recorded.
+    #[tokio::test]
+    async fn a_shell_sign_in_is_probed_only_on_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("claude");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+case "$1" in
+  --version) echo "2.1.311 (Claude Code)" ;;
+  *) if [ -n "$CLAUDE_CODE_USE_BEDROCK" ]; then echo '{"loggedIn":true,"apiProvider":"bedrock"}'; else echo '{"loggedIn":false}'; fi ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.path().to_str().unwrap();
+        let mut base: HashMap<String, String> = [("PATH", home), ("HOME", home)].into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+
+        let plain = detect(Provider::Claude, &base, home, false).await;
+        assert_eq!(plain.problem.as_deref(), Some("not signed in: run `claude auth login` in a terminal"));
+
+        base.insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+        let off = detect(Provider::Claude, &base, home, false).await;
+        assert_eq!(off.logged_in, Some(false), "the shell's switch is not passed on by default");
+        let problem = off.problem.clone().unwrap();
+        for part in ["CLAUDE_CODE_USE_BEDROCK", "Settings → Safety", "`claude auth login`"] {
+            assert!(problem.contains(part), "{part} is missing: {problem}");
+        }
+        let accounts = detect_accounts(&base, std::slice::from_ref(&off), &[], true, false).await;
+        assert_eq!((accounts[0].logged_in, accounts[0].problem.as_deref()), (Some(false), Some(problem.as_str())));
+
+        let on = detect(Provider::Claude, &base, home, true).await;
+        assert_eq!((on.logged_in, on.billing, on.plan.as_deref()), (Some(true), Billing::ThirdParty, Some("bedrock")));
+        assert_eq!(on.problem, None);
+        let accounts = detect_accounts(&base, std::slice::from_ref(&on), &[], true, true).await;
+        assert_eq!((accounts[0].logged_in, accounts[0].billing, accounts[0].problem.as_deref()), (Some(true), Billing::ThirdParty, None));
     }
 
     #[tokio::test]
@@ -1431,7 +1590,7 @@ esac
     #[tokio::test]
     async fn detects_signed_in_homes_and_keeps_only_the_primary_enabled() {
         let home = Home::new();
-        let accounts = detect_accounts(&home.base, &home.clis, &[], true).await;
+        let accounts = detect_accounts(&home.base, &home.clis, &[], true, false).await;
         let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
         let work = format!("claude:{}", home.path(".claude-work"));
         let perso = format!("gemini:{}", home.path(".gemini-perso"));
@@ -1464,7 +1623,7 @@ esac
             config(Provider::Claude, Some(&home.path(".claude-old")), None, true),
             config(Provider::Claude, None, None, false),
         ];
-        let accounts = detect_accounts(&home.base, &home.clis, &configs, true).await;
+        let accounts = detect_accounts(&home.base, &home.clis, &configs, true, false).await;
         let claude: Vec<&AccountInfo> = accounts.iter().filter(|a| a.provider == Provider::Claude).collect();
         assert_eq!(claude.len(), 3);
         assert_eq!(claude[0].id, format!("claude:{}", home.path(".claude-work")), "~ expanded, trailing slash dropped");
@@ -1478,7 +1637,7 @@ esac
         // The login shell's own CLAUDE_CONFIG_DIR is the primary account.
         let mut base = home.base.clone();
         base.insert("CLAUDE_CONFIG_DIR".into(), "~/.claude-work".into());
-        let accounts = detect_accounts(&base, &home.clis, &[], true).await;
+        let accounts = detect_accounts(&base, &home.clis, &[], true, false).await;
         let primary: Vec<&str> = accounts.iter().filter(|a| a.primary).map(|a| a.id.as_str()).collect();
         assert_eq!(primary[0], format!("claude:{}", home.path(".claude-work")));
         let default = accounts.iter().find(|a| a.id == "claude").unwrap();
@@ -1488,11 +1647,11 @@ esac
     #[tokio::test]
     async fn reconciling_after_a_settings_change_reuses_the_probes() {
         let home = Home::new();
-        let known = detect_accounts(&home.base, &home.clis, &[], true).await;
+        let known = detect_accounts(&home.base, &home.clis, &[], true, false).await;
         let probes = home.probes();
         let work = home.path(".claude-work");
         let configs = [config(Provider::Claude, Some(&work), Some("job"), true), config(Provider::Claude, None, None, true)];
-        let accounts = reconcile_accounts(&home.base, &home.clis, &configs, true, &known).await;
+        let accounts = reconcile_accounts(&home.base, &home.clis, &configs, true, &known, false).await;
         assert_eq!(home.probes(), probes, "nothing new to probe");
         assert_eq!(accounts[0].label, "job");
         assert_eq!(accounts[0].identity.as_deref(), Some("me@work.com · Work"), "state carried over");
@@ -1501,12 +1660,12 @@ esac
 
         // A newly configured home is probed, once.
         let configs = [config(Provider::Claude, Some(&home.path(".claude-new")), None, true)];
-        let accounts = reconcile_accounts(&home.base, &home.clis, &configs, true, &known).await;
+        let accounts = reconcile_accounts(&home.base, &home.clis, &configs, true, &known, false).await;
         assert_eq!(home.probes(), probes + 1);
         assert_eq!(accounts[0].logged_in, Some(false));
 
         // Without probing (fixed CLIs), every account takes the CLI's state.
-        let accounts = detect_accounts(&home.base, &home.clis, &configs, false).await;
+        let accounts = detect_accounts(&home.base, &home.clis, &configs, false, false).await;
         let ids: Vec<&str> = accounts.iter().filter(|a| a.provider == Provider::Claude).map(|a| a.id.as_str()).collect();
         assert_eq!(ids, [format!("claude:{}", home.path(".claude-new")).as_str(), "claude"]);
         assert!(accounts.iter().all(|a| a.logged_in == Some(true)));

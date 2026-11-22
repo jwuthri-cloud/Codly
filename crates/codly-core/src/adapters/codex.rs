@@ -1887,6 +1887,7 @@ mod tests {
             use_user_setup: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: cmd.map(str::to_owned),
+            sandbox_shell: false,
         };
         let off = spec(&[("CODEX_HOME", "/h")], None);
         assert!(byok_overrides(&off).is_empty());
@@ -1929,6 +1930,7 @@ mod tests {
             use_user_setup: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: None,
+            sandbox_shell: false,
         };
         let (model, effort) = classify::split_model_effort(spec.model.as_deref());
         let (m, p) = thread_request(&spec, model.as_deref(), effort.as_deref());
@@ -2325,6 +2327,7 @@ mod tests {
             use_user_setup: false,
             raw_log: cwd.join("raw.ndjson"),
             byok_command: None,
+            sandbox_shell: false,
             cwd,
         }
     }

@@ -180,7 +180,7 @@ async fn main() {
         eprintln!("{} not found on PATH", args.provider.as_str());
         std::process::exit(1);
     };
-    let info = codly_core::env::detect_all(&base).await.into_iter().find(|c| c.provider == args.provider).unwrap();
+    let info = codly_core::env::detect_all(&base, false).await.into_iter().find(|c| c.provider == args.provider).unwrap();
     println!("detected: {}", serde_json::to_string(&info).unwrap());
 
     let mcp_log = root.join("mcp-calls.ndjson");
@@ -207,6 +207,7 @@ async fn main() {
         use_user_setup: false,
         raw_log: raw_log.clone(),
         byok_command: None,
+        sandbox_shell: false,
     };
     println!("spawning {} ({:?}, model {:?}) in {}", spec.bin.display(), spec.role, spec.model, repo.display());
 

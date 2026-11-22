@@ -66,8 +66,9 @@ pub fn tools_for(spec: &SpawnSpec) -> Vec<&'static str> {
     t
 }
 
-/// Workers edit freely inside their own worktree (Bash still asks). Solo agents work in the
-/// user's checkout and read-only roles have nothing to accept, so both ask for everything.
+/// Workers edit freely inside their own worktree (Bash still asks, unless the shell is
+/// sandboxed: `settings_json`). Solo agents work in the user's checkout and read-only roles
+/// have nothing to accept, so both ask for everything.
 pub fn permission_mode(spec: &SpawnSpec) -> &'static str {
     if spec.role == Role::Worker && !spec.read_only { "acceptEdits" } else { "manual" }
 }
@@ -92,6 +93,34 @@ pub fn mcp_config(spec: &SpawnSpec) -> Option<Value> {
 /// `--allowedTools` patterns for the default servers that only read; the others ask first.
 fn default_mcp_allowed(spec: &SpawnSpec) -> Vec<String> {
     crate::housekeeping::connections::load_ready(&spec.raw_log).into_iter().filter(|x| x.read_only).map(|x| format!("mcp__{}__*", x.name)).collect()
+}
+
+/// The risk on a request to run a command outside the shell sandbox. The rules send every
+/// risk to the user, in every approval mode but Full access, and no saved rule covers it.
+pub const UNSANDBOXED: &str = "runs outside the sandbox";
+
+/// The run's `--settings` document: it goes above the user's own settings files and below
+/// managed ones. None when Codly sets nothing.
+/// - `apiKeyHelper`: the BYOK token command (byok.rs). Claude runs it for its API key and
+///   re-runs it on expiry.
+/// - `sandbox`: Claude Code's own OS sandbox for the shell (`Settings.claude_sandbox`), for
+///   an agent that has a shell. Recorded on macOS with 2.1.311
+///   (docs/research/cli-claude-stream-json-2.1.311.md §9): with `enabled`, a shell command
+///   sends no permission request, and a write outside the working directory fails; a command
+///   the model wants to run outside the sandbox still asks, marked `sandboxOverride`
+///   (`UNSANDBOXED`). Codly passes no list of folders or hosts: the CLI's defaults and the
+///   user's own Claude Code settings decide them. `failIfUnavailable` is in the CLI's
+///   settings schema; what it does is from the CLI's documentation, not recorded: where
+///   Claude Code cannot sandbox, it does not start, instead of running unsandboxed.
+pub fn settings_json(spec: &SpawnSpec) -> Option<Value> {
+    let mut doc = serde_json::Map::new();
+    if let Some(cmd) = &spec.byok_command {
+        doc.insert("apiKeyHelper".into(), json!(cmd));
+    }
+    if spec.sandbox_shell && !spec.read_only {
+        doc.insert("sandbox".into(), json!({ "enabled": true, "failIfUnavailable": true }));
+    }
+    (!doc.is_empty()).then(|| Value::Object(doc))
 }
 
 /// The full `claude` argv. `mcp_config_path` is a 0600 file holding [`mcp_config`] (a file,
@@ -139,9 +168,8 @@ pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&P
     if let Some(e) = effort {
         a.extend(["--effort".into(), e]);
     }
-    // BYOK token command (byok.rs): Claude runs it for its API key and re-runs it on expiry.
-    if let Some(cmd) = &spec.byok_command {
-        a.extend(["--settings".into(), serde_json::json!({ "apiKeyHelper": cmd }).to_string()]);
+    if let Some(settings) = settings_json(spec) {
+        a.extend(["--settings".into(), settings.to_string()]);
     }
     let role = format!("{:?}", spec.role).to_lowercase();
     let short: String = spec.agent_id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
@@ -1413,6 +1441,11 @@ impl ClaudeNormalizer {
         if req["blocked_path"].as_str().is_some_and(|p| classify::outside(p, &cwd, &cwd)) && !risks.iter().any(|r| r == "outside worktree") {
             risks.push("outside worktree".into());
         }
+        // The shell is sandboxed and the model asks to run this command outside it
+        // (`dangerouslyDisableSandbox`, recorded on 2.1.311).
+        if req["decision_reason_type"].as_str() == Some("sandboxOverride") {
+            risks.push(UNSANDBOXED.into());
+        }
         let choices = if tool == "AskUserQuestion" {
             vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel]
         } else {
@@ -1580,6 +1613,7 @@ mod tests {
             use_user_setup: false,
             raw_log: PathBuf::from("/tmp/x/raw.ndjson"),
             byok_command: None,
+            sandbox_shell: false,
         }
     }
 
@@ -1606,6 +1640,84 @@ mod tests {
         let i = a.iter().position(|x| x == "--settings").unwrap();
         let v: Value = serde_json::from_str(&a[i + 1]).unwrap();
         assert_eq!(v, serde_json::json!({ "apiKeyHelper": "~/bin/wif-token \"anthropic\"" }));
+    }
+
+    /// The `--settings` value of an argv, parsed. There is at most one.
+    fn settings_arg(args: &[String]) -> Option<Value> {
+        let at: Vec<usize> = args.iter().enumerate().filter(|(_, x)| *x == "--settings").map(|(i, _)| i).collect();
+        assert!(at.len() <= 1, "one --settings document: {args:?}");
+        at.first().map(|i| serde_json::from_str(&args[i + 1]).unwrap())
+    }
+
+    /// The sandbox goes to the agents that have a shell, as the document recorded in
+    /// docs/research/fixtures/claude-2.1.311/sandbox-allow.ndjson (`sandbox.enabled`), in one
+    /// `--settings` document with the BYOK token command.
+    #[test]
+    fn the_shell_sandbox_is_passed_to_agents_with_a_shell() {
+        let sandbox = json!({ "enabled": true, "failIfUnavailable": true });
+        for role in [Role::Worker, Role::Solo] {
+            let off = spec(role, false);
+            assert_eq!(settings_arg(&build_args(&off, "s", None)), None, "off by default: {role:?}");
+            let on = SpawnSpec { sandbox_shell: true, ..off };
+            assert_eq!(settings_arg(&build_args(&on, "s", None)), Some(json!({ "sandbox": sandbox })), "{role:?}");
+        }
+        // Lead and reviewers have no shell to sandbox.
+        for role in [Role::Lead, Role::Reviewer] {
+            let read_only = SpawnSpec { sandbox_shell: true, ..spec(role, true) };
+            assert_eq!(settings_arg(&build_args(&read_only, "s", None)), None, "{role:?}");
+            assert!(!tools_for(&read_only).contains(&"Bash"));
+        }
+        let both = SpawnSpec { sandbox_shell: true, byok_command: Some("op read key".into()), ..spec(Role::Worker, false) };
+        assert_eq!(settings_arg(&build_args(&both, "s", None)), Some(json!({ "apiKeyHelper": "op read key", "sandbox": sandbox })));
+        // The recorded run used exactly this key.
+        let recorded = &fixture("claude-2.1.311/sandbox-allow.ndjson")[0]["_argv"];
+        let argv: Vec<String> = recorded.as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).collect();
+        assert_eq!(settings_arg(&argv).unwrap()["sandbox"]["enabled"], json!(true));
+    }
+
+    /// A settings file saved before the two Claude switches existed loads with both off.
+    #[test]
+    fn an_older_settings_file_has_the_claude_switches_off() {
+        use crate::model::Settings;
+        let mut saved = serde_json::to_value(Settings::default()).unwrap();
+        for key in ["claude_sandbox", "claude_shell_auth"] {
+            assert_eq!(saved.as_object_mut().unwrap().remove(key), Some(json!(false)), "{key} is off by default");
+        }
+        let old: Settings = serde_json::from_value(saved).unwrap();
+        assert!(!old.claude_sandbox && !old.claude_shell_auth);
+    }
+
+    /// A command the model wants to run outside the sandbox is the user's to decide in every
+    /// approval mode but Full access, and no saved rule covers it. Requests replayed from the
+    /// 2.1.311 recordings (sandbox on: `sandboxOverride`; sandbox off: an ordinary request).
+    #[test]
+    fn a_command_outside_the_sandbox_always_asks() {
+        use crate::model::ApprovalMode;
+        use crate::orchestrator::approvals::{PolicyCtx, Verdict, evaluate, rule_offer};
+        let request = |name: &str| fixture(name).into_iter().find(|l| l["type"] == "control_request").expect("a permission request");
+        let worker = spec(Role::Worker, false);
+        let mut norm = ClaudeNormalizer::new(&worker, "s".into());
+
+        let recorded = request("claude-2.1.311/sandbox-allow.ndjson");
+        assert_eq!(recorded["request"]["input"]["dangerouslyDisableSandbox"], json!(true));
+        let a = approval_of(&norm.on_message(&recorded));
+        assert!(a.risks.iter().any(|r| r == UNSANDBOXED), "{:?}", a.risks);
+        assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel]);
+
+        let plain = approval_of(&norm.on_message(&request("claude-2.1.311/sandbox-off.ndjson")));
+        assert!(!plain.risks.iter().any(|r| r == UNSANDBOXED), "{:?}", plain.risks);
+
+        // The same request for a command the rules allow by themselves: only the sandbox risk is left.
+        let mut harmless = recorded.clone();
+        harmless["request"]["input"]["command"] = json!("ls");
+        let a = approval_of(&norm.on_message(&harmless));
+        assert_eq!(a.risks, vec![UNSANDBOXED.to_string()]);
+        let ctx = |mode| PolicyCtx { mode, worktree: Some(worker.cwd.as_path()), verify: &[], read_only: false, edits: true };
+        for mode in [ApprovalMode::Balanced, ApprovalMode::Strict, ApprovalMode::Autonomous] {
+            assert!(matches!(evaluate(&a, &ctx(mode)), Verdict::Ask { .. }), "{mode:?}");
+            assert!(rule_offer(&a, &ctx(mode)).is_empty(), "{mode:?}: no rule to save");
+        }
+        assert!(matches!(evaluate(&a, &ctx(ApprovalMode::Full)), Verdict::Allow { .. }));
     }
 
     #[test]

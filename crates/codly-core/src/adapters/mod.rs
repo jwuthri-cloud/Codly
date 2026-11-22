@@ -98,6 +98,10 @@ pub struct SpawnSpec {
     /// BYOK token command (byok.rs) the CLI runs itself, re-running it when the token expires:
     /// Claude `apiKeyHelper`, Codex `[model_providers.<id>.auth]`. A saved key travels in `env`.
     pub byok_command: Option<String>,
+    /// Claude only: the agent's shell commands run inside Claude Code's own OS sandbox
+    /// (`Settings.claude_sandbox`, `claude::settings_json`). Codex always has its own sandbox,
+    /// and the ACP agents have none.
+    pub sandbox_shell: bool,
 }
 
 /// Commands the orchestrator sends to a running agent.

@@ -102,8 +102,9 @@ install terminal for the missing ones, and walks you through setting up a Lead, 
 mission.
 
 Approvals have four modes: balanced, strict, autonomous and Full access (auto-approves everything except
-a few hard floors; off unless you choose it). Settings also holds Triggers (schedules and network mode)
-and Inbound (webhook and Slack sources for the Lead).
+a few hard floors; off unless you choose it). Autonomous is a list of risky commands, not a sandbox: see
+[What an agent's commands can do](#subscriptions-and-safety). Settings also holds Triggers (schedules and
+network mode) and Inbound (webhook and Slack sources for the Lead).
 
 ## Requirements
 
@@ -215,6 +216,14 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 - Each agent shows a billing badge (subscription, API key or third party). API-key variables that would
   silently switch billing are removed from agent environments, unless you turned on your own API key for
   that vendor.
+- The same goes for the variables that give Claude Code another sign-in than `claude auth login`:
+  `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_OAUTH_TOKEN` (a token from
+  `claude setup-token`). Codly removes them from agent environments unless you turn on **Use my shell's
+  Claude sign-in** (Settings → Safety). With it on, Claude agents keep them from your login shell, as
+  Claude Code does in your terminal, and that account pays. Codly does not store the token. Check
+  Anthropic's terms before you use a subscription token this way. Every other `CLAUDE_CODE_*` variable
+  is always removed, so that an agent never takes itself for a part of the Claude Code session that
+  started Codly.
 
 **Your repository**
 
@@ -232,7 +241,8 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 - One kind of agent edits your project folder directly: an agent that you hire with **Git isolation**
   switched off. The hire screen warns you about it.
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
-  access, which approves it.
+  access, which approves it. One exception: with **Sandbox Claude's shell** on (below), a Claude agent's
+  sandboxed commands do not ask.
 - By itself, Codly removes a worktree only when it is clean and merged, and deletes a `codly/…` branch
   only when its work is merged and its plan has been over for a day. Work that is not committed or not
   merged stays until you delete it in **Settings → Storage**, which first names what you would lose.
@@ -254,6 +264,29 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   under a private ref, on no branch). **Restore files to this point**, in the agent's Git tab, puts the
   files back and can be undone. It changes files only: the agent still remembers its later turns. An agent
   with Git isolation off has no checkpoints, because Codly never puts files back in your own folder.
+
+**What an agent's commands can do**
+
+- The approval rules read the text of a command. They do not see what a script, a test or a program does
+  once it runs. So **Autonomous** mode is a list of risky commands, not a sandbox: a command with no risk
+  in its text runs without asking, with the rights of your account.
+- Codex agents always run in Codex's own OS sandbox, which keeps their writes in their worktree.
+- Claude Code agents have no OS sandbox, unless you turn on **Sandbox Claude's shell** (Settings →
+  Safety; off by default). With it on, Claude Code runs the shell commands of workers and 1:1 agents in
+  its own OS sandbox:
+  - A sandboxed command can write only in the agent's folder (its worktree), a temporary folder and the
+    repository's git data. It can still read your other files.
+  - Its network access follows Claude Code's own sandbox settings (the hosts that your Claude Code
+    settings allow). Codly adds no host and no folder.
+  - Sandboxed commands run without asking, in every approval mode: the approval rules do not see them.
+    This includes git commands that change the repository (a commit, a branch, the stash).
+  - A command that Claude wants to run outside the sandbox asks you first, in every approval mode except
+    Full access. The approval card says that it runs outside the sandbox.
+  - The sandbox covers shell commands only. File edits and tool servers (MCP) are not sandboxed: they go
+    through approvals as before. Codly's own checks (a task's verify commands, the setup script) are
+    not sandboxed either.
+- Gemini, OpenCode, Cursor and Copilot agents have no OS sandbox. For them, and for Claude Code agents
+  without the switch, the approval rules are the only check.
 
 **The network**
 

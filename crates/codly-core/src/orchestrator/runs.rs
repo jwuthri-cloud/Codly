@@ -71,6 +71,10 @@ impl Inner {
             tracing::debug!("{e}; using the base env");
             self.base_env.clone()
         });
+        // Your shell's Bedrock, Vertex or token sign-in for Claude, only if you asked for it.
+        if self.settings().claude_shell_auth {
+            crate::env::apply_shell_auth(&mut env, &self.base_env, provider);
+        }
         // The sign-in: CLAUDE_CONFIG_DIR / CODEX_HOME / GEMINI_CLI_HOME of that account.
         if let Some(acct) = &info {
             crate::env::apply_account(&mut env, provider, acct.home.as_deref());
@@ -188,6 +192,7 @@ impl Inner {
             use_user_setup: self.settings().use_my_claude_setup,
             raw_log,
             byok_command,
+            sandbox_shell: self.settings().claude_sandbox,
         };
         // A panicking adapter (or a stub) must fail this run, not the caller's task.
         let fut = self.spawner.spawn(spec, self.events_tx.clone());

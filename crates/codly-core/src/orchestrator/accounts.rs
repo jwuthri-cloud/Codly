@@ -186,12 +186,13 @@ pub(super) async fn detect(
     configs: &[AccountConfig],
     probe: bool,
     known: Option<Vec<AccountInfo>>,
+    shell_auth: bool,
 ) -> Option<Vec<AccountInfo>> {
     let (base, clis, configs) = (base.clone(), clis.to_vec(), configs.to_vec());
     let job = tokio::spawn(async move {
         match known {
-            Some(k) => crate::env::reconcile_accounts(&base, &clis, &configs, probe, &k).await,
-            None => crate::env::detect_accounts(&base, &clis, &configs, probe).await,
+            Some(k) => crate::env::reconcile_accounts(&base, &clis, &configs, probe, &k, shell_auth).await,
+            None => crate::env::detect_accounts(&base, &clis, &configs, probe, shell_auth).await,
         }
     });
     match tokio::time::timeout(Duration::from_secs(30), job).await {
@@ -245,8 +246,8 @@ impl Inner {
     /// already probed (a settings change), else probe every account.
     pub(super) async fn redetect_accounts(&self, reuse: bool) {
         let known = reuse.then(|| read(&self.accounts).clone());
-        let configs = self.settings().accounts;
-        if let Some(found) = detect(&self.base_env, &self.clis(), &configs, !self.fixed_clis, known).await {
+        let Settings { accounts: configs, claude_shell_auth: shell_auth, .. } = self.settings();
+        if let Some(found) = detect(&self.base_env, &self.clis(), &configs, !self.fixed_clis, known, shell_auth).await {
             *write(&self.accounts) = found;
         }
         self.kick();

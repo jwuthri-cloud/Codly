@@ -96,4 +96,24 @@ verify_timeout_secs: number,
  * When the watchdog flags, interrupts and stops an agent that gives no output, and flags
  * a worker that sits idle on a running task.
  */
-watchdog: WatchdogSettings, };
+watchdog: WatchdogSettings, 
+/**
+ * Claude agents that have a shell (workers and 1:1 agents) run its commands inside Claude
+ * Code's own OS sandbox (`adapters::claude::settings_json`): a command can write only in
+ * the agent's working folder, a temporary folder and the repository's git data. Sandboxed
+ * commands run without a request, so the approval rules do not see them; a command Claude
+ * wants to run outside the sandbox asks you in every approval mode but Full access. Off
+ * (the default): the approval rules are the only check on a Claude agent's shell. Codex
+ * always has its own sandbox, and the ACP agents (Gemini, OpenCode, Cursor, Copilot) have
+ * none.
+ */
+claude_sandbox: boolean, 
+/**
+ * Claude agents keep the sign-in your login shell selects: CLAUDE_CODE_USE_BEDROCK,
+ * CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_OAUTH_TOKEN (`env::apply_shell_auth`). Off (the
+ * default): they are removed like every other CLAUDE_CODE_* variable, so an agent can
+ * never bill another account than the one of `claude auth login` without you asking.
+ * The sign-in checks run with the same variables as the agents: after a change, the
+ * Settings sheet asks the CLIs again (`redetect_clis`).
+ */
+claude_shell_auth: boolean, };
