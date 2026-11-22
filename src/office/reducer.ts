@@ -619,3 +619,39 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
   }
   return out;
 }
+
+/**
+ * Streamed chunks (text and reasoning deltas, tool output, usage) come many times a second.
+ * True when folding this one cannot change what the office shows, so the engine skips its
+ * director pass for it. Ask before `reduce` folds the event: the answer reads the state the
+ * event is about to change.
+ *
+ * For these events `reduce` only makes the agent if it is new, moves `lastEventAt` (read for an
+ * agent that neither works nor thinks: idle time, sleep, breaks) and, on the first delta of a
+ * reply or a thought, sets `replyingSince` / `thinkingSince`.
+ */
+export function streamOnly(m: OfficeModel, ev: EventRow): boolean {
+  const a = ev.agent_id ? m.agents.get(ev.agent_id) : undefined;
+  if (!a) return false; // a new face: the director must see it
+  switch (ev.kind.type) {
+    case 'usage_updated':
+      return true;
+    case 'text_delta':
+      return a.replyingSince != null;
+    case 'reasoning_delta':
+      return a.thinkingSince != null;
+    case 'tool_output':
+      return a.status === 'working' || a.status === 'thinking';
+    default:
+      return false;
+  }
+}
+
+/**
+ * An effect that leaves something behind: a ticker line, the mailbox flag, the merge jingle, a
+ * framed picture. The others only flash or walk (an errand to the mailbox), so the engine drops
+ * them while nobody can see the office.
+ */
+export function lasting(f: Fx): boolean {
+  return f.t === 'ticker' || f.t === 'mail' || f.t === 'merge' || f.t === 'artifact';
+}

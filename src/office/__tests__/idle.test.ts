@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CameraRig } from '../camera';
 import { Character, lookFor, PropKit } from '../gfx/character';
 import { FxSystem } from '../gfx/fx';
-import { FrameLoop, type LoopHost, type StepResult } from '../scheduler';
+import { FrameLoop, idleLife, type LoopHost, type StepResult } from '../scheduler';
 
 function fakeHost() {
   let rafs = 0;
@@ -145,6 +145,32 @@ describe('render on demand', () => {
     const f1 = frames;
     vi.advanceTimersByTime(5000);
     expect(frames).toBe(f1);
+    loop.dispose();
+  });
+
+  it('behind the chat an idle crew costs nothing: no animation frames, no timers; in full view it breathes', () => {
+    const { step } = office();
+    const h = fakeHost();
+    let backdrop = true;
+    let frames = 0;
+    const loop = new FrameLoop((now, dt) => {
+      frames++;
+      return step(now, dt, idleLife({ reducedMotion: false, backdrop, ambient: false }));
+    }, h.host);
+    loop.wake(); // an event: the pose blends settle, then nothing
+    vi.advanceTimersByTime(2000);
+    const settled = frames;
+    const rafs = h.rafs();
+    const timers = h.timers();
+    vi.advanceTimersByTime(10_000);
+    expect(frames).toBe(settled);
+    expect(h.rafs() - rafs).toBe(0);
+    expect(h.timers() - timers).toBe(0);
+    expect(loop.active).toEqual({ raf: false, timer: false });
+    backdrop = false; // the office comes to the front
+    loop.wake();
+    vi.advanceTimersByTime(3000);
+    expect((frames - settled) / 3).toBeGreaterThan(24);
     loop.dispose();
   });
 

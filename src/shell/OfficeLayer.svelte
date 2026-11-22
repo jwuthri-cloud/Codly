@@ -3,6 +3,8 @@
   src/office/OfficeView.svelte with exactly its contract props.
   - Lazy-loaded (three.js is its own chunk) and isolated by an error boundary: an office failure
     never takes the work down.
+  - Costs nothing when nobody looks: hidden in Work mode and on the map (no frames, no timers),
+    and behind the chat it is drawn only when something happens.
   - Files come from api.repoMap() (optional for the office): fetched when a workspace opens and
     refetched (debounced) when commits or merges land.
   - A fresh snapshot (epoch) remounts it so it re-derives from the new truth.
@@ -161,6 +163,8 @@
     return h.agentId || h.taskId || h.path ? { agentId: h.agentId, taskId: h.taskId, path: h.path } : null;
   });
   const backdrop = $derived(!(ui.mode === 'office' && ui.room === 'home'));
+  // Work mode and the map cover the office completely: it stops drawing until it shows again.
+  const hidden = $derived(ui.mode === 'work' || ui.mode === 'map');
 
   // The office labels say exactly what the crew strip says.
   const officeNarrate = (agentId: string) => narrate(agentId);
@@ -311,6 +315,8 @@
               {hover}
               reducedMotion={ui.reducedMotion}
               {backdrop}
+              ambient={store.settings.world_ambient}
+              {hidden}
               {onselect}
               {onhover}
               {subscribe}

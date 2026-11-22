@@ -289,7 +289,24 @@ describe('sims', () => {
     expect(t.stats('bo', 10 * HOUR, null).needs.energy).toBeCloseTo(0.75, 3); // the office was closed: no drain
     expect(t.stats('ada', 10 * HOUR, null).rest.home).not.toBeNull();
     t.tick(10 * HOUR, () => false);
-    expect(t.stats('ada', 10 * HOUR, null)).toMatchObject({ needs: { energy: 1 }, rest: { home: null } });
+    const back = t.stats('ada', 10 * HOUR, null);
+    expect(back.rest.home).toBeNull();
+    // The hour skipped: 6 minutes more at home filled it, then 54 at its desk. The closed hours: nothing.
+    expect(back.needs.energy).toBeCloseTo(0.955, 3);
+    expect(back.moodlets.some((m) => m.label === 'Rested')).toBe(true);
+    // Closed while it was at home: it rested until its time was up, and came back as the office opened.
+    const v = new SimsTracker();
+    v.setAgents([agent('ada')], 0);
+    v.setEnergy('ada', 0, 0);
+    v.sendHome('ada', 0);
+    expect(v.stats('ada', 2 * MIN, null).needs.energy).toBeCloseTo(0.2, 3);
+    const w = new SimsTracker();
+    w.setAgents([agent('ada')], 10 * HOUR);
+    w.load(v.save(), 10 * HOUR);
+    w.tick(10 * HOUR, () => false);
+    const opened = w.stats('ada', 10 * HOUR, null);
+    expect(opened.rest.home).toBeNull();
+    expect(opened.needs.energy).toBeCloseTo(1, 5);
     // The core's away_until (another window, a restart without saved state) puts it at home too.
     const u = new SimsTracker();
     u.setAgents([agent('ada', { away_until: 5 * MIN })], 0);

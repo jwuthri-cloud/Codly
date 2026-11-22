@@ -8,7 +8,7 @@
   import type { Provider } from '../lib/gen/Provider';
   import type { Role } from '../lib/gen/Role';
   import { TRAITS } from '../lib/util/career';
-  import { agentPortrait } from './portrait';
+  import Portrait from '../components/Portrait.svelte';
 
   interface Props {
     applicants: Applicant[];
@@ -27,7 +27,7 @@
 <div class="apps" role="listbox" aria-label="Applicants">
   {#each applicants as a, i (a.name)}
     <button class="app" class:on={picked === i} role="option" aria-selected={picked === i} onclick={() => onpick(i)}>
-      <img src={agentPortrait({ id: a.name, color: a.color, look_seed: a.avatar, provider, role }, 72)} alt="" width="72" height="72" />
+      <span class="pic"><Portrait agent={{ id: a.name, name: a.name, color: a.color, look_seed: a.avatar, provider, role }} size={72} /></span>
       <b>{a.name}</b>
       <q>{a.pitch}</q>
       <span class="traits">
@@ -46,7 +46,7 @@
   .app { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 10px; border: 0; border-radius: 14px; background: var(--surface-2, rgba(255, 255, 255, 0.05)); box-shadow: inset 0 0 0 1px var(--line, rgba(255, 255, 255, 0.1)); color: inherit; font: inherit; text-align: center; cursor: pointer; transition: transform 0.12s, box-shadow 0.12s; }
   .app:hover { transform: translateY(-2px); }
   .app.on { box-shadow: inset 0 0 0 2px #e9b03a; }
-  .app img { border-radius: 14px; background: rgba(0, 0, 0, 0.15); }
+  .pic { border-radius: 14px; background: rgba(0, 0, 0, 0.15); }
   .app b { font-size: 14px; }
   .app q { font-size: 12px; opacity: 0.75; quotes: '“' '”'; }
   .traits { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; }

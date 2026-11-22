@@ -52,7 +52,8 @@ interface El {
   pre: Text | null;
   code: HTMLElement | null;
   post: Text | null;
-  sig: string;
+  /** What it last showed (`fill` writes the DOM only when this differs). */
+  last: LabelSpec | null;
   iconKey: string;
   w: number;
   wc: number;
@@ -185,13 +186,30 @@ export class Overlay {
     if (spec.agentId) root.dataset.agent = spec.agentId;
     if (spec.taskId) root.dataset.task = spec.taskId;
     this.root.appendChild(root);
-    return { root, title, dot, icon, mood, badge, chip, line, pre, code, post, sig: '', iconKey: '', w: 0, wc: 0, h: 0, hc: 0, measured: false, shown: false, compact: false, x: -1e6, y: -1e6, used: true };
+    return { root, title, dot, icon, mood, badge, chip, line, pre, code, post, last: null, iconKey: '', w: 0, wc: 0, h: 0, hc: 0, measured: false, shown: false, compact: false, x: -1e6, y: -1e6, used: true };
   }
 
   private fill(e: El, s: LabelSpec) {
-    const sig = [s.title, s.pre, s.code, s.post, s.tone, s.color, s.badge, s.chip, s.selected, s.hovered, s.icon, s.mood?.emoji, s.dim, s.gold].join('\u0001');
-    if (sig === e.sig) return;
-    e.sig = sig;
+    const p = e.last;
+    if (
+      p &&
+      p.title === s.title &&
+      p.pre === s.pre &&
+      p.code === s.code &&
+      p.post === s.post &&
+      p.tone === s.tone &&
+      p.color === s.color &&
+      p.badge === s.badge &&
+      p.chip === s.chip &&
+      p.selected === s.selected &&
+      p.hovered === s.hovered &&
+      p.icon === s.icon &&
+      p.mood?.emoji === s.mood?.emoji &&
+      p.dim === s.dim &&
+      p.gold === s.gold
+    )
+      return;
+    e.last = s;
     e.title.textContent = s.title;
     if (e.dot && s.color) e.dot.style.background = s.color;
     if (e.badge) {
