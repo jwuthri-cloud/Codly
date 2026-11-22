@@ -15,7 +15,7 @@ use super::planner::{self, PlanInput};
 use super::retry::Failure;
 use super::runs::{RunReq, new_session};
 use super::scheduler::{self, Action, AgentPick, SchedInput};
-use super::{Inner, careers, guard, lead, lock, names, prompts, read, row, workspace, write};
+use super::{Inner, careers, guard, lead, lock, merge_conflict, names, prompts, read, row, workspace, write};
 use crate::adapters::SessionMode;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
@@ -677,17 +677,20 @@ impl Inner {
         let ws = self.store.workspace(&ws_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
         let repo = PathBuf::from(&ws.repo_path);
         let plan = task.plan_id.as_deref().map(|p| self.plan(p)).transpose()?;
-        let (branch, wt, start) = match &plan {
-            Some(p) => {
+        // A task that resolves a conflict with your branch works in the plan's own worktree.
+        let in_place = plan.as_ref().and_then(|p| merge_conflict::in_place(&task, p));
+        let (branch, wt, start) = match (&in_place, &plan) {
+            (Some((integ, wt)), _) => (integ.clone(), wt.clone(), integ.clone()),
+            (None, Some(p)) => {
                 let short = plan_short(p);
                 let integ = p.integration_branch.clone().ok_or_else(|| anyhow!("the plan has no integration branch"))?;
                 (format!("codly/{short}/{}", task.key), self.worktree_root(&ws).join(&short).join(&task.key), integ)
             }
-            None => (format!("codly/adhoc/{}", task.key), self.worktree_root(&ws).join("adhoc").join(&task.key), "HEAD".to_string()),
+            (None, None) => (format!("codly/adhoc/{}", task.key), self.worktree_root(&ws).join("adhoc").join(&task.key), "HEAD".to_string()),
         };
         let member = agent.member.is_some().then(|| self.team_member(&agent)).flatten();
         // A team member works in its own stable worktree, switched to the task's branch.
-        let (wt, switch_note) = if agent.member.is_some() {
+        let (wt, switch_note) = if agent.member.is_some() && in_place.is_none() {
             let switched = self.switch_member_worktree(&ws, &agent, &task.key, &branch, &start).await?;
             // New at the member's first task: prepared on that task's branch.
             self.prepare_worktree(&ws, &switched.0, Some(task_id), None).await?;
@@ -704,6 +707,9 @@ impl Inner {
             self.prepare_worktree(&ws, &wt, Some(task_id), None).await?;
             (wt, None)
         };
+        if in_place.is_some() {
+            self.reopen_resolution(&task, &repo, &wt).await?;
+        }
         if self.store.task_commits(task_id)?.0.is_none() {
             let base = self.git.rev_parse(&repo, &start).await?;
             self.store.set_task_commits(task_id, base.as_deref(), None)?;
@@ -1175,7 +1181,9 @@ impl Inner {
             each("plan", &p.id, res.map(drop));
         }
         for p in self.store.plans_with_status(&[PlanStatus::Running])? {
+            // Not the merge a task was resolving there: its worker goes on with it.
             if let Some(wt) = p.integration_worktree.as_deref().map(Path::new).filter(|w| w.exists())
+                && matches!(self.open_resolution(&p), Ok(None))
                 && let Ok(true) = self.git.abort_merge(wt).await
             {
                 let res = self.decide(Some(&p.workspace_id), None, "merge", "aborted a merge left half-done by a crash", json!({ "plan_id": p.id }));
@@ -1228,6 +1236,12 @@ impl Inner {
             .map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect())
             .unwrap_or_default();
         let wt = plan.integration_worktree.as_deref().map(PathBuf::from);
+        // A conflict resolution you cancelled half-way leaves no open merge behind: the checks
+        // run on the branch as the finished tasks left it.
+        if let Some(wt) = &wt {
+            let _g = self.repo_lock.lock().await;
+            self.git.abort_merge(wt).await?;
+        }
         let mut failed = vec![];
         // Not run: the approval rules see a risk in them, and nobody could allow them.
         let mut refused: Vec<HeldCheck> = vec![];

@@ -333,6 +333,14 @@ they are build output or third-party code in most repos. If one holds your own c
   send nothing when the repository no longer matches it. The dialog also says how many of the
   user's own unpushed commits the branch starts from, since they go with it. Codly never pushes
   on its own.
+- A merge that cannot go straight in (`merge_conflict.rs`): when the user's branch has commits
+  the plan was never checked with, `merge_plan` first runs the plan's verify commands on the
+  merge result in a scratch worktree, and a failure stops the merge unless the user merges
+  anyway. A conflict names its files (`merge_state`, read with `git merge-tree`), and
+  `resolve_merge_conflict` brings the user's branch into the Codly branch inside Codly's own
+  worktree, never in the user's checkout: a plan gets one more task that resolves it in the
+  integration worktree and passes the gate, then the plan finishes again; a solo agent resolves
+  it in its own conversation. Codly never commits a merge while conflict markers are left.
 - The workspace IDE saves files where its agent works (`ide_write`, `ide_create`): in the
   agent's worktree, or in the user's checkout when the agent has none (the Lead, or an agent
   hired with Git isolation off). It never commits.
@@ -385,6 +393,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       team.rs hires.rs careers.rs         standing team and consultants, hired agents, XP and offers
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
                       pull_request.rs                     the pull-request step: push a Codly branch, `gh pr create`, checks
+                      merge_conflict.rs                   a merge that cannot go straight in: conflict files, an agent resolves it, checks on the merge result
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
@@ -421,7 +430,7 @@ src-tauri/src/            the macOS shell
   diagnostics.rs    Settings → Troubleshooting: the scrubbed report for a bug report
   commands.rs       most Tauri commands: thin wrappers over Core
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
-  onboarding_commands.rs pr_commands.rs    the other commands, one file per topic
+  merge_commands.rs onboarding_commands.rs pr_commands.rs    the other commands, one file per topic
   ui_bus.rs         one ordered Channel of coalesced event batches per webview
   web.rs            `codly serve`: the same UI over HTTP; passes /api/voice/ws to the voice relay
   ipc_tests.rs      the real commands through Tauri's IPC layer (mock runtime)

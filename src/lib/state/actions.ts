@@ -25,6 +25,7 @@ import { withModel } from '../util/team';
 import { followUpRequest, reviewMessage } from '../util/review';
 import { accounts } from './accounts.svelte';
 import { diffstats } from './diffstats.svelte';
+import { fileList, loadMergeState, resolveMergeConflict } from './mergeState.svelte';
 import { flushClosing } from './closing';
 import { busy } from './queue';
 import { requests } from './requests.svelte';
@@ -214,14 +215,16 @@ export async function closeRequest(thread: string): Promise<boolean> {
 
 /** Merge a done plan into your checked-out branch. When that is not the branch the plan started
  *  from, nothing is merged yet: a toast says what the merge would bring and offers to go on
- *  (`into` is then the branch you confirmed). */
-export async function mergePlan(planId: string, into: string | null = null) {
+ *  (`into` is then the branch you confirmed). A merge that stops says why and how to go on: a
+ *  conflict can go to an agent, and checks that failed on the merge result can be skipped
+ *  (`unchecked`). */
+export async function mergePlan(planId: string, into: string | null = null, unchecked = false) {
   const plan = store.planMap.get(planId);
   if (!into) {
     const warning = await attempt('merge the plan', () => api.mergePlanWarning(planId));
     if (warning === undefined) return;
     if (warning) {
-      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, warning.target) };
+      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, warning.target, unchecked) };
       toast({ kind: 'attention', title: `Merge into ${warning.target}?`, body: warning.message, action: goOn, duration: 0 });
       return;
     }
@@ -229,10 +232,24 @@ export async function mergePlan(planId: string, into: string | null = null) {
   const target = into ?? store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'your branch';
   const id = toast({ kind: 'progress', title: `Merging into ${target}…` });
   try {
-    const sha = await api.mergePlan(planId, into);
+    const sha = await api.mergePlan(planId, into, unchecked);
     store.markPlanMerged(planId, sha);
     toastsUpdate(id, { kind: 'success', title: `Merged into ${target}`, body: `${plan?.summary ?? 'Plan'} · ${shortSha(sha)}` });
   } catch (e) {
+    // What stands in the way, as the core reads it now. Your branch did not move.
+    const source = { kind: 'plan' as const, id: planId };
+    const state = await loadMergeState(source);
+    if (state?.conflicts.length) {
+      const body = `${state.target} and this plan both changed ${fileList(state.conflicts)}. ${state.target} is unchanged. An agent can resolve it in Codly’s own worktree, or you can do it yourself: see the plan’s card.`;
+      const resolve = { label: 'Have an agent resolve it', run: () => void resolveMergeConflict(source) };
+      toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${state.target}`, body, action: resolve, duration: 0 });
+      return;
+    }
+    if (state?.failed_checks.length) {
+      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, into, true) };
+      toastsUpdate(id, { kind: 'error', title: `Not merged into ${state.target}`, body: msg(e), action: goOn, duration: 0 });
+      return;
+    }
     // The Lead that planned it explains in the request's chat, instead of a bare error. Only in
     // the plan's own office: a merge can take minutes, and the chat goes to the open one.
     const asked = !!plan && store.isOpen(plan.workspace_id) && sendChat(plan.thread, `Merging “${plan.summary}” into ${target} failed: ${msg(e)}\n\nWhy, and what's the safest way to get it merged?`);
@@ -250,6 +267,16 @@ export async function mergeAgent(agentId: string): Promise<boolean> {
     toastsUpdate(id, { kind: 'success', title: `Merged into ${target}`, body: `${a?.name ?? 'Agent'} · ${shortSha(sha)}` });
     return true;
   } catch (e) {
+    // A conflict can go back to the agent: it resolves it in its own worktree.
+    const source = { kind: 'agent' as const, id: agentId };
+    const state = await loadMergeState(source);
+    if (state?.conflicts.length) {
+      const who = a?.name ?? 'the agent';
+      const body = `${state.target} and ${who} both changed ${fileList(state.conflicts)}. ${state.target} is unchanged.`;
+      const resolve = { label: `Have ${who} resolve it`, run: () => void resolveMergeConflict(source, a?.name ?? null) };
+      toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${state.target}`, body, action: resolve, duration: 0 });
+      return false;
+    }
     toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${target}`, body: msg(e) });
     return false;
   }

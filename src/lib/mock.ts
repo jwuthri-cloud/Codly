@@ -32,6 +32,8 @@ import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 import type { RequestPrefs } from './gen/RequestPrefs';
 import type { LastMerge } from './gen/LastMerge';
+import type { MergeState } from './gen/MergeState';
+import type { PrSource } from './gen/PrSource';
 import type { RepoSync } from './gen/RepoSync';
 import { mockAgentGit } from './demo/agentgit';
 import { PullRequestDemo } from './demo/pullrequest';
@@ -301,6 +303,14 @@ export class MockTransport implements Transport {
       }
       case 'merge_plan_warning':
         return null; // the demo repo stays on main, where every plan starts
+      case 'merge_state':
+      case 'resolve_merge_conflict': {
+        // Nobody commits on the demo's main while a plan runs: nothing conflicts, nothing to resolve.
+        const source = a.source as PrSource;
+        const branch = source.kind === 'plan' ? sim.plans.get(source.id)?.integration_branch : mockAgentGit(sim.agents.get(source.id), sim.now()).branch;
+        if (!branch) throw new Error(source.kind === 'plan' ? 'the plan never ran, so there is nothing to merge' : 'this agent has no worktree yet, so there is nothing to merge');
+        return { target: 'main', branch, repo: sim.workspace?.repo_path ?? '', conflicts: [], resolving: null, failed_checks: [] } satisfies MergeState;
+      }
       case 'merge_agent': {
         const sha = Math.random().toString(16).slice(2, 12).padEnd(10, '0');
         this.demoMerge = { sha, branch: 'main', plan_id: null, agent_id: String(a.agentId) };

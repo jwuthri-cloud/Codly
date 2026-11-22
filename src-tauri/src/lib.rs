@@ -16,6 +16,7 @@ mod pr_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod logging;
+mod merge_commands;
 mod ui_bus;
 mod web;
 
@@ -268,6 +269,8 @@ pub fn run() {
             pr_commands::create_pull_request,
             pr_commands::push_pr_branch,
             pr_commands::refresh_pull_request,
+            merge_commands::merge_state,
+            merge_commands::resolve_merge_conflict,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

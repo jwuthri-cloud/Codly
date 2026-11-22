@@ -102,6 +102,8 @@ fn commands_round_trip_with_frontend_arg_names() {
             crate::pr_commands::create_pull_request,
             crate::pr_commands::push_pr_branch,
             crate::pr_commands::refresh_pull_request,
+            crate::merge_commands::merge_state,
+            crate::merge_commands::resolve_merge_conflict,
         ])
         .build(tauri::generate_context!(test = true))
         .unwrap();
@@ -228,8 +230,15 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("not the last merge"), "{e}");
     let e = invoke(&wv, "merge_plan_warning", json!({ "planId": "nope" })).unwrap_err();
     assert!(e.to_string().contains("unknown plan"), "{e}");
-    let e = invoke(&wv, "merge_plan", json!({ "planId": "nope", "into": null })).unwrap_err();
+    let e = invoke(&wv, "merge_plan", json!({ "planId": "nope", "into": null, "unchecked": false })).unwrap_err();
     assert!(e.to_string().contains("unknown plan"), "{e}");
+    let e = invoke(&wv, "merge_plan", json!({ "planId": "nope", "into": "main", "unchecked": true })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
+    // A merge that cannot go straight in, with the keys the plan's card and the Git tab send.
+    let e = invoke(&wv, "merge_state", json!({ "source": { "kind": "plan", "id": "nope" } })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
+    let e = invoke(&wv, "resolve_merge_conflict", json!({ "source": { "kind": "agent", "id": "nope" } })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
 
     // New worktrees: no setup script in this repo, so nothing is on and nothing can be turned on.
     let setup = invoke(&wv, "worktree_setup", json!({ "set": null })).unwrap();

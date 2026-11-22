@@ -701,6 +701,7 @@ impl Inner {
             let _g = self.repo_lock.lock().await;
             if let Owner::Agent(agent, wt) = &head.owner {
                 self.git.check_worktree(&head.repo, wt).await?;
+                self.check_resolved(agent, wt).await?;
                 let message = format!("codly(solo/{}): before pull request", agent.name);
                 if let Some(c) = self.git.commit_all(wt, &message).await? {
                     self.emit(ws_id, row(Some(&agent.id), None, None, EventKind::Committed { sha: c.sha, files: c.files, message }))?;

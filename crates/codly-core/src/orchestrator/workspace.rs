@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{Inner, guard, lock, names, prompts, row, scheduler, write};
+use super::{Inner, guard, lock, merge_conflict, names, prompts, row, scheduler, write};
 use crate::adapters::AgentCmd;
 use crate::git::{MergeOutcome, name_list};
 use crate::index::Index;
@@ -604,8 +604,9 @@ impl Inner {
             return Ok(());
         }
         let dirty = self.git.changed_paths(repo, &["HEAD"]).await.unwrap_or_default();
+        // What the branch changed since it left `base` (not what `base` got since).
         let ours = match base {
-            Some(base) => self.git.changed_paths(repo, &[base, branch]).await.unwrap_or_default(),
+            Some(base) => self.git.changed_paths(repo, &[format!("{base}...{branch}").as_str()]).await.unwrap_or_default(),
             None => vec![],
         };
         let overlap: Vec<&String> = dirty.iter().filter(|f| ours.contains(f)).collect();
@@ -639,6 +640,7 @@ impl Inner {
         let ws_id = Some(ws.id.as_str());
         let _g = self.repo_lock.lock().await;
         self.git.check_worktree(&repo, &wt).await?;
+        self.check_resolved(&agent, &wt).await?;
         let message = format!("codly(solo/{}): before merge", agent.name);
         if let Some(c) = self.git.commit_all(&wt, &message).await? {
             self.emit(ws_id, row(Some(agent_id), None, None, EventKind::Committed { sha: c.sha, files: c.files, message }))?;
@@ -662,7 +664,7 @@ impl Inner {
             }
             MergeOutcome::AlreadyMerged { sha } => sha,
             MergeOutcome::Conflict { files, .. } => {
-                bail!("merging into {target} conflicts in {}; the merge was aborted and your branch is unchanged", files.join(", "))
+                bail!("{}", merge_conflict::conflict_error(&target, &branch, &files, &format!("{} (from its Git tab)", agent.name)))
             }
         };
         self.emit(ws_id, row(Some(agent_id), None, None, EventKind::Merged { sha: sha.clone(), branch: target.clone() }))?;
@@ -858,22 +860,14 @@ impl Inner {
         Ok(Some(MergeWarning { target: target.into(), message }))
     }
 
-    /// Merge the plan's integration branch into the checked-out branch. `into` = the branch the
-    /// user confirmed after `merge_plan_warning`; without it, a branch the plan did not start
-    /// from is refused.
-    pub(super) async fn merge_plan(&self, plan_id: &str, into: Option<&str>) -> anyhow::Result<String> {
-        let p = self.plan(plan_id)?;
-        if matches!(p.status, PlanStatus::Running | PlanStatus::Integrating) {
-            bail!("the plan is still running; wait until it is done (or cancel it)");
-        }
-        let branch = p.integration_branch.clone().ok_or_else(|| anyhow!("the plan never ran, so there is nothing to merge"))?;
-        let ws = self.store.workspace(&p.workspace_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
-        let repo = PathBuf::from(&ws.repo_path);
-        let _g = self.repo_lock.lock().await;
-        self.check_dirty_overlap(&repo, &branch, p.base_commit.as_deref(), "this plan").await?;
+    /// The checked-out branch a plan would be merged into, when nothing stands in the way of
+    /// trying: none of your uncommitted changes is in a file the plan changes, and the branch is
+    /// the one the plan started from, or the one you confirmed (`into`).
+    pub(super) async fn merge_target(&self, repo: &Path, p: &Plan, branch: &str, into: Option<&str>) -> anyhow::Result<String> {
+        self.check_dirty_overlap(repo, branch, p.base_commit.as_deref(), "this plan").await?;
         let target = self
             .git
-            .current_branch(&repo)
+            .current_branch(repo)
             .await?
             .ok_or_else(|| anyhow!("your checkout is on a detached HEAD; switch to a branch first"))?;
         match into {
@@ -882,12 +876,40 @@ impl Inner {
             }
             Some(_) => {}
             None => {
-                if let Some(w) = self.other_branch_warning(&repo, &p, &target).await? {
+                if let Some(w) = self.other_branch_warning(repo, p, &target).await? {
                     bail!("{} Nothing was merged: merge again and confirm {target} to go on.", w.message);
                 }
             }
         }
+        Ok(target)
+    }
+
+    /// Merge the plan's integration branch into the checked-out branch. `into` = the branch the
+    /// user confirmed after `merge_plan_warning`; without it, a branch the plan did not start
+    /// from is refused. When your branch has commits the plan was never checked with, the
+    /// plan's verify commands run on the merge result first, in a scratch worktree, and a
+    /// failure stops the merge; `unchecked` = you merge without them.
+    pub(super) async fn merge_plan(&self, plan_id: &str, into: Option<&str>, unchecked: bool) -> anyhow::Result<String> {
+        let p = self.plan(plan_id)?;
+        if matches!(p.status, PlanStatus::Running | PlanStatus::Integrating) {
+            bail!("the plan is still running; wait until it is done (or cancel it)");
+        }
+        let branch = p.integration_branch.clone().ok_or_else(|| anyhow!("the plan never ran, so there is nothing to merge"))?;
+        let ws = self.store.workspace(&p.workspace_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
+        let repo = PathBuf::from(&ws.repo_path);
+        // Before the repo lock: the checks can take minutes.
+        let checked = match unchecked {
+            true => None,
+            false => self.check_merge_result(&p, &ws, &branch, into).await?,
+        };
+        let _g = self.repo_lock.lock().await;
+        let target = self.merge_target(&repo, &p, &branch, into).await?;
         let before = self.git.head(&repo).await?;
+        if let Some(c) = &checked
+            && (before.as_deref() != Some(c.head.as_str()) || self.git.rev_parse(&repo, &branch).await?.as_deref() != Some(c.tip.as_str()))
+        {
+            bail!("{target} or the plan's branch changed while the checks ran, so they say nothing about this merge; nothing was merged. Merge again.");
+        }
         let msg = format!("Merge Codly plan: {}", prompts::clip(&p.summary, 72));
         let sha = match self.git.merge(&repo, &branch, &msg, false).await? {
             MergeOutcome::Merged { sha } => {
@@ -896,28 +918,35 @@ impl Inner {
             }
             MergeOutcome::AlreadyMerged { sha } => sha,
             MergeOutcome::Conflict { files, .. } => {
-                bail!("merging into {target} conflicts in {}; the merge was aborted and your branch is unchanged", files.join(", "))
+                bail!("{}", merge_conflict::conflict_error(&target, &branch, &files, "An agent (on the plan's card)"))
             }
         };
+        self.forget_failed_checks(&p.id)?;
         let ws_id = Some(ws.id.as_str());
         self.emit(ws_id, row(None, None, None, EventKind::Merged { sha: sha.clone(), branch: target.clone() }))?;
         self.update_plan(&p.id, |plan| {
             plan.merged_sha = Some(sha.clone());
             Ok(())
         })?;
+        // What ran on the merge result before your branch moved, if anything had to.
+        let (said, checks) = match (&checked, unchecked) {
+            (Some(c), _) => (c.said(&target), c.detail()),
+            (None, true) => (" You merged it without the plan's checks on the merge result.".to_string(), json!("skipped by you")),
+            (None, false) => (String::new(), json!(null)),
+        };
         self.decide_by(
             ws_id,
             None,
             "merge",
             "human",
             format!("you merged {branch} into {target}"),
-            json!({ "plan_id": p.id, "sha": sha }),
+            json!({ "plan_id": p.id, "sha": sha, "merge_result_checks": checks }),
         )?;
         self.chat(
             ws_id,
             &p.thread,
             "codly",
-            &format!("Merged \"{}\" into {target} ({}).", p.summary, &sha[..sha.len().min(10)]),
+            &format!("Merged \"{}\" into {target} ({}).{said}", p.summary, &sha[..sha.len().min(10)]),
             Some(json!({ "plan_id": p.id })),
         )?;
         // The user's checkout changed under the index: re-index what the merge touched.
