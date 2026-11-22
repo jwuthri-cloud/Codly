@@ -14,7 +14,8 @@
   import { narrate } from '../lib/state/narration';
   import { store, type FileTouch } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
-  import { clock, clockSec, dur, pct, resetsIn, timer, tokens, usd } from '../lib/util/format';
+  import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
+  import { clock, clockSec, dur, pct, resetsIn, timer, tokens } from '../lib/util/format';
   import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
   import ApprovalCard from '../home/cards/ApprovalCard.svelte';
@@ -114,14 +115,8 @@
 
   // ── cost & context ──
   const u = $derived(agent.usage);
-  const ctxFrac = $derived(u.context_used != null && u.context_window ? u.context_used / u.context_window : null);
-  const costLine = $derived.by(() => {
-    if (u.cost_usd == null) return agent.provider === 'codex' ? 'Tokens only — Codex reports no cost' : 'No cost reported';
-    if (agent.billing === 'subscription') return `≈ ${usd(u.cost_usd)} at list price · included in your plan`;
-    if (agent.billing === 'api_key') return `${usd(u.cost_usd)} · billed to your API key`;
-    if (agent.billing === 'third_party') return `${usd(u.cost_usd)} · billed by the provider`;
-    return `≈ ${usd(u.cost_usd)}`;
-  });
+  const ctxFrac = $derived(contextFraction(u));
+  const costLine = $derived(costLineOf(agent));
   // Quota is per sign-in: only this agent's account, never the provider's other sign-ins.
   const limits = $derived(store.rateLimits.filter((r) => r.provider === agent.provider && r.account === accounts.idOf(agent)));
   // Its sign-in: the quota it draws from (labelled only when the CLI has several in use).

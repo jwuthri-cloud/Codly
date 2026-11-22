@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 
 use codly_core::Core;
 use codly_core::model::*;
-use codly_core::orchestrator::breaker::BreakerConfig;
+use codly_core::orchestrator::breaker::{BreakerConfig, Spent};
 use codly_core::orchestrator::BreakerStatus;
 use codly_core::pty::PtyManager;
 use tauri::State;
@@ -469,6 +469,12 @@ pub async fn breaker_status(state: State<'_, AppState>) -> R<BreakerStatus> {
 #[tauri::command]
 pub async fn reset_breaker(state: State<'_, AppState>) -> R<()> {
     state.core().await?.reset_breaker().await.map_err(err)
+}
+
+/// What a plan's tasks used so far (tokens and reported cost), for the plan cards.
+#[tauri::command]
+pub async fn plan_spent(state: State<'_, AppState>, plan_id: String) -> R<Spent> {
+    state.core().await?.plan_spent(&plan_id).await.map_err(err)
 }
 
 // ───────────── housekeeping: board archive, default MCP servers ─────────────

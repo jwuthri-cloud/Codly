@@ -33,6 +33,9 @@ pub struct SchedInput<'a> {
     /// Who works on an active task in your other offices: worker slots and account caps
     /// count every office.
     pub elsewhere: &'a [Agent],
+    /// Why no task may start right now, as the waiting tasks show it (`breaker::Budget::hold`:
+    /// a token or cost budget is used up). None: tasks start.
+    pub hold: Option<&'a str>,
 }
 
 /// Park an account once this fraction of one of its usage windows is spent (C17).
@@ -265,6 +268,10 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
         };
         if settings.paused {
             actions.push(wait("paused: no new tasks start until you resume".into()));
+            continue;
+        }
+        if let Some(why) = input.hold {
+            actions.push(wait(why.to_string()));
             continue;
         }
         if free == 0 {

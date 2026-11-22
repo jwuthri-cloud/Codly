@@ -6,8 +6,10 @@
 -->
 <script lang="ts">
   import { cancelPlan, isStarting, runPlan } from '../../lib/state/actions';
+  import { planSpent, spentVersion } from '../../lib/state/spent.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
+  import { PLAN_SPENT_TIP, spentLine } from '../../lib/util/cost';
   import { clock } from '../../lib/util/format';
   import { methodProvenance, PLAN_STATUS_LABEL } from '../../lib/util/labels';
   import Icon from '../../components/Icon.svelte';
@@ -32,6 +34,13 @@
   const starting = $derived(isStarting(planId));
   const busy = $derived(acting || starting);
   let el: HTMLElement | undefined = $state();
+
+  // What the plan's tasks used so far: asked once it runs, again when a task changes state, and
+  // every half minute while it runs.
+  const spent = $derived(planSpent.plan[planId] ?? null);
+  $effect(() => {
+    if (plan && !deciding) planSpent.ensure(planId, spentVersion(tasks.map((t) => t.status), live, live ? ui.now : 0));
+  });
 
   const eyebrow = $derived.by(() => {
     if (!plan) return '';
@@ -118,7 +127,7 @@
         <Why lines={why} />
       {:else}
         <footer class="quiet">
-          <span class="since num">{live ? `Started ${clock(plan.updated_at)}` : `Updated ${clock(plan.updated_at)}`}</span>
+          <span class="since num">{live ? `Started ${clock(plan.updated_at)}` : `Updated ${clock(plan.updated_at)}`}{#if spent?.tokens} · <span data-tip={PLAN_SPENT_TIP}>{spentLine(spent)}{live ? ' so far' : ''}</span>{/if}</span>
           <button class="btn ghost sm" onclick={() => ui.openPlan(planId, plan.thread)}>Plan room<Icon name="arrow-right" size={12} /></button>
         </footer>
       {/if}

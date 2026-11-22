@@ -14,6 +14,7 @@ import type { Blocker } from './gen/Blocker';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { BreakerConfig } from './gen/BreakerConfig';
 import type { BreakerStatus } from './gen/BreakerStatus';
+import type { Spent } from './gen/Spent';
 import type { ArchivedItem } from './gen/ArchivedItem';
 import type { ArchivePolicy } from './gen/ArchivePolicy';
 import type { Connection } from './gen/Connection';
@@ -225,6 +226,8 @@ export const api = {
   setBreakerConfig: (config: BreakerConfig) => call<BreakerConfig>('set_breaker_config', { config }),
   breakerStatus: () => call<BreakerStatus>('breaker_status'),
   resetBreaker: () => call<void>('reset_breaker'),
+  /** What a plan's tasks used so far: work tokens and the cost the CLIs report, over every worker and reviewer run. */
+  planSpent: (planId: string) => call<Spent>('plan_spent', { planId }),
   interruptAgent: (agentId: string) => call<void>('interrupt_agent', { agentId }),
   stopAgent: (agentId: string) => call<void>('stop_agent', { agentId }),
   /** Live controls (agent panel). Each returns the agent's controls after the change. */

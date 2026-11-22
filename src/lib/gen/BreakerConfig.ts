@@ -6,9 +6,14 @@
 export type BreakerConfig = { enabled: boolean, 
 /**
  * Work tokens (input + output + cache writes; cache reads excluded) all agents may use
- * together since the app started or you pressed Reset.
+ * together since you last pressed Reset. The count is kept when you quit.
  */
 token_budget: number, 
+/**
+ * Dollars all agents may use together since you last pressed Reset, as their CLIs report
+ * them (Claude Code: an estimate at list price; Codex and Gemini report none).
+ */
+cost_budget_usd: number, 
 /**
  * Output tokens per minute one agent may sustain.
  */

@@ -416,6 +416,7 @@ impl Inner {
         // A quiet 1:1 chat does not keep an agent from its task (it is stopped for it).
         let busy: HashSet<Id> = self.busy_agents();
         let accounts = self.account_states();
+        let hold = self.budget_hold();
         let actions = scheduler::schedule(&SchedInput {
             tasks: &tasks,
             plans: &plans,
@@ -426,6 +427,7 @@ impl Inner {
             accounts: &accounts,
             now: now_ms(),
             elsewhere: &elsewhere,
+            hold: hold.as_deref(),
         });
         let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
         for a in actions {

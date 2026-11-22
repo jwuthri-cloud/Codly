@@ -150,6 +150,15 @@ gated. A crash mid-turn restarts the worker. A worker the circuit breaker constr
 until you resume it (one you hold already reads why on your Resume); a breaker stop says so on the
 task.
 
+**A budget stops spend.** Settings → Autonomy & Budgets has a token budget and a cost budget for
+all agents together (both off by default). What the team used is counted from every usage report
+and saved with it, so quitting does not give a budget back; only Reset counters does. Past a
+budget the scheduler starts no task (each waiting task says which budget and the way out), agents
+in a turn are steered and then constrained, agents with no turn running are left alone, and you
+get one message. The Lead is exempt: it only talks to you. Cost is what the CLIs report (Claude
+Code: an estimate at list price; Codex and Gemini: none). Codly does not pass a spend cap to the
+CLIs themselves.
+
 **Parallel requests.** Each request is its own thread (`lead`, `lead:<id>`) with its own Lead
 session ("Lead", "Lead 2"…, at most 3 live; idle ones pause and resume by session id). Plans,
 follow-ups and workers' questions stay in their request's thread; every Lead's board header

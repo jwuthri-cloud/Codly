@@ -411,7 +411,7 @@ async fn a_turn_that_answers_you_after_a_failed_turn_is_not_checked_as_the_work(
 
 /// Two errors in a row trip the breaker; nothing else does.
 fn error_storm(hard_stop: bool) -> BreakerConfig {
-    BreakerConfig { enabled: true, token_budget: 0, velocity_per_min: 0, repeated_tool_limit: 0, error_storm_limit: 2, hard_stop }
+    BreakerConfig { enabled: true, token_budget: 0, cost_budget_usd: 0.0, velocity_per_min: 0, repeated_tool_limit: 0, error_storm_limit: 2, hard_stop }
 }
 
 fn stuck(turn: &Turn) -> End {

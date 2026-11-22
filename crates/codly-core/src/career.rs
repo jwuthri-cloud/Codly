@@ -223,7 +223,7 @@ pub fn refresh(c: &mut Career, hired_at: i64, now: i64) -> bool {
 pub const WANT_XP: i64 = 25;
 
 /// Your local day of a moment ("2026-11-01"): wants last a day.
-fn day_of(ms: i64) -> String {
+pub(crate) fn day_of(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map_or_else(String::new, |d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
 }
 

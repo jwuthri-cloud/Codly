@@ -326,7 +326,7 @@
       <Icon name="send" size={15} stroke={1.8} />
     </button>
   </div>
-  {#if !oneToOne}<LeadControls {thread} />{:else if workerRequest}<AgentControls thread={workerRequest} request />{:else if agent?.role === 'solo'}<AgentControls {thread} />{/if}
+  {#if !oneToOne}<LeadControls {thread} />{:else if workerRequest}<AgentControls thread={workerRequest} request {agent} />{:else if agent?.role === 'solo'}<AgentControls {thread} {agent} />{/if}
 </div>
 
 <style>
