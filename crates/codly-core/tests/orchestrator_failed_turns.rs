@@ -337,6 +337,45 @@ async fn a_crash_mid_turn_restarts_the_worker_and_is_not_gated() {
     core.shutdown().await;
 }
 
+/// What agents said themselves in their own threads, oldest first.
+async fn agents_said(core: &Core) -> Vec<String> {
+    let mut events = core.events(None, None, 2000).await.unwrap();
+    events.sort_by_key(|e| e.id);
+    events
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Chat { message } if message.thread == format!("agent:{}", message.author) => Some(message.text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_turn_does_not_repeat_the_error_it_reported_as_the_agents_words() {
+    const LIMIT: &str = "Claude's usage limit is reached: wait for it to reset, then try again";
+    let dir = tempfile::tempdir().unwrap();
+    let script: Script = Arc::new(|turn: &Turn| {
+        let (error, result) = match turn.n {
+            // The turn reported why it failed, and its result is that same line.
+            0 => (Some(LIMIT), LIMIT),
+            // Another error came first: the result is news.
+            1 => (Some("tool call failed"), "the CLI exited before the turn finished"),
+            // No error at all: the result is all the thread gets.
+            _ => (None, "API Error: 529 Overloaded"),
+        };
+        if let Some(message) = error {
+            (turn.emit)(EventKind::Error { message: message.into(), fatal: false });
+        }
+        End::Turn(TurnStatus::Failed, Some(result))
+    });
+    let (core, seen, task) = start(dir.path(), None, script).await;
+    let blocked = task_ended(&core, &task.id).await;
+    assert_eq!(blocked.status, TaskStatus::Blocked, "{:?}", blocked.status_reason);
+    assert_eq!(seen.lock().unwrap().prompts.len(), 3, "the brief and two retries");
+    assert_eq!(agents_said(&core).await, ["the CLI exited before the turn finished", "API Error: 529 Overloaded"]);
+    core.shutdown().await;
+}
+
 /// A retry wait no test reaches: only something else can ask the worker to continue.
 const LONG_WAIT: Duration = Duration::from_secs(600);
 

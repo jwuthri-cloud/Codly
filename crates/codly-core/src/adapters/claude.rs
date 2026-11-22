@@ -884,26 +884,22 @@ impl ClaudeNormalizer {
             let message = format!("Claude did not enable requested tools: {}", missing.join(", "));
             self.problem(message, false, out);
         }
-        // The user's own servers (Connections, their Claude setup): one line for all of them.
-        let mut down = Vec::new();
+        // The user's own servers (Connections, their Claude setup) that did not start: one
+        // line for all of them. A server that still connects, or that waits for a sign-in the
+        // user never made, is no failure of this run.
+        let mut failed = Vec::new();
         for s in v["mcp_servers"].as_array().into_iter().flatten() {
             let status = s["status"].as_str().unwrap_or("unavailable");
-            // Only the states that end without tools: a server still connecting is no failure.
-            let why = match status {
-                "failed" => Some("failed to start"),
-                "needs-auth" => Some("needs a sign-in"),
-                _ => None,
-            };
             if s["name"] == "codly" {
                 if status != "connected" {
                     self.problem(format!("codly MCP server is {status}"), false, out);
                 }
-            } else if let Some(why) = why {
-                down.push(format!("{} ({why})", s["name"].as_str().unwrap_or("unnamed")));
+            } else if status == "failed" {
+                failed.push(s["name"].as_str().unwrap_or("unnamed"));
             }
         }
-        if !down.is_empty() {
-            self.problem(format!("The agent works without the tools of these MCP servers in this run: {}", down.join(", ")), false, out);
+        if !failed.is_empty() {
+            self.problem(format!("These MCP servers did not start, so the agent works without their tools in this run: {}", failed.join(", ")), false, out);
         }
     }
 
@@ -1208,8 +1204,9 @@ impl ClaudeNormalizer {
             }
         }
         // The stream already reported this turn's own API calls; the result has the last word
-        // (it adds the subagents' calls). A streamed call that the result leaves out must not
-        // make the totals go back: the circuit breaker reads a falling count as a new run.
+        // (it adds the subagents' calls, which the circuit breaker keeps out of its velocity:
+        // they are work of the whole turn). A streamed call that the result leaves out must
+        // not make the totals go back: the circuit breaker reads a falling count as a new run.
         let live = self.live_usage();
         self.usage.input_tokens = (self.usage.input_tokens + input).max(live.input_tokens);
         self.usage.output_tokens = (self.usage.output_tokens + output).max(live.output_tokens);
@@ -2054,13 +2051,13 @@ mod tests {
         let ev = norm.on_message(&system("brand_new_subtype", json!({})));
         assert!(matches!(&ev[..], [EventKind::Unknown { raw_type }] if raw_type == "system/brand_new_subtype"));
 
-        // The user's own MCP servers that ended without tools: one line. One that is still
-        // connecting is no failure.
+        // The user's own MCP servers that did not start: one line. One that still connects,
+        // or that waits for a sign-in (a connector the user never signed in to), is no failure.
         let ev = norm.on_message(&system("init", json!({ "tools": [], "mcp_servers": [
-            { "name": "codly", "status": "connected" }, { "name": "context7", "status": "failed" },
-            { "name": "linear", "status": "needs-auth" }, { "name": "slow", "status": "pending" }, { "name": "git", "status": "connected" }
+            { "name": "codly", "status": "connected" }, { "name": "context7", "status": "failed" }, { "name": "linear", "status": "needs-auth" },
+            { "name": "slow", "status": "pending" }, { "name": "git", "status": "connected" }, { "name": "docs", "status": "failed" }
         ] })));
-        assert_eq!(errors(&ev), [("The agent works without the tools of these MCP servers in this run: context7 (failed to start), linear (needs a sign-in)", false)]);
+        assert_eq!(errors(&ev), [("These MCP servers did not start, so the agent works without their tools in this run: context7, docs", false)]);
     }
 
     #[test]

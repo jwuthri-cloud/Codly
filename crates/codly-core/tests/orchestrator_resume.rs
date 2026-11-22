@@ -1,6 +1,7 @@
 //! A resume that fails is never silent. With a fake agent in place of the CLI: a 1:1 agent's
 //! session cannot be resumed, Codly starts a new one, and the conversation says so with the
-//! reason. A resume that works says nothing.
+//! reason. A resume that works says nothing. A task's worker says it the same way, and the
+//! decision is recorded on its task.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,9 +55,12 @@ struct Seen {
     starts: Vec<String>,
     /// Knob: a resume fails to start, as when the CLI no longer has the session.
     resume_fails: bool,
+    /// Knob: a turn stays open until the agent is stopped.
+    turns_stay_open: bool,
 }
 
-/// A fake agent whose sessions are "sess-1", "sess-2"… and whose turns end at once.
+/// A fake agent whose sessions are "sess-1", "sess-2"… and whose turns end at once (or stay
+/// open, with the knob).
 struct Fake(Arc<Mutex<Seen>>);
 
 impl Spawner for Fake {
@@ -100,9 +104,15 @@ impl Spawner for Fake {
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
                         AgentCmd::Prompt(text) => {
-                            seen.lock().unwrap().prompts.push(text.clone());
+                            let stays_open = {
+                                let mut s = seen.lock().unwrap();
+                                s.prompts.push(text.clone());
+                                s.turns_stay_open
+                            };
                             send(EventKind::TurnStarted { input: Some(text) });
-                            send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
+                            if !stays_open {
+                                send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
+                            }
                         }
                         AgentCmd::Shutdown => {
                             send(EventKind::Exited { code: Some(0) });
@@ -130,6 +140,10 @@ async fn wait_for<T>(what: &str, mut f: impl AsyncFnMut() -> Option<T>) -> T {
 
 async fn agent_now(core: &Core, id: &str) -> Agent {
     core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == id).expect("the agent is hired")
+}
+
+async fn task_now(core: &Core, id: &str) -> Task {
+    core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.id == id).expect("the task is on the board")
 }
 
 /// Send a message to the agent and wait until its turn is over.
@@ -194,5 +208,47 @@ async fn a_resume_that_fails_says_so_and_goes_on_in_a_new_conversation() {
     });
     assert!(recorded, "the decision log has it too");
     assert_eq!(agent_now(&core, &id).await.session_id.as_deref(), Some("sess-2"), "the next message resumes the new conversation");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_whose_resume_fails_says_so_and_the_decision_is_on_its_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let seen = Arc::new(Mutex::new(Seen { turns_stay_open: true, ..Default::default() }));
+    let cfg = CoreConfig { data_dir: dir.path().join("data"), app_exe: PathBuf::from("/usr/bin/true") };
+    let opts = StartOptions {
+        spawner: Some(Arc::new(Fake(seen.clone()))),
+        env: Some(std::env::vars().collect()),
+        clis: Some(vec![claude()]),
+        index: false,
+    };
+    let core = Core::start_with(cfg, opts).await.unwrap();
+    core.update_settings(Settings { lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let task = core.create_task("Write the greeting", "Create hello.txt containing hello").await.unwrap();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+
+    // The worker is in its first turn when you stop it: the task waits for it, with its session.
+    wait_for("the worker's first turn", async || (seen.lock().unwrap().prompts.len() == 1).then_some(())).await;
+    let worker = task_now(&core, &task.id).await.assignee.expect("the task has a worker");
+    core.stop_agent(&worker).await.unwrap();
+    wait_for("the task to wait for you", async || (task_now(&core, &task.id).await.status == TaskStatus::Blocked).then_some(())).await;
+
+    // You retry the task and the session is gone: a new one takes the task, and the worker's
+    // thread says why it starts over.
+    seen.lock().unwrap().resume_fails = true;
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    wait_for("the worker's new session", async || (seen.lock().unwrap().prompts.len() == 2).then_some(())).await;
+    assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1", "new"]);
+    let name = agent_now(&core, &worker).await.name;
+    let notice = format!("{name}'s earlier conversation could not be resumed ({GONE}). A new one started: {name} does not know what was said before.");
+    wait_for("the notice", async || codly_said(&core, &worker).await.contains(&notice).then_some(())).await;
+    assert_eq!(codly_said(&core, &worker).await, [notice.clone()], "said once, in the worker's own thread");
+    let on_task = core.events(None, None, 2000).await.unwrap().into_iter().any(|e| match e.kind {
+        EventKind::Decision { decision_type, summary, .. } => decision_type == "retry" && summary == notice && e.task_id.as_deref() == Some(task.id.as_str()),
+        _ => false,
+    });
+    assert!(on_task, "the decision is on the task");
     core.shutdown().await;
 }

@@ -333,9 +333,10 @@ impl Inner {
                     .get(&ctx.agent_id)
                     .filter(|l| l.run_id == ctx.run_id)
                     .map_or((true, None), |l| {
-                        // A failed turn that reported its error has said why: the thread shows
-                        // that error, and the result does not repeat it as the agent's words.
-                        let told = *status == TurnStatus::Failed && l.last_error.is_some();
+                        // A failed turn whose result is the error it just reported has said
+                        // why: the thread shows that error, and the result does not repeat it
+                        // as the agent's words. Any other result text is still posted.
+                        let told = *status == TurnStatus::Failed && result_text.is_some() && l.last_error == *result_text;
                         (l.turn_messages > 0 || told, l.last_text.clone())
                     });
                 if !had_message && let Some(t) = result_text.as_deref().filter(|t| !t.trim().is_empty()) {
