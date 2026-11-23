@@ -3,6 +3,7 @@
 // agent's. Pure: the row gives its calls and the helpers its calls started.
 import type { Seg, SubAgent } from '../lib/state/store.svelte';
 import { plural, tokens } from '../lib/util/format';
+import { clean } from '../lib/util/sanitize';
 
 /**
  * The agent's own steps of a row (`own`), and each helper's calls by the id of the call that
@@ -49,4 +50,13 @@ export function helperProgress(h: SubAgent): string {
   if (h.toolUses) parts.push(plural(h.toolUses, 'step'));
   if (h.tokens) parts.push(`${tokens(h.tokens)} tokens`);
   return parts.join(' · ');
+}
+
+/**
+ * One line under a helper in the agent sheet: what it does now (while it works) and how much
+ * it did so far: "Running the tests · 3 steps · 5.9k tokens". Empty when the CLI said neither.
+ */
+export function helperLine(h: SubAgent): string {
+  const step = h.status === 'running' ? clean(h.step).trim() : '';
+  return [step, helperProgress(h)].filter(Boolean).join(' · ');
 }

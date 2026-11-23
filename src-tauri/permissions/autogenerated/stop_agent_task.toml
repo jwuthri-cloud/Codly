@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-stop-agent-task"
+description = "Enables the stop_agent_task command without any pre-configured scope."
+commands.allow = ["stop_agent_task"]
+
+[[permission]]
+identifier = "deny-stop-agent-task"
+description = "Denies the stop_agent_task command without any pre-configured scope."
+commands.deny = ["stop_agent_task"]

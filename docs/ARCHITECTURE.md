@@ -546,6 +546,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       preview.rs                          try work before a merge: your command in a plan's or an agent's worktree
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
                       takeover.rs                         "Open in my terminal": a session goes to you, and comes back
+                      live_session.rs                     a live Claude session from the agent sheet: reconnect an MCP server, stop a background command
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
@@ -593,6 +594,7 @@ src-tauri/src/            the macOS shell
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
   merge_commands.rs onboarding_commands.rs pr_commands.rs preview_commands.rs    the other commands, one file per topic
   takeover_commands.rs  "Open in my terminal": the take-over commands and the terminal they open
+  session_commands.rs   the agent sheet's "Reconnect" (an MCP server) and "Stop" (a background command)
   ui_bus.rs         one ordered Channel of coalesced event batches per webview
   notify.rs         native notifications: event → notice, one per kind within a few seconds, the switches
   web.rs            `codly serve`: the same UI over HTTP; passes /api/voice/ws to the voice relay

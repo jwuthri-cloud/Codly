@@ -22,6 +22,8 @@
     "allow-set-agent-permission-mode",
     "allow-compact-agent",
     "allow-agent-context-usage",
+    "allow-reconnect-agent-mcp",
+    "allow-stop-agent-task",
     "allow-agent-takeover",
     "allow-list-takeovers",
     "allow-take-over-agent",

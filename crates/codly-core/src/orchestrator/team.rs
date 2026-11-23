@@ -636,17 +636,9 @@ impl Inner {
             account: None,
         };
         match &agent.session_id {
-            Some(s) => {
-                if let Err(e) = self.spawn_run(req(SessionMode::Resume { session_id: s.clone() })).await {
-                    tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
-                    self.spawn_run(req(new_session(agent.provider))).await?;
-                    self.resume_failed(agent, agent.role, Some(&ws.id), None, &e);
-                }
-            }
-            None => {
-                self.spawn_run(req(new_session(agent.provider))).await?;
-            }
-        }
+            Some(s) => self.resume_or_new(s, &req).await?,
+            None => self.spawn_run(req(new_session(agent.provider))).await?,
+        };
         Ok(())
     }
 

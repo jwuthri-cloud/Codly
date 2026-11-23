@@ -6,7 +6,7 @@ import type { EventRow } from '../../lib/gen/EventRow';
 import type { Snapshot } from '../../lib/gen/Snapshot';
 import { store, type Seg, type SubAgent } from '../../lib/state/store.svelte';
 import { mkAgent } from '../../office/demo/script';
-import { helperProgress, helperState, helperTitle, splitHelpers } from '../helpers';
+import { helperLine, helperProgress, helperState, helperTitle, splitHelpers } from '../helpers';
 import { buildSpine, type Item } from '../spine';
 import { workSummary } from '../workSummary';
 
@@ -74,6 +74,9 @@ describe('a helper in the conversation', () => {
     expect(helperState(h, row.segs[0])).toBe('running'); // its call returned, the helper did not
     expect(helperTitle(h, 'running')).toBe('Helper at work');
     expect(helperProgress(h)).toBe('1 step · 5.9k tokens');
+    // The agent sheet's line under the helper: what it does now, and how far it is.
+    expect(helperLine(h)).toBe('Running Echo hi to stdout · 1 step · 5.9k tokens');
+    expect(helperLine({ ...h, step: null, toolUses: null, tokens: null })).toBe('');
 
     apply(completed(17, 'toolu-2'), progress(18, 'toolu-1', { report: 'hi', tool_uses: 1, tokens: 6604 }), helper(18, 'toolu-1', 'completed'));
     [row] = works();
@@ -82,6 +85,7 @@ describe('a helper in the conversation', () => {
     expect(helperState(h, row.segs[0])).toBe('done');
     expect(helperTitle(h, 'done')).toBe('Helper finished');
     expect(helperProgress(h)).toBe('1 step · 6.6k tokens');
+    expect(helperLine(h)).toBe('1 step · 6.6k tokens'); // over: its last step is no longer what it does
   });
 
   it('a helper whose process is gone no longer counts as at work', () => {

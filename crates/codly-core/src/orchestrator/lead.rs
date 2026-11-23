@@ -314,17 +314,9 @@ impl Inner {
         };
         lock(&self.leads).forget(&lead.id);
         match &lead.session_id {
-            Some(s) => {
-                if let Err(e) = self.spawn_run(req(SessionMode::Resume { session_id: s.clone() })).await {
-                    tracing::warn!("resuming {} failed ({e}); starting a new session", lead.name);
-                    self.spawn_run(req(new_session(provider))).await?;
-                    self.resume_failed(&lead, Role::Lead, Some(&ws.id), None, &e);
-                }
-            }
-            None => {
-                self.spawn_run(req(new_session(provider))).await?;
-            }
-        }
+            Some(s) => self.resume_or_new(s, &req).await?,
+            None => self.spawn_run(req(new_session(provider))).await?,
+        };
         Ok(())
     }
 
@@ -702,11 +694,7 @@ impl Inner {
             self.spawned_or_live(agent_id, started)?;
             return self.send_prompt(agent_id, prompt);
         }
-        let session = match &agent.session_id {
-            Some(s) => SessionMode::Resume { session_id: s.clone() },
-            None => new_session(agent.provider),
-        };
-        let req = match agent.role {
+        let (role, cwd, read_only, system_prompt) = match agent.role {
             Role::Solo => {
                 let (branch, wt) = self.solo_worktree(&ws, &agent);
                 let repo = PathBuf::from(&ws.repo_path);
@@ -717,48 +705,32 @@ impl Inner {
                     self.mark_new_worktree(&wt)?;
                 }
                 self.prepare_solo_worktree(&ws, &agent, &wt).await;
-                RunReq {
-                    agent: agent.clone(),
-                    role: Role::Solo,
-                    cwd: wt,
-                    read_only: false,
-                    task_id: None,
-                    session,
-                    system_prompt: self.solo_system(&agent, &branch),
-                    workspace_id: Some(ws.id.clone()),
-                    account: None,
-                }
+                let system_prompt = self.solo_system(&agent, &branch);
+                (Role::Solo, wt, false, system_prompt)
             }
             // An idle worker or reviewer between tasks: a read-only conversation at the repo root.
-            role => RunReq {
-                agent: agent.clone(),
-                role,
-                cwd: PathBuf::from(&ws.repo_path),
-                read_only: true,
-                task_id: None,
-                session,
-                system_prompt: prompts::CHAT_SYSTEM.to_string(),
-                workspace_id: Some(ws.id.clone()),
-                account: None,
-            },
+            role => (role, PathBuf::from(&ws.repo_path), true, prompts::CHAT_SYSTEM.to_string()),
         };
-        let resumed = matches!(req.session, SessionMode::Resume { .. });
-        let started = self.spawn_run(req).await;
-        match self.spawned_or_live(agent_id, started) {
-            Ok(()) => {}
-            // Not a start that was refused because the session went to your terminal meanwhile:
-            // that session is fine, and it is the one to keep. Nor one that was not started
-            // because of the folder's own files (`trust.rs`): its session is fine too, and a new
-            // one would not start either. It resumes once you trust the folder.
-            Err(e) if resumed && !self.in_terminal(agent_id)? && !e.is::<super::trust::NotStarted>() => {
-                tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
-                self.update_agent(agent_id, |a| a.session_id = None)?;
-                Box::pin(self.chat_agent_spawn_fresh(agent_id, prompt)).await?;
-                self.resume_failed(&agent, agent.role, Some(&ws.id), None, &e);
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        }
+        let req = |session: SessionMode| RunReq {
+            agent: agent.clone(),
+            role,
+            cwd: cwd.clone(),
+            read_only,
+            task_id: None,
+            session,
+            system_prompt: system_prompt.clone(),
+            workspace_id: Some(ws.id.clone()),
+            account: None,
+        };
+        // A conversation that cannot be resumed gives way to a new one, which takes this
+        // message, and the thread says so. One that Codly did not start (it went to your
+        // terminal meanwhile, or the folder's own files are not trusted: `trust.rs`) is fine,
+        // and it is the one to keep: the message fails with the reason.
+        let started = match &agent.session_id {
+            Some(s) => self.resume_or_new(s, &req).await,
+            None => self.spawn_run(req(new_session(agent.provider))).await,
+        };
+        self.spawned_or_live(agent_id, started)?;
         self.send_prompt(agent_id, prompt)
     }
 
@@ -770,35 +742,6 @@ impl Inner {
             Err(e) if !self.is_live(agent_id) => Err(e),
             _ => Ok(()),
         }
-    }
-
-    async fn chat_agent_spawn_fresh(self: &Arc<Self>, agent_id: &str, prompt: String) -> Result<()> {
-        let agent = self.agent(agent_id)?;
-        let ws = match self.store.agent_workspace(agent_id)? {
-            Some(id) => self.store.workspace(&id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
-            None => self.require_ws()?,
-        };
-        let (cwd, role, read_only, system_prompt) = match agent.role {
-            Role::Solo => {
-                let (branch, wt) = self.solo_worktree(&ws, &agent);
-                (wt, Role::Solo, false, self.solo_system(&agent, &branch))
-            }
-            role => (PathBuf::from(&ws.repo_path), role, true, prompts::CHAT_SYSTEM.to_string()),
-        };
-        let req = RunReq {
-            agent: agent.clone(),
-            role,
-            cwd,
-            read_only,
-            task_id: None,
-            session: new_session(agent.provider),
-            system_prompt,
-            workspace_id: Some(ws.id.clone()),
-            account: None,
-        };
-        let started = self.spawn_run(req).await;
-        self.spawned_or_live(agent_id, started)?;
-        self.send_prompt(agent_id, prompt)
     }
 }
 

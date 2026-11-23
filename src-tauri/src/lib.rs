@@ -15,6 +15,7 @@ mod hire_commands;
 mod onboarding_commands;
 mod pr_commands;
 mod quit;
+mod session_commands;
 mod takeover_commands;
 mod preview_commands;
 #[cfg(test)]
@@ -146,6 +147,8 @@ pub fn run() {
             agent_controls::set_agent_permission_mode,
             agent_controls::compact_agent,
             agent_controls::agent_context_usage,
+            session_commands::reconnect_agent_mcp,
+            session_commands::stop_agent_task,
             takeover_commands::agent_takeover,
             takeover_commands::list_takeovers,
             takeover_commands::take_over_agent,

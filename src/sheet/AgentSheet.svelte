@@ -12,6 +12,7 @@
   import { copyText, interruptAgent, letGo, refreshAccounts, stopAgent } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { narrate } from '../lib/state/narration';
+  import { MCP_LABEL } from '../lib/state/session';
   import { store, type FileTouch } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
@@ -19,6 +20,7 @@
   import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, subagentMark, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
   import ApprovalCard from '../home/cards/ApprovalCard.svelte';
+  import { helperLine } from '../home/helpers';
   import BillingBadge from '../components/BillingBadge.svelte';
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
@@ -29,7 +31,9 @@
   import Section from '../components/Section.svelte';
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
+  import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
+  import AgentMcp from './AgentMcp.svelte';
   import AgentTakeover from './AgentTakeover.svelte';
   import AgentTrust from './AgentTrust.svelte';
   import TaskChecks from './TaskChecks.svelte';
@@ -203,6 +207,8 @@
       case 'retrieval': return { icon: 'link', text: `Codly provided ${k.citations.length} citations for “${oneLine(k.query, 50)}”` };
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
       case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
+      case 'mcp_server': return { icon: 'link', text: `MCP server ${k.name}: ${MCP_LABEL[k.status].toLowerCase()}${k.error ? ` (${oneLine(k.error, 90)})` : ''}` };
+      case 'background_command': return { icon: 'terminal', text: `Background command ${k.status}: ${oneLine(k.description, 90)}` };
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
       case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
       case 'decision': return { icon: 'help', text: k.summary };
@@ -398,10 +404,14 @@
         <ul class="subs">
           {#each moreSubs ? subsRunning : subsRunning.slice(0, SHOW) as s (s.callId)}
             <li>
-              <Icon name="crew" size={15} />
-              <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
-              <span class="s-meta num">{timer(ui.now - s.startedAt)}</span>
-              <span class="s-dot on"></span>
+              <div class="s-row">
+                <Icon name="crew" size={15} />
+                {#if s.name}<span class="s-kind">{clean(s.name)}</span>{/if}
+                <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
+                <span class="s-meta num">{timer(ui.now - s.startedAt)}</span>
+                <span class="s-dot on"></span>
+              </div>
+              {#if helperLine(s)}<p class="s-now truncate">{helperLine(s)}</p>{/if}
             </li>
           {/each}
         </ul>
@@ -412,9 +422,14 @@
             <ul class="subs">
               {#each subsDone as s (s.callId)}
                 <li class="fin">
-                  <Icon name={s.status === 'completed' ? 'check' : 'x-circle'} size={15} />
-                  <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
-                  <span class="s-meta num">{dur(s.ts - s.startedAt)}</span>
+                  <div class="s-row">
+                    <Icon name={s.status === 'completed' ? 'check' : 'x-circle'} size={15} />
+                    {#if s.name}<span class="s-kind">{clean(s.name)}</span>{/if}
+                    <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
+                    <span class="s-meta num">{dur(s.ts - s.startedAt)}</span>
+                  </div>
+                  {#if helperLine(s)}<p class="s-now truncate">{helperLine(s)}</p>{/if}
+                  {#if clean(s.report).trim()}<p class="s-report selectable">{clean(s.report).trim()}</p>{/if}
                 </li>
               {/each}
             </ul>
@@ -422,6 +437,10 @@
         {/if}
       </Section>
     {/if}
+
+    <AgentBackground {agent} />
+
+    <AgentMcp {agent} />
 
     <Section id="output" title="Output" summary={liveOut ? (liveOut.live ? 'live' : liveOut.title) : 'none'}>
       {#if liveOut}
@@ -563,6 +582,12 @@
   .s-dot.on { background: color-mix(in srgb, var(--hue) 75%, white); box-shadow: 0 0 8px var(--hue); }
   .s-txt { flex: 1; min-width: 0; font-size: var(--t-md); }
   .s-meta { font-size: var(--t-xs); color: var(--ink-3); }
+  .subs li { flex-direction: column; align-items: stretch; gap: 2px; }
+  .s-row { display: flex; gap: 10px; align-items: center; min-width: 0; }
+  .s-row > :global(svg) { flex-shrink: 0; color: var(--ink-3); }
+  .s-kind { padding: 1px 7px; border-radius: var(--r-full); box-shadow: inset 0 0 0 1px var(--line-2); font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
+  .s-now, .s-report { margin-left: 25px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
+  .s-report { color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 6; line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
   .out-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: var(--t-sm); color: var(--ink-3); }
   .out-head code { font-size: 11.5px; color: var(--ink-2); }
   .out-head .open-file { margin-left: auto; flex: none; }

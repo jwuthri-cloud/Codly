@@ -46,6 +46,7 @@ import { targetLabel, type Provenance } from '../util/labels';
 import { transferredOut } from '../util/transfer';
 import { accounts } from './accounts.svelte';
 import { controls } from './control.svelte';
+import { withBackgroundCommand, withMcpServer, type BackgroundCommand, type McpServer } from './session';
 
 export const LOG_CAP = 5000;
 const SEG_CAP = 1500;
@@ -202,6 +203,9 @@ export type AgentLive = {
   lastOutput: { callId: string; text: string; ts: number; ok: boolean | null } | null;
   errors: { message: string; fatal: boolean; ts: number }[];
   subagents: SubAgent[];
+  /** Its MCP servers and the commands it left running in the background, of its last run that reported any (state/session.ts). */
+  mcp: McpServer[];
+  background: BackgroundCommand[];
   firstTs: number;
   lastTs: number;
 };
@@ -230,6 +234,8 @@ const emptyLive = (ts: number): AgentLive => ({
   lastOutput: null,
   errors: [],
   subagents: [],
+  mcp: [],
+  background: [],
   firstTs: ts,
   lastTs: ts,
 });
@@ -1010,6 +1016,12 @@ class CodlyStore {
             l.subagents = l.subagents.map((x) => (x === prev ? next : x));
           }
         }
+        break;
+      case 'mcp_server':
+        if (l) l.mcp = withMcpServer(l.mcp, k, ev.run_id, ev.ts);
+        break;
+      case 'background_command':
+        if (l) l.background = withBackgroundCommand(l.background, k, ev.run_id, ev.ts);
         break;
       case 'error':
         if (l) l.errors = [...l.errors, { message: k.message, fatal: k.fatal, ts: ev.ts }].slice(-20);

@@ -1,6 +1,7 @@
-//! A Claude agent's mode, model, "compact now" and context reading end to end, with a fake
-//! agent in place of the CLI. The fake answers session requests with the shapes Claude Code
-//! 2.1.311 was recorded to give (docs/research/cli-claude-stream-json-2.1.311.md §2); the
+//! A Claude agent's mode, model, "compact now", context reading, MCP reconnect and the stop
+//! of a background command end to end, with a fake agent in place of the CLI. The fake answers
+//! session requests with the shapes Claude Code 2.1.311 was recorded to give
+//! (docs/research/cli-claude-stream-json-2.1.311.md §2 and its part 2, §6 and §18); the
 //! adapter's own tests replay the recordings themselves.
 
 use std::path::{Path, PathBuf};
@@ -184,6 +185,16 @@ impl Spawner for Fake {
                                         "totalTokens": 1442, "maxTokens": 1000000, "percentage": 1,
                                         "autoCompactThreshold": 967000, "isAutoCompactEnabled": true,
                                     }))
+                                }
+                                // (recorded: a server that still cannot connect answers with its reason)
+                                SessionRequest::McpReconnect(server) => {
+                                    s.log.push(format!("reconnect:{server}"));
+                                    Err("Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}".to_string())
+                                }
+                                // (recorded: `{}`, whether or not a task ended)
+                                SessionRequest::StopTask(task_id) => {
+                                    s.log.push(format!("stop-task:{task_id}"));
+                                    Ok(json!({}))
                                 }
                             };
                             let _ = reply.send(answer);
@@ -611,6 +622,62 @@ async fn the_context_reading_comes_from_the_live_session() {
 
     stop(&core, &id).await;
     let e = core.agent_context_usage(&id).await.unwrap_err().to_string();
+    assert!(e.contains("is not running"), "{e}");
+    core.shutdown().await;
+}
+
+/// Your acts on a live agent, as the History shows them.
+async fn your_acts(core: &Core, id: &str) -> Vec<String> {
+    let mut events = core.events(Some(id), None, 500).await.unwrap();
+    events.sort_by_key(|e| e.id);
+    events
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Decision { decision_type, method, summary, .. } if decision_type == "agent_control" && method == "human" => Some(summary),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_reaches_the_live_session_and_its_answer_is_yours() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let name = agent(&core, &id).await.name;
+
+    // The server still does not connect: Claude Code's own reason is the error.
+    let e = core.reconnect_agent_mcp(&id, " linear ").await.unwrap_err().to_string();
+    assert_eq!(e, "Claude Code answered: Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}");
+    assert_eq!(last_seen(&seen), "reconnect:linear");
+    assert_eq!(your_acts(&core, &id).await, [format!("asked {name} to reconnect its MCP server linear")]);
+
+    // No server named: nothing reaches the CLI.
+    let e = core.reconnect_agent_mcp(&id, "  ").await.unwrap_err().to_string();
+    assert_eq!(e, "which MCP server?");
+    assert_eq!(last_seen(&seen), "reconnect:linear");
+
+    stop(&core, &id).await;
+    let e = core.reconnect_agent_mcp(&id, "linear").await.unwrap_err().to_string();
+    assert!(e.contains("is not running"), "{e}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_background_command_is_stopped_through_the_live_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let name = agent(&core, &id).await.name;
+
+    core.stop_agent_task(&id, "tid-2").await.unwrap();
+    assert_eq!(last_seen(&seen), "stop-task:tid-2");
+    assert_eq!(your_acts(&core, &id).await, [format!("asked {name} to stop a command it left running in the background")]);
+    let e = core.stop_agent_task(&id, "").await.unwrap_err().to_string();
+    assert_eq!(e, "which background command?");
+
+    stop(&core, &id).await;
+    let e = core.stop_agent_task(&id, "tid-2").await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
     core.shutdown().await;
 }

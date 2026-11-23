@@ -50,6 +50,7 @@ pub mod housekeeping;
 mod ingest;
 pub mod intake;
 mod lead;
+mod live_session;
 mod lots;
 pub mod merge_conflict;
 pub mod names;

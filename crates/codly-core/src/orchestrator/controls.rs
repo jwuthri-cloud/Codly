@@ -198,7 +198,7 @@ impl Inner {
     }
 
     /// Record why Codly did something to an agent (the History shows it).
-    fn control_decision(&self, agent_id: &str, summary: String) {
+    pub(super) fn control_decision(&self, agent_id: &str, summary: String) {
         let (ws, task) = match lock(&self.live).get(agent_id) {
             Some(l) => (l.workspace_id.clone(), l.task_id.clone()),
             None => (self.store.agent_workspace(agent_id).ok().flatten(), None),
@@ -213,7 +213,7 @@ impl Inner {
         let _ = self.emit(ws.as_deref(), row(Some(agent_id), task.as_deref(), None, kind));
     }
 
-    fn live_agent(&self, agent_id: &str) -> Result<Agent> {
+    pub(super) fn live_agent(&self, agent_id: &str) -> Result<Agent> {
         let agent = self.agent(agent_id)?;
         if !self.is_live(agent_id) {
             bail!("{} is not running", agent.name);
