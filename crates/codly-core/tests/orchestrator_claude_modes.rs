@@ -454,35 +454,43 @@ async fn a_live_claude_agent_changes_its_effort_and_takes_the_default_model_with
     assert_eq!(tail(3), ["model:sonnet", "effort:high", "effort:low"]);
     assert!(codly_said(&core, &id, "now works with thinking effort low, in the same conversation: no restart was needed.").await);
 
-    // Claude Code answers "success" for a level it then drops. Codly reads the level back:
-    // the switch is refused with what the session really works with, and nothing changes.
-    seen.lock().unwrap().drops_effort = true;
-    let e = core.set_agent_model(&id, Some("sonnet:max".into())).await.unwrap_err().to_string();
-    assert!(e.contains("did not take the effort level \"max\"") && e.contains("it works with \"low\""), "{e}");
-    assert_eq!(model().await.as_deref(), Some("sonnet:low"));
+    // Claude Code answers "success" for a level it then drops. Codly reads the level back.
     // With another model too: the model changed, the effort did not, and the agent says so.
+    seen.lock().unwrap().drops_effort = true;
     let e = format!("{:#}", core.set_agent_model(&id, Some("opus:max".into())).await.unwrap_err());
     assert!(e.contains("changed its model, but not its thinking effort") && e.contains("did not take the effort level \"max\""), "{e}");
+    assert!(e.contains("it works with \"low\""), "{e}");
     assert_eq!(model().await.as_deref(), Some("opus:low"));
     assert_eq!(tail(2), ["model:opus", "effort:max"]);
-    seen.lock().unwrap().drops_effort = false;
     assert_eq!(seen.lock().unwrap().shutdowns, 0, "all of it in the same process");
+    // The effort alone: the session keeps the one it has, so the agent restarts with the new
+    // one, as it did before there was a live request. (A first version refused the switch,
+    // which left no way to that effort but to stop the agent by hand.)
+    let a = core.set_agent_model(&id, Some("opus:max".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus:max"));
+    assert_eq!(tail(3), ["model:opus", "effort:max", "effort:max"], "the session was asked first");
+    assert_eq!(seen.lock().unwrap().shutdowns, 1);
+    assert!(!codly_said(&core, &id, "now works with thinking effort max").await, "nothing changed in place");
+    seen.lock().unwrap().drops_effort = false;
 
     // A word that is no level of Claude Code is not sent to the session, and a level cannot
     // be taken away from it: those switches still restart.
+    turn(&core, &id, "again").await;
+    assert_eq!(seen.lock().unwrap().runs.len(), 2, "the next message starts the agent again");
+    let asked = seen.lock().unwrap().log.len();
     let a = core.set_agent_model(&id, Some("opus".into())).await.unwrap();
     assert_eq!(a.model.as_deref(), Some("opus"));
     {
         let s = seen.lock().unwrap();
-        assert_eq!(s.log.last().map(String::as_str), Some("effort:max"), "nothing was asked of the session: {:?}", s.log);
-        assert_eq!(s.shutdowns, 1);
+        assert_eq!(s.log.len(), asked, "nothing was asked of the session: {:?}", s.log);
+        assert_eq!(s.shutdowns, 2);
     }
-    turn(&core, &id, "again").await;
+    turn(&core, &id, "once more").await;
     core.set_agent_model(&id, Some("opus:minimal".into())).await.unwrap();
     {
         let s = seen.lock().unwrap();
         assert!(!s.log.iter().any(|l| l == "effort:minimal"), "{:?}", s.log);
-        assert_eq!(s.shutdowns, 2);
+        assert_eq!(s.shutdowns, 3);
     }
     core.shutdown().await;
 }

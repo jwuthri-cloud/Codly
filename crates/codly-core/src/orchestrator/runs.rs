@@ -352,8 +352,9 @@ impl Inner {
     }
 
     /// Switch a 1:1 agent's model and reasoning effort. A live Claude session takes them as it
-    /// is (`live_model_switch`). Otherwise the session resumes on the next message with the new
-    /// model, so a live process is stopped first; a turn in progress must finish or be stopped.
+    /// is (`live_model_switch`). Otherwise, or when that session did not take a new effort, the
+    /// session resumes on the next message with the new model, so a live process is stopped
+    /// first; a turn in progress must finish or be stopped.
     pub(super) async fn set_agent_model(&self, agent_id: &str, model: Option<String>) -> Result<Agent> {
         let agent = self.agent(agent_id)?;
         if agent.role != Role::Solo {
@@ -362,8 +363,10 @@ impl Inner {
         if agent.model == model {
             return Ok(agent);
         }
-        if let Some(switch) = self.live_model_switch(agent_id, model.as_deref()) {
-            return self.switch_live_model(&agent, model, switch).await;
+        if let Some(switch) = self.live_model_switch(agent_id, model.as_deref())
+            && let Some(changed) = self.switch_live_model(&agent, model.as_deref(), switch).await?
+        {
+            return Ok(changed);
         }
         // Its run of a task is not a chat to restart: stopping it would strand the task.
         if agent.task_id.is_some() {

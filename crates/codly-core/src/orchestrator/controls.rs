@@ -35,7 +35,8 @@
 //! - **Context** reads how full the context is.
 //! - **Model and thinking effort** (`set_agent_model`, runs.rs; `switch_live_model` here): the
 //!   model, the CLI's default model included, and the effort change in the live session. The
-//!   CLI answers "success" for an effort level it then drops, so Codly reads the level back.
+//!   CLI answers "success" for an effort level it then drops, so Codly reads the level back; a
+//!   session that did not take a new effort is restarted with it.
 //!
 //! `AgentControl` is the pure state machine (unit-tested below); the `impl Inner`/`impl Core`
 //! blocks are the glue the ingest pipeline and `send_prompt` call.
@@ -432,10 +433,12 @@ impl Inner {
     /// restart. `model` is what the user picked, `switch` what that asks of the session
     /// (`live_model_switch`). The model goes first, as recorded. If the session then does not
     /// take the effort, the agent keeps what its session really works with (the new model and
-    /// the effort it had) and the caller gets the reason.
-    pub(super) async fn switch_live_model(&self, agent: &Agent, model: Option<String>, switch: LiveSwitch) -> Result<Agent> {
+    /// the effort it had) and the caller gets the reason. None: the session did not take a
+    /// change of effort alone, so nothing is new in it, and only a restart gives the agent
+    /// that effort.
+    pub(super) async fn switch_live_model(&self, agent: &Agent, model: Option<&str>, switch: LiveSwitch) -> Result<Option<Agent>> {
         let id = agent.id.as_str();
-        let (name, mut effort) = classify::split_model_effort(model.as_deref());
+        let (name, mut effort) = classify::split_model_effort(model);
         // The model the CLI's answer names: for its default model, the only name there is.
         let mut resolved = None;
         if let Some(ask) = &switch.model {
@@ -447,7 +450,10 @@ impl Inner {
             && let Err(e) = self.set_live_effort(id, level).await
         {
             if switch.model.is_none() {
-                return Err(e); // nothing changed
+                // The request is recorded on a process that started with no `--effort`. Whether
+                // a process that started with one takes it is not: the restart always does.
+                tracing::info!("{} restarts for the thinking effort {level}: {e:#}", agent.name);
+                return Ok(None);
             }
             effort = switch.effort_now.clone();
             effort_kept = Some(e);
@@ -477,7 +483,7 @@ impl Inner {
         let changed = self.update_agent(id, |a| a.model = model_string(shown, effort.as_deref()))?;
         match effort_kept {
             Some(e) => Err(e.context(format!("{} changed its model, but not its thinking effort", agent.name))),
-            None => Ok(changed),
+            None => Ok(Some(changed)),
         }
     }
 

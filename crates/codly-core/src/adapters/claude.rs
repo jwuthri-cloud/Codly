@@ -2145,11 +2145,19 @@ fn cli_errors(result: &Value) -> String {
 /// context window that a model id does not have ("claude-fable-5-1[1m]" in the `initialize`
 /// answer of testdata/claude-interrupt-live.jsonl). Whether `system/init` keeps that mark is
 /// not recorded, so it never makes two names differ.
+///
+/// Nor does a name that is part of the other one. Every recording is of Anthropic's own API,
+/// where `system/init` and the agent's lines spell a model the same way. Another provider is
+/// not recorded, and there the two can differ for one model: the id the session was set up
+/// with (a region and vendor in front, a version behind) and the plain id of the answer, or a
+/// short name and its dated id. A false "now runs on" in every run would be worse than a
+/// missed one for two models where one's name starts the other's.
 fn same_model(a: &str, b: &str) -> bool {
     fn id(m: &str) -> &str {
         m.split('[').next().unwrap_or(m)
     }
-    id(a) == id(b)
+    let (a, b) = (id(a), id(b));
+    a.contains(b) || b.contains(a)
 }
 
 /// A `user` line the CLI wrote itself, not something the user or a tool said (recorded,
@@ -4036,6 +4044,18 @@ mod tests {
         assert_eq!(notices, ["Claude Code now runs on claude-sonnet-5-5, not on claude-haiku-5-5", "Claude Code runs on claude-haiku-5-5 again"]);
         // A mark for the context window is no other model.
         assert!(same_model("claude-fable-5-1[1m]", "claude-fable-5-1") && !same_model("claude-sonnet-5-5", "claude-haiku-5-5"));
+        // Nor is another spelling of one model (not recorded: names in the style of a cloud
+        // provider's ids, and a short name with its dated id). No line says the model changed.
+        let (cloud, plain) = ("us.anthropic.claude-sonnet-5-5-20261001-v1:0", "claude-sonnet-5-5-20261001");
+        assert!(same_model(cloud, plain) && same_model(plain, cloud) && same_model("claude-sonnet-5-5", plain));
+        assert!(!same_model(cloud, "claude-haiku-5-5-20261001"));
+        norm.session_model_is(cloud);
+        let mut said = Vec::new();
+        norm.on_turn_model(Some(plain), &mut said);
+        assert!(said.is_empty(), "{said:?}");
+        norm.on_turn_model(Some("claude-haiku-5-5-20261001"), &mut said);
+        let other = format!("Claude Code now runs on claude-haiku-5-5-20261001, not on {cloud}");
+        assert!(matches!(said.as_slice(), [EventKind::Notice { text }] if *text == other), "{said:?}");
     }
 
     /// `init.tools` is the only place where a dropped tool shows (recorded). Before, a 1:1 run
