@@ -28,7 +28,7 @@ Reports reviewed:
   - **The user's own `SessionStart` hooks still fired** in those sessions, even under `env -i` (see G6).
 - crates.io requests used the User-Agent `codly-research-critic/0.1 (generic)`. No personal data was sent.
 - Downloaded crate tarballs (tokio-util 0.7.20, libsqlite3-sys 0.38.2) were only read.
-- Scratch outputs are in `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/critic/`. They are temporary. The one reusable script is copied into Appendix A.
+- Scratch outputs are in `/tmp/scratch/critic/`. They are temporary. The one reusable script is copied into Appendix A.
 
 ---
 
@@ -97,7 +97,7 @@ Reports reviewed:
 | 18 | Anthropic subscription policy (cli-claude-codex §2.12, landscape TL;DR 5) | Fetched code.claude.com `legal-and-compliance` and support article 15036540 | Carve-out confirmed verbatim. Products that run Claude Code must accept the **Commercial Terms**. Name and logo limits. June 15 pause and Oct 7 credits confirmed. The page says nothing about interactive versus programmatic use | ✔ plus a new obligation |
 | 19 | Claude HTTP hooks (landscape §8) | Fetched `docs/en/hooks` | `type:"http"` with `url`, `headers`, `allowedEnvVars`, `timeout` (600 s default), `onFailure` (≥ 2.1.295). 33 events. 10,000-character cap on `additionalContext`, with no setting to raise it | ✔ |
 | 20 | "Node readline splits on U+2028" (cli-others-acp §8, from Pi's docs) | `readline.createInterface` on a JSON line with raw U+2028, on Node 22.23.3 and Bun 1.3.14 | Read as one line and parsed on both | ✘ not reproduced; low impact |
-| 21 | Fixtures are redacted | Regex scan of `fixtures/` | No emails or account IDs. `/Users/julien` paths appear in 4 files | ✔ redact paths before publishing |
+| 21 | Fixtures are redacted | Regex scan of `fixtures/` | No emails or account IDs. `/Users/me` paths appear in 4 files | ✔ redact paths before publishing |
 
 ---
 

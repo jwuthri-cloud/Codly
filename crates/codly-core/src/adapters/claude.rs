@@ -2736,7 +2736,7 @@ mod tests {
             provider: Provider::Claude,
             role,
             model: Some("haiku:low".into()),
-            cwd: PathBuf::from("/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/fixture-repo"),
+            cwd: PathBuf::from("/tmp/scratch/fixture-repo"),
             bin: PathBuf::from("claude"),
             env: HashMap::new(),
             session: SessionMode::New { session_id: None },
@@ -2771,11 +2771,11 @@ mod tests {
     fn byok_token_command_becomes_an_api_key_helper() {
         let s = spec(Role::Worker, false);
         assert!(!build_args(&s, "s", None, &[]).contains(&"--settings".to_string()), "no BYOK, no --settings");
-        let s = SpawnSpec { byok_command: Some("~/bin/wif-token \"anthropic\"".into()), ..s };
+        let s = SpawnSpec { byok_command: Some("~/bin/get-token \"anthropic\"".into()), ..s };
         let a = build_args(&s, "s", None, &[]);
         let i = a.iter().position(|x| x == "--settings").unwrap();
         let v: Value = serde_json::from_str(&a[i + 1]).unwrap();
-        assert_eq!(v, serde_json::json!({ "apiKeyHelper": "~/bin/wif-token \"anthropic\"" }));
+        assert_eq!(v, serde_json::json!({ "apiKeyHelper": "~/bin/get-token \"anthropic\"" }));
     }
 
     /// The `--settings` value of an argv, parsed. There is at most one.
@@ -3266,12 +3266,12 @@ mod tests {
             EventKind::TextDelta { item_id, text } => Some((item_id.clone(), text.clone())),
             _ => None,
         });
-        assert_eq!(delta, Some(("msg_011CgPgZ5DraWXssRR4rfPzQ:0".into(), "DONE".into())));
+        assert_eq!(delta, Some(("msg-2:0".into(), "DONE".into())));
         let msg = events.iter().find_map(|e| match e {
             EventKind::Message { item_id, text, phase } => Some((item_id.clone(), text.clone(), *phase)),
             _ => None,
         });
-        assert_eq!(msg, Some(("msg_011CgPgZ5DraWXssRR4rfPzQ:0".into(), "DONE".into(), MessagePhase::Final)));
+        assert_eq!(msg, Some(("msg-2:0".into(), "DONE".into(), MessagePhase::Final)));
 
         assert!(events.iter().any(|e| matches!(e, EventKind::RateLimit { window, .. } if window == "five_hour")));
         // Usage after each of the two API calls, then the result's own numbers: the same totals.

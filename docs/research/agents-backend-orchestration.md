@@ -1421,4 +1421,4 @@ git merge --no-ff --no-edit codly/<plan>/<task>        # or --squash + commit "c
 
 - `claude --help` (2.1.309), `codex exec --help` (0.161.0), `gemini --help` (0.62.0), `bun build --help` (1.3.14), `man cp`.
 - Structured-output probes for `claude -p` and `codex exec`.
-- Sidecar PoC compile at `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/sidecar-poc/sidecar.ts`.
+- Sidecar PoC compile at `/tmp/scratch/sidecar-poc/sidecar.ts`.

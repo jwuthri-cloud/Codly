@@ -16,15 +16,19 @@ Fixture format, one JSON object per line:
   {"_meta": {...}}                    a note of the driver (stdin closed, exit code, files found on disk)
   anything else                       a line of the CLI's stdout, as written (after sanitizing)
 
-Sanitizing: user name and temp paths, every id (session, request, message, tool use, task, run, hook, uuid),
+Sanitizing: user name, host name and temp paths, every id (session, request, message, tool use, task, run, hook, uuid),
 thinking signatures, account fields, and the lists that describe the machine (slash commands, skills, plugins,
-agents, model catalog, usage report) are replaced or shortened. Key names and structure are kept.
+agents, model catalog, usage report, skills in a context report, the output of the machine's own SessionStart hooks)
+are replaced or shortened. Key names and structure are kept.
 """
-import datetime, getpass, glob, json, os, re, shutil, subprocess, sys
+import datetime, getpass, glob, json, os, re, shutil, socket, subprocess, sys
 
 OUT = os.path.abspath(os.environ.get("CAPTURE_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 USER = getpass.getuser()
 HOME = os.path.expanduser("~")
+# The machine's network name ("Someones-MacBook-Pro.local") and its short form: the CLI can write them (remote control).
+HOSTNAMES = sorted({h for h in (socket.gethostname(), socket.gethostname().split(".")[0]) if len(h) >= 6 and h != "localhost"}, key=len, reverse=True)
+HOOK_GONE = "<removed: output of a hook of the recording machine>"
 DOC_NAME = os.environ.get("DOC_NAME", "the document next to the fixtures")
 # MCP servers the scenarios themselves configure. Every other server name is this machine's and is removed.
 OWN_MCP = ("exits-at-once", "no-such-command", "needs-login", "ping-project",
@@ -150,6 +154,14 @@ def transform(v, ids, sig, key=None):
         d["tools"] = [t for t in d.get("tools", []) if not t.startswith("mcp__") or t.split("__")[1] in OWN_MCP]
         if d.get("output_style", "default") != "default":  # a run that reads the user's own settings names their output style
             d["output_style"] = "<output-style>"
+    if d.get("type") == "system" and d.get("subtype") == "hook_response" and d.get("hook_event") == "SessionStart":
+        # The scenarios configure no SessionStart hook: these are the machine's own, and print its skills and rules.
+        for k in ("output", "stdout", "stderr"):
+            if d.get(k):
+                d[k] = HOOK_GONE
+    if isinstance(d.get("skills"), dict) and "skillFrontmatter" in d["skills"]:  # get_context_usage
+        d["skills"] = dict(d["skills"], skillFrontmatter=[])
+        d["agents"] = [a for a in d.get("agents", []) if not isinstance(a, dict) or a.get("source") == "built-in"]
     if d.get("type") == "system" and d.get("subtype") == "commands_changed":
         d["commands"] = keep_commands(d.get("commands", []))
     if "commands" in d and "models" in d and "account" in d:  # initialize response
@@ -191,6 +203,8 @@ def scrub(s, ids, name_map):
     s = re.sub(r"(?:/private)?/tmp/claude-\d+/", "/tmp/claude-tmp/", s)
     s = re.sub(r"(?:/private)?/var/folders/[\w+]+/[\w+]+/", "/var/folders/xx/yy/", s)
     s = s.replace(HOME, "/Users/me").replace(re.sub(r"[^A-Za-z0-9]", "-", HOME) + "-", "-Users-me-")
+    for h in HOSTNAMES:
+        s = s.replace(h, "my-mac")
     s = re.sub(u, "me", s, flags=re.I)
     s = re.sub(r"/tmp/cc-socks/\d+\.sock", "/tmp/cc-socks/12345.sock", s)
     s = re.sub(r"[\w.+-]+@[\w-]+\.[A-Za-z][\w.-]*", lambda m: m.group(0) if m.group(0) == "demo@example.invalid" else "user-email", s)

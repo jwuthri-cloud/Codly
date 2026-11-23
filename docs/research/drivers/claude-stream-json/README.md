@@ -131,7 +131,8 @@ cd "$CAPTURE_DIR/fixtures"
 | file | what it is |
 |---|---|
 | `drv.py` | the driver: starts the CLI, logs both directions, answers `can_use_tool`, sends control requests |
-| `sanitize.py` | raw -> fixture: paths, ids, account fields, machine lists, big images, foreign MCP servers |
+| `sanitize.py` | raw -> fixture: paths, host name, ids, account fields, machine lists and hooks, big images, foreign MCP servers |
+| `test_sanitize.py` | tests of the sanitizer rules that keep the machine out of a fixture (`python3 -m unittest test_sanitize`) |
 | `tl.py`, `tlq.py` | timeline viewers for a raw recording |
 | `cost.py` | sum of `total_cost_usd` over the recordings |
 | `notes_lib.py`, `make_notes_part2.py` | build the part 2 document; every quoted line is copied from a fixture |

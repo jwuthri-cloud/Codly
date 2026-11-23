@@ -2,7 +2,7 @@
 
 Research notes for the Tauri + Rust successor. Date: 2026-10-25.
 
-**Source:** shallow clone of Munder Difflin, package version 0.4.6, MIT source license. Clone path: `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/research-src/munder-difflin`.
+**Source:** shallow clone of Munder Difflin, package version 0.4.6, MIT source license. Clone path: `/tmp/scratch/research-src/munder-difflin`.
 
 **Method:** static reading only. I did not run the app, its scripts, binaries, or npm. Numbers such as `OfficeFloor.tsx:247-261` are line references into the clone. Paths without a prefix are under `src/renderer/src/`. Other areas are covered by sibling reports in this folder (`coordination.md`, `runtime.md`, `features.md`), which I did not read.
 

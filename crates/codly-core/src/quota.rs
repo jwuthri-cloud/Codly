@@ -148,6 +148,6 @@ mod tests {
     #[test]
     fn keychain_names_match_claude_code() {
         assert_eq!(keychain_service(None), "Claude Code-credentials");
-        assert_eq!(keychain_service(Some("/Users/julien/.claude-perso")), "Claude Code-credentials-fd44029e");
+        assert_eq!(keychain_service(Some("/Users/me/.claude-two")), "Claude Code-credentials-7133f376");
     }
 }
