@@ -6,12 +6,14 @@
   import { api, isSiteDemo, isTauriApp } from '../lib/api';
   import type { RecentWorkspace } from '../lib/gen/RecentWorkspace';
   import { openWorkspace } from '../lib/state/actions';
+  import { budget } from '../lib/state/budget.svelte';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { shortSha } from '../lib/util/format';
   import { tildify } from '../lib/util/sanitize';
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
+  import BudgetMark from './BudgetMark.svelte';
   import CrewStrip from './CrewStrip.svelte';
   import AskMe from '../home/AskMe.svelte';
 
@@ -33,6 +35,8 @@
   }
   const ws = $derived(store.workspace);
   const branch = $derived(ws?.current_branch ?? ws?.default_branch ?? 'detached');
+  /** The px kept free on each side of the crew strip: the budget mark needs its own on the right. */
+  const side = $derived(budget.hold ? 242 : 200);
   const items = $derived<MenuItem[]>([
     { kind: 'header', label: 'Recent' },
     ...recent.slice(0, 6).map((r) => ({ label: r.name, hint: tildify(r.repo_path), icon: 'repo', checked: r.repo_path === ws?.repo_path, run: () => openWorkspace(r.repo_path) })),
@@ -51,13 +55,14 @@
       {#if !narrow}<span class="branch"><Icon name="branch" size={12} />{branch}</span>{/if}
     </button>
   </div>
-  <div class="crew"><CrewStrip room={frameW - 400} /></div>
+  <div class="crew" style:--side="{side}px"><CrewStrip room={frameW - 2 * side} /></div>
   <div class="actions">
     {#if siteDemo}
       <a class="demo" href="/" data-tip="A fake repo and a scripted team: nothing runs on your machine. Back to the Codly site.">
         <span class="dot" aria-hidden="true"></span>{narrow ? 'Demo' : 'Live demo'}
       </a>
     {/if}
+    <BudgetMark />
     <AskMe />
     <button class="search" onclick={() => ui.openPalette()} aria-label="Search and commands" data-tip="Agents, tasks, files, commands — or ask the Lead">
       <Icon name="search" size={14} />{#if !narrow}<span>Search</span>{/if}<kbd>⌘K</kbd>
@@ -74,8 +79,8 @@
   .name { font-size: 22px; line-height: 34px; font-style: italic; color: var(--ink-1); white-space: nowrap; }
   .branch { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
   /* centred on the stage (and so on the conversation column), whatever sits left and right;
-     the 2 × 200px kept for the sides is the 400 taken off the strip's `room` above */
-  .crew { position: absolute; left: 50%; top: 0; height: 100%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 2 * 200px); display: flex; align-items: center; }
+     the 2 × `--side` kept for the sides is what is taken off the strip's `room` above */
+  .crew { position: absolute; left: 50%; top: 0; height: 100%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 2 * var(--side)); display: flex; align-items: center; }
   .crew > :global(.strip) { min-width: 0; }
   .actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
   .demo { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px; border-radius: var(--r-full); color: var(--ink-2); font-size: var(--t-sm); font-weight: var(--w-med); background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-edge); }

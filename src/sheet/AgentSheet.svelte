@@ -11,12 +11,14 @@
   import type { EventRow } from '../lib/gen/EventRow';
   import { copyText, interruptAgent, letGo, refreshAccounts, stopAgent } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
+  import { yourAnswers } from '../lib/state/answers';
   import { narrate } from '../lib/state/narration';
   import { store, type FileTouch } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
   import { clock, clockSec, dur, pct, resetsIn, timer, tokens } from '../lib/util/format';
   import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, subagentMark, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
+  import { askedLine, settledLine } from '../lib/util/outcome';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
   import ApprovalCard from '../home/cards/ApprovalCard.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
@@ -198,8 +200,8 @@
       case 'turn_completed': return { icon: 'check-circle', text: `Turn ${k.status}${k.duration_ms ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.status === 'completed' ? undefined : 'warn' };
       case 'status_changed': return { icon: 'refresh', text: `Status → ${k.status.replace('_', ' ')}` };
       case 'plan_updated': return { icon: 'list', text: `Its list: ${k.steps.filter((s) => s.status === 'completed').length} of ${k.steps.length} done` };
-      case 'approval_requested': return { icon: 'flag', text: `Asked for approval${k.approval.subject.kind === 'command' ? `: ${oneLine(k.approval.subject.command, 60)}` : ''}`, tone: 'warn' };
-      case 'approval_resolved': return { icon: 'flag', text: `Approval ${k.status} by ${k.by === 'user' ? 'you' : k.by}`, tone: k.status === 'approved' ? 'good' : 'bad' };
+      case 'approval_requested': return { icon: 'flag', text: askedLine(k.approval), tone: 'warn' };
+      case 'approval_resolved': return { icon: 'flag', text: settledLine(k.status, k.by, store.approvals.find((a) => a.id === k.approval_id) ?? null, yourAnswers.get(k.approval_id) ?? null), tone: k.status === 'approved' ? 'good' : 'bad' };
       case 'retrieval': return { icon: 'link', text: `Codly provided ${k.citations.length} citations for “${oneLine(k.query, 50)}”` };
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
       case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
@@ -237,6 +239,9 @@
     tick().then(() => root?.querySelector(`[data-section="${f}"]`)?.scrollIntoView({ block: 'start', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
   });
 
+  /** The head with the agent's name has scrolled away: a slim bar keeps saying whose sheet this is. */
+  let headGone = $state(false);
+
   // ── menu ──
   let moreBtn: HTMLButtonElement | undefined = $state();
   let moreOpen = $state(false);
@@ -273,7 +278,9 @@
   ]);
 </script>
 
-<div class="as" bind:this={root} style:--hue={idVar(agent.color)}>
+<div class="as" bind:this={root} style:--hue={idVar(agent.color)} onscroll={() => (headGone = (root?.scrollTop ?? 0) > 72)}>
+  <!-- The name again (the head's own stays for screen readers): what you press below acts on this agent. -->
+  <div class="pin" class:on={headGone} aria-hidden="true"><div class="pin-bar"><Portrait {agent} size={22} /><b class="truncate">{agent.name}</b></div></div>
   <header class="head">
     {#if n}<Orbit size={64} progress={n.progress} tone={n.tone} stroke={2.5}><Portrait {agent} size={50} /></Orbit>{/if}
     <div class="h-text">
@@ -500,7 +507,12 @@
 
 <style>
   .sections { padding-bottom: 16px; }
-  .as { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow-y: auto; }
+  .as { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow-y: auto; scroll-padding-top: 48px; }
+  /* No height of its own: the bar lies over the top of what scrolls and takes no room. */
+  .pin { position: sticky; top: 0; z-index: 1; height: 0; flex-shrink: 0; }
+  .pin-bar { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 56px 0 22px; background: var(--glass-solid); box-shadow: 0 1px 0 var(--line); opacity: 0; pointer-events: none; transition: opacity var(--d-2) var(--ease-out); }
+  .pin.on .pin-bar { opacity: 1; pointer-events: auto; }
+  .pin-bar b { font-weight: var(--w-semi); color: var(--ink-1); }
   .head { display: flex; gap: 16px; align-items: center; padding: 24px 22px 10px; background: radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--hue) 14%, transparent), transparent 60%); }
   .h-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-right: 30px; }
   h2 { font-size: var(--d-lg); line-height: 1; }

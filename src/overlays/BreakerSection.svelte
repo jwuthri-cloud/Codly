@@ -11,14 +11,16 @@
   today's total is shown beside it.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import type { BreakerConfig } from '../lib/gen/BreakerConfig';
   import type { BreakerStatus } from '../lib/gen/BreakerStatus';
   import { api } from '../lib/api';
+  import { budget } from '../lib/state/budget.svelte';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { spentLine } from '../lib/util/cost';
   import { ago, tokens, usd } from '../lib/util/format';
+  import { holdAtTop } from '../lib/util/holdAtTop';
 
   let cfg = $state<BreakerConfig | null>(null);
   let status = $state<BreakerStatus | null>(null);
@@ -70,6 +72,24 @@
     }
   }
 
+  // The top bar's budget mark says the same as this section: it follows what is read here
+  // (untracked: with room again the toast is taken back, and this effect does not follow toasts).
+  $effect(() => {
+    const now = status;
+    if (now) untrack(() => budget.setHold(now.hold));
+  });
+  // That mark opens Settings here. The sections above show their rows after this one is in
+  // place, so it is held there until you scroll, click or press a key.
+  let el: HTMLElement | undefined = $state();
+  let letGo: (() => void) | undefined;
+  $effect(() => {
+    if (!el || !budget.reveal) return;
+    budget.reveal = false;
+    letGo?.();
+    letGo = holdAtTop(el);
+  });
+  onDestroy(() => letGo?.());
+
   const agentName = (id: string | null) => store.agents.find((a) => a.id === id)?.name ?? 'An agent';
   /** The latest breaker decisions, newest first. */
   const events = $derived.by(() => {
@@ -81,7 +101,7 @@
 </script>
 
 {#if cfg}
-  <section>
+  <section bind:this={el}>
     <h3 class="eyebrow">Autonomy & Budgets</h3>
     <p class="desc">
       A guard against runaway agents and spend. Over a limit, an agent is first <b>steered</b> (a note in its current or next turn), then <b>constrained</b>
@@ -142,6 +162,8 @@
     <div class="foot">
       {#if flagged.length}
         <span class="desc">Now: {#each flagged as a, i (a.agent_id)}{i ? ', ' : ''}<b>{agentName(a.agent_id)}</b> {a.level}{/each}.</span>
+      {:else if status?.hold}
+        <span class="desc">A budget is used up: no new task starts.</span>
       {:else}
         <span class="desc">All agents healthy.</span>
       {/if}

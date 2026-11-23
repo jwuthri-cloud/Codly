@@ -18,6 +18,8 @@ export async function startHire(m: HireManifest, confirmShell: boolean): Promise
     // It joined the office it was hired in: after a switch it is not this one's to show.
     if (store.isOpen(ws)) {
       store.upsertAgent(a);
+      // Its 1:1 chat and its sheet open together: both show the agent you just started.
+      ui.openThread(store.threadOf(a.id));
       ui.selectAgent(a.id);
     }
     toast({ kind: 'success', title: `${a.name} joined`, body: `${PROVIDER_LABEL[a.provider]} · 1:1 chat is ready` });

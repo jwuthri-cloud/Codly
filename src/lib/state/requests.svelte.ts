@@ -2,9 +2,10 @@
 // and plan, running in parallel. This is the one list every surface reads (tabs on Home, the
 // crew strip's Lead tips, ⌘[ / ⌘], the Plan room's request picker).
 import type { Agent } from '../gen/Agent';
+import type { Approval } from '../gen/Approval';
 import type { Plan } from '../gen/Plan';
 import { oneLine } from '../util/sanitize';
-import { blockers } from './blockers.svelte';
+import { groupSame } from './approvalGroups';
 import { store } from './store.svelte';
 import { isRequestThread, ui } from './ui.svelte';
 
@@ -19,7 +20,8 @@ export type Request = {
   lead: Agent | null;
   plan: Plan | null;
   phase: RequestPhase;
-  /** Pending approvals and questions from this request's agents. */
+  /** The cards that wait for your answer in this request's conversation: approvals and questions,
+   *  one per card (the same command asked by several agents is one card). */
   waiting: number;
   /** Amber: the plan waits for your go, or an agent waits for your answer. */
   needsYou: boolean;
@@ -48,13 +50,14 @@ class Requests {
     for (const a of store.leads) if (isRequestThread(a.thread ?? 'lead')) note(a.thread ?? 'lead', a.created_at);
     for (const d of ui.draftRequests) note(d.thread, d.ts);
 
-    const approvalsBy = new Map<string, number>();
+    // Counted as the conversation shows them. An Ask-me card is not in the conversation: the
+    // Ask me button in the top bar counts those, so a request never says "waiting for you"
+    // with nothing to answer in it.
+    const approvalsBy = new Map<string, Approval[]>();
     for (const ap of store.pendingApprovals) {
       const t = store.approvalThread(ap);
-      approvalsBy.set(t, (approvalsBy.get(t) ?? 0) + 1);
+      approvalsBy.set(t, [...(approvalsBy.get(t) ?? []), ap]);
     }
-    // A blocking ask-me card waits for you just the same (its thread is the request's).
-    for (const b of blockers.blocking) approvalsBy.set(b.thread, (approvalsBy.get(b.thread) ?? 0) + 1);
 
     // A request you just closed leaves the tabs at once (Undo brings it back, see ./closing.ts).
     const office = store.workspace?.id ?? null;
@@ -64,7 +67,7 @@ class Requests {
     for (const [thread, s] of seen) {
       const lead = store.leadOf(thread);
       const plan = store.planOf(thread);
-      const waiting = approvalsBy.get(thread) ?? 0;
+      const waiting = groupSame(approvalsBy.get(thread) ?? []).length;
       const tasks = plan ? store.tasks.filter((t) => t.plan_id === plan.id) : [];
       const done = tasks.filter((t) => t.status === 'done').length;
       const turns = lead ? (store.live[lead.id]?.turns ?? []) : [];

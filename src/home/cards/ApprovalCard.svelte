@@ -18,11 +18,13 @@
   import type { JsonValue } from '../../lib/gen/serde_json/JsonValue';
   import { api } from '../../lib/api';
   import { copyText, resolveApprovals, saveApprovalRule } from '../../lib/state/actions';
+  import { yourAnswers } from '../../lib/state/answers';
   import { keyTargetApproval } from '../../lib/state/keys';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
   import { idVar } from '../../lib/util/labels';
+  import { outcomeBy, outcomeWord } from '../../lib/util/outcome';
   import { oneLine, tildify } from '../../lib/util/sanitize';
   import Icon from '../../components/Icon.svelte';
   import Markdown from '../../components/Markdown.svelte';
@@ -191,10 +193,10 @@
   }
   const unanswered = $derived(questions.some((q, i) => q.options.length > 0 && !picks[i]?.length));
 
-  const outcome = $derived(
-    approval.status === 'approved' ? 'Approved' : approval.status === 'denied' ? 'Denied' : approval.status === 'cancelled' ? 'Stopped' : approval.status === 'expired' ? 'Expired' : '',
-  );
-  const by = $derived(approval.decided_by === 'user' ? 'by you' : approval.decided_by === 'policy' ? 'by Codly’s rules' : approval.decided_by ? `by ${approval.decided_by}` : '');
+  // A question is answered or skipped, with what you answered; only a permission is approved or denied.
+  const outcome = $derived(outcomeWord(approval.status, approval));
+  const by = $derived(outcomeBy(approval.decided_by));
+  const answer = $derived(subject.kind === 'question' && approval.status === 'approved' ? (yourAnswers.get(approval.id) ?? null) : null);
   const what = $derived(subject.kind === 'command' ? subject.command : subject.kind === 'question' ? (questions[0]?.question ?? 'a question') : subject.kind === 'file_change' ? subject.paths.join(', ') : subject.kind === 'tool' ? (plan !== null ? 'its plan' : subject.name) : 'permissions');
 </script>
 
@@ -204,6 +206,7 @@
     <span class="r-l">{outcome} {by}</span>
     {#if agent}<span class="r-who">{agent.name}</span>{/if}
     <code class="truncate">{oneLine(what, 120)}</code>
+    {#if answer}<span class="r-a truncate" data-tip={answer}>“{oneLine(answer, 80)}”</span>{/if}
     <time class="num">{clock(approval.created_at)}</time>
   </div>
 {:else}
@@ -343,5 +346,6 @@
   .r-l { color: var(--ink-2); white-space: nowrap; }
   .r-who { color: var(--ink-2); font-weight: var(--w-med); }
   .resolved code { flex: 1; font-size: 11.5px; color: var(--ink-3); }
+  .r-a { flex: 0 1 auto; max-width: 50%; color: var(--ink-1); }
   .resolved time { font-size: var(--t-xs); }
 </style>
