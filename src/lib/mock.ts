@@ -2,11 +2,13 @@
 // a virtual clock (demo/story.ts) that also answers every command, so each panel is demonstrable
 // without the Rust core. Never loaded inside the Tauri app (see api.ts).
 //
-// ponytail: one scripted story (dark-mode toggle on acme/web); any repo path replays it.
+// ponytail: one scripted story (dark-mode toggle on acme/web); any repo path replays it, but
+// billing-api's: that is the demo's second office, with its own Sim and a small script (`open`).
 // URL knobs (dev only): ?speed=2 (script speed), ?skip=90 (fast-forward N seconds of script),
 // ?autoplay=1 (auto "Run plan" and auto-approve), ?ws=1 (open acme/web immediately; always on in
 // the public site demo). More parameters start the demo in a state the script does not reach
-// (a merge conflict, a running preview, the intake dialog…): demo/states.ts, docs/DEMO.md.
+// (a merge conflict, a running preview, the intake dialog, a kind of request…): demo/states.ts,
+// docs/DEMO.md.
 // Also answers `repo_map` (a ~300-file acme/web) and `read_artifact` (the bytes agents produced).
 import { isSiteDemo, type Transport, type UiBatch } from './api';
 import type { ApprovalRuleKind } from './gen/ApprovalRuleKind';
@@ -36,10 +38,12 @@ import type { RequestPrefs } from './gen/RequestPrefs';
 import type { LastMerge } from './gen/LastMerge';
 import type { PrSource } from './gen/PrSource';
 import type { RepoSync } from './gen/RepoSync';
+import type { Workspace } from './gen/Workspace';
 import { mockAgentGit } from './demo/agentgit';
-import { demoCloseOffice } from './demo/office';
+import { setWallHour } from './demo/clock';
+import { BILLING, demoCloseOffice, demoMovedTo, demoPlays } from './demo/office';
 import { MergeConflictDemo } from './demo/mergeConflict';
-import { demoStates, opensRepo } from './demo/states';
+import { demoStates, opensRepo, type DemoStates } from './demo/states';
 import { intakeUi } from './state/intake.svelte';
 import { PullRequestDemo } from './demo/pullrequest';
 import { demoIntake } from './demo/intake';
@@ -154,55 +158,96 @@ const withIds = (team: TeamMember[]): TeamMember[] =>
 const params = () => new URLSearchParams(typeof location !== 'undefined' ? location.search : '');
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * What belongs to one office of the demo: its Sim, its story, and the demo state of its repo.
+ * The demo has two offices: acme/web, and billing-api once you open it. The machine (settings,
+ * CLIs, sign-ins, recent repositories) is one for both (`Sim.sameMachineAs`).
+ */
+type Desk = {
+  sim: Sim;
+  story: Story;
+  ctl: MockControls;
+  breaker: MockBreaker;
+  askMe: MockAskMe;
+  /** What stands between a plan's branch and yours (`?merge=conflict`). */
+  conflicts: MergeConflictDemo;
+  /** The commands "run" to try a plan's or an agent's work. */
+  previews: PreviewDemo;
+  checks: ChecksDemo;
+  workspaceTrust: WorkspaceTrustDemo;
+  /** The pull requests "opened" from the app. */
+  pullRequests: PullRequestDemo;
+  checkpoints: DemoCheckpoints;
+  takeovers: DemoTakeovers;
+  worktrees: WorktreeDemo;
+  hk: HousekeepingDemo | undefined;
+  /** Whether Push was clicked. */
+  pushed: boolean;
+  /** The requests closed in the demo, newest first, with what was said in each. */
+  closed: { thread: string; closed_at: number; messages: ChatMessage[]; authors: Record<string, string> }[];
+  /** The last merge into main, until it is undone. */
+  merge: Omit<LastMerge, 'blocked' | 'kept'> | null;
+};
+
+/** An office around its Sim. `states`: what the URL turned on (docs/DEMO.md), for acme/web; billing-api starts with nothing turned on. */
+function makeDesk(sim: Sim, states: DemoStates, billing = false): Desk {
+  const checks = new ChecksDemo(states.checksOn);
+  const story = new Story(sim, { checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null, ask: states.approval, billing });
+  return {
+    sim, story, checks,
+    ctl: new MockControls(sim), breaker: new MockBreaker(sim), askMe: new MockAskMe(sim, !billing),
+    conflicts: new MergeConflictDemo(states.mergeConflict, sim, story), previews: new PreviewDemo(states.previewRunning),
+    workspaceTrust: new WorkspaceTrustDemo(states.trustAsk), pullRequests: new PullRequestDemo(), checkpoints: new DemoCheckpoints(),
+    takeovers: new DemoTakeovers(), worktrees: new WorktreeDemo(), hk: undefined, pushed: false, closed: [], merge: null,
+  };
+}
+
 export class MockTransport implements Transport {
   async upload(_cmd: string, name: string): Promise<string> {
     return `/demo/acme-web/.codly/attachments/${Math.random().toString(36).slice(2, 8)}/${name}`;
   }
-  private sim: Sim;
-  private story: Story;
-  private ctl: MockControls;
+  /** acme/web's office, there from the start. */
+  private first: Desk;
+  /** billing-api's office, from the first time you open it. */
+  private billing: Desk | null = null;
+  /** The open office: every command is answered by it. */
+  private desk: Desk;
+  /** The UI's callback for events, from its last `subscribe`. */
+  private sink: ((b: UiBatch) => void) | null = null;
+  private get sim() { return this.desk.sim; }
+  private get story() { return this.desk.story; }
+  private get ctl() { return this.desk.ctl; }
+  private get breaker() { return this.desk.breaker; }
+  private get approvalRules(): MockApprovalRules { return this.desk.story.rules; }
+  private get askMe() { return this.desk.askMe; }
+  private get conflicts() { return this.desk.conflicts; }
+  private get previews() { return this.desk.previews; }
+  private get checks() { return this.desk.checks; }
+  private get workspaceTrust() { return this.desk.workspaceTrust; }
+  private get pullRequests() { return this.desk.pullRequests; }
+  private get checkpoints() { return this.desk.checkpoints; }
+  private get takeovers() { return this.desk.takeovers; }
+  private get worktrees() { return this.desk.worktrees; }
   private ptys = new Map<string, FakeShell>();
   private ptySeq = 0;
   /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
   private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
-  /** BYOK demo state. Keys are never stored, only whether one was "saved". */
-  /** Demo repo: whether Push was clicked. */
-  private demoPushed = false;
-  /** The requests closed in the demo, newest first, with what was said in each. */
-  private demoClosed: { thread: string; closed_at: number; messages: ChatMessage[]; authors: Record<string, string> }[] = [];
-  /** Demo repo: the last merge into main, until it is undone. */
-  private demoMerge: Omit<LastMerge, 'blocked' | 'kept'> | null = null;
-  /** Demo repo: the pull requests "opened" from the app. */
-  private pullRequests = new PullRequestDemo();
-  /** Demo repo: the commands "run" to try a plan's or an agent's work. */
-  private previews: PreviewDemo;
-  /** Demo repo: what stands between a plan's branch and yours (`?merge=conflict`). */
-  private conflicts: MergeConflictDemo;
   /** The demo repo: a clean checkout, two merges not pushed yet (the real one runs git). */
   private demoSync(): RepoSync {
-    const pushed = this.demoPushed;
-    const last_merge = this.demoMerge && { ...this.demoMerge, blocked: pushed ? 'the merge is already on origin/main' : null, kept: 'refs/codly/before-merge' };
+    const { pushed, merge } = this.desk;
+    const last_merge = merge && { ...merge, blocked: pushed ? 'the merge is already on origin/main' : null, kept: 'refs/codly/before-merge' };
     return { branch: 'main', upstream: 'origin/main', ahead: pushed ? 0 : 2, behind: 0, dirty: [], last_merge };
   }
+  /** BYOK demo state. Keys are never stored, only whether one was "saved". */
   private byokSaved: Record<Vendor, boolean> = { anthropic: false, openai: false, openrouter: false };
   private triggers: TriggersConfig | null = null;
-  private breaker: MockBreaker;
-  private approvalRules: MockApprovalRules;
-  private askMe!: MockAskMe;
-  private checkpoints = new DemoCheckpoints();
-  private takeovers = new DemoTakeovers();
-  private hk: HousekeepingDemo | undefined;
-  private worktrees = new WorktreeDemo();
-  private checks: ChecksDemo;
-  private workspaceTrust: WorkspaceTrustDemo;
 
   constructor() {
     const p = params();
     // The states a URL parameter starts the demo in (docs/DEMO.md).
     const states = demoStates(p);
-    this.workspaceTrust = new WorkspaceTrustDemo(states.trustAsk);
-    this.checks = new ChecksDemo(states.checksOn);
-    this.previews = new PreviewDemo(states.previewRunning);
+    // `?hour=13`: before the first clock is made, so every time of the demo follows.
+    if (states.hour !== null) setWallHour(states.hour);
     const theme = (() => {
       try {
         return localStorage.getItem('codly.theme') ?? 'system';
@@ -210,16 +255,11 @@ export class MockTransport implements Transport {
         return 'system';
       }
     })();
-    this.sim = new Sim(
+    const sim = new Sim(
       { speed: Number(p.get('speed') ?? 1) || 1, skipMs: (Number(p.get('skip') ?? 0) || 0) * 1000, autoplay: p.get('autoplay') === '1' },
       { ...SETTINGS, theme },
     );
-    this.story = new Story(this.sim, { checks: this.checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null });
-    this.conflicts = new MergeConflictDemo(states.mergeConflict, this.sim, this.story);
-    this.breaker = new MockBreaker(this.sim);
-    this.approvalRules = this.story.rules;
-    this.ctl = new MockControls(this.sim);
-    this.askMe = new MockAskMe(this.sim);
+    this.first = this.desk = makeDesk(sim, states);
     const now = this.sim.now();
     this.sim.clis = p.get('onboard') === '1' ? CLIS.map(fresh) : CLIS;
     this.sim.recent = [
@@ -236,9 +276,69 @@ export class MockTransport implements Transport {
 
   async subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot> {
     this.sim.flush();
-    this.sim.sink = onBatch;
+    this.sink = onBatch;
+    this.wire();
     await wait(40);
     return this.sim.snapshot();
+  }
+
+  private desks(): Desk[] {
+    return this.billing ? [this.first, this.billing] : [this.first];
+  }
+
+  /** The Sims of the offices you are not looking at: they keep working. */
+  private rest(): Sim[] {
+    return this.desks().filter((d) => d !== this.desk).map((d) => d.sim);
+  }
+
+  /**
+   * Where each office's events go. The open office's go to the UI as they are. Another
+   * office's persisted events go there too, each with the id of its office, as on the core's
+   * live stream: the UI does not apply them, it tells you what waits for you there. After a
+   * switch the UI subscribes again: until then (`sink` is null) the open office's events wait
+   * in its Sim, and the other's are dropped.
+   */
+  private wire() {
+    const out = this.sink;
+    for (const d of this.desks()) {
+      if (d === this.desk) d.sim.sink = out;
+      else {
+        d.sim.sink = (b) => {
+          const workspace_id = d.sim.workspace?.id;
+          if (!out || !workspace_id) return;
+          const events = b.events.filter((e) => e.id !== 0).map((e) => ({ ...e, workspace_id }));
+          if (events.length) out({ events });
+        };
+      }
+    }
+  }
+
+  /**
+   * `open_workspace`. billing-api is an office of its own: the first time, a second Sim starts
+   * with its script (story.ts `openBilling`). From then on, opening one office or the other
+   * only changes which one the UI looks at. The first office is its own path, and any path
+   * while it has no repo yet (one story for every repo). Another path opens nothing: the open
+   * office answers, as before.
+   */
+  private open(path: string): Workspace {
+    const firstPath = this.first.sim.workspace?.repo_path;
+    const next = path === BILLING.repo_path ? (this.billing ??= this.second()) : !firstPath || path === firstPath ? this.first : this.desk;
+    if (next !== this.desk) {
+      this.desk = next;
+      this.sink = null;
+      this.wire();
+    }
+    return next.story.openWorkspace(path);
+  }
+
+  /** billing-api's office: a Sim of its own on the same machine, at the first one's speed, with nothing of the URL turned on. */
+  private second(): Desk {
+    const sim = new Sim({ ...this.first.sim.opts, skipMs: 0 }, this.first.sim.settings);
+    sim.sameMachineAs(this.first.sim);
+    demoPlays(sim, BILLING.id);
+    // Who you moved there before you opened it is in its crew.
+    for (const a of demoMovedTo(BILLING.id)) sim.agents.set(a.id, a);
+    return makeDesk(sim, demoStates(new URLSearchParams()), true);
   }
 
   async attachPty(ptyId: string, onData: (bytes: Uint8Array) => void): Promise<void> {
@@ -287,7 +387,7 @@ export class MockTransport implements Transport {
       case 'list_repos':
         return sim.recent.map((r) => ({ name: r.name, path: r.repo_path, modified_ms: r.opened_at }));
       case 'open_workspace':
-        return story.openWorkspace(String(a.repoPath ?? REPO));
+        return this.open(String(a.repoPath ?? REPO));
       case 'update_settings': {
         const next = sim.signIns.normalize(a.settings as Settings);
         next.max_parallel = Math.min(8, Math.max(1, next.max_parallel));
@@ -295,7 +395,8 @@ export class MockTransport implements Transport {
         next.verify_timeout_secs = Math.min(24 * 3600, Math.max(1, next.verify_timeout_secs));
         next.team = withIds(next.team ?? []);
         sim.settings = next;
-        story.syncTeam();
+        // The team is the machine's: its members are in every office.
+        for (const d of this.desks()) d.story.syncTeam();
         return sim.settings;
       }
       case 'set_request_prefs':
@@ -327,20 +428,20 @@ export class MockTransport implements Transport {
         story.closeThread(thread);
         // Like the core: what was said stays, to read again.
         const at = sim.now();
-        if (messages.length) this.demoClosed.unshift({ thread: `closed:${thread}:${at}`, closed_at: at, messages, authors });
+        if (messages.length) this.desk.closed.unshift({ thread: `closed:${thread}:${at}`, closed_at: at, messages, authors });
         return null;
       }
       case 'closed_requests':
-        return this.demoClosed.map((c): ClosedRequest => ({ thread: c.thread, title: (c.messages.find((m) => m.author === 'user')?.text ?? '').slice(0, 300), closed_at: c.closed_at, messages: c.messages.length }));
+        return this.desk.closed.map((c): ClosedRequest => ({ thread: c.thread, title: (c.messages.find((m) => m.author === 'user')?.text ?? '').slice(0, 300), closed_at: c.closed_at, messages: c.messages.length }));
       case 'closed_request': {
-        const c = this.demoClosed.find((x) => x.thread === String(a.thread));
+        const c = this.desk.closed.find((x) => x.thread === String(a.thread));
         return { messages: c?.messages ?? [], total: c?.messages.length ?? 0, authors: c?.authors ?? {} } satisfies ClosedTranscript;
       }
       case 'merge_plan': {
         this.conflicts.refuse(String(a.planId));
         const sha = story.mergePlan(String(a.planId));
-        this.demoMerge = { sha, branch: 'main', plan_id: String(a.planId), agent_id: null };
-        this.demoPushed = false;
+        this.desk.merge = { sha, branch: 'main', plan_id: String(a.planId), agent_id: null };
+        this.desk.pushed = false;
         return sha;
       }
       case 'merge_plan_warning':
@@ -353,16 +454,16 @@ export class MockTransport implements Transport {
         throw new Error(`${sim.agents.get(String(a.agentId))?.name ?? 'This agent'} is not resolving a merge`); // only a plan's task resolves one in the demo
       case 'merge_agent': {
         const sha = Math.random().toString(16).slice(2, 12).padEnd(10, '0');
-        this.demoMerge = { sha, branch: 'main', plan_id: null, agent_id: String(a.agentId) };
-        this.demoPushed = false;
+        this.desk.merge = { sha, branch: 'main', plan_id: null, agent_id: String(a.agentId) };
+        this.desk.pushed = false;
         return sha;
       }
       case 'undo_merge': {
-        const m = this.demoMerge;
+        const m = this.desk.merge;
         if (!m || m.sha !== a.sha) throw new Error('That is not the last merge Codly made into your branch.');
-        if (this.demoPushed) throw new Error('The merge cannot be undone: the merge is already on origin/main.');
+        if (this.desk.pushed) throw new Error('The merge cannot be undone: the merge is already on origin/main.');
         if (m.plan_id) story.undoMerge(m.plan_id);
-        this.demoMerge = null;
+        this.desk.merge = null;
         return this.demoSync();
       }
       case 'repo_sync':
@@ -370,7 +471,7 @@ export class MockTransport implements Transport {
       case 'commit_checkout':
         return Math.random().toString(16).slice(2, 12).padEnd(10, '0');
       case 'push_checkout':
-        this.demoPushed = true;
+        this.desk.pushed = true;
         return this.demoSync();
       case 'pull_request':
       case 'draft_pull_request':
@@ -496,9 +597,9 @@ export class MockTransport implements Transport {
       case 'let_go':
         return demoLetGo(sim, String(a.agentId));
       case 'offices':
-        return demoOffices();
+        return demoOffices(sim, this.rest());
       case 'transfer_agent':
-        return demoTransfer(sim, String(a.agentId), String(a.toWorkspaceId));
+        return demoTransfer(sim, String(a.agentId), String(a.toWorkspaceId), this.rest());
       case 'office_shop':
         return demoShop(sim);
       case 'office_place':
@@ -514,21 +615,21 @@ export class MockTransport implements Transport {
       case 'dev_reset_office':
         return demoResetOffice(sim);
       case 'office_lot':
-        return demoLot();
+        return demoLot(sim);
       case 'office_save_lot':
         return demoSaveLot(sim, a.lot as Lot);
       case 'lots':
-        return demoLots(sim);
+        return demoLots(sim, this.rest());
       case 'lot_of':
         return demoLotOf(String(a.slotId));
       case 'buy_lot':
         return demoBuyLot(sim, String(a.slotId), (a.template as string | null) ?? null);
       case 'sell_lot':
-        return demoSellLot(sim, String(a.slotId));
+        return demoSellLot(sim, String(a.slotId), this.rest());
       case 'move_office':
-        return demoMoveOffice(sim, String(a.workspaceId), String(a.slotId));
+        return demoMoveOffice(sim, String(a.workspaceId), String(a.slotId), this.rest());
       case 'close_office':
-        return demoCloseOffice(sim, String(a.workspaceId));
+        return demoCloseOffice(sim, String(a.workspaceId), this.rest());
       case 'set_agent_model':
         return null;
       case 'create_task':
@@ -720,7 +821,7 @@ export class MockTransport implements Transport {
       case 'storage_delete_worktree':
       case 'storage_delete_branch':
       case 'storage_delete_backup':
-        return (this.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
+        return (this.desk.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
       case 'worktree_setup':
         return this.worktrees.setup((a.set as SetupChoice | null) ?? null);
       case 'required_checks':

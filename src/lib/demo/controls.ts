@@ -4,10 +4,23 @@
 import type { Agent } from '../gen/Agent';
 import type { ContextUsage } from '../gen/ContextUsage';
 import type { ControlState } from '../gen/ControlState';
+import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { PermissionMode } from '../gen/PermissionMode';
 import type { Sim } from './sim';
 
 const MAX_HELD = 32;
+
+/**
+ * The MCP servers an office's first Claude Lead reports when its session starts (story.ts
+ * `ensureLead`): one connected, one that needs a sign-in, one that did not start, with a
+ * reason of the kind Claude Code gives (the text is the demo's). "Reconnect" (below) is offered
+ * on the last two.
+ */
+export const DEMO_MCP: { name: string; status: McpServerStatus; error: string | null }[] = [
+  { name: 'codly', status: 'connected', error: null },
+  { name: 'linear', status: 'needs_sign_in', error: null },
+  { name: 'postgres', status: 'failed', error: 'MCP error -32000: Connection closed' },
+];
 
 /** The name the agent panel gives each mode (the core's `PermissionMode::label`). */
 export const MODE_LABEL: Record<PermissionMode, string> = { ask: 'ask for edits', accept_edits: 'accept edits', plan: 'plan first' };
@@ -167,12 +180,20 @@ export class MockControls {
     return { used_tokens: used, max_tokens: max, percent: Math.round((used / max) * 100), auto_compact_at: Math.round(max * 0.95), parts: [{ name: 'Messages', tokens: used }] };
   }
 
-  /** "Reconnect" on an MCP server of a Claude agent: in the demo it connects, and its state says so. */
-  reconnectMcp(id: string, server: string): null {
+  /**
+   * "Reconnect" on an MCP server of a Claude agent. Claude Code answers when its try to connect
+   * is over: after a second in the demo. A server that did not start connects then, and its
+   * state says so. One that needs a sign-in still needs it (nobody signed in): the answer says so.
+   */
+  async reconnectMcp(id: string, server: string): Promise<null> {
     const a = this.agent(id);
     if (a.provider !== 'claude') throw new Error('only a Claude agent takes this without a restart');
     this.note(id, `asked ${a.name} to reconnect its MCP server ${server}`);
-    this.sim.emit({ type: 'mcp_server', name: server, status: 'connected', error: null }, { agent: id });
+    await this.sim.sleep(1000);
+    this.agent(id); // stopped meanwhile: its servers went with its process
+    if (this.sim.mcpStatus(id, server) === 'needs_sign_in') throw new Error(`${server} still needs a sign-in`);
+    // With the run of the agent's process: the sheet shows the servers of the live run.
+    this.sim.actor(id).emit({ type: 'mcp_server', name: server, status: 'connected', error: null });
     return null;
   }
 

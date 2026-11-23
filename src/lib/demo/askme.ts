@@ -10,11 +10,12 @@ export class MockAskMe {
   private cards = new Map<string, Blocker>();
   private seeded = false;
 
-  constructor(private sim: Sim) {}
+  /** `withCards`: false for an office where no question waits (the demo's second office). */
+  constructor(private sim: Sim, private withCards = true) {}
 
   private seed() {
     const sim = this.sim;
-    if (this.seeded || !sim.workspace) return;
+    if (this.seeded || !this.withCards || !sim.workspace) return;
     this.seeded = true;
     const now = sim.now();
     const agents = [...sim.agents.values()];

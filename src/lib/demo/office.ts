@@ -31,8 +31,21 @@ let spent = 0;
 let cheated = false;
 
 // The neighbourhood: 4 × 3 plots, row by row (orchestrator/lots.rs's seed). `HERE` stands for
-// the open repo, whatever its id.
+// the demo's first repo (acme/web), whatever its id. The demo's other offices are on their
+// plots under their own ids, also while one of them is the open one.
 const HERE = '@here';
+/** Which of the demo's other offices a Sim plays, once you opened that office (`demoPlays`). */
+const plays = new WeakMap<Sim, string>();
+/** The plot key of the office a Sim plays. */
+const keyOf = (sim: Sim) => plays.get(sim) ?? HERE;
+/** The Sim that plays the office of a plot key. Null: an office you did not open, known by its numbers only. */
+const playing = (key: string, sims: Sim[]) => sims.find((s) => keyOf(s) === key) ?? null;
+const crewOf = (sim: Sim) => [...sim.agents.values()].filter((a) => a.role !== 'lead' && !a.archived);
+
+/** `sim` plays one of the demo's other offices from now on: its plot, its counts and its crew are that Sim's. */
+export function demoPlays(sim: Sim, office: string) {
+  plays.set(sim, office);
+}
 type Row = { id: string; x: number; z: number; size: LotSizeName; owned: boolean; workspace: string | null; gift: boolean };
 const SEED: LotSizeName[] = ['small', 'small', 'medium', 'large', 'small', 'medium', 'medium', 'large', 'small', 'small', 'medium', 'large'];
 let rows: Row[] | null = null;
@@ -54,7 +67,11 @@ function hood(): Row[] {
   return rows;
 }
 
-const here = (sim: Sim, ws: string) => (ws === sim.workspace?.id || ws === HERE ? HERE : ws);
+/** The plot key of a workspace id the UI names: an office that one of `sims` plays, else the id as it is. */
+function here(ws: string, sims: Sim[]): string {
+  const played = sims.find((s) => s.workspace?.id === ws);
+  return played ? keyOf(played) : ws;
+}
 const rowOf = (id: string) => hood().find((r) => r.id === id) ?? fail('no such plot');
 const homeOf = (ws: string) => hood().find((r) => r.workspace === ws) ?? fail('this repo has no plot');
 const lotOn = (r: Row) => lots.get(r.id) ?? bareLot(r.size);
@@ -68,13 +85,14 @@ function pay(sim: Sim, cost: number) {
   spent += cost;
 }
 
-export function demoLot(): Lot {
-  return structuredClone(lotOn(homeOf(HERE)));
+/** The open office's lot. */
+export function demoLot(sim: Sim): Lot {
+  return structuredClone(lotOn(homeOf(keyOf(sim))));
 }
 
 /** A priced change to the open office's lot, as the core's `lots::change`. */
 function change(sim: Sim, f: (lot: Lot) => void): LotSaved {
-  const r = homeOf(HERE);
+  const r = homeOf(keyOf(sim));
   const old = lotOn(r);
   const next = structuredClone(old);
   f(next);
@@ -95,20 +113,21 @@ export const demoSaveLot = (sim: Sim, next: Lot): LotSaved =>
     Object.assign(lot, structuredClone(next));
   });
 
-export function demoLots(sim: Sim): LotSlot[] {
+/** `sim` is the open office; `rest` are the demo's other offices that you opened (each has a Sim of its own). */
+export function demoLots(sim: Sim, rest: Sim[] = []): LotSlot[] {
   return hood().map((r) => {
     const lot = r.owned ? lotOn(r) : null;
     const other = OFFICES.find((o) => o.id === r.workspace);
-    const crew = r.workspace === HERE ? [...sim.agents.values()].filter((a) => a.role !== 'lead' && !a.archived).length : (other?.crew.length ?? 0);
+    const live = r.workspace ? playing(r.workspace, [sim, ...rest]) : null;
     return {
       id: r.id,
       x: r.x,
       z: r.z,
       size: r.size,
       owned: r.owned,
-      workspace_id: r.workspace === HERE ? (sim.workspace?.id ?? null) : r.workspace,
-      name: r.workspace === HERE ? (sim.workspace?.name ?? 'codly') : (other?.name ?? null),
-      crew,
+      workspace_id: r.workspace === HERE ? (live?.workspace?.id ?? null) : r.workspace,
+      name: r.workspace === HERE ? (live?.workspace?.name ?? 'codly') : (other?.name ?? null),
+      crew: live ? crewOf(live).length : (other?.crew.length ?? 0),
       price: landPrice(r.size),
       template: lot?.template || null,
       gift: r.gift,
@@ -145,10 +164,10 @@ export function demoBuyLot(sim: Sim, slotId: string, template: string | null): W
   return demoWallet(sim);
 }
 
-export function demoSellLot(sim: Sim, slotId: string): Wallet {
+export function demoSellLot(sim: Sim, slotId: string, rest: Sim[] = []): Wallet {
   const r = rowOf(slotId);
   if (!r.owned) throw new Error("that plot isn't yours");
-  if (r.workspace) throw new Error(`${demoLots(sim).find((s) => s.id === r.id)?.name ?? 'a repo'}'s office is there: move it out first`);
+  if (r.workspace) throw new Error(`${demoLots(sim, rest).find((s) => s.id === r.id)?.name ?? 'a repo'}'s office is there: move it out first`);
   pay(sim, -((r.gift ? 0 : landBack(r.size)) + sellValue(lotOn(r))));
   Object.assign(r, { owned: false, gift: false });
   lots.delete(r.id);
@@ -156,8 +175,8 @@ export function demoSellLot(sim: Sim, slotId: string): Wallet {
 }
 
 /** Move an office to another plot of yours with none on it (orchestrator/lots.rs's rules). */
-export function demoMoveOffice(sim: Sim, workspaceId: string, slotId: string): LotSlot[] {
-  const from = homeOf(here(sim, workspaceId));
+export function demoMoveOffice(sim: Sim, workspaceId: string, slotId: string, rest: Sim[] = []): LotSlot[] {
+  const from = homeOf(here(workspaceId, [sim, ...rest]));
   const to = rowOf(slotId);
   if (from === to) throw new Error('the office is already there');
   if (!to.owned) throw new Error('buy that plot first');
@@ -172,7 +191,7 @@ export function demoMoveOffice(sim: Sim, workspaceId: string, slotId: string): L
     lots.set(to.id, moved);
     to.workspace = from.workspace;
     from.workspace = null;
-    return demoLots(sim);
+    return demoLots(sim, rest);
   }
   // Furniture shifts as buildings sit on plots of another size: centred, against the street
   // (with no building to line up, it stays where it stands).
@@ -199,7 +218,7 @@ export function demoMoveOffice(sim: Sim, workspaceId: string, slotId: string): L
   lots.set(to.id, next);
   to.workspace = from.workspace;
   from.workspace = null;
-  return demoLots(sim);
+  return demoLots(sim, rest);
 }
 
 /**
@@ -208,28 +227,31 @@ export function demoMoveOffice(sim: Sim, workspaceId: string, slotId: string): L
  * while the office has unfinished work or an agent is in the middle of a turn. Nothing is
  * deleted: opening the repo again brings it back.
  */
-export function demoCloseOffice(sim: Sim, workspaceId: string): LotSlot[] {
-  const ws = here(sim, workspaceId);
+export function demoCloseOffice(sim: Sim, workspaceId: string, rest: Sim[] = []): LotSlot[] {
+  const sims = [sim, ...rest];
+  const ws = here(workspaceId, sims);
   const other = OFFICES.find((o) => o.id === ws);
   if (ws !== HERE && !other) throw new Error('no such office');
   const plot = homeOf(ws);
-  if (other) {
-    // The demo's other offices: one has agents at work, the other is quiet.
-    if (other.working) throw new Error(`${other.crew[0]} is in the middle of a turn in ${other.name}: wait for it, or stop it first`);
-    OFFICES.splice(OFFICES.indexOf(other), 1);
-  } else {
-    const name = sim.workspace?.name ?? 'This repo';
-    const open = [...sim.tasks.values()].find((t) => !['done', 'failed', 'cancelled'].includes(t.status));
+  const office = playing(ws, sims);
+  if (office) {
+    // An office you opened: as it stands now.
+    const name = office.workspace?.name ?? 'This repo';
+    const open = [...office.tasks.values()].find((t) => !['done', 'failed', 'cancelled'].includes(t.status));
     if (open) throw new Error(`${name} still has unfinished work (${open.key} "${open.title}"): finish or cancel it first`);
-    const busy = [...sim.agents.values()].find((a) => sim.actor(a.id).inTurn);
+    const busy = [...office.agents.values()].find((a) => office.actor(a.id).inTurn);
     if (busy) throw new Error(`${busy.name} is in the middle of a turn in ${name}: wait for it, or stop it first`);
     // Its agents stop, and the repo is no longer in the recent list.
-    for (const a of [...sim.agents.values()]) if (a.status !== 'offline') sim.patchAgent(a.id, { status: 'offline', activity: null, activity_label: null });
-    sim.recent = sim.recent.filter((r) => r.repo_path !== sim.workspace?.repo_path);
-    sim.workspace = null;
+    for (const a of [...office.agents.values()]) if (a.status !== 'offline') office.patchAgent(a.id, { status: 'offline', activity: null, activity_label: null });
+    office.recent = office.recent.filter((r) => r.repo_path !== office.workspace?.repo_path);
+    office.workspace = null;
+  } else if (other?.working) {
+    // The demo's other offices, not opened yet: one has agents at work, the other is quiet.
+    throw new Error(`${other.crew[0]} is in the middle of a turn in ${other.name}: wait for it, or stop it first`);
   }
+  if (other) OFFICES.splice(OFFICES.indexOf(other), 1);
   plot.workspace = null;
-  return demoLots(sim);
+  return demoLots(sim, rest);
 }
 
 function seeded(sim: Sim): Agent[] {
@@ -287,15 +309,22 @@ export function demoLetGo(sim: Sim, id: string): Agent {
   return gone;
 }
 
-// Two other offices for the Transfer picker (the demo has one repo), with who works there.
-// billing-api has an approval waiting, so its tab shows the amber count.
-const OFFICES = [
-  { id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'], working: 0, needs_you: 0 },
-  { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'], working: 2, needs_you: 1 },
-];
+/**
+ * The demo's second office. Opening its path opens it for real: a Sim of its own plays it
+ * (mock.ts `open`), with a small script of its own (story.ts `openBilling`). Until then it is
+ * these numbers: three agents, two tasks in flight, and one request that waits for you, so its
+ * tab shows the amber count.
+ */
+export const BILLING = { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'], working: 2, needs_you: 1 };
 
-/** Agents moved to those offices: still yours, so their XP stays in the wallet. */
-const transferred: Agent[] = [];
+// The demo's other offices, with who works there. docs-site is never opened: it stays numbers.
+const OFFICES = [{ id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'], working: 0, needs_you: 0 }, BILLING];
+
+/** Agents moved to another office, and where to: still yours, so their XP stays in the wallet. */
+const transferred: { agent: Agent; to: string }[] = [];
+
+/** The agents you moved to an office before you opened it: they are in its crew when it opens. */
+export const demoMovedTo = (office: string): Agent[] => transferred.filter((t) => t.to === office).map((t) => t.agent);
 
 /** Who is at home in those offices, so the map has someone walking down the street: Juno goes
  *  home for 4 of every 9 minutes (walking out as the demo opens), Pia for 10 of every 14 (home
@@ -320,23 +349,52 @@ function demoAway(office: string, now: number): AwayAgent[] {
   return out;
 }
 
-export const demoOffices = (): Office[] => OFFICES.map((o) => ({ id: o.id, name: o.name, repo_path: o.repo_path, crew: o.crew.length, working: o.working, needs_you: o.needs_you, home: demoAway(o.id, Date.now()) }));
+/** Tasks that keep an agent busy (the core's count of an office's tasks in flight). */
+const IN_FLIGHT = ['running', 'verifying', 'reviewing', 'changes_requested', 'merging'];
 
-/** Transfer an agent to one of the demo's other offices: same rules as the core's; it leaves this office's crew. */
-export function demoTransfer(sim: Sim, id: string, to: string): Agent {
+/** An office you opened in the demo, as it stands now: what the core's `offices` counts. */
+function counted(office: Sim): Office[] {
+  const ws = office.workspace;
+  if (!ws) return [];
+  const crew = crewOf(office);
+  const home = crew.flatMap((a) => (a.away_until != null && a.away_until > Date.now() ? [{ id: a.id, name: a.name, color: a.color, since: a.away_since ?? null, until: a.away_until }] : []));
+  const working = [...office.tasks.values()].filter((t) => IN_FLIGHT.includes(t.status)).length;
+  const needs_you = [...office.approvals.values()].filter((a) => a.status === 'pending').length + [...office.plans.values()].filter((p) => p.status === 'awaiting_approval').length;
+  return [{ id: ws.id, name: ws.name, repo_path: ws.repo_path, crew: crew.length, working, needs_you, home }];
+}
+
+/**
+ * Your other offices (the open one, `sim`, is left out). One you opened in the demo (`rest`)
+ * is counted as it stands now; the others are the numbers the demo gives them.
+ */
+export function demoOffices(sim: Sim, rest: Sim[] = []): Office[] {
+  const numbers = OFFICES.filter((o) => o.id !== sim.workspace?.id && !rest.some((s) => s.workspace?.id === o.id));
+  return [
+    ...rest.flatMap(counted),
+    ...numbers.map((o) => ({ id: o.id, name: o.name, repo_path: o.repo_path, crew: o.crew.length, working: o.working, needs_you: o.needs_you, home: demoAway(o.id, Date.now()) })),
+  ];
+}
+
+/** Transfer an agent to another of the demo's offices: same rules as the core's; it leaves this office's crew. */
+export function demoTransfer(sim: Sim, id: string, to: string, rest: Sim[] = []): Agent {
   const a = sim.agents.get(id);
   if (!a) throw new Error('no such agent');
   const block = transferBlock(a, [...sim.tasks.values()]);
   if (block) throw new Error(`${a.name}: ${block}`);
+  // An office you opened has its crew; another one has the names the demo gives it.
+  const opened = rest.find((s) => s.workspace?.id === to);
   const o = OFFICES.find((x) => x.id === to);
-  if (!o) throw new Error('no such office');
-  if (o.crew.some((n) => n.toLowerCase() === a.name.toLowerCase())) throw new Error(`someone called ${a.name} already works in ${o.name}`);
-  o.crew.push(a.name);
-  const career = { ...a.career, trust: 'intern' as Rank, friends: {}, mentor: null, milestones: [...a.career.milestones, { at: sim.now(), text: `Moved to ${o.name}` }] };
+  if (!opened && !o) throw new Error('no such office');
+  const name = opened?.workspace?.name ?? o?.name ?? to;
+  const crew = opened ? crewOf(opened).map((x) => x.name) : (o?.crew ?? []);
+  if (crew.some((n) => n.toLowerCase() === a.name.toLowerCase())) throw new Error(`someone called ${a.name} already works in ${name}`);
+  const career = { ...a.career, trust: 'intern' as Rank, friends: {}, mentor: null, milestones: [...a.career.milestones, { at: sim.now(), text: `Moved to ${name}` }] };
   const moved: Agent = { ...a, career, session_id: null, worktree: null, task_id: null, status: 'idle', consultant: false, kept: true, updated_at: sim.now() };
-  transferred.push(moved);
+  if (opened) opened.putAgent(moved);
+  else o?.crew.push(a.name);
+  transferred.push({ agent: moved, to });
   sim.agents.delete(id);
-  sim.decision('transfer', 'rule', `${a.name} moved to ${o.name}`, { agent: id, name: a.name, from: sim.workspace?.id ?? null, to: o.id, to_name: o.name });
+  sim.decision('transfer', 'rule', `${a.name} moved to ${name}`, { agent: id, name: a.name, from: sim.workspace?.id ?? null, to, to_name: name });
   return moved;
 }
 
@@ -463,14 +521,16 @@ export function demoDigest(sim: Sim, since: number): Digest {
 /** The wallet (crates/codly-core/src/orchestrator/wallet.rs): the demo's agents' XP (and those
  *  it let go or moved), plus grants, less what was paid for plots, building and furniture. */
 export function demoWallet(sim: Sim): Wallet {
-  const earned = [...sim.agents.values(), ...seeded(sim), ...transferred].reduce((n, a) => n + a.career.xp, 0);
+  // One you moved to an office that is open now is in its crew: counted once.
+  const moved = transferred.map((t) => t.agent).filter((a) => !sim.agents.has(a.id));
+  const earned = [...sim.agents.values(), ...seeded(sim), ...moved].reduce((n, a) => n + a.career.xp, 0);
   return { earned, granted, spent, balance: earned + granted - spent, cheated };
 }
 
 /** Build/Buy: the furniture bought for this office (what came with the lot and the stations
  *  are drawn from the lot; the games for sale are both). */
 export function demoShop(sim: Sim): Shop {
-  const lot = lotOn(homeOf(HERE));
+  const lot = lotOn(homeOf(keyOf(sim)));
   const gift = new Set(lot.gift);
   const bought = (item: string) => !BY_ID.get(item)?.builtin || !BY_ID.get(item)?.hidden;
   return { wallet: demoWallet(sim), placed: lot.furniture.filter((p) => !gift.has(p.uid) && bought(p.item)).map((p) => ({ ...p })) };
@@ -495,7 +555,7 @@ export function demoExportOffice(sim: Sim): string {
         stats: { merged: s.merged, commits: s.commits, checks_passed: s.checks_passed, checks_failed: s.checks_failed, reviews_done: s.reviews_done, approved: s.approved, changes_requested: s.changes_requested },
       };
     });
-  return JSON.stringify({ schema: 'codly/office@1', exported_at: sim.now(), cheated, lot: demoLot(), crew }, null, 2);
+  return JSON.stringify({ schema: 'codly/office@1', exported_at: sim.now(), cheated, lot: demoLot(sim), crew }, null, 2);
 }
 
 export function demoPlace(sim: Sim, piece: Placed): Shop {
@@ -550,7 +610,7 @@ export function demoGiveXp(sim: Sim, id: string, xp: number): Agent {
 /** The lot back to a gift Garage; what stood there sells back at the usual rates. */
 export function demoResetOffice(sim: Sim): Shop {
   developer(sim);
-  const r = homeOf(HERE);
+  const r = homeOf(keyOf(sim));
   const { w, d } = plotSize(r.size);
   pay(sim, -sellValue(lotOn(r)));
   lots.set(r.id, allGift(fit(TEMPLATES.garage, w, d)!));
