@@ -428,6 +428,9 @@ async fn your_answer_survives_a_restart_and_reaches_the_restarted_worker() {
     // The answer was kept in the store: the worker that starts now reads it first, in its session.
     let core = start(dir.path(), again()).await;
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    // The answered task would start once nothing is paused, so the restart waits for your
+    // Resume first (a pause is no reason not to ask).
+    core.resume_work().await.unwrap();
     core.update_settings(Settings { paused: false, ..core.settings() }).await.unwrap();
     plan_done(&core).await;
     let seen = turns_of(&turns, worker.as_deref());

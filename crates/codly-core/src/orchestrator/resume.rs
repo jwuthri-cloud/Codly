@@ -292,8 +292,9 @@ impl Inner {
     /// or a budget ends, so it is never a reason to hold nothing, nor to end a hold. Work is a
     /// running plan that goes on (`goes_on`; one that was in its integration checks runs them
     /// again), a ready task of no plan, or a re-check of your required checks that a quit cut
-    /// short. Nothing at all starts in an office the scheduler passes over because its repo
-    /// folder is not there (`scheduled`).
+    /// short and still has a task that waits for your checks (`rechecks_left`). Nothing at all
+    /// starts in an office the scheduler passes over because its repo folder is not there
+    /// (`scheduled`).
     fn starts_by_itself(&self) -> Result<bool> {
         let mut offices = HashMap::new();
         for plan in self.store.plans_with_status(&[PlanStatus::Running, PlanStatus::Integrating])? {
@@ -308,13 +309,13 @@ impl Inner {
                 return Ok(true);
             }
         }
-        self.rechecks_left()
+        self.rechecks_left(&mut offices)
     }
 
     /// Does the scheduler work in this office? The test of `schedule_pass`: the open office
     /// always, another one only while its repo folder is there (not on a disk that is not
     /// mounted, say). `seen` keeps the answer for one look at every office.
-    fn scheduled(&self, seen: &mut HashMap<Id, bool>, ws_id: &str) -> Result<bool> {
+    pub(super) fn scheduled(&self, seen: &mut HashMap<Id, bool>, ws_id: &str) -> Result<bool> {
         if let Some(known) = seen.get(ws_id) {
             return Ok(*known);
         }

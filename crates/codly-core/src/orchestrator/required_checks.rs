@@ -18,7 +18,7 @@
 //! are in the store until each is through (`Rechecks`): when Codly closes in the middle, the
 //! next start checks the rest, or the end of its restart hold does (`resume.rs`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -492,15 +492,30 @@ impl Inner {
     }
 
     /// Is a re-check that a quit cut short still to do? That is work that starts by itself
-    /// (`resume.rs` holds it for your Resume).
-    pub(super) fn rechecks_left(&self) -> Result<bool> {
-        Ok(!self.store.kv_prefixed(RECHECKS)?.is_empty())
+    /// (`resume.rs` holds it for your Resume): a queue of an office the scheduler works in
+    /// (`scheduled`, with `offices` as the caller's look at them) in which a task still waits
+    /// for your required checks. A queue that cannot be read, or whose office is gone, is taken
+    /// out (`left_queue`).
+    pub(super) fn rechecks_left(&self, offices: &mut HashMap<Id, bool>) -> Result<bool> {
+        for (key, row) in self.store.kv_prefixed(RECHECKS)? {
+            let Some((queue, ws)) = self.left_queue(&key, &row) else { continue };
+            if !self.scheduled(offices, &ws.id)? {
+                continue;
+            }
+            for id in &queue.tasks {
+                if let Some(t) = self.store.task(id)?
+                    && self.waits_for_checks(&t)?
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// The re-checks that a quit cut short go on: each office's queue starts again, with the
-    /// tasks that were not through and still wait for your required checks. A row that cannot
-    /// be read, or whose office is gone, is taken out: it would hold the work of every later
-    /// start for nothing.
+    /// tasks that were not through and still wait for your required checks. The queue of an
+    /// office the scheduler passes over (its repo folder is not there) waits for a later start.
     pub(super) fn restart_rechecks(self: &Arc<Self>) {
         let rows = match self.store.kv_prefixed(RECHECKS) {
             Ok(rows) => rows,
@@ -509,21 +524,35 @@ impl Inner {
                 return;
             }
         };
+        let mut offices = HashMap::new();
         for (key, row) in rows {
-            let ws_id = &key[RECHECKS.len()..];
-            let queue = serde_json::from_str::<Rechecks>(&row)
-                .map_err(anyhow::Error::from)
-                .and_then(|queue| Ok((queue, self.store.workspace(ws_id)?.ok_or_else(|| anyhow!("its office is not there any more"))?)));
-            match queue {
-                Ok((queue, ws)) => {
+            let Some((queue, ws)) = self.left_queue(&key, &row) else { continue };
+            match self.scheduled(&mut offices, &ws.id) {
+                Ok(true) => {
                     tokio::spawn(self.clone().recheck_parked(ws, queue.on, Some(queue.tasks)));
                 }
-                Err(e) => {
-                    tracing::warn!("the re-checks a quit cut short in office {ws_id} are dropped: {e:#}");
-                    if let Err(e) = self.store.kv_write(&[(key.clone(), None)]) {
-                        tracing::warn!("they stay in the store: {e:#}");
-                    }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("the re-checks a quit cut short in office {} do not go on now: {e:#}", ws.id),
+            }
+        }
+    }
+
+    /// The queue of store row `key` = `row`, with its office. None: the row cannot be read, or
+    /// its office is gone. Such a row is taken out: it would hold the work of every later start
+    /// for nothing.
+    fn left_queue(&self, key: &str, row: &str) -> Option<(Rechecks, Workspace)> {
+        let ws_id = &key[RECHECKS.len()..];
+        let queue = serde_json::from_str::<Rechecks>(row)
+            .map_err(anyhow::Error::from)
+            .and_then(|queue| Ok((queue, self.store.workspace(ws_id)?.ok_or_else(|| anyhow!("its office is not there any more"))?)));
+        match queue {
+            Ok(queue) => Some(queue),
+            Err(e) => {
+                tracing::warn!("the re-checks a quit cut short in office {ws_id} are dropped: {e:#}");
+                if let Err(e) = self.store.kv_write(&[(key.to_string(), None)]) {
+                    tracing::warn!("they stay in the store: {e:#}");
                 }
+                None
             }
         }
     }

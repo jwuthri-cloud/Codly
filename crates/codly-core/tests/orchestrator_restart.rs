@@ -1345,3 +1345,51 @@ async fn a_resolution_cut_short_by_a_quit_is_taken_back_at_the_next_start() {
     assert!(seen.lock().unwrap().runs.is_empty());
     core.shutdown().await;
 }
+
+/// Re-checks of your required checks that a quit cut short hold a start only when one of them
+/// would run. Not the queue of an office whose repo folder is not there (it waits there for a
+/// later start), not a queue whose tasks wait for the checks no more, and not a row that cannot
+/// be read: that one is taken out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rechecks_that_would_not_run_hold_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let parked = new_id();
+    let (away_row, gone_row) = {
+        let store = store_of(dir.path());
+        let here = seed_office(&store, &repo, Settings::default());
+        let folder = dir.path().join("unmounted").join("repo").to_string_lossy().into_owned();
+        let away = Workspace { id: new_id(), repo_path: folder, name: "away".into(), ..here.clone() };
+        store.upsert_workspace(&away).unwrap();
+        // A task of the away office that the gate parked for your required checks.
+        let task: Task = serde_json::from_value(adhoc_task(&parked, "a1", "blocked")).unwrap();
+        let parked_for = EventKind::Decision {
+            id: new_id(),
+            decision_type: "gate".into(),
+            method: "rule".into(),
+            summary: "waits for your required checks".into(),
+            detail: json!({ "required": "the checks file changed since you turned it on" }),
+        };
+        for kind in [EventKind::TaskChanged { task }, parked_for] {
+            let ev = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: Some(parked.clone()), run_id: None, workspace_id: None, kind };
+            store.append_event(Some(&away.id), &ev).unwrap();
+        }
+        let away_row = format!("required_rechecks:{}", away.id);
+        store.kv_set(&away_row, &json!({ "on": true, "tasks": [parked] }).to_string()).unwrap();
+        // The open office's queue has a task that is gone.
+        store.kv_set(&format!("required_rechecks:{}", here.id), &json!({ "on": true, "tasks": [new_id()] }).to_string()).unwrap();
+        let gone_row = format!("required_rechecks:{}", new_id());
+        store.kv_set(&gone_row, "not a queue").unwrap();
+        (away_row, gone_row)
+    };
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), None, "no re-check would run: there is nothing to ask");
+    core.shutdown().await;
+    drop(core);
+    let store = store_of(dir.path());
+    assert_eq!(store.kv_get(&gone_row).unwrap(), None, "the row that cannot be read is taken out");
+    assert!(store.kv_get(&away_row).unwrap().is_some(), "the away office's queue waits for its folder");
+    let left = store.task(&parked).unwrap().expect("the away office's task");
+    assert_eq!(left.status, TaskStatus::Blocked, "it was not checked again");
+}
