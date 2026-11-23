@@ -122,3 +122,67 @@ export class FrameLoop {
     this.sleep();
   }
 }
+
+/** Why the office is not drawn: the window is hidden, the host covers the office (Work mode,
+ *  the map), or the GL context is lost. */
+export type Cover = 'window' | 'host' | 'context';
+
+/**
+ * Whether the office is drawn at all: only while nothing covers it. `onchange` fires when the
+ * answer changes, never for a second cover on top of the first.
+ */
+export class Shown {
+  private covers = new Set<Cover>();
+
+  constructor(private onchange: (shown: boolean) => void) {}
+
+  get value() {
+    return this.covers.size === 0;
+  }
+
+  cover(by: Cover, on: boolean) {
+    const was = this.value;
+    if (on) this.covers.add(by);
+    else this.covers.delete(by);
+    if (this.value !== was) this.onchange(this.value);
+  }
+}
+
+/**
+ * Does the office keep moving when nothing happens (breathing, glances, the games)? In full
+ * view, yes. Behind the chat only when the user asked for it (the `world_ambient` setting):
+ * there the office is drawn when something happens and costs nothing otherwise. Never with
+ * reduced motion.
+ */
+export function idleLife(o: { reducedMotion: boolean; backdrop: boolean; ambient: boolean }): boolean {
+  return !o.reducedMotion && (!o.backdrop || o.ambient);
+}
+
+/**
+ * A repeating tick that runs only while it is on. Turning it on ticks at once, so state that
+ * is computed from the clock catches up with the time it was off; turning it off leaves no
+ * timer behind.
+ */
+export class Ticker {
+  private id: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    private tick: () => void,
+    private ms: number,
+  ) {}
+
+  get on() {
+    return this.id != null;
+  }
+
+  set(on: boolean) {
+    if (on === this.on) return;
+    if (on) {
+      this.tick();
+      this.id = setInterval(this.tick, this.ms);
+    } else {
+      clearInterval(this.id!);
+      this.id = null;
+    }
+  }
+}

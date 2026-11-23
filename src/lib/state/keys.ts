@@ -1,13 +1,16 @@
-// Global keyboard map. ⌘K palette · ⌘1 full office · ⌘2 full work · ⌘. focus · ⌘, settings ·
+// Global keyboard map. ⌘K palette · ⌘F find in the conversation · ⌘1 full office · ⌘2 full work · ⌘. focus · ⌘, settings ·
 // ⌘N new request · ⌘[ / ⌘] previous / next request · ⇧⌘N new task · ⌘O open repo · ⌘↵ the one
 // primary action (approve / run plan) · ⌥⌘↵ allow for the session · ⌘⌫ deny · ⇧⌘⌫ deny with a
-// note · G-sequences to rooms · J/K lists · Esc · ?.
+// note (both also from the empty composer) · G-sequences to rooms · J/K lists · Esc (close,
+// deselect, then stop the running turn: the first press asks, the second stops) · ?.
 // ponytail: hand-rolled instead of tinykeys — one listener, sequences included.
 import type { Approval } from '../gen/Approval';
-import { openWorkspace, resolveApproval, runPlan } from './actions';
+import { openWorkspace, resolveApprovals, runPlan, stopThreadByEsc } from './actions';
+import { twinsIn } from './approvalGroups';
+import { denyKeyInField, escStep } from './esc';
 import { requests } from './requests.svelte';
 import { store } from './store.svelte';
-import { ROOMS, isRequestThread, ui, type Room } from './ui.svelte';
+import { ROOMS, isClosedThread, isRequestThread, ui, type DiffTarget, type Room } from './ui.svelte';
 
 export type ListNav = { next: () => void; prev: () => void; open?: () => void };
 let navStack: ListNav[] = [];
@@ -47,6 +50,13 @@ export function keyTargetApproval(): Approval | null {
   return pending[0] ?? null;
 }
 
+/** The requests one key press answers: the key target and, in the conversation, the other
+ *  agents' requests that share its card (`groupSame`). */
+function keyTargetIds(ap: Approval): string[] {
+  const twins = inThread(ap) ? twinsIn(store.pendingApprovals.filter(inThread), ap) : [];
+  return [ap, ...twins].map((a) => a.id);
+}
+
 /** The plan ⌘↵ runs when no approval is waiting: the one of the request you are on. */
 export function keyTargetPlan(): string | null {
   if ((ui.mode === 'office' && ui.room === 'home') || ui.mode === 'map') return null;
@@ -55,6 +65,18 @@ export function keyTargetPlan(): string | null {
   const chosen = ui.room === 'plan' && ui.planId ? store.planMap.get(ui.planId) : null;
   const p = chosen && (chosen.thread || 'lead') === ui.request ? chosen : store.planOf(ui.request);
   return p && p.status === 'awaiting_approval' ? p.id : null;
+}
+
+/**
+ * What G C shows. From a request: that request's plan, when it has changes to show; a request
+ * without one (a draft) gets the room's own choice, not what you looked at last. From anywhere
+ * else: what you looked at last.
+ */
+export function keyTargetChanges(): DiffTarget {
+  if (ui.room !== 'home' || !isRequestThread(ui.thread)) return ui.diffTarget;
+  const p = store.planOf(ui.thread);
+  const shows = !!p && p.status !== 'cancelled' && store.tasks.some((t) => t.plan_id === p.id && (t.status === 'done' || !!t.branch));
+  return p && shows ? { kind: 'plan', id: p.id } : null;
 }
 
 const workspaceOpen = () => !!store.workspace;
@@ -77,14 +99,14 @@ export function installKeys(): () => void {
       if (e.altKey) {
         if (ap && ap.choices.includes('allow_session')) {
           e.preventDefault();
-          resolveApproval(ap.id, 'allow_session');
+          resolveApprovals(keyTargetIds(ap), 'allow_session');
         }
         return;
       }
       if (e.shiftKey) return;
       if (ap && ap.choices.includes('allow_once')) {
         e.preventDefault();
-        resolveApproval(ap.id, 'allow_once');
+        resolveApprovals(keyTargetIds(ap), 'allow_once');
         return;
       }
       const plan = keyTargetPlan();
@@ -94,12 +116,15 @@ export function installKeys(): () => void {
       }
       return;
     }
-    if (mod && e.key === 'Backspace' && !e.repeat && !overlay && !typing) {
+    // In a text field these keys delete text; in the empty composer there is nothing to delete.
+    const field = e.target as HTMLTextAreaElement | null;
+    const denyHere = !typing || denyKeyInField({ composer: !!field?.closest?.('[aria-label="Composer"]'), empty: !field?.value });
+    if (mod && e.key === 'Backspace' && !e.repeat && !overlay && denyHere) {
       const ap = keyTargetApproval();
       if (!ap || !ap.choices.includes('deny')) return;
       e.preventDefault();
       if (e.shiftKey) ui.denyNoteFor = ap.id;
-      else resolveApproval(ap.id, 'deny');
+      else resolveApprovals(keyTargetIds(ap), 'deny');
       return;
     }
 
@@ -131,6 +156,12 @@ export function installKeys(): () => void {
         else ui.openPalette();
         return;
       }
+      // Find in the conversation on screen (also while typing: the composer is where you are).
+      if (k === 'f' && !overlay && workspaceOpen() && ui.canFind) {
+        e.preventDefault();
+        ui.openFind();
+        return;
+      }
       if (k === '1' || k === '2' || k === '3') {
         e.preventDefault();
         ui.toggleMode(k === '1' ? 'office' : k === '2' ? 'work' : 'map');
@@ -159,9 +190,25 @@ export function installKeys(): () => void {
         (e.target as HTMLElement).blur();
         return;
       }
-      if (ui.artifactOpen) ui.artifactOpen = null;
-      else if (ui.selection) ui.selection = null;
-      else if (ui.mode === 'office' || ui.mode === 'map') ui.mode = 'blend';
+      // One step per press: close, deselect, leave the full office, close the find bar, leave a
+      // closed request, and only then stop the running turn.
+      const step = escStep({
+        repeat: e.repeat,
+        artifactOpen: !!ui.artifactOpen,
+        selection: !!ui.selection,
+        mode: ui.mode,
+        room: ui.room,
+        popupOpen: !!document.querySelector('[role="dialog"], [role="menu"]'),
+        inOffice: !!(e.target as HTMLElement).closest?.('[role="application"]'),
+        findOpen: ui.findOpen,
+        readingClosed: isClosedThread(ui.thread),
+      });
+      if (step === 'close-artifact') ui.artifactOpen = null;
+      else if (step === 'deselect') ui.selection = null;
+      else if (step === 'leave-office') ui.mode = 'blend';
+      else if (step === 'close-find') ui.findOpen = false;
+      else if (step === 'leave-closed') ui.openRequest(ui.request);
+      else if (step === 'stop') stopThreadByEsc(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
       return;
     }
 
@@ -174,7 +221,10 @@ export function installKeys(): () => void {
       if (dest) {
         e.preventDefault();
         if (dest === 'settings') ui.settingsOpen = true;
-        else ui.go(dest);
+        else {
+          if (dest === 'changes') ui.diffTarget = keyTargetChanges();
+          ui.go(dest);
+        }
       }
       return;
     }
@@ -209,15 +259,17 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     group: 'Everywhere',
     items: [
       ['⌘K', 'Search and commands'],
+      ['⌘F', 'Find in the conversation (↵ next · ⇧↵ previous)'],
       ['⌘1', 'Full office'],
       ['⌘2', 'Full work (hide the office)'],
+      ['⌘3', 'Neighbourhood (all your lots)'],
       ['⌘.', 'Focus: dim the office'],
       ['⌘N', 'New request (its own Lead, in parallel)'],
       ['⌘[ ⌘]', 'Previous · next request'],
       ['⇧⌘N', 'New task'],
       ['⌘O', 'Open repository'],
       ['⌘,', 'Settings'],
-      ['Esc', 'Close · deselect'],
+      ['Esc', 'Close · deselect · press twice to stop the running turn'],
       ['?', 'This sheet'],
     ],
   },
@@ -230,13 +282,19 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     items: [
       ['↵', 'Send (queues if the agent is mid-turn)'],
       ['⇧↵', 'New line'],
-      ['@', 'Talk to one agent'],
+      ['Esc Esc', 'Stop the running turn (empty line)'],
+      ['↑', 'Bring back what you sent (empty line)'],
+      ['⇧⇥', 'Next mode: Ask · Plan · Auto · Direct'],
+      ['⌫', 'Back to the request (empty line, 1:1)'],
+      ['@', 'Talk to one agent · mention a file'],
       ['#', 'Mention a task'],
+      ['/', 'Actions: new request, stop, mode, model…'],
       ['⌘↵', 'Approve once · run the plan'],
       ['⌥⌘↵', 'Allow for this session'],
       ['⌘⌫', 'Deny'],
       ['⇧⌘⌫', 'Deny with a note'],
       ['J K', 'Next · previous'],
+      ['[ ]', 'Previous · next file (Changes)'],
     ],
   },
 ];

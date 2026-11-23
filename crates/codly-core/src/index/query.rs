@@ -56,7 +56,8 @@ pub struct Tuning {
     pub medium_p: f64,
     /// Fewer present query terms than this is always `Low` (hit rate 0.06 in the replay).
     pub min_terms: usize,
-    /// After this long the chunk stage is skipped (files-only answer).
+    /// After this long in the ranking stage the chunk rankers are skipped (files-only
+    /// answer). The exact lookups that run before it are not counted.
     pub timeout_ms: u64,
     /// Run the strict (AND/NEAR) chunk levels: evidence for `why`, and a fusion list when
     /// `w_and` > 0. The replay found them neutral for ranking, so they cost little and weigh 0.
@@ -178,6 +179,18 @@ pub(crate) struct Ranked {
     pub result: SearchResult,
     pub meta: Vec<CitationMeta>,
     pub features: Features,
+    /// The `rg -i` patterns for the query. `result.fallback_rg` gives them at `Low` and
+    /// `Medium` confidence only.
+    pub rg_patterns: Vec<String>,
+}
+
+impl Ranked {
+    /// Set the confidence of the answer, and suggest the rg patterns when it is not a sure one.
+    pub fn set_confidence(&mut self, confidence: Confidence) {
+        self.result.confidence = confidence;
+        self.result.fallback_rg =
+            if matches!(confidence, Confidence::Low | Confidence::Medium) { self.rg_patterns.clone() } else { Vec::new() };
+    }
 }
 
 // ───────────────────────────── query parsing ─────────────────────────────
@@ -329,14 +342,16 @@ fn kind_weight(kind: &str) -> f64 {
     }
 }
 
+/// Symbols called ?1..?4 in any case. Every name is compared NOCASE, as the `symbols_name`
+/// index is: one name compared exactly would make the whole lookup read the symbols table.
+const SYMBOL_SITES_SQL: &str = "SELECT s.name, s.kind, s.container, s.line, s.end_line, f.id, f.path
+     FROM symbols s JOIN files f ON f.id = s.file_id
+     WHERE s.name COLLATE NOCASE IN (?1, ?2, ?3, ?4) LIMIT 120";
+
 /// Definitions of one identifier. Empty when the name is unknown; callers decide whether
 /// the number of sites is small enough to call the hit exact.
 fn symbol_sites(conn: &Connection, h: &Hint) -> anyhow::Result<Vec<Site>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT s.name, s.kind, s.container, s.line, s.end_line, f.id, f.path
-         FROM symbols s JOIN files f ON f.id = s.file_id
-         WHERE s.name = ?1 COLLATE NOCASE OR s.name IN (?2, ?3, ?4) LIMIT 120",
-    )?;
+    let mut stmt = conn.prepare_cached(SYMBOL_SITES_SQL)?;
     // Ruby spells predicates, bang methods and setters `name?`, `name!`, `name=`.
     let rows = stmt.query_map(params![h.name, format!("{}?", h.name), format!("{}!", h.name), format!("{}=", h.name)], |r| {
         Ok(Site {
@@ -775,7 +790,6 @@ fn rg_patterns(q: &QueryTerms, ladder: &[String]) -> Vec<String> {
 
 pub(crate) fn search(conn: &Connection, query: &str, k: usize, t: &Tuning) -> anyhow::Result<Ranked> {
     let started = Instant::now();
-    let deadline = started + std::time::Duration::from_millis(t.timeout_ms);
     let k = k.clamp(1, 60);
     let mut parsed = parse_query(query);
     if !t.exact {
@@ -843,6 +857,8 @@ pub(crate) fn search(conn: &Connection, query: &str, k: usize, t: &Tuning) -> an
     // ── 2–3. candidates and fusion
     let mut phases = [0.0f64; 6];
     phases[0] = started.elapsed().as_secs_f64() * 1000.0;
+    // The ranking budget starts here: a slow exact lookup must not leave the rankers no time.
+    let deadline = Instant::now() + std::time::Duration::from_millis(t.timeout_ms);
     let hy = hybrid(conn, &parsed.terms, t, deadline, &mut phases);
     let t_cit = Instant::now();
     let (cands, chunk_order) = fuse(&hy, t);
@@ -967,20 +983,23 @@ pub(crate) fn search(conn: &Connection, query: &str, k: usize, t: &Tuning) -> an
     }
     let mut features = features;
     features.phase_ms[5] = t_cit.elapsed().as_secs_f64() * 1000.0;
-    let fallback_rg =
-        if matches!(confidence, Confidence::Low | Confidence::Medium) { rg_patterns(&parsed.terms, &hy.rare) } else { Vec::new() };
-    tracing::debug!(query, ?confidence, agree5, p_hit, citations = cits.len(), "index search");
-    Ok(Ranked {
+    // Not the query: it can be the text of a task, and the app's log file ends up in bug reports.
+    tracing::debug!(query_chars = query.chars().count(), ?confidence, agree5, p_hit, citations = cits.len(), "index search");
+    let mut ranked = Ranked {
         result: SearchResult {
             query: query.to_string(),
             confidence,
             citations: cits,
-            fallback_rg,
+            fallback_rg: Vec::new(),
             took_ms: started.elapsed().as_millis() as i64,
+            warnings: Vec::new(),
         },
         meta,
         features,
-    })
+        rg_patterns: rg_patterns(&parsed.terms, &hy.rare),
+    };
+    ranked.set_confidence(confidence);
+    Ok(ranked)
 }
 
 /// Parent directory of a file (for the dispersion feature).
@@ -1030,6 +1049,30 @@ mod tests {
         assert!(parse_query("retry the upload when it fails").idents.is_empty());
         assert_eq!(parse_query("refresh").idents.len(), 1);
         assert!(parse_query("mod.rs:12-40").paths == ["mod.rs"]);
+    }
+
+    #[test]
+    fn symbol_lookup_uses_the_name_index() {
+        let d = tempfile::tempdir().unwrap();
+        let conn = super::super::store::open_writer(&d.path().join("i.sqlite"), &Default::default()).unwrap();
+        let plan = crate::store::query_plan(&conn, SYMBOL_SITES_SQL);
+        assert!(plan.contains("symbols_name") && !plan.lines().any(|l| l.starts_with("SCAN")), "{plan}");
+
+        conn.execute_batch(
+            "INSERT INTO files(id, path, lang, bytes, lines, mtime_ns, hash) VALUES (1, 'app/user.rb', 'ruby', 1, 9, 0, 0);
+             INSERT INTO symbols(file_id, name, kind, line, end_line)
+             VALUES (1, 'valid?', 'method', 1, 3), (1, 'Valid', 'class', 4, 6), (1, 'other', 'method', 7, 9);",
+        )
+        .unwrap();
+        let names = |name: &str, strict: bool| -> Vec<String> {
+            let h = Hint { name: name.into(), qualifier: None, strict };
+            symbol_sites(&conn, &h).unwrap().into_iter().map(|s| s.name).collect()
+        };
+        // A name the user marked as code: any case, and Ruby's `name?`.
+        assert_eq!(names("valid", true), ["Valid", "valid?"]);
+        // A CamelCase word in prose: that spelling only.
+        assert_eq!(names("Valid", false), ["Valid"]);
+        assert!(names("missing", true).is_empty());
     }
 
     #[test]

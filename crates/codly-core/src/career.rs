@@ -34,26 +34,27 @@ pub fn rank_for(xp: i64) -> Rank {
     RANKS.iter().rev().find(|(_, need)| xp >= *need).map_or(Rank::Intern, |(r, _)| *r)
 }
 
-/// What trusting a rank gives an agent, as you grant it (a promotion only offers it).
-pub const PERKS: [(Rank, &str); 3] = [
-    (Rank::Junior, "Edits files inside its own worktree without asking; commands still ask"),
-    (Rank::Senior, "Works inside its own worktree without asking; risky actions still ask"),
-    (Rank::Staff, "Its work merges without the cross-vendor review"),
-];
-
-/// Whether this rank's perk is on: you granted it and it still holds the rank.
-pub fn trusts(c: &Career, r: Rank) -> bool {
-    c.trust >= r && c.rank >= r
+/// Whether you trust it at least this much (`Career::trust`). Trust is a safety setting you set
+/// per agent, at any time: its rank, its XP and the office game neither grant it nor cap it.
+pub fn trusts(c: &Career, level: Rank) -> bool {
+    c.trust >= level
 }
 
-/// Grant trust up to `r` (capped at its rank; Intern takes it all back). Returns the trust set.
-pub fn grant(c: &mut Career, r: Rank, now: i64) -> Rank {
-    let r = r.min(c.rank);
-    if r > c.trust && PERKS.iter().any(|(p, _)| *p == r) {
-        note(c, now, format!("Trusted as {}", rank_label(r)));
+/// What a trust level lets an agent do, as the decision that records it says it ("you trust
+/// Ana to …"). The levels reuse `Rank`'s names in saved data and each includes the ones below
+/// it; None for Intern, the default: no extra trust, it asks like every other agent.
+///
+/// The words promise only what the approval rules keep (`approvals::with_trust`). A file edit
+/// names its paths, so "inside its own worktree" is checked for it. A command is not: the
+/// rules read the command line, not what a script or a program does, so the higher levels say
+/// "where the approval rules see no risk" and name no place.
+pub fn trust_allows(level: Rank) -> Option<&'static str> {
+    match level {
+        Rank::Intern => None,
+        Rank::Junior => Some("edit files inside its own worktree without asking"),
+        Rank::Senior => Some("work on its own where the approval rules see no risk (they read the command line, not what a script does)"),
+        Rank::Staff => Some("work on its own where the approval rules see no risk (they read the command line, not what a script does), and to merge without the cross-vendor review"),
     }
-    c.trust = r;
-    r
 }
 
 pub fn rank_label(r: Rank) -> &'static str {
@@ -223,7 +224,7 @@ pub fn refresh(c: &mut Career, hired_at: i64, now: i64) -> bool {
 pub const WANT_XP: i64 = 25;
 
 /// Your local day of a moment ("2026-11-01"): wants last a day.
-fn day_of(ms: i64) -> String {
+pub(crate) fn day_of(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map_or_else(String::new, |d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
 }
 
@@ -344,7 +345,7 @@ pub fn clean_traits(ts: &[String]) -> Vec<String> {
 pub fn sanitize(mut c: Career) -> Career {
     c.xp = c.xp.clamp(0, 1_000_000);
     c.rank = rank_for(c.xp);
-    c.trust = Rank::Intern; // trust is earned in each repo, from you
+    c.trust = Rank::Intern; // trust is yours to give, in each repo
     c.friends.clear(); // ids of agents in the repo it came from
     c.mentor = None;
     c.traits = clean_traits(&c.traits);
@@ -509,15 +510,38 @@ mod tests {
     }
 
     #[test]
-    fn trust_is_granted_never_above_rank() {
-        let mut c = Career { xp: 300, rank: Rank::Senior, ..Default::default() };
-        assert!(!trusts(&c, Rank::Senior), "a promotion alone grants nothing");
-        assert_eq!(grant(&mut c, Rank::Staff, 1), Rank::Senior, "capped at its rank");
-        assert!(trusts(&c, Rank::Senior) && !trusts(&c, Rank::Staff));
-        assert_eq!(c.milestones.last().unwrap().text, "Trusted as Senior");
-        grant(&mut c, Rank::Intern, 2);
-        assert!(!trusts(&c, Rank::Senior), "taken back");
-        assert_eq!(c.milestones.len(), 1, "taking trust back is not a milestone");
+    fn trust_is_yours_to_set_whatever_the_rank() {
+        let mut c = Career::default();
+        assert!(!trusts(&c, Rank::Junior), "the default is no extra trust");
+        c.trust = Rank::Staff;
+        assert_eq!(c.rank, Rank::Intern);
+        assert!(trusts(&c, Rank::Junior) && trusts(&c, Rank::Senior) && trusts(&c, Rank::Staff), "its rank is no cap");
+        c.trust = Rank::Junior;
+        assert!(trusts(&c, Rank::Junior) && !trusts(&c, Rank::Senior), "a level includes only the ones below it");
+        assert_eq!(trust_allows(Rank::Intern), None);
+        assert!(trust_allows(Rank::Junior).unwrap().contains("edit files"));
+        assert!(trust_allows(Rank::Staff).unwrap().contains("without the cross-vendor review"));
+        // Working on its own is "where the rules see no risk": the rules cannot prove that a
+        // command stays inside the worktree, so the words do not promise it.
+        for level in [Rank::Senior, Rank::Staff] {
+            let says = trust_allows(level).unwrap();
+            assert!(says.contains("where the approval rules see no risk") && !says.contains("inside its own worktree") && !says.contains("without asking"), "{says}");
+        }
+    }
+
+    #[test]
+    fn xp_and_promotions_never_change_trust() {
+        // The developer panel's cheat promotes it to Staff at once: still not trusted.
+        let mut c = Career::default();
+        assert_eq!(credit(&mut c, Credit::Cheat(5_000), 1), Some(Rank::Staff));
+        assert_eq!(c.trust, Rank::Intern);
+        assert!(!trusts(&c, Rank::Junior), "a rank grants nothing");
+        // Real work neither: the level you set stays as you set it, through a promotion too.
+        let mut c = Career { trust: Rank::Junior, ..Default::default() };
+        for now in 0..10 {
+            credit(&mut c, Credit::Merge, now);
+        }
+        assert_eq!((c.rank, c.trust), (Rank::Senior, Rank::Junior));
     }
 
     #[test]

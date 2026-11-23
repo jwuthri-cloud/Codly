@@ -1,9 +1,9 @@
 //! The scheduler as a pure function: readiness, leases, slots, routing and why tasks wait.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use codly_core::model::*;
-use codly_core::orchestrator::scheduler::{AccountState, Action, AgentPick, CALLED_IN, SchedInput, schedule};
+use codly_core::orchestrator::scheduler::{AccountState, Action, AgentPick, CALLED_IN, SchedInput, Stuck, dependents, schedule, stuck_plans};
 
 fn cli(p: Provider, signed_in: Option<bool>) -> CliInfo {
     CliInfo {
@@ -29,8 +29,10 @@ fn plan(id: &str, status: PlanStatus, created_at: i64) -> Plan {
         summary: id.into(),
         assumptions: vec![],
         open_questions: vec![],
+        weak_checks: vec![],
         status,
         base_commit: None,
+        base_branch: None,
         integration_branch: None,
         integration_worktree: None,
         merged_sha: None,
@@ -96,6 +98,7 @@ fn agent(id: &str, name: &str, p: Provider, role: Role) -> Agent {
         away_until: None,
         away_since: None,
         tired_since: None,
+        permission_mode: None,
         created_at: 1,
         updated_at: 1,
     }
@@ -111,6 +114,10 @@ struct World {
     accounts: Vec<AccountState>,
     now: i64,
     elsewhere: Vec<Agent>,
+    not_before: HashMap<Id, i64>,
+    hold: Option<String>,
+    in_terminal: HashSet<Id>,
+    asking: HashSet<Id>,
 }
 
 impl World {
@@ -125,10 +132,14 @@ impl World {
             accounts: vec![],
             now: 1_000_000,
             elsewhere: vec![],
+            not_before: HashMap::new(),
+            hold: None,
+            in_terminal: HashSet::new(),
+            asking: HashSet::new(),
         }
     }
-    fn run(&self) -> Vec<Action> {
-        schedule(&SchedInput {
+    fn input(&self) -> SchedInput<'_> {
+        SchedInput {
             tasks: &self.tasks,
             plans: &self.plans,
             agents: &self.agents,
@@ -138,7 +149,18 @@ impl World {
             accounts: &self.accounts,
             now: self.now,
             elsewhere: &self.elsewhere,
-        })
+            not_before: &self.not_before,
+            hold: self.hold.as_deref(),
+            in_terminal: &self.in_terminal,
+            asking: &self.asking,
+        }
+    }
+    fn run(&self) -> Vec<Action> {
+        schedule(&self.input())
+    }
+    /// The plans that cannot go on by themselves after a pass.
+    fn stuck(&self) -> Vec<Stuck> {
+        stuck_plans(&self.input(), &self.run())
     }
 }
 
@@ -153,6 +175,7 @@ fn acct(label: &str, used: f64) -> AccountState {
         logged_in: Some(true),
         parked: None,
         used,
+        waits_for_you: None,
     }
 }
 
@@ -233,10 +256,11 @@ fn leases_block_overlapping_scopes() {
     assert_eq!(starts(&a)[0].0, "t3");
 }
 
-/// A worker that asked you something waits for the answer with its process running: the
-/// answer puts its task straight back to Running, so the task keeps its files and its slot.
+/// A worker that asked you something waits for the answer with its process running: its task
+/// keeps its files, but no worker slot (nobody works on it), so open questions never stop
+/// the other tasks.
 #[test]
-fn a_blocked_task_with_a_live_worker_keeps_its_slot() {
+fn a_task_that_waits_for_your_answer_keeps_its_files_but_no_slot() {
     let mut asked = task("t1", "p", TaskStatus::Blocked, &["a/**"], &[]);
     asked.assignee = Some("w1".into());
     let mut w = World::new(vec![asked, task("t2", "p", TaskStatus::Ready, &["a/ui/**"], &[]), task("t3", "p", TaskStatus::Ready, &["b/**"], &[])]);
@@ -248,13 +272,43 @@ fn a_blocked_task_with_a_live_worker_keeps_its_slot() {
     let a = w.run();
     let wt = waits(&a);
     assert_eq!(wt.len(), 1, "{wt:?}");
-    assert!(wt[0].0 == "t2" && wt[0].1.contains("overlaps running task t1"), "{wt:?}");
+    assert_eq!(wt[0], ("t2".to_string(), "waiting: write scope 'a/ui/**' overlaps task t1 ('a/**'), which waits for your answer".to_string()));
     assert_eq!(starts(&a).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["t3"]);
+    // With one slot in all, and one per account: t3 still starts, on the account of t1's worker.
     w.settings.max_parallel = 1;
-    assert_eq!(waits(&w.run())[1], ("t3".to_string(), "waiting: all 1 worker slots are busy".to_string()));
+    w.settings.max_per_provider = 1;
+    let a = w.run();
+    assert_eq!(starts(&a).iter().map(|s| (s.0.as_str(), s.1)).collect::<Vec<_>>(), [("t3", Provider::Claude)]);
+    assert_eq!(waits(&a).len(), 1, "only t2 waits, for the files: {:?}", waits(&a));
     // Stopped, or its worker gone: a blocked task holds nothing.
     w.busy.clear();
     assert_eq!(starts(&w.run()).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["t2"]);
+}
+
+/// After a restart of Codly the worker's process is gone, but its question is still open: the
+/// task keeps its files and its worker takes no other task, as before the restart.
+#[test]
+fn a_task_whose_question_is_still_open_keeps_its_files_without_a_live_worker() {
+    let mut asked = task("t1", "p", TaskStatus::Blocked, &["a/**"], &[]);
+    asked.assignee = Some("w1".into());
+    let mut next = task("t3", "p", TaskStatus::Ready, &["b/**"], &[]);
+    next.assignee = Some("w1".into());
+    let mut w = World::new(vec![asked, task("t2", "p", TaskStatus::Ready, &["a/ui/**"], &[]), next]);
+    // Not live and on no task: what a restart leaves of the worker.
+    w.agents = vec![agent("w1", "Ada", Provider::Claude, Role::Worker)];
+    w.asking.insert("t1".into());
+    let a = w.run();
+    assert!(starts(&a).is_empty(), "{a:?}");
+    let wt = waits(&a);
+    assert_eq!(wt.len(), 2, "{wt:?}");
+    assert_eq!(wt[0], ("t2".to_string(), "waiting: write scope 'a/ui/**' overlaps task t1 ('a/**'), which waits for your answer".to_string()));
+    assert_eq!(wt[1], ("t3".to_string(), "waiting: Ada (assigned) is busy with t1".to_string()));
+    assert!(w.stuck().is_empty(), "the plan waits for your answer: its card says so");
+    // The question is closed: the files are free again, and nothing waits for t1 any more.
+    w.asking.clear();
+    let a = w.run();
+    assert_eq!(starts(&a)[0].0, "t2");
+    assert!(waits(&a).iter().all(|(_, why)| !why.contains("t1")), "{:?}", waits(&a));
 }
 
 #[test]
@@ -342,6 +396,22 @@ fn assignee_is_respected_and_waits_when_busy() {
 }
 
 #[test]
+fn a_task_for_an_agent_in_your_terminal_says_how_to_end_the_wait() {
+    let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    t.assignee = Some("a1".into());
+    let mut w = World::new(vec![t]);
+    w.agents = vec![agent("a1", "Ada", Provider::Claude, Role::Worker), agent("a2", "Bo", Provider::Claude, Role::Worker)];
+    w.busy.insert("a1".into());
+    w.in_terminal.insert("a1".into());
+    assert_eq!(waits(&w.run()), [("t1".into(), "waiting: Ada (assigned) is in your terminal: give it back".into())]);
+    assert!(starts(&w.run()).is_empty(), "it does not go to another agent");
+    // Given back, it starts.
+    w.busy.clear();
+    w.in_terminal.clear();
+    assert_eq!(starts(&w.run())[0], ("t1".into(), Provider::Claude, AgentPick::Existing("a1".into())));
+}
+
+#[test]
 fn critical_path_goes_first() {
     // t1 unlocks two more tasks; t9 unlocks nothing. With one slot, t1 starts.
     let mut w = World::new(vec![
@@ -379,6 +449,31 @@ fn parked_providers_are_skipped_with_the_reason() {
     assert!(summary_of(&a, "t1").contains("Claude Code parked (91% of 5h used, resets in 2h)"), "{}", summary_of(&a, "t1"));
     w.accounts.push(AccountState { parked: Some("7d limit reached".into()), ..AccountState::implicit(&cli(Provider::Codex, Some(true))) });
     assert!(waits(&w.run())[0].1.contains("Codex parked (7d limit reached)"));
+}
+
+/// A CLI that waits for a choice of yours (its files in the repo are not trusted yet) is not
+/// "parked": that word is for a usage limit, which ends by itself. The task says what it
+/// waits for, also when the same account is over a limit.
+#[test]
+fn a_cli_that_waits_for_your_choice_says_so_and_not_parked() {
+    const CHOICE: &str = "waits for your choice about this folder's files: Settings → Safety";
+    let mut assigned = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    assigned.assignee = Some("m1".into());
+    let mut w = World::new(vec![assigned, task("t2", "p", TaskStatus::Ready, &["b/**"], &[])]);
+    w.agents = vec![member("m1", "Ana")];
+    w.accounts = vec![AccountState { waits_for_you: Some(CHOICE.into()), parked: Some("91% of 5h used, resets in 2h".into()), ..acct("default", 0.91) }];
+    let a = w.run();
+    // Ana's task waits for her CLI, with its own reason; the other task goes to the next CLI.
+    assert_eq!(waits(&a), [("t1".to_string(), format!("waiting: Ana (assigned): Claude Code {CHOICE}"))]);
+    assert_eq!(starts(&a)[0].1, Provider::Codex);
+    assert!(summary_of(&a, "t2").ends_with(&format!("; Claude Code {CHOICE}")), "{}", summary_of(&a, "t2"));
+    // No other CLI: every task waits for your choice, and none says "parked".
+    w.settings.worker_providers = vec![Provider::Claude];
+    let reasons: Vec<String> = waits(&w.run()).into_iter().map(|w| w.1).collect();
+    assert_eq!(reasons, [format!("waiting: Ana (assigned): Claude Code {CHOICE}"), format!("waiting: no free worker (Claude Code {CHOICE})")]);
+    // After your choice the usage limit is what is left, under its own word.
+    w.accounts[0].waits_for_you = None;
+    assert_eq!(waits(&w.run())[0].1, "waiting: Ana (assigned): Claude Code parked (91% of 5h used, resets in 2h)");
 }
 
 // ───────────── accounts ─────────────
@@ -591,19 +686,77 @@ fn paused_starts_nothing_and_says_why() {
     assert_eq!(starts(&w.run()).len(), 2);
 }
 
+/// A budget that is used up starts nothing, however many slots are free, and every ready task
+/// says which budget and the way out. Tasks whose dependencies are done still become ready, so
+/// they start as soon as the budget has room.
+#[test]
+fn a_used_up_budget_starts_nothing_and_says_the_way_out() {
+    let hold = "paused: the token budget of 1.0M work tokens is used up; raise it or press Reset counters in Settings → Autonomy & Budgets";
+    let mut tasks = ready(2);
+    tasks.push(task("done", "p", TaskStatus::Done, &["d/**"], &[]));
+    tasks.push(task("next", "p", TaskStatus::Pending, &["n/**"], &["done"]));
+    let mut w = World::new(tasks);
+    w.hold = Some(hold.into());
+    let a = w.run();
+    assert!(starts(&a).is_empty(), "{a:?}");
+    assert_eq!(waits(&a).len(), 3);
+    assert!(waits(&a).iter().all(|(_, why)| why == hold), "{:?}", waits(&a));
+    assert!(a.iter().any(|x| matches!(x, Action::MakeReady { task_id } if task_id == "next")));
+    // You paused Codly yourself: that is what the tasks say.
+    w.settings.paused = true;
+    assert!(waits(&w.run()).iter().all(|(_, why)| why == "paused: no new tasks start until you resume"));
+    w.settings.paused = false;
+    w.hold = None;
+    assert_eq!(starts(&w.run()).len(), 3);
+}
+
 fn member(id: &str, name: &str) -> Agent {
     let mut m = agent(id, name, Provider::Claude, Role::Worker);
     m.member = Some(format!("{id}-member"));
     m
 }
 
-/// A member at home (the office's energy): its queued task waits until it is back, minutes
-/// later, while someone else is at work; once back it starts.
+/// The office game is for show by default (`Settings::game_rules` off): a task queued for a
+/// member at home starts at once with no call-in, and home or tired never changes who on your
+/// staff gets a task.
+#[test]
+fn home_and_tired_change_nothing_unless_the_office_rules_are_on() {
+    let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    t.assignee = Some("m1".into());
+    let mut w = World::new(vec![t]);
+    assert!(!w.settings.game_rules, "off by default");
+    let mut ana = member("m1", "Ana");
+    ana.away_until = Some(w.now + 10 * 60_000);
+    w.agents = vec![ana, member("m2", "Bo")];
+    let a = w.run();
+    assert!(waits(&a).is_empty(), "{:?}", waits(&a));
+    assert_eq!(starts(&a)[0].2, AgentPick::Existing("m1".into()));
+    assert!(!summary_of(&a, "t1").contains("called in"), "{}", summary_of(&a, "t1"));
+    assert!(a.iter().any(|x| matches!(x, Action::Start { detail, .. } if detail["called_in"] == false)));
+
+    // An unassigned task goes to the oldest idle worker on your staff, at home and tired or not.
+    let mut w = World::new(vec![task("t1", "p", TaskStatus::Ready, &["a/**"], &[])]);
+    let mut home = agent("c1", "Cy", Provider::Claude, Role::Worker);
+    home.created_at = 0;
+    home.away_until = Some(w.now + 60_000);
+    let mut tired = agent("c2", "Bo", Provider::Claude, Role::Worker);
+    tired.tired_since = Some(1);
+    let mut fresh = agent("c3", "Di", Provider::Claude, Role::Worker);
+    fresh.created_at = 2;
+    w.agents = vec![fresh, tired, home];
+    assert_eq!(starts(&w.run())[0].2, AgentPick::Existing("c1".into()), "the oldest, though at home");
+    w.agents.pop();
+    assert_eq!(starts(&w.run())[0].2, AgentPick::Existing("c2".into()), "the next oldest, though tired");
+}
+
+/// With the office rules on, a member at home (the office's energy): its queued task waits until
+/// it is back, minutes later, while someone else is at work; once back it starts.
 #[test]
 fn a_queued_task_waits_for_its_member_at_home_while_others_work() {
     let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
     t.assignee = Some("m1".into());
     let mut w = World::new(vec![t]);
+    w.settings.game_rules = true;
     let mut ana = member("m1", "Ana");
     ana.away_until = Some(w.now + 10 * 60_000);
     w.agents = vec![ana, member("m2", "Bo")];
@@ -626,6 +779,7 @@ fn a_member_at_home_is_called_in_when_nobody_else_is_free() {
     let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
     t.assignee = Some("m1".into());
     let mut w = World::new(vec![t]);
+    w.settings.game_rules = true;
     let mut ana = member("m1", "Ana");
     ana.away_until = Some(w.now + 10 * 60_000);
     let mut bo = member("m2", "Bo");
@@ -645,11 +799,110 @@ fn a_member_at_home_is_called_in_when_nobody_else_is_free() {
     assert!(summary_of(&w.run(), "t1").contains(CALLED_IN), "alone on the team");
 }
 
+/// A worker that failed starts again after a wait: until then its task keeps its reason (no
+/// action for it) and takes no worker slot, so the next task starts in its place.
+#[test]
+fn a_task_whose_worker_restarts_later_waits_without_an_action_or_a_slot() {
+    let mut w = World::new(ready(2));
+    w.settings.max_parallel = 1;
+    w.not_before.insert("t1".into(), w.now + 5_000);
+    let a = w.run();
+    assert_eq!(starts(&a).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["t2"]);
+    assert!(waits(&a).is_empty(), "t1 keeps the reason that says when it starts again: {a:?}");
+    assert!(w.stuck().is_empty(), "a plan that waits for a retry is not stuck");
+
+    // Its time has come: it starts like any ready task.
+    w.now += 5_000;
+    assert_eq!(starts(&w.run())[0].0, "t1");
+}
+
+fn blocked(id: &str, reason: &str) -> Task {
+    Task { status_reason: Some(reason.into()), ..task(id, "p", TaskStatus::Blocked, &[], &[]) }
+}
+
+/// Nothing of the plan runs or can start, and work is left: it is stuck, with the task that
+/// stopped it and every task behind it, however far.
+#[test]
+fn a_plan_is_stuck_when_only_you_can_move_it_on() {
+    let w = World::new(vec![
+        task("t1", "p", TaskStatus::Done, &[], &[]),
+        blocked("t2", "blocked: could not start the worker: Claude Code is not signed in"),
+        task("t3", "p", TaskStatus::Pending, &[], &["t2"]),
+        task("t4", "p", TaskStatus::Pending, &[], &["t3"]),
+    ]);
+    let stuck = Stuck { plan_id: "p".into(), stopped: vec!["t2".into()], waiting: vec!["t3".into(), "t4".into()], merged: 1 };
+    assert_eq!(w.stuck(), vec![stuck]);
+
+    // A failed task stops a plan as well, and so does a task you cancelled that others wait for.
+    let mut w = World::new(vec![task("t1", "p", TaskStatus::Failed, &[], &[])]);
+    assert_eq!(w.stuck()[0].stopped, ["t1"]);
+    w.tasks = vec![task("t1", "p", TaskStatus::Cancelled, &[], &[]), task("t2", "p", TaskStatus::Pending, &[], &["t1"])];
+    assert_eq!((w.stuck()[0].stopped.clone(), w.stuck()[0].waiting.clone()), (vec!["t1".to_string()], vec!["t2".to_string()]));
+}
+
+#[test]
+fn a_plan_that_still_goes_on_is_not_stuck() {
+    let stopped = || blocked("t1", "blocked: the gate failed");
+    // Another task runs, is ready (even if it waits for a slot or a pause), or starts this pass.
+    for other in [TaskStatus::Running, TaskStatus::Verifying, TaskStatus::Merging, TaskStatus::Ready] {
+        let w = World::new(vec![stopped(), task("t2", "p", other, &["b/**"], &[])]);
+        assert!(w.stuck().is_empty(), "{other:?}");
+    }
+    let mut w = World::new(vec![stopped(), task("t2", "p", TaskStatus::Ready, &["b/**"], &[])]);
+    w.settings.paused = true;
+    assert!(w.stuck().is_empty(), "paused work goes on when you resume");
+    // A task whose dependencies are all merged becomes ready in this pass.
+    let w = World::new(vec![stopped(), task("t2", "p", TaskStatus::Done, &[], &[]), task("t3", "p", TaskStatus::Pending, &["c/**"], &["t2"])]);
+    assert!(w.stuck().is_empty());
+    // Every task done or cancelled: the plan finishes (or is cancelled) by itself.
+    let w = World::new(vec![task("t1", "p", TaskStatus::Done, &[], &[]), task("t2", "p", TaskStatus::Cancelled, &[], &[])]);
+    assert!(w.stuck().is_empty());
+    // A plan that does not run is never stuck.
+    let mut w = World::new(vec![stopped()]);
+    w.plans = vec![plan("p", PlanStatus::AwaitingApproval, 1)];
+    assert!(w.stuck().is_empty());
+}
+
+/// A task that waits for your answer has its Ask me card: its plan says nothing more, while
+/// the worker holds the task and after it is gone. With another stop beside it, the plan is
+/// stuck all the same.
+#[test]
+fn a_plan_that_only_waits_for_your_answer_is_not_told_as_stuck() {
+    let mut asks = blocked("t1", "waiting for you: Which provider?");
+    asks.assignee = Some("w1".into());
+    let mut w = World::new(vec![asks.clone(), task("t2", "p", TaskStatus::Pending, &[], &["t1"])]);
+    let mut worker = agent("w1", "Ada", Provider::Claude, Role::Worker);
+    worker.task_id = Some("t1".into());
+    w.agents = vec![worker];
+    w.busy.insert("w1".into());
+    assert!(w.stuck().is_empty(), "its worker is live and waits for you");
+    w.busy.clear();
+    assert!(w.stuck().is_empty(), "its worker is gone, the card is still open");
+    w.tasks.push(blocked("t3", "blocked: the gate failed"));
+    assert_eq!(w.stuck()[0].stopped, ["t1", "t3"]);
+}
+
+#[test]
+fn dependents_are_found_through_other_tasks() {
+    let tasks = vec![
+        task("t1", "p", TaskStatus::Failed, &[], &[]),
+        task("t2", "p", TaskStatus::Pending, &[], &["t1"]),
+        task("t3", "p", TaskStatus::Pending, &[], &["t2"]),
+        task("t4", "p", TaskStatus::Pending, &[], &[]),
+        task("t5", "p", TaskStatus::Pending, &[], &["t4", "t3"]),
+    ];
+    let keys = |id: &str| dependents(&tasks, id).iter().map(|t| t.key.clone()).collect::<Vec<_>>();
+    assert_eq!(keys("t1"), ["t2", "t3", "t5"]);
+    assert_eq!(keys("t4"), ["t5"]);
+    assert!(keys("t5").is_empty());
+}
+
 /// Tiredness is only a tiebreak: an idle generic worker at work and rested goes first, but a
 /// tired or home one still gets the task when it is the only one.
 #[test]
 fn the_scheduler_prefers_rested_workers_but_never_refuses_a_tired_one() {
     let mut w = World::new(vec![task("t1", "p", TaskStatus::Ready, &["a/**"], &[])]);
+    w.settings.game_rules = true;
     let mut old = agent("c1", "Bo", Provider::Claude, Role::Worker);
     old.tired_since = Some(1);
     let mut home = agent("c2", "Cy", Provider::Claude, Role::Worker);

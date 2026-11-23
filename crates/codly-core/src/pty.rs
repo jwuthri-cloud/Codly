@@ -19,6 +19,8 @@ struct Session {
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     shared: Arc<Mutex<Shared>>,
+    /// What the terminal was opened for, when its opener wants to find it again (`close_tagged`).
+    tag: Option<String>,
 }
 
 #[derive(Default)]
@@ -35,6 +37,15 @@ pub struct PtyManager {
 impl PtyManager {
     /// Start the user's login shell in `cwd` with the captured login environment.
     pub fn open(&self, cwd: &Path, env: &HashMap<String, String>) -> anyhow::Result<String> {
+        self.spawn(cwd, env, None)
+    }
+
+    /// `open`, with a tag that `close_tagged` finds the terminal by.
+    pub fn open_tagged(&self, cwd: &Path, env: &HashMap<String, String>, tag: &str) -> anyhow::Result<String> {
+        self.spawn(cwd, env, Some(tag.to_string()))
+    }
+
+    fn spawn(&self, cwd: &Path, env: &HashMap<String, String>, tag: Option<String>) -> anyhow::Result<String> {
         let pair = native_pty_system().openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })?;
         let shell = env.get("SHELL").cloned().unwrap_or_else(|| "/bin/zsh".into());
         let mut cmd = CommandBuilder::new(&shell);
@@ -73,7 +84,7 @@ impl PtyManager {
             }
         })?;
 
-        self.sessions.lock().unwrap().insert(id.clone(), Session { master: pair.master, writer, child, shared });
+        self.sessions.lock().unwrap().insert(id.clone(), Session { master: pair.master, writer, child, shared, tag });
         Ok(id)
     }
 
@@ -108,6 +119,14 @@ impl PtyManager {
     pub fn close(&self, id: &str) {
         if let Some(mut s) = self.sessions.lock().unwrap().remove(id) {
             let _ = s.child.kill();
+        }
+    }
+
+    /// Close every terminal opened with `tag`.
+    pub fn close_tagged(&self, tag: &str) {
+        let ids: Vec<String> = self.sessions.lock().unwrap().iter().filter(|(_, s)| s.tag.as_deref() == Some(tag)).map(|(id, _)| id.clone()).collect();
+        for id in ids {
+            self.close(&id);
         }
     }
 

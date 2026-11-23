@@ -1,12 +1,14 @@
 <!--
   A task landed: who did it, what it says it did (its own words), the diff it produced, the
-  checks Codly ran (verify, review, merge), and what it made (artifacts).
+  checks Codly ran (the task's own check, your required checks, review, merge), and what it made
+  (artifacts).
 -->
 <script lang="ts">
   import { diffstats, statLine } from '../../lib/state/diffstats.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { accounts } from '../../lib/state/accounts.svelte';
   import { ui } from '../../lib/state/ui.svelte';
+  import { doneChecks, requiredLine } from '../../lib/util/checks';
   import { clock } from '../../lib/util/format';
   import { idVar } from '../../lib/util/labels';
   import ArtifactThumb from '../../components/ArtifactThumb.svelte';
@@ -25,7 +27,10 @@
     void store.rev;
     return store.taskMarks[taskId] ?? [];
   });
-  const verify = $derived([...marks].reverse().find((m) => m.kind === 'verified') ?? null);
+  // Codly's check runs: the task's own check (the Lead wrote it), and yours (the repo's required checks).
+  const checks = $derived(doneChecks(task?.verify ?? [], marks));
+  const verify = $derived(checks.own);
+  const requiredFailed = $derived(checks.required.some((c) => c.state === 'fail'));
   const review = $derived([...marks].reverse().find((m) => m.kind === 'reviewed') ?? null);
   const merged = $derived([...marks].reverse().find((m) => m.kind === 'merged') ?? null);
   const stat = $derived(diffstats.task[taskId] ?? null);
@@ -54,7 +59,8 @@
 
     <ul class="facts">
       {#if stat}<li data-tip="From git, in the task’s worktree"><Icon name="diff" size={13} /><span class="num"><span class="add">+{stat.added}</span> <span class="del">−{stat.removed}</span> in {stat.files} {stat.files === 1 ? 'file' : 'files'}</span></li>{/if}
-      {#if verify}<li class:bad={!verify.ok}><Icon name={verify.ok ? 'check' : 'x'} size={13} stroke={2} /><code>{verify.text}</code>{#if tests}<span class="num">· {tests.testsFailed ? `${tests.testsFailed} failed` : `${tests.testsPassed} passed`}</span>{/if}</li>{/if}
+      {#if verify}<li class:bad={verify.state === 'fail'}><Icon name={verify.state === 'fail' ? 'x' : 'check'} size={13} stroke={2} /><code>{verify.cmd}</code>{#if tests}<span class="num">· {tests.testsFailed ? `${tests.testsFailed} failed` : `${tests.testsPassed} passed`}</span>{/if}</li>{/if}
+      {#if checks.required.length}<li class:bad={requiredFailed} data-tip="Your required checks (.codly/checks): {checks.required.map((c) => c.cmd).join(' · ')}"><Icon name={requiredFailed ? 'x' : 'check'} size={13} stroke={2} />{requiredLine(checks.required)}</li>{/if}
       {#if review}<li class:bad={!review.ok}><Icon name="eye" size={13} />{review.text}</li>{/if}
       {#if merged}<li><Icon name="merge" size={13} />merged into <code>{merged.text}</code></li>{/if}
     </ul>

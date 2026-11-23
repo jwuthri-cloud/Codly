@@ -3,7 +3,7 @@
 // to search; the sweep applies the same day rules as `housekeeping/archive.rs` to the story's
 // real tasks (none is old enough in a short session, so nothing else archives); and the
 // connection switches are kept in memory (keys are never stored: the demo only remembers that
-// one was "added").
+// one was "added"). The storage commands go to `./storage`.
 import type { ArchivedItem } from '../gen/ArchivedItem';
 import type { ArchivePolicy } from '../gen/ArchivePolicy';
 import type { BoardFlag } from '../gen/BoardFlag';
@@ -11,6 +11,7 @@ import type { Connection } from '../gen/Connection';
 import type { ConnectionSecret } from '../gen/ConnectionSecret';
 import type { SweepReport } from '../gen/SweepReport';
 import type { Task } from '../gen/Task';
+import { StorageDemo } from './storage';
 
 const DAY = 86_400_000;
 
@@ -52,8 +53,10 @@ export class HousekeepingDemo {
   private archive: ArchivedItem[];
   private enabled = new Map<string, boolean>();
   private keys = new Set<string>();
+  private storage: StorageDemo;
 
   constructor(now: number) {
+    this.storage = new StorageDemo(now);
     const old = (n: number, id: string, key: string, title: string, text: string, status: string, reason: ArchivedItem['reason']): ArchivedItem => ({
       id,
       kind: 'task',
@@ -99,6 +102,13 @@ export class HousekeepingDemo {
         if (typeof a.enabled === 'boolean') this.enabled.set(id, a.enabled);
         return this.connections();
       }
+      case 'storage_report':
+      case 'storage_policy':
+      case 'storage_clean':
+      case 'storage_delete_worktree':
+      case 'storage_delete_branch':
+      case 'storage_delete_backup':
+        return this.storage.handle(cmd, a, now);
     }
     throw new Error(`Unknown command ${cmd}`);
   }

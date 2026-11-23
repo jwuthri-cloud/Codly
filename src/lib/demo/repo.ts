@@ -800,6 +800,71 @@ test('a correct password before the limit still works', async ({ page }) => {
 });
 `;
 
+// ───────────── the second office, billing-api: retries for failed payments ─────────────
+
+const retry = `// A failed invoice payment is tried again one day later, three times at most.
+import { charge } from '../stripe/charge';
+import { invoices } from './store';
+
+export const RETRY_DAYS = [1, 2, 3] as const;
+const DAY = 86_400_000;
+
+/** When the payment is tried next (ms), or null when the last try failed. */
+export function nextTry(failedAt: number, tries: number): number | null {
+  return tries < RETRY_DAYS.length ? failedAt + DAY : null;
+}
+
+export async function retryPayment(invoiceId: string, now = Date.now()): Promise<'paid' | 'retry' | 'unpaid'> {
+  const invoice = await invoices.get(invoiceId);
+  if (await charge(invoice)) return invoices.mark(invoiceId, 'paid');
+  const next = nextTry(now, invoice.tries + 1);
+  await invoices.failed(invoiceId, next);
+  return next === null ? invoices.mark(invoiceId, 'unpaid') : 'retry';
+}
+`;
+
+const retryTest = `import { describe, expect, it } from 'vitest';
+import { nextTry, RETRY_DAYS } from './retry';
+
+const DAY = 86_400_000;
+
+describe('nextTry', () => {
+  it('tries again one day later, three times', () => {
+    for (let tries = 0; tries < RETRY_DAYS.length; tries++) expect(nextTry(0, tries)).toBe(DAY);
+  });
+
+  it('gives up after the last try', () => {
+    expect(nextTry(0, RETRY_DAYS.length)).toBeNull();
+  });
+});
+`;
+
+const paymentFailed = `// The email a customer gets when the last try to pay an invoice failed.
+import { send } from './send';
+
+type Unpaid = { number: string; email: string; amount: string };
+
+export function paymentFailedEmail(invoice: Unpaid) {
+  return {
+    to: invoice.email,
+    subject: \`We could not take the payment for invoice \${invoice.number}\`,
+    text: \`We tried four times to take \${invoice.amount} for invoice \${invoice.number}. Please update your card.\`,
+  };
+}
+
+export const sendPaymentFailed = (invoice: Unpaid) => send(paymentFailedEmail(invoice));
+`;
+
+const paymentFailedTest = `import { expect, it } from 'vitest';
+import { paymentFailedEmail } from './paymentFailed';
+
+it('names the invoice and the amount', () => {
+  const mail = paymentFailedEmail({ number: 'INV-204', email: 'ana@example.com', amount: '$48.00' });
+  expect(mail.subject).toContain('INV-204');
+  expect(mail.text).toContain('$48.00');
+});
+`;
+
 /** Files each planned task touches, in the order the worker edits them. */
 export const TASK_FILES: Record<string, RepoFile[]> = {
   t1: [
@@ -832,6 +897,21 @@ export const TASK_FILES: Record<string, RepoFile[]> = {
     { path: 'tests/e2e/auth-lockout.spec.ts', before: null, after: lockoutE2e },
   ],
   adhoc: [{ path: 'package.json', before: pkgBefore, after: pkgAfter }],
+};
+
+/**
+ * Files of billing-api's plan (keyed b1/b2), for its diffs. Apart from `TASK_FILES`: that table
+ * is acme/web's tree, which the code map and the file browser list.
+ */
+export const BILLING_FILES: Record<string, RepoFile[]> = {
+  b1: [
+    { path: 'src/invoices/retry.ts', before: null, after: retry },
+    { path: 'src/invoices/retry.test.ts', before: null, after: retryTest },
+  ],
+  b2: [
+    { path: 'src/mail/paymentFailed.ts', before: null, after: paymentFailed },
+    { path: 'src/mail/paymentFailed.test.ts', before: null, after: paymentFailedTest },
+  ],
 };
 
 // ───────────── unified diff generation (LCS, 3 lines of context) ─────────────

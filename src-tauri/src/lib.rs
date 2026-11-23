@@ -3,25 +3,30 @@
 
 mod agent_controls;
 mod ask_me;
+mod awake;
+mod boot;
+pub mod cli;
 mod commands;
+mod diagnostics;
 mod dictation;
 mod ide_commands;
 mod inbound;
 mod hire_commands;
 mod onboarding_commands;
+mod pr_commands;
+mod quit;
+mod session_commands;
+mod takeover_commands;
+mod preview_commands;
 #[cfg(test)]
 mod ipc_tests;
+mod logging;
+mod notify;
+mod merge_commands;
 mod ui_bus;
 mod web;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use codly_core::blockers::{BlockerSeverity, BlockerStatus};
-use codly_core::model::{Approval, EventKind, PlanStatus, TaskStatus};
-use codly_core::{Core, CoreConfig};
-use tauri::{Manager, RunEvent};
-use tauri_plugin_notification::NotificationExt;
+use tauri::{Manager, RunEvent, WindowEvent};
 use tokio::sync::{OnceCell, watch};
 
 use commands::AppState;
@@ -29,9 +34,7 @@ use ui_bus::UiBus;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("CODLY_LOG").unwrap_or_else(|_| "info".into()))
-        .init();
+    logging::init();
 
     let serve = match web::from_args(&std::env::args().collect::<Vec<_>>()) {
         Ok(s) => s,
@@ -40,6 +43,10 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    // Said here, in the terminal you typed it in: an app that already runs serves for this one.
+    if let Some(s) = serve.as_ref().filter(|s| s.remote) {
+        eprintln!("{}", web::remote_warning(s));
+    }
     let (core_tx, core_rx) = watch::channel(None);
     let (hub_tx, hub_rx) = watch::channel(None);
     let bus = UiBus::new();
@@ -47,10 +54,16 @@ pub fn run() {
     let app = tauri::Builder::default()
         // must be registered first (plugins run in registration order)
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // `codly serve` while the app runs: this app serves too, and opens the browser.
-            if let Ok(Some(s)) = web::from_args(&argv) {
-                tauri::async_runtime::spawn(web::run(app.clone(), s, true));
-                return;
+            match web::from_args(&argv) {
+                // `codly serve` while the app runs: this app serves too, and opens the browser.
+                Ok(Some(s)) if !s.remote => {
+                    tauri::async_runtime::spawn(web::run(app.clone(), s, true));
+                    return;
+                }
+                // Not to the network: nobody sees the link this app would print, and its token
+                // is never kept. `web::remote_warning` told the terminal to quit Codly first.
+                Ok(Some(_)) => tracing::warn!("codly serve --allow-remote was not started: Codly is already open. Quit it, then run the command again."),
+                _ => {}
             }
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
@@ -67,6 +80,9 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState { core: core_rx, bus: bus.clone(), pty: Default::default(), shell_env: OnceCell::new() })
         .manage(inbound::InboundHandle { hub: hub_rx })
+        .manage(boot::Boot { core: core_tx, hub: hub_tx, bus, problem: Default::default() })
+        .manage(quit::Asking::default())
+        .on_menu_event(|app, event| quit::on_menu(app, event.id().as_ref()))
         .setup(move |app| {
             // The window starts hidden (tauri.conf.json): `codly serve` keeps it so, and out of the Dock.
             match serve {
@@ -86,26 +102,19 @@ pub fn run() {
                     });
                 }
             }
-            let data_dir = app.path().app_data_dir()?;
-            let inbound_dir = data_dir.clone();
-            let app_exe = std::env::current_exe()?;
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let started = Core::start(CoreConfig { data_dir, app_exe }).await.map_err(|e| format!("{e:#}"));
-                if let Ok(core) = &started {
-                    // A new consultant's job offer stays up in the office this long (you may pick).
-                    core.set_hiring_window(std::time::Duration::from_secs(30));
-                    tauri::async_runtime::spawn(bus.clone().pump(core.subscribe()));
-                    tauri::async_runtime::spawn(notify_loop(handle, core.clone()));
-                    let _ = hub_tx.send(inbound::start(core.clone(), inbound_dir).await);
-                } else if let Err(e) = &started {
-                    tracing::error!("core failed to start: {e}");
-                }
-                let _ = core_tx.send(Some(started));
-            });
+            // Cmd+Q asks first while agents work. Elsewhere there is no app menu to change.
+            if cfg!(target_os = "macos")
+                && let Err(e) = quit::own_menu_quit(app.handle())
+            {
+                tracing::warn!("Quit in the menu does not ask before it stops agents: {e}");
+            }
+            boot::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            boot::retry_core,
+            boot::start_problem,
+            boot::recover_database,
             commands::ui_subscribe,
             commands::ui_set_visible,
             commands::detect_clis,
@@ -118,30 +127,50 @@ pub fn run() {
             commands::run_plan,
             commands::cancel_plan,
             commands::close_thread,
+            commands::closed_requests,
+            commands::closed_request,
             commands::resolve_approval,
+            commands::approval_rule_offer,
+            commands::add_approval_rule,
+            commands::approval_rules,
+            commands::remove_approval_rule,
             commands::breaker_config,
             commands::set_breaker_config,
             commands::breaker_status,
             commands::reset_breaker,
+            commands::plan_spent,
             commands::interrupt_agent,
-            agent_controls::agent_control,
             agent_controls::set_agent_block_tools,
             agent_controls::stop_agent_after_step,
             agent_controls::resume_agent,
             agent_controls::steer_agent,
+            agent_controls::set_agent_permission_mode,
+            agent_controls::compact_agent,
+            agent_controls::agent_context_usage,
+            session_commands::reconnect_agent_mcp,
+            session_commands::stop_agent_task,
+            takeover_commands::agent_takeover,
+            takeover_commands::list_takeovers,
+            takeover_commands::take_over_agent,
+            takeover_commands::open_takeover_terminal,
+            takeover_commands::give_back_agent,
             commands::stop_agent,
-            commands::hire_agent,
-            commands::list_models,
+            commands::model_catalog,
             commands::set_workspace_team,
             commands::set_request_prefs,
             commands::set_agent_model,
             commands::set_agent_look,
             commands::create_task,
             commands::move_task,
+            commands::recheck_task,
+            commands::accept_task,
             commands::assign_task,
             commands::task_diff,
             commands::plan_diff,
+            commands::send_back_task,
             commands::merge_plan,
+            commands::merge_plan_warning,
+            commands::undo_merge,
             commands::merge_agent,
             commands::repo_sync,
             commands::commit_checkout,
@@ -168,6 +197,9 @@ pub fn run() {
             dictation::dictation_clear_key,
             dictation::dictation_transcribe,
             commands::agent_git,
+            commands::agent_checkpoints,
+            commands::restore_checkpoint,
+            commands::last_turn_diff,
             commands::get_triggers,
             commands::set_triggers,
             commands::list_skills,
@@ -234,91 +266,65 @@ pub fn run() {
             commands::board_policy,
             commands::board_sweep,
             commands::board_archive,
+            commands::worktree_setup,
+            commands::required_checks,
+            commands::check_agent,
+            commands::agent_check_state,
+            commands::workspace_trust,
+            commands::resume_work,
+            preview_commands::preview,
             commands::list_connections,
             commands::update_connection,
+            commands::storage_report,
+            commands::storage_policy,
+            commands::storage_clean,
+            commands::storage_delete_worktree,
+            commands::storage_delete_branch,
+            commands::storage_delete_backup,
             onboarding_commands::install_cli,
             onboarding_commands::byok_status,
             onboarding_commands::byok_configure,
             onboarding_commands::byok_save_key,
             onboarding_commands::byok_clear_key,
+            diagnostics::diagnostics,
+            commands::cancel_task_tree,
+            commands::finish_plan,
+            pr_commands::pull_request,
+            pr_commands::draft_pull_request,
+            pr_commands::create_pull_request,
+            pr_commands::push_pr_branch,
+            pr_commands::refresh_pull_request,
+            merge_commands::merge_state,
+            merge_commands::resolve_merge_conflict,
+            merge_commands::stop_resolving_merge,
+            pr_commands::start_from_github,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");
 
-    app.run(|handle, event| {
-        if let RunEvent::Exit = event {
+    // The data dir is known from here on: the lines logged so far waited in memory.
+    match app.path().app_data_dir() {
+        Ok(dir) => match logging::open(&dir.join(logging::DIR)) {
+            Ok(()) => tracing::info!("Codly {} started", cli::VERSION),
+            Err(e) => tracing::warn!("no log file in {}: {e}", dir.display()),
+        },
+        Err(e) => tracing::warn!("no log file: {e}"),
+    }
+
+    app.run(|handle, event| match event {
+        // Closing the window quits Codly: asked first while agents work (`quit.rs`).
+        RunEvent::WindowEvent { label, event: WindowEvent::CloseRequested { api, .. }, .. } if label == "main" => {
+            if !quit::may_quit(handle) {
+                api.prevent_close();
+            }
+        }
+        RunEvent::Exit => {
             let state = handle.state::<AppState>();
             state.pty.close_all();
             if let Some(Ok(core)) = state.core.borrow().clone() {
                 tauri::async_runtime::block_on(core.shutdown());
             }
         }
+        _ => {}
     });
-}
-
-/// Native notifications come from Rust: the webview may be suspended while hidden, and an
-/// approval must never wait silently. Only when the window is not focused.
-async fn notify_loop(app: tauri::AppHandle, core: Arc<Core>) {
-    let mut rx = core.subscribe();
-    // Approvals not answered yet. The broker allows most of them by itself right away: only one
-    // it leaves to you ("asking you: …") is worth a notification.
-    let mut asked: HashMap<String, Approval> = HashMap::new();
-    loop {
-        let ev = match rx.recv().await {
-            Ok(ev) => ev,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(_) => return,
-        };
-        let (title, body) = match &ev.kind {
-            EventKind::ApprovalRequested { approval } => {
-                asked.insert(approval.id.clone(), approval.clone());
-                continue;
-            }
-            EventKind::ApprovalResolved { approval_id, .. } => {
-                asked.remove(approval_id);
-                continue;
-            }
-            EventKind::Decision { decision_type, summary, detail, .. } if decision_type == "approval_policy" && summary.starts_with("asking you") => {
-                let Some(approval) = detail["approval_id"].as_str().and_then(|id| asked.remove(id)) else { continue };
-                let what = match &approval.subject {
-                    codly_core::model::ApprovalSubject::Command { command, .. } => format!("run `{}`", truncate(command, 60)),
-                    codly_core::model::ApprovalSubject::FileChange { paths, .. } => format!("change {} file(s)", paths.len()),
-                    codly_core::model::ApprovalSubject::Question { .. } => "ask you a question".into(),
-                    codly_core::model::ApprovalSubject::Tool { name, .. } => format!("use {name}"),
-                    codly_core::model::ApprovalSubject::Permissions { .. } => "get more permissions".into(),
-                };
-                // Who, and in which office: it may not be the one on screen.
-                let (office, agent) = core.names_for(ev.workspace_id.as_deref(), Some(&approval.agent_id));
-                let agent = agent.unwrap_or_else(|| "An agent".into());
-                let title = office.map_or_else(|| format!("{agent} needs you"), |o| format!("{o}: {agent} needs you"));
-                (title, format!("It wants to {what}."))
-            }
-            // A new blocking question, or one that has waited for days.
-            EventKind::BlockerChanged { blocker }
-                if blocker.status == BlockerStatus::Open && blocker.severity == BlockerSeverity::Blocking && blocker.updated_at == blocker.reminded_at.unwrap_or(blocker.created_at) =>
-            {
-                let title = if blocker.reminded_at.is_some() { "Still waiting for your answer" } else { "An agent needs a decision" };
-                (title.to_string(), truncate(&blocker.title, 120))
-            }
-            EventKind::PlanChanged { plan } if plan.status == PlanStatus::Done => {
-                ("Plan done".to_string(), truncate(&plan.summary, 120))
-            }
-            EventKind::TaskChanged { task } if task.status == TaskStatus::Failed => {
-                ("Task failed".to_string(), format!("{} — {}", task.key, truncate(&task.title, 80)))
-            }
-            _ => continue,
-        };
-        let focused = app.get_webview_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
-        if !focused {
-            let _ = app.notification().builder().title(title).body(body).show();
-        }
-    }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    let mut out: String = s.chars().take(n).collect();
-    if s.chars().count() > n {
-        out.push('…');
-    }
-    out
 }

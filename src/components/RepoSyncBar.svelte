@@ -1,19 +1,26 @@
 <!--
-  Your checkout against its remote, and the two git steps Codly can do for you there: commit
-  your own uncommitted changes (they block a merge that touches the same files), and push your
-  branch once merges have landed on it. Codly never pushes on its own.
+  Your checkout against its remote, and the git steps Codly can do for you there: commit your
+  own uncommitted changes (they block a merge that touches the same files), push your branch
+  once merges have landed on it, and undo the merge this bar sits with while that is still safe
+  (it is the last one, not pushed, nothing committed after it). Whether or not Undo still can,
+  the bar names the ref where Codly keeps your branch as it was before that merge. Codly never
+  pushes on its own.
 -->
 <script lang="ts">
   import { api } from '../lib/api';
   import type { RepoSync } from '../lib/gen/RepoSync';
-  import { commitCheckout, pushCheckout } from '../lib/state/actions';
+  import { commitCheckout, pushCheckout, undoMerge } from '../lib/state/actions';
+  import { shortSha } from '../lib/util/format';
   import Icon from './Icon.svelte';
 
   interface Props {
     /** Changes when something may have moved the checkout (a merge): the bar re-reads it. */
     refresh?: unknown;
+    /** The plan, or the solo agent, this bar sits with: Undo merge shows for its merge only. */
+    planId?: string | null;
+    agentId?: string | null;
   }
-  let { refresh = null }: Props = $props();
+  let { refresh = null, planId = null, agentId = null }: Props = $props();
 
   let sync = $state<RepoSync | null>(null);
   let busy = $state(false);
@@ -34,6 +41,10 @@
 
   const remote = $derived(sync?.upstream ?? `origin/${sync?.branch ?? ''}`);
   const toPush = $derived(!!sync?.branch && (sync.ahead > 0 || !sync.upstream));
+  const merge = $derived.by(() => {
+    const m = sync?.last_merge;
+    return m && ((planId && m.plan_id === planId) || (agentId && m.agent_id === agentId)) ? m : null;
+  });
 
   async function commit() {
     if (!message.trim()) return;
@@ -53,10 +64,32 @@
     else await load();
     busy = false;
   }
+
+  async function undo() {
+    if (!merge) return;
+    busy = true;
+    const s = await undoMerge(merge);
+    if (s) sync = s;
+    else await load();
+    busy = false;
+  }
 </script>
 
-{#if sync && (sync.dirty.length || toPush || sync.behind)}
+{#if sync && (sync.dirty.length || toPush || sync.behind || merge)}
   <div class="sync">
+    {#if merge}
+      <div class="row">
+        {#if merge.blocked}
+          <span class="what"><Icon name="merge" size={12} />This merge can’t be undone here: {merge.blocked}.</span>
+        {:else}
+          <span class="what"><Icon name="merge" size={12} />You can still undo the merge at {shortSha(merge.sha)}: {merge.branch} goes back to where it was.</span>
+          <button class="btn sm" disabled={busy} onclick={undo}>Undo merge</button>
+        {/if}
+      </div>
+      {#if merge.kept}
+        <p class="kept">Codly keeps {merge.branch} as it was before this merge at <code>{merge.kept}</code>, until the next merge.</p>
+      {/if}
+    {/if}
     {#if sync.dirty.length}
       <div class="row">
         <span class="what" data-tip={sync.dirty.join('\n')}><Icon name="file" size={12} />{sync.dirty.length} uncommitted {sync.dirty.length === 1 ? 'file' : 'files'} in your checkout</span>
@@ -76,7 +109,8 @@
     {#if toPush}
       <div class="row">
         <span class="what"><Icon name="branch" size={12} />{sync.upstream ? `${sync.ahead} ${sync.ahead === 1 ? 'commit' : 'commits'} not on ${remote} yet` : `${sync.branch} is not on the remote yet`}</span>
-        <button class="btn sm primary" disabled={busy} onclick={push}><Icon name="arrow-right" size={12} />Push to {remote}</button>
+        <!-- The next step only once this card's merge has landed: before it, Merge is the one primary button. -->
+        <button class="btn sm" class:primary={!!merge} disabled={busy} onclick={push}><Icon name="arrow-right" size={12} />Push to {remote}</button>
       </div>
     {/if}
   </div>
@@ -88,4 +122,6 @@
   .what { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--ink-2); }
   .field { flex: 1; min-width: 0; font-size: var(--t-sm); }
   .note { font-size: var(--t-sm); color: var(--amber-ink, var(--ink-2)); }
+  .kept { font-size: var(--t-sm); color: var(--ink-3); }
+  .kept code { font-size: 11.5px; color: var(--ink-2); user-select: text; }
 </style>

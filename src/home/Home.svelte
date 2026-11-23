@@ -3,18 +3,25 @@
   top. Each request you make is its own tab (its own Lead and plan, in parallel); the running
   plan of the request you are on is pinned above its conversation. In full-office mode (⌘1) the
   column steps aside and a small dock keeps you one click from the Lead and anything waiting.
+  ⌘F opens a find bar over the conversation; a closed request shows in its place, read-only.
 -->
 <script lang="ts">
   import { requests } from '../lib/state/requests.svelte';
   import { store } from '../lib/state/store.svelte';
-  import { isRequestThread, ui } from '../lib/state/ui.svelte';
+  import { isClosedThread, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { oneLine } from '../lib/util/sanitize';
   import Icon from '../components/Icon.svelte';
   import PlanHeader from './cards/PlanHeader.svelte';
+  import ClosedRequests from './ClosedRequests.svelte';
   import Conversation from './Conversation.svelte';
+  import FindBar from './FindBar.svelte';
   import RequestTabs from './RequestTabs.svelte';
 
   const thread = $derived(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
+  /** The closed requests (their list, or one of them) you are reading instead of a conversation. */
+  const closed = $derived(isClosedThread(ui.thread) ? ui.thread : null);
+  /** The column: the find bar looks up the conversation's text inside it. */
+  let column: HTMLElement | undefined = $state();
   const isRequest = $derived(isRequestThread(thread));
   const pinned = $derived.by(() => {
     if (!isRequest) return null;
@@ -49,10 +56,15 @@
   </div>
 {:else}
   <div class="home">
-    <section class="column glass" aria-label="Conversation">
-      {#if tabs}<RequestTabs />{/if}
-      {#if pinned}<PlanHeader planId={pinned} />{/if}
-      <Conversation {thread} />
+    <section class="column glass" aria-label="Conversation" bind:this={column}>
+      {#if tabs || closed}<RequestTabs />{/if}
+      {#if ui.findOpen}<FindBar thread={closed ?? thread} scope={column} />{/if}
+      {#if closed}
+        <ClosedRequests thread={closed} />
+      {:else}
+        {#if pinned}<PlanHeader planId={pinned} />{/if}
+        <Conversation {thread} />
+      {/if}
     </section>
   </div>
 {/if}

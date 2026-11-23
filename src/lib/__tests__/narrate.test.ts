@@ -31,12 +31,12 @@ const live = (segments: Seg[], o: Partial<AgentLive> = {}): AgentLive => {
   segments.forEach((s, i) => s.end == null && (open[s.callId] = i));
   return {
     segments, open, todo: [], todoTs: 0, files: {}, messages: [], reasoning: [], retrievals: [], searches: [], session: null, turn: null, turns: [],
-    statusSince: T0, lastOutput: null, errors: [], subagents: [], firstTs: T0, lastTs: T0, ...o,
+    statusSince: T0, lastOutput: null, errors: [], subagents: [], mcp: [], background: [], firstTs: T0, lastTs: T0, ...o,
   };
 };
 
 const input = (o: Partial<NarrationInput> = {}): NarrationInput => ({
-  agent: agent(), now: T0 + 41_000, approvals: [], live: live([]), streaming: null, task: task(), lastDone: null, rate: null, ...o,
+  agent: agent(), now: T0 + 41_000, approvals: [], live: live([]), streaming: null, task: task(), lastDone: null, rate: null, inTerminal: false, ...o,
 });
 
 describe('narration', () => {
@@ -60,6 +60,18 @@ describe('narration', () => {
     const n = narrateFrom(input({ agent: agent({ status: 'waiting_approval' }), approvals: [ap] }));
     expect(n.key).toBe('Waiting for you: `rm -rf dist`');
     expect(n.tone).toBe('wait');
+    // A command in Claude Code's sandbox wants a host: the host, not the name of the request's tool.
+    const tool = (name: string, asked: Record<string, string>, provider: Agent['provider'] = 'claude') =>
+      narrateFrom(input({ agent: agent({ status: 'waiting_approval', provider }), approvals: [{ ...ap, subject: { kind: 'tool', name, input: asked } }] })).key;
+    expect(tool('SandboxNetworkAccess', { host: 'example.com' })).toBe('Waiting for you: reach `example.com`');
+    expect(tool('SandboxNetworkAccess', {})).toBe('Waiting for you: use the network');
+    expect(tool('WebFetch', { url: 'https://example.com' })).toBe('Waiting for you: use `WebFetch`');
+    // A Claude agent's plan to read is said as that, not by the name of the request's tool.
+    expect(tool('ExitPlanMode', { plan: '1. Add the line' })).toBe('Waiting for you: read its plan');
+    // Those requests are Claude Code's own: from another CLI the same name is a tool like any other.
+    expect(tool('SandboxNetworkAccess', { host: 'example.com' }, 'codex')).toBe('Waiting for you: use `SandboxNetworkAccess`');
+    expect(tool('SandboxNetworkAccess', { host: 'example.com' }, 'gemini')).toBe('Waiting for you: use `SandboxNetworkAccess`');
+    expect(tool('ExitPlanMode', { plan: '1. Add the line' }, 'codex')).toBe('Waiting for you: use `ExitPlanMode`');
   });
 
   it('a task waiting for you narrates as wait', () => {
@@ -67,6 +79,15 @@ describe('narration', () => {
     expect(n.tone).toBe('wait');
     // Any other blocked reason stays red.
     expect(narrateFrom(input({ agent: agent({ status: 'idle' }), task: task({ status: 'blocked', status_reason: 'verify failed' }) })).tone).toBe('blocked');
+  });
+
+  it('says an agent is in your terminal, whatever its row says', () => {
+    // After a restart of Codly its row says it stopped; a task of its own may be blocked.
+    for (const a of [agent({ status: 'offline', task_id: null }), agent({ status: 'idle' })]) {
+      const n = narrateFrom(input({ agent: a, task: task({ status: 'blocked', status_reason: 'stopped by you' }), inTerminal: true }));
+      expect([n.text, n.tone]).toEqual(['In your terminal', 'idle']);
+    }
+    expect(narrateFrom(input({ agent: agent({ status: 'offline' }) })).text).toBe('Stopped');
   });
 
   it('reports the diff of the last finished task', () => {

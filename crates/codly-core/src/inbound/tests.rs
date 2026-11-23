@@ -6,16 +6,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use super::secrets::{MemorySecrets, SecretStore};
-use super::slack::SlackConfig;
+use super::slack::{APP_KEY, BOT_KEY, SlackConfig};
 use super::*;
 
-type Inbox = Arc<Mutex<Vec<(String, String)>>>;
+type Inbox = Arc<Mutex<Vec<(String, InboundMessage)>>>;
 
 fn hub(dir: &std::path::Path, secrets: Arc<MemorySecrets>) -> (Arc<InboundHub>, Inbox) {
     let inbox: Inbox = Arc::default();
     let sink = inbox.clone();
-    let deliver: Deliver = Arc::new(move |thread, text| {
-        sink.lock().unwrap().push((thread, text));
+    let deliver: Deliver = Arc::new(move |thread, msg| {
+        sink.lock().unwrap().push((thread, msg));
         Box::pin(async { Ok(()) })
     });
     let h = InboundHub::new(dir, secrets, deliver);
@@ -69,13 +69,25 @@ async fn a_new_endpoint_is_off_and_the_listener_runs_only_while_one_is_on() {
     let got = inbox.lock().unwrap().clone();
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].0, "lead", "the Lead answers by default");
-    assert!(got[0].1.contains("webhook “CI alerts”") && got[0].1.contains("not from the user") && got[0].1.ends_with("CI\n\nbuild 42 failed"));
+    // The message as it was sent, under its endpoint's name; a new endpoint cannot start work alone.
+    assert_eq!(got[0].1, InboundMessage { source: "webhook “CI alerts”".into(), text: "CI\n\nbuild 42 failed".into(), auto_run: false });
     let st = h.state();
     assert_eq!((st.endpoints[0].received, st.deliveries[0].outcome.as_str()), (1, "accepted"));
 
+    // Once you let the endpoint run plans without asking, its next messages say so.
+    h.set_webhook_auto_run(&w.endpoint.id, true).unwrap();
+    assert_eq!(post_with(port, &w.endpoint.id, &w.secret, "text/plain", "deploy 7 is out").await, 202);
+    assert_eq!(inbox.lock().unwrap()[1].1, InboundMessage { source: "webhook “CI alerts”".into(), text: "deploy 7 is out".into(), auto_run: true });
+
     h.set_webhook_enabled(&w.endpoint.id, false).unwrap();
     assert!(!h.state().listening);
-    assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err(), "the port is closed again");
+    // The listener's task closes the socket a moment after the switch.
+    let closed = async {
+        while TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(5), closed).await.is_ok(), "the port is closed again");
 }
 
 #[tokio::test]
@@ -114,9 +126,76 @@ async fn bad_requests_are_refused_and_nothing_reaches_the_lead() {
 
     let msgs = inbox.lock().unwrap().clone();
     assert_eq!(msgs.len(), 1, "only the one valid request got through: {msgs:?}");
-    assert!(msgs[0].1.ends_with("via header"));
+    assert_eq!(msgs[0].1.text, "via header");
     let outcomes: Vec<_> = h.state().deliveries.into_iter().map(|d| d.outcome).collect();
     assert!(outcomes.iter().any(|o| o == "wrong secret") && outcomes.iter().any(|o| o == "too large") && outcomes.iter().any(|o| o == "switched off"));
+}
+
+/// What the thread stores for an inbound message names its source and is never the user's
+/// words; whether work may follow without the user is read back from what was stored.
+#[test]
+fn an_inbound_message_is_stored_under_its_source() {
+    let m = InboundMessage { source: "webhook “CI alerts”".into(), text: "build 42 failed".into(), auto_run: false };
+    assert_eq!(m.shown(), "From webhook “CI alerts” (outside Codly):\nbuild 42 failed");
+    let att = m.attachment();
+    assert_eq!(att, serde_json::json!({ "inbound": { "source": "webhook “CI alerts”", "auto_run": false } }));
+    assert!(is_inbound(Some(&att)) && needs_ok(Some(&att)));
+    let trusted = InboundMessage { auto_run: true, ..m }.attachment();
+    assert!(is_inbound(Some(&trusted)) && !needs_ok(Some(&trusted)), "its endpoint runs plans without asking");
+    // Anything but a plain `true` asks; other attachments (a plan card) and none are not inbound.
+    assert!(needs_ok(Some(&serde_json::json!({ "inbound": { "source": "x", "auto_run": "true" } }))));
+    assert!(needs_ok(Some(&serde_json::json!({ "inbound": { "source": "x" } }))));
+    for other in [Some(serde_json::json!({ "plan_id": "p1" })), Some(serde_json::json!({ "inbound": true })), None] {
+        assert!(!is_inbound(other.as_ref()) && !needs_ok(other.as_ref()), "{other:?}");
+    }
+}
+
+/// The switch of an endpoint, without a listener (the endpoint stays off): what the hub saves,
+/// and what the table the listener reads would give a request.
+#[tokio::test]
+async fn an_endpoint_runs_plans_without_asking_only_when_you_say_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets: Arc<MemorySecrets> = Arc::default();
+    let (h, _) = hub(dir.path(), secrets.clone());
+    let w = h.create_webhook("deploys").unwrap();
+    let accepted = |h: &InboundHub| {
+        h.table.set_enabled(&w.endpoint.id, true);
+        h.table.authorize(&w.endpoint.id, &w.secret, std::time::Instant::now())
+    };
+    assert!(!w.endpoint.auto_run && !h.state().endpoints[0].auto_run, "off for a new endpoint");
+    assert_eq!(accepted(&h), webhook::Verdict::Accepted { name: "deploys".into(), auto_run: false });
+    h.set_webhook_auto_run(&w.endpoint.id, true).unwrap();
+    assert!(h.state().endpoints[0].auto_run);
+    assert_eq!(accepted(&h), webhook::Verdict::Accepted { name: "deploys".into(), auto_run: true });
+    assert!(h.set_webhook_auto_run("wh_nope", true).is_err());
+
+    // The choice is saved with the endpoint, and can be taken back.
+    let (h, _) = hub_keeping_settings(dir.path(), secrets.clone());
+    assert!(h.state().endpoints[0].auto_run);
+    assert_eq!(accepted(&h), webhook::Verdict::Accepted { name: "deploys".into(), auto_run: true });
+    h.set_webhook_auto_run(&w.endpoint.id, false).unwrap();
+    assert!(!h.state().endpoints[0].auto_run);
+    assert_eq!(accepted(&h), webhook::Verdict::Accepted { name: "deploys".into(), auto_run: false });
+
+    // A config written before the switch existed reads as off.
+    h.set_webhook_auto_run(&w.endpoint.id, true).unwrap();
+    let path = dir.path().join("inbound.json");
+    let mut saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["endpoints"][0].as_object_mut().unwrap().remove("auto_run"), Some(serde_json::json!(true)));
+    std::fs::write(&path, saved.to_string()).unwrap();
+    let (h, _) = hub_keeping_settings(dir.path(), secrets);
+    assert!(!h.state().endpoints[0].auto_run);
+}
+
+/// A long message is cut before it is handed over, so the thread and the agent get the same text.
+#[tokio::test]
+async fn a_long_message_is_cut_once_for_everyone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, inbox) = hub(dir.path(), Arc::default());
+    let long = InboundMessage { source: "webhook “logs”".into(), text: "é".repeat(MAX_TEXT + 500), auto_run: false };
+    (h.sink)(long).await.unwrap();
+    let got = inbox.lock().unwrap();
+    assert_eq!((got[0].0.as_str(), got[0].1.text.chars().count()), ("lead", MAX_TEXT));
 }
 
 #[tokio::test]
@@ -147,18 +226,43 @@ async fn secrets_never_touch_the_config_file_or_the_state() {
     let secrets: Arc<MemorySecrets> = Arc::default();
     let (h, _) = hub(dir.path(), secrets.clone());
     let w = h.create_webhook("a").unwrap();
-    h.set_slack(SlackUpdate { config: SlackConfig::default(), bot_token: Some("xoxb-1-secret".into()), app_token: Some("xapp-1-secret".into()) }).unwrap();
     let file = std::fs::read_to_string(dir.path().join("inbound.json")).unwrap();
     let state = serde_json::to_string(&h.state()).unwrap();
     for hay in [&file, &state] {
-        assert!(!hay.contains(&w.secret) && !hay.contains("xoxb-1-secret") && !hay.contains("xapp-1-secret"), "{hay}");
+        assert!(!hay.contains(&w.secret), "{hay}");
     }
-    assert!(state.contains("\"bot_token_set\":true") && state.contains("\"app_token_set\":true"));
-    assert_eq!(secrets.get("slack-bot-token").unwrap().as_deref(), Some("xoxb-1-secret"));
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(dir.path().join("inbound.json")).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+/// Slack cannot connect in this version, so a token would sit in the Keychain with nothing to
+/// read it. None is taken; the tokens an earlier version saved are shown as saved and can go.
+#[tokio::test]
+async fn slack_takes_no_token_and_lets_a_saved_one_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets: Arc<MemorySecrets> = Arc::default();
+    secrets.set(BOT_KEY, "xoxb-1-secret").unwrap();
+    secrets.set(APP_KEY, "xapp-1-secret").unwrap();
+    let (h, _) = hub(dir.path(), secrets.clone());
+    let state = serde_json::to_string(&h.state()).unwrap();
+    assert!(state.contains("\"bot_token_set\":true") && state.contains("\"app_token_set\":true"), "{state}");
+    assert!(!state.contains("xoxb-1-secret") && !state.contains("xapp-1-secret"), "{state}");
+
+    for update in [
+        SlackUpdate { config: SlackConfig::default(), bot_token: Some("xoxb-2-new".into()), app_token: None },
+        SlackUpdate { config: SlackConfig::default(), bot_token: Some(String::new()), app_token: Some("xapp-2-new".into()) },
+    ] {
+        let e = h.set_slack(update).unwrap_err().to_string();
+        assert!(e.contains("not available yet"), "{e}");
+    }
+    assert_eq!(secrets.get(BOT_KEY).unwrap().as_deref(), Some("xoxb-1-secret"), "a refused update changes nothing");
+    assert_eq!(secrets.get(APP_KEY).unwrap().as_deref(), Some("xapp-1-secret"));
+
     h.set_slack(SlackUpdate { config: SlackConfig::default(), bot_token: Some(String::new()), app_token: None }).unwrap();
-    assert!(!h.state().slack.bot_token_set && h.state().slack.app_token_set);
+    assert!(!h.state().slack.bot_token_set && h.state().slack.app_token_set, "one token removed, the other kept");
+    h.set_slack(SlackUpdate { config: SlackConfig::default(), bot_token: None, app_token: Some(String::new()) }).unwrap();
+    assert!(secrets.get(BOT_KEY).unwrap().is_none() && secrets.get(APP_KEY).unwrap().is_none());
+    assert!(!h.state().slack.connected);
 }
 
 #[tokio::test]
@@ -192,8 +296,8 @@ async fn config_survives_a_restart_and_a_lost_secret_cannot_be_switched_on() {
 fn hub_keeping_settings(dir: &std::path::Path, secrets: Arc<MemorySecrets>) -> (Arc<InboundHub>, Inbox) {
     let inbox: Inbox = Arc::default();
     let sink = inbox.clone();
-    let deliver: Deliver = Arc::new(move |thread, text| {
-        sink.lock().unwrap().push((thread, text));
+    let deliver: Deliver = Arc::new(move |thread, msg| {
+        sink.lock().unwrap().push((thread, msg));
         Box::pin(async { Ok(()) })
     });
     (InboundHub::new(dir, secrets, deliver), inbox)

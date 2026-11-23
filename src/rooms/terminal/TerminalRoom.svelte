@@ -1,34 +1,56 @@
 <!--
-  Terminal room: a real shell (portable-pty in the core) in the repo or any agent's worktree.
-  Sessions survive room switches; WebGL rendering only while visible.
+  Terminal room: a real shell (portable-pty in the core) in the repo, any agent's worktree, or
+  a plan's integration worktree (Open in terminal on its card).
+  An agent that is in your terminal ("Open in my terminal" in its sheet) has a tab of its own,
+  where the core types its CLI's resume command. Sessions survive room switches; WebGL
+  rendering only while visible.
 -->
 <script lang="ts">
   import '@xterm/xterm/css/xterm.css';
   import { onMount, tick, untrack } from 'svelte';
   import { api } from '../../lib/api';
   import { store } from '../../lib/state/store.svelte';
+  import { takeovers } from '../../lib/state/takeover.svelte';
   import { ui } from '../../lib/state/ui.svelte';
-  import { idVar } from '../../lib/util/labels';
+  import { idVar, PROVIDER_LABEL } from '../../lib/util/labels';
   import { tildify } from '../../lib/util/sanitize';
   import Icon from '../../components/Icon.svelte';
   import Portrait from '../../components/Portrait.svelte';
   import RoomHead from '../RoomHead.svelte';
-  import { closeSession, disableWebgl, enableWebgl, openSession, sessions, xtermTheme, type Session } from './sessions';
+  import { closeSession, disableWebgl, enableWebgl, openSession, sessionKey, sessions, takeoverKey, xtermTheme, type Session } from './sessions';
 
-  type Place = { key: string; cwd: string | null; label: string; agentId: string | null };
+  /** `takeover`: the tab of an agent that is in your terminal, not a plain shell in a folder. */
+  type Place = { key: string; cwd: string | null; label: string; agentId: string | null; takeover: boolean };
   const places = $derived.by((): Place[] => {
     const repo = store.workspace?.repo_path ?? null;
-    const list: Place[] = [{ key: repo ?? '(repo)', cwd: repo, label: store.workspace?.name ?? 'Repository', agentId: null }];
+    const list: Place[] = [{ key: sessionKey(repo), cwd: repo, label: store.workspace?.name ?? 'Repository', agentId: null, takeover: false }];
     // Agents can share a worktree (or sit in the repo itself): one tab per path, keys must be unique.
     const seen = new Set(list.map((p) => p.key));
     for (const a of store.agents) {
       if (!a.worktree || seen.has(a.worktree)) continue;
       seen.add(a.worktree);
-      list.push({ key: a.worktree, cwd: a.worktree, label: `${a.name}’s worktree`, agentId: a.id });
+      list.push({ key: a.worktree, cwd: a.worktree, label: `${a.name}’s worktree`, agentId: a.id, takeover: false });
+    }
+    for (const t of takeovers.active) {
+      const a = store.agentMap.get(t.agent_id);
+      if (a) list.push({ key: takeoverKey(a.id), cwd: t.cwd, label: `${a.name} in ${PROVIDER_LABEL[a.provider]}`, agentId: a.id, takeover: true });
+    }
+    // A plan's integration worktree: when its card sent you here, and while a shell is open there.
+    for (const p of store.plans) {
+      const wt = p.integration_worktree;
+      if (!wt || seen.has(wt) || (wt !== ui.terminalCwd && !openKeys.includes(wt))) continue;
+      seen.add(wt);
+      list.push({ key: wt, cwd: wt, label: `Plan: ${p.summary}`, agentId: null, takeover: false });
     }
     return list;
   });
-  const current = $derived(places.find((p) => p.cwd === ui.terminalCwd) ?? places[0]);
+  const current = $derived(
+    places.find((p) => p.takeover && p.agentId === ui.terminalTakeover) ?? places.find((p) => !p.takeover && p.cwd === ui.terminalCwd) ?? places[0],
+  );
+  function pick(p: Place) {
+    ui.terminalTakeover = p.takeover ? p.agentId : null;
+    if (!p.takeover) ui.terminalCwd = p.cwd;
+  }
 
   let host: HTMLDivElement | undefined = $state();
   let session = $state<Session | null>(null);
@@ -39,7 +61,9 @@
     if (!host) return;
     error = null;
     try {
-      const s = await openSession(p.cwd, p.label);
+      // An agent's own tab: the core opens the terminal and types the resume command, not run.
+      const agentId = p.takeover ? p.agentId : null;
+      const s = await openSession(p.cwd, p.label, agentId ? { key: p.key, open: () => api.openTakeoverTerminal(agentId) } : undefined);
       if (session && session !== s) {
         disableWebgl(session);
         session.el.remove();
@@ -115,7 +139,7 @@
 <div class="places" role="tablist" aria-label="Where">
   {#each places as p (p.key)}
     {@const a = p.agentId ? store.agentMap.get(p.agentId) : null}
-    <button class="place" role="tab" aria-selected={current?.key === p.key} class:on={current?.key === p.key} style:--hue={a ? idVar(a.color) : 'var(--ink-3)'} onclick={() => (ui.terminalCwd = p.cwd)} data-tip={tildify(p.cwd)}>
+    <button class="place" role="tab" aria-selected={current?.key === p.key} class:on={current?.key === p.key} style:--hue={a ? idVar(a.color) : 'var(--ink-3)'} onclick={() => pick(p)} data-tip={tildify(p.cwd)}>
       {#if a}<Portrait agent={a} size={18} />{:else}<Icon name="repo" size={14} />{/if}
       <span class="truncate">{p.label}</span>
       {#if openKeys.includes(p.key)}<span class="alive" aria-label="shell open"></span>{/if}

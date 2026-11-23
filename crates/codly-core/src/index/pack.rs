@@ -4,15 +4,17 @@
 // ponytail: no snippet of the top span at `High` confidence yet (§4.8); add it when the replay
 // can score Span-Recall@budget.
 
-use crate::model::Confidence;
+use crate::model::{Confidence, SearchResult};
 
 use super::query::{Ranked, confidence_label};
 
 /// ≈ 1.2k tokens at 4 chars/token.
 const MAX_CHARS: usize = 4800;
 const MAX_LINE_CHARS: usize = 230;
+/// A warning names files, so it may run over two lines.
+const MAX_NOTE_CHARS: usize = 2 * MAX_LINE_CHARS;
 
-fn clip(s: &str, max: usize) -> String {
+pub(super) fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -55,6 +57,19 @@ fn selected(r: &Ranked) -> Vec<usize> {
     (0..r.result.citations.len()).filter(|&i| r.meta[i].level != Confidence::Low).take(cap).collect()
 }
 
+/// What the result warns about (the index is behind, files differ in the worktree), one
+/// `Note:` line each, as long as the pack stays within its size. Only below pointers: a pack
+/// without any tells the agent to search for itself, and that reads its own files.
+fn push_notes(out: &mut String, res: &SearchResult) {
+    for w in &res.warnings {
+        let note = format!("Note: {}\n", clip(w, MAX_NOTE_CHARS));
+        if out.len() + note.len() > MAX_CHARS {
+            break;
+        }
+        out.push_str(&note);
+    }
+}
+
 pub(crate) fn render(r: &Ranked) -> String {
     let res = &r.result;
     let q = clip(&res.query.split_whitespace().collect::<Vec<_>>().join(" "), 90);
@@ -88,5 +103,6 @@ pub(crate) fn render(r: &Ranked) -> String {
             out.push_str(&hint);
         }
     }
+    push_notes(&mut out, res);
     out
 }

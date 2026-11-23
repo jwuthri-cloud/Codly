@@ -1,21 +1,29 @@
 <!--
   Settings → Inbound: ways for something outside Codly to hand the Lead work. Webhooks (a local
-  listener, one secret per endpoint, each created switched off, each revocable) and Slack (the
-  settings are kept; the connection is not built yet, and this says so). Also: who answers
-  inbound messages. A secret is shown once, right after creating its endpoint, and never again.
+  listener, one secret per endpoint, each created switched off, each revocable). Slack is not
+  available yet: the section says so and takes no token; tokens that an earlier version saved can
+  be removed here. Also: who answers inbound messages. A secret is shown once, right after
+  creating its endpoint, and never again.
+  A plan the Lead makes from an inbound message waits for Run plan, unless you let that endpoint
+  run plans without asking: the switch says what that hands over. An agent picked to answer
+  instead of the Lead makes no plan, so nothing waits: its row says so.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { InboundState } from '../lib/gen/InboundState';
   import type { NewWebhook } from '../lib/gen/NewWebhook';
+  import type { WebhookEndpoint } from '../lib/gen/WebhookEndpoint';
   import { api } from '../lib/api';
   import { copyText } from '../lib/state/actions';
+  import { Loader } from '../lib/state/loader.svelte';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { ago } from '../lib/util/inbound';
   import Icon from '../components/Icon.svelte';
+  import LoadError from '../components/LoadError.svelte';
 
-  let st = $state<InboundState | null>(null);
+  const inbound = new Loader<InboundState>(() => api.inboundState());
+  const st = $derived(inbound.value);
   let fresh = $state<NewWebhook | null>(null); // the secret on screen, once
   let name = $state('');
   let confirming = $state<string | null>(null);
@@ -33,7 +41,7 @@
       busy = false;
     }
   }
-  const load = () => api.inboundState().then((s) => (st = s)).catch(() => {});
+  const load = () => inbound.load();
   onMount(() => {
     void load();
     const t = setInterval(load, 5000); // counts and the delivery log
@@ -50,10 +58,15 @@
     name = '';
     await load();
   }
-  async function toggle(id: string, on: boolean) {
-    const s = await run(on ? 'switch it on' : 'switch it off', () => api.inboundSetWebhook(id, on));
-    if (s) st = s;
+  async function toggle(e: WebhookEndpoint, on: boolean) {
+    const s = await run(on ? 'switch it on' : 'switch it off', () => api.inboundSetWebhook(e.id, on, e.auto_run));
+    if (s) inbound.set(s);
     else await load(); // the switch snaps back
+  }
+  async function setAutoRun(e: WebhookEndpoint, on: boolean) {
+    const s = await run('save', () => api.inboundSetWebhook(e.id, e.enabled, on));
+    if (s) inbound.set(s);
+    else await load(); // the box snaps back
   }
   async function revoke(id: string) {
     if (confirming !== id) {
@@ -63,57 +76,30 @@
     confirming = null;
     const s = await run('revoke the endpoint', () => api.inboundRevokeWebhook(id));
     if (s) {
-      st = s;
+      inbound.set(s);
       if (fresh?.endpoint.id === id) fresh = null;
     }
   }
   async function setAnswerer(answerer: string) {
     const s = st && (await run('save', () => api.inboundSetSettings(answerer, st!.port)));
-    if (s) st = s;
+    if (s) inbound.set(s);
   }
   async function setPort(v: string) {
     const s = st && (await run('save the port', () => api.inboundSetSettings(st!.answerer, Number(v) || 0)));
-    if (s) st = s;
+    if (s) inbound.set(s);
     else await load();
   }
 
   const curl = (w: NewWebhook) =>
     `curl -X POST ${w.endpoint.url} \\\n  -H "Authorization: Bearer ${w.secret}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"text": "Hello from a webhook"}'`;
 
-  // ── Slack ──
-  let botToken = $state('');
-  let appToken = $state('');
-  let users = $state('');
-  let channels = $state('');
-  let slackSeen = $state(false);
-  $effect(() => {
-    if (st && !slackSeen) {
-      slackSeen = true;
-      users = st.slack.config.user_ids.join(', ');
-      channels = st.slack.config.channel_ids.join(', ');
-    }
-  });
-  const list = (s: string) => s.split(/[\s,]+/).filter(Boolean);
-  async function saveSlack(e: Event) {
-    e.preventDefault();
-    if (!st) return;
-    const s = await run('save the Slack settings', () =>
-      api.inboundSetSlack({
-        config: { enabled: false, user_ids: list(users), channel_ids: list(channels) },
-        bot_token: botToken.trim() || null,
-        app_token: appToken.trim() || null,
-      }),
-    );
+  // ── Slack: not available yet. Nothing is collected; tokens from an earlier version can go. ──
+  const slackTokensSaved = $derived(!!st && (st.slack.bot_token_set || st.slack.app_token_set));
+  async function removeSlackTokens() {
+    const s = await run('remove the Slack tokens', () => api.inboundSetSlack({ config: st!.slack.config, bot_token: '', app_token: '' }));
     if (!s) return;
-    st = s;
-    botToken = appToken = '';
-    toast({ kind: 'success', title: 'Slack settings saved', body: 'Tokens are in your Keychain. Slack is not connected yet.' });
-  }
-  async function clearToken(which: 'bot' | 'app') {
-    const s = await run('remove the token', () =>
-      api.inboundSetSlack({ config: st!.slack.config, bot_token: which === 'bot' ? '' : null, app_token: which === 'app' ? '' : null }),
-    );
-    if (s) st = s;
+    inbound.set(s);
+    toast({ kind: 'success', title: 'Slack tokens removed', body: 'They are no longer in your Keychain.' });
   }
 </script>
 
@@ -122,10 +108,12 @@
   <p class="desc">
     Anyone holding an endpoint’s URL and secret can post a message to the Lead. Each endpoint has its own secret, starts switched off, and can be revoked on its own.
     The listener only accepts connections from this Mac (127.0.0.1) and only runs while an endpoint is on; to reach it from elsewhere, run a tunnel yourself.
-    Messages reach the Lead marked as outside input.
+    A message shows in the thread under its endpoint’s name, and the Lead reads it as outside input, not as your words.
+    A plan the Lead makes from it waits for you to click Run plan, unless you let that endpoint run plans without asking.
   </p>
 
   {#if st}
+    {#if inbound.fails >= 2}<p class="desc warn" role="status">Not updating: {inbound.error}</p>{/if}
     <div class="status" class:bad={!!st.listen_error}>
       <span class="dot" class:live={st.listening}></span>
       {#if st.listen_error}
@@ -171,7 +159,7 @@
               {:else}
                 <button class="btn sm ghost rm" onclick={() => revoke(e.id)}><Icon name="trash" size={13} />Revoke</button>
               {/if}
-              <input type="checkbox" class="switch" checked={e.enabled} disabled={busy || e.broken} aria-label={`${e.name} on`} onchange={(ev) => toggle(e.id, ev.currentTarget.checked)} />
+              <input type="checkbox" class="switch" checked={e.enabled} disabled={busy || e.broken} aria-label={`${e.name} on`} onchange={(ev) => toggle(e, ev.currentTarget.checked)} />
             </div>
             <div class="e-url">
               <code class="mono small">{e.url}</code>
@@ -180,6 +168,17 @@
             <span class="muted small">
               {e.enabled ? 'On' : 'Off'} · {e.received} received{e.last_received_at ? `, last ${ago(e.last_received_at)}` : ''}
             </span>
+            <label class="e-auto small">
+              <input type="checkbox" checked={e.auto_run} disabled={busy || e.broken} onchange={(ev) => setAutoRun(e, ev.currentTarget.checked)} />
+              <span>
+                Run plans without asking.
+                {#if e.auto_run}
+                  <span class="warn">In an Auto or Direct request, a plan made from this endpoint’s messages starts at once. Anyone who can post here, or who writes what gets posted here, can start work on your Mac.</span>
+                {:else}
+                  <span class="muted">Off: a plan made from this endpoint’s messages waits for your Run plan click.</span>
+                {/if}
+              </span>
+            </label>
           </li>
         {/each}
       </ul>
@@ -195,7 +194,13 @@
     <div class="row">
       <div class="r-text">
         <span class="r-title">Who answers inbound messages</span>
-        <span class="desc">The Lead, unless you pick one agent to take them all.</span>
+        <span class="desc">
+          The Lead, unless you pick one agent to take them all.
+          <span class:warn={st.answerer !== 'lead'}>
+            An agent you pick gets each message at once, in its own chat. It is told to report and not to obey, but it makes no plan: nothing waits for
+            Run plan, the “Run plans without asking” switches do nothing, and it can act under its own approval mode.
+          </span>
+        </span>
       </div>
       <select class="input sel" value={st.answerer} aria-label="Who answers inbound messages" onchange={(e) => setAnswerer(e.currentTarget.value)}>
         <option value="lead">The Lead</option>
@@ -212,42 +217,31 @@
       <div class="log">
         <span class="f-label">Recent requests</span>
         <ul>
-          {#each st.deliveries.slice(0, 6) as d (d.at + d.endpoint + d.outcome)}
+          {#each st.deliveries.slice(0, 6) as d, i (i)}
             <li><span class="muted small">{ago(d.at)}</span><span>{d.endpoint}</span><span class="small" class:warn={d.outcome !== 'accepted'}>{d.outcome}</span></li>
           {/each}
         </ul>
       </div>
     {/if}
+  {:else if inbound.error}
+    <LoadError what="the endpoints" error={inbound.error} loading={inbound.loading} onretry={load} />
   {:else}
     <p class="desc">Loading…</p>
   {/if}
 </section>
 
 <section>
-  <h3 class="eyebrow">Slack <span class="badge">Not connected yet</span></h3>
-  <p class="desc">
-    Slack through Socket Mode with your own Slack app, no public URL needed. Your settings and tokens are saved now (tokens go to your Keychain),
-    but this version cannot open the connection, so nothing arrives from Slack yet. Only the people listed below will be heard once it can.
-  </p>
-  <form class="slack" onsubmit={saveSlack}>
-    <label class="field">
-      <span class="f-label">Bot token {#if st?.slack.bot_token_set}<span class="muted">saved</span> <button type="button" class="link" onclick={() => clearToken('bot')}>remove</button>{/if}</span>
-      <input class="input mono" type="password" bind:value={botToken} placeholder={st?.slack.bot_token_set ? '••••••••' : 'xoxb-…'} autocomplete="off" spellcheck="false" />
-    </label>
-    <label class="field">
-      <span class="f-label">App-level token {#if st?.slack.app_token_set}<span class="muted">saved</span> <button type="button" class="link" onclick={() => clearToken('app')}>remove</button>{/if}</span>
-      <input class="input mono" type="password" bind:value={appToken} placeholder={st?.slack.app_token_set ? '••••••••' : 'xapp-…'} autocomplete="off" spellcheck="false" />
-    </label>
-    <label class="field">
-      <span class="f-label">Allowed user IDs <span class="muted">(nobody is allowed until you list someone)</span></span>
-      <input class="input mono" bind:value={users} placeholder="U0123ABCD, U0456EFGH" spellcheck="false" autocomplete="off" />
-    </label>
-    <label class="field">
-      <span class="f-label">Channel IDs <span class="muted">(empty: any channel the bot is in)</span></span>
-      <input class="input mono" bind:value={channels} placeholder="C0123ABCD" spellcheck="false" autocomplete="off" />
-    </label>
-    <button class="btn sm end" type="submit" disabled={busy || !st}>Save Slack settings</button>
-  </form>
+  <h3 class="eyebrow">Slack <span class="badge">Not available yet</span></h3>
+  <p class="desc">This version cannot connect to Slack, so nothing arrives from Slack and Codly asks for no Slack token.</p>
+  {#if slackTokensSaved}
+    <div class="row">
+      <div class="r-text">
+        <span class="r-title">Slack tokens from an earlier version</span>
+        <span class="desc">They are still in your Keychain, and nothing uses them.</span>
+      </div>
+      <button class="btn sm" onclick={removeSlackTokens} disabled={busy}><Icon name="trash" size={13} />Remove saved Slack tokens</button>
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -278,6 +272,8 @@
   .e-name { font-weight: var(--w-semi); }
   .e-url { display: flex; align-items: center; gap: 4px; min-width: 0; }
   .e-url code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+  .e-auto { display: flex; align-items: flex-start; gap: 8px; line-height: var(--lh-sm); color: var(--ink-2); }
+  .e-auto input { margin-top: 2px; flex-shrink: 0; }
   .rm { color: var(--ink-3); }
   .rm:hover { color: var(--bad); background: var(--bad-soft); }
   .new { display: flex; gap: 8px; }
@@ -291,9 +287,5 @@
   .log ul { display: flex; flex-direction: column; border-radius: var(--r-md); background: var(--surface-1); }
   .log li { display: grid; grid-template-columns: 64px 1fr auto; gap: 10px; align-items: center; padding: 6px 14px; }
   .log li + li { box-shadow: inset 0 1px 0 var(--line); }
-  .slack { display: flex; flex-direction: column; gap: 10px; }
-  .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
   .f-label { font-size: var(--t-sm); font-weight: var(--w-med); color: var(--ink-2); }
-  .link { font-size: var(--t-sm); color: var(--ink-3); text-decoration: underline; }
-  .link:hover { color: var(--bad); }
 </style>

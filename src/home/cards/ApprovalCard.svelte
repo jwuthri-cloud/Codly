@@ -3,20 +3,39 @@
   words), inferred risks, and only the choices the provider offered. The oldest visible request
   takes the keyboard: ⌘↵ once · ⌥⌘↵ session · ⌘⌫ deny · ⇧⌘⌫ deny with a note.
   Questions (AskUserQuestion / requestUserInput) render as a choice to answer.
+  A plan (Claude's plan mode asks to leave it with `ExitPlanMode`) renders as the plan itself:
+  accept it, accept it with your changes (Claude Code takes your text as the plan), or send it
+  back with a note.
+  The plan card and the card for a host that Claude Code's sandbox blocks are for Claude agents
+  only: these two tool names are Claude Code's own, and for any other CLI a request with such a
+  name shows as every other tool request, by its name and its input.
+  The same command asked by several agents is one card (`twins`): one answer goes to all.
+  "Always allow in this repo" saves a rule in Codly for every agent of the repo; the card
+  offers it only when the core says the request can be saved (never for what Codly always asks):
+  a command, or a tool of an MCP server by its name.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
   import type { Approval } from '../../lib/gen/Approval';
   import type { ApprovalChoice } from '../../lib/gen/ApprovalChoice';
+  import type { ApprovalRuleKind } from '../../lib/gen/ApprovalRuleKind';
+  import type { ApprovalRuleOffer } from '../../lib/gen/ApprovalRuleOffer';
   import type { JsonValue } from '../../lib/gen/serde_json/JsonValue';
-  import { copyText, resolveApproval } from '../../lib/state/actions';
+  import { api } from '../../lib/api';
+  import { copyText, resolveApprovals, saveApprovalRule } from '../../lib/state/actions';
+  import { yourAnswers } from '../../lib/state/answers';
+  import { changedPlan } from '../../lib/state/control.svelte';
   import { keyTargetApproval } from '../../lib/state/keys';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
   import { idVar } from '../../lib/util/labels';
+  import { outcomeBy, outcomeWord } from '../../lib/util/outcome';
+  import { shownPlan } from '../../lib/util/planRequest';
+  import { HOST_ALLOW_LASTS, sandboxHost, sandboxWants } from '../../lib/util/sandbox';
   import { oneLine, tildify } from '../../lib/util/sanitize';
   import Icon from '../../components/Icon.svelte';
+  import Markdown from '../../components/Markdown.svelte';
   import Portrait from '../../components/Portrait.svelte';
   import Provenance from '../../components/Provenance.svelte';
   import Why, { type WhyLine } from '../../components/Why.svelte';
@@ -25,10 +44,14 @@
   interface Props {
     approval: Approval;
     showAgent?: boolean;
+    /** Other agents' requests that wait for the same answer: this card answers them too. */
+    twins?: Approval[];
   }
-  let { approval, showAgent = true }: Props = $props();
+  let { approval, showAgent = true, twins = [] }: Props = $props();
 
   const agent = $derived(store.agentMap.get(approval.agent_id) ?? null);
+  /** Who else asked the same, by name. */
+  const others = $derived([...new Set(twins.filter((t) => t.agent_id !== approval.agent_id).map((t) => store.agentMap.get(t.agent_id)?.name ?? 'an agent'))]);
   const task = $derived(approval.task_id ? (store.taskMap.get(approval.task_id) ?? null) : null);
   const pending = $derived(approval.status === 'pending');
   const subject = $derived(approval.subject);
@@ -41,10 +64,21 @@
   let noteEl: HTMLInputElement | undefined = $state();
   let el: HTMLElement | undefined = $state();
 
+  /** The plan a Claude agent in plan mode shows you before it changes anything; null for every other request and every other CLI. */
+  const plan = $derived(shownPlan(subject, agent?.provider));
+
+  /** The host a command in Claude Code's sandbox wants to reach, whole ('' = it names none); null for every other request and every other CLI. */
+  const netHost = $derived(sandboxHost(subject, agent?.provider));
+
   const headline = $derived.by(() => {
     const who = agent?.name ?? 'An agent';
+    if (plan !== null) return `${who} shows you its plan`;
+    const net = sandboxWants(subject, agent?.provider, 80);
+    if (net !== null) return `${who} wants to ${net}`;
     switch (subject.kind) {
-      case 'command': return `${who} wants to run a command`;
+      case 'command':
+        if (others.length) return `${who} and ${others.length === 1 ? others[0] : `${others.length} others`} want to run the same command`;
+        return `${who} wants to run a command`;
       case 'file_change': return `${who} wants to change ${subject.paths.length === 1 ? 'a file' : `${subject.paths.length} files`}`;
       case 'tool': return `${who} wants to use ${oneLine(subject.name, 40)}`;
       case 'question': return `${who} asks you`;
@@ -78,16 +112,77 @@
     cancel: { label: 'Stop the turn', cls: 'danger' },
   };
   const ORDER: ApprovalChoice[] = ['allow_once', 'allow_session', 'allow_always', 'deny', 'cancel'];
+  /** A plan is accepted or rejected, not "approved once". */
+  const choiceLabel = (c: ApprovalChoice) => (plan === null ? CHOICE[c].label : c === 'allow_once' ? 'Accept the plan' : c === 'deny' ? 'Reject the plan' : CHOICE[c].label);
 
   async function decide(choice: ApprovalChoice, message: string | null = null, answers: JsonValue | null = null) {
     if (!pending || busy || !offered.has(choice)) return;
     busy = true;
-    await resolveApproval(approval.id, choice, message, answers);
+    await resolveApprovals([approval, ...twins].map((a) => a.id), choice, message, answers);
     busy = false;
     noteOpen = false;
+    editOpen = false;
+  }
+
+  // ── a plan you change before you accept it ──
+  let editOpen = $state(false);
+  let edited = $state('');
+  let editEl: HTMLTextAreaElement | undefined = $state();
+  function openEdit() {
+    if (plan === null) return;
+    edited = plan;
+    editOpen = true;
+    tick().then(() => editEl?.focus());
+  }
+  /** Accept the plan with your text. Left as it was, it is a plain accept. */
+  function acceptEdited() {
+    if (plan !== null && edited.trim()) decide('allow_once', null, changedPlan(plan, edited));
+  }
+  function onEditKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      editOpen = false;
+    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      acceptEdited();
+    }
+  }
+
+  // ── "Always allow in this repo" ──
+  // What the core lets this request be saved as. It records that when its rules decide to ask
+  // you, which can be a moment after the card shows: read it again once that decision is in.
+  let ruleOffer = $state<ApprovalRuleOffer | null>(null);
+  const rulePrefix = $derived(ruleOffer?.prefix ?? null);
+  const ruleExact = $derived(ruleOffer?.exact ?? null);
+  const brokerAsked = $derived.by(() => {
+    void store.rev;
+    return store.decisions.some((d) => d.type === 'approval_policy' && (d.detail as { approval_id?: unknown } | null)?.approval_id === approval.id);
+  });
+  $effect(() => {
+    if (!pending || (subject.kind !== 'command' && subject.kind !== 'tool')) return;
+    void brokerAsked;
+    let stale = false;
+    api.approvalRuleOffer(approval.id).then(
+      (o) => {
+        if (!stale) ruleOffer = o;
+      },
+      () => {
+        /* the choice stays hidden: the other answers work without it */
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  });
+  async function saveRule(kind: ApprovalRuleKind) {
+    if (!pending || busy) return;
+    busy = true;
+    await saveApprovalRule(approval.id, kind);
+    busy = false;
   }
   function openNote() {
     if (!offered.has('deny')) return;
+    editOpen = false;
     noteOpen = true;
     tick().then(() => noteEl?.focus());
   }
@@ -98,7 +193,7 @@
     }
   });
   $effect(() => {
-    if (ui.revealApproval === approval.id && el) {
+    if (el && (ui.revealApproval === approval.id || twins.some((t) => t.id === ui.revealApproval))) {
       ui.revealApproval = null;
       el.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' });
     }
@@ -133,11 +228,13 @@
   }
   const unanswered = $derived(questions.some((q, i) => q.options.length > 0 && !picks[i]?.length));
 
-  const outcome = $derived(
-    approval.status === 'approved' ? 'Approved' : approval.status === 'denied' ? 'Denied' : approval.status === 'cancelled' ? 'Stopped' : approval.status === 'expired' ? 'Expired' : '',
-  );
-  const by = $derived(approval.decided_by === 'user' ? 'by you' : approval.decided_by === 'policy' ? 'by Codly’s rules' : approval.decided_by ? `by ${approval.decided_by}` : '');
-  const what = $derived(subject.kind === 'command' ? subject.command : subject.kind === 'question' ? (questions[0]?.question ?? 'a question') : subject.kind === 'file_change' ? subject.paths.join(', ') : subject.kind === 'tool' ? subject.name : 'permissions');
+  // A question is answered or skipped, with what you answered; only a permission is approved or denied.
+  const outcome = $derived(outcomeWord(approval.status, approval));
+  const by = $derived(outcomeBy(approval.decided_by));
+  const answer = $derived(subject.kind === 'question' && approval.status === 'approved' ? (yourAnswers.get(approval.id) ?? null) : null);
+  const what = $derived(subject.kind === 'command' ? subject.command : subject.kind === 'question' ? (questions[0]?.question ?? 'a question') : subject.kind === 'file_change' ? subject.paths.join(', ') : subject.kind === 'tool' ? (plan !== null ? 'its plan' : netHost !== null ? (netHost ? `network access to ${netHost}` : 'network access') : subject.name) : 'permissions');
+  /** The closed row of an answered question cuts both to fit: the whole question and answer, for its tooltip. */
+  const asked = $derived(answer ? `${oneLine(what, Infinity)} “${oneLine(answer, Infinity)}”` : null);
 </script>
 
 {#if !pending}
@@ -145,7 +242,13 @@
     <Icon name={approval.status === 'approved' ? 'check' : 'x'} size={12} stroke={2} />
     <span class="r-l">{outcome} {by}</span>
     {#if agent}<span class="r-who">{agent.name}</span>{/if}
-    <code class="truncate">{oneLine(what, 120)}</code>
+    {#if answer}
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (the row cuts the question and the answer: focus shows both whole, as hover does) -->
+      <code class="truncate asked" tabindex="0" data-tip={asked}>{oneLine(what, 120)}</code>
+      <span class="r-a truncate" data-tip={asked}>“{oneLine(answer, 80)}”</span>
+    {:else}
+      <code class="truncate">{oneLine(what, 120)}</code>
+    {/if}
     <time class="num">{clock(approval.created_at)}</time>
   </div>
 {:else}
@@ -166,9 +269,18 @@
         {#if inside === true}<span class="ok"><Icon name="check" size={11} stroke={2.2} />inside {agent?.name}’s worktree</span>
         {:else if inside === false}<span class="bad"><Icon name="alert" size={11} />outside the worktree</span>{/if}
       </div>
+      {#if others.length}<p class="same">Also asked by {others.join(', ')}, each in the same folder of its own worktree. Your answer goes to all of them.</p>{/if}
     {:else if subject.kind === 'file_change'}
-      <ul class="paths">{#each subject.paths as p (p)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
+      <ul class="paths">{#each subject.paths as p, pi (pi)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
       {#if subject.diff}<pre class="diff selectable">{subject.diff}</pre>{/if}
+    {:else if plan !== null}
+      {#if editOpen}
+        <textarea bind:this={editEl} class="plan-edit" rows="12" bind:value={edited} spellcheck="true" aria-label="The plan, with your changes" onkeydown={onEditKey}></textarea>
+      {:else}
+        <div class="plan selectable"><Markdown text={plan} brief /></div>
+      {/if}
+    {:else if netHost !== null}
+      <p class="net selectable">A shell command of {agent?.name ?? 'the agent'}, inside Claude Code’s sandbox, wants to connect to {#if netHost}<code>{netHost}</code>{:else}a host on the network{/if}. {HOST_ALLOW_LASTS} If you deny, the command gets a network error.</p>
     {:else if subject.kind === 'tool'}
       <pre class="diff selectable">{subject.name}({JSON.stringify(subject.input, null, 2)})</pre>
     {:else if subject.kind === 'question'}
@@ -176,7 +288,7 @@
         {#each questions as q, qi (qi)}
           <fieldset class="q">
             <legend>{q.question}</legend>
-            {#each q.options as o (o.label)}
+            {#each q.options as o, oi (oi)}
               <label class="opt" class:on={(picks[qi] ?? []).includes(o.label)}>
                 <input type={q.multiSelect ? 'checkbox' : 'radio'} name="q-{approval.id}-{qi}" checked={(picks[qi] ?? []).includes(o.label)} onchange={() => toggle(qi, o.label, !!q.multiSelect)} />
                 <span class="ot"><b>{o.label}</b>{#if o.description}<span class="od">{o.description}</span>{/if}</span>
@@ -197,7 +309,7 @@
     {/if}
     {#if approval.risks.length}
       <div class="risks">
-        {#each approval.risks as r (r)}<span class="risk">{r}</span>{/each}
+        {#each approval.risks as r, ri (ri)}<span class="risk">{r}</span>{/each}
         <Provenance kind="inferred" />
       </div>
     {/if}
@@ -211,17 +323,31 @@
       <form class="note" onsubmit={(e) => { e.preventDefault(); decide('deny', note.trim() || null); }}>
         <input bind:this={noteEl} class="input" placeholder="Tell {agent?.name ?? 'the agent'} what to do instead…" bind:value={note} spellcheck="true"
           onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (noteOpen = false))} />
-        <button class="btn" type="submit" disabled={busy}>Deny with note</button>
+        <button class="btn" type="submit" disabled={busy}>{plan !== null ? 'Send the plan back' : 'Deny with note'}</button>
       </form>
+    {:else if editOpen}
+      <footer>
+        <button class="btn primary" disabled={busy || !edited.trim()} onclick={acceptEdited}>Accept with my changes</button>
+        <button class="btn ghost" disabled={busy} onclick={() => (editOpen = false)}>Keep its plan</button>
+      </footer>
+      <p class="same">{agent?.name ?? 'The agent'} then works from your text: Claude Code takes it as the plan.</p>
     {:else}
       <footer>
         {#each ORDER.filter((c) => offered.has(c)) as c (c)}
           <button class="btn {CHOICE[c].cls}" disabled={busy} onclick={() => decide(c)}>
-            {CHOICE[c].label}{#if isKeyTarget && CHOICE[c].kbd}<span class="k">{CHOICE[c].kbd}</span>{/if}
+            {choiceLabel(c)}{#if isKeyTarget && CHOICE[c].kbd}<span class="k">{CHOICE[c].kbd}</span>{/if}
           </button>
         {/each}
-        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={openNote}>Deny with a note…{#if isKeyTarget}<span class="k">⇧⌘⌫</span>{/if}</button>{/if}
+        {#if plan !== null && offered.has('allow_once')}<button class="btn" disabled={busy} onclick={openEdit}>Change the plan…</button>{/if}
+        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={openNote}>{plan !== null ? 'Send it back with a note…' : 'Deny with a note…'}{#if isKeyTarget}<span class="k">⇧⌘⌫</span>{/if}</button>{/if}
       </footer>
+      {#if rulePrefix || ruleExact}
+        <div class="always">
+          <span class="a-l" data-tip="Codly approves this request and stops asking about it, for every agent in this repo. Remove the rule in Settings → Safety.">Always allow in this repo, for every agent:</span>
+          {#if rulePrefix}<button class="btn sm" disabled={busy} onclick={() => saveRule('prefix')}>Commands that start with <code>{rulePrefix}</code></button>{/if}
+          {#if ruleExact}<button class="btn sm" disabled={busy} onclick={() => saveRule('exact')}>{subject.kind === 'tool' ? 'This tool' : 'This exact command'}</button>{/if}
+        </div>
+      {/if}
     {/if}
     <Why lines={why} />
   </article>
@@ -248,12 +374,21 @@
   .risks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .risk { height: 22px; padding: 0 9px; border-radius: var(--r-full); font-size: var(--t-sm); line-height: 22px; color: var(--ink-2); background: var(--surface-2); }
   footer { display: flex; flex-wrap: wrap; gap: 6px; }
+  .same { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); margin-top: -4px; }
+  .always { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--ink-3); }
+  .a-l { margin-right: 2px; }
+  .always code { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-1); }
   .note { display: flex; gap: 6px; }
   .note .input { flex: 1; }
   .paths { display: flex; flex-direction: column; gap: 4px; }
   .paths li { display: flex; align-items: center; gap: 6px; color: var(--ink-3); }
   .paths code { font-size: var(--mono); color: var(--ink-1); }
   .diff { margin: 0; max-height: 220px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: 11.5px; line-height: 17px; font-family: var(--font-mono); color: var(--ink-2); }
+  .net { font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-2); }
+  .net code { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-1); word-break: break-all; }
+  .plan { max-height: 360px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-1); }
+  .plan-edit { resize: vertical; min-height: 120px; max-height: 360px; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-family: var(--font-mono); font-size: 12.5px; line-height: 19px; color: var(--ink-1); }
+  .plan-edit:focus-visible { outline: 2px solid var(--live); outline-offset: 1px; }
   .q { border: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   legend { font-size: 16px; line-height: 24px; color: var(--ink-1); margin-bottom: 6px; padding: 0; }
   .opt { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-1); transition: background-color var(--d-2) var(--ease-out), box-shadow var(--d-2); }
@@ -270,5 +405,9 @@
   .r-l { color: var(--ink-2); white-space: nowrap; }
   .r-who { color: var(--ink-2); font-weight: var(--w-med); }
   .resolved code { flex: 1; font-size: 11.5px; color: var(--ink-3); }
+  /* An answered question keeps 40 % of the row: a long answer gives way first (its shrink factor takes
+     nearly all of the cut, hence the 1px over), and a short one leaves the question the rest. */
+  .resolved code.asked { flex: 1 1 calc(40% + 1px); }
+  .r-a { flex: 0 9999 auto; color: var(--ink-1); }
   .resolved time { font-size: var(--t-xs); }
 </style>

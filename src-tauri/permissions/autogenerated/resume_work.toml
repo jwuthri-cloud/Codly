@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resume-work"
+description = "Enables the resume_work command without any pre-configured scope."
+commands.allow = ["resume_work"]
+
+[[permission]]
+identifier = "deny-resume-work"
+description = "Denies the resume_work command without any pre-configured scope."
+commands.deny = ["resume_work"]

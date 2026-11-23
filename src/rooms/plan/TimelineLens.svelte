@@ -9,7 +9,8 @@
   import { narrate } from '../../lib/state/narration';
   import { store, type Seg } from '../../lib/state/store.svelte';
   import { ui, wallNow } from '../../lib/state/ui.svelte';
-  import { clock, clockSec, dur } from '../../lib/util/format';
+  import { clock, clockSec, dur, plural } from '../../lib/util/format';
+  import { uniqueKeys } from '../../lib/util/keys';
   import { activityClass, idVar, pastVerb, phrase } from '../../lib/util/labels';
   import { oneLine } from '../../lib/util/sanitize';
   import EmptyState from '../../components/EmptyState.svelte';
@@ -42,12 +43,17 @@
     return () => ro.disconnect();
   });
 
+  // Bars and turns change with stored events only (a streamed word draws nothing here), and the
+  // store never changes a list it has handed out: no copy is needed. `keys`: one per bar, its
+  // call id; a CLI may use an id again in a later turn, and that bar adds its place.
   const lanes = $derived.by(() => {
     void store.rev;
-    void store.liveRev;
     return [...store.agents]
       .sort((a, b) => (a.role === 'lead' ? -1 : b.role === 'lead' ? 1 : a.created_at - b.created_at))
-      .map((a) => ({ agent: a, segs: (store.live[a.id]?.segments ?? []).slice(), turns: (store.live[a.id]?.turns ?? []).slice() }));
+      .map((a) => {
+        const segs = store.live[a.id]?.segments ?? [];
+        return { agent: a, segs, keys: uniqueKeys(segs, (s) => s.callId), turns: store.live[a.id]?.turns ?? [] };
+      });
   });
   // Running agents first; the stopped ones below a fold (open by itself when nobody runs).
   const alive = $derived(lanes.filter((l) => l.agent.status !== 'offline'));
@@ -59,20 +65,26 @@
     ...(open ? stopped.map((l, i) => ({ ...l, y: foldY + (stopped.length ? FOLD : 0) + i * LANE, off: true })) : []),
   ]);
   type Mark = { agentId: string; ts: number; end: number | null; kind: 'approval' | 'commit' | 'verified' | 'merged' | 'artifact'; ok: boolean; text: string };
-  const marks = $derived.by((): Mark[] => {
+  /** Per agent. The log is read once: when each approval was answered, and the commits, checks, merges and artifacts. */
+  const marks = $derived.by((): Map<string, Mark[]> => {
     void store.rev;
-    const out: Mark[] = [];
-    for (const ap of store.approvals) {
-      const r = store.events.find((e) => e.kind.type === 'approval_resolved' && e.kind.approval_id === ap.id);
-      out.push({ agentId: ap.agent_id, ts: ap.created_at, end: r ? r.ts : ap.status === 'pending' ? null : ap.created_at, kind: 'approval', ok: ap.status === 'approved', text: ap.subject.kind === 'command' ? `Asked to run ${oneLine(ap.subject.command, 60)}` : 'Asked you' });
-    }
+    const answered = new Map<string, number>();
+    const steps: Mark[] = [];
     for (const e of store.events) {
       const k = e.kind;
+      if (k.type === 'approval_resolved' && !answered.has(k.approval_id)) answered.set(k.approval_id, e.ts);
       if (!e.agent_id) continue;
-      if (k.type === 'committed') out.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'commit', ok: true, text: `Codly committed ${k.sha.slice(0, 7)} · ${k.files.length} files` });
-      else if (k.type === 'verified') out.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'verified', ok: k.ok, text: `${k.ok ? 'Verified' : 'Failed'}: ${k.command}` });
-      else if (k.type === 'merged') out.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'merged', ok: true, text: `Merged into ${k.branch}` });
-      else if (k.type === 'artifact_added') out.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'artifact', ok: true, text: `Made ${k.artifact.title}` });
+      if (k.type === 'committed') steps.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'commit', ok: true, text: `Codly committed ${k.sha.slice(0, 7)} · ${plural(k.files.length, 'file')}` });
+      else if (k.type === 'verified') steps.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'verified', ok: k.ok, text: `${k.ok ? 'Verified' : 'Failed'}: ${k.command}` });
+      else if (k.type === 'merged') steps.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'merged', ok: true, text: `Merged into ${k.branch}` });
+      else if (k.type === 'artifact_added') steps.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'artifact', ok: true, text: `Made ${k.artifact.title}` });
+    }
+    const asked = store.approvals.map((ap): Mark => ({ agentId: ap.agent_id, ts: ap.created_at, end: answered.get(ap.id) ?? (ap.status === 'pending' ? null : ap.created_at), kind: 'approval', ok: ap.status === 'approved', text: ap.subject.kind === 'command' ? `Asked to run ${oneLine(ap.subject.command, 60)}` : 'Asked you' }));
+    const out = new Map<string, Mark[]>();
+    for (const m of [...asked, ...steps]) {
+      const list = out.get(m.agentId);
+      if (list) list.push(m);
+      else out.set(m.agentId, [m]);
     }
     return out;
   });
@@ -152,12 +164,12 @@
           <g class="lane" class:off={l.off} class:lit={ui.hover.agentId === l.agent.id} style:--hue={idVar(l.agent.color)}>
             <rect class="lane-bg" x="0" {y} {width} height={LANE} />
             {#each l.turns as t, ti (ti)}<rect class="turn" x={x(t.start)} y={y + 10} width={Math.max(2, x(t.end ?? clockNow) - x(t.start))} height={LANE - 20} rx="6" />{/each}
-            {#each l.segs as s (s.callId)}
+            {#each l.segs as s, si (l.keys[si])}
               {@const w = Math.max(3, x(s.end ?? clockNow) - x(s.start))}
               <!-- svelte-ignore a11y_click_events_have_key_events -->
               <rect class="seg c-{activityClass(s.activity)}" class:open={s.end == null} class:fail={s.ok === false} x={x(s.start)} y={y + 16} width={w} height={LANE - 32} rx="3" role="button" tabindex="-1" data-tip={segTip(s)} onclick={() => ui.selectAgent(s.agentId, s.eventId)} />
             {/each}
-            {#each marks.filter((m) => m.agentId === l.agent.id) as m, mi (mi)}
+            {#each marks.get(l.agent.id) ?? [] as m, mi (mi)}
               {#if m.kind === 'approval'}
                 <rect class="ap" class:ok={m.ok} x={x(m.ts)} y={y + 6} width={Math.max(3, x(m.end ?? clockNow) - x(m.ts))} height="4" rx="2" data-tip={m.text} />
               {:else}

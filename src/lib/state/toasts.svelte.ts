@@ -1,4 +1,5 @@
-// Toasts (design §4): bottom-right, max 3, progress updates in place, success 4 s, info 6 s,
+// Toasts (design §4): top-right under the top bar, laid over the page at a place where they cover
+// nothing you can press (see components/Toasts.svelte), max 3, progress updates in place, success 4 s, info 6 s,
 // errors persist. Hover pauses dismissal. Approvals are never toast-only: an approval toast
 // is just a pointer into the Inbox.
 

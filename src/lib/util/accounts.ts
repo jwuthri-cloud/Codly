@@ -44,6 +44,16 @@ export function derivedLabel(provider: Provider, home: string | null): string {
   return short || name;
 }
 
+/**
+ * The problem line of a sign-in. Null when it is only the plain sentence about the login
+ * command, which the row shows below it. A problem that says more (your shell selects the
+ * sign-in, a switch in Settings) is shown, also when it names that command.
+ */
+export function problemText(a: AccountInfo): string | null {
+  if (!a.problem) return null;
+  return a.login_command && a.problem === `not signed in: run \`${a.login_command}\` in a terminal` ? null : a.problem;
+}
+
 // ───────────── quota windows ─────────────
 
 /** Timestamps are ms (model.rs); a value in unix seconds is read as such, to be safe. */

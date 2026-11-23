@@ -1,10 +1,30 @@
 // The browser demo's side of the per-agent live controls. `AgentControl` mirrors the core's state
 // machine (crates/codly-core/src/orchestrator/controls.rs) so the demo behaves the same:
 // a stop waits for the running turn, held notes wait for the resume, kill clears everything.
+import type { Agent } from '../gen/Agent';
+import type { ContextUsage } from '../gen/ContextUsage';
 import type { ControlState } from '../gen/ControlState';
+import type { McpServerStatus } from '../gen/McpServerStatus';
+import type { PermissionMode } from '../gen/PermissionMode';
+import { demoBackground } from './background';
 import type { Sim } from './sim';
 
 const MAX_HELD = 32;
+
+/**
+ * The MCP servers an office's first Claude Lead reports when its session starts (story.ts
+ * `ensureLead`): one connected, one that needs a sign-in, one that did not start, with a
+ * reason of the kind Claude Code gives (the text is the demo's). "Reconnect" (below) is offered
+ * on the last two.
+ */
+export const DEMO_MCP: { name: string; status: McpServerStatus; error: string | null }[] = [
+  { name: 'codly', status: 'connected', error: null },
+  { name: 'linear', status: 'needs_sign_in', error: null },
+  { name: 'postgres', status: 'failed', error: 'MCP error -32000: Connection closed' },
+];
+
+/** The name the agent panel gives each mode (the core's `PermissionMode::label`). */
+export const MODE_LABEL: Record<PermissionMode, string> = { ask: 'ask for edits', accept_edits: 'accept edits', plan: 'plan first' };
 
 export class AgentControl {
   blockTools = false;
@@ -72,10 +92,6 @@ export class MockControls {
     this.sim.decision('agent_control', 'human', summary, { agent_id: id }, { agent: id });
   }
 
-  state(id: string): ControlState {
-    return this.of(id).state();
-  }
-
   setBlockTools(id: string, on: boolean): ControlState {
     const a = this.agent(id);
     if (a.role === 'lead') throw new Error('the Lead needs its tools to plan; stop it instead');
@@ -120,6 +136,78 @@ export class MockControls {
     this.note(id, `steer note for ${a.name}: ${t.slice(0, 80)}`);
     if (this.of(id).route(t) !== null) void this.deliver(id, t);
     return this.publish(id);
+  }
+
+  /** The mode of a 1:1 Claude agent: kept on the agent, as the core keeps it. */
+  setMode(id: string, mode: PermissionMode): Agent {
+    const a = this.sim.agents.get(id);
+    if (!a) throw new Error('Unknown agent');
+    if (a.role !== 'solo' || a.provider !== 'claude') throw new Error('only a 1:1 Claude agent has a mode to switch');
+    const permissions = this.sim.requestPrefs[`agent:${id}`]?.approval_mode ?? this.sim.settings.approval_mode;
+    if (mode === 'accept_edits' && permissions === 'strict') {
+      throw new Error(`${a.name}'s permissions are "Ask first": every change asks you, so it cannot accept edits by itself. Give it other permissions first.`);
+    }
+    if ((a.permission_mode ?? 'ask') === mode) return a;
+    this.note(id, `${a.name} now works in the mode "${MODE_LABEL[mode]}"`);
+    return this.sim.patchAgent(id, { permission_mode: mode });
+  }
+
+  /** "Compact now", as in the core: a Codex agent between turns and off a task, a Claude agent
+   *  between turns (the demo agent's context shrinks to a quarter). */
+  compact(id: string): null {
+    const a = this.agent(id);
+    if (a.provider === 'codex') {
+      if (this.sim.actor(id).inTurn) throw new Error(`${a.name} is working. Compact it when its turn ends.`);
+      if (a.task_id) throw new Error(`${a.name} is on a task. Compact it between tasks.`);
+      this.note(id, `you asked Codex to compact ${a.name}’s conversation`);
+      this.sim.emit({ type: 'compacting', pre_tokens: null, post_tokens: null }, { agent: id });
+      return null;
+    }
+    if (a.provider !== 'claude') throw new Error('only a Claude or a Codex agent can be compacted from here');
+    if (this.sim.actor(id).inTurn) throw new Error(`${a.name} is still working: compact it when its turn ends`);
+    const used = a.usage.context_used ?? 0;
+    const left = Math.round(used / 4);
+    this.note(id, `asked ${a.name} to compact its conversation`);
+    this.sim.emit({ type: 'compacting', pre_tokens: used, post_tokens: left }, { agent: id });
+    this.sim.patchAgent(id, { usage: { ...a.usage, context_used: left } });
+    return null;
+  }
+
+  contextUsage(id: string): ContextUsage {
+    const a = this.agent(id);
+    if (a.provider !== 'claude') throw new Error('only a Claude agent takes this without a restart');
+    const used = a.usage.context_used ?? 0;
+    const max = a.usage.context_window ?? 200_000;
+    return { used_tokens: used, max_tokens: max, percent: Math.round((used / max) * 100), auto_compact_at: Math.round(max * 0.95), parts: [{ name: 'Messages', tokens: used }] };
+  }
+
+  /**
+   * "Reconnect" on an MCP server of a Claude agent. Claude Code answers when its try to connect
+   * is over: after a second in the demo. A server that did not start connects then, and its
+   * state says so. One that needs a sign-in still needs it (nobody signed in): the answer says so.
+   */
+  async reconnectMcp(id: string, server: string): Promise<null> {
+    const a = this.agent(id);
+    if (a.provider !== 'claude') throw new Error('only a Claude agent takes this without a restart');
+    this.note(id, `asked ${a.name} to reconnect its MCP server ${server}`);
+    await this.sim.sleep(1000);
+    this.agent(id); // stopped meanwhile: its servers went with its process
+    if (this.sim.mcpStatus(id, server) === 'needs_sign_in') throw new Error(`${server} still needs a sign-in`);
+    // With the run of the agent's process: the sheet shows the servers of the live run.
+    this.sim.actor(id).emit({ type: 'mcp_server', name: server, status: 'connected', error: null });
+    return null;
+  }
+
+  /** "Stop" on a background command: its CLI ends it, and the agent's next list says "stopped".
+   *  (An agent of the demo leaves one command running at most, so the request names none.) */
+  stopTask(id: string): null {
+    const a = this.agent(id);
+    const background = demoBackground(this.sim);
+    const running = background.of(id);
+    if (!running.length) throw new Error(`${a.name} has no command running in the background`);
+    this.note(id, `asked ${a.name} to stop a command it left running in the background`);
+    for (const task of running) background.end(id, task.id, 'stopped');
+    return null;
   }
 
   /** The note reaches the agent on its next turn: it acknowledges it in its own thread. */

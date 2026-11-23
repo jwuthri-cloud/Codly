@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { prettyModel } from '../labels';
+import { prettyModel, subagentMark, subagentTag } from '../labels';
+
+describe('subagentMark', () => {
+  it('marks a tool call a subagent made, and only that', () => {
+    expect(subagentMark({ command: 'ls', subagent: { thread: 't1', name: 'Ada (explorer)' } })).toBe(' · subagent Ada (explorer)');
+    expect(subagentMark({ command: 'ls', subagent: { thread: 't1', name: null } })).toBe(' · subagent');
+    expect(subagentMark({ command: 'ls' })).toBe('');
+    expect(subagentMark({ subagent: 'Explore' })).toBe('');
+    expect(subagentMark(null)).toBe('');
+    expect(subagentMark(['subagent'])).toBe('');
+  });
+
+  it('is the same words without the dot, for a place that shows them apart', () => {
+    expect(subagentTag({ command: 'ls', subagent: { thread: 't1', name: 'Ada (explorer)' } })).toBe('subagent Ada (explorer)');
+    expect(subagentTag({ command: 'ls', subagent: { thread: 't1', name: null } })).toBe('subagent');
+    expect(subagentTag({ command: 'ls' })).toBe('');
+  });
+});
 
 describe('prettyModel', () => {
   it('names models the way people say them', () => {

@@ -3,7 +3,11 @@
 //!   tasks and pending questions and copies archived tasks to the archive file, and a slow
 //!   background loop runs it;
 //! - default MCP servers: the switches live in `kv`, keys in the Keychain, and
-//!   `prepare_default_mcp` writes the enabled servers into a run's directory at spawn.
+//!   `prepare_default_mcp` writes the enabled servers into a run's directory at spawn;
+//! - storage (`storage.rs`): what Codly left on disk and in each repository, the user's own
+//!   deletes, and the pass of the same background loop that removes what has nothing to lose.
+
+mod storage;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -97,16 +101,25 @@ impl Inner {
     }
 
     /// Called as a run is prepared: write the enabled default servers beside its raw log. The
-    /// adapters merge them next to the `codly` server. Never fails the spawn.
-    pub(super) fn prepare_default_mcp(&self, raw_log: &Path, cwd: &Path) {
-        let extra = connections::resolve(&self.mcp_prefs(), &KeychainStore, cwd);
+    /// adapters merge them next to the `codly` server. Never fails the spawn. Which servers
+    /// have their keys is asked of the Keychain through a subprocess, which can wait on a
+    /// permission dialog, so that part runs off the runtime threads.
+    pub(super) async fn prepare_default_mcp(&self, raw_log: &Path, cwd: &Path) {
+        let (prefs, cwd) = (self.mcp_prefs(), cwd.to_path_buf());
+        let extra = match tokio::task::spawn_blocking(move || connections::resolve(&prefs, &KeychainStore, &cwd)).await {
+            Ok(extra) => extra,
+            Err(e) => {
+                tracing::warn!("could not read the default MCP servers: {e}");
+                return;
+            }
+        };
         if let Err(e) = connections::write_sidecar(raw_log, &extra) {
             tracing::warn!("could not write the default MCP servers: {e}");
         }
     }
 }
 
-/// Sweep the board once soon after start, then every half hour.
+/// Sweep the board and the storage once soon after start, then every half hour.
 pub(super) async fn sweeper(inner: Arc<Inner>) {
     tokio::time::sleep(Duration::from_secs(20)).await;
     loop {
@@ -121,6 +134,20 @@ pub(super) async fn sweeper(inner: Arc<Inner>) {
             {
                 tracing::warn!("board sweep of {} failed: {e}", ws.name);
             }
+        }
+        for problem in inner.storage_sweep_at(now_ms()).await.problems {
+            tracing::warn!("storage sweep: {problem}");
+        }
+        // The daily copy of the database (it reads all of it: off the async threads).
+        let copied = tokio::task::spawn_blocking({
+            let inner = inner.clone();
+            move || inner.store.backup_if_due(now_ms())
+        });
+        match copied.await {
+            Ok(Ok(Some(copy))) => tracing::info!("database backup written: {}", copy.path),
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => tracing::warn!("database backup failed: {e:#}"),
+            Err(e) => tracing::warn!("database backup did not finish: {e}"),
         }
         tokio::time::sleep(SWEEP_EVERY).await;
     }

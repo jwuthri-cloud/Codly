@@ -30,4 +30,11 @@ request_prefs: { [key in string]: RequestPrefs }, agents: Array<Agent>, plans: A
 /**
  * Most recent persisted events (for timeline, inspector and world replay).
  */
-events: Array<EventRow>, };
+events: Array<EventRow>, 
+/**
+ * What runs beside the live runs and is not in `events`: the last `mcp_server` event of
+ * each of their servers, and each run's last `background_tasks` event. Oldest first. A
+ * row with id 0 is a server that stands where an earlier run of its agent recorded it:
+ * the log has no row of it for this run.
+ */
+session_events: Array<EventRow>, };

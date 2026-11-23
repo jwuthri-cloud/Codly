@@ -42,6 +42,7 @@
       <EmptyState compact title="Ask the index." body="The same search agents use: paths, symbols and 60-line chunks, ranked, with the evidence for every hit." />
     {:else}
       <p class="head"><span class="conf c-{res.confidence}">{CONF[res.confidence]}</span><span class="muted num">{res.citations.length} hits · {res.took_ms} ms</span></p>
+      {#each res.warnings ?? [] as w, i (i)}<p class="warn">{w}</p>{/each}
       <ol class="hits">
         {#each res.citations as c (c.id)}
           <li>
@@ -49,7 +50,7 @@
               <span class="cid">{c.id}</span>
               <span class="body">
                 <span class="path"><code>{c.path}</code><span class="ln num">:{c.start_line}–{c.end_line}</span>{#if c.symbol}<span class="sym">{c.symbol}</span>{/if}</span>
-                <span class="why">{#each c.why as w (w)}<span class="w">{w}</span>{/each}<Provenance kind="observed" compact /></span>
+                <span class="why">{#each c.why as w, i (i)}<span class="w">{w}</span>{/each}<Provenance kind="observed" compact /></span>
               </span>
               <span class="score num">{c.score.toFixed(1)}</span>
             </button>
@@ -60,7 +61,7 @@
           </li>
         {/each}
       </ol>
-      {#if res.fallback_rg.length}<p class="rg">Try: {#each res.fallback_rg as r (r)}<code>{r}</code>{/each}</p>{/if}
+      {#if res.fallback_rg.length}<p class="rg">Try: {#each res.fallback_rg as r, i (i)}<code>{r}</code>{/each}</p>{/if}
     {/if}
   </div>
 </div>
@@ -75,6 +76,7 @@
   .c-exact, .c-high { color: var(--ok); }
   .c-medium { color: var(--amber-ink); }
   .c-low { color: var(--bad); }
+  .warn { margin-bottom: 10px; font-size: var(--t-sm); color: var(--amber-ink); }
   .hits { display: flex; flex-direction: column; gap: 4px; }
   .hits li { position: relative; }
   .hit { display: flex; align-items: center; gap: 14px; width: 100%; padding: 10px 90px 10px 14px; border-radius: var(--r-md); text-align: left; }

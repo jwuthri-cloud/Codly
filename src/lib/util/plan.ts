@@ -1,0 +1,74 @@
+// What a plan's tasks say about the plan as a whole, for its card and the task sheet.
+import type { Plan } from '../gen/Plan';
+import type { Task } from '../gen/Task';
+import type { Decision } from '../state/store.svelte';
+
+/** In flight: the task has a worker, or Codly checks, reviews or merges its work. */
+const ACTIVE = ['running', 'verifying', 'reviewing', 'changes_requested', 'merging'];
+/** The reason of a task that waits for your answer starts with this (ask_me.rs's `WAITING`). */
+const WAITING = 'waiting for you:';
+
+export type Stuck = {
+  /** The tasks that stopped the plan: blocked, failed, or cancelled while others wait for them. */
+  stopped: Task[];
+  /** The tasks that cannot start because of them. */
+  waiting: Task[];
+  /** Tasks merged into the plan's integration branch. */
+  merged: number;
+};
+
+/** A running plan that cannot go on by itself (the core's `scheduler::stuck_plans`): nothing of it
+ *  runs, is ready or can become ready, and work is left. Null: it goes on, or it only waits for
+ *  your answers (each of those has its own card). `tasks`: the plan's. */
+export function stuckPlan(plan: Plan, tasks: Task[]): Stuck | null {
+  if (plan.status !== 'running') return null;
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const startable = (t: Task) => t.status === 'pending' && t.depends_on.every((d) => byId.get(d)?.status === 'done');
+  if (tasks.some((t) => t.status === 'ready' || ACTIVE.includes(t.status) || startable(t))) return null;
+  const waiting = tasks.filter((t) => t.status === 'pending');
+  const stopped = tasks.filter(
+    (t) => t.status === 'blocked' || t.status === 'failed' || (t.status === 'cancelled' && waiting.some((w) => w.depends_on.includes(t.id))),
+  );
+  if (!stopped.length && !waiting.length) return null;
+  if (stopped.length && stopped.every((t) => t.status === 'blocked' && (t.status_reason ?? '').startsWith(WAITING))) return null;
+  return { stopped, waiting, merged: tasks.filter((t) => t.status === 'done').length };
+}
+
+/** The tasks that wait for task `id`, directly or through other tasks, and are not over yet:
+ *  once `id` is cancelled they can never start. `tasks`: the plan's, returned in that order. */
+export function waitingOn(tasks: Task[], id: string): Task[] {
+  const found = new Set([id]);
+  // Plans are small: look again until a pass finds nothing new.
+  for (let before = 0; before !== found.size; ) {
+    before = found.size;
+    for (const t of tasks) if (t.depends_on.some((d) => found.has(d))) found.add(t.id);
+  }
+  return tasks.filter((t) => t.id !== id && found.has(t.id) && t.status !== 'done' && t.status !== 'cancelled');
+}
+
+/** Why a plan did not start by itself in a request that runs its plans at once (Auto, Direct): the
+ *  words for its card, above Run plan. Read from the plan's `plan_validate` decision that says so
+ *  (the core's `submit_plan_inner`): rule `inbound` or `intake`. Null: it waits because the request
+ *  asks you before every plan, or for its open questions, which the card lists. */
+export function waitReason(decisions: Decision[], planId: string): string | null {
+  for (const { type, detail } of decisions) {
+    if (type !== 'plan_validate' || !detail || typeof detail !== 'object' || Array.isArray(detail) || detail.plan_id !== planId) continue;
+    if (detail.rule === 'inbound') return 'A message from outside Codly came in after your last one, so this plan did not start by itself. Read it, then run it if it is what you want.';
+    if (detail.rule === 'intake') return 'This request started from GitHub, and other people write there, so this plan did not start by itself. Read it, then run it if it is what you want.';
+  }
+  return null;
+}
+
+/** What you can do about a task with no real check (`Plan.weak_checks`), by where its plan is. Null: nothing any more
+ *  (the plan is cancelled, or its work is merged into your branch). */
+export function weakAdvice(plan: Pick<Plan, 'status' | 'merged_sha'>): string | null {
+  if (plan.status === 'planning' || plan.status === 'awaiting_approval') return 'Ask the Lead for a real test, or run the plan as it is.';
+  if (plan.status === 'cancelled' || plan.merged_sha) return null;
+  return 'Read what this task changed before you merge the plan.';
+}
+
+/** "t1", "t1 and t2", "t1, t2 and t3". */
+export function keyList(tasks: Task[]): string {
+  const keys = tasks.map((t) => t.key);
+  return keys.length < 2 ? keys.join('') : `${keys.slice(0, -1).join(', ')} and ${keys[keys.length - 1]}`;
+}

@@ -1,6 +1,7 @@
 //! Agents hired through the add-agent wizard (or an imported hire manifest): a 1:1 agent with
 //! its own name, avatar and colour, an optional briefing (role + standing goal) that rides on
-//! every prompt, a choice of working in its own worktree or straight in the project folder, and
+//! every prompt (its career block rides on the first prompt of each run only), a choice of
+//! working in its own worktree or straight in the project folder, and
 //! an optional session to resume. The manifest rules live in `crate::hire`; this is the part
 //! that needs the store, git and the live runs.
 
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 
-use super::{Inner, names, prompts};
+use super::{Inner, lock, names, prompts};
 use crate::hire::{self, Engine, HireManifest};
 use crate::model::*;
 
@@ -50,14 +51,21 @@ impl Inner {
             .flatten()
     }
 
-    /// `text` with the agent's standing briefing in front, if it has one.
+    /// `text` with the agent's standing briefing in front, if it has one, and, on the first
+    /// prompt of a run, with what its career adds.
     pub(super) fn with_briefing(&self, agent_id: &str, text: &str) -> String {
         let text = match self.agent_brief(agent_id) {
             Some(b) => hire::wrap_prompt(&b.description, &b.goal, b.isolate, text),
             None => text.to_string(),
         };
-        // The traits you picked and its track record (career.rs), for workers and 1:1 agents.
-        let career = self.agent(agent_id).ok().filter(|a| matches!(a.role, Role::Worker | Role::Solo)).map(|a| crate::career::briefing(&a.career));
+        // Its traits' work rules and its track record (career.rs), for workers and 1:1 agents:
+        // once in a run. On every fix round and steer note they only cost tokens.
+        let first = lock(&self.live).get_mut(agent_id).is_some_and(|l| !std::mem::replace(&mut l.briefed, true));
+        if !first {
+            return text;
+        }
+        let rules = self.settings().game_rules;
+        let career = self.agent(agent_id).ok().filter(|a| matches!(a.role, Role::Worker | Role::Solo)).map(|a| career_briefing(a.role, &a.career, rules));
         match career.filter(|c| !c.is_empty()) {
             Some(c) => format!("{text}\n\n[Who you are at work]\n{c}"),
             None => text,
@@ -89,7 +97,10 @@ impl Inner {
     /// Nothing is started; the caller reviews the result like an imported file.
     pub(super) async fn hire_draft(&self, brief: &str) -> anyhow::Result<hire::HireReview> {
         let bin = crate::env::resolve_bin(Provider::Claude, &self.base_env).ok_or_else(|| anyhow!("Claude is not installed"))?;
-        let env = crate::env::child_env_with(&self.base_env, Provider::Claude, None);
+        let mut env = crate::env::child_env_with(&self.base_env, Provider::Claude, None);
+        if self.settings().claude_shell_auth {
+            crate::env::apply_shell_auth(&mut env, &self.base_env, Provider::Claude);
+        }
         let args: Vec<String> = vec![
             "-p".into(),
             hire::draft_prompt(brief),
@@ -145,6 +156,7 @@ impl Inner {
             let start = self.git.head(&repo).await?.ok_or_else(|| anyhow!("the repository has no commits yet"))?;
             let _g = self.repo_lock.lock().await;
             self.git.worktree_add(&repo, &wt, &branch, &start).await?;
+            self.mark_new_worktree(&wt)?; // prepared at its first message
         }
         let title = m.title.as_deref().and_then(role_title).map(String::from);
         self.update_agent(&agent.id, |a| {
@@ -203,10 +215,34 @@ impl Inner {
     }
 }
 
+/// What a career adds in front of an agent's prompts. A 1:1 agent has the traits you gave it
+/// when you hired it. A worker's traits were rolled for its job offer, so their work rules count
+/// only with the office rules on (`Settings::game_rules`); its track record always does.
+fn career_briefing(role: Role, career: &Career, game_rules: bool) -> String {
+    if role == Role::Worker && !game_rules {
+        return crate::career::briefing(&Career { traits: vec![], ..career.clone() });
+    }
+    crate::career::briefing(career)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{Core, CoreConfig, StartOptions};
+    use super::career_briefing;
     use crate::model::*;
+
+    /// Traits rolled for a job offer change a worker's prompts only with the office rules on;
+    /// the traits you gave a 1:1 agent always count, and so does a track record.
+    #[test]
+    fn rolled_traits_reach_a_workers_prompts_only_with_the_office_rules_on() {
+        let career = Career { traits: vec!["perfectionist".into(), "clumsy".into()], xp: 70, ..Default::default() };
+        let rule = "Perfectionist: Before you say you are done";
+        let off = career_briefing(Role::Worker, &career, false);
+        assert!(!off.contains("Perfectionist") && off.starts_with("Your track record: "), "{off}");
+        assert!(career_briefing(Role::Worker, &career, true).starts_with(rule));
+        assert!(career_briefing(Role::Solo, &career, false).starts_with(rule), "the traits you picked always count");
+        assert_eq!(career_briefing(Role::Worker, &Career { xp: 0, ..career }, false), "", "nothing to add");
+    }
 
     #[tokio::test]
     async fn solo_system_carries_the_memory_file() {
@@ -241,6 +277,7 @@ mod tests {
             away_until: None,
             away_since: None,
             tired_since: None,
+            permission_mode: None,
             created_at: 0,
             updated_at: 0,
         };

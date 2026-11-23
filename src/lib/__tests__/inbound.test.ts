@@ -24,10 +24,30 @@ describe('inbound mock follows the core rules', () => {
     let s = inboundMock('inbound_state', {}) as InboundState;
     expect(s.listening).toBe(false);
     expect(JSON.stringify(s)).not.toContain(w.secret);
-    s = inboundMock('inbound_set_webhook', { id: w.endpoint.id, enabled: true }) as InboundState;
+    s = inboundMock('inbound_set_webhook', { id: w.endpoint.id, enabled: true, autoRun: false }) as InboundState;
     expect(s.listening).toBe(true);
     s = inboundMock('inbound_revoke_webhook', { id: w.endpoint.id }) as InboundState;
     expect(s.listening).toBe(false);
-    expect(() => inboundMock('inbound_set_webhook', { id: w.endpoint.id, enabled: true })).toThrow();
+    expect(() => inboundMock('inbound_set_webhook', { id: w.endpoint.id, enabled: true, autoRun: false })).toThrow();
+  });
+
+  it('lets an endpoint run plans without asking only when it is told to', () => {
+    const w = inboundMock('inbound_create_webhook', { name: 'deploys' }) as NewWebhook;
+    expect(w.endpoint.auto_run).toBe(false);
+    const of = (s: InboundState) => s.endpoints.find((e) => e.id === w.endpoint.id)!;
+    let s = inboundMock('inbound_set_webhook', { id: w.endpoint.id, enabled: true, autoRun: false }) as InboundState;
+    expect([of(s).enabled, of(s).auto_run]).toEqual([true, false]);
+    s = inboundMock('inbound_set_webhook', { id: w.endpoint.id, enabled: true, autoRun: true }) as InboundState;
+    expect([of(s).enabled, of(s).auto_run]).toEqual([true, true]);
+    s = inboundMock('inbound_set_webhook', { id: w.endpoint.id, enabled: false, autoRun: true }) as InboundState;
+    expect([of(s).enabled, of(s).auto_run]).toEqual([false, true]);
+  });
+
+  it('takes no Slack token while Slack is not available, and removing one is always allowed', () => {
+    const config = { enabled: false, user_ids: [], channel_ids: [] };
+    expect(() => inboundMock('inbound_set_slack', { update: { config, bot_token: 'xoxb-1-new', app_token: null } })).toThrow('not available yet');
+    expect(() => inboundMock('inbound_set_slack', { update: { config, bot_token: '', app_token: 'xapp-1-new' } })).toThrow('not available yet');
+    const s = inboundMock('inbound_set_slack', { update: { config, bot_token: '', app_token: '' } }) as InboundState;
+    expect([s.slack.bot_token_set, s.slack.app_token_set, s.slack.connected]).toEqual([false, false, false]);
   });
 });

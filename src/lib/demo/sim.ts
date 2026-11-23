@@ -14,6 +14,7 @@ import type { Citation } from '../gen/Citation';
 import type { CliInfo } from '../gen/CliInfo';
 import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
+import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Memory } from '../gen/Memory';
 import type { MemoryKind } from '../gen/MemoryKind';
 import type { MemoryScope } from '../gen/MemoryScope';
@@ -77,6 +78,8 @@ export class Sim {
   private nextId = 1;
   log: EventRow[] = [];
   private queue: EventRow[] = [];
+  /** The last `mcp_server` event of each agent's server: the log is cut, and a snapshot still says where a server stands. */
+  private servers = new Map<string, EventRow>();
   sink: ((b: UiBatch) => void) | null = null;
 
   clis: CliInfo[] = [];
@@ -101,6 +104,8 @@ export class Sim {
   cancelled = new Set<string>();
   /** task key → paths written so far (diffs grow as agents edit). */
   touched = new Map<string, Set<string>>();
+  /** Runs after each tool call of an agent's turn, while the turn goes on (the story sets it). */
+  afterStep: ((act: Actor) => Promise<void>) | null = null;
   private waiters = new Set<Waiter>();
 
   constructor(opts: SimOptions, settings: Settings) {
@@ -109,6 +114,19 @@ export class Sim {
     this.signIns = new DemoAccounts(HOME, this.clock.now());
     this.settings = this.signIns.normalize(settings);
     setInterval(() => this.flush(), 33);
+  }
+
+  /**
+   * Another office of the same machine: the settings, the installed CLIs, the sign-ins and the
+   * recent repositories are the first office's, whichever of the two reads or changes them.
+   */
+  sameMachineAs(first: Sim) {
+    const share = <K extends 'settings' | 'clis' | 'recent' | 'signIns'>(key: K) =>
+      Object.defineProperty(this, key, { get: () => first[key], set: (v: Sim[K]) => void (first[key] = v), enumerable: true, configurable: true });
+    share('settings');
+    share('clis');
+    share('recent');
+    share('signIns');
   }
 
   now() {
@@ -130,6 +148,7 @@ export class Sim {
     if (!ephemeral) {
       this.log.push(row);
       if (this.log.length > 8000) this.log = this.log.slice(-6000);
+      if (kind.type === 'mcp_server') this.servers.set(`${row.agent_id}:${kind.name}`, row);
     }
     this.queue.push(row);
     this.check();
@@ -147,8 +166,16 @@ export class Sim {
     return this.nextId - 1;
   }
 
+  /** Where an agent's MCP server stands, as it last reported (null: it reported none by that name). */
+  mcpStatus(agentId: string, name: string): McpServerStatus | null {
+    const k = this.servers.get(`${agentId}:${name}`)?.kind;
+    return k?.type === 'mcp_server' ? k.status : null;
+  }
+
   snapshot(): Snapshot {
     this.flush();
+    const events = this.log.slice(-2000);
+    const from = events[0]?.id ?? 0;
     return {
       as_of: this.lastId,
       clis: this.clis,
@@ -165,7 +192,9 @@ export class Sim {
       memories: [...this.memories.values()],
       triples: this.triples,
       artifacts: [...this.artifacts.values()],
-      events: this.log.slice(-2000),
+      events,
+      // Like the core: where each MCP server stands, when that is older than `events`. (The demo's agents leave no command running.)
+      session_events: [...this.servers.values()].filter((e) => e.id < from).sort((a, b) => a.id - b.id),
     };
   }
 
@@ -225,8 +254,9 @@ export class Sim {
     return this.putPlan({ ...prev, ...patch, updated_at: this.now() });
   }
 
-  chat(thread: string, author: string, text: string, attachment: JsonValue | null = null) {
-    const m: ChatMessage = { id: uid('m-'), thread, author, text, attachment, ts: this.now() };
+  /** `itemId`: the agent's message this row shows (as the core writes it on the row of a message). */
+  chat(thread: string, author: string, text: string, attachment: JsonValue | null = null, itemId?: string) {
+    const m: ChatMessage = { id: uid('m-'), thread, author, text, attachment, ts: this.now(), ...(itemId ? { item_id: itemId } : {}) };
     this.chats.push(m);
     const agent = author !== 'user' && author !== 'codly' ? author : null;
     this.emit({ type: 'chat', message: m }, { agent });
@@ -457,7 +487,7 @@ export class Actor {
       await this.sleep((opts.pace ?? 38) + Math.random() * 34);
     }
     this.emit({ type: 'message', item_id: itemId, text, phase: opts.phase ?? 'final' });
-    if (opts.thread) this.sim.chat(opts.thread, this.id, text, opts.attachment ?? null);
+    if (opts.thread) this.sim.chat(opts.thread, this.id, text, opts.attachment ?? null, itemId);
     this.usage(600 + Math.round(Math.random() * 900), Math.round(text.length / 3.4));
   }
 
@@ -511,6 +541,7 @@ export class Actor {
       tests_failed: s.failed ?? null,
     });
     this.usage(900 + Math.round(Math.random() * 2400), 40 + Math.round(Math.random() * 160), true);
+    await this.sim.afterStep?.(this);
     return callId;
   }
 

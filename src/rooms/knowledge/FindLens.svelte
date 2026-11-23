@@ -14,8 +14,10 @@
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { ago } from '../../lib/util/format';
+  import { searchFailure } from '../../lib/util/search';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
+  import InlineText from '../../components/InlineText.svelte';
   import Provenance from '../../components/Provenance.svelte';
 
   type Mode = 'exact' | 'meaning';
@@ -24,9 +26,12 @@
   let busy = $state(false);
   let failed = $state<string | null>(null);
   let exact = $state<ExactHit[] | null>(null);
-  let meaning = $state<{ memories: Memory[]; code: SearchResult | null; facts: Triple[] } | null>(null);
+  /** `code`: null when the code search failed; `codeFailed` then says why. */
+  let meaning = $state<{ memories: Memory[]; code: SearchResult | null; codeFailed: string | null; facts: Triple[] } | null>(null);
   let el: HTMLInputElement | undefined = $state();
   let seq = 0;
+  /** Try again: the same search once more. */
+  let again = $state(0);
 
   const KIND: Record<HitKind, string> = { board: 'Whiteboard', task: 'Task', memory: 'Memory' };
   const who = (id: string | null) => (id ? (store.agentMap.get(id)?.name ?? (id === 'user' ? 'You' : id === 'codly' ? 'Codly' : null)) : null);
@@ -48,6 +53,7 @@
   $effect(() => {
     const query = q.trim();
     const m = mode;
+    void again;
     if (!query) {
       exact = meaning = null;
       failed = null;
@@ -62,8 +68,13 @@
           const r = await api.exactSearch(query);
           if (my === seq) exact = r;
         } else {
-          const [memories, code] = await Promise.all([api.memories(query), api.search(query).catch(() => null)]);
-          if (my === seq) meaning = { memories: memories.slice(0, 12), code, facts: facts(query) };
+          // A code search that fails does not take the memories and the facts away: its part says why.
+          const code = api.search(query).then(
+            (found) => ({ found, codeFailed: null }),
+            (e: unknown) => ({ found: null, codeFailed: searchFailure(e) }),
+          );
+          const [memories, { found, codeFailed }] = await Promise.all([api.memories(query), code]);
+          if (my === seq) meaning = { memories: memories.slice(0, 12), code: found, codeFailed, facts: facts(query) };
         }
         if (my === seq) failed = null;
       } catch (e) {
@@ -113,8 +124,8 @@
               <button class="hit" class:static={h.kind !== 'task'} onclick={() => openHit(h)}>
                 <span class="kind k-{h.kind}">{KIND[h.kind]}</span>
                 <span class="body">
-                  <span class="title truncate">{h.title}</span>
-                  <span class="snip selectable">{a}<mark>{m}</mark>{b}</span>
+                  <span class="title truncate"><InlineText text={h.title} /></span>
+                  <span class="snip selectable"><InlineText text={a} /><mark>{m}</mark><InlineText text={b} /></span>
                   <span class="meta"><span>in {h.field}</span>{#if who(h.who)}<span>{who(h.who)}</span>{/if}<span class="num">{ago(h.ts, ui.now)}</span></span>
                 </span>
               </button>
@@ -128,20 +139,25 @@
       <section>
         <h2 class="eyebrow">Memories <span class="num">{meaning.memories.length}</span></h2>
         {#each meaning.memories as m (m.id)}
-          <p class="mem selectable"><span class="kind k-{m.kind === 'note' ? 'board' : 'memory'}">{m.kind}</span>{m.text}<span class="meta"><span>{who(m.author) ?? m.author}</span><span class="num">{ago(m.created_at, ui.now)}</span></span></p>
+          <p class="mem selectable"><span class="kind k-{m.kind === 'note' ? 'board' : 'memory'}">{m.kind}</span><span><InlineText text={m.text} /></span><span class="meta"><span>{who(m.author) ?? m.author}</span><span class="num">{ago(m.created_at, ui.now)}</span></span></p>
         {:else}
           <p class="none">Nothing remembered about this.</p>
         {/each}
       </section>
       <section>
         <h2 class="eyebrow">Code {#if meaning.code}<span class="num">{meaning.code.citations.length}</span><Provenance kind="observed" compact />{/if}</h2>
-        {#each meaning.code?.citations ?? [] as c (c.id)}
-          <button class="cite" onpointerenter={() => ui.setHover({ path: c.path })} onpointerleave={() => ui.setHover(null)} onclick={() => ui.selectFile(c.path)}>
-            <code>{c.path}<span class="muted">:{c.start_line}–{c.end_line}</span></code>{#if c.symbol}<span class="sym">{c.symbol}</span>{/if}
-          </button>
+        {#if meaning.codeFailed}
+          <p class="none failed" role="alert"><span>{meaning.codeFailed}</span><button class="btn sm" disabled={busy} onclick={() => again++}>Try again</button></p>
         {:else}
-          <p class="none">No code hits{meaning.code ? ` (${meaning.code.confidence} confidence)` : ' — the index is not ready'}.</p>
-        {/each}
+          {#each meaning.code?.warnings ?? [] as w, i (i)}<p class="warn" role="status">{w}</p>{/each}
+          {#each meaning.code?.citations ?? [] as c (c.id)}
+            <button class="cite" onpointerenter={() => ui.setHover({ path: c.path })} onpointerleave={() => ui.setHover(null)} onclick={() => ui.selectFile(c.path)}>
+              <code>{c.path}<span class="muted">:{c.start_line}–{c.end_line}</span></code>{#if c.symbol}<span class="sym">{c.symbol}</span>{/if}
+            </button>
+          {:else}
+            <p class="none">No code hits{meaning.code ? ` (${meaning.code.confidence} confidence)` : ''}.</p>
+          {/each}
+        {/if}
       </section>
       <section>
         <h2 class="eyebrow">Facts <span class="num">{meaning.facts.length}</span></h2>
@@ -186,5 +202,9 @@
   .sym { font-size: var(--t-sm); color: var(--aurora-m); }
   .fact { display: flex; gap: 8px; padding: 6px 14px; font-size: var(--t-md); color: var(--ink-1); }
   .pred { color: var(--ink-3); }
+  .warn { padding: 0 14px 6px; font-size: var(--t-sm); color: var(--amber-ink); }
   .none { padding: 4px 14px; font-size: var(--t-sm); color: var(--ink-3); }
+  .failed { display: flex; align-items: center; gap: 10px; }
+  .failed span { min-width: 0; overflow-wrap: anywhere; }
+  .failed .btn { flex-shrink: 0; }
 </style>

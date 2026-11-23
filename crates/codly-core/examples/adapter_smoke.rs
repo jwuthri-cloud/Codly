@@ -180,7 +180,7 @@ async fn main() {
         eprintln!("{} not found on PATH", args.provider.as_str());
         std::process::exit(1);
     };
-    let info = codly_core::env::detect_all(&base).await.into_iter().find(|c| c.provider == args.provider).unwrap();
+    let info = codly_core::env::detect_all(&base, false).await.into_iter().find(|c| c.provider == args.provider).unwrap();
     println!("detected: {}", serde_json::to_string(&info).unwrap());
 
     let mcp_log = root.join("mcp-calls.ndjson");
@@ -192,6 +192,7 @@ async fn main() {
     let model = args.model.clone().unwrap_or_else(|| default_model(args.provider).to_string());
     let spec = SpawnSpec {
         agent_id: new_id(),
+        agent_name: "Smoke".into(),
         run_id: run_id.clone(),
         provider: args.provider,
         role: args.role.unwrap_or(default_role(args.provider)),
@@ -200,12 +201,16 @@ async fn main() {
         bin,
         env: codly_core::env::child_env(&base, args.provider),
         session: SessionMode::New { session_id: None },
+        session_cost_usd: 0.0,
         system_prompt: "You are a Codly smoke-test agent. Follow the user's instructions exactly and keep replies short.".into(),
         read_only: false,
         mcp,
         use_user_setup: false,
+        sandbox_network: false,
+        local_settings: false,
         raw_log: raw_log.clone(),
         byok_command: None,
+        sandbox_shell: false,
     };
     println!("spawning {} ({:?}, model {:?}) in {}", spec.bin.display(), spec.role, spec.model, repo.display());
 

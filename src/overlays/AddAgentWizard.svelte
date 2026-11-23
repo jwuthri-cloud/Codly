@@ -11,6 +11,7 @@
   import type { HireManifest } from '../lib/gen/HireManifest';
   import type { HireReview } from '../lib/gen/HireReview';
   import type { LaunchPreview } from '../lib/gen/LaunchPreview';
+  import type { ModelCatalog } from '../lib/gen/ModelCatalog';
   import type { Provider } from '../lib/gen/Provider';
   import { api } from '../lib/api';
   import { askForHire, startHire } from '../lib/state/hireWizard';
@@ -22,7 +23,8 @@
     type HireTemplate,
   } from '../lib/util/hire';
   import { COMPANY_LABEL, PROVIDER_LABEL, idVar } from '../lib/util/labels';
-  import { ROLE_TITLES } from '../lib/util/team';
+  import { effortLabel, effortsFor, keptEffort, optionLabel, sourceNote, troubleNote } from '../lib/util/models';
+  import { ROLE_TITLES, joinModel, splitModel } from '../lib/util/team';
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
   import Portrait from '../components/Portrait.svelte';
@@ -48,7 +50,9 @@
   let aiOpen = $state(false);
   let brief = $state('');
   let asking: AbortController | null = $state(null);
-  let models = $state<string[]>([]);
+  let catalog = $state<ModelCatalog | null>(null);
+  /** Why the catalog could not be read: said under the model field (typing a name still works). */
+  let catalogFailed = $state<string | null>(null);
   let preview = $state<LaunchPreview | null>(null);
   let review = $state<HireReview | null>(null);
   /** The person accepted the shell metacharacters in a custom command. */
@@ -113,12 +117,28 @@
   });
   $effect(() => {
     const p = m.provider;
-    models = [];
+    catalog = null;
+    catalogFailed = null;
     if (p === CUSTOM) return;
     let live = true;
-    api.listModels(p as Provider).then((l) => live && (models = l.slice(0, 8))).catch(() => {});
+    api.modelCatalog(p as Provider).then(
+      (c) => live && (catalog = c),
+      (e) => live && (catalogFailed = e instanceof Error ? e.message : String(e)),
+    );
     return () => (live = false);
   });
+  // The model is "name:effort" in the manifest; the wizard picks the two apart.
+  const picked = $derived(splitModel(m.model));
+  const efforts = $derived(custom ? [] : effortsFor(catalog, m.provider as Provider, picked.name));
+  const modelNote = $derived.by(() => {
+    if (custom) return null;
+    const cli = PROVIDER_LABEL[m.provider as Provider];
+    return troubleNote(catalog, catalogFailed, cli) ?? sourceNote(catalog, cli);
+  });
+  /** Another model keeps the effort only if it takes that level. */
+  function pickModel(name: string) {
+    m.model = joinModel(name, custom ? '' : keptEffort(catalog, m.provider as Provider, name.trim(), picked.effort));
+  }
   // A risky command needs a fresh confirmation whenever it changes.
   $effect(() => {
     void m.command;
@@ -260,7 +280,7 @@
     {/if}
     {#if notice.length}
       <div class="callout bad" role="alert">
-        {#each notice as n (n)}<div>{n}</div>{/each}
+        {#each notice as n, i (i)}<div>{n}</div>{/each}
       </div>
     {/if}
 
@@ -322,7 +342,7 @@
         <span class="eyebrow">Project folder</span>
         <div class="path" title={folder?.repo_path}>
           <Icon name="reveal" size={14} />
-          <span class="mono">{folder?.repo_path ?? 'No project open'}</span>
+          <span class="mono"><bdi>{folder?.repo_path ?? 'No project open'}</bdi></span>
           {#if folder?.current_branch}<span class="muted small">on {folder.current_branch}</span>{/if}
         </div>
         <p class="muted small">Agents start in the project that is open. Open another repository from the Welcome screen to hire into it.</p>
@@ -360,13 +380,25 @@
         <div class="field">
           <span class="eyebrow">Model</span>
           <div class="choices" role="radiogroup" aria-label="Model">
-            <button type="button" class="choice" role="radio" aria-checked={!m.model} class:on={!m.model} onclick={() => (m.model = null)}><span class="radio"></span>CLI default</button>
-            {#each models as name (name)}
-              <button type="button" class="choice" role="radio" aria-checked={m.model === name} class:on={m.model === name} onclick={() => (m.model = name)}><span class="radio"></span>{name}</button>
+            <button type="button" class="choice" role="radio" aria-checked={!picked.name} class:on={!picked.name} onclick={() => pickModel('')}><span class="radio"></span>CLI default</button>
+            {#each (catalog?.models ?? []).slice(0, 8) as option, oi (oi)}
+              <button type="button" class="choice" role="radio" aria-checked={picked.name === option.id} class:on={picked.name === option.id} onclick={() => pickModel(option.id)}><span class="radio"></span>{optionLabel(option)}</button>
             {/each}
           </div>
-          <input value={m.model ?? ''} oninput={(e) => (m.model = e.currentTarget.value.trim() || null)} placeholder="Other model name" spellcheck="false" autocomplete="off" />
+          <input value={picked.name} oninput={(e) => pickModel(e.currentTarget.value)} placeholder="Other model name" spellcheck="false" autocomplete="off" />
+          {#if modelNote}<span class="muted small">{modelNote}</span>{/if}
         </div>
+        {#if efforts.length}
+          <div class="field">
+            <span class="eyebrow">Thinking effort</span>
+            <div class="choices" role="radiogroup" aria-label="Thinking effort">
+              <button type="button" class="choice" role="radio" aria-checked={!picked.effort} class:on={!picked.effort} onclick={() => (m.model = joinModel(picked.name, ''))}><span class="radio"></span>Default</button>
+              {#each efforts as e (e)}
+                <button type="button" class="choice" role="radio" aria-checked={picked.effort === e} class:on={picked.effort === e} onclick={() => (m.model = joinModel(picked.name, e))}><span class="radio"></span>{effortLabel(e)}</button>
+              {/each}
+            </div>
+          </div>
+        {/if}
       {/if}
       <div class="field">
         <span class="eyebrow">Launch command</span>
@@ -455,6 +487,8 @@
   .swatch { width: 26px; height: 26px; border-radius: 50%; background: var(--hue); box-shadow: inset 0 0 0 2px var(--pop); }
   .swatch.on { box-shadow: inset 0 0 0 2px var(--pop), 0 0 0 2px var(--ink-1); }
   .path { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 12px; border-radius: var(--r-md); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); min-width: 0; }
+  /* A long path loses its start, not its end: the box is right-to-left so the ellipsis is on the
+     left, and the path itself stays left-to-right in its <bdi> (without it the leading "/" moves to the end). */
   .path .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; flex: 1; min-width: 0; }
   .check { display: flex; align-items: flex-start; gap: 10px; font-size: var(--t-md); cursor: pointer; }
   .check input { margin-top: 3px; flex-shrink: 0; }

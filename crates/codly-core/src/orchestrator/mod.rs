@@ -7,47 +7,84 @@
 //! - `runs`     spawning agent runs (the `Spawner` seam), prompts, the live-run table
 //! - `lead`     the supervisors: one Lead per request thread (≤ 3 live), board header, follow-ups
 //! - `plans`    submit/run/cancel plans, the scheduler loop, starting workers
+//! - `retry`    a worker that failed starts again after a wait; what blocks instead
+//! - `stuck`    plans that cannot go on by themselves: the notice, keep what is merged
 //! - `gate`     commit → verify → scope → review → merge queue → done
+//! - `background` work a run left behind its turn (a background command, a helper): the gate waits for it
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
+//! - `preview`  try the work before a merge: your command in a plan's or an agent's worktree
+//! - `approval_rules` "always allow in this repo": saved rules the approval broker follows
 //! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
 //! - `triggers` schedules and context rules run on a clock (policy: `crate::triggers`)
 //! - `housekeeping` board archiving sweep, default MCP servers for new agents
 //! - `team`     standing team members (per-repo agents, stable worktrees) and consultants
 //! - `breaker_run` circuit breaker enforcement (policy in `breaker`): steer, constrain, stop
+//! - `watchdog` a turn that gives no output, a worker idle on a running task: flag, interrupt, stop
+//! - `interrupts` who asked for an interrupt, and what follows when the CLI does not stop
 //! - `wallet`   the player's coins (🪙) across every repo, Build/Buy, developer grants
-//! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
+//! - `worktree_setup` a new worktree made ready: copied ignored files, a port block, the setup script
+//! - `checkpoints` an agent's files before each turn (private refs), "Restore files to this point"
+//! - `takeover` "Open in my terminal": an idle agent's CLI session goes to you, and comes back
+//! - `merge_conflict` a conflict at the final merge: its files, an agent that resolves it, checks on the merge result
+//! - `required_checks` the repo owner's `.codly/checks`: run by the gate for every task and plan
+//! - `trust`    workspace trust: the repo's own CLI configuration loads only once you trusted it
+//! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`,
+//!   `weak_checks` (a verify command that proves nothing)
 
 pub mod accounts;
 pub mod approvals;
+mod approval_rules;
 pub mod agent_git;
+pub mod checkpoints;
 pub mod breaker;
 mod breaker_run;
 mod careers;
+pub mod codex_account;
 pub use breaker_run::{AgentBreaker, BreakerStatus};
 mod controls;
 mod ask_me;
 mod gate;
+mod left_out;
 mod ide;
 mod hires;
 pub mod housekeeping;
 mod ingest;
+pub mod intake;
 mod lead;
+mod live_session;
 mod lots;
+pub mod merge_conflict;
 pub mod names;
 pub mod planner;
 mod plans;
 pub mod prompts;
+pub mod preview;
+mod retry;
+pub mod pull_request;
 mod runs;
 pub mod scheduler;
 pub mod scope;
 mod snapshot;
+mod stuck;
 mod team;
 mod tools;
 mod triggers;
 pub mod wallet;
 mod workspace;
 mod memgraph;
+pub mod watchdog;
+mod interrupts;
+mod rebrief;
+pub mod worktree_setup;
+pub mod activity;
+pub mod takeover;
+pub mod required_checks;
+mod weak_checks;
+pub mod trust;
+mod background;
+mod outside;
+pub mod resume;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -64,7 +101,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::{Notify, broadcast, mpsc};
 
-use crate::adapters::{AdapterEvent, AgentCmd, AgentHandle, SpawnSpec};
+use crate::adapters::{AdapterEvent, AgentHandle, SpawnSpec};
 use crate::git::Git;
 use crate::index::Index;
 use crate::mcp::McpServer;
@@ -134,7 +171,8 @@ struct Live {
     token: String,
     /// Between TurnStarted and TurnCompleted.
     turn_active: bool,
-    /// Prompts sent but not started yet (the adapter queues them; Codex steers instead).
+    /// Prompts sent that no `TurnStarted` (a turn of its own) or `PromptSteered` (the CLI put
+    /// it into the running turn) has accounted for yet.
     queued: u32,
     /// Some while the CLI is still in its handshake (`spawn_run` holds the agent's place, with
     /// a `handle` nobody listens to): the prompts sent meanwhile, in order.
@@ -151,10 +189,29 @@ struct Live {
     turn_messages: u32,
     /// First line of the latest user message (solo commit messages).
     last_prompt: Option<String>,
+    /// A prompt of this run carried the agent's career block (`with_briefing`): once in a run.
+    briefed: bool,
     /// Lead messages (codly_message_member) whose answer goes back to that Lead.
     answers: Vec<Answer>,
     /// Started only to answer the Lead: shut down once every answer went out.
     answer_only: bool,
+    /// Turns in a row that ended on an error or at the turn limit; a completed turn resets it.
+    failed_turns: u32,
+    /// The last error the CLI reported in the current or last turn.
+    last_error: Option<String>,
+    /// The continue prompt a failed turn still owes this worker. It goes out after the retry
+    /// wait, when another turn completes or when you resume the worker, whichever is first.
+    continue_owed: Option<String>,
+    /// When its last event came, and what the watchdog did about a silence (watchdog.rs).
+    watch: watchdog::Watch,
+    /// Who asked its turn to stop, and whether its adapter gave that turn up (interrupts.rs).
+    interrupt: interrupts::Interrupt,
+    /// The turn that runs, or ran last, took no prompt: the CLI started it by itself.
+    self_started: bool,
+    /// What it has at work beside its own turns, and the gate's wait for it (background.rs).
+    background: background::Background,
+    /// Its MCP servers and its last list of background tasks, for a snapshot (live_session.rs).
+    session_rows: live_session::SessionRows,
 }
 
 /// A member's reply the Lead of `thread` waits for: the reply of turn number `due`.
@@ -194,12 +251,12 @@ struct Inner {
     /// Tasks whose gate is running (one per task at a time) → "run it again when done"
     /// (a worker turn ended while it ran).
     gating: Mutex<HashMap<Id, bool>>,
-    /// Fix rounds used per task (verify, scope, review and conflict feedback); a user retry resets them.
-    fix_rounds: Mutex<HashMap<Id, u32>>,
-    /// Reminders sent to a reviewer run that ended without a verdict.
-    review_nudges: Mutex<HashMap<Id, u32>>,
-    /// Feedback for the next worker run of a task whose worker was not alive.
-    pending_feedback: Mutex<HashMap<Id, String>>,
+    /// Rounds used per task: fix rounds (verify, scope, review feedback) and, apart, merge
+    /// conflict rounds; a user retry resets them. Kept in the store too (`resume.rs`).
+    fix_rounds: Mutex<HashMap<Id, gate::Rounds>>,
+    /// Reminders sent to a run that ended without what the gate needs from it, by run: a
+    /// reviewer's verdict, a worker's report.
+    nudges: Mutex<HashMap<Id, u32>>,
     /// The request threads' Leads: per-Lead turn queues (codly_ask_lead forwarding), LRU
     /// use, and turns waiting for a free Lead slot.
     leads: Mutex<lead::LeadPool>,
@@ -212,14 +269,44 @@ struct Inner {
     quota: Mutex<HashMap<String, Vec<UsageWindow>>>,
     /// Artifact files already announced (absolute path + size), so rewrites re-announce.
     artifacts_seen: Mutex<HashSet<String>>,
+    /// Files to copy into `artifacts/` and announce (`ingest::copy_artifacts` does it, so a
+    /// copy never runs on the ingest task).
+    artifact_copies: mpsc::UnboundedSender<ingest::ArtifactCopy>,
     /// Open (and just-closed) job offers, by task.
     offers: Mutex<HashMap<Id, JobOffer>>,
     /// How long a job offer stays up (ms); 0 = hire at once (the default, and in tests).
     hiring_window_ms: std::sync::atomic::AtomicU64,
-    /// Model names per CLI (`env::list_models`), for the Lead's consultant choices.
+    /// Model names per CLI (`Inner::cli_model_names`), for the Lead's consultant choices.
     models: Mutex<HashMap<Provider, Vec<String>>>,
+    /// A refresh of the accounts also reads each Codex sign-in's usage (`pull_codex_limits`).
+    /// On; `Core::set_codex_usage_reads` switches it off for tests beside a real Codex.
+    codex_usage_reads: AtomicBool,
     /// Circuit breaker: its settings and the per-agent signals.
     breaker: Mutex<breaker_run::Runtime>,
+    /// How long Codly waits before it asks a worker whose turn failed to continue: one wait
+    /// per retry, then the task is blocked (`ingest::TURN_RETRY_WAITS`; tests shorten them).
+    turn_retry_waits: RwLock<Vec<Duration>>,
+    /// How long the gate waits for a worker's background work before Codly stops it
+    /// (`background::WAIT`; tests shorten it).
+    background_wait: RwLock<Duration>,
+    /// Where each agent's MCP servers stood in their last rows on record (`live_session.rs`).
+    mcp_recorded: Mutex<live_session::McpRecorded>,
+    /// Workers that failed lately: failures in a row per task, and when each starts again.
+    retries: Mutex<retry::Retries>,
+    /// The stuck plans Codly told you about: plan → the tasks that stopped it (`stuck.rs`).
+    stuck_told: Mutex<HashMap<Id, String>>,
+    /// The last look for plans merged outside Codly, per office.
+    merge_looks: Mutex<HashMap<Id, plans::MergeLook>>,
+    /// 1:1 agents whose work "Check the work" checks now: one run for an agent at a time.
+    checking: Mutex<HashSet<Id>>,
+    /// Agents that a message from outside Codly reached: which of their turns work for it
+    /// (`outside.rs`).
+    outside_turns: Mutex<HashMap<Id, outside::Turns>>,
+    /// One choice about the required checks at a time re-checks the tasks that waited for it
+    /// (`required_checks.rs`): a second choice waits for the first one's tasks.
+    rechecks: tokio::sync::Mutex<()>,
+    /// Work was under way when Codly last closed, and it waits for your Resume (`resume.rs`).
+    held_work: Mutex<Option<resume::Hold>>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -277,9 +364,9 @@ async fn capture_env() -> HashMap<String, String> {
     })
 }
 
-async fn detect_clis(base: &HashMap<String, String>) -> Vec<CliInfo> {
+async fn detect_clis(base: &HashMap<String, String>, shell_auth: bool) -> Vec<CliInfo> {
     let base = base.clone();
-    let job = tokio::spawn(async move { crate::env::detect_all(&base).await });
+    let job = tokio::spawn(async move { crate::env::detect_all(&base, shell_auth).await });
     match tokio::time::timeout(Duration::from_secs(30), job).await {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
@@ -333,7 +420,7 @@ impl Core {
             std::fs::set_permissions(cfg.data_dir.join("runs"), std::fs::Permissions::from_mode(0o700))?;
         }
         approvals::protect_dir(&cfg.data_dir);
-        let store = Store::open(&cfg.data_dir.join("codly.sqlite"))?;
+        let store = Store::open(&cfg.data_dir.join(store::FILE))?;
         let settings = store.settings()?;
         let base_env = match opts.env {
             Some(e) => e,
@@ -343,13 +430,17 @@ impl Core {
         let fixed_clis = opts.clis.is_some();
         let clis = match opts.clis {
             Some(c) => c,
-            None => detect_clis(&base_env).await,
+            None => detect_clis(&base_env, settings.claude_shell_auth).await,
         };
         // Fixed CLIs (tests) are not probed: every account takes its CLI's state.
-        let accounts = accounts::detect(&base_env, &clis, &settings.accounts, !fixed_clis, None).await.unwrap_or_default();
+        let accounts =
+            accounts::detect(&base_env, &clis, &settings.accounts, !fixed_clis, None, settings.claude_shell_auth).await.unwrap_or_default();
         let quota = accounts::stored_limits(&store);
+        let rounds = resume::stored_rounds(&store);
+        let outside_turns = outside::stored(&store)?;
         let breaker = Mutex::new(breaker_run::Runtime::load(&store));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (artifact_copies, artifact_jobs) = mpsc::unbounded_channel();
         let (bus, _) = broadcast::channel(4096);
         let inner = Arc::new(Inner {
             cfg: cfg.clone(),
@@ -374,28 +465,41 @@ impl Core {
             lead_lock: tokio::sync::Mutex::new(()),
             kick: Notify::new(),
             gating: Mutex::new(HashMap::new()),
-            fix_rounds: Mutex::new(HashMap::new()),
-            review_nudges: Mutex::new(HashMap::new()),
-            pending_feedback: Mutex::new(HashMap::new()),
+            fix_rounds: Mutex::new(rounds),
+            nudges: Mutex::new(HashMap::new()),
             leads: Mutex::new(lead::LeadPool::default()),
             shutting_down: AtomicBool::new(false),
             labels: Mutex::new(HashMap::new()),
             accounts: RwLock::new(accounts),
             quota: Mutex::new(quota),
             artifacts_seen: Mutex::new(HashSet::new()),
+            artifact_copies,
             offers: Mutex::new(HashMap::new()),
             hiring_window_ms: std::sync::atomic::AtomicU64::new(0),
             models: Mutex::new(HashMap::new()),
+            codex_usage_reads: AtomicBool::new(true),
             breaker,
+            turn_retry_waits: RwLock::new(ingest::TURN_RETRY_WAITS.to_vec()),
+            background_wait: RwLock::new(background::WAIT),
+            mcp_recorded: Mutex::new(HashMap::new()),
+            retries: Mutex::new(retry::Retries::default()),
+            stuck_told: Mutex::new(HashMap::new()),
+            merge_looks: Mutex::new(HashMap::new()),
+            checking: Mutex::new(HashSet::new()),
+            outside_turns: Mutex::new(outside_turns),
+            rechecks: tokio::sync::Mutex::new(()),
+            held_work: Mutex::new(None),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);
         inner.recover().await;
         tokio::spawn(ingest::run(inner.clone(), events_rx));
+        tokio::spawn(ingest::copy_artifacts(inner.clone(), artifact_jobs));
         tokio::spawn(plans::scheduler_loop(inner.clone()));
         tokio::spawn(triggers::run(inner.clone()));
         tokio::spawn(breaker_run::beat_loop(inner.clone()));
         tokio::spawn(housekeeping::sweeper(inner.clone()));
+        tokio::spawn(watchdog::run(inner.clone()));
         match inner.store.last_workspace() {
             Ok(Some(ws)) => {
                 if let Err(e) = inner.open_workspace(&ws.repo_path).await {
@@ -408,7 +512,8 @@ impl Core {
         Ok(Arc::new(Core { inner }))
     }
 
-    /// Live stream of every event: persisted rows (id > 0) and ephemeral deltas (id = 0).
+    /// Live stream of every event: persisted rows (id > 0), and with id = 0 the ephemeral
+    /// deltas and an agent's live changes (its activity and usage: `update_agent`).
     pub fn subscribe(&self) -> broadcast::Receiver<EventRow> {
         self.inner.bus.subscribe()
     }
@@ -418,10 +523,12 @@ impl Core {
         self.inner.snapshot().await
     }
 
+    /// Look for the CLIs again and ask each who is signed in. The onboarding polls this, so it
+    /// never asks for a quota (`Inner::pull_quota` reads a credential).
     pub async fn redetect_clis(&self) -> anyhow::Result<Vec<CliInfo>> {
         let i = &self.inner;
         if !i.fixed_clis {
-            let clis = detect_clis(&i.base_env).await;
+            let clis = detect_clis(&i.base_env, i.settings().claude_shell_auth).await;
             *write(&i.clis) = clis;
         }
         i.redetect_accounts(false).await;
@@ -429,11 +536,13 @@ impl Core {
     }
 
     /// Every sign-in of every installed CLI, in your order, with the usage windows its agents
-    /// last reported (`limits`). `refresh` = ask each CLI again who is signed in, and each
-    /// Claude sign-in for its quota (≤ 10 s).
+    /// last reported (`limits`). `refresh` = ask each CLI again who is signed in, ask each Codex
+    /// sign-in's app-server for its usage windows (≤ 15 s) and, only with
+    /// `Settings.read_claude_quota` on, ask Anthropic for each Claude sign-in's quota (≤ 10 s).
     pub async fn accounts(&self, refresh: bool) -> anyhow::Result<Vec<AccountInfo>> {
         if refresh {
             self.inner.redetect_accounts(false).await;
+            tokio::join!(self.inner.pull_quota(), self.inner.pull_codex_limits());
         }
         Ok(self.inner.accounts())
     }
@@ -457,6 +566,7 @@ impl Core {
         let mut s = settings;
         s.max_parallel = s.max_parallel.clamp(1, 8);
         s.max_per_provider = s.max_per_provider.clamp(1, s.max_parallel);
+        s.verify_timeout_secs = s.verify_timeout_secs.clamp(1, 24 * 3600); // 0 would stop every check at once
         let mut seen = HashSet::new();
         s.worker_providers.retain(|p| seen.insert(*p));
         s.accounts = normalize_accounts(std::mem::take(&mut s.accounts), &self.inner.base_env)?;
@@ -474,12 +584,15 @@ impl Core {
             self.inner.sync_team(&ws)?;
         }
         self.inner.kick();
+        self.inner.permissions_changed().await;
         Ok(s)
     }
 
     /// A request thread's own mode, permissions and Lead model (None fields = Settings defaults).
     pub async fn set_request_prefs(&self, thread: &str, prefs: RequestPrefs) -> anyhow::Result<RequestPrefs> {
-        self.inner.set_request_prefs(thread, prefs)
+        let prefs = self.inner.set_request_prefs(thread, prefs)?;
+        self.inner.permissions_changed().await;
+        Ok(prefs)
     }
 
     /// The open repo's changes to the global team (switch members off, add its own).
@@ -521,14 +634,30 @@ impl Core {
         self.inner.close_thread(thread).await
     }
 
+    /// The requests closed in the open repo, newest first (at most `store::CLOSED_LISTED`).
+    pub async fn closed_requests(&self) -> anyhow::Result<Vec<ClosedRequest>> {
+        let ws = self.inner.require_ws()?;
+        self.inner.store.closed_requests(&ws.id, store::CLOSED_LISTED)
+    }
+
+    /// One closed request of the open repo, to read again: `thread` is its archive thread, from
+    /// `closed_requests`. Open conversations are not read this way (the snapshot has them).
+    pub async fn closed_request(&self, thread: &str) -> anyhow::Result<ClosedTranscript> {
+        if !thread.starts_with("closed:") {
+            bail!("{thread} is not a closed request");
+        }
+        let ws = self.inner.require_ws()?;
+        self.inner.store.closed_transcript(&ws.id, thread, store::CLOSED_MESSAGES)
+    }
+
     pub async fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision) -> anyhow::Result<()> {
         self.inner.resolve_approval(approval_id, decision, "user")
     }
 
     pub async fn interrupt_agent(&self, agent_id: &str) -> anyhow::Result<()> {
-        let live = lock(&self.inner.live);
-        let l = live.get(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
-        if !l.handle.send(AgentCmd::Interrupt) {
+        let mut live = lock(&self.inner.live);
+        let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("that agent is not running"))?;
+        if !l.send_interrupt(interrupts::Asker::You) {
             bail!("that agent's process is gone");
         }
         Ok(())
@@ -539,7 +668,8 @@ impl Core {
     }
 
     /// How long a job offer stays up in the office before the Lead's pick is hired
-    /// (the app sets 30 s; 0, the default, hires at once).
+    /// (the app sets 30 s; 0, the default, hires at once). Offers are posted only with the
+    /// office rules on (`Settings::game_rules`).
     pub fn set_hiring_window(&self, d: std::time::Duration) {
         self.inner.set_hiring_window(d);
     }
@@ -611,20 +741,17 @@ impl Core {
         Ok(a)
     }
 
-    /// Trust an agent up to a rank's perks (`career::PERKS`, capped at its rank); Intern takes
-    /// them back. You grant it; a promotion only offers it.
-    pub fn trust_agent(&self, agent_id: &str, rank: Rank) -> anyhow::Result<Agent> {
+    /// Set how much you trust an agent (`career::trust_allows`): any level at any time, whatever
+    /// its rank; Intern takes it all back. A change is recorded as a decision.
+    pub fn trust_agent(&self, agent_id: &str, level: Rank) -> anyhow::Result<Agent> {
         let ws = self.inner.require_ws()?;
-        let mut set = Rank::Intern;
-        let a = self.inner.update_agent(agent_id, |a| set = crate::career::grant(&mut a.career, rank, now_ms()))?;
-        let what = if set == Rank::Intern { format!("took back trust in {}", a.name) } else { format!("trusted {} as {}", a.name, crate::career::rank_label(set)) };
-        self.inner.decide(Some(&ws.id), None, "staff", what, serde_json::json!({ "agent": a.id, "trust": set }))?;
-        Ok(a)
+        self.inner.set_trust(&ws, agent_id, level)
     }
 
-    /// The office sends an agent home to rest until `until` (ms), or calls it back (None). The
-    /// Lead gives an agent at home no new work; nothing else changes (its conversation and
-    /// session stay as they are). The Lead never goes home: you talk to it.
+    /// The office sends an agent home to rest until `until` (ms), or calls it back (None). With
+    /// the office rules on (`Settings::game_rules`) the Lead gives an agent at home no new work;
+    /// otherwise it is only shown. Nothing else changes (its conversation and session stay as
+    /// they are). The Lead never goes home: you talk to it.
     pub fn set_agent_home(&self, agent_id: &str, until: Option<i64>) -> anyhow::Result<Agent> {
         if until.is_some() && self.inner.agent(agent_id)?.role == Role::Lead {
             anyhow::bail!("the Lead never goes home");
@@ -645,7 +772,8 @@ impl Core {
     }
 
     /// The office reports that an agent is tired (its energy fell under 30%) or rested again.
-    /// Only a hint for the Lead's board and the scheduler's tiebreaks: nobody is refused work.
+    /// With the office rules on, a hint for the Lead's board and the scheduler's tiebreaks:
+    /// nobody is refused work.
     pub fn set_agent_tired(&self, agent_id: &str, tired: bool) -> anyhow::Result<Agent> {
         let a = self.inner.agent(agent_id)?;
         if a.tired_since.is_some() == tired {
@@ -835,14 +963,6 @@ impl Core {
         self.inner.set_agent_model(agent_id, model).await
     }
 
-    /// Models a CLI can run, for the start-agent picker (empty when it takes any name).
-    pub async fn list_models(&self, provider: Provider) -> anyhow::Result<Vec<String>> {
-        let key = self.inner.byok_for(provider).await.ok().and_then(|(key, _)| key);
-        crate::env::list_models(provider, &self.inner.base_env, key.as_ref().map(|k| k.expose()))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
-    }
-
     /// A BYOK key or source changed: forget the model lists of the CLIs it concerns and ask them
     /// again, so the Lead's model choices follow (the start-agent picker asks every time).
     pub fn byok_changed(&self) {
@@ -874,6 +994,22 @@ impl Core {
         self.inner.move_task(task_id, status).await
     }
 
+    /// Re-run checks, from the card of a blocked or failed task: the gate runs again with no
+    /// worker turn. `allow` names the task's risky verify commands you OK'd. Returns the
+    /// commands that still need your OK (then nothing ran); empty = the checks are running, or
+    /// the task is Ready again for a team member that is on other work in the same worktree.
+    pub async fn recheck_task(&self, task_id: &str, allow: Vec<String>) -> anyhow::Result<Vec<HeldCheck>> {
+        self.inner.recheck_task(task_id, allow, gate::Rerun::You).await
+    }
+
+    /// Merge anyway, from the card of a task that its checks stopped (one failed its last fix
+    /// round, ran out of time, or waits for your OK): it goes on to the scope check, the review
+    /// and the merge without its verify commands. Your decision and the check that failed
+    /// last stay in the task's record.
+    pub async fn accept_task(&self, task_id: &str) -> anyhow::Result<Task> {
+        self.inner.accept_task(task_id).await
+    }
+
     /// Drag an agent onto a task (or None to unassign).
     pub async fn assign_task(&self, task_id: &str, agent_id: Option<&str>) -> anyhow::Result<Task> {
         self.inner.assign_task(task_id, agent_id)
@@ -889,10 +1025,38 @@ impl Core {
         self.inner.plan_diff(plan_id).await
     }
 
+    /// Send back, from a task's diff: your review comments (one message: for each, the file
+    /// and line, the quoted line, the comment) go to the agent that did the work. A worker
+    /// still on the task reads them after its current turn and the gate checks its work again;
+    /// a blocked or failed task starts again with them. Refused for a done task: its work is
+    /// merged, so the changes are a new request.
+    pub async fn send_back_task(&self, task_id: &str, comments: &str) -> anyhow::Result<Task> {
+        self.inner.send_back_task(task_id, comments).await
+    }
+
     /// Merge the plan's integration branch into the user's current branch (refuses if the
-    /// main checkout is dirty). Returns the new HEAD sha.
+    /// main checkout is dirty, or is not on the branch the plan started from). Returns the new
+    /// HEAD sha.
     pub async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<String> {
-        self.inner.merge_plan(plan_id).await
+        self.inner.merge_plan(plan_id, None, false).await
+    }
+
+    /// What to tell the user before merging the plan, when the checked-out branch is not the
+    /// one the plan started from (None: nothing to confirm).
+    pub async fn merge_plan_warning(&self, plan_id: &str) -> anyhow::Result<Option<MergeWarning>> {
+        self.inner.merge_plan_warning(plan_id).await
+    }
+
+    /// `merge_plan` after the user saw `merge_plan_warning` and chose to go on: merges into
+    /// `branch`, and only if that is still the checked-out branch.
+    pub async fn merge_plan_into(&self, plan_id: &str, branch: &str) -> anyhow::Result<String> {
+        self.inner.merge_plan(plan_id, Some(branch), false).await
+    }
+
+    /// Undo the last merge Codly made into the user's branch, named by its commit `sha` (from
+    /// `repo_sync`). Only while that is safe; otherwise the error says why not.
+    pub async fn undo_merge(&self, sha: &str) -> anyhow::Result<RepoSync> {
+        self.inner.undo_merge(sha).await
     }
 
     /// Merge a solo agent's branch into the user's current branch (same dirty-checkout rule as a
@@ -935,9 +1099,16 @@ impl Core {
         self.inner.store.events(ws.as_deref(), agent_id, before, limit)
     }
 
+    /// Paged history (newest first) of one conversation of the open repo: `owner` is the agent
+    /// the thread belongs to, if it has one yet (see `Store::thread_events`).
+    pub async fn thread_events(&self, thread: &str, owner: Option<&str>, before: Option<i64>, limit: i64) -> anyhow::Result<Vec<EventRow>> {
+        let ws = self.inner.require_ws()?;
+        self.inner.store.thread_events(&ws.id, thread, owner, before, limit)
+    }
+
     /// Code search over the workspace index (the same engine as the codly_search tool).
     pub async fn search(&self, query: &str) -> anyhow::Result<SearchResult> {
-        self.inner.search(None, query, 12).await
+        self.inner.search(None, None, query, 12).await
     }
 
     pub async fn memories(&self, query: Option<&str>, scope: Option<MemoryScope>) -> anyhow::Result<Vec<Memory>> {
@@ -965,10 +1136,14 @@ impl Core {
         self.inner.store.with(|db| guard("knowledge graph", || memory::query_triples(db, ws.as_deref(), entity, None, 500)))
     }
 
-    /// Files of the open workspace for the 3D codebase city (from the code index).
+    /// Files of the open workspace for the 3D codebase city and the composer's `@` menu (from
+    /// the code index, brought up to date with the files on disk first, like a search).
     pub async fn repo_map(&self) -> anyhow::Result<Vec<RepoFile>> {
         match self.inner.index_of(None) {
-            Some(ix) => tokio::task::spawn_blocking(move || ix.files()).await?,
+            Some(ix) => {
+                self.inner.freshen(&ix).await;
+                tokio::task::spawn_blocking(move || ix.files()).await?
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -983,7 +1158,8 @@ impl Core {
 
     /// Save a pasted or dropped file where the Lead can read it and return its absolute path:
     /// `<repo>/.codly/attachments/<id>/<name>`. Inside the repo because agents may not read
-    /// Codly's data dir; `.codly/` ignores itself, so git never sees it.
+    /// Codly's data dir; `.codly/` ignores itself, so git never sees it (except the repo's
+    /// setup script, `.codly/setup.sh`, which you can commit).
     pub async fn save_attachment(&self, name: &str, bytes: Vec<u8>) -> anyhow::Result<String> {
         const MAX: usize = 25 * 1024 * 1024;
         if bytes.is_empty() {
@@ -998,7 +1174,7 @@ impl Core {
         sweep_attachments(&attachments, std::time::Duration::from_secs(7 * 24 * 3600)).await;
         let dir = attachments.join(new_id());
         tokio::fs::create_dir_all(&dir).await.context("create the attachments folder")?;
-        tokio::fs::write(root.join(".gitignore"), "*\n").await.context("write .codly/.gitignore")?;
+        tokio::fs::write(root.join(".gitignore"), worktree_setup::CODLY_IGNORE).await.context("write .codly/.gitignore")?;
         let path = dir.join(attachment_name(name));
         tokio::fs::write(&path, bytes).await.context("save the file")?;
         Ok(path.to_string_lossy().into_owned())
@@ -1016,6 +1192,20 @@ fn refresh_career(a: &mut Agent) {
     crate::career::refresh(&mut a.career, hired, now_ms());
 }
 
+/// Agent fields that follow every tool call: what it is doing right now, and its usage.
+/// `update_agent` shows a change to these alone live and keeps it out of the event log.
+const LIVE_AGENT_FIELDS: [&str; 3] = ["activity", "activity_label", "usage"];
+
+/// An agent (as JSON) without its live fields: the part whose changes the event log records.
+fn without_live_fields(mut agent: Value) -> Value {
+    if let Some(fields) = agent.as_object_mut() {
+        for name in LIVE_AGENT_FIELDS {
+            fields.remove(name);
+        }
+    }
+    agent
+}
+
 /// Whether an agent is at home now, and until when ("14:05", your local clock).
 pub(crate) fn at_home(a: &Agent, now: i64) -> Option<String> {
     let until = a.away_until.filter(|t| *t > now)?;
@@ -1023,9 +1213,19 @@ pub(crate) fn at_home(a: &Agent, now: i64) -> Option<String> {
     Some(local.format("%H:%M").to_string())
 }
 
-/// Tired (the office said so) and not at home: the Lead and the scheduler prefer someone rested.
-pub(crate) fn tired(a: &Agent, now: i64) -> bool {
-    a.tired_since.is_some() && at_home(a, now).is_none()
+/// At home and, with the office rules on (`Settings::game_rules`), kept from new work until then.
+/// Off (the default): home is only shown in the office, never a reason to hold or refuse work.
+pub(crate) fn kept_home(rules: bool, a: &Agent, now: i64) -> Option<String> {
+    if !rules {
+        return None;
+    }
+    at_home(a, now)
+}
+
+/// Tired (the office said so) and not at home, with the office rules on: the Lead and the
+/// scheduler prefer someone rested.
+pub(crate) fn tired(rules: bool, a: &Agent, now: i64) -> bool {
+    rules && a.tired_since.is_some() && at_home(a, now).is_none()
 }
 
 impl Inner {
@@ -1135,8 +1335,19 @@ impl Inner {
     }
 
     fn chat(&self, ws: Option<&str>, thread: &str, author: &str, text: &str, attachment: Option<Value>) -> anyhow::Result<EventRow> {
+        self.post_chat(ws, thread, author, text, attachment, None)
+    }
+
+    /// The chat row of a message an agent said (`EventKind::Message`). It carries the message's
+    /// item id, so the conversation shows the two as one without comparing their words. A
+    /// message whose CLI gave it no id gets a row without one.
+    fn chat_of_message(&self, ws: Option<&str>, thread: &str, author: &str, item_id: &str, text: &str, attachment: Option<Value>) -> anyhow::Result<EventRow> {
+        self.post_chat(ws, thread, author, text, attachment, Some(item_id).filter(|id| !id.is_empty()).map(String::from))
+    }
+
+    fn post_chat(&self, ws: Option<&str>, thread: &str, author: &str, text: &str, attachment: Option<Value>, item_id: Option<String>) -> anyhow::Result<EventRow> {
         let message =
-            ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment, ts: now_ms() };
+            ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment, ts: now_ms(), item_id };
         // Attributed to the agent of a 1:1 thread, or to the agent who wrote it (the Lead).
         let agent = thread.strip_prefix("agent:").or((author != "user" && author != "codly").then_some(author));
         self.emit(ws, row(agent, None, None, EventKind::Chat { message }))
@@ -1198,18 +1409,38 @@ impl Inner {
         )
     }
 
+    /// Load-modify-save an agent atomically, like `update_row`. A change to `LIVE_AGENT_FIELDS`
+    /// only (every tool call makes two) is saved on the agent row and broadcast with id 0, but
+    /// adds no `agent_changed` row to the event log: the tool and usage events that caused it
+    /// are already there, and a full Agent per tool call would bury them.
     fn update_agent(&self, id: &str, f: impl FnOnce(&mut Agent)) -> anyhow::Result<Agent> {
-        self.update_row(
-            "agent",
-            id,
-            |a| {
-                f(a);
-                refresh_career(a);
-                Ok(())
-            },
-            |a: &Agent| row(Some(&a.id), a.task_id.as_deref(), a.run_id.as_deref(), EventKind::AgentChanged { agent: a.clone() }),
-            |a| a.updated_at = now_ms(),
-        )
+        let (agent, ev, ws) = self.store.tx(|tx| {
+            let (json, ws): (String, Option<String>) = tx
+                .query_row("SELECT json, workspace_id FROM agent WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .ok_or_else(|| anyhow!("unknown agent {id}"))?;
+            let mut a: Agent = serde_json::from_str(&json)?;
+            let before = serde_json::to_value(&a)?;
+            f(&mut a);
+            refresh_career(&mut a);
+            let after = serde_json::to_value(&a)?;
+            if after == before {
+                return Ok((a, None, ws));
+            }
+            // Strictly later than the last change, so the UI can tell which of two is newer.
+            a.updated_at = now_ms().max(a.updated_at + 1);
+            let mut ev = row(Some(&a.id), a.task_id.as_deref(), a.run_id.as_deref(), EventKind::AgentChanged { agent: a.clone() });
+            if without_live_fields(after) == without_live_fields(before) {
+                store::save_live_agent(tx, &a)?;
+            } else {
+                ev.id = store::insert_event(tx, ws.as_deref(), &ev)?;
+            }
+            Ok((a, Some(ev), ws))
+        })?;
+        if let Some(ev) = ev {
+            self.publish(ws.as_deref(), &ev);
+        }
+        Ok(agent)
     }
 
     fn update_plan(&self, id: &str, f: impl FnOnce(&mut Plan) -> anyhow::Result<()>) -> anyhow::Result<Plan> {
@@ -1291,6 +1522,7 @@ impl Inner {
             away_until: None,
             away_since: None,
             tired_since: None,
+            permission_mode: None,
             created_at: now,
             updated_at: now,
         }
@@ -1427,5 +1659,78 @@ mod attachment_tests {
         assert_eq!(attachment_name(".env"), "env");
         assert_eq!(attachment_name(""), "file");
         assert_eq!(attachment_name("a$b`c.txt"), "a_b_c.txt");
+    }
+}
+
+#[cfg(test)]
+mod live_agent_tests {
+    use super::*;
+
+    /// The newest `agent_changed` of `id` waiting on the bus: (event id, the agent it carries).
+    fn changed(bus: &mut broadcast::Receiver<EventRow>, id: &str) -> Option<(i64, Agent)> {
+        let mut last = None;
+        while let Ok(ev) = bus.try_recv() {
+            if let EventKind::AgentChanged { agent } = ev.kind
+                && agent.id == id
+            {
+                last = Some((ev.id, agent));
+            }
+        }
+        last
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tool_call_changes_the_agent_without_a_row_in_the_log() {
+        let root = tempfile::tempdir().unwrap();
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: root.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let inner = &core.inner;
+        let ws = Workspace {
+            id: new_id(),
+            repo_path: "/tmp/repo".into(),
+            name: "repo".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: now_ms(),
+        };
+        inner.store.upsert_workspace(&ws).unwrap();
+        let hired = inner.create_agent(&ws.id, "Ada", Provider::Claude, Role::Worker, 0, None).unwrap();
+        let agent_rows = || {
+            let events = inner.store.events(Some(&ws.id), Some(&hired.id), None, 100).unwrap();
+            events.iter().filter(|e| e.kind.type_name() == "agent_changed").count()
+        };
+        assert_eq!(agent_rows(), 1, "the hire is on record");
+        let mut bus = core.subscribe();
+
+        // What a tool call and a usage report do: the screen follows, the log does not grow.
+        inner
+            .update_agent(&hired.id, |a| {
+                a.activity = Some(ActivityKind::Edit);
+                a.activity_label = Some("app.ts".into());
+                a.usage.input_tokens = 9;
+            })
+            .unwrap();
+        assert_eq!(agent_rows(), 1);
+        let saved = inner.store.agent(&hired.id).unwrap().unwrap();
+        assert_eq!((saved.activity_label.as_deref(), saved.usage.input_tokens), (Some("app.ts"), 9));
+        assert!(saved.updated_at > hired.updated_at);
+        let (id, shown) = changed(&mut bus, &hired.id).expect("the change is broadcast");
+        assert_eq!((id, shown.activity_label.as_deref(), shown.updated_at), (0, Some("app.ts"), saved.updated_at));
+
+        // Nothing changed: nothing saved, nothing sent.
+        inner.update_agent(&hired.id, |_| {}).unwrap();
+        assert_eq!(inner.store.agent(&hired.id).unwrap().unwrap().updated_at, saved.updated_at);
+        assert!(changed(&mut bus, &hired.id).is_none());
+
+        // A status is on record, and its row carries the live fields as they are now.
+        inner.update_agent(&hired.id, |a| a.status = AgentStatus::Working).unwrap();
+        assert_eq!(agent_rows(), 2);
+        let (id, shown) = changed(&mut bus, &hired.id).unwrap();
+        assert!(id > 0);
+        assert_eq!((shown.status, shown.activity_label.as_deref()), (AgentStatus::Working, Some("app.ts")));
+        assert!(shown.updated_at > saved.updated_at);
+        core.shutdown().await;
     }
 }

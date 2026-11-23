@@ -115,9 +115,10 @@ pub struct CliInfo {
     pub default_model: Option<String>,
 }
 
-/// How to get one agent CLI onto this machine. Built from constants in `install.rs`, never from
-/// user input; the UI shows these strings and asks `install_cli` to run them (by provider and
-/// rung, not by text).
+/// How to get one agent CLI onto this machine and keep it new enough. The commands are constants
+/// in `install.rs`, never user input; the UI shows these strings and asks `install_cli` to run
+/// them (by provider and rung, not by text). `npm_available` and `update_to` are what detection
+/// found on this machine (`env::detect`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct InstallHint {
@@ -129,6 +130,16 @@ pub struct InstallHint {
     pub login: Option<String>,
     /// The vendor's docs or home page.
     pub docs: String,
+    /// The command that updates an installed CLI, if there is one.
+    #[serde(default)]
+    pub update: Option<String>,
+    /// Is `npm` on the login shell's PATH? False = the `npm` line cannot run here.
+    #[serde(default)]
+    pub npm_available: bool,
+    /// Set when the installed CLI is older than the oldest version Codly supports
+    /// (`env::MIN_VERSIONS`): the version to update to. It still runs; it may fail in odd ways.
+    #[serde(default)]
+    pub update_to: Option<String>,
 }
 
 // ───────────────────────────── accounts ─────────────────────────────
@@ -441,8 +452,9 @@ pub struct Agent {
     /// Track record, rank and traits; kept for good and carried along when exported.
     #[serde(default)]
     pub career: Career,
-    /// Gone home to rest (the office's energy) until then (ms). The Lead gives it no new work
-    /// meanwhile; you still can. Its conversation and session are untouched.
+    /// Gone home to rest (the office's energy) until then (ms). With the office rules on
+    /// (`Settings::game_rules`) the Lead gives it no new work meanwhile; you still can. Its
+    /// conversation and session are untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub away_until: Option<i64>,
@@ -451,10 +463,16 @@ pub struct Agent {
     #[ts(optional)]
     pub away_since: Option<i64>,
     /// Tired since then (ms): the office's energy fell under 30% (it reports crossing back).
-    /// Only a hint: the Lead and the scheduler prefer someone rested, never refuse it work.
+    /// Only a hint, with the office rules on: the Lead and the scheduler prefer someone rested,
+    /// never refuse it work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub tired_since: Option<i64>,
+    /// 1:1 Claude agents only: how it works with edits (`PermissionMode`), kept for its next
+    /// run. None = never chosen: it asks before every edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub permission_mode: Option<PermissionMode>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -530,8 +548,8 @@ pub struct Career {
     pub milestones: Vec<Milestone>,
     /// Personality (`career::TRAITS` ids). Some change how it works; see `career::TRAITS`.
     pub traits: Vec<String>,
-    /// The rank whose perks you granted (`career::PERKS`), never above `rank`. A promotion only
-    /// offers it; it stays in this repo (an imported agent starts with none).
+    /// How much you let it do without asking (`career::trust_allows`): a safety setting you set,
+    /// whatever its `rank`. It stays in this repo (an imported agent starts with none).
     #[serde(default)]
     pub trust: Rank,
     /// Reviews between it and other agents in this repo, by agent id (both ways). Repo-local:
@@ -927,8 +945,17 @@ pub struct Plan {
     pub summary: String,
     pub assumptions: Vec<String>,
     pub open_questions: Vec<String>,
+    /// The tasks the planner marked when it accepted the plan (`weak_checks.rs`): none of their
+    /// verify commands can fail on the work, so the gate passes them whatever the worker did.
+    /// The plan's card shows them, before the plan runs and after.
+    #[serde(default)]
+    pub weak_checks: Vec<WeakTask>,
     pub status: PlanStatus,
     pub base_commit: Option<String>,
+    /// The branch that was checked out when the plan started (None: a detached HEAD, or a plan
+    /// from before this was recorded). Merging into another branch asks first.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     pub integration_branch: Option<String>,
     pub integration_worktree: Option<String>,
     /// Set when the user merged the integration branch into their branch.
@@ -939,6 +966,24 @@ pub struct Plan {
     pub kept: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A task of a plan whose verify commands prove nothing about the work (`Plan::weak_checks`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WeakTask {
+    /// The task's key in the plan ("t1").
+    pub task: String,
+    /// Each of its verify commands, and why it proves nothing.
+    pub checks: Vec<WeakCheck>,
+}
+
+/// One verify command that cannot fail on the work, and why ("always passes").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WeakCheck {
+    pub command: String,
+    pub why: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1010,6 +1055,31 @@ pub struct PlanStep {
     pub status: String,
 }
 
+/// Something an agent's run left at work beside its own turns (`EventKind::BackgroundTasks`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundTask {
+    /// The CLI's id of it.
+    pub id: String,
+    /// "command" (a shell command in the background) | "helper" (a subagent) | "task"
+    pub kind: String,
+    /// The command, or what the helper was asked to do.
+    pub description: String,
+}
+
+/// Something that left the list of a run's background work (`EventKind::BackgroundTasks`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundEnded {
+    /// As in `BackgroundTask`.
+    pub id: String,
+    pub kind: String,
+    pub description: String,
+    /// How it ended, in the CLI's own word ("completed", "stopped"); "ended" when the CLI
+    /// did not say.
+    pub status: String,
+}
+
 // ───────────────────────────── approvals ─────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1073,8 +1143,64 @@ pub struct ApprovalDecision {
     pub choice: ApprovalChoice,
     /// Feedback for the agent on deny.
     pub message: Option<String>,
-    /// Answers for Question approvals (provider-shaped JSON).
+    /// Answers for Question approvals (provider-shaped JSON), or the edited plan of a plan
+    /// card (`{ plan }`).
     pub answers: Option<Value>,
+}
+
+/// How a saved rule reads a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ApprovalRuleKind {
+    /// The whole command line, as it was asked, or the full name of an MCP server's tool.
+    Exact,
+    /// A command that starts with these words (`cargo test`), alone on its line or with
+    /// commands that only read.
+    Prefix,
+}
+
+/// "Always allow in this repo": a command, or a tool of an MCP server, you told Codly not to
+/// ask about again, for every agent of one repo. Kept in Codly's store
+/// (`orchestrator/approval_rules.rs`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApprovalRule {
+    pub id: Id,
+    pub workspace_id: Id,
+    pub kind: ApprovalRuleKind,
+    pub command: String,
+    pub created_at: i64,
+}
+
+/// The rules one request can be saved as. Both are None for what Codly always asks about.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApprovalRuleOffer {
+    /// The command line itself, or the full name of an MCP server's tool.
+    pub exact: Option<String>,
+    /// The first words of the one command on the line that does more than read, when its
+    /// program takes a subcommand.
+    pub prefix: Option<String>,
+}
+
+impl ApprovalRuleOffer {
+    pub fn is_empty(&self) -> bool {
+        self.exact.is_none() && self.prefix.is_none()
+    }
+
+    /// The text this request would be saved under as a rule of that kind.
+    pub fn text(&self, kind: ApprovalRuleKind) -> Option<&str> {
+        match kind {
+            ApprovalRuleKind::Exact => self.exact.as_deref(),
+            ApprovalRuleKind::Prefix => self.prefix.as_deref(),
+        }
+    }
+
+    /// Is `rule` one of the rules this request offers? A rule allows these requests only.
+    pub fn offers(&self, rule: &ApprovalRule) -> bool {
+        self.text(rule.kind) == Some(rule.command.as_str())
+    }
 }
 
 // ───────────────────────────── chat, notes, memory, knowledge ─────────────────────────────
@@ -1091,6 +1217,39 @@ pub struct ChatMessage {
     /// Optional structured attachment, e.g. {"plan_id": "..."} renders a plan card.
     pub attachment: Option<Value>,
     pub ts: i64,
+    /// The agent's message this row shows (`EventKind::Message::item_id`), so the conversation
+    /// shows the message and its row as one. None: the row shows no message of an agent
+    /// (yours, Codly's, a turn result no message carried), or it was stored before rows had it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub item_id: Option<String>,
+}
+
+/// A request you closed, in the list of closed requests. Its messages stay under its archive
+/// thread, to read again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ClosedRequest {
+    /// The archive thread, "closed:<thread>:<ms>".
+    pub thread: String,
+    /// The start of your first message there ("" when you wrote none).
+    pub title: String,
+    /// When it was closed (ms).
+    pub closed_at: i64,
+    pub messages: i64,
+}
+
+/// One closed request, to read again.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ClosedTranscript {
+    /// Its newest messages, in the order they were written.
+    pub messages: Vec<ChatMessage>,
+    /// How many messages it has in all (`messages` may leave the oldest out).
+    pub total: i64,
+    /// Agent id → name of the agents who wrote there. Its Lead is archived, so the snapshot
+    /// no longer has it.
+    pub authors: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1213,6 +1372,11 @@ pub struct SearchResult {
     /// Suggested `rg` patterns when confidence is low.
     pub fallback_rg: Vec<String>,
     pub took_ms: i64,
+    /// Why the citations may not match the files the asker sees: the index is behind the files
+    /// on disk, or files differ in the asking agent's worktree. Absent when they match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<String>>", optional)]
+    pub warnings: Vec<String>,
 }
 
 // ───────────────────────────── artifacts & repo map ─────────────────────────────
@@ -1301,6 +1465,22 @@ pub enum TurnStatus {
     MaxTurns,
 }
 
+/// Where one MCP server of an agent's session stands, as its CLI reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum McpServerStatus {
+    Connected,
+    /// The CLI is still connecting to it.
+    Connecting,
+    /// It did not start, or it cannot be reached.
+    Failed,
+    /// It wants a sign-in that nobody made yet.
+    NeedsSignIn,
+    /// Switched off in the CLI.
+    Disabled,
+}
+
 /// The canonical event. Adapters produce the provider kinds; the orchestrator adds the
 /// domain kinds. Persisted to SQLite (except ephemeral deltas) and streamed to the UI.
 /// Both views (Workspace and World) are projections of this stream.
@@ -1320,6 +1500,12 @@ pub enum EventKind {
     },
     TurnStarted {
         input: Option<String>,
+    },
+    /// A prompt delivered into the running turn (Codex `turn/steer`; Claude Code takes a
+    /// waiting message in at its next tool boundary): it gets no `TurnStarted`/`TurnCompleted`
+    /// of its own.
+    PromptSteered {
+        input: String,
     },
     StatusChanged {
         status: AgentStatus,
@@ -1357,6 +1543,11 @@ pub enum EventKind {
     ToolOutput {
         call_id: String,
         chunk: String,
+    },
+    /// Ephemeral: a tool call that still runs says so, with no output (Claude Code's
+    /// `tool_progress` heartbeat, every 30 s). A life sign for the watchdog.
+    ToolProgress {
+        call_id: String,
     },
     ToolCompleted {
         call_id: String,
@@ -1406,6 +1597,30 @@ pub enum EventKind {
         description: String,
         status: String,
     },
+    /// What a subagent does while it works. `call_id` is the tool call that started it, as in
+    /// `SubAgent`. Each other field is set when the CLI just said it; one left out keeps what
+    /// an earlier event said.
+    SubAgentProgress {
+        call_id: String,
+        /// Its kind ("general-purpose", "Explore").
+        name: Option<String>,
+        /// What it does now, in the CLI's words ("Running the tests").
+        step: Option<String>,
+        /// A tool call of its own: the `ToolStarted` with this id came just before.
+        tool_call_id: Option<String>,
+        /// The tool calls it made and the tokens it used so far.
+        tool_uses: Option<i64>,
+        tokens: Option<i64>,
+        /// What it reported when it was done.
+        report: Option<String>,
+    },
+    /// One MCP server of the agent's session changed its state (Claude Code: the user's own
+    /// servers and Connections, not Codly's). `error` is the CLI's own reason, when it gave one.
+    McpServer {
+        name: String,
+        status: McpServerStatus,
+        error: Option<String>,
+    },
     Compacting {
         pre_tokens: Option<i64>,
         post_tokens: Option<i64>,
@@ -1425,6 +1640,20 @@ pub enum EventKind {
     /// An event Codly does not understand yet (raw kept in the run log).
     Unknown {
         raw_type: String,
+    },
+    /// Something the CLI tells about the run that is neither the agent's words nor an error
+    /// (Codex: what a hook did, a change of the thread's goal).
+    Notice {
+        text: String,
+    },
+    /// What the run has at work in the background, as its CLI lists it: the whole list at
+    /// every change, empty when nothing is left (Claude Code's `background_tasks_changed`).
+    /// `ended`: what left the list since the run's last event of this kind. This is the one
+    /// record of a run's background work: the gate waits on `tasks`, the agent sheet shows both.
+    BackgroundTasks {
+        tasks: Vec<BackgroundTask>,
+        #[serde(default)]
+        ended: Vec<BackgroundEnded>,
     },
 
     // ── Codly domain events (from the orchestrator) ──
@@ -1502,7 +1731,7 @@ impl EventKind {
     pub fn is_ephemeral(&self) -> bool {
         matches!(
             self,
-            EventKind::TextDelta { .. } | EventKind::ReasoningDelta { .. } | EventKind::ToolOutput { .. }
+            EventKind::TextDelta { .. } | EventKind::ReasoningDelta { .. } | EventKind::ToolOutput { .. } | EventKind::ToolProgress { .. }
         )
     }
 
@@ -1510,6 +1739,7 @@ impl EventKind {
         match self {
             EventKind::SessionStarted { .. } => "session_started",
             EventKind::TurnStarted { .. } => "turn_started",
+            EventKind::PromptSteered { .. } => "prompt_steered",
             EventKind::StatusChanged { .. } => "status_changed",
             EventKind::TextDelta { .. } => "text_delta",
             EventKind::Message { .. } => "message",
@@ -1517,6 +1747,7 @@ impl EventKind {
             EventKind::Reasoning { .. } => "reasoning",
             EventKind::ToolStarted { .. } => "tool_started",
             EventKind::ToolOutput { .. } => "tool_output",
+            EventKind::ToolProgress { .. } => "tool_progress",
             EventKind::ToolCompleted { .. } => "tool_completed",
             EventKind::FilesChanged { .. } => "files_changed",
             EventKind::PlanUpdated { .. } => "plan_updated",
@@ -1526,11 +1757,15 @@ impl EventKind {
             EventKind::RateLimit { .. } => "rate_limit",
             EventKind::Retrying { .. } => "retrying",
             EventKind::SubAgent { .. } => "sub_agent",
+            EventKind::SubAgentProgress { .. } => "sub_agent_progress",
+            EventKind::McpServer { .. } => "mcp_server",
             EventKind::Compacting { .. } => "compacting",
             EventKind::TurnCompleted { .. } => "turn_completed",
             EventKind::Error { .. } => "error",
             EventKind::Exited { .. } => "exited",
             EventKind::Unknown { .. } => "unknown",
+            EventKind::Notice { .. } => "notice",
+            EventKind::BackgroundTasks { .. } => "background_tasks",
             EventKind::AgentChanged { .. } => "agent_changed",
             EventKind::PlanChanged { .. } => "plan_changed",
             EventKind::TaskChanged { .. } => "task_changed",
@@ -1591,10 +1826,12 @@ pub enum ApprovalMode {
     Balanced,
     /// Ask for every command and edit the CLI would ask about.
     Strict,
-    /// Allow everything that stays inside the agent's worktree.
+    /// Allow everything in which the rules see no risk (they read the command line, not what
+    /// a script does: this is not a sandbox).
     Autonomous,
     /// Auto-approve everything, risky commands included, except the hard floors: questions,
-    /// permission changes, writes by read-only agents and Codly's own data dir still ask.
+    /// permission changes, changes to the agent's own CLI settings, writes by read-only agents
+    /// and Codly's own data dir still ask.
     Full,
 }
 
@@ -1645,6 +1882,12 @@ pub struct Settings {
     /// Account the Lead runs on (None = the one with the most quota left).
     #[serde(default)]
     pub lead_account: Option<String>,
+    /// Ask Anthropic for each Claude sign-in's usage (what `/usage` shows) when Accounts are
+    /// refreshed. This reads the sign-in's OAuth token (login Keychain, else its
+    /// `.credentials.json`) and sends it to api.anthropic.com (`quota.rs`). Off = Codly never
+    /// reads that token: usage comes only from what running agents report.
+    #[serde(default)]
+    pub read_claude_quota: bool,
     pub approval_mode: ApprovalMode,
     /// Run plans without waiting for the "Run plan" click.
     pub auto_run_plans: bool,
@@ -1664,24 +1907,105 @@ pub struct Settings {
     /// API-key variable is scrubbed from the agents' env.
     #[serde(default)]
     pub byok: crate::byok::ByokSettings,
-    /// Claude agents also load your own Claude Code setup: your MCP servers, plugins, skills
-    /// and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
+    /// Agents also load your own CLI setup. Claude: your MCP servers, plugins, skills and the
+    /// repo's `.claude` settings. Codex: the MCP servers of your Codex config. Off = Codly's
+    /// own tools and Connections only.
     #[serde(default = "yes")]
     pub use_my_claude_setup: bool,
+    /// Commands a Codex agent runs in its workspace sandbox may use the network without
+    /// asking (package installs, fetches). Off = each one asks first.
+    #[serde(default)]
+    pub codex_network_access: bool,
     /// Pause (the office's speed control): no new task starts; running ones finish.
     #[serde(default)]
     pub paused: bool,
     /// Offices paused one by one (their own Pause, or their tab closed): the same rule, there only.
     #[serde(default)]
     pub paused_offices: Vec<Id>,
+    /// The office game changes real work: an agent at home gets no new work from the Lead and
+    /// its queued task waits, a tired one is a second choice, a new consultant waits for its job
+    /// offer, and the traits rolled for a worker ride on its prompts. Off (the default): the
+    /// office only shows all this, and work is never delayed, refused or changed by it.
+    #[serde(default)]
+    pub game_rules: bool,
     /// The Settings' Developer panel: cheats for testing the game (coins, XP, a fresh office).
     /// Cheats flag the wallet for good.
     #[serde(default)]
     pub developer_mode: bool,
+    /// Seconds one verify or integration command may run before the gate stops it. A check
+    /// that runs out of time blocks its task for you; it is not sent back to the worker.
+    #[serde(default = "verify_timeout_secs")]
+    pub verify_timeout_secs: u32,
+    /// When the watchdog flags, interrupts and stops an agent that gives no output, and flags
+    /// a worker that sits idle on a running task.
+    #[serde(default)]
+    pub watchdog: crate::orchestrator::watchdog::WatchdogSettings,
+    /// Which events raise a notification of your system, and when (Settings → Notifications).
+    #[serde(default)]
+    pub notifications: crate::notifications::NotificationSettings,
+    /// Keep the Mac from going to sleep by itself while agents work or a plan runs, so a long
+    /// run is not cut off when you walk away. Closing the lid still puts it to sleep.
+    #[serde(default = "yes")]
+    pub keep_awake: bool,
+    /// Ask before Codly quits while agents work: they stop, and resume at the next start.
+    #[serde(default = "yes")]
+    pub confirm_quit: bool,
+    /// Claude agents that have a shell (workers and 1:1 agents) run its commands inside Claude
+    /// Code's own OS sandbox (`adapters::claude::settings_json`): a command can write only in
+    /// the agent's working folder, a temporary folder and the repository's git data. A
+    /// sandboxed command still asks as it does without the sandbox, so the approval rules
+    /// decide it as before; a command Claude wants to run outside the sandbox asks you in
+    /// every approval mode but Full access. A run whose sandbox is not on does not start. Off
+    /// (the default): the approval rules are the only check on a Claude agent's shell. Codex
+    /// always has its own sandbox, and the ACP agents (Gemini, OpenCode, Cursor, Copilot) have
+    /// none.
+    #[serde(default)]
+    pub claude_sandbox: bool,
+    /// Claude agents keep the sign-in your login shell selects: CLAUDE_CODE_USE_BEDROCK,
+    /// CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_OAUTH_TOKEN (`env::apply_shell_auth`). Off (the
+    /// default): they are removed like every other CLAUDE_CODE_* variable, so an agent can
+    /// never bill another account than the one of `claude auth login` without you asking.
+    /// The sign-in checks run with the same variables as the agents: after a change, the
+    /// Settings sheet asks the CLIs again (`redetect_clis`).
+    #[serde(default)]
+    pub claude_shell_auth: bool,
+    /// Tasks or plans were under way when Codly last closed: ask before they go on (the
+    /// default), let them go on at once, or keep them stopped until you press Resume work
+    /// (`orchestrator::resume`).
+    #[serde(default)]
+    pub resume_on_launch: ResumeOnLaunch,
+}
+
+/// What Codly does at launch with the work that was under way when it last closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ResumeOnLaunch {
+    /// One question at launch. Nothing starts before your answer.
+    #[default]
+    Ask,
+    /// The work goes on at once.
+    Always,
+    /// Nothing starts until you press Resume work.
+    Never,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn verify_timeout_secs() -> u32 {
+    600
+}
+
+/// A verify command the gate did not run: the approval rules see a risk in it. You allow it
+/// from the task's card (Re-run checks).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HeldCheck {
+    pub command: String,
+    /// "network", "deletes files", "outside worktree"…
+    pub risks: Vec<String>,
 }
 
 impl Default for Settings {
@@ -1695,6 +2019,7 @@ impl Default for Settings {
             accounts: vec![],
             account_strategy: AccountStrategy::Spread,
             lead_account: None,
+            read_claude_quota: false,
             approval_mode: ApprovalMode::Balanced,
             auto_run_plans: false,
             review_gate: false,
@@ -1704,9 +2029,19 @@ impl Default for Settings {
             team: vec![],
             byok: Default::default(),
             use_my_claude_setup: true,
+            codex_network_access: false,
             paused: false,
             paused_offices: vec![],
+            game_rules: false,
             developer_mode: false,
+            verify_timeout_secs: verify_timeout_secs(),
+            watchdog: Default::default(),
+            notifications: Default::default(),
+            keep_awake: true,
+            confirm_quit: true,
+            claude_sandbox: false,
+            claude_shell_auth: false,
+            resume_on_launch: ResumeOnLaunch::Ask,
         }
     }
 }
@@ -1723,6 +2058,38 @@ pub struct RepoSync {
     pub behind: u32,
     /// Tracked files with uncommitted changes.
     pub dirty: Vec<String>,
+    /// The last merge Codly made into your branch here, until it is undone or the next one.
+    pub last_merge: Option<LastMerge>,
+}
+
+/// A merge Codly made into the user's branch, and whether Undo merge can still take it back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LastMerge {
+    /// The merge commit.
+    pub sha: String,
+    /// The branch it went into.
+    pub branch: String,
+    /// The plan that was merged, or…
+    pub plan_id: Option<Id>,
+    /// …the solo agent whose branch was merged.
+    pub agent_id: Option<Id>,
+    /// Why it cannot be undone right now (None: it can).
+    pub blocked: Option<String>,
+    /// The ref in the user's repository that keeps the branch as it was before this merge
+    /// (`refs/codly/before-merge`), while it does: until the next merge or the undo. None
+    /// for a merge made before Codly kept one.
+    pub kept: Option<String>,
+}
+
+/// What the user should know before a plan is merged: the checked-out branch is not the one
+/// the plan started from. Merging goes on only when they name `target` to confirm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MergeWarning {
+    /// The checked-out branch the merge would go into.
+    pub target: String,
+    pub message: String,
 }
 
 /// Everything the UI needs on (re)connect. Deltas with `id <= as_of` are dropped.
@@ -1748,6 +2115,11 @@ pub struct Snapshot {
     pub artifacts: Vec<Artifact>,
     /// Most recent persisted events (for timeline, inspector and world replay).
     pub events: Vec<EventRow>,
+    /// What runs beside the live runs and is not in `events`: the last `mcp_server` event of
+    /// each of their servers, and each run's last `background_tasks` event. Oldest first. A
+    /// row with id 0 is a server that stands where an earlier run of its agent recorded it:
+    /// the log has no row of it for this run.
+    pub session_events: Vec<EventRow>,
 }
 
 /// Recent workspaces for the welcome screen.
@@ -1810,4 +2182,125 @@ impl ControlState {
     pub fn is_default(&self) -> bool {
         *self == ControlState::default()
     }
+}
+
+/// How a 1:1 Claude agent works with edits: Claude Code's permission mode, which Codly can
+/// switch on a live session. A mode changes what the CLI asks Codly about. What it does ask
+/// still goes through Codly's approval rules; what it no longer asks, they never see.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PermissionMode {
+    /// It asks before every edit (Claude Code's `default`).
+    #[default]
+    Ask,
+    /// Edits inside its worktree are made without asking, and so are shell commands that write
+    /// files there (`acceptEdits`). The approval rules never see those, so the mode is refused
+    /// where your permissions are "ask first" (`ApprovalMode::Strict`).
+    AcceptEdits,
+    /// It reads and plans, and shows you its plan (`plan`). Until you accept the plan, the
+    /// approval rules approve only reads for it, in every approval mode.
+    Plan,
+}
+
+impl PermissionMode {
+    /// The name Claude Code gives the mode.
+    pub fn cli(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "default",
+            PermissionMode::AcceptEdits => "acceptEdits",
+            PermissionMode::Plan => "plan",
+        }
+    }
+
+    /// From Claude Code's name. None for the modes Codly never offers (`auto`, `dontAsk`,
+    /// `bypassPermissions`): they would decide in place of Codly's approval rules.
+    pub fn from_cli(name: &str) -> Option<Self> {
+        match name {
+            "default" | "manual" => Some(PermissionMode::Ask),
+            "acceptEdits" => Some(PermissionMode::AcceptEdits),
+            "plan" => Some(PermissionMode::Plan),
+            _ => None,
+        }
+    }
+
+    /// The name the agent panel gives the mode.
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "ask for edits",
+            PermissionMode::AcceptEdits => "accept edits",
+            PermissionMode::Plan => "plan first",
+        }
+    }
+}
+
+/// How full a Claude agent's context is, as its CLI counts it right now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContextUsage {
+    pub used_tokens: i64,
+    pub max_tokens: i64,
+    /// `used_tokens` of `max_tokens`, in percent, as the CLI rounds it.
+    pub percent: f64,
+    /// The CLI compacts the conversation by itself at this many tokens (None = it does not).
+    pub auto_compact_at: Option<i64>,
+    /// What takes the room, as the CLI lists it.
+    pub parts: Vec<ContextPart>,
+}
+
+/// One part of a context (system prompt, tools, messages, …).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContextPart {
+    pub name: String,
+    pub tokens: i64,
+}
+
+// ───────────────────────────── model catalog ─────────────────────────────
+
+/// One model a CLI can run, as a model picker shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelOption {
+    /// The name the CLI takes for this model.
+    pub id: String,
+    /// The CLI's own display name; the id when it gives none.
+    pub name: String,
+    /// The model the CLI runs when none is chosen.
+    pub is_default: bool,
+    /// The thinking-effort levels this model takes, in the CLI's order. Empty = the CLI did
+    /// not say.
+    pub efforts: Vec<String>,
+    /// The effort this model runs with when none is chosen.
+    pub default_effort: Option<String>,
+}
+
+impl ModelOption {
+    /// A model known by its name only.
+    pub fn named(id: impl Into<String>) -> ModelOption {
+        let id = id.into();
+        ModelOption { name: id.clone(), id, is_default: false, efforts: vec![], default_effort: None }
+    }
+}
+
+/// Where a `ModelCatalog` comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ModelSource {
+    /// The CLI's own list, asked now.
+    Cli,
+    /// Codly's built-in list: the CLI has no list, or it could not be asked (`problem`).
+    BuiltIn,
+}
+
+/// The models of one CLI, for the hire wizard and the model dialog. Any other name can still
+/// be typed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelCatalog {
+    pub models: Vec<ModelOption>,
+    pub source: ModelSource,
+    /// Why the CLI's own list is not shown, in the CLI's or Codly's words.
+    pub problem: Option<String>,
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-from-github"
+description = "Enables the start_from_github command without any pre-configured scope."
+commands.allow = ["start_from_github"]
+
+[[permission]]
+identifier = "deny-start-from-github"
+description = "Denies the start_from_github command without any pre-configured scope."
+commands.deny = ["start_from_github"]

@@ -200,6 +200,7 @@ mod tests {
             away_until: None,
             away_since: None,
             tired_since: None,
+            permission_mode: None,
             archived,
             usage: Usage::default(),
             career: Career { xp, ..Default::default() },

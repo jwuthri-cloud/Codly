@@ -1,8 +1,9 @@
 //! Finding the files to index: `ignore`'s walker (the one ripgrep uses) for a full refresh,
-//! and a single-path ignore check for `update_paths` (watcher events, commits).
+//! and a single-path ignore check for `update_paths` (the files a merge touched).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -37,8 +38,12 @@ pub(crate) fn rel_string(root: &Path, abs: &Path) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-fn builder(root: &Path) -> WalkBuilder {
-    let mut b = WalkBuilder::new(root);
+/// A walker over `start`, a directory at or below the index `root`.
+fn builder(root: &Path, start: &Path) -> WalkBuilder {
+    // The walker applies the ignore files itself; this answers the one question it cannot:
+    // did a `!` rule ask for a directory that is left out by default?
+    let check = Mutex::new(IgnoreCheck::new(root));
+    let mut b = WalkBuilder::new(start);
     b.hidden(false) // .github/, .eslintrc… are code; `.git` is cut by filter_entry below
         .git_ignore(true)
         .git_exclude(true)
@@ -49,9 +54,15 @@ fn builder(root: &Path) -> WalkBuilder {
         .follow_links(false)
         .max_filesize(Some(MAX_FILE_BYTES))
         .add_custom_ignore_filename(".codlyignore")
-        .filter_entry(|e| {
-            let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-            !(is_dir && e.depth() > 0 && e.file_name().to_str().is_some_and(lang::is_denied_dir))
+        .filter_entry(move |e| {
+            if e.depth() == 0 || !e.file_type().is_some_and(|t| t.is_dir()) {
+                return true;
+            }
+            let Some(name) = e.file_name().to_str() else { return true };
+            if lang::is_denied_dir(name) {
+                return false;
+            }
+            !lang::is_default_excluded_dir(name) || check.lock().unwrap_or_else(|p| p.into_inner()).rules(e.path(), true) == Rules::Keep
         });
     b
 }
@@ -61,7 +72,7 @@ fn builder(root: &Path) -> WalkBuilder {
 pub(crate) fn walk(root: &Path, sub: Option<&Path>) -> Vec<Found> {
     let start = sub.unwrap_or(root);
     let mut out = Vec::new();
-    for entry in builder(start).build().flatten() {
+    for entry in builder(root, start).build().flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -75,10 +86,21 @@ pub(crate) fn walk(root: &Path, sub: Option<&Path>) -> Vec<Found> {
 
 /// Would a full walk have returned this path? Applies the `.gitignore`, `.ignore` and
 /// `.codlyignore` files of every directory from the root down to the file, deepest last,
-/// plus the denied-directory list, without walking anything.
+/// plus the two directory lists of `lang`, without walking anything.
 pub(crate) struct IgnoreCheck {
     root: PathBuf,
     cache: HashMap<PathBuf, Option<Gitignore>>,
+}
+
+/// What the ignore files say about one path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rules {
+    /// A pattern ignores it.
+    Ignore,
+    /// A `!` pattern asks for it.
+    Keep,
+    /// No pattern names it.
+    Silent,
 }
 
 impl IgnoreCheck {
@@ -112,17 +134,32 @@ impl IgnoreCheck {
         if rel.components().any(|c| matches!(c, Component::ParentDir)) {
             return true; // `root/../x` lexically starts with root but is outside it
         }
-        if rel.components().any(|c| c.as_os_str().to_str().is_some_and(lang::is_denied_dir)) {
-            return true;
+        // The lists name directories: a file may be called `dist` or `vendor`.
+        let comps: Vec<_> = rel.components().collect();
+        let dirs = if is_dir { comps.len() } else { comps.len().saturating_sub(1) };
+        let mut dir = self.root.clone();
+        for c in &comps[..dirs] {
+            dir.push(c.as_os_str());
+            let Some(name) = c.as_os_str().to_str() else { continue };
+            if lang::is_denied_dir(name) || (lang::is_default_excluded_dir(name) && self.rules(&dir, true) != Rules::Keep) {
+                return true;
+            }
         }
-        let mut ignored = false;
+        self.rules(abs, is_dir) == Rules::Ignore
+    }
+
+    /// The verdict of the ignore files on `abs` (under the root): the last pattern that
+    /// matches it or one of its parent directories, the deepest ignore file winning.
+    fn rules(&mut self, abs: &Path, is_dir: bool) -> Rules {
+        let Ok(rel) = abs.strip_prefix(&self.root) else { return Rules::Silent };
+        let mut verdict = Rules::Silent;
         let mut dir = self.root.clone();
         let comps: Vec<_> = rel.components().collect();
         for i in 0..comps.len() {
             if let Some(m) = self.matcher(&dir) {
                 match m.matched_path_or_any_parents(abs, is_dir) {
-                    ignore::Match::Ignore(_) => ignored = true,
-                    ignore::Match::Whitelist(_) => ignored = false,
+                    ignore::Match::Ignore(_) => verdict = Rules::Ignore,
+                    ignore::Match::Whitelist(_) => verdict = Rules::Keep,
                     ignore::Match::None => {}
                 }
             }
@@ -130,7 +167,7 @@ impl IgnoreCheck {
                 dir.push(comps[i].as_os_str());
             }
         }
-        ignored
+        verdict
     }
 }
 
@@ -175,5 +212,34 @@ mod tests {
         assert!(!c.is_ignored(&r.join("src/a.rs"), false));
         assert!(!c.is_ignored(&r.join("sub/a.rs"), false));
         assert!(c.is_ignored(&r.join("../elsewhere.rs"), false));
+    }
+
+    #[test]
+    fn a_rule_brings_back_a_directory_that_is_left_out_by_default() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        write(r, ".codlyignore", "!/src/vendor/\n!node_modules/\n");
+        write(r, "src/vendor/invoice.rs", "fn pay() {}");
+        write(r, "src/vendor/dist/bundle.rs", "fn bundle() {}");
+        write(r, "vendor/lib/x.go", "package x");
+        write(r, "dist/app.js", "x");
+        write(r, "node_modules/x/index.js", "x");
+        write(r, "docs/vendor", "a file, not a directory");
+        let got: Vec<String> = walk(r, None).into_iter().map(|f| f.rel).collect();
+        // First-party code under a name that is usually third-party is back, with what is below
+        // it; the same names elsewhere stay out, and nothing brings `node_modules` back.
+        assert_eq!(got, [".codlyignore", "docs/vendor", "src/vendor/dist/bundle.rs", "src/vendor/invoice.rs"]);
+        let sub: Vec<String> = walk(r, Some(&r.join("src"))).into_iter().map(|f| f.rel).collect();
+        assert_eq!(sub, ["src/vendor/dist/bundle.rs", "src/vendor/invoice.rs"]);
+
+        let mut c = IgnoreCheck::new(r);
+        for f in &got {
+            assert!(!c.is_ignored(&r.join(f), false), "{f}");
+        }
+        for f in ["vendor/lib/x.go", "dist/app.js", "node_modules/x/index.js"] {
+            assert!(c.is_ignored(&r.join(f), false), "{f}");
+        }
+        assert!(!c.is_ignored(&r.join("src/vendor"), true));
+        assert!(c.is_ignored(&r.join("vendor"), true));
     }
 }

@@ -1,7 +1,13 @@
 // One-line summary of a folded work group: "Read 4 files · searched twice · ran npm test".
+import type { Provider } from '../lib/gen/Provider';
 import type { Seg } from '../lib/state/store.svelte';
+import { isPlanCall } from '../lib/util/planRequest';
 
-export function workSummary(segs: Seg[]): string {
+/** `provider`: the CLI of the agent whose steps these are (none when Codly does not know the agent). */
+export function workSummary(all: Seg[], provider: Provider | null = null): string {
+  // A Claude agent's plan shown to you is said as that, whatever kind of step the call is.
+  const segs = all.filter((s) => !isPlanCall(s.name, provider));
+  const shown = all.length - segs.length;
   const count = (pred: (s: Seg) => boolean) => segs.filter(pred).length;
   const parts: string[] = [];
   const reads = count((s) => s.activity === 'read' || s.activity === 'fetch');
@@ -24,6 +30,7 @@ export function workSummary(segs: Seg[]): string {
   if (runs.length) parts.push(`ran ${runs.length === 1 ? runs[0].label : `${runs.length} commands`}`);
   if (helpers) parts.push(helpers === 1 ? 'briefed a helper' : `briefed ${helpers} helpers`);
   if (plans.length) parts.push(plans.some((s) => /submit_plan/.test(s.name)) ? 'submitted the plan' : 'updated its plan');
+  if (shown) parts.push(shown === 1 ? 'showed you its plan' : `showed you its plan ${shown} times`);
   if (saves) parts.push(saves === 1 ? 'saved a note' : `saved ${saves} notes`);
   if (asks) parts.push(asks === 1 ? 'asked the Lead' : `asked the Lead ${asks} times`);
   if (other > 0) parts.push(`${other} other step${other > 1 ? 's' : ''}`);

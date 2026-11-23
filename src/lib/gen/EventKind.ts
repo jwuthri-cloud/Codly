@@ -5,6 +5,8 @@ import type { AgentStatus } from "./AgentStatus";
 import type { Approval } from "./Approval";
 import type { ApprovalStatus } from "./ApprovalStatus";
 import type { Artifact } from "./Artifact";
+import type { BackgroundEnded } from "./BackgroundEnded";
+import type { BackgroundTask } from "./BackgroundTask";
 import type { Billing } from "./Billing";
 import type { Blocker } from "./Blocker";
 import type { ChatMessage } from "./ChatMessage";
@@ -12,6 +14,7 @@ import type { Citation } from "./Citation";
 import type { Confidence } from "./Confidence";
 import type { ControlState } from "./ControlState";
 import type { JobOffer } from "./JobOffer";
+import type { McpServerStatus } from "./McpServerStatus";
 import type { Memory } from "./Memory";
 import type { MessagePhase } from "./MessagePhase";
 import type { Plan } from "./Plan";
@@ -29,7 +32,7 @@ import type { JsonValue } from "./serde_json/JsonValue";
  * domain kinds. Persisted to SQLite (except ephemeral deltas) and streamed to the UI.
  * Both views (Workspace and World) are projections of this stream.
  */
-export type EventKind = { "type": "session_started", provider: Provider, model: string | null, cwd: string, cli_version: string | null, session_id: string | null, billing: Billing, tools: Array<string>, } | { "type": "turn_started", input: string | null, } | { "type": "status_changed", status: AgentStatus, } | { "type": "text_delta", item_id: string, text: string, } | { "type": "message", item_id: string, text: string, phase: MessagePhase, } | { "type": "reasoning_delta", item_id: string, text: string, } | { "type": "reasoning", item_id: string, text: string, } | { "type": "tool_started", call_id: string, 
+export type EventKind = { "type": "session_started", provider: Provider, model: string | null, cwd: string, cli_version: string | null, session_id: string | null, billing: Billing, tools: Array<string>, } | { "type": "turn_started", input: string | null, } | { "type": "prompt_steered", input: string, } | { "type": "status_changed", status: AgentStatus, } | { "type": "text_delta", item_id: string, text: string, } | { "type": "message", item_id: string, text: string, phase: MessagePhase, } | { "type": "reasoning_delta", item_id: string, text: string, } | { "type": "reasoning", item_id: string, text: string, } | { "type": "tool_started", call_id: string, 
 /**
  * Provider tool name ("Bash", "commandExecution", "read_file"…).
  */
@@ -37,7 +40,7 @@ name: string, activity: ActivityKind, target: Target, input: JsonValue,
 /**
  * "observed" when the provider said what it is; "inferred" when Codly classified it.
  */
-confidence: string, } | { "type": "tool_output", call_id: string, chunk: string, } | { "type": "tool_completed", call_id: string, ok: boolean, 
+confidence: string, } | { "type": "tool_output", call_id: string, chunk: string, } | { "type": "tool_progress", call_id: string, } | { "type": "tool_completed", call_id: string, ok: boolean, 
 /**
  * Truncated (≤ 8 KB head+tail) output.
  */
@@ -53,7 +56,27 @@ source: string, } | { "type": "plan_updated", steps: Array<PlanStep>, } | { "typ
 /**
  * "user" | "policy" | "provider"
  */
-by: string, } | { "type": "usage_updated", usage: Usage, } | { "type": "rate_limit", window: string, used_fraction: number | null, resets_at: number | null, status: string | null, } | { "type": "retrying", attempt: number, reason: string, } | { "type": "sub_agent", call_id: string, description: string, status: string, } | { "type": "compacting", pre_tokens: number | null, post_tokens: number | null, } | { "type": "turn_completed", status: TurnStatus, result_text: string | null, duration_ms: number | null, } | { "type": "error", message: string, fatal: boolean, } | { "type": "exited", code: number | null, } | { "type": "unknown", raw_type: string, } | { "type": "agent_changed", agent: Agent, } | { "type": "plan_changed", plan: Plan, } | { "type": "task_changed", task: Task, } | { "type": "chat", message: ChatMessage, } | { "type": "decision", id: string, decision_type: string, 
+by: string, } | { "type": "usage_updated", usage: Usage, } | { "type": "rate_limit", window: string, used_fraction: number | null, resets_at: number | null, status: string | null, } | { "type": "retrying", attempt: number, reason: string, } | { "type": "sub_agent", call_id: string, description: string, status: string, } | { "type": "sub_agent_progress", call_id: string, 
+/**
+ * Its kind ("general-purpose", "Explore").
+ */
+name: string | null, 
+/**
+ * What it does now, in the CLI's words ("Running the tests").
+ */
+step: string | null, 
+/**
+ * A tool call of its own: the `ToolStarted` with this id came just before.
+ */
+tool_call_id: string | null, 
+/**
+ * The tool calls it made and the tokens it used so far.
+ */
+tool_uses: number | null, tokens: number | null, 
+/**
+ * What it reported when it was done.
+ */
+report: string | null, } | { "type": "mcp_server", name: string, status: McpServerStatus, error: string | null, } | { "type": "compacting", pre_tokens: number | null, post_tokens: number | null, } | { "type": "turn_completed", status: TurnStatus, result_text: string | null, duration_ms: number | null, } | { "type": "error", message: string, fatal: boolean, } | { "type": "exited", code: number | null, } | { "type": "unknown", raw_type: string, } | { "type": "notice", text: string, } | { "type": "background_tasks", tasks: Array<BackgroundTask>, ended: Array<BackgroundEnded>, } | { "type": "agent_changed", agent: Agent, } | { "type": "plan_changed", plan: Plan, } | { "type": "task_changed", task: Task, } | { "type": "chat", message: ChatMessage, } | { "type": "decision", id: string, decision_type: string, 
 /**
  * "rule" | "model" | "human"
  */

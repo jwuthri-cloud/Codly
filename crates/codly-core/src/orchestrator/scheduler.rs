@@ -33,6 +33,18 @@ pub struct SchedInput<'a> {
     /// Who works on an active task in your other offices: worker slots and account caps
     /// count every office.
     pub elsewhere: &'a [Agent],
+    /// Ready tasks whose worker failed a moment ago: task → the time (ms) before which it
+    /// does not start again (`retry.rs`).
+    pub not_before: &'a HashMap<Id, i64>,
+    /// Why no task may start right now, as the waiting tasks show it (`breaker::Budget::hold`:
+    /// a token or cost budget is used up). None: tasks start.
+    pub hold: Option<&'a str>,
+    /// The agents of `busy` that are in your terminal (takeover.rs): a task for one of them
+    /// waits until you give it back, and says so.
+    pub in_terminal: &'a HashSet<Id>,
+    /// Blocked tasks whose question to you is still open (`Inner::tasks_asking`): each keeps
+    /// its write-scope lease, also when its worker's process is gone (a restart of Codly).
+    pub asking: &'a HashSet<Id>,
 }
 
 /// Park an account once this fraction of one of its usage windows is spent (C17).
@@ -51,10 +63,14 @@ pub struct AccountState {
     pub enabled: bool,
     /// None = unknown (no cheap status check).
     pub logged_in: Option<bool>,
-    /// Near its usage limit: why, e.g. "91% of its 5h window used".
+    /// Takes no task for now: why, e.g. "91% of its 5h window used".
     pub parked: Option<String>,
     /// Highest use of its live usage windows, 0..1.
     pub used: f64,
+    /// Takes no task until you decide something, whatever its usage: what it waits for, in
+    /// words that follow its name ("waits for your choice about this folder's files",
+    /// `trust.rs`).
+    pub waits_for_you: Option<String>,
 }
 
 impl AccountState {
@@ -69,6 +85,7 @@ impl AccountState {
             logged_in: cli.logged_in,
             parked: None,
             used: 0.0,
+            waits_for_you: None,
         }
     }
 
@@ -106,7 +123,8 @@ pub enum Action {
     },
 }
 
-/// Why a task started for a member at home (the office shows it on its Overtime moodlet).
+/// Why a task started for a member at home, with the office rules on (the office shows it on
+/// its Overtime moodlet).
 pub const CALLED_IN: &str = "called in from home: nobody else was free";
 
 /// Statuses that hold a worker slot and a write-scope lease.
@@ -114,10 +132,14 @@ pub fn is_active(s: TaskStatus) -> bool {
     matches!(s, TaskStatus::Running | TaskStatus::Verifying | TaskStatus::Reviewing | TaskStatus::ChangesRequested | TaskStatus::Merging)
 }
 
-/// A blocked task whose worker (`assignee`) is still live on it holds its slot and lease too:
-/// the worker asked you something, and your answer puts the task straight back to Running.
-pub fn held(t: &Task, assignee: Option<&Agent>, busy: &HashSet<Id>) -> bool {
-    t.status == TaskStatus::Blocked && assignee.is_some_and(|a| busy.contains(&a.id) && a.task_id.as_deref() == Some(t.id.as_str()))
+/// A blocked task whose worker (`assignee`) is still live on it keeps its write-scope lease:
+/// the worker asked you something, and no other task may change its files while it waits.
+/// So does one whose question is still open (`asking`) after its worker's process is gone: a
+/// restart of Codly does not hand its files to another task. It holds no worker slot: nobody
+/// works on it until you answer.
+pub fn held(t: &Task, assignee: Option<&Agent>, busy: &HashSet<Id>, asking: &HashSet<Id>) -> bool {
+    t.status == TaskStatus::Blocked
+        && (asking.contains(&t.id) || assignee.is_some_and(|a| busy.contains(&a.id) && a.task_id.as_deref() == Some(t.id.as_str())))
 }
 
 /// Installed and not known to be signed out (`logged_in: None` = no cheap status check).
@@ -192,11 +214,18 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
     // Agent → the active task it works on (why an assigned task waits).
     let mut doing: HashMap<Id, String> = HashMap::new();
     let worker = |t: &Task| t.assignee.as_deref().and_then(|id| agent_by_id.get(id)).copied();
-    for t in input.tasks.iter().filter(|t| is_active(t.status) || held(t, worker(t), input.busy)) {
-        active += 1;
+    // Tasks that wait for your answer (`held`): a lease and a busy worker, but no slot.
+    let mut asked: HashSet<&str> = HashSet::new();
+    for t in input.tasks.iter().filter(|t| is_active(t.status) || held(t, worker(t), input.busy, input.asking)) {
+        let works = is_active(t.status);
+        if works {
+            active += 1;
+        } else {
+            asked.insert(t.key.as_str());
+        }
         leases.push((t.key.clone(), t.write_scope.clone()));
         if let Some(a) = t.assignee.as_deref().and_then(|id| agent_by_id.get(id)) {
-            if let Some(acc) = accounts.of_agent(a) {
+            if works && let Some(acc) = accounts.of_agent(a) {
                 *per.entry(acc.id.clone()).or_default() += 1;
             }
             busy.insert(a.id.clone());
@@ -257,6 +286,11 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
     let mut taken_names: Vec<String> = input.agents.iter().map(|a| a.name.clone()).collect();
     let mut used_colors: Vec<i64> = input.agents.iter().map(|a| a.color).collect();
     for t in ready {
+        // Its worker starts again after a wait: until then the task keeps the reason that says
+        // so (no action) and takes no slot.
+        if input.not_before.get(&t.id).is_some_and(|at| *at > input.now) {
+            continue;
+        }
         let wait = |reason: String| Action::Wait {
             task_id: t.id.clone(),
             detail: json!({ "task": t.key, "plan_id": t.plan_id, "reason": reason }),
@@ -266,12 +300,17 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
             actions.push(wait("paused: no new tasks start until you resume".into()));
             continue;
         }
+        if let Some(why) = input.hold {
+            actions.push(wait(why.to_string()));
+            continue;
+        }
         if free == 0 {
             actions.push(wait(format!("waiting: all {max_parallel} worker slots are busy")));
             continue;
         }
         if let Some((key, (a, b))) = leases.iter().find_map(|(k, s)| scope::overlap(&t.write_scope, s).map(|o| (k, o))) {
-            actions.push(wait(format!("waiting: write scope '{a}' overlaps running task {key} ('{b}')")));
+            let (what, why) = if asked.contains(key.as_str()) { ("task", ", which waits for your answer") } else { ("running task", "") };
+            actions.push(wait(format!("waiting: write scope '{a}' overlaps {what} {key} ('{b}'){why}")));
             continue;
         }
         let ctx = RouteCtx {
@@ -285,6 +324,7 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
             accounts: &accounts,
             doing: &doing,
             now: input.now,
+            in_terminal: input.in_terminal,
         };
         match route(t, &ctx, &taken_names, &used_colors) {
             Err(reason) => actions.push(wait(reason)),
@@ -326,6 +366,7 @@ struct RouteCtx<'a> {
     accounts: &'a Accounts,
     doing: &'a HashMap<Id, String>,
     now: i64,
+    in_terminal: &'a HashSet<Id>,
 }
 
 /// The account a run goes on, with its running count, (with several accounts) why, and the
@@ -346,8 +387,9 @@ struct Route {
 }
 
 impl RouteCtx<'_> {
-    /// An account of `p` with a free slot that is not parked: the first of `prefer` that
-    /// qualifies, else by the strategy. Err = why none does, one reason per account.
+    /// An account of `p` with a free slot that is not parked and does not wait for you: the
+    /// first of `prefer` that qualifies, else by the strategy. Err = why none does, one reason
+    /// per account.
     fn account_for(&self, p: Provider, prefer: &[&str]) -> Result<AccountPick<'_>, Vec<String>> {
         if !self.clis.iter().any(|c| c.provider == p && c.path.is_some()) {
             return Err(vec![format!("{} not installed", p.label())]);
@@ -365,6 +407,11 @@ impl RouteCtx<'_> {
         let mut open: Vec<(&AccountState, usize)> = vec![];
         for a in all.into_iter().filter(|a| a.usable()) {
             let n = self.per.get(&a.id).copied().unwrap_or(0);
+            // Its own reason, before any usage limit: no reset ends this wait.
+            if let Some(why) = &a.waits_for_you {
+                skipped.push(format!("{} {why}", self.accounts.name(a)));
+                continue;
+            }
             match &a.parked {
                 Some(why) => skipped.push(format!("{} parked ({why})", self.accounts.name(a))),
                 None if n >= cap => skipped.push(format!("{} {n}/{cap} busy", self.accounts.name(a))),
@@ -409,18 +456,23 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
     let cap = ctx.cap;
     let pin = t.account_hint.as_deref().and_then(|id| ctx.accounts.get(id));
     if let Some(a) = t.assignee.as_deref().and_then(|id| ctx.agent_by_id.get(id)) {
+        if ctx.in_terminal.contains(&a.id) {
+            return Err(format!("waiting: {} (assigned) is in your terminal: give it back", a.name));
+        }
         if ctx.busy.contains(&a.id) {
             return Err(match ctx.doing.get(&a.id) {
                 Some(k) => format!("waiting: {} (assigned) is busy with {k}", a.name),
                 None => format!("waiting: {} (assigned) is busy", a.name),
             });
         }
-        // At home (the office's energy): its task waits until it is back, a few minutes. Unless
-        // nobody else on the team is at work: then it is called in, the crew never stops.
-        let home = super::at_home(a, ctx.now);
+        // At home (the office's energy), with the office rules on (`Settings::game_rules`): its
+        // task waits until it is back, a few minutes. Unless nobody else on the team is at work:
+        // then it is called in, the crew never stops. Rules off (the default): it starts now.
+        let rules = ctx.settings.game_rules;
+        let home = super::kept_home(rules, a, ctx.now);
         if let Some(until) = &home
             && ctx.agents.iter().any(|o| {
-                o.id != a.id && o.on_staff() && o.role == Role::Worker && super::at_home(o, ctx.now).is_none()
+                o.id != a.id && o.on_staff() && o.role == Role::Worker && super::kept_home(rules, o, ctx.now).is_none()
             })
         {
             return Err(format!("waiting: {} (assigned) is at home until {until}; it starts when it is back, or call it in", a.name));
@@ -550,16 +602,97 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
 }
 
 /// A free agent on your staff on `provider` (not a team member: those only take tasks assigned
-/// to them): a worker before a solo agent, one whose session is on `account` first, then one at
-/// work, then a rested one.
+/// to them): a worker before a solo agent, one whose session is on `account` first, then (with
+/// the office rules on, `Settings::game_rules`) one at work, then a rested one.
 fn idle_staff<'a>(ctx: &'a RouteCtx, provider: Provider, account: &str) -> Option<&'a Agent> {
     ctx.agents
         .iter()
         .filter(|a| a.on_staff() && a.member.is_none() && a.provider == provider && a.status != AgentStatus::Offline && !ctx.busy.contains(&a.id))
         .min_by_key(|a| {
             let other_account = ctx.accounts.of_agent(a).is_none_or(|x| x.id != account);
-            (a.role != Role::Worker, other_account, super::at_home(a, ctx.now).is_some(), super::tired(a, ctx.now), a.created_at, a.id.clone())
+            let rules = ctx.settings.game_rules;
+            (a.role != Role::Worker, other_account, super::kept_home(rules, a, ctx.now).is_some(), super::tired(rules, a, ctx.now), a.created_at, a.id.clone())
         })
+}
+
+/// A running plan that cannot go on by itself: nothing of it runs, waits for a worker or can
+/// start, and work is left. Only you can move it on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stuck {
+    pub plan_id: Id,
+    /// The tasks that stopped it: blocked, failed, or cancelled while others wait for them.
+    pub stopped: Vec<Id>,
+    /// The tasks that cannot start because of them.
+    pub waiting: Vec<Id>,
+    /// Tasks merged into the plan's integration branch.
+    pub merged: usize,
+}
+
+/// The running plans that are stuck after this pass (`actions` = what `schedule` returned for
+/// the same input). A plan whose stopped tasks all wait for your answer is left out: each of
+/// those has its own Ask me card.
+pub fn stuck_plans(input: &SchedInput, actions: &[Action]) -> Vec<Stuck> {
+    let moving: HashSet<&str> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::MakeReady { task_id } | Action::Start { task_id, .. } => Some(task_id.as_str()),
+            Action::Wait { .. } => None,
+        })
+        .collect();
+    let worker = |t: &Task| t.assignee.as_deref().and_then(|id| input.agents.iter().find(|a| a.id == id));
+    let mut out = vec![];
+    for p in input.plans.iter().filter(|p| p.status == PlanStatus::Running) {
+        let tasks: Vec<&Task> = input.tasks.iter().filter(|t| t.plan_id.as_deref() == Some(p.id.as_str())).collect();
+        let goes_on = |t: &&Task| {
+            t.status == TaskStatus::Ready || is_active(t.status) || held(*t, worker(*t), input.busy, input.asking) || moving.contains(t.id.as_str())
+        };
+        if tasks.iter().any(goes_on) {
+            continue;
+        }
+        let waiting: Vec<&Task> = tasks.iter().copied().filter(|t| t.status == TaskStatus::Pending).collect();
+        let stopped: Vec<&Task> = tasks
+            .iter()
+            .copied()
+            .filter(|t| match t.status {
+                TaskStatus::Blocked | TaskStatus::Failed => true,
+                TaskStatus::Cancelled => waiting.iter().any(|w| w.depends_on.contains(&t.id)),
+                _ => false,
+            })
+            .collect();
+        if stopped.is_empty() && waiting.is_empty() {
+            continue; // every task is done or cancelled: the plan finishes by itself
+        }
+        let asks_you =
+            |t: &&Task| t.status == TaskStatus::Blocked && t.status_reason.as_deref().is_some_and(|r| r.starts_with(super::ask_me::WAITING));
+        if !stopped.is_empty() && stopped.iter().all(asks_you) {
+            continue;
+        }
+        out.push(Stuck {
+            plan_id: p.id.clone(),
+            stopped: stopped.iter().map(|t| t.id.clone()).collect(),
+            waiting: waiting.iter().map(|t| t.id.clone()).collect(),
+            merged: tasks.iter().filter(|t| t.status == TaskStatus::Done).count(),
+        });
+    }
+    out
+}
+
+/// Every task that waits for `id`, directly or through other tasks, in the order given.
+pub fn dependents<'a>(tasks: &'a [Task], id: &str) -> Vec<&'a Task> {
+    let mut found: HashSet<&str> = HashSet::from([id]);
+    // Plans are small: look again until a pass finds nothing new.
+    loop {
+        let before = found.len();
+        for t in tasks {
+            if t.depends_on.iter().any(|d| found.contains(d.as_str())) {
+                found.insert(t.id.as_str());
+            }
+        }
+        if found.len() == before {
+            break;
+        }
+    }
+    tasks.iter().filter(|t| t.id != id && found.contains(t.id.as_str())).collect()
 }
 
 /// Longest dependent chain (in tasks) starting at each task.

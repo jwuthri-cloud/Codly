@@ -1,18 +1,27 @@
 <!--
   The plan card: the clearest thing in the conversation. What you asked (your words), the Lead's
   plan as a checklist (each task: title, who does it, what it waits on, its state), open
-  questions highlighted, and the one action that matters: Run plan ⌘↵. While the plan runs the
-  same checklist stays here and updates live; once it is over it folds to one line you can open.
+  questions highlighted, and the one action that matters: Run plan ⌘↵. Tasks with no real check
+  are marked (WeakChecks), before the plan runs and after. A plan that did not start by itself
+  although its request runs plans at once says why above Run plan (WaitReason). While the plan
+  runs the same checklist stays here and updates live; once it is over it folds to one line you
+  can open.
+  A running plan that cannot go on by itself says so here, with Keep what is merged.
 -->
 <script lang="ts">
-  import { cancelPlan, isStarting, runPlan } from '../../lib/state/actions';
+  import { cancelPlan, finishPlan, isStarting, runPlan } from '../../lib/state/actions';
+  import { planSpent, spentVersion } from '../../lib/state/spent.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
+  import { PLAN_SPENT_TIP, spentLine } from '../../lib/util/cost';
   import { clock } from '../../lib/util/format';
   import { methodProvenance, PLAN_STATUS_LABEL } from '../../lib/util/labels';
+  import { keyList, stuckPlan } from '../../lib/util/plan';
   import Icon from '../../components/Icon.svelte';
   import Why, { type WhyLine } from '../../components/Why.svelte';
   import TaskRow from './TaskRow.svelte';
+  import WaitReason from './WaitReason.svelte';
+  import WeakChecks from './WeakChecks.svelte';
 
   interface Props {
     planId: string;
@@ -32,6 +41,27 @@
   const starting = $derived(isStarting(planId));
   const busy = $derived(acting || starting);
   let el: HTMLElement | undefined = $state();
+  /** Running, but nothing of it goes on without you: a task stopped, and the rest waits for it. */
+  const stuck = $derived(plan ? stuckPlan(plan, tasks) : null);
+  const stuckLine = $derived.by(() => {
+    if (!stuck) return '';
+    const stopped = stuck.stopped.length ? `${keyList(stuck.stopped)} ${stuck.stopped.length === 1 ? 'is' : 'are'} stopped` : '';
+    const waiting = stuck.waiting.length ? `${keyList(stuck.waiting)} cannot start` : '';
+    return [stopped, waiting].filter(Boolean).join(', and ');
+  });
+  /** Tasks that Keep what is merged would cancel. */
+  const left = $derived(tasks.filter((t) => t.status !== 'done' && t.status !== 'cancelled').length);
+  let confirmKeep = $state(false);
+  $effect(() => {
+    if (!stuck) confirmKeep = false;
+  });
+
+  // What the plan's tasks used so far: asked once it runs, again when a task changes state, and
+  // every half minute while it runs.
+  const spent = $derived(planSpent.plan[planId] ?? null);
+  $effect(() => {
+    if (plan && !deciding) planSpent.ensure(planId, spentVersion(tasks.map((t) => t.status), live, live ? ui.now : 0));
+  });
 
   const eyebrow = $derived.by(() => {
     if (!plan) return '';
@@ -95,6 +125,7 @@
         {#each tasks as t (t.id)}<TaskRow task={t} {plan} goal={deciding} />{/each}
       </ol>
 
+      <WeakChecks {plan} />
       {#if deciding && plan.open_questions.length}
         <ul class="qs">
           {#each plan.open_questions as q, i (i)}<li><Icon name="question" size={14} /><span>{q}</span></li>{/each}
@@ -107,6 +138,7 @@
       {/if}
 
       {#if deciding}
+        <WaitReason {plan} />
         <footer>
           <button class="btn primary" disabled={busy || plan.status !== 'awaiting_approval'} onclick={() => act(() => runPlan(planId))}>
             <Icon name="play" size={13} />{starting ? 'Starting…' : 'Run plan'}<span class="k">⌘↵</span>
@@ -117,8 +149,22 @@
         <p class="fine">Each task runs in its own worktree and lands on an integration branch; <code>{store.workspace?.current_branch ?? 'main'}</code> is untouched until you merge.</p>
         <Why lines={why} />
       {:else}
+        {#if stuck}
+          <div class="stuck" role="status">
+            <p>This plan cannot go on by itself: {stuckLine}. Open a stopped task to retry or cancel it{stuck.merged ? ', or keep what is merged: the plan then finishes with its merged tasks.' : ', or cancel the plan.'}</p>
+            {#if stuck.merged && confirmKeep}
+              <div class="stuck-acts">
+                <span>Cancel the {left === 1 ? 'task that is' : `${left} tasks that are`} not done, and finish the plan with the {stuck.merged} merged?</span>
+                <button class="btn sm ghost" disabled={acting} onclick={() => (confirmKeep = false)}>Not now</button>
+                <button class="btn sm amber" disabled={acting} onclick={() => act(() => finishPlan(planId))}>Keep what is merged</button>
+              </div>
+            {:else if stuck.merged}
+              <div class="stuck-acts"><button class="btn sm" onclick={() => (confirmKeep = true)}>Keep what is merged</button></div>
+            {/if}
+          </div>
+        {/if}
         <footer class="quiet">
-          <span class="since num">{live ? `Started ${clock(plan.updated_at)}` : `Updated ${clock(plan.updated_at)}`}</span>
+          <span class="since num">{live ? `Started ${clock(plan.updated_at)}` : `Updated ${clock(plan.updated_at)}`}{#if spent?.tokens} · <span data-tip={PLAN_SPENT_TIP}>{spentLine(spent)}{live ? ' so far' : ''}</span>{/if}</span>
           <button class="btn ghost sm" onclick={() => ui.openPlan(planId, plan.thread)}>Plan room<Icon name="arrow-right" size={12} /></button>
         </footer>
       {/if}
@@ -142,6 +188,8 @@
   .qs li { display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; border-radius: var(--r-md); background: var(--amber-soft); color: var(--ink-1); font-size: var(--t-md); line-height: var(--lh-md); }
   .qs li :global(svg) { color: var(--amber); margin-top: 3px; flex-shrink: 0; }
   .as { display: flex; flex-direction: column; gap: 3px; margin: 0 4px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
+  .stuck { display: flex; flex-direction: column; gap: 8px; margin: 0 4px; padding: 10px 12px; border-radius: var(--r-md); background: var(--amber-soft); color: var(--ink-1); font-size: var(--t-md); line-height: var(--lh-md); }
+  .stuck-acts { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; font-size: var(--t-sm); color: var(--ink-2); }
   footer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 2px 4px 0; }
   footer.quiet { justify-content: space-between; margin-top: -2px; }
   .since { font-size: var(--t-sm); color: var(--ink-3); }

@@ -7,12 +7,14 @@
   import { isTauriApp } from '../lib/api';
   import { diffstats } from '../lib/state/diffstats.svelte';
   import { store } from '../lib/state/store.svelte';
+  import { loadTakeovers } from '../lib/state/takeover.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import Home from '../home/Home.svelte';
   import PlanRoom from '../rooms/plan/PlanRoom.svelte';
   import ChangesRoom from '../rooms/changes/ChangesRoom.svelte';
   import KnowledgeRoom from '../rooms/knowledge/KnowledgeRoom.svelte';
   import TerminalRoom from '../rooms/terminal/TerminalRoom.svelte';
+  import { closeSessionsOutside, sessionKey } from '../rooms/terminal/sessions';
   import Sheet from '../sheet/Sheet.svelte';
   import OfficeLayer from './OfficeLayer.svelte';
   import Rail from './Rail.svelte';
@@ -26,6 +28,13 @@
   const frameW = $derived(ui.width - (ui.railW + 28) - 14 - (ui.sheetOpen ? SHEET + 14 : 0));
   const narrow = $derived(frameW < 960);
 
+  // The agents that are in your terminal ("Open in my terminal") are marked from the moment
+  // an office opens, also after a restart of Codly: the core keeps them.
+  $effect(() => {
+    void store.epoch;
+    if (store.workspace?.id) void loadTakeovers();
+  });
+
   // Keep diffstats warm for finished work: narration, cards and Changes read the same numbers.
   $effect(() => {
     void store.rev;
@@ -38,6 +47,13 @@
       const done = tasks.filter((t) => t.status === 'done').length;
       if (done) diffstats.ensurePlan(p.id, `${p.status}:${done}`);
     }
+  });
+
+  // A shell lives as long as its folder is a place of this office (the repository, an agent's
+  // worktree), whatever room is open. After another office opens or an agent leaves, it is closed.
+  $effect(() => {
+    const places = [sessionKey(store.workspace?.repo_path ?? null), ...store.agents.flatMap((a) => (a.worktree ? [a.worktree] : []))];
+    void closeSessionsOutside(places);
   });
 </script>
 

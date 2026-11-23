@@ -1,0 +1,113 @@
+import { describe, expect, it } from 'vitest';
+import type { Plan } from '../../gen/Plan';
+import type { JsonValue } from '../../gen/serde_json/JsonValue';
+import type { Task } from '../../gen/Task';
+import type { Decision } from '../../state/store.svelte';
+import { keyList, stuckPlan, waitingOn, waitReason, weakAdvice } from '../plan';
+
+const plan = (o: Partial<Plan> = {}): Plan => ({
+  id: 'p1', workspace_id: 'ws', thread: 'lead', request: '', summary: 'Sign-in', assumptions: [], open_questions: [], weak_checks: [], status: 'running',
+  base_commit: null, base_branch: null, integration_branch: null, integration_worktree: null, merged_sha: null, kept: false, created_at: 0, updated_at: 0, ...o,
+});
+
+const task = (key: string, status: Task['status'], o: Partial<Task> = {}): Task => ({
+  id: key, plan_id: 'p1', key, title: key, goal: '', acceptance: [], write_scope: [], verify: [], depends_on: [], status,
+  assignee: null, agent_hint: null, account_hint: null, consultant: null, fresh_session: false, branch: null, worktree: null, attempt: 0,
+  status_reason: null, summary: null, created_at: 0, updated_at: 0, ...o,
+});
+
+const keys = (ts: Task[]) => ts.map((t) => t.key);
+
+describe('stuckPlan', () => {
+  it('names what stopped the plan, what waits behind it and what is merged', () => {
+    const tasks = [task('t1', 'done'), task('t2', 'blocked', { status_reason: 'blocked: the gate failed' }), task('t3', 'pending', { depends_on: ['t2'] }), task('t4', 'pending', { depends_on: ['t3'] })];
+    const stuck = stuckPlan(plan(), tasks);
+    expect(stuck && { stopped: keys(stuck.stopped), waiting: keys(stuck.waiting), merged: stuck.merged }).toEqual({ stopped: ['t2'], waiting: ['t3', 't4'], merged: 1 });
+  });
+
+  it('counts a failed task, and a cancelled one that others wait for', () => {
+    expect(keys(stuckPlan(plan(), [task('t1', 'failed')])!.stopped)).toEqual(['t1']);
+    expect(keys(stuckPlan(plan(), [task('t1', 'cancelled'), task('t2', 'pending', { depends_on: ['t1'] })])!.stopped)).toEqual(['t1']);
+  });
+
+  it('is null while the plan still goes on', () => {
+    const stopped = task('t1', 'blocked', { status_reason: 'blocked: the gate failed' });
+    for (const status of ['ready', 'running', 'verifying', 'reviewing', 'changes_requested', 'merging'] as const) {
+      expect(stuckPlan(plan(), [stopped, task('t2', status)])).toBeNull();
+    }
+    // A task whose dependencies are all merged starts at the next pass.
+    expect(stuckPlan(plan(), [stopped, task('t2', 'done'), task('t3', 'pending', { depends_on: ['t2'] })])).toBeNull();
+    // Every task done or cancelled: the plan finishes by itself. A plan that does not run is never stuck.
+    expect(stuckPlan(plan(), [task('t1', 'done'), task('t2', 'cancelled')])).toBeNull();
+    expect(stuckPlan(plan({ status: 'awaiting_approval' }), [stopped])).toBeNull();
+  });
+
+  it('leaves a plan that only waits for your answer to its Ask me card', () => {
+    const asks = task('t1', 'blocked', { status_reason: 'waiting for you: Which provider?' });
+    expect(stuckPlan(plan(), [asks, task('t2', 'pending', { depends_on: ['t1'] })])).toBeNull();
+    expect(keys(stuckPlan(plan(), [asks, task('t3', 'failed')])!.stopped)).toEqual(['t1', 't3']);
+  });
+});
+
+describe('waitingOn', () => {
+  const tasks = [
+    task('t1', 'failed'), task('t2', 'pending', { depends_on: ['t1'] }), task('t3', 'pending', { depends_on: ['t2'] }),
+    task('t4', 'pending'), task('t5', 'pending', { depends_on: ['t4', 't3'] }), task('t6', 'cancelled', { depends_on: ['t1'] }),
+  ];
+
+  it('finds the tasks behind a task, through other tasks, that are not over', () => {
+    expect(keys(waitingOn(tasks, 't1'))).toEqual(['t2', 't3', 't5']);
+    expect(keys(waitingOn(tasks, 't4'))).toEqual(['t5']);
+    expect(waitingOn(tasks, 't5')).toEqual([]);
+  });
+});
+
+let n = 0;
+const decision = (type: string, detail: JsonValue): Decision => {
+  n += 1;
+  return { id: `d${n}`, type, method: 'rule', summary: '', detail, ts: n, agentId: null, taskId: null, eventId: n };
+};
+
+describe('waitReason', () => {
+  const INBOUND = 'A message from outside Codly came in after your last one, so this plan did not start by itself. Read it, then run it if it is what you want.';
+  const INTAKE = 'This request started from GitHub, and other people write there, so this plan did not start by itself. Read it, then run it if it is what you want.';
+
+  it('says why a plan did not start by itself, however many decisions the planner made before', () => {
+    // A plan with many planner fixes: the reason comes after them and after "accepted plan".
+    const fixes = Array.from({ length: 8 }, (_, i) => decision('plan_validate', { plan_id: 'p1', rule: 'brief_shape', task: `t${i + 1}` }));
+    const accepted = decision('plan_validate', { plan_id: 'p1', rule: 'validated', tasks: ['t1'], fixes: 8 });
+    expect(waitReason([...fixes, accepted, decision('plan_validate', { plan_id: 'p1', rule: 'inbound', sources: ['webhook “CI”'] })], 'p1')).toBe(INBOUND);
+    expect(waitReason([...fixes, accepted, decision('plan_validate', { plan_id: 'p1', rule: 'intake' })], 'p1')).toBe(INTAKE);
+  });
+
+  it('is null for a plan that waits because its request asks first, or for its open questions', () => {
+    const decisions = [
+      decision('plan_validate', { plan_id: 'p1', rule: 'validated', tasks: ['t1'], fixes: 0 }),
+      decision('plan_validate', { plan_id: 'p1', rule: 'open_questions' }),
+      // Another plan's reason, and the same rule under another decision type.
+      decision('plan_validate', { plan_id: 'p2', rule: 'intake' }),
+      decision('route', { plan_id: 'p1', rule: 'inbound' }),
+      decision('plan_validate', 'inbound'),
+    ];
+    expect(waitReason(decisions, 'p1')).toBeNull();
+    expect(waitReason(decisions, 'p2')).toBe(INTAKE);
+  });
+});
+
+describe('weakAdvice', () => {
+  it('says what you can still do about a task with no real check, in every state of its plan', () => {
+    const before = 'Ask the Lead for a real test, or run the plan as it is.';
+    const after = 'Read what this task changed before you merge the plan.';
+    expect([weakAdvice(plan({ status: 'planning' })), weakAdvice(plan({ status: 'awaiting_approval' }))]).toEqual([before, before]);
+    // A plan that ran at once (Auto, Direct) never waited: the mark stays while it runs and when it is done.
+    for (const status of ['running', 'integrating', 'done', 'failed'] as const) expect(weakAdvice(plan({ status }))).toBe(after);
+    expect(weakAdvice(plan({ status: 'cancelled' }))).toBeNull();
+    expect(weakAdvice(plan({ status: 'done', merged_sha: 'abc1234' }))).toBeNull();
+  });
+});
+
+describe('keyList', () => {
+  it('reads as a sentence', () => {
+    expect([keyList([]), keyList([task('t1', 'done')]), keyList([task('t1', 'done'), task('t2', 'done'), task('t3', 'done')])]).toEqual(['', 't1', 't1, t2 and t3']);
+  });
+});

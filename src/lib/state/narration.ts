@@ -1,11 +1,13 @@
-// The store-bound narration: call `narrate(agentId)` inside a `$derived` (it reads the store's
-// version counters and the 1 Hz clock, so it re-runs when anything relevant changes).
+// The store-bound narration: call `narrate(agentId)` inside a `$derived` (it reads that agent's
+// version counters and the 1 Hz clock, so it re-runs when something of that agent changes, and
+// not when another agent streams).
 // Pure rules live in ../narrate.ts.
 import { narrateFrom, type Narration } from '../narrate';
 import type { Task } from '../gen/Task';
 import { accounts } from './accounts.svelte';
 import { diffstats } from './diffstats.svelte';
 import { store } from './store.svelte';
+import { takeovers } from './takeover.svelte';
 import { ui } from './ui.svelte';
 
 /** The agent's most recently finished task (newest first). */
@@ -16,8 +18,8 @@ export function lastDoneTask(agentId: string): Task | null {
 }
 
 export function narrate(agentId: string, now = ui.now): Narration | null {
-  void store.rev;
-  void store.liveRev;
+  void store.revBy.get(agentId);
+  void store.liveRevBy.get(agentId);
   const agent = store.agentMap.get(agentId);
   if (!agent) return null;
   const live = store.live[agentId];
@@ -38,5 +40,6 @@ export function narrate(agentId: string, now = ui.now): Narration | null {
     task,
     lastDone: done ? { task: done, stat: diffstats.task[done.id] ?? null, files } : null,
     rate,
+    inTerminal: takeovers.has(agentId),
   });
 }

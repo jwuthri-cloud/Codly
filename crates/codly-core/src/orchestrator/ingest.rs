@@ -5,15 +5,28 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::approvals::{self, PolicyCtx, Verdict};
-use super::{Inner, guard, lead, lock, prompts, row, scheduler};
+use super::retry::{self, Failure};
+use super::{Inner, guard, lead, lock, prompts, read, row, scheduler, write};
 use crate::adapters::{AdapterEvent, AgentCmd};
 use crate::{career, memory};
 use crate::model::*;
+
+/// How long Codly waits before it asks a worker whose turn failed to continue, one wait per
+/// retry. The CLI retried the provider by itself before it gave up, so these are long enough
+/// for a short outage to pass. After the last one, the next failed turn blocks the task.
+pub(super) const TURN_RETRY_WAITS: [Duration; 2] = [Duration::from_secs(15), Duration::from_secs(60)];
+
+/// Is `agent_id` the worker of this task, and may its turns still change it? Also in the
+/// task's gate: you can message its worker there. Not in the merge: that work was checked.
+fn works_on(t: &Task, agent_id: &str) -> bool {
+    scheduler::is_active(t.status) && t.status != TaskStatus::Merging && t.assignee.as_deref() == Some(agent_id)
+}
 
 pub(super) async fn run(inner: Arc<Inner>, mut rx: mpsc::UnboundedReceiver<AdapterEvent>) {
     while let Some(ev) = rx.recv().await {
@@ -21,6 +34,42 @@ pub(super) async fn run(inner: Arc<Inner>, mut rx: mpsc::UnboundedReceiver<Adapt
         let ty = ev.kind.type_name();
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.ingest(ev))).is_err() {
             tracing::error!("ingesting a {ty} event panicked; continuing");
+        }
+    }
+}
+
+/// A file to copy into `artifacts/` and announce.
+pub(super) struct ArtifactCopy {
+    from: std::path::PathBuf,
+    ws: Option<Id>,
+    run_id: Option<Id>,
+    /// As it is announced once the copy exists: `abs_path` is where the copy goes.
+    artifact: Artifact,
+}
+
+/// Copies the files `detect_artifacts` found and announces each one, in the order they were
+/// found. A copy can be slow (a large file whose copy is on another disk than the repository),
+/// so it runs here and not on the ingest task, where every agent's events would wait for it.
+pub(super) async fn copy_artifacts(inner: Arc<Inner>, mut jobs: mpsc::UnboundedReceiver<ArtifactCopy>) {
+    while let Some(ArtifactCopy { from, ws, run_id, artifact }) = jobs.recv().await {
+        let to = std::path::PathBuf::from(&artifact.abs_path);
+        let copied = tokio::task::spawn_blocking(move || {
+            if let Some(dir) = to.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::copy(&from, &to)
+        })
+        .await;
+        match copied {
+            Ok(Ok(_)) => {
+                let (agent, task) = (artifact.agent_id.clone(), artifact.task_id.clone());
+                let announced = row(agent.as_deref(), task.as_deref(), run_id.as_deref(), EventKind::ArtifactAdded { artifact });
+                if let Err(e) = inner.emit(ws.as_deref(), announced) {
+                    tracing::debug!("artifact not recorded: {e}");
+                }
+            }
+            Ok(Err(e)) => tracing::debug!("artifact not copied: {e}"),
+            Err(e) => tracing::debug!("artifact copy did not finish: {e}"),
         }
     }
 }
@@ -62,6 +111,7 @@ impl Inner {
     }
 
     fn ingest(self: &Arc<Self>, ev: AdapterEvent) {
+        self.watchdog_seen(&ev); // any event is a life sign, the live deltas below too
         let ctx = self.run_ctx(&ev.agent_id, &ev.run_id);
         let mut r = row(Some(&ev.agent_id), ctx.task_id.as_deref(), Some(&ev.run_id), ev.kind);
         if let EventKind::ApprovalRequested { approval } = &mut r.kind
@@ -76,7 +126,11 @@ impl Inner {
         }
         // Only what is on record is shown (as `emit` does): a row the store refused would be a card
         // nobody can answer, gone at the next resync. The run's bookkeeping below still follows it.
-        match self.store.append_event(ctx.ws.as_deref(), &r) {
+        // One event is shown and not recorded (id 0): an MCP server that stands where the
+        // agent's last row has it, as every new run reports each server (live_session.rs).
+        let repeat = self.mcp_server_repeats(&ctx.agent_id, &r.kind);
+        let stored = if repeat { Ok(0) } else { self.store.append_event(ctx.ws.as_deref(), &r) };
+        match stored {
             Ok(id) => {
                 r.id = id;
                 self.publish(ctx.ws.as_deref(), &r);
@@ -91,6 +145,20 @@ impl Inner {
         match &r.kind {
             EventKind::TurnCompleted { .. } => self.control_turn_done(&ctx.agent_id),
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
+            EventKind::TurnStarted { input } => {
+                self.checkpoint_turn(&ctx.agent_id, &ctx.run_id, input.is_some()); // the files before the turn
+                if let Some(input) = input {
+                    self.chat_prompt_read(&ctx.agent_id, input, true); // whose words the turn works for
+                }
+            }
+            EventKind::PromptSteered { input } => {
+                self.restore_note_read(&ctx.agent_id); // the note came with that prompt
+                self.chat_prompt_read(&ctx.agent_id, input, false);
+            }
+            EventKind::McpServer { .. } | EventKind::BackgroundTasks { .. } if repeat || r.id > 0 => self.session_row_seen(&ctx.agent_id, &r),
+            EventKind::Decision { decision_type, detail, .. } if decision_type == crate::adapters::MODE_CHANGED => {
+                self.control_mode_changed(&ctx.agent_id, ctx.role, detail)
+            }
             _ => {}
         }
         if let Err(e) = self.project_agent(&ctx, &r.kind) {
@@ -141,22 +209,16 @@ impl Inner {
                 .unwrap_or_else(|| abs.to_string_lossy().into_owned());
             let title = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| display.clone());
             // Snapshot it: task worktrees are removed after merge, and generated images can be
-            // anywhere. The copy is what the UI reads.
+            // anywhere. The copy is what the UI reads; `copy_artifacts` makes it and announces it.
             let id = new_id();
-            let dir = self.cfg.data_dir.join("artifacts");
             let ext = abs.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-            let copy = dir.join(format!("{id}.{ext}"));
-            if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&abs, &copy)) {
-                tracing::debug!("artifact not copied: {e}");
-                continue;
-            }
-            let abs = copy;
+            let copy = self.cfg.data_dir.join("artifacts").join(format!("{id}.{ext}"));
             let artifact = Artifact {
                 id,
                 kind,
                 mime: mime.into(),
                 path: display,
-                abs_path: abs.to_string_lossy().into_owned(),
+                abs_path: copy.to_string_lossy().into_owned(),
                 title,
                 bytes: meta.len() as i64,
                 agent_id: r.agent_id.clone(),
@@ -164,8 +226,8 @@ impl Inner {
                 caption: caption.clone(),
                 created_at: now_ms(),
             };
-            if let Err(e) = self.emit(ws, row(r.agent_id.as_deref(), r.task_id.as_deref(), r.run_id.as_deref(), EventKind::ArtifactAdded { artifact })) {
-                tracing::debug!("artifact not recorded: {e}");
+            if self.artifact_copies.send(ArtifactCopy { from: abs, ws: ws.map(String::from), run_id: r.run_id.clone(), artifact }).is_err() {
+                tracing::debug!("artifact not copied: the copier has stopped");
             }
         }
     }
@@ -173,24 +235,53 @@ impl Inner {
     fn track_live(&self, ctx: &Ctx, kind: &EventKind) {
         let mut live = lock(&self.live);
         let Some(l) = live.get_mut(&ctx.agent_id).filter(|l| l.run_id == ctx.run_id) else { return };
+        l.interrupt.seen(kind);
         match kind {
-            EventKind::TurnStarted { .. } => {
+            EventKind::TurnStarted { input } => {
                 l.turn_active = true;
-                l.queued = l.queued.saturating_sub(1);
+                // A turn the CLI started by itself (no input) took no prompt off the count.
+                if input.is_some() {
+                    l.queued = l.queued.saturating_sub(1);
+                }
                 l.turn_messages = 0;
                 l.last_text = None;
+                l.last_error = None;
+                l.self_started = input.is_none();
+                l.background.turn_started(std::time::Instant::now());
+            }
+            EventKind::BackgroundTasks { tasks, .. } => l.background.listed(tasks),
+            // A Codex subagent works on a thread of its own, and its turn can go on after the
+            // agent's own ended ("running" until that turn ends). From the types of codex-cli
+            // 0.166.0: not verified on a live run. (Claude Code lists its helpers itself.)
+            EventKind::SubAgent { call_id, description, status } if l.provider == Provider::Codex => {
+                l.background.helper(call_id, description, status == "running")
+            }
+            // Delivered into the running turn: no turn of its own will take it off the count,
+            // and the answers owed by the turns behind the running one come a turn sooner.
+            EventKind::PromptSteered { .. } => {
+                l.queued = l.queued.saturating_sub(1);
+                let running = l.turns + 1;
+                for a in l.answers.iter_mut().filter(|a| a.due > running) {
+                    a.due -= 1;
+                }
             }
             EventKind::Message { text, .. } if !text.trim().is_empty() => {
                 l.last_text = Some(text.clone());
                 l.turn_messages += 1;
             }
-            EventKind::TurnCompleted { .. } => {
+            EventKind::Error { message, .. } => l.last_error = Some(message.clone()),
+            EventKind::TurnCompleted { status, .. } => {
                 if !l.turn_active {
                     // A turn whose start we never saw still consumed its prompt.
                     l.queued = l.queued.saturating_sub(1);
                 }
                 l.turn_active = false;
                 l.turns += 1;
+                match status {
+                    TurnStatus::Completed => l.failed_turns = 0,
+                    TurnStatus::Failed | TurnStatus::MaxTurns => l.failed_turns += 1,
+                    TurnStatus::Interrupted => {}
+                }
             }
             _ => {}
         }
@@ -232,8 +323,13 @@ impl Inner {
                         a.session_id = Some(s.clone());
                     }
                     // A member keeps its configured model (with its effort suffix) for the next run.
-                    if model.is_some() && a.member.is_none() {
-                        a.model = model.clone();
+                    // Any other agent takes the id the CLI reports, which names no effort, and
+                    // keeps the effort its row had: its next run starts with it again.
+                    if let Some(id) = model
+                        && a.member.is_none()
+                    {
+                        let (_, effort) = crate::adapters::classify::split_model_effort(a.model.as_deref());
+                        a.model = Some(effort.map_or_else(|| id.clone(), |effort| format!("{id}:{effort}")));
                     }
                     if a.status == AgentStatus::Starting {
                         a.status = AgentStatus::Idle;
@@ -302,21 +398,27 @@ impl Inner {
             EventKind::SessionStarted { session_id: Some(s), .. } => {
                 let _ = self.store.set_run_session(&ctx.run_id, s);
             }
-            EventKind::Message { text, .. } if !text.trim().is_empty() => {
+            EventKind::Message { item_id, text, .. } if !text.trim().is_empty() => {
                 // A Lead turn answering a worker's codly_ask_lead links back to the asker.
                 let reply_to = (ctx.role == Role::Lead).then(|| lock(&self.leads).reply_to(&ctx.agent_id)).flatten();
-                let _ = self.chat(ws, &thread(), &ctx.agent_id, text, reply_to.map(|id| json!({ "reply_to": id })));
+                let _ = self.chat_of_message(ws, &thread(), &ctx.agent_id, item_id, text, reply_to.map(|id| json!({ "reply_to": id })));
             }
             EventKind::TurnCompleted { status, result_text, .. } => {
                 let (had_message, last) = lock(&self.live)
                     .get(&ctx.agent_id)
                     .filter(|l| l.run_id == ctx.run_id)
-                    .map_or((true, None), |l| (l.turn_messages > 0, l.last_text.clone()));
+                    .map_or((true, None), |l| {
+                        // A failed turn whose result is the error it just reported has said
+                        // why: the thread shows that error, and the result does not repeat it
+                        // as the agent's words. Any other result text is still posted.
+                        let told = *status == TurnStatus::Failed && result_text.is_some() && l.last_error == *result_text;
+                        (l.turn_messages > 0 || told, l.last_text.clone())
+                    });
                 if !had_message && let Some(t) = result_text.as_deref().filter(|t| !t.trim().is_empty()) {
                     let _ = self.chat(ws, &thread(), &ctx.agent_id, t, None);
                 }
                 let reply = last.or_else(|| result_text.clone());
-                self.on_turn_completed(ctx, *status, reply);
+                self.on_turn_completed(ctx, *status, reply, result_text.as_deref());
             }
             EventKind::StatusChanged { status: AgentStatus::RateLimited } => {
                 // Codex usage errors and Claude's rate_limit result report only this: park the
@@ -336,11 +438,14 @@ impl Inner {
             }
             EventKind::ApprovalRequested { approval } => self.broker(ctx, approval),
             EventKind::Exited { code } => self.on_exit(ctx, *code),
+            EventKind::PromptSteered { .. } if ctx.role == Role::Lead => lock(&self.leads).steered(&ctx.agent_id),
+            // The gate may wait for this work (background.rs).
+            EventKind::BackgroundTasks { .. } | EventKind::SubAgent { .. } => self.background_changed(&ctx.agent_id, &ctx.run_id),
             _ => {}
         }
     }
 
-    fn on_turn_completed(self: &Arc<Self>, ctx: &Ctx, status: TurnStatus, reply: Option<String>) {
+    fn on_turn_completed(self: &Arc<Self>, ctx: &Ctx, status: TurnStatus, reply: Option<String>, result_text: Option<&str>) {
         if ctx.role != Role::Lead {
             self.forward_answers(&ctx.agent_id, &ctx.run_id, reply.as_deref());
         }
@@ -358,15 +463,25 @@ impl Inner {
                 self.pump_leads(); // an idle Lead can make room for a request that waits
             }
             Role::Worker if ctx.task_id.is_some() && self.hit_limit(ctx) => self.hand_off(ctx),
-            Role::Worker if ctx.task_id.is_some() => {
-                // Gate only when the worker is really done: not interrupted, and no queued
-                // prompt (a user steer, a fix round) is about to start another turn.
-                if status != TurnStatus::Interrupted && self.is_quiet(&ctx.agent_id) && !self.control_holding(&ctx.agent_id) {
-                    let me = self.clone();
+            Role::Worker if ctx.task_id.is_some() => match status {
+                // Gate only when the worker is really done: its turn completed, and no queued
+                // prompt (a user steer, a fix round) is about to start another turn. A turn that
+                // completed while a failed turn's continue prompt is still owed answered something
+                // else (a message from you, a note): the worker goes on with its work instead.
+                TurnStatus::Completed => {
                     let task = ctx.task_id.clone().unwrap_or_default();
-                    tokio::spawn(async move { me.gate(task).await });
+                    // Its worker runs: a failure after this turn is the first of a new row (`retry.rs`).
+                    lock(&self.retries).forget(&task);
+                    if self.is_quiet(&ctx.agent_id) && !self.continue_failed_turn(&ctx.agent_id) && !self.control_holding(&ctx.agent_id) {
+                        let me = self.clone();
+                        tokio::spawn(async move { me.gate(task).await });
+                    }
                 }
-            }
+                // An error or the turn limit ended it: the work is not finished, so no gate.
+                TurnStatus::Failed | TurnStatus::MaxTurns => self.turn_failed(ctx, status, result_text),
+                // Whoever interrupted it (you, a control, the circuit breaker) says what is next.
+                TurnStatus::Interrupted => {}
+            },
             Role::Reviewer if ctx.task_id.is_some() => {
                 if self.is_quiet(&ctx.agent_id) {
                     let me = self.clone();
@@ -413,8 +528,11 @@ impl Inner {
         let member = self.agent(&ctx.agent_id).is_ok_and(|a| a.member.is_some());
         let next = if member { "waiting for its quota" } else { "handing off to the next free provider" };
         let reason = format!("{provider} hit its usage limit; {next}. Continue from the work already in this worktree.");
-        // status_reason reaches a resumed session; a fresh one (another provider) gets this.
-        lock(&self.pending_feedback).entry(task_id.clone()).or_insert_with(|| format!("[Codly] {reason}"));
+        // status_reason reaches a resumed session; a fresh one (another provider) gets this,
+        // after what already waits for the task's next run (your answer, the gate's feedback).
+        if let Err(e) = self.add_feedback(&task_id, &format!("[Codly] {reason}")) {
+            tracing::warn!("the hand-off note of task {task_id} was not kept: {e}");
+        }
         let moved = self.update_task(&task_id, |t| {
             t.status = TaskStatus::Ready;
             if !member {
@@ -436,9 +554,123 @@ impl Inner {
         self.kick();
     }
 
+    /// A worker's turn ended on an error or at its turn limit. Its work is not finished, so it
+    /// never reaches the gate. While the run lives, Codly asks the same session to continue,
+    /// once per wait in `turn_retry_waits`; the next failed turn after those blocks the task
+    /// with the error. The continue prompt is owed from here (`Live::continue_owed`): the
+    /// wait sends it, or `continue_failed_turn` when something else comes first. A run that is
+    /// exiting (a crash ends its turn first) is left to `task_run_lost`, which restarts the
+    /// worker.
+    fn turn_failed(self: &Arc<Self>, ctx: &Ctx, status: TurnStatus, result_text: Option<&str>) {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return; // quitting ends turns too: the next start resumes the task
+        }
+        let task_id = ctx.task_id.clone().unwrap_or_default();
+        let run = lock(&self.live).get(&ctx.agent_id).filter(|l| l.run_id == ctx.run_id && !l.stopping).map(|l| {
+            // Claude gives a failed turn's error as the turn's result; the others send an Error first
+            // (their result is the agent's last message).
+            let result = result_text.filter(|r| l.provider == Provider::Claude && !r.trim().is_empty());
+            (l.failed_turns, l.turns, result.map(String::from).or_else(|| l.last_error.clone()))
+        });
+        let Some((failures, turns, error)) = run else { return };
+        let Ok(t) = self.task(&task_id) else { return };
+        if !works_on(&t, &ctx.agent_id) {
+            return;
+        }
+        let what = match error.map(|e| e.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|e| !e.is_empty()) {
+            _ if status == TurnStatus::MaxTurns => "it reached its turn limit".to_string(),
+            Some(e) => prompts::clip(&e, 200),
+            None => "the CLI gave no reason".to_string(),
+        };
+        // A full session fails every next turn the same way: the task starts again in a new
+        // one, as a failure of its worker (`retry.rs`). Not for a task in its gate: that
+        // worker goes on below.
+        if status != TurnStatus::MaxTurns
+            && retry::context_full(&what)
+            && self.worker_failed(&task_id, &ctx.agent_id, Failure::ContextFull(what.clone()))
+        {
+            return;
+        }
+        let ws = ctx.ws.as_deref();
+        let waits = read(&self.turn_retry_waits).clone();
+        let detail = json!({ "plan_id": t.plan_id, "turn": status, "error": what, "failed_turns": failures });
+        let Some(wait) = waits.get(failures.saturating_sub(1) as usize).copied() else {
+            let reason = format!("blocked: the worker's turn failed {failures} times in a row ({what}); fix the cause, then Retry");
+            // Checked in the write: stopped or cancelled by you meanwhile, or in its merge, it stays as it is.
+            let mut blocked = false;
+            let _ = self.update_task(&task_id, |t| {
+                blocked = works_on(t, &ctx.agent_id);
+                if blocked {
+                    t.status = TaskStatus::Blocked;
+                    t.status_reason = Some(reason.clone());
+                }
+                Ok(())
+            });
+            if !blocked {
+                return;
+            }
+            // Its worker goes (stopping: on_exit will not call task_run_lost), and a reviewer that
+            // was reading it: a Retry starts from the worker's session, with fresh fix rounds.
+            self.release_task_agents(&t);
+            let _ = self.decide(ws, Some(&task_id), "retry", reason, detail);
+            if let Some(ws) = ctx.ws.clone() {
+                let who = self.agent(&ctx.agent_id).map_or_else(|_| "the worker".into(), |a| a.name);
+                let (me, thread) = (self.clone(), self.task_thread(&t));
+                let text = prompts::turns_failed(&t, &who, failures, &what);
+                tokio::spawn(async move { me.lead_followup(&ws, &thread, &text).await });
+            }
+            self.kick();
+            return;
+        };
+        match lock(&self.live).get_mut(&ctx.agent_id).filter(|l| l.run_id == ctx.run_id) {
+            Some(l) => l.continue_owed = Some(prompts::turn_failed(&t, &what)),
+            None => return, // the run exited meanwhile: the restart continues the task
+        }
+        let reason = format!("the worker's turn failed ({what}); Codly asks it to continue (try {failures} of {})", waits.len());
+        let _ = self.update_task(&task_id, |t| {
+            if matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) {
+                t.status_reason = Some(reason.clone());
+            }
+            Ok(())
+        });
+        let _ = self.decide(ws, Some(&task_id), "retry", reason, detail);
+        let me = self.clone();
+        let (agent_id, run_id) = (ctx.agent_id.clone(), ctx.run_id.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            // Still this run, and nothing happened since: no turn ended, runs or is queued. A
+            // turn that came meanwhile (a message from you, a note) sends the prompt when it
+            // completes. A run that exited meanwhile was a crash: the restart continues the task.
+            let idle = lock(&me.live)
+                .get(&agent_id)
+                .is_some_and(|l| l.run_id == run_id && !l.stopping && l.turns == turns && !l.turn_active && l.queued == 0);
+            if idle {
+                me.continue_failed_turn(&agent_id);
+            }
+        });
+    }
+
+    /// Ask a worker to go on with the work its failed turn left, if that prompt is still owed
+    /// (it is taken: it goes out once). True = it was owed, so the worker's last turn is not
+    /// its finish and the gate must not run. A worker you hold keeps the prompt for your Resume.
+    pub(super) fn continue_failed_turn(&self, agent_id: &str) -> bool {
+        let owed = lock(&self.live).get_mut(agent_id).and_then(|l| Some((l.continue_owed.take()?, l.task_id.clone()?)));
+        let Some((prompt, task_id)) = owed else { return false };
+        // No longer its task to change (you moved it, or it is in its merge): nothing to continue.
+        if !self.task(&task_id).is_ok_and(|t| works_on(&t, agent_id)) {
+            return false;
+        }
+        if let Err(e) = self.send_prompt(agent_id, prompt) {
+            tracing::debug!("the worker was not asked to continue: {e}");
+        }
+        true
+    }
+
     /// Codly commits a solo agent's worktree after each turn (C7: agents never commit).
     async fn solo_snapshot(self: Arc<Self>, agent_id: Id, ws: Option<Id>) {
+        // A turn the CLI started by itself read no prompt: it is not named for the last one.
         let (cwd, prompt) = match lock(&self.live).get(&agent_id) {
+            Some(l) if l.self_started => (l.cwd.clone(), Some(super::checkpoints::SELF_STARTED.to_string())),
             Some(l) => (l.cwd.clone(), l.last_prompt.clone()),
             None => return,
         };
@@ -450,20 +682,30 @@ impl Inner {
             let _g = self.repo_lock.lock().await;
             match repo {
                 Some(repo) => match self.git.check_worktree(&repo, &cwd).await {
-                    Ok(()) => self.git.commit_all(&cwd, &message).await,
+                    // Not a merge it has not finished resolving: that stays open for its next
+                    // turn, and its conversation says that nothing was committed.
+                    Ok(()) => match self.may_snapshot(ws.as_deref(), &agent, &cwd).await {
+                        Ok(true) => self.git.commit_work(&cwd, &message).await,
+                        Ok(false) => Ok(crate::git::WorkCommit { commit: None, left_out: vec![] }),
+                        Err(e) => Err(e),
+                    },
                     Err(e) => Err(e),
                 },
                 None => Err(anyhow::anyhow!("no workspace")),
             }
         };
         match commit {
-            Ok(Some(c)) => {
-                let _ = self.emit(
-                    ws.as_deref(),
-                    row(Some(&agent_id), None, agent.run_id.as_deref(), EventKind::Committed { sha: c.sha, files: c.files, message }),
-                );
+            Ok(snap) => {
+                if let Err(e) = self.note_left_out(ws.as_deref(), Some(&agent_id), None, &agent.name, &cwd, &snap.left_out) {
+                    tracing::warn!("could not record what the commit for {} left out: {e}", agent.name);
+                }
+                if let Some(c) = snap.commit {
+                    let _ = self.emit(
+                        ws.as_deref(),
+                        row(Some(&agent_id), None, agent.run_id.as_deref(), EventKind::Committed { sha: c.sha, files: c.files, message }),
+                    );
+                }
             }
-            Ok(None) => {}
             Err(e) => tracing::warn!("solo snapshot for {} failed: {e}", agent.name),
         }
     }
@@ -475,6 +717,10 @@ impl Inner {
             return; // tools are blocked for this agent
         }
         let (cwd, read_only) = lock(&self.live).get(&ctx.agent_id).map_or((None, true), |l| (Some(l.cwd.clone()), l.read_only));
+        // A 1:1 agent that plans first changes nothing before you accept its plan (Claude Code
+        // then leaves plan mode by itself, `control_mode_changed`): read-only until then.
+        let planning = ctx.role == Role::Solo && self.agent(&ctx.agent_id).is_ok_and(|a| a.permission_mode == Some(PermissionMode::Plan));
+        let read_only = read_only || planning;
         let task = ctx.task_id.as_deref().and_then(|t| self.store.task(t).ok().flatten());
         // The request the run works for (a Lead's own, a task's plan's) or a 1:1 chat may set its own permissions.
         let thread = match (&task, ctx.role) {
@@ -485,16 +731,38 @@ impl Inner {
         };
         let verify = task.map(|t| t.verify).unwrap_or_default();
         let base = self.approval_mode_for(ws, thread.as_deref());
-        let trusts = |r| {
+        let trusted = |r| {
             !read_only
                 && self.agent(&ctx.agent_id).is_ok_and(|a| matches!(a.role, Role::Worker | Role::Solo) && career::trusts(&a.career, r))
         };
+        // An agent whose turn reads a message from outside Codly may be working for what a
+        // stranger wrote: until a turn that the user's own message to it starts, their trust
+        // in it answers nothing, and the approval mode alone judges (outside.rs).
+        let held_back = trusted(Rank::Junior) && self.works_for_outside(&ctx.agent_id);
+        let trusts = |r| !held_back && trusted(r);
         let mode = approvals::with_trust(base, trusts(Rank::Senior));
-        let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only, edits: trusts(Rank::Junior) };
+        // Your project folder: where an agent hired with Git isolation off works, and where any agent can point a command.
+        let checkout = ws.and_then(|w| self.store.workspace(w).ok().flatten()).map(|w| std::path::PathBuf::from(w.repo_path));
+        // Your Connections that this run was given, by name: the rules ask about a tool of any other MCP server.
+        let own_mcp = crate::housekeeping::connections::given(&self.data("runs").join(&ctx.run_id).join("raw.ndjson"));
+        let pctx = PolicyCtx {
+            mode,
+            worktree: cwd.as_deref(),
+            verify: &verify,
+            read_only,
+            edits: trusts(Rank::Junior),
+            checkout: checkout.as_deref(),
+            own_mcp: &own_mcp,
+            provider: self.agent(&ctx.agent_id).ok().map(|a| a.provider),
+        };
         let verdict = match approvals::evaluate(approval, &pctx) {
-            Verdict::Allow { choice, rule } if mode != base => Verdict::Allow { choice, rule: format!("{rule} (trusted Senior)") },
+            Verdict::Allow { choice, rule } if mode != base => {
+                Verdict::Allow { choice, rule: format!("{rule} (you trust it to work on its own)") }
+            }
             v => v,
         };
+        // What the rules would ask you about, a rule you saved for this repo may answer.
+        let verdict = self.with_saved_rules(ws, approval, &pctx, verdict);
         let subject = serde_json::to_value(&approval.subject).unwrap_or_default();
         let detail =
             |rule: &str| json!({ "approval_id": approval.id, "mode": mode, "rule": rule, "subject": subject, "read_only": read_only });
@@ -530,6 +798,18 @@ impl Inner {
                 });
             }
             Verdict::Ask { reason } => {
+                let reason = if planning { format!("{reason} (its mode is \"plan first\")") } else { reason };
+                // The user's trust in it would have answered this one: say why it asks.
+                let trust_answers = held_back
+                    && matches!(
+                        approvals::evaluate(approval, &PolicyCtx { mode: approvals::with_trust(base, trusted(Rank::Senior)), edits: true, ..pctx }),
+                        Verdict::Allow { .. }
+                    );
+                let reason = if trust_answers {
+                    format!("{reason} (a message from outside Codly came into its chat: what you trust it to do alone waits for your next message to it)")
+                } else {
+                    reason
+                };
                 let _ = self.decide(ws, ctx.task_id.as_deref(), "approval_policy", format!("asking you: {reason}"), detail(&reason));
             }
         }
@@ -548,15 +828,20 @@ impl Inner {
         }
         if removed.is_some() {
             self.control_clear(&ctx.agent_id); // controls do not outlive the process
+            self.chat_prompts_lost(&ctx.agent_id);
         }
         let stopping = removed.as_ref().is_none_or(|l| l.stopping);
+        // Its adapter ended it because the turn did not stop after an interrupt: Codly's doing
+        // too, and no crash (interrupts.rs). A run Codly also asked to stop is the stopper's.
+        let gave_up = removed.as_ref().filter(|l| !l.stopping).and_then(|l| l.gave_up(&ctx.agent_id));
+        let ended = stopping || gave_up.is_some();
         // It exited during its handshake: `spawn_run` owns this start and fails it, and its
         // caller may already be starting the next one (resume, then a new session).
         let starting = removed.as_ref().is_some_and(|l| l.starting.is_some());
         let shutting = self.shutting_down.load(Ordering::SeqCst);
         let status = if shutting {
             "lost" // resumed by session id on the next start
-        } else if !starting && (stopping || code == Some(0)) {
+        } else if !starting && (ended || code == Some(0)) {
             "completed"
         } else {
             "failed"
@@ -577,7 +862,7 @@ impl Inner {
         if shutting {
             return;
         }
-        let unexpected = !stopping && code != Some(0);
+        let unexpected = !ended && code != Some(0);
         let run_id = ctx.run_id.clone();
         let _ = self.update_agent(&ctx.agent_id, |a| {
             if a.run_id.as_deref() == Some(run_id.as_str()) {
@@ -598,52 +883,28 @@ impl Inner {
             }
             self.pump_leads(); // a Lead slot freed up
         }
-        if !stopping && !starting && let Some(task_id) = ctx.task_id.clone() {
+        if let Some(gave_up) = gave_up {
+            // Who asked for the interrupt says what is next.
+            let me = self.clone();
+            tokio::spawn(async move { me.interrupt_gave_up(gave_up).await });
+        } else if !stopping && !starting && let Some(task_id) = ctx.task_id.clone() {
             let me = self.clone();
             let (role, agent_id, run) = (ctx.role, ctx.agent_id.clone(), ctx.run_id.clone());
-            tokio::spawn(async move { me.task_run_lost(task_id, role, agent_id, run, code).await });
+            let error = removed.and_then(|l| l.last_error);
+            tokio::spawn(async move { me.task_run_lost(task_id, role, agent_id, run, code, error).await });
         }
         self.kick();
     }
 
-    /// A task's worker or reviewer exited without Codly asking it to.
-    async fn task_run_lost(self: Arc<Self>, task_id: Id, role: Role, agent_id: Id, run_id: Id, code: Option<i64>) {
+    /// A task's worker or reviewer exited without Codly asking it to. `error`: the last error
+    /// its CLI reported.
+    async fn task_run_lost(self: Arc<Self>, task_id: Id, role: Role, agent_id: Id, run_id: Id, code: Option<i64>, error: Option<String>) {
         let Ok(t) = self.task(&task_id) else { return };
-        let ws = self.store.task_workspace(&task_id).ok().flatten();
         match role {
             Role::Reviewer if t.status == TaskStatus::Reviewing => self.review_done(task_id, run_id).await,
-            Role::Worker if matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) => {
-                let code = code.map_or("signal".to_string(), |c| c.to_string());
-                let give_up = t.attempt >= 3;
-                let reason = if give_up {
-                    format!("blocked: the worker exited unexpectedly {} times (last exit {code}); check the CLI and its run log", t.attempt)
-                } else {
-                    format!("the worker exited unexpectedly ({code}); restarting it")
-                };
-                let moved = self.update_task(&task_id, |t| {
-                    t.status = if give_up { TaskStatus::Blocked } else { TaskStatus::Ready };
-                    t.status_reason = Some(reason.clone());
-                    Ok(())
-                });
-                let _ = self.update_agent(&agent_id, |a| {
-                    if a.task_id.as_deref() == Some(task_id.as_str()) {
-                        a.task_id = None;
-                    }
-                });
-                if moved.is_err() {
-                    return; // stopped or cancelled by you meanwhile: that stands, and nothing is retried
-                }
-                let _ = self.decide(
-                    ws.as_deref(),
-                    Some(&task_id),
-                    "retry",
-                    reason.clone(),
-                    json!({ "plan_id": t.plan_id, "exit": code, "attempt": t.attempt }),
-                );
-                if give_up && let Some(ws) = ws {
-                    self.lead_followup(&ws, &self.task_thread(&t), &format!("Task {} \"{}\" is {reason}.", t.key, t.title)).await;
-                }
-                self.kick();
+            // The worker starts again after a wait; its third failure in a row blocks the task.
+            Role::Worker => {
+                self.worker_failed(&task_id, &agent_id, Failure::Exit { code, error });
             }
             _ => {}
         }
@@ -731,5 +992,13 @@ impl Inner {
         }?;
         lock(&self.labels).insert(id.to_string(), l.clone());
         Some(l)
+    }
+}
+
+impl super::Core {
+    /// The waits before Codly asks a worker whose turn failed to continue, one per retry
+    /// (`TURN_RETRY_WAITS` until set; the tests shorten them).
+    pub fn set_turn_retry_waits(&self, waits: Vec<Duration>) {
+        *write(&self.inner.turn_retry_waits) = waits;
     }
 }

@@ -202,6 +202,7 @@ impl Inner {
             a.activity_label = None;
             a.worktree = None; // the task's worktree goes with the plan; a ghost brought back gets a new one
         })?;
+        self.forget_agent(&a.id); // what the store kept about its work in that worktree (`resume.rs`)
         let who = if a.consultant { "consultant " } else { "" };
         self.decide(Some(ws_id), None, "staff", format!("let {who}{} go: {why}", a.name), json!({ "agent": a.id, "consultant": a.consultant }))?;
         Ok(())
@@ -242,7 +243,8 @@ impl Inner {
         path.starts_with(self.team_root(ws))
     }
 
-    /// The member's stable worktree, created (detached at HEAD, deps seeded) on first use.
+    /// The member's stable worktree, created (detached at HEAD) on first use. Its first task
+    /// prepares it (copied files, ports, setup script: `worktree_setup`).
     pub(super) async fn member_worktree(&self, ws: &Workspace, agent: &Agent) -> Result<PathBuf> {
         let id = agent.member.as_deref().ok_or_else(|| anyhow!("{} is not on the team", agent.name))?;
         let wt = self.team_root(ws).join(id);
@@ -253,7 +255,7 @@ impl Inner {
                 let _g = self.repo_lock.lock().await;
                 self.git.worktree_add_detached(&repo, &wt, &head).await?;
             }
-            self.bootstrap_worktree(ws, &repo, &wt, None).await;
+            self.mark_new_worktree(&wt)?;
         }
         Ok(wt)
     }
@@ -285,7 +287,7 @@ impl Inner {
                     b
                 }
             };
-            if let Some(c) = self.git.commit_all(&wt, &format!("codly(wip): {} leftovers before {key}", agent.name)).await? {
+            if let Some(c) = self.commit_noted(Some(&ws.id), Some(&agent.id), &agent.name, &wt, &format!("codly(wip): {} leftovers before {key}", agent.name)).await? {
                 note = Some(format!("Codly committed your uncommitted leftovers on {on} ({}).", &c.sha[..c.sha.len().min(10)]));
             }
         }
@@ -299,7 +301,7 @@ impl Inner {
                 bail!("{branch} is checked out in {}; switch that checkout to another branch", w.path.display());
             }
             self.git.check_worktree(&repo, &w.path).await?;
-            self.git.commit_all(&w.path, &format!("codly(wip): leftovers before {} takes {key}", agent.name)).await?;
+            self.commit_noted(Some(&ws.id), Some(&agent.id), key, &w.path, &format!("codly(wip): leftovers before {} takes {key}", agent.name)).await?;
             self.git.detach(&w.path).await?;
         }
         self.git.switch(&wt, branch, &start).await?;
@@ -335,9 +337,7 @@ impl Inner {
         for p in CONSULTANT_CLIS.into_iter().filter(|p| self.cli_usable(*p) && !lock(&self.models).contains_key(p)) {
             let me = self.clone();
             tokio::spawn(async move {
-                let key = me.byok_for(p).await.ok().and_then(|(key, _)| key);
-                let job = crate::env::list_models(p, &me.base_env, key.as_ref().map(|k| k.expose()));
-                let models = match tokio::time::timeout(Duration::from_secs(10), job).await {
+                let models = match tokio::time::timeout(Duration::from_secs(10), me.cli_model_names(p)).await {
                     Ok(Ok(m)) => m,
                     _ => vec![],
                 };
@@ -358,6 +358,7 @@ impl Inner {
     pub(super) fn team_view(&self, ws_id: &str, agents: &[Agent], tasks: &[Task]) -> Vec<Value> {
         let team = self.effective_team(ws_id);
         let key = |id: &Option<Id>| id.as_deref().and_then(|i| tasks.iter().find(|t| t.id == i)).map(|t| t.key.clone());
+        let (rules, now) = (self.settings().game_rules, now_ms());
         agents
             .iter()
             .filter(|a| a.on_staff() || a.consultant)
@@ -378,8 +379,8 @@ impl Inner {
                     "status": a.status, "task": key(&a.task_id), "queue": queue,
                     "session": { "resumable": a.session_id.is_some(), "context_pct": ctx },
                     "cli_ready": self.cli_usable(a.provider),
-                    "at_home_until": super::at_home(a, now_ms()),
-                    "energy": super::tired(a, now_ms()).then_some(TIRED_NOTE),
+                    "at_home_until": super::kept_home(rules, a, now),
+                    "energy": super::tired(rules, a, now).then_some(TIRED_NOTE),
                 })
             })
             .collect()
@@ -393,14 +394,15 @@ impl Inner {
         let agents = self.store.agents(&ws.id)?;
         let members: Vec<&Agent> = agents.iter().filter(|a| a.on_staff() && a.role != Role::Reviewer).collect();
         let names = || members.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
-        // At home: the Lead gives it no new work (you can call it in), unless the whole team
-        // is home; the game never stops the crew from shipping.
-        let now = now_ms();
+        // At home, with the office rules on (`Settings::game_rules`): the Lead gives it no new
+        // work (you can call it in), unless the whole team is home; the game never stops the
+        // crew from shipping. Rules off (the default): home and tired change nothing here.
+        let (rules, now) = (self.settings().game_rules, now_ms());
         // Rested first: a tired member is only a second choice (never refused).
-        let mut at_work: Vec<&&Agent> = members.iter().filter(|a| super::at_home(a, now).is_none()).collect();
-        at_work.sort_by_key(|a| super::tired(a, now));
+        let mut at_work: Vec<&&Agent> = members.iter().filter(|a| super::kept_home(rules, a, now).is_none()).collect();
+        at_work.sort_by_key(|a| super::tired(rules, a, now));
         let at_work: Vec<String> =
-            at_work.iter().map(|a| if super::tired(a, now) { format!("{} (tired)", a.name) } else { a.name.clone() }).collect();
+            at_work.iter().map(|a| if super::tired(rules, a, now) { format!("{} (tired)", a.name) } else { a.name.clone() }).collect();
         let mut errors = vec![];
         let mut notes = vec![];
         for t in tasks.iter_mut() {
@@ -414,7 +416,7 @@ impl Inner {
                     Some(a) if a.role == Role::Reviewer => {
                         errors.push(format!("task {}: {} reviews code; assign one of: {}", t.id, a.name, names()))
                     }
-                    Some(a) if !at_work.is_empty() && super::at_home(a, now).is_some() => errors.push(format!(
+                    Some(a) if !at_work.is_empty() && super::kept_home(rules, a, now).is_some() => errors.push(format!(
                         "task {}: {}; assign someone at work ({}) or a consultant",
                         t.id,
                         away_note(a, now),
@@ -498,7 +500,13 @@ impl Inner {
         let thread = super::lead::thread_of(&lead).to_string();
         let ws_id = self.store.agent_workspace(lead_id)?.ok_or_else(|| anyhow!("no workspace"))?;
         let ws = self.store.workspace(&ws_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
-        let mut input: TaskInput = serde_json::from_value(args.clone()).map_err(|e| anyhow!("Reassign rejected: {e}"))?;
+        // The arguments carry a task's staffing, not the task: `TaskInput` wants its id, title
+        // and goal too. The id is set below; the other two are not read here.
+        let mut staffing = args.as_object().cloned().unwrap_or_default();
+        for field in ["id", "title", "goal"] {
+            staffing.insert(field.into(), json!(""));
+        }
+        let mut input: TaskInput = serde_json::from_value(Value::Object(staffing)).map_err(|e| anyhow!("Reassign rejected: {e}"))?;
         let key = args["task"].as_str().map(str::trim).unwrap_or_default().to_string();
         let plan_id = args["plan_id"].as_str().map(str::trim).filter(|p| !p.is_empty());
         let plans: Vec<Plan> = self
@@ -528,6 +536,8 @@ impl Inner {
         let mut one = [input];
         let notes = self.check_team(&ws, &mut one)?;
         let [input] = one;
+        // The reassignment could go through: after a message from outside, the user says so first.
+        self.ask_user_first(&lead, &ws.id, &format!("reassign {}", task.key))?;
         let member = input.member().and_then(|n| self.member_by_name(&ws.id, n));
         let from = task.assignee.as_deref().and_then(|a| self.agent(a).ok()).map_or_else(|| "nobody".into(), |a| a.name);
         let to = match (&member, input.consultant_spec()) {
@@ -575,9 +585,11 @@ impl Inner {
                 let names: Vec<&str> = agents.iter().filter(|a| a.member.is_some() || a.consultant).map(|a| a.name.as_str()).collect();
                 anyhow!("no team member or working consultant is called '{to}' (team: {})", if names.is_empty() { "none".into() } else { names.join(", ") })
             })?;
-        if super::at_home(&agent, now_ms()).is_some() {
+        if super::kept_home(self.settings().game_rules, &agent, now_ms()).is_some() {
             bail!("{}", away_note(&agent, now_ms()));
         }
+        // The message has someone to go to: after a message from outside, the user says so first.
+        self.ask_user_first(&lead, &ws.id, &format!("message {}", agent.name))?;
         let hands_off = agent
             .task_id
             .as_deref()
@@ -603,20 +615,17 @@ impl Inner {
             }
             "started a read-only chat"
         };
-        let steer = self.would_steer(&agent.id);
-        self.send_prompt(&agent.id, prompt)?;
-        if let Some(l) = lock(&self.live).get_mut(&agent.id) {
+        // The answer is owed in one step with the send: a turn that reads the message and ends
+        // right away already finds whom its reply goes to.
+        self.send_prompt_then(&agent.id, prompt, |l| {
             // The message a run was started for is its first turn, ahead of what was sent while
             // it started. Any other one is the last in the queue, behind that first message if
-            // it has not gone out yet (`Live::waited`).
+            // it has not gone out yet (`Live::waited`). One that goes into the running turn
+            // instead of a turn of its own is due a turn sooner (`track_live`, PromptSteered).
             let behind_first = (l.starting.is_some() || !l.waited.is_empty()) as u64;
-            let due = match (first, steer) {
-                (true, _) => 1,
-                (_, true) => l.turns + 1,
-                _ => l.turns + l.turn_active as u64 + l.queued as u64 + behind_first,
-            };
+            let due = if first { 1 } else { l.turns + l.turn_active as u64 + l.queued as u64 + behind_first };
             l.answers.push(Answer { due, ws_id: ws.id.clone(), thread });
-        }
+        })?;
         Ok(json!({ "ok": true, "delivery": delivery, "note": format!("{}'s answer arrives as a later [Codly] message.", agent.name) }))
     }
 
@@ -639,16 +648,9 @@ impl Inner {
             account: None,
         };
         match &agent.session_id {
-            Some(s) => {
-                if let Err(e) = self.spawn_run(req(SessionMode::Resume { session_id: s.clone() })).await {
-                    tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
-                    self.spawn_run(req(new_session(agent.provider))).await?;
-                }
-            }
-            None => {
-                self.spawn_run(req(new_session(agent.provider))).await?;
-            }
-        }
+            Some(s) => self.resume_or_new(s, &req).await?,
+            None => self.spawn_run(req(new_session(agent.provider))).await?,
+        };
         Ok(())
     }
 
@@ -716,10 +718,11 @@ impl Inner {
         })
     }
 
-    /// Agents a task cannot go to right now: every live run but quiet chats.
+    /// Agents a task cannot go to right now: every live run but quiet chats, and every agent
+    /// that is in your terminal (takeover.rs).
     pub(super) fn busy_agents(&self) -> HashSet<Id> {
         let ids: Vec<Id> = lock(&self.live).keys().cloned().collect();
-        ids.into_iter().filter(|id| !self.preemptible(id)).collect()
+        ids.into_iter().filter(|id| !self.preemptible(id)).chain(self.in_terminal_ids()).collect()
     }
 }
 

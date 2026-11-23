@@ -2,14 +2,21 @@
 // a virtual clock (demo/story.ts) that also answers every command, so each panel is demonstrable
 // without the Rust core. Never loaded inside the Tauri app (see api.ts).
 //
-// ponytail: one scripted story (dark-mode toggle on acme/web); any repo path replays it.
+// ponytail: one scripted story (dark-mode toggle on acme/web); any repo path replays it, but
+// billing-api's: that is the demo's second office, with its own Sim and a small script (`open`).
 // URL knobs (dev only): ?speed=2 (script speed), ?skip=90 (fast-forward N seconds of script),
 // ?autoplay=1 (auto "Run plan" and auto-approve), ?ws=1 (open acme/web immediately; always on in
-// the public site demo).
+// the public site demo). More parameters start the demo in a state the script does not reach
+// (a merge conflict, a running preview, the intake dialog, a kind of request…): demo/states.ts,
+// docs/DEMO.md.
 // Also answers `repo_map` (a ~300-file acme/web) and `read_artifact` (the bytes agents produced).
 import { isSiteDemo, type Transport, type UiBatch } from './api';
+import type { ApprovalRuleKind } from './gen/ApprovalRuleKind';
 import type { BreakerConfig } from './gen/BreakerConfig';
+import type { ChatMessage } from './gen/ChatMessage';
 import type { CliInfo } from './gen/CliInfo';
+import type { ClosedRequest } from './gen/ClosedRequest';
+import type { ClosedTranscript } from './gen/ClosedTranscript';
 import type { Placed } from './gen/Placed';
 import type { Rank } from './gen/Rank';
 import type { InstallHint } from './gen/InstallHint';
@@ -19,6 +26,7 @@ import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
 import type { MemoryKind } from './gen/MemoryKind';
 import type { MemoryScope } from './gen/MemoryScope';
+import type { PermissionMode } from './gen/PermissionMode';
 import type { Provider } from './gen/Provider';
 import type { SearchResult } from './gen/SearchResult';
 import type { Settings } from './gen/Settings';
@@ -27,7 +35,21 @@ import type { TaskStatus } from './gen/TaskStatus';
 import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 import type { RequestPrefs } from './gen/RequestPrefs';
+import type { LastMerge } from './gen/LastMerge';
+import type { PrSource } from './gen/PrSource';
+import type { RepoSync } from './gen/RepoSync';
+import type { Workspace } from './gen/Workspace';
 import { mockAgentGit } from './demo/agentgit';
+import { setWallHour } from './demo/clock';
+import { BILLING, demoCloseOffice, demoMovedTo, demoPlays } from './demo/office';
+import { MergeConflictDemo } from './demo/mergeConflict';
+import { demoStates, opensRepo, type DemoStates } from './demo/states';
+import { intakeUi } from './state/intake.svelte';
+import { PullRequestDemo } from './demo/pullrequest';
+import { demoIntake } from './demo/intake';
+import { PreviewDemo } from './demo/preview';
+import { DemoCheckpoints } from './demo/checkpoints';
+import type { TurnSource } from './gen/TurnSource';
 import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
@@ -35,11 +57,21 @@ import { makeApplicants } from './util/career';
 import { demoBiggerModel, demoBringBack, demoBuyLot, demoLetGo, demoDigest, demoExportOffice, demoGhosts, demoGiveXp, demoGrant, demoHangout, demoHome, demoLook, demoLot, demoLotOf, demoLots, demoMoveOffice, demoOffices, demoPlace, demoResetOffice, demoRest, demoSaveLot, demoSell, demoSellLot, demoShop, demoTired, demoTransfer, demoTrust, demoWallet } from './demo/office';
 import type { Lot } from './gen/Lot';
 import { HousekeepingDemo } from './demo/housekeeping';
+import { WorktreeDemo } from './demo/worktree';
+import type { SetupChoice } from './gen/SetupChoice';
+import { ChecksDemo } from './demo/checks';
+import type { ChecksChoice } from './gen/ChecksChoice';
+import { checksLine } from './util/checks';
+import { WorkspaceTrustDemo } from './demo/workspaceTrust';
+import type { TrustChoice } from './gen/TrustChoice';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
+import type { MockApprovalRules } from './demo/approvalRules';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { MockControls } from './demo/controls';
+import { demoCatalog } from './demo/models';
+import { DemoTakeovers } from './demo/takeover';
 import { Story } from './demo/story';
 import { saveTriggers, seedTriggers } from './demo/triggers';
 import type { TriggersConfig } from './gen/TriggersConfig';
@@ -52,14 +84,16 @@ import type { MemoryFile } from './gen/MemoryFile';
 const memoryFiles = new Map<string, MemoryFile>();
 import { inboundMock } from './demo/inbound';
 
+/** The demo Mac has npm, and every installed CLI is new enough. */
+const HERE = { npm_available: true, update_to: null };
 /** The core's trusted install table (crates/codly-core/src/install.rs), for the browser demo. */
 const INSTALL: Record<Provider, InstallHint> = {
-  claude: { npm: 'npm install -g @anthropic-ai/claude-code', native: 'curl -fsSL https://claude.ai/install.sh | bash', login: 'claude auth login', docs: 'https://docs.claude.com/en/docs/claude-code/setup' },
-  codex: { npm: 'npm install -g @openai/codex', native: null, login: 'codex login', docs: 'https://github.com/openai/codex' },
-  gemini: { npm: 'npm install -g @google/gemini-cli', native: null, login: 'gemini', docs: 'https://github.com/google-gemini/gemini-cli' },
-  opencode: { npm: 'npm install -g opencode-ai@latest', native: 'curl -fsSL https://opencode.ai/install | bash', login: null, docs: 'https://opencode.ai/docs' },
-  cursor: { npm: null, native: 'curl https://cursor.com/install -fsS | bash', login: null, docs: 'https://cursor.com/cli' },
-  copilot: { npm: 'npm install -g @github/copilot', native: null, login: null, docs: 'https://github.com/github/copilot-cli' },
+  claude: { npm: 'npm install -g @anthropic-ai/claude-code', native: 'curl -fsSL https://claude.ai/install.sh | bash', login: 'claude auth login', docs: 'https://docs.claude.com/en/docs/claude-code/setup', update: 'claude update', ...HERE },
+  codex: { npm: 'npm install -g @openai/codex', native: null, login: 'codex login', docs: 'https://github.com/openai/codex', update: 'npm install -g @openai/codex@latest', ...HERE },
+  gemini: { npm: 'npm install -g @google/gemini-cli', native: null, login: 'gemini', docs: 'https://github.com/google-gemini/gemini-cli', update: 'npm install -g @google/gemini-cli@latest', ...HERE },
+  opencode: { npm: 'npm install -g opencode-ai@latest', native: 'curl -fsSL https://opencode.ai/install | bash', login: null, docs: 'https://opencode.ai/docs', update: 'opencode upgrade', ...HERE },
+  cursor: { npm: null, native: 'curl https://cursor.com/install -fsS | bash', login: null, docs: 'https://cursor.com/cli', update: null, ...HERE },
+  copilot: { npm: 'npm install -g @github/copilot', native: null, login: null, docs: 'https://github.com/github/copilot-cli', update: null, ...HERE },
 };
 
 /** `?onboard=1`: a machine with none of the CLIs installed, so the quest has something to do. */
@@ -89,14 +123,25 @@ const SETTINGS: Settings = {
   ],
   account_strategy: 'spread',
   lead_account: null,
+  read_claude_quota: false,
   approval_mode: 'balanced',
   auto_run_plans: false,
   review_gate: false,
   lead_followups: true,
   use_my_claude_setup: true,
+  codex_network_access: false,
   paused: false,
   paused_offices: [],
+  game_rules: false,
   developer_mode: false,
+  verify_timeout_secs: 600,
+  watchdog: { quiet_secs: 600, quiet_tool_secs: 3600, idle_secs: 120 },
+  notifications: { approval: true, question: true, plan_done: true, plan_failed: true, task_blocked: true, agent_stalled: true, budget: true, merge_ready: true, only_in_background: true },
+  keep_awake: true,
+  confirm_quit: true,
+  claude_sandbox: false,
+  claude_shell_auth: false,
+  resume_on_launch: 'ask',
   world_ambient: false,
   theme: 'system',
   team: [],
@@ -113,28 +158,96 @@ const withIds = (team: TeamMember[]): TeamMember[] =>
 const params = () => new URLSearchParams(typeof location !== 'undefined' ? location.search : '');
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * What belongs to one office of the demo: its Sim, its story, and the demo state of its repo.
+ * The demo has two offices: acme/web, and billing-api once you open it. The machine (settings,
+ * CLIs, sign-ins, recent repositories) is one for both (`Sim.sameMachineAs`).
+ */
+type Desk = {
+  sim: Sim;
+  story: Story;
+  ctl: MockControls;
+  breaker: MockBreaker;
+  askMe: MockAskMe;
+  /** What stands between a plan's branch and yours (`?merge=conflict`). */
+  conflicts: MergeConflictDemo;
+  /** The commands "run" to try a plan's or an agent's work. */
+  previews: PreviewDemo;
+  checks: ChecksDemo;
+  workspaceTrust: WorkspaceTrustDemo;
+  /** The pull requests "opened" from the app. */
+  pullRequests: PullRequestDemo;
+  checkpoints: DemoCheckpoints;
+  takeovers: DemoTakeovers;
+  worktrees: WorktreeDemo;
+  hk: HousekeepingDemo | undefined;
+  /** Whether Push was clicked. */
+  pushed: boolean;
+  /** The requests closed in the demo, newest first, with what was said in each. */
+  closed: { thread: string; closed_at: number; messages: ChatMessage[]; authors: Record<string, string> }[];
+  /** The last merge into main, until it is undone. */
+  merge: Omit<LastMerge, 'blocked' | 'kept'> | null;
+};
+
+/** An office around its Sim. `states`: what the URL turned on (docs/DEMO.md), for acme/web; billing-api starts with nothing turned on. */
+function makeDesk(sim: Sim, states: DemoStates, billing = false): Desk {
+  const checks = new ChecksDemo(states.checksOn);
+  const story = new Story(sim, { checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null, ask: states.approval, billing });
+  return {
+    sim, story, checks,
+    ctl: new MockControls(sim), breaker: new MockBreaker(sim), askMe: new MockAskMe(sim, !billing),
+    conflicts: new MergeConflictDemo(states.mergeConflict, sim, story), previews: new PreviewDemo(states.previewRunning),
+    workspaceTrust: new WorkspaceTrustDemo(states.trustAsk), pullRequests: new PullRequestDemo(), checkpoints: new DemoCheckpoints(),
+    takeovers: new DemoTakeovers(), worktrees: new WorktreeDemo(), hk: undefined, pushed: false, closed: [], merge: null,
+  };
+}
+
 export class MockTransport implements Transport {
   async upload(_cmd: string, name: string): Promise<string> {
     return `/demo/acme-web/.codly/attachments/${Math.random().toString(36).slice(2, 8)}/${name}`;
   }
-  private sim: Sim;
-  private story: Story;
-  private ctl: MockControls;
+  /** acme/web's office, there from the start. */
+  private first: Desk;
+  /** billing-api's office, from the first time you open it. */
+  private billing: Desk | null = null;
+  /** The open office: every command is answered by it. */
+  private desk: Desk;
+  /** The UI's callback for events, from its last `subscribe`. */
+  private sink: ((b: UiBatch) => void) | null = null;
+  private get sim() { return this.desk.sim; }
+  private get story() { return this.desk.story; }
+  private get ctl() { return this.desk.ctl; }
+  private get breaker() { return this.desk.breaker; }
+  private get approvalRules(): MockApprovalRules { return this.desk.story.rules; }
+  private get askMe() { return this.desk.askMe; }
+  private get conflicts() { return this.desk.conflicts; }
+  private get previews() { return this.desk.previews; }
+  private get checks() { return this.desk.checks; }
+  private get workspaceTrust() { return this.desk.workspaceTrust; }
+  private get pullRequests() { return this.desk.pullRequests; }
+  private get checkpoints() { return this.desk.checkpoints; }
+  private get takeovers() { return this.desk.takeovers; }
+  private get worktrees() { return this.desk.worktrees; }
   private ptys = new Map<string, FakeShell>();
   private ptySeq = 0;
   /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
   private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
+  /** The demo repo: a clean checkout, two merges not pushed yet (the real one runs git). */
+  private demoSync(): RepoSync {
+    const { pushed, merge } = this.desk;
+    const last_merge = merge && { ...merge, blocked: pushed ? 'the merge is already on origin/main' : null, kept: 'refs/codly/before-merge' };
+    return { branch: 'main', upstream: 'origin/main', ahead: pushed ? 0 : 2, behind: 0, dirty: [], last_merge };
+  }
   /** BYOK demo state. Keys are never stored, only whether one was "saved". */
-  /** Demo repo: whether Push was clicked. */
-  private demoPushed = false;
   private byokSaved: Record<Vendor, boolean> = { anthropic: false, openai: false, openrouter: false };
   private triggers: TriggersConfig | null = null;
-  private breaker: MockBreaker;
-  private askMe!: MockAskMe;
-  private hk: HousekeepingDemo | undefined;
 
   constructor() {
     const p = params();
+    // The states a URL parameter starts the demo in (docs/DEMO.md).
+    const states = demoStates(p);
+    // `?hour=13`: before the first clock is made, so every time of the demo follows.
+    if (states.hour !== null) setWallHour(states.hour);
     const theme = (() => {
       try {
         return localStorage.getItem('codly.theme') ?? 'system';
@@ -142,14 +255,11 @@ export class MockTransport implements Transport {
         return 'system';
       }
     })();
-    this.sim = new Sim(
+    const sim = new Sim(
       { speed: Number(p.get('speed') ?? 1) || 1, skipMs: (Number(p.get('skip') ?? 0) || 0) * 1000, autoplay: p.get('autoplay') === '1' },
       { ...SETTINGS, theme },
     );
-    this.story = new Story(this.sim);
-    this.breaker = new MockBreaker(this.sim);
-    this.ctl = new MockControls(this.sim);
-    this.askMe = new MockAskMe(this.sim);
+    this.first = this.desk = makeDesk(sim, states);
     const now = this.sim.now();
     this.sim.clis = p.get('onboard') === '1' ? CLIS.map(fresh) : CLIS;
     this.sim.recent = [
@@ -159,14 +269,76 @@ export class MockTransport implements Transport {
     ];
     // Let the UI's relative times follow the virtual clock (dev only).
     (globalThis as { __codlyNow?: () => number }).__codlyNow = () => this.sim.now();
-    if (p.get('ws') === '1' || p.get('skip') || isSiteDemo()) this.story.openWorkspace(REPO);
+    if (p.get('ws') === '1' || p.get('skip') || isSiteDemo() || opensRepo(states)) this.story.openWorkspace(REPO);
+    // `?intake=issue` / `?intake=pr`: that dialog is open when the demo starts.
+    if (states.intake) intakeUi.dialog = states.intake;
   }
 
   async subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot> {
     this.sim.flush();
-    this.sim.sink = onBatch;
+    this.sink = onBatch;
+    this.wire();
     await wait(40);
     return this.sim.snapshot();
+  }
+
+  private desks(): Desk[] {
+    return this.billing ? [this.first, this.billing] : [this.first];
+  }
+
+  /** The Sims of the offices you are not looking at: they keep working. */
+  private rest(): Sim[] {
+    return this.desks().filter((d) => d !== this.desk).map((d) => d.sim);
+  }
+
+  /**
+   * Where each office's events go. The open office's go to the UI as they are. Another
+   * office's persisted events go there too, each with the id of its office, as on the core's
+   * live stream: the UI does not apply them, it tells you what waits for you there. After a
+   * switch the UI subscribes again: until then (`sink` is null) the open office's events wait
+   * in its Sim, and the other's are dropped.
+   */
+  private wire() {
+    const out = this.sink;
+    for (const d of this.desks()) {
+      if (d === this.desk) d.sim.sink = out;
+      else {
+        d.sim.sink = (b) => {
+          const workspace_id = d.sim.workspace?.id;
+          if (!out || !workspace_id) return;
+          const events = b.events.filter((e) => e.id !== 0).map((e) => ({ ...e, workspace_id }));
+          if (events.length) out({ events });
+        };
+      }
+    }
+  }
+
+  /**
+   * `open_workspace`. billing-api is an office of its own: the first time, a second Sim starts
+   * with its script (story.ts `openBilling`). From then on, opening one office or the other
+   * only changes which one the UI looks at. The first office is its own path, and any path
+   * while it has no repo yet (one story for every repo). Another path opens nothing: the open
+   * office answers, as before.
+   */
+  private open(path: string): Workspace {
+    const firstPath = this.first.sim.workspace?.repo_path;
+    const next = path === BILLING.repo_path ? (this.billing ??= this.second()) : !firstPath || path === firstPath ? this.first : this.desk;
+    if (next !== this.desk) {
+      this.desk = next;
+      this.sink = null;
+      this.wire();
+    }
+    return next.story.openWorkspace(path);
+  }
+
+  /** billing-api's office: a Sim of its own on the same machine, at the first one's speed, with nothing of the URL turned on. */
+  private second(): Desk {
+    const sim = new Sim({ ...this.first.sim.opts, skipMs: 0 }, this.first.sim.settings);
+    sim.sameMachineAs(this.first.sim);
+    demoPlays(sim, BILLING.id);
+    // Who you moved there before you opened it is in its crew.
+    for (const a of demoMovedTo(BILLING.id)) sim.agents.set(a.id, a);
+    return makeDesk(sim, demoStates(new URLSearchParams()), true);
   }
 
   async attachPty(ptyId: string, onData: (bytes: Uint8Array) => void): Promise<void> {
@@ -195,6 +367,9 @@ export class MockTransport implements Transport {
     const story = this.story;
     switch (cmd) {
       case 'ui_set_visible':
+      case 'retry_core': // the demo's core never fails to start
+      case 'start_problem':
+      case 'recover_database':
         return null;
       case 'detect_clis':
         // Like the core: a CLI's badge says so while its vendor's own credential is in use.
@@ -212,14 +387,16 @@ export class MockTransport implements Transport {
       case 'list_repos':
         return sim.recent.map((r) => ({ name: r.name, path: r.repo_path, modified_ms: r.opened_at }));
       case 'open_workspace':
-        return story.openWorkspace(String(a.repoPath ?? REPO));
+        return this.open(String(a.repoPath ?? REPO));
       case 'update_settings': {
         const next = sim.signIns.normalize(a.settings as Settings);
         next.max_parallel = Math.min(8, Math.max(1, next.max_parallel));
         next.max_per_provider = Math.min(next.max_parallel, Math.max(1, next.max_per_provider));
+        next.verify_timeout_secs = Math.min(24 * 3600, Math.max(1, next.verify_timeout_secs));
         next.team = withIds(next.team ?? []);
         sim.settings = next;
-        story.syncTeam();
+        // The team is the machine's: its members are in every office.
+        for (const d of this.desks()) d.story.syncTeam();
         return sim.settings;
       }
       case 'set_request_prefs':
@@ -233,6 +410,8 @@ export class MockTransport implements Transport {
       }
       case 'send_chat': {
         if (!sim.workspace) throw new Error('Open a repository first.');
+        const to = sim.agents.get(String(a.thread).replace(/^agent:/, ''));
+        if (to && this.takeovers.has(to.id)) throw new Error(`${to.name} is in your terminal: give it back first`);
         story.userChat(String(a.thread), String(a.text));
         return null;
       }
@@ -242,21 +421,69 @@ export class MockTransport implements Transport {
       case 'cancel_plan':
         story.cancelPlan(String(a.planId));
         return null;
-      case 'close_thread':
-        story.closeThread(String(a.thread));
+      case 'close_thread': {
+        const thread = String(a.thread);
+        const messages = sim.chats.filter((c) => c.thread === thread);
+        const authors = Object.fromEntries(messages.flatMap((m) => (sim.agents.has(m.author) ? [[m.author, sim.agents.get(m.author)!.name]] : [])));
+        story.closeThread(thread);
+        // Like the core: what was said stays, to read again.
+        const at = sim.now();
+        if (messages.length) this.desk.closed.unshift({ thread: `closed:${thread}:${at}`, closed_at: at, messages, authors });
         return null;
-      case 'merge_plan':
-        return story.mergePlan(String(a.planId));
-      // The demo repo: a clean checkout, two merges not pushed yet (the real one runs git).
-      case 'merge_agent':
-        return Math.random().toString(16).slice(2, 12).padEnd(10, '0');
+      }
+      case 'closed_requests':
+        return this.desk.closed.map((c): ClosedRequest => ({ thread: c.thread, title: (c.messages.find((m) => m.author === 'user')?.text ?? '').slice(0, 300), closed_at: c.closed_at, messages: c.messages.length }));
+      case 'closed_request': {
+        const c = this.desk.closed.find((x) => x.thread === String(a.thread));
+        return { messages: c?.messages ?? [], total: c?.messages.length ?? 0, authors: c?.authors ?? {} } satisfies ClosedTranscript;
+      }
+      case 'merge_plan': {
+        this.conflicts.refuse(String(a.planId));
+        const sha = story.mergePlan(String(a.planId));
+        this.desk.merge = { sha, branch: 'main', plan_id: String(a.planId), agent_id: null };
+        this.desk.pushed = false;
+        return sha;
+      }
+      case 'merge_plan_warning':
+        return null; // the demo repo stays on main, where every plan starts
+      case 'merge_state':
+        return this.conflicts.state(a.source as PrSource);
+      case 'resolve_merge_conflict':
+        return this.conflicts.resolve(a.source as PrSource);
+      case 'stop_resolving_merge':
+        throw new Error(`${sim.agents.get(String(a.agentId))?.name ?? 'This agent'} is not resolving a merge`); // only a plan's task resolves one in the demo
+      case 'merge_agent': {
+        const sha = Math.random().toString(16).slice(2, 12).padEnd(10, '0');
+        this.desk.merge = { sha, branch: 'main', plan_id: null, agent_id: String(a.agentId) };
+        this.desk.pushed = false;
+        return sha;
+      }
+      case 'undo_merge': {
+        const m = this.desk.merge;
+        if (!m || m.sha !== a.sha) throw new Error('That is not the last merge Codly made into your branch.');
+        if (this.desk.pushed) throw new Error('The merge cannot be undone: the merge is already on origin/main.');
+        if (m.plan_id) story.undoMerge(m.plan_id);
+        this.desk.merge = null;
+        return this.demoSync();
+      }
       case 'repo_sync':
-        return { branch: 'main', upstream: 'origin/main', ahead: this.demoPushed ? 0 : 2, behind: 0, dirty: [] };
+        return this.demoSync();
       case 'commit_checkout':
         return Math.random().toString(16).slice(2, 12).padEnd(10, '0');
       case 'push_checkout':
-        this.demoPushed = true;
-        return { branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0, dirty: [] };
+        this.desk.pushed = true;
+        return this.demoSync();
+      case 'pull_request':
+      case 'draft_pull_request':
+      case 'create_pull_request':
+      case 'push_pr_branch':
+      case 'refresh_pull_request':
+        return this.pullRequests.handle(cmd, a, sim);
+      case 'start_from_github':
+        if (!sim.workspace) throw new Error('Open a repository first.');
+        return demoIntake(a, (thread, text, source) => story.userChat(thread, text, { intake: source }));
+      case 'preview':
+        return this.previews.handle(a, sim);
       case 'keep_plan':
       case 'pin_memory':
         return null; // ponytail: the mock keeps these as UI state only
@@ -265,6 +492,15 @@ export class MockTransport implements Transport {
         story.resolveApproval(String(a.approvalId), d.choice, d.message, d.answers);
         return null;
       }
+      case 'approval_rule_offer':
+        return this.approvalRules.offer(String(a.approvalId));
+      case 'add_approval_rule':
+        return this.approvalRules.add(String(a.approvalId), a.kind as ApprovalRuleKind);
+      case 'approval_rules':
+        return this.approvalRules.list();
+      case 'remove_approval_rule':
+        this.approvalRules.remove(String(a.ruleId));
+        return null;
       case 'breaker_config':
         return this.breaker.cfg;
       case 'set_breaker_config':
@@ -274,6 +510,8 @@ export class MockTransport implements Transport {
       case 'reset_breaker':
         this.breaker.reset();
         return null;
+      case 'plan_spent':
+        return this.breaker.planSpent(String(a.planId));
       case 'interrupt_agent':
         story.interrupt(String(a.agentId));
         return null;
@@ -281,8 +519,6 @@ export class MockTransport implements Transport {
         story.interrupt(String(a.agentId), true);
         this.ctl.clear(String(a.agentId));
         return null;
-      case 'agent_control':
-        return this.ctl.state(String(a.agentId));
       case 'set_agent_block_tools':
         return this.ctl.setBlockTools(String(a.agentId), !!a.on);
       case 'stop_agent_after_step':
@@ -291,10 +527,33 @@ export class MockTransport implements Transport {
         return this.ctl.resume(String(a.agentId));
       case 'steer_agent':
         return this.ctl.steer(String(a.agentId), String(a.text ?? ''));
-      case 'hire_agent':
-        return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
-      case 'list_models':
-        return a.provider === 'claude' ? ['sonnet', 'opus', 'haiku', 'fable'] : a.provider === 'codex' ? ['gpt-5.5-codex', 'gpt-5.5-mini'] : [];
+      case 'set_agent_permission_mode':
+        return this.ctl.setMode(String(a.agentId), a.mode as PermissionMode);
+      case 'compact_agent':
+        return this.ctl.compact(String(a.agentId));
+      case 'agent_context_usage':
+        return this.ctl.contextUsage(String(a.agentId));
+      case 'reconnect_agent_mcp':
+        return this.ctl.reconnectMcp(String(a.agentId), String(a.server ?? ''));
+      case 'stop_agent_task':
+        return this.ctl.stopTask(String(a.agentId));
+      case 'agent_takeover':
+        return this.takeovers.state(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
+      case 'list_takeovers':
+        return this.takeovers.list([...sim.agents.values()], [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
+      case 'take_over_agent':
+        return this.takeovers.take(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO, sim.now());
+      case 'open_takeover_terminal': {
+        const t = this.takeovers.state(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO).takeover;
+        if (!t) throw new Error('this agent is not in your terminal: open it in your terminal first');
+        const id = `pty-${++this.ptySeq}`;
+        this.ptys.set(id, new FakeShell(t.cwd, sim, t.command));
+        return id;
+      }
+      case 'give_back_agent':
+        return this.takeovers.giveBack(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
+      case 'model_catalog':
+        return demoCatalog(a.provider as Provider);
       case 'hire_review':
         return reviewHire(String(a.raw));
       case 'hire_launch_preview':
@@ -336,9 +595,9 @@ export class MockTransport implements Transport {
       case 'let_go':
         return demoLetGo(sim, String(a.agentId));
       case 'offices':
-        return demoOffices();
+        return demoOffices(sim, this.rest());
       case 'transfer_agent':
-        return demoTransfer(sim, String(a.agentId), String(a.toWorkspaceId));
+        return demoTransfer(sim, String(a.agentId), String(a.toWorkspaceId), this.rest());
       case 'office_shop':
         return demoShop(sim);
       case 'office_place':
@@ -354,37 +613,52 @@ export class MockTransport implements Transport {
       case 'dev_reset_office':
         return demoResetOffice(sim);
       case 'office_lot':
-        return demoLot();
+        return demoLot(sim);
       case 'office_save_lot':
         return demoSaveLot(sim, a.lot as Lot);
       case 'lots':
-        return demoLots(sim);
+        return demoLots(sim, this.rest());
       case 'lot_of':
         return demoLotOf(String(a.slotId));
       case 'buy_lot':
         return demoBuyLot(sim, String(a.slotId), (a.template as string | null) ?? null);
       case 'sell_lot':
-        return demoSellLot(sim, String(a.slotId));
+        return demoSellLot(sim, String(a.slotId), this.rest());
       case 'move_office':
-        return demoMoveOffice(sim, String(a.workspaceId), String(a.slotId));
+        return demoMoveOffice(sim, String(a.workspaceId), String(a.slotId), this.rest());
+      case 'close_office':
+        return demoCloseOffice(sim, String(a.workspaceId), this.rest());
       case 'set_agent_model':
         return null;
       case 'create_task':
         return story.createTask(String(a.title), String(a.goal ?? ''));
       case 'move_task':
         return story.moveTask(String(a.taskId), a.status as TaskStatus);
+      case 'cancel_task_tree':
+        return story.cancelTaskTree(String(a.taskId));
+      case 'finish_plan':
+        return story.finishPlan(String(a.planId));
+      case 'recheck_task':
+        return story.recheckTask(String(a.taskId));
+      case 'accept_task':
+        return story.acceptTask(String(a.taskId));
       case 'assign_task':
         return story.assignTask(String(a.taskId), (a.agentId as string | null) ?? null);
       case 'task_diff':
         return story.taskDiff(String(a.taskId));
       case 'plan_diff':
         return story.planDiff(String(a.planId));
+      case 'send_back_task':
+        return story.sendBackTask(String(a.taskId), String(a.comments));
       case 'get_events': {
         const agentId = a.agentId as string | null;
+        const thread = (a.thread as string | null) ?? null;
         const before = a.before as number | null;
         const limit = Number(a.limit ?? 500);
+        // A conversation's page: its agent's events and its messages.
         return sim.log
-          .filter((e) => (!agentId || e.agent_id === agentId) && (before == null || e.id < before))
+          .filter((e) => (thread ? e.agent_id === agentId || (e.kind.type === 'chat' && e.kind.message.thread === thread) : !agentId || e.agent_id === agentId))
+          .filter((e) => before == null || e.id < before)
           .slice(-limit)
           .reverse();
       }
@@ -459,7 +733,7 @@ export class MockTransport implements Transport {
         // Only the table's constants run, chosen by (provider, rung), as in the core.
         const hint = INSTALL[a.provider as Provider];
         const rung = a.rung as InstallRung;
-        const command = rung === 'npm' || rung === 'native' ? hint?.[rung] : undefined;
+        const command = rung === 'npm' || rung === 'native' || rung === 'update' ? hint?.[rung] : undefined;
         if (!command) throw new Error(`there is no ${String(a.rung)} installer for ${String(a.provider)}`);
         const id = `pty-${++this.ptySeq}`;
         this.ptys.set(id, new FakeShell(HOME, sim));
@@ -498,6 +772,16 @@ export class MockTransport implements Transport {
       }
       case 'agent_git':
         return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now());
+      case 'agent_checkpoints':
+        return this.checkpoints.list(sim.agents.get(String(a.agentId)), sim.now());
+      case 'restore_checkpoint':
+        return this.checkpoints.restore(sim.agents.get(String(a.agentId)), Number(a.checkpoint), sim.now(), (a.path as string | null) ?? null);
+      case 'last_turn_diff': {
+        // A task's last turn is the one of the agent that works on it.
+        const source = a.source as TurnSource;
+        const agentId = source.kind === 'agent' ? source.id : sim.tasks.get(source.id)?.assignee;
+        return this.checkpoints.lastTurn(agentId ? sim.agents.get(agentId) : undefined, sim.now());
+      }
       case 'get_triggers':
         return (this.triggers ??= seedTriggers());
       case 'set_triggers':
@@ -529,7 +813,49 @@ export class MockTransport implements Transport {
       case 'board_archive':
       case 'list_connections':
       case 'update_connection':
-        return (this.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
+      case 'storage_report':
+      case 'storage_policy':
+      case 'storage_clean':
+      case 'storage_delete_worktree':
+      case 'storage_delete_branch':
+      case 'storage_delete_backup':
+        return (this.desk.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
+      case 'worktree_setup':
+        return this.worktrees.setup((a.set as SetupChoice | null) ?? null);
+      case 'required_checks':
+        return this.checks.status((a.set as ChecksChoice | null) ?? null);
+      case 'check_agent': {
+        // Like the core: the result is also on record, as a decision.
+        const results = this.checks.run(String(a.agentId), sim.now());
+        const name = sim.agents.get(String(a.agentId))?.name ?? 'the agent';
+        sim.decision('gate', 'human', `you checked ${name}'s work: ${checksLine(results)}`, { agent_id: String(a.agentId), checks: results });
+        return results;
+      }
+      case 'agent_check_state': {
+        const status = sim.agents.get(String(a.agentId))?.status;
+        return this.checks.state(String(a.agentId), status !== undefined && !['idle', 'done', 'failed', 'offline'].includes(status));
+      }
+      case 'workspace_trust':
+        return this.workspaceTrust.trust((a.set as TrustChoice | null) ?? null);
+      case 'resume_work':
+        // The demo starts new each time: no work of an earlier run waits for a Resume.
+        return null;
+      case 'diagnostics':
+        // The shape of the app's report (src-tauri/src/diagnostics.rs), about the scripted session.
+        return {
+          version: 'demo',
+          log_file: null,
+          report: [
+            'Codly demo',
+            'System: your browser',
+            'Core: scripted demo session',
+            '',
+            'Agent CLIs',
+            ...sim.clis.map((c) => (c.path ? `- ${c.provider} ${c.version ?? 'version unknown'} (${c.transport})` : `- ${c.provider}: not installed`)),
+            '',
+            'No log file: the demo has no app behind it.',
+          ].join('\n'),
+        };
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }
@@ -577,7 +903,8 @@ class FakeShell {
   private out: ((b: Uint8Array) => void) | null = null;
   private line = '';
   private pending = '';
-  constructor(private cwd: string, private sim: Sim) {}
+  /** `typed`: a line that is at the prompt when the terminal opens, typed and not run. */
+  constructor(private cwd: string, private sim: Sim, private typed = '') {}
 
   private write(s: string) {
     if (this.out) this.out(enc.encode(s));
@@ -599,6 +926,8 @@ class FakeShell {
       this.write(p);
     }
     this.write(this.prompt);
+    this.input(this.typed);
+    this.typed = '';
   }
 
   close() {
@@ -673,6 +1002,9 @@ class FakeShell {
         say('logout');
         this.close();
         return;
+      case 'claude':
+        say(`${C.dim}(mock) the demo has no ${bin} to run. In the app, this opens the agent’s session in ${bin}’s own terminal UI.${C.reset}`);
+        break;
       default:
         say(`zsh: command not found: ${bin}`);
     }

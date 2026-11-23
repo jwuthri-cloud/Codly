@@ -127,6 +127,25 @@ export function targetLabel(t: Target | null | undefined, a?: ActivityKind): str
   return '';
 }
 
+/**
+ * Who made a tool call, when it was one of the agent's subagents: "subagent Ada (explorer)",
+ * or "subagent" when it has no name. '' for the agent's own call. The Codex adapter marks such
+ * a call's input with `subagent: { thread, name }`.
+ */
+export function subagentTag(input: unknown): string {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return '';
+  const sub = (input as { subagent?: unknown }).subagent;
+  if (!sub || typeof sub !== 'object') return '';
+  const name = (sub as { name?: unknown }).name;
+  return typeof name === 'string' && name ? `subagent ${oneLine(name, 40)}` : 'subagent';
+}
+
+/** `subagentTag` as the end of a line of text: " · subagent Ada (explorer)", or ''. */
+export function subagentMark(input: unknown): string {
+  const tag = subagentTag(input);
+  return tag ? ` · ${tag}` : '';
+}
+
 /** "Editing app.ts", "Running npm test", "Searching “useAuth”". */
 export function phrase(a: ActivityKind, label?: string | null): string {
   if (a === 'await_approval') return 'Waiting on you';
@@ -263,7 +282,7 @@ export const COMPANY_LABEL: Record<Provider, string> = {
   codex: 'OpenAI',
   gemini: 'Google',
   opencode: 'Open source',
-  cursor: 'xAI',
+  cursor: 'Anysphere',
   copilot: 'GitHub',
 };
 

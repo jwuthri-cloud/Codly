@@ -71,6 +71,7 @@ fn agent(name: &str, role: Role) -> Agent {
         away_until: None,
         away_since: None,
         tired_since: None,
+        permission_mode: None,
         archived: false,
         usage: Usage::default(),
         career: Career::default(),
@@ -181,6 +182,18 @@ async fn a_transfer_keeps_the_career_and_leaves_the_repo_behind() {
     };
     assert_eq!(moves(&a.id), ["Dee moved to there"]);
     assert_eq!(moves(&b.id), ["Dee moved in from here"]);
+    // The trust it leaves behind is a decision too, in the office where it asks again.
+    let left: Vec<_> = store
+        .events(Some(&b.id), Some(&dee.id), None, 500)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Decision { decision_type, method, summary, detail, .. } if decision_type == "trust" => Some((method, summary, detail)),
+            _ => None,
+        })
+        .collect();
+    let detail = serde_json::json!({ "agent": dee.id, "name": "Dee", "from": "senior", "to": "intern" });
+    assert_eq!(left, [("rule".to_string(), "Dee asks like every other agent here: your trust in it stayed in here".to_string(), detail)]);
 
     // It's gone from here: transferring it again from this office is refused.
     assert!(no(core.transfer_agent(&dee.id, &b.id).await).contains("doesn't work in this office"));

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { clashes, contextLabel, emptyCareer, makeApplicants, rankFor, rankProgress } from '../util/career';
-import { demoBiggerModel } from '../demo/office';
+import { canTrust, clashes, contextLabel, emptyCareer, makeApplicants, raisesTrust, rankFor, rankProgress, TRUST, trustOf } from '../util/career';
+import { demoBiggerModel, demoTrust } from '../demo/office';
 import type { Sim } from '../demo/sim';
 import type { Agent } from '../gen/Agent';
 
@@ -45,5 +45,71 @@ describe('a new Legend’s offer', () => {
     expect(demoBiggerModel(sim, 'a')).toBeNull();
     agents.set('a', { ...a, provider: 'gemini' });
     expect(demoBiggerModel(sim, 'a')).toBeNull();
+  });
+});
+
+describe('trust is a safety setting, not a rank', () => {
+  it('names every level in plain words, the safe one first', () => {
+    expect(TRUST.map((t) => t.level)).toEqual(['intern', 'junior', 'senior', 'staff']);
+    expect(trustOf('intern').label).toBe('No extra trust');
+    for (const t of TRUST) {
+      expect(t.label).not.toMatch(/intern|junior|senior|staff/i);
+      expect(t.allows.length).toBeGreaterThan(20);
+    }
+    // The two middle levels only change anything where permissions are Balanced, and say so.
+    expect(trustOf('junior').allows).toContain('Balanced');
+    expect(trustOf('senior').allows).toContain('Balanced');
+    expect(trustOf('staff').allows).toContain('without the cross-vendor review');
+  });
+
+  it('each level’s sentence stands alone: a toast, a tooltip and the office show it without the list', () => {
+    for (const t of TRUST) expect(t.allows).not.toMatch(/\b(above|below)\b/i);
+    // The top level: working alone needs Balanced permissions, the review is skipped whatever they are.
+    expect(trustOf('staff').allows).toBe(
+      'Where permissions are Balanced, it works on its own where the approval rules see no risk (they read the command line, not what a script does). Whatever the permissions, its work merges without the cross-vendor review.',
+    );
+  });
+
+  it('working on its own promises no place: the rules cannot check what a command does', () => {
+    for (const level of ['senior', 'staff'] as const) {
+      expect(trustOf(level).allows).toContain('where the approval rules see no risk');
+      expect(trustOf(level).allows).not.toMatch(/inside its own worktree|without asking/);
+    }
+    // A file edit names its paths: for edits the place is checked.
+    expect(trustOf('junior').allows).toContain('edits files inside its own worktree');
+  });
+
+  it('a change is a raise only when it gives more than the agent has', () => {
+    expect(raisesTrust('intern', 'junior')).toBe(true);
+    expect(raisesTrust('junior', 'staff')).toBe(true);
+    expect(raisesTrust('senior', 'senior')).toBe(false);
+    expect(raisesTrust('staff', 'intern')).toBe(false);
+  });
+
+  it('only agents that write on their own can be trusted', () => {
+    expect((['lead', 'worker', 'reviewer', 'solo'] as const).filter(canTrust)).toEqual(['worker', 'solo']);
+  });
+
+  it('the demo sets any level whatever the rank, and records each change as a decision', () => {
+    const agents = new Map<string, Agent>();
+    const decisions: unknown[][] = [];
+    const sim = { agents, now: () => 7, putAgent: (a: Agent) => agents.set(a.id, a), decision: (...d: unknown[]) => decisions.push(d) } as unknown as Sim;
+    agents.set('ana', { id: 'ana', name: 'Ana', role: 'worker', career: emptyCareer() } as unknown as Agent);
+    agents.set('lead', { id: 'lead', name: 'Lead', role: 'lead', career: emptyCareer() } as unknown as Agent);
+
+    // An Intern with no XP, trusted all the way: no rank cap, and no scrapbook milestone.
+    const a = demoTrust(sim, 'ana', 'staff');
+    expect([a.career.rank, a.career.trust, a.career.milestones]).toEqual(['intern', 'staff', []]);
+    expect(agents.get('ana')?.career.trust).toBe('staff');
+    demoTrust(sim, 'ana', 'staff'); // the same level: nothing to record
+    expect(demoTrust(sim, 'ana', 'intern').career.trust).toBe('intern');
+    expect(decisions).toEqual([
+      ['trust', 'human', 'you trust Ana to work on its own where the approval rules see no risk (they read the command line, not what a script does), and to merge without the cross-vendor review', { agent: 'ana', name: 'Ana', from: 'intern', to: 'staff' }, { agent: 'ana' }],
+      ['trust', 'human', 'you took back your trust in Ana: it asks like every other agent', { agent: 'ana', name: 'Ana', from: 'staff', to: 'intern' }, { agent: 'ana' }],
+    ]);
+
+    expect(() => demoTrust(sim, 'lead', 'junior')).toThrow('only a worker or a 1:1 agent can be trusted');
+    expect(demoTrust(sim, 'lead', 'intern').career.trust).toBe('intern');
+    expect(decisions).toHaveLength(2);
   });
 });

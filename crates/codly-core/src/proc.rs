@@ -116,14 +116,20 @@ pub enum Inbound {
     Eof,
 }
 
-/// [`spawn_reader`] + raw log + JSON parse: every line is appended to `raw` before parsing.
+/// [`spawn_reader`] + raw log + JSON parse: every line is appended to `raw`, also one that is
+/// not JSON. The adapter gets the line as it is; the log gets it without the MCP server
+/// configs in it (`without_mcp_configs`).
 pub fn spawn_json_reader<R: AsyncRead + Unpin + Send + 'static>(r: R, raw: Arc<RawLog>) -> tokio::sync::mpsc::UnboundedReceiver<Inbound> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     spawn_reader(r, move |rec| {
         let item = match rec {
             Record::Line(b) => {
-                raw.inbound(b);
-                match serde_json::from_slice::<Value>(b) {
+                let parsed = serde_json::from_slice::<Value>(b);
+                match parsed.as_ref().ok().and_then(without_mcp_configs) {
+                    Some(safe) => raw.inbound(safe.to_string().as_bytes()),
+                    None => raw.inbound(b),
+                }
+                match parsed {
                     Ok(v) => Inbound::Json(v),
                     Err(_) => Inbound::Text(String::from_utf8_lossy(b).into_owned()),
                 }
@@ -140,6 +146,18 @@ pub fn spawn_json_reader<R: AsyncRead + Unpin + Send + 'static>(r: R, raw: Arc<R
 }
 
 /// A tokio Command with env_clear().envs(env), cwd, piped stdio, own process group, kill_on_drop.
+///
+/// What the own process group holds depends on the child. `killpg()` reaches the child and
+/// what it started in its own group, and nothing else:
+/// - A plain shell (`sh -c`): the commands it runs stay in its group, unless one leaves it.
+/// - Claude Code (recorded on 2.1.311, docs/research/cli-claude-stream-json-2.1.311-part2.md
+///   §7): every Bash call runs in a shell that leads a process group and a session of its own,
+///   so the CLI's group holds the CLI alone. A signal to that group reaches no shell and no
+///   command. The CLI ends the background commands it tracks (`run_in_background`) when it
+///   gets SIGTERM, not when it gets SIGKILL. A process that a command left behind with `&`
+///   keeps the group of its shell, which has exited: the CLI does not track it, and no signal
+///   Codly sends reaches it.
+/// - The other CLIs: not recorded.
 pub fn command(bin: &Path, args: &[String], cwd: &Path, env: &HashMap<String, String>) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
@@ -149,7 +167,8 @@ pub fn command(bin: &Path, args: &[String], cwd: &Path, env: &HashMap<String, St
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Own pgid: killpg() then also reaches the shells and test runners the agent started.
+        // Own pgid: killpg() reaches the child and what stayed in its group (see above), and
+        // a signal to Codly's own group does not reach the child.
         .process_group(0)
         .kill_on_drop(true);
     cmd
@@ -159,6 +178,8 @@ pub fn command(bin: &Path, args: &[String], cwd: &Path, env: &HashMap<String, St
 ///
 /// Returns early once the group is gone. The caller must keep reaping the group leader
 /// (await `Child::wait` on another task): an unreaped zombie still counts as a member.
+/// The grace matters for a CLI that ends its own children at SIGTERM (Claude Code: [`command`]):
+/// the SIGKILL that follows would leave them running.
 pub async fn kill_group(pgid: i32, grace: Duration) {
     if pgid <= 1 {
         return; // 0/1 would signal our own group or init
@@ -175,6 +196,31 @@ pub async fn kill_group(pgid: i32, grace: Duration) {
         }
     }
     let _ = killpg(pg, Signal::SIGKILL);
+}
+
+/// How long what a leader left running in its group gets to stop (SIGTERM) before SIGKILL.
+const SWEEP_GRACE: Duration = Duration::from_secs(2);
+
+/// Wait for a child that leads its own process group ([`command`]) on a task of its own, and
+/// give its exit code to `on_exit`. Then end what it left running in that group: a process
+/// that outlives its agent keeps its ports and goes on writing to a worktree that the next
+/// run is about to use. Only the child's own group is signalled, and only once the child
+/// itself is gone and reaped. So this ends what stayed in the group, not everything the agent
+/// started: the commands of a Claude Code agent are in groups of their own ([`command`]). The
+/// adapter stops those through the CLI before it lets the CLI go (`adapters::claude`), and a
+/// process left behind with `&` is ended by nothing here.
+pub fn reap<F>(mut child: tokio::process::Child, on_exit: F) -> tokio::task::JoinHandle<()>
+where
+    F: FnOnce(Option<i64>) + Send + 'static,
+{
+    let pgid = child.id().map(|p| p as i32).unwrap_or(0);
+    tokio::spawn(async move {
+        let status = child.wait().await;
+        on_exit(status.as_ref().ok().copied().and_then(exit_code));
+        if status.is_ok() {
+            kill_group(pgid, SWEEP_GRACE).await;
+        }
+    })
 }
 
 /// Note a run's process group and when its leader started in `pgid`, next to the run's raw
@@ -202,19 +248,42 @@ pub fn exit_code(status: std::process::ExitStatus) -> Option<i64> {
 /// before parsing so a run can be replayed and re-normalized after mapping fixes.
 /// Inbound lines are stored verbatim; lines Codly wrote to the CLI are stored as
 /// `{"codly_sent":<line>}` and Codly's own notes as `{"codly_note":"..."}`, so the file stays NDJSON.
+/// The file is owner-only. The keys of MCP servers are left out of it, in what Codly sends to a
+/// CLI (`write_json`) and in what a CLI says about its servers (`spawn_json_reader`), as are
+/// the bytes of attached images (`write_json`). Each record reaches the file in one `write` as soon as it
+/// is logged (no buffer is held back: a record is on its way to the disk before it is parsed).
 pub struct RawLog {
-    file: Mutex<File>,
+    /// The file, and the buffer its records are put together in.
+    out: Mutex<(File, Vec<u8>)>,
 }
 
 const SENT_PREFIX: &[u8] = b"{\"codly_sent\":";
+/// The record buffer is given back above this size, so one huge line (a file read of some MB)
+/// does not keep its memory for the rest of the run.
+const RECORD_BUF_KEEP: usize = 64 << 10;
+
+/// Put the parts of one record together in `buf` and hand them to `w` as one `write_all`: one
+/// system call per line of a stream that has a line per token, not one per part.
+fn write_record<W: Write>(w: &mut W, buf: &mut Vec<u8>, parts: &[&[u8]]) -> std::io::Result<()> {
+    buf.clear();
+    for p in parts {
+        buf.extend_from_slice(p);
+    }
+    let written = w.write_all(buf);
+    if buf.capacity() > RECORD_BUF_KEEP {
+        *buf = Vec::new();
+    }
+    written
+}
 
 impl RawLog {
     pub fn open(path: &Path) -> std::io::Result<RawLog> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(RawLog { file: Mutex::new(file) })
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
+        Ok(RawLog { out: Mutex::new((file, Vec::new())) })
     }
 
     pub fn inbound(&self, line: &[u8]) {
@@ -232,23 +301,128 @@ impl RawLog {
     }
 
     fn write(&self, parts: &[&[u8]]) {
-        let mut f = self.file.lock().unwrap_or_else(|e| e.into_inner());
-        for p in parts {
-            if let Err(e) = f.write_all(p) {
-                tracing::warn!("raw log write failed: {e}");
-                return;
-            }
+        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
+        let (file, buf) = &mut *out;
+        if let Err(e) = write_record(file, buf, parts) {
+            tracing::warn!("raw log write failed: {e}");
         }
     }
 }
 
-/// Serialize `msg`, log it as outbound, and write it as one NDJSON line.
+/// Serialize `msg`, log it as outbound, and write it as one NDJSON line. The CLI gets the
+/// message as it is; the log gets it without the keys in it (`without_mcp_secrets`) and
+/// without the bytes of its images (`without_image_data`).
 pub async fn write_json<W: AsyncWrite + Unpin>(w: &mut W, raw: &RawLog, msg: &Value) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(msg)?;
-    raw.outbound(&line);
+    match without_mcp_secrets(msg).or_else(|| without_image_data(msg)) {
+        Some(safe) => raw.outbound(&serde_json::to_vec(&safe)?),
+        None => raw.outbound(&line),
+    }
     line.push(b'\n');
     w.write_all(&line).await?;
     w.flush().await
+}
+
+/// How long a CLI may take to read one line Codly writes to its stdin. A CLI that takes
+/// longer has stopped reading (its pipe is full): it is hung.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// [`write_json`] with a deadline: `TimedOut` when the CLI does not take the line within
+/// `limit`. A part of the line may be in the pipe by then, so the caller must give the
+/// process up: nothing more can be written to it.
+pub async fn write_json_within<W: AsyncWrite + Unpin>(w: &mut W, raw: &RawLog, msg: &Value, limit: Duration) -> std::io::Result<()> {
+    match tokio::time::timeout(limit, write_json(w, raw, msg)).await {
+        Ok(written) => written,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("the CLI did not read its input within {} s", limit.as_secs()))),
+    }
+}
+
+/// What the raw log shows in place of a key.
+const REDACTED: &str = "***";
+
+/// Where an outbound message lists the MCP servers of a session, with their environment: ACP
+/// `session/new|load|resume` (a list of servers, env as `[{name, value}]`) and Codex
+/// `thread/start|resume` (a map of servers, env as a map).
+const MCP_SERVER_LISTS: [&str; 2] = ["/params/mcpServers", "/params/config/mcp_servers"];
+
+/// A copy of `msg` for the raw log, with every MCP server's environment values replaced:
+/// they hold this run's Codly token and the user's Connection keys (a GitHub token, a database
+/// URL), which live in the Keychain and must not be copied to disk. None when `msg` lists no
+/// MCP server (almost every message), so nothing is copied.
+pub fn without_mcp_secrets(msg: &Value) -> Option<Value> {
+    if MCP_SERVER_LISTS.iter().all(|at| msg.pointer(at).is_none()) {
+        return None;
+    }
+    let mut safe = msg.clone();
+    for at in MCP_SERVER_LISTS {
+        let servers: Vec<&mut Value> = match safe.pointer_mut(at) {
+            Some(Value::Array(list)) => list.iter_mut().collect(),
+            Some(Value::Object(map)) => map.values_mut().collect(),
+            _ => continue,
+        };
+        for server in servers {
+            match server.get_mut("env") {
+                Some(Value::Object(env)) => env.values_mut().for_each(|v| *v = REDACTED.into()),
+                Some(Value::Array(env)) => env.iter_mut().filter_map(|e| e.get_mut("value")).for_each(|v| *v = REDACTED.into()),
+                _ => {}
+            }
+        }
+    }
+    Some(safe)
+}
+
+/// Where an outbound message holds the content blocks of a prompt: Claude's stream-json user
+/// message and ACP `session/prompt`.
+const PROMPT_BLOCKS: [&str; 2] = ["/message/content", "/params/prompt"];
+
+/// A copy of `msg` for the raw log without the bytes of the images in it (base64, megabytes
+/// for one screenshot): the log keeps how long each was. None when `msg` holds no image block
+/// (almost every message), so nothing is copied.
+pub fn without_image_data(msg: &Value) -> Option<Value> {
+    let is_image = |block: &Value| block["type"] == "image";
+    let blocks_of = |msg: &Value, at: &str| msg.pointer(at).and_then(Value::as_array).is_some_and(|blocks| blocks.iter().any(is_image));
+    if PROMPT_BLOCKS.iter().all(|at| !blocks_of(msg, at)) {
+        return None;
+    }
+    let mut safe = msg.clone();
+    for at in PROMPT_BLOCKS {
+        let Some(Value::Array(blocks)) = safe.pointer_mut(at) else { continue };
+        for block in blocks.iter_mut().filter(|block| is_image(block)) {
+            // Claude keeps the bytes in `source.data`, ACP in `data`.
+            for data in ["/source/data", "/data"] {
+                if let Some(Value::String(base64)) = block.pointer_mut(data) {
+                    *base64 = format!("<{} base64 characters left out>", base64.len());
+                }
+            }
+        }
+    }
+    Some(safe)
+}
+
+/// Where the Claude CLI's answer to an `mcp_status` control request lists the MCP servers of
+/// the session, each with its `config`.
+const MCP_STATUS_SERVERS: &str = "/response/response/mcpServers";
+
+/// A copy of an inbound line for the raw log, with the `config` of every MCP server in it
+/// replaced. The CLI gives each server's config as the user wrote it: for a remote server
+/// that is its URL and its request headers (an `Authorization` key), and a command line can
+/// carry a key too. Codly reads the name, the status and the error of a server, never its
+/// config, so the whole config is left out, whatever is in it. None when `line` is not such
+/// an answer (almost every line), so nothing is copied.
+pub fn without_mcp_configs(line: &Value) -> Option<Value> {
+    line.pointer(MCP_STATUS_SERVERS)?;
+    let mut safe = line.clone();
+    let servers: Vec<&mut Value> = match safe.pointer_mut(MCP_STATUS_SERVERS) {
+        Some(Value::Array(list)) => list.iter_mut().collect(),
+        Some(Value::Object(map)) => map.values_mut().collect(),
+        _ => return None,
+    };
+    for server in servers {
+        if let Some(config) = server.get_mut("config") {
+            *config = REDACTED.into();
+        }
+    }
+    Some(safe)
 }
 
 /// The last `cap` bytes a child wrote to stderr. The drain task keeps reading forever, so a
@@ -381,6 +555,226 @@ mod tests {
         assert_eq!(lines[2]["codly_note"], "dropped 5 bytes");
     }
 
+    /// The stream has a line per token, so a record must cost one write, not one per part
+    /// (and an appended record written in one piece is never split by another writer).
+    #[test]
+    fn a_record_is_one_write() {
+        #[derive(Default)]
+        struct Counting {
+            writes: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for Counting {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1;
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (mut w, mut buf) = (Counting::default(), Vec::new());
+        write_record(&mut w, &mut buf, &[&b"{\"type\":\"system\"}"[..], b"\n"]).unwrap();
+        write_record(&mut w, &mut buf, &[SENT_PREFIX, b"{\"type\":\"user\"}", b"}\n"]).unwrap();
+        assert_eq!(w.writes, 2, "two records, two writes");
+        assert_eq!(String::from_utf8(w.bytes).unwrap(), "{\"type\":\"system\"}\n{\"codly_sent\":{\"type\":\"user\"}}\n");
+
+        // A huge record does not keep its buffer; the next record is still whole.
+        let big = vec![b'x'; RECORD_BUF_KEEP + 1];
+        let mut w = Counting::default();
+        write_record(&mut w, &mut buf, &[big.as_slice(), b"\n"]).unwrap();
+        assert_eq!((w.writes, w.bytes.len()), (1, big.len() + 1));
+        assert!(buf.capacity() <= RECORD_BUF_KEEP);
+        write_record(&mut w, &mut buf, &[&b"after"[..], b"\n"]).unwrap();
+        assert!(w.bytes.ends_with(b"x\nafter\n"));
+    }
+
+    /// A CLI that stopped reading its stdin: the write gives up at the deadline instead of
+    /// waiting for ever, and a write that is read goes through.
+    #[tokio::test]
+    async fn a_write_nobody_reads_gives_up_at_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = RawLog::open(&dir.path().join("raw.ndjson")).unwrap();
+        // 16 bytes of pipe, and nobody reads the other end.
+        let (mut w, _unread) = tokio::io::duplex(16);
+        let msg = serde_json::json!({ "type": "user", "text": "x".repeat(4096) });
+        let started = std::time::Instant::now();
+        let e = write_json_within(&mut w, &log, &msg, Duration::from_millis(100)).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut, "{e}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let (mut w, mut r) = tokio::io::duplex(16);
+        let reader = tokio::spawn(async move {
+            let mut all = Vec::new();
+            r.read_to_end(&mut all).await.unwrap();
+            all
+        });
+        write_json_within(&mut w, &log, &msg, Duration::from_secs(5)).await.unwrap();
+        drop(w);
+        let line = reader.await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&line).unwrap(), msg);
+    }
+
+    /// The spec of a run whose codly server carries a token and nothing else.
+    fn spec_with_token(provider: crate::model::Provider, token: &str) -> crate::adapters::SpawnSpec {
+        use crate::adapters::{McpLaunch, SessionMode, SpawnSpec};
+        SpawnSpec {
+            agent_id: "a".into(),
+            agent_name: "Ada".into(),
+            run_id: "r".into(),
+            provider,
+            role: crate::model::Role::Worker,
+            model: None,
+            cwd: "/w".into(),
+            bin: "cli".into(),
+            env: HashMap::new(),
+            session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
+            system_prompt: String::new(),
+            read_only: false,
+            mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), token.into())] }),
+            use_user_setup: false,
+            sandbox_network: false,
+            local_settings: false,
+            raw_log: "/nonexistent/r/raw.ndjson".into(),
+            byok_command: None,
+            sandbox_shell: false,
+        }
+    }
+
+    /// What each adapter really sends at session start carries the keys; the raw log must not.
+    #[tokio::test]
+    async fn keys_reach_the_cli_but_not_the_raw_log() {
+        use crate::model::Provider;
+        const TOKEN: &str = "tok-5f1e2d3c4b5a";
+        const PAT: &str = "ghp_connectionSecret0123456789";
+        // ACP `session/new`, with a Connection server beside codly's (as `acp::mcp_servers` builds them).
+        let mut servers = crate::adapters::acp::mcp_servers(&spec_with_token(Provider::Gemini, TOKEN), &[]);
+        servers.as_array_mut().unwrap().push(serde_json::json!({
+            "name": "github", "command": "npx", "args": ["-y", "server-github"],
+            "env": [{ "name": "GITHUB_PERSONAL_ACCESS_TOKEN", "value": PAT }],
+        }));
+        let acp = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": "/w", "mcpServers": servers } });
+        // Codex `thread/start`, the same way (as `codex::thread_request` builds it).
+        let (method, mut params) = crate::adapters::codex::thread_request(&spec_with_token(Provider::Codex, TOKEN), None, None, &[], &[]);
+        params["config"]["mcp_servers"]["github"] = serde_json::json!({ "command": "npx", "args": [], "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": PAT } });
+        let codex = serde_json::json!({ "id": 2, "method": method, "params": params });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runs/r1/raw.ndjson");
+        let log = RawLog::open(&path).unwrap();
+        let mut sent = Vec::new();
+        for msg in [&acp, &codex] {
+            assert!(msg.to_string().contains(TOKEN) && msg.to_string().contains(PAT), "the test message holds both keys: {msg}");
+            write_json(&mut sent, &log, msg).await.unwrap();
+        }
+        // The CLI got every byte.
+        let sent = String::from_utf8(sent).unwrap();
+        let lines: Vec<Value> = sent.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines, [acp.clone(), codex.clone()]);
+        // The log has the same messages with the values hidden, and nothing else changed.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(TOKEN) && !text.contains(PAT), "{text}");
+        let logged: Vec<Value> = text.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"].clone()).collect();
+        assert_eq!(logged[0]["params"]["mcpServers"][0]["env"], serde_json::json!([{ "name": "CODLY_MCP_TOKEN", "value": "***" }]));
+        assert_eq!(logged[0]["params"]["mcpServers"][1]["env"][0], serde_json::json!({ "name": "GITHUB_PERSONAL_ACCESS_TOKEN", "value": "***" }));
+        assert_eq!(logged[0]["params"]["mcpServers"][1]["args"], acp["params"]["mcpServers"][1]["args"]);
+        assert_eq!(logged[1]["params"]["config"]["mcp_servers"]["codly"]["env"], serde_json::json!({ "CODLY_MCP_TOKEN": "***" }));
+        assert_eq!(logged[1]["params"]["config"]["mcp_servers"]["github"]["env"], serde_json::json!({ "GITHUB_PERSONAL_ACCESS_TOKEN": "***" }));
+        assert_eq!(logged[1]["params"]["cwd"], codex["params"]["cwd"]);
+        // A message without servers is logged as it is, with no copy made.
+        let prompt = serde_json::json!({ "id": 3, "method": "session/prompt", "params": { "prompt": [{ "type": "text", "text": "env: {}" }] } });
+        assert_eq!(without_mcp_secrets(&prompt), None);
+        // Only the owner reads the log.
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// An attached image reaches the CLI whole; the raw log keeps the message without its bytes.
+    #[tokio::test]
+    async fn image_bytes_reach_the_cli_but_not_the_raw_log() {
+        let data = "aGVsbG8gd29ybGQ=".repeat(1000);
+        // Claude's user message and ACP `session/prompt`, as `adapters::attachments` builds them.
+        let claude = serde_json::json!({ "type": "user", "session_id": "", "parent_tool_use_id": null, "message": { "role": "user", "content": [
+            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": data } },
+            { "type": "text", "text": "what is this?" },
+        ] } });
+        let acp = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": { "sessionId": "s", "prompt": [
+            { "type": "text", "text": "what is this?" },
+            { "type": "image", "mimeType": "image/png", "data": data },
+        ] } });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.ndjson");
+        let log = RawLog::open(&path).unwrap();
+        let mut sent = Vec::new();
+        for msg in [&claude, &acp] {
+            write_json(&mut sent, &log, msg).await.unwrap();
+        }
+        // The CLI got every byte.
+        let sent = String::from_utf8(sent).unwrap();
+        let lines: Vec<Value> = sent.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines, [claude.clone(), acp.clone()]);
+        // The log has the same messages with the length of the bytes in their place.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&data), "{} bytes logged", text.len());
+        let logged: Vec<Value> = text.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"].clone()).collect();
+        let left_out = "<16000 base64 characters left out>";
+        assert_eq!(logged[0]["message"]["content"][0], serde_json::json!({ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": left_out } }));
+        assert_eq!(logged[0]["message"]["content"][1], claude["message"]["content"][1]);
+        assert_eq!(logged[1]["params"]["prompt"][0], acp["params"]["prompt"][0]);
+        assert_eq!(logged[1]["params"]["prompt"][1], serde_json::json!({ "type": "image", "mimeType": "image/png", "data": left_out }));
+        assert_eq!(logged[1]["params"]["sessionId"], "s");
+        // A prompt without an image is logged as it is, with no copy made.
+        assert_eq!(without_image_data(&serde_json::json!({ "type": "user", "message": { "role": "user", "content": "hi" } })), None);
+        assert_eq!(without_image_data(&serde_json::json!({ "method": "session/prompt", "params": { "prompt": [{ "type": "text", "text": "hi" }] } })), None);
+    }
+
+    /// What the Claude CLI answers to `mcp_status` holds every server's config; the adapter
+    /// gets the answer as it is, the raw log gets it without the configs.
+    #[tokio::test]
+    async fn server_configs_reach_the_adapter_but_not_the_raw_log() {
+        const BEARER: &str = "Bearer header-value-of-the-test";
+        const ARG_KEY: &str = "arg-value-of-the-test";
+        // The recorded answer (docs/research/fixtures/claude-2.1.311/broken-mcp.ndjson), with a
+        // key in a server's command line and a remote server beside it. The config of a remote
+        // server is in no recording (`url` and `headers` here are the fields of the user's own
+        // MCP config file): the log must not depend on what a config holds.
+        let answer = serde_json::json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "codly-mcp-status", "response": { "mcpServers": [
+            { "name": "exits-at-once", "status": "failed", "error": "Connection closed", "config": { "type": "stdio", "command": "/usr/bin/false", "args": ["--api-key", ARG_KEY] }, "transport": "stdio", "scope": "dynamic", "source": "dynamic" },
+            { "name": "remote", "status": "failed", "error": "Connection closed", "config": { "type": "http", "url": "https://mcp.example.com/mcp", "headers": { "Authorization": BEARER } }, "transport": "http", "scope": "user", "source": "user" },
+        ] } } });
+        // A line that only talks about servers, and one that is not JSON: both stay as they are.
+        let init = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"remote","status":"failed","source":"user"}]}"#;
+        let banner = "warning: config.mcpServers is deprecated";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runs/r1/raw.ndjson");
+        let stdout = format!("{init}\n{answer}\n{banner}\n");
+        assert!(stdout.contains(BEARER) && stdout.contains(ARG_KEY), "the test answer holds both keys");
+        let mut lines = spawn_json_reader(std::io::Cursor::new(stdout.into_bytes()), Arc::new(RawLog::open(&path).unwrap()));
+        // The adapter got every line whole.
+        assert!(matches!(lines.recv().await, Some(Inbound::Json(v)) if v == serde_json::from_str::<Value>(init).unwrap()));
+        assert!(matches!(lines.recv().await, Some(Inbound::Json(v)) if v == answer));
+        assert!(matches!(lines.recv().await, Some(Inbound::Text(t)) if t == banner));
+        assert!(matches!(lines.recv().await, Some(Inbound::Eof)));
+        // The log has the answer with each config hidden, and what the normalizer reads kept.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(BEARER) && !text.contains(ARG_KEY) && !text.contains("mcp.example.com"), "{text}");
+        let logged: Vec<&str> = text.lines().collect();
+        assert_eq!(logged.len(), 3, "{text}");
+        assert_eq!(logged[0], init);
+        assert_eq!(logged[2], banner);
+        let mut hidden = answer.clone();
+        for server in hidden["response"]["response"]["mcpServers"].as_array_mut().unwrap() {
+            server["config"] = "***".into();
+        }
+        assert_eq!(serde_json::from_str::<Value>(logged[1]).unwrap(), hidden);
+        // A line without that list is logged as it is, with no copy made.
+        assert_eq!(without_mcp_configs(&serde_json::from_str(init).unwrap()), None);
+    }
+
     #[tokio::test]
     async fn stderr_tail_keeps_the_end() {
         let (mut w, r) = tokio::io::duplex(1024);
@@ -406,5 +800,38 @@ mod tests {
         assert_eq!(exit_code(status), Some(128 + 15));
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(killpg(Pid::from_raw(pgid), None).is_err(), "group still alive");
+    }
+
+    /// A child that exits by itself leaves nothing running in its group: what it started
+    /// there is ended once the child is gone, after its exit code is told.
+    #[tokio::test]
+    async fn reap_ends_what_the_leader_left_running() {
+        let env: HashMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())].into();
+        let child = command(Path::new("/bin/sh"), &["-c".into(), "sleep 30 & exit 3".into()], Path::new("/"), &env).spawn().unwrap();
+        let pgid = child.id().unwrap() as i32;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let started = std::time::Instant::now();
+        let reaped = reap(child, move |code| {
+            // The `sleep` the shell left behind still runs: nothing was signalled before the exit was told.
+            let _ = tx.send((code, killpg(Pid::from_raw(pgid), None).is_ok()));
+        });
+        assert_eq!(rx.await.unwrap(), (Some(3), true));
+        reaped.await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "the `sleep 30` was not waited for");
+        assert!(killpg(Pid::from_raw(pgid), None).is_err(), "group still alive");
+    }
+
+    /// A leader that leaves nothing behind: the sweep finds no group and signals nobody.
+    #[tokio::test]
+    async fn reap_of_a_child_that_left_nothing_only_reports_the_exit() {
+        let env: HashMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())].into();
+        let child = command(Path::new("/bin/sh"), &["-c".into(), "exit 0".into()], Path::new("/"), &env).spawn().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        reap(child, move |code| {
+            let _ = tx.send(code);
+        })
+        .await
+        .unwrap();
+        assert_eq!(rx.await.unwrap(), Some(0));
     }
 }

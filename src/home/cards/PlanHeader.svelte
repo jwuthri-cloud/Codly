@@ -3,12 +3,18 @@
   its agent's hue (live ones carry the aurora), how far along it is (in amber when an agent
   waits for you), and who is on it.
   Click → the plan's checklist in the conversation; the arrow opens the Plan room.
+  While it runs, Cancel plan stops every worker (it asks first, like the Plan room).
+  A plan that cannot go on by itself says "Needs you": its card has the ways out.
+  A finished plan that conflicts with your branch says so, and not "ready for <branch>".
 -->
 <script lang="ts">
+  import { cancelPlan } from '../../lib/state/actions';
+  import { conflictsWith } from '../../lib/state/mergeState.svelte';
   import { requests } from '../../lib/state/requests.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
+  import { stuckPlan } from '../../lib/util/plan';
   import Icon from '../../components/Icon.svelte';
   import Portrait from '../../components/Portrait.svelte';
 
@@ -25,16 +31,37 @@
   const target = $derived(store.workspace?.current_branch ?? 'main');
   /** Approvals and questions its agents wait on: a task held by one still counts as running. */
   const waiting = $derived(requests.get(plan?.thread || 'lead')?.waiting ?? 0);
+  /** Running, but only you can move it on: a task stopped, and the rest waits for it. */
+  const stuck = $derived(plan ? stuckPlan(plan, tasks) : null);
+  /** Finished, but it cannot merge yet: your branch and the plan changed the same files. */
+  const conflict = $derived.by(() => {
+    void store.rev;
+    return finished && !store.mergeOf(planId) ? conflictsWith({ kind: 'plan', id: planId }) : null;
+  });
   const status = $derived(
     waiting ? `${waiting === 1 ? 'Waiting for you' : `${waiting} waiting for you`} · ${done} of ${tasks.length} done`
+    : stuck ? `Needs you · ${done} of ${tasks.length} done`
+    : conflict ? `${done === tasks.length ? `All ${tasks.length} done` : `${done} of ${tasks.length} done`} · conflicts with ${conflict}`
     : finished ? (done === tasks.length ? `All ${tasks.length} merged · ready for ${target}` : `${done} of ${tasks.length} done · ready for ${target}`)
     : plan?.status === 'integrating' ? `${done} of ${tasks.length} done · integrating`
     : `${done} of ${tasks.length} done${live ? ` · ${live} working` : ''}`,
   );
+  /** Cancelling a running plan stops every worker: ask first. */
+  let confirmCancel = $state(false);
+  let cancelling = $state(false);
+  async function cancel() {
+    cancelling = true;
+    await cancelPlan(planId);
+    cancelling = false;
+    confirmCancel = false;
+  }
+  $effect(() => {
+    if (plan?.status !== 'running') confirmCancel = false;
+  });
 </script>
 
 {#if plan}
-  <div class="ph" class:finished class:wait={waiting > 0}>
+  <div class="ph" class:finished class:wait={waiting > 0 || !!stuck || !!conflict}>
     <button class="main" onclick={() => (ui.revealPlan = planId)} aria-label="Show the plan: {plan.summary}, {status}">
       <span class="title serif truncate">{plan.summary}</span>
       <span class="bar" aria-hidden="true">
@@ -45,9 +72,16 @@
       </span>
       <span class="status num">{status}</span>
     </button>
-    <span class="crew">
-      {#each crew as a (a!.id)}<button class="face" onclick={() => ui.selectAgent(a!.id)} aria-label={a!.name} data-tip={a!.name}><Portrait agent={a} size={22} /></button>{/each}
-    </span>
+    {#if confirmCancel}
+      <span class="ask">Stop every worker?</span>
+      <button class="btn sm danger" disabled={cancelling} onclick={cancel}>{cancelling ? 'Cancelling…' : 'Cancel plan'}</button>
+      <button class="btn ghost sm" disabled={cancelling} onclick={() => (confirmCancel = false)}>Keep</button>
+    {:else}
+      <span class="crew">
+        {#each crew as a (a!.id)}<button class="face" onclick={() => ui.selectAgent(a!.id)} aria-label={a!.name} data-tip={a!.name}><Portrait agent={a} size={22} /></button>{/each}
+      </span>
+      {#if plan.status === 'running'}<button class="btn ghost sm" onclick={() => (confirmCancel = true)}>Cancel plan</button>{/if}
+    {/if}
     <button class="icon-btn sm room" onclick={() => ui.openPlan(planId, plan.thread)} aria-label="Open in the Plan room" data-tip="Plan room" data-tip-kbd="G P"><Icon name="arrow-right" size={13} /></button>
   </div>
 {/if}
@@ -55,16 +89,20 @@
 <style>
   .ph { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 12px 0 20px; box-shadow: inset 0 -1px 0 var(--line); flex-shrink: 0; }
   .main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 14px; height: 100%; text-align: left; }
-  .title { font-size: 19px; color: var(--ink-1); flex: 0 1 auto; min-width: 60px; }
-  .bar { display: flex; gap: 3px; width: 120px; flex-shrink: 0; }
+  /* When the row is short the title gives way first, then the bar. The status takes no part in
+     the shrinking (a share of a hundredth of a pixel is enough to draw its ellipsis): it is cut
+     only when the title and the bar are at their least, 60px + 40px and the two 14px gaps. */
+  .title { font-size: 19px; color: var(--ink-1); flex: 0 1000 auto; min-width: 60px; }
+  .bar { display: flex; gap: 3px; flex: 0 10 120px; min-width: 40px; }
   .bar i { flex: 1; height: 5px; border-radius: 3px; background: var(--line-2); transition: background var(--d-4) var(--ease-out); }
   .bar i.s-done { background: var(--hue); }
   .bar i.s-running, .bar i.s-verifying, .bar i.s-reviewing, .bar i.s-merging { background: linear-gradient(90deg, var(--hue), var(--aurora-a), var(--aurora-b), var(--hue)); background-size: 200% 100%; animation: aurora-drift 2.4s linear infinite; }
   .bar i.s-blocked, .bar i.s-failed { background: var(--bad); }
-  .status { font-size: var(--t-sm); color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status { flex: none; max-width: calc(100% - 128px); font-size: var(--t-sm); color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .finished .status { color: var(--ink-2); }
   .wait .status { color: var(--amber-ink); }
   .crew { display: flex; }
+  .ask { font-size: var(--t-sm); color: var(--ink-2); white-space: nowrap; }
   .room { margin-left: 2px; }
   .face { display: grid; border-radius: 50%; margin-left: -4px; box-shadow: 0 0 0 2px var(--glass-solid); }
   .main:hover .title { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }

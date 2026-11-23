@@ -409,13 +409,17 @@ export class SimsTracker {
     if (now <= m.restAt) return;
     const sh = this.shift(id);
     const lead = this.isLead(id);
+    // Home lasts until `home.until`, whenever this runs: when nothing ticked at that time (the
+    // office was hidden), the time after it is time at the office, not more rest.
+    const homeUntil = m.home ? m.home.until : -Infinity;
     let t = m.restAt;
     while (t < now) {
-      const dt = Math.min(60_000, now - t);
+      const home = t < homeUntil;
+      const dt = Math.min(60_000, (home ? Math.min(now, homeUntil) : now) - t);
       const min = dt / 60_000;
       t += dt;
       let mood = 0.01;
-      if (m.home) {
+      if (home) {
         m.energy = Math.min(m.cap, m.energy + min / sh.homeMinutes);
         m.hunger = m.thirst = 1; // ponytail: dinner at home is instant
       } else {
@@ -523,10 +527,15 @@ export class SimsTracker {
     return true;
   }
 
-  private back(id: string, m: Mind, now: number) {
-    this.advance(id, m, now);
+  /** Its time at home (`until`) is up. It came back then, also when this tick comes late (the
+   *  office was hidden, so nothing ticked): the time since is time at the office. */
+  private back(id: string, m: Mind, until: number, now: number) {
+    // Not before what it already knows (an event since then moved its clock on).
+    const at = Math.min(now, Math.max(until, m.restAt ?? until));
+    this.advance(id, m, at);
     this.leaveHome(id, m);
-    this.feel(id, now, 0.05, { key: 'rest', label: 'Rested', why: 'Back from home', tone: 'good', icon: 'battery', ms: 10 * 60_000 });
+    this.feel(id, at, 0.05, { key: 'rest', label: 'Rested', why: 'Back from home', tone: 'good', icon: 'battery', ms: 10 * 60_000 });
+    this.advance(id, m, now);
   }
 
   private leaveHome(id: string, m: Mind) {
@@ -538,7 +547,8 @@ export class SimsTracker {
 
   /** Send the exhausted and the sick home once their task is done, bring them back when rested,
    *  call in one that started working at home (you talked to it, or its task needed it: see
-   *  `Busy`), and tell the core who is tired. The office calls this every couple of seconds.
+   *  `Busy`), and tell the core who is tired. The office calls this every couple of seconds
+   *  while it can be seen, and for an event from an agent at home (`atHome`) while it cannot.
    *  `busy`: working on something now; `present`: in the office at all. */
   tick(now: number, busy: (id: string) => Busy, present: (id: string) => boolean = () => true) {
     for (const a of this.agents.values()) {
@@ -548,7 +558,7 @@ export class SimsTracker {
       if (m.home) {
         // Rested first: a task the core starts as it comes back is no call-in.
         const b = busy(a.id);
-        if (now >= m.home.until) this.back(a.id, m, now);
+        if (now >= m.home.until) this.back(a.id, m, m.home.until, now);
         else if (b) this.callIn(a.id, now, b === 'task' ? CALLED_IN : undefined);
         continue;
       }
@@ -561,6 +571,13 @@ export class SimsTracker {
       if ((m.energy <= 0 || m.sick) && !busy(a.id)) this.sendHome(a.id, now);
       this.tellTired(a, m);
     }
+  }
+
+  /** Is this event from an agent that is at home here? It is heard from again: its time was up
+   *  and the core gave it work, or it was called in. A hidden office has no clock tick, so it
+   *  ticks for this event: the agent is back from now on, and the office follows what it does. */
+  atHome(ev: EventRow): boolean {
+    return ev.agent_id != null && this.minds.get(ev.agent_id)?.home != null;
   }
 
   /** Tired (under 30%, not at home) or rested again, when the core's row says otherwise: once
@@ -646,6 +663,12 @@ export class SimsTracker {
       const h = s.home;
       m.home = h && typeof h.until === 'number' ? { since: Number(h.since) || now, until: h.until, from: Number(h.from) || 0, sick: !!h.sick } : null;
       m.restAt = m.home && typeof s.restAt === 'number' ? Math.min(now, s.restAt) : now;
+      // Its time at home was up while the office was closed: it rested until then, and the
+      // closed time after that does not count (as for everyone who was not at home).
+      if (m.home && m.home.until < now) {
+        this.advance(id, m, m.home.until);
+        m.restAt = now;
+      }
     }
   }
 

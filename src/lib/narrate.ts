@@ -9,11 +9,14 @@
 // `narrateFrom` is pure (unit-tested); `narrate(agentId)` binds it to the live store.
 import type { Agent } from './gen/Agent';
 import type { Approval } from './gen/Approval';
+import type { Provider } from './gen/Provider';
 import type { Task } from './gen/Task';
 import type { AgentLive, RateWindow, Seg } from './state/store.svelte';
 import type { DiffStat } from './state/diffstats.svelte';
 import { timer } from './util/format';
-import { basename, oneLine } from './util/sanitize';
+import { isPlanCall, PLAN_ASK, planStep, showsPlan } from './util/planRequest';
+import { sandboxHost } from './util/sandbox';
+import { basename, oneLine, truncate } from './util/sanitize';
 
 export type Part = { t: string; code?: boolean; timer?: boolean };
 /** live = working · wait = needs you · done · idle · blocked · off (stopped). */
@@ -44,6 +47,8 @@ export type NarrationInput = {
   lastDone: { task: Task; stat: DiffStat | null; files: number } | null;
   /** The worst rate-limit window for its provider. */
   rate: RateWindow | null;
+  /** Its session is in your terminal ("Open in my terminal"): Codly runs nothing for it until you give it back. */
+  inTerminal: boolean;
 };
 
 const code = (t: string): Part => ({ t, code: true });
@@ -72,8 +77,10 @@ function toolName(s: Seg): string {
   return raw.replace(/^mcp__codly__/, '').replace(/^codly\./, '');
 }
 
-/** What an open tool call is doing, as parts. */
-export function activityParts(s: Seg): Part[] {
+/** What an open tool call is doing, as parts. `provider`: the CLI of the agent that makes the call. */
+export function activityParts(s: Seg, provider: Provider | null | undefined): Part[] {
+  // A Claude agent's plan shown to you is said as that, whatever kind of step the call is.
+  if (isPlanCall(s.name, provider)) return [txt(planStep(true))];
   switch (s.activity) {
     case 'read':
       return [txt('Reading '), code(fileOf(s))];
@@ -120,15 +127,22 @@ export function activityParts(s: Seg): Part[] {
   }
 }
 
-function approvalParts(ap: Approval): Part[] {
+/** `provider`: the CLI of the agent that asks. */
+function approvalParts(ap: Approval, provider: Provider): Part[] {
   const s = ap.subject;
   switch (s.kind) {
     case 'command':
       return [txt('Waiting for you: '), code(oneLine(s.command, 44))];
     case 'file_change':
       return s.paths.length === 1 ? [txt('Waiting for you: change '), code(basename(s.paths[0]))] : [txt(`Waiting for you: change ${s.paths.length} files`)];
-    case 'tool':
-      return [txt('Waiting for you: use '), code(oneLine(s.name, 32))];
+    case 'tool': {
+      // A Claude agent's plan to read, or a host that a command in Claude Code's sandbox wants:
+      // said as that, not by the request's tool name.
+      if (showsPlan(s, provider)) return [txt(`Waiting for you: ${PLAN_ASK}`)];
+      const host = sandboxHost(s, provider);
+      if (host === null) return [txt('Waiting for you: use '), code(oneLine(s.name, 32))];
+      return host ? [txt('Waiting for you: reach '), code(truncate(host, 44))] : [txt('Waiting for you: use the network')];
+    }
     case 'question': {
       const raw = s.questions as unknown;
       const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? ((raw as { questions?: unknown[] }).questions ?? []) : [];
@@ -161,11 +175,14 @@ export function narrateFrom(i: NarrationInput): Narration {
     return { parts: all, text: plainOf(all), key, tone, since, progress: tone === 'done' && progress != null ? 1 : progress };
   };
 
+  // 0 · Its session is in your terminal: whatever its row says, it is yours until you give it back.
+  if (i.inTerminal) return out([txt('In your terminal')], 'idle');
+
   if (a.status === 'offline') return out([txt('Stopped')], 'off');
 
   // 1 · It needs you: say exactly what is asked.
   const ap = [...i.approvals].sort((x, y) => y.created_at - x.created_at)[0];
-  if (ap) return out(approvalParts(ap), 'wait', ap.created_at, true);
+  if (ap) return out(approvalParts(ap, a.provider), 'wait', ap.created_at, true);
   if (a.status === 'waiting_approval') return out([txt('Waiting for you')], 'wait', live?.statusSince ?? null, true);
 
   // 2 · It can't move.
@@ -192,7 +209,7 @@ export function narrateFrom(i: NarrationInput): Narration {
   }
   if (open) {
     const slow = open.activity === 'execute' || open.activity === 'test';
-    return out(activityParts(open), 'live', open.start, slow);
+    return out(activityParts(open, a.provider), 'live', open.start, slow);
   }
 
   // 4 · Streaming.

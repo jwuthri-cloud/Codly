@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::scope;
+use super::{scope, weak_checks};
 use crate::model::{ConsultantSpec, Provider, ROLE_TITLES, role_title};
 
 pub const MAX_TASKS: usize = 8;
@@ -359,7 +359,24 @@ pub fn validate(input: PlanInput) -> Result<ValidPlan, String> {
     if let Some(fix) = collapse_if_small(&mut plan) {
         fixes.push(fix);
     }
+    fixes.extend(plan.tasks.iter().filter_map(weak_verify));
     Ok(ValidPlan { plan, fixes })
+}
+
+/// A task whose every verify command proves nothing about the work (`weak_checks`): the gate
+/// would pass it whatever its worker did. Not a rejection (a docs task may have no better
+/// check): the Lead is told, and the plan card marks the task before you run the plan.
+fn weak_verify(t: &TaskInput) -> Option<Fix> {
+    let weak: Vec<(&String, &str)> = t.verify.iter().map_while(|c| weak_checks::weakness(c).map(|why| (c, why))).collect();
+    if weak.is_empty() || weak.len() < t.verify.len() {
+        return None;
+    }
+    let list: Vec<String> = weak.iter().map(|(c, why)| format!("`{c}` {why}")).collect();
+    let checks: Vec<Value> = weak.iter().map(|(c, why)| json!({ "command": c, "why": why })).collect();
+    Some(Fix {
+        summary: format!("{}: no verify command can fail on the work ({}): add the project's test, typecheck or build command", t.id, list.join(", ")),
+        detail: json!({ "rule": "weak_verify", "task": t.id, "checks": checks }),
+    })
 }
 
 fn reject(errors: &[String]) -> String {

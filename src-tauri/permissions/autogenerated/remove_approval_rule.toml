@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remove-approval-rule"
+description = "Enables the remove_approval_rule command without any pre-configured scope."
+commands.allow = ["remove_approval_rule"]
+
+[[permission]]
+identifier = "deny-remove-approval-rule"
+description = "Denies the remove_approval_rule command without any pre-configured scope."
+commands.deny = ["remove_approval_rule"]

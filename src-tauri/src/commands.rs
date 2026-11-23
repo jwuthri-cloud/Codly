@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 
 use codly_core::Core;
 use codly_core::model::*;
-use codly_core::orchestrator::breaker::BreakerConfig;
+use codly_core::orchestrator::breaker::{BreakerConfig, Spent};
 use codly_core::orchestrator::BreakerStatus;
 use codly_core::pty::PtyManager;
 use tauri::State;
@@ -120,9 +120,46 @@ pub async fn close_thread(state: State<'_, AppState>, thread: String) -> R<()> {
     state.core().await?.close_thread(&thread).await.map_err(err)
 }
 
+/// The requests closed in the open repo, newest first.
+#[tauri::command]
+pub async fn closed_requests(state: State<'_, AppState>) -> R<Vec<ClosedRequest>> {
+    state.core().await?.closed_requests().await.map_err(err)
+}
+
+/// One closed request's messages, to read again (`thread` comes from `closed_requests`).
+#[tauri::command]
+pub async fn closed_request(state: State<'_, AppState>, thread: String) -> R<ClosedTranscript> {
+    state.core().await?.closed_request(&thread).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn resolve_approval(state: State<'_, AppState>, approval_id: String, decision: ApprovalDecision) -> R<()> {
     state.core().await?.resolve_approval(&approval_id, decision).await.map_err(err)
+}
+
+/// What a waiting request can be saved as ("Always allow in this repo"): nothing for the
+/// kinds of request Codly always asks about.
+#[tauri::command]
+pub async fn approval_rule_offer(state: State<'_, AppState>, approval_id: String) -> R<ApprovalRuleOffer> {
+    state.core().await?.approval_rule_offer(&approval_id).map_err(err)
+}
+
+/// Save a rule from a waiting request, and answer the requests it covers. The rule's text
+/// comes from the request, never from the caller.
+#[tauri::command]
+pub async fn add_approval_rule(state: State<'_, AppState>, approval_id: String, kind: ApprovalRuleKind) -> R<ApprovalRule> {
+    state.core().await?.add_approval_rule(&approval_id, kind).map_err(err)
+}
+
+/// The open repo's saved rules (Settings → Approvals).
+#[tauri::command]
+pub async fn approval_rules(state: State<'_, AppState>) -> R<Vec<ApprovalRule>> {
+    state.core().await?.approval_rules().map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_approval_rule(state: State<'_, AppState>, rule_id: String) -> R<()> {
+    state.core().await?.remove_approval_rule(&rule_id).map_err(err)
 }
 
 #[tauri::command]
@@ -136,11 +173,6 @@ pub async fn stop_agent(state: State<'_, AppState>, agent_id: String) -> R<()> {
 }
 
 #[tauri::command]
-pub async fn hire_agent(state: State<'_, AppState>, provider: Provider, model: Option<String>, title: Option<String>) -> R<Agent> {
-    state.core().await?.hire_agent(provider, model, title).await.map_err(err)
-}
-
-#[tauri::command]
 pub async fn set_request_prefs(state: State<'_, AppState>, thread: String, prefs: RequestPrefs) -> R<RequestPrefs> {
     state.core().await?.set_request_prefs(&thread, prefs).await.map_err(err)
 }
@@ -151,8 +183,8 @@ pub async fn set_workspace_team(state: State<'_, AppState>, team: WorkspaceTeam)
 }
 
 #[tauri::command]
-pub async fn list_models(state: State<'_, AppState>, provider: Provider) -> R<Vec<String>> {
-    state.core().await?.list_models(provider).await.map_err(err)
+pub async fn model_catalog(state: State<'_, AppState>, provider: Provider) -> R<ModelCatalog> {
+    state.core().await?.model_catalog(provider).await.map_err(err)
 }
 
 #[tauri::command]
@@ -175,6 +207,32 @@ pub async fn move_task(state: State<'_, AppState>, task_id: String, status: Task
     state.core().await?.move_task(&task_id, status).await.map_err(err)
 }
 
+/// Cancel a task together with every task that waits for it. Answers them as they are now,
+/// the task first.
+#[tauri::command]
+pub async fn cancel_task_tree(state: State<'_, AppState>, task_id: String) -> R<Vec<Task>> {
+    state.core().await?.cancel_task_tree(&task_id).await.map_err(err)
+}
+
+/// Keep what is merged: a running plan finishes with its merged tasks, the others are cancelled.
+#[tauri::command]
+pub async fn finish_plan(state: State<'_, AppState>, plan_id: String) -> R<Plan> {
+    state.core().await?.finish_plan(&plan_id).await.map_err(err)
+}
+
+/// Re-run a blocked or failed task's checks. Answers the risky commands that need the
+/// user's OK first (then nothing ran); `allow` names the ones the user OK'd.
+#[tauri::command]
+pub async fn recheck_task(state: State<'_, AppState>, task_id: String, allow: Vec<String>) -> R<Vec<HeldCheck>> {
+    state.core().await?.recheck_task(&task_id, allow).await.map_err(err)
+}
+
+/// Merge anyway: a task that its checks stopped goes on without them.
+#[tauri::command]
+pub async fn accept_task(state: State<'_, AppState>, task_id: String) -> R<Task> {
+    state.core().await?.accept_task(&task_id).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn assign_task(state: State<'_, AppState>, task_id: String, agent_id: Option<String>) -> R<Task> {
     state.core().await?.assign_task(&task_id, agent_id.as_deref()).await.map_err(err)
@@ -190,9 +248,33 @@ pub async fn plan_diff(state: State<'_, AppState>, plan_id: String) -> R<String>
     state.core().await?.plan_diff(&plan_id).await.map_err(err)
 }
 
+/// Send back: the review comments on a task's diff go to the agent that did the work.
 #[tauri::command]
-pub async fn merge_plan(state: State<'_, AppState>, plan_id: String) -> R<String> {
-    state.core().await?.merge_plan(&plan_id).await.map_err(err)
+pub async fn send_back_task(state: State<'_, AppState>, task_id: String, comments: String) -> R<Task> {
+    state.core().await?.send_back_task(&task_id, &comments).await.map_err(err)
+}
+
+/// `into`: the branch the user confirmed after `merge_plan_warning`. `unchecked`: the user
+/// merges without the plan's checks on the merge result (they failed, and the user goes on).
+#[tauri::command]
+pub async fn merge_plan(state: State<'_, AppState>, plan_id: String, into: Option<String>, unchecked: bool) -> R<String> {
+    let core = state.core().await?;
+    match (unchecked, into) {
+        (true, into) => core.merge_plan_unchecked(&plan_id, into.as_deref()).await,
+        (false, Some(branch)) => core.merge_plan_into(&plan_id, &branch).await,
+        (false, None) => core.merge_plan(&plan_id).await,
+    }
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn merge_plan_warning(state: State<'_, AppState>, plan_id: String) -> R<Option<codly_core::model::MergeWarning>> {
+    state.core().await?.merge_plan_warning(&plan_id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn undo_merge(state: State<'_, AppState>, sha: String) -> R<codly_core::model::RepoSync> {
+    state.core().await?.undo_merge(&sha).await.map_err(err)
 }
 
 #[tauri::command]
@@ -216,8 +298,14 @@ pub async fn push_checkout(state: State<'_, AppState>) -> R<codly_core::model::R
 }
 
 #[tauri::command]
-pub async fn get_events(state: State<'_, AppState>, agent_id: Option<String>, before: Option<i64>, limit: i64) -> R<Vec<EventRow>> {
-    state.core().await?.events(agent_id.as_deref(), before, limit.clamp(1, 5000)).await.map_err(err)
+pub async fn get_events(state: State<'_, AppState>, agent_id: Option<String>, thread: Option<String>, before: Option<i64>, limit: i64) -> R<Vec<EventRow>> {
+    let (core, limit) = (state.core().await?, limit.clamp(1, 5000));
+    match thread {
+        // One conversation's page: `agent_id` is the agent the thread belongs to.
+        Some(thread) => core.thread_events(&thread, agent_id.as_deref(), before, limit).await,
+        None => core.events(agent_id.as_deref(), before, limit).await,
+    }
+    .map_err(err)
 }
 
 #[tauri::command]
@@ -306,7 +394,8 @@ fn uri_decode(s: &str) -> String {
 
 #[tauri::command]
 pub async fn pty_open(state: State<'_, AppState>, cwd: Option<String>) -> R<String> {
-    let env = state.shell_env().await.clone();
+    let mut env = state.shell_env().await.clone();
+    codly_core::env::refresh_path(&mut env); // a CLI installed since the env was captured is found (the sign-in terminal)
     let cwd = cwd
         .filter(|c| std::path::Path::new(c).is_dir())
         .or_else(|| env.get("HOME").cloned())
@@ -342,6 +431,39 @@ pub async fn pty_close(state: State<'_, AppState>, pty_id: String) -> R<()> {
 #[tauri::command]
 pub async fn agent_git(state: State<'_, AppState>, agent_id: String) -> R<codly_core::orchestrator::agent_git::AgentGit> {
     state.core().await?.agent_git(&agent_id).await.map_err(err)
+}
+
+/// The Git tab's checkpoints: an agent's files as they were before each of its turns.
+#[tauri::command]
+pub async fn agent_checkpoints(state: State<'_, AppState>, agent_id: String) -> R<codly_core::orchestrator::checkpoints::AgentCheckpoints> {
+    state.core().await?.agent_checkpoints(&agent_id).await.map_err(err)
+}
+
+/// "Restore files to this point": puts the files of the agent's worktree back to a checkpoint.
+/// Files only; the state it replaces is kept as a checkpoint, so it can be undone. With `path`,
+/// "Restore this file": that one file goes back and the others stay.
+#[tauri::command]
+pub async fn restore_checkpoint(
+    state: State<'_, AppState>,
+    agent_id: String,
+    checkpoint: u32,
+    path: Option<String>,
+) -> R<codly_core::orchestrator::checkpoints::CheckpointRestore> {
+    let core = state.core().await?;
+    let done = match path {
+        Some(path) => core.restore_checkpoint_file(&agent_id, checkpoint, &path).await,
+        None => core.restore_checkpoint(&agent_id, checkpoint).await,
+    };
+    done.map_err(err)
+}
+
+/// "Last turn": what the last turn of an agent, or the last turn in a task's worktree, changed.
+#[tauri::command]
+pub async fn last_turn_diff(
+    state: State<'_, AppState>,
+    source: codly_core::orchestrator::checkpoints::TurnSource,
+) -> R<Option<codly_core::orchestrator::checkpoints::LastTurn>> {
+    state.core().await?.last_turn(&source).await.map_err(err)
 }
 
 /// Triggers: schedules, context rules and network mode, with the log of what they did.
@@ -435,6 +557,12 @@ pub async fn reset_breaker(state: State<'_, AppState>) -> R<()> {
     state.core().await?.reset_breaker().await.map_err(err)
 }
 
+/// What a plan's tasks used so far (tokens and reported cost), for the plan cards.
+#[tauri::command]
+pub async fn plan_spent(state: State<'_, AppState>, plan_id: String) -> R<Spent> {
+    state.core().await?.plan_spent(&plan_id).await.map_err(err)
+}
+
 // ───────────── housekeeping: board archive, default MCP servers ─────────────
 
 /// The board's archiving thresholds; pass `policy` to change them.
@@ -455,6 +583,61 @@ pub async fn board_archive(state: State<'_, AppState>, query: Option<String>) ->
     state.core().await?.board_archive(query.as_deref()).await.map_err(err)
 }
 
+/// What a new worktree of the open repo gets: its `.worktreeinclude` lines and its setup
+/// script (text, risks, on or off). Pass `set` to turn the script on, for the text you read, or off.
+#[tauri::command]
+pub async fn worktree_setup(
+    state: State<'_, AppState>,
+    set: Option<codly_core::orchestrator::worktree_setup::SetupChoice>,
+) -> R<codly_core::orchestrator::worktree_setup::WorktreeSetup> {
+    state.core().await?.worktree_setup(set).await.map_err(err)
+}
+
+/// The open repo's required checks (`.codly/checks`): the text, its commands with their risks,
+/// on or off. Pass `set` to turn them on, for the text you read, or off.
+#[tauri::command]
+pub async fn required_checks(
+    state: State<'_, AppState>,
+    set: Option<codly_core::orchestrator::required_checks::ChecksChoice>,
+) -> R<codly_core::orchestrator::required_checks::RequiredChecks> {
+    state.core().await?.required_checks(set).await.map_err(err)
+}
+
+/// Run the repo's required checks in the worktree of an agent you chat with ("Check the work").
+#[tauri::command]
+pub async fn check_agent(state: State<'_, AppState>, agent_id: String) -> R<Vec<codly_core::orchestrator::required_checks::CheckResult>> {
+    state.core().await?.check_agent(&agent_id).await.map_err(err)
+}
+
+/// What "Check the work" has for an agent now: whether its checks run, and the last result
+/// while the agent's files are still the ones that were checked.
+#[tauri::command]
+pub async fn agent_check_state(state: State<'_, AppState>, agent_id: String) -> R<codly_core::orchestrator::required_checks::AgentCheck> {
+    state.core().await?.agent_check_state(&agent_id).await.map_err(err)
+}
+
+/// What the open repo makes the agent CLIs load by themselves (project settings with hooks
+/// or allow rules, project MCP servers) and your choice about it. Pass `set` to trust the
+/// files you read, by their fingerprint, or to open the repo without them.
+#[tauri::command]
+pub async fn workspace_trust(
+    state: State<'_, AppState>,
+    set: Option<codly_core::orchestrator::trust::TrustChoice>,
+) -> R<codly_core::orchestrator::trust::WorkspaceTrust> {
+    state.core().await?.workspace_trust(set).await.map_err(err)
+}
+
+/// The work that was under way when Codly last closed and waits for your Resume (None:
+/// nothing waits). Pass `go` to let it go on.
+#[tauri::command]
+pub async fn resume_work(state: State<'_, AppState>, go: bool) -> R<Option<codly_core::orchestrator::resume::ResumeOffer>> {
+    let core = state.core().await?;
+    if go {
+        core.resume_work().await.map_err(err)?;
+    }
+    Ok(core.resume_offer())
+}
+
 #[tauri::command]
 pub async fn list_connections(state: State<'_, AppState>) -> R<Vec<codly_core::housekeeping::connections::Connection>> {
     state.core().await?.connections().await.map_err(err)
@@ -469,4 +652,50 @@ pub async fn update_connection(
     secret: Option<codly_core::orchestrator::housekeeping::ConnectionSecret>,
 ) -> R<Vec<codly_core::housekeeping::connections::Connection>> {
     state.core().await?.update_connection(&id, enabled, secret).await.map_err(err)
+}
+
+// ───────────── housekeeping: storage (worktrees, codly/… branches, run logs) ─────────────
+
+/// What Codly holds on disk and in each repository (Settings → Storage). Measures every
+/// worktree, so it can take a while.
+#[tauri::command]
+pub async fn storage_report(state: State<'_, AppState>) -> R<codly_core::housekeeping::storage::StorageReport> {
+    state.core().await?.storage().await.map_err(err)
+}
+
+/// How long run logs are kept and whether the sweep cleans up after finished plans; pass
+/// `policy` to change them.
+#[tauri::command]
+pub async fn storage_policy(state: State<'_, AppState>, policy: Option<codly_core::housekeeping::storage::StoragePolicy>) -> R<codly_core::housekeeping::storage::StoragePolicy> {
+    state.core().await?.storage_policy(policy).await.map_err(err)
+}
+
+/// "Clean up now": remove what has nothing to lose (merged, clean worktrees and merged branches
+/// of finished work, run logs past their limit). Returns what went.
+#[tauri::command]
+pub async fn storage_clean(state: State<'_, AppState>) -> R<codly_core::housekeeping::storage::StorageCleanup> {
+    Ok(state.core().await?.clean_storage().await)
+}
+
+/// Delete one of Codly's worktrees. `head` is the commit the list showed. A dirty or unmerged
+/// one is refused unless `force` (the user confirmed what is lost) and keeps its branch
+/// unless `delete_branch`.
+#[tauri::command]
+pub async fn storage_delete_worktree(state: State<'_, AppState>, office_id: String, path: String, head: Option<String>, force: bool, delete_branch: bool) -> R<()> {
+    state.core().await?.delete_worktree(&office_id, &path, head.as_deref(), force, delete_branch).await.map_err(err)
+}
+
+/// Delete a `codly/…` branch that no worktree has checked out. Commits that no other branch
+/// has are refused unless `force`.
+#[tauri::command]
+pub async fn storage_delete_branch(state: State<'_, AppState>, office_id: String, branch: String, head: String, force: bool) -> R<()> {
+    state.core().await?.delete_branch(&office_id, &branch, &head, force).await.map_err(err)
+}
+
+/// Remove one backup of Codly's database that the report listed (`path`): a copy, or a folder
+/// of older copies that was moved aside. The user confirmed it. Anything else is refused: the
+/// database is never removed here.
+#[tauri::command]
+pub async fn storage_delete_backup(state: State<'_, AppState>, path: String) -> R<()> {
+    state.core().await?.delete_backup(&path).await.map_err(err)
 }

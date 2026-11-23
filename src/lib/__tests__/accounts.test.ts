@@ -4,7 +4,7 @@ import type { AccountInfo } from '../gen/AccountInfo';
 import type { UsageWindow } from '../gen/UsageWindow';
 import {
   accountFor, applyConfigs, asConfigs, byHeadroom, derivedLabel, headroom, mostConstrained, moveItem, multiProviders,
-  normalizeHome, observeWindow, parked, resetLabel, toMs, usedNow, windowLabel, withProvider,
+  normalizeHome, observeWindow, parked, problemText, resetLabel, toMs, usedNow, windowLabel, withProvider,
 } from '../util/accounts';
 import { clock } from '../util/format';
 
@@ -97,6 +97,27 @@ describe('labels', () => {
     expect(accountFor({ provider: 'claude', account: null }, list)?.id).toBe('claude');
     expect(accountFor({ provider: 'claude', account: 'claude:/u/.claude-work' }, list)?.id).toBe('claude:/u/.claude-work');
     expect(accountFor({ provider: 'claude', account: 'claude:/u/.gone' }, list)).toBeNull();
+  });
+});
+
+describe('the problem line of a sign-in', () => {
+  const login = 'CLAUDE_CONFIG_DIR=/Users/me/.claude-work claude auth login';
+  const out = (problem: string | null, login_command: string | null = login) => acct('claude:/Users/me/.claude-work', { logged_in: false, problem, login_command });
+
+  it('is hidden when it only repeats the login command shown below it', () => {
+    expect(problemText(out(`not signed in: run \`${login}\` in a terminal`))).toBeNull();
+    expect(problemText(out(null))).toBeNull();
+  });
+
+  it('is shown when your shell selects the sign-in, also when it names the login command', () => {
+    const shell = `not signed in: your shell sets CLAUDE_CODE_USE_BEDROCK, and Codly takes that out of an agent's environment. Turn on "Use my shell's Claude sign-in" in Settings → Safety, or run \`${login}\` in a terminal`;
+    expect(problemText(out(shell))).toBe(shell);
+    const refused = 'not signed in: the sign-in your shell selects (CLAUDE_CODE_USE_BEDROCK) was not accepted. Run `claude auth status` in a terminal to see why';
+    expect(problemText(out(refused, null))).toBe(refused);
+  });
+
+  it('is shown for any other problem', () => {
+    expect(problemText(out('Not signed in: run `copilot` once and use /login.', null))).toBe('Not signed in: run `copilot` once and use /login.');
   });
 });
 

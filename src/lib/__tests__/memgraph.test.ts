@@ -30,6 +30,12 @@ describe('exactSearch', () => {
     expect(hits.map((h) => h.id)).toEqual(['b', 'a']);
   });
 
+  it('a memory title that was cut ends in an ellipsis', () => {
+    const long = `needle ${'word '.repeat(30)}`;
+    expect(exactSearch('needle', [], [mem('m', long)])[0].title).toBe(`${long.slice(0, 60).trimEnd()}…`);
+    expect(exactSearch('needle', [], [mem('m', 'A short needle\nand more')])[0].title).toBe('A short needle');
+  });
+
   it('trims long text around the match', () => {
     const h = exactSearch('needle', [], [mem('m', `${'a'.repeat(100)} needle ${'b'.repeat(100)}`)])[0];
     expect(h.snippet.startsWith('…') && h.snippet.endsWith('…')).toBe(true);

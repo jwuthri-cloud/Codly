@@ -5,26 +5,38 @@
 <script lang="ts">
   import type { ApprovalMode } from '../lib/gen/ApprovalMode';
   import type { Provider } from '../lib/gen/Provider';
+  import type { ResumeOnLaunch } from '../lib/gen/ResumeOnLaunch';
   import type { Settings } from '../lib/gen/Settings';
-  import { api } from '../lib/api';
-  import { updateSettings } from '../lib/state/actions';
+  import { redetect, refreshAccounts, updateSettings } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
+  import { ModelCatalogs } from '../lib/state/modelCatalogs.svelte';
   import { usable as accountUsable } from '../lib/util/accounts';
   import { skillsUi } from '../lib/state/skills.svelte';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
+  import { defaultEffortLabel, effortOptions, keptEffort, optionLabel, troubleNote } from '../lib/util/models';
+  import { HOST_ALLOW_LASTS } from '../lib/util/sandbox';
+  import { joinModel, splitModel } from '../lib/util/team';
   import AccountsSection from './AccountsSection.svelte';
   import ApiKeysSection from './ApiKeysSection.svelte';
+  import ApprovalRulesSection from './ApprovalRulesSection.svelte';
   import FreeFlowSection from './FreeFlowSection.svelte';
   import BreakerSection from './BreakerSection.svelte';
+  import WatchdogSection from './WatchdogSection.svelte';
   import InboundSection from './InboundSection.svelte';
+  import NotificationsSection from './NotificationsSection.svelte';
   import ConnectionsSection from './ConnectionsSection.svelte';
   import DeveloperSection from './DeveloperSection.svelte';
   import HousekeepingSection from './HousekeepingSection.svelte';
+  import StorageSection from './StorageSection.svelte';
   import TeamSection from './TeamSection.svelte';
   import TriggersSection from './TriggersSection.svelte';
+  import WorktreeSection from './WorktreeSection.svelte';
+  import RequiredChecksSection from './RequiredChecksSection.svelte';
+  import TrustSection from './TrustSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
+  import DiagnosticsReport from '../components/DiagnosticsReport.svelte';
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
   import FullAccessConfirm from '../onboarding/FullAccessConfirm.svelte';
@@ -55,27 +67,16 @@
   }
 
   // The Lead's model and thinking effort, stored as one string: "opus:high" (the core's format).
-  // ponytail: each CLI's levels today, by hand; Gemini and OpenCode take none through Codly.
-  const EFFORTS: Partial<Record<Provider, string[]>> = {
-    claude: ['low', 'medium', 'high', 'xhigh', 'max'],
-    codex: ['low', 'medium', 'high', 'xhigh'],
-  };
-  const ALL_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
-  const leadModel = $derived.by(() => {
-    const m = s.lead_model ?? '';
-    const i = m.lastIndexOf(':');
-    return i >= 0 && ALL_EFFORTS.includes(m.slice(i + 1)) ? { name: m.slice(0, i), effort: m.slice(i + 1) } : { name: m, effort: '' };
-  });
-  function setLeadModel(name: string, effort: string) {
-    const n = name.trim();
-    set({ lead_model: n || effort ? `${n}${effort ? `:${effort}` : ''}` : null });
-  }
-  let leadModels = $state<string[]>([]);
-  $effect(() => {
-    const p = leadCli;
-    leadModels = [];
-    api.listModels(p).then((l) => p === leadCli && (leadModels = l)).catch(() => {}); // typing a name still works
-  });
+  // The names and the efforts each model takes are its CLI's catalog; any other name can be typed.
+  const leadModel = $derived(splitModel(s.lead_model));
+  const catalogs = new ModelCatalogs();
+  const leadCatalog = $derived(catalogs.of(leadCli));
+  const leadEfforts = $derived(effortOptions(leadCatalog, leadCli, leadModel.name, leadModel.effort));
+  const leadListTrouble = $derived(troubleNote(leadCatalog, catalogs.failure(leadCli), PROVIDER_LABEL[leadCli]));
+  $effect(() => catalogs.ask(leadCli));
+  const setLeadModel = (name: string, effort: string) => set({ lead_model: joinModel(name, effort) });
+  /** Another model keeps the effort only if it takes that level. */
+  const pickLeadModel = (name: string) => setLeadModel(name, keptEffort(leadCatalog, leadCli, name.trim(), leadModel.effort));
   function move(p: Provider, d: number) {
     const list = [...s.worker_providers];
     const i = list.indexOf(p);
@@ -92,13 +93,19 @@
   const MODES: { id: ApprovalMode; title: string; body: string }[] = [
     { id: 'balanced', title: 'Balanced', body: 'Codly’s rules settle the obvious cases; anything risky (rm -rf, git push, outside the worktree, network installs) asks you.' },
     { id: 'strict', title: 'Ask first', body: 'Every command and edit the CLI would ask about comes to you.' },
-    { id: 'autonomous', title: 'Autonomous', body: 'Anything that stays inside the agent’s worktree is allowed. Risky commands still ask.' },
-    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, Codly’s private data and read-only agents still ask.' },
+    { id: 'autonomous', title: 'Autonomous', body: 'Commands and edits run without asking unless Codly sees a risk in them (rm -rf, git push, network, paths outside the worktree). This is a list of risky commands, not a sandbox: Codly reads the command, not what a script or program does once it runs. Codex agents run in their own OS sandbox. Claude agents have one only with “Sandbox Claude’s shell” on (below). Gemini, OpenCode, Cursor and Copilot agents have none.' },
+    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, changes to an agent’s own CLI settings, Codly’s private data and read-only agents still ask. So does a command that can lose work in your project folder itself: from an agent hired with Git isolation off, or from one that points the command there from its worktree.' },
   ];
   let confirmFull = $state(false);
   function pickMode(m: ApprovalMode) {
     confirmFull = m === 'full' && s.approval_mode !== 'full';
     if (!confirmFull) set({ approval_mode: m });
+  }
+  /** Claude is asked who is signed in again at once: with your shell's sign-in, or without it. */
+  async function setShellAuth(on: boolean) {
+    await updateSettings({ claude_shell_auth: on });
+    await redetect();
+    await refreshAccounts();
   }
 
   const TABS = [
@@ -110,6 +117,12 @@
   ];
   let tab = $state(ui.settingsTab ?? 'general');
   ui.settingsTab = null;
+  // Another tab starts at its top, not where the last one was scrolled to.
+  let panel: HTMLDivElement | undefined = $state();
+  $effect(() => {
+    void tab;
+    if (panel) panel.scrollTop = 0;
+  });
   // Office sound (kept on this machine, not in the core's settings).
   let soundOn = $state(!sound.muted);
   let volume = $state(sound.volume);
@@ -122,9 +135,21 @@
   const PLAN_TOGGLES = [
     ['auto_run_plans', 'Run plans without asking', 'New requests start in Auto instead of Plan (switch per request under the composer, or ⇧⇥). You can still cancel at any time.'],
     ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
-    ['use_my_claude_setup', 'Use my Claude Code setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings. Applies to agents started after the change; approvals still go through Codly.'],
+    ['use_my_claude_setup', 'Use my own CLI setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings once you trusted the folder (Safety). Codex agents also start the MCP servers of your Codex config, in every folder, trusted or not: they are yours, not the repo’s. Off: agents get Codly’s tools and your Connections only. Applies to agents started after the change; approvals still go through Codly.'],
+  ];
+  const LONG_RUN_TOGGLES = [
+    ['keep_awake', 'Keep the Mac awake while agents work', 'The Mac does not go to sleep by itself while an agent works or a plan runs. It may sleep when all work waits for you. Closing the lid still puts it to sleep.'],
+    ['confirm_quit', 'Ask before quitting while agents work', 'Agents stop when Codly quits. Their work can go on when you open Codly again.'],
+  ];
+  const RESUME_CHOICES: [ResumeOnLaunch, string][] = [['ask', 'Ask'], ['always', 'Always'], ['never', 'Never']];
+  const SANDBOX_TOGGLES = [['codex_network_access', 'Let Codex agents use the network', 'Commands a Codex agent runs in its sandbox can reach the internet (package installs, downloads) without asking you. Codly’s approval rules (git push, curl | sh, package downloads) are not asked for these commands either. Off: each one asks first. Applies to agents started after the change.']];
+  const OFFICE_TOGGLES = [
+    ['game_rules', 'Office rules affect work', 'Agents can be at home or tired, and new hires wait for a job offer.'],
+    ['world_ambient', 'Keep the office moving behind the chat', 'Idle agents keep moving and the break-room games play while the office shows behind the chat. Off: there the office is drawn only when something happens, which saves battery. With your system’s “Reduce motion” on, it never moves by itself.'],
   ];
   const REVIEW_TOGGLES = [['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.']];
+  // Seconds; the value in use is always one of the choices.
+  const checkLimits = $derived([...new Set([300, 600, 1200, 1800, 3600, 7200, s.verify_timeout_secs])].sort((a, b) => a - b));
 </script>
 
 <Dialog label="Settings" width={820} style="height: min(760px, calc(100vh - 64px))" onclose={() => (ui.settingsOpen = false)}>
@@ -134,12 +159,12 @@
         <button role="tab" aria-selected={tab === t.id} class:on={tab === t.id} onclick={() => (tab = t.id)}><Icon name={t.icon} size={15} />{t.label}</button>
       {/each}
     </nav>
-    <div class="body" role="tabpanel">
+    <div class="body" role="tabpanel" bind:this={panel}>
     {#snippet toggles(list: string[][])}
       {#each list as [k, title, body] (k)}
         <label class="row toggle">
           <div class="r-text"><span class="r-title">{title}</span><span class="desc">{body}</span></div>
-          <input type="checkbox" class="switch" checked={s[k as 'auto_run_plans']} onchange={(e) => set({ [k]: (e.currentTarget as HTMLInputElement).checked })} />
+          <input type="checkbox" class="switch" checked={s[k as 'auto_run_plans']} aria-label={title} onchange={(e) => set({ [k]: (e.currentTarget as HTMLInputElement).checked })} />
         </label>
       {/each}
     {/snippet}
@@ -161,18 +186,19 @@
           <span class="r-title">Model</span>
           <span class="desc">Empty uses {PROVIDER_LABEL[leadCli]}’s default. A request can pick its own under the composer. Leads switch on their next message and keep their conversation.</span>
         </div>
-        <input class="field" list="lead-models" value={leadModel.name} placeholder="Default" spellcheck="false" autocomplete="off" aria-label="Lead model" onchange={(e) => setLeadModel(e.currentTarget.value, leadModel.effort)} />
-        <datalist id="lead-models">{#each leadModels as m (m)}<option value={m}></option>{/each}</datalist>
+        <input class="field" list="lead-models" value={leadModel.name} placeholder="Default" spellcheck="false" autocomplete="off" aria-label="Lead model" onchange={(e) => pickLeadModel(e.currentTarget.value)} />
+        <datalist id="lead-models">{#each leadCatalog?.models ?? [] as m, i (i)}<option value={m.id}>{optionLabel(m)}</option>{/each}</datalist>
       </div>
-      {#if EFFORTS[leadCli]}
+      {#if leadListTrouble}<p class="desc warn" role="status">{leadListTrouble} <button class="link" onclick={() => catalogs.ask(leadCli, true)}>Try again</button></p>{/if}
+      {#if leadEfforts.length}
         <div class="row">
           <div class="r-text">
             <span class="r-title">Thinking effort</span>
             <span class="desc">How long it reasons before answering. Higher plans better, slower, and uses more of your quota.</span>
           </div>
           <select class="field" value={leadModel.effort} aria-label="Lead thinking effort" onchange={(e) => setLeadModel(leadModel.name, e.currentTarget.value)}>
-            <option value="">Default</option>
-            {#each EFFORTS[leadCli] ?? [] as e (e)}<option value={e}>{e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1)}</option>{/each}
+            <option value="">{defaultEffortLabel(leadCatalog, leadModel.name)}</option>
+            {#each leadEfforts as e (e.id)}<option value={e.id}>{e.label}</option>{/each}
           </select>
         </div>
       {/if}
@@ -181,6 +207,25 @@
     <section>
       <h3 class="eyebrow">Plans</h3>
       {@render toggles(PLAN_TOGGLES)}
+    </section>
+
+    <section>
+      <h3 class="eyebrow">Long runs</h3>
+      {@render toggles(LONG_RUN_TOGGLES)}
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Resume work when Codly opens</span>
+          <span class="desc">For tasks and plans that were running when Codly last closed. Ask: one question, and nothing starts before your answer. Always: the work goes on at once. Never: it stays stopped until you press Resume work.</span>
+        </div>
+        <select class="field" value={s.resume_on_launch} aria-label="Resume work when Codly opens" onchange={(e) => set({ resume_on_launch: e.currentTarget.value as ResumeOnLaunch })}>
+          {#each RESUME_CHOICES as [id, label] (id)}<option value={id}>{label}</option>{/each}
+        </select>
+      </div>
+    </section>
+
+    <section>
+      <h3 class="eyebrow">Office</h3>
+      {@render toggles(OFFICE_TOGGLES)}
     </section>
 
     <section>
@@ -216,7 +261,7 @@
       <h3 class="eyebrow">Sound</h3>
       <label class="row toggle">
         <div class="r-text"><span class="r-title">Office sounds</span><span class="desc">Pool balls, the PS5 and the TV match, typing, the kitchen, jingles for merges and promotions, and music in Build/Buy. Off by default; quiet when the window is hidden.</span></div>
-        <input type="checkbox" class="switch" checked={soundOn} onchange={(e) => sound.setMuted(!(e.currentTarget as HTMLInputElement).checked)} />
+        <input type="checkbox" class="switch" checked={soundOn} aria-label="Office sounds" onchange={(e) => sound.setMuted(!(e.currentTarget as HTMLInputElement).checked)} />
       </label>
       <div class="row">
         <div class="r-text"><span class="r-title">Volume</span><span class="desc">{Math.round(volume * 100)}%</span></div>
@@ -224,7 +269,16 @@
       </div>
     </section>
 
+    <NotificationsSection />
+
     <HousekeepingSection />
+    <StorageSection />
+
+    <section>
+      <h3 class="eyebrow">Troubleshooting</h3>
+      <p class="desc">For a bug report: the Codly version, your system, your agent CLIs and the last log lines. Tokens, keys, email addresses and paths under your home folder are taken out. Repository and agent names can remain: read it before you share it.</p>
+      <DiagnosticsReport preview />
+    </section>
     {:else if tab === 'team'}
     <TeamSection />
 
@@ -278,11 +332,58 @@
     </section>
 
     <section>
-      <h3 class="eyebrow">Review</h3>
-      {@render toggles(REVIEW_TOGGLES)}
+      <h3 class="eyebrow">Claude Code</h3>
+      <!-- Not <label>s: only the switch itself changes these, never a click on the text. -->
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Sandbox Claude’s shell</span>
+          <!-- One long help text, in short paragraphs: what the switch does, what a sandboxed command may do, how it sits with the approval rules, what it does not cover. -->
+          <span class="desc">For Claude Code agents that have a shell: workers and 1:1 agents. Off: a shell command runs with your account’s rights, and Codly’s approval rules are the only check. On: Claude Code runs each shell command in its own OS sandbox.</span>
+          <span class="desc">A sandboxed command can write only in the agent’s folder, a temporary folder and the repository’s git data. It can still read your other files. It can reach only the hosts that your Claude Code settings allow: for another host Codly asks you, in every mode except Full access. {HOST_ALLOW_LASTS}</span>
+          <span class="desc">Commands still go through Codly’s approval rules, as they do with the switch off: the sandbox is a second check under the rules, not a way around them. So a command can ask you once for itself and once more for a host. A command that Claude wants to run outside the sandbox asks you first, in every mode except Full access.</span>
+          <span class="desc">If Claude Code does not turn its sandbox on, the agent does not start, and Codly tells you why. File edits and tool servers are not sandboxed.</span>
+          <span class="desc">Codex agents always run in Codex’s own sandbox. Gemini, OpenCode, Cursor and Copilot agents have no sandbox. Applies to agents started after the change.</span>
+        </div>
+        <input type="checkbox" class="switch" checked={s.claude_sandbox} aria-label="Sandbox Claude’s shell" onchange={(e) => set({ claude_sandbox: e.currentTarget.checked })} />
+      </div>
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Use my shell’s Claude sign-in</span>
+          <span class="desc">Off: Codly takes <code>CLAUDE_CODE_USE_BEDROCK</code>, <code>CLAUDE_CODE_USE_VERTEX</code> and <code>CLAUDE_CODE_OAUTH_TOKEN</code> out of an agent’s environment, so Claude agents use only the sign-in of <code>claude auth login</code>. On: Claude agents keep these variables from your login shell, as Claude Code does in your terminal, and that account pays: Amazon Bedrock, Google Vertex AI, or the subscription of the token. Codly does not store the token. For a token from <code>claude setup-token</code>, check Anthropic’s terms first: they may not allow another app to use it. Applies to agents started after the change.</span>
+        </div>
+        <input type="checkbox" class="switch" checked={s.claude_shell_auth} aria-label="Use my shell’s Claude sign-in" onchange={(e) => setShellAuth(e.currentTarget.checked)} />
+      </div>
     </section>
 
+    <ApprovalRulesSection />
+
+    <section>
+      <h3 class="eyebrow">Sandbox</h3>
+      {@render toggles(SANDBOX_TOGGLES)}
+    </section>
+
+    <section>
+      <h3 class="eyebrow">Review</h3>
+      {@render toggles(REVIEW_TOGGLES)}
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Time limit for checks</span>
+          <span class="desc">How long one verify command may run before Codly stops it. A check that runs out of time blocks its task for you; it does not go back to the worker.</span>
+        </div>
+        <select class="field" value={String(s.verify_timeout_secs)} aria-label="Time limit for checks" onchange={(e) => set({ verify_timeout_secs: Number(e.currentTarget.value) })}>
+          {#each checkLimits as secs (secs)}<option value={String(secs)}>{secs % 60 ? `${secs} s` : `${secs / 60} min`}</option>{/each}
+        </select>
+      </div>
+    </section>
+
+    <RequiredChecksSection />
+    <TrustSection />
+
+    <WorktreeSection />
+
     <BreakerSection />
+
+    <WatchdogSection />
     {:else if tab === 'automation'}
     <FreeFlowSection />
     <TriggersSection />
@@ -306,6 +407,8 @@
   section { padding: 20px 0; box-shadow: inset 0 -1px 0 var(--line); display: flex; flex-direction: column; gap: 12px; }
   .desc { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .small { font-size: var(--t-sm); }
+  .warn { color: var(--amber-ink); }
+  .link { color: var(--ink-1); font-weight: var(--w-med); text-decoration: underline; text-decoration-color: var(--line-3); text-underline-offset: 3px; }
   .choices { display: flex; flex-wrap: wrap; gap: 6px; }
   .choice { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px 0 12px; border-radius: var(--r-full); background: var(--surface-1); font-weight: var(--w-med); }
   .choice:hover { background: var(--surface-2); }
@@ -321,6 +424,8 @@
   .grow { flex: 1; }
   .row { display: flex; align-items: center; gap: 16px; min-height: 42px; }
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  /* A help text in several paragraphs. */
+  .r-text .desc + .desc { margin-top: 6px; }
   .r-title { font-weight: var(--w-med); }
   .field { width: 180px; font-size: var(--t-sm); }
   .stepper { display: inline-flex; align-items: center; gap: 4px; padding: 2px; border-radius: var(--r-full); background: var(--surface-1); }

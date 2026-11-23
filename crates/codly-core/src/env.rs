@@ -127,6 +127,25 @@ fn effective_path(current: &str, home: Option<&Path>, nvm_dir: Option<&Path>) ->
     std::env::join_paths(dirs).ok().and_then(|s| s.into_string().ok()).unwrap_or_else(|| current.to_string())
 }
 
+/// `base["PATH"]` as `effective_path` makes it now. The base env is captured once, when Codly
+/// starts, and its PATH has only the fallback folders that existed then. An installer run since
+/// (onboarding's "Install for me", nvm, Homebrew, the Node.js package) may have created
+/// `~/.local/bin`, `~/.nvm/versions/node/*/bin`, `/opt/homebrew/bin` or `/usr/local/bin`:
+/// "Check again" must find the CLI or the npm it put there, without a restart of Codly.
+fn path_now(base: &HashMap<String, String>) -> Option<String> {
+    let home = base.get("HOME").map(PathBuf::from);
+    let nvm = base.get("NVM_DIR").map(PathBuf::from).or_else(|| home.as_ref().map(|h| h.join(".nvm")));
+    Some(effective_path(base.get("PATH")?, home.as_deref(), nvm.as_deref()))
+}
+
+/// Bring `env["PATH"]` up to date (`path_now`) for a process started now: the sign-in or update
+/// line typed into a terminal must find the CLI that was installed a moment ago.
+pub fn refresh_path(env: &mut HashMap<String, String>) {
+    if let Some(path) = path_now(env) {
+        env.insert("PATH".into(), path);
+    }
+}
+
 /// `<nvm>/versions/node/v*/bin`, newest version first.
 fn nvm_bins(nvm_dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(nvm_dir.join("versions/node")) else { return Vec::new() };
@@ -154,44 +173,47 @@ fn bin_names(provider: Provider) -> &'static [&'static str] {
     }
 }
 
-/// Resolve a provider's binary on `base["PATH"]` (re-resolved at every spawn: symlinks move).
+/// Resolve a provider's binary on `base["PATH"]` and the install folders made since
+/// (`path_now`). Re-resolved at every spawn: symlinks move, and a CLI may just have been installed.
 /// Returns the path as found on PATH, not canonicalized, so `~/.local/bin/claude` keeps
 /// following the auto-updater's symlink.
 pub fn resolve_bin(provider: Provider, base: &HashMap<String, String>) -> Option<PathBuf> {
-    let path = base.get("PATH")?;
-    let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    bin_names(provider).iter().find_map(|n| which::which_in(n, Some(path), &cwd).ok())
+    find_on(bin_names(provider), &path_now(base)?, base)
 }
 
-/// Models a CLI can run, for the start-agent picker. Codex and OpenCode print their catalog and
-/// Claude takes aliases; the rest return none and take any name typed in. `byok_key` is the CLI's
-/// opt-in vendor key (byok.rs): OpenCode lists the OpenRouter models only when it has it.
+/// The first of `names` that is a program in a folder of `path`.
+fn find_on(names: &[&str], path: &str, base: &HashMap<String, String>) -> Option<PathBuf> {
+    let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+    names.iter().find_map(|n| which::which_in(n, Some(path), &cwd).ok())
+}
+
+/// Models a CLI can run, for the start-agent picker. OpenCode prints its catalog and Claude
+/// takes aliases; the rest return none and take any name typed in. Codex is not asked here: its
+/// app-server lists its models (`adapters/codex/account.rs`, through
+/// `orchestrator/codex_account.rs`). `byok_key` is the CLI's opt-in vendor key (byok.rs): OpenCode
+/// lists the OpenRouter models only when it has it.
 pub async fn list_models(
     provider: Provider,
     base: &HashMap<String, String>,
     byok_key: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let args: &[&str] = match provider {
+    match provider {
         Provider::Claude => return Ok(["opus", "sonnet", "haiku", "fable"].map(str::to_owned).to_vec()),
-        Provider::Codex => &["debug", "models"],
-        Provider::Opencode => &["models"],
+        Provider::Opencode => {}
         _ => return Ok(vec![]),
-    };
+    }
     let bin = resolve_bin(provider, base).ok_or_else(|| format!("{} is not installed", bin_names(provider)[0]))?;
     let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    let out = run(&bin, args, &child_env_with(base, provider, byok_key), &cwd).await?;
+    let out = run(&bin, &["models"], &child_env_with(base, provider, byok_key), &cwd).await?;
     if !out.ok {
         return Err(first_line(&out.text()));
     }
-    parse_models(provider, &out.stdout)
+    Ok(parse_models(&out.stdout))
 }
 
-fn parse_models(provider: Provider, stdout: &str) -> Result<Vec<String>, String> {
-    if provider == Provider::Codex {
-        let v = serde_json::from_str::<Value>(stdout.trim()).map_err(|_| "`codex debug models` printed no JSON".to_string())?;
-        return Ok(v["models"].as_array().into_iter().flatten().filter_map(|m| m["slug"].as_str().map(str::to_owned)).collect());
-    }
-    Ok(stdout.lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains(char::is_whitespace)).map(str::to_owned).collect())
+/// The model names `opencode models` prints: one per line.
+fn parse_models(stdout: &str) -> Vec<String> {
+    stdout.lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains(char::is_whitespace)).map(str::to_owned).collect()
 }
 
 /// Claude Code's aliases with their context windows. Every current model runs with 1M by default
@@ -253,11 +275,14 @@ pub fn transport(provider: Provider) -> &'static str {
 }
 
 /// Detect every provider in parallel (≤ 5 s each): path, `--version`, auth status, billing.
-pub async fn detect_all(base: &HashMap<String, String>) -> Vec<CliInfo> {
+/// `shell_auth` = `Settings.claude_shell_auth`: Claude is asked with the sign-in the user's
+/// shell selects (`apply_shell_auth`), as its agents will run.
+pub async fn detect_all(base: &HashMap<String, String>, shell_auth: bool) -> Vec<CliInfo> {
+    let path = path_now(base).unwrap_or_default();
     let mut set = tokio::task::JoinSet::new();
     for (i, provider) in Provider::ALL.into_iter().enumerate() {
-        let base = base.clone();
-        set.spawn(async move { (i, detect(provider, &base).await) });
+        let (base, path) = (base.clone(), path.clone());
+        set.spawn(async move { (i, detect(provider, &base, &path, shell_auth).await) });
     }
     let mut out: Vec<(usize, CliInfo)> = set.join_all().await;
     out.sort_by_key(|(i, _)| *i);
@@ -266,7 +291,8 @@ pub async fn detect_all(base: &HashMap<String, String>) -> Vec<CliInfo> {
 
 const DETECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
+/// One provider's CLI, looked up in the folders of `path` (the PATH as it is now, `path_now`).
+async fn detect(provider: Provider, base: &HashMap<String, String>, path: &str, shell_auth: bool) -> CliInfo {
     let mut info = CliInfo {
         provider,
         path: None,
@@ -276,10 +302,11 @@ async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
         plan: None,
         problem: None,
         transport: transport(provider).into(),
-        install: install_hint(provider),
+        // Without npm the `npm install -g …` lines cannot run.
+        install: InstallHint { npm_available: find_on(&["npm"], path, base).is_some(), ..install_hint(provider) },
         default_model: None,
     };
-    let Some(bin) = resolve_bin(provider, base) else {
+    let Some(bin) = find_on(bin_names(provider), path, base) else {
         info.problem = Some(format!(
             "not installed: `{}` was not found on your login shell PATH",
             bin_names(provider)[0]
@@ -288,7 +315,10 @@ async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
     };
     info.path = Some(bin.to_string_lossy().into_owned());
     // Probe with the same scrubbed env the agents get, so billing reflects what they will use.
-    let env = child_env(base, provider);
+    let mut env = child_env(base, provider);
+    if shell_auth {
+        apply_shell_auth(&mut env, base, provider);
+    }
     let cwd = base.get("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
     let (version, auth, default_model) = tokio::join!(run(&bin, &["--version"], &env, &cwd), auth_status(provider, &bin, &env, &cwd), default_model(provider, &bin, &env, &cwd));
     info.default_model = default_model;
@@ -297,12 +327,18 @@ async fn detect(provider: Provider, base: &HashMap<String, String>) -> CliInfo {
         Ok(out) => info.problem = Some(format!("`{} --version` failed: {}", bin_names(provider)[0], first_line(&out.text()))),
         Err(e) => info.problem = Some(format!("`{} --version` {e}", bin_names(provider)[0])),
     }
+    // Older than supported is a notice with an update button, not a `problem`: the minimum is
+    // the oldest version verified, and a slightly older CLI may still work.
+    info.install.update_to = info.version.as_deref().and_then(|v| update_to(provider, v)).map(str::to_owned);
     let ((logged_in, billing, plan, problem), _) = auth;
     info.logged_in = logged_in;
     info.billing = billing;
     info.plan = plan;
     if info.problem.is_none() {
-        info.problem = problem;
+        info.problem = match (logged_in, login_command(provider, None)) {
+            (Some(false), Some(login)) => shell_auth_advice(provider, base, shell_auth, &login).or(problem),
+            _ => problem,
+        };
     }
     info
 }
@@ -319,7 +355,29 @@ impl RunOut {
     }
 }
 
-async fn run(bin: &Path, args: &[&str], env: &HashMap<String, String>, cwd: &Path) -> Result<RunOut, String> {
+/// Why a probe command gave no answer.
+enum RunErr {
+    /// It could not be started: no such file, not a program.
+    Spawn(std::io::Error),
+    TimedOut,
+}
+
+impl std::fmt::Display for RunErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunErr::Spawn(e) => write!(f, "could not run: {e}"),
+            RunErr::TimedOut => write!(f, "timed out after {} s", DETECT_TIMEOUT.as_secs()),
+        }
+    }
+}
+
+impl From<RunErr> for String {
+    fn from(e: RunErr) -> String {
+        e.to_string()
+    }
+}
+
+async fn run(bin: &Path, args: &[&str], env: &HashMap<String, String>, cwd: &Path) -> Result<RunOut, RunErr> {
     let fut = tokio::process::Command::new(bin)
         .args(args)
         .current_dir(cwd)
@@ -334,8 +392,8 @@ async fn run(bin: &Path, args: &[&str], env: &HashMap<String, String>, cwd: &Pat
             stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
         }),
-        Ok(Err(e)) => Err(format!("could not run: {e}")),
-        Err(_) => Err(format!("timed out after {} s", DETECT_TIMEOUT.as_secs())),
+        Ok(Err(e)) => Err(RunErr::Spawn(e)),
+        Err(_) => Err(RunErr::TimedOut),
     }
 }
 
@@ -511,13 +569,101 @@ fn first_line(s: &str) -> String {
     s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no output").chars().take(200).collect()
 }
 
+// ───────────── minimum versions ─────────────
+
+/// The oldest version of each tool that Codly supports, by binary name. For the agent CLIs it
+/// is the oldest version the adapters were verified against (docs/ARCHITECTURE.md §9 and the
+/// "require ≥" lines of docs/research/cli-claude-codex.md; cli-others-acp.md for Gemini and
+/// OpenCode); for git it is the first release with `merge-tree --write-tree`, which the merge
+/// queue needs. This is the only copy: detection, the adapters' start-up errors and the UI all
+/// read it. Cursor and Copilot have no row: no version of theirs was verified.
+pub const MIN_VERSIONS: [(&str, &str); 5] =
+    [("claude", "2.1.302"), ("codex", "0.161.0"), ("gemini", "0.62.0"), ("opencode", "1.18.0"), ("git", "2.38.0")];
+
+fn min_of(tool: &str) -> Option<&'static str> {
+    MIN_VERSIONS.iter().find(|(t, _)| *t == tool).map(|(_, v)| *v)
+}
+
+/// The oldest version of `provider`'s CLI that Codly supports, if one was verified.
+pub fn min_version(provider: Provider) -> Option<&'static str> {
+    min_of(provider.as_str())
+}
+
+/// The leading numbers of a version: "2.1.309" → [2, 1, 309], "v0.63.0-nightly.2" → [0, 63, 0].
+fn version_numbers(version: &str) -> Vec<u64> {
+    let numeric = version.trim_start_matches('v').split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap_or("");
+    numeric.split('.').map_while(|part| part.parse().ok()).collect()
+}
+
+/// Is `version` older than `min`? Missing parts count as 0 ("2.38" = "2.38.0"). A version with
+/// no number in it is never older: there is nothing to compare.
+fn older_than(version: &str, min: &str) -> bool {
+    let (mut v, mut m) = (version_numbers(version), version_numbers(min));
+    if v.is_empty() {
+        return false;
+    }
+    let len = v.len().max(m.len());
+    v.resize(len, 0);
+    m.resize(len, 0);
+    v < m
+}
+
+/// The version an installed CLI must be updated to: its minimum, when `version` is older.
+pub fn update_to(provider: Provider, version: &str) -> Option<&'static str> {
+    min_version(provider).filter(|min| older_than(version, min))
+}
+
+/// "Update Codex to 0.161.0 or later: run `npm install -g @openai/codex@latest` in a terminal".
+/// None for a CLI without a minimum version.
+pub fn update_advice(provider: Provider) -> Option<String> {
+    let min = min_version(provider)?;
+    let how = install_hint(provider).update.map(|cmd| format!(": run `{cmd}` in a terminal")).unwrap_or_default();
+    Some(format!("Update {} to {min} or later{how}", provider.label()))
+}
+
+/// Why this `git` cannot be used, or None when it can: it does not run (not installed; on a
+/// Mac without the Command Line Tools `/usr/bin/git` is a stub), or it is older than the
+/// minimum. Checked when a repository is opened, so the answer is never stale.
+pub async fn git_problem(bin: &Path, base: &HashMap<String, String>) -> Option<String> {
+    let cwd = base.get("HOME").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| PathBuf::from("/"));
+    git_version_problem(run(bin, &["--version"], base, &cwd).await)
+}
+
+/// `git_problem` from the outcome of `git --version` ("git version 2.39.5 (Apple Git-154)").
+/// Only a clear answer blocks a repository. A git that prints something else than a version, or
+/// that is slow to answer (the first run of the Command Line Tools shim can take seconds), is
+/// left alone: the git commands that follow say what is wrong, if anything is.
+fn git_version_problem(out: Result<RunOut, RunErr>) -> Option<String> {
+    let min = min_of("git").expect("git has a row in MIN_VERSIONS");
+    let unusable = |why: String| {
+        format!("Git cannot be used: `git --version` {why}. On a Mac, run `xcode-select --install` in a terminal to install it, then try again")
+    };
+    match out {
+        Ok(out) if out.ok => {
+            let version = parse_version(&out.stdout)?;
+            // Codly picks its git when it starts (Homebrew's first), so a new one needs a restart.
+            older_than(&version, min).then(|| {
+                format!(
+                    "Git {version} is too old: Codly needs Git {min} or later. On a Mac, run `brew install git` in a terminal, \
+                     or update the Command Line Tools in Software Update. Then quit Codly and open it again"
+                )
+            })
+        }
+        // The stub of a Mac without the Command Line Tools exits with an error.
+        Ok(out) => Some(unusable(format!("failed: {}", first_line(&out.text()).trim_end_matches('.')))),
+        Err(e @ RunErr::Spawn(_)) => Some(unusable(e.to_string())),
+        Err(RunErr::TimedOut) => None,
+    }
+}
+
 /// Is `key` removed from `provider`'s child env? Codly-internal markers of a parent Claude
 /// session always go (they hide sessions from `--resume`, change the entrypoint, or force
 /// `--bare`-like behaviour); in subscription mode, so do the keys that would make *this*
 /// provider silently bill an API account instead of the user's plan.
 ///
-/// ponytail: v1 is subscription mode only; a BYOK mode keeps the provider's own key (and
-/// Bedrock/Vertex users' CLAUDE_CODE_USE_* switches) and passes it explicitly.
+/// The two exceptions are opt-in and are set after the scrub: the user's own key for this
+/// CLI's vendor (`child_env_with`), and for Claude the sign-in the user's shell selects
+/// (`apply_shell_auth`).
 fn scrubbed(key: &str, provider: Provider) -> bool {
     if key == "CLAUDECODE" || key.starts_with("CLAUDE_CODE_") || key.starts_with("CLAUDE_AGENT_SDK_") {
         return true;
@@ -547,8 +693,25 @@ fn scrubbed(key: &str, provider: Provider) -> bool {
 /// Claude agents also get CLAUDE_CODE_DISABLE_AUTO_MEMORY=1: auto memory is one directory
 /// per repository, shared by every worktree, so parallel workers would race on one
 /// MEMORY.md (memory-knowledge §5.6); Codly's own memory replaces it.
+///
+/// Every agent's git runs with `core.fsmonitor=false`, as Codly's own git does (`git.rs`): a
+/// repository inside the worktree (a bare one in a cloned repo, or one the agent wrote) cannot
+/// make `git status` start the program its config names. Other settings of such a repository
+/// (filters, `diff.external`) still apply; `approvals.rs` asks before git runs in one.
 pub fn child_env(base: &HashMap<String, String>, provider: Provider) -> HashMap<String, String> {
     child_env_with(base, provider, None)
+}
+
+/// Add one git setting (`setting` is `key=value`, without a `'`) through
+/// `GIT_CONFIG_PARAMETERS`, where git itself keeps its `-c key=value` options: it beats every
+/// config file. It goes after what the user's shell already put there, never over it. One
+/// variable, with no KEY in its name: of the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+/// `GIT_CONFIG_VALUE_n` triple, a filter that drops `*KEY*` names (Codex's
+/// `shell_environment_policy` excludes, a secrets scrubber) removes one part, and git then
+/// refuses to run at all.
+fn git_config(env: &mut HashMap<String, String>, setting: &str) {
+    let params = env.entry("GIT_CONFIG_PARAMETERS".into()).or_default();
+    *params = format!("{} '{setting}'", params.trim()).trim_start().to_string();
 }
 
 /// `child_env` plus the opt-in key of this CLI's own vendor (`byok.rs`: ANTHROPIC_API_KEY for
@@ -557,7 +720,11 @@ pub fn child_env(base: &HashMap<String, String>, provider: Provider) -> HashMap<
 pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, byok_key: Option<&str>) -> HashMap<String, String> {
     let mut env: HashMap<String, String> =
         base.iter().filter(|(k, _)| !scrubbed(k, provider)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    // A CLI installed by npm is a `#!/usr/bin/env node` shim: a Node.js installed since Codly
+    // started (in a folder that is new on the PATH) must be found when the CLI runs.
+    refresh_path(&mut env);
     env.insert("TERM".into(), "dumb".into());
+    git_config(&mut env, "core.fsmonitor=false");
     match provider {
         Provider::Claude => {
             env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
@@ -572,6 +739,66 @@ pub fn child_env_with(base: &HashMap<String, String>, provider: Provider, byok_k
         env.insert(vendor.env_var().into(), key.into());
     }
     env
+}
+
+/// Variables of the user's shell that give Claude Code another sign-in than `claude auth
+/// login`: Amazon Bedrock, Google Vertex AI, or a long-lived token (`claude setup-token`).
+/// They change who pays as surely as an API key does, so `scrubbed` removes them with the
+/// other CLAUDE_CODE_* variables, and `apply_shell_auth` puts them back only for a user who
+/// asked for it (`Settings.claude_shell_auth`). What these backends need beside the switch
+/// (AWS_REGION, AWS_PROFILE, CLOUD_ML_REGION, ANTHROPIC_VERTEX_PROJECT_ID,
+/// ANTHROPIC_BEDROCK_BASE_URL) is never removed.
+const CLAUDE_SHELL_AUTH: [&str; 3] = ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_OAUTH_TOKEN"];
+
+/// The `CLAUDE_SHELL_AUTH` variables the user's shell sets. An empty value selects nothing.
+fn shell_auth_vars(base: &HashMap<String, String>) -> Vec<(&'static str, &str)> {
+    CLAUDE_SHELL_AUTH.into_iter().filter_map(|k| base.get(k).filter(|v| !v.is_empty()).map(|v| (k, v.as_str()))).collect()
+}
+
+/// The names of the `CLAUDE_SHELL_AUTH` variables that `env` sets, as "A, B". None without
+/// one. For a child env: Some = the run signs in as the user's shell does (`apply_shell_auth`).
+pub(crate) fn shell_auth_names(env: &HashMap<String, String>) -> Option<String> {
+    let names: Vec<&str> = shell_auth_vars(env).into_iter().map(|(k, _)| k).collect();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// What to say when Claude Code refuses the sign-in of the user's shell (`names`, from
+/// `shell_auth_names`). `claude auth login` is not the fix there: it signs in a subscription,
+/// and Claude Code keeps using what the variables select.
+pub(crate) fn shell_auth_refused(names: &str) -> String {
+    format!("the sign-in your shell selects ({names}) was not accepted. Run `claude auth status` in a terminal to see why")
+}
+
+/// Leave the sign-in the user's shell selects in a Claude child env: the `CLAUDE_SHELL_AUTH`
+/// variables, with the shell's own values, after the scrub took them out. Every other
+/// CLAUDE_CODE_* variable stays out, and another CLI gets nothing. Codly does not make, save
+/// or log the token: the user's own variable is passed on as their terminal passes it.
+pub fn apply_shell_auth(env: &mut HashMap<String, String>, base: &HashMap<String, String>, provider: Provider) {
+    if provider != Provider::Claude {
+        return;
+    }
+    for (k, v) in shell_auth_vars(base) {
+        env.insert(k.to_string(), v.to_string());
+    }
+}
+
+/// What a signed-out Claude says when the user's shell selects another sign-in for it
+/// (`CLAUDE_SHELL_AUTH`): `login`, the command that signs in with a subscription, is not the
+/// only thing that can be missing then. `kept` = the probe ran with those variables. None for
+/// another CLI, and when the shell sets none of them.
+fn shell_auth_advice(provider: Provider, base: &HashMap<String, String>, kept: bool, login: &str) -> Option<String> {
+    if provider != Provider::Claude {
+        return None;
+    }
+    let names = shell_auth_names(base)?;
+    Some(if kept {
+        format!("not signed in: {}", shell_auth_refused(&names))
+    } else {
+        format!(
+            "not signed in: your shell sets {names}, and Codly takes that out of an agent's environment. Turn on \
+             \"Use my shell's Claude sign-in\" in Settings → Safety, or run `{login}` in a terminal"
+        )
+    })
 }
 
 // ───────────── accounts (several sign-ins of one CLI) ─────────────
@@ -699,7 +926,7 @@ pub fn login_command(provider: Provider, home: Option<&str>) -> Option<String> {
     })
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-~+".contains(c)) {
         s.to_string()
     } else {
@@ -713,8 +940,16 @@ fn shell_quote(s: &str) -> String {
 /// out. Without `probe` (fixed CLIs in tests) each provider has its configured accounts and
 /// its primary one, with the CLI's detected state. `limits` are left empty (the orchestrator
 /// fills them). Configured homes are normalized (`~` expanded, no trailing slash).
-pub async fn detect_accounts(base: &HashMap<String, String>, clis: &[CliInfo], configs: &[AccountConfig], probe: bool) -> Vec<AccountInfo> {
-    accounts_with(base, clis, configs, probe, None).await
+/// `shell_auth` = `Settings.claude_shell_auth`: Claude's sign-ins are asked with the sign-in
+/// the user's shell selects (`apply_shell_auth`), as in `detect_all`.
+pub async fn detect_accounts(
+    base: &HashMap<String, String>,
+    clis: &[CliInfo],
+    configs: &[AccountConfig],
+    probe: bool,
+    shell_auth: bool,
+) -> Vec<AccountInfo> {
+    accounts_with(base, clis, configs, probe, None, shell_auth).await
 }
 
 /// `detect_accounts` after a settings change (labels, order, enabled, a new home): the
@@ -726,8 +961,9 @@ pub async fn reconcile_accounts(
     configs: &[AccountConfig],
     probe: bool,
     known: &[AccountInfo],
+    shell_auth: bool,
 ) -> Vec<AccountInfo> {
-    accounts_with(base, clis, configs, probe, Some(known)).await
+    accounts_with(base, clis, configs, probe, Some(known), shell_auth).await
 }
 
 async fn accounts_with(
@@ -736,6 +972,7 @@ async fn accounts_with(
     configs: &[AccountConfig],
     probe: bool,
     known: Option<&[AccountInfo]>,
+    shell_auth: bool,
 ) -> Vec<AccountInfo> {
     struct Candidate {
         provider: Provider,
@@ -790,6 +1027,9 @@ async fn accounts_with(
         }
         let Some(bin) = cli.path.as_ref().map(PathBuf::from) else { continue };
         let mut env = child_env(base, c.provider);
+        if shell_auth {
+            apply_shell_auth(&mut env, base, c.provider);
+        }
         apply_account(&mut env, c.provider, c.home.as_deref());
         let (p, cwd) = (c.provider, cwd.clone());
         set.spawn(async move { (i, auth_status(p, &bin, &env, &cwd).await) });
@@ -829,10 +1069,15 @@ async fn accounts_with(
             plan,
             identity,
             problem: problem.map(|p| match login_command(c.provider, c.home.as_deref()) {
-                Some(cmd) if logged_in == Some(false) => format!("not signed in: run `{cmd}` in a terminal"),
+                Some(cmd) if logged_in == Some(false) => match shell_auth_advice(c.provider, base, shell_auth, &cmd) {
+                    Some(advice) => advice,
+                    None => format!("not signed in: run `{cmd}` in a terminal"),
+                },
                 _ => p,
             }),
-            login_command: login_command(c.provider, c.home.as_deref()),
+            // With the shell's sign-in kept, the login command signs in nothing an agent uses.
+            login_command: login_command(c.provider, c.home.as_deref())
+                .filter(|_| !(shell_auth && c.provider == Provider::Claude && shell_auth_names(base).is_some())),
             home: c.home,
             limits: vec![],
         });
@@ -855,10 +1100,7 @@ mod tests {
 
     #[test]
     fn parses_model_catalogs() {
-        assert_eq!(parse_models(Provider::Opencode, "opencode/big-pickle\n\nopenrouter/x/y\n").unwrap(), ["opencode/big-pickle", "openrouter/x/y"]);
-        let codex = r#"{"models":[{"slug":"gpt-6-luna"},{"display_name":"no slug"}]}"#;
-        assert_eq!(parse_models(Provider::Codex, codex).unwrap(), ["gpt-6-luna"]);
-        assert!(parse_models(Provider::Codex, "not json").is_err());
+        assert_eq!(parse_models("opencode/big-pickle\n\nopenrouter/x/y\n"), ["opencode/big-pickle", "openrouter/x/y"]);
     }
 
     #[test]
@@ -955,6 +1197,45 @@ mod tests {
         assert!(!opencode.contains_key("OPENAI_API_KEY") && !opencode.contains_key("ANTHROPIC_API_KEY"));
     }
 
+    /// An agent's git never starts a repository's fsmonitor program; the user's own git
+    /// settings stay. The setting travels in one variable that a `*KEY*` / `*SECRET*` /
+    /// `*TOKEN*` filter keeps: half of a KEY/VALUE pair makes every git command fail.
+    #[test]
+    fn child_env_turns_git_fsmonitor_off() {
+        let env = child_env(&HashMap::new(), Provider::Claude);
+        assert_eq!(env["GIT_CONFIG_PARAMETERS"], "'core.fsmonitor=false'");
+        for name in env.keys().filter(|k| k.starts_with("GIT_")) {
+            assert!(!["KEY", "SECRET", "TOKEN"].iter().any(|word| name.contains(word)), "{name}");
+        }
+
+        let base: HashMap<String, String> = [
+            ("GIT_CONFIG_PARAMETERS", "'user.name=Me'"),
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "user.email"),
+            ("GIT_CONFIG_VALUE_0", "me@example.com"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .into();
+        let env = child_env(&base, Provider::Codex);
+        assert_eq!(env["GIT_CONFIG_PARAMETERS"], "'user.name=Me' 'core.fsmonitor=false'");
+        assert_eq!((env["GIT_CONFIG_COUNT"].as_str(), env["GIT_CONFIG_KEY_0"].as_str(), env["GIT_CONFIG_VALUE_0"].as_str()), ("1", "user.email", "me@example.com"));
+
+        // git reads it: the setting, and the ones that were there before.
+        let git = |env: &HashMap<String, String>, key: &str| {
+            let out = std::process::Command::new("git")
+                .args(["config", "--get", key])
+                .envs(env)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(git(&env, "core.fsmonitor"), "false");
+        assert_eq!(git(&env, "user.name"), "Me");
+        assert_eq!(git(&env, "user.email"), "me@example.com");
+    }
+
     /// Base URLs and Vertex/ADC switches move billing off the user's plan like a key does.
     #[test]
     fn child_env_scrubs_billing_switches() {
@@ -979,6 +1260,43 @@ mod tests {
         assert_eq!(child_env(&base, Provider::Claude)["GOOGLE_CLOUD_PROJECT"], "x", "other vendors' settings stay");
     }
 
+    /// The shell's Bedrock, Vertex or token sign-in reaches Claude only when the user asked for
+    /// it. What belongs to a parent Claude Code session never does, and no other CLI gets it.
+    #[test]
+    fn the_shell_sign_in_reaches_claude_only_on_request() {
+        let base: HashMap<String, String> = [
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("CLAUDE_CODE_USE_VERTEX", ""),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "token-from-the-shell"),
+            ("AWS_REGION", "eu-west-1"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_ENTRYPOINT", "cli"),
+            ("CLAUDE_CODE_SSE_PORT", "4242"),
+            ("CLAUDE_AGENT_SDK_VERSION", "0.3"),
+            ("ANTHROPIC_API_KEY", "sk-ant"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let mut claude = child_env(&base, Provider::Claude);
+        for k in CLAUDE_SHELL_AUTH {
+            assert!(!claude.contains_key(k), "{k} reached Claude without the switch");
+        }
+        assert_eq!(claude["AWS_REGION"], "eu-west-1", "the backend's own settings are never removed");
+
+        apply_shell_auth(&mut claude, &base, Provider::Claude);
+        assert_eq!(claude["CLAUDE_CODE_USE_BEDROCK"], "1");
+        assert_eq!(claude["CLAUDE_CODE_OAUTH_TOKEN"], "token-from-the-shell");
+        assert!(!claude.contains_key("CLAUDE_CODE_USE_VERTEX"), "an empty value selects nothing");
+        for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "CLAUDE_AGENT_SDK_VERSION", "ANTHROPIC_API_KEY"] {
+            assert!(!claude.contains_key(k), "{k} leaked");
+        }
+
+        let mut codex = child_env(&base, Provider::Codex);
+        apply_shell_auth(&mut codex, &base, Provider::Codex);
+        assert!(CLAUDE_SHELL_AUTH.iter().all(|k| !codex.contains_key(*k)), "another CLI never gets Claude's sign-in");
+    }
+
     #[test]
     fn versions_and_auth_parsing() {
         assert_eq!(parse_version("2.1.309 (Claude Code)").as_deref(), Some("2.1.309"));
@@ -1000,6 +1318,187 @@ mod tests {
         assert_eq!(gemini_auth(Some("gemini-api-key")).1, Billing::ApiKey);
         assert_eq!(gemini_auth(Some("oauth-personal")).1, Billing::Subscription);
         assert!(gemini_auth(None).3.is_some());
+    }
+
+    #[test]
+    fn an_old_cli_is_told_which_version_to_update_to() {
+        assert_eq!(version_numbers("2.1.309"), [2, 1, 309]);
+        assert_eq!(version_numbers("v0.63.0-nightly.2"), [0, 63, 0]);
+        assert_eq!(version_numbers("1.18"), [1, 18]);
+        assert!(version_numbers("unknown").is_empty());
+
+        assert!(older_than("2.1.99", "2.1.302"), "numbers, not text: 99 < 302");
+        assert!(older_than("0.160.9", "0.161.0"));
+        assert!(older_than("2.37", "2.38.0"), "a missing part counts as 0");
+        assert!(!older_than("2.38", "2.38.0"));
+        assert!(!older_than("2.1.302", "2.1.302"));
+        assert!(!older_than("3.0.0", "2.1.302"));
+        assert!(!older_than("0.161.0-alpha.1", "0.161.0"), "a pre-release counts as its version");
+        assert!(!older_than("nightly", "0.62.0"), "nothing to compare");
+
+        assert_eq!(update_to(Provider::Claude, "2.1.250"), Some("2.1.302"));
+        assert_eq!(update_to(Provider::Claude, "2.1.309"), None);
+        assert_eq!(update_to(Provider::Codex, "0.150.2"), Some("0.161.0"));
+        assert_eq!(update_to(Provider::Gemini, "0.62.0"), None);
+        assert_eq!(update_to(Provider::Opencode, "1.17.9"), Some("1.18.0"));
+        assert_eq!(update_to(Provider::Cursor, "0.0.1"), None, "no verified version, no minimum");
+
+        assert_eq!(update_advice(Provider::Claude).as_deref(), Some("Update Claude Code to 2.1.302 or later: run `claude update` in a terminal"));
+        assert_eq!(update_advice(Provider::Copilot), None);
+        // Every minimum is a full version, and belongs to a CLI or to git.
+        for (tool, min) in MIN_VERSIONS {
+            assert_eq!(version_numbers(min).len(), 3, "{tool}");
+            assert!(tool == "git" || Provider::ALL.iter().any(|p| p.as_str() == tool), "{tool}");
+        }
+    }
+
+    /// The base env is captured when Codly starts. An installer run after that makes
+    /// `~/.local/bin` (Claude Code), `~/.opencode/bin` or a Node.js folder (nvm): "Check again",
+    /// the next terminal and the next CLI run must see it without a restart.
+    #[test]
+    fn a_cli_installed_while_codly_runs_is_found() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        let start_path = home.join("bin").to_str().unwrap().to_string();
+        let mut base: HashMap<String, String> = [("PATH".to_string(), start_path.clone()), ("HOME".to_string(), home.to_str().unwrap().to_string())].into();
+        // Only what is under this $HOME is checked: the machine's own folders may hold anything.
+        let under_home = |path: &str| std::env::split_paths(path).filter(|d| d.starts_with(home)).collect::<Vec<PathBuf>>();
+        assert_eq!(under_home(&path_now(&base).unwrap()), [home.join("bin")]);
+        let program = |rel: &str| {
+            let path = home.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+
+        let claude = program(".local/bin/claude");
+        let opencode = program(".opencode/bin/opencode");
+        assert_eq!(resolve_bin(Provider::Claude, &base), Some(claude));
+        assert_eq!(resolve_bin(Provider::Opencode, &base), Some(opencode));
+        assert_eq!(base["PATH"], start_path, "the captured env itself is not changed");
+
+        // Node.js installed with nvm, then Codex with its npm: both land in a folder that is new.
+        let node_bin = ".nvm/versions/node/v22.9.0/bin";
+        let npm = program(&format!("{node_bin}/npm"));
+        let codex = program(&format!("{node_bin}/codex"));
+        let now = path_now(&base).unwrap();
+        assert_eq!(find_on(&["npm"], &now, &base), Some(npm), "the npm lines can run");
+        assert_eq!(resolve_bin(Provider::Codex, &base), Some(codex));
+        let expected = [home.join("bin"), home.join(".local/bin"), home.join(".opencode/bin"), home.join(node_bin)];
+        // The Codex shim is `#!/usr/bin/env node`: the CLI's own env needs the Node.js folder too.
+        assert_eq!(under_home(child_env(&base, Provider::Codex)["PATH"].as_str()), expected);
+
+        refresh_path(&mut base);
+        assert_eq!(under_home(base["PATH"].as_str()), expected);
+        assert_eq!(std::env::split_paths(&base["PATH"]).next(), Some(home.join("bin")), "what was on the PATH stays first");
+    }
+
+    #[tokio::test]
+    async fn detection_flags_an_old_cli_and_a_missing_npm() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // The fake bin folder is the whole search path, so the machine's own npm is not found.
+        let home = dir.path().to_str().unwrap();
+        let base: HashMap<String, String> = [("PATH", home), ("HOME", home)].into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+
+        script("opencode", "echo 1.17.2");
+        let old = detect(Provider::Opencode, &base, home, false).await;
+        assert_eq!(old.version.as_deref(), Some("1.17.2"));
+        assert_eq!(old.install.update_to.as_deref(), Some("1.18.0"));
+        assert_eq!(old.install.update.as_deref(), Some("opencode upgrade"));
+        assert_eq!(old.problem, None, "an old CLI is still an installed CLI");
+        assert!(!old.install.npm_available);
+        assert!(!detect(Provider::Codex, &base, home, false).await.install.npm_available, "also for a CLI that is not installed");
+
+        script("opencode", "echo 1.18.31");
+        script("npm", "exit 0");
+        let new = detect(Provider::Opencode, &base, home, false).await;
+        assert_eq!(new.install.update_to, None);
+        assert!(new.install.npm_available);
+    }
+
+    /// The probe runs with the env the agents get. Without the switch the shell's Bedrock
+    /// sign-in is taken out, and the advice names it instead of sending the user to a login
+    /// they do not use; with the switch, Claude is asked as the terminal asks it. The fake
+    /// `claude` answers by the variable alone: what the real CLI prints on Bedrock is not
+    /// recorded.
+    #[tokio::test]
+    async fn a_shell_sign_in_is_probed_only_on_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("claude");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+case "$1" in
+  --version) echo "2.1.311 (Claude Code)" ;;
+  *) if [ -n "$CLAUDE_CODE_USE_BEDROCK" ]; then echo '{"loggedIn":true,"apiProvider":"bedrock"}'; else echo '{"loggedIn":false}'; fi ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.path().to_str().unwrap();
+        let mut base: HashMap<String, String> = [("PATH", home), ("HOME", home)].into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+
+        let plain = detect(Provider::Claude, &base, home, false).await;
+        assert_eq!(plain.problem.as_deref(), Some("not signed in: run `claude auth login` in a terminal"));
+
+        base.insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+        let off = detect(Provider::Claude, &base, home, false).await;
+        assert_eq!(off.logged_in, Some(false), "the shell's switch is not passed on by default");
+        let problem = off.problem.clone().unwrap();
+        for part in ["CLAUDE_CODE_USE_BEDROCK", "Settings → Safety", "`claude auth login`"] {
+            assert!(problem.contains(part), "{part} is missing: {problem}");
+        }
+        let accounts = detect_accounts(&base, std::slice::from_ref(&off), &[], true, false).await;
+        assert_eq!((accounts[0].logged_in, accounts[0].problem.as_deref()), (Some(false), Some(problem.as_str())));
+        assert_eq!(accounts[0].login_command.as_deref(), Some("claude auth login"));
+        // The switch on and Claude Code still signed out (not probed again here): the shell's
+        // sign-in is what failed, so no login command is offered.
+        let refused = detect_accounts(&base, std::slice::from_ref(&off), &[], false, true).await;
+        assert_eq!(refused[0].logged_in, Some(false));
+        assert_eq!(
+            refused[0].problem.as_deref(),
+            Some("not signed in: the sign-in your shell selects (CLAUDE_CODE_USE_BEDROCK) was not accepted. Run `claude auth status` in a terminal to see why")
+        );
+        assert_eq!(refused[0].login_command, None);
+
+        let on = detect(Provider::Claude, &base, home, true).await;
+        assert_eq!((on.logged_in, on.billing, on.plan.as_deref()), (Some(true), Billing::ThirdParty, Some("bedrock")));
+        assert_eq!(on.problem, None);
+        let accounts = detect_accounts(&base, std::slice::from_ref(&on), &[], true, true).await;
+        assert_eq!((accounts[0].logged_in, accounts[0].billing, accounts[0].problem.as_deref()), (Some(true), Billing::ThirdParty, None));
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_old_git_says_what_to_do() {
+        let out = |ok, stdout: &str, stderr: &str| Ok(RunOut { ok, stdout: stdout.into(), stderr: stderr.into() });
+        assert_eq!(git_version_problem(out(true, "git version 2.39.5 (Apple Git-154)\n", "")), None);
+        assert_eq!(git_version_problem(out(true, "git version 2.38.0\n", "")), None);
+        // Apple Git of the Command Line Tools 14.0 to 14.2.
+        let old = git_version_problem(out(true, "git version 2.37.1 (Apple Git-137.1)\n", "")).unwrap();
+        assert!(old.contains("Git 2.37.1 is too old") && old.contains("2.38.0 or later"), "{old}");
+        assert!(old.contains("`brew install git`") && old.contains("Software Update") && old.contains("quit Codly"), "it says what to run: {old}");
+        // A Mac without the Command Line Tools: the stub prints a note and fails.
+        let stub = git_version_problem(out(false, "", "xcode-select: note: No developer tools were found, requesting install.\n")).unwrap();
+        assert!(stub.contains("requesting install. On a Mac, run `xcode-select --install`"), "one full stop between the sentences: {stub}");
+        // A slow answer is not a missing git: the repository is not blocked.
+        assert_eq!(git_version_problem(Err(RunErr::TimedOut)), None);
+        assert_eq!(git_version_problem(out(true, "this is not a version\n", "")), None);
+
+        // No binary at all, through the real probe.
+        let base: HashMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())].into();
+        let gone = git_problem(Path::new("/nonexistent/git"), &base).await.unwrap();
+        assert!(gone.contains("could not run") && gone.contains("`xcode-select --install`"), "{gone}");
     }
 
     #[tokio::test]
@@ -1105,7 +1604,7 @@ esac
     #[tokio::test]
     async fn detects_signed_in_homes_and_keeps_only_the_primary_enabled() {
         let home = Home::new();
-        let accounts = detect_accounts(&home.base, &home.clis, &[], true).await;
+        let accounts = detect_accounts(&home.base, &home.clis, &[], true, false).await;
         let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
         let work = format!("claude:{}", home.path(".claude-work"));
         let perso = format!("gemini:{}", home.path(".gemini-perso"));
@@ -1138,7 +1637,7 @@ esac
             config(Provider::Claude, Some(&home.path(".claude-old")), None, true),
             config(Provider::Claude, None, None, false),
         ];
-        let accounts = detect_accounts(&home.base, &home.clis, &configs, true).await;
+        let accounts = detect_accounts(&home.base, &home.clis, &configs, true, false).await;
         let claude: Vec<&AccountInfo> = accounts.iter().filter(|a| a.provider == Provider::Claude).collect();
         assert_eq!(claude.len(), 3);
         assert_eq!(claude[0].id, format!("claude:{}", home.path(".claude-work")), "~ expanded, trailing slash dropped");
@@ -1152,7 +1651,7 @@ esac
         // The login shell's own CLAUDE_CONFIG_DIR is the primary account.
         let mut base = home.base.clone();
         base.insert("CLAUDE_CONFIG_DIR".into(), "~/.claude-work".into());
-        let accounts = detect_accounts(&base, &home.clis, &[], true).await;
+        let accounts = detect_accounts(&base, &home.clis, &[], true, false).await;
         let primary: Vec<&str> = accounts.iter().filter(|a| a.primary).map(|a| a.id.as_str()).collect();
         assert_eq!(primary[0], format!("claude:{}", home.path(".claude-work")));
         let default = accounts.iter().find(|a| a.id == "claude").unwrap();
@@ -1162,11 +1661,11 @@ esac
     #[tokio::test]
     async fn reconciling_after_a_settings_change_reuses_the_probes() {
         let home = Home::new();
-        let known = detect_accounts(&home.base, &home.clis, &[], true).await;
+        let known = detect_accounts(&home.base, &home.clis, &[], true, false).await;
         let probes = home.probes();
         let work = home.path(".claude-work");
         let configs = [config(Provider::Claude, Some(&work), Some("job"), true), config(Provider::Claude, None, None, true)];
-        let accounts = reconcile_accounts(&home.base, &home.clis, &configs, true, &known).await;
+        let accounts = reconcile_accounts(&home.base, &home.clis, &configs, true, &known, false).await;
         assert_eq!(home.probes(), probes, "nothing new to probe");
         assert_eq!(accounts[0].label, "job");
         assert_eq!(accounts[0].identity.as_deref(), Some("me@work.com · Work"), "state carried over");
@@ -1175,12 +1674,12 @@ esac
 
         // A newly configured home is probed, once.
         let configs = [config(Provider::Claude, Some(&home.path(".claude-new")), None, true)];
-        let accounts = reconcile_accounts(&home.base, &home.clis, &configs, true, &known).await;
+        let accounts = reconcile_accounts(&home.base, &home.clis, &configs, true, &known, false).await;
         assert_eq!(home.probes(), probes + 1);
         assert_eq!(accounts[0].logged_in, Some(false));
 
         // Without probing (fixed CLIs), every account takes the CLI's state.
-        let accounts = detect_accounts(&home.base, &home.clis, &configs, false).await;
+        let accounts = detect_accounts(&home.base, &home.clis, &configs, false, false).await;
         let ids: Vec<&str> = accounts.iter().filter(|a| a.provider == Provider::Claude).map(|a| a.id.as_str()).collect();
         assert_eq!(ids, [format!("claude:{}", home.path(".claude-new")).as_str(), "claude"]);
         assert!(accounts.iter().all(|a| a.logged_in == Some(true)));

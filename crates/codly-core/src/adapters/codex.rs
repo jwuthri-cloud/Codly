@@ -13,10 +13,27 @@
 //! `thread/start.config` objects are read as dotted `-c` keys; `mcp_servers.codly.{command,
 //! args, env, default_tools_approval_mode}`, `features.memories` and `memories.*` are valid.
 //!
+//! Questions that are no part of a run (the models, the account's usage, a compaction, the
+//! user's own MCP servers) are in `account.rs`.
+//!
 //! A prompt sent while a turn runs is steered into it (`turn/steer`), so it does not get a
-//! `TurnStarted`/`TurnCompleted` of its own.
+//! `TurnStarted`/`TurnCompleted` of its own: a `PromptSteered` says it was delivered. Codex
+//! may report the turn's end before it answers the steer: the adapter keeps that end back
+//! until the answer, so a `PromptSteered` always comes before its turn's `TurnCompleted`.
+//!
+//! A Codex subagent works on a thread of its own (`thread.parentThreadId` names the thread
+//! that spawned it). That thread is routed to the agent that owns the parent: the subagent's
+//! approvals reach Codly, its tool calls are rows of the agent marked `input.subagent`, its
+//! tokens count for the run. Its words, plan and turns stay out: they are not the agent's.
+//! It has one row in the agent's list of helpers. Its thread is forgotten when Codex closes it
+//! (`thread/closed`) and let go with the agent's own (`thread/unsubscribe`).
 
-use std::collections::{HashMap, VecDeque};
+mod account;
+
+pub use account::{AccountQuery, compact_thread, models, rate_limits};
+
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -28,15 +45,31 @@ use tokio::process::ChildStdin;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
-use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
+use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, attachments, startup};
+use crate::housekeeping::connections::{self, ReadyMcp};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, Billing, EventKind,
-    Id, MessagePhase, PlanStep, Provider, TurnStatus, Usage, new_id, now_ms,
+    Id, MessagePhase, ModelOption, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
 };
 use crate::proc::{self, RawLog, Record, StderrTail};
 
 /// Notifications Codly never uses (opted out in `initialize`).
 const OPT_OUT: &[&str] = &["remoteControl/status/changed"];
+
+/// The account's usage windows. Codex sends it after every model response, changed or not.
+const RATE_LIMITS: &str = "account/rateLimits/updated";
+/// An unchanged `RATE_LIMITS` reading is passed on again after this long: a window without a
+/// reset time counts only while it was seen recently.
+const LIMITS_REFRESH_MS: i64 = 60_000;
+
+/// How long Codex has to open a thread, and to answer `turn/start`.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a turn has to end after `turn/interrupt`. Past either limit the thread is let go:
+/// the run ends and the next one resumes the thread.
+const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long Codex has to start the turn of a compaction it was asked for. Prompts wait for
+/// that turn's end; past this limit they get their turns as if nothing was asked.
+const COMPACT_START_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One app-server per sign-in: its CODEX_HOME (None = unset) holds the account's auth and
 /// threads, and its thread-less notifications (rate limits) concern that account only.
@@ -103,6 +136,9 @@ struct ServerInfo {
 
 enum Waiter {
     Oneshot(oneshot::Sender<Result<Value, Value>>, Arc<RawLog>),
+    /// A `Oneshot` whose answer holds what the user keeps in their own Codex config (keys of
+    /// their MCP servers and model providers): the raw log gets a note in its place.
+    Unlogged(oneshot::Sender<Result<Value, Value>>, Arc<RawLog>),
     /// Delivered in stream order on the agent's channel. `register`: the result is a thread
     /// (`thread/start`/`resume`) whose id is routed to this agent before anything else is read.
     Agent { route: Route, register: bool },
@@ -119,6 +155,10 @@ enum ServerMsg {
     Notification { method: String, params: Value },
     Request { id: Value, method: String, params: Value },
     Exited { code: Option<i64>, stderr: String },
+    /// Not from the server: Codly asks the thread's agent to have it compacted
+    /// (`account::compact_thread`). The agent decides, so a compaction and the agent's own
+    /// turns never start into each other.
+    Compact(oneshot::Sender<anyhow::Result<()>>),
 }
 
 #[derive(Default)]
@@ -126,6 +166,89 @@ struct State {
     pending: HashMap<i64, Waiter>,
     /// threadId → the agent that owns it
     routes: HashMap<String, Route>,
+    /// The routed threads that are subagents' (`adopt_subagents`): Codly did not open them.
+    subagent_threads: HashSet<String>,
+    /// The last `RATE_LIMITS` params passed on to the agents, and when.
+    last_limits: Option<(Value, i64)>,
+}
+
+impl State {
+    /// Is this `RATE_LIMITS` reading worth passing on: a new one, or the same one seen long ago?
+    fn limits_news(&mut self, params: &Value, now: i64) -> bool {
+        if self.last_limits.as_ref().is_some_and(|(last, at)| last == params && now - at < LIMITS_REFRESH_MS) {
+            return false;
+        }
+        self.last_limits = Some((params.clone(), now));
+        true
+    }
+
+    /// One route per agent: an agent whose subagents have threads is in `routes` once per thread.
+    fn agents(&self) -> Vec<Route> {
+        let mut agents: Vec<Route> = Vec::new();
+        for r in self.routes.values() {
+            if !agents.iter().any(|a| a.tx.same_channel(&r.tx)) {
+                agents.push(r.clone());
+            }
+        }
+        agents
+    }
+
+    /// Give the subagent threads this message names to the agent that owns their parent: a
+    /// `thread/started` with a routed `parentThreadId`, the agents a routed thread's collab call
+    /// starts or wakes (`WAKES_SUBAGENT`), the thread of its `subAgentActivity`. A thread that
+    /// has a route keeps it.
+    fn adopt_subagents(&mut self, method: &str, params: &Value) {
+        let (parent, children): (Option<&str>, Vec<&str>) = match method {
+            "thread/started" => {
+                let thread = &params["thread"];
+                (thread["parentThreadId"].as_str(), thread["id"].as_str().into_iter().collect())
+            }
+            "item/started" | "item/completed" => {
+                let item = &params["item"];
+                let children: Vec<&str> = match item["type"].as_str() {
+                    Some("collabAgentToolCall") if item["tool"].as_str().is_some_and(|tool| WAKES_SUBAGENT.contains(&tool)) => {
+                        receiver_threads(item)
+                    }
+                    Some("subAgentActivity") => item["agentThreadId"].as_str().into_iter().collect(),
+                    _ => return,
+                };
+                (params["threadId"].as_str(), children)
+            }
+            _ => return,
+        };
+        let Some(route) = parent.and_then(|p| self.routes.get(p)).cloned() else { return };
+        for child in children {
+            if let Entry::Vacant(free) = self.routes.entry(child.to_string()) {
+                free.insert(route.clone());
+                self.subagent_threads.insert(child.to_string());
+            }
+        }
+    }
+
+    /// Codex closed a thread (`thread/closed`): nothing more comes from it. A subagent's
+    /// thread loses its route, so a long run does not keep one for every subagent it ever had.
+    /// The agent's own thread keeps its route until the agent ends.
+    fn forget_closed(&mut self, thread: &str) {
+        if self.subagent_threads.remove(thread) {
+            self.routes.remove(thread);
+        }
+    }
+}
+
+/// The collab tools that make a subagent work: the one that creates it and the ones that reach
+/// one that exists. A thread such a call names is routed (again) to the agent that owns the
+/// caller's thread; `wait`, `closeAgent`, `interruptAgent` and `listAgents` start nothing.
+/// From the codex-cli 0.166.0 types (`CollabAgentTool`), not verified live.
+const WAKES_SUBAGENT: [&str; 5] = ["spawnAgent", "resumeAgent", "sendInput", "sendMessage", "followupTask"];
+
+/// The thread a server message is about: its `threadId`, or the thread of a `thread/started`.
+fn thread_of(params: &Value) -> Option<&str> {
+    params["threadId"].as_str().or(params["thread"]["id"].as_str())
+}
+
+/// The threads a `collabAgentToolCall` item names: for `spawnAgent`, the one it created.
+fn receiver_threads(item: &Value) -> Vec<&str> {
+    item["receiverThreadIds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect()
 }
 
 struct AppServer {
@@ -133,6 +256,11 @@ struct AppServer {
     next_id: AtomicI64,
     state: StdMutex<State>,
     alive: AtomicBool,
+    /// Codly gave this server up (`give_up`): its process is being ended, and no new agent
+    /// may start on it.
+    abandoned: AtomicBool,
+    /// When the server last wrote a line (ms): how long it has said nothing to anybody.
+    last_inbound_ms: AtomicI64,
     pgid: i32,
     /// With `pgid`, what every run on this server records for crash recovery.
     started_ms: i64,
@@ -140,6 +268,8 @@ struct AppServer {
     info: StdMutex<ServerInfo>,
     /// Raw log of the agent that started the server: lines that belong to nobody else.
     bootstrap_raw: Arc<RawLog>,
+    /// The model list this server gave (`account::models`), asked once.
+    models: Mutex<Option<Vec<ModelOption>>>,
 }
 
 impl AppServer {
@@ -157,19 +287,20 @@ impl AppServer {
             next_id: AtomicI64::new(0),
             state: StdMutex::new(State::default()),
             alive: AtomicBool::new(true),
+            abandoned: AtomicBool::new(false),
+            last_inbound_ms: AtomicI64::new(now_ms()),
             pgid: child.id().map(|p| p as i32).unwrap_or(0),
             started_ms: now_ms(),
             stderr: StderrTail::spawn(child.stderr.take().context("no stderr")?, 64 << 10),
             info: StdMutex::new(ServerInfo { cli_version: None, billing: Billing::Unknown }),
             bootstrap_raw: raw.clone(),
+            models: Mutex::new(None),
         });
         let reader = server.clone();
         proc::spawn_reader(child.stdout.take().context("no stdout")?, move |rec| reader.on_record(rec));
         let waiter = server.clone();
-        tokio::spawn(async move {
-            let code = child.wait().await.ok().and_then(proc::exit_code);
-            waiter.on_exit(code);
-        });
+        // Also ends what the server left running in its group (the commands of its agents) once it is gone.
+        proc::reap(child, move |code| waiter.on_exit(code));
 
         let caps = json!({ "experimentalApi": false, "optOutNotificationMethods": OPT_OUT });
         let client = json!({ "name": "codly", "title": "Codly", "version": crate::version() });
@@ -184,6 +315,11 @@ impl AppServer {
         };
         server.send(&json!({ "method": "initialized" }), &raw).await?;
         let account = server.call("account/read", json!({ "refreshToken": false }), &raw, Duration::from_secs(15)).await.ok();
+        // Detection can be stale (signed out since): say so now, not as a token error mid-turn.
+        if !startup::uses_own_key(spec) && account.as_ref().is_some_and(signed_out) {
+            server.close().await;
+            return Err(anyhow!(startup::not_signed_in(Provider::Codex, startup::account_home(spec), None)));
+        }
         *server.info.lock().unwrap() = ServerInfo {
             // "codly/0.161.0 (Mac OS 26.5.2; arm64) dumb (codly; 0.1.0)"
             cli_version: init["userAgent"].as_str().and_then(|ua| ua.split_whitespace().next()).and_then(|t| t.split_once('/')).map(|(_, v)| v.to_string()),
@@ -207,23 +343,30 @@ impl AppServer {
 
     /// Write each line to the owning agent's raw log, then hand it over in stream order.
     fn route_line(self: &Arc<Self>, bytes: &[u8]) {
-        let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
+        self.last_inbound_ms.store(now_ms(), Ordering::SeqCst);
+        let Ok(mut v) = serde_json::from_slice::<Value>(bytes) else {
             self.bootstrap_raw.inbound(bytes);
             return;
         };
+        // The parsed line is used once: its parts are taken out of it, not copied.
+        let mut part = |key: &str| v.get_mut(key).map(Value::take);
         let mut st = self.state.lock().unwrap();
-        let method = v.get("method").and_then(Value::as_str).map(str::to_owned);
-        let id = v.get("id").cloned();
+        let method = part("method").and_then(|m| m.as_str().map(str::to_owned));
+        let id = part("id");
         match (method, id) {
             (None, Some(id)) => {
                 let id = id.as_i64().unwrap_or(-1);
-                let result = match v.get("error") {
-                    Some(e) if !e.is_null() => Err(e.clone()),
-                    _ => Ok(v.get("result").cloned().unwrap_or(Value::Null)),
+                let result = match part("error") {
+                    Some(e) if !e.is_null() => Err(e),
+                    _ => Ok(part("result").unwrap_or(Value::Null)),
                 };
                 match st.pending.remove(&id) {
                     Some(Waiter::Oneshot(tx, raw)) => {
                         raw.inbound(bytes);
+                        let _ = tx.send(result);
+                    }
+                    Some(Waiter::Unlogged(tx, raw)) => {
+                        raw.note(&format!("the answer to request {id} is not logged: it holds your own Codex config"));
                         let _ = tx.send(result);
                     }
                     Some(Waiter::Agent { route, register }) => {
@@ -240,10 +383,17 @@ impl AppServer {
                 }
             }
             (Some(method), id) => {
-                let params = v.get("params").cloned().unwrap_or(Value::Null);
-                let tid = params["threadId"].as_str().or(params["thread"]["id"].as_str()).map(str::to_owned);
-                if let Some(route) = tid.as_deref().and_then(|t| st.routes.get(t)).cloned() {
+                let params = part("params").unwrap_or(Value::Null);
+                st.adopt_subagents(&method, &params);
+                let tid = thread_of(&params).map(str::to_owned);
+                let routed = tid.as_deref().and_then(|t| Some((t, st.routes.get(t)?.clone())));
+                if let Some((thread, route)) = routed {
                     route.raw.inbound(bytes);
+                    // From the codex-cli 0.166.0 types (`ThreadClosedNotification`), not
+                    // verified live: the agent hears of the end, then the thread has no owner.
+                    if id.is_none() && method == "thread/closed" {
+                        st.forget_closed(thread);
+                    }
                     let msg = match id {
                         Some(id) => ServerMsg::Request { id, method, params },
                         None => ServerMsg::Notification { method, params },
@@ -261,9 +411,18 @@ impl AppServer {
                 } else if tid.is_some() {
                     // A thread nobody owns (any more): its `turn/completed` must not end another agent's turn.
                     self.bootstrap_raw.inbound(bytes);
+                } else if method == "account/updated" {
+                    // Who is signed in: this server's own state, nothing for an agent to report.
+                    self.bootstrap_raw.inbound(bytes);
+                    if let Some(billing) = params["authMode"].as_str().and_then(auth_mode_billing) {
+                        self.info.lock().unwrap().billing = billing;
+                    }
+                } else if method == RATE_LIMITS && !st.routes.is_empty() && !st.limits_news(&params, now_ms()) {
+                    // The reading the agents already have: in the raw log once, reported by nobody.
+                    self.bootstrap_raw.inbound(bytes);
                 } else {
                     // Thread-less notifications (account rate limits, warnings) concern every agent.
-                    let routes: Vec<Route> = st.routes.values().cloned().collect();
+                    let routes = st.agents();
                     if routes.is_empty() {
                         self.bootstrap_raw.inbound(bytes);
                     }
@@ -286,16 +445,63 @@ impl AppServer {
                 let _ = route.tx.send(ServerMsg::Response { id, result: Err(json!({ "message": "codex app-server exited" })) });
             } // dropping a Oneshot sender fails its receiver
         }
+        st.subagent_threads.clear();
         for (_, r) in st.routes.drain() {
             let _ = r.tx.send(ServerMsg::Exited { code, stderr: tail.clone() });
         }
     }
 
     async fn send(&self, msg: &Value, raw: &RawLog) -> std::io::Result<()> {
+        self.send_within(msg, raw, proc::WRITE_TIMEOUT).await
+    }
+
+    /// Every agent of the account writes through this one lock, so a write may never wait
+    /// without end: a server that does not take a line within `limit` has stopped reading. It
+    /// is given up, and every later write fails at once instead of waiting behind this one.
+    async fn send_within(&self, msg: &Value, raw: &RawLog, limit: Duration) -> std::io::Result<()> {
         let mut stdin = self.stdin.lock().await;
-        match stdin.as_mut() {
-            Some(w) => proc::write_json(w, raw, msg).await,
-            None => Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "codex app-server stdin is closed")),
+        let Some(w) = stdin.as_mut() else {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "codex app-server stdin is closed"));
+        };
+        let sent = proc::write_json_within(w, raw, msg, limit).await;
+        if sent.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::TimedOut) {
+            *stdin = None;
+            self.give_up("it stopped reading its input");
+        }
+        sent
+    }
+
+    /// Usable for a new agent: its process runs and Codly did not give it up.
+    fn usable(&self) -> bool {
+        self.alive.load(Ordering::SeqCst) && !self.abandoned.load(Ordering::SeqCst)
+    }
+
+    /// How long the server has written nothing at all (ms).
+    fn silent_ms(&self) -> i64 {
+        now_ms() - self.last_inbound_ms.load(Ordering::SeqCst)
+    }
+
+    /// The server is hung, or runs a turn nobody can stop: end its process. Its agents receive
+    /// `Exited` when it is gone, and the next agent of the account starts a new server.
+    fn give_up(&self, why: &str) {
+        if self.abandoned.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!("stopping a codex app-server: {why}");
+        self.bootstrap_raw.note(&format!("stopping the codex app-server: {why}"));
+        tokio::spawn(proc::kill_group(self.pgid, Duration::from_secs(2)));
+    }
+
+    /// `give_up` when no agent is on this server and nothing else waits for an answer from it
+    /// (an agent that starts, an account read). Requests of `mine`, the agent that leaves, do
+    /// not count: its own unanswered ones are why it leaves.
+    fn give_up_if_unused(&self, mine: &Route, why: &str) {
+        let unused = {
+            let st = self.state.lock().unwrap();
+            st.routes.is_empty() && st.pending.values().all(|w| matches!(w, Waiter::Agent { route, .. } if route.tx.same_channel(&mine.tx)))
+        };
+        if unused {
+            self.give_up(why);
         }
     }
 
@@ -310,30 +516,83 @@ impl AppServer {
     }
 
     async fn call(&self, method: &str, params: Value, raw: &Arc<RawLog>, timeout: Duration) -> anyhow::Result<Value> {
+        self.call_as(Waiter::Oneshot, method, params, raw, timeout).await
+    }
+
+    /// `call` for an answer that must not reach the raw log (`Waiter::Unlogged`).
+    async fn call_unlogged(&self, method: &str, params: Value, raw: &Arc<RawLog>, timeout: Duration) -> anyhow::Result<Value> {
+        self.call_as(Waiter::Unlogged, method, params, raw, timeout).await
+    }
+
+    async fn call_as(
+        &self,
+        waiter: fn(oneshot::Sender<Result<Value, Value>>, Arc<RawLog>) -> Waiter,
+        method: &str,
+        params: Value,
+        raw: &Arc<RawLog>,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
         let (tx, rx) = oneshot::channel();
-        self.request(method, params, Waiter::Oneshot(tx, raw.clone()), raw).await?;
+        let id = self.request(method, params, waiter(tx, raw.clone()), raw).await?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => Err(anyhow!("{method} failed: {}", e["message"].as_str().map(str::to_owned).unwrap_or_else(|| e.to_string()))),
             Ok(Err(_)) => Err(anyhow!("codex app-server exited during {method}")),
-            Err(_) => Err(anyhow!("codex app-server did not answer {method} within {} s", timeout.as_secs())),
+            Err(_) => {
+                // Nobody waits any more: a request left here would make the server look in use
+                // for good (`give_up_if_unused`).
+                self.state.lock().unwrap().pending.remove(&id);
+                Err(anyhow!("codex app-server did not answer {method} within {} s", timeout.as_secs()))
+            }
         }
     }
 
-    fn unroute(&self, thread_id: &str) {
-        self.state.lock().unwrap().routes.remove(thread_id);
+    /// Forget an agent's threads: its own and its subagents'.
+    fn unroute(&self, agent: &Route) {
+        let mut st = self.state.lock().unwrap();
+        let State { routes, subagent_threads, .. } = &mut *st;
+        routes.retain(|_, r| !r.tx.same_channel(&agent.tx));
+        subagent_threads.retain(|t| routes.contains_key(t));
     }
 
-    /// Close stdin (the server exits on EOF), then SIGTERM → SIGKILL if it lingers.
+    /// The threads of an agent's subagents that still have a route, in a fixed order.
+    fn subagent_threads(&self, agent: &Route) -> Vec<String> {
+        let st = self.state.lock().unwrap();
+        let mut threads: Vec<String> =
+            st.subagent_threads.iter().filter(|t| st.routes.get(*t).is_some_and(|r| r.tx.same_channel(&agent.tx))).cloned().collect();
+        threads.sort();
+        threads
+    }
+
+    /// Close stdin (the server exits on EOF), then SIGTERM → SIGKILL if it lingers. A write
+    /// that is still under way holds stdin: after 1 s the close goes straight to the signals.
     async fn close(&self) {
-        self.stdin.lock().await.take();
-        for _ in 0..30 {
-            if !self.alive.load(Ordering::SeqCst) {
-                return;
+        if let Ok(mut stdin) = tokio::time::timeout(Duration::from_secs(1), self.stdin.lock()).await {
+            stdin.take();
+            drop(stdin);
+            for _ in 0..30 {
+                if !self.alive.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         proc::kill_group(self.pgid, Duration::from_secs(3)).await;
+    }
+}
+
+/// `account/read` when nobody is signed in and the model provider needs an OpenAI sign-in.
+fn signed_out(account: &Value) -> bool {
+    account["account"].is_null() && account["requiresOpenaiAuth"] == true
+}
+
+/// Who pays under an `account/updated.authMode`. None = a mode Codly does not know: the
+/// billing `account/read` gave stays.
+fn auth_mode_billing(mode: &str) -> Option<Billing> {
+    match mode {
+        "chatgpt" => Some(Billing::Subscription),
+        "apikey" => Some(Billing::ApiKey),
+        _ => None,
     }
 }
 
@@ -352,11 +611,11 @@ async fn server_for(servers: &Servers, spec: &SpawnSpec, raw: &Arc<RawLog>) -> a
         }
     };
     let mut cur = slot.lock().await;
-    if let Some(s) = cur.as_ref().filter(|s| s.alive.load(Ordering::SeqCst)) {
+    if let Some(s) = cur.as_ref().filter(|s| s.usable()) {
         return Ok(s.clone());
     }
     let s = AppServer::start(spec, raw.clone()).await?;
-    *cur = Some(s.clone()); // in place of the dead one, if any
+    *cur = Some(s.clone()); // in place of the dead or hung one, if any
     Ok(s)
 }
 
@@ -373,8 +632,11 @@ pub async fn shutdown_server() {
     set.join_all().await;
 }
 
-/// `thread/start` (or `thread/resume`) and its params for one agent.
-pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str>) -> (&'static str, Value) {
+/// `thread/start` (or `thread/resume`) and its params for one agent. `own_servers` = the MCP
+/// servers of the user's own Codex config that this thread must not start (`use_user_setup`
+/// off; `account::own_mcp_servers`). `ready` = the user's default servers with their keys
+/// (`connections::load_ready`): looked up by the caller, off the runtime's threads.
+pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str>, own_servers: &[String], ready: &[ReadyMcp]) -> (&'static str, Value) {
     let mut config = json!({
         "model_reasoning_summary": "auto",
         // Codly keeps its own memory; Codly threads must not feed the user's Codex memories
@@ -391,7 +653,7 @@ pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str
         config["mcp_servers"] = json!({ "codly": { "command": m.command, "args": m.args, "env": env, "default_tools_approval_mode": "approve" } });
         // The user's default servers (Settings → Connections), as enabled when this run started.
         // Read-only ones run without asking; the others use Codex's own approval prompt.
-        for x in crate::housekeeping::connections::load_ready(&spec.raw_log) {
+        for x in ready {
             let env: serde_json::Map<String, Value> = x.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
             let mut server = json!({ "command": x.command, "args": x.args, "env": env });
             if x.read_only {
@@ -399,6 +661,16 @@ pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str
             }
             config["mcp_servers"][&x.name] = server;
         }
+    }
+    // A `-c` key is merged into the user's config, so `enabled` alone switches the user's own
+    // entry off for this thread. A server Codly passes itself under the same name stays.
+    for name in own_servers {
+        if config["mcp_servers"].get(name).is_none() {
+            config["mcp_servers"][name] = json!({ "enabled": false });
+        }
+    }
+    if spec.sandbox_network && !spec.read_only {
+        config["sandbox_workspace_write"] = json!({ "network_access": true });
     }
     let mut p = json!({
         "cwd": spec.cwd,
@@ -426,14 +698,50 @@ pub fn thread_request(spec: &SpawnSpec, model: Option<&str>, effort: Option<&str
     }
 }
 
+/// The name a new thread gets in Codex's own lists (`codex resume`, the Codex app), where it
+/// would otherwise show the first lines of Codly's prompt: "Codly: Ada (worker)".
+fn thread_name(spec: &SpawnSpec) -> String {
+    let role = match spec.role {
+        Role::Lead => " (Lead)",
+        Role::Worker => " (worker)",
+        Role::Reviewer => " (reviewer)",
+        Role::Solo => "",
+    };
+    format!("Codly: {}{role}", spec.agent_name)
+}
+
 pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> anyhow::Result<AgentHandle> {
+    spawn_on(&SERVERS, spec, events).await
+}
+
+/// `spawn` on the app-server that `servers` has for the agent's sign-in.
+async fn spawn_on(servers: &Servers, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> anyhow::Result<AgentHandle> {
     let raw = Arc::new(RawLog::open(&spec.raw_log).with_context(|| format!("cannot open raw log {}", spec.raw_log.display()))?);
-    let server = server_for(&SERVERS, &spec, &raw).await?;
+    // The keys of the default servers come from the Keychain through a subprocess, which can
+    // wait on a permission dialog: not on a runtime thread.
+    let ready = {
+        let raw_log = spec.raw_log.clone();
+        tokio::task::spawn_blocking(move || connections::load_ready(&raw_log)).await.context("reading the default MCP servers")?
+    };
+    let server = server_for(servers, &spec, &raw).await.map_err(|e| startup::explain(&spec, None, e))?;
     proc::record_group(&spec.raw_log, server.pgid, server.started_ms);
     let (msg_tx, msgs) = mpsc::unbounded_channel();
     let route = Route { tx: msg_tx, raw: raw.clone() };
     let (model, effort) = classify::split_model_effort(spec.model.as_deref());
-    let (method, params) = thread_request(&spec, model.as_deref(), effort.as_deref());
+    let own_servers = if spec.use_user_setup {
+        Vec::new()
+    } else {
+        match account::own_mcp_servers(&server, &spec.cwd, &raw).await {
+            Ok(names) => names,
+            // The thread still starts, with the user's servers, and says so.
+            Err(e) => {
+                let message = format!("Codly could not read your Codex config ({e:#}), so your own MCP servers may start with this agent.");
+                let _ = events.send(AdapterEvent { agent_id: spec.agent_id.clone(), run_id: spec.run_id.clone(), kind: EventKind::Error { message, fatal: false } });
+                Vec::new()
+            }
+        }
+    };
+    let (method, params) = thread_request(&spec, model.as_deref(), effort.as_deref(), &own_servers, &ready);
     let start_id = server.request(method, params, Waiter::Agent { route: route.clone(), register: true }, &raw).await?;
 
     let (tx, cmds) = mpsc::unbounded_channel();
@@ -448,26 +756,35 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         route,
         raw: raw.clone(),
         effort,
+        // A resumed thread keeps the name it has: the user may have given it one in Codex.
+        name: (!resumed).then(|| thread_name(&spec)),
         thread_id: None,
         started: false,
         norm: CodexNormalizer::new(&spec.agent_id, &spec.run_id, spec.cwd.clone(), resumed),
         pending: HashMap::new(),
         active_turn: None,
+        compaction: Compaction::No,
         turn_pending: false,
         interrupt_after_start: false,
         steer_queue: Vec::new(),
         queue: VecDeque::new(),
+        held: Vec::new(),
         stage: Stage::Running,
         deadline: None,
     };
     agent.pending.insert(start_id, Pending::Thread);
     tokio::spawn(agent.run(cmds, msgs, ready_tx));
-    match tokio::time::timeout(Duration::from_secs(60), ready_rx).await {
+    match tokio::time::timeout(START_TIMEOUT, ready_rx).await {
         Ok(Ok(Ok(()))) => Ok(AgentHandle { agent_id: spec.agent_id, run_id: spec.run_id, tx }),
-        Ok(Ok(Err(e))) => Err(e),
+        Ok(Ok(Err(e))) => Err(startup::explain(&spec, server.info.lock().unwrap().cli_version.as_deref(), e)),
         Ok(Err(_)) => Err(anyhow!("codex adapter stopped during startup")),
         Err(_) => {
             let _ = tx.send(AgentCmd::Shutdown);
+            // A server that said nothing to anybody all that time is hung: the next start gets
+            // a new one, instead of waiting 60 s behind this one again.
+            if server.silent_ms() >= START_TIMEOUT.as_millis() as i64 {
+                server.give_up("it answered nothing while a thread waited to open");
+            }
             // The thread may still open, and by then its adapter is gone: take the answer
             // here and unsubscribe, so the thread is neither routed to a dead channel nor
             // left loaded on the shared server. (The server's exit drops the waiter.)
@@ -482,7 +799,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
                     let _ = server.call("thread/unsubscribe", json!({ "threadId": tid }), &raw, Duration::from_secs(3)).await;
                 }
             });
-            Err(anyhow!("codex app-server did not answer {method} within 60 s"))
+            Err(anyhow!("codex app-server did not answer {method} within {} s", START_TIMEOUT.as_secs()))
         }
     }
 }
@@ -493,6 +810,27 @@ enum Pending {
     Steer(String),
     Interrupt,
     Unsubscribe,
+    /// `thread/unsubscribe` for a subagent's thread: the agent's own decides when it is done.
+    SubagentUnsubscribe,
+    /// `thread/name/set`.
+    Name,
+    /// `thread/compact/start`, and who hears whether Codex took it.
+    Compact(oneshot::Sender<anyhow::Result<()>>),
+}
+
+/// A compaction of the thread that Codly asked Codex for (`CodexAgent::compact`). Codex
+/// compacts in a turn of its own. Codly did not start that turn and it answers no prompt, so
+/// it is no turn of the agent: its start and end are not reported as one (a worker's turn end
+/// runs the gate, a Lead's forwards its reply). A prompt sent from the request to that turn's
+/// end waits in `queue`: a `turn/start` sent before the turn has started could be taken for
+/// it, and Codex takes no prompt into it (`activeTurnNotSteerable`, turn kind `compact`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Compaction {
+    No,
+    /// `thread/compact/start` is sent; the turn Codex compacts in has not started.
+    Asked,
+    /// `active_turn` is that turn. An interrupt or a shutdown stops it like any turn.
+    Running,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -512,6 +850,9 @@ struct CodexAgent {
     route: Route,
     raw: Arc<RawLog>,
     effort: Option<String>,
+    /// The name to give the thread once it is open (`thread_name`). None: a resumed thread, or
+    /// the name was sent.
+    name: Option<String>,
     thread_id: Option<String>,
     /// `spawn` got its Ok. If it gave up first (60 s), it failed the run itself and this
     /// adapter must not report on it any more.
@@ -519,6 +860,7 @@ struct CodexAgent {
     norm: CodexNormalizer,
     pending: HashMap<i64, Pending>,
     active_turn: Option<String>,
+    compaction: Compaction,
     /// `turn/start` sent, its response (the turn id) not yet back.
     turn_pending: bool,
     interrupt_after_start: bool,
@@ -526,7 +868,12 @@ struct CodexAgent {
     steer_queue: Vec<String>,
     /// Prompts that could not be steered (the turn ended first): new turns.
     queue: VecDeque<String>,
+    /// A `turn/completed` that came while a `turn/steer` was unanswered, and the notifications
+    /// after it: handled, in order, once the last steer is answered.
+    held: Vec<(String, Value)>,
     stage: Stage,
+    /// While running: when `turn/start` must be answered, an interrupted turn must have ended,
+    /// or a compaction that was asked for must have started. In a shutdown: the stage's limit.
     deadline: Option<tokio::time::Instant>,
 }
 
@@ -578,6 +925,7 @@ impl CodexAgent {
                         }
                     }
                     Some(ServerMsg::Exited { code, stderr }) => self.server_exited(code, &stderr, &mut ready),
+                    Some(ServerMsg::Compact(reply)) => self.compact(reply).await,
                     None => self.stage = Stage::Done,
                 },
                 cmd = cmds.recv(), if cmds_open => match cmd {
@@ -595,6 +943,7 @@ impl CodexAgent {
         match (what, result) {
             (Pending::Thread, Ok(r)) => {
                 self.thread_id = r["thread"]["id"].as_str().map(str::to_owned);
+                self.norm.thread = self.thread_id.clone();
                 // The spawner gave up: no session to announce, only a thread to let go.
                 let Some(waiting) = ready.take().filter(|w| !w.is_closed()) else {
                     self.unsubscribe().await;
@@ -611,6 +960,7 @@ impl CodexAgent {
                     tools: Vec::new(),
                 });
                 self.started = waiting.send(Ok(())).is_ok();
+                self.name_thread().await;
             }
             (Pending::Thread, Err(e)) => {
                 if let Some(r) = ready.take() {
@@ -621,6 +971,7 @@ impl CodexAgent {
             (Pending::TurnStart, Ok(r)) => {
                 self.turn_pending = false;
                 self.active_turn = r["turn"]["id"].as_str().map(str::to_owned);
+                self.answered_in_time();
                 if self.interrupt_after_start {
                     self.interrupt_after_start = false;
                     self.interrupt().await;
@@ -631,6 +982,7 @@ impl CodexAgent {
             }
             (Pending::TurnStart, Err(e)) => {
                 self.turn_pending = false;
+                self.answered_in_time();
                 self.emit(EventKind::Error { message: format!("codex refused the turn: {}", err_text(&e)), fatal: false });
                 let events = self.norm.turn_failed();
                 self.emit_all(events);
@@ -640,25 +992,148 @@ impl CodexAgent {
             // The turn ended before the steer landed: run it as the next turn instead.
             (Pending::Steer(text), Err(_)) => {
                 self.queue.push_back(text);
+                self.release_held().await;
                 if self.active_turn.is_none() && !self.turn_pending {
                     self.next_turn().await;
                 }
             }
+            // In the running turn now: it gets no turn events, so say it was delivered.
+            (Pending::Steer(text), Ok(_)) => {
+                self.emit(EventKind::PromptSteered { input: text });
+                self.release_held().await;
+            }
             (Pending::Unsubscribe, _) => self.finish(),
-            (Pending::Steer(_) | Pending::Interrupt, _) => {}
+            (Pending::Interrupt | Pending::SubagentUnsubscribe, _) => {}
+            (Pending::Name, Ok(_)) => {}
+            // The name is for Codex's own lists: the run does not need it.
+            (Pending::Name, Err(e)) => tracing::warn!("codex: the thread got no name: {}", err_text(&e)),
+            // Codex took the request: the turn it compacts in is still to start (`on_deadline`).
+            (Pending::Compact(reply), Ok(_)) => {
+                let _ = reply.send(Ok(()));
+            }
+            (Pending::Compact(reply), Err(e)) => {
+                let _ = reply.send(Err(anyhow!(err_text(&e))));
+                self.compaction_off().await;
+            }
         }
     }
 
+    /// Give a new thread its name (`thread/name/set`), once.
+    /// From the codex-cli 0.166.0 types (`ThreadSetNameParams`), not verified live.
+    async fn name_thread(&mut self) {
+        if !self.started {
+            return;
+        }
+        if let (Some(name), Some(tid)) = (self.name.take(), self.thread_id.clone()) {
+            self.request("thread/name/set", json!({ "threadId": tid, "name": name }), Pending::Name).await;
+        }
+    }
+
+    fn steer_unanswered(&self) -> bool {
+        self.pending.values().any(|p| matches!(p, Pending::Steer(_)))
+    }
+
+    /// Codex answers a steer and ends a turn on two streams, in no fixed order. A turn's end
+    /// that comes before the answer waits for it: a `PromptSteered` after its `TurnCompleted`
+    /// would tell Codly the agent ended its turn with a prompt still to come, and no later
+    /// turn would end to say it is done. What follows the end waits behind it, to stay in order.
     async fn on_notification(&mut self, method: &str, params: &Value) {
-        let events = self.norm.on_notification(method, params);
+        if !self.held.is_empty() || (self.ends_own_turn(method, params) && self.steer_unanswered()) {
+            self.held.push((method.to_owned(), params.clone()));
+            return;
+        }
+        self.handle_notification(method, params).await;
+    }
+
+    /// Every steer is answered (Codex answers each request, and a server that exits fails the
+    /// open ones): handle what waited for that.
+    async fn release_held(&mut self) {
+        if self.steer_unanswered() {
+            return;
+        }
+        for (method, params) in std::mem::take(&mut self.held) {
+            self.handle_notification(&method, &params).await;
+        }
+    }
+
+    /// The end of the agent's own turn. A subagent's turn ends on its own thread, and the
+    /// agent's turn goes on.
+    fn ends_own_turn(&self, method: &str, params: &Value) -> bool {
+        method == "turn/completed" && self.norm.subagent_thread(params).is_none()
+    }
+
+    async fn handle_notification(&mut self, method: &str, params: &Value) {
+        let own_turn_ended = self.ends_own_turn(method, params);
+        let mut events = self.norm.on_notification(method, params);
+        // No turn of the agent's own starts while a compaction is asked for (`compact`,
+        // `on_cmd`): the turn that starts and ends on the thread now is the one Codex compacts in.
+        if method == "turn/started"
+            && self.compaction == Compaction::Asked
+            && self.stage == Stage::Running
+            && let Some(turn) = params["turn"]["id"].as_str()
+        {
+            self.active_turn = Some(turn.to_owned());
+            self.compaction = Compaction::Running;
+            self.answered_in_time();
+        }
+        if self.compaction != Compaction::No {
+            events.retain(|e| !matches!(e, EventKind::TurnStarted { .. } | EventKind::TurnCompleted { .. }));
+        }
         self.emit_all(events);
-        if method == "turn/completed" {
+        if own_turn_ended {
             self.active_turn = None;
+            self.compaction = Compaction::No;
+            self.answered_in_time();
             match self.stage {
                 Stage::Interrupting => self.unsubscribe().await,
                 Stage::Running => self.next_turn().await,
                 _ => {}
             }
+        }
+    }
+
+    /// `account::compact_thread`: ask Codex to compact the thread (`thread/compact/start`),
+    /// when no turn runs on it and no prompt waits for one. `reply` hears whether Codex took
+    /// the request.
+    async fn compact(&mut self, reply: oneshot::Sender<anyhow::Result<()>>) {
+        let refusal = if self.stage != Stage::Running {
+            Some("the agent is stopping")
+        } else if self.compaction != Compaction::No {
+            Some("a compaction is already under way")
+        } else if self.active_turn.is_some() || self.turn_pending || !self.queue.is_empty() {
+            Some("a turn started on it first")
+        } else {
+            None
+        };
+        if let Some(why) = refusal {
+            let _ = reply.send(Err(anyhow!(why)));
+            return;
+        }
+        let Some(tid) = self.thread_id.clone() else {
+            let _ = reply.send(Err(anyhow!("its conversation is not open yet")));
+            return;
+        };
+        let (method, params) = account::compact_request(&tid);
+        let waiter = Waiter::Agent { route: self.route.clone(), register: false };
+        match self.server.request(method, params, waiter, &self.raw).await {
+            Ok(id) => {
+                self.pending.insert(id, Pending::Compact(reply));
+                self.compaction = Compaction::Asked;
+                self.wait_at_most(COMPACT_START_TIMEOUT);
+            }
+            Err(e) => {
+                let _ = reply.send(Err(anyhow!("{method}: {e}")));
+            }
+        }
+    }
+
+    /// The compaction that was asked for starts no turn (Codex refused it, or started none in
+    /// time): the prompts that waited for it get their turns.
+    async fn compaction_off(&mut self) {
+        if self.compaction == Compaction::Asked {
+            self.compaction = Compaction::No;
+            self.answered_in_time();
+            self.next_turn().await;
         }
     }
 
@@ -668,7 +1143,10 @@ impl CodexAgent {
                 if self.stage != Stage::Running {
                     return;
                 }
-                if self.active_turn.is_some() {
+                if self.compaction != Compaction::No {
+                    // Its turn comes when the compaction's turn has ended (`Compaction`).
+                    self.queue.push_back(text);
+                } else if self.active_turn.is_some() {
                     self.steer(text).await;
                 } else if self.turn_pending {
                     self.steer_queue.push(text);
@@ -689,23 +1167,49 @@ impl CodexAgent {
                 None => tracing::warn!("codex: no pending approval {approval_id}"),
             },
             AgentCmd::Shutdown => self.begin_shutdown().await,
+            // Claude's control requests: the orchestrator sends them to Claude agents only.
+            AgentCmd::Session { reply, .. } => {
+                let _ = reply.send(Err("Codex has no such request".into()));
+            }
         }
     }
 
-    fn input(text: &str) -> Value {
-        json!([{ "type": "text", "text": text, "text_elements": [] }])
+    /// The `input` of a turn: the text, which keeps the paths of its attached files, and the
+    /// attached images as items of their own.
+    async fn input(&self, text: &str) -> Value {
+        let attached = attachments::images(text).await;
+        if let Some(note) = attached.note {
+            self.emit(EventKind::Error { message: note, fatal: false });
+        }
+        attachments::codex_input(text, &attached.images)
     }
 
     async fn start_turn(&mut self, text: String) {
         let Some(tid) = self.thread_id.clone() else { return };
-        let mut params = json!({ "threadId": tid, "input": Self::input(&text) });
+        let mut params = json!({ "threadId": tid, "input": self.input(&text).await });
         if let Some(e) = &self.effort {
             params["effort"] = json!(e);
         }
         if self.request("turn/start", params, Pending::TurnStart).await {
             self.turn_pending = true;
+            self.wait_at_most(START_TIMEOUT);
             let events = self.norm.turn_started(&text);
             self.emit_all(events);
+        }
+    }
+
+    /// While running, wait `limit` for what was just asked (a turn to start, a turn to end);
+    /// `on_deadline` lets the thread go when it does not come. A shutdown keeps its own limits.
+    fn wait_at_most(&mut self, limit: Duration) {
+        if self.stage == Stage::Running {
+            self.deadline = Some(tokio::time::Instant::now() + limit);
+        }
+    }
+
+    /// What `wait_at_most` waited for came.
+    fn answered_in_time(&mut self) {
+        if self.stage == Stage::Running {
+            self.deadline = None;
         }
     }
 
@@ -720,7 +1224,7 @@ impl CodexAgent {
             self.queue.push_back(text);
             return;
         };
-        let params = json!({ "threadId": tid, "input": Self::input(&text), "expectedTurnId": turn });
+        let params = json!({ "threadId": tid, "input": self.input(&text).await, "expectedTurnId": turn });
         self.request("turn/steer", params, Pending::Steer(text)).await;
     }
 
@@ -729,9 +1233,21 @@ impl CodexAgent {
             (Some(tid), Some(turn)) => {
                 self.norm.interrupt_requested = true;
                 self.request("turn/interrupt", json!({ "threadId": tid, "turnId": turn }), Pending::Interrupt).await;
+                self.interrupt_subagents().await;
+                self.wait_at_most(INTERRUPT_TIMEOUT);
             }
+            // The limit of its `turn/start` still runs.
             _ if self.turn_pending => self.interrupt_after_start = true,
-            _ => {}
+            // No turn of its own, but its subagents may still work.
+            _ => self.interrupt_subagents().await,
+        }
+    }
+
+    /// A subagent's turn runs on its own thread: stopping the agent's turn does not stop it,
+    /// and nobody else can.
+    async fn interrupt_subagents(&mut self) {
+        for (thread, turn) in self.norm.subagent_turns() {
+            self.request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }), Pending::Interrupt).await;
         }
     }
 
@@ -748,6 +1264,7 @@ impl CodexAgent {
             self.stage = Stage::Interrupting;
             self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
         } else {
+            self.interrupt_subagents().await;
             self.unsubscribe().await;
         }
     }
@@ -755,6 +1272,18 @@ impl CodexAgent {
     async fn unsubscribe(&mut self) {
         self.stage = Stage::Unsubscribing;
         self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(3));
+        // The subagents' threads go with the agent's: nobody reads them once it is gone, and
+        // a thread somebody is subscribed to may stay loaded on the shared server.
+        // From the codex-cli 0.166.0 types (`ThreadUnsubscribeParams`), not verified live:
+        // whether Codly is subscribed to them is not known, and the answer says so
+        // (`notSubscribed`, `notLoaded`); either way there is nothing left to do.
+        for thread in self.server.subagent_threads(&self.route) {
+            if !self.request("thread/unsubscribe", json!({ "threadId": thread }), Pending::SubagentUnsubscribe).await {
+                // The server takes no more lines, and the error of this request said so: the
+                // agent's own request would only fail with the same words.
+                return self.finish();
+            }
+        }
         match self.thread_id.clone() {
             Some(tid) => {
                 if !self.request("thread/unsubscribe", json!({ "threadId": tid }), Pending::Unsubscribe).await {
@@ -770,28 +1299,69 @@ impl CodexAgent {
         match self.stage {
             Stage::Interrupting => self.unsubscribe().await,
             Stage::Unsubscribing => self.finish(),
-            _ => {}
+            // Nothing else has a limit while a compaction is asked for: no turn is pending or runs.
+            Stage::Running if self.compaction == Compaction::Asked => {
+                let message = format!("Codex did not start the compaction within {} s.", COMPACT_START_TIMEOUT.as_secs());
+                self.emit(EventKind::Error { message, fatal: false });
+                self.compaction_off().await;
+            }
+            Stage::Running => self.let_go().await,
+            Stage::Done => {}
         }
+    }
+
+    /// `turn/start` got no answer, or the turn did not end after `turn/interrupt`: the thread
+    /// is stuck. Codly says so and ends the run (`Exited`); the next run resumes the thread. A
+    /// turn that never started ends as failed, one that would not stop as interrupted.
+    async fn let_go(&mut self) {
+        let unsent = super::unsent_note(self.queue.len() + self.steer_queue.len());
+        self.queue.clear();
+        self.steer_queue.clear();
+        let what = if self.turn_pending {
+            format!("Codex did not start the turn within {} s", START_TIMEOUT.as_secs())
+        } else {
+            format!("Codex did not stop within {} s", INTERRUPT_TIMEOUT.as_secs())
+        };
+        self.emit(EventKind::Error { message: format!("{what}, so Codly ended this run. The session is kept: its next run resumes it.{unsent}"), fatal: false });
+        if std::mem::take(&mut self.turn_pending) {
+            // An answer that comes after all starts nothing here: the turn is over for Codly.
+            self.pending.retain(|_, what| !matches!(what, Pending::TurnStart));
+            let events = self.norm.turn_failed();
+            self.emit_all(events);
+            // Nothing from the server for anybody all that time: it is hung for every agent on it.
+            if self.server.silent_ms() >= START_TIMEOUT.as_millis() as i64 {
+                self.server.give_up("it answered nothing while a turn waited to start");
+            }
+        } else {
+            // The exit that follows ends an interrupt nobody answered: it is no crash.
+            self.emit(super::gave_up("Codex", INTERRUPT_TIMEOUT));
+        }
+        self.unsubscribe().await;
     }
 
     fn finish(&mut self) {
         if self.stage == Stage::Done {
             return;
         }
-        if let Some(tid) = &self.thread_id {
-            self.server.unroute(tid);
-        }
+        self.server.unroute(&self.route);
+        let open = self.active_turn.take().is_some() || std::mem::take(&mut self.turn_pending);
+        let foreign = std::mem::replace(&mut self.compaction, Compaction::No) == Compaction::Running;
         if self.started {
             let events = self.norm.cancel_all_approvals();
             self.emit_all(events);
             // Once unrouted, Codex's own `turn/completed` cannot reach us: close the turn here.
             // Interrupted, not Failed: this is a shutdown Codly asked for, and a failed turn
             // would send a stopped worker to the gate.
-            if self.active_turn.take().is_some() || std::mem::take(&mut self.turn_pending) {
+            if open && !foreign {
                 self.emit(EventKind::TurnCompleted { status: TurnStatus::Interrupted, result_text: None, duration_ms: None });
             }
             self.emit(EventKind::StatusChanged { status: AgentStatus::Offline });
             self.emit(EventKind::Exited { code: None });
+        }
+        // The turn never ended, so it may still run on the server, with nobody to stop it or
+        // to read it. A server that no other agent uses is ended with it.
+        if open {
+            self.server.give_up_if_unused(&self.route, "a turn did not stop and no other agent uses the server");
         }
         self.stage = Stage::Done;
     }
@@ -799,12 +1369,12 @@ impl CodexAgent {
     fn server_exited(&mut self, code: Option<i64>, stderr: &str, ready: &mut Option<oneshot::Sender<anyhow::Result<()>>>) {
         self.stage = Stage::Done;
         if let Some(r) = ready.take() {
-            let _ = r.send(Err(anyhow!("codex app-server exited during startup (code {code:?}): {stderr}")));
+            let _ = r.send(Err(anyhow!("codex app-server exited during startup ({}): {stderr}", startup::exit_text(code))));
             return;
         }
         let cancelled = self.norm.cancel_all_approvals();
         self.emit_all(cancelled);
-        if self.active_turn.is_some() || self.turn_pending {
+        if (self.active_turn.is_some() && self.compaction != Compaction::Running) || self.turn_pending {
             self.emit(EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: Some("codex app-server exited".into()), duration_ms: None });
         }
         let detail = if stderr.is_empty() { String::new() } else { format!(": {stderr}") };
@@ -822,6 +1392,36 @@ struct ItemInfo {
     paths: Vec<String>,
     diff: Option<String>,
     command: Option<String>,
+    /// The subagent thread that runs it. None: the agent's own thread.
+    thread: Option<String>,
+    /// A `spawnAgent` call that named no thread when it started: it may name one when it ends.
+    unnamed_spawn: bool,
+}
+
+/// A thread one of the agent's Codex subagents works on.
+#[derive(Default)]
+struct Subagent {
+    /// Its nickname and role, when Codex gave them.
+    name: Option<String>,
+    /// What it was asked to do: the `prompt` of the `spawnAgent` call that names its thread.
+    prompt: Option<String>,
+    /// The key of its row in the agent's list of helpers: the `spawnAgent` call that named its
+    /// thread before the row was first told (one row for the call and its subagent), else
+    /// its thread.
+    row: Option<String>,
+    /// What its row waits to say (`subagent_row`) while a `spawnAgent` call that has named no
+    /// thread yet is open: that call may name this thread, and the row is then the call's.
+    held: Option<String>,
+    /// What its row last said (description, status): the same words are not told twice.
+    told: Option<(String, String)>,
+    /// Its running turn: stopped when the agent is.
+    turn: Option<String>,
+    /// How its last turn ended. A `spawnAgent` call that ends later does not say otherwise.
+    ended: Option<&'static str>,
+    /// Its thread's token totals before this run first heard of them.
+    baseline: Option<[i64; 4]>,
+    /// What it spent since (input, cached input, cache write, output).
+    spent: [i64; 4],
 }
 
 enum AnswerShape {
@@ -838,14 +1438,25 @@ enum AnswerShape {
 struct PendingApproval {
     request_id: Value,
     shape: AnswerShape,
+    /// The subagent thread that asks. None: the agent's own thread.
+    thread: Option<String>,
 }
 
-/// Turns one thread's app-server notifications and server requests into `EventKind`s.
+/// Turns an agent's app-server notifications and server requests into `EventKind`s: those
+/// of its own thread, and those of its subagents' threads.
 pub struct CodexNormalizer {
     agent_id: Id,
     run_id: Id,
     cwd: PathBuf,
     resumed: bool,
+    /// The agent's own thread, once it is open. A message about another thread is a subagent's.
+    thread: Option<String>,
+    /// Its subagents, by thread id.
+    subagents: HashMap<String, Subagent>,
+    /// The thread's goal as last told: (objective, status).
+    goal: Option<(String, String)>,
+    /// The MCP servers whose failed start was told: once per run, however many threads try.
+    failed_servers: HashSet<String>,
     status: Option<AgentStatus>,
     /// The thread is flagged waitingOnApproval / waitingOnUserInput.
     waiting: bool,
@@ -855,8 +1466,12 @@ pub struct CodexNormalizer {
     usage: Usage,
     /// Thread totals before this run (a resumed thread's `total` includes earlier runs).
     baseline: Option<[i64; 4]>,
+    /// What the agent's own thread spent in this run (`usage` adds its subagents').
+    spent: [i64; 4],
     retries: i64,
     turn_announced: bool,
+    /// Between a turn's start and its `turn/completed`.
+    in_turn: bool,
     pub interrupt_requested: bool,
 }
 
@@ -870,6 +1485,10 @@ impl CodexNormalizer {
             run_id: run_id.into(),
             cwd,
             resumed,
+            thread: None,
+            subagents: HashMap::new(),
+            goal: None,
+            failed_servers: HashSet::new(),
             status: None,
             waiting: false,
             items: HashMap::new(),
@@ -877,8 +1496,10 @@ impl CodexNormalizer {
             last_final: None,
             usage: Usage::default(),
             baseline: None,
+            spent: [0; 4],
             retries: 0,
             turn_announced: false,
+            in_turn: false,
             interrupt_requested: false,
         }
     }
@@ -901,9 +1522,150 @@ impl CodexNormalizer {
         }
     }
 
+    /// A subagent still runs a tool or waits for an answer. The agent's own turn may be over.
+    fn subagents_busy(&self) -> bool {
+        self.items.values().any(|i| i.thread.is_some()) || self.approvals.values().any(|a| a.thread.is_some())
+    }
+
+    /// The status when the agent's own thread has no turn: free, unless a subagent is busy.
+    fn idle_status(&self) -> AgentStatus {
+        if self.subagents_busy() { self.busy_status() } else { AgentStatus::Idle }
+    }
+
+    /// The status once a tool call or an approval is over.
+    fn resting_status(&self) -> AgentStatus {
+        if self.in_turn { self.busy_status() } else { self.idle_status() }
+    }
+
+    /// The subagent thread a message is about. None: the agent's own thread, or no thread.
+    fn subagent_thread<'a>(&self, p: &'a Value) -> Option<&'a str> {
+        let own = self.thread.as_deref()?;
+        thread_of(p).filter(|t| *t != own)
+    }
+
+    /// "Subagent Ada (explorer)", or "A subagent" when Codex gave it no name.
+    fn subagent_label(&self, thread: &str) -> String {
+        match self.subagents.get(thread).and_then(|s| s.name.as_deref()) {
+            Some(name) => format!("Subagent {name}"),
+            None => "A subagent".into(),
+        }
+    }
+
+    /// Tell the subagent's row in the agent's list of helpers, when it has news. It says who
+    /// works and on what, as far as Codex told: "Ada (explorer): <prompt>", the name, the
+    /// prompt, or "Codex subagent".
+    ///
+    /// The conversation shows a helper at the call that is its row's key, so a subagent that
+    /// has no row waits while a `spawnAgent` call that named no thread is open: its own
+    /// `turn/started` can come before the call names it. From the codex-cli 0.166.0 types, not
+    /// verified live: the types do not say in which order the two threads' messages come.
+    fn subagent_row(&mut self, thread: &str, status: &str, out: &mut Vec<EventKind>) {
+        let unnamed_spawn = self.items.values().any(|i| i.unnamed_spawn);
+        let sub = self.subagents.entry(thread.to_string()).or_default();
+        if sub.row.is_none() && unnamed_spawn {
+            sub.held = Some(status.to_string());
+            return;
+        }
+        sub.held = None;
+        let call_id = sub.row.get_or_insert_with(|| thread.to_string()).clone();
+        let description = match (&sub.name, &sub.prompt) {
+            (Some(name), Some(prompt)) => format!("{name}: {prompt}"),
+            (name, prompt) => name.clone().or_else(|| prompt.clone()).unwrap_or_else(|| "Codex subagent".into()),
+        };
+        let row = (description, status.to_string());
+        if sub.told.as_ref() != Some(&row) {
+            sub.told = Some(row.clone());
+            out.push(EventKind::SubAgent { call_id, description: row.0, status: row.1 });
+        }
+    }
+
+    /// The rows that waited for a `spawnAgent` call to name their threads, once no such call
+    /// is open: nothing named them, so each subagent has a row of its own, keyed by its thread.
+    fn tell_held(&mut self, out: &mut Vec<EventKind>) {
+        if self.items.values().any(|i| i.unnamed_spawn) {
+            return;
+        }
+        let mut held: Vec<(String, String)> = self.subagents.iter().filter_map(|(thread, s)| Some((thread.clone(), s.held.clone()?))).collect();
+        held.sort();
+        for (thread, status) in held {
+            self.subagent_row(&thread, &status, out);
+        }
+    }
+
+    /// The rows of a collab call. Only `spawnAgent` has any: it names the threads it created
+    /// (`receiverThreadIds`) and what it asked of them (`prompt`), and each subagent has one
+    /// row. A thread whose row was not told yet (it may have waited for this call: `held`)
+    /// takes the call for its key, so the list of helpers shows the subagent at the call that
+    /// started it; a thread that has a row keeps it and gets the prompt. The other calls
+    /// (`wait`, `closeAgent`, `sendInput`...) are tool calls about subagents that have their
+    /// rows: they add none. `ended`: the call is over.
+    /// From the codex-cli 0.166.0 types (the `collabAgentToolCall` item), not verified live:
+    /// the types do not say whether the call names its thread when it starts or when it ends.
+    fn spawned(&mut self, call: &str, item: &Value, ended: bool, out: &mut Vec<EventKind>) {
+        if item["tool"] != "spawnAgent" {
+            return;
+        }
+        let threads = receiver_threads(item);
+        let prompt = item["prompt"].as_str().map(str::trim).filter(|p| !p.is_empty()).map(|p| classify::truncate_chars(p, NOTICE_MAX));
+        let call_status = if ended { item["status"].as_str().unwrap_or("completed") } else { "started" };
+        for thread in &threads {
+            let sub = self.subagents.entry(thread.to_string()).or_default();
+            if sub.prompt.is_none() {
+                sub.prompt = prompt.clone();
+            }
+            // One row cannot stand for two subagents: those of a call that names several are
+            // keyed by their threads.
+            if sub.row.is_none() {
+                sub.row = Some(if threads.len() == 1 { call } else { *thread }.to_string());
+            }
+            // Its own thread has the last word on what it does; the call speaks until then.
+            let status = if sub.turn.is_some() { "running" } else { sub.ended.unwrap_or(call_status) };
+            self.subagent_row(thread, status, out);
+        }
+        // The call ended and named no thread (it failed, or Codex did not say): the call is
+        // all there is to show of that subagent.
+        if ended && threads.is_empty() {
+            let description = prompt.unwrap_or_else(|| "Codex subagent".into());
+            out.push(EventKind::SubAgent { call_id: call.to_string(), description, status: call_status.into() });
+        }
+        if ended {
+            self.tell_held(out);
+        }
+    }
+
+    /// A message of a subagent's thread names the turn it is part of. A thread the agent got
+    /// after its `turn/started` has its running turn from here, so a stop reaches it.
+    fn subagent_in_turn(&mut self, thread: &str, turn: &Value) {
+        if let Some(turn) = turn.as_str() {
+            self.subagents.entry(thread.to_string()).or_default().turn.get_or_insert_with(|| turn.to_string());
+        }
+    }
+
+    /// A subagent's turn is over (`status`: completed, stopped or failed): its row says so.
+    fn subagent_ended(&mut self, thread: &str, status: &'static str, out: &mut Vec<EventKind>) {
+        self.subagents.entry(thread.to_string()).or_default().ended = Some(status);
+        self.subagent_row(thread, status, out);
+    }
+
+    /// The status once the agent's own turn is over. Codly takes an agent for free when its
+    /// turn ends, so the status a busy subagent keeps it at is told again, changed or not.
+    fn rest_after_turn(&mut self, out: &mut Vec<EventKind>) {
+        let st = self.idle_status();
+        if st != AgentStatus::Idle {
+            self.status = None;
+        }
+        self.set_status(st, out);
+    }
+
+    /// The running turns of the agent's subagents: (thread, turn).
+    fn subagent_turns(&self) -> Vec<(String, String)> {
+        self.subagents.iter().filter_map(|(thread, s)| Some((thread.clone(), s.turn.clone()?))).collect()
+    }
+
     pub fn turn_started(&mut self, text: &str) -> Vec<EventKind> {
         let mut out = vec![EventKind::TurnStarted { input: Some(text.to_string()) }];
         self.turn_announced = true;
+        self.in_turn = true;
         self.interrupt_requested = false;
         self.last_final = None;
         self.set_status(AgentStatus::Thinking, &mut out);
@@ -914,19 +1676,101 @@ impl CodexNormalizer {
     pub fn turn_failed(&mut self) -> Vec<EventKind> {
         let mut out = vec![EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: None, duration_ms: None }];
         self.turn_announced = false;
-        self.set_status(AgentStatus::Idle, &mut out);
+        self.in_turn = false;
+        self.rest_after_turn(&mut out);
         out
     }
 
     pub fn on_notification(&mut self, method: &str, p: &Value) -> Vec<EventKind> {
+        match self.subagent_thread(p) {
+            Some(thread) => self.subagent_notification(thread, method, p),
+            None => self.own_notification(method, p),
+        }
+    }
+
+    /// What a subagent does on its own thread. Its tool calls, approvals, errors and tokens
+    /// are told as the agent's, marked as the subagent's. Its words, reasoning, plan and
+    /// context are not the agent's own: they stay in the raw log.
+    fn subagent_notification(&mut self, thread: &str, method: &str, p: &Value) -> Vec<EventKind> {
         let mut out = Vec::new();
         match method {
-            "thread/started" | "thread/closed" | "turn/diff/updated" | "item/reasoning/summaryPartAdded" | "item/plan/delta"
+            "thread/started" => self.subagents.entry(thread.to_string()).or_default().name = subagent_name(&p["thread"]),
+            "turn/started" => {
+                self.subagents.entry(thread.to_string()).or_default().turn = p["turn"]["id"].as_str().map(str::to_owned);
+                self.subagent_row(thread, "running", &mut out);
+            }
+            "turn/completed" | "thread/closed" => {
+                let running = self.subagents.entry(thread.to_string()).or_default().turn.take().is_some();
+                // What it still waited for or ran ends with its turn.
+                out.extend(self.cancel_approvals(Some(thread)));
+                self.items.retain(|_, i| i.thread.as_deref() != Some(thread));
+                if method == "turn/completed" {
+                    let turn = &p["turn"];
+                    let status = match turn["status"].as_str() {
+                        Some("completed") => "completed",
+                        Some("interrupted") => "stopped",
+                        _ => "failed",
+                    };
+                    if status == "failed"
+                        && let Some(m) = turn["error"]["message"].as_str()
+                    {
+                        out.push(EventKind::Error { message: format!("{}: {m}", self.subagent_label(thread)), fatal: false });
+                    }
+                    self.subagent_ended(thread, status, &mut out);
+                } else if running {
+                    self.subagent_ended(thread, "stopped", &mut out);
+                }
+                // A `spawnAgent` call of its own went with its turn.
+                self.tell_held(&mut out);
+                let st = self.resting_status();
+                self.set_status(st, &mut out);
+            }
+            "item/started" | "item/completed" => {
+                self.subagent_in_turn(thread, &p["turnId"]);
+                let item = &p["item"];
+                let (ty, id) = (item["type"].as_str().unwrap_or(""), s(item, "id"));
+                if is_tool_item(ty) {
+                    if method == "item/started" {
+                        self.tool_started(ty, &id, item, Some(thread), &mut out);
+                    } else {
+                        self.tool_ended(ty, &id, item, Some(thread), &mut out);
+                    }
+                }
+            }
+            "thread/tokenUsage/updated" => out.push(self.subagent_usage(thread, &p["tokenUsage"])),
+            "error" | "model/rerouted" => {
+                let who = self.subagent_label(thread);
+                out = self.own_notification(method, p);
+                for e in &mut out {
+                    if let EventKind::Error { message, .. } | EventKind::Retrying { reason: message, .. } | EventKind::Notice { text: message } = e {
+                        *message = format!("{who}: {message}");
+                    }
+                }
+            }
+            // These name their tool call, request, hook or MCP server: the thread makes no difference.
+            "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" | "serverRequest/resolved" | "hook/started" | "hook/completed"
+            | "mcpServer/startupStatus/updated" => {
+                out = self.own_notification(method, p);
+            }
+            _ => {}
+        }
+        out
+    }
+
+    fn own_notification(&mut self, method: &str, p: &Value) -> Vec<EventKind> {
+        let mut out = Vec::new();
+        match method {
+            // (`thread/name/updated`: from the codex-cli 0.166.0 types, `ThreadNameUpdatedNotification`,
+            // not verified live. The thread has another name: the one Codly gave it itself
+            // (`name_thread`), and the same notification also comes when the user renames the
+            // thread in Codex. Neither is news for the timeline.)
+            "thread/started" | "thread/closed" | "thread/name/updated" | "turn/diff/updated" | "item/reasoning/summaryPartAdded" | "item/plan/delta"
             | "item/fileChange/patchUpdated" | "item/mcpToolCall/progress" | "item/commandExecution/terminalInteraction" => {}
             "turn/started" => {
                 if !std::mem::take(&mut self.turn_announced) {
                     out.push(EventKind::TurnStarted { input: None });
                 }
+                self.in_turn = true;
                 self.set_status(AgentStatus::Thinking, &mut out);
             }
             "turn/completed" => {
@@ -942,13 +1786,17 @@ impl CodexNormalizer {
                 {
                     out.push(EventKind::Error { message: m.to_string(), fatal: false });
                 }
-                out.extend(self.cancel_all_approvals());
-                self.items.clear();
+                // A subagent's turn is its own: what it runs or waits for outlives this one.
+                out.extend(self.cancel_approvals(None));
+                self.items.retain(|_, i| i.thread.is_some());
+                // A `spawnAgent` call that was open names no thread any more.
+                self.tell_held(&mut out);
                 self.waiting = false;
                 self.interrupt_requested = false;
                 self.turn_announced = false;
+                self.in_turn = false;
                 out.push(EventKind::TurnCompleted { status, result_text: self.last_final.take(), duration_ms: turn["durationMs"].as_i64() });
-                self.set_status(AgentStatus::Idle, &mut out);
+                self.rest_after_turn(&mut out);
             }
             "thread/status/changed" => match p["status"]["type"].as_str() {
                 Some("active") => {
@@ -959,7 +1807,8 @@ impl CodexNormalizer {
                 }
                 Some("idle") => {
                     self.waiting = false;
-                    self.set_status(AgentStatus::Idle, &mut out);
+                    let st = self.idle_status();
+                    self.set_status(st, &mut out);
                 }
                 Some("systemError") => {
                     out.push(EventKind::Error { message: "Codex reported a system error on this thread".into(), fatal: false });
@@ -993,22 +1842,23 @@ impl CodexNormalizer {
                 out.push(EventKind::PlanUpdated { steps });
             }
             "thread/tokenUsage/updated" => out.push(self.usage_update(&p["tokenUsage"])),
-            "account/rateLimits/updated" => self.rate_limits(&p["rateLimits"], &mut out),
+            RATE_LIMITS => self.rate_limits(&p["rateLimits"], &mut out),
             "error" => {
                 let err = &p["error"];
                 let message = err["message"].as_str().unwrap_or("Codex error").to_string();
                 let info = &err["codexErrorInfo"];
-                if info == "usageLimitExceeded" || info == "rateLimitExceeded" {
-                    self.set_status(AgentStatus::RateLimited, &mut out);
-                }
-                if info == "usageLimitExceeded" && p["willRetry"] != true {
-                    // The account's quota is spent (no window in this error).
-                    out.push(EventKind::RateLimit { window: "usage".into(), used_fraction: None, resets_at: None, status: Some("rejected".into()) });
-                }
                 if p["willRetry"] == true {
+                    // Codex tries again by itself: a limit it retries is not a limit reached.
                     self.retries += 1;
                     out.push(EventKind::Retrying { attempt: self.retries, reason: message });
                 } else {
+                    if info == "usageLimitExceeded" || info == "rateLimitExceeded" {
+                        self.set_status(AgentStatus::RateLimited, &mut out);
+                    }
+                    if info == "usageLimitExceeded" {
+                        // The account's quota is spent (no window in this error).
+                        out.push(EventKind::RateLimit { window: "usage".into(), used_fraction: None, resets_at: None, status: Some("rejected".into()) });
+                    }
                     out.push(EventKind::Error { message, fatal: false });
                 }
             }
@@ -1018,18 +1868,45 @@ impl CodexNormalizer {
                 if let Some(id) = self.approvals.iter().find(|(_, a)| &a.request_id == rid).map(|(id, _)| id.clone()) {
                     self.approvals.remove(&id);
                     out.push(EventKind::ApprovalResolved { approval_id: id, status: ApprovalStatus::Cancelled, by: "provider".into() });
-                    let st = self.busy_status();
+                    let st = self.resting_status();
                     self.set_status(st, &mut out);
                 }
             }
-            "thread/compacted" => out.push(EventKind::Compacting { pre_tokens: None, post_tokens: None }),
-            "mcpServer/startupStatus/updated" => {
-                if p["name"] == "codly" && p["status"] == "failed" {
-                    out.push(EventKind::Error {
-                        message: format!("codly MCP server failed to start: {}", p["error"].as_str().unwrap_or("unknown error")),
-                        fatal: false,
-                    });
+            // A hook that starts is bookkeeping. What it said or stopped is told when it ends.
+            "hook/started" => {}
+            "hook/completed" => out.extend(hook_row(&p["run"])),
+            "thread/goal/updated" => {
+                let goal = &p["goal"];
+                let told = (s(goal, "objective"), s(goal, "status"));
+                // An update of the tokens or the time it used is no news: a row when it changes.
+                if self.goal.as_ref() != Some(&told) {
+                    out.push(EventKind::Notice { text: goal_text(&told.0, &told.1, goal["tokenBudget"].as_i64()) });
+                    self.goal = Some(told);
                 }
+            }
+            "thread/goal/cleared" => {
+                self.goal = None;
+                out.push(EventKind::Notice { text: "Goal cleared".into() });
+            }
+            "thread/compacted" => out.push(EventKind::Compacting { pre_tokens: None, post_tokens: None }),
+            // Recorded with 0.161.0 (fixtures/codex-appserver.jsonl: a server of the user's own
+            // config that failed). `failureReason` is from the codex-cli 0.166.0 types
+            // (`McpServerStartupFailureReason`), not verified live.
+            "mcpServer/startupStatus/updated" => {
+                if p["status"] == "failed"
+                    && let Some(name) = p["name"].as_str()
+                    && self.failed_servers.insert(name.to_string())
+                {
+                    out.push(mcp_start_failed(name, p["error"].as_str(), p["failureReason"].as_str()));
+                }
+            }
+            // From the codex-cli 0.166.0 types (`ModelReroutedNotification`), not verified live.
+            // A notice, as the MCP server that did not start: the turn goes on, on another
+            // model. An error would be read as the reason of a turn that fails later, and as
+            // one of the errors in a row that stop an agent.
+            "model/rerouted" => {
+                let text = rerouted_text(&s(p, "fromModel"), &s(p, "toModel"), p["reason"].as_str());
+                out.push(EventKind::Notice { text });
             }
             "warning" | "configWarning" | "guardianWarning" | "deprecationNotice" => {
                 let message = p["message"].as_str().or(p["summary"].as_str()).map(str::to_owned).unwrap_or_else(|| p.to_string());
@@ -1050,13 +1927,13 @@ impl CodexNormalizer {
                 self.set_status(st, out);
             }
             "contextCompaction" => out.push(EventKind::Compacting { pre_tokens: None, post_tokens: None }),
-            "commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall" | "webSearch" | "collabAgentToolCall" | "imageView"
-            | "imageGeneration" | "sleep" | "subAgentActivity" => self.tool_started(ty, &id, item, out),
+            ty if is_tool_item(ty) => self.tool_started(ty, &id, item, None, out),
             other => out.push(EventKind::Unknown { raw_type: format!("item/started:{other}") }),
         }
     }
 
-    fn tool_started(&mut self, ty: &str, id: &str, item: &Value, out: &mut Vec<EventKind>) {
+    /// `thread`: the subagent thread that runs the call (None: the agent's own).
+    fn tool_started(&mut self, ty: &str, id: &str, item: &Value, thread: Option<&str>, out: &mut Vec<EventKind>) {
         if self.items.contains_key(id) {
             return;
         }
@@ -1066,9 +1943,13 @@ impl CodexNormalizer {
         let mut input = item.clone();
         if let Some(o) = input.as_object_mut() {
             o.remove("aggregatedOutput"); // empty at start; the output streams separately
+            if let Some(t) = thread {
+                // The mark of a subagent's work: the row is the agent's, the call is not its own.
+                o.insert("subagent".into(), json!({ "thread": t, "name": self.subagents.get(t).and_then(|s| s.name.clone()) }));
+            }
         }
         if ty == "collabAgentToolCall" {
-            out.push(EventKind::SubAgent { call_id: id.to_string(), description: s(item, "prompt"), status: "started".into() });
+            self.spawned(id, item, false, out);
         }
         out.push(EventKind::ToolStarted { call_id: id.to_string(), name: ty.to_string(), activity, target: target.clone(), input, confidence: confidence.into() });
         self.items.insert(
@@ -1079,6 +1960,8 @@ impl CodexNormalizer {
                 paths: if target.paths.is_empty() { target.path.clone().into_iter().collect() } else { target.paths.clone() },
                 diff: diff.map(|d| classify::truncate_output(&d, OUTPUT_MAX)),
                 command: item["command"].as_str().map(str::to_owned),
+                thread: thread.map(str::to_owned),
+                unnamed_spawn: ty == "collabAgentToolCall" && item["tool"] == "spawnAgent" && receiver_threads(item).is_empty(),
             },
         );
         let st = self.busy_status();
@@ -1110,20 +1993,22 @@ impl CodexNormalizer {
             }
             "plan" => out.push(EventKind::Message { item_id: id, text: s(item, "text"), phase: MessagePhase::Commentary }),
             "userMessage" | "contextCompaction" | "hookPrompt" | "enteredReviewMode" | "exitedReviewMode" | "functionCallOutput" => {}
-            "commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall" | "webSearch" | "collabAgentToolCall" | "imageView"
-            | "imageGeneration" | "sleep" | "subAgentActivity" => {
-                if !self.items.contains_key(&id) {
-                    self.tool_started(ty, &id, item, out); // completed without a start event
-                }
-                self.tool_completed(ty, &id, item, out);
-                // Generated images land outside the worktree; announce them so they become artifacts.
-                if ty == "imageGeneration"
-                    && let Some(path) = item["savedPath"].as_str()
-                {
-                    out.push(EventKind::FilesChanged { call_id: Some(id.clone()), paths: vec![path.to_string()], source: "provider".into() });
-                }
-            }
+            ty if is_tool_item(ty) => self.tool_ended(ty, &id, item, None, out),
             other => out.push(EventKind::Unknown { raw_type: format!("item/completed:{other}") }),
+        }
+    }
+
+    /// A tool item completed. `thread` as in `tool_started`.
+    fn tool_ended(&mut self, ty: &str, id: &str, item: &Value, thread: Option<&str>, out: &mut Vec<EventKind>) {
+        if !self.items.contains_key(id) {
+            self.tool_started(ty, id, item, thread, out); // completed without a start event
+        }
+        self.tool_completed(ty, id, item, out);
+        // Generated images land outside the worktree; announce them so they become artifacts.
+        if ty == "imageGeneration"
+            && let Some(path) = item["savedPath"].as_str()
+        {
+            out.push(EventKind::FilesChanged { call_id: Some(id.to_string()), paths: vec![path.to_string()], source: "provider".into() });
         }
     }
 
@@ -1167,37 +2052,59 @@ impl CodexNormalizer {
             out.push(EventKind::FilesChanged { call_id: Some(id.to_string()), paths, source: "provider".into() });
         }
         if ty == "collabAgentToolCall" {
-            out.push(EventKind::SubAgent { call_id: id.to_string(), description: s(item, "prompt"), status: status.to_string() });
+            self.spawned(id, item, true, out);
         }
-        let st = self.busy_status();
+        let st = self.resting_status();
         self.set_status(st, out);
     }
 
     fn usage_update(&mut self, tu: &Value) -> EventKind {
-        let get = |b: &Value| {
-            [
-                b["inputTokens"].as_i64().unwrap_or(0),
-                b["cachedInputTokens"].as_i64().unwrap_or(0),
-                b["cacheWriteInputTokens"].as_i64().unwrap_or(0),
-                b["outputTokens"].as_i64().unwrap_or(0),
-            ]
-        };
-        let (total, last) = (get(&tu["total"]), get(&tu["last"]));
+        let (total, last) = (token_counts(&tu["total"]), token_counts(&tu["last"]));
         let resumed = self.resumed;
         let base = *self.baseline.get_or_insert_with(|| if resumed { std::array::from_fn(|i| total[i] - last[i]) } else { [0; 4] });
-        let d: [i64; 4] = std::array::from_fn(|i| (total[i] - base[i]).max(0));
+        self.spent = std::array::from_fn(|i| (total[i] - base[i]).max(0));
+        self.usage.context_used = tu["last"]["totalTokens"].as_i64().or(self.usage.context_used);
+        self.usage.context_window = tu["modelContextWindow"].as_i64().or(self.usage.context_window);
+        self.usage_event()
+    }
+
+    /// A subagent spends on its own thread: its tokens count for the run, its context is not
+    /// the agent's. What its thread had used before the first reading is not this run's.
+    fn subagent_usage(&mut self, thread: &str, tu: &Value) -> EventKind {
+        let (total, last) = (token_counts(&tu["total"]), token_counts(&tu["last"]));
+        let sub = self.subagents.entry(thread.to_string()).or_default();
+        let base = *sub.baseline.get_or_insert_with(|| std::array::from_fn(|i| total[i] - last[i]));
+        sub.spent = std::array::from_fn(|i| (total[i] - base[i]).max(0));
+        self.usage_event()
+    }
+
+    /// The run's tokens: the agent's own thread plus its subagents'.
+    fn usage_event(&mut self) -> EventKind {
+        let mut d = self.spent;
+        for sub in self.subagents.values() {
+            for (sum, n) in d.iter_mut().zip(sub.spent) {
+                *sum += n;
+            }
+        }
         // Codex counts cached tokens inside inputTokens; Usage keeps them apart (as Claude does).
         self.usage.input_tokens = (d[0] - d[1]).max(0);
         self.usage.cache_read_tokens = d[1];
         self.usage.cache_write_tokens = d[2];
         self.usage.output_tokens = d[3];
-        self.usage.context_used = tu["last"]["totalTokens"].as_i64().or(self.usage.context_used);
-        self.usage.context_window = tu["modelContextWindow"].as_i64().or(self.usage.context_window);
         EventKind::UsageUpdated { usage: self.usage.clone() }
     }
 
     fn rate_limits(&mut self, rl: &Value, out: &mut Vec<EventKind>) {
         let reached = !rl["rateLimitReachedType"].is_null();
+        // The status before the windows: they are the account's real reading and have the last
+        // word on it (an allowed window lifts the park a bare RateLimited status sets).
+        if reached {
+            self.set_status(AgentStatus::RateLimited, out);
+        } else if self.status == Some(AgentStatus::RateLimited) {
+            // The limit lifted: back to work mid-turn, free otherwise.
+            let s = if self.in_turn { self.busy_status() } else { AgentStatus::Idle };
+            self.set_status(s, out);
+        }
         let full = |key: &str| rl[key]["usedPercent"].as_f64().is_some_and(|p| p >= 100.0);
         // The window that is full is the one that was reached (both, if neither says so).
         let any_full = full("primary") || full("secondary");
@@ -1218,9 +2125,6 @@ impl CodexNormalizer {
                 resets_at: w["resetsAt"].as_i64().map(|s| s * 1000),
                 status: Some(if reached && (full(key) || !any_full) { "rejected" } else { "allowed" }.into()),
             });
-        }
-        if reached {
-            self.set_status(AgentStatus::RateLimited, out);
         }
     }
 
@@ -1276,6 +2180,16 @@ impl CodexNormalizer {
             AnswerShape::UserInput => vec![ApprovalChoice::AllowOnce, ApprovalChoice::Cancel],
             AnswerShape::Elicitation => vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel],
         };
+        // A subagent's request is the agent's to get answered: the card says who asks.
+        let thread = self.subagent_thread(p).map(str::to_owned);
+        let reason = match &thread {
+            Some(t) => {
+                self.subagent_in_turn(t, &p["turnId"]);
+                let who = self.subagent_label(t);
+                Some(reason.map_or_else(|| format!("{who} asks for this"), |r| format!("{who}: {r}")))
+            }
+            None => reason,
+        };
         let approval = Approval {
             id: new_id(),
             agent_id: self.agent_id.clone(),
@@ -1290,7 +2204,7 @@ impl CodexNormalizer {
             decided_by: None,
             created_at: now_ms(),
         };
-        self.approvals.insert(approval.id.clone(), PendingApproval { request_id: id.clone(), shape });
+        self.approvals.insert(approval.id.clone(), PendingApproval { request_id: id.clone(), shape, thread });
         out.push(EventKind::ApprovalRequested { approval });
         self.set_status(AgentStatus::WaitingApproval, &mut out);
         (out, None)
@@ -1314,14 +2228,27 @@ impl CodexNormalizer {
                 _ => json!({ "action": "cancel" }),
             },
         };
-        if d.choice == ApprovalChoice::Cancel {
+        // "cancel" also stops the turn that asked. Only the agent's own turn is then told as
+        // stopped by the user: a subagent's cancelled card says nothing about that turn.
+        if d.choice == ApprovalChoice::Cancel && p.thread.is_none() {
             self.interrupt_requested = true;
         }
         let mut out = Vec::new();
         self.waiting = false;
-        let st = self.busy_status();
+        let st = self.resting_status();
         self.set_status(st, &mut out);
         Some((json!({ "id": p.request_id, "result": result }), out))
+    }
+
+    /// Close the cards of one thread (None: the agent's own): its turn is over.
+    fn cancel_approvals(&mut self, thread: Option<&str>) -> Vec<EventKind> {
+        let ids: Vec<Id> = self.approvals.iter().filter(|(_, a)| a.thread.as_deref() == thread).map(|(id, _)| id.clone()).collect();
+        ids.into_iter()
+            .map(|id| {
+                self.approvals.remove(&id);
+                EventKind::ApprovalResolved { approval_id: id, status: ApprovalStatus::Cancelled, by: "provider".into() }
+            })
+            .collect()
     }
 
     pub fn cancel_all_approvals(&mut self) -> Vec<EventKind> {
@@ -1334,6 +2261,117 @@ impl CodexNormalizer {
 
 fn s(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or("").to_string()
+}
+
+/// Thread items that are tool calls: a row when they start, a result when they end.
+fn is_tool_item(ty: &str) -> bool {
+    matches!(
+        ty,
+        "commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall" | "webSearch" | "collabAgentToolCall" | "imageView" | "imageGeneration" | "sleep" | "subAgentActivity"
+    )
+}
+
+/// A `TokenUsageBreakdown` as (input, cached input, cache write, output).
+fn token_counts(b: &Value) -> [i64; 4] {
+    [
+        b["inputTokens"].as_i64().unwrap_or(0),
+        b["cachedInputTokens"].as_i64().unwrap_or(0),
+        b["cacheWriteInputTokens"].as_i64().unwrap_or(0),
+        b["outputTokens"].as_i64().unwrap_or(0),
+    ]
+}
+
+/// What Codex calls a subagent, from its thread: "Ada (explorer)", "Ada", "explorer" or nothing.
+fn subagent_name(thread: &Value) -> Option<String> {
+    let part = |key: &str| thread[key].as_str().map(str::trim).filter(|v| !v.is_empty());
+    match (part("agentNickname"), part("agentRole")) {
+        (Some(nick), Some(role)) => Some(format!("{nick} ({role})")),
+        (nick, role) => nick.or(role).map(str::to_owned),
+    }
+}
+
+/// How much of a hook's, a goal's or a subagent prompt's own text a row shows.
+const NOTICE_MAX: usize = 300;
+/// How much of the error of an MCP server that did not start a row shows: it is Codex's own
+/// text, long and full of type names, and its start says what failed. The raw log has all of it.
+const MCP_ERROR_MAX: usize = 160;
+
+/// The row for an MCP server that did not start. Codly's own server is an error: the agent
+/// cannot report to Codly without it. Another one is a notice: the agent works on without that
+/// server's tools, and it is no failure of the agent's (errors in a row stop an agent).
+fn mcp_start_failed(name: &str, error: Option<&str>, failure_reason: Option<&str>) -> EventKind {
+    if name == "codly" {
+        return EventKind::Error { message: format!("codly MCP server failed to start: {}", error.unwrap_or("unknown error")), fatal: false };
+    }
+    let text = match (failure_reason, error.map(str::trim).filter(|e| !e.is_empty())) {
+        // (Codly has no sign-in for it: the server is from the user's own Codex configuration.)
+        (Some("reauthenticationRequired"), _) => {
+            format!("MCP server {name} did not start: it needs you to sign in again in Codex (the server comes from your own Codex settings). This agent works without its tools.")
+        }
+        (_, Some(error)) => format!("MCP server {name} did not start, so this agent works without its tools: {}", classify::truncate_chars(error, MCP_ERROR_MAX)),
+        (_, None) => format!("MCP server {name} did not start, so this agent works without its tools."),
+    };
+    EventKind::Notice { text }
+}
+
+/// The notice for a turn Codex ran on another model than the thread's (`ModelRerouteReason`).
+fn rerouted_text(from: &str, to: &str, reason: Option<&str>) -> String {
+    match reason {
+        Some("highRiskCyberActivity") => format!("Codex ran this turn on {to} instead of {from}: it took the request for high-risk security work."),
+        Some(other) => format!("Codex ran this turn on {to} instead of {from} ({other})."),
+        None => format!("Codex ran this turn on {to} instead of {from}."),
+    }
+}
+
+/// The row for a hook run that ended (`HookRunSummary`). A hook that ran and said nothing
+/// gets none: only what it stopped or told the agent explains the turn.
+fn hook_row(run: &Value) -> Option<EventKind> {
+    let entries: Vec<(&str, &str)> = run["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| Some((e["kind"].as_str()?, e["text"].as_str()?.trim())))
+        .filter(|(_, text)| !text.is_empty())
+        .collect();
+    let status = run["status"].as_str().unwrap_or("");
+    let did = match status {
+        "blocked" | "failed" | "stopped" => status,
+        _ => match entries.first()?.0 {
+            "context" => "added context",
+            "feedback" => "gave feedback",
+            "warning" => "gave a warning",
+            "stop" => "asked to stop",
+            "error" => "reported an error",
+            _ => return None,
+        },
+    };
+    // `statusMessage` is not what the hook said: it is the progress text of its configuration.
+    let said = entries.iter().map(|(_, text)| *text).collect::<Vec<_>>().join(" ");
+    // The file the hook comes from. The types do not say if that is its script or the file
+    // that declares it, so the row only names it.
+    let source = run["sourcePath"].as_str().and_then(|p| std::path::Path::new(p).file_name()).map(|f| format!(" ({})", f.to_string_lossy()));
+    let mut text = format!("Codex hook {}{} {did}", run["eventName"].as_str().unwrap_or("?"), source.unwrap_or_default());
+    if !said.is_empty() {
+        text = format!("{text}: {}", classify::truncate_chars(&said, NOTICE_MAX));
+    }
+    Some(if status == "failed" { EventKind::Error { message: text, fatal: false } } else { EventKind::Notice { text } })
+}
+
+/// The row for a thread's goal (`ThreadGoal`) when its objective or status changes.
+fn goal_text(objective: &str, status: &str, token_budget: Option<i64>) -> String {
+    let objective = classify::truncate_chars(objective, NOTICE_MAX);
+    match status {
+        "active" => match token_budget {
+            Some(budget) => format!("Goal: {objective} (budget: {budget} tokens)"),
+            None => format!("Goal: {objective}"),
+        },
+        "paused" => format!("Goal paused: {objective}"),
+        "blocked" => format!("Goal blocked: {objective}"),
+        "usageLimited" => format!("Goal stopped at the usage limit: {objective}"),
+        "budgetLimited" => format!("Goal stopped at its token budget: {objective}"),
+        "complete" => format!("Goal complete: {objective}"),
+        other => format!("Goal ({other}): {objective}"),
+    }
 }
 
 /// Choices are exactly what Codex offered (`availableDecisions`, CRITIQUE W11), each mapped
@@ -1468,6 +2506,14 @@ mod tests {
         assert_eq!(statuses.last(), Some(&AgentStatus::Idle));
         // mcp startup chatter about the user's own servers is not surfaced
         assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { raw_type } if raw_type.starts_with("mcpServer"))));
+        // ... but the one that did not start is told, in words a person can read, and it is
+        // no error of the agent's
+        let notices: Vec<&String> = events.iter().filter_map(|e| if let EventKind::Notice { text } = e { Some(text) } else { None }).collect();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        let told = "MCP server heysam did not start, so this agent works without its tools: MCP client for `heysam` failed to start";
+        assert!(notices[0].starts_with(told), "{notices:?}");
+        assert!(notices[0].ends_with('…') && notices[0].chars().count() < 240, "its error is cut: {notices:?}");
+        assert!(!events.iter().any(|e| matches!(e, EventKind::Error { .. })), "{events:?}");
     }
 
     /// Live 0.161.0 capture under Codly's real thread settings (on-request, workspace-write,
@@ -1574,6 +2620,11 @@ mod tests {
         assert!(matches!(&ev[0], EventKind::ToolOutput { call_id, chunk } if call_id == "c1" && chunk == "line\n"));
         let ev = norm.on_notification("error", &json!({ "error": { "message": "overloaded" }, "willRetry": true }));
         assert!(matches!(&ev[0], EventKind::Retrying { attempt: 1, .. }));
+        // A rate limit Codex retries by itself is not a limit reached: nothing parks the account.
+        for info in ["rateLimitExceeded", "usageLimitExceeded"] {
+            let ev = norm.on_notification("error", &json!({ "error": { "message": "429", "codexErrorInfo": info }, "willRetry": true }));
+            assert!(matches!(&ev[..], [EventKind::Retrying { reason, .. }] if reason == "429"), "{ev:?}");
+        }
         let ev = norm.on_notification("error", &json!({ "error": { "message": "limit", "codexErrorInfo": "usageLimitExceeded" }, "willRetry": false }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::StatusChanged { status: AgentStatus::RateLimited })));
         assert!(ev.iter().any(|e| matches!(e, EventKind::RateLimit { window, status: Some(s), .. } if window == "usage" && s == "rejected")));
@@ -1597,8 +2648,9 @@ mod tests {
         assert_eq!((usage.input_tokens, usage.cache_read_tokens, usage.output_tokens, usage.context_used), (60, 40, 5, Some(105)));
         let ev = norm.on_notification("mcpServer/startupStatus/updated", &json!({ "name": "codly", "status": "failed", "error": "boom" }));
         assert!(matches!(&ev[0], EventKind::Error { message, .. } if message.contains("boom")));
-        let ev = norm.on_notification("thread/goal/updated", &json!({}));
-        assert!(matches!(&ev[0], EventKind::Unknown { raw_type } if raw_type == "thread/goal/updated"));
+        assert!(norm.on_notification("thread/name/updated", &json!({ "threadId": "t", "threadName": "Codly: Ada (worker)" })).is_empty());
+        let ev = norm.on_notification("thread/archived", &json!({}));
+        assert!(matches!(&ev[0], EventKind::Unknown { raw_type } if raw_type == "thread/archived"));
         let mcp_item = json!({ "type": "mcpToolCall", "id": "m1", "server": "codly", "tool": "codly_post_note", "arguments": { "text": "hi" }, "status": "inProgress" });
         let ev = norm.on_notification("item/started", &json!({ "item": mcp_item }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::ToolStarted { activity: ActivityKind::Note, .. })));
@@ -1608,10 +2660,427 @@ mod tests {
         assert!(ev.iter().any(|e| matches!(e, EventKind::ToolCompleted { ok: true, output: Some(o), duration_ms: Some(12), .. } if o == "posted")));
     }
 
+    /// The account's limit reaches every agent on it, the idle ones too: they are free again
+    /// when a reading says the limit lifted, not only at their next turn.
+    #[test]
+    fn a_lifted_limit_frees_the_agent() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        let rl = |reached: bool| {
+            let (kind, used) = if reached { (json!("rate_limit_reached"), 100.0) } else { (Value::Null, 3.0) };
+            json!({ "rateLimits": { "rateLimitReachedType": kind, "primary": { "usedPercent": used, "windowDurationMins": 300, "resetsAt": 1 } } })
+        };
+        let statuses = |ev: &[EventKind]| -> Vec<AgentStatus> {
+            ev.iter().filter_map(|e| if let EventKind::StatusChanged { status } = e { Some(*status) } else { None }).collect()
+        };
+        let ev = norm.on_notification(RATE_LIMITS, &rl(true));
+        // the status first: the window after it is the real reading, with the last word on the account
+        assert!(matches!(&ev[..], [EventKind::StatusChanged { status: AgentStatus::RateLimited }, EventKind::RateLimit { status: Some(s), .. }] if s == "rejected"), "{ev:?}");
+        assert_eq!(statuses(&norm.on_notification(RATE_LIMITS, &rl(false))), [AgentStatus::Idle]);
+        assert!(statuses(&norm.on_notification(RATE_LIMITS, &rl(false))).is_empty(), "an agent that was not limited keeps its status");
+        // mid-turn it goes back to work, not to idle
+        norm.turn_started("go");
+        norm.on_notification(RATE_LIMITS, &rl(true));
+        assert_eq!(statuses(&norm.on_notification(RATE_LIMITS, &rl(false))), [AgentStatus::Thinking]);
+        norm.on_notification("turn/completed", &json!({ "turn": { "status": "completed" } }));
+        norm.on_notification(RATE_LIMITS, &rl(true));
+        assert_eq!(statuses(&norm.on_notification(RATE_LIMITS, &rl(false))), [AgentStatus::Idle], "the turn is over");
+    }
+
+    /// An MCP server that did not start is told once per run, whatever thread tried. Codly's
+    /// own is an error; another one is a notice, so five broken servers of the user's are not
+    /// five errors in a row of the agent's. (`mcpServer/startupStatus/updated` as recorded with
+    /// 0.161.0 in fixtures/codex-appserver.jsonl; `failureReason: "reauthenticationRequired"`
+    /// and a null `threadId` are from the codex-cli 0.166.0 types, not verified live.)
+    #[test]
+    fn a_server_that_did_not_start_is_told_once() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        norm.thread = Some("main".into());
+        let update = |thread: Value, name: &str, status: &str, error: Value, reason: Value| {
+            json!({ "threadId": thread, "name": name, "status": status, "error": error, "failureReason": reason })
+        };
+        let notices = |ev: &[EventKind]| -> Vec<String> {
+            ev.iter().filter_map(|e| if let EventKind::Notice { text } = e { Some(text.clone()) } else { None }).collect()
+        };
+        assert!(norm.on_notification("mcpServer/startupStatus/updated", &update(json!("main"), "linear", "starting", Value::Null, Value::Null)).is_empty());
+        assert!(norm.on_notification("mcpServer/startupStatus/updated", &update(json!("main"), "docs", "ready", Value::Null, Value::Null)).is_empty());
+        assert!(norm.on_notification("mcpServer/startupStatus/updated", &update(json!("main"), "docs", "cancelled", Value::Null, Value::Null)).is_empty());
+        let failed = update(json!("main"), "linear", "failed", json!("handshaking with MCP server failed: connection refused"), Value::Null);
+        let ev = norm.on_notification("mcpServer/startupStatus/updated", &failed);
+        assert_eq!(notices(&ev), ["MCP server linear did not start, so this agent works without its tools: handshaking with MCP server failed: connection refused"]);
+        assert_eq!(ev.len(), 1, "a notice and nothing else: {ev:?}");
+        // again on the same thread, on a subagent's thread, and for the whole account: said already
+        assert!(norm.on_notification("mcpServer/startupStatus/updated", &failed).is_empty());
+        assert!(norm.on_notification("mcpServer/startupStatus/updated", &update(json!("sub"), "linear", "failed", json!("again"), Value::Null)).is_empty());
+        assert!(norm.on_notification("mcpServer/startupStatus/updated", &update(Value::Null, "linear", "failed", json!("again"), Value::Null)).is_empty());
+        // another server, first heard of on a subagent's thread
+        let ev = norm.on_notification("mcpServer/startupStatus/updated", &update(json!("sub"), "figma", "failed", json!("401"), json!("reauthenticationRequired")));
+        assert_eq!(
+            notices(&ev),
+            ["MCP server figma did not start: it needs you to sign in again in Codex (the server comes from your own Codex settings). This agent works without its tools."]
+        );
+        let ev = norm.on_notification("mcpServer/startupStatus/updated", &update(json!("main"), "notes", "failed", Value::Null, Value::Null));
+        assert_eq!(notices(&ev), ["MCP server notes did not start, so this agent works without its tools."]);
+        // Codly's own server is an error, once
+        let codly = update(json!("sub"), "codly", "failed", json!("boom"), Value::Null);
+        let ev = norm.on_notification("mcpServer/startupStatus/updated", &codly);
+        assert!(matches!(&ev[..], [EventKind::Error { message, fatal: false }] if message == "codly MCP server failed to start: boom"), "{ev:?}");
+        assert!(norm.on_notification("mcpServer/startupStatus/updated", &codly).is_empty());
+    }
+
+    /// Codex ran a turn on another model than the one the agent has: the user is told which,
+    /// and why when Codex says, in a quiet line. Before, the line was an error: a rerouted turn
+    /// that failed later was shown as failed because of the reroute, and the reroute counted
+    /// as one of the errors in a row that stop an agent. (Lines written from the codex-cli
+    /// 0.166.0 schema types: ModelReroutedNotification, ModelRerouteReason, and for the turn
+    /// that fails TurnCompletedNotification, Turn, TurnError. Not verified live.)
+    #[test]
+    fn a_rerouted_turn_is_a_notice_that_names_both_models() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        norm.thread = Some("main".into());
+        let rerouted = |thread: &str, reason: Value| {
+            json!({ "threadId": thread, "turnId": "u1", "fromModel": "gpt-6.2-sol", "toModel": "gpt-6.1-luna", "reason": reason })
+        };
+        let warning = |ev: Vec<EventKind>| match &ev[..] {
+            [EventKind::Notice { text }] => text.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            warning(norm.on_notification("model/rerouted", &rerouted("main", json!("highRiskCyberActivity")))),
+            "Codex ran this turn on gpt-6.1-luna instead of gpt-6.2-sol: it took the request for high-risk security work."
+        );
+        // a reason this Codly does not know is shown as Codex wrote it
+        assert_eq!(
+            warning(norm.on_notification("model/rerouted", &rerouted("main", json!("capacity")))),
+            "Codex ran this turn on gpt-6.1-luna instead of gpt-6.2-sol (capacity)."
+        );
+        // a subagent's turn: the warning says whose
+        assert_eq!(
+            warning(norm.on_notification("model/rerouted", &rerouted("sub", json!("highRiskCyberActivity")))),
+            "A subagent: Codex ran this turn on gpt-6.1-luna instead of gpt-6.2-sol: it took the request for high-risk security work."
+        );
+        // the rerouted turn then fails: the only error is the turn's own reason
+        let failed = json!({ "threadId": "main", "turn": { "id": "u1", "items": [], "status": "failed", "error": { "message": "stream disconnected before completion" } } });
+        let ev = norm.on_notification("turn/completed", &failed);
+        let errors: Vec<&str> = ev.iter().filter_map(|e| if let EventKind::Error { message, .. } = e { Some(message.as_str()) } else { None }).collect();
+        assert_eq!(errors, ["stream disconnected before completion"]);
+        assert!(ev.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Failed, .. })), "{ev:?}");
+    }
+
+    /// A goal and a hook are rows a person can read. No capture has them: the lines are written
+    /// from the codex-cli 0.166.0 schema types (ThreadGoalUpdatedNotification, ThreadGoal,
+    /// ThreadGoalClearedNotification, HookStartedNotification, HookCompletedNotification,
+    /// HookRunSummary, HookOutputEntry).
+    #[test]
+    fn goals_and_hooks_are_rows_one_can_read() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        let notices = |ev: &[EventKind]| -> Vec<String> { ev.iter().filter_map(|e| if let EventKind::Notice { text } = e { Some(text.clone()) } else { None }).collect() };
+        let goal = |status: &str, used: i64| {
+            let goal = json!({ "threadId": "t", "objective": "Make the parser pass its tests", "status": status, "tokenBudget": 50000,
+                "tokensUsed": used, "timeUsedSeconds": 12, "createdAt": 1, "updatedAt": 2 });
+            json!({ "threadId": "t", "turnId": null, "goal": goal })
+        };
+        assert_eq!(notices(&norm.on_notification("thread/goal/updated", &goal("active", 0))), ["Goal: Make the parser pass its tests (budget: 50000 tokens)"]);
+        assert!(norm.on_notification("thread/goal/updated", &goal("active", 900)).is_empty(), "only its tokens moved");
+        assert_eq!(notices(&norm.on_notification("thread/goal/updated", &goal("budgetLimited", 50000))), ["Goal stopped at its token budget: Make the parser pass its tests"]);
+        assert_eq!(notices(&norm.on_notification("thread/goal/cleared", &json!({ "threadId": "t" }))), ["Goal cleared"]);
+        assert_eq!(notices(&norm.on_notification("thread/goal/updated", &goal("budgetLimited", 50000))).len(), 1, "the same goal set again is news");
+
+        // `statusMessage` is the progress text of the hook's configuration (ConfiguredHookHandler,
+        // HookMetadata): it is never told as what the hook said.
+        let hook = |status: &str, entries: Value| {
+            let run = json!({ "id": "h1", "eventName": "preToolUse", "handlerType": "command", "executionMode": "sync", "scope": "turn",
+                "sourcePath": "/Users/me/.codex/hooks.json", "source": "user", "displayOrder": 0, "status": status, "statusMessage": "Checking the command",
+                "startedAt": 1, "completedAt": 2, "durationMs": 40, "entries": entries });
+            json!({ "threadId": "t", "turnId": "u", "run": run })
+        };
+        assert!(norm.on_notification("hook/started", &hook("running", json!([]))).is_empty());
+        assert!(norm.on_notification("hook/completed", &hook("completed", json!([]))).is_empty(), "a hook that ran and said nothing is no row");
+        let ev = norm.on_notification("hook/completed", &hook("blocked", json!([{ "kind": "feedback", "text": "rm -rf is not allowed here" }])));
+        assert_eq!(notices(&ev), ["Codex hook preToolUse (hooks.json) blocked: rm -rf is not allowed here"]);
+        let ev = norm.on_notification("hook/completed", &hook("completed", json!([{ "kind": "context", "text": "Branch: main" }])));
+        assert_eq!(notices(&ev), ["Codex hook preToolUse (hooks.json) added context: Branch: main"]);
+        let ev = norm.on_notification("hook/completed", &hook("failed", json!([{ "kind": "error", "text": "guard.sh: command not found" }])));
+        assert!(
+            matches!(&ev[..], [EventKind::Error { message, fatal: false }] if message == "Codex hook preToolUse (hooks.json) failed: guard.sh: command not found"),
+            "{ev:?}"
+        );
+        let ev = norm.on_notification("hook/completed", &hook("failed", json!([])));
+        assert!(matches!(&ev[..], [EventKind::Error { message, fatal: false }] if message == "Codex hook preToolUse (hooks.json) failed"), "{ev:?}");
+    }
+
+    /// A Codex subagent works on a thread of its own. No capture has one: the lines are
+    /// written from the codex-cli 0.166.0 schema types (ThreadStartedNotification, Thread,
+    /// TurnStartedNotification, TurnCompletedNotification, Turn, ItemStartedNotification,
+    /// ItemCompletedNotification, ThreadItem, CommandExecutionRequestApprovalParams,
+    /// AgentMessageDeltaNotification, TurnPlanUpdatedNotification,
+    /// ThreadTokenUsageUpdatedNotification, TokenUsageBreakdown).
+    #[test]
+    fn a_subagents_work_is_told_as_the_agents() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        norm.thread = Some("main".into());
+        let mut events = norm.turn_started("go");
+        let thread = json!({ "id": "sub", "parentThreadId": "main", "agentNickname": "Ada", "agentRole": "explorer", "preview": "" });
+        events.extend(norm.on_notification("thread/started", &json!({ "thread": thread })));
+        events.extend(norm.on_notification("turn/started", &json!({ "threadId": "sub", "turn": { "id": "su1", "status": "inProgress", "items": [] } })));
+        assert_eq!(events.iter().filter(|e| matches!(e, EventKind::TurnStarted { .. })).count(), 1, "its turn is not the agent's");
+        assert!(
+            matches!(events.last(), Some(EventKind::SubAgent { call_id, description, status }) if call_id == "sub" && description == "Ada (explorer)" && status == "running"),
+            "{events:?}"
+        );
+        assert_eq!(norm.subagent_turns(), [("sub".to_string(), "su1".to_string())]);
+
+        // its command is a row of the agent, marked as the subagent's
+        let cmd = |status: &str, exit: Value| {
+            json!({ "type": "commandExecution", "id": "c1", "pluginId": null, "scriptPath": null, "command": "/bin/zsh -lc 'cargo build'", "cwd": "/w",
+                "processId": null, "source": "agent", "status": status, "commandActions": [], "aggregatedOutput": null, "exitCode": exit, "durationMs": null })
+        };
+        let ev = norm.on_notification("item/started", &json!({ "threadId": "sub", "turnId": "su1", "item": cmd("inProgress", Value::Null), "startedAtMs": 1 }));
+        assert!(
+            matches!(&ev[..], [EventKind::ToolStarted { call_id, input, .. }, EventKind::StatusChanged { status: AgentStatus::Working }]
+                if call_id == "c1" && input["subagent"] == json!({ "thread": "sub", "name": "Ada (explorer)" })),
+            "{ev:?}"
+        );
+
+        // its request is the agent's to get answered, and says who asks
+        let ask = json!({ "kind": "command", "threadId": "sub", "turnId": "su1", "itemId": "c1", "startedAtMs": 2, "environmentId": null, "reason": "needs the network" });
+        let (ev, reply) = norm.on_request(&json!(7), "item/commandExecution/requestApproval", &ask);
+        assert!(reply.is_none());
+        let a = approval_of(&ev);
+        assert_eq!(a.reason.as_deref(), Some("Subagent Ada (explorer): needs the network"));
+        assert!(matches!(&a.subject, ApprovalSubject::Command { command, .. } if command == "cargo build"), "{:?}", a.subject);
+
+        // its words and its plan are not the agent's
+        let said = json!({ "type": "agentMessage", "id": "m1", "text": "It builds.", "phase": "final_answer", "memoryCitation": null, "delivery": null, "questions": null });
+        assert!(norm.on_notification("item/agentMessage/delta", &json!({ "threadId": "sub", "turnId": "su1", "itemId": "m1", "delta": "It" })).is_empty());
+        assert!(norm.on_notification("item/completed", &json!({ "threadId": "sub", "turnId": "su1", "item": said, "completedAtMs": 3 })).is_empty());
+        let plan = json!({ "threadId": "sub", "turnId": "su1", "explanation": null, "plan": [{ "step": "build", "status": "inProgress" }] });
+        assert!(norm.on_notification("turn/plan/updated", &plan).is_empty());
+
+        // The agent's own turn ends first. Its result is not the subagent's last words and the
+        // subagent's card stays open. Codly rests an agent when its turn ends, so the agent
+        // says again that it still waits on that card.
+        let ev = norm.on_notification("turn/completed", &json!({ "threadId": "main", "turn": { "id": "u1", "status": "completed", "items": [] } }));
+        assert!(
+            matches!(&ev[..], [EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, .. }, EventKind::StatusChanged { status: AgentStatus::WaitingApproval }]),
+            "{ev:?}"
+        );
+
+        // answered under the request's id; the subagent's command still runs
+        let (resp, ev) = norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).unwrap();
+        assert_eq!(resp, json!({ "id": 7, "result": { "decision": "accept" } }));
+        assert!(matches!(&ev[..], [EventKind::StatusChanged { status: AgentStatus::Working }]), "{ev:?}");
+        let ev = norm.on_notification("item/completed", &json!({ "threadId": "sub", "turnId": "su1", "item": cmd("completed", json!(0)), "completedAtMs": 4 }));
+        assert!(
+            matches!(&ev[..], [EventKind::ToolCompleted { call_id, ok: true, .. }, EventKind::StatusChanged { status: AgentStatus::Idle }] if call_id == "c1"),
+            "{ev:?}"
+        );
+
+        // its tokens count for the run; the agent's context stays its own
+        let tu = |total: i64, last: i64| {
+            let counts = |n: i64| json!({ "totalTokens": n, "inputTokens": n, "cachedInputTokens": 0, "cacheWriteInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0 });
+            json!({ "total": counts(total), "last": counts(last), "modelContextWindow": 1000 })
+        };
+        let input = |ev: Vec<EventKind>| match &ev[..] {
+            [EventKind::UsageUpdated { usage }] => (usage.input_tokens, usage.context_used),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(input(norm.on_notification("thread/tokenUsage/updated", &json!({ "threadId": "main", "turnId": "u1", "tokenUsage": tu(100, 100) }))), (100, Some(100)));
+        assert_eq!(input(norm.on_notification("thread/tokenUsage/updated", &json!({ "threadId": "sub", "turnId": "su1", "tokenUsage": tu(40, 40) }))), (140, Some(100)));
+        assert_eq!(input(norm.on_notification("thread/tokenUsage/updated", &json!({ "threadId": "sub", "turnId": "su1", "tokenUsage": tu(70, 30) }))), (170, Some(100)));
+
+        let ev = norm.on_notification("turn/completed", &json!({ "threadId": "sub", "turn": { "id": "su1", "status": "completed", "items": [] } }));
+        assert!(matches!(&ev[..], [EventKind::SubAgent { call_id, status, .. }] if call_id == "sub" && status == "completed"), "{ev:?}");
+        assert!(norm.subagent_turns().is_empty());
+    }
+
+    /// A request ends with the turn of the thread that asked, not with another thread's.
+    /// (Lines written from the 0.166.0 schema types, as above; `TurnError` for the failure.)
+    #[test]
+    fn a_request_ends_with_the_turn_of_its_own_thread() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        norm.thread = Some("main".into());
+        norm.turn_started("go");
+        let ask = |thread: &str, item: &str| json!({ "kind": "command", "threadId": thread, "turnId": "x", "itemId": item, "startedAtMs": 1, "environmentId": null, "command": "ls", "cwd": "/w" });
+        let closed = |ev: &[EventKind]| -> Vec<Id> {
+            ev.iter().filter_map(|e| if let EventKind::ApprovalResolved { approval_id, status: ApprovalStatus::Cancelled, .. } = e { Some(approval_id.clone()) } else { None }).collect()
+        };
+        let own = approval_of(&norm.on_request(&json!(1), "item/commandExecution/requestApproval", &ask("main", "i1")).0);
+        assert_eq!(own.reason, None);
+        let subs = approval_of(&norm.on_request(&json!(2), "item/commandExecution/requestApproval", &ask("sub", "i2")).0);
+        assert_eq!(subs.reason.as_deref(), Some("A subagent asks for this"), "Codex gave it no name");
+
+        let failed = json!({ "id": "su1", "status": "failed", "items": [], "error": { "message": "the model is overloaded", "codexErrorInfo": null, "additionalDetails": null } });
+        let ev = norm.on_notification("turn/completed", &json!({ "threadId": "sub", "turn": failed }));
+        assert_eq!(closed(&ev), [subs.id.clone()], "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, EventKind::Error { message, fatal: false } if message == "A subagent: the model is overloaded")), "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, EventKind::SubAgent { status, .. } if status == "failed")), "{ev:?}");
+        assert!(!ev.iter().any(|e| matches!(e, EventKind::TurnCompleted { .. })), "{ev:?}");
+
+        // A cancelled card stops the turn that asked. The subagent's is not the agent's: when
+        // the agent's own turn fails later, it is told as failed, with its error.
+        let again = approval_of(&norm.on_request(&json!(3), "item/commandExecution/requestApproval", &ask("sub", "i3")).0);
+        // the request names the subagent's turn: a stop reaches it without its turn/started
+        assert_eq!(norm.subagent_turns(), [("sub".to_string(), "x".to_string())]);
+        let (resp, _) = norm.answer(&again.id, &ApprovalDecision { choice: ApprovalChoice::Cancel, message: None, answers: None }).unwrap();
+        assert_eq!(resp, json!({ "id": 3, "result": { "decision": "cancel" } }));
+        assert!(!norm.interrupt_requested);
+
+        let own_failed = json!({ "id": "u1", "status": "failed", "items": [], "error": { "message": "stream disconnected", "codexErrorInfo": null, "additionalDetails": null } });
+        let ev = norm.on_notification("turn/completed", &json!({ "threadId": "main", "turn": own_failed }));
+        assert_eq!(closed(&ev), [own.id.clone()], "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, EventKind::Error { message, fatal: false } if message == "stream disconnected")), "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Failed, .. })), "{ev:?}");
+    }
+
+    /// A subagent has one row in the list of helpers, and the row always says something. A
+    /// call about a subagent that is not the one that started it (`wait`, `closeAgent`...) has
+    /// none. A thread the agent got late can still be stopped. (Lines written from the
+    /// codex-cli 0.166.0 schema types: the `collabAgentToolCall` and `commandExecution` items
+    /// of ThreadItem, CollabAgentTool, ItemStartedNotification, ItemCompletedNotification,
+    /// ThreadStartedNotification, Thread, TurnStartedNotification, TurnCompletedNotification.
+    /// Not verified live.)
+    #[test]
+    fn a_subagent_has_one_row_that_says_what_it_does() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        norm.thread = Some("main".into());
+        norm.turn_started("go");
+        let rows = |ev: &[EventKind]| -> Vec<(String, String, String)> {
+            ev.iter()
+                .filter_map(|e| if let EventKind::SubAgent { call_id, description, status } = e { Some((call_id.clone(), description.clone(), status.clone())) } else { None })
+                .collect()
+        };
+        let row = |key: &str, description: &str, status: &str| (key.to_string(), description.to_string(), status.to_string());
+        let spawn = |id: &str, status: &str, threads: Value| {
+            json!({ "type": "collabAgentToolCall", "id": id, "tool": "spawnAgent", "status": status, "senderThreadId": "main", "receiverThreadIds": threads,
+                "prompt": "Find the flaky test", "model": null, "reasoningEffort": null, "agentsStates": {} })
+        };
+        let begun = |thread: &str, turn: &str, item: Value| json!({ "threadId": thread, "turnId": turn, "item": item, "startedAtMs": 1 });
+        let ended = |thread: &str, turn: &str, item: Value| json!({ "threadId": thread, "turnId": turn, "item": item, "completedAtMs": 2 });
+        let turn = |thread: &str, id: &str, status: &str| json!({ "threadId": thread, "turn": { "id": id, "status": status, "items": [] } });
+
+        // The call names its thread when it ends: the row comes then, keyed by the call, and
+        // the subagent keeps it. Until then the call is a tool call like another.
+        let ev = norm.on_notification("item/started", &begun("main", "u1", spawn("k1", "inProgress", json!([]))));
+        assert!(rows(&ev).is_empty() && ev.iter().any(|e| matches!(e, EventKind::ToolStarted { call_id, .. } if call_id == "k1")), "{ev:?}");
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k1", "completed", json!(["s1"]))));
+        assert_eq!(rows(&ev), [row("k1", "Find the flaky test", "completed")]);
+        let thread = json!({ "id": "s1", "parentThreadId": "main", "agentNickname": "Ada", "agentRole": "explorer", "preview": "" });
+        norm.on_notification("thread/started", &json!({ "thread": thread }));
+        let ev = norm.on_notification("turn/started", &turn("s1", "su1", "inProgress"));
+        assert_eq!(rows(&ev), [row("k1", "Ada (explorer): Find the flaky test", "running")]);
+        let ev = norm.on_notification("turn/completed", &turn("s1", "su1", "completed"));
+        assert_eq!(rows(&ev), [row("k1", "Ada (explorer): Find the flaky test", "completed")]);
+
+        // The call names its thread when it starts and ends while the subagent works: the row
+        // stays open until the subagent's turn ends.
+        let ev = norm.on_notification("item/started", &begun("main", "u1", spawn("k2", "inProgress", json!(["s2"]))));
+        assert_eq!(rows(&ev), [row("k2", "Find the flaky test", "started")]);
+        let ev = norm.on_notification("turn/started", &turn("s2", "su2", "inProgress"));
+        assert_eq!(rows(&ev), [row("k2", "Find the flaky test", "running")], "Codex gave it no name: the row says what it was asked");
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k2", "completed", json!(["s2"]))));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        let ev = norm.on_notification("turn/completed", &turn("s2", "su2", "completed"));
+        assert_eq!(rows(&ev), [row("k2", "Find the flaky test", "completed")]);
+
+        // A thread nothing named yet, with no `spawnAgent` call open that could name it, has a
+        // row of its own, and the row is not blank. A call that names it afterwards adds no
+        // second row: the subagent's row now says what it does.
+        let ev = norm.on_notification("turn/started", &turn("s3", "su3", "inProgress"));
+        assert_eq!(rows(&ev), [row("s3", "Codex subagent", "running")]);
+        let ev = norm.on_notification("item/started", &begun("main", "u1", spawn("k3", "inProgress", json!([]))));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k3", "completed", json!(["s3"]))));
+        assert_eq!(rows(&ev), [row("s3", "Find the flaky test", "running")]);
+        let ev = norm.on_notification("turn/completed", &turn("s3", "su3", "completed"));
+        assert_eq!(rows(&ev), [row("s3", "Find the flaky test", "completed")]);
+
+        // The subagent's turn starts while the call that started it is open and has named no
+        // thread: its row waits for the call, and is the call's like the others (the
+        // conversation shows a helper at the call that is its row's key). A stop reaches it.
+        norm.on_notification("item/started", &begun("main", "u1", spawn("k9", "inProgress", json!([]))));
+        let ev = norm.on_notification("turn/started", &turn("s9", "su9", "inProgress"));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        assert_eq!(norm.subagent_turns(), [("s9".to_string(), "su9".to_string())]);
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k9", "completed", json!(["s9"]))));
+        assert_eq!(rows(&ev), [row("k9", "Find the flaky test", "running")]);
+        let ev = norm.on_notification("turn/completed", &turn("s9", "su9", "completed"));
+        assert_eq!(rows(&ev), [row("k9", "Find the flaky test", "completed")]);
+
+        // A quick subagent's turn is over before the call names it: one row, at the call.
+        norm.on_notification("item/started", &begun("main", "u1", spawn("k10", "inProgress", json!([]))));
+        let mut ev = norm.on_notification("turn/started", &turn("s10", "su10", "inProgress"));
+        ev.extend(norm.on_notification("turn/completed", &turn("s10", "su10", "completed")));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k10", "completed", json!(["s10"]))));
+        assert_eq!(rows(&ev), [row("k10", "Find the flaky test", "completed")]);
+
+        // The call ends and names nobody: the subagent that waited has a row of its own.
+        norm.on_notification("item/started", &begun("main", "u1", spawn("k11", "inProgress", json!([]))));
+        let ev = norm.on_notification("turn/started", &turn("s11", "su11", "inProgress"));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k11", "failed", json!([]))));
+        assert_eq!(rows(&ev), [row("k11", "Find the flaky test", "failed"), row("s11", "Codex subagent", "running")]);
+        let ev = norm.on_notification("turn/completed", &turn("s11", "su11", "completed"));
+        assert_eq!(rows(&ev), [row("s11", "Codex subagent", "completed")]);
+
+        // The subagent's own thread has the last word: a call that ends after a failed
+        // subagent does not turn its row to "completed".
+        let ev = norm.on_notification("item/started", &begun("main", "u1", spawn("k5", "inProgress", json!(["s5"]))));
+        assert_eq!(rows(&ev), [row("k5", "Find the flaky test", "started")]);
+        norm.on_notification("turn/started", &turn("s5", "su5", "inProgress"));
+        let ev = norm.on_notification("turn/completed", &turn("s5", "su5", "failed"));
+        assert_eq!(rows(&ev), [row("k5", "Find the flaky test", "failed")]);
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k5", "completed", json!(["s5"]))));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+
+        // A call that names two subagents: each has its row, keyed by its thread.
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k6", "completed", json!(["s6", "s7"]))));
+        let asked = "Find the flaky test";
+        assert_eq!(rows(&ev), [row("s6", asked, "started"), row("s7", asked, "started"), row("s6", asked, "completed"), row("s7", asked, "completed")]);
+
+        // A call that failed and started nobody is all there is to show.
+        norm.on_notification("item/started", &begun("main", "u1", spawn("k8", "inProgress", json!([]))));
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k8", "failed", json!([]))));
+        assert_eq!(rows(&ev), [row("k8", "Find the flaky test", "failed")]);
+
+        // The calls about a subagent that exists are tool calls and nothing more: no blank
+        // row for each `wait` or `closeAgent`.
+        for tool in ["wait", "closeAgent", "sendInput", "interruptAgent", "listAgents"] {
+            let call = |status: &str| {
+                json!({ "type": "collabAgentToolCall", "id": format!("c-{tool}"), "tool": tool, "status": status, "senderThreadId": "main", "receiverThreadIds": ["s1"],
+                    "prompt": null, "model": null, "reasoningEffort": null, "agentsStates": { "s1": { "status": "completed", "message": null } } })
+            };
+            let mut ev = norm.on_notification("item/started", &begun("main", "u1", call("inProgress")));
+            ev.extend(norm.on_notification("item/completed", &ended("main", "u1", call("completed"))));
+            assert!(rows(&ev).is_empty(), "{tool}: {ev:?}");
+            assert!(ev.iter().any(|e| matches!(e, EventKind::ToolStarted { .. })), "{tool}: {ev:?}");
+            assert!(ev.iter().any(|e| matches!(e, EventKind::ToolCompleted { ok: true, .. })), "{tool}: {ev:?}");
+        }
+
+        // A thread the agent got after its turn/started: its items name its turn, so a stop
+        // reaches it. And the agent is not free while that subagent works, whatever its own turn does.
+        assert!(norm.subagent_turns().is_empty());
+        let cmd = json!({ "type": "commandExecution", "id": "c4", "pluginId": null, "scriptPath": null, "command": "cargo test", "cwd": "/w", "processId": null,
+            "source": "agent", "status": "inProgress", "commandActions": [], "aggregatedOutput": null, "exitCode": null, "durationMs": null });
+        norm.on_notification("item/started", &begun("s4", "su4", cmd));
+        assert_eq!(norm.subagent_turns(), [("s4".to_string(), "su4".to_string())]);
+        let ev = norm.turn_failed();
+        assert!(matches!(&ev[..], [EventKind::TurnCompleted { status: TurnStatus::Failed, .. }, EventKind::StatusChanged { status: AgentStatus::Working }]), "{ev:?}");
+
+        // The agent's turn ends with the call still open: no call names the subagent that
+        // waited, so it has a row of its own. (`s4` never had a row to tell: it gets none.)
+        norm.on_notification("item/started", &begun("main", "u2", spawn("k12", "inProgress", json!([]))));
+        let ev = norm.on_notification("turn/started", &turn("s12", "su12", "inProgress"));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        let ev = norm.on_notification("turn/completed", &turn("main", "u2", "interrupted"));
+        assert_eq!(rows(&ev), [row("s12", "Codex subagent", "running")]);
+    }
+
     #[test]
     fn byok_points_codex_at_its_own_provider() {
         let spec = |env: &[(&str, &str)], cmd: Option<&str>| SpawnSpec {
             agent_id: "a".into(),
+            agent_name: "Ada".into(),
             run_id: "r".into(),
             provider: Provider::Codex,
             role: Role::Worker,
@@ -1620,12 +3089,16 @@ mod tests {
             bin: PathBuf::from("codex"),
             env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
             system_prompt: String::new(),
             read_only: false,
             mcp: None,
             use_user_setup: false,
+            sandbox_network: false,
+            local_settings: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: cmd.map(str::to_owned),
+            sandbox_shell: false,
         };
         let off = spec(&[("CODEX_HOME", "/h")], None);
         assert!(byok_overrides(&off).is_empty());
@@ -1653,6 +3126,7 @@ mod tests {
     fn thread_params() {
         let spec = SpawnSpec {
             agent_id: "a".into(),
+            agent_name: "Ada".into(),
             run_id: "r".into(),
             provider: Provider::Codex,
             role: Role::Worker,
@@ -1661,15 +3135,19 @@ mod tests {
             bin: PathBuf::from("codex"),
             env: HashMap::new(),
             session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
             system_prompt: "rules".into(),
             read_only: false,
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "tok".into())] }),
             use_user_setup: false,
+            sandbox_network: false,
+            local_settings: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: None,
+            sandbox_shell: false,
         };
         let (model, effort) = classify::split_model_effort(spec.model.as_deref());
-        let (m, p) = thread_request(&spec, model.as_deref(), effort.as_deref());
+        let (m, p) = thread_request(&spec, model.as_deref(), effort.as_deref(), &[], &[]);
         assert_eq!(m, "thread/start");
         assert_eq!(p["model"], "gpt-6-luna");
         assert_eq!(p["approvalPolicy"], "on-request");
@@ -1683,9 +3161,50 @@ mod tests {
         let mut ro = spec.clone();
         ro.read_only = true;
         ro.session = SessionMode::Resume { session_id: "th-1".into() };
-        let (m, p) = thread_request(&ro, None, None);
+        let (m, p) = thread_request(&ro, None, None, &[], &[]);
         assert_eq!((m, &p["threadId"], &p["sandbox"]), ("thread/resume", &json!("th-1"), &json!("read-only")));
         assert!(p.get("threadSource").is_none() && p.get("model").is_none());
+        assert!(p["config"].get("sandbox_workspace_write").is_none(), "the sandbox keeps the network closed unless you open it");
+
+        // "Use my setup" off: each server of the user's own config is switched off for the
+        // thread (`mcp_servers.<name>.enabled`); Codly's own server keeps its definition.
+        let own = ["linear".to_string(), "codly".to_string()];
+        let (_, p) = thread_request(&spec, None, None, &own, &[]);
+        assert_eq!(p["config"]["mcp_servers"]["linear"], json!({ "enabled": false }));
+        assert_eq!(p["config"]["mcp_servers"]["codly"]["command"], "/x/codly");
+        assert!(p["config"]["mcp_servers"]["codly"].get("enabled").is_none());
+        // ... also for an agent that has no Codly server
+        let bare = SpawnSpec { mcp: None, ..spec.clone() };
+        assert_eq!(thread_request(&bare, None, None, &own, &[]).1["config"]["mcp_servers"], json!({ "codly": { "enabled": false }, "linear": { "enabled": false } }));
+        assert!(thread_request(&bare, None, None, &[], &[]).1["config"].get("mcp_servers").is_none());
+
+        // The default servers (Settings → Connections) are handed in with their keys, looked
+        // up by the caller: one that only reads runs without asking, the other asks first.
+        let server = |name: &str, read_only: bool| ReadyMcp {
+            name: name.into(),
+            command: "npx".into(),
+            args: vec![format!("{name}-mcp")],
+            env: vec![("TOKEN".into(), "k".into())],
+            read_only,
+        };
+        let (_, p) = thread_request(&spec, None, None, &["docs".to_string()], &[server("docs", true), server("github", false)]);
+        let servers = &p["config"]["mcp_servers"];
+        assert_eq!(servers["docs"], json!({ "command": "npx", "args": ["docs-mcp"], "env": { "TOKEN": "k" }, "default_tools_approval_mode": "approve" }));
+        assert_eq!(servers["github"], json!({ "command": "npx", "args": ["github-mcp"], "env": { "TOKEN": "k" } }));
+        assert_eq!(servers["codly"]["command"], "/x/codly");
+        // an agent without Codly's server gets none of them
+        assert!(thread_request(&bare, None, None, &[], &[server("docs", true)]).1["config"].get("mcp_servers").is_none());
+
+        assert_eq!(thread_name(&spec), "Codly: Ada (worker)");
+        assert_eq!(thread_name(&SpawnSpec { role: Role::Lead, ..spec.clone() }), "Codly: Ada (Lead)");
+        assert_eq!(thread_name(&SpawnSpec { role: Role::Solo, ..spec.clone() }), "Codly: Ada");
+
+        // Settings → "Let Codex agents use the network": the workspace sandbox opens the
+        // network (`sandbox_workspace_write.network_access`); a read-only agent has no such sandbox.
+        let net = SpawnSpec { sandbox_network: true, ..spec.clone() };
+        assert_eq!(thread_request(&net, None, None, &[], &[]).1["config"]["sandbox_workspace_write"], json!({ "network_access": true }));
+        let net_ro = SpawnSpec { sandbox_network: true, ..ro.clone() };
+        assert!(thread_request(&net_ro, None, None, &[], &[]).1["config"].get("sandbox_workspace_write").is_none());
     }
 
     /// An app-server with no process behind it: lines are fed by hand, every write fails.
@@ -1695,11 +3214,14 @@ mod tests {
             next_id: AtomicI64::new(0),
             state: StdMutex::new(State::default()),
             alive: AtomicBool::new(true),
+            abandoned: AtomicBool::new(false),
+            last_inbound_ms: AtomicI64::new(0),
             pgid: 0,
             started_ms: 0,
             stderr: StderrTail::default(),
             info: StdMutex::new(ServerInfo { cli_version: None, billing: Billing::Unknown }),
             bootstrap_raw: Arc::new(RawLog::open(&dir.join("raw.ndjson")).unwrap()),
+            models: Mutex::new(None),
         })
     }
 
@@ -1716,15 +3238,18 @@ mod tests {
             route: Route { tx: mpsc::unbounded_channel().0, raw: raw.clone() },
             raw,
             effort: None,
+            name: None,
             thread_id: None,
             started: false,
             norm: CodexNormalizer::new("a", "r", PathBuf::from("/w"), false),
             pending: HashMap::from([(0, Pending::Thread)]),
             active_turn: None,
+            compaction: Compaction::No,
             turn_pending: false,
             interrupt_after_start: false,
             steer_queue: Vec::new(),
             queue: VecDeque::new(),
+            held: Vec::new(),
             stage: Stage::Running,
             deadline: None,
         };
@@ -1733,6 +3258,29 @@ mod tests {
 
     fn emitted(events: &mut mpsc::UnboundedReceiver<AdapterEvent>) -> Vec<EventKind> {
         std::iter::from_fn(|| events.try_recv().ok()).map(|e| e.kind).collect()
+    }
+
+    /// The input of a turn names an attached image as an item of its own beside the text; one
+    /// over the size limit stays a path, and the user is told.
+    #[tokio::test]
+    async fn an_attached_image_is_an_input_item_of_its_own() {
+        use crate::adapters::attachments::testing::{attach, message, png_of};
+        let dir = tempfile::tempdir().unwrap();
+        let (agent, mut events) = fake_agent(&fake_server(dir.path()));
+        let shot = attach(dir.path(), "shot.png", &png_of(300));
+        let big = attach(dir.path(), "big.png", &png_of(4_000_000));
+        let text = message("Make it look like this.", &[&shot, &big]);
+
+        // Written from the schema types of codex-cli 0.166.0 (`app-server generate-ts`):
+        // `TurnStartParams.input` and `TurnSteerParams.input` are `Array<UserInput>`, with the
+        // items `{ "type": "text", text, text_elements }` and `{ "type": "localImage", path }`.
+        let expected = json!([{ "type": "text", "text": text, "text_elements": [] }, { "type": "localImage", "path": shot.to_str().unwrap() }]);
+        assert_eq!(agent.input(&text).await, expected);
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::Error { message, fatal: false }] if message.starts_with("big.png is over 3.5 MB")), "{kinds:?}");
+
+        assert_eq!(agent.input("no files").await, json!([{ "type": "text", "text": "no files", "text_elements": [] }]));
+        assert!(emitted(&mut events).is_empty());
     }
 
     #[tokio::test]
@@ -1759,6 +3307,512 @@ mod tests {
         server.route_line(br#"{"method":"account/rateLimits/updated","params":{"rateLimits":{}}}"#);
         let limits = Some("account/rateLimits/updated".to_string());
         assert_eq!((got(&mut agents[0]), got(&mut agents[1])), (limits.clone(), limits));
+    }
+
+    /// Codex repeats the account's usage after every model response. Each agent would record
+    /// every copy: only a reading that says something new is passed on.
+    #[tokio::test]
+    async fn an_unchanged_rate_limit_reading_is_passed_on_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let mut agents = Vec::new();
+        for tid in ["t1", "t2"] {
+            let (tx, rx) = mpsc::unbounded_channel();
+            server.state.lock().unwrap().routes.insert(tid.into(), Route { tx, raw: server.bootstrap_raw.clone() });
+            agents.push(rx);
+        }
+        // how many notifications each agent got since the last look
+        let mut got = || -> Vec<usize> { agents.iter_mut().map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).count()).collect() };
+        // `emittedAtMs` differs on every line: only the reading itself (`params`) is compared
+        let reading = |used: u32, reached: &str, at: u32| {
+            format!(r#"{{"method":"account/rateLimits/updated","params":{{"rateLimits":{{"primary":{{"usedPercent":{used}}},"rateLimitReachedType":{reached}}}}},"emittedAtMs":{at}}}"#)
+        };
+        server.route_line(reading(4, "null", 1).as_bytes());
+        assert_eq!(got(), [1, 1], "the first reading reaches every agent");
+        server.route_line(reading(4, "null", 2).as_bytes());
+        server.route_line(reading(4, "null", 3).as_bytes());
+        assert_eq!(got(), [0, 0], "the same reading again reaches nobody");
+        server.route_line(reading(5, "null", 4).as_bytes());
+        assert_eq!(got(), [1, 1], "more usage is news");
+        server.route_line(reading(5, r#""rate_limit_reached""#, 5).as_bytes());
+        assert_eq!(got(), [1, 1], "so is a limit reached at the same usage");
+        // a minute on, the same reading counts again (a window without a reset time goes stale)
+        server.state.lock().unwrap().last_limits.as_mut().unwrap().1 -= LIMITS_REFRESH_MS;
+        server.route_line(reading(5, r#""rate_limit_reached""#, 6).as_bytes());
+        assert_eq!(got(), [1, 1]);
+
+        // who is signed in is the server's to know: no agent reports it
+        server.route_line(br#"{"method":"account/updated","params":{"authMode":"chatgpt","planType":"plus"}}"#);
+        assert_eq!(got(), [0, 0]);
+        assert_eq!(server.info.lock().unwrap().billing, Billing::Subscription);
+        server.route_line(br#"{"method":"account/updated","params":{"authMode":"a mode from the future"}}"#);
+        assert_eq!(server.info.lock().unwrap().billing, Billing::Subscription, "an unknown mode changes nothing");
+    }
+
+    /// Codex runs a subagent on a thread of its own. What that thread sends belongs to the
+    /// agent that owns the thread it came from: a request nobody takes is refused, and the
+    /// subagent's command fails without a word. (Lines written from the codex-cli 0.166.0
+    /// schema types: ThreadStartedNotification, Thread, ItemCompletedNotification, the
+    /// `collabAgentToolCall` and `subAgentActivity` items, CommandExecutionRequestApprovalParams.)
+    #[tokio::test]
+    async fn a_subagents_thread_reaches_the_agent_that_owns_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let mut agents = Vec::new();
+        for tid in ["t1", "t2"] {
+            let (tx, rx) = mpsc::unbounded_channel();
+            server.state.lock().unwrap().routes.insert(tid.into(), Route { tx, raw: server.bootstrap_raw.clone() });
+            agents.push(rx);
+        }
+        // what each agent got since the last look
+        let got = |rx: &mut mpsc::UnboundedReceiver<ServerMsg>| -> Vec<String> {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|m| match m {
+                    ServerMsg::Notification { method, .. } | ServerMsg::Request { method, .. } => method,
+                    _ => "not a server message".into(),
+                })
+                .collect()
+        };
+        let none: [&str; 0] = [];
+
+        // the thread says which thread spawned it
+        server.route_line(br#"{"method":"thread/started","params":{"thread":{"id":"s1","parentThreadId":"t1","agentNickname":"Ada","agentRole":null}}}"#);
+        server.route_line(br#"{"method":"item/commandExecution/requestApproval","id":4,"params":{"kind":"command","threadId":"s1","turnId":"u","itemId":"c1","startedAtMs":1}}"#);
+        assert_eq!(got(&mut agents[0]), ["thread/started", "item/commandExecution/requestApproval"]);
+        assert_eq!(got(&mut agents[1]), none);
+        // a subagent of the subagent
+        server.route_line(br#"{"method":"thread/started","params":{"thread":{"id":"s3","parentThreadId":"s1"}}}"#);
+        assert_eq!(got(&mut agents[0]), ["thread/started"]);
+
+        // the parent's items name the threads of the agents it started
+        server.route_line(
+            br#"{"method":"item/completed","params":{"threadId":"t2","turnId":"u","completedAtMs":1,"item":{"type":"collabAgentToolCall","id":"k1","tool":"spawnAgent","status":"completed","senderThreadId":"t2","receiverThreadIds":["s2"],"prompt":"look around","agentsStates":{}}}}"#,
+        );
+        server.route_line(br#"{"method":"turn/started","params":{"threadId":"s2","turn":{"id":"u2"}}}"#);
+        server.route_line(
+            br#"{"method":"item/started","params":{"threadId":"t2","turnId":"u","startedAtMs":2,"item":{"type":"subAgentActivity","id":"k2","kind":"started","agentThreadId":"s4","agentPath":"/root/helper"}}}"#,
+        );
+        server.route_line(br#"{"method":"turn/started","params":{"threadId":"s4","turn":{"id":"u4"}}}"#);
+        assert_eq!(got(&mut agents[1]), ["item/completed", "turn/started", "item/started", "turn/started"]);
+        assert_eq!(got(&mut agents[0]), none);
+
+        // a thread that has an owner keeps it; a subagent of nobody's thread reaches nobody
+        server.route_line(br#"{"method":"thread/started","params":{"thread":{"id":"t2","parentThreadId":"t1"}}}"#);
+        server.route_line(br#"{"method":"thread/started","params":{"thread":{"id":"s9","parentThreadId":"gone"}}}"#);
+        server.route_line(br#"{"method":"turn/started","params":{"threadId":"s9","turn":{"id":"u9"}}}"#);
+        assert_eq!(got(&mut agents[1]), ["thread/started"]);
+        assert_eq!(got(&mut agents[0]), none);
+
+        // what concerns the account reaches each agent once, however many threads it has
+        server.route_line(br#"{"method":"account/rateLimits/updated","params":{"rateLimits":{}}}"#);
+        assert_eq!((got(&mut agents[0]).len(), got(&mut agents[1]).len()), (1, 1));
+
+        // Codex closes a subagent's thread (ThreadClosedNotification): its owner hears it, and
+        // then the thread has no route. An agent's own thread keeps its route.
+        let (first, second) = {
+            let st = server.state.lock().unwrap();
+            (st.routes["t1"].clone(), st.routes["t2"].clone())
+        };
+        assert_eq!(server.subagent_threads(&second), ["s2", "s4"]);
+        server.route_line(br#"{"method":"thread/closed","params":{"threadId":"s2"}}"#);
+        server.route_line(br#"{"method":"turn/started","params":{"threadId":"s2","turn":{"id":"u5"}}}"#);
+        server.route_line(br#"{"method":"thread/closed","params":{"threadId":"t2"}}"#);
+        server.route_line(br#"{"method":"turn/started","params":{"threadId":"t2","turn":{"id":"u6"}}}"#);
+        assert_eq!(got(&mut agents[1]), ["thread/closed", "thread/closed", "turn/started"]);
+        assert_eq!(server.subagent_threads(&second), ["s4"]);
+        // a call that only waits for the closed subagent, or closes it, brings no route back
+        for tool in ["wait", "closeAgent"] {
+            let line = format!(
+                r#"{{"method":"item/completed","params":{{"threadId":"t2","turnId":"u","completedAtMs":3,"item":{{"type":"collabAgentToolCall","id":"k-{tool}","tool":"{tool}","status":"completed","senderThreadId":"t2","receiverThreadIds":["s2"],"prompt":null,"agentsStates":{{}}}}}}}}"#
+            );
+            server.route_line(line.as_bytes());
+        }
+        assert_eq!(server.subagent_threads(&second), ["s4"]);
+        // the agent resumes it: what it does reaches the agent again
+        server.route_line(
+            br#"{"method":"item/started","params":{"threadId":"t2","turnId":"u","startedAtMs":4,"item":{"type":"collabAgentToolCall","id":"k3","tool":"resumeAgent","status":"inProgress","senderThreadId":"t2","receiverThreadIds":["s2"],"prompt":null,"agentsStates":{}}}}"#,
+        );
+        server.route_line(br#"{"method":"turn/started","params":{"threadId":"s2","turn":{"id":"u7"}}}"#);
+        assert_eq!(got(&mut agents[1]), ["item/completed", "item/completed", "item/started", "turn/started"]);
+        assert_eq!(server.subagent_threads(&second), ["s2", "s4"]);
+        assert_eq!(got(&mut agents[0]), none);
+
+        // an agent that ends leaves with its subagents' threads
+        assert_eq!(server.subagent_threads(&first), ["s1", "s3"]);
+        server.unroute(&first);
+        let st = server.state.lock().unwrap();
+        let mut left: Vec<String> = st.routes.keys().cloned().collect();
+        left.sort();
+        assert_eq!(left, ["s2", "s4", "t2"]);
+        let mut subagents: Vec<String> = st.subagent_threads.iter().cloned().collect();
+        subagents.sort();
+        assert_eq!(subagents, ["s2", "s4"]);
+    }
+
+    /// An agent that ends lets its subagents' threads go with its own, so none stays loaded
+    /// on the shared server for nobody. Only the answer about its own thread ends the run.
+    /// (`thread/unsubscribe` with ThreadUnsubscribeParams and ThreadUnsubscribeResponse, and
+    /// the `thread/started` lines, written from the codex-cli 0.166.0 schema types. Not
+    /// verified live.)
+    #[tokio::test]
+    async fn an_agent_that_ends_lets_its_subagents_threads_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        // an app-server that only keeps what it is sent
+        let mut sink = proc::command(Path::new("/bin/sh"), &["-c".into(), "cat > sent".into()], dir.path(), &env).spawn().unwrap();
+        let server = fake_server(dir.path());
+        *server.stdin.lock().await = sink.stdin.take();
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.started, agent.thread_id) = (true, Some("t".into()));
+        agent.norm.thread = agent.thread_id.clone();
+        server.state.lock().unwrap().routes.insert("t".into(), agent.route.clone());
+        // another agent of the account, with a subagent of its own
+        server.state.lock().unwrap().routes.insert("other".into(), Route { tx: mpsc::unbounded_channel().0, raw: server.bootstrap_raw.clone() });
+        for (thread, parent) in [("s1", "t"), ("s2", "s1"), ("s3", "t"), ("o1", "other")] {
+            server.route_line(format!(r#"{{"method":"thread/started","params":{{"thread":{{"id":"{thread}","parentThreadId":"{parent}"}}}}}}"#).as_bytes());
+        }
+        // one of them is closed before the agent ends: nothing to let go there
+        server.route_line(br#"{"method":"thread/closed","params":{"threadId":"s3"}}"#);
+
+        agent.on_cmd(AgentCmd::Shutdown).await;
+        assert_eq!(agent.stage, Stage::Unsubscribing);
+        // ThreadUnsubscribeResponse { status }: a subagent's answer ends nothing
+        agent.on_response(0, Ok(json!({ "status": "notSubscribed" })), &mut None).await;
+        agent.on_response(1, Ok(json!({ "status": "unsubscribed" })), &mut None).await;
+        assert_eq!(agent.stage, Stage::Unsubscribing);
+        agent.on_response(2, Ok(json!({ "status": "unsubscribed" })), &mut None).await;
+        assert_eq!(agent.stage, Stage::Done);
+        assert!(matches!(emitted(&mut events).last(), Some(EventKind::Exited { .. })));
+
+        server.stdin.lock().await.take(); // end of input: `cat` exits
+        sink.wait().await.unwrap();
+        let sent: Vec<Value> = std::fs::read_to_string(dir.path().join("sent")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let asked: Vec<(&str, &str)> = sent.iter().map(|m| (m["method"].as_str().unwrap(), m["params"]["threadId"].as_str().unwrap())).collect();
+        assert_eq!(asked, [("thread/unsubscribe", "s1"), ("thread/unsubscribe", "s2"), ("thread/unsubscribe", "t")]);
+        // the other agent keeps its threads
+        let mut left: Vec<String> = server.state.lock().unwrap().routes.keys().cloned().collect();
+        left.sort();
+        assert_eq!(left, ["o1", "other"]);
+    }
+
+    /// The app-server takes no more lines when an agent with subagents ends: one cause, said
+    /// once. Before, the request for the first subagent's thread failed, and then the agent's
+    /// own failed with the same words: two equal errors. (`thread/started` lines written from
+    /// the codex-cli 0.166.0 schema types. Not verified live.)
+    #[tokio::test]
+    async fn a_server_that_takes_no_more_lines_is_said_once_when_an_agent_with_subagents_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path()); // every write fails
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.started, agent.thread_id) = (true, Some("t".into()));
+        agent.norm.thread = agent.thread_id.clone();
+        server.state.lock().unwrap().routes.insert("t".into(), agent.route.clone());
+        for thread in ["s1", "s2"] {
+            server.route_line(format!(r#"{{"method":"thread/started","params":{{"thread":{{"id":"{thread}","parentThreadId":"t"}}}}}}"#).as_bytes());
+        }
+        assert_eq!(server.subagent_threads(&agent.route), ["s1", "s2"]);
+
+        agent.on_cmd(AgentCmd::Shutdown).await;
+        assert_eq!(agent.stage, Stage::Done, "nothing to wait for: no request went out");
+        let kinds = emitted(&mut events);
+        let errors: Vec<&str> = kinds.iter().filter_map(|e| if let EventKind::Error { message, .. } = e { Some(message.as_str()) } else { None }).collect();
+        assert_eq!(errors, ["thread/unsubscribe: codex app-server stdin is closed"]);
+        assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
+        assert!(server.state.lock().unwrap().routes.is_empty(), "the agent's threads are let go");
+    }
+
+    /// A subagent's turn ends on its own thread: the agent's turn goes on. Its end is neither
+    /// kept back behind a steer nor taken for the end of the agent's turn.
+    #[tokio::test]
+    async fn a_subagents_turn_end_is_not_the_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.thread_id, agent.active_turn) = (Some("t".into()), Some("u".into()));
+        agent.norm.thread = agent.thread_id.clone();
+        agent.norm.turn_started("go");
+        agent.pending.insert(7, Pending::Steer("also run the tests".into()));
+        agent.on_notification("turn/started", &json!({ "threadId": "s", "turn": { "id": "su" } })).await;
+        agent.on_notification("turn/completed", &json!({ "threadId": "s", "turn": { "id": "su", "status": "completed" } })).await;
+        assert!(agent.held.is_empty() && agent.active_turn.is_some());
+        let kinds = emitted(&mut events);
+        assert!(
+            matches!(&kinds[..], [EventKind::SubAgent { status: began, .. }, EventKind::SubAgent { status: ended, .. }] if began == "running" && ended == "completed"),
+            "{kinds:?}"
+        );
+        // the agent's own turn end still waits for the steer's answer
+        agent.on_notification("turn/completed", &json!({ "threadId": "t", "turn": { "id": "u", "status": "completed" } })).await;
+        assert!(agent.active_turn.is_some() && emitted(&mut events).is_empty());
+    }
+
+    /// Stop means stop. A subagent's turn runs on its own thread, so it gets an interrupt of
+    /// its own: with the agent's turn, and when the agent has no turn left to stop.
+    #[tokio::test]
+    async fn an_interrupt_stops_the_subagents_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        // an app-server that only keeps what it is sent
+        let mut sink = proc::command(Path::new("/bin/sh"), &["-c".into(), "cat > sent".into()], dir.path(), &env).spawn().unwrap();
+        let server = fake_server(dir.path());
+        *server.stdin.lock().await = sink.stdin.take();
+        let (mut agent, _events) = fake_agent(&server);
+        (agent.started, agent.thread_id, agent.active_turn) = (true, Some("t".into()), Some("u".into()));
+        agent.norm.thread = agent.thread_id.clone();
+        agent.on_notification("turn/started", &json!({ "threadId": "s", "turn": { "id": "su" } })).await;
+
+        agent.on_cmd(AgentCmd::Interrupt).await;
+        // the agent's turn ends, the subagent's does not: the next stop is for the subagent alone
+        agent.on_notification("turn/completed", &json!({ "threadId": "t", "turn": { "id": "u", "status": "interrupted" } })).await;
+        agent.on_cmd(AgentCmd::Interrupt).await;
+        // and so is a shutdown, before the agent lets its thread go
+        agent.on_cmd(AgentCmd::Shutdown).await;
+
+        server.stdin.lock().await.take(); // end of input: `cat` exits
+        sink.wait().await.unwrap();
+        let sent: Vec<Value> = std::fs::read_to_string(dir.path().join("sent")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let asked: Vec<(&str, &Value)> = sent.iter().map(|m| (m["method"].as_str().unwrap(), &m["params"])).collect();
+        let (own, subs) = (json!({ "threadId": "t", "turnId": "u" }), json!({ "threadId": "s", "turnId": "su" }));
+        assert_eq!(
+            asked,
+            [("turn/interrupt", &own), ("turn/interrupt", &subs), ("turn/interrupt", &subs), ("turn/interrupt", &subs), ("thread/unsubscribe", &json!({ "threadId": "t" }))]
+        );
+    }
+
+    /// `TurnStartedNotification { threadId, turn: Turn }` and the `turn/completed` of the same
+    /// turn, written from the codex-cli 0.166.0 protocol types.
+    fn turn_started_on_t(id: &str) -> Value {
+        json!({ "threadId": "t", "turn": { "id": id, "rootTurnId": null, "items": [], "itemsView": "full", "status": "inProgress", "error": null, "startedAt": 1, "completedAt": null, "durationMs": null } })
+    }
+
+    fn turn_completed_on_t(id: &str) -> Value {
+        json!({ "threadId": "t", "turn": { "id": id, "status": "completed" } })
+    }
+
+    /// The turn of a compaction that was asked for (`thread/compact/start`) is the thread's
+    /// running turn: an interrupt or a shutdown stops it. It is no turn of the agent: Codly
+    /// hears its status, not a turn's start and end (a worker's turn end runs the gate, a
+    /// Lead's forwards its reply).
+    #[tokio::test]
+    async fn a_compaction_turn_runs_on_the_thread_but_is_no_turn_of_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let (mut agent, mut events) = fake_agent(&server);
+        agent.pending.clear();
+        agent.thread_id = Some("t".into());
+        (agent.compaction, agent.deadline) = (Compaction::Asked, Some(tokio::time::Instant::now() + COMPACT_START_TIMEOUT));
+        agent.on_notification("turn/started", &turn_started_on_t("u-compact")).await;
+        assert_eq!((agent.active_turn.as_deref(), agent.compaction), (Some("u-compact"), Compaction::Running));
+        assert!(agent.deadline.is_none(), "it started in time");
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::StatusChanged { status: AgentStatus::Thinking }]), "{kinds:?}");
+        agent.on_notification("item/started", &json!({ "threadId": "t", "turnId": "u-compact", "item": { "type": "contextCompaction", "id": "i1" } })).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::Compacting { .. }]), "{kinds:?}");
+        // its end frees the thread for the next turn
+        agent.on_notification("turn/completed", &turn_completed_on_t("u-compact")).await;
+        assert_eq!((agent.active_turn.as_deref(), agent.compaction), (None, Compaction::No));
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::StatusChanged { status: AgentStatus::Idle }]), "{kinds:?}");
+
+        // a turn Codly started keeps the id the answer to its `turn/start` gives, and is reported
+        agent.turn_pending = true;
+        agent.on_notification("turn/started", &turn_started_on_t("u-early")).await;
+        assert_eq!((agent.active_turn.as_deref(), agent.compaction), (None, Compaction::No));
+        assert!(matches!(&emitted(&mut events)[..], [EventKind::TurnStarted { input: None }, EventKind::StatusChanged { status: AgentStatus::Thinking }]));
+        (agent.turn_pending, agent.active_turn) = (false, Some("u-mine".into()));
+        agent.on_notification("turn/completed", &turn_completed_on_t("u-mine")).await;
+        assert!(emitted(&mut events).iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Completed, .. })));
+
+        // a turn nobody asked for is reported as before
+        agent.on_notification("turn/started", &turn_started_on_t("u-unknown")).await;
+        assert_eq!((agent.active_turn.as_deref(), agent.compaction), (None, Compaction::No));
+        assert!(matches!(&emitted(&mut events)[..], [EventKind::TurnStarted { input: None }, ..]));
+        agent.on_notification("turn/completed", &turn_completed_on_t("u-unknown")).await;
+        emitted(&mut events);
+
+        // a server that exits during a compaction ends no turn of the agent
+        agent.compaction = Compaction::Asked;
+        agent.on_notification("turn/started", &turn_started_on_t("u-compact-2")).await;
+        assert_eq!(agent.compaction, Compaction::Running);
+        emitted(&mut events);
+        agent.server_exited(Some(1), "", &mut None);
+        let kinds = emitted(&mut events);
+        assert!(!kinds.iter().any(|e| matches!(e, EventKind::TurnCompleted { .. })), "{kinds:?}");
+        assert!(matches!(kinds.last(), Some(EventKind::Exited { code: Some(1) })), "{kinds:?}");
+    }
+
+    /// The fake server takes no write, so a `turn/start` that the agent sends shows as this error.
+    fn tried_to_start_a_turn(kind: &EventKind) -> bool {
+        matches!(kind, EventKind::Error { message, fatal: false } if message.starts_with("turn/start:"))
+    }
+
+    /// A prompt that comes after a compaction was asked for must not start a turn before the
+    /// compaction's turn has ended: Codex would refuse it or run it after the compaction, and
+    /// either way the compaction's turn would be taken for the prompt's.
+    #[tokio::test]
+    async fn a_prompt_waits_for_the_end_of_a_compaction_that_was_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let (mut agent, mut events) = fake_agent(&server);
+        agent.pending.clear();
+        (agent.started, agent.thread_id) = (true, Some("t".into()));
+
+        // asked, its turn not started yet
+        agent.compaction = Compaction::Asked;
+        agent.on_cmd(AgentCmd::Prompt("go on".into())).await;
+        assert_eq!(agent.queue, ["go on"]);
+        assert!(!agent.turn_pending && emitted(&mut events).is_empty(), "nothing is sent to Codex yet");
+        // its turn runs: a prompt is not steered at it either
+        agent.on_notification("turn/started", &turn_started_on_t("u-compact")).await;
+        agent.on_cmd(AgentCmd::Prompt("and the docs".into())).await;
+        assert_eq!(agent.queue, ["go on", "and the docs"]);
+        assert!(agent.pending.is_empty(), "no turn/steer");
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::StatusChanged { status: AgentStatus::Thinking }]), "{kinds:?}");
+        // its end: the first prompt that waited gets its turn
+        agent.on_notification("turn/completed", &turn_completed_on_t("u-compact")).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::StatusChanged { status: AgentStatus::Idle }, start] if tried_to_start_a_turn(start)), "{kinds:?}");
+        assert_eq!(agent.queue, ["and the docs"]);
+    }
+
+    /// A compaction that starts no turn must not hold the prompts for ever: Codex refuses the
+    /// request, or takes it and starts nothing in time (the deadline is fired by hand).
+    #[tokio::test]
+    async fn a_compaction_that_never_starts_frees_the_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        for refused in [true, false] {
+            let (mut agent, mut events) = fake_agent(&server);
+            agent.pending.clear();
+            (agent.started, agent.thread_id) = (true, Some("t".into()));
+            let (reply, mut answer) = oneshot::channel();
+            agent.pending.insert(9, Pending::Compact(reply));
+            (agent.compaction, agent.deadline) = (Compaction::Asked, Some(tokio::time::Instant::now() + COMPACT_START_TIMEOUT));
+            agent.on_cmd(AgentCmd::Prompt("go on".into())).await;
+            assert!(emitted(&mut events).is_empty());
+
+            if refused {
+                agent.on_response(9, Err(json!({ "code": -32600, "message": "thread not found: t" })), &mut None).await;
+                assert_eq!(answer.try_recv().unwrap().unwrap_err().to_string(), "thread not found: t", "Codex's own words reach who asked");
+                let kinds = emitted(&mut events);
+                assert!(matches!(&kinds[..], [start] if tried_to_start_a_turn(start)), "{kinds:?}");
+            } else {
+                agent.on_response(9, Ok(json!({})), &mut None).await;
+                assert!(answer.try_recv().unwrap().is_ok());
+                assert_eq!(agent.compaction, Compaction::Asked, "taken, its turn still to start");
+                agent.on_deadline().await;
+                let kinds = emitted(&mut events);
+                assert!(
+                    matches!(&kinds[..], [EventKind::Error { message, fatal: false }, start]
+                        if message == "Codex did not start the compaction within 15 s." && tried_to_start_a_turn(start)),
+                    "{kinds:?}"
+                );
+            }
+            assert_eq!((agent.compaction, agent.stage, agent.deadline), (Compaction::No, Stage::Running, None), "the run goes on");
+            assert!(agent.queue.is_empty());
+        }
+    }
+
+    /// A compaction is asked for only when nothing runs on the thread and nothing waits to:
+    /// the agent decides, at the moment the request reaches it.
+    #[tokio::test]
+    async fn a_compaction_is_refused_when_a_turn_got_there_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        async fn refusal(agent: &mut CodexAgent) -> String {
+            let (reply, mut answer) = oneshot::channel();
+            agent.compact(reply).await;
+            answer.try_recv().unwrap().unwrap_err().to_string()
+        }
+        let (mut agent, _events) = fake_agent(&server);
+        agent.pending.clear();
+        agent.thread_id = Some("t".into());
+
+        agent.turn_pending = true;
+        assert_eq!(refusal(&mut agent).await, "a turn started on it first");
+        (agent.turn_pending, agent.active_turn) = (false, Some("u".into()));
+        assert_eq!(refusal(&mut agent).await, "a turn started on it first");
+        agent.active_turn = None;
+        agent.queue.push_back("go on".into());
+        assert_eq!(refusal(&mut agent).await, "a turn started on it first");
+        agent.queue.clear();
+        agent.compaction = Compaction::Asked;
+        assert_eq!(refusal(&mut agent).await, "a compaction is already under way");
+        agent.compaction = Compaction::No;
+        agent.stage = Stage::Unsubscribing;
+        assert_eq!(refusal(&mut agent).await, "the agent is stopping");
+        // free: the request goes to Codex (the fake server takes no write)
+        agent.stage = Stage::Running;
+        let e = refusal(&mut agent).await;
+        assert!(e.starts_with("thread/compact/start:"), "{e}");
+        assert_eq!((agent.compaction, agent.deadline), (Compaction::No, None), "a request that was not sent is not waited for");
+    }
+
+    /// A steered prompt gets no turn of its own. The adapter says it was delivered, or Codly
+    /// would wait for that turn and never see the agent as done.
+    #[tokio::test]
+    async fn a_steered_prompt_is_reported_as_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.thread_id, agent.active_turn) = (Some("t".into()), Some("u".into()));
+        agent.pending.insert(7, Pending::Steer("also run the tests".into()));
+        agent.on_response(7, Ok(json!({ "turnId": "u" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::PromptSteered { input }] if input == "also run the tests"), "{kinds:?}");
+
+        // Codex refused it (the turn was ending): not delivered yet, it waits for a turn of its own
+        agent.pending.insert(8, Pending::Steer("and the docs".into()));
+        agent.on_response(8, Err(json!({ "message": "no active turn to steer" })), &mut None).await;
+        assert!(emitted(&mut events).is_empty());
+        assert_eq!(agent.queue, ["and the docs"]);
+    }
+
+    /// Codex may report a turn's end before it answers a steer sent into that turn. Codly
+    /// must hear "delivered" first: after the turn's end it would wait for a turn that never
+    /// comes, and the task would never reach its gate.
+    #[tokio::test]
+    async fn a_turn_end_waits_for_the_steer_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let done = json!({ "threadId": "t", "turn": { "status": "completed" } });
+        let ended = |k: &[EventKind]| {
+            matches!(k, [EventKind::TurnCompleted { status: TurnStatus::Completed, .. }, EventKind::StatusChanged { status: AgentStatus::Idle }])
+        };
+
+        // accepted: delivered, then the turn ends
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.thread_id, agent.active_turn) = (Some("t".into()), Some("u".into()));
+        agent.pending.insert(7, Pending::Steer("also run the tests".into()));
+        agent.on_notification("turn/completed", &done).await;
+        // what Codex sends after the end stays behind it
+        agent.on_notification("thread/status/changed", &json!({ "threadId": "t", "status": { "type": "idle" } })).await;
+        assert!(emitted(&mut events).is_empty());
+        assert!(agent.active_turn.is_some());
+        agent.on_response(7, Ok(json!({ "turnId": "u" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::PromptSteered { input }, end @ ..] if input == "also run the tests" && ended(end)), "{kinds:?}");
+        assert!(agent.active_turn.is_none() && agent.held.is_empty());
+
+        // two steers: the end waits for the last answer. That one is refused (the turn was
+        // over), so its prompt starts the next turn, after the end.
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.thread_id, agent.active_turn) = (Some("t".into()), Some("u".into()));
+        agent.pending.insert(7, Pending::Steer("also run the tests".into()));
+        agent.pending.insert(8, Pending::Steer("and the docs".into()));
+        agent.on_notification("turn/completed", &done).await;
+        agent.on_response(7, Ok(json!({ "turnId": "u" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::PromptSteered { .. }]), "{kinds:?}");
+        agent.on_response(8, Err(json!({ "message": "no active turn to steer" })), &mut None).await;
+        let kinds = emitted(&mut events);
+        // the fake server takes no write: the next turn's `turn/start` shows as this error
+        assert!(
+            matches!(&kinds[..], [end @ .., EventKind::Error { message, fatal: false }] if ended(end) && message.starts_with("turn/start:")),
+            "{kinds:?}"
+        );
+        assert!(agent.queue.is_empty());
     }
 
     /// The spawner gave up after 60 s and failed the run itself: the adapter stays silent.
@@ -1811,6 +3865,178 @@ mod tests {
         }
     }
 
+    /// Did the adapter mark the exit as the end of an interrupt that was not answered?
+    fn gave_up(kinds: &[EventKind]) -> bool {
+        kinds.iter().any(|k| matches!(k, EventKind::Decision { decision_type, .. } if decision_type == crate::adapters::GAVE_UP))
+    }
+
+    fn turn_ends(kinds: &[EventKind]) -> Vec<TurnStatus> {
+        kinds.iter().filter_map(|k| if let EventKind::TurnCompleted { status, .. } = k { Some(*status) } else { None }).collect()
+    }
+
+    /// `turn/start` is never answered: the thread is let go and the turn ends as failed. A
+    /// server that said nothing to anybody meanwhile is hung and is given up; one that still
+    /// talks is kept for its other agents. (Deadlines are fired by hand, as above.)
+    #[tokio::test]
+    async fn a_turn_that_never_starts_ends_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        for talks in [false, true] {
+            let server = fake_server(dir.path());
+            if talks {
+                server.last_inbound_ms.store(now_ms(), Ordering::SeqCst);
+            }
+            let (mut agent, mut events) = fake_agent(&server);
+            (agent.started, agent.thread_id, agent.turn_pending) = (true, Some("t".into()), true);
+            agent.pending.insert(3, Pending::TurnStart);
+            agent.steer_queue.push("then test it".into());
+            agent.on_deadline().await;
+            assert_eq!(agent.stage, Stage::Done);
+            let kinds = emitted(&mut events);
+            assert!(
+                matches!(&kinds[0], EventKind::Error { message, fatal: false }
+                    if message.starts_with("Codex did not start the turn within 60 s") && message.contains("1 message that waited for this turn was not sent")),
+                "{kinds:?}"
+            );
+            assert_eq!(turn_ends(&kinds), [TurnStatus::Failed], "{kinds:?}");
+            assert!(!gave_up(&kinds), "no interrupt was asked: this exit is handled as a crash: {kinds:?}");
+            assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
+            assert_eq!(server.usable(), talks);
+            // An answer that comes after all starts nothing here.
+            agent.on_response(3, Ok(json!({ "turn": { "id": "u" } })), &mut None).await;
+            assert!(agent.active_turn.is_none() && emitted(&mut events).is_empty());
+        }
+    }
+
+    /// The turn does not end after `turn/interrupt`: the thread is let go and the turn ends as
+    /// interrupted. It may still run on the server, so a server no other agent uses is ended too.
+    #[tokio::test]
+    async fn an_interrupt_that_does_not_end_the_turn_ends_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        // Who else is on the server: nobody, an agent with a thread, an agent that opens one.
+        for other in ["nobody", "a thread", "a start"] {
+            let shared = other != "nobody";
+            let server = fake_server(dir.path());
+            server.last_inbound_ms.store(now_ms(), Ordering::SeqCst);
+            let (mut agent, mut events) = fake_agent(&server);
+            let route = || Route { tx: mpsc::unbounded_channel().0, raw: server.bootstrap_raw.clone() };
+            {
+                let mut st = server.state.lock().unwrap();
+                // The agent's own `turn/interrupt`, never answered, keeps nobody's server alive.
+                st.pending.insert(7, Waiter::Agent { route: agent.route.clone(), register: false });
+                if other == "a thread" {
+                    st.routes.insert("other".into(), route());
+                }
+                if other == "a start" {
+                    st.pending.insert(8, Waiter::Agent { route: route(), register: true });
+                }
+            }
+            (agent.started, agent.thread_id, agent.active_turn) = (true, Some("t".into()), Some("u".into()));
+            agent.on_cmd(AgentCmd::Interrupt).await;
+            assert!(agent.deadline.is_some() && agent.stage == Stage::Running);
+            emitted(&mut events);
+
+            agent.on_deadline().await;
+            assert_eq!(agent.stage, Stage::Done);
+            let kinds = emitted(&mut events);
+            assert!(matches!(&kinds[0], EventKind::Error { message, fatal: false } if message.starts_with("Codex did not stop within 15 s")), "{kinds:?}");
+            assert!(gave_up(&kinds), "the exit that follows is marked as Codly's doing: {kinds:?}");
+            assert_eq!(turn_ends(&kinds), [TurnStatus::Interrupted], "{kinds:?}");
+            assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
+            assert_eq!(server.usable(), shared);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_turn_that_ends_in_time_keeps_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path());
+        let (mut agent, _events) = fake_agent(&server);
+        (agent.started, agent.thread_id, agent.active_turn) = (true, Some("t".into()), Some("u".into()));
+        agent.on_cmd(AgentCmd::Interrupt).await;
+        assert!(agent.deadline.is_some());
+        agent.on_notification("turn/completed", &json!({ "threadId": "t", "turn": { "status": "interrupted" } })).await;
+        assert!(agent.deadline.is_none() && agent.active_turn.is_none());
+        assert_eq!(agent.stage, Stage::Running);
+        assert!(server.usable());
+    }
+
+    /// Every agent of an account writes to one app-server. One that stops reading must not
+    /// hold them all behind a write: the write gives up, and so does every later one, at once.
+    #[tokio::test]
+    async fn a_server_that_stops_reading_is_given_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let mut child = proc::command(Path::new("/bin/sh"), &["-c".into(), "exec sleep 30".into()], dir.path(), &env).spawn().unwrap();
+        let server = fake_server(dir.path());
+        *server.stdin.lock().await = child.stdin.take();
+        let raw = server.bootstrap_raw.clone();
+        let big = json!({ "method": "turn/start", "params": { "text": "x".repeat(1 << 20) } });
+        let e = server.send_within(&big, &raw, Duration::from_millis(200)).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut, "{e}");
+        assert!(!server.usable(), "no new agent starts on a server that stopped reading");
+        let e = server.send(&json!({ "method": "initialized" }), &raw).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+    }
+
+    #[test]
+    fn account_read_tells_a_signed_out_codex() {
+        assert!(signed_out(&json!({ "account": null, "requiresOpenaiAuth": true })));
+        assert!(!signed_out(&json!({ "account": { "type": "chatgpt" }, "requiresOpenaiAuth": true })));
+        assert!(!signed_out(&json!({ "account": null, "requiresOpenaiAuth": false })), "another model provider needs no OpenAI sign-in");
+        assert!(!signed_out(&json!({})), "an answer that does not say is not a sign-out");
+    }
+
+    /// An account whose app-server is a `/bin/sh` that runs `script` (the `app-server` file of
+    /// its cwd, `<dir>/<home>`).
+    fn sh_account(dir: &Path, home: &str, script: &str) -> SpawnSpec {
+        let cwd = dir.join(home);
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("app-server"), script).unwrap();
+        SpawnSpec {
+            agent_id: home.into(),
+            agent_name: "Ada".into(),
+            run_id: home.into(),
+            provider: Provider::Codex,
+            role: Role::Worker,
+            model: None,
+            bin: PathBuf::from("/bin/sh"),
+            env: HashMap::from([("CODEX_HOME".to_string(), home.to_string())]),
+            session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
+            system_prompt: String::new(),
+            read_only: false,
+            mcp: None,
+            use_user_setup: false,
+            sandbox_network: false,
+            local_settings: false,
+            raw_log: cwd.join("raw.ndjson"),
+            byok_command: None,
+            sandbox_shell: false,
+            cwd,
+        }
+    }
+
+    /// Detection said signed in, but nobody is any more: the start fails with the command that
+    /// signs this account in, not a token error at the first turn.
+    #[tokio::test]
+    async fn a_signed_out_account_fails_at_start_with_the_sign_in_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = sh_account(
+            dir.path(),
+            "out",
+            r#"while read -r line; do
+  case "$line" in
+    *'"id":0'*) echo '{"id":0,"result":{"userAgent":"codex/0.161.0 (sh)"}}' ;;
+    *'"id":1'*) echo '{"id":1,"result":{"account":null,"requiresOpenaiAuth":true}}' ;;
+  esac
+done
+"#,
+        );
+        let raw = Arc::new(RawLog::open(&dir.path().join("raw.ndjson")).unwrap());
+        let e = server_for(&Servers::default(), &out, &raw).await.map(|_| ()).unwrap_err();
+        assert_eq!(e.to_string(), "Codex is not signed in: run `CODEX_HOME=out codex login` in a terminal");
+    }
+
     /// Two accounts, each with a `/bin/sh` for app-server (it runs the `app-server` script of
     /// its cwd). One never answers `initialize`: the other's agents must not wait behind it.
     /// The list is the test's own: `SERVERS` belongs to the whole process, and a test that
@@ -1818,28 +4044,7 @@ mod tests {
     #[tokio::test]
     async fn a_slow_account_does_not_block_another() {
         let dir = tempfile::tempdir().unwrap();
-        let account = |home: &str, script: &str| {
-            let cwd = dir.path().join(home);
-            std::fs::create_dir_all(&cwd).unwrap();
-            std::fs::write(cwd.join("app-server"), script).unwrap();
-            SpawnSpec {
-                agent_id: home.into(),
-                run_id: home.into(),
-                provider: Provider::Codex,
-                role: Role::Worker,
-                model: None,
-                bin: PathBuf::from("/bin/sh"),
-                env: HashMap::from([("CODEX_HOME".to_string(), home.to_string())]),
-                session: SessionMode::New { session_id: None },
-                system_prompt: String::new(),
-                read_only: false,
-                mcp: None,
-                use_user_setup: false,
-                raw_log: cwd.join("raw.ndjson"),
-                byok_command: None,
-                cwd,
-            }
-        };
+        let account = |home: &str, script: &str| sh_account(dir.path(), home, script);
         let slow = account("slow", ": > up\nwhile read -r line; do :; done\n");
         let fast = account(
             "fast",
@@ -1871,5 +4076,170 @@ done
         assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(a.info.lock().unwrap().billing, Billing::ApiKey);
         a.close().await;
+    }
+
+    /// The start-up of a `/bin/sh` app-server and the opening of thread `th-1`; `more` = the
+    /// `case` branches of the test. The thread's `thread/start` line is kept in `thread-start`.
+    fn sh_server(more: &str) -> String {
+        let script = r#"while read -r line; do
+  id=${line#*'"id":'}; id=${id%%,*}
+  case "$line" in
+    *'"initialize"'*) echo '{"id":0,"result":{"userAgent":"codex/0.166.0 (sh)"}}' ;;
+    *'"account/read"'*) echo '{"id":1,"result":{"account":{"type":"chatgpt"}}}' ;;
+    *'"thread/start"'*) printf '%s\n' "$line" > thread-start; echo "{\"id\":$id,\"result\":{\"thread\":{\"id\":\"th-1\"}}}" ;;
+    *'"thread/unsubscribe"'*) echo "{\"id\":$id,\"result\":{}}" ;;
+MORE
+  esac
+done
+"#;
+        script.replace("MORE", more)
+    }
+
+    /// "Use my own CLI setup" off: the thread starts with each MCP server of the user's Codex
+    /// config switched off. The answer to `config/read` is the user's whole config, with the
+    /// keys of those servers: none of it reaches the run's raw log. A config that cannot be
+    /// read does not stop the agent: the thread starts, and the user is told what may differ.
+    #[tokio::test]
+    async fn the_users_own_servers_are_switched_off_and_their_keys_stay_out_of_the_log() {
+        const ENV_KEY: &str = "sk-docs-secret-0123";
+        const HEADER_KEY: &str = "lin-secret-4567";
+        let dir = tempfile::tempdir().unwrap();
+        let servers = Servers::default();
+        let thread_config = |spec: &SpawnSpec| -> Value {
+            let line = std::fs::read_to_string(spec.cwd.join("thread-start")).unwrap();
+            serde_json::from_str::<Value>(&line).unwrap()["params"]["config"].clone()
+        };
+
+        // ConfigReadResponse { config, origins, layers }, written from the codex-cli 0.166.0
+        // protocol types; `config` has the config.toml keys.
+        let answered = sh_server(
+            r#"    *'"config/read"'*) echo "{\"id\":$id,\"result\":{\"config\":{\"model\":\"gpt-6.1-sol\",\"mcp_servers\":{\"docs\":{\"command\":\"docs-mcp\",\"env\":{\"DOCS_TOKEN\":\"sk-docs-secret-0123\"}},\"linear\":{\"url\":\"https://mcp.linear.app/mcp\",\"http_headers\":{\"Authorization\":\"Bearer lin-secret-4567\"}}}},\"origins\":{},\"layers\":null}}" ;;"#,
+        );
+        let spec = sh_account(dir.path(), "answered", &answered);
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let handle = spawn_on(&servers, spec.clone(), tx).await.unwrap();
+        assert_eq!(thread_config(&spec)["mcp_servers"], json!({ "docs": { "enabled": false }, "linear": { "enabled": false } }));
+        let kinds = emitted(&mut events);
+        assert!(matches!(&kinds[..], [EventKind::SessionStarted { .. }]), "{kinds:?}");
+        let log = std::fs::read_to_string(&spec.raw_log).unwrap();
+        assert!(log.contains("config/read"), "the question is logged: {log}");
+        assert!(!log.contains(ENV_KEY) && !log.contains(HEADER_KEY) && !log.contains("docs-mcp"), "{log}");
+        assert!(log.contains("is not logged: it holds your own Codex config"), "{log}");
+        assert!(log.contains(r#"your own Codex config starts the MCP servers [\"docs\", \"linear\"]"#), "the names are: {log}");
+        handle.send(AgentCmd::Shutdown);
+
+        let refused = sh_server(r#"    *'"config/read"'*) echo "{\"id\":$id,\"error\":{\"code\":-32603,\"message\":\"config.toml is not valid\"}}" ;;"#);
+        let spec = sh_account(dir.path(), "refused", &refused);
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let handle = spawn_on(&servers, spec.clone(), tx).await.unwrap();
+        assert!(thread_config(&spec).get("mcp_servers").is_none(), "nothing to switch off is known");
+        let kinds = emitted(&mut events);
+        assert!(
+            matches!(&kinds[..], [EventKind::Error { message, fatal: false }, EventKind::SessionStarted { .. }]
+                if message == "Codly could not read your Codex config (config/read failed: config.toml is not valid), so your own MCP servers may start with this agent."),
+            "{kinds:?}"
+        );
+        handle.send(AgentCmd::Shutdown);
+
+        // "Use my own CLI setup" on: the config is not asked for
+        let spec = SpawnSpec { use_user_setup: true, ..sh_account(dir.path(), "own-setup", &sh_server("")) };
+        let (tx, _events) = mpsc::unbounded_channel();
+        let handle = spawn_on(&servers, spec.clone(), tx).await.unwrap();
+        assert!(thread_config(&spec).get("mcp_servers").is_none());
+        assert!(!std::fs::read_to_string(&spec.raw_log).unwrap().contains("config/read"));
+        handle.send(AgentCmd::Shutdown);
+        for (_, slot) in servers.lock().await.iter() {
+            if let Some(server) = slot.lock().await.as_ref() {
+                server.close().await;
+            }
+        }
+    }
+
+    /// A thread Codly opens gets a name, so it can be told from the user's own in Codex's
+    /// lists. A thread Codly resumes keeps the name it has. (`thread/name/set` with
+    /// ThreadSetNameParams, written from the codex-cli 0.166.0 schema types. Not verified live.)
+    #[tokio::test]
+    async fn a_new_thread_gets_a_name_and_a_resumed_one_keeps_its_own() {
+        let script = sh_server(
+            r#"    *'"thread/name/set"'*) printf '%s\n' "$line" > thread-name; echo "{\"id\":$id,\"result\":{}}" ;;
+    *'"thread/resume"'*) echo "{\"id\":$id,\"result\":{\"thread\":{\"id\":\"th-1\"}}}" ;;"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let servers = Servers::default();
+        // the run is over when its adapter says so: everything it sent was sent by then
+        async fn ended(events: &mut mpsc::UnboundedReceiver<AdapterEvent>) {
+            loop {
+                let event = tokio::time::timeout(Duration::from_secs(10), events.recv()).await.expect("the run did not end");
+                if matches!(event.expect("the adapter stopped").kind, EventKind::Exited { .. }) {
+                    return;
+                }
+            }
+        }
+
+        let new = SpawnSpec { use_user_setup: true, ..sh_account(dir.path(), "new", &script) };
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let handle = spawn_on(&servers, new.clone(), tx).await.unwrap();
+        handle.send(AgentCmd::Shutdown);
+        ended(&mut events).await;
+        let line: Value = serde_json::from_str(&std::fs::read_to_string(new.cwd.join("thread-name")).unwrap()).unwrap();
+        assert_eq!(line["params"], json!({ "threadId": "th-1", "name": "Codly: Ada (worker)" }));
+
+        let resumed = SpawnSpec { use_user_setup: true, session: SessionMode::Resume { session_id: "th-1".into() }, ..sh_account(dir.path(), "resumed", &script) };
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let handle = spawn_on(&servers, resumed.clone(), tx).await.unwrap();
+        handle.send(AgentCmd::Shutdown);
+        ended(&mut events).await;
+        assert!(!resumed.cwd.join("thread-name").exists());
+        for (_, slot) in servers.lock().await.iter() {
+            if let Some(server) = slot.lock().await.as_ref() {
+                server.close().await;
+            }
+        }
+    }
+
+    /// "Compact now" and a prompt at the same moment, on a `/bin/sh` app-server that takes the
+    /// compaction and starts its turn only when told to (`codly/go`). The prompt's `turn/start`
+    /// must reach Codex after that turn's end, and the agent has one turn: the prompt's.
+    #[tokio::test]
+    async fn a_prompt_sent_while_a_compaction_starts_gets_its_turn_after_it() {
+        // The notifications are TurnStartedNotification / TurnCompletedNotification, written
+        // from the codex-cli 0.166.0 protocol types.
+        let script = sh_server(
+            r#"    *'"thread/compact/start"'*) echo compact >> asked; echo "{\"id\":$id,\"result\":{}}" ;;
+    *'"codly/go"'*) echo go >> asked; echo "{\"id\":$id,\"result\":{}}"
+      echo '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"u-compact","items":[],"status":"inProgress","error":null}}}'
+      echo '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"u-compact","items":[],"status":"completed","error":null}}}' ;;
+    *'"turn/start"'*) echo turn >> asked; echo "{\"id\":$id,\"result\":{\"turn\":{\"id\":\"u-1\"}}}"
+      echo '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"u-1","items":[],"status":"inProgress","error":null}}}'
+      echo '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"u-1","items":[],"status":"completed","error":null}}}' ;;"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let spec = SpawnSpec { use_user_setup: true, ..sh_account(dir.path(), "work", &script) };
+        let servers = Servers::default();
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let handle = spawn_on(&servers, spec.clone(), tx).await.unwrap();
+        let raw = Arc::new(RawLog::open(&spec.raw_log).unwrap());
+        let server = server_for(&servers, &spec, &raw).await.unwrap();
+
+        account::compact_on(&server, "th-1").await.unwrap();
+        let e = account::compact_on(&server, "th-1").await.unwrap_err();
+        assert_eq!(e.to_string(), "a compaction is already under way");
+        let e = account::compact_on(&server, "th-9").await.unwrap_err();
+        assert_eq!(e.to_string(), "its conversation is not open on the Codex server");
+        assert!(handle.send(AgentCmd::Prompt("go on".into())));
+        server.call("codly/go", json!({}), &raw, Duration::from_secs(5)).await.unwrap();
+
+        let mut kinds: Vec<EventKind> = Vec::new();
+        while turn_ends(&kinds).is_empty() {
+            let event = tokio::time::timeout(Duration::from_secs(10), events.recv()).await.expect("the prompt's turn did not end");
+            kinds.push(event.expect("the adapter stopped").kind);
+        }
+        let asked = std::fs::read_to_string(spec.cwd.join("asked")).unwrap();
+        assert_eq!(asked.lines().collect::<Vec<_>>(), ["compact", "go", "turn"], "the prompt waited for the compaction's end");
+        let starts: Vec<&Option<String>> = kinds.iter().filter_map(|k| if let EventKind::TurnStarted { input } = k { Some(input) } else { None }).collect();
+        assert_eq!(starts, [&Some("go on".to_string())], "{kinds:?}");
+        assert_eq!(turn_ends(&kinds), [TurnStatus::Completed], "{kinds:?}");
+        handle.send(AgentCmd::Shutdown);
+        server.close().await;
     }
 }

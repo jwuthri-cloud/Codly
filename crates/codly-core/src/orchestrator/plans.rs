@@ -12,9 +12,11 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use super::planner::{self, PlanInput};
+use super::required_checks::Required;
+use super::retry::Failure;
 use super::runs::{RunReq, new_session};
 use super::scheduler::{self, Action, AgentPick, SchedInput};
-use super::{Inner, careers, guard, lead, lock, names, prompts, read, row, workspace, write};
+use super::{Inner, careers, guard, lead, lock, merge_conflict, names, prompts, read, row, workspace, write};
 use crate::adapters::SessionMode;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
@@ -46,6 +48,32 @@ fn plan_short(p: &Plan) -> String {
         return s.to_string();
     }
     format!("{}-{}", names::slug(&p.summary, 24), &p.id[p.id.len().saturating_sub(4)..])
+}
+
+/// The last look for plans merged outside Codly in one office, and what it looked at.
+pub(super) struct MergeLook {
+    /// The finished plans that were not merged and not kept.
+    open: Vec<Id>,
+    /// Where your branch was (`head_stamp`).
+    head: Option<(u64, std::time::SystemTime)>,
+    at: i64,
+}
+
+impl MergeLook {
+    /// Is this look worth making, `last` being the one before? Yes when your branch moved or
+    /// the plans that wait changed. A repo whose branch cannot be watched is looked at once a
+    /// minute.
+    fn due(&self, last: Option<&MergeLook>) -> bool {
+        last.is_none_or(|l| l.open != self.open || l.head != self.head || (self.head.is_none() && self.at - l.at >= 60_000))
+    }
+}
+
+/// When your branch last moved, read from the file of HEAD's reflog (no git process): its size
+/// and time change with every commit, merge, pull, reset and checkout. None: there is no such
+/// file to read (a repo without reflogs, or a checkout whose `.git` is a file).
+fn head_stamp(repo: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let log = std::fs::metadata(repo.join(".git").join("logs").join("HEAD")).ok()?;
+    Some((log.len(), log.modified().ok()?))
 }
 
 impl Inner {
@@ -93,17 +121,36 @@ impl Inner {
             self.cancel_plan_inner(&old, "superseded by a newer plan from the Lead").await?;
         }
 
+        // The user's last own words in the request (a message they wrote, or a schedule of theirs
+        // that fired), and the messages from outside Codly (a webhook, Slack) that came in after
+        // them. The plan may answer those messages, so it then carries no "user's words", and it
+        // waits for Run plan unless each of them came from an endpoint the user lets run plans
+        // alone. Without them the plan carries the user's words: for a schedule, its own line.
+        let (own, outside) = self.store.since_user(Some(&ws.id), &thread)?;
+        let outside_waits = outside.iter().any(|m| crate::inbound::needs_ok(m.attachment.as_ref()));
+        let request = if outside.is_empty() { own.map(|m| m.text).unwrap_or_default() } else { String::new() };
+
         let plan_id = new_id();
+        // The planner's marks (`weak_verify`) stay on the plan itself: its card has them at any
+        // time, also when the decisions that carry them are far back in the history.
+        let weak_checks: Vec<WeakTask> = valid
+            .fixes
+            .iter()
+            .filter(|f| f.detail["rule"] == "weak_verify")
+            .map(|f| serde_json::from_value(f.detail.clone()))
+            .collect::<serde_json::Result<_>>()?;
         let plan = Plan {
             id: plan_id.clone(),
             workspace_id: ws.id.clone(),
             thread: thread.clone(),
-            request: self.store.last_chat_by(Some(&ws.id), &thread, "user")?.unwrap_or_default(),
+            request,
             summary: valid.plan.summary.clone(),
             assumptions: valid.plan.assumptions.clone(),
             open_questions: valid.plan.open_questions.clone(),
+            weak_checks,
             status: PlanStatus::AwaitingApproval,
             base_commit: None,
+            base_branch: None,
             integration_branch: None,
             integration_worktree: None,
             merged_sha: None,
@@ -111,6 +158,11 @@ impl Inner {
             created_at: now,
             updated_at: now,
         };
+        // A request that started from an issue or a pull request asks for what GitHub's text
+        // says, and other people write that text: its plans wait for Run plan, whatever the
+        // mode and whatever was said in the request since (a schedule that fired, the user's
+        // own note), until a plan made for it is done (`plan_intake`).
+        let from_github = self.plan_intake(&plan)?.is_some();
         let ids: HashMap<String, Id> = valid.plan.tasks.iter().map(|t| (t.id.clone(), new_id())).collect();
         let tasks: Vec<Task> = valid
             .plan
@@ -142,9 +194,10 @@ impl Inner {
                 updated_at: now + i as i64,
             })
             .collect();
-        // Auto and Direct requests run at once (unless the plan has questions for the user).
+        // Auto and Direct requests run at once (unless the plan has questions for the user, may
+        // answer a message from outside that the user has not said OK to, or started from GitHub).
         let runs_at_once = matches!(mode, LeadMode::Auto | LeadMode::Direct);
-        let auto = runs_at_once && valid.plan.open_questions.is_empty();
+        let auto = runs_at_once && !outside_waits && !from_github && valid.plan.open_questions.is_empty();
         let plan_json = serde_json::to_value(&valid.plan)?;
         let rows = self.store.tx(|tx| {
             let mut out = vec![];
@@ -169,7 +222,17 @@ impl Inner {
                 ),
                 json!({ "rule": "validated", "tasks": tasks.iter().map(|t| &t.key).collect::<Vec<_>>(), "fixes": valid.fixes.len() }),
             ));
-            if runs_at_once && !auto {
+            if runs_at_once && outside_waits {
+                decisions.push((
+                    "not auto-running: a message from outside Codly came in after your last one, so the plan waits for you".into(),
+                    json!({ "rule": "inbound", "sources": outside.iter().filter_map(|m| m.attachment.as_ref()?["inbound"]["source"].as_str()).collect::<Vec<_>>() }),
+                ));
+            } else if runs_at_once && from_github {
+                decisions.push((
+                    "not auto-running: this request started from GitHub, and other people write there, so the plan waits for you".into(),
+                    json!({ "rule": "intake" }),
+                ));
+            } else if runs_at_once && !auto {
                 decisions.push(("not auto-running: the plan has open questions for you".into(), json!({ "rule": "open_questions" })));
             }
             for (summary, mut detail) in decisions {
@@ -187,11 +250,27 @@ impl Inner {
             self.publish(Some(&ws.id), r);
         }
         let n = tasks.len();
+        // Tasks the planner marked (`weak_verify`): said here too, because a plan that runs at
+        // once never waits with its card open.
+        let weak: Vec<&str> = plan.weak_checks.iter().map(|w| w.task.as_str()).collect();
+        let weak = match weak.len() {
+            0 => String::new(),
+            1 => format!(" {} has no check that can fail on the work: the plan card says why.", weak[0]),
+            _ => format!(" {} have no check that can fail on the work: the plan card says why.", weak.join(", ")),
+        };
         let text = format!(
-            "Plan ready: {} ({n} task{}).{}",
+            "Plan ready: {} ({n} task{}).{weak}{}",
             plan.summary,
             if n == 1 { "" } else { "s" },
-            if auto { " Running it now." } else { " Review it on the board, then click Run plan." }
+            if auto {
+                " Running it now."
+            } else if runs_at_once && outside_waits {
+                " A message from outside Codly came in, so it waits for you: review it on the board, then click Run plan."
+            } else if runs_at_once && from_github {
+                " This request started from GitHub, and other people write there, so it waits for you: review it on the board, then click Run plan."
+            } else {
+                " Review it on the board, then click Run plan."
+            }
         );
         self.chat(Some(&ws.id), &thread, "codly", &text, Some(json!({ "plan_id": plan_id })))?;
         if auto {
@@ -231,39 +310,59 @@ impl Inner {
         let short = plan_short(&plan);
         let branch = format!("codly/{short}/integration");
         let wt = self.worktree_root(&ws).join(&short).join("integration");
-        let (base, fresh) = {
+        let (base, base_branch) = {
             let _g = self.repo_lock.lock().await;
             let head = self
                 .git
                 .head(&repo)
                 .await?
                 .ok_or_else(|| anyhow!("the repository has no commits yet; make a first commit, then run the plan"))?;
-            let base = match plan.base_commit.clone() {
-                Some(b) if self.git.branch_exists(&repo, &branch).await? => b,
-                _ => head,
+            // A plan that already has its base keeps the branch it started from, too.
+            let (base, base_branch) = match plan.base_commit.clone() {
+                Some(b) if self.git.branch_exists(&repo, &branch).await? => (b, plan.base_branch.clone()),
+                _ => (head, self.git.current_branch(&repo).await?),
             };
             if !self.git.branch_exists(&repo, &branch).await? {
                 self.git.create_branch(&repo, &branch, &base).await?;
             }
             let fresh = !wt.exists();
             self.git.worktree_add(&repo, &wt, &branch, &base).await?;
-            (base, fresh)
+            if fresh {
+                self.mark_new_worktree(&wt)?;
+            }
+            (base, base_branch)
         };
-        if fresh {
-            self.bootstrap_worktree(&ws, &repo, &wt, None).await; // integration checks need deps too
+        // Integration checks need deps too. A setup script that fails stops the start here.
+        // The plan keeps the base its branch was cut from, so running it again goes on from it.
+        if let Err(e) = self.prepare_worktree(&ws, &wt, None, Some(&plan.thread)).await {
+            self.update_plan(plan_id, |p| {
+                p.base_commit = Some(base.clone());
+                p.base_branch = base_branch.clone();
+                Ok(())
+            })?;
+            return Err(e);
         }
         let wt_s = wt.to_string_lossy().into_owned();
+        let mut started = false;
         self.update_plan(plan_id, |p| {
-            if !matches!(p.status, PlanStatus::AwaitingApproval | PlanStatus::Planning) {
-                bail!("the plan was changed meanwhile");
+            match p.status {
+                PlanStatus::AwaitingApproval | PlanStatus::Planning => {}
+                // A second Run plan waited for the first one's worktree setup: the plan runs.
+                PlanStatus::Running | PlanStatus::Integrating => return Ok(()),
+                _ => bail!("the plan was changed meanwhile"),
             }
+            started = true;
             p.status = PlanStatus::Running;
             p.base_commit = Some(base.clone());
+            p.base_branch = base_branch.clone();
             p.integration_branch = Some(branch.clone());
             p.integration_worktree = Some(wt_s.clone());
             Ok(())
         })?;
-        let current = self.git.current_branch(&repo).await.ok().flatten().unwrap_or_else(|| "HEAD".into());
+        if !started {
+            return Ok(());
+        }
+        let current = base_branch.unwrap_or_else(|| "HEAD".into());
         self.decide(
             Some(&ws.id),
             None,
@@ -306,10 +405,27 @@ impl Inner {
             PlanStatus::Running | PlanStatus::Integrating => Some(self.merge_lock.lock().await),
             _ => None,
         };
-        self.update_plan(&plan.id, |p| {
-            p.status = PlanStatus::Cancelled;
-            Ok(())
-        })?;
+        // A plan that was finished and runs again only to resolve a conflict with your branch:
+        // the resolution is cancelled, not the finished work. The plan stays running, and its
+        // next pass finishes it again as it was (`settle_resolution` takes the merge back).
+        let resolving = plan.status == PlanStatus::Running && self.open_resolution(plan)?.is_some();
+        if !resolving {
+            // Checked in the write: `plan` is as the caller read it, before the wait above. A
+            // plan that finished since stays finished: it said "Plan done", and its work is
+            // yours to merge.
+            let mut over = false;
+            self.update_plan(&plan.id, |p| {
+                over = matches!(p.status, PlanStatus::Done | PlanStatus::Cancelled);
+                if !over {
+                    p.status = PlanStatus::Cancelled;
+                }
+                Ok(())
+            })?;
+            if over {
+                return Ok(());
+            }
+        }
+        let what = if resolving { "conflict resolution" } else { "plan" };
         for t in self.store.plan_tasks(&plan.id)? {
             if matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled) {
                 continue;
@@ -319,19 +435,20 @@ impl Inner {
             // `by_user`: a cancel takes a blocked task too (the loop must not stop halfway).
             self.update_task_as(&t.id, true, |t| {
                 t.status = TaskStatus::Cancelled;
-                t.status_reason = Some(format!("plan {why}"));
+                t.status_reason = Some(format!("{what} {why}"));
                 Ok(())
             })?;
             self.release_task_agents(&t);
         }
         // Branches and worktrees are kept: never delete unmerged work.
-        self.decide(
-            Some(&plan.workspace_id),
-            None,
-            "schedule",
-            format!("plan \"{}\" {why}", prompts::clip(&plan.summary, 60)),
-            json!({ "plan_id": plan.id }),
-        )?;
+        let summary = match resolving {
+            true => format!("the conflict resolution of plan \"{}\" was {why}; the plan finishes again as it was", prompts::clip(&plan.summary, 60)),
+            false => format!("plan \"{}\" {why}", prompts::clip(&plan.summary, 60)),
+        };
+        self.decide(Some(&plan.workspace_id), None, "schedule", summary, json!({ "plan_id": plan.id }))?;
+        if resolving {
+            self.kick();
+        }
         Ok(())
     }
 
@@ -344,7 +461,7 @@ impl Inner {
         }) {
             self.release_worker(&a.id, &t.id);
         }
-        lock(&self.fix_rounds).remove(&t.id);
+        self.forget_rounds(&t.id);
     }
 
     // ───────────── scheduling ─────────────
@@ -389,12 +506,12 @@ impl Inner {
 
     async fn schedule_office(self: &Arc<Self>, ws: &Workspace, spaces: &[Workspace]) -> Result<()> {
         let mut elsewhere = vec![];
-        let busy = self.busy_agents();
         for o in spaces.iter().filter(|o| o.id != ws.id) {
             let agents = self.store.agents(&o.id)?;
             for t in self.store.tasks(&o.id)? {
                 let worker = agents.iter().find(|a| t.assignee.as_ref() == Some(&a.id));
-                if scheduler::is_active(t.status) || scheduler::held(&t, worker, &busy) {
+                // Not one that waits for your answer: nobody works on it, so it holds no slot.
+                if scheduler::is_active(t.status) {
                     elsewhere.extend(worker.cloned());
                 }
             }
@@ -402,18 +519,31 @@ impl Inner {
         self.sync_team(&ws)?;
         let tasks = self.store.tasks(&ws.id)?;
         self.sweep_staff(&ws, &tasks, &self.store.agents(&ws.id)?)?;
-        if let Err(e) = self.notice_outside_merges(&ws).await {
-            tracing::debug!("checking for merges outside Codly: {e}");
+        let mut plans = self.store.plans(&ws.id, 100)?;
+        if self.outside_merges_due(ws, &plans) {
+            if let Err(e) = self.notice_outside_merges(&ws).await {
+                tracing::debug!("checking for merges outside Codly: {e}");
+                lock(&self.merge_looks).remove(&ws.id); // not looked: the next pass tries again
+            }
+            plans = self.store.plans(&ws.id, 100)?;
         }
-        let plans = self.store.plans(&ws.id, 100)?;
         let agents = self.store.agents(&ws.id)?;
         let clis = self.clis();
         let mut settings = self.settings();
         settings.paused |= settings.paused_offices.contains(&ws.id);
         // A quiet 1:1 chat does not keep an agent from its task (it is stopped for it).
         let busy: HashSet<Id> = self.busy_agents();
-        let accounts = self.account_states();
-        let actions = scheduler::schedule(&SchedInput {
+        let in_terminal: HashSet<Id> = self.in_terminal_ids().into_iter().collect();
+        // A CLI that is not started in this repo until you trust its files takes no task (`trust.rs`).
+        let accounts = self.park_untrusted(ws, &clis, self.account_states()).await;
+        let now = now_ms();
+        let not_before = lock(&self.retries).holds(now);
+        // No task starts while the work of the last run waits for your Resume (`resume.rs`),
+        // or past a budget.
+        let resume_hold = self.launch_hold();
+        let hold = resume_hold.clone().or_else(|| self.budget_hold());
+        let asking = self.tasks_asking(&ws.id, &tasks)?;
+        let input = SchedInput {
             tasks: &tasks,
             plans: &plans,
             agents: &agents,
@@ -421,9 +551,15 @@ impl Inner {
             settings: &settings,
             busy: &busy,
             accounts: &accounts,
-            now: now_ms(),
+            now,
             elsewhere: &elsewhere,
-        });
+            not_before: &not_before,
+            hold: hold.as_deref(),
+            in_terminal: &in_terminal,
+            asking: &asking,
+        };
+        let actions = scheduler::schedule(&input);
+        let stuck = scheduler::stuck_plans(&input, &actions);
         let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
         for a in actions {
             match a {
@@ -456,6 +592,10 @@ impl Inner {
             let ts: Vec<&Task> = tasks.iter().filter(|t| t.plan_id.as_deref() == Some(&p.id)).collect();
             // A task you cancelled doesn't hold the plan open; the rest still has to be done.
             if ts.iter().any(|t| t.status == TaskStatus::Done) && ts.iter().all(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)) {
+                // Its integration checks are work too: they wait for your Resume.
+                if resume_hold.is_some() {
+                    continue;
+                }
                 let me = self.clone();
                 let id = p.id.clone();
                 tokio::spawn(async move { me.complete_plan(&id).await });
@@ -477,7 +617,27 @@ impl Inner {
                 }
             }
         }
-        Ok(())
+        // A plan that only you can move on says so, once, in its thread.
+        self.tell_stuck(ws, &plans, &tasks, &stuck)
+    }
+
+    /// Is a look for plans you merged without Codly due? Each look runs git once or twice per
+    /// finished plan that is not merged, so an idle office looks only when something changed:
+    /// your branch moved, or another plan waits to be merged.
+    fn outside_merges_due(&self, ws: &Workspace, plans: &[Plan]) -> bool {
+        let open: Vec<Id> =
+            plans.iter().filter(|p| p.status == PlanStatus::Done && p.merged_sha.is_none() && !p.kept).map(|p| p.id.clone()).collect();
+        let mut looks = lock(&self.merge_looks);
+        if open.is_empty() {
+            looks.remove(&ws.id);
+            return false;
+        }
+        let look = MergeLook { open, head: head_stamp(Path::new(&ws.repo_path)), at: now_ms() };
+        let due = look.due(looks.get(&ws.id));
+        if due {
+            looks.insert(ws.id.clone(), look);
+        }
+        due
     }
 
     /// Persist the scheduler's choice before any side effect, then start the run.
@@ -500,7 +660,8 @@ impl Inner {
                 _ => self.agent(&id)?,
             },
             AgentPick::New { name, color, model } => {
-                // A job offer goes up in the office first; you may pick who gets the job.
+                // With the office rules on, a job offer goes up in the office first; you may pick
+                // who gets the job. Otherwise the consultant is hired at once.
                 let hired = match self.hiring(&ws.id, &self.task(task_id)?, provider, model.clone(), &name, color) {
                     careers::Hiring::Wait => {
                         let why = "waiting: hiring (the job offer is up in the office)".to_string();
@@ -518,11 +679,16 @@ impl Inner {
                 let mut a = self.new_agent(&name, provider, Role::Worker, color, model);
                 a.consultant = true;
                 a.title = title;
+                let offered = hired.is_some();
                 if let Some(h) = hired {
                     a.look_seed = h.avatar;
                     a.career.traits = h.traits;
                 }
-                self.insert_agent(&ws.id, a)?
+                let a = self.insert_agent(&ws.id, a)?;
+                if !offered {
+                    self.announce_hire(&ws.id, task_id, &a);
+                }
+                a
             }
         };
         let mut why = None; // why it was not running: tells a resumed session what happened
@@ -538,7 +704,7 @@ impl Inner {
         })?;
         self.update_agent(&agent.id, |a| {
             a.task_id = Some(task_id.to_string());
-            // Called in from home (the scheduler found nobody else at work): it is back.
+            // It was at home (called in, or the office rules are off): at work, it is back.
             if super::at_home(a, now_ms()).is_some() {
                 a.away_until = None;
             }
@@ -557,25 +723,8 @@ impl Inner {
         if self.shutting_down.load(Ordering::SeqCst) {
             return;
         }
-        let reason = format!("blocked: could not start the worker: {e}");
-        let _ = self.update_task(&task_id, |t| {
-            if t.status == TaskStatus::Running {
-                t.status = TaskStatus::Blocked;
-                t.status_reason = Some(reason.clone());
-            }
-            Ok(())
-        });
-        let _ = self.update_agent(&agent_id, |a| {
-            if a.task_id.as_deref() == Some(task_id.as_str()) {
-                a.task_id = None;
-            }
-        });
-        let ws = self.store.task_workspace(&task_id).ok().flatten();
-        let _ = self.decide(ws.as_deref(), Some(&task_id), "schedule", reason.clone(), json!({ "error": e.to_string() }));
-        if let (Some(ws), Ok(t)) = (ws, self.task(&task_id)) {
-            self.lead_followup(&ws, &self.task_thread(&t), &format!("Task {} \"{}\" is {reason}.", t.key, t.title)).await;
-        }
-        self.kick();
+        // Tried again after a wait, unless only you can fix the cause (`retry.rs`).
+        self.worker_failed(&task_id, &agent_id, Failure::Start(e.to_string()));
     }
 
     async fn try_start_worker(self: &Arc<Self>, task_id: &str, agent_id: &str, account: &str, why: Option<&str>) -> Result<()> {
@@ -585,29 +734,39 @@ impl Inner {
         let ws = self.store.workspace(&ws_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
         let repo = PathBuf::from(&ws.repo_path);
         let plan = task.plan_id.as_deref().map(|p| self.plan(p)).transpose()?;
-        let (branch, wt, start) = match &plan {
-            Some(p) => {
+        // A task that resolves a conflict with your branch works in the plan's own worktree.
+        let in_place = plan.as_ref().and_then(|p| merge_conflict::in_place(&task, p));
+        let (branch, wt, start) = match (&in_place, &plan) {
+            (Some((integ, wt)), _) => (integ.clone(), wt.clone(), integ.clone()),
+            (None, Some(p)) => {
                 let short = plan_short(p);
                 let integ = p.integration_branch.clone().ok_or_else(|| anyhow!("the plan has no integration branch"))?;
                 (format!("codly/{short}/{}", task.key), self.worktree_root(&ws).join(&short).join(&task.key), integ)
             }
-            None => (format!("codly/adhoc/{}", task.key), self.worktree_root(&ws).join("adhoc").join(&task.key), "HEAD".to_string()),
+            (None, None) => (format!("codly/adhoc/{}", task.key), self.worktree_root(&ws).join("adhoc").join(&task.key), "HEAD".to_string()),
         };
         let member = agent.member.is_some().then(|| self.team_member(&agent)).flatten();
         // A team member works in its own stable worktree, switched to the task's branch.
-        let (wt, switch_note) = if agent.member.is_some() {
-            self.switch_member_worktree(&ws, &agent, &task.key, &branch, &start).await?
+        let (wt, switch_note) = if agent.member.is_some() && in_place.is_none() {
+            let switched = self.switch_member_worktree(&ws, &agent, &task.key, &branch, &start).await?;
+            // New at the member's first task: prepared on that task's branch.
+            self.prepare_worktree(&ws, &switched.0, Some(task_id), None).await?;
+            switched
         } else {
-            let fresh = !wt.exists();
             {
                 let _g = self.repo_lock.lock().await;
+                let fresh = !wt.exists();
                 self.git.worktree_add(&repo, &wt, &branch, &start).await?;
+                if fresh {
+                    self.mark_new_worktree(&wt)?;
+                }
             }
-            if fresh {
-                self.bootstrap_worktree(&ws, &repo, &wt, Some(task_id)).await;
-            }
+            self.prepare_worktree(&ws, &wt, Some(task_id), None).await?;
             (wt, None)
         };
+        if in_place.is_some() {
+            self.reopen_resolution(&task, &repo, &wt).await?;
+        }
         if self.store.task_commits(task_id)?.0.is_none() {
             let base = self.git.rev_parse(&repo, &start).await?;
             self.store.set_task_commits(task_id, base.as_deref(), None)?;
@@ -622,17 +781,24 @@ impl Inner {
         // retry). A session only exists in its account's config home; on another account the
         // worker starts over in a new session (the worktree keeps its work).
         let primary = self.primary_account(agent.provider);
+        // Its last session ran out of context: this run starts a new one, from the brief and
+        // the work in the worktree. A member's own long conversation is not resumed either.
+        let fresh = lock(&self.retries).fresh(task_id);
         let prev = self.store.latest_task_run(task_id, Some(Role::Worker))?.filter(|r| {
-            r.agent_id == agent.id
+            !fresh
+                && r.agent_id == agent.id
                 && r.provider == agent.provider
                 && r.session_id.is_some()
                 && r.account.clone().or_else(|| primary.clone()).as_deref().is_none_or(|a| a == account)
         });
         // Taken for good only when the brief goes out: a start that stops short keeps it for the retry.
-        let feedback = lock(&self.pending_feedback).get(task_id).cloned();
+        let feedback = self.feedback(task_id)?;
+        // For a session that is new to the task: what you said to the task's questions.
+        let answers = self.answers_given(&ws.id, task_id, feedback.as_deref())?;
         // A member continues its own conversation on a new task (unless the Lead asked for a
         // fresh one), when that conversation lives on this account.
         let own = match (&member, &agent.session_id) {
+            _ if fresh => None,
             (Some(_), Some(s)) if prev.is_none() && !task.fresh_session && self.agent_account(&agent).is_none_or(|a| a == account) => {
                 Some(s.clone())
             }
@@ -685,9 +851,13 @@ impl Inner {
         let started = match resume {
             Some((session_id, how)) => match self.spawn_run(req(SessionMode::Resume { session_id })).await {
                 Ok(_) => how,
+                // A start that Codly itself refused says nothing against the session: it is
+                // kept for the next start, like a chat's (`gives_up_conversation`).
+                Err(e) if !self.gives_up_conversation(&agent, &e) => return Err(e),
                 Err(e) => {
                     tracing::warn!("resuming {} on {} failed ({e}); starting a new session", agent.name, task.key);
                     self.spawn_run(req(new_session(agent.provider))).await?;
+                    self.resume_failed(&agent, Role::Worker, Some(&ws.id), Some(task_id), &e);
                     Start::New
                 }
             },
@@ -698,62 +868,51 @@ impl Inner {
         };
         let prompt = match (started, feedback) {
             (Start::SameTask, Some(f)) => f,
-            (Start::SameTask, None) => prompts::continuation(&task, why),
+            (Start::SameTask, None) => {
+                // Read just before the prompt goes out: the session may be older than the files.
+                let seen = match self.seen_in_worktree(&repo, &wt, &task).await {
+                    Ok(seen) => Some(seen),
+                    Err(e) => {
+                        tracing::warn!("{} resumes without what Codly sees in its worktree: {e:#}", task.key);
+                        None
+                    }
+                };
+                prompts::continuation(&task, why, seen.as_ref())
+            }
             (Start::OwnSession, f) => {
                 let brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), false).await;
                 let next = prompts::member_next_task(&brief, &branch, switch_note.as_deref());
-                match f {
-                    Some(f) => format!("{next}\n\n{f}"),
-                    None => next,
-                }
+                [Some(next), answers, f].into_iter().flatten().collect::<Vec<_>>().join("\n\n")
             }
             (Start::New, f) => {
-                let brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), true).await;
-                match f {
-                    Some(f) => format!("{brief}\n\n{f}"),
-                    None => brief,
+                let mut brief = self.worker_brief(&ws, &task, plan.as_ref(), &agent, member.as_ref(), true).await;
+                if fresh {
+                    brief = format!("{brief}\n\n{}", prompts::new_session_note());
                 }
+                [Some(brief), answers, f].into_iter().flatten().collect::<Vec<_>>().join("\n\n")
             }
         };
         if stale() {
             self.release_worker(agent_id, task_id);
             return Ok(());
         }
-        lock(&self.pending_feedback).remove(task_id);
-        self.send_prompt(agent_id, prompt)
+        lock(&self.retries).started(task_id);
+        self.send_prompt(agent_id, prompt)?;
+        self.clear_feedback(task_id)
     }
 
-    /// Give a new worktree what git does not carry (CRITIQUE G9): the checkout's installed
-    /// dependencies and local env files, as APFS clones (`cp -c`: copy-on-write, near-free).
-    /// Only paths the repo ignores are copied, so none of them can end up in a Codly commit.
-    /// ponytail: a fixed list; per-repo setup scripts and port blocks come when users ask.
-    pub(super) async fn bootstrap_worktree(&self, ws: &Workspace, repo: &Path, wt: &Path, task_id: Option<&str>) {
-        const SEED: &[&str] = &["node_modules", ".venv", "venv", ".env", ".env.local", ".env.development.local", ".env.test.local"];
-        let mut copied = vec![];
-        for rel in SEED {
-            let (src, dst) = (repo.join(rel), wt.join(rel));
-            if !src.exists() || dst.exists() || !self.git.is_ignored(repo, rel).await.unwrap_or(false) {
-                continue;
-            }
-            let cp = tokio::process::Command::new("/bin/cp")
-                .arg("-cR")
-                .arg(&src)
-                .arg(&dst)
-                .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output();
-            match tokio::time::timeout(Duration::from_secs(120), cp).await {
-                Ok(Ok(out)) if out.status.success() => copied.push(rel.to_string()),
-                Ok(Ok(out)) => {
-                    tracing::info!("could not clone {rel} into {}: {}", wt.display(), String::from_utf8_lossy(&out.stderr).trim())
-                }
-                _ => tracing::info!("cloning {rel} into {} failed or timed out", wt.display()),
-            }
-        }
-        if !copied.is_empty() {
-            let summary = format!("seeded the new worktree with {} from your checkout (APFS clones, git-ignored)", copied.join(", "));
-            let _ = self.decide(Some(&ws.id), task_id, "context", summary, json!({ "worktree": wt.to_string_lossy(), "copied": copied }));
-        }
+    /// What is in the worktree a worker comes back to, and what Codly last did with the task's
+    /// work, for the first prompt of its resumed session (`prompts::continuation`).
+    async fn seen_in_worktree(&self, repo: &Path, wt: &Path, task: &Task) -> Result<prompts::Seen> {
+        self.git.check_worktree(repo, wt).await?; // the reads below run in the agent's worktree
+        let branch = self.git.checked_out_branch(wt).await?;
+        let uncommitted = self.git.dirty_paths(wt).await?;
+        let last_commit = self.store.task_commits(&task.id)?.1;
+        let last_check = self.store.task_events(&task.id, "decision")?.into_iter().rev().find_map(|e| match e.kind {
+            EventKind::Decision { decision_type, summary, .. } if matches!(decision_type.as_str(), "gate" | "merge") => Some(summary),
+            _ => None,
+        });
+        Ok(prompts::Seen { branch, uncommitted, last_commit, last_check })
     }
 
     /// Task brief + pointer pack (logged as a Retrieval event) + memory pack + what the
@@ -775,7 +934,7 @@ impl Inner {
             })
             .collect();
         let query = format!("{} {}", task.title, task.goal);
-        let pointer_pack = match self.pointer_pack(&ws.id, &query).await {
+        let pointer_pack = match self.pointer_pack(&ws.id, task.worktree.as_deref().map(Path::new), &query).await {
             Some((text, result)) => {
                 let _ = self.emit(
                     Some(&ws.id),
@@ -807,7 +966,12 @@ impl Inner {
         let memory_pack = memory::panel::with_memory_file(memory_pack, &self.data("memory"), &agent.id);
         let history = if history && member.is_some() { self.member_history(&ws.id, &agent.id) } else { vec![] };
         let role = member.map(|m| m.role.clone());
-        prompts::task_brief(&prompts::Brief { task, plan, deps, pointer_pack, memory_pack, role, history })
+        let brief = prompts::task_brief(&prompts::Brief { task, plan, deps, pointer_pack, memory_pack, role, history });
+        // The gate runs the repo's required checks after the task's own: the worker is told.
+        match self.required_checks(&ws.id, Path::new(&ws.repo_path)) {
+            Ok(Required::Run(cmds)) => format!("{brief}{}", prompts::required_checks_note(&cmds, &task.verify)),
+            _ => brief,
+        }
     }
 
     /// Blackboard notes of the dependency tasks, read from events (used while the memory
@@ -895,7 +1059,8 @@ impl Inner {
             _ => bail!("cannot move {} from {} to {}", t.key, store::enum_str(&from), store::enum_str(&to)),
         }
         if to == Ready {
-            lock(&self.fix_rounds).remove(task_id); // a retry gets fresh fix rounds
+            self.forget_rounds(task_id); // a retry gets fresh fix rounds
+            lock(&self.retries).forget(task_id); // and starts now, with its worker's failures forgotten
         }
         let was = t;
         let t = self.update_task_as(task_id, true, |t| {
@@ -970,13 +1135,39 @@ impl Inner {
     /// Runs left `starting`/`running` by a crash become `lost` and the process groups they
     /// left running are killed; every pending approval expires; their tasks go back to ready,
     /// keeping the assignee, so the scheduler resumes the same agent with the stored session id.
-    pub(super) async fn recover(&self) {
-        if let Err(e) = self.recover_inner().await {
-            tracing::warn!("crash recovery incomplete: {e}");
+    /// A task whose worker had finished its turn (Codly was checking, reviewing or merging
+    /// the work) gets no worker turn: its gate runs again. Unless Settings say "always", none
+    /// of that work goes on before your Resume (`resume.rs`).
+    pub(super) async fn recover(self: &Arc<Self>) {
+        match self.recover_inner().await {
+            Ok(regate) => {
+                for task_id in regate {
+                    tokio::spawn(self.clone().gate(task_id));
+                }
+            }
+            Err(e) => tracing::warn!("crash recovery incomplete: {e}"),
         }
     }
 
-    async fn recover_inner(&self) -> Result<()> {
+    /// Had the task's worker ended its last turn, completed, with no turn started after it?
+    /// Then its work was whole when Codly stopped, and only the gate is left to do.
+    fn worker_turn_ended(&self, t: &Task) -> bool {
+        let last = |ty: &str| {
+            let of_worker = |e: &EventRow| e.agent_id.is_some() && e.agent_id == t.assignee;
+            self.store.task_events(&t.id, ty).ok().and_then(|events| events.into_iter().filter(of_worker).next_back())
+        };
+        match (last("turn_started"), last("turn_completed")) {
+            (Some(started), Some(ended)) => {
+                ended.id > started.id && matches!(ended.kind, EventKind::TurnCompleted { status: TurnStatus::Completed, .. })
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns the tasks whose gate runs again (see `recover`).
+    async fn recover_inner(&self) -> Result<Vec<Id>> {
+        // No run of this start exists yet: every MCP config file under runs/ is a leftover with keys in it.
+        crate::adapters::claude::remove_stale_mcp_configs(&self.data("runs"));
         // One bad row must not leave everything after it stuck: each item recovers on its own.
         let each = |what: &str, id: &str, res: Result<()>| {
             if let Err(e) = res {
@@ -1033,14 +1224,35 @@ impl Inner {
             });
             each("approval", &a.id, res.map(drop));
         }
+        // The work goes on by itself only with "always": otherwise it waits for your Resume
+        // (`resume.rs`).
+        let ask = self.settings().resume_on_launch != ResumeOnLaunch::Always;
         let active = [TaskStatus::Running, TaskStatus::Verifying, TaskStatus::Reviewing, TaskStatus::ChangesRequested, TaskStatus::Merging];
+        let mut regate = vec![];
+        let mut in_work = vec![];
         for t in self.store.tasks_with_status(&active)? {
-            let res = self.update_task(&t.id, |t| {
-                t.status = TaskStatus::Ready;
-                t.status_reason = Some("resuming after Codly restarted".into());
-                Ok(())
-            });
-            each("task", &t.id, res.map(drop));
+            // In its checks, review or merge, with the worker's turn over and its worktree
+            // still there: the gate runs again from the work as it is (as Running: the gate
+            // takes it from there). Anything else is resumed by its worker.
+            let gate_only = matches!(t.status, TaskStatus::Verifying | TaskStatus::Reviewing | TaskStatus::Merging)
+                && t.worktree.as_deref().is_some_and(|w| Path::new(w).is_dir())
+                && self.worker_turn_ended(&t);
+            let res = if ask { self.hold_task(&t) } else { self.resume_task(&t, gate_only) };
+            if res.is_ok() {
+                in_work.push(t.id.clone());
+                if gate_only {
+                    regate.push(t.id.clone());
+                }
+            }
+            each("task", &t.id, res);
+        }
+        if ask {
+            // Their gates run when you say Resume, with everything else that waits. Held
+            // from here on, whatever the rest of the recovery finds.
+            self.hold_at_launch(in_work, std::mem::take(&mut regate));
+        } else {
+            // A start that asked, and that Codly closed on before your answer: its tasks go on too.
+            regate.extend(self.resume_left_open(&in_work));
         }
         for a in self.store.all_agents()? {
             let busy = !matches!(a.status, AgentStatus::Idle | AgentStatus::Offline | AgentStatus::Done);
@@ -1065,14 +1277,16 @@ impl Inner {
             each("plan", &p.id, res.map(drop));
         }
         for p in self.store.plans_with_status(&[PlanStatus::Running])? {
+            // Not the merge a task was resolving there: its worker goes on with it.
             if let Some(wt) = p.integration_worktree.as_deref().map(Path::new).filter(|w| w.exists())
+                && matches!(self.open_resolution(&p), Ok(None))
                 && let Ok(true) = self.git.abort_merge(wt).await
             {
                 let res = self.decide(Some(&p.workspace_id), None, "merge", "aborted a merge left half-done by a crash", json!({ "plan_id": p.id }));
                 each("plan", &p.id, res.map(drop));
             }
         }
-        Ok(())
+        Ok(regate)
     }
 
     // ───────────── plan completion ─────────────
@@ -1117,20 +1331,43 @@ impl Inner {
             .as_array()
             .map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect())
             .unwrap_or_default();
+        // A conflict resolution that did not finish (you cancelled its task) is taken back: the
+        // checks run on the branch as the finished tasks left it.
+        let plan = &{
+            let _g = self.repo_lock.lock().await;
+            self.settle_resolution(plan).await?
+        };
         let wt = plan.integration_worktree.as_deref().map(PathBuf::from);
         let mut failed = vec![];
+        // Not run: the approval rules see a risk in them, and nobody could allow them.
+        let mut refused: Vec<HeldCheck> = vec![];
+        // Your required checks are on and did not run: what to say about it.
+        let mut unchecked = None;
         if let Some(wt) = &wt {
-            for cmd in &checks {
-                let v = self.run_verify(wt, cmd).await;
+            let mode = self.approval_mode_for(ws_id, Some(&plan.thread));
+            // What the task that resolved a merge with your branch ran on this very commit, and
+            // passed, is not run a second time.
+            let passed = self.checked_in_place(plan, wt).await?;
+            for cmd in checks.iter().filter(|c| !passed.contains(c)) {
+                let v = self.run_verify(wt, cmd, mode).await;
                 self.emit(
                     ws_id,
                     row(None, None, None, EventKind::Verified { command: cmd.clone(), ok: v.ok, exit_code: v.code, tail: v.tail }),
                 )?;
-                if !v.ok {
+                if !v.held.is_empty() {
+                    refused.push(HeldCheck { command: cmd.clone(), risks: v.held });
+                } else if !v.ok {
                     failed.push(cmd.clone());
                 }
             }
+            // Then the repo's required checks (yours), on the merged work.
+            let ran: Vec<String> = checks.iter().chain(&passed).filter(|c| !refused.iter().any(|h| h.command == **c)).cloned().collect();
+            let required = self.required_on_plan(&ws, wt, &ran).await?;
+            failed.extend(required.failed);
+            unchecked = required.not_run;
         }
+        // Only a check that ran and failed fails the plan. One Codly refused to run leaves it
+        // done, so you can still merge it: its message says what was not checked.
         let status = if failed.is_empty() { PlanStatus::Done } else { PlanStatus::Failed };
         let tasks = self.store.plan_tasks(&plan.id)?;
         let branch = plan.integration_branch.clone().unwrap_or_default();
@@ -1140,19 +1377,45 @@ impl Inner {
         };
         let target = self.git.current_branch(Path::new(&ws.repo_path)).await.ok().flatten().unwrap_or_else(|| ws.default_branch.clone());
         let n = tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
-        let text = if failed.is_empty() {
+        // A check Codly did not run is no failed check: the work may be fine, and no fix plan
+        // changes that. You are told which ones, why, and where to run them yourself.
+        let not_run = || {
+            let one = refused.len() == 1;
+            let list = refused.iter().map(|h| format!("`{}` ({})", h.command, h.risks.join(", "))).collect::<Vec<_>>().join(", ");
+            let place = wt.as_deref().map(|w| format!(" in {}", w.display())).unwrap_or_default();
+            format!(
+                "Codly did not run {} integration check{}: {} your OK first. {list}. Run {it} yourself{place} if you trust {it}. \
+                 Under Full access, Codly runs such checks by itself.",
+                refused.len(),
+                if one { "" } else { "s" },
+                if one { "it needs" } else { "they need" },
+                it = if one { "it" } else { "them" },
+            )
+        };
+        let text = if !failed.is_empty() {
+            let mut text = format!(
+                "Plan \"{}\" finished, but integration checks failed: {}. The work is on {branch}; ask the Lead for a fix plan or merge it anyway.",
+                plan.summary,
+                failed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")
+            );
+            if !refused.is_empty() {
+                text.push_str(&format!(" {}", not_run()));
+            }
+            text
+        } else if !refused.is_empty() {
+            format!("Plan \"{}\" finished, but {} The work is on {branch}: review the diff, then merge it into {target}.", plan.summary, not_run())
+        } else {
             format!(
                 "Plan done: \"{}\". {n} task{} merged into {branch} ({files} file{} changed). Review the diff, then merge it into {target}.",
                 plan.summary,
                 if n == 1 { "" } else { "s" },
                 if files == 1 { "" } else { "s" }
             )
-        } else {
-            format!(
-                "Plan \"{}\" finished, but integration checks failed: {}. The work is on {branch}; ask the Lead for a fix plan or merge it anyway.",
-                plan.summary,
-                failed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")
-            )
+        };
+        // Required checks that did not run are said: silence would read as a pass.
+        let text = match unchecked {
+            Some(why) => format!("{text} {why}"),
+            None => text,
         };
         // The status before the news, and only if the plan is still integrating: one you
         // cancelled while its checks ran stays cancelled and gets no "Plan done".
@@ -1173,9 +1436,143 @@ impl Inner {
             None,
             "merge",
             prompts::clip(&text, 200),
-            json!({ "plan_id": plan.id, "files": files, "failed_checks": failed }),
+            json!({ "plan_id": plan.id, "files": files, "failed_checks": failed, "refused_checks": refused }),
         )?;
         self.lead_followup(&ws.id, &plan.thread, &text).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn look(open: &[&str], head: Option<u64>, at: i64) -> MergeLook {
+        MergeLook { open: open.iter().map(|id| id.to_string()).collect(), head: head.map(|len| (len, std::time::UNIX_EPOCH)), at }
+    }
+
+    #[test]
+    fn a_look_for_outside_merges_is_due_only_when_something_changed() {
+        let first = look(&["p1"], Some(100), 0);
+        assert!(first.due(None), "the first look");
+        assert!(!look(&["p1"], Some(100), 600_000).due(Some(&first)), "nothing moved: no git runs, however long it lasts");
+        assert!(look(&["p1"], Some(180), 5_000).due(Some(&first)), "your branch moved");
+        assert!(look(&["p1", "p2"], Some(100), 5_000).due(Some(&first)), "another plan waits to be merged");
+        // No reflog to watch: once a minute.
+        let blind = look(&["p1"], None, 0);
+        assert!(!look(&["p1"], None, 59_000).due(Some(&blind)));
+        assert!(look(&["p1"], None, 60_000).due(Some(&blind)));
+    }
+
+    #[test]
+    fn the_head_stamp_follows_the_reflog_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(head_stamp(dir.path()), None, "no reflog, no stamp");
+        let logs = dir.path().join(".git").join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("HEAD"), "a\n").unwrap();
+        let before = head_stamp(dir.path()).expect("a reflog gives a stamp");
+        std::fs::write(logs.join("HEAD"), "a\nb\n").unwrap();
+        assert_ne!(head_stamp(dir.path()), Some(before));
+    }
+
+    /// A Core with one office that has no folder: no scheduling pass touches its plans.
+    async fn office(root: &Path) -> (Arc<crate::orchestrator::Core>, Workspace) {
+        use crate::orchestrator::{Core, CoreConfig, StartOptions};
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: root.join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let ws = Workspace {
+            id: new_id(),
+            repo_path: root.join("gone").to_string_lossy().into_owned(),
+            name: "repo".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: now_ms(),
+        };
+        core.inner.store.upsert_workspace(&ws).unwrap();
+        (core, ws)
+    }
+
+    /// A plan of that office with no task, saved. `worktree`: its integration worktree.
+    fn saved_plan(inner: &Inner, ws: &Workspace, status: PlanStatus, worktree: Option<&Path>) -> Plan {
+        let plan: Plan = serde_json::from_value(json!({
+            "id": new_id(), "workspace_id": ws.id, "request": "Add a hello file", "summary": "Add a hello file",
+            "assumptions": [], "open_questions": [], "status": status, "base_commit": null,
+            "integration_branch": null, "integration_worktree": worktree, "created_at": now_ms(), "updated_at": now_ms(),
+        }))
+        .unwrap();
+        inner.emit(Some(&ws.id), row(None, None, None, EventKind::PlanChanged { plan: plan.clone() })).unwrap();
+        plan
+    }
+
+    /// A cancel works on the plan as its caller read it, and it can wait behind a merge. A
+    /// plan whose last check ended meanwhile is done: the cancel that comes after changes
+    /// nothing. One that is still integrating is cancelled.
+    #[tokio::test]
+    async fn a_cancel_that_comes_after_the_plan_finished_changes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let (core, ws) = office(root.path()).await;
+        let inner = &core.inner;
+        let cancelled = |p: &Plan| {
+            let said = format!("plan \"{}\" cancelled by you", p.summary);
+            let events = inner.store.events(Some(&ws.id), None, None, 100).unwrap();
+            events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, detail, .. } if *summary == said && detail["plan_id"] == p.id.as_str()))
+        };
+
+        // Read while its checks ran; they ended before the cancel went on.
+        let done = saved_plan(inner, &ws, PlanStatus::Done, None);
+        let read = Plan { status: PlanStatus::Integrating, ..done.clone() };
+        inner.cancel_plan_inner(&read, "cancelled by you").await.unwrap();
+        assert_eq!(inner.plan(&read.id).unwrap().status, PlanStatus::Done);
+        assert!(!cancelled(&read), "nothing says that a finished plan was cancelled");
+
+        let running = saved_plan(inner, &ws, PlanStatus::Integrating, None);
+        inner.cancel_plan_inner(&running, "cancelled by you").await.unwrap();
+        assert_eq!(inner.plan(&running.id).unwrap().status, PlanStatus::Cancelled);
+        assert!(cancelled(&running));
+        core.shutdown().await;
+    }
+
+    /// The other order: you cancel a plan while its integration checks run. When they end,
+    /// the plan's end writes no status over the cancel and says nothing in the chat. The
+    /// test waits for that end itself, so it has no time to guess.
+    #[tokio::test]
+    async fn checks_that_end_after_a_cancel_change_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let (core, ws) = office(root.path()).await;
+        let inner = &core.inner;
+        // Full access: the check runs whatever the approval rules see in its text.
+        core.update_settings(Settings { approval_mode: ApprovalMode::Full, ..core.settings() }).await.unwrap();
+        // The check says when it runs (`started`) and lasts until `go` is in its folder.
+        let wt = root.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        let check = "touch started; while [ ! -f go ]; do sleep 0.05; done";
+        let plan = saved_plan(inner, &ws, PlanStatus::Running, Some(&wt));
+        inner.store.with(|db| store::set_plan_json(db, &plan.id, &json!({ "integration_checks": [check] }))).unwrap();
+
+        let finishing = tokio::spawn({
+            let (inner, id) = (inner.clone(), plan.id.clone());
+            async move { inner.complete_plan(&id).await }
+        });
+        let until = tokio::time::Instant::now() + Duration::from_secs(30);
+        while !wt.join("started").exists() {
+            assert!(tokio::time::Instant::now() < until, "the integration check did not start");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let read = inner.plan(&plan.id).unwrap();
+        assert_eq!(read.status, PlanStatus::Integrating);
+        inner.cancel_plan_inner(&read, "cancelled by you").await.unwrap();
+        assert_eq!(inner.plan(&plan.id).unwrap().status, PlanStatus::Cancelled);
+
+        std::fs::write(wt.join("go"), "").unwrap();
+        finishing.await.unwrap();
+        let events = inner.store.events(Some(&ws.id), None, None, 100).unwrap();
+        let ran = |e: &EventRow| matches!(&e.kind, EventKind::Verified { command, ok: true, .. } if command == check);
+        assert!(events.iter().any(ran), "the check ran to its end");
+        assert_eq!(inner.plan(&plan.id).unwrap().status, PlanStatus::Cancelled, "a finished check never brings a cancelled plan back");
+        assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Chat { .. })), "no \"Plan done\" for a cancelled plan");
+        core.shutdown().await;
     }
 }

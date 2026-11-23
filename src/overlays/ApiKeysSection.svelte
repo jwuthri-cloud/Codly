@@ -11,7 +11,9 @@
   import type { ByokSource } from '../lib/gen/ByokSource';
   import type { ByokStatus } from '../lib/gen/ByokStatus';
   import type { Vendor } from '../lib/gen/Vendor';
+  import { Loader } from '../lib/state/loader.svelte';
   import { toast } from '../lib/state/toasts.svelte';
+  import LoadError from '../components/LoadError.svelte';
 
   const VENDORS: { id: Vendor; label: string; cli: string; placeholder: string }[] = [
     { id: 'anthropic', label: 'Anthropic', cli: 'Claude Code', placeholder: 'sk-ant-…' },
@@ -24,20 +26,26 @@
     { kind: 'command', label: 'Token command' },
   ];
 
-  let st = $state<ByokStatus | null>(null);
+  const byok = new Loader<ByokStatus>(() => api.byokStatus());
+  const st = $derived(byok.value);
   let busy = $state(false);
   /** What the user picked but has not saved yet (Key before a key is saved, Command before its line). */
   let pick = $state<Partial<Record<Vendor, ByokSource['kind']>>>({});
   let keys = $state<Record<Vendor, string>>({ anthropic: '', openai: '', openrouter: '' });
   let commands = $state<Record<Vendor, string>>({ anthropic: '', openai: '', openrouter: '' });
 
-  onMount(() => {
-    api.byokStatus().then(load).catch(() => {});
-  });
+  async function refresh() {
+    if ((await byok.load()) && byok.value) showCommands(byok.value);
+  }
+  onMount(() => void refresh());
 
-  function load(s: ByokStatus) {
-    st = s;
+  /** A command is not secret: the saved one shows in its field. */
+  function showCommands(s: ByokStatus) {
     for (const v of s.vendors) if (v.source.kind === 'command') commands[v.vendor] = v.source.command;
+  }
+  function load(s: ByokStatus) {
+    byok.set(s);
+    showCommands(s);
   }
 
   const of = (v: Vendor) => st?.vendors.find((x) => x.vendor === v);
@@ -118,6 +126,8 @@
         {/if}
       </div>
     {/each}
+  {:else if byok.error}
+    <LoadError what="your API keys" error={byok.error} loading={byok.loading} onretry={refresh} />
   {:else}
     <p class="desc">Loading…</p>
   {/if}

@@ -33,6 +33,9 @@
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; padding: 22px 26px 26px; }
   h3 { margin-bottom: 10px; }
   ul { display: flex; flex-direction: column; gap: 2px; }
-  li { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 30px; font-size: var(--t-md); color: var(--ink-2); }
+  /* a label of two lines makes its row taller; the keys keep their size */
+  li { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; padding: 3px 0; font-size: var(--t-md); line-height: 18px; color: var(--ink-2); }
+  li > span { min-width: 0; }
+  li > :global(.kbds) { flex-shrink: 0; }
   @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
 </style>

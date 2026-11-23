@@ -3,8 +3,11 @@ import type { AccountConfig } from "./AccountConfig";
 import type { AccountStrategy } from "./AccountStrategy";
 import type { ApprovalMode } from "./ApprovalMode";
 import type { ByokSettings } from "./ByokSettings";
+import type { NotificationSettings } from "./NotificationSettings";
 import type { Provider } from "./Provider";
+import type { ResumeOnLaunch } from "./ResumeOnLaunch";
 import type { TeamMember } from "./TeamMember";
+import type { WatchdogSettings } from "./WatchdogSettings";
 
 export type Settings = { lead_provider: Provider | null, lead_model: string | null, 
 /**
@@ -23,7 +26,14 @@ accounts: Array<AccountConfig>, account_strategy: AccountStrategy,
 /**
  * Account the Lead runs on (None = the one with the most quota left).
  */
-lead_account: string | null, approval_mode: ApprovalMode, 
+lead_account: string | null, 
+/**
+ * Ask Anthropic for each Claude sign-in's usage (what `/usage` shows) when Accounts are
+ * refreshed. This reads the sign-in's OAuth token (login Keychain, else its
+ * `.credentials.json`) and sends it to api.anthropic.com (`quota.rs`). Off = Codly never
+ * reads that token: usage comes only from what running agents report.
+ */
+read_claude_quota: boolean, approval_mode: ApprovalMode, 
 /**
  * Run plans without waiting for the "Run plan" click.
  */
@@ -55,10 +65,16 @@ team: Array<TeamMember>,
  */
 byok: ByokSettings, 
 /**
- * Claude agents also load your own Claude Code setup: your MCP servers, plugins, skills
- * and the repo's `.claude` settings. Off = Codly's own tools and Connections only.
+ * Agents also load your own CLI setup. Claude: your MCP servers, plugins, skills and the
+ * repo's `.claude` settings. Codex: the MCP servers of your Codex config. Off = Codly's
+ * own tools and Connections only.
  */
 use_my_claude_setup: boolean, 
+/**
+ * Commands a Codex agent runs in its workspace sandbox may use the network without
+ * asking (package installs, fetches). Off = each one asks first.
+ */
+codex_network_access: boolean, 
 /**
  * Pause (the office's speed control): no new task starts; running ones finish.
  */
@@ -68,7 +84,64 @@ paused: boolean,
  */
 paused_offices: Array<string>, 
 /**
+ * The office game changes real work: an agent at home gets no new work from the Lead and
+ * its queued task waits, a tired one is a second choice, a new consultant waits for its job
+ * offer, and the traits rolled for a worker ride on its prompts. Off (the default): the
+ * office only shows all this, and work is never delayed, refused or changed by it.
+ */
+game_rules: boolean, 
+/**
  * The Settings' Developer panel: cheats for testing the game (coins, XP, a fresh office).
  * Cheats flag the wallet for good.
  */
-developer_mode: boolean, };
+developer_mode: boolean, 
+/**
+ * Seconds one verify or integration command may run before the gate stops it. A check
+ * that runs out of time blocks its task for you; it is not sent back to the worker.
+ */
+verify_timeout_secs: number, 
+/**
+ * When the watchdog flags, interrupts and stops an agent that gives no output, and flags
+ * a worker that sits idle on a running task.
+ */
+watchdog: WatchdogSettings, 
+/**
+ * Which events raise a notification of your system, and when (Settings → Notifications).
+ */
+notifications: NotificationSettings, 
+/**
+ * Keep the Mac from going to sleep by itself while agents work or a plan runs, so a long
+ * run is not cut off when you walk away. Closing the lid still puts it to sleep.
+ */
+keep_awake: boolean, 
+/**
+ * Ask before Codly quits while agents work: they stop, and resume at the next start.
+ */
+confirm_quit: boolean, 
+/**
+ * Claude agents that have a shell (workers and 1:1 agents) run its commands inside Claude
+ * Code's own OS sandbox (`adapters::claude::settings_json`): a command can write only in
+ * the agent's working folder, a temporary folder and the repository's git data. A
+ * sandboxed command still asks as it does without the sandbox, so the approval rules
+ * decide it as before; a command Claude wants to run outside the sandbox asks you in
+ * every approval mode but Full access. A run whose sandbox is not on does not start. Off
+ * (the default): the approval rules are the only check on a Claude agent's shell. Codex
+ * always has its own sandbox, and the ACP agents (Gemini, OpenCode, Cursor, Copilot) have
+ * none.
+ */
+claude_sandbox: boolean, 
+/**
+ * Claude agents keep the sign-in your login shell selects: CLAUDE_CODE_USE_BEDROCK,
+ * CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_OAUTH_TOKEN (`env::apply_shell_auth`). Off (the
+ * default): they are removed like every other CLAUDE_CODE_* variable, so an agent can
+ * never bill another account than the one of `claude auth login` without you asking.
+ * The sign-in checks run with the same variables as the agents: after a change, the
+ * Settings sheet asks the CLIs again (`redetect_clis`).
+ */
+claude_shell_auth: boolean, 
+/**
+ * Tasks or plans were under way when Codly last closed: ask before they go on (the
+ * default), let them go on at once, or keep them stopped until you press Resume work
+ * (`orchestrator::resume`).
+ */
+resume_on_launch: ResumeOnLaunch, };

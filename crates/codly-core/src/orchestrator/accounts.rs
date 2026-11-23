@@ -21,9 +21,18 @@ pub const UNKNOWN_USED: f64 = 0.5;
 /// A window without a reset time counts for this long after it was seen.
 const STALE_MS: i64 = 30 * 60_000;
 
+/// The window recorded (by `ingest`) for an agent that says only "rate limited": no window
+/// name and no reset time, so it parks the account for `STALE_MS` unless a reading lifts it.
+const UNNAMED_LIMIT: &str = "limit";
+
 /// "rejected" / "limited" / "exceeded": the provider refuses work until the window resets.
 pub fn rejected(status: Option<&str>) -> bool {
     matches!(status, Some("rejected" | "limited" | "exceeded"))
+}
+
+/// "allowed" / "allowed_warning": the provider takes work on this window.
+fn allowed(status: Option<&str>) -> bool {
+    status.is_some_and(|s| s.starts_with("allowed"))
 }
 
 /// A window that still applies: before its reset, or (no reset time) seen recently.
@@ -34,7 +43,9 @@ pub fn live(w: &UsageWindow, now: i64) -> bool {
 /// Record one `RateLimit` reading in an account's windows (one entry per window name, the
 /// latest wins, sorted by name). A reading that says the limit is reached counts as 100%; one
 /// without a fraction keeps the window's last live fraction, or is not recorded at all
-/// (unknown stays unknown). Returns the window's used fraction, if known.
+/// (unknown stays unknown). A window the provider reports as allowed also ends the park of
+/// an unnamed limit: the real reading has the last word. Returns the window's used fraction,
+/// if known.
 pub fn record_window(
     windows: &mut Vec<UsageWindow>,
     window: &str,
@@ -43,6 +54,9 @@ pub fn record_window(
     status: Option<&str>,
     now: i64,
 ) -> Option<f64> {
+    if window != UNNAMED_LIMIT && allowed(status) {
+        windows.retain(|w| w.window != UNNAMED_LIMIT);
+    }
     let prev = windows.iter().position(|w| w.window == window);
     let used = if rejected(status) {
         1.0
@@ -76,21 +90,29 @@ pub struct Load {
     pub parked: Option<String>,
 }
 
-pub fn load(limits: &[UsageWindow], now: i64) -> Load {
-    let mut used: Option<f64> = None;
-    let mut worst: Option<(f64, &UsageWindow)> = None;
-    for w in limits.iter().filter(|w| live(w, now)) {
-        let f = if rejected(w.status.as_deref()) { 1.0 } else { w.used_fraction };
-        used = Some(used.map_or(f, |u: f64| u.max(f)));
-        if f >= PARK_AT && worst.is_none_or(|(g, _)| f > g) {
-            worst = Some((f, w));
+/// How spent a window is: one the provider refuses work on counts as fully spent.
+fn spent(w: &UsageWindow) -> f64 {
+    if rejected(w.status.as_deref()) { 1.0 } else { w.used_fraction }
+}
+
+/// The window that parks an account: the most spent live one at or over `PARK_AT`.
+fn parking(limits: &[UsageWindow], now: i64) -> Option<&UsageWindow> {
+    let mut worst: Option<&UsageWindow> = None;
+    for w in limits.iter().filter(|w| live(w, now) && spent(w) >= PARK_AT) {
+        if worst.is_none_or(|g| spent(w) > spent(g)) {
+            worst = Some(w);
         }
     }
-    let parked = worst.map(|(f, w)| {
+    worst
+}
+
+pub fn load(limits: &[UsageWindow], now: i64) -> Load {
+    let used = limits.iter().filter(|w| live(w, now)).map(spent).reduce(f64::max);
+    let parked = parking(limits, now).map(|w| {
         let what = if rejected(w.status.as_deref()) {
             format!("{} limit reached", window_name(&w.window))
         } else {
-            format!("{:.0}% of {} used", f * 100.0, window_name(&w.window))
+            format!("{:.0}% of {} used", spent(w) * 100.0, window_name(&w.window))
         };
         match w.resets_at {
             Some(r) => format!("{what}, resets in {}", in_time(r - now)),
@@ -100,9 +122,29 @@ pub fn load(limits: &[UsageWindow], now: i64) -> Load {
     Load { used, parked }
 }
 
+/// Why new work stays off an account, in words that do not change while it is parked: "over
+/// 85% of 5h used, resets at 14:05". The scheduler puts this in the reason of every task that
+/// waits, and writes a reason again each time it changes: the percentage and the countdown of
+/// `Load::parked` would do that every minute. `clock` gives a time (ms) in a chrono format.
+pub fn parked_until(limits: &[UsageWindow], now: i64, clock: impl Fn(i64, &str) -> String) -> Option<String> {
+    const DAY_MS: i64 = 24 * 3_600_000;
+    let w = parking(limits, now)?;
+    let name = window_name(&w.window);
+    let what = if rejected(w.status.as_deref()) { format!("{name} limit reached") } else { format!("over {:.0}% of {name} used", PARK_AT * 100.0) };
+    Some(match w.resets_at {
+        // With the day when the reset is a day or more away.
+        Some(r) => format!("{what}, resets at {}", clock(r, if r - now < DAY_MS { "%H:%M" } else { "%a %H:%M" })),
+        None => what,
+    })
+}
+
+/// A time (ms) on your local clock.
+fn local_clock(at: i64, format: &str) -> String {
+    chrono::DateTime::from_timestamp_millis(at).map(|t| t.with_timezone(&chrono::Local).format(format).to_string()).unwrap_or_default()
+}
+
 /// What the scheduler needs to know about one sign-in (unknown usage counts as half used).
 pub fn state_of(a: &AccountInfo, now: i64) -> AccountState {
-    let l = load(&a.limits, now);
     AccountState {
         id: a.id.clone(),
         provider: a.provider,
@@ -110,8 +152,9 @@ pub fn state_of(a: &AccountInfo, now: i64) -> AccountState {
         primary: a.primary,
         enabled: a.enabled,
         logged_in: a.logged_in,
-        parked: l.parked,
-        used: l.used.unwrap_or(UNKNOWN_USED),
+        parked: parked_until(&a.limits, now, local_clock),
+        used: load(&a.limits, now).used.unwrap_or(UNKNOWN_USED),
+        waits_for_you: None,
     }
 }
 
@@ -144,12 +187,13 @@ pub(super) async fn detect(
     configs: &[AccountConfig],
     probe: bool,
     known: Option<Vec<AccountInfo>>,
+    shell_auth: bool,
 ) -> Option<Vec<AccountInfo>> {
     let (base, clis, configs) = (base.clone(), clis.to_vec(), configs.to_vec());
     let job = tokio::spawn(async move {
         match known {
-            Some(k) => crate::env::reconcile_accounts(&base, &clis, &configs, probe, &k).await,
-            None => crate::env::detect_accounts(&base, &clis, &configs, probe).await,
+            Some(k) => crate::env::reconcile_accounts(&base, &clis, &configs, probe, &k, shell_auth).await,
+            None => crate::env::detect_accounts(&base, &clis, &configs, probe, shell_auth).await,
         }
     });
     match tokio::time::timeout(Duration::from_secs(30), job).await {
@@ -163,6 +207,20 @@ pub(super) async fn detect(
             None
         }
     }
+}
+
+/// The Claude sign-ins (id, config home) whose OAuth token Codly may read to ask for their
+/// quota. None unless the user switched `read_claude_quota` on, and never a sign-in the user
+/// switched off or one known to be signed out.
+fn quota_targets(settings: &Settings, accounts: &[AccountInfo]) -> Vec<(String, Option<String>)> {
+    if !settings.read_claude_quota {
+        return vec![];
+    }
+    accounts
+        .iter()
+        .filter(|a| a.provider == Provider::Claude && a.enabled && a.logged_in != Some(false))
+        .map(|a| (a.id.clone(), a.home.clone()))
+        .collect()
 }
 
 impl Inner {
@@ -189,23 +247,29 @@ impl Inner {
     /// already probed (a settings change), else probe every account.
     pub(super) async fn redetect_accounts(&self, reuse: bool) {
         let known = reuse.then(|| read(&self.accounts).clone());
-        let configs = self.settings().accounts;
-        if let Some(found) = detect(&self.base_env, &self.clis(), &configs, !self.fixed_clis, known).await {
+        let Settings { accounts: configs, claude_shell_auth: shell_auth, .. } = self.settings();
+        if let Some(found) = detect(&self.base_env, &self.clis(), &configs, !self.fixed_clis, known, shell_auth).await {
             *write(&self.accounts) = found;
-        }
-        if !reuse && !self.fixed_clis {
-            self.pull_quota().await;
         }
         self.kick();
     }
 
-    /// Ask each signed-in Claude account for its quota (what `/usage` shows), so accounts no
-    /// agent has run on yet have it too.
-    async fn pull_quota(&self) {
+    /// Ask Anthropic for the quota of each Claude account in `quota_targets` (what `/usage`
+    /// shows), so accounts no agent has run on yet have it too. This is the only place Codly
+    /// reads a CLI's own credential (`crate::quota`), so it does nothing unless the user
+    /// switched it on. Fixed CLIs (tests) never read one.
+    pub(super) async fn pull_quota(&self) {
+        if self.fixed_clis {
+            return;
+        }
+        let targets = quota_targets(&self.settings(), &read(&self.accounts));
+        if targets.is_empty() {
+            return;
+        }
         let user_home = self.base_env.get("HOME").cloned().unwrap_or_default();
         let mut set = tokio::task::JoinSet::new();
-        for a in read(&self.accounts).iter().filter(|a| a.provider == Provider::Claude && a.logged_in != Some(false)) {
-            let (id, home, user_home) = (a.id.clone(), a.home.clone(), user_home.clone());
+        for (id, home) in targets {
+            let user_home = user_home.clone();
             set.spawn(async move { (id, crate::quota::claude(home.as_deref(), &user_home).await) });
         }
         for (id, readings) in set.join_all().await {
@@ -213,6 +277,7 @@ impl Inner {
                 self.record_usage(&id, &r.window, Some(r.used_fraction), r.resets_at, r.status.as_deref());
             }
         }
+        self.kick();
     }
 
     /// The login shell's sign-in of a provider (None = no account detected for it).
@@ -323,6 +388,34 @@ mod tests {
         assert_eq!(record_window(&mut ws, "overage", Some(1.7), None, None, now), Some(1.0));
     }
 
+    /// An agent that says only "rate limited" (a Codex error, Claude's `rate_limit` retry)
+    /// parks its account with no reset time. A retried 429 must not keep it parked for the
+    /// full 30 minutes: the next reading that says the provider takes work lifts it.
+    #[test]
+    fn an_allowed_reading_lifts_the_park_of_an_unnamed_limit() {
+        let now = 1_000 * H;
+        let mut ws = vec![];
+        record_window(&mut ws, UNNAMED_LIMIT, Some(1.0), None, Some("rejected"), now);
+        assert!(load(&ws, now).parked.is_some());
+        // A reading with no verdict, or of a window that is itself refused, lifts nothing.
+        record_window(&mut ws, "seven_day", Some(0.4), Some(now + 48 * H), None, now + 1);
+        record_window(&mut ws, "five_hour", Some(1.0), Some(now + 2 * H), Some("rejected"), now + 1);
+        assert!(ws.iter().any(|w| w.window == UNNAMED_LIMIT));
+        // The provider takes work again: only the real windows are left.
+        record_window(&mut ws, "five_hour", Some(0.3), Some(now + 2 * H), Some("allowed"), now + 2);
+        assert_eq!(ws.iter().map(|w| w.window.as_str()).collect::<Vec<_>>(), ["five_hour", "seven_day"]);
+        assert_eq!(load(&ws, now + 2), Load { used: Some(0.4), parked: None });
+        // So does a window whose own usage is unknown (it is not recorded, but it spoke).
+        record_window(&mut ws, UNNAMED_LIMIT, Some(1.0), None, Some("rejected"), now + 3);
+        assert_eq!(record_window(&mut ws, "seven_day_opus", None, None, Some("allowed_warning"), now + 4), None);
+        assert_eq!(load(&ws, now + 4).parked, None);
+        // A window of a full account that is allowed while another is refused: still parked, by the real one.
+        record_window(&mut ws, UNNAMED_LIMIT, Some(1.0), None, Some("rejected"), now + 5);
+        record_window(&mut ws, "five_hour", Some(1.0), Some(now + 2 * H), Some("rejected"), now + 5);
+        record_window(&mut ws, "seven_day", Some(0.4), Some(now + 48 * H), Some("allowed"), now + 5);
+        assert_eq!(load(&ws, now + 5).parked.as_deref(), Some("5h limit reached, resets in 2h"));
+    }
+
     #[test]
     fn load_parks_near_a_limit_until_the_window_resets() {
         let now = 1_000 * H;
@@ -365,7 +458,71 @@ mod tests {
         assert_eq!((s.used, s.parked.clone(), s.usable()), (UNKNOWN_USED, None, true));
         a.limits = vec![w("five_hour", 0.9, Some(now + H), None, now)];
         let s = state_of(&a, now);
-        assert_eq!((s.used, s.parked.as_deref()), (0.9, Some("90% of 5h used, resets in 1h")));
+        assert_eq!(s.used, 0.9);
+        // The reset is on your local clock, so only its start is the same everywhere.
+        assert_eq!(s.parked, parked_until(&a.limits, now, local_clock));
+        assert!(s.parked.as_deref().is_some_and(|p| p.starts_with("over 85% of 5h used, resets at ")), "{:?}", s.parked);
         assert_eq!(window_name("seven_day_opus"), "7d opus");
+    }
+
+    /// The scheduler writes a waiting task's reason again each time it changes, so the words
+    /// for a parked account hold no number that moves while it is parked.
+    #[test]
+    fn the_schedulers_parked_reason_stays_the_same_while_parked() {
+        let now = 1_000 * H;
+        let clock = |at: i64, format: &str| format!("hour {} as {format}", at / H);
+        let reset = now + 2 * H + 10 * 60_000;
+        let said = parked_until(&[w("five_hour", 0.91, Some(reset), None, now)], now, clock);
+        assert_eq!(said.as_deref(), Some("over 85% of 5h used, resets at hour 1002 as %H:%M"));
+        // A minute later, with more of the window spent: the same words.
+        assert_eq!(parked_until(&[w("five_hour", 0.97, Some(reset), None, now + 60_000)], now + 60_000, clock), said);
+        // A reset a day or more away comes with its day.
+        let refused = [w("seven_day", 0.3, Some(now + 50 * H), Some("rejected"), now)];
+        assert_eq!(parked_until(&refused, now, clock).as_deref(), Some("7d limit reached, resets at hour 1050 as %a %H:%M"));
+        assert_eq!(parked_until(&[w("five_hour", 0.9, None, None, now)], now, clock).as_deref(), Some("over 85% of 5h used"));
+        assert_eq!(parked_until(&[w("five_hour", 0.6, Some(now + H), None, now)], now, clock), None, "not parked");
+        assert_eq!(local_clock(0, "%Y").len(), 4, "a real clock formats the time");
+    }
+
+    fn account(id: &str, provider: Provider, home: Option<&str>) -> AccountInfo {
+        AccountInfo {
+            id: id.into(),
+            provider,
+            home: home.map(String::from),
+            label: "default".into(),
+            enabled: true,
+            primary: home.is_none(),
+            configured: false,
+            logged_in: Some(true),
+            billing: Billing::Subscription,
+            plan: None,
+            identity: None,
+            problem: None,
+            login_command: None,
+            limits: vec![],
+        }
+    }
+
+    #[test]
+    fn claude_tokens_are_read_only_after_the_user_switched_it_on() {
+        let work = "/h/.claude-work";
+        let accounts = [
+            account("claude", Provider::Claude, None),
+            account("claude:/h/.claude-work", Provider::Claude, Some(work)),
+            AccountInfo { logged_in: Some(false), ..account("claude:/h/.claude-out", Provider::Claude, Some("/h/.claude-out")) },
+            AccountInfo { enabled: false, ..account("claude:/h/.claude-off", Provider::Claude, Some("/h/.claude-off")) },
+            account("codex", Provider::Codex, None),
+        ];
+        // Off by default, also for settings saved before the switch existed.
+        assert!(!Settings::default().read_claude_quota);
+        let mut saved = serde_json::to_value(Settings::default()).unwrap();
+        saved.as_object_mut().unwrap().remove("read_claude_quota").unwrap();
+        let old: Settings = serde_json::from_value(saved).unwrap();
+        assert!(!old.read_claude_quota);
+        assert!(quota_targets(&old, &accounts).is_empty(), "no credential is read by default");
+
+        // On: Claude sign-ins Codly may use, never one switched off or signed out, never another CLI.
+        let on = Settings { read_claude_quota: true, ..Settings::default() };
+        assert_eq!(quota_targets(&on, &accounts), [("claude".to_string(), None), ("claude:/h/.claude-work".to_string(), Some(work.to_string()))]);
     }
 }

@@ -37,6 +37,10 @@ describe('pool', () => {
     const turns = new Set<number>();
     const reactions = new Set<string>();
     let potted = 0;
+    // How far any ball ever got from the centre (checked once after the loop, not with a
+    // million `expect` calls).
+    let farX = 0;
+    let farZ = 0;
     for (let f = 0; f < 60 * 600; f++) {
       now += DT * 1000;
       sim.step(now, DT, 2, true);
@@ -44,14 +48,16 @@ describe('pool', () => {
       if (sim.result) reactions.add(sim.result.kind);
       potted = Math.max(potted, sim.balls.filter((b, i) => i > 0 && b.in).length);
       for (const b of sim.balls) {
-        expect(Math.abs(b.x)).toBeLessThanOrEqual(0.9);
-        expect(Math.abs(b.z)).toBeLessThanOrEqual(0.46);
+        farX = Math.max(farX, Math.abs(b.x));
+        farZ = Math.max(farZ, Math.abs(b.z));
       }
     }
+    expect(farX).toBeLessThanOrEqual(0.9);
+    expect(farZ).toBeLessThanOrEqual(0.46);
     expect(turns).toEqual(new Set([0, 1]));
     expect(potted).toBeGreaterThan(0);
     expect(reactions).toEqual(new Set(['cheer', 'groan']));
-  });
+  }, 60_000); // ten minutes of pool: seconds to simulate, more on a busy machine
 
   it('the shooter stands behind the cue ball, outside the table, facing the shot', () => {
     const shot = new PoolSim(3).plan();

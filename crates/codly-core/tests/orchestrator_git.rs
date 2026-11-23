@@ -65,11 +65,11 @@ async fn worktree_commit_merge_cycle() {
 
     let t1 = wt_root.join("t1");
     git.worktree_add(&repo, &t1, "codly/p/t1", "codly/p/integration").await.unwrap();
-    assert_eq!(git.commit_all(&t1, "nothing").await.unwrap(), None, "no changes → no commit");
+    assert_eq!(git.commit_work(&t1, "nothing").await.unwrap().commit, None, "no changes → no commit");
 
     std::fs::write(t1.join("new.txt"), "hello\n").unwrap();
     std::fs::write(t1.join("a.txt"), "ONE\ntwo\nthree\n").unwrap();
-    let c = git.commit_all(&t1, "codly(t1): snapshot").await.unwrap().unwrap();
+    let c = git.commit_work(&t1, "codly(t1): snapshot").await.unwrap().commit.unwrap();
     assert_eq!(c.files, vec!["a.txt", "new.txt"]);
     let author = sh(&t1, &["log", "-1", "--format=%an <%ae>"]);
     assert_eq!(author, "Codly <codly@localhost>");
@@ -110,8 +110,8 @@ async fn conflicts_are_detected_aborted_and_resolvable() {
     git.worktree_add(&repo, &b, "task-b", "integ").await.unwrap();
     std::fs::write(a.join("a.txt"), "A\ntwo\nthree\n").unwrap();
     std::fs::write(b.join("a.txt"), "B\ntwo\nthree\n").unwrap();
-    git.commit_all(&a, "a").await.unwrap().unwrap();
-    git.commit_all(&b, "b").await.unwrap().unwrap();
+    git.commit_work(&a, "a").await.unwrap().commit.unwrap();
+    git.commit_work(&b, "b").await.unwrap().commit.unwrap();
     assert!(matches!(git.merge(&integ, "task-a", "merge a", true).await.unwrap(), MergeOutcome::Merged { .. }));
 
     let check = git.merge_tree_check(&repo, "integ", "task-b").await.unwrap();
@@ -133,7 +133,7 @@ async fn conflicts_are_detected_aborted_and_resolvable() {
     assert_eq!(conflicted, vec!["a.txt"]);
     assert!(std::fs::read_to_string(b.join("a.txt")).unwrap().contains("<<<<<<<"));
     std::fs::write(b.join("a.txt"), "AB\ntwo\nthree\n").unwrap();
-    let c = git.commit_all(&b, "resolve").await.unwrap().unwrap();
+    let c = git.commit_work(&b, "resolve").await.unwrap().commit.unwrap();
     assert_eq!(sh(&b, &["rev-list", "--parents", "-n", "1", &c.sha]).split(' ').count(), 3, "a merge commit");
     assert!(git.merge_tree_check(&repo, "integ", "task-b").await.unwrap().clean);
     assert!(matches!(git.merge(&integ, "task-b", "merge b", true).await.unwrap(), MergeOutcome::Merged { .. }));
@@ -172,5 +172,5 @@ async fn user_hooks_do_not_run_on_codly_commits() {
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     std::fs::write(repo.join("b.txt"), "b").unwrap();
-    assert!(git.commit_all(&repo, "snapshot").await.unwrap().is_some());
+    assert!(git.commit_work(&repo, "snapshot").await.unwrap().commit.is_some());
 }

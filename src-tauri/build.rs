@@ -2,11 +2,15 @@ fn main() {
     // Declaring an app manifest makes every app command subject to capability checks
     // (without it, local app commands are allowed implicitly).
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
-        "agent_control", "set_agent_block_tools", "stop_agent_after_step", "resume_agent", "steer_agent",
-        "ui_subscribe", "ui_set_visible", "detect_clis", "list_accounts", "recent_workspaces", "list_repos", "open_workspace", "update_settings",
-        "send_chat", "run_plan", "cancel_plan", "close_thread", "resolve_approval", "interrupt_agent", "stop_agent", "hire_agent", "list_models", "set_agent_model", "set_agent_look", "set_workspace_team", "set_request_prefs",
-        "breaker_config", "set_breaker_config", "breaker_status", "reset_breaker",
-        "create_task", "move_task", "assign_task", "task_diff", "plan_diff", "merge_plan", "merge_agent", "repo_sync", "commit_checkout", "push_checkout", "get_events", "search_code",
+        "set_agent_block_tools", "stop_agent_after_step", "resume_agent", "steer_agent",
+        "set_agent_permission_mode", "compact_agent", "agent_context_usage",
+        "reconnect_agent_mcp", "stop_agent_task",
+        "agent_takeover", "list_takeovers", "take_over_agent", "open_takeover_terminal", "give_back_agent",
+        "retry_core", "ui_subscribe", "ui_set_visible", "detect_clis", "list_accounts", "recent_workspaces", "list_repos", "open_workspace", "update_settings",
+        "send_chat", "run_plan", "cancel_plan", "close_thread", "resolve_approval", "interrupt_agent", "stop_agent", "model_catalog", "set_agent_model", "set_agent_look", "set_workspace_team", "set_request_prefs",
+        "approval_rule_offer", "add_approval_rule", "approval_rules", "remove_approval_rule",
+        "breaker_config", "set_breaker_config", "breaker_status", "reset_breaker", "plan_spent",
+        "create_task", "move_task", "recheck_task", "accept_task", "assign_task", "task_diff", "plan_diff", "send_back_task", "merge_plan", "merge_plan_warning", "undo_merge", "merge_agent", "repo_sync", "commit_checkout", "push_checkout", "get_events", "search_code",
         "list_memories", "add_memory", "delete_memory", "list_triples", "repo_map", "read_artifact", "keep_plan", "pin_memory", "pty_open", "pty_attach", "pty_write",
         "pty_resize", "pty_close",
         "dictation_status", "dictation_configure", "dictation_save_key", "dictation_clear_key", "dictation_transcribe",
@@ -15,10 +19,22 @@ fn main() {
         "inbound_state", "inbound_create_webhook", "inbound_set_webhook", "inbound_revoke_webhook", "inbound_set_settings", "inbound_set_slack",
         "hire_review", "hire_launch_preview", "hire_draft_prompt", "hire_from_manifest", "hire_applicants", "pick_applicant", "export_agent", "export_office", "ghosts", "bring_back", "let_go", "offices", "transfer_agent", "office_shop", "office_place", "office_sell", "office_lot", "office_save_lot", "lots", "lot_of", "buy_lot", "sell_lot", "move_office", "close_office",
         "wallet", "dev_grant", "dev_give_xp", "dev_reset_office",
+        "agent_checkpoints", "restore_checkpoint", "last_turn_diff",
         "agent_git", "get_triggers", "set_triggers", "list_skills", "skill_catalog", "install_skill", "uninstall_skill", "open_skill_folder", "ide_info", "ide_list", "ide_read", "ide_write", "ide_create", "ide_search", "ide_changes", "ide_diff",
         "board_policy", "board_sweep", "board_archive", "list_connections", "update_connection",
+        "storage_report", "storage_policy", "storage_clean", "storage_delete_worktree", "storage_delete_branch", "storage_delete_backup",
         "save_attachment", "hire_draft", "trust_agent", "office_digest", "set_agent_home", "note_rest", "note_hangout", "set_agent_tired", "bigger_model",
         "install_cli", "byok_status", "byok_configure", "byok_save_key", "byok_clear_key",
+        "diagnostics",
+        "cancel_task_tree", "finish_plan",
+        "worktree_setup", "workspace_trust", "preview",
+        "resume_work",
+        "closed_requests", "closed_request",
+        "pull_request", "draft_pull_request", "create_pull_request", "push_pr_branch", "refresh_pull_request",
+        "merge_state", "resolve_merge_conflict", "stop_resolving_merge",
+        "required_checks", "check_agent", "agent_check_state",
+        "start_problem", "recover_database",
+        "start_from_github",
     ])))
     .expect("tauri-build failed");
 }

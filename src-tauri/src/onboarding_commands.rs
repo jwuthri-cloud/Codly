@@ -16,12 +16,13 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 /// Opens a visible login-shell terminal (attach with `pty_attach`) and types the vendor's
-/// install line for (provider, rung) into it. Nothing runs without this explicit call.
+/// install or update line for (provider, rung) into it. Nothing runs without this explicit call.
 #[tauri::command]
 pub async fn install_cli(state: State<'_, AppState>, provider: Provider, rung: InstallRung) -> R<InstallRun> {
     // Reject before spawning a shell: unknown/unavailable rungs and scripts off POSIX.
     install::command_for(provider, rung, cfg!(unix)).map_err(err)?;
-    let env = state.shell_env().await.clone();
+    let mut env = state.shell_env().await.clone();
+    codly_core::env::refresh_path(&mut env); // an update line must find the CLI installed a moment ago
     let home = env.get("HOME").cloned().unwrap_or_else(|| "/".into());
     install::start(&state.pty, std::path::Path::new(&home), &env, provider, rung).map_err(err)
 }

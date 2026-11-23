@@ -1,7 +1,9 @@
 <!--
   ⌘K, everywhere. Scopes: > commands · @ agents · # tasks · / files · + new task · ? help.
   ↵ runs the primary action, ⌘↵ the secondary. Esc pops the scope, then closes. Recents first;
-  "Ask the Lead…" is always the last row, so a query never dead-ends.
+  "Ask the Lead…" is always the last row, so a query never dead-ends. A row that cannot be taken
+  back (merge, cancel a running plan, approve or deny) asks first: ↵ shows what it will do, ↵
+  again does it.
   ponytail: no Raycast-style ⌘K action panel yet — ⌘↵ runs the row's one secondary action.
 -->
 <script lang="ts">
@@ -17,6 +19,7 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { narrate } from '../lib/state/narration';
   import { ROOMS, ui } from '../lib/state/ui.svelte';
+  import { article } from '../lib/util/format';
   import { fuzzy, highlight } from '../lib/util/fuzzy';
   import { PROVIDER_LABEL, TASK_STATUS_LABEL, taskState } from '../lib/util/labels';
   import { modal } from '../lib/util/modal';
@@ -27,6 +30,8 @@
   import Portrait from '../components/Portrait.svelte';
   import StateMark from '../components/StateMark.svelte';
   import { skillsUi } from '../lib/state/skills.svelte';
+  import { intakeUi } from '../lib/state/intake.svelte';
+  import { bySection, press, wants } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
   type Row = {
@@ -42,6 +47,8 @@
     run: () => void;
     alt?: { label: string; run: () => void };
     keep?: boolean;
+    /** It cannot be taken back: what it will do, in full, shown before the second ↵ runs it. */
+    confirm?: string;
   };
 
   const SCOPES: Record<Exclude<Scope, null>, { label: string; placeholder: string; icon: string }> = {
@@ -60,6 +67,8 @@
   let search = $state<SearchResult | null>(null);
   let searching = $state(false);
   let searchError = $state<string | null>(null);
+  /** The row that waits for a second ↵ (see ./palette.ts). */
+  let armed = $state<string | null>(null);
 
   // Seed (⌘N → "+", ui.openPalette('>') …)
   const seed = ui.paletteSeed;
@@ -103,6 +112,8 @@
       { id: 'view:work', section: 'View', title: ui.mode === 'work' ? 'Bring the office back' : 'Full work (hide the office)', icon: 'workspace', kbd: '⌘2', run: () => ui.toggleMode('work') },
       { id: 'view:focus', section: 'View', title: ui.focus ? 'End focus' : 'Focus: dim the office', icon: 'focus', kbd: '⌘.', run: () => (ui.focus = !ui.focus) },
       { id: 'request:new', section: 'Work', title: 'New request', sub: 'Its own Lead plans it, in parallel with the others', icon: 'plus', kbd: '⌘N', run: () => ui.newRequest() },
+      { id: 'request:issue', section: 'Work', title: 'From issue…', sub: 'Start a request from a GitHub issue', icon: 'link', run: () => (intakeUi.dialog = 'issue') },
+      { id: 'request:pr', section: 'Work', title: 'From pull request…', sub: 'Its reviews, comments on the code and failing checks go to the Lead', icon: 'merge', run: () => (intakeUi.dialog = 'pull_request') },
       { id: 'task:new', section: 'Work', title: 'New task…', icon: 'plus', kbd: '⇧⌘N', keep: true, run: () => setScope('+') },
       { id: 'repo:open', section: 'Work', title: 'Open repository…', icon: 'folder', kbd: '⌘O', run: () => openWorkspace() },
       { id: 'settings', section: 'App', title: 'Settings', icon: 'settings', kbd: '⌘,', run: () => (ui.settingsOpen = true) },
@@ -110,24 +121,29 @@
       { id: 'onboarding', section: 'App', title: 'Replay the quest', sub: 'Install agents, add models, images, voice and video', icon: 'flag', run: () => (ui.onboardingOpen = true) },
       { id: 'shortcuts', section: 'App', title: 'Keyboard shortcuts', icon: 'keyboard', kbd: '?', run: () => (ui.shortcutsOpen = true) },
       { id: 'theme:system', section: 'App', title: 'Theme: follow the system', icon: 'monitor', run: () => updateSettings({ theme: 'system' }) },
-      { id: 'theme:dark', section: 'App', title: 'Theme: dark', icon: 'moon', run: () => updateSettings({ theme: 'dark' }) },
-      { id: 'theme:light', section: 'App', title: 'Theme: light', icon: 'sun', run: () => updateSettings({ theme: 'light' }) },
+      { id: 'theme:dark', section: 'App', title: 'Theme: Night', sub: 'The dark theme', icon: 'moon', run: () => updateSettings({ theme: 'dark' }) },
+      { id: 'theme:light', section: 'App', title: 'Theme: Day', sub: 'The light theme', icon: 'sun', run: () => updateSettings({ theme: 'light' }) },
       { id: 'clis:detect', section: 'App', title: 'Check agent CLIs again', icon: 'refresh', run: () => redetect().then(() => toast({ kind: 'success', title: 'CLIs re-detected' })) },
     );
     for (const p of store.plans) {
       if (p.status === 'awaiting_approval') rows.push({ id: `plan:run:${p.id}`, section: 'Plan', title: `Run plan: ${p.summary}`, icon: 'play', run: () => runPlan(p.id) });
-      if (p.status === 'running' || p.status === 'awaiting_approval') rows.push({ id: `plan:cancel:${p.id}`, section: 'Plan', title: `Cancel plan: ${p.summary}`, icon: 'stop', run: () => cancelPlan(p.id) });
-      if (p.status === 'done' && !store.mergeOf(p.id)) rows.push({ id: `plan:merge:${p.id}`, section: 'Plan', title: `Merge into ${store.workspace?.current_branch ?? 'main'}: ${p.summary}`, icon: 'merge', run: () => mergePlan(p.id) });
+      if (p.status === 'running' || p.status === 'awaiting_approval') rows.push({ id: `plan:cancel:${p.id}`, section: 'Plan', title: `Cancel plan: ${p.summary}`, icon: 'stop', run: () => cancelPlan(p.id), confirm: p.status === 'running' ? `Cancel the running plan “${p.summary}”? Every worker stops.` : undefined });
+      if (p.status === 'done' && !store.mergeOf(p.id)) {
+        const branch = store.workspace?.current_branch ?? 'main';
+        rows.push({ id: `plan:merge:${p.id}`, section: 'Plan', title: `Merge into ${branch}: ${p.summary}`, icon: 'merge', run: () => mergePlan(p.id), confirm: `Merge “${p.summary}” into ${branch}?` });
+      }
     }
     for (const ap of store.pendingApprovals) {
       const a = store.agentMap.get(ap.agent_id);
       const what = ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : ap.subject.kind;
-      if (ap.choices.includes('allow_once')) rows.push({ id: `ap:ok:${ap.id}`, section: 'Needs you', title: `Approve ${a?.name ?? 'agent'}: ${what}`, icon: 'check', run: () => resolveApproval(ap.id, 'allow_once') });
-      if (ap.choices.includes('deny')) rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: `Deny ${a?.name ?? 'agent'}: ${what}`, icon: 'x', run: () => resolveApproval(ap.id, 'deny') });
+      // The title shows 50 characters: the confirmation shows all of what is asked.
+      const full = `${a?.name ?? 'An agent'} wants to ${wants(ap.subject, a?.provider)}`;
+      if (ap.choices.includes('allow_once')) rows.push({ id: `ap:ok:${ap.id}`, section: 'Needs you', title: `Approve ${a?.name ?? 'agent'}: ${what}`, icon: 'check', run: () => resolveApproval(ap.id, 'allow_once'), confirm: `Approve once? ${full}` });
+      if (ap.choices.includes('deny')) rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: `Deny ${a?.name ?? 'agent'}: ${what}`, icon: 'x', run: () => resolveApproval(ap.id, 'deny'), confirm: `Deny? ${full}` });
     }
     for (const c of store.clis)
       if (c.path && !c.problem)
-        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start a ${PROVIDER_LABEL[c.provider as Provider]} agent (1:1)`, icon: 'user-plus', run: () => (ui.modelDialog = { provider: c.provider as Provider, agentId: null }) });
+        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start ${article(PROVIDER_LABEL[c.provider as Provider])} ${PROVIDER_LABEL[c.provider as Provider]} agent (1:1)`, icon: 'user-plus', run: () => (ui.modelDialog = { provider: c.provider as Provider, agentId: null }) });
     for (const a of store.agents)
       if (narrate(a.id)?.tone === 'live') rows.push({ id: `int:${a.id}`, section: 'Agents', title: `Interrupt ${a.name}`, icon: 'pause', run: () => interruptAgent(a.id) });
     return rows;
@@ -198,17 +214,20 @@
   type Scored = Row & { hits: number[] };
   const rows = $derived.by((): Scored[] => {
     const q = query.trim();
+    // Ranked by score, then grouped: a section's header shows once, the best match stays first.
     const rank = (list: Row[], limit = 50): Scored[] => {
-      if (!q) return list.slice(0, limit).map((r) => ({ ...r, hits: [] }));
-      return list
-        .map((r) => {
-          const sub = r.sub ? fuzzy(q, r.sub) : null;
-          return { r, m: fuzzy(q, r.title) ?? (sub ? { score: sub.score / 3, hits: [] as number[] } : null) };
-        })
-        .filter((x) => x.m)
-        .sort((a, b) => b.m!.score - a.m!.score + (recents.indexOf(b.r.id) >= 0 ? 2 : 0) - (recents.indexOf(a.r.id) >= 0 ? 2 : 0))
-        .slice(0, limit)
-        .map((x) => ({ ...x.r, hits: x.m!.hits }));
+      if (!q) return bySection(list.slice(0, limit).map((r) => ({ ...r, hits: [] })));
+      return bySection(
+        list
+          .map((r) => {
+            const sub = r.sub ? fuzzy(q, r.sub) : null;
+            return { r, m: fuzzy(q, r.title) ?? (sub ? { score: sub.score / 3, hits: [] as number[] } : null) };
+          })
+          .filter((x) => x.m)
+          .sort((a, b) => b.m!.score - a.m!.score + (recents.indexOf(b.r.id) >= 0 ? 2 : 0) - (recents.indexOf(a.r.id) >= 0 ? 2 : 0))
+          .slice(0, limit)
+          .map((x) => ({ ...x.r, hits: x.m!.hits })),
+      );
     };
     if (scope === '>') return rank(commands);
     if (scope === '@') return rank(agentRows);
@@ -259,6 +278,7 @@
     void query;
     void scope;
     active = 0;
+    armed = null;
   });
   $effect(() => {
     if (active >= withAsk.length) active = Math.max(0, withAsk.length - 1);
@@ -270,10 +290,20 @@
     tick().then(() => inputEl?.focus());
   }
 
-  function exec(r: Row, alt = false) {
+  /** `again`: a held ↵ repeating, or a later click of a double-click (see ./palette.ts). */
+  function exec(r: Row, alt: boolean, again: boolean) {
+    const p = press(r, armed, again);
+    armed = p.armed;
+    if (!p.run) return;
     remember(r.id);
     if (!r.keep) close();
     (alt && r.alt ? r.alt.run : r.run)();
+  }
+  /** Another row under the pointer or the arrows: the armed one is let go. */
+  function move(i: number) {
+    if (i === active) return;
+    active = i;
+    armed = null;
   }
 
   function onInput() {
@@ -287,6 +317,15 @@
   }
 
   function key(e: KeyboardEvent) {
+    if (e.key === 'Escape' && armed) {
+      // Esc first backs out of the question; the palette stays.
+      e.preventDefault();
+      e.stopPropagation();
+      armed = null;
+      return;
+    }
+    // Any key but ↵ (and a bare modifier on its way to ⌘↵) lets the armed row go.
+    if (e.key !== 'Enter' && !['Meta', 'Control', 'Shift', 'Alt'].includes(e.key)) armed = null;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -306,7 +345,7 @@
     } else if (e.key === 'Enter') {
       e.preventDefault();
       const r = withAsk[active];
-      if (r) exec(r, e.metaKey || e.ctrlKey);
+      if (r) exec(r, e.metaKey || e.ctrlKey, e.repeat);
     } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       e.stopPropagation();
@@ -351,6 +390,8 @@
     </div>
 
     <div class="list" id="palette-list" role="listbox" bind:this={listEl}>
+      <!-- Why the matches may not be the files on disk: the index is behind them. -->
+      {#each search?.warnings ?? [] as w, wi (wi)}<p class="warn" role="status">{w}</p>{/each}
       {#if searchError}
         <p class="hint-empty">Search failed: {searchError}</p>
       {:else if scope === '/' && !search && query.trim().length < 2}
@@ -372,8 +413,8 @@
           role="option"
           aria-selected={i === active}
           data-active={i === active}
-          onpointermove={() => (active = i)}
-          onclick={(e) => exec(r, e.metaKey || e.ctrlKey)}
+          onpointermove={() => move(i)}
+          onclick={(e) => exec(r, e.metaKey || e.ctrlKey, e.detail > 1)}
         >
           <span class="lead">
             {#if r.agentId}<Portrait agent={store.agentMap.get(r.agentId)} size={20} />
@@ -386,9 +427,13 @@
           {#if r.sub}<span class="sub truncate">{r.sub}</span>{/if}
           <span class="right">
             {#if i === active && r.alt}<span class="alt"><Kbd keys="⌘↵" /> {r.alt.label}</span>{/if}
-            {#if r.kbd}<Kbd keys={r.kbd} />{:else if i === active && r.hint}<span class="alt"><Kbd keys="↵" /> {r.hint}</span>{/if}
+            {#if armed === r.id}<span class="alt"><Kbd keys="↵" /> Confirm</span>
+            {:else if r.kbd}<Kbd keys={r.kbd} />{:else if i === active && r.hint}<span class="alt"><Kbd keys="↵" /> {r.hint}</span>{/if}
           </span>
         </button>
+        {#if armed === r.id && r.confirm}
+          <p class="confirm" role="alert">{r.confirm}<span class="how">Press ↵ again to confirm, Esc to go back.</span></p>
+        {/if}
       {/each}
     </div>
 
@@ -423,6 +468,9 @@
   .sub { flex: 1; min-width: 0; font-size: var(--t-sm); color: var(--ink-3); }
   .right { margin-left: auto; display: inline-flex; align-items: center; gap: 10px; flex-shrink: 0; }
   .alt { display: inline-flex; align-items: center; gap: 5px; font-size: var(--t-sm); color: var(--ink-3); white-space: nowrap; }
+  .confirm { margin: 2px 12px 8px 44px; padding: 8px 12px; border-radius: var(--r-md); background: color-mix(in srgb, var(--amber) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 45%, transparent); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-1); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+  .how { display: block; margin-top: 4px; color: var(--ink-3); }
+  .warn { padding: 10px 16px 0; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--amber-ink); }
   .hint-empty { padding: 20px 16px; font-size: var(--t-md); color: var(--ink-3); line-height: var(--lh-md); }
   .foot { display: flex; align-items: center; gap: 14px; height: 38px; padding: 0 16px; box-shadow: inset 0 1px 0 var(--line); font-size: var(--t-sm); color: var(--ink-3); flex-shrink: 0; overflow: hidden; white-space: nowrap; }
   .foot span { display: inline-flex; align-items: center; gap: 4px; }

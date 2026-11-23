@@ -1,0 +1,207 @@
+# Builds Codly.app for Apple Silicon and Intel and puts the two .dmg files, with their
+# checksums, in a draft GitHub release. The steps for the person who releases are in
+# docs/RELEASE.md.
+#
+#   push a tag v<version>   -> build, then a draft release (nothing is public until you publish it)
+#   "Run workflow" by hand  -> build only, on a branch or on a tag: the .dmg files are artifacts
+#                              of the run, and no release is made or changed
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# The build jobs only read the code. Only the job that writes the draft release may write.
+permissions:
+  contents: read
+
+# One run per tag or branch at a time. A release build is never cancelled half way.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    # A fixed release, as in ci.yml. It is an Apple Silicon machine; the Intel app is
+    # cross-compiled there, which Apple's toolchain does without extra setup.
+    runs-on: macos-15
+    # A full optimized build from nothing, then Apple's notarization, which can take a while.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple Silicon
+            target: aarch64-apple-darwin
+          - name: Intel
+            target: x86_64-apple-darwin
+    outputs:
+      # The same in both builds: they read the same secrets.
+      signed: ${{ steps.signing.outputs.signed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # The app's version has one source: [workspace.package] in Cargo.toml. A tag that says
+      # another version would publish files whose names and About window disagree with it.
+      - name: Check the tag is the app's version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "::error::No version found under [workspace.package] in Cargo.toml."
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::The tag is $GITHUB_REF_NAME, but Cargo.toml says version $version. Tag v$version, or change the version first (docs/RELEASE.md)."
+            exit 1
+          fi
+
+      # Signing is a switch: it is on when the six Apple secrets exist (docs/RELEASE.md), and
+      # off when none does. Some but not all is a mistake, so the run stops and names the
+      # missing ones. An unset secret reads as an empty text here.
+      - name: Choose a signed or an unsigned build
+        id: signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          found=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!name}" ]; then
+              found=$((found + 1))
+            else
+              missing="$missing $name"
+            fi
+          done
+          if [ "$found" -eq 6 ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$found" -eq 0 ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Apple signing secrets: this build is not signed with a Developer ID and not notarized. macOS asks the user before it opens the app (docs/RELEASE.md)."
+          else
+            echo "::error::Some Apple signing secrets are set and some are not. Missing:$missing. Set all six, or remove them all for an unsigned build (docs/RELEASE.md)."
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # rustup is on the runner already. No build cache: a release is built from nothing, and
+      # a cache saved by a tag's run cannot be read by the next tag's run.
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustc --version
+
+      - name: Install the frontend packages
+        run: pnpm install --frozen-lockfile
+
+      # Tauri reads these variables (https://v2.tauri.app/distribute/sign/macos/): it puts the
+      # certificate in a keychain of its own for this build, signs the app and the .dmg, sends
+      # the app to Apple for notarization and staples Apple's ticket to it.
+      - name: Build, sign and notarize
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm tauri build --target ${{ matrix.target }}
+
+      # "-" is the ad-hoc identity: a signature with no certificate behind it. An Apple Silicon
+      # Mac refuses a downloaded app that has no signature at all ("is damaged"); with this one
+      # the user can allow the app in System Settings.
+      - name: Build without a Developer ID
+        if: steps.signing.outputs.signed != 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: pnpm tauri build --target ${{ matrix.target }}
+
+      - name: Check the signature
+        run: codesign --verify --deep --strict --verbose=2 "target/${{ matrix.target }}/release/bundle/macos/Codly.app"
+
+      # Tauri does not stop when stapling fails, so check that Apple's ticket is on the app.
+      - name: Check the notarization ticket
+        if: steps.signing.outputs.signed == 'true'
+        run: xcrun stapler validate "target/${{ matrix.target }}/release/bundle/macos/Codly.app"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dmg-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  publish:
+    name: Draft release
+    needs: build
+    # Only a pushed tag writes a release. "Run workflow" on a tag is also a run for a tag, so the
+    # event is part of the test.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The only job that may write, and it has no Apple secret.
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      SIGNED: ${{ needs.build.outputs.signed }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dmg-*
+          merge-multiple: true
+
+      # The format `shasum -a 256 -c SHA256SUMS.txt` reads on a Mac.
+      - name: Write the checksums
+        run: sha256sum Codly_*.dmg | tee SHA256SUMS.txt
+
+      # A draft: nobody else sees it until you publish it on the Releases page. A second run for
+      # the same tag replaces the files of the draft; it never touches a published release.
+      # The notes of a draft are yours to edit, so a second run leaves them alone. They were
+      # written for the first build: when signing was turned on or off since, the run warns that
+      # the line about signing is now wrong.
+      - name: Create or update the draft release
+        run: |
+          unsigned_note="This build is not signed with an Apple Developer ID, so macOS asks before it opens Codly the first time. How to open it: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$TAG/README.md#download"
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != "true" ]; then
+              echo "::error::The release $TAG is already published. This run does not change a published release: use a new version."
+              exit 1
+            fi
+            gh release upload "$TAG" --clobber Codly_*.dmg SHA256SUMS.txt
+            if [ "$SIGNED" = "true" ]; then
+              echo "::warning::The draft $TAG has new files and its old notes. The new files are signed and notarized: if the notes say the build is not signed, remove that line before you publish."
+            else
+              echo "::warning::The draft $TAG has new files and its old notes. The new files are not signed with an Apple Developer ID: if the notes do not say so, add this line before you publish: $unsigned_note"
+            fi
+          else
+            args=(--draft --verify-tag --title "Codly ${TAG#v}" --generate-notes)
+            if [ "$SIGNED" != "true" ]; then
+              args+=(--notes "$unsigned_note")
+            fi
+            gh release create "$TAG" "${args[@]}" Codly_*.dmg SHA256SUMS.txt
+          fi

@@ -13,12 +13,13 @@ pub struct InboundHandle {
     pub hub: watch::Receiver<Option<Arc<InboundHub>>>,
 }
 
-/// Start the hub: whatever was left switched on listens again. `Core::send_chat` is how an
-/// inbound message reaches the Lead (or the agent the user chose).
+/// Start the hub: whatever was left switched on listens again. `Core::send_inbound` is how an
+/// inbound message reaches the Lead (or the agent the user chose): under its source's name,
+/// never as the user's own message.
 pub async fn start(core: Arc<Core>, data_dir: std::path::PathBuf) -> Option<Arc<InboundHub>> {
-    let deliver: Deliver = Arc::new(move |thread, text| {
+    let deliver: Deliver = Arc::new(move |thread, msg| {
         let core = core.clone();
-        Box::pin(async move { core.send_chat(&thread, &text).await })
+        Box::pin(async move { core.send_inbound(&thread, &msg).await })
     });
     tokio::task::spawn_blocking(move || InboundHub::new(&data_dir, Arc::from(default_store()), deliver)).await.ok()
 }
@@ -42,9 +43,16 @@ pub async fn inbound_create_webhook(h: State<'_, InboundHandle>, name: String) -
     h.run(move |hub| hub.create_webhook(&name)).await
 }
 
+/// The two switches of one endpoint: on or off, and whether a plan made from its messages may
+/// run without the user's Run plan click (`auto_run`).
 #[tauri::command]
-pub async fn inbound_set_webhook(h: State<'_, InboundHandle>, id: String, enabled: bool) -> Result<InboundState, String> {
-    h.run(move |hub| hub.set_webhook_enabled(&id, enabled).map(|()| hub.state())).await
+pub async fn inbound_set_webhook(h: State<'_, InboundHandle>, id: String, enabled: bool, auto_run: bool) -> Result<InboundState, String> {
+    h.run(move |hub| {
+        // First, so an endpoint that is switched on here already has the choice made for it.
+        hub.set_webhook_auto_run(&id, auto_run)?;
+        hub.set_webhook_enabled(&id, enabled).map(|()| hub.state())
+    })
+    .await
 }
 
 #[tauri::command]

@@ -1,5 +1,6 @@
 <!-- A file from a diff, the office or search: who touched it and why, and how it changed. -->
 <script lang="ts">
+  import { ide } from '../ide/ide.svelte';
   import { copyText } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
@@ -24,6 +25,14 @@
     void store.rev;
     return store.tasks.filter((t) => (store.taskMarks[t.id] ?? []).some((m) => m.files?.includes(path)));
   });
+  // Where the file opens in the editor: the worktree of the agent that changed it last (the
+  // newest version), else your repository, which is what a Lead's editor shows.
+  const editor = $derived.by(() => {
+    const worker = touches.find((t) => t.agent.worktree && (t.f!.modified || t.f!.created) && !t.f!.deleted)?.agent;
+    if (worker) return { agentId: worker.id, tip: `Opens the file in ${worker.name}’s worktree` };
+    const lead = store.leadOf(ui.request) ?? store.leads[0];
+    return lead ? { agentId: lead.id, tip: 'Opens the file in your repository' } : { agentId: null, tip: 'The editor opens once this repository has a Lead: send a request first' };
+  });
   const kgs = $derived(store.triples.filter((t) => t.valid_to == null && (t.subject === `file:${path}` || t.object === `file:${path}`)).slice(0, 8));
   const label = (e: string) => {
     const [type, ...rest] = e.split(':');
@@ -41,6 +50,7 @@
     <h2 class="serif">{basename(path)}</h2>
     <p class="dir mono">{dirname(path) || '/'}</p>
     <div class="acts">
+      <button class="btn sm" aria-disabled={!editor.agentId} data-tip={editor.tip} onclick={() => { if (editor.agentId) void ide.openPath(editor.agentId, path); }}><Icon name="code" size={13} />Open in editor</button>
       <button class="btn sm ghost" onclick={() => copyText(path, 'Path copied')}><Icon name="copy" size={13} />Copy path</button>
       <button class="btn sm ghost" onclick={() => ui.seedComposer(ui.request, `\`${path}\` `)}><Icon name="chat" size={13} />Ask the Lead about it</button>
     </div>
@@ -78,6 +88,7 @@
   h2 { font-size: var(--d-md); line-height: 1.1; padding-right: 30px; word-break: break-all; }
   .dir { color: var(--ink-3); font-size: 11.5px; }
   .acts { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .acts [aria-disabled='true'] { opacity: 0.45; cursor: default; }
   section { padding: 14px 22px; box-shadow: inset 0 1px 0 var(--line); display: flex; flex-direction: column; gap: 8px; }
   .who { display: flex; gap: 10px; align-items: flex-start; text-align: left; padding: 6px 8px; margin: 0 -8px; border-radius: var(--r-md); }
   .who:hover { background: var(--surface-1); }

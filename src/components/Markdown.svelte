@@ -1,6 +1,21 @@
-<!-- Sanitized markdown (marked → DOMPurify). Links open in the system browser. -->
+<!--
+  Sanitized markdown (marked → DOMPurify). Links open in the system browser; a code block has a Copy button.
+  A finished message is parsed once (its HTML is kept, so a thread opened again parses nothing).
+  A message being written keeps the blocks that are finished and parses only the one being
+  written: a new word neither parses the whole message again nor replaces what you selected.
+-->
+<script lang="ts" module>
+  import { textCache } from '../lib/util/textCache';
+
+  /** Finished messages: text → HTML with Copy buttons. The same text always gives the same HTML. */
+  const finished = textCache(500, 2_000_000);
+</script>
+
 <script lang="ts">
-  import { openExternal, renderMarkdown } from '../lib/util/markdown';
+  import { copyText } from '../lib/state/actions';
+  import { markdownBlocks, openExternal, renderMarkdown } from '../lib/util/markdown';
+  import { streamRenderer } from '../lib/util/mdstream';
+  import { codeToCopy, withCopyButtons } from './codeblocks';
 
   interface Props {
     text: string;
@@ -12,15 +27,21 @@
   // The caret rides inline at the end of the streamed text (a private-use marker survives
   // markdown + sanitizing and is swapped for a span afterwards).
   const CARET = '\uE000';
-  // The conversation hands every message a fresh item on each streamed batch: an unchanged
-  // string stops at these two, so only the streaming message is parsed again.
+  // A parent may hand over the same text again: an unchanged string stops at these two.
   const src = $derived(text);
   const live = $derived(streaming);
-  const html = $derived(
-    live ? renderMarkdown(src + CARET).replace(CARET, '<span class="caret" aria-hidden="true"></span>') : renderMarkdown(src),
-  );
+  const stream = streamRenderer((s) => renderMarkdown(s).replace(CARET, '<span class="caret" aria-hidden="true"></span>'), markdownBlocks);
+  const parts = $derived(live ? stream(src, CARET) : null);
+  // Copy waits for the whole message: a block still being written is not worth copying.
+  const html = $derived(live ? '' : finished(src, (s) => withCopyButtons(renderMarkdown(s))));
 
   function click(e: MouseEvent) {
+    const copy = (e.target as HTMLElement).closest('button.copy');
+    if (copy) {
+      const pre = copy.parentElement?.querySelector('pre');
+      if (pre) void copyText(codeToCopy((pre.querySelector(':scope > code') ?? pre).textContent ?? ''), 'Code copied');
+      return;
+    }
     const a = (e.target as HTMLElement).closest('a');
     if (!a) return;
     e.preventDefault();
@@ -31,7 +52,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="md selectable" class:streaming class:brief onclick={click}>{@html html}</div>
+<div class="md selectable" class:streaming class:brief onclick={click}>{#if parts}{#each parts.done as part, i (i)}{@html part}{/each}{@html parts.tail}{:else}{@html html}{/if}</div>
 
 <style>
   .md { font-size: var(--t-lg); line-height: var(--lh-lg); color: var(--ink-1); overflow-wrap: anywhere; }
@@ -46,6 +67,10 @@
   .md :global(code) { font-family: var(--font-mono); font-size: 0.84em; padding: 1px 5px; border-radius: 5px; background: var(--surface-2); color: var(--ink-1); white-space: break-spaces; }
   .md :global(pre) { margin: 8px 0 12px; padding: 12px 14px; border-radius: var(--r-md); background: var(--code-bg); overflow-x: auto; }
   .md :global(pre code) { padding: 0; background: none; font-size: var(--mono); line-height: var(--lh-mono); white-space: pre; }
+  .md :global(.code) { position: relative; }
+  .md :global(.copy) { position: absolute; top: 6px; right: 6px; height: 22px; padding: 0 9px; border-radius: var(--r-full); background: var(--surface-3); color: var(--ink-2); font-size: var(--t-xs); font-weight: var(--w-med); opacity: 0; transition: opacity var(--d-2); user-select: none; -webkit-user-select: none; cursor: pointer; }
+  .md :global(.code:hover .copy), .md :global(.copy:focus-visible) { opacity: 1; }
+  .md :global(.copy:hover) { color: var(--ink-1); }
   .md :global(blockquote) { margin: 8px 0; padding-left: 12px; border-left: 2px solid var(--line-2); color: var(--ink-2); }
   .md :global(h1), .md :global(h2), .md :global(h3) { font-family: var(--font-display); font-weight: 400; margin: 16px 0 6px; line-height: 1.15; }
   .md :global(h1) { font-size: 30px; }

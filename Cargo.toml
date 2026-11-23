@@ -20,7 +20,8 @@ uuid = { version = "1.29", features = ["v4", "v7", "serde"] }
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+# Keep function names: a panic's backtrace in the log file must be readable.
+strip = "debuginfo"
 
 [profile.dev.package."*"]
 opt-level = 2

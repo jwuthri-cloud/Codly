@@ -11,13 +11,18 @@
   import type { EventRow } from '../lib/gen/EventRow';
   import { copyText, interruptAgent, letGo, refreshAccounts, stopAgent } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
+  import { yourAnswers } from '../lib/state/answers';
   import { narrate } from '../lib/state/narration';
+  import { MCP_LABEL } from '../lib/state/session';
   import { store, type FileTouch } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
-  import { clock, clockSec, dur, pct, resetsIn, timer, tokens, usd } from '../lib/util/format';
-  import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
+  import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
+  import { clock, clockSec, dur, pct, plural, resetsIn, timer, tokens } from '../lib/util/format';
+  import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, subagentMark, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
+  import { askedLine, settledLine } from '../lib/util/outcome';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
   import ApprovalCard from '../home/cards/ApprovalCard.svelte';
+  import { helperLine } from '../home/helpers';
   import BillingBadge from '../components/BillingBadge.svelte';
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
@@ -28,10 +33,17 @@
   import Section from '../components/Section.svelte';
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
+  import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
+  import { backgroundLine, historyFacts, repeatsReply, taskChangedLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
+  import { isPlanCall, planCallEnd, planStep } from '../lib/util/planRequest';
+  import AgentMcp from './AgentMcp.svelte';
+  import AgentTakeover from './AgentTakeover.svelte';
+  import AgentTrust from './AgentTrust.svelte';
   import TaskChecks from './TaskChecks.svelte';
   import AgentTabs from './AgentTabs.svelte';
   import { agentTitle } from '../lib/util/team';
+  import { canTrust, trustOf } from '../lib/util/career';
   import { ide } from '../ide/ide.svelte';
 
   interface Props {
@@ -40,15 +52,16 @@
   let { agent }: Props = $props();
 
   const n = $derived(narrate(agent.id));
+  // What follows is this agent's own: it reads this agent's versions, so the sheet works out
+  // nothing when another agent streams. (A delta changes no `live` record, only streams and output.)
   const live = $derived.by(() => {
-    void store.rev;
-    void store.liveRev;
+    void store.revBy.get(agent.id);
     const l = store.live[agent.id];
     return l ? { ...l } : null;
   });
   const now = $derived.by(() => {
-    void store.rev;
-    void store.liveRev;
+    void store.revBy.get(agent.id);
+    void store.liveRevBy.get(agent.id);
     return store.now(agent.id);
   });
   const task = $derived(agent.task_id ? (store.taskMap.get(agent.task_id) ?? null) : null);
@@ -114,14 +127,8 @@
 
   // ── cost & context ──
   const u = $derived(agent.usage);
-  const ctxFrac = $derived(u.context_used != null && u.context_window ? u.context_used / u.context_window : null);
-  const costLine = $derived.by(() => {
-    if (u.cost_usd == null) return agent.provider === 'codex' ? 'Tokens only — Codex reports no cost' : 'No cost reported';
-    if (agent.billing === 'subscription') return `≈ ${usd(u.cost_usd)} at list price · included in your plan`;
-    if (agent.billing === 'api_key') return `${usd(u.cost_usd)} · billed to your API key`;
-    if (agent.billing === 'third_party') return `${usd(u.cost_usd)} · billed by the provider`;
-    return `≈ ${usd(u.cost_usd)}`;
-  });
+  const ctxFrac = $derived(contextFraction(u));
+  const costLine = $derived(costLineOf(agent));
   // Quota is per sign-in: only this agent's account, never the provider's other sign-ins.
   const limits = $derived(store.rateLimits.filter((r) => r.provider === agent.provider && r.account === accounts.idOf(agent)));
   // Its sign-in: the quota it draws from (labelled only when the CLI has several in use).
@@ -136,7 +143,7 @@
 
   // ── live output ──
   const liveOut = $derived.by(() => {
-    void store.liveRev;
+    void store.liveRevBy.get(agent.id);
     const seg = now?.seg;
     if (seg) {
       const o = store.liveOut.get(seg.callId);
@@ -145,7 +152,7 @@
     const lo = live?.lastOutput;
     if (lo) {
       const s = live?.segments.find((x) => x.callId === lo.callId);
-      return { title: s ? `${pastVerb(s.activity)} ${s.label}` : 'Last output', text: lo.text, live: false, ok: lo.ok, path: segPath(s, lo.text) };
+      return { title: s ? (isPlanCall(s.name, agent.provider) ? planStep(false) : `${pastVerb(s.activity)} ${s.label}`) : 'Last output', text: lo.text, live: false, ok: lo.ok, path: segPath(s, lo.text) };
     }
     return null;
   });
@@ -169,6 +176,10 @@
   // ── history ──
   let filter = $state<'all' | 'tools' | 'files' | 'decisions' | 'errors'>('all');
   let rawOpen = $state<number | null>(null);
+  const facts = $derived.by(() => {
+    void store.revBy.get(agent.id);
+    return historyFacts(store.events, agent.id, agent.provider);
+  });
   const log = $derived.by(() => {
     void store.rev;
     const out: EventRow[] = [];
@@ -176,40 +187,51 @@
       const e = store.events[i];
       if (e.agent_id !== agent.id && !(task && e.task_id === task.id && e.kind.type === 'decision')) continue;
       const t = e.kind.type;
-      if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed' || t === 'control_changed') continue;
+      // (a helper's progress is no step of its own: its calls and its end are rows already)
+      if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed' || t === 'control_changed' || t === 'sub_agent_progress') continue;
       if (filter === 'tools' && t !== 'tool_started' && t !== 'tool_completed') continue;
       if (filter === 'files' && t !== 'files_changed' && !(t === 'tool_started' && ['read', 'edit', 'create', 'delete'].includes((e.kind as { activity: string }).activity))) continue;
       if (filter === 'decisions' && t !== 'decision') continue;
-      if (filter === 'errors' && t !== 'error' && !(t === 'tool_completed' && !(e.kind as { ok: boolean }).ok)) continue;
+      if (filter === 'errors' && t !== 'error' && !(e.kind.type === 'tool_completed' && !e.kind.ok && !facts.planCalls.has(e.kind.call_id))) continue;
+      if (repeatsReply(e, agent.id, facts)) continue;
       out.push(e);
     }
-    return out;
+    // (a task's row says its status: one that repeats the row before it says nothing)
+    return withoutRepeatedTaskRows(out);
   });
+  const names: Names = { agent: (id) => store.agentMap.get(id)?.name, task: (id) => store.taskMap.get(id)?.key };
   function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
     const k = e.kind;
     switch (k.type) {
-      case 'tool_started': return { icon: 'play', text: `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}` };
-      case 'tool_completed': return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
+      case 'tool_started': return { icon: 'play', text: isPlanCall(k.name, agent.provider) ? planStep(false) : `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
+      case 'tool_completed':
+        if (facts.planCalls.has(k.call_id)) return { icon: k.ok ? 'check' : 'refresh', text: `${planCallEnd(k.ok, store.approvals.find((a) => a.call_id === k.call_id)?.status ?? null)}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}` };
+        return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
       case 'files_changed': return { icon: 'diff', text: `Changed ${k.paths.map(basename).join(', ')}` };
       case 'message': return { icon: 'chat', text: oneLine(k.text, 120) };
       case 'reasoning': return { icon: 'chat', text: `Thought: ${oneLine(k.text, 110)}` };
-      case 'turn_started': return { icon: 'arrow-right', text: `Turn started${k.input ? `: ${oneLine(k.input, 80)}` : ''}` };
+      case 'turn_started': return { icon: 'arrow-right', text: k.input ? `Turn started: ${oneLine(k.input, 80)}` : 'Started a turn by itself' };
+      case 'prompt_steered': return { icon: 'arrow-right', text: `Took a message into its turn: ${oneLine(k.input, 80)}` };
       case 'turn_completed': return { icon: 'check-circle', text: `Turn ${k.status}${k.duration_ms ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.status === 'completed' ? undefined : 'warn' };
       case 'status_changed': return { icon: 'refresh', text: `Status → ${k.status.replace('_', ' ')}` };
       case 'plan_updated': return { icon: 'list', text: `Its list: ${k.steps.filter((s) => s.status === 'completed').length} of ${k.steps.length} done` };
-      case 'approval_requested': return { icon: 'flag', text: `Asked for approval${k.approval.subject.kind === 'command' ? `: ${oneLine(k.approval.subject.command, 60)}` : ''}`, tone: 'warn' };
-      case 'approval_resolved': return { icon: 'flag', text: `Approval ${k.status} by ${k.by === 'user' ? 'you' : k.by}`, tone: k.status === 'approved' ? 'good' : 'bad' };
+      case 'approval_requested': return { icon: 'flag', text: askedLine(k.approval, agent.provider), tone: 'warn' };
+      case 'approval_resolved': return { icon: 'flag', text: settledLine(k.status, k.by, store.approvals.find((a) => a.id === k.approval_id) ?? null, yourAnswers.get(k.approval_id) ?? null, agent.provider), tone: k.status === 'approved' ? 'good' : 'bad' };
       case 'retrieval': return { icon: 'link', text: `Codly provided ${k.citations.length} citations for “${oneLine(k.query, 50)}”` };
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
       case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
+      case 'mcp_server': return { icon: 'link', text: `MCP server ${k.name}: ${MCP_LABEL[k.status].toLowerCase()}${k.error ? ` (${oneLine(k.error, 90)})` : ''}` };
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
+      case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
+      case 'background_tasks': return { icon: 'terminal', text: backgroundLine(k) };
       case 'decision': return { icon: 'help', text: k.summary };
-      case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${k.files.length} files` };
+      case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${plural(k.files.length, 'file')}` };
       case 'verified': return { icon: k.ok ? 'check-circle' : 'x-circle', text: `Verified ${k.command}`, tone: k.ok ? 'good' : 'bad' };
       case 'merged': return { icon: 'merge', text: `Merged into ${k.branch}`, tone: 'good' };
       case 'memory_added': return { icon: 'memory', text: `Saved: ${oneLine(k.memory.text, 90)}` };
       case 'artifact_added': return { icon: 'image', text: `Made ${k.artifact.title}` };
-      case 'triple_added': return { icon: 'graph', text: `${k.triple.subject.split(':').pop()} ${k.triple.predicate} ${k.triple.object.split(':').pop()}` };
+      case 'triple_added': return { icon: 'graph', text: tripleLine(k.triple, names) };
+      case 'task_changed': return { icon: 'plan', text: taskChangedLine(k.task) };
       case 'exited': return { icon: 'stop', text: `Process exited${k.code != null ? ` (${k.code})` : ''}` };
       case 'compacting': return { icon: 'layers', text: `Compacted context${k.pre_tokens ? ` ${tokens(k.pre_tokens)} → ${tokens(k.post_tokens)}` : ''}` };
       case 'retrying': return { icon: 'refresh', text: `Retrying (${k.attempt}): ${k.reason}`, tone: 'warn' };
@@ -235,6 +257,10 @@
     tick().then(() => root?.querySelector(`[data-section="${f}"]`)?.scrollIntoView({ block: 'start', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
   });
 
+  /** The agent's name in the head has scrolled out of view: a slim bar keeps saying whose sheet this is. */
+  let headGone = $state(false);
+  let nameEl: HTMLHeadingElement | undefined = $state();
+
   // ── menu ──
   let moreBtn: HTMLButtonElement | undefined = $state();
   let moreOpen = $state(false);
@@ -258,7 +284,7 @@
     if (!working) interrupting = false;
   });
   const moreItems = $derived<MenuItem[]>([
-    { label: 'Open a terminal in its worktree', icon: 'terminal', disabled: !agent.worktree, run: () => { ui.terminalCwd = agent.worktree; ui.go('terminal'); } },
+    { label: 'Open a terminal in its worktree', icon: 'terminal', disabled: !agent.worktree, run: () => { ui.terminalTakeover = null; ui.terminalCwd = agent.worktree; ui.go('terminal'); } },
     { label: 'Copy worktree path', icon: 'copy', disabled: !agent.worktree, run: () => copyText(agent.worktree ?? '', 'Path copied') },
     { label: 'Change model…', icon: 'sparkle', disabled: agent.role !== 'solo', run: () => (ui.modelDialog = { provider: agent.provider, agentId: agent.id }) },
     { kind: 'separator' },
@@ -271,13 +297,21 @@
   ]);
 </script>
 
-<div class="as" bind:this={root} style:--hue={idVar(agent.color)}>
+<div class="as" bind:this={root} style:--hue={idVar(agent.color)} onscroll={() => (headGone = !!root && !!nameEl && nameEl.getBoundingClientRect().bottom <= root.getBoundingClientRect().top)}>
+  <!-- The name again (the head's own stays for screen readers): what you press below acts on this agent. -->
+  <div class="pin" class:on={headGone} aria-hidden="true"><div class="pin-bar"><Portrait {agent} size={22} /><b class="truncate">{agent.name}</b></div></div>
   <header class="head">
     {#if n}<Orbit size={64} progress={n.progress} tone={n.tone} stroke={2.5}><Portrait {agent} size={50} /></Orbit>{/if}
     <div class="h-text">
-      <h2 class="serif">{agent.name}</h2>
+      <h2 class="serif" bind:this={nameEl}>{agent.name}</h2>
       <p class="h-sub">{agentTitle(agent) ? `${agentTitle(agent)} · ` : ''}{PROVIDER_LABEL[agent.provider]} ({COMPANY_LABEL[agent.provider]}){#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{` · ${model}`}</p>
-      <div class="h-tags"><BillingBadge billing={agent.billing} plan={account?.plan ?? cli?.plan} /></div>
+      <div class="h-tags">
+        <BillingBadge billing={agent.billing} plan={account?.plan ?? cli?.plan} />
+        {#if canTrust(agent.role) && agent.career.trust !== 'intern'}
+          {@const trust = trustOf(agent.career.trust)}
+          <button class="trusted" data-tip={trust.allows} onclick={() => (ui.sheetFocus = 'trust')}><Icon name="check" size={11} />Trusted: {trust.label.toLowerCase()}</button>
+        {/if}
+      </div>
     </div>
   </header>
   <div class="h-actions">
@@ -333,7 +367,12 @@
       </Section>
     {/if}
 
+    {#if canTrust(agent.role)}<AgentTrust {agent} />{/if}
+
     <AgentControls {agent} />
+
+    <!-- The Lead works through Codly's own tools, which a terminal does not have: it never goes. -->
+    {#if agent.role !== 'lead'}<AgentTakeover {agent} />{/if}
 
     <Section id="task" title="Task" summary={task ? `${task.key} · ${task.title}` : 'None'}>
       {#if task}
@@ -385,10 +424,14 @@
         <ul class="subs">
           {#each moreSubs ? subsRunning : subsRunning.slice(0, SHOW) as s (s.callId)}
             <li>
-              <Icon name="crew" size={15} />
-              <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
-              <span class="s-meta num">{timer(ui.now - s.startedAt)}</span>
-              <span class="s-dot on"></span>
+              <div class="s-row">
+                <Icon name="crew" size={15} />
+                {#if s.name}<span class="s-kind">{clean(s.name)}</span>{/if}
+                <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
+                <span class="s-meta num">{timer(ui.now - s.startedAt)}</span>
+                <span class="s-dot on"></span>
+              </div>
+              {#if helperLine(s)}<p class="s-now truncate">{helperLine(s)}</p>{/if}
             </li>
           {/each}
         </ul>
@@ -399,9 +442,14 @@
             <ul class="subs">
               {#each subsDone as s (s.callId)}
                 <li class="fin">
-                  <Icon name={s.status === 'completed' ? 'check' : 'x-circle'} size={15} />
-                  <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
-                  <span class="s-meta num">{dur(s.ts - s.startedAt)}</span>
+                  <div class="s-row">
+                    <Icon name={s.status === 'completed' ? 'check' : 'x-circle'} size={15} />
+                    {#if s.name}<span class="s-kind">{clean(s.name)}</span>{/if}
+                    <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
+                    <span class="s-meta num">{dur(s.ts - s.startedAt)}</span>
+                  </div>
+                  {#if helperLine(s)}<p class="s-now truncate">{helperLine(s)}</p>{/if}
+                  {#if clean(s.report).trim()}<p class="s-report selectable">{clean(s.report).trim()}</p>{/if}
                 </li>
               {/each}
             </ul>
@@ -409,6 +457,10 @@
         {/if}
       </Section>
     {/if}
+
+    <AgentBackground {agent} />
+
+    <AgentMcp {agent} />
 
     <Section id="output" title="Output" summary={liveOut ? (liveOut.live ? 'live' : liveOut.title) : 'none'}>
       {#if liveOut}
@@ -487,12 +539,22 @@
 
 <style>
   .sections { padding-bottom: 16px; }
-  .as { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow-y: auto; }
+  /* `position: relative`: what is out of flow inside (the screen-reader-only labels) scrolls with
+     the content, and never makes the sheet's frame around it scrollable. */
+  .as { position: relative; display: flex; flex-direction: column; min-height: 0; height: 100%; overflow-y: auto; scroll-padding-top: 48px; }
+  /* No height of its own: the bar lies over the top of what scrolls and takes no room. */
+  .pin { position: sticky; top: 0; z-index: 1; height: 0; flex-shrink: 0; }
+  .pin-bar { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 56px 0 22px; background: var(--glass-solid); box-shadow: 0 1px 0 var(--line); opacity: 0; pointer-events: none; transition: opacity var(--d-2) var(--ease-out); }
+  /* It is there at once (the head's name has just left), and fades only on its way out. */
+  .pin.on .pin-bar { opacity: 1; pointer-events: auto; transition: none; }
+  .pin-bar b { font-weight: var(--w-semi); color: var(--ink-1); }
   .head { display: flex; gap: 16px; align-items: center; padding: 24px 22px 10px; background: radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--hue) 14%, transparent), transparent 60%); }
   .h-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-right: 30px; }
   h2 { font-size: var(--d-lg); line-height: 1; }
   .h-sub { font-size: var(--t-sm); color: var(--ink-3); }
-  .h-tags { margin-top: 6px; }
+  .h-tags { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .trusted { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px; border-radius: var(--r-full); font-size: var(--t-xs); font-weight: var(--w-med); line-height: 1; white-space: nowrap; color: var(--amber-ink); background: var(--amber-soft); }
+  .trusted:hover { color: var(--ink-1); }
   .h-actions { display: flex; align-items: center; gap: 6px; padding: 6px 22px 12px; }
   .h-actions .icon-btn { margin-left: auto; }
   .confirm { display: flex; align-items: center; gap: 6px; margin: 0 22px 12px; padding: 10px 12px; border-radius: var(--r-md); background: var(--bad-soft); font-size: var(--t-sm); }
@@ -548,6 +610,12 @@
   .s-dot.on { background: color-mix(in srgb, var(--hue) 75%, white); box-shadow: 0 0 8px var(--hue); }
   .s-txt { flex: 1; min-width: 0; font-size: var(--t-md); }
   .s-meta { font-size: var(--t-xs); color: var(--ink-3); }
+  .subs li { flex-direction: column; align-items: stretch; gap: 2px; }
+  .s-row { display: flex; gap: 10px; align-items: center; min-width: 0; }
+  .s-row > :global(svg) { flex-shrink: 0; color: var(--ink-3); }
+  .s-kind { padding: 1px 7px; border-radius: var(--r-full); box-shadow: inset 0 0 0 1px var(--line-2); font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
+  .s-now, .s-report { margin-left: 25px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
+  .s-report { color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 6; line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
   .out-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: var(--t-sm); color: var(--ink-3); }
   .out-head code { font-size: 11.5px; color: var(--ink-2); }
   .out-head .open-file { margin-left: auto; flex: none; }

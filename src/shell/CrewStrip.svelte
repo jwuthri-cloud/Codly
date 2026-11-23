@@ -6,6 +6,7 @@
 <script lang="ts">
   import { narrate } from '../lib/state/narration';
   import { store } from '../lib/state/store.svelte';
+  import { takeovers } from '../lib/state/takeover.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import type { Provider } from '../lib/gen/Provider';
   import Icon from '../components/Icon.svelte';
@@ -19,9 +20,10 @@
 
   const leads = $derived(store.leads.filter((a) => a.status !== 'offline'));
   const crew = $derived(
-    // The team first (always there, even idle), then everyone else by arrival.
+    // The team first (always there, even idle), then everyone else by arrival. An agent that is
+    // in your terminal stays in sight, also when its row says it stopped (after a restart).
     store.agents
-      .filter((a) => a.role !== 'lead' && (a.status !== 'offline' || a.member))
+      .filter((a) => a.role !== 'lead' && (a.status !== 'offline' || a.member || takeovers.has(a.id)))
       .sort((a, b) => Number(!a.member) - Number(!b.member) || a.created_at - b.created_at),
   );
   // Workers drop their sentence only when the strip itself runs out of room, not when the window is
@@ -66,12 +68,15 @@
 <p class="sr-only" aria-live="polite">{announce}</p>
 
 <style>
-  .strip { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 2px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%); }
+  /* 12px at each end, the width of the fade: scrolled to an end, the first pill and "Start an agent" are clear of it. */
+  .strip { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 12px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%); }
   .strip::-webkit-scrollbar { display: none; }
   /* Centred while it fits; when it overflows it scrolls from the start (the Leads), which
      justify-content: center would put out of reach. */
   .strip > :global(:first-child) { margin-left: auto; }
   .strip > :global(:last-child) { margin-right: auto; }
-  .add { flex-shrink: 0; color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line-2); border-radius: var(--r-full); }
+  /* on a backing of its own, like the repo name: readable over any office scene (see TopBar) */
+  .add { flex-shrink: 0; color: var(--ink-3); background: var(--glass-strong); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-edge), inset 0 0 0 1px var(--line-2); border-radius: var(--r-full); }
+  .add:hover { background: var(--glass-strong); color: var(--ink-1); }
   .sep { width: 1px; height: 22px; background: var(--line-2); flex-shrink: 0; margin: 0 2px; }
 </style>

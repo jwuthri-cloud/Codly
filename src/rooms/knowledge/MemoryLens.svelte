@@ -149,7 +149,7 @@
             <div class="foot">
               <div class="chips">
                 {#each tags as t (t)}<span class="chip">{t}</span>{/each}
-                {#each refs as r, i (m.refs[i])}<span class="chip ref" data-tip={m.refs[i]}>{r}</span>{/each}
+                {#each refs as r, i (i)}<span class="chip ref" data-tip={m.refs[i]}>{r}</span>{/each}
               </div>
               <span class="by">{#if a}<Portrait agent={a} size={16} />{a.name}{:else}{m.author === 'user' ? 'You' : 'Codly'}{/if}</span>
               <Provenance kind={prov(m)} compact />

@@ -3,6 +3,7 @@ import { Mesh, Texture } from 'three';
 import { expect, it } from 'vitest';
 import { Character, LOOK_STYLES, lookFor, PropKit } from '../gfx/character';
 
+// Sculpting every look takes a few seconds, far more on a busy machine: it gets a minute, not the default 5 s.
 it('builds every look without NaN', () => {
   const env = { emotes: () => new Texture(), props: new PropKit() };
   const kinds = [['lead', 'none', false], ['reviewer', 'none', false], ['worker', 'hood', false], ['worker', 'headphones', false], ['solo', 'none', false], ['worker', 'none', true]] as const;
@@ -14,4 +15,4 @@ it('builds every look without NaN', () => {
       });
       c.dispose();
     }
-});
+}, 60_000);

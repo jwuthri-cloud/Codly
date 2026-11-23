@@ -6,4 +6,9 @@ export type SearchResult = { query: string, confidence: Confidence, citations: A
 /**
  * Suggested `rg` patterns when confidence is low.
  */
-fallback_rg: Array<string>, took_ms: number, };
+fallback_rg: Array<string>, took_ms: number, 
+/**
+ * Why the citations may not match the files the asker sees: the index is behind the files
+ * on disk, or files differ in the asking agent's worktree. Absent when they match.
+ */
+warnings?: Array<string>, };

@@ -1,17 +1,29 @@
 <!--
   The plan landed on its integration branch: what changed in total, what each task did, what
   the agents made, and the decision that is yours — merge into your branch, or keep the branch.
+  A merge that would conflict with your branch says so here, with the two ways out: until the
+  conflict is resolved the card does not say "ready to merge", and the one primary button is
+  the step's own "Have an agent resolve it". While a pull request for the plan is open with
+  checks still running, the primary button is to look at the pull request; Merge stays.
 -->
 <script lang="ts">
   import { keepBranch, mergePlan } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
+  import { conflictsWith } from '../../lib/state/mergeState.svelte';
+  import { checksState, prKey, prUi } from '../../lib/state/pullRequest.svelte';
+  import { planSpent, spentVersion } from '../../lib/state/spent.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
-  import { shortSha } from '../../lib/util/format';
+  import { PLAN_SPENT_TIP, spentLine } from '../../lib/util/cost';
+  import { plural, shortSha } from '../../lib/util/format';
   import { idVar, GLOSSARY } from '../../lib/util/labels';
+  import { openExternal } from '../../lib/util/markdown';
   import ArtifactThumb from '../../components/ArtifactThumb.svelte';
   import Icon from '../../components/Icon.svelte';
+  import MergeConflictStep from '../../components/MergeConflictStep.svelte';
   import RepoSyncBar from '../../components/RepoSyncBar.svelte';
+  import PullRequestStep from '../../components/PullRequestStep.svelte';
+  import PreviewStep from '../../components/PreviewStep.svelte';
 
   interface Props {
     planId: string;
@@ -20,6 +32,11 @@
   const plan = $derived(store.planMap.get(planId) ?? null);
   const tasks = $derived(store.tasks.filter((t) => t.plan_id === planId).sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true })));
   const stat = $derived(diffstats.plan[planId] ?? null);
+  // What the plan's tasks used in all (its runs are over: asked once, and again if a task changes state).
+  const spent = $derived(planSpent.plan[planId] ?? null);
+  $effect(() => {
+    if (plan) planSpent.ensure(planId, spentVersion(tasks.map((t) => t.status), false, 0));
+  });
   const arts = $derived(store.artifacts.filter((a) => a.task_id && tasks.some((t) => t.id === a.task_id)));
   const merged = $derived.by(() => {
     void store.rev;
@@ -27,22 +44,34 @@
   });
   const kept = $derived(ui.keptPlans.includes(planId) || !!store.planMap.get(planId)?.kept);
   const target = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main');
+  /** The branch it conflicts with: nothing can merge until that is resolved, and the step below has the ways out. */
+  const conflict = $derived(merged || kept ? null : conflictsWith({ kind: 'plan', id: planId }));
+  /** A pull request for it is open and its checks still run: look at those before you merge here. */
+  const pr = $derived(prUi.opened[prKey({ kind: 'plan', id: planId })] ?? null);
+  const prChecking = $derived(!!pr && pr.state === 'open' && !!pr.checks && checksState(pr.checks) === 'wait');
   let busy = $state(false);
-  async function merge() {
+  // `unchecked`: after the plan's checks failed on the merge result, you merge anyway.
+  async function merge(unchecked = false) {
     busy = true;
-    await mergePlan(planId);
+    await mergePlan(planId, null, unchecked);
+    busy = false;
+  }
+  async function keep() {
+    busy = true;
+    await keepBranch(planId);
     busy = false;
   }
 </script>
 
 {#if plan}
   <article class="card" class:open={!merged && !kept}>
-    <p class="eyebrow">{merged ? `Merged into ${target}` : kept ? 'Branch kept' : 'Plan finished · ready to merge'}</p>
+    <p class="eyebrow">{merged ? `Merged into ${target}` : kept ? 'Branch kept' : conflict ? `Plan finished · conflicts with ${conflict}` : 'Plan finished · ready to merge'}</p>
     <h3 class="serif">{plan.summary}</h3>
     <p class="stats num">
-      {#if stat}<span class="add">+{stat.added}</span> <span class="del">−{stat.removed}</span> across {stat.files} files ·{/if}
+      {#if stat}<span class="add">+{stat.added}</span> <span class="del">−{stat.removed}</span> across {plural(stat.files, 'file')} ·{/if}
       {tasks.filter((t) => t.status === 'done').length} of {tasks.length} tasks merged into <code data-tip={GLOSSARY.integration}>{plan.integration_branch ?? 'the integration branch'}</code>
     </p>
+    {#if spent?.tokens}<p class="used num"><span data-tip={PLAN_SPENT_TIP}>Used {spentLine(spent)}</span></p>{/if}
     <ul class="tasks">
       {#each tasks as t (t.id)}
         {@const a = t.assignee ? store.agentMap.get(t.assignee) : null}
@@ -68,12 +97,20 @@
         <span class="done"><Icon name="check" size={13} stroke={2} />Merged into <code>{target}</code> at <code>{shortSha(merged.sha)}</code></span>
         <button class="btn ghost sm" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {:else}
-        <button class="btn primary" disabled={busy || kept} onclick={merge}><Icon name="merge" size={14} />Merge into {target}</button>
-        <button class="btn" disabled={busy || kept} onclick={() => keepBranch(planId)}>Keep the branch</button>
+        {#if prChecking && pr && !conflict}
+          {@const url = pr.url}
+          <button class="btn primary" onclick={() => openExternal(url)} data-tip="Its checks still run: look at them before you merge here"><Icon name="link" size={14} />View the pull request</button>
+        {/if}
+        <button class="btn" class:primary={!conflict && !prChecking} disabled={busy || kept} onclick={() => merge()}><Icon name="merge" size={14} />Merge into {target}</button>
+        <button class="btn" disabled={busy || kept} onclick={keep}>Keep the branch</button>
         <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {/if}
     </footer>
-    {#if !kept}<RepoSyncBar refresh={merged?.sha ?? busy} />{/if}
+    <!-- Until the merge: Codly removes the plan's worktree then. -->
+    {#if plan.integration_worktree && !merged}<PreviewStep source={{ kind: 'plan', id: planId }} worktree={plan.integration_worktree} />{/if}
+    {#if !merged && !kept}<MergeConflictStep source={{ kind: 'plan', id: planId }} refresh={busy} onunchecked={() => merge(true)} />{/if}
+    {#if !kept}<RepoSyncBar refresh={merged?.sha ?? busy} {planId} />{/if}
+    {#if plan.integration_branch}<PullRequestStep source={{ kind: 'plan', id: planId }} canPush={!merged} />{/if}
   </article>
 {/if}
 
@@ -84,6 +121,7 @@
   h3 { font-size: var(--d-md); line-height: 1.12; }
   .stats { font-size: var(--t-md); color: var(--ink-2); }
   .stats code { font-size: 11.5px; color: var(--ink-2); }
+  .used { margin-top: -8px; font-size: var(--t-sm); color: var(--ink-3); }
   .add { color: var(--ok); }
   .del { color: var(--bad); }
   .tasks { display: flex; flex-direction: column; }

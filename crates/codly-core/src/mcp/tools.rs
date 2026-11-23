@@ -4,6 +4,8 @@
 //!
 //! Tool descriptions say *when* to use a tool, because agents otherwise ignore MCP tools.
 
+use std::time::Duration;
+
 use serde_json::{Value, json};
 
 use crate::model::{ROLE_TITLES, Role};
@@ -24,6 +26,24 @@ pub const MESSAGE_MEMBER: &str = "codly_message_member";
 pub const QUICK_TASK: &str = "codly_quick_task";
 pub const REASSIGN: &str = "codly_reassign";
 pub const ASK_USER: &str = "codly_ask_user";
+
+/// How long the app works on one call before the agent gets an answer anyway (`server.rs`):
+/// a call that hangs must not hang the agent's turn. The bridge waits a little longer
+/// (`bridge.rs`), for an app that does not answer at all.
+pub fn time_limit(tool: &str) -> Duration {
+    match tool {
+        // These make worktrees and start agents.
+        SUBMIT_PLAN | QUICK_TASK | MESSAGE_MEMBER => Duration::from_secs(120),
+        _ => Duration::from_secs(30),
+    }
+}
+
+/// What the agent is told when a call got no answer within `limit`. The call may have done
+/// its work all the same (a second codly_quick_task would make a second task), so the agent
+/// is told to look before it tries again.
+pub fn slow_answer(limit: Duration) -> String {
+    format!("Codly did not answer within {} seconds. The call may still finish: read codly_board before you try it again.", limit.as_secs())
+}
 
 /// The goal field of a task: a markdown brief the worker reads and the task card renders.
 const BRIEF_DOC: &str = "Markdown brief: one plain goal sentence, then ### Scope, ### Steps, ### Acceptance and \
@@ -88,7 +108,8 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
             SEARCH,
             "Find code by behaviour or concept when you don't know the identifier (e.g. 'where are auth tokens refreshed'). \
              Returns path:line citations with a confidence level. For a known exact symbol, grep is faster. \
-             If confidence is 'low', grep with the suggested patterns instead.",
+             If confidence is 'low', grep with the suggested patterns instead. The index covers the user's checkout: \
+             'warnings' and a citation marked 'differs in your worktree' say when it does not match your files.",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string", "description": "What you are looking for, in words or identifiers." },
                 "k": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max citations (default 8)." }
@@ -204,8 +225,9 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
         Role::Worker => {
             tools.push(tool(
                 SUBMIT_REPORT,
-                "Call this exactly once when you finish your task (or cannot continue). Codly then commits your worktree, \
-                 re-runs the verify commands and merges your work. Do not commit yourself.",
+                "Call this when you finish your task (or cannot continue), and again each time you finish a fix that Codly \
+                 asked for. Codly then commits your worktree, re-runs the verify commands and merges your work. Do not \
+                 commit yourself.",
                 json!({ "type": "object", "properties": {
                     "status": { "type": "string", "enum": ["done", "blocked", "failed"] },
                     "summary": { "type": "string", "description": "What you changed and why, in 1-5 short sentences (ASD-STE100: one instruction or fact per sentence)." },
@@ -285,5 +307,16 @@ mod tests {
         assert!(names(Role::Worker).contains(&SUBMIT_REPORT.to_string()));
         assert!(names(Role::Reviewer).contains(&SUBMIT_REVIEW.to_string()));
         assert_eq!(names(Role::Solo).len(), 8);
+    }
+
+    #[test]
+    fn calls_that_start_work_get_more_time() {
+        for t in [SUBMIT_PLAN, QUICK_TASK, MESSAGE_MEMBER] {
+            assert_eq!(time_limit(t), Duration::from_secs(120));
+        }
+        for t in [BOARD, SEARCH, ASK_USER, "__list"] {
+            assert_eq!(time_limit(t), Duration::from_secs(30));
+        }
+        assert_eq!(slow_answer(Duration::from_secs(30)), "Codly did not answer within 30 seconds. The call may still finish: read codly_board before you try it again.");
     }
 }

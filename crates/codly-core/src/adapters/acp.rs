@@ -15,19 +15,23 @@
 //! - OpenCode allows edits and shell without asking by default; Codly forces "ask" through
 //!   `OPENCODE_CONFIG_CONTENT`. Gemini gets a policy file that keeps workers out of its own
 //!   memory/settings files (memory-knowledge §5.6).
+//! - The session's permission mode is Codly's choice, never the user's CLI settings': a
+//!   read-only run is put in the agent's `plan` mode and a Gemini worker in `default` (ask
+//!   first). A session that does not take its mode is not started (`mode_call`).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use serde_json::{Value, json};
 use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
-use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
+use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, attachments, startup};
+use crate::housekeeping::connections::{self, ReadyMcp};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, EventKind, Id,
     MessagePhase, PlanStep, Provider, TurnStatus, Usage, new_id, now_ms,
@@ -35,6 +39,13 @@ use crate::model::{
 use crate::proc::{self, Inbound, RawLog, StderrTail};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a turn has to end after `session/cancel`. Past it the agent is stuck: its process
+/// is ended (stdin closed, then SIGTERM, then SIGKILL) and the session resumes with the next run.
+const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The only ACP version Codly speaks.
+const PROTOCOL_VERSION: i64 = 1;
 
 /// Keeps Gemini workers out of its own memory and settings (`~/.gemini/GEMINI.md`, the
 /// private MEMORY.md index); 0.62 has no `save_memory` tool any more, older versions do.
@@ -88,8 +99,9 @@ pub fn launch(spec: &SpawnSpec, policy_path: Option<&Path>) -> (Vec<String>, Vec
     }
 }
 
-/// The codly stdio MCP server in ACP's shape (env as `[{name, value}]`).
-pub fn mcp_servers(spec: &SpawnSpec) -> Value {
+/// The codly stdio MCP server in ACP's shape (env as `[{name, value}]`). `ready`: the user's
+/// default servers with their keys (`connections::load_ready`), looked up once per spawn.
+pub fn mcp_servers(spec: &SpawnSpec, ready: &[ReadyMcp]) -> Value {
     match &spec.mcp {
         Some(m) => {
             let mut servers = vec![json!({
@@ -97,7 +109,7 @@ pub fn mcp_servers(spec: &SpawnSpec) -> Value {
                 "env": m.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
             })];
             // The user's default servers (Settings → Connections), as enabled when this run started.
-            for x in crate::housekeeping::connections::load_ready(&spec.raw_log) {
+            for x in ready {
                 servers.push(json!({
                     "name": x.name, "command": x.command, "args": x.args,
                     "env": x.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
@@ -111,6 +123,12 @@ pub fn mcp_servers(spec: &SpawnSpec) -> Value {
 
 pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> anyhow::Result<AgentHandle> {
     let raw = Arc::new(RawLog::open(&spec.raw_log).with_context(|| format!("cannot open raw log {}", spec.raw_log.display()))?);
+    // The keys of the default servers come from the Keychain through a subprocess, which can
+    // wait on a permission dialog: once per spawn, and not on a runtime thread.
+    let ready = {
+        let raw_log = spec.raw_log.clone();
+        tokio::task::spawn_blocking(move || connections::load_ready(&raw_log)).await.context("reading the default MCP servers")?
+    };
     let policy = if spec.provider == Provider::Gemini {
         let path = spec.raw_log.with_file_name("gemini-policy.toml");
         std::fs::write(&path, GEMINI_POLICY).with_context(|| format!("cannot write {}", path.display()))?;
@@ -121,6 +139,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     let (args, extra_env) = launch(&spec, policy.as_deref());
     let mut env = spec.env.clone();
     env.extend(extra_env);
+    startup::check_cwd(&spec.cwd)?;
     let mut child = proc::command(&spec.bin, &args, &spec.cwd, &env)
         .spawn()
         .with_context(|| format!("failed to start {}", spec.bin.display()))?;
@@ -130,8 +149,8 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     let lines = proc::spawn_json_reader(child.stdout.take().context("no stdout")?, raw.clone());
     let stderr = StderrTail::spawn(child.stderr.take().context("no stderr")?, 64 << 10);
     let (exit_tx, exit_rx) = oneshot::channel();
-    tokio::spawn(async move {
-        let code = child.wait().await.ok().and_then(proc::exit_code);
+    // Also ends what the CLI left running in its group (a dev server, a watcher) once it is gone.
+    proc::reap(child, move |code| {
         let _ = exit_tx.send(code);
     });
 
@@ -143,6 +162,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         // Kept for a resume too: dropped once the session is resumed, sent if it falls back to new.
         system_prompt: Some(spec.system_prompt.clone()).filter(|s| !s.trim().is_empty()),
         spec,
+        ready,
         events,
         stdin: Some(stdin),
         raw,
@@ -150,17 +170,19 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         stderr,
         next_id: 0,
         session_id: None,
+        takes_images: false,
         pending: HashMap::new(),
         prompt_in_flight: false,
         queue: VecDeque::new(),
         replaying: false,
         stage: Stage::Running,
         deadline: None,
+        interrupt_failed: false,
     };
     tokio::spawn(actor.run(cmds, lines, exit_rx, ready_tx));
-    // The handshake is two calls in a row (initialize, then the session), each with its own
-    // deadline: wait for both, so the actor's own error always comes first.
-    match tokio::time::timeout(HANDSHAKE_TIMEOUT * 2 + Duration::from_secs(5), ready_rx).await {
+    // The handshake is up to three calls in a row (initialize, the session, its mode), each
+    // with its own deadline: wait for all of them, so the actor's own error always comes first.
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT * 3 + Duration::from_secs(5), ready_rx).await {
         Ok(Ok(Ok(()))) => Ok(AgentHandle { agent_id, run_id, tx }),
         Ok(Ok(Err(e))) => Err(e),
         Ok(Err(_)) => Err(anyhow!("ACP adapter stopped during startup")),
@@ -173,7 +195,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
 
 enum Pending {
     Prompt,
-    /// best-effort config calls; errors become non-fatal Error events
+    /// best-effort config calls (the model); errors become non-fatal Error events
     Config(&'static str),
 }
 
@@ -187,6 +209,8 @@ enum Stage {
 
 struct Actor {
     spec: SpawnSpec,
+    /// The user's default MCP servers with their keys, for the session's `mcpServers`.
+    ready: Vec<ReadyMcp>,
     events: mpsc::UnboundedSender<AdapterEvent>,
     stdin: Option<ChildStdin>,
     raw: Arc<RawLog>,
@@ -197,13 +221,18 @@ struct Actor {
     system_prompt: Option<String>,
     next_id: i64,
     session_id: Option<String>,
+    /// The agent said at `initialize` that a prompt may hold images.
+    takes_images: bool,
     pending: HashMap<i64, Pending>,
     prompt_in_flight: bool,
     queue: VecDeque<String>,
     /// `session/load` replays history as updates: keep them out of the live stream.
     replaying: bool,
     stage: Stage,
+    /// While running: when a cancelled turn must have ended. In a shutdown: the stage's limit.
     deadline: Option<tokio::time::Instant>,
+    /// A cancelled turn did not end within `INTERRUPT_TIMEOUT`, so the process is being ended.
+    interrupt_failed: bool,
 }
 
 type Ready = Option<oneshot::Sender<anyhow::Result<()>>>;
@@ -222,14 +251,26 @@ impl Actor {
     async fn write(&mut self, mut msg: Value) -> bool {
         msg["jsonrpc"] = json!("2.0");
         let Some(stdin) = self.stdin.as_mut() else { return false };
-        match proc::write_json(stdin, &self.raw, &msg).await {
+        match proc::write_json_within(stdin, &self.raw, &msg, proc::WRITE_TIMEOUT).await {
             Ok(()) => true,
             Err(e) => {
                 tracing::warn!("acp stdin write failed: {e}");
                 self.stdin = None;
+                if e.kind() == std::io::ErrorKind::TimedOut {
+                    self.stopped_reading();
+                }
                 false
             }
         }
+    }
+
+    /// The agent no longer reads its stdin: nothing can be said to it, not even "cancel". Its
+    /// process is ended; the exit is reported as any other, and the next run resumes the session.
+    fn stopped_reading(&self) {
+        self.raw.note("the agent stopped reading its input: ending its process");
+        let message = format!("{} stopped reading its input, so Codly ended its process.", self.spec.provider.label());
+        self.emit(EventKind::Error { message, fatal: false });
+        tokio::spawn(proc::kill_group(self.pgid, Duration::from_secs(2)));
     }
 
     async fn request(&mut self, method: &str, params: Value) -> i64 {
@@ -267,19 +308,27 @@ impl Actor {
 
     async fn handshake(&mut self, lines: &mut mpsc::UnboundedReceiver<Inbound>) -> anyhow::Result<()> {
         let init = json!({
-            "protocolVersion": 1,
+            "protocolVersion": PROTOCOL_VERSION,
             "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false, "_meta": { "terminal_output_delta": true } },
             "clientInfo": { "name": "codly", "title": "Codly", "version": crate::version() },
         });
-        let init = self.call("initialize", init, lines).await?.map_err(|e| anyhow!("initialize failed: {}", err_msg(&e)))?;
+        // An agent too old for `--acp` exits here with its option parser's error.
+        let init = self
+            .call("initialize", init, lines)
+            .await
+            .and_then(|r| r.map_err(|e| anyhow!("initialize failed: {}", err_msg(&e))))
+            .map_err(|e| startup::explain(&self.spec, None, e))?;
+        check_protocol(self.spec.provider, &init)?;
+        self.takes_images = takes_images(&init);
         let caps = &init["agentCapabilities"];
         let cwd = self.spec.cwd.to_string_lossy().into_owned();
-        let mcp = mcp_servers(&self.spec);
+        let mcp = mcp_servers(&self.spec, &self.ready);
         let session = match self.spec.session.clone() {
             SessionMode::Resume { session_id } if !caps["sessionCapabilities"]["resume"].is_null() => {
                 let r = self.call("session/resume", json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp }), lines).await?;
                 if r.is_ok() {
                     self.system_prompt = None; // the resumed conversation already has it
+                    self.norm.cost_before = self.spec.session_cost_usd;
                 }
                 r.map(|mut v| {
                     v["sessionId"] = json!(session_id);
@@ -292,6 +341,7 @@ impl Actor {
                 self.replaying = false;
                 if r.is_ok() {
                     self.system_prompt = None;
+                    self.norm.cost_before = self.spec.session_cost_usd;
                 }
                 r.map(|mut v| {
                     v["sessionId"] = json!(session_id);
@@ -306,10 +356,10 @@ impl Actor {
         };
         let session = session.map_err(|e| {
             if e["code"] == -32000 {
-                let methods: Vec<&str> = init["authMethods"].as_array().into_iter().flatten().filter_map(|m| m["name"].as_str()).collect();
-                anyhow!("not signed in ({}): sign in with the CLI in a terminal first", methods.join(", "))
+                anyhow!(startup::not_signed_in(self.spec.provider, startup::account_home(&self.spec), auth_how(&init).as_deref()))
             } else {
-                anyhow!("could not open a session: {}", err_msg(&e))
+                let version = init["agentInfo"]["version"].as_str();
+                startup::explain(&self.spec, version, anyhow!("could not open a session: {}", err_msg(&e)))
             }
         })?;
         let sid = session["sessionId"].as_str().context("the agent returned no sessionId")?.to_string();
@@ -332,13 +382,27 @@ impl Actor {
                 }
             }
         }
-        if self.spec.read_only {
-            if let Some((config_id, value)) = pick_option(&session["configOptions"], "mode", "plan") {
-                let id = self.request("session/set_config_option", json!({ "sessionId": sid, "configId": config_id, "value": value })).await;
-                self.pending.insert(id, Pending::Config("mode"));
-            } else if session["modes"]["availableModes"].as_array().is_some_and(|m| m.iter().any(|x| x["id"] == "plan")) {
-                let id = self.request("session/set_mode", json!({ "sessionId": sid, "modeId": "plan" })).await;
-                self.pending.insert(id, Pending::Config("mode"));
+        // A reasoning effort ("model:high") goes to the agent's own option when it offers one.
+        // Without one the agent runs with its default: say so, once per run.
+        if let Some(effort) = classify::split_model_effort(self.spec.model.as_deref()).1 {
+            match pick_option(&session["configOptions"], "thought_level", &effort) {
+                Some((config_id, value)) => {
+                    let id = self.request("session/set_config_option", json!({ "sessionId": sid, "configId": config_id, "value": value })).await;
+                    self.pending.insert(id, Pending::Config("reasoning effort"));
+                }
+                None => self.emit(EventKind::Error { message: effort_not_set(self.spec.provider, &effort), fatal: false }),
+            }
+        }
+        // The mode is waited for: a session left in another mode must not get a prompt.
+        if let Some(call) = mode_call(self.spec.provider, self.spec.read_only, &session) {
+            let (method, params, mode) = match call {
+                ModeCall::Option { config_id, value } => {
+                    ("session/set_config_option", json!({ "sessionId": sid, "configId": config_id, "value": value }), value)
+                }
+                ModeCall::Mode(mode) => ("session/set_mode", json!({ "sessionId": sid, "modeId": mode }), mode.to_string()),
+            };
+            if let Err(e) = self.call(method, params, lines).await? {
+                bail!(mode_refused(self.spec.provider, &mode, &err_msg(&e)));
             }
         }
         let current = session["configOptions"]
@@ -417,7 +481,8 @@ impl Actor {
         let cancelled = self.norm.cancel_all_approvals();
         self.emit_all(cancelled);
         if self.prompt_in_flight {
-            self.emit(EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: Some("the agent exited before the turn finished".into()), duration_ms: None });
+            let (status, result_text) = self.unfinished_turn();
+            self.emit(EventKind::TurnCompleted { status, result_text, duration_ms: None });
         }
         if self.stage == Stage::Running {
             let tail = self.stderr.tail(2000);
@@ -448,10 +513,11 @@ impl Actor {
                         self.emit_all(events);
                         if self.stage == Stage::Interrupting {
                             self.close_stdin();
-                        } else if self.stage == Stage::Running
-                            && let Some(next) = self.queue.pop_front()
-                        {
-                            self.send_prompt(next).await;
+                        } else if self.stage == Stage::Running {
+                            self.deadline = None; // a cancelled turn ended in time
+                            if let Some(next) = self.queue.pop_front() {
+                                self.send_prompt(next).await;
+                            }
                         }
                     }
                     Some(Pending::Config(what)) => {
@@ -516,6 +582,10 @@ impl Actor {
                 None => tracing::warn!("acp: no pending approval {approval_id}"),
             },
             AgentCmd::Shutdown => self.begin_shutdown().await,
+            // Claude's control requests: the orchestrator sends them to Claude agents only.
+            AgentCmd::Session { reply, .. } => {
+                let _ = reply.send(Err("this CLI has no such request".into()));
+            }
         }
     }
 
@@ -525,7 +595,18 @@ impl Actor {
             Some(sys) => format!("<codly_instructions>\n{sys}\n</codly_instructions>\n\n{text}"),
             None => text.clone(),
         };
-        let id = self.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": full }] })).await;
+        // An agent that takes images gets the attached ones as image blocks (no GIF: see
+        // `attachments::acp_images`); any other opens them by their paths, which the text
+        // keeps either way.
+        let mut images = Vec::new();
+        if self.takes_images {
+            let attached = attachments::acp_images(&text).await;
+            if let Some(note) = attached.note {
+                self.emit(EventKind::Error { message: note, fatal: false });
+            }
+            images = attached.images;
+        }
+        let id = self.request("session/prompt", json!({ "sessionId": sid, "prompt": attachments::acp_prompt(&full, &images) })).await;
         self.pending.insert(id, Pending::Prompt);
         self.prompt_in_flight = true;
         let events = self.norm.turn_started(&text);
@@ -545,6 +626,20 @@ impl Actor {
         for (reply, event) in self.norm.cancel_permissions() {
             self.write(reply).await;
             self.emit(event);
+        }
+        // A shutdown sets its own, shorter limit right after this.
+        if self.stage == Stage::Running {
+            self.deadline = Some(tokio::time::Instant::now() + INTERRUPT_TIMEOUT);
+        }
+    }
+
+    /// How a turn that is still open when the process exits ends: interrupted when Codly ended
+    /// the process because the turn did not stop, failed otherwise.
+    fn unfinished_turn(&self) -> (TurnStatus, Option<String>) {
+        if self.interrupt_failed {
+            (TurnStatus::Interrupted, None)
+        } else {
+            (TurnStatus::Failed, Some("the agent exited before the turn finished".into()))
         }
     }
 
@@ -576,13 +671,64 @@ impl Actor {
                 self.deadline = None;
                 tokio::spawn(proc::kill_group(self.pgid, Duration::from_secs(3)));
             }
-            Stage::Running | Stage::Killing => self.deadline = None,
+            // The turn did not end after `session/cancel`: the agent is stuck in a tool or a
+            // request that ignores it. End the process; the session resumes with the next run.
+            Stage::Running => {
+                self.interrupt_failed = true;
+                let unsent = super::unsent_note(self.queue.len());
+                self.queue.clear();
+                self.emit(EventKind::Error {
+                    message: format!(
+                        "{} did not stop within {} s, so Codly ended its process. The session is kept: its next run resumes it.{unsent}",
+                        self.spec.provider.label(),
+                        INTERRUPT_TIMEOUT.as_secs()
+                    ),
+                    fatal: false,
+                });
+                self.emit(super::gave_up(self.spec.provider.label(), INTERRUPT_TIMEOUT));
+                self.close_stdin();
+            }
+            Stage::Killing => self.deadline = None,
         }
     }
 }
 
 fn err_msg(e: &Value) -> String {
     e["message"].as_str().map(str::to_owned).unwrap_or_else(|| e.to_string())
+}
+
+/// An agent that cannot speak the client's protocol version answers `initialize` with the
+/// version it has; the client must then stop. An answer without a version is taken as is.
+fn check_protocol(provider: Provider, init: &Value) -> anyhow::Result<()> {
+    match init["protocolVersion"].as_i64() {
+        Some(v) if v != PROTOCOL_VERSION => {
+            let label = provider.label();
+            bail!("{label} speaks version {v} of the agent protocol (ACP) and Codly speaks version {PROTOCOL_VERSION}: update {label} and Codly to their latest versions")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Does the agent take image blocks in a prompt (`promptCapabilities.image` of `initialize`)?
+/// The protocol lets a client send one only then.
+fn takes_images(init: &Value) -> bool {
+    init["agentCapabilities"]["promptCapabilities"]["image"] == true
+}
+
+/// How the agent itself says to sign in (`authMethods` of `initialize`): a method's own
+/// description ("Run `opencode auth login` in the terminal"), else the methods' names.
+fn auth_how(init: &Value) -> Option<String> {
+    let methods = init["authMethods"].as_array()?;
+    if let Some(description) = methods.iter().find_map(|m| m["description"].as_str().filter(|d| !d.trim().is_empty())) {
+        return Some(description.to_string());
+    }
+    let names: Vec<&str> = methods.iter().filter_map(|m| m["name"].as_str()).collect();
+    (!names.is_empty()).then(|| format!("sign in with its CLI in a terminal first ({})", names.join(", ")))
+}
+
+/// What the user reads when an agent has no option for the reasoning effort Codly was given.
+fn effort_not_set(provider: Provider, effort: &str) -> String {
+    format!("{} has no \"{effort}\" reasoning effort to set over ACP: it runs with its own default", provider.label())
 }
 
 /// (configId, value) of the `category` select option matching `want` (exact, or as the
@@ -599,6 +745,36 @@ fn pick_option(options: &Value, category: &str, want: &str) -> Option<(String, S
     }
     let value = values.iter().find(|v| **v == want).or_else(|| values.iter().find(|v| v.ends_with(&format!("/{want}"))))?;
     Some((opt["id"].as_str()?.to_string(), value.to_string()))
+}
+
+/// How the handshake puts a session in the permission mode Codly needs.
+#[derive(Debug, PartialEq)]
+enum ModeCall {
+    /// `session/set_config_option` on the `mode` option (OpenCode).
+    Option { config_id: String, value: String },
+    /// `session/set_mode` (Gemini, Cursor).
+    Mode(&'static str),
+}
+
+/// The mode call a session needs after `session/new|load|resume` answered with `session`;
+/// None when it is where Codly wants it. The agent's own settings never decide:
+/// - a read-only run goes to the agent's `plan` mode. OpenCode without that option needs no
+///   call: its launch config already denies edits and commands (`launch`);
+/// - a Gemini worker goes to `default` (ask before edits and commands) unless the session says
+///   it is there: in `autoEdit` or `yolo` it would act without a request Codly can answer.
+fn mode_call(provider: Provider, read_only: bool, session: &Value) -> Option<ModeCall> {
+    if read_only {
+        if let Some((config_id, value)) = pick_option(&session["configOptions"], "mode", "plan") {
+            return Some(ModeCall::Option { config_id, value });
+        }
+        return (provider != Provider::Opencode).then_some(ModeCall::Mode("plan"));
+    }
+    (provider == Provider::Gemini && session["modes"]["currentModeId"] != "default").then_some(ModeCall::Mode("default"))
+}
+
+/// Why a run did not start: the agent would not take the mode of `mode_call`.
+fn mode_refused(provider: Provider, mode: &str, why: &str) -> String {
+    format!("{} did not switch to its \"{mode}\" mode, so Codly did not start it: in another mode it can change files without asking you ({why})", provider.label())
 }
 
 // ───────────────────────────── normalization (pure) ─────────────────────────────
@@ -631,6 +807,9 @@ pub struct AcpNormalizer {
     tools: HashMap<String, ToolState>,
     approvals: HashMap<Id, PendingPermission>,
     usage: Usage,
+    /// What the session cost before this run: set when a session is resumed, 0 for a new one.
+    /// `usage_update.cost` is the session's running total, and a run reports its own cost.
+    pub cost_before: f64,
     turn_started_at: Option<Instant>,
     pub interrupt_requested: bool,
 }
@@ -650,9 +829,21 @@ impl AcpNormalizer {
             tools: HashMap::new(),
             approvals: HashMap::new(),
             usage: Usage::default(),
+            cost_before: 0.0,
             turn_started_at: None,
             interrupt_requested: false,
         }
+    }
+
+    /// This run's part of the session's running cost.
+    fn run_cost(&mut self, session_total: f64) -> f64 {
+        // A total under what the session cost before this run: the agent started its count
+        // over, so all of it is this run's. (A billionth of a dollar under is rounding: the
+        // cost before is a sum of earlier runs.)
+        if session_total < self.cost_before - 1e-9 {
+            self.cost_before = 0.0;
+        }
+        (session_total - self.cost_before).max(0.0)
     }
 
     fn set_status(&mut self, s: AgentStatus, out: &mut Vec<EventKind>) {
@@ -753,7 +944,8 @@ impl AcpNormalizer {
                 self.usage.context_used = u["used"].as_i64().or(self.usage.context_used);
                 self.usage.context_window = u["size"].as_i64().or(self.usage.context_window);
                 if u["cost"]["currency"] == "USD" {
-                    self.usage.cost_usd = u["cost"]["amount"].as_f64();
+                    let cost = u["cost"]["amount"].as_f64().map(|total| self.run_cost(total));
+                    self.usage.cost_usd = cost;
                 }
                 out.push(EventKind::UsageUpdated { usage: self.usage.clone() });
             }
@@ -903,7 +1095,16 @@ impl AcpNormalizer {
                 }
                 ApprovalSubject::FileChange { paths, diff: render_diffs(&merged) }
             }
-            _ => ApprovalSubject::Tool { name: if title.is_empty() { kind.to_string() } else { title.clone() }, input: merged["rawInput"].clone() },
+            _ => {
+                // The title is free text: the approval rules also get the protocol kind.
+                let mut input = match merged["rawInput"].clone() {
+                    Value::Object(o) => Value::Object(o),
+                    Value::Null => json!({}),
+                    other => json!({ "input": other }),
+                };
+                input[classify::ACP_KIND] = json!(kind);
+                ApprovalSubject::Tool { name: if title.is_empty() { kind.to_string() } else { title.clone() }, input }
+            }
         };
         let mut options: Vec<(ApprovalChoice, String)> = Vec::new();
         for o in p["options"].as_array().into_iter().flatten() {
@@ -1000,13 +1201,19 @@ impl AcpNormalizer {
             self.usage.output_tokens += q["output_tokens"].as_i64().unwrap_or(0);
             out.push(EventKind::UsageUpdated { usage: self.usage.clone() });
         }
-        let status = match r["stopReason"].as_str() {
+        let reason = r["stopReason"].as_str();
+        let status = match reason {
             _ if self.interrupt_requested => TurnStatus::Interrupted,
             Some("end_turn") => TurnStatus::Completed,
             Some("cancelled") => TurnStatus::Interrupted,
             Some("max_turn_requests") => TurnStatus::MaxTurns,
             _ => TurnStatus::Failed,
         };
+        // A failed turn says why (max_tokens, refusal, …): Codly shows it and tells the worker.
+        if status == TurnStatus::Failed {
+            let message = format!("the agent stopped before it finished: {}", reason.unwrap_or("no stop reason given"));
+            out.push(EventKind::Error { message, fatal: false });
+        }
         self.close_turn(status, &mut out);
         out
     }
@@ -1189,6 +1396,53 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, EventKind::ToolCompleted { exit_code: Some(0), output: Some(o), .. } if o.contains("hello.txt"))));
     }
 
+    /// `usage_update.cost` is the session's running total (docs/research/cli-others-acp.md
+    /// §1.6). A run on a resumed session reports only what it added.
+    #[test]
+    fn a_resumed_sessions_cost_starts_from_zero_for_the_run() {
+        let new = || AcpNormalizer::new(Provider::Opencode, "a", "r", PathBuf::from("/w"));
+        let cost = |norm: &mut AcpNormalizer, total: f64| {
+            let update = json!({ "sessionUpdate": "usage_update", "used": 15040, "size": 200000, "cost": { "amount": total, "currency": "USD" } });
+            let events = norm.on_update(&update);
+            events.iter().find_map(|e| if let EventKind::UsageUpdated { usage } = e { usage.cost_usd } else { None }).unwrap()
+        };
+        // A new session: the total is the run's.
+        let mut norm = new();
+        assert_eq!((cost(&mut norm, 0.25), cost(&mut norm, 0.75)), (0.25, 0.75));
+        // Resumed: its earlier runs cost 0.75 together, and Codly counted that then.
+        let mut norm = new();
+        norm.cost_before = 0.75;
+        assert_eq!(cost(&mut norm, 0.75), 0.0, "nothing new yet");
+        assert_eq!((cost(&mut norm, 1.0), cost(&mut norm, 1.25)), (0.25, 0.5));
+        // The cost before is a sum of earlier runs: its rounding is not a count that started over.
+        let mut norm = new();
+        norm.cost_before = 0.1 + 0.2;
+        assert_eq!(cost(&mut norm, 0.3), 0.0);
+        // An agent that starts its count over on a resume: all it reports is this run's.
+        let mut norm = new();
+        norm.cost_before = 0.75;
+        assert_eq!((cost(&mut norm, 0.125), cost(&mut norm, 0.5)), (0.125, 0.5));
+    }
+
+    /// A tool request is named by its free-text title; the approval rules get the kind too.
+    #[test]
+    fn tool_permissions_keep_the_protocol_kind() {
+        let mut norm = AcpNormalizer::new(Provider::Opencode, "a", "r", PathBuf::from("/w"));
+        norm.turn_started("go");
+        let mut ask = |id: &str, title: &str, kind: &str, raw: Value| {
+            let req = json!({ "sessionId": "s", "toolCall": { "toolCallId": id, "title": title, "kind": kind, "status": "pending", "rawInput": raw },
+                              "options": [{ "optionId": "once", "name": "Allow once", "kind": "allow_once" }] });
+            let ev = norm.on_permission(&json!(1), &req);
+            ev.iter().find_map(|e| if let EventKind::ApprovalRequested { approval } = e { Some(approval.subject.clone()) } else { None }).unwrap()
+        };
+        let fetch = ask("t1", "https://example.com/?q=1", "fetch", json!({ "url": "https://example.com/?q=1" }));
+        assert!(matches!(&fetch, ApprovalSubject::Tool { name, input } if name == "https://example.com/?q=1" && input[classify::ACP_KIND] == "fetch" && input["url"].is_string()));
+        let read = ask("t2", "read", "read", Value::Null);
+        assert!(matches!(&read, ApprovalSubject::Tool { name, input } if name == "read" && *input == json!({ "_kind": "read" })));
+        let other = ask("t3", "list", "other", json!("raw text"));
+        assert!(matches!(&other, ApprovalSubject::Tool { input, .. } if *input == json!({ "_kind": "other", "input": "raw text" })));
+    }
+
     #[test]
     fn permissions_cancel_and_live_output() {
         let mut norm = AcpNormalizer::new(Provider::Cursor, "a", "r", PathBuf::from("/w"));
@@ -1225,6 +1479,11 @@ mod tests {
         norm.interrupt_requested = true;
         let ev = norm.turn_ended(&json!({ "stopReason": "cancelled" }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Interrupted, .. })));
+        assert!(!ev.iter().any(|e| matches!(e, EventKind::Error { .. })), "an interrupt is no error: {ev:?}");
+        // A turn that stopped short fails, and says why before it ends.
+        let ev = norm.turn_ended(&json!({ "stopReason": "max_tokens" }));
+        let end = ev.iter().position(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Failed, .. })).unwrap();
+        assert!(ev[..end].iter().any(|e| matches!(e, EventKind::Error { message, fatal: false } if message.contains("max_tokens"))), "{ev:?}");
 
         let ev = norm.on_update(&json!({ "sessionUpdate": "plan", "entries": [{ "content": "a", "priority": "high", "status": "in_progress" }] }));
         assert!(matches!(&ev[0], EventKind::PlanUpdated { steps } if steps[0].status == "in_progress"));
@@ -1233,11 +1492,67 @@ mod tests {
     }
 
     #[test]
+    fn handshake_errors_say_what_to_do() {
+        // The version: 1 goes on, anything else stops with both names in the message.
+        assert!(check_protocol(Provider::Gemini, &json!({ "protocolVersion": 1 })).is_ok());
+        assert!(check_protocol(Provider::Gemini, &json!({ "agentInfo": {} })).is_ok(), "an answer without a version is taken as is");
+        let e = check_protocol(Provider::Gemini, &json!({ "protocolVersion": 2 })).unwrap_err().to_string();
+        assert_eq!(e, "Gemini CLI speaks version 2 of the agent protocol (ACP) and Codly speaks version 1: update Gemini CLI and Codly to their latest versions");
+
+        // Sign-in: the agent's own words (OpenCode's `initialize`), else the names of its methods.
+        let opencode = json!({ "authMethods": [{ "description": "Run `opencode auth login` in the terminal", "name": "Login with opencode", "id": "opencode-login" }] });
+        assert_eq!(auth_how(&opencode).as_deref(), Some("Run `opencode auth login` in the terminal"));
+        let gemini = json!({ "authMethods": [{ "id": "oauth-personal", "name": "Log in with Google", "description": null }, { "id": "gemini-api-key", "name": "Use Gemini API key" }] });
+        assert_eq!(auth_how(&gemini).as_deref(), Some("sign in with its CLI in a terminal first (Log in with Google, Use Gemini API key)"));
+        assert_eq!(auth_how(&json!({ "authMethods": [] })), None);
+        assert_eq!(auth_how(&json!({})), None);
+        // What the user reads: Codly's own command where it knows one, the agent's words otherwise.
+        assert_eq!(startup::not_signed_in(Provider::Gemini, Some("/Users/x/.gemini-perso"), auth_how(&gemini).as_deref()), "Gemini CLI is not signed in: run `GEMINI_CLI_HOME=/Users/x/.gemini-perso gemini` in a terminal");
+        assert_eq!(startup::not_signed_in(Provider::Opencode, None, auth_how(&opencode).as_deref()), "OpenCode is not signed in: Run `opencode auth login` in the terminal");
+    }
+
+    /// The session's mode after the handshake is Codly's choice, whatever the agent starts in.
+    #[test]
+    fn sessions_are_put_in_the_mode_codly_needs() {
+        // Gemini's real `session/new` answer: default, autoEdit, yolo, plan; it starts in default.
+        let gemini = fixture("acp-gemini.jsonl").into_iter().find(|l| l["msg"]["result"]["modes"].is_object()).unwrap()["msg"]["result"].clone();
+        assert_eq!(gemini["modes"]["currentModeId"], "default");
+        assert_eq!(mode_call(Provider::Gemini, false, &gemini), None, "already asks first");
+        assert_eq!(mode_call(Provider::Gemini, true, &gemini), Some(ModeCall::Mode("plan")));
+        // The user's Gemini settings start it elsewhere: a worker is brought back to ask-first.
+        for started_in in ["autoEdit", "yolo", "plan"] {
+            let mut s = gemini.clone();
+            s["modes"]["currentModeId"] = json!(started_in);
+            assert_eq!(mode_call(Provider::Gemini, false, &s), Some(ModeCall::Mode("default")), "{started_in}");
+            assert_eq!(mode_call(Provider::Gemini, true, &s), Some(ModeCall::Mode("plan")), "{started_in}");
+        }
+        // An answer that names no mode (a resumed session) is not taken on trust.
+        assert_eq!(mode_call(Provider::Gemini, false, &json!({ "sessionId": "s" })), Some(ModeCall::Mode("default")));
+
+        // OpenCode: the standard `mode` option; its launch config asks or denies by itself.
+        let opencode = json!({ "configOptions": [{ "id": "mode", "category": "mode", "currentValue": "build", "options": [{ "value": "build" }, { "value": "plan" }] }] });
+        assert_eq!(mode_call(Provider::Opencode, true, &opencode), Some(ModeCall::Option { config_id: "mode".into(), value: "plan".into() }));
+        assert_eq!(mode_call(Provider::Opencode, false, &opencode), None);
+        assert_eq!(mode_call(Provider::Opencode, true, &json!({})), None, "edit and bash are denied at launch");
+
+        // Any other agent in a read-only role must take `plan`, offered or not: the call fails the start otherwise.
+        assert_eq!(mode_call(Provider::Cursor, true, &json!({})), Some(ModeCall::Mode("plan")));
+        assert_eq!(mode_call(Provider::Copilot, true, &json!({ "modes": { "availableModes": [{ "id": "agent" }], "currentModeId": "agent" } })), Some(ModeCall::Mode("plan")));
+        assert_eq!(mode_call(Provider::Cursor, false, &json!({})), None);
+
+        assert_eq!(
+            mode_refused(Provider::Gemini, "plan", "Invalid or unavailable mode: plan"),
+            "Gemini CLI did not switch to its \"plan\" mode, so Codly did not start it: in another mode it can change files without asking you (Invalid or unavailable mode: plan)"
+        );
+    }
+
+    #[test]
     fn launch_lines() {
         use crate::adapters::McpLaunch;
         use crate::model::Role;
         let mut spec = SpawnSpec {
             agent_id: "a".into(),
+            agent_name: "Ada".into(),
             run_id: "r".into(),
             provider: Provider::Gemini,
             role: Role::Worker,
@@ -1246,17 +1561,28 @@ mod tests {
             bin: PathBuf::from("gemini"),
             env: HashMap::new(),
             session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
             system_prompt: String::new(),
             read_only: false,
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "t".into())] }),
             use_user_setup: false,
+            sandbox_network: false,
+            local_settings: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: None,
+            sandbox_shell: false,
         };
         let (a, env) = launch(&spec, Some(Path::new("/tmp/r/gemini-policy.toml")));
         assert_eq!(a, ["--acp", "--skip-trust", "-m", "gemini-2.5-flash", "--policy", "/tmp/r/gemini-policy.toml"]);
         assert!(env.is_empty());
-        assert_eq!(mcp_servers(&spec), json!([{ "name": "codly", "command": "/x/codly", "args": ["mcp"], "env": [{ "name": "CODLY_MCP_TOKEN", "value": "t" }] }]));
+        let codly = json!({ "name": "codly", "command": "/x/codly", "args": ["mcp"], "env": [{ "name": "CODLY_MCP_TOKEN", "value": "t" }] });
+        assert_eq!(mcp_servers(&spec, &[]), json!([codly]));
+        // The default servers (Settings → Connections) are handed in with their keys, looked
+        // up by the caller; an agent without Codly's server gets none of them.
+        let docs = ReadyMcp { name: "docs".into(), command: "npx".into(), args: vec!["docs-mcp".into()], env: vec![("TOKEN".into(), "k".into())], read_only: true };
+        let with_docs = json!([codly, { "name": "docs", "command": "npx", "args": ["docs-mcp"], "env": [{ "name": "TOKEN", "value": "k" }] }]);
+        assert_eq!(mcp_servers(&spec, std::slice::from_ref(&docs)), with_docs);
+        assert_eq!(mcp_servers(&SpawnSpec { mcp: None, ..spec.clone() }, &[docs]), json!([]));
         spec.provider = Provider::Opencode;
         let (a, env) = launch(&spec, None);
         assert_eq!(a, ["acp"]);
@@ -1269,8 +1595,178 @@ mod tests {
         assert_eq!(pick_option(&opts, "model", "big-pickle"), Some(("model".into(), "opencode/big-pickle".into())));
         assert_eq!(pick_option(&opts, "model", "openai/gpt-4.1"), Some(("model".into(), "openai/gpt-4.1".into())));
         assert_eq!(pick_option(&opts, "model", "nope"), None);
+        // A reasoning effort is set through the agent's `thought_level` option; an agent
+        // without one (Gemini has no config options), or without that level, is told apart.
+        let opts = json!([{ "id": "model", "category": "model", "options": [{ "value": "high" }] }, { "id": "effort", "category": "thought_level", "options": [{ "value": "low" }, { "value": "high" }] }]);
+        assert_eq!(pick_option(&opts, "thought_level", "high"), Some(("effort".into(), "high".into())));
+        assert_eq!(pick_option(&opts, "thought_level", "xhigh"), None);
+        assert_eq!(pick_option(&Value::Null, "thought_level", "high"), None);
+        assert_eq!(effort_not_set(Provider::Gemini, "high"), "Gemini CLI has no \"high\" reasoning effort to set over ACP: it runs with its own default");
         assert_eq!(tool_name("read_file__read_file_1792964533840_0", Some("README.md")).as_deref(), Some("read_file"));
         assert_eq!(tool_name("ccd5e765-06b2", Some("read")).as_deref(), Some("read"));
         assert_eq!(tool_name("ccd5e765-06b2", Some("git status --short")), None);
+    }
+
+    /// An actor on a child that reads its stdin and never answers, with a session open.
+    fn silent_actor(dir: &Path) -> (Actor, mpsc::UnboundedReceiver<AdapterEvent>, tokio::process::Child) {
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let mut child = proc::command(Path::new("/bin/sh"), &["-c".into(), "cat > /dev/null".into()], dir, &env).spawn().unwrap();
+        let spec = SpawnSpec {
+            agent_id: "a".into(),
+            agent_name: "Ada".into(),
+            run_id: "r".into(),
+            provider: Provider::Gemini,
+            role: crate::model::Role::Worker,
+            model: None,
+            cwd: dir.to_path_buf(),
+            bin: PathBuf::from("gemini"),
+            env: HashMap::new(),
+            session: SessionMode::New { session_id: None },
+            session_cost_usd: 0.0,
+            system_prompt: String::new(),
+            read_only: false,
+            mcp: None,
+            use_user_setup: false,
+            sandbox_network: false,
+            local_settings: false,
+            raw_log: dir.join("raw.ndjson"),
+            byok_command: None,
+            sandbox_shell: false,
+        };
+        let (events, events_rx) = mpsc::unbounded_channel();
+        let actor = Actor {
+            norm: AcpNormalizer::new(spec.provider, &spec.agent_id, &spec.run_id, spec.cwd.clone()),
+            system_prompt: None,
+            events,
+            stdin: child.stdin.take(),
+            raw: Arc::new(RawLog::open(&spec.raw_log).unwrap()),
+            pgid: 0, // nothing to signal: the child ends with the test
+            stderr: StderrTail::default(),
+            next_id: 0,
+            session_id: Some("s".into()),
+            takes_images: false,
+            pending: HashMap::new(),
+            prompt_in_flight: false,
+            queue: VecDeque::new(),
+            replaying: false,
+            stage: Stage::Running,
+            deadline: None,
+            interrupt_failed: false,
+            ready: Vec::new(),
+            spec,
+        };
+        (actor, events_rx, child)
+    }
+
+    fn emitted(events: &mut mpsc::UnboundedReceiver<AdapterEvent>) -> Vec<EventKind> {
+        std::iter::from_fn(|| events.try_recv().ok()).map(|e| e.kind).collect()
+    }
+
+    /// Both recorded agents say at `initialize` that a prompt may hold images; an agent that
+    /// does not say so takes none.
+    #[test]
+    fn the_image_capability_is_read_from_initialize() {
+        for name in ["acp-gemini.jsonl", "acp-opencode.jsonl"] {
+            let init = fixture(name).into_iter().find(|l| l["dir"] == "a2c" && l["msg"]["result"]["agentCapabilities"].is_object()).unwrap();
+            assert!(takes_images(&init["msg"]["result"]), "{name}");
+        }
+        assert!(!takes_images(&json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": true, "promptCapabilities": { "embeddedContext": true } } })));
+        assert!(!takes_images(&json!({ "protocolVersion": 1 })));
+    }
+
+    /// An attached image is an image block of the prompt only for an agent that takes images:
+    /// any other gets the text alone, which names the file's path. A GIF is never a block.
+    #[tokio::test]
+    async fn an_attached_image_is_an_image_block_for_an_agent_that_takes_images() {
+        use crate::adapters::attachments::testing::{attach, message, png_of};
+        /// The `prompt` of the `session/prompt` Codly wrote, from the raw log of `dir`.
+        fn prompt_sent(dir: &Path) -> Value {
+            let log = std::fs::read_to_string(dir.join("raw.ndjson")).unwrap();
+            let mut sent = log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"].clone()).filter(|l| l["method"] == "session/prompt");
+            let prompt = sent.next().expect("a prompt was sent")["params"]["prompt"].clone();
+            assert!(sent.next().is_none());
+            prompt
+        }
+
+        for takes_images in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, mut events, _child) = silent_actor(dir.path());
+            actor.takes_images = takes_images;
+            let shot = attach(dir.path(), "shot.png", &png_of(300));
+            let big = attach(dir.path(), "big.png", &png_of(4_000_000));
+            let gif = attach(dir.path(), "anim.gif", b"GIF89a\x01\0\x01\0");
+            let text = message("Make it look like this.", &[&gif, &shot, &big]);
+            actor.on_cmd(AgentCmd::Prompt(text.clone())).await;
+
+            let kinds = emitted(&mut events);
+            let told = kinds.iter().position(|k| matches!(k, EventKind::Error { message, fatal: false } if message.starts_with("big.png is over 3.5 MB")));
+            let started = kinds.iter().position(|k| matches!(k, EventKind::TurnStarted { input: Some(input) } if *input == text));
+            assert!(started.is_some(), "the turn shows the text: {kinds:?}");
+            if takes_images {
+                // The raw log keeps the block without its bytes (`proc::without_image_data`).
+                let image = json!({ "type": "image", "mimeType": "image/png", "data": "<400 base64 characters left out>" });
+                assert_eq!(prompt_sent(dir.path()), json!([{ "type": "text", "text": text }, image]));
+                assert!(told.is_some() && told < started, "the image over the limit stays a path, and the user is told: {kinds:?}");
+            } else {
+                assert_eq!(prompt_sent(dir.path()), json!([{ "type": "text", "text": text }]));
+                assert!(told.is_none(), "nothing was left out of what this agent takes: {kinds:?}");
+            }
+        }
+    }
+
+    /// A turn that does not end after `session/cancel` is not waited for without end. (The
+    /// deadline is fired by hand: tokio's paused clock is not among the workspace's features.)
+    #[tokio::test]
+    async fn a_cancel_that_does_not_end_the_turn_ends_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+
+        // no turn runs: nothing to cancel, nothing to wait for
+        actor.on_cmd(AgentCmd::Interrupt).await;
+        assert!(actor.deadline.is_none());
+
+        // a turn runs, and a message waits behind it
+        actor.on_cmd(AgentCmd::Prompt("build it".into())).await;
+        actor.on_cmd(AgentCmd::Prompt("then test it".into())).await;
+        assert!(actor.prompt_in_flight);
+        actor.on_cmd(AgentCmd::Interrupt).await;
+        assert!(actor.deadline.is_some() && actor.stage == Stage::Running);
+        emitted(&mut events);
+
+        // the prompt is not answered within the limit: Codly says so and ends the process
+        actor.on_deadline().await;
+        assert_eq!(actor.stage, Stage::Closing);
+        assert!(actor.stdin.is_none() && actor.queue.is_empty());
+        let kinds = emitted(&mut events);
+        assert!(
+            matches!(&kinds[..], [EventKind::Error { message, fatal: false }, EventKind::Decision { decision_type, .. }]
+                if message.starts_with("Gemini CLI did not stop within 15 s")
+                    && message.contains("1 message that waited for this turn was not sent")
+                    && decision_type == crate::adapters::GAVE_UP),
+            "the exit that follows is marked as Codly's doing: {kinds:?}"
+        );
+        // The turn it leaves open ends as interrupted: a failed turn would be asked to continue.
+        assert_eq!(actor.unfinished_turn(), (TurnStatus::Interrupted, None));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_that_ends_in_time_keeps_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        actor.on_cmd(AgentCmd::Prompt("build it".into())).await; // request 0
+        actor.on_cmd(AgentCmd::Prompt("then test it".into())).await;
+        actor.on_cmd(AgentCmd::Interrupt).await;
+        assert!(actor.deadline.is_some());
+        emitted(&mut events);
+
+        actor.on_json(json!({ "jsonrpc": "2.0", "id": 0, "result": { "stopReason": "cancelled" } })).await;
+        assert!(actor.deadline.is_none() && actor.stage == Stage::Running && actor.stdin.is_some());
+        let kinds = emitted(&mut events);
+        let ended = kinds.iter().position(|k| matches!(k, EventKind::TurnCompleted { status: TurnStatus::Interrupted, .. }));
+        let next = kinds.iter().position(|k| matches!(k, EventKind::TurnStarted { input: Some(text) } if text == "then test it"));
+        assert!(ended.is_some() && ended < next, "the message that waited is the next turn: {kinds:?}");
+        assert!(actor.prompt_in_flight && actor.queue.is_empty());
+        // No cancel is pending any more: an exit now is a failed turn.
+        assert_eq!(actor.unfinished_turn().0, TurnStatus::Failed);
     }
 }

@@ -160,6 +160,12 @@ kbd, .kbd {
 .switch:checked { background: var(--aurora); }
 .switch:checked::after { transform: translateX(14px); }
 
+/* ---------- find in the conversation (⌘F, home/FindBar.svelte) ---------- */
+::highlight(codly-find) { background-color: color-mix(in srgb, var(--amber) 34%, transparent); }
+::highlight(codly-find-here) { background-color: var(--amber); color: #241504; }
+/* A webview without the highlight API: the paragraph of the current match. */
+[data-find-hit] { outline: 2px solid var(--amber); outline-offset: 3px; border-radius: 4px; }
+
 /* ---------- motion helpers ---------- */
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes rise-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

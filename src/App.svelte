@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import Shell from './shell/Shell.svelte';
   import Onboarding from './onboarding/Onboarding.svelte';
   import Welcome from './overlays/Welcome.svelte';
@@ -11,24 +11,49 @@
   import RepoPicker from './overlays/RepoPicker.svelte';
   import SkillsManager from './overlays/SkillsManager.svelte';
   import { skillsUi } from './lib/state/skills.svelte';
+  import PullRequestDialog from './overlays/PullRequestDialog.svelte';
+  import IntakeDialog from './overlays/IntakeDialog.svelte';
+  import { prUi } from './lib/state/pullRequest.svelte';
+  import TrustDialog from './overlays/TrustDialog.svelte';
+  import { workspaceTrust } from './lib/state/workspaceTrust.svelte';
+  import { intakeUi } from './lib/state/intake.svelte';
   import IdeOverlay from './ide/IdeOverlay.svelte';
-  import EmptyState from './components/EmptyState.svelte';
+  import Logo from './components/Logo.svelte';
+  import StartFailed from './components/StartFailed.svelte';
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
+  import ResumeWork from './components/ResumeWork.svelte';
   import DragGhost from './components/DragGhost.svelte';
   import { store, installVisibility } from './lib/state/store.svelte';
   import { ui } from './lib/state/ui.svelte';
   import { installKeys } from './lib/state/keys';
   import { installNotifications } from './lib/state/notify';
+  import { installNoticeOpener } from './lib/state/openNotice';
   import { installTooltips } from './lib/state/tooltip.svelte';
+  import { resumeWork } from './lib/state/resumeWork.svelte';
 
   // Dev-only handle for debugging and browser tests (stripped from production builds).
   if (import.meta.env.DEV) (window as unknown as { __codly: unknown }).__codly = { store, ui };
 
   onMount(() => {
     store.connect();
-    const off = [installKeys(), installTooltips(), installVisibility(), installNotifications()];
+    workspaceTrust.start();
+    const off = [installKeys(), installTooltips(), installVisibility(), installNotifications(), installNoticeOpener()];
     return () => off.forEach((f) => f());
+  });
+
+  // A repo that opens is asked about once: its own CLI configuration loads only when you trust it.
+  const openRepo = $derived(store.workspace?.id ?? null);
+  $effect(() => {
+    void openRepo;
+    untrack(() => void workspaceTrust.check());
+  });
+
+  // Work that was under way when Codly last closed waits for your answer (the core holds it):
+  // asked once the core is up, and again after a start that had failed.
+  const coreUp = $derived(store.ready && !store.error);
+  $effect(() => {
+    if (coreUp) untrack(() => void resumeWork.check());
   });
 
   // Theme: always resolved onto [data-theme] ("system" follows the OS live).
@@ -50,15 +75,22 @@
 </script>
 
 {#if !store.ready}
-  <div class="boot" data-tauri-drag-region></div>
+  <!-- The core reads the login shell and asks each CLI who is signed in: seconds, with a slow shell
+       start-up file. Shown after a moment, so a fast start does not flash it. -->
+  <div class="boot center" data-tauri-drag-region>
+    <div class="starting" role="status">
+      <Logo size={40} />
+      <p class="serif">Starting Codly…</p>
+      <p class="what">Reading your shell setup and checking your agent CLIs.</p>
+      <p class="what slow">Still working. A slow shell start-up file (like <code>.zshrc</code>) can make this take a few more seconds.</p>
+    </div>
+  </div>
 {:else if store.workspace}
   <Shell />
 {:else if store.error}
   <!-- The first snapshot never arrived: say why, instead of an empty Welcome. -->
-  <div class="boot fail" data-tauri-drag-region>
-    <EmptyState title="Codly couldn’t start." body={store.error}>
-      <button class="btn primary" onclick={() => store.connect()}>Try again</button>
-    </EmptyState>
+  <div class="boot center" data-tauri-drag-region>
+    <StartFailed />
   </div>
 {:else if ui.onboarded}
   <Welcome />
@@ -73,6 +105,10 @@
 {#if ui.modelDialog}{#if ui.modelDialog.agentId}<ModelDialog />{:else}<AddAgentWizard />{/if}{/if}
 {#if ui.repoPickerOpen}<RepoPicker />{/if}
 {#if skillsUi.open}<SkillsManager />{/if}
+{#if prUi.dialog}<PullRequestDialog />{/if}
+{#if workspaceTrust.asking}<TrustDialog />{/if}
+{#if intakeUi.dialog}<IntakeDialog />{/if}
+<ResumeWork />
 <IdeOverlay />
 <Toasts />
 <TooltipHost />
@@ -80,5 +116,10 @@
 
 <style>
   .boot { position: fixed; inset: 0; background: var(--night); }
-  .boot.fail { display: grid; place-items: center; }
+  .boot.center { display: grid; place-items: center; }
+  .starting { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px; text-align: center; animation: fade-in var(--d-4) var(--ease-out) 600ms both; }
+  .starting .serif { margin-top: 6px; font-size: var(--d-sm); color: var(--ink-1); }
+  .what { font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-3); max-width: 46ch; }
+  .what.slow { animation: fade-in var(--d-4) var(--ease-out) 8s both; }
+  .what code { font-size: 0.9em; color: var(--ink-2); }
 </style>

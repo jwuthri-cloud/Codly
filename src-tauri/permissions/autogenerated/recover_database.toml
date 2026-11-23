@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recover-database"
+description = "Enables the recover_database command without any pre-configured scope."
+commands.allow = ["recover_database"]
+
+[[permission]]
+identifier = "deny-recover-database"
+description = "Denies the recover_database command without any pre-configured scope."
+commands.deny = ["recover_database"]

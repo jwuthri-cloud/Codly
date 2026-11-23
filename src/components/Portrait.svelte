@@ -1,28 +1,13 @@
 <!--
-  An agent's portrait: its character as the office draws it (office/portrait.ts), or — while the
-  office has none (it returns '') — a small monogram glyph in the agent's identity hue.
+  An agent's portrait: its character as the office draws it, or — until it is drawn, and when the
+  office cannot draw one — a small monogram glyph in the agent's identity hue. The drawing code
+  (three.js) is loaded after the first paint and each agent is drawn once (office/portraits):
+  the picture is scaled to `size`.
 -->
-<script lang="ts" module>
-  import { agentPortrait } from '../office/portrait';
-  import type { Agent } from '../lib/gen/Agent';
-  const cache = new Map<string, string>();
-  function portraitOf(a: Pick<Agent, 'id' | 'color' | 'look_seed' | 'provider' | 'role'>, px: number): string {
-    const key = `${a.id}:${a.color}:${a.look_seed}:${a.provider}:${a.role}:${px}`;
-    let v = cache.get(key);
-    if (v == null) {
-      try {
-        v = agentPortrait(a, px) || '';
-      } catch {
-        v = '';
-      }
-      cache.set(key, v);
-    }
-    return v;
-  }
-</script>
-
 <script lang="ts">
+  import type { Agent } from '../lib/gen/Agent';
   import { idVar } from '../lib/util/labels';
+  import { portraitOf } from '../office/portraits.svelte';
 
   interface Props {
     agent: Pick<Agent, 'id' | 'color' | 'look_seed' | 'provider' | 'role' | 'name'> | null | undefined;
@@ -31,7 +16,7 @@
   }
   let { agent, size = 24, dim = false }: Props = $props();
   const uid = $props.id();
-  const src = $derived(agent ? portraitOf(agent, size) : '');
+  const src = $derived(agent ? portraitOf(agent) : '');
   const hue = $derived(idVar(agent?.color ?? 0));
   const lead = $derived(agent?.role === 'lead');
 </script>

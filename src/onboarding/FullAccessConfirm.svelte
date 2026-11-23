@@ -12,8 +12,10 @@
     stillAsks: [
       'Questions an agent asks you',
       'Changes to an agent’s permissions',
+      'Changes to an agent’s own CLI settings (.claude, .codex, .mcp.json…)',
       'Anything touching Codly’s private data',
       'Read-only agents: the Lead and reviewers',
+      'In your project folder itself (an agent hired with Git isolation off, or one that points a command there from its worktree): commands that can lose work, such as git reset --hard, git clean, a history rewrite, a force push, or rm -rf outside build folders',
     ],
   };
 </script>

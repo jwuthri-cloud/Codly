@@ -6,13 +6,17 @@
 <script lang="ts">
   import type { Task } from '../lib/gen/Task';
   import type { TaskStatus } from '../lib/gen/TaskStatus';
-  import { moveTask } from '../lib/state/actions';
+  import type { HeldCheck } from '../lib/gen/HeldCheck';
+  import { acceptTask, cancelTaskTree, moveTask, recheckTask } from '../lib/state/actions';
   import { diffstats, statLine } from '../lib/state/diffstats.svelte';
   import { narrate } from '../lib/state/narration';
+  import { review, reviewKey } from '../lib/state/review.svelte';
   import { store } from '../lib/state/store.svelte';
   import { accounts } from '../lib/state/accounts.svelte';
   import { ui } from '../lib/state/ui.svelte';
-  import { clock, shortSha } from '../lib/util/format';
+  import { clock, plural, shortSha } from '../lib/util/format';
+  import { stoppedByChecks } from '../lib/util/gate';
+  import { keyList, waitingOn } from '../lib/util/plan';
   import { GLOSSARY, idVar, methodProvenance, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
   import { tildify } from '../lib/util/sanitize';
   import ArtifactThumb from '../components/ArtifactThumb.svelte';
@@ -40,6 +44,8 @@
     return store.taskMarks[task.id] ?? [];
   });
   const stat = $derived(diffstats.task[task.id] ?? null);
+  /** Review comments you wrote on its diff and did not send back yet. */
+  const unsent = $derived(review.comments(reviewKey({ kind: 'task', id: task.id })).length);
   const arts = $derived(store.artifacts.filter((a) => a.task_id === task.id));
   const why = $derived.by((): WhyLine[] => {
     void store.rev;
@@ -59,6 +65,50 @@
     cancelled: [{ to: 'ready', label: 'Reopen' }],
   };
   const MARK_ICON: Record<string, string> = { committed: 'commit', verified: 'check-circle', reviewed: 'eye', merged: 'merge' };
+  // Stopped after Codly committed its work: you can run its checks again, or take the work as it is.
+  const stopped = $derived((task.status === 'blocked' || task.status === 'failed') && marks.some((m) => m.kind === 'committed'));
+  // Merge anyway skips the task's checks, so it is only for a task that its checks stopped.
+  const byChecks = $derived.by(() => {
+    void store.rev;
+    return stopped && stoppedByChecks(store.decisions, task.id);
+  });
+  /** Checks with a risk: Codly runs them only with your OK. */
+  let held = $state<HeldCheck[]>([]);
+  let confirmAccept = $state(false);
+  /** The plan's tasks that wait for this one: once it is cancelled they can never start. */
+  const behind = $derived(plan ? waitingOn(store.tasks.filter((t) => t.plan_id === plan.id), task.id) : []);
+  let confirmCancel = $state(false);
+  // What you were asked belongs to the task as it was: another task, or a new status, closes it.
+  const asked = $derived(`${task.id}:${task.status}`);
+  $effect(() => {
+    void asked;
+    held = [];
+    confirmAccept = false;
+    confirmCancel = false;
+  });
+  /** A board move. Cancel asks first when other tasks wait for this one. */
+  function move(to: TaskStatus) {
+    if (to === 'cancelled' && behind.length) {
+      held = [];
+      confirmAccept = false;
+      confirmCancel = true;
+      return;
+    }
+    void moveTask(task.id, to);
+  }
+  function cancel(withBehind: boolean) {
+    confirmCancel = false;
+    void (withBehind ? cancelTaskTree(task.id) : moveTask(task.id, 'cancelled'));
+  }
+  async function recheck(allow: string[] = []) {
+    confirmAccept = false;
+    confirmCancel = false;
+    held = await recheckTask(task.id, allow);
+  }
+  function accept() {
+    confirmAccept = false;
+    void acceptTask(task.id);
+  }
 </script>
 
 <div class="ts" style:--hue={idVar(agent?.color ?? 0)}>
@@ -67,10 +117,41 @@
     <h2 class="serif">{task.title}</h2>
     <p class="status st-{task.status}">{TASK_STATUS_LABEL[task.status]}{task.status_reason ? ` — ${task.status_reason}` : ''}</p>
     <div class="acts">
-      {#if marks.length || task.status === 'done'}<button class="btn sm" onclick={() => ui.openDiff({ kind: 'task', id: task.id })}><Icon name="diff" size={13} />View changes</button>{/if}
-      {#each LEGAL[task.status] ?? [] as l (l.to)}<button class="btn sm ghost" onclick={() => moveTask(task.id, l.to)}>{l.label}</button>{/each}
+      {#if marks.length || task.status === 'done'}<button class="btn sm" onclick={() => ui.openDiff({ kind: 'task', id: task.id })} data-tip="Read the diff, comment on lines and send the task back"><Icon name="diff" size={13} />View changes{#if unsent}<span class="k">{unsent} {unsent === 1 ? 'comment' : 'comments'} not sent</span>{/if}</button>{/if}
+      {#each LEGAL[task.status] ?? [] as l (l.to)}<button class="btn sm ghost" onclick={() => move(l.to)}>{l.label}</button>{/each}
+      {#if stopped}
+        {#if task.verify.length}<button class="btn sm ghost" onclick={() => recheck()}>Re-run checks</button>{/if}
+        {#if byChecks}<button class="btn sm ghost" onclick={() => ((held = []), (confirmCancel = false), (confirmAccept = true))}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>{/if}
+      {/if}
       {#if plan}<button class="btn sm ghost" onclick={() => ui.openPlan(plan.id, plan.thread)}><Icon name="plan" size={13} />In the plan</button>{/if}
     </div>
+    {#if held.length}
+      <div class="ask" role="alertdialog" aria-label="Checks that need your OK">
+        <p>The Lead wrote {held.length === 1 ? 'a check' : 'checks'} that can do more than test this task. Codly runs {held.length === 1 ? 'it' : 'them'} only with your OK:</p>
+        <ul>{#each held as h, i (i)}<li><code class="selectable">{h.command}</code><span>{h.risks.join(', ')}</span></li>{/each}</ul>
+        <div class="ask-acts">
+          <button class="btn sm ghost" onclick={() => (held = [])}>Not now</button>
+          <button class="btn sm amber" onclick={() => recheck(held.map((h) => h.command))}>Allow and run</button>
+        </div>
+      </div>
+    {:else if confirmAccept}
+      <div class="ask" role="alertdialog" aria-label={plan ? 'Merge anyway' : 'Accept anyway'}>
+        <p>{plan ? 'Merge this task without its checks?' : 'Accept this task without its checks?'} Codly does not run them again for it. Your choice stays in the task’s record.</p>
+        <div class="ask-acts">
+          <button class="btn sm ghost" onclick={() => (confirmAccept = false)}>Not now</button>
+          <button class="btn sm amber" onclick={accept}>{plan ? 'Merge anyway' : 'Accept anyway'}</button>
+        </div>
+      </div>
+    {:else if confirmCancel}
+      <div class="ask" role="alertdialog" aria-label="Cancel the tasks that wait for this one too">
+        <p>{keyList(behind)} {behind.length === 1 ? 'waits' : 'wait'} for this task and cannot start without it. Cancel {behind.length === 1 ? 'it' : 'them'} too?</p>
+        <div class="ask-acts">
+          <button class="btn sm ghost" onclick={() => (confirmCancel = false)}>Not now</button>
+          <button class="btn sm ghost" onclick={() => cancel(false)}>Only this task</button>
+          <button class="btn sm amber" onclick={() => cancel(true)}>Cancel all {behind.length + 1}</button>
+        </div>
+      </div>
+    {/if}
   </header>
 
   <div class="sections">
@@ -109,7 +190,7 @@
         {#if stat}<p class="stat num"><span class="add">+{stat.added}</span> <span class="del">−{stat.removed}</span> in {stat.files} {stat.files === 1 ? 'file' : 'files'}</p>{/if}
         <ol class="marks">
           {#each marks as m (m.eventId)}
-            <li class:bad={!m.ok}><Icon name={MARK_ICON[m.kind]} size={13} /><span class="m-k">{m.kind}</span><span class="m-t truncate">{m.kind === 'committed' ? `${shortSha(m.sha)} · ${m.files?.length ?? 0} files` : m.text}</span><time class="num">{clock(m.ts)}</time></li>
+            <li class:bad={!m.ok}><Icon name={MARK_ICON[m.kind]} size={13} /><span class="m-k">{m.kind}</span><span class="m-t truncate">{m.kind === 'committed' ? `${shortSha(m.sha)} · ${plural(m.files?.length ?? 0, 'file')}` : m.text}</span><time class="num">{clock(m.ts)}</time></li>
           {/each}
         </ol>
       </Section>
@@ -136,6 +217,12 @@
   .st-blocked, .st-failed { color: var(--bad); }
   .st-done { color: var(--ok); }
   .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .ask { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; padding: 12px 14px; border-radius: var(--r-md); background: var(--amber-soft); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); }
+  .ask ul { display: flex; flex-direction: column; gap: 6px; }
+  .ask li { display: flex; flex-direction: column; gap: 2px; }
+  .ask code { font-size: 11.5px; color: var(--ink-1); overflow-wrap: anywhere; }
+  .ask li span { color: var(--amber-ink); }
+  .ask-acts { display: flex; justify-content: flex-end; gap: 8px; }
   .who { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: var(--r-md); background: var(--surface-1); text-align: left; margin-bottom: 8px; }
   .who:hover { background: var(--surface-2); }
   .w-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }

@@ -17,8 +17,9 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
 use super::runs::{RunReq, new_session};
-use super::{Inner, guard, lock, names, prompts};
+use super::{Core, Inner, guard, lock, names, prompts};
 use crate::adapters::SessionMode;
+use crate::inbound::InboundMessage;
 use crate::memory::{self, MemoryView};
 use crate::model::*;
 
@@ -31,6 +32,33 @@ pub(super) const MAX_LIVE_LEADS: usize = 3;
 /// The request thread a Lead serves (Lead rows written before threads existed serve "lead").
 pub(super) fn thread_of(lead: &Agent) -> &str {
     lead.thread.as_deref().unwrap_or("lead")
+}
+
+/// Who a turn in a chat thread is from: you, or something outside Codly (a webhook, Slack).
+pub(super) enum Said<'a> {
+    User(&'a str),
+    Outside(&'a InboundMessage),
+}
+
+impl Core {
+    /// A message from outside Codly (a webhook, Slack) for `thread`: "lead" or "lead:<id>" for
+    /// that request's Lead, "agent:<id>" for one agent. It is not the user's message: the
+    /// thread stores and shows it under its source's name, the agent reads it as quoted data,
+    /// and a plan made after it waits for Run plan (`Inner::submit_plan_inner`).
+    /// Returns once the message is recorded and handed over, like `send_chat`.
+    pub async fn send_inbound(&self, thread: &str, msg: &InboundMessage) -> Result<()> {
+        if msg.text.trim().is_empty() {
+            bail!("empty message");
+        }
+        if is_lead_thread(thread) {
+            if thread.strip_prefix("lead:").is_some_and(|id| id.trim().is_empty()) {
+                bail!("unknown thread {thread}");
+            }
+            return self.inner.inbound_to_lead(&self.inner.require_ws()?, thread, msg).await;
+        }
+        let Some(agent_id) = thread.strip_prefix("agent:") else { bail!("unknown thread {thread}") };
+        self.inner.chat_agent_from(agent_id, Said::Outside(msg)).await
+    }
 }
 
 #[derive(Default)]
@@ -72,14 +100,20 @@ impl LeadPool {
         self.turns.remove(lead);
     }
 
-    fn sent(&mut self, lead: &str, forward_to: Option<Id>, steered: bool) {
-        let turns = self.turns.entry(lead.to_string()).or_default();
-        let targets: Vec<Id> = forward_to.into_iter().collect();
-        match turns.back_mut() {
-            // Codex folds a prompt into the running turn, so its reply covers both.
-            Some(back) if steered => back.extend(targets),
-            _ => turns.push_back(targets),
+    /// The oldest prompt that waited went into the Lead's running turn (`PromptSteered`), not
+    /// into a turn of its own: that turn's reply answers it too.
+    pub(super) fn steered(&mut self, lead: &str) {
+        let Some(turns) = self.turns.get_mut(lead) else { return };
+        if let Some(folded) = turns.remove(1)
+            && let Some(running) = turns.front_mut()
+        {
+            running.extend(folded);
         }
+    }
+
+    fn sent(&mut self, lead: &str, forward_to: Option<Id>) {
+        let turns = self.turns.entry(lead.to_string()).or_default();
+        turns.push_back(forward_to.into_iter().collect());
         self.tick += 1;
         self.used.insert(lead.to_string(), self.tick);
     }
@@ -111,7 +145,7 @@ impl Inner {
     }
 
     /// The request's own CLI when it picked one and it is usable, else the Settings one.
-    fn lead_provider_for(&self, ws_id: &str, thread: &str) -> Result<Provider> {
+    pub(super) fn lead_provider_for(&self, ws_id: &str, thread: &str) -> Result<Provider> {
         let own = self.store.request_prefs(ws_id, thread).ok().and_then(|p| p.provider);
         match own {
             Some(p) if self.provider_usable(p, false) => Ok(p),
@@ -280,16 +314,9 @@ impl Inner {
         };
         lock(&self.leads).forget(&lead.id);
         match &lead.session_id {
-            Some(s) => {
-                if let Err(e) = self.spawn_run(req(SessionMode::Resume { session_id: s.clone() })).await {
-                    tracing::warn!("resuming {} failed ({e}); starting a new session", lead.name);
-                    self.spawn_run(req(new_session(provider))).await?;
-                }
-            }
-            None => {
-                self.spawn_run(req(new_session(provider))).await?;
-            }
-        }
+            Some(s) => self.resume_or_new(s, &req).await?,
+            None => self.spawn_run(req(new_session(provider))).await?,
+        };
         Ok(())
     }
 
@@ -351,9 +378,8 @@ impl Inner {
             }
         }
         let header = self.board_header(ws, thread).await.unwrap_or_default();
-        let steered = self.would_steer(&lead.id);
         // Recorded before sending: the reply's Message event looks it up (reply_to).
-        lock(&self.leads).sent(&lead.id, forward_to.cloned(), steered);
+        lock(&self.leads).sent(&lead.id, forward_to.cloned());
         if let Err(e) = self.send_prompt(&lead.id, format!("{header}\n{body}")) {
             lock(&self.leads).forget(&lead.id);
             return Err(e);
@@ -469,6 +495,15 @@ impl Inner {
         self.send_to_lead(ws, thread, body, None).await
     }
 
+    /// A message from outside Codly for the Lead of `thread`: recorded under its source's name
+    /// (a Codly line with an `inbound` attachment, never a "user" message), and handed to the
+    /// Lead as quoted data. The Lead is told that it may plan the work only when the message's
+    /// source is one the user lets run plans without asking (`auto_run`).
+    async fn inbound_to_lead(self: &Arc<Self>, ws: &Workspace, thread: &str, msg: &InboundMessage) -> Result<()> {
+        self.chat(Some(&ws.id), thread, "codly", &msg.shown(), Some(msg.attachment()))?;
+        self.send_to_lead(ws, thread, format!("\n{}", prompts::inbound_message(&msg.source, &msg.text, msg.auto_run)), None).await
+    }
+
     /// Close a request: stop and archive its Lead, cancel its unfinished plans, and move its
     /// messages and plans to an archive thread ("closed:<thread>:<ms>") so it leaves the tabs.
     /// Nothing is deleted: history, branches and worktrees stay. The same thread id can be
@@ -550,6 +585,7 @@ impl Inner {
                 (who, m.text)
             })
             .collect();
+        let required = super::required_checks::board_line(&self.required_checks(&ws.id, std::path::Path::new(&ws.repo_path))?);
         Ok(prompts::board_header(&prompts::Board {
             workspace: &ws,
             thread,
@@ -561,6 +597,8 @@ impl Inner {
             accounts: &self.accounts(),
             consultant_clis: &self.consultant_clis(),
             mode: self.lead_mode(&ws.id, thread),
+            game_rules: self.settings().game_rules,
+            required_checks: required.as_deref(),
         }))
     }
 
@@ -568,7 +606,7 @@ impl Inner {
     /// the user's message, one line each, agent-written ones marked as such.
     /// ponytail: built here from `search_memories` because `memory_pack` has no budget
     /// parameter (see CONTRACT REQUESTS); switch once it does.
-    fn lead_memory_pack(&self, ws: &Workspace, thread: &str, text: &str) -> Option<String> {
+    pub(super) fn lead_memory_pack(&self, ws: &Workspace, thread: &str, text: &str) -> Option<String> {
         let lead = self.find_lead(&ws.id, thread);
         let view = MemoryView { workspace_id: Some(&ws.id), agent_id: lead.as_ref().map(|l| l.id.as_str()), task_ids: &[] };
         let found = self.store.with(|db| guard("memory", || memory::search_memories(db, &view, text, None, 40))).ok()?;
@@ -602,6 +640,11 @@ impl Inner {
     /// 1:1 chat: a turn in that agent's own session — queued if it is busy, steering a
     /// worker mid-task — spawned (or resumed) if it is not running.
     pub(super) async fn chat_agent(self: &Arc<Self>, agent_id: &str, text: &str) -> Result<()> {
+        self.chat_agent_from(agent_id, Said::User(text)).await
+    }
+
+    /// `chat_agent` for a turn that is yours or came from outside Codly (`Said`).
+    pub(super) async fn chat_agent_from(self: &Arc<Self>, agent_id: &str, said: Said<'_>) -> Result<()> {
         let agent = self.agent(agent_id)?;
         let ws_id = self.store.agent_workspace(agent_id)?;
         if agent.role == Role::Lead {
@@ -610,14 +653,33 @@ impl Inner {
                 Some(id) => self.store.workspace(id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
                 None => self.require_ws()?,
             };
-            return self.chat_lead_in(&ws, thread_of(&agent), text).await;
+            return match said {
+                Said::User(text) => self.chat_lead_in(&ws, thread_of(&agent), text).await,
+                Said::Outside(msg) => self.inbound_to_lead(&ws, thread_of(&agent), msg).await,
+            };
         }
+        // In your terminal (takeover.rs): refused here, before the message is recorded.
+        self.not_in_terminal(&agent)?;
         let thread = format!("agent:{agent_id}");
-        self.chat(ws_id.as_deref(), &thread, "user", text, None)?;
-        let prompt = format!("[User] {text}");
+        let outside = matches!(said, Said::Outside(_));
+        let prompt = match said {
+            Said::User(text) => {
+                self.chat(ws_id.as_deref(), &thread, "user", text, None)?;
+                format!("[User] {text}")
+            }
+            // Not your message: recorded under its source's name, read as quoted data. One
+            // agent makes no plan, so no Run plan click stands between it and the work: it is
+            // told to report and suggest, whatever the endpoint's "Run plans without asking",
+            // and the user's trust in it answers no request of the turn that reads this
+            // (`send_chat_prompt`, outside.rs).
+            Said::Outside(msg) => {
+                self.chat(ws_id.as_deref(), &thread, "codly", &msg.shown(), Some(msg.attachment()))?;
+                prompts::inbound_message(&msg.source, &msg.text, false)
+            }
+        };
         let stopping = lock(&self.live).get(agent_id).map(|l| l.stopping);
         match stopping {
-            Some(false) => return self.send_prompt(agent_id, prompt),
+            Some(false) => return self.send_chat_prompt(agent_id, outside, prompt),
             // A run that is shutting down takes no more turns: this one starts (resumes) the next.
             Some(true) if !self.stop_and_wait(agent_id).await => {
                 bail!("{} is still shutting down; send your message again in a moment", agent.name)
@@ -635,13 +697,9 @@ impl Inner {
         if agent.member.is_some() {
             let started = self.spawn_member_chat(&ws, &agent).await;
             self.spawned_or_live(agent_id, started)?;
-            return self.send_prompt(agent_id, prompt);
+            return self.send_chat_prompt(agent_id, outside, prompt);
         }
-        let session = match &agent.session_id {
-            Some(s) => SessionMode::Resume { session_id: s.clone() },
-            None => new_session(agent.provider),
-        };
-        let req = match agent.role {
+        let (role, cwd, read_only, system_prompt) = match agent.role {
             Role::Solo => {
                 let (branch, wt) = self.solo_worktree(&ws, &agent);
                 let repo = PathBuf::from(&ws.repo_path);
@@ -649,44 +707,36 @@ impl Inner {
                     let start = self.git.head(&repo).await?.ok_or_else(|| anyhow!("the repository has no commits yet"))?;
                     let _g = self.repo_lock.lock().await;
                     self.git.worktree_add(&repo, &wt, &branch, &start).await?;
+                    self.mark_new_worktree(&wt)?;
                 }
-                RunReq {
-                    agent: agent.clone(),
-                    role: Role::Solo,
-                    cwd: wt,
-                    read_only: false,
-                    task_id: None,
-                    session,
-                    system_prompt: self.solo_system(&agent, &branch),
-                    workspace_id: Some(ws.id.clone()),
-                    account: None,
-                }
+                self.prepare_solo_worktree(&ws, &agent, &wt).await;
+                let system_prompt = self.solo_system(&agent, &branch);
+                (Role::Solo, wt, false, system_prompt)
             }
             // An idle worker or reviewer between tasks: a read-only conversation at the repo root.
-            role => RunReq {
-                agent: agent.clone(),
-                role,
-                cwd: PathBuf::from(&ws.repo_path),
-                read_only: true,
-                task_id: None,
-                session,
-                system_prompt: prompts::CHAT_SYSTEM.to_string(),
-                workspace_id: Some(ws.id.clone()),
-                account: None,
-            },
+            role => (role, PathBuf::from(&ws.repo_path), true, prompts::CHAT_SYSTEM.to_string()),
         };
-        let resumed = matches!(req.session, SessionMode::Resume { .. });
-        let started = self.spawn_run(req).await;
-        match self.spawned_or_live(agent_id, started) {
-            Ok(()) => {}
-            Err(e) if resumed => {
-                tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
-                self.update_agent(agent_id, |a| a.session_id = None)?;
-                return Box::pin(self.chat_agent_spawn_fresh(agent_id, prompt)).await;
-            }
-            Err(e) => return Err(e),
-        }
-        self.send_prompt(agent_id, prompt)
+        let req = |session: SessionMode| RunReq {
+            agent: agent.clone(),
+            role,
+            cwd: cwd.clone(),
+            read_only,
+            task_id: None,
+            session,
+            system_prompt: system_prompt.clone(),
+            workspace_id: Some(ws.id.clone()),
+            account: None,
+        };
+        // A conversation that cannot be resumed gives way to a new one, which takes this
+        // message, and the thread says so. One that Codly did not start (it went to your
+        // terminal meanwhile, or the folder's own files are not trusted: `trust.rs`) is fine,
+        // and it is the one to keep: the message fails with the reason.
+        let started = match &agent.session_id {
+            Some(s) => self.resume_or_new(s, &req).await,
+            None => self.spawn_run(req(new_session(agent.provider))).await,
+        };
+        self.spawned_or_live(agent_id, started)?;
+        self.send_chat_prompt(agent_id, outside, prompt)
     }
 
     /// The outcome of starting an agent's run, for a caller that only wants it running: a
@@ -698,33 +748,28 @@ impl Inner {
             _ => Ok(()),
         }
     }
+}
 
-    async fn chat_agent_spawn_fresh(self: &Arc<Self>, agent_id: &str, prompt: String) -> Result<()> {
-        let agent = self.agent(agent_id)?;
-        let ws = match self.store.agent_workspace(agent_id)? {
-            Some(id) => self.store.workspace(&id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
-            None => self.require_ws()?,
-        };
-        let (cwd, role, read_only, system_prompt) = match agent.role {
-            Role::Solo => {
-                let (branch, wt) = self.solo_worktree(&ws, &agent);
-                (wt, Role::Solo, false, self.solo_system(&agent, &branch))
-            }
-            role => (PathBuf::from(&ws.repo_path), role, true, prompts::CHAT_SYSTEM.to_string()),
-        };
-        let req = RunReq {
-            agent: agent.clone(),
-            role,
-            cwd,
-            read_only,
-            task_id: None,
-            session: new_session(agent.provider),
-            system_prompt,
-            workspace_id: Some(ws.id.clone()),
-            account: None,
-        };
-        let started = self.spawn_run(req).await;
-        self.spawned_or_live(agent_id, started)?;
-        self.send_prompt(agent_id, prompt)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every prompt is recorded as a turn of its own. One that goes into the running turn is
+    /// answered by that turn's reply, and the turns behind it keep their own.
+    #[test]
+    fn a_prompt_steered_into_the_leads_turn_shares_its_reply() {
+        let mut pool = LeadPool::default();
+        pool.sent("lead", Some("w1".into()));
+        pool.sent("lead", Some("w2".into()));
+        pool.sent("lead", Some("w3".into()));
+        pool.steered("lead");
+        assert_eq!(pool.reply_to("lead").as_deref(), Some("w1"));
+        assert_eq!(pool.turn_done("lead"), ["w1", "w2"]);
+        assert_eq!(pool.turn_done("lead"), ["w3"]);
+        // Nothing waits behind the running turn: nothing to move.
+        pool.sent("lead", None);
+        pool.steered("lead");
+        pool.steered("other");
+        assert!(pool.turn_done("lead").is_empty());
     }
 }

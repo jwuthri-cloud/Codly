@@ -3,6 +3,16 @@
 //! mechanisms that already exist: a prompt (rides the agent's next turn; Codex steers it into
 //! the running turn), an interrupt, `stop_agent`. Every level change is a `Decision` on the
 //! agent's timeline. The Lead is exempt: it only talks to you.
+//!
+//! A task's worker that is constrained is also paused ("stop after this step"), so the turn in
+//! which it answers the note never reaches the gate as finished work; Resume sends it back to
+//! the task. One you hold already gets no note to answer: it reads why on your Resume. A stop
+//! says on the task that the breaker did it, and why.
+//!
+//! The budgets (tokens, cost) stop spend, not only steer it. What the team used is counted from
+//! every usage report and saved with it, so the count is the same after a restart. Past a
+//! budget the scheduler starts no task (`budget_hold`), only agents in a turn are steered and
+//! constrained, and you are told once, with the way out: raise the budget or Reset.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -13,25 +23,55 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use ts_rs::TS;
 
-use super::breaker::{self, Action, BEAT_MS, BreakerConfig, BreakerLevel, Tracker, Transition};
-use super::{Core, Inner, lock, row};
-use crate::adapters::AgentCmd;
+use super::breaker::{self, Action, BEAT_MS, BreakerConfig, BreakerLevel, Spent, Today, Tracker, Transition, Trip};
+use super::interrupts::Asker;
+use super::{Core, Inner, lock, row, scheduler};
 use crate::model::*;
 
 const KV_KEY: &str = "breaker";
+/// What the team used since the last Reset, and today (`Saved`).
+const KV_SPENT: &str = "breaker_spent";
+
+/// The counts that outlive the app.
+#[derive(Default, Serialize, Deserialize)]
+struct Saved {
+    floor: Spent,
+    today: Today,
+}
 
 /// The settings and the signals, behind one lock.
 #[derive(Default)]
 pub(super) struct Runtime {
     cfg: BreakerConfig,
     tracker: Tracker,
+    today: Today,
+    /// A budget is used up, and you were told so.
+    holding: bool,
 }
 
 impl Runtime {
-    /// The saved settings (defaults when none, or when the saved JSON is from another version).
+    /// The saved settings (defaults when none, or when the saved JSON is from another version),
+    /// and the saved counts.
     pub(super) fn load(store: &crate::store::Store) -> Runtime {
         let cfg = store.kv_get(KV_KEY).ok().flatten().and_then(|s| serde_json::from_str::<BreakerConfig>(&s).ok()).unwrap_or_default();
-        Runtime { cfg: cfg.normalized(), tracker: Tracker::default() }
+        let read = || -> anyhow::Result<Saved> {
+            Ok(match store.kv_get(KV_SPENT)? {
+                Some(s) => serde_json::from_str(&s)?,
+                None => Saved::default(),
+            })
+        };
+        let saved = read().unwrap_or_else(|e| {
+            tracing::warn!("the saved budget count cannot be read, so it starts from zero: {e}");
+            Saved::default()
+        });
+        let cfg = cfg.normalized();
+        // Over a budget when you quit: you were told then, and the waiting tasks still say why.
+        let holding = breaker::over_budget(&cfg, saved.floor).is_some();
+        Runtime { cfg, tracker: Tracker::resumed(saved.floor), today: saved.today, holding }
+    }
+
+    fn saved(&self) -> Saved {
+        Saved { floor: self.tracker.floor(), today: self.today.clone() }
     }
 }
 
@@ -39,7 +79,12 @@ impl Runtime {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct BreakerStatus {
-    pub floor_tokens: i64,
+    /// What every agent used together since the last Reset: the budgets are checked against it.
+    pub used: Spent,
+    /// What every agent used today (your local day).
+    pub today: Spent,
+    /// Why no new task starts: the budget that is used up. None: work goes on.
+    pub hold: Option<String>,
     pub agents: Vec<AgentBreaker>,
 }
 
@@ -64,11 +109,81 @@ pub(super) async fn beat_loop(inner: Arc<Inner>) {
 impl Inner {
     /// Called by the ingest pipeline for every persisted event.
     pub(super) fn breaker_observe(&self, agent_id: &str, kind: &EventKind) {
-        lock(&self.breaker).tracker.observe(agent_id, now_ms(), kind);
+        let now = now_ms();
+        let saved = {
+            let mut rt = lock(&self.breaker);
+            let added = rt.tracker.observe(agent_id, now, kind);
+            if added == Spent::default() {
+                return;
+            }
+            rt.today.add(&crate::career::day_of(now), added);
+            rt.saved()
+        };
+        // Saved with every usage report: a restart (or a crash) does not give the budget back.
+        if let Err(e) = self.breaker_save(&saved) {
+            tracing::warn!("budget count not saved: {e}");
+        }
+    }
+
+    fn breaker_save(&self, saved: &Saved) -> anyhow::Result<()> {
+        self.store.kv_set(KV_SPENT, &serde_json::to_string(saved)?)
+    }
+
+    /// Why no new task starts: the budget the team is over. The scheduler asks at every pass.
+    pub(super) fn budget_hold(&self) -> Option<String> {
+        let rt = lock(&self.breaker);
+        breaker::over_budget(&rt.cfg, rt.tracker.floor()).map(|b| b.hold())
+    }
+
+    /// Say it once when a budget is used up, and once when work goes on again: a line in every
+    /// conversation with a running plan (in the open office's first conversation when no plan
+    /// runs), and a decision, which the app also shows as a notification.
+    fn budget_announce(&self) {
+        let (over, was) = {
+            let mut rt = lock(&self.breaker);
+            let over = breaker::over_budget(&rt.cfg, rt.tracker.floor());
+            (over, std::mem::replace(&mut rt.holding, over.is_some()))
+        };
+        let (summary, next, detail) = match (over, was) {
+            (Some(budget), false) => (
+                format!("Budget reached: {}. No new task starts.", budget.reason()),
+                " Agents in a turn are asked to stop. To go on, raise the budget or press Reset counters in Settings → Autonomy & Budgets.",
+                json!({ "action": "budget", "level": BreakerLevel::Constrained, "trip": budget.kind(), "reason": budget.reason() }),
+            ),
+            (None, true) => (
+                "The budget has room again: waiting tasks start.".to_string(),
+                " An agent the circuit breaker paused still waits for your Resume.",
+                json!({ "action": "budget_cleared", "level": BreakerLevel::Healthy }),
+            ),
+            _ => return,
+        };
+        let mut threads: Vec<(Id, String)> = match self.store.plans_with_status(&[PlanStatus::Running]) {
+            Ok(plans) => plans.into_iter().map(|p| (p.workspace_id, p.thread)).collect(),
+            Err(e) => {
+                tracing::warn!("running plans not read for the budget message: {e}");
+                vec![]
+            }
+        };
+        threads.sort();
+        threads.dedup();
+        if threads.is_empty()
+            && let Some(ws) = self.workspace()
+        {
+            threads.push((ws.id, default_lead_thread()));
+        }
+        for (ws, thread) in &threads {
+            if let Err(e) = self.chat(Some(ws.as_str()), thread, "codly", &format!("{summary}{next}"), None) {
+                tracing::warn!("budget message not posted: {e}");
+            }
+        }
+        if let Err(e) = self.decide(None, None, "breaker", summary, detail) {
+            tracing::warn!("budget event not recorded: {e}");
+        }
     }
 
     /// One look at the floor: decide, enforce, record.
     pub(super) async fn breaker_beat(&self) {
+        self.budget_announce();
         let leads: HashSet<Id> = lock(&self.live).iter().filter(|(_, l)| l.role == Role::Lead).map(|(id, _)| id.clone()).collect();
         let transitions = {
             let mut rt = lock(&self.breaker);
@@ -83,14 +198,32 @@ impl Inner {
     async fn breaker_enforce(&self, t: Transition) {
         let Ok(agent) = self.agent(&t.agent) else { return };
         let ws = self.store.agent_workspace(&t.agent).ok().flatten();
+        // The task it holds (as `stop_agent` reads it), and whether it is that task's worker.
+        let held = agent.task_id.clone().or_else(|| lock(&self.live).get(&t.agent).and_then(|l| l.task_id.clone()));
+        let task = held.and_then(|id| self.task(&id).ok());
+        let work = task.as_ref().filter(|x| scheduler::is_active(x.status) && x.assignee.as_deref() == Some(t.agent.as_str()));
         // Send first, record after: a note that could not be delivered is said so in the event.
         let delivered = match (t.action, &t.trip) {
             (Action::Steer, Some(trip)) => self.send_prompt(&t.agent, breaker::note(BreakerLevel::Steering, trip)).is_ok(),
-            (Action::Constrain, Some(trip)) => {
-                let interrupted = lock(&self.live).get(&t.agent).is_some_and(|l| l.handle.send(AgentCmd::Interrupt));
-                interrupted && self.send_prompt(&t.agent, breaker::note(BreakerLevel::Constrained, trip)).is_ok()
+            (Action::Constrain, Some(trip)) => match work {
+                // A task's worker is paused too.
+                Some(task) => self.breaker_pause(ws.as_deref(), &agent, task, trip),
+                None => {
+                    let interrupted = self.interrupt_run(&t.agent, Asker::Breaker);
+                    interrupted && self.send_prompt(&t.agent, breaker::note(BreakerLevel::Constrained, trip)).is_ok()
+                }
+            },
+            (Action::Stop, trip) => {
+                let why = trip.as_ref().map(|x| format!(": {}", x.reason())).unwrap_or_default();
+                let stopped = self.stop_agent_as(&t.agent, &format!("the circuit breaker{why}")).await.is_ok();
+                // Its task is blocked now: say so where you follow that task.
+                if let Some(task) = task.as_ref().filter(|x| self.task(&x.id).is_ok_and(|now| now.status == TaskStatus::Blocked)) {
+                    let text =
+                        format!("The circuit breaker stopped {} on {} \"{}\"{why}. The task is blocked until you retry it.", agent.name, task.key, task.title);
+                    let _ = self.chat(ws.as_deref(), &self.task_thread(task), "codly", &text, None);
+                }
+                stopped
             }
-            (Action::Stop, _) => self.stop_agent(&t.agent).await.is_ok(),
             _ => true,
         };
         let name = &agent.name;
@@ -121,6 +254,50 @@ impl Inner {
             tracing::warn!("breaker event not recorded: {e}");
         }
     }
+
+    /// Constrain a task's worker. The turn that answers the note is a summary, not finished
+    /// work: the worker is paused before its turn is interrupted, so no turn that ends from
+    /// here on reaches the gate, and the note goes past the pause. A worker you hold already
+    /// gets no note: held, it would be answered after your Resume, and that answer would reach
+    /// the gate. Its turn is interrupted, and it reads why when you resume it. Your Resume
+    /// sends the worker back to its task. True = the worker got the note, or will read why on
+    /// your Resume.
+    fn breaker_pause(&self, ws: Option<&str>, agent: &Agent, task: &Task, trip: &Trip) -> bool {
+        let (interrupted, held) = {
+            // Under the `live` lock: an exit (which clears the controls) is before or after, not between.
+            let mut live = lock(&self.live);
+            let Some(l) = live.get_mut(&agent.id) else { return false };
+            let mut controls = lock(&self.controls);
+            let control = controls.entry(agent.id.clone()).or_default();
+            let held = control.holding();
+            // The note is its next turn: the pause holds from now and shows when a turn ends.
+            control.request_stop(true);
+            (l.send_interrupt(Asker::Breaker), held)
+        };
+        if !interrupted {
+            return false; // its process is gone: the exit clears the pause
+        }
+        let note = (!held).then(|| self.deliver_prompt(&agent.id, breaker::note(BreakerLevel::Constrained, trip)));
+        // Held until the resume (holding it also tells the UI about the pause).
+        let resume = self.send_prompt(&agent.id, breaker::resume_note(held.then_some(trip)));
+        if let Err(e) = &resume {
+            tracing::debug!("breaker resume note not held: {e}");
+        }
+        let why = trip.reason();
+        let reason = format!("paused by the circuit breaker: {why}; resume {} to continue", agent.name);
+        let _ = self.update_task(&task.id, |t| {
+            if matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) {
+                t.status_reason = Some(reason.clone());
+            }
+            Ok(())
+        });
+        let text = format!(
+            "The circuit breaker paused {} on {} \"{}\": {why}. Its work is not checked while it is paused. Resume {} to let it continue, or stop it.",
+            agent.name, task.key, task.title, agent.name
+        );
+        let _ = self.chat(ws, &self.task_thread(task), "codly", &text, None);
+        note.unwrap_or(resume).is_ok()
+    }
 }
 
 impl Core {
@@ -132,18 +309,53 @@ impl Core {
         let cfg = cfg.normalized();
         self.inner.store.kv_set(KV_KEY, &serde_json::to_string(&cfg)?)?;
         lock(&self.inner.breaker).cfg = cfg.clone();
+        // A raised budget lets waiting tasks start now (not at the scheduler's next slow tick);
+        // a lowered one may hold them.
+        self.inner.budget_announce();
+        self.inner.kick();
         Ok(cfg)
     }
 
-    /// Start the floor's token count and every level over (running agents keep running).
+    /// Start the floor's counts and every level over (running agents keep running). Today's
+    /// total stays: it is what was used, not what a budget is checked against.
     pub async fn reset_breaker(&self) -> anyhow::Result<()> {
-        lock(&self.inner.breaker).tracker.reset();
+        let saved = {
+            let mut rt = lock(&self.inner.breaker);
+            rt.tracker.reset();
+            rt.saved()
+        };
+        self.inner.breaker_save(&saved)?;
+        self.inner.budget_announce();
+        self.inner.kick();
         Ok(())
+    }
+
+    /// Look at the floor now, as the beat loop does every `BEAT_MS` (the tests do not wait for it).
+    pub async fn breaker_beat(&self) {
+        self.inner.breaker_beat().await;
     }
 
     pub async fn breaker_status(&self) -> anyhow::Result<BreakerStatus> {
         let rt = lock(&self.inner.breaker);
         let agents = rt.tracker.snapshot().into_iter().map(|(agent_id, level, work_tokens)| AgentBreaker { agent_id, level, work_tokens }).collect();
-        Ok(BreakerStatus { floor_tokens: rt.tracker.floor_tokens(), agents })
+        let used = rt.tracker.floor();
+        Ok(BreakerStatus {
+            used,
+            today: rt.today.on(&crate::career::day_of(now_ms())),
+            hold: breaker::over_budget(&rt.cfg, used).map(|b| b.reason()),
+            agents,
+        })
+    }
+
+    /// What a plan's tasks used so far: the total of every worker and reviewer run on them.
+    /// The Lead's own turns are not in it (they belong to the conversation, not to one plan).
+    pub async fn plan_spent(&self, plan_id: &str) -> anyhow::Result<Spent> {
+        let store = &self.inner.store;
+        self.inner.plan(plan_id)?;
+        let mut total = Spent::default();
+        for task in store.plan_tasks(plan_id)? {
+            total.add(store.task_run_usage(&task.id)?.iter().map(Spent::of).sum());
+        }
+        Ok(total)
     }
 }

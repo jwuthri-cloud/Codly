@@ -6,7 +6,9 @@
 //! type → ACP `kind` → the input's shape → shell argv rules. Anything decided by the first two
 //! is "observed"; heuristics are "inferred".
 
+use std::iter::Peekable;
 use std::path::{Component, Path, PathBuf};
+use std::str::Chars;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -262,6 +264,25 @@ enum Tok {
     Redirect(String),
 }
 
+/// After `>&` or `<&`: the descriptor the redirect copies (`2>&1`, `>&2-`) or closes (`>&-`),
+/// taken off `rest`. None, with nothing taken, when a file name follows: `cmd >&out.log` sends
+/// stdout and stderr to that file, as `cmd &>out.log` does.
+pub(crate) fn fd_copy(rest: &mut Peekable<Chars<'_>>) -> Option<String> {
+    let mut ahead = rest.clone();
+    let mut fd = String::new();
+    while let Some(digit) = ahead.next_if(char::is_ascii_digit) {
+        fd.push(digit);
+    }
+    if let Some(dash) = ahead.next_if_eq(&'-') {
+        fd.push(dash);
+    }
+    let ends = ahead.peek().is_none_or(|c| c.is_whitespace() || ";|&<>()".contains(*c));
+    (!fd.is_empty() && ends).then(|| {
+        *rest = ahead;
+        fd
+    })
+}
+
 /// Small shell tokenizer: quotes, backslashes, `&& || | ; &` and redirections. Not a shell
 /// parser; good enough to find argv[0] and the arguments that look like paths.
 fn tokenize(cmd: &str) -> Vec<Tok> {
@@ -335,10 +356,13 @@ fn tokenize(cmd: &str) -> Vec<Tok> {
                     ('&', Some('&')) => "&&",
                     ('|', Some('|')) => "||",
                     ('&', Some('>')) => {
-                        // `&>file` / `&>>file`
+                        // `&>file` / `&>>file`, and zsh's `&>|file` / `&>!file`
                         chars.next();
                         let append = chars.peek() == Some(&'>');
                         if append {
+                            chars.next();
+                        }
+                        if matches!(chars.peek(), Some('|' | '!')) {
                             chars.next();
                         }
                         out.push(Tok::Redirect(if append { "&>>" } else { "&>" }.into()));
@@ -368,16 +392,15 @@ fn tokenize(cmd: &str) -> Vec<Tok> {
                         break;
                     }
                 }
-                // `2>&1`: the digits after `&` are part of the redirect, not a file
-                if op.ends_with('&') {
-                    while let Some(&n) = chars.peek() {
-                        if n.is_ascii_digit() || n == '-' {
-                            op.push(n);
-                            chars.next();
-                        } else {
-                            break;
-                        }
+                // `2>&1`: the descriptor after `&` is part of the redirect, not a file. Any other
+                // word after `>&` is a file (`cmd >&out.log`): `op` then still ends with `&`.
+                match op.ends_with('&').then(|| fd_copy(&mut chars)).flatten() {
+                    Some(fd) => op.push_str(&fd),
+                    // `>|file` and zsh's `>!file` write the file even where `noclobber` is set.
+                    None if op.contains('>') && matches!(chars.peek(), Some('|' | '!')) => {
+                        chars.next();
                     }
+                    None => {}
                 }
                 out.push(Tok::Redirect(op));
             }
@@ -409,8 +432,8 @@ fn segments(cmd: &str) -> Vec<Seg> {
                 out.push(Seg { piped_in: op == "|", ..Default::default() });
             }
             Tok::Redirect(r) => {
-                // fd duplications (`2>&1`) take no file argument
-                pending_redirect = !r.contains('&') || r.starts_with('&');
+                // A copy of a descriptor (`2>&1`, `>&-`) takes no file; `>&file` and `&>file` do.
+                pending_redirect = !r.contains('&') || r.starts_with('&') || r.ends_with('&');
             }
             Tok::Word(w) => {
                 let seg = out.last_mut().unwrap();
@@ -723,24 +746,940 @@ fn normalize(p: &Path) -> PathBuf {
     }
 }
 
-/// Is `path` (absolute, or relative to `cwd`) outside `root`? `~` paths count as outside.
+/// `p` (absolute) with its symlinks resolved, as the kernel resolves it when a program opens
+/// it. What is not on disk yet is appended as written. A dangling link is followed to where it
+/// points: writing through it creates that file.
+pub(crate) fn real_path(p: &Path) -> PathBuf {
+    if p.is_relative() {
+        return p.to_path_buf(); // nothing says what it is relative to
+    }
+    resolve_links(p, 0)
+}
+
+fn resolve_links(p: &Path, depth: u8) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(p) {
+        return real;
+    }
+    let parts: Vec<Component> = p.components().collect();
+    // The longest prefix that is on disk, then the rest as written.
+    for n in (1..parts.len()).rev() {
+        let Ok(mut out) = std::fs::canonicalize(parts[..n].iter().collect::<PathBuf>()) else { continue };
+        let mut rest = parts[n..].iter();
+        if depth < 8
+            && let Some(Component::Normal(name)) = parts.get(n)
+            && let Ok(target) = std::fs::read_link(out.join(name))
+        {
+            out = resolve_links(&out.join(target), depth + 1);
+            rest.next();
+        }
+        for c in rest {
+            match c {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        return out;
+    }
+    p.to_path_buf()
+}
+
+/// Is `path` (absolute, or relative to `cwd`) outside `root`? `~` paths count as outside, and
+/// so does a path that leaves `root` through a symlink (`docs/ref -> ~`), whether `..` is read
+/// before the link is followed (as `cd` does) or after (as the kernel does).
 pub fn outside(path: &str, cwd: &Path, root: &Path) -> bool {
     if path.starts_with('~') {
         return true;
     }
     let p = Path::new(path);
     let abs = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
-    !normalize(&abs).starts_with(normalize(root))
+    let plain = normalize(&abs);
+    if !plain.starts_with(normalize(root)) {
+        return true;
+    }
+    let real_root = normalize(&real_path(root));
+    let leaves = |p: &Path| !normalize(&real_path(p)).starts_with(&real_root);
+    leaves(&plain) || (plain != abs && leaves(&abs))
 }
 
 const HARMLESS_PATHS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/tty", "/dev/zero", "/dev/random", "/dev/urandom"];
 
-fn looks_like_path(a: &str) -> bool {
-    a.starts_with('/') || a.starts_with('~') || a == ".." || a.starts_with("../") || a.contains("/../")
+// Risk labels the approval rules (`orchestrator/approvals.rs`) share with the card hints.
+/// The agent's own CLI settings would change (permission rules, hooks, MCP servers).
+pub const AGENT_SETTINGS: &str = "changes agent settings";
+/// The environment or a file that usually holds secrets would be shown to the model.
+pub const SECRETS: &str = "may show secrets";
+/// git's own files would change: its config and hooks name programs that git runs.
+pub const GIT_INTERNALS: &str = "git internals";
+
+/// Key under which an ACP tool request carries its protocol `kind` in the approval's input:
+/// the title that names the request is free text.
+pub const ACP_KIND: &str = "_kind";
+
+/// Why a change to `path` needs you, if it does. `AGENT_SETTINGS`: a CLI's own settings inside
+/// a project (permission rules, hooks, MCP servers), which the agent's next run, or your own
+/// CLI after a merge, loads without asking. `GIT_INTERNALS`: anything under `.git`. Names
+/// compare without case, as the macOS filesystem does, and a shell pattern counts when it can
+/// expand to one of them (`.cl*`, see `wildcard`). Inside `root` (the worktree) only the part
+/// below it counts: a worktree may itself live under such a directory (`.claude/worktrees/x`).
+pub(crate) fn guarded_path(path: &str, root: &Path) -> Option<&'static str> {
+    const DIRS: &[&str] = &[".claude", ".codex", ".gemini", ".opencode", ".cursor"];
+    const FILES: &[&str] = &[".mcp.json", "opencode.json", "opencode.jsonc"];
+    let named = |names: &[&str], s: &str| names.iter().any(|n| wildcard(s, n, false));
+    let path = Path::new(path).strip_prefix(root).ok().and_then(Path::to_str).unwrap_or(path).to_ascii_lowercase();
+    if path.split('/').any(|s| named(DIRS, s)) || named(FILES, basename(&path)) {
+        Some(AGENT_SETTINGS)
+    } else if path.split('/').any(|s| named(&[".git"], s)) {
+        Some(GIT_INTERNALS)
+    } else {
+        None
+    }
+}
+
+/// A file that usually holds secrets: `.env` and its variants, a private key, a credentials
+/// file. `.env.example` and its kin are templates. A shell pattern counts when it can expand to
+/// one of these names (`.e*`, `id_*`, `*.pem`; see `wildcard`).
+pub(crate) fn secret_file(path: &str) -> bool {
+    const NAMES: &[&str] = &[".envrc", ".netrc", ".pypirc", ".git-credentials", ".dev.vars", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+    const TEMPLATES: &[&str] = &["example", "sample", "template", "dist"];
+    let name = basename(path).to_ascii_lowercase();
+    if [".pem", ".key", ".p12", ".pfx"].iter().any(|e| name.ends_with(e)) {
+        return true;
+    }
+    if name.contains(['*', '?', '[']) {
+        return NAMES.iter().chain(&[".env"]).any(|n| wildcard(&name, n, false))
+            || [".env.", ".env-", ".env_"].iter().any(|n| wildcard(&name, n, true));
+    }
+    // `.env`, `.env.local`; not `.environment`
+    NAMES.contains(&name.as_str())
+        || name
+            .strip_prefix(".env")
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_alphanumeric()) && !TEMPLATES.iter().any(|t| rest.ends_with(t)))
+}
+
+/// Can the shell expand the pattern `pat` (`*`, `?`, `[a-z]`) to `name`, or with `open` to a
+/// longer name that starts with it? Both are in lower case; a `pat` without these characters
+/// is a plain comparison. As in the shell, only a literal `.` matches a leading dot. A leading
+/// `*` matches no name here: `*` and `*.json` name every file, not this one.
+fn wildcard(pat: &str, name: &str, open: bool) -> bool {
+    let (p, n) = (pat.as_bytes(), name.as_bytes());
+    if matches!((p.first(), n.first()), (Some(b'*'), _) | (Some(b'?' | b'['), Some(b'.'))) {
+        return false;
+    }
+    let (mut i, mut j) = (0, 0);
+    // The last `*` and how far into `name` it reaches so far.
+    let mut star: Option<(usize, usize)> = None;
+    while j < n.len() {
+        if p.get(i) == Some(&b'*') {
+            star = Some((i, j));
+            i += 1;
+        } else if let Some(next) = wildcard_one(p, i, n[j]) {
+            i = next;
+            j += 1;
+        } else if let Some((si, sj)) = star {
+            (i, j) = (si + 1, sj + 1);
+            star = Some((si, sj + 1));
+        } else {
+            return false;
+        }
+    }
+    open || p[i..].iter().all(|c| *c == b'*')
+}
+
+/// Does the pattern element at `p[i]` (a character, `?` or a `[…]` set) match `c`? The index
+/// after the element when it does.
+fn wildcard_one(p: &[u8], i: usize, c: u8) -> Option<usize> {
+    match *p.get(i)? {
+        b'?' => Some(i + 1),
+        // The set ends at the first `]` after its first character (`[]a]` holds `]`).
+        b'[' => match p[i + 1..].iter().skip(1).position(|b| *b == b']') {
+            Some(len) => {
+                let end = i + 2 + len;
+                let set = &p[i + 1..end];
+                let (negated, set) = match set.split_first() {
+                    Some((b'!' | b'^', rest)) => (true, rest),
+                    _ => (false, set),
+                };
+                let hit = (0..set.len()).any(|k| if k + 2 < set.len() && set[k + 1] == b'-' { (set[k]..=set[k + 2]).contains(&c) } else { set[k] == c });
+                (hit != negated).then_some(end + 1)
+            }
+            None => (c == b'[').then_some(i + 1),
+        },
+        literal => (literal == c).then_some(i + 1),
+    }
+}
+
+/// More brace alternatives than this are not listed.
+const MAX_BRACES: usize = 256;
+
+/// What the shell makes of the brace lists in `word` (`.e{nv,x}` → `.env`, `.ex`); a range
+/// (`{1..9}`) becomes `*`. None when there are more than `MAX_BRACES` results.
+pub(crate) fn braces(word: &str) -> Option<Vec<String>> {
+    let (mut done, mut todo) = (vec![], vec![word.to_string()]);
+    while let Some(w) = todo.pop() {
+        match brace_list(&w) {
+            // The stack gives them back in the order the shell writes them.
+            Some((open, close, parts)) => todo.extend(parts.iter().rev().map(|part| format!("{}{part}{}", &w[..open], &w[close + 1..]))),
+            None => done.push(w),
+        }
+        if done.len() + todo.len() > MAX_BRACES {
+            return None;
+        }
+    }
+    Some(done)
+}
+
+/// The first brace list in `w` that the shell expands: where its `{` and `}` are, and its
+/// alternatives. `{}` and `{x}` are plain text.
+fn brace_list(w: &str) -> Option<(usize, usize, Vec<&str>)> {
+    let b = w.as_bytes();
+    for open in (0..b.len()).filter(|i| b[*i] == b'{') {
+        let (mut depth, mut cuts) = (0usize, vec![open]);
+        for k in open..b.len() {
+            match b[k] {
+                b'{' => depth += 1,
+                b',' if depth == 1 => cuts.push(k),
+                b'}' if depth == 1 => {
+                    cuts.push(k);
+                    if cuts.len() > 2 {
+                        return Some((open, k, cuts.windows(2).map(|c| &w[c[0] + 1..c[1]]).collect()));
+                    }
+                    if w[open + 1..k].contains("..") {
+                        return Some((open, k, vec!["*"]));
+                    }
+                    break;
+                }
+                b'}' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// The file names one shell word may stand for: each of its brace alternatives, or the value
+/// an option carries (`--out=x`, `-ox`, `of=x`). None when the alternatives are too many to
+/// list: the word may name anything.
+fn word_names(word: &str) -> Option<Vec<String>> {
+    let mut out = vec![];
+    for w in braces(word)? {
+        let value = w.split_once('=').map(|(_, v)| v.to_string());
+        match w.strip_prefix('-') {
+            None => {
+                out.extend(value);
+                out.push(w);
+            }
+            Some(_) if value.is_some() => out.extend(value),
+            // `-ofile`, `-rofile`: the value starts after one of the leading letters.
+            Some(cluster) if !cluster.starts_with('-') => {
+                let letters = cluster.len() - cluster.trim_start_matches(|c: char| c.is_ascii_alphabetic()).len();
+                out.extend((1..=letters).map(|k| &cluster[k..]).filter(|v| !v.is_empty()).map(str::to_owned));
+            }
+            Some(_) => {}
+        }
+    }
+    Some(out)
+}
+
+/// Why a change to what the shell word `word` names needs you (see `guarded_path`). The word
+/// is read as the shell expands it: `.{claude,x}`, `.cl*` and `-o.claude/x` name `.claude`.
+pub(crate) fn guarded_word(word: &str, root: &Path) -> Vec<&'static str> {
+    let Some(names) = word_names(word) else { return vec![AGENT_SETTINGS] };
+    let mut out = vec![];
+    for why in names.iter().filter_map(|n| guarded_path(n, root)) {
+        if !out.contains(&why) {
+            out.push(why);
+        }
+    }
+    out
+}
+
+/// Can the shell word `word` name a `secret_file`? Read as `guarded_word` reads it.
+fn secret_word(word: &str) -> bool {
+    word_names(word).is_none_or(|names| names.iter().any(|n| secret_file(n)))
+}
+
+// ───────────────────────────── read-only commands ─────────────────────────────
+//
+// Which `program args…` only read. The approval rules allow these in balanced mode
+// (`approvals::classify_command`), and `exposure` below uses the same judgement.
+
+pub(crate) fn has(args: &[String], flags: &[&str]) -> bool {
+    args.iter().any(|a| flags.contains(&a.as_str()) || flags.iter().any(|f| f.starts_with("--") && a.starts_with(&format!("{f}="))))
+}
+
+/// Options before `--`.
+pub(crate) fn options(args: &[String]) -> impl Iterator<Item = &str> {
+    args.iter().map(String::as_str).take_while(|a| *a != "--").filter(|a| a.starts_with('-') && *a != "-")
+}
+
+/// A short-option cluster (`-o`, `-ro`, `-ofile`) holds one of `letters`.
+pub(crate) fn short_flag(args: &[String], letters: &str) -> bool {
+    options(args).filter(|a| !a.starts_with("--")).any(|a| a[1..].contains(|c| letters.contains(c)))
+}
+
+/// `--name`, `--name=value` or an abbreviation of it (getopt_long and git accept unambiguous
+/// prefixes: `--out=f` is `--output=f`).
+pub(crate) fn long_flag(args: &[String], names: &[&str]) -> bool {
+    options(args)
+        .filter_map(|a| a.strip_prefix("--"))
+        .map(|a| a.split('=').next().unwrap_or(a))
+        .any(|n| !n.is_empty() && names.iter().any(|x| x.starts_with(n)))
+}
+
+/// Operands (non-option arguments), skipping the value of the short options in `valued`.
+pub(crate) fn operands<'a>(args: &'a [String], valued: &str) -> Vec<&'a str> {
+    let (mut out, mut i, mut done) = (vec![], 0, false);
+    while let Some(a) = args.get(i).map(String::as_str) {
+        i += 1;
+        if done || a == "-" || !a.starts_with('-') {
+            out.push(a);
+        } else if a == "--" {
+            done = true;
+        } else if !a.starts_with("--")
+            && let Some(j) = a[1..].find(|c| valued.contains(c))
+            && j + 2 == a.len()
+        {
+            i += 1;
+        }
+    }
+    out
+}
+
+pub(crate) fn first_non_flag(args: &[String]) -> Option<&str> {
+    args.iter().map(String::as_str).find(|a| !a.starts_with('-'))
+}
+
+/// The git subcommand, skipping global options (`-C dir`, `-c k=v`, `--no-pager`…).
+pub(crate) fn git_sub(args: &[String]) -> (Option<&str>, &[String]) {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "-C" || a == "-c" || a == "--git-dir" || a == "--work-tree" || a == "--namespace" {
+            i += 2;
+        } else if a.starts_with('-') {
+            i += 1;
+        } else {
+            return (Some(a), &args[i + 1..]);
+        }
+    }
+    (None, &[])
+}
+
+pub(crate) fn git_read_only(sub: &str, rest: &[String]) -> bool {
+    match sub {
+        "" | "status" | "diff" | "log" | "show" | "blame" | "grep" | "ls-files" | "ls-tree" | "rev-parse" | "describe" | "shortlog"
+        | "cat-file" | "version" | "rev-list" | "merge-base" | "name-rev" | "whatchanged" | "show-ref" | "for-each-ref"
+        | "count-objects" => true,
+        // `git help -w` starts a browser
+        "help" => rest.iter().all(|a| !a.starts_with('-')),
+        "reflog" => !first_non_flag(rest).is_some_and(|a| ["expire", "delete", "drop", "write"].contains(&a)),
+        "branch" | "tag" => rest
+            .iter()
+            .all(|a| ["-a", "-r", "-l", "--list", "-v", "-vv", "--all", "--show-current", "--contains", "--merged"].contains(&a.as_str())),
+        "remote" => rest.iter().all(|a| a == "-v" || a == "show" || a == "get-url"),
+        "config" => has(rest, &["--get", "--list", "-l", "--get-all", "--get-regexp"]),
+        "stash" => rest.first().is_some_and(|a| a == "list" || a == "show"),
+        "worktree" => rest.first().is_some_and(|a| a == "list"),
+        _ => false,
+    }
+}
+
+/// Does `prog args…` only read: a program that cannot write a file or run another program,
+/// or one used with none of its options that do?
+pub(crate) fn read_only(prog: &str, args: &[String]) -> bool {
+    const RO: &[&str] = &[
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "grep",
+        "egrep",
+        "fgrep",
+        "pwd",
+        "echo",
+        "printf",
+        "which",
+        "type",
+        "whereis",
+        "stat",
+        "du",
+        "df",
+        "cut",
+        "tr",
+        "diff",
+        "cmp",
+        "comm",
+        "basename",
+        "dirname",
+        "realpath",
+        "readlink",
+        "true",
+        "false",
+        "test",
+        "[",
+        "[[",
+        "nl",
+        "column",
+        "hexdump",
+        "od",
+        "strings",
+        "sha1sum",
+        "sha256sum",
+        "shasum",
+        "md5",
+        "md5sum",
+        "cksum",
+        "uname",
+        "whoami",
+        "id",
+        "seq",
+        "cd",
+    ];
+    // ponytail: `ack` (a project `.ackrc` can set --pager) and `hostname NAME` are not here;
+    // they ask. `printenv` is not here either: it shows every secret of your shell profile.
+    match prog {
+        p if RO.contains(&p) => true,
+        // a filter file cannot be checked for `env` (`classify::exposure` reads inline filters)
+        "jq" => !short_flag(args, "f") && !long_flag(args, &["from-file"]),
+        // Options that write a file or run a program:
+        "sort" => !short_flag(args, "oT") && !long_flag(args, &["output", "compress-program", "temporary-directory"]),
+        // the second operand is the output file
+        "uniq" => operands(args, "fsw").len() <= 1,
+        "xxd" => operands(args, "cglosn").len() <= 1,
+        // -o writes the listing, -R writes 00Tree.html into every directory
+        "tree" => !short_flag(args, "oR"),
+        "fd" => !short_flag(args, "xX") && !long_flag(args, &["exec", "exec-batch"]),
+        "rg" => !long_flag(args, &["pre", "pre-glob", "hostname-bin"]),
+        "ag" => !long_flag(args, &["pager"]),
+        "file" => !short_flag(args, "C") && !long_flag(args, &["compile"]),
+        "date" => !short_flag(args, "s") && !long_flag(args, &["set"]) && operands(args, "").iter().all(|a| a.starts_with('+')),
+        "find" => !has(args, &["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]),
+        "sed" => sed_read_only(args),
+        "git" => git_read_only_cmd(args),
+        _ => false,
+    }
+}
+
+/// `git …` that only reads: no `-c core.pager=…` / `--config-env` / `--exec-path` (they make
+/// any subcommand run a program), no `--git-dir` / `--work-tree` (another repository's config
+/// can do the same; `-C dir` is checked on disk, see `nested_repo`), no `--output=<file>`, no
+/// `git grep -O<pager>`.
+fn git_read_only_cmd(args: &[String]) -> bool {
+    let mut i = 0;
+    while let Some(a) = args.get(i).map(String::as_str).filter(|a| a.starts_with('-')) {
+        if ["-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"].iter().any(|f| a.starts_with(f)) {
+            return false;
+        }
+        i += if matches!(a, "-C" | "--git-dir" | "--work-tree" | "--namespace") { 2 } else { 1 };
+    }
+    let (sub, rest) = git_sub(args);
+    let sub = sub.unwrap_or("");
+    if long_flag(rest, &["output"]) || (sub == "grep" && (short_flag(rest, "O") || long_flag(rest, &["open-files-in-pager"]))) {
+        return false;
+    }
+    git_read_only(sub, rest)
+}
+
+/// sed without in-place edits (`-i`, `-ni`, `--in-place`), script files (`-f`) or script
+/// commands that write, read or run (`w`, `W`, `r`, `R`, `e`, `s///w`, `s///e`).
+fn sed_read_only(args: &[String]) -> bool {
+    let mut scripts: Vec<&str> = vec![];
+    let mut files: Vec<&str> = vec![];
+    let (mut i, mut done) = (0, false);
+    while let Some(a) = args.get(i).map(String::as_str) {
+        i += 1;
+        if done || a == "-" || !a.starts_with('-') {
+            files.push(a);
+            continue;
+        }
+        if a == "--" {
+            done = true;
+            continue;
+        }
+        if let Some(long) = a.strip_prefix("--") {
+            let (name, value) = long.split_once('=').map_or((long, None), |(n, v)| (n, Some(v)));
+            match (name, value) {
+                ("expression", Some(v)) => scripts.push(v),
+                ("expression", None) => match args.get(i) {
+                    Some(v) => {
+                        scripts.push(v);
+                        i += 1;
+                    }
+                    None => return false,
+                },
+                ("quiet" | "silent" | "regexp-extended" | "separate" | "sandbox" | "debug" | "posix" | "null-data" | "zero-terminated"
+                | "unbuffered", None) => {}
+                // --in-place, --file, abbreviations of either, anything unknown
+                _ => return false,
+            }
+            continue;
+        }
+        for (j, c) in a[1..].char_indices() {
+            match c {
+                'n' | 's' | 'E' | 'r' | 'u' | 'z' => {}
+                'e' => {
+                    let rest = &a[2 + j..];
+                    if !rest.is_empty() {
+                        scripts.push(rest);
+                    } else if let Some(v) = args.get(i) {
+                        scripts.push(v);
+                        i += 1;
+                    } else {
+                        return false;
+                    }
+                    break;
+                }
+                // i: in place; f: script file; l: a flag in BSD sed but takes a value in GNU sed
+                _ => return false,
+            }
+        }
+    }
+    if scripts.is_empty() {
+        let Some(s) = files.first() else { return false };
+        scripts.push(s);
+    }
+    scripts.iter().all(|s| sed_script_read_only(s))
+}
+
+/// Walk a sed script command by command. Anything not understood counts as not read-only.
+fn sed_script_read_only(script: &str) -> bool {
+    let c: Vec<char> = script.chars().collect();
+    let n = c.len();
+    let mut i = 0;
+    let blank = |i: &mut usize| {
+        while *i < n && (c[*i] == ' ' || c[*i] == '\t') {
+            *i += 1;
+        }
+    };
+    // `/re/`, `\%re%`: index after the closing delimiter
+    let regex = |mut i: usize, delim: char| -> Option<usize> {
+        while i < n && c[i] != delim {
+            if c[i] == '\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        (i < n).then_some(i + 1)
+    };
+    // One address: a line number, `first~step`, `$`, `/re/` or `\cREc` (+ GNU `I`/`M`), or
+    // after a comma GNU `+N` / `~N`.
+    let address = |mut i: usize| -> Option<usize> {
+        match c.get(i) {
+            Some(d) if d.is_ascii_digit() || *d == '+' || *d == '~' => {
+                i += 1;
+                while i < n && (c[i].is_ascii_digit() || c[i] == '~') {
+                    i += 1;
+                }
+                Some(i)
+            }
+            Some('$') => Some(i + 1),
+            Some('/') => regex(i + 1, '/').map(|mut j| {
+                while j < n && (c[j] == 'I' || c[j] == 'M') {
+                    j += 1;
+                }
+                j
+            }),
+            Some('\\') => {
+                let d = *c.get(i + 1)?;
+                regex(i + 2, d).map(|mut j| {
+                    while j < n && (c[j] == 'I' || c[j] == 'M') {
+                        j += 1;
+                    }
+                    j
+                })
+            }
+            _ => Some(i),
+        }
+    };
+    loop {
+        while i < n && (c[i].is_whitespace() || c[i] == ';') {
+            i += 1;
+        }
+        if i >= n {
+            return true;
+        }
+        let Some(j) = address(i) else { return false };
+        i = j;
+        blank(&mut i);
+        if i < n && c[i] == ',' {
+            i += 1;
+            blank(&mut i);
+            let Some(j) = address(i) else { return false };
+            i = j;
+        }
+        while i < n && (c[i] == '!' || c[i] == ' ' || c[i] == '\t') {
+            i += 1;
+        }
+        let Some(&cmd) = c.get(i) else { return false };
+        i += 1;
+        match cmd {
+            '{' | '}' | '=' | 'd' | 'D' | 'g' | 'G' | 'h' | 'H' | 'n' | 'N' | 'p' | 'P' | 'x' | 'z' | 'F' => {}
+            // optional numeric argument
+            'l' | 'L' | 'q' | 'Q' => {
+                blank(&mut i);
+                while i < n && c[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            // a label, up to `;` or the end of the line
+            ':' | 'b' | 't' | 'T' | 'v' => {
+                while i < n && c[i] != ';' && c[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '#' => {
+                while i < n && c[i] != '\n' {
+                    i += 1;
+                }
+            }
+            // text to the end of the line, continued by a trailing backslash
+            'a' | 'i' | 'c' => {
+                while i < n && !(c[i] == '\n' && c[i - 1] != '\\') {
+                    i += 1;
+                }
+            }
+            's' | 'y' => {
+                let Some(&delim) = c.get(i) else { return false };
+                if delim == '\\' || delim == '\n' {
+                    return false;
+                }
+                let Some(j) = regex(i + 1, delim).and_then(|j| regex(j, delim)) else { return false };
+                i = j;
+                if cmd == 's' {
+                    while i < n && !matches!(c[i], ';' | '\n' | '}') {
+                        if !(c[i].is_ascii_digit() || matches!(c[i], 'g' | 'p' | 'i' | 'I' | 'm' | 'M' | ' ' | '\t')) {
+                            return false; // `w file`, `e`, anything unknown
+                        }
+                        i += 1;
+                    }
+                }
+            }
+            // w W r R e, anything else
+            _ => return false,
+        }
+    }
+}
+
+/// Programs that cannot show what a file holds.
+const BLIND: &[&str] = &[
+    "ls", "test", "[", "[[", "stat", "touch", "mkdir", "chmod", "cp", "mv", "cd", "realpath", "readlink", "basename", "dirname", "echo", "printf",
+];
+/// Programs whose first operand is a pattern or a script, not a file (`grep '.env' src`),
+/// unless an option gives it (`-e`, `-f`).
+const PATTERN_FIRST: &[&str] = &["grep", "egrep", "fgrep", "rg", "ag", "jq", "sed", "awk"];
+
+/// jq's `env` builtin or `$ENV` in a filter (`.env` and `"env"` are plain data).
+fn jq_reads_env(filter: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    filter.contains("$ENV")
+        || filter.match_indices("env").any(|(i, _)| {
+            !filter[..i].ends_with(|c: char| word(c) || ".$\"".contains(c)) && !filter[i + 3..].starts_with(|c: char| word(c) || c == '"')
+        })
+}
+
+/// What one simple command (`prog` is its basename) may expose, in any approval mode: the
+/// environment or a secrets file shown to the model (`SECRETS`), the agent's own settings or
+/// git's files changed (see `guarded_path`, also for `root`). The check reads the names on the
+/// command line, as the shell expands them (`guarded_word`): what a script the command runs
+/// reaches is not seen.
+pub(crate) fn exposure(prog: &str, args: &[String], root: &Path) -> Vec<&'static str> {
+    // The pattern of a search is not a file name.
+    let by_option = |a: &String| match a.strip_prefix("--") {
+        // getopt takes any unambiguous abbreviation (`--reg=x` is `--regexp=x`)
+        Some(long) => {
+            let name = long.split('=').next().unwrap_or(long);
+            !name.is_empty() && ["regexp", "expression", "file", "from-file", "source"].iter().any(|o| o.starts_with(name) || name.starts_with(o))
+        }
+        None => a.starts_with('-') && a.contains(['e', 'f']),
+    };
+    let search = PATTERN_FIRST.contains(&prog);
+    let pattern = (search && !args.iter().any(by_option)).then(|| args.iter().position(|a| !a.starts_with('-'))).flatten();
+    // A shell's `-c` script is not a name either: the caller checks the commands in it.
+    let script = match SHELLS.contains(&prog).then(|| shell_run(args)) {
+        Some(ShellRun::Command(script)) => Some(script),
+        _ => None,
+    };
+    let before = |i: usize, flags: &[&str]| i > 0 && flags.contains(&args[i - 1].as_str());
+    // The words that may name a file: not that pattern or script (also after `-e`; jq's `-e`
+    // takes no value), not what an option leaves out (`--exclude=.claude`), not an env file
+    // the program loads for itself (`--env-file=.env`, `--env-file .env`).
+    let skipped = |i: usize, a: &str| {
+        Some(i) == pattern
+            || script.is_some_and(|s| a == s || a.strip_prefix("--command=") == Some(s))
+            || (search && prog != "jq" && before(i, &["-e", "--regexp", "--expression"]))
+            || a.split_once('=').is_some_and(|(flag, _)| flag.starts_with('-') && (flag.contains("exclude") || flag.contains("ignore")))
+            || a.starts_with("--env-file")
+            || before(i, &["--env-file", "--env-file-if-exists"])
+    };
+    let words: Vec<&str> = args.iter().enumerate().filter(|(i, a)| !skipped(*i, a)).map(|(_, a)| a.as_str()).collect();
+    // A command that only reads changes nothing it names. Its options are read after brace
+    // expansion (`sort ''{-o,out}` writes), and `cd` is not one: what follows runs in there.
+    let expanded: Option<Vec<String>> = args.iter().map(|a| braces(a)).collect::<Option<Vec<_>>>().map(|a| a.concat());
+    let reads = prog != "cd" && expanded.is_some_and(|a| read_only(prog, &a));
+    let mut out = vec![];
+    if !reads {
+        for why in words.iter().flat_map(|w| guarded_word(w, root)) {
+            if !out.contains(&why) {
+                out.push(why);
+            }
+        }
+    }
+    let prints_env = match prog {
+        "printenv" => true,
+        // With no name these builtins list every variable and its value.
+        "set" => args.is_empty(),
+        "export" | "declare" | "typeset" | "readonly" => args.iter().all(|a| a.starts_with('-')),
+        "jq" => args.iter().any(|a| jq_reads_env(a)),
+        _ => false,
+    };
+    // `find` without an action prints names, not what the files hold.
+    let lists = BLIND.contains(&prog) || (prog == "find" && reads);
+    if prints_env || (!lists && words.iter().any(|w| secret_word(w))) {
+        out.push(SECRETS);
+    }
+    out
+}
+
+/// Test runners and checkers that npm publishes under the name of their command, so
+/// `npx <name>` runs the project's own copy when it is installed.
+pub(crate) const NPX_RUNNERS: &[&str] =
+    &["jest", "vitest", "mocha", "ava", "tap", "playwright", "tsc", "eslint", "svelte-check", "vue-tsc", "pyright", "stylelint", "biome", "prettier"];
+
+/// The runner `npx <args>` names (bunx and `npm exec` take the same arguments), when it is one
+/// of `NPX_RUNNERS` and npx's own options, those before the name, neither add a package
+/// (`-p x`, `--package=x`) nor run a shell string (`-c`, `--call`).
+pub(crate) fn npx_runner<S: AsRef<str>>(args: &[S]) -> Option<&str> {
+    for a in args.iter().map(AsRef::as_ref) {
+        if !a.starts_with('-') {
+            return NPX_RUNNERS.contains(&a).then_some(a);
+        }
+        if a.starts_with("-p") || a.starts_with("--package") || a == "-c" || a.starts_with("--call") {
+            return None;
+        }
+    }
+    None
+}
+
+/// Does `npx <args>` run a tool the project already has: an `npx_runner` with an entry in
+/// `node_modules/.bin`, in `dir` or a parent up to `root`? Anything else npx downloads from the
+/// registry and runs, without a prompt when there is no terminal.
+pub(crate) fn npx_runs_local<S: AsRef<str>>(args: &[S], dir: &Path, root: &Path) -> bool {
+    npx_runner(args).is_some_and(|tool| {
+        dir.ancestors().take_while(|d| d.starts_with(root)).any(|d| d.join("node_modules/.bin").join(tool).symlink_metadata().is_ok())
+    })
+}
+
+/// `uv run` with packages or an index added on the command line (`--with=x`, `--index-url`):
+/// uv downloads them and runs their code.
+pub(crate) fn uv_run_fetches<S: AsRef<str>>(args: &[S]) -> bool {
+    const FETCH: &[&str] = &["--with", "-w", "--index", "--extra-index-url", "--default-index", "--find-links"];
+    args.iter()
+        .map(AsRef::as_ref)
+        .skip_while(|a| *a != "run")
+        .skip(1)
+        .take_while(|a| a.starts_with('-'))
+        .any(|a| FETCH.iter().any(|f| a.starts_with(f)))
+}
+
+/// A Python interpreter, by any of its names (`python`, `python3`, `python3.12`, `pypy3`).
+fn is_python(prog: &str) -> bool {
+    ["python", "pypy"].iter().any(|name| prog.strip_prefix(name).is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.')))
+}
+
+/// What a Python interpreter's own options make it run instead of a script file.
+enum PythonRuns<'a, S> {
+    /// `-c code`
+    Code,
+    /// `-m module args…`
+    Module(&'a str, &'a [S]),
+}
+
+/// Reads Python's options, the words before its script: `-c` and `-m` end them, `-W` and `-X`
+/// take a value, in the same word or the next one.
+fn python_runs<S: AsRef<str>>(args: &[S]) -> Option<PythonRuns<'_, S>> {
+    let mut i = 0;
+    loop {
+        let a: &str = args.get(i)?.as_ref();
+        i += 1;
+        if !a.starts_with('-') || a.starts_with("--") {
+            return None;
+        }
+        for (at, option) in a.char_indices().skip(1) {
+            let glued = &a[at + option.len_utf8()..];
+            match option {
+                'c' => return Some(PythonRuns::Code),
+                'm' if glued.is_empty() => return Some(PythonRuns::Module(args.get(i)?.as_ref(), &args[i + 1..])),
+                'm' => return Some(PythonRuns::Module(glued, &args[i..])),
+                'W' | 'X' => {
+                    i += usize::from(glued.is_empty());
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `python -m pip install x` runs pip: the module a Python interpreter is told to run, with the
+/// module's own arguments.
+pub(crate) fn python_module<'a, S: AsRef<str>>(prog: &str, args: &'a [S]) -> Option<(&'a str, &'a [S])> {
+    if !is_python(prog) {
+        return None;
+    }
+    match python_runs(args)? {
+        PythonRuns::Module(module, rest) => Some((module, rest)),
+        PythonRuns::Code => None,
+    }
+}
+
+/// Interpreters that take code on the command line, each with: its names, its short options
+/// that hold the code (`perl -e`), its short options that take a value in the same word or the
+/// next one (`ruby -r json`), its long options that hold the code, and its long options that
+/// take a value in the next word. Python is read by `python_runs`.
+const INTERPRETERS: &[(&[&str], &str, &str, &[&str], &[&str])] = &[
+    (
+        &["node", "nodejs"],
+        "ep",
+        "rC",
+        &["--eval", "--print"],
+        &["--require", "--import", "--loader", "--experimental-loader", "--conditions", "--env-file", "--input-type"],
+    ),
+    (
+        &["bun"],
+        "ep",
+        "rcdl",
+        &["--eval", "--print"],
+        &["--preload", "--require", "--import", "--cwd", "--config", "--env-file", "--define", "--loader"],
+    ),
+    (&["ruby"], "e", "rICEF", &[], &[]),
+    (&["perl"], "eE", "IMmF", &[], &[]),
+    (&["php"], "rBRE", "dcfzStF", &[], &[]),
+    (&["osascript"], "e", "ls", &[], &[]),
+];
+
+/// A program that runs code in its language: one of `INTERPRETERS`, Python or Deno.
+pub(crate) fn is_interpreter(prog: &str) -> bool {
+    is_python(prog) || prog == "deno" || INTERPRETERS.iter().any(|(names, ..)| names.contains(&prog))
+}
+
+/// What starts a command in awk code that holds no string and no pattern any more
+/// (`awk_code`): `system(…)`, and a `|` with something after it that is not the "or" `||`.
+static AWK_RUNS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bsystem\s*\(|(?:^|[^|])\|\s*[^|\s]").unwrap());
+
+/// Does a word of an awk line start a command: `system(…)`, or a pipe to or from one
+/// (`print | "sh"`, `print | cmd`, `"date" | getline`, `|&`)? In awk code every single `|`
+/// is such a pipe. A `|` in a string (`" | "`, `FS="|"`) or in a pattern (`/a|b/`) is text,
+/// and `||` is "or": a program that only prints is a text filter.
+fn awk_starts_command(program: &str) -> bool {
+    AWK_RUNS.is_match(&awk_code(program))
+}
+
+/// An awk program without what its strings and patterns hold: each string is left as `""`,
+/// each pattern as `//`. Both end at the first `"` or `/` that no `\` comes before, which is
+/// where every awk ends them or earlier (gawk reads on inside `[…]`), so nothing that runs
+/// is taken out. A comment stays as it is written: a `#` may be in a pattern that this
+/// reading took for a division.
+fn awk_code(program: &str) -> String {
+    let mut code = String::with_capacity(program.len());
+    let mut chars = program.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '/' if c == '"' || awk_pattern_starts(&code) => {
+                while let Some(inside) = chars.next() {
+                    match inside {
+                        '\\' => drop(chars.next()),
+                        end if end == c => break,
+                        _ => {}
+                    }
+                }
+                code.extend([c, c]);
+            }
+            '#' => {
+                code.push(c);
+                code.extend(chars.by_ref().take_while(|x| *x != '\n'));
+                code.push('\n');
+            }
+            // A line that goes on in the next one.
+            '\\' if chars.peek() == Some(&'\n') => drop(chars.next()),
+            _ => code.push(c),
+        }
+    }
+    code
+}
+
+/// Does a `/` after this much awk code start a pattern (`$1 ~ /a|b/`), not a division? As awk
+/// reads it: where a value is expected, which is at the start, after an operator or one of
+/// `( , { } ;`, on a new line, and after a word like `print`. After `++` or `--` it divides
+/// (`i++ / 2`).
+fn awk_pattern_starts(code: &str) -> bool {
+    let before = code.trim_end_matches([' ', '\t']);
+    let Some(last) = before.chars().next_back() else { return true };
+    match last {
+        '+' | '-' => !before[..before.len() - 1].ends_with(last),
+        c if "\n(,{};!~&|=?:*%^<>".contains(c) => true,
+        _ => {
+            let word = before.rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+            ["print", "printf", "return", "else", "do", "case", "in"].contains(&word)
+        }
+    }
+}
+
+/// Does the line give an interpreter code to run (`python -c …`, `node -e …`, `perl -pe …`,
+/// `deno eval …`, an awk program that starts a command)? What such code reads, writes or
+/// reaches is not on the command line as a word, so no path check sees it. Only the
+/// interpreter's own options count: after its script or subcommand the words belong to that
+/// script (`python manage.py -c x`, `bun install -p`).
+pub(crate) fn inline_code(prog: &str, args: &[String]) -> bool {
+    if is_python(prog) {
+        return matches!(python_runs(args), Some(PythonRuns::Code));
+    }
+    if prog == "deno" {
+        return first_non_flag(args) == Some("eval");
+    }
+    if matches!(prog, "awk" | "gawk" | "mawk" | "nawk") {
+        // A field separator and a variable's value are text, never code (`-F'|'`, `-v sep='|'`),
+        // in the next word or in the option's own. Every other word may be the program.
+        let text = |a: &str| ["-F", "-v", "--field-separator=", "--assign="].iter().any(|option| a.starts_with(option));
+        let mut words = args.iter().map(String::as_str);
+        while let Some(a) = words.next() {
+            if matches!(a, "-F" | "-v" | "--field-separator" | "--assign") {
+                words.next();
+            } else if !text(a) && awk_starts_command(a) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let Some(&(_, code, valued, long_code, long_valued)) = INTERPRETERS.iter().find(|(names, ..)| names.contains(&prog)) else { return false };
+    let mut i = 0;
+    while let Some(a) = args.get(i).map(String::as_str).filter(|a| a.starts_with('-') && *a != "-" && *a != "--") {
+        i += 1;
+        if a.starts_with("--") {
+            if long_code.contains(&a.split('=').next().unwrap_or(a)) {
+                return true;
+            }
+            i += usize::from(long_valued.contains(&a));
+            continue;
+        }
+        for (at, option) in a.char_indices().skip(1) {
+            if code.contains(option) {
+                return true;
+            }
+            if valued.contains(option) {
+                i += usize::from(a[at + option.len_utf8()..].is_empty());
+                break;
+            }
+        }
+    }
+    false
 }
 
 /// Inferred risk hints for an approval card: "outside worktree", "deletes files",
-/// "network", "git push", "sudo", "pipes to shell".
+/// "network", "git push", "sudo", "pipes to shell", `AGENT_SETTINGS`, `SECRETS`.
 pub fn risk_hints(command: &str, cwd: Option<&Path>, worktree: &Path) -> Vec<String> {
     let mut hints: Vec<&'static str> = Vec::new();
     hints_into(command, cwd.unwrap_or(worktree), worktree, 0, &mut hints);
@@ -791,11 +1730,25 @@ fn hints_into(command: &str, cwd: &Path, worktree: &Path, depth: u8, hints: &mut
         if wrappers.iter().any(|a| matches!(basename(a), "sudo" | "doas")) || argv.first().is_some_and(|a| basename(a) == "su") {
             add("sudo", hints);
         }
-        let Some(a0) = argv.first().map(|a| basename(a)) else { continue };
-        let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+        for why in seg.redirects.iter().flat_map(|r| guarded_word(r, worktree)) {
+            add(why, hints);
+        }
+        let Some(a0) = argv.first().map(|a| basename(a)) else {
+            // `env` with no command prints the environment
+            if command_start(full) == Some(full.len()) && full.iter().any(|a| basename(a) == "env") {
+                add(SECRETS, hints);
+            }
+            continue;
+        };
+        // `python -m pip install x` is read as pip.
+        let (tool, tool_args) = python_module(a0, &argv[1..]).unwrap_or((a0, &argv[1..]));
+        let args: Vec<&str> = tool_args.iter().map(String::as_str).collect();
         let sub = args.iter().find(|a| !a.starts_with('-')).copied();
         if seg.piped_in && SHELLS.contains(&a0) {
             add("pipes to shell", hints);
+        }
+        for h in exposure(a0, &argv[1..], worktree) {
+            add(h, hints);
         }
         // `bash -lc 'git push'` inside a longer command: check what it runs.
         if SHELLS.contains(&a0)
@@ -804,7 +1757,7 @@ fn hints_into(command: &str, cwd: &Path, worktree: &Path, depth: u8, hints: &mut
         {
             hints_into(script, &cur_dir, worktree, depth + 1, hints);
         }
-        match a0 {
+        match tool {
             "rm" | "rmdir" | "unlink" | "shred" | "trash" => add("deletes files", hints),
             "find" if args.contains(&"-delete") => add("deletes files", hints),
             "git" => match git_subcommand(&args) {
@@ -813,13 +1766,18 @@ fn hints_into(command: &str, cwd: &Path, worktree: &Path, depth: u8, hints: &mut
                 Some("clone" | "fetch" | "pull" | "ls-remote" | "submodule") => add("network", hints),
                 _ => {}
             },
-            "curl" | "wget" | "ssh" | "scp" | "sftp" | "rsync" | "nc" | "ncat" | "telnet" | "ftp" | "http" | "https" | "xh" | "gh" | "npx" | "bunx" => {
-                add("network", hints)
-            }
+            "curl" | "wget" | "ssh" | "scp" | "sftp" | "rsync" | "nc" | "ncat" | "telnet" | "ftp" | "http" | "https" | "xh" | "gh" | "uvx" | "tox"
+            | "nox" => add("network", hints),
+            "npx" | "bunx" if !npx_runs_local(&args, &cur_dir, worktree) => add("network", hints),
+            "uv" if uv_run_fetches(&args) => add("network", hints),
             "npm" | "pnpm" | "yarn" | "bun" if matches!(sub, Some("install" | "i" | "add" | "ci" | "update" | "upgrade" | "dlx" | "x" | "publish")) => {
                 add("network", hints)
             }
             "npm" | "pnpm" | "yarn" | "bun" if sub == Some("exec") && package_flag(&args) => add("network", hints),
+            // `npm exec` is npx: it downloads what the project does not have.
+            "npm" if sub == Some("exec") && !npx_runs_local(args.split(|a| *a == "exec").nth(1).unwrap_or_default(), &cur_dir, worktree) => {
+                add("network", hints)
+            }
             "pip" | "pip3" | "gem" | "brew" | "uv" | "poetry" | "cargo" | "go" | "composer" | "bundle" | "docker"
                 if matches!(sub, Some("install" | "add" | "get" | "sync" | "update" | "upgrade" | "fetch" | "pull" | "push" | "login" | "require" | "download")) =>
             {
@@ -839,7 +1797,8 @@ fn hints_into(command: &str, cwd: &Path, worktree: &Path, depth: u8, hints: &mut
         }
         let path_args = args.iter().map(|a| a.split_once('=').map_or(*a, |(_, v)| v)).chain(seg.redirects.iter().map(String::as_str));
         for a in path_args {
-            if looks_like_path(a) && !HARMLESS_PATHS.contains(&a) && outside(a, &cur_dir, worktree) {
+            // Every word that is not an option: a plain relative name can leave through a symlink.
+            if !a.starts_with('-') && !HARMLESS_PATHS.contains(&a) && outside(a, &cur_dir, worktree) {
                 add("outside worktree", hints);
             }
         }
@@ -887,7 +1846,7 @@ pub fn activity_label(kind: ActivityKind, target: &Target) -> String {
     truncate_chars(&raw, 28)
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
+pub(super) fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -1152,7 +2111,7 @@ mod tests {
         assert_eq!(h("npm install left-pad"), ["network"]);
         assert_eq!(h("git fetch origin"), ["network"]);
         assert_eq!(h("cat /etc/passwd"), ["outside worktree"]);
-        assert_eq!(h("cat ~/.ssh/id_rsa"), ["outside worktree"]);
+        assert_eq!(h("cat ~/.ssh/id_rsa"), [SECRETS, "outside worktree"]);
         assert_eq!(h("cp a.txt ../other/a.txt"), ["outside worktree"]);
         assert_eq!(h("echo x > /tmp/out.txt"), ["outside worktree"]);
         assert!(h("cd .. && ls").contains(&"outside worktree".to_string()));
@@ -1165,6 +2124,256 @@ mod tests {
         for want in ["sudo", "deletes files", "outside worktree", "git push", "network", "pipes to shell"] {
             assert!(all.contains(&want.to_string()), "{want} missing from {all:?}");
         }
+    }
+
+    /// The card names what the approval rules ask about: secrets shown, agent settings changed.
+    #[test]
+    fn hints_name_secrets_and_agent_settings() {
+        let wt = Path::new("/w/tree");
+        let h = |c: &str| risk_hints(c, Some(wt), wt);
+        for c in [
+            "printenv",
+            "env",
+            "env | sort",
+            "export -p",
+            "set",
+            "jq -n env",
+            "cat .env",
+            "grep KEY config/.env.local",
+            "cat certs/tls.key",
+            // the shell turns these into `.env` or a key
+            "cat .e*",
+            "cat .e{nv,x}",
+            "cat .[e]nv",
+            "head -3 id_*",
+            "grep -f.env src",
+            "find . -name '.e*' -exec cat {} +",
+        ] {
+            assert_eq!(h(c), [SECRETS], "{c}");
+        }
+        for c in [
+            "echo '{}' > .claude/settings.local.json",
+            "tee .mcp.json",
+            "cp x .codex/config.toml",
+            "mkdir -p .gemini",
+            "cd .opencode",
+            "sed -i s/ask/allow/ opencode.json",
+            // a pattern, a brace list or a glued option value that names them
+            "cd .cl*",
+            "mkdir -p .{claude,x}",
+            "sort -o.claude/settings.local.json x",
+            "sort ''{-o,.claude/settings.local.json} x",
+            "echo '{}' > .cl*/settings.local.json",
+            "tee .{mcp,x}.json",
+            "cp x .c[l]aude/y",
+            "sed -i s/ask/allow/ o*.json",
+        ] {
+            assert_eq!(h(c), [AGENT_SETTINGS], "{c}");
+        }
+        for c in [
+            "cat .env.example",
+            "cp .env.example .env",
+            "ls -la .env",
+            "echo .env >> .gitignore",
+            "grep -rn '.env' src",
+            "rg -n 'process.env' src",
+            "jq '.env' package.json",
+            "find . -name '.env*'",
+            "env FOO=1 make",
+            "set -e",
+            "export FOO=bar",
+            "cat .claude/settings.json",
+            "ls .claude",
+            "grep -r allow .claude",
+            "tar --exclude=.claude -czf out.tgz src",
+            "git status",
+            "cargo test",
+            "pnpm test",
+            "pytest -q",
+            // reads and tests of these names change and show nothing
+            "[[ -f .env ]] || cp .env.example .env",
+            "[[ -d .git ]] && git status",
+            "tree -a -I .git",
+            "fd -H -E .git foo",
+            "git diff -- .claude/skills/x.md",
+            "git log -- .cursor/rules",
+            "sed -n 1,20p .claude/settings.json",
+            "true && bash -c 'cp .env.example ./.env'",
+            "node --env-file=.env.test --test",
+            "uv run --env-file .env pytest",
+            // patterns that name every file, or none of these
+            "cat *",
+            "grep -n foo *",
+            "wc -l src/*.rs",
+            "chmod 644 *.json",
+            "mkdir -p src/{a,b}/{x,y}",
+            "cat src/app/[id]/page.tsx",
+            "grep -e '.e*' src",
+            "sed -i -e 's/.*/x/' notes.txt",
+        ] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        // Only what is below the worktree counts: the worktree may live under `.claude/`.
+        let nested = Path::new("/repo/.claude/worktrees/t1");
+        assert!(risk_hints("cargo test --manifest-path /repo/.claude/worktrees/t1/Cargo.toml", Some(nested), nested).is_empty());
+        assert_eq!(guarded_path("/repo/.claude/worktrees/t1/.claude/settings.json", nested), Some(AGENT_SETTINGS));
+        assert_eq!(guarded_path("/repo/.claude/worktrees/t1/src/a.rs", nested), None);
+        for (path, why) in [
+            (".Claude/settings.local.json", Some(AGENT_SETTINGS)),
+            ("sub/opencode.jsonc", Some(AGENT_SETTINGS)),
+            (".git/hooks/pre-commit", Some(GIT_INTERNALS)),
+            ("src/claude/settings.json", None),
+            ("CLAUDE.md", None),
+            (".gitignore", None),
+            (".github/workflows/ci.yml", None),
+            (".cl*/settings.local.json", Some(AGENT_SETTINGS)),
+            (".c[l]aude/x", Some(AGENT_SETTINGS)),
+            (".*/x", Some(AGENT_SETTINGS)),
+            ("o*.json", Some(AGENT_SETTINGS)),
+            (".gi?/config", Some(GIT_INTERNALS)),
+            // the shell gives a leading dot to no `*`, `?` or set; `*.json` names every file
+            ("*/settings.json", None),
+            ("?claude/x", None),
+            ("[.]claude/x", None),
+            ("*.json", None),
+            (".github*", None),
+            ("src/app/[id]/page.tsx", None),
+        ] {
+            assert_eq!(guarded_path(path, wt), why, "{path}");
+        }
+        for c in ["cp hook.sh .git/hooks/pre-commit", "echo x >> .git/config", "tee .git/info/exclude"] {
+            assert_eq!(h(c), [GIT_INTERNALS], "{c}");
+        }
+        for c in ["cat .git/HEAD", "ls .git", "find . -name '*.rs' -not -path './.git/*'", "tar --exclude=.git -czf out.tgz src"] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        for (file, secret) in [
+            (".env", true),
+            ("app/.env.production", true),
+            (".env*", true),
+            (".envrc", true),
+            ("deploy/id_ed25519", true),
+            ("server.pem", true),
+            (".env.example", false),
+            (".env.local.sample", false),
+            (".environment", false),
+            ("src/env.rs", false),
+            ("process.env", false),
+            (".e*", true),
+            (".e?v", true),
+            (".env.*", true),
+            (".e*.local", true),
+            ("id_*", true),
+            ("certs/*.pem", true),
+            ("*", false),
+            ("*.rs", false),
+            (".eslintrc*", false),
+            ("[id].tsx", false),
+        ] {
+            assert_eq!(secret_file(file), secret, "{file}");
+        }
+    }
+
+    /// A word is read as the shell expands it: brace lists, patterns, a value glued to an option.
+    #[test]
+    fn shell_words_name_what_they_expand_to() {
+        let b = |w: &str| braces(w).unwrap();
+        assert_eq!(b(".e{nv,x}"), [".env", ".ex"]);
+        assert_eq!(b("{a,b{c,d}}/{x,y}"), ["a/x", "a/y", "bc/x", "bc/y", "bd/x", "bd/y"]);
+        assert_eq!(b("f{1..3}.txt"), ["f*.txt"]);
+        for plain in ["{}", "{x}", "${HOME}/x", "a{b", "src/a.rs"] {
+            assert_eq!(b(plain), [plain]);
+        }
+        let names = |w: &str| word_names(w).unwrap();
+        assert_eq!(names("-o.claude/x"), [".claude/x"]);
+        assert_eq!(names("-roout"), ["oout", "out", "ut", "t"]);
+        assert_eq!(names("--out=.mcp.json"), [".mcp.json"]);
+        assert_eq!(names("of=.mcp.json"), [".mcp.json", "of=.mcp.json"]);
+        assert!(names("--verbose").is_empty() && names("-").is_empty() && names("--").is_empty());
+        // Too many alternatives to list: the word may name anything.
+        let many = "{a,b}".repeat(9);
+        assert_eq!(braces(&many), None);
+        assert_eq!(guarded_word(&many, Path::new("/w")), [AGENT_SETTINGS]);
+        assert!(secret_word(&many));
+        assert_eq!(braces(&"{a,b}".repeat(8)).map(|v| v.len()), Some(256));
+
+        for (pat, name, open, want) in [
+            (".claude", ".claude", false, true),
+            (".claude", ".claud", false, false),
+            (".cl*", ".claude", false, true),
+            (".*a*e", ".claude", false, true),
+            (".*a*x", ".claude", false, false),
+            (".c[a-m]aude", ".claude", false, true),
+            (".c[!l]aude", ".claude", false, false),
+            ("id_???", "id_rsa", false, true),
+            ("[i]d_rsa", "id_rsa", false, true),
+            ("a[b", "a[b", false, true),
+            ("*", "id_rsa", false, false),
+            ("?claude", ".claude", false, false),
+            (".e*.local", ".env.", true, true),
+            (".e", ".env.", true, false),
+            (".env.", ".env.", true, true),
+        ] {
+            assert_eq!(wildcard(pat, name, open), want, "{pat} / {name}");
+        }
+    }
+
+    /// npx, uvx and their kin download and run a package unless the project has the tool.
+    #[test]
+    fn hints_tell_a_local_tool_from_a_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path();
+        std::fs::create_dir_all(wt.join("node_modules/.bin")).unwrap();
+        std::fs::write(wt.join("node_modules/.bin/vitest"), "").unwrap();
+        std::fs::create_dir_all(wt.join("web")).unwrap();
+        let h = |c: &str| risk_hints(c, Some(wt), wt);
+        for c in ["npx vitest run", "bunx vitest", "npm exec vitest run", "cd web && npx vitest run", "pnpm exec vitest run", "uv run pytest"] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        for c in [
+            "npx jest",
+            "npx pytest",
+            "npx -p evil vitest",
+            "npx vitest@latest",
+            "npm exec jest",
+            "uvx ruff check",
+            "uv run --with=evil pytest",
+            "tox",
+            "nox",
+        ] {
+            assert_eq!(h(c), ["network"], "{c}");
+        }
+        assert_eq!(npx_runner(&["tsc", "-p", "tsconfig.json"]), Some("tsc"), "options after the name are the tool's");
+        assert_eq!(npx_runner(&["-c", "vitest"]), None);
+    }
+
+    /// A path that leaves the worktree through a symlink is outside, as written or resolved.
+    #[test]
+    fn symlinks_are_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top = tmp.path().canonicalize().unwrap();
+        let wt = top.join("wt");
+        std::fs::create_dir_all(wt.join("docs")).unwrap();
+        std::fs::create_dir_all(top.join("home")).unwrap();
+        std::fs::write(top.join("home/key"), "secret").unwrap();
+        std::fs::write(wt.join("docs/a.md"), "x").unwrap();
+        std::os::unix::fs::symlink(top.join("home"), wt.join("docs/ref")).unwrap();
+        std::os::unix::fs::symlink("a.md", wt.join("docs/alias.md")).unwrap();
+        std::os::unix::fs::symlink(top.join("home/new"), wt.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(&wt, top.join("wt-link")).unwrap();
+        for p in ["docs/ref/key", "docs/ref", "docs/ref/../home/key", "missing/../docs/ref/key", "dangling", "docs/ref/not-yet"] {
+            assert!(outside(p, &wt, &wt), "{p}");
+        }
+        for p in ["docs/a.md", "docs/alias.md", "docs/not-yet.md", "docs/../docs/a.md"] {
+            assert!(!outside(p, &wt, &wt), "{p}");
+        }
+        assert_eq!(real_path(&wt.join("dangling")), top.join("home/new"));
+        assert_eq!(real_path(&wt.join("docs/ref/not-yet/x")), top.join("home/not-yet/x"));
+        // the worktree reached through a link is still the worktree
+        let via = top.join("wt-link");
+        assert!(!outside("docs/a.md", &via, &via) && outside("docs/ref/key", &via, &via));
+        assert_eq!(risk_hints("cat docs/ref/key", Some(&wt), &wt), ["outside worktree"]);
+        assert!(risk_hints("cat docs/alias.md", Some(&wt), &wt).is_empty());
     }
 
     /// Reviewer-verified: a wrapper or a nested shell hid the push from the approval card.
@@ -1206,6 +2415,59 @@ mod tests {
         assert_eq!(activity_label(ActivityKind::Execute, &t), "echo $(date)");
     }
 
+    /// `cmd >&file` sends stdout and stderr to the file (`>&2` copies a descriptor); `>|file`
+    /// and zsh's `>!file` write it too. The card names what such a file is.
+    #[test]
+    fn a_file_after_a_redirect_is_a_path_the_line_writes() {
+        let wt = Path::new("/w/tree");
+        let h = |c: &str| risk_hints(c, Some(wt), wt);
+        for c in [
+            "echo x >&/tmp/out.txt",
+            "echo x >& /tmp/out.txt",
+            "echo x >>&/tmp/out.txt",
+            "echo x 2>&/tmp/out.txt",
+            "echo x >|/tmp/out.txt",
+            "echo x >!/tmp/out.txt",
+            "echo x >&|/tmp/out.txt",
+            "echo x &>|/tmp/out.txt",
+            "echo x &>/tmp/out.txt",
+        ] {
+            assert_eq!(h(c), ["outside worktree"], "{c}");
+        }
+        for c in ["echo '{}' >&.claude/settings.local.json", "echo '{}' >!.mcp.json"] {
+            assert_eq!(h(c), [AGENT_SETTINGS], "{c}");
+        }
+        for c in ["make 2>&1", "make >&2", "make >&-", "make 3>&1-", "make 2>&1 | tail -5", "make 2>&1|tail -5", "make >&out.log", "make >|out.log"] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        let read = |c: &str| segments(c).into_iter().map(|s| (s.argv.join(" "), s.redirects.join(" "))).collect::<Vec<_>>();
+        assert_eq!(read("make >&out.log all"), [("make all".to_string(), "out.log".to_string())]);
+        assert_eq!(read("make >&2file"), [("make".to_string(), "2file".to_string())]);
+        assert_eq!(read("make >&2 all"), [("make all".to_string(), String::new())]);
+        assert_eq!(read("make 2>&1|tail -5"), [("make".to_string(), String::new()), ("tail -5".to_string(), String::new())]);
+        assert_eq!(read("make >|out.log | tail -5"), [("make".to_string(), "out.log".to_string()), ("tail -5".to_string(), String::new())]);
+    }
+
+    /// `python -m pip` is pip, on the card too.
+    #[test]
+    fn hints_read_python_m_pip_as_pip() {
+        let wt = Path::new("/w/tree");
+        let h = |c: &str| risk_hints(c, Some(wt), wt);
+        for c in ["python -m pip install requests", "python3 -um pip install requests", "python3.12 -mpip install requests", "python -W ignore -m pip install x"] {
+            assert_eq!(h(c), ["network"], "{c}");
+        }
+        for c in ["python -m pytest -q", "python scripts/tool.py -m pip install", "python -c 'print(1)' -m pip install"] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        let argv = |c: &str| c.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(python_module("python3", &argv("-m pip install x")), Some(("pip", &argv("install x")[..])));
+        assert_eq!(python_module("python", &argv("-Bmhttp.server 8000")), Some(("http.server", &argv("8000")[..])));
+        assert_eq!(python_module("python", &argv("-m")), None);
+        assert_eq!(python_module("python", &argv("-c code -m pip")), None);
+        assert_eq!(python_module("pythonic", &argv("-m pip")), None);
+        assert_eq!(python_module("node", &argv("-m pip")), None);
+    }
+
     #[test]
     fn labels() {
         use ActivityKind::*;
@@ -1243,5 +2505,59 @@ mod tests {
         assert_eq!(split_model_effort(Some("anthropic.claude-v1:0")), (Some("anthropic.claude-v1:0".into()), None));
         assert_eq!(split_model_effort(Some(":high")), (None, Some("high".into())));
         assert_eq!(split_model_effort(None), (None, None));
+    }
+
+    /// An awk program starts a command with `system(…)` or a pipe in its code. A `|` in a
+    /// string, a pattern, a field separator or a variable's value is text.
+    #[test]
+    fn awk_pipes_are_read_in_the_code_not_in_its_text() {
+        let awk = |args: &[&str]| inline_code("awk", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        for program in [
+            r#"BEGIN { system("id") }"#,
+            r#"{ print | "sh" }"#,
+            r#"{ print $1 | "sort -u" }"#,
+            r#"{ print | cmd }"#,
+            r#"{ print $1/2 | "sh" }"#,
+            r#"BEGIN { "date" | getline d; print d }"#,
+            r#"BEGIN { while ((cmd | getline line) > 0) print line }"#,
+            r#"BEGIN { print "x" |& "cat" }"#,
+            // A string or a pattern before the pipe does not hide it.
+            r#"{ print "a | b" | "sh" }"#,
+            r#"/a|b/ { print | "sh" }"#,
+            r#"/"/ { print | "sh" }"#,
+            r#"{ print /"/ | "sh" }"#,
+            r#"{ n = i++ / 2 | "sh"; m = 1 / 2 }"#,
+            "{ x = 1 # a \" in a comment\n print | \"sh\" }",
+            "{ x = a \\\n / b | \"sh\"; y = c / d }",
+        ] {
+            assert!(awk(&[program, "notes.txt"]), "{program}");
+        }
+        assert!(awk(&["-F", "|", r#"{ print | "sh" }"#]));
+        assert!(awk(&["-v", "n=1", "-e", r#"BEGIN { system("id") }"#]));
+        for args in [
+            &[r#"{print $1 " | " $2}"#, "a.csv"][..],
+            &["-F,", r#"{print $1 " | " $2}"#, "a.csv"],
+            &[r#"BEGIN{FS="|"} {print $2}"#, "t.md"],
+            &[r#"BEGIN{OFS="|"} {$1=$1; print}"#, "f"],
+            &[r#"{n=split($0,a,"|"); print a[2]}"#, "f"],
+            &[r#"{ printf "%s | %s\n", $1, $2 }"#],
+            &[r#"{ print "a \" | \" b" }"#],
+            &["/a|b/ {print}"],
+            &["$1 ~ /^(a|b)$/ && !/c|d/"],
+            &["{ if ($0 ~ /a|b/) print; else print /c|d/ }"],
+            &[r#"{ gsub(/\/|"/, ""); print }"#],
+            &[r#"$1 == "a" || "b" == $2"#],
+            &["{ print $1/2, $2/4 }"],
+            &["-F|", "{print $2}"],
+            &["-F", "|", "{print $2}"],
+            &["-v", "sep=|", "{print $1 sep $2}"],
+            &["-vsep=a|b", "{print $1 sep $2}"],
+            &["--assign=sep=a|b", "{print $1 sep $2}"],
+            &["{print $1 sep $2}", "sep=|", "f"],
+            &["-f", "report.awk", "data/a.csv"],
+        ] {
+            assert!(!awk(args), "{args:?}");
+        }
+        assert_eq!(awk_code(r#"$1 ~ /a|b/ { print "x | y", $2 / 2 }"#), r#"$1 ~ // { print "", $2 / 2 }"#);
     }
 }

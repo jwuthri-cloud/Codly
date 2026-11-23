@@ -22,6 +22,13 @@ function snippet(text: string, at: number, len: number): Pick<ExactHit, 'snippet
   return { snippet: `${start > 0 ? '…' : ''}${body}${end < text.length ? '…' : ''}`, at: at - start + (start > 0 ? 1 : 0), len };
 }
 
+const TITLE = 60;
+/** A memory's title in the results: its first line, ending in "…" when it was cut. */
+function memoryTitle(text: string): string {
+  const line = text.split('\n')[0];
+  return line.length > TITLE ? `${line.slice(0, TITLE).trimEnd()}…` : line;
+}
+
 /** Case-insensitive literal search over tasks and memories. Title matches first, then newest. */
 export function exactSearch(query: string, tasks: Task[], memories: Memory[], limit = 60): ExactHit[] {
   const needle = query.trim().toLowerCase();
@@ -40,7 +47,7 @@ export function exactSearch(query: string, tasks: Task[], memories: Memory[], li
     if (m.superseded_by) continue;
     const at = m.text.toLowerCase().indexOf(needle);
     if (at < 0) continue;
-    hits.push({ top: false, hit: { kind: m.kind === 'note' ? 'board' : 'memory', id: m.id, title: m.text.split('\n')[0].slice(0, 60), field: 'text', ...snippet(m.text, at, needle.length), who: m.author, ts: m.created_at } });
+    hits.push({ top: false, hit: { kind: m.kind === 'note' ? 'board' : 'memory', id: m.id, title: memoryTitle(m.text), field: 'text', ...snippet(m.text, at, needle.length), who: m.author, ts: m.created_at } });
   }
   hits.sort((a, b) => Number(b.top) - Number(a.top) || b.hit.ts - a.hit.ts || (a.hit.id < b.hit.id ? -1 : 1));
   return hits.slice(0, limit).map((h) => h.hit);

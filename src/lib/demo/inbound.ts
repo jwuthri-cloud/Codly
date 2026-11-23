@@ -1,6 +1,7 @@
 // Mock of the inbound hub (webhooks, Slack) for `pnpm dev`: the same rules as the Rust core
-// (new endpoints are off, the listener is "on" only while one is, the secret is returned once and
-// never kept), with a fake delivery log. No real server runs in the browser.
+// (new endpoints are off and do not run plans without asking, the listener is "on" only while one
+// is on, the secret is returned once and never kept), with a fake delivery log. No real server
+// runs in the browser.
 import type { InboundState } from '../gen/InboundState';
 import type { SlackUpdate } from '../gen/SlackUpdate';
 import type { WebhookEndpoint } from '../gen/WebhookEndpoint';
@@ -16,7 +17,7 @@ const state: InboundState = {
     bot_token_set: false,
     app_token_set: false,
     connected: false,
-    status: 'Not connected yet: your settings and tokens are saved, but this build cannot open the Socket Mode connection.',
+    status: 'Not available yet: this version cannot connect to Slack, so it takes no Slack tokens.',
   },
   deliveries: [],
 };
@@ -43,12 +44,13 @@ export function inboundMock(cmd: string, a: Record<string, unknown>): unknown {
       const name = String(a.name ?? '').trim();
       if (!name || name.length > 60) throw new Error('give the endpoint a short name (1 to 60 characters)');
       const id = `wh_${hex(12)}`;
-      const e: WebhookEndpoint = { id, name, enabled: false, created_at: Date.now(), url: url(id), received: 0, last_received_at: null, broken: false };
+      const e: WebhookEndpoint = { id, name, enabled: false, created_at: Date.now(), url: url(id), received: 0, last_received_at: null, broken: false, auto_run: false };
       state.endpoints.push(e);
       return { endpoint: { ...e }, secret: `cwh_${hex(64)}` };
     }
     case 'inbound_set_webhook': {
       const e = find();
+      e.auto_run = !!a.autoRun;
       e.enabled = !!a.enabled;
       if (e.enabled && !state.deliveries.length) {
         // Something to look at: a message that came in just now.
@@ -71,10 +73,10 @@ export function inboundMock(cmd: string, a: Record<string, unknown>): unknown {
     }
     case 'inbound_set_slack': {
       const u = a.update as SlackUpdate;
-      for (const [t, prefix, key] of [[u.bot_token, 'xoxb-', 'bot_token_set'], [u.app_token, 'xapp-', 'app_token_set']] as const) {
-        if (t && !t.startsWith(prefix)) throw new Error(`a Slack token starts with ${prefix}`);
-        if (t !== null) state.slack[key] = t !== '';
-      }
+      // As the core: no new token while Slack cannot connect; '' removes a saved one.
+      if (u.bot_token || u.app_token) throw new Error('Slack is not available yet, so Codly does not take Slack tokens');
+      if (u.bot_token !== null) state.slack.bot_token_set = false;
+      if (u.app_token !== null) state.slack.app_token_set = false;
       state.slack.config = u.config;
       return refresh();
     }

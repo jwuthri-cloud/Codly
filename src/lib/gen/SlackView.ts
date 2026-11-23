@@ -3,6 +3,6 @@ import type { SlackConfig } from "./SlackConfig";
 
 export type SlackView = { config: SlackConfig, bot_token_set: boolean, app_token_set: boolean, connected: boolean, 
 /**
- * One sentence on where it stands ("Not connected yet: …").
+ * One sentence on where it stands ("Not available yet: …").
  */
 status: string, };

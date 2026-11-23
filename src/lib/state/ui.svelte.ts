@@ -38,6 +38,16 @@ export const ONBOARD_DEMO = typeof location !== 'undefined' && new URLSearchPara
 /** Request threads: "lead" (the first) and "lead:<id>" (parallel requests, each with its own Lead). */
 export const isRequestThread = (thread: string | null | undefined): thread is string => thread === 'lead' || !!thread?.startsWith('lead:');
 
+/** The agent a 1:1 thread ("agent:<id>") is with; null for a request thread or a closed one. */
+export const threadAgentId = (thread: string): string | null => (thread.startsWith('agent:') ? thread.slice('agent:'.length) : null);
+
+/** Closed requests on Home, read-only: the list of them (`CLOSED_LIST`) or one archive thread ("closed:<thread>:<ms>"). */
+export const CLOSED_LIST = 'closed:';
+export const isClosedThread = (thread: string): boolean => thread.startsWith(CLOSED_LIST);
+
+/** A request you opened that has no message yet. `kept`: its composer holds text or files you did not send. */
+type DraftRequest = { thread: string; ts: number; kept?: boolean };
+
 /** A short id for a new request thread ("lead:" + shortId()). */
 export function shortId(): string {
   const b = new Uint8Array(6);
@@ -112,9 +122,20 @@ class Ui {
   /** The request you are on (the thread a 1:1 chat returns to). */
   request = $state('lead');
   /** Requests you opened (⌘N) that have no message yet: they show as tabs until you leave them empty. */
-  draftRequests = $state<{ thread: string; ts: number }[]>([]);
+  draftRequests = $state<DraftRequest[]>([]);
+  /** Where you were in each office you left in this session: the request you were on, and its draft requests that hold text. */
+  private left = new Map<string, { request: string; drafts: DraftRequest[] }>();
+  /** Between `leaveOffice` and `enterOffice`: no office's requests are on screen. */
+  private between = false;
+  /** Requests you just closed, per office, while Undo is still on offer: not tabs any more, not closed yet. */
+  closingRequests = $state<{ office: string | null; thread: string }[]>([]);
+  /** Bumped when the core has closed a request: the closed requests' list is read again. */
+  closedRev = $state(0);
   /** Bumped to focus the composer (New request, palette…). */
   composerFocus = $state(0);
+  /** ⌘F: the find bar over the open conversation; `findFocus` is bumped to focus its field again. */
+  findOpen = $state(false);
+  findFocus = $state(0);
   /** Plan card to scroll into view on Home (the pinned progress header). */
   revealPlan = $state<string | null>(null);
   planLens = $state<PlanLens>(this.prefs.planView && ['list', 'flow', 'timeline'].includes(this.prefs.planView) ? this.prefs.planView : 'list');
@@ -124,10 +145,14 @@ class Ui {
   diffTarget = $state<DiffTarget>(null);
   artifactOpen = $state<string | null>(null);
   terminalCwd = $state<string | null>(null);
+  /** The Terminal room is on the tab of this agent, which is in your terminal (an agent id); null: on the place of `terminalCwd`. */
+  terminalTakeover = $state<string | null>(null);
   timelineZoom = $state(this.prefs.timelineZoom ?? 5);
   memoryEntity = $state<string | null>(null);
   /** ⇧⌘⌫ asks this approval card to open its "deny with a note" field. */
   denyNoteFor = $state<string | null>(null);
+  /** The first Esc on a running turn: that thread's composer row asks for a second one (`state/esc.ts`). */
+  escAsk = $state<{ thread: string; at: number } | null>(null);
   /** Sheet section to scroll to when it opens (e.g. a subagent companion → "subagents"). */
   sheetFocus = $state<string | null>(null);
   /** Approval card to scroll into view on Home (toast "Review"). */
@@ -141,11 +166,13 @@ class Ui {
   sections = $state<Record<string, boolean>>({
     now: true,
     needs: true,
+    trust: false,
     controls: false,
     task: true,
     steps: true,
     files: false,
     subagents: true,
+    mcp: false,
     output: false,
     cost: false,
     history: false,
@@ -153,7 +180,7 @@ class Ui {
   });
 
   /** Composer draft injected by other surfaces (palette "Ask the Lead…", file mentions). */
-  composerSeed = $state<{ thread: string; text: string; nonce: number } | null>(null);
+  composerSeed = $state<{ thread: string; text: string; keep: boolean; replaces: string | null; nonce: number } | null>(null);
 
   systemDark = $state(mq('(prefers-color-scheme: dark)')?.matches ?? true);
   reducedMotion = $state(mq('(prefers-reduced-motion: reduce)')?.matches ?? false);
@@ -228,17 +255,27 @@ class Ui {
     this.hover = h ? { agentId: h.agentId ?? null, taskId: h.taskId ?? null, path: h.path ?? null } : { agentId: null, taskId: null, path: null };
   }
 
+  /** An agent's sheet that is open moves to the agent whose chat you open: what the sheet does
+   *  (Block tools, Stop, Kill) then acts on the agent you talk to. A closed sheet stays closed,
+   *  and the sheet of a task or a file stays. */
+  sheetFollows(agentId: string) {
+    if (this.selection?.kind === 'agent' && this.selection.id !== agentId) this.selection = { kind: 'agent', id: agentId };
+  }
+
   openThread(thread: string) {
     if (isRequestThread(thread)) return this.openRequest(thread);
     this.thread = thread;
+    const agentId = threadAgentId(thread);
+    if (agentId) this.sheetFollows(agentId);
     this.go('home');
     if (this.mode === 'office') this.mode = 'blend';
   }
 
   /** Switch to a request thread (its Lead, its plan, its approvals). Empty drafts you leave are dropped. */
   openRequest(thread: string) {
-    // A draft you leave either has a message by now (the chat list carries it) or is dropped.
-    this.draftRequests = this.draftRequests.filter((d) => d.thread === thread);
+    // A draft you leave has a message by now (the chat list carries it), or holds text you did
+    // not send (it stays a tab until you send or close it), or is dropped.
+    this.draftRequests = this.draftRequests.filter((d) => d.thread === thread || d.kept);
     this.request = thread;
     this.thread = thread;
     this.go('home');
@@ -251,6 +288,41 @@ class Ui {
     this.draftRequests = [...this.draftRequests, { thread, ts: wallNow() }];
     this.openRequest(thread);
     this.composerFocus++;
+  }
+
+  /** A draft request that holds nothing any more goes, and you stay in the room you are in: if it was the request you were on, `next` is now. */
+  dropDraft(thread: string, next: string) {
+    this.draftRequests = this.draftRequests.filter((d) => d.thread !== thread);
+    if (this.request === thread) this.request = next;
+    if (this.thread === thread) this.thread = next;
+  }
+
+  /** The composer of a draft request holds text or files (`on`), or none any more: one that does stays a tab when you leave it. */
+  holdDraft(thread: string, on: boolean) {
+    if (this.draftRequests.some((d) => d.thread === thread && !!d.kept !== on)) this.draftRequests = this.draftRequests.map((d) => (d.thread === thread ? { ...d, kept: on } : d));
+  }
+
+  /**
+   * Another office is about to show (`office`: the one on screen, null when none was open).
+   * Where you were is remembered now, while the tabs and the composer are still this office's:
+   * the request you were on, and the draft requests that hold text. A switch that overtakes
+   * another one has nothing to add: the office in between never showed its requests.
+   */
+  leaveOffice(office: string | null) {
+    if (this.between) return;
+    this.between = true;
+    if (office) this.left.set(office, { request: this.request, drafts: this.draftRequests.filter((d) => d.kept) });
+    this.draftRequests = [];
+  }
+
+  /** An office's requests are on screen: its drafts that hold text are tabs again. Returns the
+   *  request you were on when you left it (null: you were not there in this session). */
+  enterOffice(office: string): string | null {
+    this.between = false;
+    const was = this.left.get(office);
+    this.left.delete(office);
+    this.draftRequests = was?.drafts ?? [];
+    return was?.request ?? null;
   }
 
   openDiff(target: DiffTarget) {
@@ -272,6 +344,17 @@ class Ui {
     this.go('plan');
   }
 
+  /** A conversation is on screen (Home, not the full office or the map): ⌘F can find text in it. */
+  get canFind(): boolean {
+    return this.room === 'home' && this.mode !== 'office' && this.mode !== 'map';
+  }
+
+  /** ⌘F on Home: find text in the conversation on screen. */
+  openFind() {
+    this.findOpen = true;
+    this.findFocus++;
+  }
+
   openPalette(seed = '') {
     this.paletteSeed = seed;
     this.paletteOpen = true;
@@ -281,18 +364,23 @@ class Ui {
     this.sections = { ...this.sections, [id]: !(this.sections[id] ?? true) };
   }
 
-  togglePin(id: string) {
-    this.pinned = this.pinned.includes(id) ? this.pinned.filter((x) => x !== id) : [...this.pinned, id];
+  setPin(id: string, on: boolean) {
+    const rest = this.pinned.filter((x) => x !== id);
+    this.pinned = on ? [...rest, id] : rest;
   }
 
   keepPlan(id: string) {
     if (!this.keptPlans.includes(id)) this.keptPlans = [...this.keptPlans, id];
   }
 
-  seedComposer(thread: string, text: string) {
+  /** `keep`: a draft being typed there is not replaced (the composer says so). `replaces`: the
+   *  text an earlier seed put there, which this one stands in for (`seedDraft`). */
+  seedComposer(thread: string, text: string, keep = false, replaces: string | null = null) {
     if (isRequestThread(thread)) this.request = thread;
     this.thread = thread;
-    this.composerSeed = { thread, text, nonce: Math.random() };
+    this.composerSeed = { thread, text, keep, replaces, nonce: Math.random() };
+    // A draft request holds this text from now on, also before its composer is on screen.
+    if (text.trim()) this.holdDraft(thread, true);
     this.go('home');
     if (this.mode === 'office') this.mode = 'blend';
   }
