@@ -1834,6 +1834,13 @@ pub struct Settings {
     /// Which events raise a notification of your system, and when (Settings → Notifications).
     #[serde(default)]
     pub notifications: crate::notifications::NotificationSettings,
+    /// Keep the Mac from going to sleep by itself while agents work or a plan runs, so a long
+    /// run is not cut off when you walk away. Closing the lid still puts it to sleep.
+    #[serde(default = "yes")]
+    pub keep_awake: bool,
+    /// Ask before Codly quits while agents work: they stop, and resume at the next start.
+    #[serde(default = "yes")]
+    pub confirm_quit: bool,
 }
 
 fn yes() -> bool {
@@ -1882,6 +1889,8 @@ impl Default for Settings {
             verify_timeout_secs: verify_timeout_secs(),
             watchdog: Default::default(),
             notifications: Default::default(),
+            keep_awake: true,
+            confirm_quit: true,
         }
     }
 }

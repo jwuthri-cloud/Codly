@@ -82,6 +82,20 @@ notification shown behind it (about as long as its banner is on screen), the she
 is a guess, so the UI never switches office on it: for another office it shows a toast whose
 Review goes there.
 
+Long runs. Agents are children of the app, so they stop when it quits or the Mac sleeps. While
+work is under way (`Core::activity`: an agent in a turn, a gate, a plan that goes on by itself;
+not work that waits for you: an approval, a paused worker, a budget that is used up) the shell
+holds `/usr/bin/caffeinate -i -w <pid>` (src-tauri/src/awake.rs, Settings → Long
+runs, on by default): no idle sleep, and the helper ends with Codly; closing the lid still
+sleeps. A quit you ask for while work is under way is questioned once (src-tauri/src/quit.rs,
+same Settings section). After a restart a resumed worker's first prompt says what Codly sees in
+its worktree: the branch, the uncommitted files, Codly's last commit and its last check. When an
+agent's process is gone, what it left in its process group (a dev server, a watcher) is ended
+(`proc::reap`). Git calls have two limits (`git.rs`): 2 min for a status-sized call, 15 min for
+a checkout, `add -A`, commit, merge or push; one that runs out of time is asked to stop before
+it is killed, and the gate makes its commit or merge once more when the first try found a lock
+file or ran out of time.
+
 PATH: GUI apps get launchd's minimal PATH, so Codly captures the login shell env once
 (`$SHELL -ilc '/usr/bin/env -0'`, 5 s timeout) and resolves each CLI on it at every spawn.
 Child envs are scrubbed of variables that silently change billing or session behaviour
@@ -412,6 +426,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
+                      activity.rs                         the work under way now, for the shell (keep awake, quit question)
   store/            SQLite: schema.sql, later migrations (m2…m4), typed queries
   git.rs            worktrees, commits, merges, push (shells out to the user's git)
   mcp/              server.rs (Unix socket), bridge.rs (`codly mcp`), tools.rs (tool specs)
@@ -440,6 +455,8 @@ src-tauri/src/            the macOS shell
   main.rs lib.rs    entry point; window, plugins, the command list
   cli.rs            what `codly <arguments>` asks for, decided before a window or a server starts
   boot.rs           starts the core, and starts it again after a failed start (`retry_core`)
+  awake.rs quit.rs  long runs: no idle sleep while agents work (`caffeinate`); the question before a quit
+                    that would stop them
   logging.rs        the log file (`<data dir>/logs/codly.log`) and the panic hook
   diagnostics.rs    Settings → Troubleshooting: the scrubbed report for a bug report
   commands.rs       most Tauri commands: thin wrappers over Core

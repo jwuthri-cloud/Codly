@@ -183,6 +183,28 @@ pub async fn kill_group(pgid: i32, grace: Duration) {
     let _ = killpg(pg, Signal::SIGKILL);
 }
 
+/// How long what a leader left running in its group gets to stop (SIGTERM) before SIGKILL.
+const SWEEP_GRACE: Duration = Duration::from_secs(2);
+
+/// Wait for a child that leads its own process group ([`command`]) on a task of its own, and
+/// give its exit code to `on_exit`. Then end what it left running in that group: the dev
+/// servers, watchers and test runners an agent started keep their ports and go on writing to a
+/// worktree that the next run is about to use. Only the child's own group is signalled, and
+/// only once the child itself is gone and reaped.
+pub fn reap<F>(mut child: tokio::process::Child, on_exit: F) -> tokio::task::JoinHandle<()>
+where
+    F: FnOnce(Option<i64>) + Send + 'static,
+{
+    let pgid = child.id().map(|p| p as i32).unwrap_or(0);
+    tokio::spawn(async move {
+        let status = child.wait().await;
+        on_exit(status.as_ref().ok().copied().and_then(exit_code));
+        if status.is_ok() {
+            kill_group(pgid, SWEEP_GRACE).await;
+        }
+    })
+}
+
 /// Note a run's process group and when its leader started in `pgid`, next to the run's raw
 /// log, so that the next start can find the group if Codly dies before the CLI does.
 pub fn record_group(raw_log: &Path, pgid: i32, started_ms: i64) {
@@ -704,5 +726,38 @@ mod tests {
         assert_eq!(exit_code(status), Some(128 + 15));
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(killpg(Pid::from_raw(pgid), None).is_err(), "group still alive");
+    }
+
+    /// An agent that exits by itself leaves nothing running: what it started in its group (a
+    /// dev server, a watcher) is ended once the agent is gone, after its exit code is told.
+    #[tokio::test]
+    async fn reap_ends_what_the_leader_left_running() {
+        let env: HashMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())].into();
+        let child = command(Path::new("/bin/sh"), &["-c".into(), "sleep 30 & exit 3".into()], Path::new("/"), &env).spawn().unwrap();
+        let pgid = child.id().unwrap() as i32;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let started = std::time::Instant::now();
+        let reaped = reap(child, move |code| {
+            // The `sleep` the shell left behind still runs: nothing was signalled before the exit was told.
+            let _ = tx.send((code, killpg(Pid::from_raw(pgid), None).is_ok()));
+        });
+        assert_eq!(rx.await.unwrap(), (Some(3), true));
+        reaped.await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "the `sleep 30` was not waited for");
+        assert!(killpg(Pid::from_raw(pgid), None).is_err(), "group still alive");
+    }
+
+    /// A leader that leaves nothing behind: the sweep finds no group and signals nobody.
+    #[tokio::test]
+    async fn reap_of_a_child_that_left_nothing_only_reports_the_exit() {
+        let env: HashMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())].into();
+        let child = command(Path::new("/bin/sh"), &["-c".into(), "exit 0".into()], Path::new("/"), &env).spawn().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        reap(child, move |code| {
+            let _ = tx.send(code);
+        })
+        .await
+        .unwrap();
+        assert_eq!(rx.await.unwrap(), Some(0));
     }
 }

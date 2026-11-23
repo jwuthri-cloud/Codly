@@ -34,6 +34,8 @@ pub const MAX_FIX_ROUNDS: u32 = 2;
 /// its own rounds and never uses a fix round.
 const MAX_CONFLICT_ROUNDS: u32 = 3;
 const TAIL_LINES: usize = 80;
+/// How long the gate waits before it makes a git step a second time (`Inner::git_step`).
+const GIT_RETRY_AFTER: Duration = Duration::from_secs(2);
 /// Keys in a gate decision's detail that say the task's checks stopped it: one failed its last
 /// fix round, one ran out of time, some wait for your OK. The task's card reads the same keys
 /// (src/lib/util/gate.ts) to offer Merge anyway.
@@ -271,7 +273,7 @@ impl Inner {
         let message = format!("codly({}): {}", task.key, prompts::clip(&task.title, 60));
         let commit = {
             let _g = self.repo_lock.lock().await;
-            self.git.commit_all(&wt, &message).await?
+            self.git_step(&task, ws, || self.git.commit_all(&wt, &message)).await?
         };
         if let Some(c) = commit {
             self.store.set_task_commits(task_id, None, Some(&c.sha))?;
@@ -393,6 +395,29 @@ impl Inner {
 
         // 7. Merge queue.
         self.merge_task(task_id, 0).await
+    }
+
+    /// A git step of the gate that writes: the commit of the worker's files, the merge into the
+    /// plan's branch. When it fails in a way that passes by itself (`git::transient`: another
+    /// git process held a lock file, or git ran out of time), the gate waits a moment and makes
+    /// the step once more, so only a second failure blocks the task. The first one is on record.
+    async fn git_step<T, F>(&self, task: &Task, ws: Option<&str>, step: impl Fn() -> F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let first = match step().await {
+            Err(e) if crate::git::transient(&e) => e,
+            done => return done,
+        };
+        self.decide(
+            ws,
+            Some(&task.id),
+            "gate",
+            format!("{}: git could not finish a step ({}); Codly tries it once more", task.key, prompts::clip(&first_line(&first), 160)),
+            json!({ "plan_id": task.plan_id, "error": format!("{first:#}") }),
+        )?;
+        tokio::time::sleep(GIT_RETRY_AFTER).await;
+        step().await
     }
 
     /// Did the worker get a new message while this pass ran (a user steer)? Its run is in a
@@ -1187,7 +1212,7 @@ impl Inner {
                 let message = format!("codly({}): {}", task.key, prompts::clip(&task.title, 60));
                 let out = {
                     let _g = self.repo_lock.lock().await;
-                    self.git.merge(&integ_wt, &branch, &message, true).await?
+                    self.git_step(&task, Some(&ws_id), || self.git.merge(&integ_wt, &branch, &message, true)).await?
                 };
                 match out {
                     MergeOutcome::Merged { sha } | MergeOutcome::AlreadyMerged { sha } => {
@@ -1471,6 +1496,11 @@ async fn pump(mut r: impl tokio::io::AsyncRead + Unpin, tail: Arc<Mutex<Tail>>) 
             Ok(n) => lock(&tail).feed(&buf[..n]),
         }
     }
+}
+
+/// The first line of an error: git adds a paragraph of advice to some of its messages.
+fn first_line(e: &anyhow::Error) -> String {
+    format!("{e:#}").lines().next().unwrap_or_default().to_string()
 }
 
 fn files_with_markers(wt: &Path, files: &[String]) -> Vec<String> {

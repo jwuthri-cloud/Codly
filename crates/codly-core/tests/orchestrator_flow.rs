@@ -44,6 +44,16 @@ fn temp_repo(root: &Path) -> PathBuf {
     repo
 }
 
+/// Make every new worktree of `repo` slow to add: a checkout filter (git-lfs has one) runs the
+/// shell command `wait` before it gives README.md its content. Codly's own checkouts run none
+/// of the repository's hooks; a filter is part of the checkout itself.
+fn slow_checkout(repo: &Path, wait: &str) {
+    std::fs::write(repo.join(".gitattributes"), "README.md filter=slow\n").unwrap();
+    sh(repo, &["add", ".gitattributes"]);
+    sh(repo, &["commit", "-qm", "a checkout filter"]);
+    sh(repo, &["config", "filter.slow.smudge", &format!("{wait}; cat")]);
+}
+
 fn claude() -> CliInfo {
     CliInfo {
         provider: Provider::Claude,
@@ -1430,14 +1440,10 @@ async fn a_gate_failure_frees_the_worker_so_retry_works() {
 async fn a_task_that_is_merging_cannot_be_cancelled() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
-    // A post-checkout hook that lasts while a file exists: a new worktree keeps the repository
+    // A checkout filter that lasts while a file exists: a new worktree keeps the repository
     // busy as long as the test says.
-    let (hooks, hold, held) = (dir.path().join("hooks"), dir.path().join("hold"), dir.path().join("held"));
-    std::fs::create_dir_all(&hooks).unwrap();
-    let hook = format!("#!/bin/sh\nwhile [ -f '{}' ]; do touch '{}'; sleep 0.05; done\n", hold.display(), held.display());
-    std::fs::write(hooks.join("post-checkout"), hook).unwrap();
-    std::fs::set_permissions(hooks.join("post-checkout"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    sh(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    let (hold, held) = (dir.path().join("hold"), dir.path().join("held"));
+    slow_checkout(&repo, &format!("while [ -f '{}' ]; do touch '{}'; sleep 0.05; done", hold.display(), held.display()));
     let log = Arc::new(Mutex::new(Log::default()));
     let worker: Behavior = Arc::new(|turn: FakeTurn| {
         Box::pin(async move {
@@ -1480,12 +1486,8 @@ async fn a_task_that_is_merging_cannot_be_cancelled() {
 async fn a_start_stopped_while_its_worktree_is_added_leaves_the_agents_next_chat_alone() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
-    // A post-checkout hook (git-lfs, husky) makes every new worktree take a second to add.
-    let hooks = dir.path().join("hooks");
-    std::fs::create_dir_all(&hooks).unwrap();
-    std::fs::write(hooks.join("post-checkout"), "#!/bin/sh\nsleep 1\n").unwrap();
-    std::fs::set_permissions(hooks.join("post-checkout"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    sh(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    // A slow checkout filter (git-lfs) makes every new worktree take a second to add.
+    slow_checkout(&repo, "sleep 1");
     let log = Arc::new(Mutex::new(Log::default()));
     let worker: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("here") }));
     let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;
@@ -1518,12 +1520,8 @@ async fn a_start_stopped_while_its_worktree_is_added_leaves_the_agents_next_chat
 async fn cancelling_a_plan_while_a_worktree_is_added_leaves_the_agents_chat_alone() {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
-    // A post-checkout hook (git-lfs, husky) makes every new worktree take two seconds to add.
-    let hooks = dir.path().join("hooks");
-    std::fs::create_dir_all(&hooks).unwrap();
-    std::fs::write(hooks.join("post-checkout"), "#!/bin/sh\nsleep 2\n").unwrap();
-    std::fs::set_permissions(hooks.join("post-checkout"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    sh(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    // A slow checkout filter (git-lfs) makes every new worktree take two seconds to add.
+    slow_checkout(&repo, "sleep 2");
     let log = Arc::new(Mutex::new(Log::default()));
     let worker: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("here") }));
     let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: planning_lead(), worker }).await;

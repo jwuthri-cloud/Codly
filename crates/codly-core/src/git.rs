@@ -36,7 +36,22 @@ pub const CODLY_NAME: &str = "Codly";
 pub const CODLY_EMAIL: &str = "codly@localhost";
 
 /// A hung git (lock wait, fsmonitor, huge repo) must not wedge the orchestrator forever.
+/// The limit of a status-sized call: a read, a ref, a config value.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// The limit of a call whose time grows with the size of the repository, with the user's hooks
+/// or with the network (`long_running`): a large or LFS repository needs minutes for a checkout,
+/// `add -A` or a push.
+const GIT_LONG_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// A git that ran out of time is asked to stop, so that it removes its lock files, and killed
+/// if it has not stopped after this long.
+const GIT_STOP_GRACE: Duration = Duration::from_secs(2);
+/// In the error of a call that ran out of time (`transient` reads it).
+const TIMED_OUT: &str = "timed out after";
+/// What git says when another git process holds a lock file of the repository
+/// ("Unable to create '…/index.lock': File exists.").
+const LOCKED: &str = ".lock': File exists";
+/// In the error of a merge that ran out of time and could not be aborted.
+const MERGE_LEFT: &str = "the merge is still in progress";
 /// Stable links to the newest forwarded SSH agent, under the home directory (see `Git::push`).
 const AGENT_LINKS: [&str; 2] = [".ssh/agent.sock", ".ssh/ssh_auth_sock"];
 
@@ -57,6 +72,9 @@ const LOCATION_VARS: &[&str] = &[
 pub struct Git {
     bin: PathBuf,
     env: HashMap<String, String>,
+    /// The time limit of a status-sized call, and of a `long_running` one.
+    quick: Duration,
+    long: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +135,7 @@ impl Git {
         for k in LOCATION_VARS {
             env.remove(*k);
         }
-        Git { bin, env }
+        Git { bin, env, quick: GIT_TIMEOUT, long: GIT_LONG_TIMEOUT }
     }
 
     /// Resolve git on `env["PATH"]`, preferring Homebrew's over the Xcode shim.
@@ -169,14 +187,28 @@ impl Git {
         if let Some(index) = index {
             cmd.env("GIT_INDEX_FILE", index);
         }
-        let child = cmd.spawn().map_err(|e| anyhow!("cannot run git ({}): {e}", self.bin.display()))?;
-        let out = tokio::time::timeout(GIT_TIMEOUT, child.wait_with_output())
-            .await
-            .map_err(|_| anyhow!("git {} timed out after {}s", args.first().unwrap_or(&""), GIT_TIMEOUT.as_secs()))??;
+        let limit = if long_running(args) { self.long } else { self.quick };
+        let mut child = cmd.spawn().map_err(|e| anyhow!("cannot run git ({}): {e}", self.bin.display()))?;
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let ended = tokio::time::timeout(limit, async { tokio::try_join!(child.wait(), read_all(stdout), read_all(stderr)) }).await;
+        let Ok(ended) = ended else {
+            // Asked to stop first: git then removes its lock files (a killed one leaves them, and
+            // every later call fails on them). Only a git that still runs is asked: `id` is None
+            // once git ended and was reaped, and its pid may be another process's by then (what
+            // git left running, a hook's background job or a shared ssh connection, can hold the
+            // pipes open long after git). Dropping `child` kills a git that has not stopped by
+            // the end of the grace.
+            if let Some(pid) = child.id() {
+                let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGTERM);
+                let _ = tokio::time::timeout(GIT_STOP_GRACE, child.wait()).await;
+            }
+            bail!("git {} {TIMED_OUT} {}s", subcommand(args), limit.as_secs());
+        };
+        let (status, stdout, stderr) = ended?;
         Ok(Out {
-            ok: out.status.success(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            ok: status.success(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
         })
     }
 
@@ -184,7 +216,7 @@ impl Git {
     async fn ok(&self, dir: &Path, args: &[&str], read: bool) -> Result<String> {
         let out = self.run(dir, args, read).await?;
         if !out.ok {
-            return Err(out.err(args.first().copied().unwrap_or("")));
+            return Err(out.err(subcommand(args)));
         }
         Ok(out.stdout)
     }
@@ -324,7 +356,7 @@ impl Git {
             env.insert("SSH_AUTH_SOCK".into(), sock.to_string_lossy().into_owned());
         }
         env.entry("GIT_SSH_COMMAND".into()).or_insert_with(|| "ssh -o BatchMode=yes".into());
-        let pusher = Git { bin: self.bin.clone(), env };
+        let pusher = Git { env, ..self.clone() };
         let refspec = format!("{branch}:refs/heads/{branch}");
         let out = pusher.run(repo, &["push", "--set-upstream", remote, &refspec], false).await?;
         if out.ok {
@@ -519,7 +551,34 @@ impl Git {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        self.ok(repo, &["worktree", "add", "--detach", &path.to_string_lossy(), rev], false).await.map(drop)
+        let fresh = !path.exists();
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        let added = self.ok(repo, &[c1, hooks, c2, fsmonitor, "worktree", "add", "--detach", &path.to_string_lossy(), rev], false).await;
+        self.added(repo, path, fresh, added).await
+    }
+
+    /// The end of a `worktree add` at `path`. A failed one (a checkout that ran out of time, a
+    /// full disk) can leave a registered worktree with only a part of its files: the next try
+    /// would take it for a whole one (`worktree_add` reuses a worktree on the same branch), and
+    /// the missing files would be committed as deletions. So what a failed add made is removed.
+    /// `fresh` = nothing was at `path` before the add: only then is what is there now its own.
+    async fn added(&self, repo: &Path, path: &Path, fresh: bool, added: Result<String>) -> Result<()> {
+        let Err(e) = added else { return Ok(()) };
+        if !fresh {
+            return Err(e);
+        }
+        // git refuses to remove a worktree it never finished: then the folder goes, and the
+        // prune forgets it.
+        let _ = self.ok(repo, &["worktree", "remove", "--force", &path.to_string_lossy()], false).await;
+        if path.exists()
+            && let Err(left) = tokio::fs::remove_dir_all(path).await
+        {
+            bail!("{e:#} (and the unfinished worktree at {} could not be removed: {left})", path.display());
+        }
+        if let Err(prune) = self.ok(repo, &["worktree", "prune"], false).await {
+            tracing::warn!("after a failed worktree add: {prune:#}");
+        }
+        Err(e)
     }
 
     /// Check out `branch` in a worktree, creating it at `start` when it does not exist.
@@ -561,12 +620,14 @@ impl Git {
             std::fs::create_dir_all(dir)?;
         }
         let p = path.to_string_lossy();
-        if self.branch_exists(repo, branch).await? {
-            self.ok(repo, &["worktree", "add", &p, branch], false).await?;
+        // An internal checkout, like `switch`: the user's post-checkout hook does not run.
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        let added = if self.branch_exists(repo, branch).await? {
+            self.ok(repo, &[c1, hooks, c2, fsmonitor, "worktree", "add", &p, branch], false).await
         } else {
-            self.ok(repo, &["worktree", "add", "-b", branch, &p, start], false).await?;
-        }
-        Ok(())
+            self.ok(repo, &[c1, hooks, c2, fsmonitor, "worktree", "add", "-b", branch, &p, start], false).await
+        };
+        self.added(repo, path, true, added).await
     }
 
     /// Remove a worktree. Unless `force`, refuses when it has uncommitted (or untracked)
@@ -693,10 +754,23 @@ impl Git {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = match self.run(wt, &args, false).await {
             Ok(out) => out,
-            // Killed mid-merge (a slow hook hit the timeout): don't leave the checkout half-merged.
+            // Stopped mid-merge (a slow hook hit the time limit): don't leave the checkout half-merged.
             Err(e) => {
+                // Stopped after the merge commit was made (a slow post-merge hook): the branch
+                // has moved, so the merge is reported as what it is.
+                if matches!(self.is_ancestor(wt, &tip, "HEAD").await, Ok(true))
+                    && let Some(sha) = self.head(wt).await?
+                {
+                    tracing::warn!("{e:#}, after the merge of {branch} was made: the merge stands");
+                    // git runs that hook before it forgets the merge, so the checkout still
+                    // says "merging": only that note is left to remove (`--quit` changes no file).
+                    if self.merging(wt, &tip, internal).await {
+                        self.ok(wt, &["merge", "--quit"], false).await?;
+                    }
+                    return Ok(MergeOutcome::Merged { sha });
+                }
                 let left = self.merging(wt, &tip, internal).await && self.ok(wt, &["merge", "--abort"], false).await.is_err();
-                let note = if left { "the merge is still in progress: run `git merge --abort`" } else { "the merge was aborted, nothing changed" };
+                let note = if left { format!("{MERGE_LEFT}: run `git merge --abort`") } else { "the merge was aborted, nothing changed".to_string() };
                 bail!("{e:#} ({note})");
             }
         };
@@ -763,6 +837,48 @@ impl Git {
         self.ok(repo, &["reset", "--keep", "--quiet", before], false).await?;
         Ok(restored)
     }
+}
+
+/// Everything a child writes to one of its pipes, until every process that holds the pipe has
+/// closed it.
+async fn read_all(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut out = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut out).await?;
+    }
+    Ok(out)
+}
+
+/// The git subcommand of `args`, after the `-c name=value` pairs before it.
+fn subcommand<'a>(args: &[&'a str]) -> &'a str {
+    let mut rest = args;
+    while let ["-c", _, after @ ..] = rest {
+        rest = after;
+    }
+    rest.first().copied().unwrap_or("")
+}
+
+/// Is this a call whose time grows with the size of the repository, with the user's hooks or
+/// with the network (`GIT_LONG_TIMEOUT`)? A checkout, `add -A`, a commit, a merge, a push.
+fn long_running(args: &[&str]) -> bool {
+    match subcommand(args) {
+        "add" | "commit" | "merge" | "switch" | "reset" | "read-tree" | "push" => true,
+        // `worktree add` checks every file out and `worktree remove` deletes them; `prune` and
+        // `list` only read the list of worktrees.
+        "worktree" => args.iter().skip_while(|a| **a != "worktree").nth(1).is_some_and(|a| matches!(*a, "add" | "remove")),
+        _ => false,
+    }
+}
+
+/// Did a git call fail in a way that passes by itself: another git process held a lock file
+/// of the repository (an editor's git panel, a watcher), or the call ran out of time and was
+/// stopped? Then the same call can be made again after a moment: a call that found a lock
+/// changed nothing, and one that was stopped left nothing that the next one does not redo.
+/// (Not a merge that could not be aborted: that one needs you.)
+pub fn transient(e: &anyhow::Error) -> bool {
+    let text = format!("{e:#}");
+    text.contains(LOCKED) || (text.contains(TIMED_OUT) && !text.contains(MERGE_LEFT))
 }
 
 /// The last `max` characters of `s`.
@@ -1544,5 +1660,161 @@ mod tests {
         assert_eq!(std::fs::read_to_string(wt.join("after.txt")).unwrap(), "not committed\n");
         assert_eq!(git.worktree_tree(&wt).await.unwrap(), after);
         assert_eq!(out(&wt, &["rev-parse", "HEAD"]), head);
+    }
+
+    /// A checkout, a commit, a merge or a push may take minutes in a large repository; a read
+    /// may not. The command decides, wherever the `-c` flags put it.
+    #[test]
+    fn a_call_gets_the_time_limit_of_what_it_does() {
+        let [c1, hooks, c2, fsmonitor] = Git::SAFE;
+        assert_eq!(subcommand(&[c1, hooks, c2, fsmonitor, "add", "-A"]), "add");
+        assert_eq!(subcommand(&["status", "--porcelain=v1"]), "status");
+        assert_eq!(subcommand(&[]), "");
+        let long: [&[&str]; 7] = [
+            &["push", "--set-upstream", "origin", "x:refs/heads/x"],
+            &[c1, hooks, c2, fsmonitor, "worktree", "add", "-b", "t1", "/w", "main"],
+            &["worktree", "remove", "--force", "/w"],
+            &[c1, hooks, c2, fsmonitor, "add", "-A"],
+            &[c1, hooks, "commit", "--no-verify", "-m", "x"],
+            &["merge", "--abort"],
+            &[c1, hooks, c2, fsmonitor, "switch", "t1"],
+        ];
+        for args in long {
+            assert!(long_running(args), "{args:?}");
+        }
+        let quick: [&[&str]; 6] = [
+            &["worktree", "prune"],
+            &["worktree", "list", "--porcelain"],
+            &["status", "--porcelain=v1", "-z"],
+            &["merge-base", "--is-ancestor", "a", "b"],
+            &["merge-tree", "--write-tree", "a", "b"],
+            &["-c", "core.fsmonitor=false", "diff", "--name-only", "add"],
+        ];
+        for args in quick {
+            assert!(!long_running(args), "{args:?}");
+        }
+    }
+
+    /// A call that runs out of time is asked to stop before it is killed, so that git removes
+    /// its lock files; the error names the command and the limit, and the call can be made again.
+    #[tokio::test]
+    async fn a_call_out_of_time_is_asked_to_stop_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, lock, stopped) = (dir.path().join("git"), dir.path().join("held.lock"), dir.path().join("stopped"));
+        // Stands for a git that holds a lock file and, as git does, removes it when asked to stop.
+        let body = format!(
+            "#!/bin/sh\ntrap 'rm -f \"{lock}\"; touch \"{stopped}\"; kill $!; exit 1' TERM\ntouch \"{lock}\"\nsleep 30 &\nwait\n",
+            lock = lock.display(),
+            stopped = stopped.display()
+        );
+        executable(&fake, &body);
+        let mut git = Git::new(fake, std::env::vars().collect());
+        git.quick = Duration::from_secs(1);
+        let started = std::time::Instant::now();
+        let e = git.ok(dir.path(), &["-c", "core.fsmonitor=false", "status"], true).await.unwrap_err();
+        assert_eq!(e.to_string(), "git status timed out after 1s");
+        assert!(transient(&e));
+        assert!(stopped.exists(), "it was asked to stop, not killed at once");
+        assert!(!lock.exists(), "so it removed its lock file");
+        assert!(started.elapsed() < Duration::from_secs(15), "the `sleep 30` was not waited for");
+    }
+
+    /// Git ended and left something running that holds its pipes (a hook's background job, a
+    /// shared ssh connection): the call still runs out of time, but git's process id is no
+    /// longer git's, so nothing is asked to stop and nothing is waited for.
+    #[tokio::test]
+    async fn a_git_that_ended_is_not_asked_to_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("git");
+        executable(&fake, "#!/bin/sh\nsleep 6 &\nexit 0\n");
+        let mut git = Git::new(fake, std::env::vars().collect());
+        git.quick = Duration::from_secs(1);
+        let started = std::time::Instant::now();
+        let e = git.ok(dir.path(), &["-c", "core.fsmonitor=false", "status"], true).await.unwrap_err();
+        assert_eq!(e.to_string(), "git status timed out after 1s");
+        assert!(started.elapsed() < git.quick + GIT_STOP_GRACE, "no process was given the time to stop: {:?}", started.elapsed());
+    }
+
+    /// Another git process holds the index lock: the call changes nothing and fails in a way
+    /// that is told apart from a real failure, with the command's name in the error.
+    #[tokio::test]
+    async fn a_held_lock_file_is_a_failure_that_passes_by_itself() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        let lock = repo.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let e = git.commit_all(&repo, "work").await.unwrap_err();
+        assert!(transient(&e), "{e:#}");
+        assert!(e.to_string().starts_with("git add failed:"), "{e}");
+        std::fs::remove_file(&lock).unwrap();
+        let commit = git.commit_all(&repo, "work").await.unwrap().expect("the same call works once the lock is gone");
+        assert_eq!(commit.files, ["b.txt"]);
+
+        let e = git.merge(&repo, "no-such-branch", "m", true).await.unwrap_err();
+        assert!(!transient(&e), "{e:#}");
+        let left = anyhow!("git merge timed out after 900s ({MERGE_LEFT}: run `git merge --abort`)");
+        assert!(!transient(&left), "a merge that could not be aborted needs you");
+    }
+
+    /// A `worktree add` that fails after it made the worktree (stopped in the middle of the
+    /// checkout) leaves nothing behind: the next try makes a whole worktree instead of reusing
+    /// one with files missing. A folder that was there before is not Codly's to remove.
+    #[tokio::test]
+    async fn a_failed_worktree_add_leaves_no_half_made_worktree() {
+        let (d, repo) = repo();
+        let wt = d.path().join("wt");
+        // A git that makes the worktree, loses one of its files and fails.
+        let broken = d.path().join("git-stopped");
+        let body = format!(
+            "#!/bin/sh\ncase \" $* \" in\n*\" worktree add \"*) git \"$@\" && rm \"{}\"; exit 1 ;;\nesac\nexec git \"$@\"\n",
+            wt.join("a.txt").display()
+        );
+        executable(&broken, &body);
+        let stopped = Git::new(broken, std::env::vars().collect());
+        let base = stopped.head(&repo).await.unwrap().unwrap();
+        assert!(stopped.worktree_add(&repo, &wt, "t1", &base).await.is_err());
+        assert!(!wt.exists(), "the half-made worktree is removed");
+        let git = Git::from_process_env();
+        assert_eq!(git.worktrees(&repo).await.unwrap().len(), 1, "and git has forgotten it");
+        git.worktree_add(&repo, &wt, "t1", &base).await.unwrap();
+        assert!(wt.join("a.txt").exists(), "the next try checks every file out");
+
+        let taken = d.path().join("taken");
+        std::fs::create_dir(&taken).unwrap();
+        std::fs::write(taken.join("keep.txt"), "mine\n").unwrap();
+        assert!(git.worktree_add_detached(&repo, &taken, &base).await.is_err(), "git does not add a worktree over a folder with files");
+        assert_eq!(std::fs::read_to_string(taken.join("keep.txt")).unwrap(), "mine\n");
+    }
+
+    /// Internal checkouts run none of the user's hooks: a `post-checkout` hook stays quiet when
+    /// Codly makes a worktree.
+    #[tokio::test]
+    async fn worktree_adds_do_not_run_the_users_hooks() {
+        let (d, repo) = repo();
+        let ran = d.path().join("hook-ran");
+        executable(&repo.join(".git/hooks/post-checkout"), &format!("#!/bin/sh\ntouch \"{}\"\n", ran.display()));
+        let git = Git::from_process_env();
+        let base = git.head(&repo).await.unwrap().unwrap();
+        git.worktree_add(&repo, &d.path().join("wt"), "t1", &base).await.unwrap();
+        git.worktree_add_detached(&repo, &d.path().join("home"), &base).await.unwrap();
+        assert!(!ran.exists(), "the post-checkout hook ran");
+    }
+
+    /// The user's slow `post-merge` hook runs out of time after the merge commit was made: the
+    /// merge is reported as made (their branch moved), not as "aborted, nothing changed".
+    #[tokio::test]
+    async fn a_merge_stopped_after_its_commit_is_reported_as_made() {
+        let (_d, repo) = repo();
+        branch_with(&repo, "work", "w.txt", Some("w\n"));
+        commit_file(&repo, "c.txt", "c\n");
+        executable(&repo.join(".git/hooks/post-merge"), "#!/bin/sh\nexec sleep 8\n");
+        let mut git = Git::from_process_env();
+        git.long = Duration::from_secs(3);
+        let merged = git.merge(&repo, "work", "merge work", false).await.unwrap();
+        let head = git.head(&repo).await.unwrap().unwrap();
+        assert_eq!(merged, MergeOutcome::Merged { sha: head });
+        assert!(repo.join("w.txt").exists() && !git.in_merge(&repo).await);
+        assert_eq!(git.rev_parse(&repo, "HEAD^2").await.unwrap(), git.rev_parse(&repo, "work").await.unwrap(), "HEAD is the merge of work");
     }
 }

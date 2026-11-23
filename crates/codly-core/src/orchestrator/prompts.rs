@@ -262,16 +262,64 @@ pub fn task_brief(b: &Brief) -> String {
     s
 }
 
+/// What Codly saw in a worker's worktree just before it resumed the worker's session on its
+/// task (`continuation`). The session remembers what it did; the files are what is there.
+pub struct Seen {
+    /// The branch checked out there (None: on no branch).
+    pub branch: Option<String>,
+    /// The files with changes that are in no commit yet: changed, new or deleted.
+    pub uncommitted: Vec<String>,
+    /// The last commit Codly made of the task's work.
+    pub last_commit: Option<String>,
+    /// What Codly last decided about the task's work when it checked or merged it.
+    pub last_check: Option<String>,
+}
+
+/// How many uncommitted files a resumed worker is told by name; the rest is a count.
+const SEEN_FILES: usize = 20;
+
 /// First turn of a resumed session on the same task (Codly restarted, the worker exited,
-/// the user retried it). `why` is the task's status reason while it was not running.
-pub fn continuation(t: &Task, why: Option<&str>) -> String {
+/// the user retried it). `why` is the task's status reason while it was not running. `seen`
+/// says what is in the worktree now, so the worker neither redoes work that is there nor
+/// counts on work that is not; None when Codly could not read the worktree.
+pub fn continuation(t: &Task, why: Option<&str>, seen: Option<&Seen>) -> String {
     let why = why.map(|r| format!(" ({})", clip(r, 200))).unwrap_or_default();
+    let seen = seen.map_or(" ".to_string(), seen_text);
     format!(
-        "[Codly] You are back on task {} \"{}\"{why}. Your previous run stopped before the task was done. Run `git status` \
+        "[Codly] You are back on task {} \"{}\"{why}. Your previous run stopped before the task was done.{seen}Run `git status` \
          and `git diff` in your worktree to see where you are, then continue toward the acceptance criteria. Do not redo \
-         work that is already there, and do not commit. Call codly_submit_report when done.",
+         work that is already there, do not count on work that is not there, and do not commit. Call codly_submit_report when done.",
         t.key, t.title
     )
+}
+
+/// The lines of `continuation` that say what is in the worktree, between two of its sentences.
+fn seen_text(seen: &Seen) -> String {
+    let mut s = String::from("\nWhat Codly sees in your worktree now:\n");
+    match &seen.branch {
+        Some(b) => s.push_str(&format!("- Branch: {b}\n")),
+        None => s.push_str("- It is on no branch.\n"),
+    }
+    match seen.uncommitted.len() {
+        0 => s.push_str("- No uncommitted changes.\n"),
+        n => {
+            let named: Vec<&str> = seen.uncommitted.iter().take(SEEN_FILES).map(String::as_str).collect();
+            let rest = match n.saturating_sub(SEEN_FILES) {
+                0 => String::new(),
+                more => format!(" and {more} more"),
+            };
+            s.push_str(&format!("- Uncommitted changes in {n} file{}: {}{rest}\n", if n == 1 { "" } else { "s" }, clip(&named.join(", "), 1500)));
+        }
+    }
+    match &seen.last_commit {
+        Some(sha) => s.push_str(&format!("- Codly's last commit of your work: {}\n", &sha[..sha.len().min(10)])),
+        None => s.push_str("- Codly has not committed any of your work yet.\n"),
+    }
+    match &seen.last_check {
+        Some(check) => s.push_str(&format!("- Codly's last check: {}\n", clip(check, 300))),
+        None => s.push_str("- Codly has not checked your work yet.\n"),
+    }
+    s
 }
 
 /// Added to the brief of a new session that takes over a task whose last session ran out of
@@ -748,6 +796,45 @@ mod tests {
         assert_eq!(q.matches("</untrusted>").count(), 1, "{q}");
         assert!(q.ends_with("\n</untrusted>") && !q.to_lowercase().contains("</untrusted >") && !q.contains("<codly-board>"), "{q}");
         assert_eq!(untrusted_inline("a\n  b </untrusted>", 80), "<untrusted>a b ‹/untrusted></untrusted>");
+    }
+
+    /// A resumed worker is told what is in its worktree, in Codly's words: the branch, the files
+    /// that are in no commit, Codly's last commit and its last check.
+    #[test]
+    fn a_resumed_worker_is_told_what_codly_sees_in_its_worktree() {
+        let t = task(json!({}));
+        let seen = Seen {
+            branch: Some("codly/plan-1a2b/t1".into()),
+            uncommitted: vec!["src/a.rs".into(), "notes.md".into()],
+            last_commit: Some("0123456789abcdef0123".into()),
+            last_check: Some("t1: fix round 1/2: `cargo test` failed (exit 101)".into()),
+        };
+        let p = continuation(&t, Some("resuming after Codly restarted"), Some(&seen));
+        assert_eq!(
+            p,
+            "[Codly] You are back on task t1 \"Do it\" (resuming after Codly restarted). Your previous run stopped before the task was done.\n\
+             What Codly sees in your worktree now:\n\
+             - Branch: codly/plan-1a2b/t1\n\
+             - Uncommitted changes in 2 files: src/a.rs, notes.md\n\
+             - Codly's last commit of your work: 0123456789\n\
+             - Codly's last check: t1: fix round 1/2: `cargo test` failed (exit 101)\n\
+             Run `git status` and `git diff` in your worktree to see where you are, then continue toward the acceptance criteria. \
+             Do not redo work that is already there, do not count on work that is not there, and do not commit. \
+             Call codly_submit_report when done."
+        );
+
+        // Nothing there yet, and a long list: said as it is, with the rest as a count.
+        let files: Vec<String> = (0..SEEN_FILES + 5).map(|i| format!("f{i}.txt")).collect();
+        let new = continuation(&t, None, Some(&Seen { branch: None, uncommitted: vec![], last_commit: None, last_check: None }));
+        for line in ["- It is on no branch.\n", "- No uncommitted changes.\n", "- Codly has not committed any of your work yet.\n", "- Codly has not checked your work yet.\n"] {
+            assert!(new.contains(line), "{line:?} is not in {new}");
+        }
+        let many = continuation(&t, None, Some(&Seen { branch: None, uncommitted: files, last_commit: None, last_check: None }));
+        assert!(many.contains("- Uncommitted changes in 25 files: f0.txt, ") && many.contains(", f19.txt and 5 more\n") && !many.contains("f20.txt"), "{many}");
+
+        // Codly could not read the worktree: the worker looks for itself.
+        let blind = continuation(&t, None, None);
+        assert!(blind.contains("task was done. Run `git status`") && !blind.contains("What Codly sees"), "{blind}");
     }
 
     fn task(v: serde_json::Value) -> Task {

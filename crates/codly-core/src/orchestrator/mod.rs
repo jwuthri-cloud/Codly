@@ -64,6 +64,7 @@ pub mod watchdog;
 mod interrupts;
 mod rebrief;
 pub mod worktree_setup;
+pub mod activity;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

@@ -3,6 +3,7 @@
 
 mod agent_controls;
 mod ask_me;
+mod awake;
 mod boot;
 pub mod cli;
 mod commands;
@@ -13,6 +14,7 @@ mod inbound;
 mod hire_commands;
 mod onboarding_commands;
 mod pr_commands;
+mod quit;
 #[cfg(test)]
 mod ipc_tests;
 mod logging;
@@ -20,7 +22,7 @@ mod notify;
 mod ui_bus;
 mod web;
 
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 use tokio::sync::{OnceCell, watch};
 
 use commands::AppState;
@@ -75,6 +77,8 @@ pub fn run() {
         .manage(AppState { core: core_rx, bus: bus.clone(), pty: Default::default(), shell_env: OnceCell::new() })
         .manage(inbound::InboundHandle { hub: hub_rx })
         .manage(boot::Boot { core: core_tx, hub: hub_tx, bus })
+        .manage(quit::Asking::default())
+        .on_menu_event(|app, event| quit::on_menu(app, event.id().as_ref()))
         .setup(move |app| {
             // The window starts hidden (tauri.conf.json): `codly serve` keeps it so, and out of the Dock.
             match serve {
@@ -93,6 +97,12 @@ pub fn run() {
                         handle.exit(0);
                     });
                 }
+            }
+            // Cmd+Q asks first while agents work. Elsewhere there is no app menu to change.
+            if cfg!(target_os = "macos")
+                && let Err(e) = quit::own_menu_quit(app.handle())
+            {
+                tracing::warn!("Quit in the menu does not ask before it stops agents: {e}");
             }
             boot::start(app.handle().clone());
             Ok(())
@@ -275,13 +285,20 @@ pub fn run() {
         Err(e) => tracing::warn!("no log file: {e}"),
     }
 
-    app.run(|handle, event| {
-        if let RunEvent::Exit = event {
+    app.run(|handle, event| match event {
+        // Closing the window quits Codly: asked first while agents work (`quit.rs`).
+        RunEvent::WindowEvent { label, event: WindowEvent::CloseRequested { api, .. }, .. } if label == "main" => {
+            if !quit::may_quit(handle) {
+                api.prevent_close();
+            }
+        }
+        RunEvent::Exit => {
             let state = handle.state::<AppState>();
             state.pty.close_all();
             if let Some(Ok(core)) = state.core.borrow().clone() {
                 tauri::async_runtime::block_on(core.shutdown());
             }
         }
+        _ => {}
     });
 }

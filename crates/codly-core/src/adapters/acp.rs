@@ -141,8 +141,8 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     let lines = proc::spawn_json_reader(child.stdout.take().context("no stdout")?, raw.clone());
     let stderr = StderrTail::spawn(child.stderr.take().context("no stderr")?, 64 << 10);
     let (exit_tx, exit_rx) = oneshot::channel();
-    tokio::spawn(async move {
-        let code = child.wait().await.ok().and_then(proc::exit_code);
+    // Also ends what the CLI left running in its group (a dev server, a watcher) once it is gone.
+    proc::reap(child, move |code| {
         let _ = exit_tx.send(code);
     });
 
