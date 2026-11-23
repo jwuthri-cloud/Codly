@@ -3,7 +3,8 @@
 // 360 x 63, the stack starts 68 px under the window's top.
 import { describe, expect, it } from 'vitest';
 import tokens from '../../../styles/tokens.css?raw';
-import { BESIDE, counts, grown, ms, onTop, reachDown, toastTop, visiblePart, widthBeside, type Box, type Seen } from '../toastPlace';
+import toastsView from '../../../components/Toasts.svelte?raw';
+import { counts, grown, ms, onTop, reachDown, toastTop, visiblePart, type Box, type Seen } from '../toastPlace';
 
 const box = (left: number, top: number, right: number, bottom: number): Box => ({ left, top, right, bottom });
 
@@ -138,40 +139,6 @@ describe('reachDown', () => {
   });
 });
 
-describe('widthBeside', () => {
-  /** The gap to the panel, the least and the most width, as the stack uses them. */
-  const beside = (panelRight: number, stackRight: number) => widthBeside(panelRight, stackRight, 12, 220, 360);
-
-  it('takes the free room beside the conversation column (Home, 1440 x 900: column 393..1113)', () => {
-    expect(beside(1113, 1426)).toBe(301);
-  });
-
-  it('is still there in a 1280 px window (column 313..1033)', () => {
-    expect(beside(1033, 1266)).toBe(221);
-  });
-
-  it('is never wider than the stack’s own width', () => {
-    expect(beside(1353, 1906)).toBe(360);
-  });
-
-  it('is nothing in a narrow window (900 x 600: column 123..843)', () => {
-    expect(beside(843, 886)).toBeNull();
-  });
-
-  it('is nothing with the sheet open (1440 x 900: column 184..904, the stack ends at 1008)', () => {
-    expect(beside(904, 1008)).toBeNull();
-  });
-
-  it('is nothing beside a room, which is as wide as the window', () => {
-    expect(beside(1426, 1426)).toBeNull();
-  });
-
-  it('needs the least width in full', () => {
-    expect(widthBeside(1000, 1231, 12, 220, 360)).toBeNull();
-    expect(widthBeside(1000, 1232, 12, 220, 360)).toBe(220);
-  });
-});
-
 describe('grown', () => {
   it('keeps a gap around a control: "+" is 3 px left of the stack, and counts with a 4 px gap', () => {
     const plus = box(1033, 72, 1063, 102);
@@ -287,13 +254,6 @@ describe('onTop: does a press at a point reach this control?', () => {
     expect(onTop(button, [], aside)).toBe(false);
     expect(onTop(button, [toast, stack], aside)).toBe(false);
   });
-
-  it('the same asks whether a panel shows: the quest’s level over the office’s column', () => {
-    const column = part('column', shell);
-    const message = part('message', column);
-    expect(onTop(column, [message, column, shell, page], aside)).toBe(true);
-    expect(onTop(column, [quest, message, column, shell, page], aside)).toBe(false);
-  });
 });
 
 describe('ms', () => {
@@ -322,26 +282,20 @@ describe('ms', () => {
   });
 });
 
-describe('the panels the stack stands beside', () => {
-  const views = import.meta.glob<string>(['/src/**/*.svelte'], { query: '?raw', import: 'default', eager: true });
-  const source = (file: string): string => {
-    const found = Object.entries(views).find(([path]) => path.endsWith(`/${file}`));
-    if (!found) throw new Error(`no view ${file}`);
+describe('a toast’s words stay in the toast', () => {
+  /** The declarations of one rule in the toast stack's style. */
+  const rule = (selector: string): string => {
+    const found = new RegExp(`^\\s*\\${selector} \\{([^}]*)\\}`, 'm').exec(toastsView);
+    if (!found) throw new Error(`no rule ${selector}`);
     return found[1];
   };
 
-  it('the mark is an attribute the stack selects on', () => {
-    expect(BESIDE).toBe('data-toast-beside');
-    expect(source('Toasts.svelte')).toContain('querySelectorAll(`[${BESIDE}]`)');
+  it('a long word with no place to break (a branch, a file name) breaks anywhere, in the title and in the text', () => {
+    expect(rule('.title')).toContain('overflow-wrap: anywhere;');
+    expect(rule('.body')).toContain('overflow-wrap: anywhere;');
   });
 
-  it('Home’s conversation column and the first-run quest’s level carry it, and nothing else', () => {
-    const marked = Object.entries(views)
-      .filter(([, text]) => /<[a-z][^>]*\sdata-toast-beside[\s>]/.test(text))
-      .map(([path]) => path.split('/').pop())
-      .sort();
-    expect(marked).toEqual(['Home.svelte', 'Onboarding.svelte']);
-    expect(source('Home.svelte')).toMatch(/<section class="column glass" data-toast-beside[\s>]/);
-    expect(source('Onboarding.svelte')).toMatch(/<section class="panel glass" data-toast-beside[\s>]/);
+  it('the text column can get narrower than its longest word', () => {
+    expect(rule('.txt')).toContain('min-width: 0;');
   });
 });
