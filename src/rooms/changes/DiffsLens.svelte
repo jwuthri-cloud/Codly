@@ -31,7 +31,7 @@
   import { ago, plural } from '../../lib/util/format';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import { oneAtATime } from '../../lib/util/oneAtATime';
-  import { discardWords, editorPlace, heavy, HEAVY_LABEL, inTurn, offDiff, parseDiffKeeping, placeId, reviewBarWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
+  import { commentKeys, discardWords, editorPlace, heavy, HEAVY_LABEL, inTurn, offDiff, parseDiffKeeping, reviewBarWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
@@ -206,6 +206,7 @@
   /** Comments on files that left the diff since you wrote them: no file on screen shows them.
    *  (The last turn shows a part of the task's diff: a file that is not in it did not leave.) */
   const gone = $derived(!lastTurn && loaded === key && !error ? offDiff(comments, files.map((f) => f.path)) : NONE);
+  const goneKeys = $derived(commentKeys(gone));
   const viewedCount = $derived(files.filter((f) => review.viewed(key, f)).length);
   /** Where a file opens in the editor: the worktree of the task that wrote it, or your
    *  repository once the plan is merged (see `editorPlace`). */
@@ -358,7 +359,7 @@
         <div class="review" role="region" aria-label="Your review">
           {#if gone.length}
             <ul class="gone" aria-label="Comments on files that left the diff">
-              {#each gone as c (c.path + ' ' + placeId(c) + c.quote)}
+              {#each gone as c, i (goneKeys[i])}
                 <li>
                   <p class="g-w"><span class="mono">{c.path}{c.line == null ? '' : `:${c.line}`}</span> is not in this diff any more. Send back still sends your comment{c.quote == null ? '' : ', with the line as it was'}.</p>
                   {#if c.quote != null}<p class="g-q">{c.quote}</p>{/if}

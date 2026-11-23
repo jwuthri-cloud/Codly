@@ -8,6 +8,7 @@ import type { Plan } from '../gen/Plan';
 import type { Task } from '../gen/Task';
 import type { TaskStatus } from '../gen/TaskStatus';
 import { parseDiff, type DiffFile, type DiffHunk, type DiffLine } from './diff';
+import { uniqueKeys } from './keys';
 
 /** Where a comment sits: a line of a file's diff (in the new file, or in the old one for a line
  *  the change removes), or the whole file (`line` null). `quote` is that line as the diff shows it. */
@@ -71,6 +72,18 @@ export function placeComments(f: DiffFile, list: ReviewComment[]): { placed: Map
 export function offDiff(list: ReviewComment[], paths: string[]): ReviewComment[] {
   const inDiff = new Set(paths);
   return list.filter((c) => !inDiff.has(c.path));
+}
+
+/**
+ * A key for the row of each comment, in the list's order: no two the same, and a comment keeps
+ * its key when another one is removed, so its row (and a button in it that has the focus) goes
+ * with it and is never handed to the next comment. A comment has no id and no time of its own:
+ * its file, its place and the line as you quoted it name it (`sameSpot`, one comment per such
+ * place). Should two ever share all three, the later one adds its position among them.
+ */
+export function commentKeys(list: readonly ReviewComment[]): string[] {
+  // As JSON: the three parts cannot run into each other, whatever a path or a quoted line holds.
+  return uniqueKeys(list, (c) => JSON.stringify([c.path, placeId(c), c.quote]));
 }
 
 /** Reading order: the diff's file order; in a file, its own comment first, then by line (a removed

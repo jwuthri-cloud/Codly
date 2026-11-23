@@ -44,8 +44,9 @@
 </script>
 
 <!-- Back in Codly's window: a file you changed in your editor meanwhile is not the checked one
-     any more, and no event says so. The core is asked again, once each time the window gets the focus. -->
-<svelte:window onfocus={() => void agentChecks.load(agent.id)} />
+     any more, and no event says so. The core is asked again, but not on every focus: each question
+     starts git there (`agentChecks.focused`). -->
+<svelte:window onfocus={() => agentChecks.focused(agent.id)} />
 
 <div class="checks">
   <div class="head">
