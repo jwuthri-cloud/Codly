@@ -16,7 +16,7 @@ import { ui } from './ui.svelte';
 const watching = (thread: string) => ui.room === 'home' && ui.mode !== 'office' && ui.mode !== 'map' && ui.thread === thread;
 
 const asks = (s: Approval['subject']) =>
-  s.kind === 'command' ? oneLine(s.command, 80) : s.kind === 'question' ? 'Answer it in the conversation' : `Wants to ${sandboxWants(s) ?? s.kind.replace('_', ' ')}`;
+  s.kind === 'command' ? oneLine(s.command, 80) : s.kind === 'question' ? 'Answer it in the conversation' : `Wants to ${sandboxWants(s, 80) ?? s.kind.replace('_', ' ')}`;
 
 /** Something that waits for you in an office you are not looking at, and how to get to it once there. */
 type Need = { line: string; body: string; open: () => void };

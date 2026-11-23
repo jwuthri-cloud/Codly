@@ -142,7 +142,7 @@ pub fn sandbox_host<'a>(tool: &str, input: &'a Value) -> Option<&'a str> {
 
 /// Does this run ask for Claude Code's shell sandbox? An agent with a shell and
 /// `Settings.claude_sandbox` on.
-fn sandboxed(spec: &SpawnSpec) -> bool {
+pub(super) fn sandboxed(spec: &SpawnSpec) -> bool {
     spec.sandbox_shell && !spec.read_only
 }
 
@@ -163,7 +163,8 @@ fn sandboxed(spec: &SpawnSpec) -> bool {
 ///   not allow the CLI asks Codly (`SANDBOX_NETWORK`), which asks the user.
 ///   `failIfUnavailable` is in the CLI's settings schema; what it does is from the CLI's
 ///   documentation, not recorded: where Claude Code cannot sandbox, it does not start. Codly
-///   does not rely on it: it asks the CLI once the session is up (`sandbox_refusal`).
+///   does not rely on it: it asks the CLI once the session is up (`sandbox_refusal`). A CLI
+///   that does end there is said in the same words (`startup::explain`).
 pub fn settings_json(spec: &SpawnSpec) -> Option<Value> {
     let mut doc = serde_json::Map::new();
     if let Some(cmd) = &spec.byok_command {
@@ -175,26 +176,51 @@ pub fn settings_json(spec: &SpawnSpec) -> Option<Value> {
     (!doc.is_empty()).then(|| Value::Object(doc))
 }
 
+/// A run that asked for the shell sandbox and was not started, because the sandbox is not on
+/// as Codly asked for it: the text says why, and what to do. Nothing is wrong with the
+/// conversation, and a new one would not start either: a caller that resumes keeps the session.
+#[derive(Debug)]
+pub struct SandboxNotOn(pub String);
+
+impl std::fmt::Display for SandboxNotOn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SandboxNotOn {}
+
+impl SandboxNotOn {
+    /// What to do about it: the end of every text.
+    const FIX: &'static str = "Check Claude Code's sandbox on this computer, or turn off \"Sandbox Claude's shell\" in Settings → Safety";
+
+    /// Claude Code did not turn its sandbox on at all: the CLI said so (`sandbox_refusal`), or
+    /// it ended at its start because of it (`startup::explain`).
+    pub(super) fn off() -> Self {
+        Self(format!("Claude Code did not turn its sandbox on, so Codly did not start this agent. {}", Self::FIX))
+    }
+}
+
 /// Why a run that asked for the shell sandbox must not go on, read from the CLI's answer to
 /// `get_sandbox_dialog` (`resp`: the `response` of the control response). None: the sandbox
 /// is on and shell commands ask. The answer is recorded on 2.1.311 with the sandbox off
 /// (`enabled: false`), on as Codly asks for it (`mode: "regular"`), and on with the CLI's
 /// default (`mode: "auto-allow"`: commands run with no request). Codly's own `--settings`
 /// never give the last one; settings above them (managed ones) can.
-fn sandbox_refusal(resp: &Value) -> Option<String> {
-    const FIX: &str = "Check Claude Code's sandbox on this computer, or turn off \"Sandbox Claude's shell\" in Settings → Safety";
+fn sandbox_refusal(resp: &Value) -> Option<SandboxNotOn> {
+    const FIX: &str = SandboxNotOn::FIX;
     if resp["subtype"] != "success" {
         let error = resp["error"].as_str().map_or_else(|| resp["error"].to_string(), str::to_owned);
-        return Some(format!("Codly could not check that Claude Code's sandbox is on ({error}), so it did not start this agent. {FIX}"));
+        return Some(SandboxNotOn(format!("Codly could not check that Claude Code's sandbox is on ({error}), so it did not start this agent. {FIX}")));
     }
     let status = &resp["response"];
     if status["enabled"] != true {
-        return Some(format!("Claude Code did not turn its sandbox on, so Codly did not start this agent. {FIX}"));
+        return Some(SandboxNotOn::off());
     }
     if status["mode"] == "auto-allow" {
-        return Some(format!(
+        return Some(SandboxNotOn(format!(
             "Claude Code's sandbox would run this agent's commands without asking, so Codly's approval rules would not see them (a Claude Code setting above Codly's own decides that). Codly did not start this agent. {FIX}"
-        ));
+        )));
     }
     None
 }
@@ -634,7 +660,8 @@ impl Actor {
     /// The CLI's answer to `get_sandbox_dialog`, asked once at the start of a run with the
     /// shell sandbox (shapes: cli-claude-stream-json-2.1.311 §9 and -part2, scenario 16). The
     /// run starts when the sandbox is on. When it is not, the start fails with the reason
-    /// (`sandbox_refusal`) and the process is ended: no command of this run was run.
+    /// (`sandbox_refusal`, a `SandboxNotOn` error) and the process is ended: no command of
+    /// this run was run.
     async fn on_sandbox_status(&mut self, started: EventKind, resp: &Value, ready: &mut Option<oneshot::Sender<anyhow::Result<()>>>) {
         let Some(r) = ready.take() else { return };
         match sandbox_refusal(resp) {
@@ -643,7 +670,7 @@ impl Actor {
                 let _ = r.send(Ok(()));
             }
             Some(why) => {
-                let _ = r.send(Err(anyhow!(why)));
+                let _ = r.send(Err(why.into()));
                 self.start_failed = true; // spawn() returned the error: no events for this run
                 self.begin_shutdown().await;
             }
@@ -2303,19 +2330,21 @@ mod tests {
     #[test]
     fn the_sandbox_status_decides_whether_the_run_goes_on() {
         let status = |name: &str| recorded_control(&recording(name), &json!({ "subtype": "get_sandbox_dialog" })).1["response"].clone();
+        let refusal = |resp: &Value| sandbox_refusal(resp).map(|why| why.to_string());
         // On, as Codly asks for it: commands ask (`mode: "regular"`).
         for name in ["r4-sandbox-noauto", "r4-sandbox-manual-noauto"] {
-            assert_eq!(sandbox_refusal(&status(name)), None, "{name}");
+            assert_eq!(refusal(&status(name)), None, "{name}");
         }
         // Off: the run would work with no sandbox at all.
-        let off = sandbox_refusal(&status("sandbox-off")).expect("the sandbox is off");
+        let off = refusal(&status("sandbox-off")).expect("the sandbox is off");
+        assert_eq!(off, SandboxNotOn::off().to_string());
         assert!(off.starts_with("Claude Code did not turn its sandbox on"), "{off}");
         // On, but commands would run with no request (`mode: "auto-allow"`).
-        let unasked = sandbox_refusal(&status("r4-sandbox-required-available")).expect("commands would not ask");
+        let unasked = refusal(&status("r4-sandbox-required-available")).expect("commands would not ask");
         assert!(unasked.contains("without asking"), "{unasked}");
         // A CLI that cannot answer: nothing says that the sandbox is on. (The shape is the one
         // of every refused control request; the error text here is made up.)
-        let refused = sandbox_refusal(&json!({ "subtype": "error", "request_id": "codly-2", "error": "Unsupported control request subtype: get_sandbox_dialog" }));
+        let refused = refusal(&json!({ "subtype": "error", "request_id": "codly-2", "error": "Unsupported control request subtype: get_sandbox_dialog" }));
         assert!(refused.as_deref().is_some_and(|r| r.starts_with("Codly could not check") && r.contains("Unsupported control request subtype")), "{refused:?}");
         for why in [off, unasked, refused.unwrap()] {
             assert!(why.contains("did not start this agent") && why.ends_with("in Settings → Safety"), "{why}");
@@ -2324,8 +2353,8 @@ mod tests {
 
     /// A run with the sandbox does not start before the CLI says that its sandbox is on:
     /// Codly asks once, right after the handshake, and the session's first event waits for
-    /// the answer. A run that must not go on fails its start, with no events, and its process
-    /// is ended. Request and answers as recorded on 2.1.311.
+    /// the answer. A run that must not go on fails its start (`SandboxNotOn`), with no events,
+    /// and its process is ended. Request and answers as recorded on 2.1.311.
     #[tokio::test]
     async fn a_run_with_the_sandbox_starts_only_when_the_sandbox_is_on() {
         let asked = json!({ "subtype": "get_sandbox_dialog" });
@@ -2355,8 +2384,9 @@ mod tests {
                 assert!(matches!(&kinds[..], [EventKind::SessionStarted { .. }]), "{status_of}: {kinds:?}");
                 assert!(actor.stage == Stage::Running && actor.stdin.is_some(), "{status_of}");
             } else {
-                let why = outcome.expect_err("the run must not start").to_string();
-                assert!(why.contains("did not start this agent"), "{status_of}: {why}");
+                let why = outcome.expect_err("the run must not start");
+                assert!(why.is::<SandboxNotOn>(), "{status_of}: the refusal has its type, for the callers that resume: {why:?}");
+                assert!(why.to_string().contains("did not start this agent"), "{status_of}: {why}");
                 assert!(kinds.is_empty(), "{status_of}: a start that failed has no events: {kinds:?}");
                 assert!(actor.start_failed && actor.stage == Stage::Closing && actor.stdin.is_none(), "{status_of}: the process is ended");
             }

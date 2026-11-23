@@ -24,6 +24,19 @@ describe('a command in Claude Code’s sandbox wants a host', () => {
     expect(sandboxHost(hostRequest({ host: 'moc.elpmaxe‮.evil.example\n' }))).toBe('moc.elpmaxe.evil.example');
   });
 
+  it('keeps a long host whole where it is read, and cuts it only for a short line', () => {
+    // The end of a host name says whose it is: a cut there would show "github.com" alone.
+    const host = `github.com.${'a'.repeat(96)}.evil.example`;
+    expect(host).toHaveLength(120);
+    const s = hostRequest({ host });
+    expect(sandboxHost(s)).toBe(host);
+    expect(sandboxWants(s)).toBe(`reach ${host}`);
+    expect(sandboxWants(s, 80)).toBe(`reach ${host.slice(0, 79)}…`);
+    expect(sandboxWants(hostRequest({ host: 'example.com' }), 80)).toBe('reach example.com');
+    // No space in a host: text after one would read as words of the sentence.
+    expect(sandboxHost(hostRequest({ host: 'example.com and\tevil.example' }))).toBe('example.comandevil.example');
+  });
+
   it('is no other request', () => {
     const others: ApprovalSubject[] = [
       { kind: 'tool', name: 'WebFetch', input: { host: 'example.com' } },

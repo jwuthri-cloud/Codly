@@ -13,7 +13,8 @@ import type { Task } from './gen/Task';
 import type { AgentLive, RateWindow, Seg } from './state/store.svelte';
 import type { DiffStat } from './state/diffstats.svelte';
 import { timer } from './util/format';
-import { basename, oneLine } from './util/sanitize';
+import { sandboxHost } from './util/sandbox';
+import { basename, oneLine, truncate } from './util/sanitize';
 
 export type Part = { t: string; code?: boolean; timer?: boolean };
 /** live = working · wait = needs you · done · idle · blocked · off (stopped). */
@@ -129,8 +130,12 @@ function approvalParts(ap: Approval): Part[] {
       return [txt('Waiting for you: '), code(oneLine(s.command, 44))];
     case 'file_change':
       return s.paths.length === 1 ? [txt('Waiting for you: change '), code(basename(s.paths[0]))] : [txt(`Waiting for you: change ${s.paths.length} files`)];
-    case 'tool':
-      return [txt('Waiting for you: use '), code(oneLine(s.name, 32))];
+    case 'tool': {
+      // A command in Claude Code's sandbox wants a host: said as that, not by the request's tool name.
+      const host = sandboxHost(s);
+      if (host === null) return [txt('Waiting for you: use '), code(oneLine(s.name, 32))];
+      return host ? [txt('Waiting for you: reach '), code(truncate(host, 44))] : [txt('Waiting for you: use the network')];
+    }
     case 'question': {
       const raw = s.questions as unknown;
       const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? ((raw as { questions?: unknown[] }).questions ?? []) : [];

@@ -7,6 +7,7 @@ use std::path::Path;
 use anyhow::bail;
 
 use super::SpawnSpec;
+use super::claude::{self, SandboxNotOn};
 use crate::env;
 use crate::model::Provider;
 
@@ -47,6 +48,17 @@ pub(crate) fn session_trouble(text: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Claude Code that ended at its start because the shell sandbox cannot start: `text` (its
+/// stderr) names the setting that made it end there, `sandbox.failIfUnavailable`, which
+/// `claude::settings_json` passes. The same refusal as when the CLI starts and says that its
+/// sandbox is off. The stderr text is read in the 2.1.311 bundle ("Set
+/// sandbox.failIfUnavailable=false to allow unsandboxed execution"), not recorded
+/// (docs/research/cli-claude-stream-json-2.1.311-part2.md, scenario 16): no machine at hand
+/// has a sandbox that cannot start.
+fn sandbox_trouble(text: &str) -> Option<SandboxNotOn> {
+    text.to_lowercase().contains("failifunavailable").then(SandboxNotOn::off)
 }
 
 /// A process exit as text: "code 1", or "killed by a signal" when there is no code.
@@ -141,9 +153,18 @@ fn advice(provider: Provider, text: &str, version: Option<&str>, home: Option<&s
 }
 
 /// The start-up error to show for `raw`: led by the advice when its text says why it failed,
-/// unchanged otherwise (also when it already is that advice).
+/// unchanged otherwise (also when it already is that advice). A run with Claude Code's shell
+/// sandbox that ended because the sandbox cannot start is led by a `SandboxNotOn`, in the
+/// words of Codly's own check (`sandbox_trouble`): the CLI's advice names a setting that is
+/// not the user's to change in Codly.
 pub(crate) fn explain(spec: &SpawnSpec, version: Option<&str>, raw: anyhow::Error) -> anyhow::Error {
     let text = format!("{raw:#}");
+    if spec.provider == Provider::Claude
+        && claude::sandboxed(spec)
+        && let Some(not_on) = sandbox_trouble(&text)
+    {
+        return raw.context(not_on);
+    }
     match advice(spec.provider, &text, version, account_home(spec), uses_own_key(spec), shell_sign_in(spec).as_deref()) {
         Some(advice) if !text.contains(&advice) => raw.context(advice),
         _ => raw,
@@ -253,6 +274,37 @@ mod tests {
         // Claude Code's words only: another CLI's text stands as it is.
         assert_eq!(advice(Provider::Codex, &gone, None, None, false, None), None);
         assert_eq!(session_trouble("ENOSPC: no space left on device"), None);
+    }
+
+    /// A run with the shell sandbox whose CLI ended at its start, because the sandbox cannot
+    /// start, says what Codly's own check says, with the switch to turn off: not the CLI's
+    /// advice about a setting. The stderr line is written from the text in the 2.1.311 bundle
+    /// (part 2, scenario 16: not recorded), so only the setting's name in it is relied on.
+    #[test]
+    fn a_sandbox_that_cannot_start_is_said_in_plain_words() {
+        let exited = || anyhow!("claude exited during startup (code 1): Error: sandbox required but unavailable. Set sandbox.failIfUnavailable=false to allow unsandboxed execution");
+        let sandboxed = SpawnSpec { sandbox_shell: true, ..spec(Provider::Claude, &[]) };
+        let e = explain(&sandboxed, None, exited());
+        assert_eq!(
+            e.to_string(),
+            "Claude Code did not turn its sandbox on, so Codly did not start this agent. \
+             Check Claude Code's sandbox on this computer, or turn off \"Sandbox Claude's shell\" in Settings → Safety"
+        );
+        assert!(e.is::<SandboxNotOn>(), "the callers that resume keep the session: {e:?}");
+        assert!(format!("{e:#}").ends_with("Set sandbox.failIfUnavailable=false to allow unsandboxed execution"), "the CLI's words stay: {e:#}");
+
+        // The refusal of Codly's own check is not said twice.
+        let checked = explain(&sandboxed, None, SandboxNotOn::off().into());
+        assert_eq!(format!("{checked:#}"), SandboxNotOn::off().to_string());
+
+        // A run that did not ask for the sandbox (the switch is off, or an agent without a
+        // shell), and another CLI: the switch is not the fix, so the CLI's words stand alone.
+        let read_only = SpawnSpec { read_only: true, ..sandboxed.clone() };
+        let codex = SpawnSpec { sandbox_shell: true, ..spec(Provider::Codex, &[]) };
+        for other in [spec(Provider::Claude, &[]), read_only, codex] {
+            let e = explain(&other, None, exited());
+            assert!(!e.is::<SandboxNotOn>() && format!("{e:#}") == exited().to_string(), "{e:#}");
+        }
     }
 
     #[test]

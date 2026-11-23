@@ -62,13 +62,13 @@
     return typeof input?.plan === 'string' ? input.plan : null;
   });
 
-  /** The host a command in Claude Code's sandbox wants to reach ('' = it names none); null for every other request. */
+  /** The host a command in Claude Code's sandbox wants to reach, whole ('' = it names none); null for every other request. */
   const netHost = $derived(sandboxHost(subject));
 
   const headline = $derived.by(() => {
     const who = agent?.name ?? 'An agent';
     if (plan !== null) return `${who} shows you its plan`;
-    const net = sandboxWants(subject);
+    const net = sandboxWants(subject, 80);
     if (net !== null) return `${who} wants to ${net}`;
     switch (subject.kind) {
       case 'command':

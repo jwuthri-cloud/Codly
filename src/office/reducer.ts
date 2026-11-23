@@ -9,6 +9,7 @@ import type { AgentStatus } from '../lib/gen/AgentStatus';
 import type { Approval } from '../lib/gen/Approval';
 import type { EventRow } from '../lib/gen/EventRow';
 import type { Task } from '../lib/gen/Task';
+import { sandboxWants } from '../lib/util/sandbox';
 import { columnOf, emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type ToolCall } from './model';
 import { basename, clean, commandHead, hash, host } from './text';
 import { setChosenTraits } from './traits';
@@ -213,7 +214,8 @@ export function approvalText(ap: Approval): string {
     case 'file_change':
       return s.paths.length ? `edit ${clean(basename(s.paths[0]), 28)}${s.paths.length > 1 ? ` +${s.paths.length - 1}` : ''}` : 'a file change';
     case 'tool':
-      return `use ${clean(s.name, 30)}`;
+      // A command in Claude Code's sandbox wants a host: said as that, not by the request's tool name.
+      return sandboxWants(s, 30) ?? `use ${clean(s.name, 30)}`;
     case 'question':
       return 'a question';
     default:

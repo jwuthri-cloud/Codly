@@ -60,6 +60,12 @@ describe('narration', () => {
     const n = narrateFrom(input({ agent: agent({ status: 'waiting_approval' }), approvals: [ap] }));
     expect(n.key).toBe('Waiting for you: `rm -rf dist`');
     expect(n.tone).toBe('wait');
+    // A command in Claude Code's sandbox wants a host: the host, not the name of the request's tool.
+    const tool = (name: string, asked: Record<string, string>) =>
+      narrateFrom(input({ agent: agent({ status: 'waiting_approval' }), approvals: [{ ...ap, subject: { kind: 'tool', name, input: asked } }] })).key;
+    expect(tool('SandboxNetworkAccess', { host: 'example.com' })).toBe('Waiting for you: reach `example.com`');
+    expect(tool('SandboxNetworkAccess', {})).toBe('Waiting for you: use the network');
+    expect(tool('WebFetch', { url: 'https://example.com' })).toBe('Waiting for you: use `WebFetch`');
   });
 
   it('a task waiting for you narrates as wait', () => {

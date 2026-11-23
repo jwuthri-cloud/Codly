@@ -363,7 +363,11 @@ that are new there are named (the index does not search them).
   fails. After the `initialize` handshake the adapter asks `get_sandbox_dialog` once
   (`sandbox_refusal`): the run starts only when the answer says `enabled: true` and its `mode`
   is not `auto-allow` (commands would run with no request: a setting above Codly's own); else
-  the start fails with the reason and the process is ended. A command the model wants to run
+  the start fails with the reason and the process is ended. That failure is a
+  `claude::SandboxNotOn` error, as is a CLI that ends at its start with a text that names
+  `failIfUnavailable` (`startup::explain`: the same plain words): a 1:1 agent that was
+  resuming keeps its session then, since no new one would start either (`lead.rs`
+  `chat_agent_from`). A command the model wants to run
   outside the sandbox sends `can_use_tool` with `decision_reason_type: "sandboxOverride"`,
   which the adapter marks with the risk "runs outside the sandbox": it asks the user in every
   mode but Full access, and no saved rule covers it. The same risk is set when the request's
@@ -376,7 +380,9 @@ that are new there are named (the index does not search them).
   adapter gives it the risk "network (<host>)", so it asks the user in every mode but Full
   access, and offers allow or deny only. Allowed, the command goes on; denied, it ends with a
   sandbox error. The card and the notification name the host, not the tool
-  (`claude::sandbox_host`, src/lib/util/sandbox.ts). Read in the bundle, not recorded: on
+  (`claude::sandbox_host`, src/lib/util/sandbox.ts), as do the agent's status line, the
+  office bubble and the palette; the card's sentence and the palette's confirmation show the
+  host whole, a headline or a toast may cut it. Read in the bundle, not recorded: on
   allow the CLI keeps the host for the rest of its session. Not recorded: `failIfUnavailable`
   (asked for so that Claude Code does not start where it cannot sandbox; the status request
   above is the check Codly relies on), a write to a linked worktree's shared `.git`, and
