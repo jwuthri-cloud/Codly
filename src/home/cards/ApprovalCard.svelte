@@ -226,7 +226,7 @@
       </div>
       {#if others.length}<p class="same">Also asked by {others.join(', ')}, each in the same folder of its own worktree. Your answer goes to all of them.</p>{/if}
     {:else if subject.kind === 'file_change'}
-      <ul class="paths">{#each subject.paths as p (p)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
+      <ul class="paths">{#each subject.paths as p, pi (pi)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
       {#if subject.diff}<pre class="diff selectable">{subject.diff}</pre>{/if}
     {:else if plan !== null}
       <div class="plan selectable"><Markdown text={plan} brief /></div>
@@ -237,7 +237,7 @@
         {#each questions as q, qi (qi)}
           <fieldset class="q">
             <legend>{q.question}</legend>
-            {#each q.options as o (o.label)}
+            {#each q.options as o, oi (oi)}
               <label class="opt" class:on={(picks[qi] ?? []).includes(o.label)}>
                 <input type={q.multiSelect ? 'checkbox' : 'radio'} name="q-{approval.id}-{qi}" checked={(picks[qi] ?? []).includes(o.label)} onchange={() => toggle(qi, o.label, !!q.multiSelect)} />
                 <span class="ot"><b>{o.label}</b>{#if o.description}<span class="od">{o.description}</span>{/if}</span>
@@ -258,7 +258,7 @@
     {/if}
     {#if approval.risks.length}
       <div class="risks">
-        {#each approval.risks as r (r)}<span class="risk">{r}</span>{/each}
+        {#each approval.risks as r, ri (ri)}<span class="risk">{r}</span>{/each}
         <Provenance kind="inferred" />
       </div>
     {/if}
