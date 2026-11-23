@@ -29,7 +29,7 @@ env -u <every CLAUDE* and ANTHROPIC_BASE_URL variable of the parent session> \
   - `{"_sent":{…},"_t":…}` a line the host wrote to stdin.
   - `{"_stderr":"…","_t":…}` a stderr line. `{"_meta":{…},"_t":…}` a driver note (stdin closed, exit code, files on disk).
   - every other line: one stdout line of the CLI.
-- The unsanitized recordings and the driver scripts are not in the repo.
+- The unsanitized recordings are not in the repo. The driver scripts are in `docs/research/drivers/claude-stream-json/`.
 
 ## Sanitizing
 
