@@ -7,6 +7,7 @@
   import type { Seg, SubAgent } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { dur } from '../../lib/util/format';
+  import { uniqueKeys } from '../../lib/util/keys';
   import { clean } from '../../lib/util/sanitize';
   import Icon from '../../components/Icon.svelte';
   import { helperProgress, helperState, helperTitle } from '../helpers';
@@ -25,6 +26,8 @@
   const progress = $derived(helperProgress(helper));
   const now = $derived(phase === 'running' ? clean(helper.step).trim() : '');
   const report = $derived(clean(helper.report).trim());
+  /** One key per call, its call id. A CLI may use an id again: the later call adds its place. */
+  const stepKeys = $derived(uniqueKeys(steps, (s) => s.callId));
 </script>
 
 <div class="helper s-{phase}">
@@ -41,7 +44,7 @@
       {#if now}<p class="now truncate">{now}</p>{/if}
       {#if steps.length}
         <ol class="own">
-          {#each steps as s (s.callId)}
+          {#each steps as s, si (stepKeys[si])}
             <li>{@render step(s)}</li>
           {/each}
         </ol>

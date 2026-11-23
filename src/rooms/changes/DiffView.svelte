@@ -118,7 +118,7 @@
     {#if onviewed}<label class="viewed" data-tip="Tick the files you have read. A file that changes later is unticked."><input type="checkbox" checked={viewed} onchange={(e) => onviewed?.(e.currentTarget.checked)} />Viewed</label>{/if}
   </header>
   {#if editingId === FILE_PLACE || notes.has(FILE_PLACE)}{@render note(onFile)}{/if}
-  {#each lost as c (placeId(c) + c.quote)}
+  {#each lost as c, i (i)}
     <div class="note of-file">
       <p class="note-w">Line {c.line} changed or left the diff after you wrote this. Send back still sends your comment, with the line as it was:</p>
       <p class="note-q">{c.quote}</p>

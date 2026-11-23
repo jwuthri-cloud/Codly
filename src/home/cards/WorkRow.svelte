@@ -8,6 +8,7 @@
   import type { Seg, SubAgent, Thought } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { dur } from '../../lib/util/format';
+  import { uniqueKeys } from '../../lib/util/keys';
   import { pastVerb, phrase, subagentTag } from '../../lib/util/labels';
   import Icon from '../../components/Icon.svelte';
   import Provenance from '../../components/Provenance.svelte';
@@ -26,6 +27,8 @@
   let open = $state(false);
   /** The agent's own steps, and each helper's calls apart from them. */
   const split = $derived(splitHelpers(segs, helpers));
+  /** One key per step, its call id. A CLI may use an id again in a later turn of the same stretch: that step adds its place. */
+  const ownKeys = $derived(uniqueKeys(split.own, (s) => s.callId));
   const helperOf = (s: Seg) => helpers.find((h) => h.callId === s.callId);
   const running = $derived(segs.some((s) => s.end == null) || thinking != null || helpers.some((h) => h.status === 'running'));
   /** Only the latest outcome counts: a failing run fixed later in the same stretch is not a failure. */
@@ -58,7 +61,7 @@
     </button>
     {#if open}
       <ol class="steps">
-        {#each split.own as s (s.callId)}
+        {#each split.own as s, si (ownKeys[si])}
           {@const helper = helperOf(s)}
           <li>
             {#if helper}

@@ -139,7 +139,7 @@
     {#if log.length}
       <h4 class="r-title">Recent activity</h4>
       <ul class="log">
-        {#each log as l (l.ts + l.kind + l.label)}
+        {#each log as l, i (i)}
           <li class:bad={!l.ok}>
             <span class="muted small">{ago(l.ts, now)}</span>
             <span class="small"><b>{l.kind === 'schedule' ? 'Schedule' : l.kind}</b> {l.label}: {l.detail}</span>

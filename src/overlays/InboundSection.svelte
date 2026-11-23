@@ -217,7 +217,7 @@
       <div class="log">
         <span class="f-label">Recent requests</span>
         <ul>
-          {#each st.deliveries.slice(0, 6) as d (d.at + d.endpoint + d.outcome)}
+          {#each st.deliveries.slice(0, 6) as d, i (i)}
             <li><span class="muted small">{ago(d.at)}</span><span>{d.endpoint}</span><span class="small" class:warn={d.outcome !== 'accepted'}>{d.outcome}</span></li>
           {/each}
         </ul>

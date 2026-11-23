@@ -78,11 +78,6 @@ class Review {
     }
   }
 
-  /** A request was closed with nothing sent: the comments its composer held stay on their diffs, as before Send back. */
-  unhand(office: string | null, thread: string) {
-    this.handed = Object.fromEntries(Object.entries(this.handed).filter(([, to]) => to.office !== office || to.thread !== thread));
-  }
-
   private mark(f: DiffFile): string {
     let m = this.marks.get(f);
     if (m == null) this.marks.set(f, (m = fileMark(f)));

@@ -8,6 +8,7 @@
   text is in the tooltip), its buttons stay.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { blockers } from '../lib/state/blockers.svelte';
   import { resumeWork } from '../lib/state/resumeWork.svelte';
   import { store } from '../lib/state/store.svelte';
@@ -19,6 +20,17 @@
   const asking = $derived(asksNow(store.settings.resume_on_launch, resumeWork.later));
   /** The bar ends left of an open sheet or Ask me panel: only then can its text be cut. */
   const beside = $derived(ui.sheetOpen || blockers.panel);
+
+  // What the bar says was true when the core was asked. While it is on screen, a task or a plan
+  // that changes may have changed it (the tasks that waited were cancelled): the core is asked
+  // again (`changed` waits a second, so many changes are one read), and once when the bar shows.
+  const shown = $derived(offer != null);
+  $effect(() => {
+    if (!shown) return;
+    void store.tasks;
+    void store.plans;
+    untrack(() => resumeWork.changed());
+  });
 </script>
 
 {#if offer}

@@ -12,13 +12,16 @@ export function optionOf(catalog: ModelCatalog | null, name: string): ModelOptio
   return catalog?.models.find((m) => (name ? m.id === name : m.is_default)) ?? null;
 }
 
-/** The thinking efforts to offer for `name`: the model's own, in the CLI's order. For a name the
- *  CLI does not list (typed by hand), or one it lists without levels: every level its list
- *  names, weakest first. For a CLI that lists none: Codly's table (`EFFORTS`, Claude Code).
+/** The thinking efforts to offer for `name`: the model's own, in the CLI's order, once each. A
+ *  model that the CLI's own list names without a level takes none: none is offered. For a name
+ *  the list does not have (typed by hand), and for a model of Codly's built-in list without
+ *  levels: every level the list names, weakest first. For a list that names none: Codly's
+ *  table (`EFFORTS`, Claude Code).
  *  Only levels the "model:effort" format carries: another word would become part of the name. */
 export function effortsFor(catalog: ModelCatalog | null, provider: Provider, name: string): string[] {
-  const own = (optionOf(catalog, name)?.efforts ?? []).filter((e) => EFFORT_LEVELS.includes(e));
-  if (own.length) return own;
+  const option = optionOf(catalog, name);
+  const own = [...new Set(option?.efforts ?? [])].filter((e) => EFFORT_LEVELS.includes(e));
+  if (own.length || (option && catalog?.source === 'cli')) return own;
   const named = new Set((catalog?.models ?? []).flatMap((m) => m.efforts));
   const listed = EFFORT_LEVELS.filter((e) => named.has(e));
   return listed.length ? listed : (EFFORTS[provider] ?? []);

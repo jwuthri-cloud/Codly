@@ -10,6 +10,7 @@
   import { store, type Seg } from '../../lib/state/store.svelte';
   import { ui, wallNow } from '../../lib/state/ui.svelte';
   import { clock, clockSec, dur } from '../../lib/util/format';
+  import { uniqueKeys } from '../../lib/util/keys';
   import { activityClass, idVar, pastVerb, phrase } from '../../lib/util/labels';
   import { oneLine } from '../../lib/util/sanitize';
   import EmptyState from '../../components/EmptyState.svelte';
@@ -43,12 +44,16 @@
   });
 
   // Bars and turns change with stored events only (a streamed word draws nothing here), and the
-  // store never changes a list it has handed out: no copy is needed.
+  // store never changes a list it has handed out: no copy is needed. `keys`: one per bar, its
+  // call id; a CLI may use an id again in a later turn, and that bar adds its place.
   const lanes = $derived.by(() => {
     void store.rev;
     return [...store.agents]
       .sort((a, b) => (a.role === 'lead' ? -1 : b.role === 'lead' ? 1 : a.created_at - b.created_at))
-      .map((a) => ({ agent: a, segs: store.live[a.id]?.segments ?? [], turns: store.live[a.id]?.turns ?? [] }));
+      .map((a) => {
+        const segs = store.live[a.id]?.segments ?? [];
+        return { agent: a, segs, keys: uniqueKeys(segs, (s) => s.callId), turns: store.live[a.id]?.turns ?? [] };
+      });
   });
   // Running agents first; the stopped ones below a fold (open by itself when nobody runs).
   const alive = $derived(lanes.filter((l) => l.agent.status !== 'offline'));
@@ -159,7 +164,7 @@
           <g class="lane" class:off={l.off} class:lit={ui.hover.agentId === l.agent.id} style:--hue={idVar(l.agent.color)}>
             <rect class="lane-bg" x="0" {y} {width} height={LANE} />
             {#each l.turns as t, ti (ti)}<rect class="turn" x={x(t.start)} y={y + 10} width={Math.max(2, x(t.end ?? clockNow) - x(t.start))} height={LANE - 20} rx="6" />{/each}
-            {#each l.segs as s (s.callId)}
+            {#each l.segs as s, si (l.keys[si])}
               {@const w = Math.max(3, x(s.end ?? clockNow) - x(s.start))}
               <!-- svelte-ignore a11y_click_events_have_key_events -->
               <rect class="seg c-{activityClass(s.activity)}" class:open={s.end == null} class:fail={s.ok === false} x={x(s.start)} y={y + 16} width={w} height={LANE - 32} rx="3" role="button" tabindex="-1" data-tip={segTip(s)} onclick={() => ui.selectAgent(s.agentId, s.eventId)} />

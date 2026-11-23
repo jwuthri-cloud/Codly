@@ -3,6 +3,7 @@ import { api } from '../api';
 import type { ChatMessage } from '../gen/ChatMessage';
 import type { Plan } from '../gen/Plan';
 import type { PullRequest } from '../gen/PullRequest';
+import type { Task } from '../gen/Task';
 import type { Workspace } from '../gen/Workspace';
 import { openWorkspace } from '../state/actions';
 import { closeQuestion, closeWithUndo, flushClosing, UNDO_MS } from '../state/closing';
@@ -163,6 +164,7 @@ describe('closing a request, with Undo', () => {
 describe('what a close asks first', () => {
   const BRANCH = 'codly/ab12/integration';
   const plan = (o: Partial<Plan> = {}): Plan => ({ id: 'p1', thread: 'lead:a', status: 'done', integration_branch: BRANCH, merged_sha: null, kept: false, created_at: 1, ...o }) as Plan;
+  const task = (id: string, status: Task['status'], plan_id = 'p1'): Task => ({ id, plan_id, status }) as Task;
   const request = (o: Partial<Request> = {}): Request => ({ thread: 'lead:a', title: 'Fix A', phase: 'done', ...o }) as Request;
   const pr = (state: PullRequest['state']): PullRequest => ({ url: 'https://github.com/acme/web/pull/7', remote: 'origin', branch: BRANCH, base: 'main', created_at: 1, state, checks: null });
   const kept = `Nothing is deleted: ${BRANCH} stays, and you can still merge it in Changes.`;
@@ -176,6 +178,7 @@ describe('what a close asks first', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     store.plans = [];
+    store.tasks = [];
     ui.keptPlans = [];
     prUi.opened = {};
   });
@@ -203,6 +206,42 @@ describe('what a close asks first', () => {
     // An earlier plan of the request counts too.
     store.plans = [plan(), plan({ id: 'p2', created_at: 2, merged_sha: 'abc1234' })];
     expect((await closeQuestion(request({ phase: 'merged' })))?.ask).toBe('Not merged yet: its branch stays. Close?');
+  });
+
+  it('a failed or cancelled plan with done tasks asks first, and says that their work stays on its branch', async () => {
+    const inChanges = 'Nothing is deleted: you can still merge it in Changes.';
+    const some = { ask: 'Some tasks are done and not merged: their work stays on the plan’s branch. Close?', detail: inChanges, yes: 'Close' };
+    store.tasks = [task('t1', 'done'), task('t2', 'done'), task('t3', 'failed')];
+    for (const status of ['failed', 'cancelled'] as const) {
+      store.plans = [plan({ status })];
+      expect(await closeQuestion(request({ phase: status }))).toEqual(some);
+    }
+    // One done task: the question does not say "some".
+    store.plans = [plan({ status: 'failed' })];
+    store.tasks = [task('t1', 'done'), task('t3', 'failed')];
+    expect(await closeQuestion(request({ phase: 'failed' }))).toEqual({ ask: 'A task is done and not merged: its work stays on the plan’s branch. Close?', detail: inChanges, yes: 'Close' });
+    expect(record).not.toHaveBeenCalled(); // a plan that did not finish has no pull request to read
+  });
+
+  it('a failed or cancelled plan with no done task leaves nothing behind, and neither does one whose work is in your branch', async () => {
+    store.plans = [plan({ status: 'failed' })];
+    store.tasks = [task('t1', 'failed'), task('t2', 'cancelled'), task('t9', 'done', 'another-plan')];
+    expect(await closeQuestion(request({ phase: 'failed' }))).toBeNull();
+    // Its done tasks are merged, or you chose to keep the branch as it is.
+    store.tasks = [task('t1', 'done'), task('t2', 'failed')];
+    for (const p of [plan({ status: 'failed', merged_sha: 'abc1234' }), plan({ status: 'cancelled', kept: true })]) {
+      store.plans = [p];
+      expect(await closeQuestion(request({ phase: 'failed' }))).toBeNull();
+    }
+    // Another request's plan is not this one's.
+    store.plans = [plan({ status: 'failed', thread: 'lead:b' })];
+    expect(await closeQuestion(request({ phase: 'talking' }))).toBeNull();
+  });
+
+  it('a finished plan that is not merged asks about its branch, also beside a failed plan with done tasks', async () => {
+    store.plans = [plan(), plan({ id: 'p0', status: 'failed', created_at: 0 })];
+    store.tasks = [task('t1', 'done', 'p0')];
+    expect(await closeQuestion(request())).toEqual({ ask: 'Not merged yet: its branch stays. Close?', detail: kept, yes: 'Close' });
   });
 
   it('an open pull request asks first, with unmerged work and without', async () => {

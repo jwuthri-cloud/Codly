@@ -82,7 +82,7 @@
     {/if}
     {#if merge.failed_checks.length}
       <div class="row">
-        <span class="what grow"><Icon name="merge" size={12} /><span>With this plan merged into <code>{merge.target}</code>, {#each merge.failed_checks as c, i (c)}{i ? ', ' : ''}<code>{c}</code>{/each} failed, so nothing was merged. <code>{merge.target}</code> has commits the plan was never checked with.</span></span>
+        <span class="what grow"><Icon name="merge" size={12} /><span>With this plan merged into <code>{merge.target}</code>, {#each merge.failed_checks as c, i (i)}{i ? ', ' : ''}<code>{c}</code>{/each} failed, so nothing was merged. <code>{merge.target}</code> has commits the plan was never checked with.</span></span>
         <button class="btn sm primary" disabled={busy} data-tip={`Codly brings ${merge.target} into its own worktree, and a task of the plan makes the checks pass there. Your checkout is not touched.`} onclick={resolve}>Have an agent fix it</button>
         {#if onunchecked}<button class="btn sm" onclick={onunchecked}>Merge anyway</button>{/if}
       </div>
