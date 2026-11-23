@@ -36,24 +36,29 @@ export interface TraceSummary {
 
 /**
  * Chronological (oldest first). `events` may hold any agents' events, in the order Codly recorded
- * them. A call id names one call while that call runs: a CLI that uses the id again after the
- * call ended (in a later turn) started another call, and both are listed, as on the timeline.
+ * them. A call id names one call while that call runs, and no longer than its turn: a CLI that
+ * uses the id again after the call ended, or in a later turn (the first call was stopped with its
+ * turn and has no completion), started another call. Both are listed, as on the timeline.
  */
 export function buildTraces(events: readonly EventRow[], agentId: string): TraceCall[] {
   const calls: TraceCall[] = [];
   /** The calls with no completion yet, by call id. */
   const open = new Map<string, TraceCall>();
+  /** Those of them whose turn or process is over: a result may still come, a new start may not. */
+  const left = new Set<TraceCall>();
   for (const e of events) {
     if (e.agent_id !== agentId) continue;
     const k = e.kind;
-    if (k.type === 'tool_started') {
+    if (k.type === 'turn_completed' || k.type === 'exited') {
+      for (const c of open.values()) left.add(c);
+    } else if (k.type === 'tool_started') {
       const call: TraceCall = {
         callId: k.call_id, name: k.name, activity: k.activity, label: targetLabel(k.target, k.activity), subagent: subagentTag(k.input), start: e.ts,
         durationMs: null, source: null, ok: null, exitCode: null, testsPassed: null, testsFailed: null,
       };
       const running = open.get(k.call_id);
-      // Announced again while it runs (the CLI knows more of its input by now): the same call.
-      if (running) Object.assign(running, call, { start: running.start });
+      // Announced again in the turn it runs in (the CLI knows more of its input by now): the same call.
+      if (running && !left.has(running)) Object.assign(running, call, { start: running.start });
       else {
         calls.push(call);
         open.set(k.call_id, call);

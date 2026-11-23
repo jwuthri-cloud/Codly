@@ -54,6 +54,24 @@ describe('buildTraces', () => {
     expect(t[0].label).toContain('pnpm test');
   });
 
+  it('lists both calls when a call was stopped with its turn and a later turn uses its id again', () => {
+    for (const end of [{ type: 'turn_completed', status: 'interrupted', result_text: null, duration_ms: null }, { type: 'exited', code: null }]) {
+      const t = buildTraces([started('a', T0, 'c1'), ev('a', T0 + 400, end), started('a', T0 + 60_000, 'c1', 'Read'), done('a', T0 + 60_300, 'c1')], 'a');
+      // The later call has its own start: its duration is not measured from the turn before.
+      expect(t.map((c) => [c.name, c.start, c.durationMs, c.ok])).toEqual([
+        ['Bash', T0, null, null],
+        ['Read', T0 + 60_000, 300, true],
+      ]);
+      expect(summarize(t)).toMatchObject({ calls: 2, totalMs: 300 });
+    }
+  });
+
+  it('still pairs a result that comes after the turn with the call it belongs to', () => {
+    const t = buildTraces([started('a', T0, 'c1'), ev('a', T0 + 400, { type: 'turn_completed', status: 'completed', result_text: null, duration_ms: null }), done('a', T0 + 900, 'c1')], 'a');
+    expect(t).toHaveLength(1);
+    expect(t[0]).toMatchObject({ start: T0, durationMs: 900, ok: true });
+  });
+
   it("says which calls a subagent made, and leaves the agent's own unmarked", () => {
     const by = (input: unknown) => ev('a', T0, { type: 'tool_started', call_id: `c${id}`, name: 'commandExecution', activity: 'execute', target, input, confidence: 'observed' });
     const t = buildTraces([by({ command: 'ls' }), by({ command: 'ls', subagent: { thread: 't1', name: 'Ada (explorer)' } }), by({ command: 'ls', subagent: { thread: 't2', name: null } })], 'a');
