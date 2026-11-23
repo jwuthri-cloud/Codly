@@ -11,12 +11,20 @@
 //!   itself resolves them in its worktree, and Codly commits the merge when its turn ends.
 //! - `check_merge_result` runs the plan's verify commands on the result of the merge, in a
 //!   scratch worktree, before the user's branch moves. Only when that result is new: the user's
-//!   branch has commits the plan was never checked with.
+//!   branch has commits the plan was never checked with. When a check fails there and nothing
+//!   conflicts, `resolve_merge_conflict` gives the plan one more task that makes the checks
+//!   pass, on the merge Codly committed in the plan's worktree.
+//!
+//! The task that works on the plan's own branch is reviewed like every task, but its reviewer
+//! reads only what was done by hand (`resolution_diff`): each conflict as git left it against
+//! how it was resolved, and the commits after the merge, not the user's own commits that the
+//! merge brought in. The checks its gate ran on the plan's branch as it is are not run a second
+//! time when the plan finishes again (`checked_in_place`).
 //!
 //! A merge is only ever committed by Codly, and never while a file still has conflict markers.
 //! A resolution that does not finish leaves nothing behind: the plan's branch goes back to
-//! where it was (`settle_resolution`), and a solo agent's merge can be stopped
-//! (`stop_resolving_merge`).
+//! where it was and the new files its worker left go (`settle_resolution`), and a solo agent's
+//! merge can be stopped (`stop_resolving_merge`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -49,8 +57,9 @@ pub struct MergeState {
     pub repo: String,
     /// Files both branches changed in a way git cannot combine. Empty: it merges cleanly.
     pub conflicts: Vec<String>,
-    /// Who resolves the conflicts now: the plan's task, while it is not finished; the solo
-    /// agent, while the merge Codly started is open in its worktree.
+    /// Who works on it now: the plan's task that resolves the conflicts (or makes the plan's
+    /// checks pass on the merge), while it is not finished; the solo agent, while the merge
+    /// Codly started is open in its worktree.
     pub resolving: Option<Id>,
     /// The plan's checks that failed on the result of this very merge the last time it was
     /// tried (the merge was not made). Empty once either branch moved.
@@ -59,6 +68,9 @@ pub struct MergeState {
     /// was tried (the worktree for them could not be set up; the merge was not made). None
     /// once either branch moved.
     pub checks_not_run: Option<String>,
+    /// How many commits the checked-out branch has that the Codly branch was not built on: it
+    /// is behind by that many, and the merge brings the two together.
+    pub behind: u32,
 }
 
 /// The plan's checks that failed on the result of merging `tip` into `head`, or why they could
@@ -86,6 +98,12 @@ struct Resolution {
     tip: String,
     base_commit: Option<String>,
     base_branch: Option<String>,
+    /// The new (untracked) paths that were in the plan's worktree before the task started, as
+    /// `Git::untracked` lists them: what worktree setup and the checks left there. A resolution
+    /// that does not finish removes the new paths that are not in this list. None in a record
+    /// from before Codly kept the list: then no file is removed.
+    #[serde(default)]
+    untracked: Option<Vec<String>>,
 }
 
 fn resolution_key(plan_id: &str) -> String {
@@ -154,17 +172,30 @@ pub(super) fn in_place(task: &Task, plan: &Plan) -> Option<(String, PathBuf)> {
     Some((branch.clone(), PathBuf::from(plan.integration_worktree.as_ref()?)))
 }
 
+/// The key of a task that resolves a conflict with the user's branch, and of one that makes
+/// the plan's checks pass on the merge with it.
+const RESOLVE: &str = "resolve";
+const FIX_CHECKS: &str = "fix-checks";
+
 /// "resolve", then "resolve-2"…: a plan can need this more than once.
-fn resolve_key(tasks: &[Task]) -> String {
+fn next_key(tasks: &[Task], stem: &str) -> String {
     let mut n = 1;
     loop {
-        let key = if n == 1 { "resolve".to_string() } else { format!("resolve-{n}") };
+        let key = if n == 1 { stem.to_string() } else { format!("{stem}-{n}") };
         if !tasks.iter().any(|t| t.key == key) {
             return key;
         }
         n += 1;
     }
 }
+
+/// What the reviewer of a task that worked on its plan's own branch reads after the brief: the
+/// diff there is not the task's whole change.
+pub(super) const REVIEW_NOTE: &str = "\n\nAbout the diff: this task worked on a merge of the plan's branch with the user's branch. \
+     The diff shows only what the worker changed by hand, in the order Codly committed it. In the merge, the removed lines \
+     from <<<<<<< to >>>>>>> are a conflict as git left it, with both sides, and the added lines are how the worker resolved \
+     it. What git merged by itself is the user's own work: it is not in the diff and not for review. Check that each \
+     resolution keeps what both sides changed.";
 
 fn resolve_goal(target: &str, files: &[String]) -> String {
     format!(
@@ -212,6 +243,55 @@ fn resolve_task(plan: &Plan, key: String, target: &str, files: &[String], verify
         created_at: now,
         updated_at: now,
     }
+}
+
+fn fix_goal(target: &str, failed: &[String]) -> String {
+    format!(
+        "The plan is finished, and {target} (the user's branch) got new commits meanwhile. The two merge without a conflict, \
+         but on the result of that merge these checks fail: {}. Codly merged {target} into this worktree, which holds the \
+         plan's finished work, and committed the merge.\n\
+         Find out why the checks fail now. Fix it so that the plan's work and the changes on {target} are both kept and work \
+         together. Then make sure the verify commands pass.\n\
+         Your write scope is the files the plan changed. If the fix needs a change in another file, make that change and \
+         name the file in scope_exceptions in your report.\n\
+         Do not run git commands that change the repository (commit, merge, checkout, reset, stash): Codly commits your work \
+         when you report.",
+        code_list(failed)
+    )
+}
+
+/// The task that makes the plan's checks pass on the merge with `target`, in the plan's own
+/// worktree: like the task that resolves a conflict. `scope`: the files the plan changed.
+#[allow(clippy::too_many_arguments)]
+fn fix_task(plan: &Plan, key: String, target: &str, failed: &[String], scope: &[String], verify: Vec<String>, branch: &str, wt: &Path) -> Task {
+    let mut acceptance: Vec<String> = failed.iter().map(|c| format!("`{c}` passes")).collect();
+    acceptance.push(format!("The plan's work and the changes on {target} are both kept and work together"));
+    Task {
+        title: format!("Fix the checks with {target} merged in"),
+        goal: fix_goal(target, failed),
+        acceptance,
+        ..resolve_task(plan, key, target, scope, verify, branch, wt)
+    }
+}
+
+/// Remove what is new in one of Codly's own worktrees: the untracked paths `now` that were not
+/// there `before` (both as `Git::untracked` lists them). A path under a folder that was there
+/// before stays, and so does a folder that holds a path from before. Returns what was removed.
+fn remove_new(wt: &Path, now: &[String], before: &[String]) -> std::io::Result<Vec<String>> {
+    let was_there = |path: &str| before.iter().any(|b| b == path || (b.ends_with('/') && path.starts_with(b.as_str())) || (path.ends_with('/') && b.starts_with(path)));
+    let mut removed = vec![];
+    for path in now.iter().filter(|p| !was_there(p)) {
+        let full = wt.join(path);
+        // A link is removed, never followed.
+        match std::fs::symlink_metadata(&full) {
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&full)?,
+            Ok(_) => std::fs::remove_file(&full)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        }
+        removed.push(path.clone());
+    }
+    Ok(removed)
 }
 
 /// What a solo agent is asked, in its own conversation, when the user has it resolve a conflict.
@@ -268,16 +348,15 @@ impl Inner {
         let target = self.checked_out(&repo).await?;
         let head = self.git.head(&repo).await?;
         let tip = self.git.rev_parse(&repo, &branch).await?;
-        let conflicts = match &tip {
-            Some(tip) => self.git.merge_tree_check(&repo, "HEAD", tip).await?.conflicts,
+        let (conflicts, behind) = match &tip {
+            Some(tip) => (self.git.merge_tree_check(&repo, "HEAD", tip).await?.conflicts, self.git.commits_ahead(&repo, tip, "HEAD").await?),
             // The branch was deleted: there is nothing to merge, so nothing conflicts.
-            None => vec![],
+            None => (vec![], 0),
         };
         let (resolving, failed_checks, checks_not_run) = match source {
             PrSource::Plan(id) => {
                 let resolving = self.open_resolution(&self.plan(id)?)?.map(|t| t.id);
-                let failed: Option<FailedChecks> = self.store.kv_get(&failed_key(id))?.map(|v| serde_json::from_str(&v)).transpose()?;
-                let current = failed.filter(|f| Some(&f.head) == head.as_ref() && Some(&f.tip) == tip.as_ref());
+                let current = self.failed_checks(id, head.as_deref(), tip.as_deref())?;
                 let (failed, not_run) = current.map(|f| (f.failed, f.not_run)).unwrap_or_default();
                 (resolving, failed, not_run)
             }
@@ -286,11 +365,19 @@ impl Inner {
                 (self.git.in_merge(&wt).await.then(|| id.clone()), vec![], None)
             }
         };
-        Ok(MergeState { target, branch, repo: ws.repo_path, conflicts, resolving, failed_checks, checks_not_run })
+        Ok(MergeState { target, branch, repo: ws.repo_path, conflicts, resolving, failed_checks, checks_not_run, behind })
     }
 
-    /// The plan's task that resolves a conflict with the user's branch, while it is not
-    /// finished: until then a merge may be open in the plan's integration worktree.
+    /// What the plan's checks said about the result of merging `tip` into `head`, the last
+    /// time that merge was tried. None: they passed or never ran, or one of the two moved since.
+    fn failed_checks(&self, plan_id: &str, head: Option<&str>, tip: Option<&str>) -> Result<Option<FailedChecks>> {
+        let failed: Option<FailedChecks> = self.store.kv_get(&failed_key(plan_id))?.map(|v| serde_json::from_str(&v)).transpose()?;
+        Ok(failed.filter(|f| Some(f.head.as_str()) == head && Some(f.tip.as_str()) == tip))
+    }
+
+    /// The plan's task that resolves a conflict with the user's branch (or makes the plan's
+    /// checks pass on the merge with it), while it is not finished: until then a merge may be
+    /// open in the plan's integration worktree.
     pub(super) fn open_resolution(&self, plan: &Plan) -> Result<Option<Task>> {
         let open = |t: &Task| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled) && in_place(t, plan).is_some();
         Ok(self.store.plan_tasks(&plan.id)?.into_iter().find(open))
@@ -333,7 +420,8 @@ impl Inner {
         let key = resolution_key(&plan.id);
         let Some(saved) = self.store.kv_get(&key)? else { return Ok(plan.clone()) };
         let was: Resolution = serde_json::from_str(&saved)?;
-        if self.store.task(&was.task)?.is_some_and(|t| t.status == TaskStatus::Done) {
+        let task = self.store.task(&was.task)?;
+        if task.as_ref().is_some_and(|t| t.status == TaskStatus::Done) {
             self.store.kv_write(&[(key, None)])?;
             return Ok(plan.clone());
         }
@@ -348,8 +436,14 @@ impl Inner {
             self.mark_new_worktree(&wt)?;
         }
         self.git.check_worktree(&repo, &wt).await?;
+        let mut removed = vec![];
         if self.git.is_ancestor(&wt, &was.tip, "HEAD").await? {
             self.git.reset_to(&wt, &was.tip).await?;
+            // The new files its worker left, which are on no branch, go too: the plan's checks
+            // must not see them. What was there before the task started stays.
+            if let Some(before) = &was.untracked {
+                removed = remove_new(&wt, &self.git.untracked(&wt).await?, before)?;
+            }
         } else {
             // Somebody else moved the branch since: only the open merge goes.
             self.git.abort_merge(&wt).await?;
@@ -361,9 +455,19 @@ impl Inner {
         })?;
         self.store.kv_write(&[(key, None)])?;
         let ws_id = Some(ws.id.as_str());
-        let summary = format!("the conflict resolution did not finish: {branch} is back where it was before it");
-        self.decide(ws_id, Some(&was.task), "merge", summary, json!({ "plan_id": plan.id, "tip": was.tip }))?;
-        let text = "The conflict with your branch was not resolved. Codly took the unfinished merge back: the plan's branch is as its tasks left it.";
+        // The task resolved a conflict, or it made the checks pass on a merge without one.
+        let (what, text) = match task.is_some_and(|t| t.key.starts_with(FIX_CHECKS)) {
+            false => (
+                "the conflict resolution",
+                "The conflict with your branch was not resolved. Codly took the unfinished merge back: the plan's branch is as its tasks left it.",
+            ),
+            true => (
+                "the fix of the plan's checks",
+                "The plan's checks still fail with your branch merged in. Codly took that merge back: the plan's branch is as its tasks left it.",
+            ),
+        };
+        let summary = format!("{what} did not finish: {branch} is back where it was before it");
+        self.decide(ws_id, Some(&was.task), "merge", summary, json!({ "plan_id": plan.id, "tip": was.tip, "removed": removed }))?;
         self.chat(ws_id, &plan.thread, "codly", text, None)?;
         Ok(plan)
     }
@@ -382,10 +486,68 @@ impl Inner {
         }
     }
 
+    /// One more task of a finished plan starts on the plan's own branch, in the plan's
+    /// worktree. If it does not finish, the plan goes back to where it is now
+    /// (`settle_resolution`): its branch at `before`, and no new file but those in `untracked`.
+    fn add_in_place(&self, ws_id: Option<&str>, plan: &Plan, task: &Task, before: &str, untracked: Vec<String>) -> Result<()> {
+        let undo = Resolution {
+            task: task.id.clone(),
+            tip: before.into(),
+            base_commit: plan.base_commit.clone(),
+            base_branch: plan.base_branch.clone(),
+            untracked: Some(untracked),
+        };
+        self.store.kv_set(&resolution_key(&plan.id), &serde_json::to_string(&undo)?)?;
+        self.emit(ws_id, row(None, Some(&task.id), None, EventKind::TaskChanged { task: task.clone() }))?;
+        // What the task changes is measured from the plan's branch as it was.
+        self.store.set_task_commits(&task.id, Some(before), None)
+    }
+
+    /// For a task that worked on its plan's own branch (it resolved a conflict with the user's
+    /// branch, or made the checks pass on the merge with it): the diff its reviewer reads, which
+    /// is what was changed by hand since `before` and not what the merge brought in from the
+    /// user's branch (`Git::resolution_diff`). None for every other task.
+    pub(super) async fn resolution_diff(&self, task: &Task, repo: &Path, before: &str) -> Result<Option<String>> {
+        let Some(plan) = task.plan_id.as_deref().map(|p| self.plan(p)).transpose()? else { return Ok(None) };
+        let Some((branch, _)) = in_place(task, &plan) else { return Ok(None) };
+        self.git.resolution_diff(repo, before, &branch).await.map(Some)
+    }
+
+    /// The checks that already passed on the plan's branch as it is in `wt`: the last task that
+    /// worked on that branch itself ran them in its gate, after its last commit, and nothing
+    /// moved the branch since. The plan does not run them a second time when it finishes
+    /// again, and the record says so. Empty when no such task was the last to move the branch.
+    pub(super) async fn checked_in_place(&self, plan: &Plan, wt: &Path) -> Result<Vec<String>> {
+        let tasks = self.store.plan_tasks(&plan.id)?;
+        let last = tasks.iter().filter(|t| t.status == TaskStatus::Done && in_place(t, plan).is_some()).max_by_key(|t| t.updated_at);
+        let Some(task) = last else { return Ok(vec![]) };
+        let (_, committed) = self.store.task_commits(&task.id)?;
+        if committed.is_none() || committed != self.git.head(wt).await? {
+            return Ok(vec![]);
+        }
+        // Its gate's results after its last commit: the last one of each command counts.
+        let since = self.store.task_events(&task.id, "committed")?.last().map_or(0, |e| e.id);
+        let mut results: Vec<(String, bool)> = vec![];
+        for e in self.store.task_events(&task.id, "verified")?.into_iter().filter(|e| e.id > since) {
+            if let EventKind::Verified { command, ok, .. } = e.kind {
+                results.retain(|(c, _)| *c != command);
+                results.push((command, ok));
+            }
+        }
+        let passed: Vec<String> = results.into_iter().filter(|(_, ok)| *ok).map(|(command, _)| command).collect();
+        if !passed.is_empty() {
+            let summary = format!("{} passed in task {} on the plan's branch as it is: the plan does not run {} a second time", code_list(&passed), task.key, if passed.len() == 1 { "it" } else { "them" });
+            self.decide(Some(&plan.workspace_id), None, "merge", summary, json!({ "plan_id": plan.id, "task_id": task.id, "checks": passed }))?;
+        }
+        Ok(passed)
+    }
+
     /// Bring the user's branch into the plan's integration branch, in the plan's own worktree.
-    /// With conflicts, one more task of the plan resolves them there; without, the merge is
-    /// committed at once. Either way the plan runs again: it finishes, with its integration
-    /// checks on the result, when that task is done.
+    /// With conflicts, one more task of the plan resolves them there. Without, and with checks
+    /// of the plan that failed on that very merge, the merge is committed at once and one more
+    /// task makes them pass. Either way the plan runs again: it finishes, with its integration
+    /// checks on the result, when that task is done. Without a conflict and without a check
+    /// that is known to fail, nothing is brought in: the merge itself checks its result.
     async fn resolve_plan_conflict(self: &Arc<Self>, plan_id: &str, into: Option<&str>) -> Result<()> {
         let plan = self.resolvable_plan(plan_id)?;
         let branch = plan.integration_branch.clone().ok_or_else(|| anyhow!("the plan never ran, so there is nothing to merge"))?;
@@ -422,6 +584,16 @@ impl Inner {
         // A merge that could not be committed last time is still open: this one starts over.
         self.git.abort_merge(&wt).await?;
         let before = self.git.head(&wt).await?.ok_or_else(|| anyhow!("{branch} has no commits"))?;
+        // The plan's checks that failed on this very merge when you tried it.
+        let failed = self.failed_checks(&plan.id, Some(&head), Some(&before))?.map(|f| f.failed).unwrap_or_default();
+        // Nothing conflicts and no check is known to fail: there is nothing for an agent to do,
+        // and a merge brought in here would reach your branch without the plan's checks on it.
+        // The merge itself runs them on the result first. (A git too old to say goes on.)
+        if failed.is_empty() && self.git.merge_tree_check(&repo, &before, &head).await.is_ok_and(|check| check.clean) {
+            bail!("{branch} and {target} merge without a conflict now, so there is nothing to resolve; merge the plan (Codly runs its checks on the result first)");
+        }
+        // What worktree setup and the checks left there: it stays if the task does not finish.
+        let untracked = self.git.untracked(&wt).await?;
         let files = self.git.merge_for_resolution(&wt, &theirs).await?;
         let ws_id = Some(ws.id.as_str());
         let mut detail = json!({ "plan_id": plan.id, "target_sha": head, "files": files });
@@ -437,13 +609,8 @@ impl Inner {
                  run again on the result; then you can merge it."
             )
         } else {
-            let task = resolve_task(&plan, resolve_key(&self.store.plan_tasks(&plan.id)?), &target, &files, self.plan_verify_commands(&plan)?, &branch, &wt);
-            // A resolution that does not finish puts the plan back where it is now (`settle_resolution`).
-            let undo = Resolution { task: task.id.clone(), tip: before.clone(), base_commit: plan.base_commit.clone(), base_branch: plan.base_branch.clone() };
-            self.store.kv_set(&resolution_key(&plan.id), &serde_json::to_string(&undo)?)?;
-            self.emit(ws_id, row(None, Some(&task.id), None, EventKind::TaskChanged { task: task.clone() }))?;
-            // What the merge brings in is measured from the plan's branch as it was.
-            self.store.set_task_commits(&task.id, Some(&before), None)?;
+            let task = resolve_task(&plan, next_key(&self.store.plan_tasks(&plan.id)?, RESOLVE), &target, &files, self.plan_verify_commands(&plan)?, &branch, &wt);
+            self.add_in_place(ws_id, &plan, &task, &before, untracked.clone())?;
             let summary = format!("you had an agent resolve the conflicts of {branch} with {target} in {}: task {}", name_list(&files), task.key);
             self.decide_by(ws_id, Some(&task.id), "merge", "human", summary, detail)?;
             format!(
@@ -451,6 +618,29 @@ impl Inner {
                  (your checkout is not touched), and task {} resolves the conflicts there. Then the plan's checks run again \
                  and you can merge it.",
                 name_list(&files),
+                task.key
+            )
+        };
+        // No conflict, but the plan's checks failed on this very merge when you tried it: one
+        // more task of the plan makes them pass, on the merge Codly committed just now.
+        let text = if failed.is_empty() || !files.is_empty() {
+            text
+        } else {
+            // Its write scope: the files the plan changed, measured from where the plan started.
+            let scope = match plan.base_commit.as_deref() {
+                Some(base) => self.git.changed_paths(&repo, &[format!("{base}...{before}").as_str()]).await?,
+                None => vec![],
+            };
+            let key = next_key(&self.store.plan_tasks(&plan.id)?, FIX_CHECKS);
+            let task = fix_task(&plan, key, &target, &failed, &scope, self.plan_verify_commands(&plan)?, &branch, &wt);
+            self.add_in_place(ws_id, &plan, &task, &before, untracked)?;
+            let summary = format!("you had an agent fix {} on {branch} with {target} merged in: task {}", code_list(&failed), task.key);
+            self.decide_by(ws_id, Some(&task.id), "merge", "human", summary, json!({ "plan_id": plan.id, "target_sha": head, "failed_checks": failed }))?;
+            format!(
+                "{target} and this plan merge without a conflict, but {} failed on the result. Codly brought {target} into the \
+                 plan's branch, in its own worktree (your checkout is not touched), and task {} makes the checks pass there. \
+                 Then the plan's checks run again and you can merge it.",
+                code_list(&failed),
                 task.key
             )
         };
@@ -708,7 +898,7 @@ impl Inner {
         let list = code_list(&failed);
         let text = format!(
             "Not merged: with \"{}\" merged into {target}, {list} failed. {target} was not changed. {target} has commits the plan \
-             was never checked with; ask the Lead for a fix, or merge anyway if you know why it fails.",
+             was never checked with; have an agent fix it (on the plan's card), or merge anyway if you know why it fails.",
             plan.summary
         );
         self.chat(ws_id, &plan.thread, "codly", &text, None)?;
@@ -819,9 +1009,47 @@ mod tests {
         assert_eq!(in_place(&Task { branch: None, ..task.clone() }, &unstarted), None);
 
         // A second conflict gets a key of its own.
-        assert_eq!(resolve_key(&[]), "resolve");
-        assert_eq!(resolve_key(&[task.clone()]), "resolve-2");
-        assert_eq!(resolve_key(&[task.clone(), Task { key: "resolve-2".into(), ..task }]), "resolve-3");
+        assert_eq!(next_key(&[], RESOLVE), "resolve");
+        assert_eq!(next_key(&[task.clone()], RESOLVE), "resolve-2");
+        assert_eq!(next_key(&[task.clone(), Task { key: "resolve-2".into(), ..task.clone() }], RESOLVE), "resolve-3");
+        assert_eq!(next_key(&[task], FIX_CHECKS), "fix-checks");
+    }
+
+    #[test]
+    fn the_task_that_fixes_the_checks_works_in_place_on_the_files_the_plan_changed() {
+        let plan = plan();
+        let failed = ["npm test".to_string()];
+        let scope = ["src/theme.ts".to_string()];
+        let task = fix_task(&plan, "fix-checks".into(), "main", &failed, &scope, vec!["npm test".into(), "npm run lint".into()], "codly/sign-in/integration", Path::new("/data/worktrees/web/sign-in/integration"));
+        assert!(in_place(&task, &plan).is_some());
+        assert_eq!((task.key.as_str(), task.title.as_str(), task.status, &task.write_scope[..]), ("fix-checks", "Fix the checks with main merged in", TaskStatus::Pending, &scope[..]));
+        assert_eq!(task.verify, ["npm test", "npm run lint"]);
+        assert_eq!(task.acceptance, ["`npm test` passes", "The plan's work and the changes on main are both kept and work together"]);
+        assert!(task.goal.contains("merge without a conflict") && task.goal.contains("these checks fail: `npm test`") && task.goal.contains("Do not run git commands"), "{}", task.goal);
+    }
+
+    #[test]
+    fn only_what_is_new_in_a_worktree_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        for folder in ["setup", "mixed", "new/deep", "elsewhere"] {
+            std::fs::create_dir_all(wt.join(folder)).unwrap();
+        }
+        for file in ["setup/kept.txt", "setup/added-later.txt", "mixed/old.log", "mixed/new.log", "new/deep/a.txt", "old.txt", "new.txt", "elsewhere/target.txt"] {
+            std::fs::write(wt.join(file), "x\n").unwrap();
+        }
+        std::os::unix::fs::symlink(wt.join("elsewhere"), wt.join("link")).unwrap();
+        let list = |paths: &[&str]| paths.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        // As `Git::untracked` lists them: a folder that is new as a whole is one entry.
+        let before = list(&["setup/", "mixed/old.log", "old.txt"]);
+        let now = list(&["setup/", "mixed/", "new/", "old.txt", "new.txt", "link", "gone.txt"]);
+        let removed = remove_new(wt, &now, &before).unwrap();
+        assert_eq!(removed, ["new/", "new.txt", "link"]);
+        assert!(!wt.join("new").exists() && !wt.join("new.txt").exists() && wt.join("link").symlink_metadata().is_err());
+        assert!(wt.join("elsewhere/target.txt").exists(), "a link is removed, not what it points at");
+        assert!(wt.join("setup/added-later.txt").exists(), "a folder that was there before is left alone");
+        assert!(wt.join("mixed/old.log").exists() && wt.join("mixed/new.log").exists(), "a folder that holds a path from before stays whole");
+        assert!(wt.join("old.txt").exists());
     }
 
     #[test]

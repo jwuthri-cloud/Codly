@@ -1298,7 +1298,10 @@ impl Inner {
         let mut unchecked = None;
         if let Some(wt) = &wt {
             let mode = self.approval_mode_for(ws_id, Some(&plan.thread));
-            for cmd in &checks {
+            // What the task that resolved a merge with your branch ran on this very commit, and
+            // passed, is not run a second time.
+            let passed = self.checked_in_place(plan, wt).await?;
+            for cmd in checks.iter().filter(|c| !passed.contains(c)) {
                 let v = self.run_verify(wt, cmd, mode).await;
                 self.emit(
                     ws_id,
@@ -1311,7 +1314,7 @@ impl Inner {
                 }
             }
             // Then the repo's required checks (yours), on the merged work.
-            let ran: Vec<String> = checks.iter().filter(|c| !refused.iter().any(|h| h.command == **c)).cloned().collect();
+            let ran: Vec<String> = checks.iter().chain(&passed).filter(|c| !refused.iter().any(|h| h.command == **c)).cloned().collect();
             let required = self.required_on_plan(&ws, wt, &ran).await?;
             failed.extend(required.failed);
             unchecked = required.not_run;

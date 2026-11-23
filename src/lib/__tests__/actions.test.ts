@@ -115,7 +115,7 @@ describe('merging into your branch', () => {
 
   it('an undone merge is no longer merged; a refused undo keeps it and says why', async () => {
     store.markPlanMerged('p3', 'abc1234def');
-    const merge: LastMerge = { sha: 'abc1234def', branch: 'main', plan_id: 'p3', agent_id: null, blocked: null };
+    const merge: LastMerge = { sha: 'abc1234def', branch: 'main', plan_id: 'p3', agent_id: null, blocked: null, kept: 'refs/codly/before-merge' };
     const after: RepoSync = { branch: 'main', upstream: null, ahead: 0, behind: 0, dirty: [], last_merge: null };
     const undo = vi
       .spyOn(api, 'undoMerge')

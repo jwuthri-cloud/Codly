@@ -2,7 +2,9 @@
   Your checkout against its remote, and the git steps Codly can do for you there: commit your
   own uncommitted changes (they block a merge that touches the same files), push your branch
   once merges have landed on it, and undo the merge this bar sits with while that is still safe
-  (it is the last one, not pushed, nothing committed after it). Codly never pushes on its own.
+  (it is the last one, not pushed, nothing committed after it). Whether or not Undo still can,
+  the bar names the ref where Codly keeps your branch as it was before that merge. Codly never
+  pushes on its own.
 -->
 <script lang="ts">
   import { api } from '../lib/api';
@@ -84,6 +86,9 @@
           <button class="btn sm" disabled={busy} onclick={undo}>Undo merge</button>
         {/if}
       </div>
+      {#if merge.kept}
+        <p class="kept">Codly keeps {merge.branch} as it was before this merge at <code>{merge.kept}</code>, until the next merge.</p>
+      {/if}
     {/if}
     {#if sync.dirty.length}
       <div class="row">
@@ -116,4 +121,6 @@
   .what { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--ink-2); }
   .field { flex: 1; min-width: 0; font-size: var(--t-sm); }
   .note { font-size: var(--t-sm); color: var(--amber-ink, var(--ink-2)); }
+  .kept { font-size: var(--t-sm); color: var(--ink-3); }
+  .kept code { font-size: 11.5px; color: var(--ink-2); user-select: text; }
 </style>

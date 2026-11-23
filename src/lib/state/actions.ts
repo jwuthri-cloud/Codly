@@ -247,7 +247,9 @@ export async function mergePlan(planId: string, into: string | null = null, unch
     }
     if (state?.failed_checks.length || state?.checks_not_run) {
       const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, into, true) };
-      toastsUpdate(id, { kind: 'error', title: `Not merged into ${state.target}`, body: msg(e), action: goOn, duration: 0 });
+      // Checks that failed can go to an agent, like a conflict: the button is on the plan's card.
+      const body = state.failed_checks.length ? `${msg(e)}. An agent can fix it: see the plan’s card.` : msg(e);
+      toastsUpdate(id, { kind: 'error', title: `Not merged into ${state.target}`, body, action: goOn, duration: 0 });
       return;
     }
     // The Lead that planned it explains in the request's chat, instead of a bare error. Only in

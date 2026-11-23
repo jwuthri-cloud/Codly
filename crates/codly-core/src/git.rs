@@ -1274,6 +1274,41 @@ impl Git {
     }
 }
 
+/// For the last merge, into the user's branch (`orchestrator/merge_conflict.rs`, `workspace.rs`).
+impl Git {
+    /// What was changed by hand between `base` and `tip`, along the first parents, oldest
+    /// first. For a merge commit: the difference between what git merges by itself (a
+    /// conflict as git leaves it, markers included) and what was committed (`--remerge-diff`,
+    /// git ≥ 2.36), so a conflict that was resolved by taking one side whole shows too. For
+    /// every other commit: its own diff. What a merge brought in without a conflict is not in
+    /// it. Empty: nothing was changed by hand.
+    pub async fn resolution_diff(&self, repo: &Path, base: &str, tip: &str) -> Result<String> {
+        let range = format!("{base}..{tip}");
+        let log = ["log", "--first-parent", "--reverse", "--format=", "--remerge-diff", "-p"];
+        let diff = ["--no-color", "--no-ext-diff", "--find-renames", "-U3", range.as_str(), "--"];
+        self.ok(repo, &[log, diff].concat(), true).await
+    }
+
+    /// How many commits `rev` has that `base` does not have.
+    pub async fn commits_ahead(&self, repo: &Path, base: &str, rev: &str) -> Result<u32> {
+        Ok(self.read(repo, &["rev-list", "--count", &format!("{base}..{rev}"), "--"]).await?.trim().parse()?)
+    }
+
+    /// The new (untracked, not ignored) paths of a worktree. A folder that is new as a whole
+    /// is one entry ending in `/`: git does not look inside it.
+    pub async fn untracked(&self, wt: &Path) -> Result<Vec<String>> {
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        let list = [c1, hooks, c2, fsmonitor, "ls-files", "-z", "--others", "--exclude-standard", "--directory", "--no-empty-directory"];
+        Ok(split_z(&self.ok(wt, &list, true).await?))
+    }
+
+    /// Point the ref `name` at `sha`, whatever it pointed at before.
+    pub async fn set_ref(&self, repo: &Path, name: &str, sha: &str) -> Result<()> {
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        self.ok(repo, &[c1, hooks, c2, fsmonitor, "update-ref", name, sha], false).await.map(drop)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2105,5 +2140,92 @@ mod tests {
         assert_eq!(merged, MergeOutcome::Merged { sha: head });
         assert!(repo.join("w.txt").exists() && !git.in_merge(&repo).await);
         assert_eq!(git.rev_parse(&repo, "HEAD^2").await.unwrap(), git.rev_parse(&repo, "work").await.unwrap(), "HEAD is the merge of work");
+    }
+
+    /// A branch `name` whose merge with main is resolved by hand: main changed a.txt (a
+    /// conflict) and added c.txt (no conflict). `resolved` is a.txt as the merge commits it.
+    /// Returns the branch as it was before the merge.
+    async fn resolved_merge(git: &Git, repo: &Path, name: &str, resolved: &str) -> String {
+        branch_with(repo, name, "a.txt", Some("from the plan\n"));
+        commit_file(repo, "a.txt", "from main\n");
+        commit_file(repo, "c.txt", "only on main\n");
+        sh(repo, &["checkout", "-q", name]);
+        let before = git.head(repo).await.unwrap().unwrap();
+        assert_eq!(git.merge_for_resolution(repo, "main").await.unwrap(), ["a.txt"]);
+        commit_file(repo, "a.txt", resolved);
+        before
+    }
+
+    /// The diff of a resolution has what was done by hand and nothing else: each conflict as
+    /// git left it against how it was resolved, then the commits made after the merge. What
+    /// the merge brought in without a conflict is not in it.
+    #[tokio::test]
+    async fn a_resolution_diff_shows_the_conflicts_and_the_later_commits_only() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        let before = resolved_merge(&git, &repo, "plan", "from main and the plan\n").await;
+        let diff = git.resolution_diff(&repo, &before, "plan").await.unwrap();
+        assert!(diff.contains("diff --git a/a.txt b/a.txt") && diff.contains("-<<<<<<<") && diff.contains("->>>>>>>"), "{diff}");
+        assert!(diff.contains("-from the plan\n") && diff.contains("-from main\n") && diff.contains("+from main and the plan\n"), "{diff}");
+        // (A conflict marker names main's last commit, "c.txt": only the file's own diff counts.)
+        assert!(!diff.contains("a/c.txt") && !diff.contains("only on main"), "what merged by itself is left out: {diff}");
+        assert_eq!(diff.matches("diff --git").count(), 1, "{diff}");
+
+        // A commit after the merge (a fix round) follows with its own diff.
+        commit_file(&repo, "d.txt", "a later fix\n");
+        let diff = git.resolution_diff(&repo, &before, "plan").await.unwrap();
+        let (merge, fix) = (diff.find("+from main and the plan").unwrap(), diff.find("+a later fix").unwrap());
+        assert!(merge < fix && !diff.contains("a/c.txt") && diff.matches("diff --git").count() == 2, "{diff}");
+    }
+
+    /// A conflict that was resolved by taking one side whole shows in the diff of the
+    /// resolution (a combined diff would leave it out), and a merge without a conflict that
+    /// nobody changed has an empty one.
+    #[tokio::test]
+    async fn a_resolution_diff_shows_a_side_that_was_dropped() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        let before = resolved_merge(&git, &repo, "plan", "from the plan\n").await;
+        let diff = git.resolution_diff(&repo, &before, "plan").await.unwrap();
+        assert!(diff.contains("-from main\n") && !diff.contains("+from main"), "main's line is gone, and the diff says so: {diff}");
+
+        sh(&repo, &["checkout", "-q", "main"]);
+        branch_with(&repo, "clean", "e.txt", Some("e\n"));
+        commit_file(&repo, "f.txt", "f\n");
+        sh(&repo, &["checkout", "-q", "clean"]);
+        let before = git.head(&repo).await.unwrap().unwrap();
+        assert!(git.merge_for_resolution(&repo, "main").await.unwrap().is_empty());
+        sh(&repo, &["commit", "-qm", "merge main"]);
+        assert_eq!(git.resolution_diff(&repo, &before, "clean").await.unwrap().trim(), "");
+        assert_eq!(git.commits_ahead(&repo, &before, "clean").await.unwrap(), 2, "the merge and the commit it brought in");
+        assert_eq!(git.commits_ahead(&repo, "clean", &before).await.unwrap(), 0);
+    }
+
+    /// The new paths of a worktree: untracked files, a folder that is new as a whole as one
+    /// entry, and nothing that is ignored or tracked.
+    #[tokio::test]
+    async fn untracked_lists_new_files_and_whole_new_folders() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        commit_file(&repo, ".gitignore", "*.log\n");
+        assert!(git.untracked(&repo).await.unwrap().is_empty());
+        std::fs::create_dir_all(repo.join("out/deep")).unwrap();
+        for file in ["note.txt", "debug.log", "out/1.txt", "out/deep/2.txt"] {
+            std::fs::write(repo.join(file), "x\n").unwrap();
+        }
+        assert_eq!(git.untracked(&repo).await.unwrap(), ["note.txt", "out/"]);
+    }
+
+    /// A ref that is set again moves, where `create_ref` would refuse.
+    #[tokio::test]
+    async fn set_ref_moves_a_ref_that_exists() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        let first = git.head(&repo).await.unwrap().unwrap();
+        git.set_ref(&repo, "refs/codly/before-merge", &first).await.unwrap();
+        commit_file(&repo, "b.txt", "b\n");
+        let second = git.head(&repo).await.unwrap().unwrap();
+        git.set_ref(&repo, "refs/codly/before-merge", &second).await.unwrap();
+        assert_eq!(git.rev_parse(&repo, "refs/codly/before-merge").await.unwrap(), Some(second));
     }
 }

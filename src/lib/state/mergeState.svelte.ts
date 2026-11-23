@@ -25,6 +25,14 @@ export function fileList(files: string[]): string {
   return files.length > 3 ? `${shown} and ${files.length - 3} more` : shown;
 }
 
+/** "This plan is behind main by 3 commits": your branch has commits the Codly branch was not
+ *  built on, and whether git can bring the two together by itself. Said before you merge. */
+export function behindLine(merge: Pick<MergeState, 'target' | 'behind' | 'conflicts'>, who: string | null = null): string {
+  const commits = merge.behind === 1 ? '1 commit' : `${merge.behind} commits`;
+  const end = merge.conflicts.length ? '.' : ': they merge without a conflict.';
+  return `${who ? `${who}’s branch` : 'This plan'} is behind ${merge.target} by ${commits}${end}`;
+}
+
 /** One shell word: as it is when it needs no quotes, else in single quotes. */
 function word(s: string): string {
   return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
@@ -57,7 +65,8 @@ export async function loadMergeState(source: PrSource): Promise<MergeState | nul
 
 /** Have an agent resolve it. `who`: the solo agent's name; a plan gets a task of its own. When
  *  your checkout is not on the branch the plan started from, nothing starts yet: a toast says
- *  what that brings and offers to go on (`into` is then the branch you confirmed). */
+ *  what that brings and offers to go on (`into` is then the branch you confirmed). The same for
+ *  a plan whose checks failed on the merge result with no conflict: its task makes them pass. */
 export async function resolveMergeConflict(source: PrSource, who: string | null = null, into: string | null = null): Promise<boolean> {
   if (source.kind === 'plan' && !into) {
     let warning: MergeWarning | null;
@@ -79,15 +88,20 @@ export async function resolveMergeConflict(source: PrSource, who: string | null 
   try {
     const merge = await api.resolveMergeConflict(source, into);
     mergeUi.states[mergeKey(source)] = merge;
-    const body = !merge.conflicts.length
-      ? `No conflict after all.${source.kind === 'plan' ? ' The plan’s checks run again; then you can merge it.' : ' You can merge it now.'}`
-      : source.kind === 'plan'
-        ? 'A task of the plan resolves it. When the plan is checked again, you can merge it.'
-        : `${who ?? 'The agent'} resolves it in its conversation. Merge again when its turn ends.`;
     // The plan's new task is on the board: one click away. (A solo agent has no task.)
     const task = source.kind === 'plan' ? merge.resolving : null;
+    // No conflict, and still a task: it makes the checks that failed on the merge result pass.
+    const fixing = !!task && !merge.conflicts.length;
+    const body = fixing
+      ? 'A task of the plan makes the checks pass with your branch merged in. When the plan is checked again, you can merge it.'
+      : !merge.conflicts.length
+        ? `No conflict after all.${source.kind === 'plan' ? ' The plan’s checks run again; then you can merge it.' : ' You can merge it now.'}`
+        : source.kind === 'plan'
+          ? 'A task of the plan resolves it. When the plan is checked again, you can merge it.'
+          : `${who ?? 'The agent'} resolves it in its conversation. Merge again when its turn ends.`;
+    const title = fixing ? 'An agent is fixing the checks' : merge.conflicts.length ? 'An agent is resolving the conflict' : `${merge.target} is in Codly’s branch now`;
     const action = task ? { label: 'Open the task', run: () => ui.selectTask(task) } : undefined;
-    toasts.update(id, { kind: 'success', title: merge.conflicts.length ? 'An agent is resolving the conflict' : `${merge.target} is in Codly’s branch now`, body, action });
+    toasts.update(id, { kind: 'success', title, body, action });
     return true;
   } catch (e) {
     toasts.update(id, { kind: 'error', title: 'Couldn’t have an agent resolve it', body: msg(e) });

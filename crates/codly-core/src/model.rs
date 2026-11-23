@@ -1956,6 +1956,10 @@ pub struct LastMerge {
     pub agent_id: Option<Id>,
     /// Why it cannot be undone right now (None: it can).
     pub blocked: Option<String>,
+    /// The ref in the user's repository that keeps the branch as it was before this merge
+    /// (`refs/codly/before-merge`), while it does: until the next merge or the undo. None
+    /// for a merge made before Codly kept one.
+    pub kept: Option<String>,
 }
 
 /// What the user should know before a plan is merged: the checked-out branch is not the one

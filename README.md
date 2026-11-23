@@ -268,6 +268,10 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
 - Codly changes your branch only when you press a button: **Merge** (a plan's integration branch, or one
   agent's branch, into the branch you have checked out), **Commit** (your own uncommitted changes) and
   **Push** (the branch you have checked out, to its remote, through your own SSH agent).
+- Before a merge writes to your branch, Codly keeps the branch as it was under the ref
+  `refs/codly/before-merge` in your repository, until the next merge. **Undo merge** takes the last merge
+  back while nothing was committed or pushed after it. Before you merge, a plan's card says how many
+  commits the plan is behind your branch.
 - **Create pull request** pushes one of Codly's own `codly/…` branches (a plan's, or one agent's), never
   a branch of yours and never with force. It asks first and names the remote, the branch and the base.
   Your own `gh` opens the pull request with its sign-in: Codly stores no GitHub token. Without `gh` you

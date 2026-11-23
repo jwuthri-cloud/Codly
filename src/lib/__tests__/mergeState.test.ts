@@ -3,12 +3,12 @@ import { api } from '../api';
 import type { MergeState } from '../gen/MergeState';
 import type { PrSource } from '../gen/PrSource';
 import { mergeAgent, mergePlan } from '../state/actions';
-import { fileList, loadMergeState, mergeByHand, mergeKey, mergeUi, resolveMergeConflict, stopResolvingMerge } from '../state/mergeState.svelte';
+import { behindLine, fileList, loadMergeState, mergeByHand, mergeKey, mergeUi, resolveMergeConflict, stopResolvingMerge } from '../state/mergeState.svelte';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 
 const plan: PrSource = { kind: 'plan', id: 'p1' };
-const clean: MergeState = { target: 'main', branch: 'codly/dark-mode-ab12/integration', repo: '/Users/me/web', conflicts: [], resolving: null, failed_checks: [], checks_not_run: null };
+const clean: MergeState = { target: 'main', branch: 'codly/dark-mode-ab12/integration', repo: '/Users/me/web', conflicts: [], resolving: null, failed_checks: [], checks_not_run: null, behind: 0 };
 const conflict: MergeState = { ...clean, conflicts: ['src/theme.ts', 'README.md'] };
 const said = () => toasts.list.map((t) => [t.kind, t.title, t.body]);
 
@@ -163,5 +163,33 @@ describe('a merge that cannot go straight in', () => {
     expect(said().at(-1)).toEqual(['success', 'Stopped resolving', 'Ada’s branch is as it was before the merge. The conflict is still there.']);
     expect(await stopResolvingMerge('a1', 'Ada')).toBe(false);
     expect(said().at(-1)).toEqual(['error', 'Couldn’t stop resolving', 'Ada is not resolving a merge']);
+  });
+
+  it('says how far the Codly branch is behind yours, before you merge', () => {
+    expect(behindLine({ ...clean, behind: 1 })).toBe('This plan is behind main by 1 commit: they merge without a conflict.');
+    expect(behindLine({ ...conflict, behind: 3 })).toBe('This plan is behind main by 3 commits.');
+    expect(behindLine({ ...clean, target: 'feature-x', behind: 12 }, 'Ada')).toBe('Ada’s branch is behind feature-x by 12 commits: they merge without a conflict.');
+  });
+
+  it('checks that failed on the merge result can go to an agent: a task of the plan fixes them', async () => {
+    vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(null);
+    vi.spyOn(api, 'mergePlan').mockRejectedValue(new Error('with the plan merged into main, `npm test` failed, so nothing was merged and main is unchanged'));
+    vi.spyOn(api, 'mergeState').mockResolvedValue({ ...clean, behind: 2, failed_checks: ['npm test'] });
+    await mergePlan('p1');
+    // The toast keeps Merge anyway, and says where the other way is.
+    const stop = toasts.list.find((t) => t.title === 'Not merged into main');
+    expect(stop?.body).toBe('with the plan merged into main, `npm test` failed, so nothing was merged and main is unchanged. An agent can fix it: see the plan’s card.');
+
+    // From the card: your branch is in the plan's branch, nothing conflicts, and a task is on it.
+    const resolve = vi.spyOn(api, 'resolveMergeConflict').mockResolvedValue({ ...clean, resolving: 't12' });
+    expect(await resolveMergeConflict(plan)).toBe(true);
+    expect(resolve).toHaveBeenCalledWith(plan, null);
+    const started = toasts.list.find((t) => t.title === 'An agent is fixing the checks');
+    expect([started?.kind, started?.body, started?.action?.label]).toEqual([
+      'success',
+      'A task of the plan makes the checks pass with your branch merged in. When the plan is checked again, you can merge it.',
+      'Open the task',
+    ]);
+    expect(mergeUi.states[mergeKey(plan)]?.resolving).toBe('t12');
   });
 });
