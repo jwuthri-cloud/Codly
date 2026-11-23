@@ -658,3 +658,11 @@ pub async fn storage_delete_worktree(state: State<'_, AppState>, office_id: Stri
 pub async fn storage_delete_branch(state: State<'_, AppState>, office_id: String, branch: String, head: String, force: bool) -> R<()> {
     state.core().await?.delete_branch(&office_id, &branch, &head, force).await.map_err(err)
 }
+
+/// Remove one backup of Codly's database that the report listed (`path`): a copy, or a folder
+/// of older copies that was moved aside. The user confirmed it. Anything else is refused: the
+/// database is never removed here.
+#[tauri::command]
+pub async fn storage_delete_backup(state: State<'_, AppState>, path: String) -> R<()> {
+    state.core().await?.delete_backup(&path).await.map_err(err)
+}

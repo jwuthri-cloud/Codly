@@ -97,6 +97,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::storage_clean,
             commands::storage_delete_worktree,
             commands::storage_delete_branch,
+            commands::storage_delete_backup,
             commands::agent_checkpoints,
             commands::restore_checkpoint,
             crate::agent_controls::set_agent_permission_mode,
@@ -187,6 +188,18 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("not one of Codly's worktrees"), "{e}");
     let e = invoke(&wv, "storage_delete_branch", json!({ "officeId": ws["id"], "branch": "main", "head": "abc1234", "force": true })).unwrap_err();
     assert!(e.to_string().contains("not one of Codly's branches"), "{e}");
+    // The backups of Codly's own data: a folder of older copies that was moved aside is
+    // listed and can be removed. The database itself is refused.
+    let kept = tmp.path().join("data").join("backups.before-5");
+    std::fs::create_dir(&kept).unwrap();
+    std::fs::write(kept.join("codly-4-v1-daily.sqlite"), b"an older copy").unwrap();
+    let storage = invoke(&wv, "storage_report", json!({})).unwrap();
+    assert_eq!(storage["set_aside"], json!([{ "path": kept.to_str().unwrap(), "kind": "backups", "moved_at": 5, "bytes": 13 }]));
+    let database = tmp.path().join("data").join("codly.sqlite");
+    let e = invoke(&wv, "storage_delete_backup", json!({ "path": database.to_str().unwrap() })).unwrap_err();
+    assert!(e.to_string().contains("is not a backup of Codly's data") && database.exists(), "{e}");
+    assert_eq!(invoke(&wv, "storage_delete_backup", json!({ "path": kept.to_str().unwrap() })), Ok(Value::Null));
+    assert!(!kept.exists() && database.exists());
 
     let m = invoke(&wv, "add_memory", json!({ "text": "We use pnpm.", "scope": "project", "kind": "decision" })).unwrap();
     assert_eq!(m["kind"], "decision");

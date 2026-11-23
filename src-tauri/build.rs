@@ -21,7 +21,7 @@ fn main() {
         "agent_checkpoints", "restore_checkpoint",
         "agent_git", "get_triggers", "set_triggers", "list_skills", "skill_catalog", "install_skill", "uninstall_skill", "open_skill_folder", "ide_info", "ide_list", "ide_read", "ide_write", "ide_create", "ide_search", "ide_changes", "ide_diff",
         "board_policy", "board_sweep", "board_archive", "list_connections", "update_connection",
-        "storage_report", "storage_policy", "storage_clean", "storage_delete_worktree", "storage_delete_branch",
+        "storage_report", "storage_policy", "storage_clean", "storage_delete_worktree", "storage_delete_branch", "storage_delete_backup",
         "save_attachment", "hire_draft", "trust_agent", "office_digest", "set_agent_home", "note_rest", "note_hangout", "set_agent_tired", "bigger_model",
         "install_cli", "byok_status", "byok_configure", "byok_save_key", "byok_clear_key",
         "diagnostics",

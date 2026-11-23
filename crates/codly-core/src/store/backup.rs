@@ -102,8 +102,58 @@ pub struct StartProblem {
     pub start_empty: bool,
 }
 
+/// What `recover` moved out of the way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SetAsideKind {
+    /// `backups.before-<time>/`: the copies of the data from before a start with no data.
+    Backups,
+    /// `codly.broken-<time>.sqlite`: a database that could not be used.
+    Database,
+}
+
+/// A folder or a file that `recover` moved out of the way. Codly never removes one by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetAside {
+    pub path: String,
+    pub kind: SetAsideKind,
+    /// When it was moved aside (unix ms).
+    pub moved_at: i64,
+    /// A folder: the copies in it. A database: the file with its `-wal` and `-shm`.
+    pub bytes: i64,
+}
+
 fn dir(db: &Path) -> PathBuf {
     db.with_file_name(DIR)
+}
+
+/// `backups.before-<unix ms>`: the folder of the copies, moved aside by a start with no data.
+fn kept_name(now: i64) -> String {
+    format!("{DIR}.before-{now}")
+}
+
+/// `<stem>.broken-<unix ms>.sqlite`: the database with the file stem `stem`, moved aside.
+fn broken_name(stem: &str, now: i64) -> String {
+    format!("{stem}.broken-{now}.sqlite")
+}
+
+/// The time in a name that `kept_name` or `broken_name` made: digits only.
+fn stamp(digits: &str) -> Option<i64> {
+    digits.bytes().all(|b| b.is_ascii_digit()).then(|| digits.parse().ok()).flatten()
+}
+
+fn parse_kept(name: &str) -> Option<i64> {
+    stamp(name.strip_prefix(DIR)?.strip_prefix(".before-")?)
+}
+
+fn parse_broken(stem: &str, name: &str) -> Option<i64> {
+    stamp(name.strip_prefix(stem)?.strip_prefix(".broken-")?.strip_suffix(".sqlite")?)
+}
+
+fn file_stem(db: &Path) -> String {
+    db.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// `codly-<unix ms>-v<data version>-<kind>.sqlite`
@@ -310,6 +360,65 @@ impl Store {
     pub fn backups(&self) -> Vec<DbBackup> {
         self.path.as_deref().map(|db| list(&dir(db))).unwrap_or_default()
     }
+
+    /// What a start from a backup, or with no data, moved aside in the data folder, newest
+    /// first.
+    pub fn set_aside(&self) -> Vec<SetAside> {
+        self.path.as_deref().map(set_aside).unwrap_or_default()
+    }
+
+    /// Remove one backup the user chose: `path` as `backups` or `set_aside` listed it (see
+    /// `remove`). Returns the bytes that came free.
+    pub fn remove_backup(&self, path: &Path) -> Result<i64> {
+        let Some(db) = &self.path else { bail!("a database in memory has no backups") };
+        remove(db, path)
+    }
+}
+
+/// The bytes of the file at `path`; 0 when there is none.
+fn file_bytes(path: &Path) -> i64 {
+    std::fs::symlink_metadata(path).ok().filter(|m| m.is_file()).map_or(0, |m| m.len() as i64)
+}
+
+/// What `recover` moved aside beside the database file `db`, newest first: the folders of
+/// copies (`backups.before-<time>/`) and the databases (`<name>.broken-<time>.sqlite`).
+fn set_aside(db: &Path) -> Vec<SetAside> {
+    let Some(entries) = db.parent().and_then(|folder| std::fs::read_dir(folder).ok()) else { return vec![] };
+    let stem = file_stem(db);
+    let mut found: Vec<SetAside> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // The entry itself, not what a link points to.
+            let meta = entry.metadata().ok()?;
+            let path = entry.path();
+            let (kind, moved_at, bytes) = if let Some(at) = parse_kept(&name).filter(|_| meta.is_dir()) {
+                (SetAsideKind::Backups, at, list(&path).iter().map(|copy| copy.bytes).sum::<i64>())
+            } else if let Some(at) = parse_broken(&stem, &name).filter(|_| meta.is_file()) {
+                (SetAsideKind::Database, at, meta.len() as i64 + file_bytes(&beside(&path, "-wal")) + file_bytes(&beside(&path, "-shm")))
+            } else {
+                return None;
+            };
+            Some(SetAside { path: path.to_string_lossy().into_owned(), kind, moved_at, bytes })
+        })
+        .collect();
+    found.sort_unstable_by(|a, b| b.moved_at.cmp(&a.moved_at).then_with(|| a.path.cmp(&b.path)));
+    found
+}
+
+/// Remove one backup of the database file `db`: a copy in `backups/`, or a folder of copies
+/// that a start with no data moved aside. `path` is what `list` or `set_aside` gave for it.
+/// Nothing else is removed here: not `db`, not a database that was moved aside, not a file
+/// or a folder anywhere else. Returns the bytes that came free.
+fn remove(db: &Path, path: &Path) -> Result<i64> {
+    if let Some(copy) = list(&dir(db)).into_iter().find(|copy| Path::new(&copy.path) == path) {
+        std::fs::remove_file(&copy.path).with_context(|| format!("remove {}", copy.path))?;
+        return Ok(copy.bytes);
+    }
+    let kept = set_aside(db).into_iter().find(|aside| aside.kind == SetAsideKind::Backups && Path::new(&aside.path) == path);
+    let Some(kept) = kept else { bail!("{} is not a backup of Codly's data", path.display()) };
+    std::fs::remove_dir_all(&kept.path).with_context(|| format!("remove {}", kept.path))?;
+    Ok(kept.bytes)
 }
 
 /// What to show when a start failed with `err`. None = the failure is not about the database
@@ -358,11 +467,10 @@ pub fn recover(db: &Path, backup: Option<&Path>, now: i64) -> Result<PathBuf> {
         std::fs::copy(from, &restored).with_context(|| format!("copy {}", from.display()))?;
         std::fs::File::open(&restored)?.sync_all()?;
     }
-    let stem = db.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let aside = db.with_file_name(format!("{stem}.broken-{now}.sqlite"));
+    let aside = db.with_file_name(broken_name(&file_stem(db), now));
     // The copies leave the rotation before the database leaves its place: no state has a new
     // database beside the copies of the old one.
-    let (copies, kept) = (dir(db), db.with_file_name(format!("{DIR}.before-{now}")));
+    let (copies, kept) = (dir(db), db.with_file_name(kept_name(now)));
     if backup.is_none() {
         match std::fs::rename(&copies, &kept) {
             Err(e) if e.kind() != ErrorKind::NotFound => return Err(anyhow::Error::new(e).context(format!("move {} aside", copies.display()))),
@@ -646,6 +754,61 @@ mod tests {
         recover(&db, Some(Path::new(&from.path)), now + 1).unwrap();
         assert_eq!(list(&dir(&db)).len(), KEEP_DAILY);
         assert!(!tmp.path().join(format!("backups.before-{}", now + 1)).exists());
+    }
+
+    #[test]
+    fn what_was_moved_aside_is_listed_and_only_a_backup_can_be_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("codly.sqlite");
+        {
+            let store = Store::open(&db).unwrap();
+            store.kv_set("k", "old data").unwrap();
+            assert!(store.backup_if_due(0).unwrap().is_some());
+            assert!(store.set_aside().is_empty(), "nothing was moved aside yet");
+        }
+        // "Start with no data": the database goes aside with its side file, and its copies too.
+        std::fs::write(beside(&db, "-wal"), b"12345").unwrap();
+        let old_database = file_bytes(&db) + file_bytes(&beside(&db, "-wal")) + file_bytes(&beside(&db, "-shm"));
+        assert!(old_database > file_bytes(&db));
+        recover(&db, None, 50).unwrap();
+        let store = Store::open(&db).unwrap();
+        let today = store.backup_if_due(DAY_MS).unwrap().expect("the new database has no copy yet");
+
+        let (kept, broken) = (tmp.path().join("backups.before-50"), tmp.path().join("codly.broken-50.sqlite"));
+        let old_copies: i64 = list(&kept).iter().map(|copy| copy.bytes).sum();
+        assert!(old_copies > 0);
+        let listed = store.set_aside();
+        let expected = [
+            SetAside { path: kept.to_string_lossy().into_owned(), kind: SetAsideKind::Backups, moved_at: 50, bytes: old_copies },
+            SetAside { path: broken.to_string_lossy().into_owned(), kind: SetAsideKind::Database, moved_at: 50, bytes: old_database },
+        ];
+        assert_eq!(listed, expected);
+        // Names that only look like Codly's are not listed.
+        let not_ours = tmp.path().join("backups.before-soon");
+        std::fs::create_dir(&not_ours).unwrap();
+        std::fs::write(tmp.path().join("backups.before-9"), b"a file, not a folder").unwrap();
+        std::fs::create_dir(tmp.path().join("codly.broken-9.sqlite")).unwrap();
+        std::fs::write(tmp.path().join("notes.broken-9.sqlite"), b"mine").unwrap();
+        assert_eq!(store.set_aside(), expected);
+
+        // Not a backup: the database, the one that was moved aside, the folder of the copies,
+        // a folder that is not Codly's, a path that leaves the folder, a file elsewhere.
+        let (copies, around) = (dir(&db), dir(&db).join("..").join("codly.sqlite"));
+        for refused in [db.as_path(), broken.as_path(), copies.as_path(), not_ours.as_path(), around.as_path(), Path::new("/etc/hosts")] {
+            let e = store.remove_backup(refused).unwrap_err().to_string();
+            assert!(e.contains("is not a backup of Codly's data"), "{e}");
+        }
+        assert!(db.exists() && broken.exists() && beside(&broken, "-wal").exists() && not_ours.is_dir());
+        assert_eq!((store.backups(), store.set_aside()), (vec![today.clone()], expected.to_vec()), "a refused remove takes nothing");
+
+        // One copy, then the folder that was moved aside with every copy in it.
+        assert_eq!(store.remove_backup(Path::new(&today.path)).unwrap(), today.bytes);
+        assert!(store.backups().is_empty() && !Path::new(&today.path).exists());
+        assert_eq!(store.remove_backup(&kept).unwrap(), old_copies);
+        assert!(!kept.exists());
+        assert_eq!(store.set_aside(), expected[1..]);
+        assert!(store.remove_backup(&kept).is_err(), "it is gone: there is nothing to remove twice");
+        assert!(db.exists() && broken.exists() && beside(&broken, "-wal").exists(), "no database is ever removed");
     }
 
     #[test]

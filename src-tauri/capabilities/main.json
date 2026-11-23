@@ -145,6 +145,7 @@
     "allow-storage-clean",
     "allow-storage-delete-worktree",
     "allow-storage-delete-branch",
+    "allow-storage-delete-backup",
     "allow-agent-git",
     "allow-agent-checkpoints",
     "allow-restore-checkpoint",

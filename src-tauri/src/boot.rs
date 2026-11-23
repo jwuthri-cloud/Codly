@@ -90,17 +90,29 @@ pub async fn start_problem(boot: State<'_, Boot>) -> Result<Option<StartProblem>
     Ok(boot.problem().clone())
 }
 
+const NOTHING_TO_RECOVER: &str = "Codly did not fail to start on its database: there is nothing to recover.";
+
+/// Whether the start-up screen offered this way out of `problem`: a start with no data
+/// (`backup` None), or a start from the copy at `backup`. A copy the screen did not list is
+/// refused, also one that is in the backups folder.
+fn offered(problem: Option<&StartProblem>, backup: Option<&str>) -> Result<(), String> {
+    let Some(problem) = problem.filter(|p| p.start_empty) else { return Err(NOTHING_TO_RECOVER.into()) };
+    match backup {
+        Some(path) if !problem.backups.iter().any(|b| b.path == path) => Err(format!("{path} is not a backup that Codly offered to start from.")),
+        _ => Ok(()),
+    }
+}
+
 /// "Start from the last backup" (`backup`: its path) and "Start with no data" (None) on the
 /// start-up screen. The database that cannot be used is moved aside in its folder, never
 /// deleted, and the core starts again. Only after a start that failed on the database: then
-/// nothing has the file open, and a running Codly can never be made to drop its data.
+/// nothing has the file open, and a running Codly can never be made to drop its data. And
+/// only what `start_problem` offered for that start.
 #[tauri::command]
 pub async fn recover_database<R: Runtime>(app: AppHandle<R>, boot: State<'_, Boot>, backup: Option<String>) -> Result<(), String> {
     let db = data_dir(&app).map_err(|e| e.to_string())?.join(codly_core::store::FILE);
-    let offered = boot.problem().as_ref().is_some_and(|p| p.start_empty);
-    let Some(why) = offered.then(|| take_failed(&boot.core)).flatten() else {
-        return Err("Codly did not fail to start on its database: there is nothing to recover.".into());
-    };
+    offered(boot.problem().as_ref(), backup.as_deref())?;
+    let Some(why) = take_failed(&boot.core) else { return Err(NOTHING_TO_RECOVER.into()) };
     let moved = tokio::task::spawn_blocking(move || backup::recover(&db, backup.as_deref().map(std::path::Path::new), codly_core::model::now_ms()))
         .await
         .map_err(|e| e.to_string())
@@ -135,6 +147,7 @@ fn take_failed<T>(started: &watch::Sender<Option<Result<T, String>>>) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use codly_core::store::backup::{BackupKind, DbBackup};
     use serde_json::{Value, json};
     use tauri::test::mock_builder;
 
@@ -196,6 +209,32 @@ mod tests {
         *boot.problem() = Some(problem.clone());
         assert_eq!(crate::ipc_tests::invoke(&wv, "start_problem", json!({})), Ok(serde_json::to_value(&problem).unwrap()));
         assert_eq!(recover(Value::Null), refused);
+        // The database is damaged and the screen offers one copy. Another file is refused,
+        // also one in the backups folder: nothing is moved for it.
+        let copy = DbBackup { path: "/data/backups/codly-2-v1-daily.sqlite".into(), kind: BackupKind::Daily, created_at: 2, schema: 1, bytes: 1 };
+        *boot.problem() = Some(StartProblem { message: "Codly's database is damaged".into(), backups: vec![copy], start_empty: true, ..problem });
+        for other in ["/data/backups/codly-1-v1-daily.sqlite", "/data/codly.sqlite", "/data/backups/../codly-2-v1-daily.sqlite"] {
+            assert_eq!(recover(json!(other)), Err(json!(format!("{other} is not a backup that Codly offered to start from."))));
+        }
         assert!(matches!(&*core_rx.borrow(), Some(Err(e)) if e == "no login shell"), "the failed start is kept as it was");
+    }
+
+    #[test]
+    fn only_what_the_screen_offered_is_a_way_out() {
+        let copy = |at: i64| DbBackup { path: format!("/data/backups/codly-{at}-v1-daily.sqlite"), kind: BackupKind::Daily, created_at: at, schema: 1, bytes: 1 };
+        let damaged = StartProblem { message: "damaged".into(), database: "/data/codly.sqlite".into(), backups: vec![copy(2), copy(1)], start_empty: true };
+        assert_eq!(offered(Some(&damaged), None), Ok(()));
+        assert_eq!(offered(Some(&damaged), Some(&copy(1).path)), Ok(()));
+        assert_eq!(offered(Some(&damaged), Some(&copy(3).path)), Err(format!("{} is not a backup that Codly offered to start from.", copy(3).path)));
+        // The update of the data failed: no copy is offered, only a start with no data.
+        let update_failed = StartProblem { backups: vec![], ..damaged.clone() };
+        assert_eq!(offered(Some(&update_failed), None), Ok(()));
+        assert!(offered(Some(&update_failed), Some(&copy(2).path)).is_err());
+        // Nothing to move: the start did not fail on the database, or only its copy failed.
+        let copy_failed = StartProblem { start_empty: false, ..damaged };
+        for backup in [None, Some(copy(2).path)] {
+            assert_eq!(offered(None, backup.as_deref()), Err(NOTHING_TO_RECOVER.into()));
+            assert_eq!(offered(Some(&copy_failed), backup.as_deref()), Err(NOTHING_TO_RECOVER.into()));
+        }
     }
 }
