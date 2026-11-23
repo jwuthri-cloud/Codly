@@ -324,7 +324,7 @@ Every line from the driver's note before `stop_task` (first recording):
 {"_meta":{"after_the_exit":{"lines_after_stdin_was_closed":["assistant","assistant","result/success"],"sleep_139_alive":false,"sleep_67_alive":false}},"_t":13.229}
 ```
 
-The note `before_stdin_is_closed` above is older than its time stamp: the driver listed the lines, then looked for two processes, then wrote the note, and the `user`, `user` and `system/init` lines came in between (they are in the file before the note; its `init_of_a_turn` is null and its list has 4 lines). Stdin was closed after that `init`. Part 5 ("Notes of part 4 written late") lists every note of part 4 this touches; the script is fixed.
+The note `before_stdin_is_closed` above is older than its time stamp: the driver listed the lines, then looked for two processes, then wrote the note, and the `user`, `user` and `system/init` lines came in between (they are in the file before the note; its `init_of_a_turn` is null and its list has 4 lines). Stdin was closed after that `init`. Part 5 ("Notes written late", "Part 4") lists every note of part 4 this touches; the script is fixed.
 
 ### `idle-interrupt-again`: the self-started turn is interrupted
 

@@ -53,15 +53,16 @@ s.note(before_the_interrupt=dict(when=how, helpers=len(helper_ids()), list=open_
 m, n = s.mark(), results(s)
 ask(s, "interrupt")
 time.sleep(10.0)
+alive = dict(sleep_181_alive=bool(a.alive()), sleep_191_alive=bool(b.alive()))
 ends = {}
 with s.cv:
     for e in s.events[m:]:
         if e.get("type") == "system" and e.get("subtype") in ("task_updated", "task_notification") and e.get("task_id") in helper_ids():
             ends.setdefault(e["task_id"], []).append(e.get("status") or e.get("patch", {}).get("status"))
-s.note(after_the_interrupt=dict(lines=kinds(s, m), end_words_per_helper=list(ends.values()), helpers_ended=len(ends), results_in_the_10s_after=results(s) - n,
-                                list=open_tasks(s), sleep_181_alive=bool(a.alive()), sleep_191_alive=bool(b.alive())),
-       seconds_from_the_interrupt_request=stamps(s, sent_at(s, "interrupt"), answer=answer_to(s), first_task_notification=system("task_notification"),
-                                                 result=is_result, next_init=is_init))
+    s.note(after_the_interrupt=dict(lines=kinds(s, m), end_words_per_helper=list(ends.values()), helpers_ended=len(ends), results_in_the_10s_after=results(s) - n,
+                                    list=open_tasks(s), **alive),
+           seconds_from_the_interrupt_request=stamps(s, sent_at(s, "interrupt"), answer=answer_to(s), first_task_notification=system("task_notification"),
+                                                     result=is_result, next_init=is_init))
 print("lines after the interrupt:", kinds(s, m))
 print("next turn:", next_turn(s, "Reply with the single word: alive", 40))
 time.sleep(1.0)

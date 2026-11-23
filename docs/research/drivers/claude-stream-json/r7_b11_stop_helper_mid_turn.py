@@ -36,11 +36,13 @@ ask(s, "stop_task", task_id=tid)
 stop_answer = answer_to(s)
 print("turn 2's result:", s.wait_results(n + 1, 60))
 time.sleep(20.0)
-r = [e for e in s.events[m:] if e.get("type") == "result"]
-s.note(after_stop_task=dict(lines=kinds(s, m), results_since_the_request=len(r), result_origins=[e.get("origin") for e in r],
-                            list=open_tasks(s), sleep_173_alive=bool(helper.alive()), sleep_21_5_alive=bool(fg.alive())),
-       seconds_from_stop_task=stamps(s, sent_at(s, "stop_task"), answer=stop_answer, task_notification=system("task_notification", task_id=tid),
-                                     result=is_result, init_after_it=is_init))
+alive = dict(sleep_173_alive=bool(helper.alive()), sleep_21_5_alive=bool(fg.alive()))
+with s.cv:
+    r = [e for e in s.events[m:] if e.get("type") == "result"]
+    s.note(after_stop_task=dict(lines=kinds(s, m), results_since_the_request=len(r), result_origins=[e.get("origin") for e in r],
+                                list=open_tasks(s), **alive),
+           seconds_from_stop_task=stamps(s, sent_at(s, "stop_task"), answer=stop_answer, task_notification=system("task_notification", task_id=tid),
+                                         result=is_result, init_after_it=is_init))
 print("lines since stop_task:", kinds(s, m))
 print("results:", results(s), "cost:", s.cost(), "exit:", s.close(after_exit=lambda: dict(transcript=queued_notifications(s.sid))))
 print("killed leftovers:", helper.kill_left(), fg.kill_left())

@@ -81,9 +81,13 @@ Part 5 (`r7_*.py`), what is new:
 - Cost at list price: 0.050 USD for the committed recordings (about 0.08 USD with the runs that were recorded again).
 - `mcp_toggle` IS SAVED in `~/.claude.json` (part 5, section 1). Every part 5 script that switches a server
   (`r7_e1`, `r7_e9`) runs with a throw-away HOME, made empty by `r7_lib.home()` at each run. Earlier scripts that
-  switch a server with your real HOME (`r4_e18_mcp_needs_auth.py`, `r5_e10_mcp_reconnect_toggle.py`) leave the entry
-  of their work folder in your `~/.claude.json`; both turn the server on again at the end, so its
-  `disabledMcpServers` list ends empty.
+  switch a server with your real HOME (`s08_broken_mcp.py`, `r4_e18_mcp_needs_auth.py`,
+  `r5_e10_mcp_reconnect_toggle.py`) leave the entry of their work folder in your `~/.claude.json`. `r4_e18` and
+  `r5_e10` turn the server on again at the end, so its `disabledMcpServers` list ends empty. `s08_broken_mcp.py` as
+  run for part 1 did NOT: if you ran it, your `~/.claude.json` still has
+  `"disabledMcpServers":["no-such-command"]` in the entry `projects["<CAPTURE_DIR>/work/broken-mcp"]`, and a new run
+  there starts that server `disabled`, not `failed`. Remove that entry (or that list) by hand. The script now turns
+  the server on again at its end; its part 1 fixture was recorded before that change.
 - TWO RUNS READ YOUR OWN USER SETTINGS with your real login: `r7_e2_untrusted_mcp.py user-login` and
   `user-local-login`, with the safety of `r6_e8` (see Part 4 above: `disableAllHooks`, claude.ai connectors off, one tool
   allowed, no `mcp_status`). Your own stdio MCP servers are started by the CLI, as in any session of yours.
@@ -170,7 +174,7 @@ cd "$CAPTURE_DIR/fixtures"
 | `r6_lib.py` | helpers of the `r6_*.py` scripts: time stamps of lines (not of the driver's waits), a note at the moment the process exits, process helpers |
 | `r7_lib.py` | helpers of the `r7_*.py` scripts: a throw-away HOME, changed files, the folder's entry in `HOME/.claude.json`, counts of queued task notifications in a session's transcript |
 | `mcp_http_ping_server.py` | minimal MCP server over Streamable HTTP on 127.0.0.1, run in a thread of `r7_b6_tool_progress_http.py` (a slow tool) |
-| `make_notes_part5.py` | builds the part 5 document, with the same checks; it also lists the part 4 notes that were written late |
+| `make_notes_part5.py` | builds the part 5 document, with the same checks; it also lists the notes of parts 4 and 5 that were written late (and fails on a late one of part 5) |
 
 Part 1 scenarios (`s*.py` -> fixtures without prefix): `s00_smoke`, `s01_mid_turn` (plain, uuid, uuid-now,
 uuid-next, uuid-later), `s02_control`, `s03_image`, `s04_subagent`, `s05_background`, `s06_limits`,
@@ -261,7 +265,8 @@ Notes for whoever records again:
   0.2 s, and part 3 once reported that interval as a latency.
 - A note that lists lines must be written in the same step as the list: make the slow checks (`pgrep`) first, then
   take the list and write the note under `s.cv` (the driver's lock). Two part 4 notes listed fewer lines than the
-  file has before them (part 5, "Notes of part 4 written late").
+  file has before them (part 5, "Notes written late"); the driver now writes a line to the raw file and to its list
+  in one step under that lock.
 - The CLI streams no partial lines of a helper (no `stream_event` with its `parent_tool_use_id`): a scenario cannot wait
   for a helper's first text delta.
 - `r6_f10_budget_midturn_resumed.py` tries budgets of 0.5, 0.7 and 0.85 of one turn's cost and stops at the first

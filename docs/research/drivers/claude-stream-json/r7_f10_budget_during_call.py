@@ -83,13 +83,21 @@ def run(label, budget=None):
     if budget is not None and s.alive():
         m = s.mark()
         time.sleep(3.0)
-        s.note(three_s_after_the_result=dict(lines=kinds(s, m), list=open_tasks(s), sleep_61_5_alive=bool(sleeps.alive())))
+        sleep_alive = bool(sleeps.alive())
+        with s.cv:
+            s.note(three_s_after_the_result=dict(lines=kinds(s, m), list=open_tasks(s), sleep_61_5_alive=sleep_alive))
         m = s.mark()
         second = next_turn(s, "Reply with the single word: alive", 30)
         r2 = [e for e in s.events[m:] if e.get("type") == "result"]
         s.note(second_turn=dict(result_came=second, result_subtype=r2 and r2[-1].get("subtype"), list=open_tasks(s), sleep_61_5_alive=bool(sleeps.alive())))
     m = s.mark()
-    s.close(after_exit=lambda: dict(after_the_exit=dict(lines_after_stdin_was_closed=kinds(s, m), sleep_61_5_alive=bool(sleeps.alive()))))
+
+    def after_exit():
+        sleep_alive = bool(sleeps.alive())
+        with s.cv:
+            return dict(after_the_exit=dict(lines_after_stdin_was_closed=kinds(s, m), sleep_61_5_alive=sleep_alive))
+
+    s.close(after_exit=after_exit)
     print("killed leftovers:", sleeps.kill_left())
     return note
 

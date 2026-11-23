@@ -3,7 +3,7 @@
 python3 make_notes_part5.py [output file]      (default: $CAPTURE_DIR/NOTES-part5.md)
 
 Numbers and words that the text states about a fixture are checked against it (`check`): the build fails when a
-recording no longer says what the text says. The section "Notes of part 4 written late" reads the r6-* fixtures.
+recording no longer says what the text says. The section "Notes written late" also reads the r6-* fixtures.
 """
 import json
 import os
@@ -100,12 +100,18 @@ w("""# Claude Code CLI stream-json: recorded protocol shapes, part 5
 
 Differences from the part 4 method:
 - Times are time stamps of the recording, as in part 4. A note that lists lines is now written under the driver's lock
-  in the same step as the list, and the process checks are made before that step (`r7_a5`, and `r6_a2` fixed the same
-  way): no line can come between a list and its note's stamp. Part 4 had notes written late: see "Notes of part 4
-  written late".
+  in the same step as the list, and the process checks are made before that step, and the driver writes a line to the
+  raw file and to its list in one step under that lock: no line can come between a list and its note's stamp. When
+  the part 5 recordings were made, only the script `r7_a5` took its notes that way; `r7_a4`, `r7_b3`, `r7_b11`,
+  `r7_f10`, `r6_a2` and the driver were fixed after. This build compares every note that lists lines with the fixture
+  and fails when one is late: none of part 5 is ("Notes written late"); two of part 4 are.
 - EVERY RUN THAT SWITCHES AN MCP SERVER uses a throw-away HOME: section 1 shows that Claude Code saves the switch in
-  `~/.claude.json`. (Earlier parts switched servers with the real HOME: `r4-mcp-needs-auth`, `r5-mcp-reconnect-toggle`.
-  Both turned their server on again before they ended, which empties the saved list again: section 1.)
+  `~/.claude.json`. Earlier parts switched servers with the real HOME: `r4-mcp-needs-auth` and
+  `r5-mcp-reconnect-toggle` turned their server on again before they ended, which empties the saved list again
+  (section 1). Part 1's `broken-mcp` (`s08_broken_mcp.py`) did NOT: it left `"disabledMcpServers":["no-such-command"]`
+  in the real `~/.claude.json`, in the entry of `<CAPTURE_DIR>/work/broken-mcp` (inferred from sections 1 and 9; that
+  file was not read). A new run of `s08` in that folder starts the server `disabled`, not `failed`, until the entry is
+  removed by hand. The script now turns the server on again at its end; part 1's fixture was not recorded again.
 - Two recordings of section 2 run with the REAL login and the user's own settings (`--setting-sources user…`, no
   `--strict-mcp-config`), because that is the question. Same safety as part 4: `"disableAllHooks":true` in
   `--settings`, the claude.ai connectors off, one tool allowed and every other request denied, no `mcp_status`; the
@@ -379,11 +385,14 @@ T6 = [note(n, "seconds_from_tool_use_to_tool_result") for n in N6]
 w("""What the adapter can rely on:
 - Yes: the same heartbeat line as for a stdio server (`tool_use_id` `<call id>-heartbeat-N`, `parent_tool_use_id` =
   the call id, `tool_name` = the tool, `"heartbeat":true`) at 30 s and 60 s (n=2), at 30 s for the 45 s call (n=1).
-- NEW: an HTTP MCP tool call does not outlast 60 s. At %s s after its `tool_use` line (n=2) the call ended with
-  the error tool result `The operation timed out.` (`tool_use_result` `"Error: The operation timed out."`), while
-  the server was still working on it; the turn went on (the model got the error). The 45 s call returned its answer.
-  The stdio tool of part 3 ran 100 s and returned. Recorded with a server that answers with a JSON body; a server that
-  streams its answer (an event stream) is not recorded.
+- NEW: a call to an HTTP server that SENDS NOTHING until the tool is done (no response headers, then one JSON body)
+  ended at 60 s. At %s s after its `tool_use` line (n=2) the call ended with the error tool result
+  `The operation timed out.` (`tool_use_result` `"Error: The operation timed out."`), while the server was still
+  working on it; the turn went on (the model got the error). The 45 s call returned its answer. The stdio tool of
+  part 3 ran 100 s and returned.
+- Only that one server shape was recorded. Servers built with the MCP SDKs usually answer `tools/call` with an event
+  stream whose headers come at once; the words look like a timeout of one HTTP request, which such a server may never
+  hit (inference, not recorded). So this is NOT a rule that an HTTP MCP call never outlasts 60 s.
 - The approval request of an HTTP server's tool has `"mcp_server":{"name":"ping-http","source":"dynamic"}`, as for a
   stdio server of `--mcp-config`.
 """ % secs(T6, "%.3f"))
@@ -586,13 +595,18 @@ for n in N11:
 w("""What the adapter can rely on (n=2):
 - The stop itself is as with no turn running: `task_updated` `killed`, `task_notification` `stopped`, the list `[]`,
   the answer `{}`, then the helper's two `user` lines.
-- The running turn goes on and ends normally (`success`). NO turn starts by itself after it: no `system/init` in the
-  20 s after that `result`. (With no turn running the CLI starts one at once: part 3, section 1; part 4, section 2.)
+- Both runs sent `stop_task` 2 s into the turn's own Bash call, so one more model request of that turn followed (the
+  one that reads the call's result). Under that condition: the running turn goes on and ends normally (`success`),
+  and NO turn starts by itself after it: no `system/init` in the 20 s after that `result`. (With no turn running the
+  CLI starts one at once: part 3, section 1; part 4, section 2.)
 - Where the helper's notification went: the session's transcript shows ONE task notification put in the CLI's queue
-  and handed to a model request of the running turn (`queued_command`), then taken out of the queue, in each run. So
-  the agent is told about the stop inside the turn that runs; the stream itself shows no line for that.
-- So the hint "goes on with a turn of its own" is right only when no turn runs. When a turn runs, the agent is told
-  within that turn.
+  and handed to that later model request of the running turn (`queued_command`), then taken out of the queue, in
+  each run. So the agent is told about the stop inside the turn that runs; the stream itself shows no line for that.
+- NOT recorded: `stop_task` while the turn's LAST model request runs (its final answer streams, no later request to
+  hand the notification to). There the notification may stay in the queue and the CLI may start a turn by itself
+  after the `result` (inference from the queue the transcript shows, not recorded).
+- So the hint "goes on with a turn of its own" is right when no turn runs, and wrong for a stop made while a tool call
+  of the running turn runs. For a stop during the turn's last model request it is not known.
 """)
 
 # ================================================================= 12
@@ -650,8 +664,9 @@ What the adapter can rely on (n=2 per duration; 10 calls became tasks, 4 did not
   part 4, sections 1 and 2; the budget stop's close: section 10).
 """ % (min(TS12), max(TS12), min(NOTASK12), max(NOTASK12)))
 
-# ================================================================= part 4 notes
-w("## Notes of part 4 written late\n")
+# ================================================================= late notes
+w("## Notes written late\n")
+w("### Part 4\n")
 w("The script `r6_a2_shutdown_helper.py` listed the lines, then looked for two processes, then wrote its note `before_stdin_is_closed`; a line "
   "that came in between is in the file before the note but not in its list. The other part 4 notes that list lines (`r6_a1`: `after_the_interrupt`; "
   "`r6_a2`: `after_stop_task`, `after_the_exit`) were made in the same order. This build compares each such list with the lines in the fixture "
@@ -688,6 +703,40 @@ lines of the file, not the note, and stands. Part 4 now says this under its quot
 first, then the list and the note in one step under the driver's lock); its fixtures were not recorded again.
 """)
 
+w("### Part 5\n")
+w("Four scripts of this part (`r7_a4`, `r7_b3`, `r7_b11`, `r7_f10`) took their notes in the old order when they were recorded, and the "
+  "driver wrote a line to the raw file before it put it in its list. The same comparison, for every note of this part that lists lines; its "
+  "starting point is the step the script marked just before it (named in the last column):\n")
+# The host step after which a script took its mark for each note that lists lines.
+SINCE7 = {"after_the_exit": ("the close of stdin", lambda l: "_meta" in l and "closing_stdin" in l["_meta"]),
+          "before_stdin_is_closed": ("the `interrupt` request", is_sent("interrupt")),
+          "after_the_interrupt": ("the `interrupt` request", is_sent("interrupt")),
+          "after_stop_task": ("the `stop_task` request", is_sent("stop_task")),
+          "right_after_the_failed_turn": ("the message of turn 2", is_sent(kind_="user")),
+          "after_it": ("the note `right_after_the_failed_turn`", from_note("right_after_the_failed_turn")),
+          "three_s_after_the_result": ("the note `run`", from_note("run"))}
+w("| fixture | note | lines in its list | lines in the file before it | counted from |")
+w("|---|---|---|---|---|")
+LATE7, CHECKED7 = [], 0
+for n in ALL:
+    lines = fx(n)
+    for i, l in enumerate(lines):
+        for key, v in (l.get("_meta") or {}).items():
+            for k2, listed in (v.items() if isinstance(v, dict) else []):
+                if k2.startswith("lines") and isinstance(listed, list):
+                    check(key in SINCE7, "a starting point for the note %r of %s" % (key, n))
+                    label, at = SINCE7[key]
+                    since = [x for x, m in enumerate(lines[:i]) if at(m)][-1]
+                    seen = sum(1 for x in lines[since:i] if kindline(x))
+                    CHECKED7 += 1
+                    if seen != len(listed):
+                        LATE7.append((n, key))
+                    w("| `%s` | `%s` | %d | %d | %s |" % (n, key, len(listed), seen, label))
+check(LATE7 == [], "no late note in part 5: %r" % LATE7)
+w("""
+All %d notes of this part that list lines list exactly the lines in their window: none is late.
+""" % CHECKED7)
+
 # ================================================================= code
 w("""## Can the waiting code be built now? (as of the day of recording)
 
@@ -698,12 +747,12 @@ w("""## Can the waiting code be built now? (as of the day of recording)
 | 3 | `on_result` and the store's rule for a FAILED turn (helpers) | yes: a turn that fails by a limit ends no background helper; the helper ends at its own `task_notification`, and a turn by itself follows. Keep helpers past a failed turn, as past a done one. Not recorded: a failure by an API error |
 | 4 | The same rule for an interrupt with several helpers, or a helper that waits for the model | yes: each helper gets its own `killed` / `stopped` pair before the answer (2 helpers, n=2; a helper waiting for its answer, n=2) |
 | 5 | `begin_shutdown` / `wind_down` | yes: `interrupt` first, also with no turn running (it ends the helpers and leaves the commands listed), then `stop_task` for each listed command, then close: exit in 0.70 s, nothing left (n=2). Today `wind_down` with no turn running skips the interrupt and leaves a helper to the later steps |
-| 6 | The watchdog's short limit for `mcp__` tools | yes: an HTTP server's tool gets the same 30 s heartbeat. New: such a call ends with `The operation timed out.` at 60 s (n=2, a server that answers with a JSON body): a limit above 60 s for it is never reached |
+| 6 | The watchdog's short limit for `mcp__` tools | yes: an HTTP server's tool gets the same 30 s heartbeat as a stdio one (n=2). Also seen: a call to an HTTP server that sends nothing until the tool is done ended with `The operation timed out.` at 60 s (n=2); other HTTP servers (an event stream) were not recorded, so the watchdog must not count on that end |
 | 7 | One answer for "approve and accept edits" (`grantable` never sends `setMode`) | yes: the request's own `setMode` suggestion in the allow answer switches the session to `acceptEdits` (status line at once, next `init`, the next Edit does not ask). Read the mode back from those lines: `get_settings` has none |
 | 8 | Taking an effort away with no restart (`runs.rs` `live_model_switch`) | yes: `effortLevel:null` gives `medium` for `low`, `high` and `max` (n=2 each) |
 | 9 | The toast of a failed "Turn on" / "Restart" (`AgentMcp.svelte`) | yes: both are control errors with the CLI's words (`Connection closed`; `Executable not found in $PATH: "stdio"`, which names the transport, not the program) and `mcp_status` says `failed` with the same words. After a failed "Turn on" the saved switch is on |
 | 10 | The text of the budget stop (`failure_reason`) and package `answers-and-limits` item 3 | partly: the text can say that the work stopped (`budget_exhausted`, `Reached maximum budget ($…)`); it must not say that everything stopped: a Bash call that runs at that moment runs on, unlisted, until the process ends. The host should end the process after such a stop. A helper with requests left at the stop is not recorded |
-| 11 | The Stop hint of a helper row (`session.ts` `stopHint`) and the demo | yes: the agent "goes on with a turn of its own" only when no turn runs; during a turn it is told within that turn and no turn follows |
+| 11 | The Stop hint of a helper row (`session.ts` `stopHint`) and the demo | partly: the agent "goes on with a turn of its own" when no turn runs; for a stop made while a tool call of the running turn runs (a model request of the turn still follows) it is told within that turn and no turn follows (n=2). A stop during the turn's last model request is not recorded, so a hint built only on "does a turn run?" may be wrong there |
 | 12 | `on_task` (a line that must end no helper and no background row) | yes: a foreground Bash call becomes a task about 3 s after its `tool_use`; its end by itself is one `task_notification` `completed` with `"output_file":""` and the call's `tool_use_id`, no `task_updated`, no list line |
 """ % (COUNT2 + len(P4_ROWS), COUNT2 + len(P4_ROWS)))
 
@@ -717,12 +766,12 @@ w("""## Table: question -> answer -> fixture
 | 3 | A turn that fails by itself while a helper works | The helper goes on (still listed), ends `completed` later, a turn by itself follows | 2 | `r7-failed-turn-helper-1`, `-2` |
 | 4 | An interrupt with two helpers; with a helper that waits for the model | All ended: `killed` / `stopped` for each before the answer; the waiting helper's line is `[Request interrupted by user]` | 2 + 2 | `r7-interrupt-two-helpers-1`, `-2`, `r7-interrupt-helper-model-1`, `-2` |
 | 5 | Shutdown with a helper and a command | interrupt ends the helper (command still listed), `stop_task` ends the command, exit 0.70 s after close, nothing left | 2 | `r7-shutdown-helper-and-command-1`, `-2` |
-| 6 | `tool_progress` of an HTTP MCP tool | Heartbeat at 30 and 60 s, as for stdio; the call ends at 60 s with `The operation timed out.` | 2 (+1 control) | `r7-tool-progress-http-70-1`, `-2`, `-45-1` |
+| 6 | `tool_progress` of an HTTP MCP tool | Heartbeat at 30 and 60 s, as for stdio; with a server that sends nothing until the tool is done, the call ended at 60 s with `The operation timed out.` | 2 (+1 control) | `r7-tool-progress-http-70-1`, `-2`, `-45-1` |
 | 7 | Allow with the request's `setMode` suggestion | Session in `acceptEdits`: status line, next `init`, next Edit not asked; `get_settings` has no mode | 2 | `r7-allow-set-mode-1`, `-2` |
 | 8 | `effortLevel:null` on `--effort low` / `max` | `medium` at once and after a turn | 2 per level | `r7-effort-null-low-1` … `-max-2` |
 | 9 | "Turn on" of a server that cannot start; reconnect of a gone program | control error `Connection closed` (or `Executable not found in $PATH: "stdio"`), status `failed` with the same words; the saved switch is on | 2 | `r7-mcp-cannot-start-1`, `-2` |
 | 10 | Budget reached during a long call and while a helper works | The turn ends (`budget_exhausted`), the call runs on unlisted until stdin closes; the helper had completed; a turn by itself fails at once | 2 | `r7-budget-during-call-1-calib`, `-1-t1`, `-2-calib`, `-2-t1` |
-| 11 | `stop_task` on a helper while a turn runs | The turn goes on; no turn by itself after it; the notification goes into the running turn | 2 | `r7-stop-helper-mid-turn-1`, `-2` |
+| 11 | `stop_task` on a helper while a tool call of the running turn runs | The turn goes on; no turn by itself after it; the notification goes into the turn's next model request | 2 | `r7-stop-helper-mid-turn-1`, `-2` |
 | 12 | A Bash call that becomes a task and ends by itself | Task about 3 s after `tool_use`; `task_notification` `completed`, `"output_file":""`, before the tool result, no `task_updated` | 2 per duration | `r7-bash-becomes-task-1`, `-2` |
 
 ## Not verified
@@ -753,7 +802,8 @@ Open after these recordings:
 - 9: a server that cannot start at the process start AND is then turned off and on in a NEW process (the saved switch).
 - 10: a helper that still had requests to make when the limit was passed; whether closing stdin is the only end of the
   call that runs on (an `interrupt` after the stop was not tried).
-- 11: `stop_task` on a COMMAND while a turn runs.
+- 11: `stop_task` on a helper during the turn's LAST model request (no later request to take the notification): does
+  a turn start by itself after the `result`? `stop_task` on a COMMAND while a turn runs.
 - 12: the line of a Bash call that becomes a task and FAILS by itself (exit code not 0).
 """ % COUNT2)
 

@@ -318,8 +318,8 @@ check(_late["seconds_from_stop_task"]["init_of_a_turn"] is None and len(_late["b
       and any(sub(l) == "init" for l in _before[[i for i, l in enumerate(_before) if "_sent" in l][-1]:]), "the late note of idle-close-now")
 w("The note `before_stdin_is_closed` above is older than its time stamp: the driver listed the lines, then looked for two "
   "processes, then wrote the note, and the `user`, `user` and `system/init` lines came in between (they are in the file before "
-  "the note; its `init_of_a_turn` is null and its list has 4 lines). Stdin was closed after that `init`. Part 5 (\"Notes of part 4 "
-  "written late\") lists every note of part 4 this touches; the script is fixed.\n")
+  "the note; its `init_of_a_turn` is null and its list has 4 lines). Stdin was closed after that `init`. Part 5 (\"Notes written late\", "
+  "\"Part 4\") lists every note of part 4 this touches; the script is fixed.\n")
 w("### `idle-interrupt-again`: the self-started turn is interrupted\n")
 w("From `stop_task` on (first recording):\n")
 w(block(tl(N2["idle-interrupt-again"][0], SEQ2, start=lambda l: "_sent" in l and l["_sent"].get("request", {}).get("subtype") == "stop_task", text=120, maxlist=9)))

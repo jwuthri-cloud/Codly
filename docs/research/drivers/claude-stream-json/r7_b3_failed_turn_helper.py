@@ -29,17 +29,20 @@ s.user("Run the Bash command `echo one`. After you see its output, run `echo two
        "run `echo three` in a third, separate tool call. Then reply with the single word: done")
 print("turn 2's result:", s.wait_results(n + 1, 60))
 r2 = s.wait_for(is_result, 1, m) or {}
-s.note(right_after_the_failed_turn=dict(result_subtype=r2.get("subtype"), terminal_reason=r2.get("terminal_reason"), num_turns=r2.get("num_turns"),
-                                        list=open_tasks(s), sleep_41_alive=bool(helper.alive()), lines=kinds(s, m)))
+sleep_41_alive = bool(helper.alive())
+with s.cv:
+    s.note(right_after_the_failed_turn=dict(result_subtype=r2.get("subtype"), terminal_reason=r2.get("terminal_reason"), num_turns=r2.get("num_turns"),
+                                            list=open_tasks(s), sleep_41_alive=sleep_41_alive, lines=kinds(s, m)))
 m2, n2 = s.mark(), results(s)
 end = s.wait_for(system("task_notification", task_id=tid), 70, m)
 self_started = s.wait_results(n2 + 1, 40) if end else False
 time.sleep(1.0)
+sleep_41_alive = bool(helper.alive())
 with s.cv:
     later = [e for e in s.events[m2:] if e.get("type") == "result"]
-s.note(after_it=dict(helper_end=end and end.get("status"), helper_summary=end and end.get("summary", "")[:120],
-                     turn_by_itself=self_started, its_results=[[e.get("subtype"), e.get("origin")] for e in later],
-                     lines=kinds(s, m2), list=open_tasks(s), sleep_41_alive=bool(helper.alive())))
+    s.note(after_it=dict(helper_end=end and end.get("status"), helper_summary=end and end.get("summary", "")[:120],
+                         turn_by_itself=self_started, its_results=[[e.get("subtype"), e.get("origin")] for e in later],
+                         lines=kinds(s, m2), list=open_tasks(s), sleep_41_alive=sleep_41_alive))
 print("helper's end:", end and end.get("status"), "turn by itself:", self_started, "lines:", kinds(s, m2))
 print("results:", results(s), "cost:", s.cost(), "exit:", s.close())
 print("killed leftovers:", helper.kill_left())
