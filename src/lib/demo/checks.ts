@@ -30,6 +30,11 @@ export class ChecksDemo {
   /** The last "Check the work" of each agent, until the agent works again. */
   private checked = new Map<string, CheckedWork>();
 
+  /** `on` (`?checks=on`): start with the checks turned on, as after a click in Settings. */
+  constructor(on = false) {
+    if (on) this.allowed = fingerprint(this.text);
+  }
+
   /** `required_checks`: the repo's checks; `set` turns them on (for the text shown) or off. */
   status(set: ChecksChoice | null): RequiredChecks {
     const sha = fingerprint(this.text);
@@ -39,6 +44,12 @@ export class ChecksDemo {
     }
     const on = this.allowed === sha;
     return { text: this.text, sha, commands: commands(this.text).map((command) => ({ command, risks: [] })), on, changed: this.allowed !== null && !on, problem: null };
+  }
+
+  /** What the gate runs for every task, after the task's own checks: your commands while they are on, none while they are off or changed. */
+  required(): string[] {
+    const now = this.status(null);
+    return now.on ? now.commands.map((c) => c.command) : [];
   }
 
   /** `check_agent`: every command passes in the demo, once the checks are on. `at`: now (ms). */

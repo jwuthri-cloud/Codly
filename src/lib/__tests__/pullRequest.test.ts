@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import { PullRequestDemo, type DemoWorld } from '../demo/pullrequest';
+import type { ChatMessage } from '../gen/ChatMessage';
+import type { IntakeSource } from '../gen/IntakeSource';
 import type { Plan } from '../gen/Plan';
 import type { PrChecks } from '../gen/PrChecks';
 import type { PrDraft } from '../gen/PrDraft';
@@ -137,6 +139,7 @@ describe('the demo’s pull requests', () => {
       ['t2', { id: 't2', plan_id: 'p1', key: 't2', title: 'Toggle', status: 'changes_requested', verify: ['pnpm test toggle'] } as Task],
     ]),
     agents: new Map(),
+    chats: [],
     now: () => 1000,
   };
 
@@ -166,5 +169,31 @@ describe('the demo’s pull requests', () => {
     const second = demo.handle('refresh_pull_request', args, world) as PullRequest;
     expect([second.checks?.pending, second.checks?.passed]).toEqual([0, 3]);
     expect(() => demo.handle('refresh_pull_request', { source: { kind: 'agent', id: 'nobody' } }, world)).toThrow('has not opened a pull request');
+  });
+
+  it('ends the description with the issue or pull request the plan’s request started from', () => {
+    const source: IntakeSource = { kind: 'issue', host: 'github.com', owner: 'acme', repo: 'web', number: 12, url: 'https://github.com/acme/web/issues/12', title: 'Dark mode resets on reload' };
+    const from = (ts: number, intake: IntakeSource): ChatMessage => ({ id: `m${ts}`, thread: 'lead', author: 'user', text: 'Work on it.', attachment: { intake }, ts });
+    const p1 = { ...world.plans.get('p1')!, thread: 'lead', status: 'running', created_at: 500 } as Plan;
+    const drafted = (chats: ChatMessage[], plans: Plan[] = [p1]) => {
+      const w: DemoWorld = { ...world, chats, plans: new Map(plans.map((p) => [p.id, p])) };
+      return (new PullRequestDemo().handle('draft_pull_request', { source: plan, confirm }, w) as PrDraft).body;
+    };
+    const plain = drafted([]);
+    expect(plain).not.toMatch(/Closes|Related to/);
+    // An issue of the repo the pull request opens in closes with it; of another repo, by its full name.
+    expect(drafted([from(100, source)])).toBe(`${plain}\nCloses #12\n`);
+    expect(drafted([from(100, { ...source, owner: 'Acme', repo: 'WEB' })])).toBe(`${plain}\nCloses #12\n`);
+    expect(drafted([from(100, { ...source, repo: 'api', number: 3 })])).toBe(`${plain}\nCloses acme/api#3\n`);
+    // A pull request, or another host, is only named.
+    expect(drafted([from(100, { ...source, kind: 'pull_request', number: 7 })])).toBe(`${plain}\nRelated to #7\n`);
+    expect(drafted([from(100, { ...source, host: 'git.example.com' })])).toBe(`${plain}\nRelated to https://github.com/acme/web/issues/12\n`);
+    // The newest message before the plan counts; one sent after the plan, or in another request, does not.
+    expect(drafted([from(100, source), from(200, { ...source, number: 40 })])).toBe(`${plain}\nCloses #40\n`);
+    expect(drafted([from(900, source)])).toBe(plain);
+    expect(drafted([{ ...from(100, source), thread: 'lead:other' }])).toBe(plain);
+    // An earlier plan made after that message is done: its work was delivered, this plan is new work.
+    const earlier = { ...p1, id: 'p0', status: 'done', created_at: 300 } as Plan;
+    expect(drafted([from(100, source)], [earlier, p1])).toBe(plain);
   });
 });

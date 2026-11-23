@@ -1,31 +1,40 @@
 // The scripted demo session for `pnpm dev` (no backend). Two requests run side by side, each in
 // its own thread with its own Lead and plan:
 //   "lead"       — you ask for a dark-mode toggle; while the Lead is still planning you add a
-//                  detail, which waits as Queued (Send now interrupts the Lead so it runs next);
-//                  Claude Code, Codex and Gemini CLI then build it in parallel worktrees.
+//                  detail. A Claude Code or Codex Lead reads it after the step it is in, as the
+//                  real one does; with another CLI it waits as Queued for the turn's end (Send
+//                  now interrupts the Lead so it runs next). Claude Code, Codex and Gemini CLI
+//                  then build it in parallel worktrees.
 //   "lead:<id>"  — a little later you open a second request (sign-in lockout); "Lead 2" plans
 //                  it and Codex + OpenCode build it while the first plan is still running.
 // Workers ask before risky commands (approvals land in their plan's thread), Codly commits,
 // verifies and merges, and each Lead reports back in its own thread. Everything is expressed as
 // real EventKinds, so every panel and the office render it exactly like a live session.
+// A 1:1 Claude agent you hire works in its mode (plan first, ask for edits, accept edits).
+// docs/DEMO.md lists the URL parameters that start the demo in a state the script does not reach.
 import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
 import type { Citation } from '../gen/Citation';
 import type { HeldCheck } from '../gen/HeldCheck';
+import type { JsonValue } from '../gen/serde_json/JsonValue';
 import type { Plan } from '../gen/Plan';
 import type { Provider } from '../gen/Provider';
+import type { Target } from '../gen/Target';
 import type { Task } from '../gen/Task';
 import type { TaskStatus } from '../gen/TaskStatus';
 import type { Workspace } from '../gen/Workspace';
+import { describeRule, MockApprovalRules, PACKAGE_INSTALL } from './approvalRules';
 import { bytesOf, contrastCsv, contrastSvg, ILLUSTRATION_PROMPT, illustrationPng, SETTINGS_API_MD, TOGGLE_PREVIEW_HTML } from './artifacts';
+import { ChecksDemo } from './checks';
+import { MODE_LABEL } from './controls';
 import { diffOf, INDEX, INDEX_AFTER, NEXT_BUMP, TASK_FILES, type RepoFile } from './repo';
-import { Actor, Cancelled, REPO, Sim, WORKTREES, sha, uid } from './sim';
+import { Actor, Cancelled, REPO, Sim, WORKTREES, sha, uid, type ToolSpec } from './sim';
 import { waitingOn } from '../util/plan';
 import { memberTitle } from '../util/team';
 
 export const REQUEST =
   'Add a dark mode toggle to Settings. Persist the choice per user, follow the system by default, and cover it with tests.';
-/** Sent while the Lead is still planning: it queues until the Lead's turn ends. */
+/** Sent while the Lead is still planning: a Claude Code or Codex Lead reads it after its current step. */
 export const AMEND = 'Also make the toggle fully keyboard-accessible: arrow keys should move between the options.';
 /** The second request, opened in parallel (⌘N) a little later. */
 export const REQUEST_B = 'Lock sign-in for 15 minutes after 5 failed attempts, and tell people clearly when they’re locked out.';
@@ -58,6 +67,21 @@ const BRANCH: Record<Spec, string> = { theme: 'codly/dark-mode', lockout: 'codly
 /** Task key → the demo files it writes (TASK_FILES key). */
 const FILES: Record<Spec, Record<string, string>> = { theme: { t1: 't1', t2: 't2', t3: 't3' }, lockout: { t1: 'l1', t2: 'l2' } };
 const KEYBOARD = /keyboard|arrow|a11y|accessib/i;
+/** Claude Code and Codex take a message into the turn that runs; the other CLIs run it as the next turn (state/queue.ts). */
+const readsMidTurn = (provider: Provider) => provider === 'claude' || provider === 'codex';
+const quoted = (text: string, max: number) => `“${text.slice(0, max)}${text.length > max ? '…' : ''}”`;
+/** What the demo's build prints. */
+const BUILD_OUTPUT = [
+  '> acme-web@2.4.0 build', '> next build', '', '   ▲ Next.js 16.1.2', '   Creating an optimized production build …', ' ✓ Compiled successfully in 9.4s',
+  '   Linting and checking validity of types …', ' ✓ Generating static pages (14/14)', '', 'Route (app)                Size  First Load JS',
+  '┌ ○ /                     4.1 kB        112 kB', '├ ƒ /api/settings           0 B           0 B', '└ ○ /settings             3.2 kB        109 kB',
+];
+/** The plan a 1:1 Claude agent shows in "plan first" (`note`: what you asked to change when you sent it back). */
+const soloPlan = (ask: string, note: string | null) =>
+  [
+    '# Plan', '', `You asked: ${quoted(ask, 200)}`, '', '## Steps', '1. Add a short section about it to `README.md`, the only file that changes.',
+    '2. Run `npm test`.', '3. Tell you what changed.', ...(note ? ['', `Changed as you asked: ${note}`] : []), '', 'Nothing changes before you accept this plan.',
+  ].join('\n');
 
 function stats(files: RepoFile[]) {
   const d = diffOf(files).split('\n');
@@ -70,9 +94,30 @@ function stats(files: RepoFile[]) {
 
 /** One request thread: its words, its plan, and the FIFO of turns its Lead takes. */
 type Req = { thread: string; spec: Spec | null; words: string[]; planId: string | null; chain: Promise<void> };
+/** A message of yours that its agent has not read yet. */
+type Sent = { text: string };
+/** One call a helper (sub-agent) makes, and what it says it is doing meanwhile. */
+type HelperStep = Pick<ToolSpec, 'name' | 'activity' | 'target'> & { step: string };
+
+/** The states a URL parameter starts the story in (demo/states.ts, docs/DEMO.md). */
+export type StoryOptions = {
+  /** The repo's required checks (Settings → Safety): the gate runs them for every task while they are on. */
+  checks?: ChecksDemo;
+  /** `?helper=slow`: a helper stays at work long enough to look at. */
+  slowHelper?: boolean;
+  /** `?mode=plan`: a 1:1 Claude agent in "plan first" shows you a plan when the repo opens. */
+  planMode?: boolean;
+  /** `?intake=…`: the scripted requests do not start, so the request you start from GitHub is the first. */
+  yourRequestFirst?: boolean;
+};
 
 export class Story {
+  /** "Always allow in this repo": the rules you saved, which answer later requests as in the core. */
+  readonly rules: MockApprovalRules;
+  private checks: ChecksDemo;
   private reqs = new Map<string, Req>();
+  /** By thread: your messages sent while the agent's turn ran, in order, until it reads them. */
+  private unread = new Map<string, Sent[]>();
   private busyLeads = new Set<string>();
   private running = new Set<string>(); // agent ids inside a task track
   private userAssigned = new Set<string>(); // task ids you assigned by hand
@@ -82,7 +127,11 @@ export class Story {
   private fileKeys = new Map<string, string>();
   private nextAdhoc = 4;
 
-  constructor(private sim: Sim) {}
+  constructor(private sim: Sim, private opts: StoryOptions = {}) {
+    this.rules = new MockApprovalRules(sim, this);
+    this.checks = opts.checks ?? new ChecksDemo();
+    sim.afterStep = (act) => this.readMidTurn(act);
+  }
 
   // ───────────── workspace ─────────────
 
@@ -130,8 +179,10 @@ export class Story {
     sim.triple(`task:${a3.id}`, 'modified', 'file:package.json', 'observed', { emit: false });
     sim.triple('concept:checkout e2e', 'flaky_because', 'concept:Stripe test key', 'agent', { emit: false, confidence: 0.6 });
 
+    if (this.opts.planMode) this.seedPlanner();
+    if (this.opts.yourRequestFirst) return sim.workspace;
     // The demo's "you": ask for the feature, add a detail while the Lead is still planning (it
-    // queues), then open a second request in parallel.
+    // reads it after its current step, or it queues), then open a second request in parallel.
     void (async () => {
       await sim.sleep(1600);
       if (!sim.chats.some((c) => c.thread === 'lead' && c.author === 'user')) this.userChat('lead', REQUEST);
@@ -153,10 +204,43 @@ export class Story {
     return r;
   }
 
-  userChat(thread: string, text: string) {
-    this.sim.chat(thread, 'user', text);
-    if (thread === 'lead' || thread.startsWith('lead:')) void this.withLead(thread, (lead) => this.leadRespond(lead, this.req(thread), text));
-    else void this.agentRespond(thread.replace(/^agent:/, ''), text);
+  /** `attachment`: what the core keeps with your message (the issue or pull request a request started from). */
+  userChat(thread: string, text: string, attachment: JsonValue | null = null) {
+    this.sim.chat(thread, 'user', text, attachment);
+    // It waits for its agent: read during the turn that runs, or answered by a turn of its own.
+    const sent: Sent = { text };
+    this.unread.set(thread, [...(this.unread.get(thread) ?? []), sent]);
+    if (thread === 'lead' || thread.startsWith('lead:')) {
+      void this.withLead(thread, async (lead) => {
+        if (this.take(thread, sent)) await this.leadRespond(lead, this.req(thread), text);
+      });
+    } else void this.agentRespond(thread.replace(/^agent:/, ''), sent);
+  }
+
+  /** The message leaves the ones that wait. False: the agent read it during a turn already. */
+  private take(thread: string, sent: Sent): boolean {
+    const waiting = this.unread.get(thread) ?? [];
+    if (!waiting.includes(sent)) return false;
+    this.unread.set(thread, waiting.filter((m) => m !== sent));
+    return true;
+  }
+
+  /**
+   * After each step of a running turn. Like Claude Code and Codex: the agent reads the messages
+   * you sent meanwhile. They go into the turn (`prompt_steered`) and get no turn of their own;
+   * a message sent after the turn's last step still runs as the next turn.
+   */
+  private async readMidTurn(act: Actor) {
+    const a = act.a;
+    if (!readsMidTurn(a.provider)) return;
+    const thread = a.role === 'lead' ? (a.thread ?? 'lead') : `agent:${a.id}`;
+    const texts = (this.unread.get(thread) ?? []).map((m) => m.text);
+    if (!texts.length) return;
+    this.unread.delete(thread);
+    for (const input of texts) act.emit({ type: 'prompt_steered', input });
+    // The Lead plans with everything you said; a worker says that it read you, and goes on.
+    if (a.role === 'lead') this.req(thread).words.push(...texts);
+    else await act.say(`Noted: ${quoted(texts[texts.length - 1], 60)}. I’ll take it into account before I hand this back.`, { phase: 'commentary', thread });
   }
 
   private leadActor(thread: string): Actor | null {
@@ -187,7 +271,8 @@ export class Story {
 
   /**
    * Every turn of a request's Lead goes through one FIFO (like Codly's prompt queue): a message
-   * sent while the Lead is mid-turn waits, and runs as its next turn.
+   * sent while the Lead is mid-turn waits, and runs as its next turn unless the Lead read it
+   * during the turn (`readMidTurn`).
    */
   private withLead(thread: string, job: (lead: Actor) => Promise<void>): Promise<void> {
     const r = this.req(thread);
@@ -453,32 +538,41 @@ export class Story {
     lead.status('idle');
   }
 
-  private async agentRespond(agentId: string, text: string) {
+  private async agentRespond(agentId: string, sent: Sent) {
     const sim = this.sim;
     if (!sim.agents.get(agentId)) return;
     const act = sim.actor(agentId);
-    // One FIFO per agent: a message to a busy worker waits for its turn to end.
+    const thread = `agent:${agentId}`;
+    const text = sent.text;
+    // One FIFO per agent: a message to a busy worker waits for its turn to end, unless the
+    // worker read it during that turn (`readMidTurn`).
     const prev = this.agentChains.get(agentId) ?? Promise.resolve();
     const next = prev.then(async () => {
       await sim.sleep(500);
       await sim.waitFor(() => !act.inTurn);
       await sim.sleep(300);
+      if (!this.take(thread, sent)) return;
       sim.cancelled.delete(agentId);
       const a = act.a;
       const task = a.task_id ? sim.tasks.get(a.task_id) : null;
       const busy = this.running.has(agentId) && !!task;
+      // A 1:1 Claude agent does what you ask, in its mode; the demo's other agents only answer.
+      const works = !busy && a.role === 'solo' && a.provider === 'claude';
       const reply = busy
         ? `Noted. I’m finishing **${task!.key} · ${task!.title}** — I’ll take “${text.slice(0, 48)}${text.length > 48 ? '…' : ''}” into account before Codly merges it.`
         : 'I’m free. Assign me a task from the Plan room, or ask a Lead to plan something and I’ll pick it up.';
       try {
         await act.turn(text, async () => {
-          await act.say(reply, { thread: `agent:${agentId}` });
+          if (works) await this.soloWork(act, text);
+          else await act.say(reply, { thread });
         });
-        if (!this.running.has(agentId)) act.status('idle');
       } catch (e) {
         if (!(e instanceof Cancelled)) console.error(e);
         sim.cancelled.delete(agentId);
       }
+      // However the turn ended (done, "Stop the turn", Send now), the agent waits for you
+      // again, unless you stopped the agent itself or it is on a task.
+      if (act.a.status !== 'offline' && !this.running.has(agentId)) act.status('idle');
     });
     this.agentChains.set(agentId, next);
     await next;
@@ -605,6 +699,10 @@ export class Story {
     live();
     // Like the core: one result for each of the task's verify commands, under its exact text.
     task.verify.forEach((command, i) => sim.emit({ type: 'verified', command, ok: true, exit_code: 0, tail: i === task.verify.length - 1 ? o.tail : '' }, { agent: act.id, task: task.id }));
+    // Like the core: then the repo's required checks, while you have them turned on (a command the task ran already is not run twice).
+    for (const command of this.checks.required()) {
+      if (!task.verify.includes(command)) sim.emit({ type: 'verified', command, ok: true, exit_code: 0, tail: 'ok' }, { agent: act.id, task: task.id });
+    }
     if (o.integration) {
       const branch = (task.plan_id && sim.plans.get(task.plan_id)?.integration_branch) || 'codly/integration';
       sim.patchTask(task.id, { status: 'merging', status_reason: 'In the merge queue' });
@@ -619,7 +717,22 @@ export class Story {
     if (!this.running.has(act.id) || act.a.task_id === task.id) act.set({ status: 'idle', activity: null, activity_label: null, task_id: null });
   }
 
-  private async approval(act: Actor, command: string, reason: string, risks: string[]): Promise<'approved' | 'denied'> {
+  /**
+   * Wait for your answer to a request that is on screen. With `?autoplay=1` it is allowed after
+   * `auto` ms (`answers`: what autoplay picks for a question).
+   */
+  private async answered(act: Actor, ap: Approval, label: string, auto: number, answers: unknown = null): Promise<Approval['status']> {
+    const sim = this.sim;
+    act.status('waiting_approval', 'await_approval', label);
+    while (sim.approvals.get(ap.id)!.status === 'pending') {
+      await act.sleep(250);
+      if (sim.opts.autoplay && sim.now() - ap.created_at > auto) this.resolveApproval(ap.id, 'allow_once', null, answers);
+    }
+    return sim.approvals.get(ap.id)!.status;
+  }
+
+  /** A command that asks first. `output`: what it prints once it is allowed. */
+  private async approval(act: Actor, command: string, reason: string, risks: string[], output: string[]): Promise<'approved' | 'denied'> {
     const sim = this.sim;
     const a = act.a;
     const call = uid('call-');
@@ -634,33 +747,31 @@ export class Story {
     };
     sim.approvals.set(ap.id, ap);
     act.emit({ type: 'approval_requested', approval: ap });
-    act.status('waiting_approval', 'await_approval', `${command.split(' ').slice(0, 3).join(' ')}…`);
-    const asked = sim.now();
-    while (sim.approvals.get(ap.id)!.status === 'pending') {
-      await act.sleep(250);
-      if (sim.opts.autoplay && sim.now() - asked > 3500) this.resolveApproval(ap.id, 'allow_once', null);
+    const rule = this.rules.covering(ap);
+    if (rule) {
+      // Like the core's broker: a rule you saved for this repo answers in your place.
+      sim.approvals.set(ap.id, { ...ap, status: 'approved', decided_by: 'policy' });
+      act.emit({ type: 'approval_resolved', approval_id: ap.id, status: 'approved', by: 'policy' });
+      sim.decision('approval_policy', 'rule', `auto-allowed your rule for this repo: ${describeRule(rule)}`, { approval_id: ap.id, rule: rule.id }, { agent: a.id, task: a.task_id });
     }
-    const st = sim.approvals.get(ap.id)!.status;
+    const st = rule ? 'approved' : await this.answered(act, ap, `${command.split(' ').slice(0, 3).join(' ')}…`, 3500);
     if (st === 'approved') {
       act.status('working', 'execute', command.split(' ').slice(0, 3).join(' '));
-      const lines = /redis/.test(command)
-        ? ['OK']
-        : ['> acme-web@2.4.0 build', '> next build', '', '   ▲ Next.js 16.1.2', '   Creating an optimized production build …', ' ✓ Compiled successfully in 9.4s',
-          '   Linting and checking validity of types …', ' ✓ Generating static pages (14/14)', '', 'Route (app)                Size  First Load JS',
-          '┌ ○ /                     4.1 kB        112 kB', '├ ƒ /api/settings           0 B           0 B', '└ ○ /settings             3.2 kB        109 kB'];
-      for (const l of lines) {
+      for (const l of output) {
         await act.sleep(320 + Math.random() * 300);
         act.emit({ type: 'tool_output', call_id: call, chunk: l + '\n' });
       }
-      act.emit({ type: 'tool_completed', call_id: call, ok: true, output: lines.join('\n'), exit_code: 0, duration_ms: sim.now() - asked, tests_passed: null, tests_failed: null });
+      act.emit({ type: 'tool_completed', call_id: call, ok: true, output: output.join('\n'), exit_code: 0, duration_ms: sim.now() - ap.created_at, tests_passed: null, tests_failed: null });
       return 'approved';
     }
-    act.emit({ type: 'tool_completed', call_id: call, ok: false, output: 'Declined by the user.', exit_code: null, duration_ms: sim.now() - asked, tests_passed: null, tests_failed: null });
+    act.emit({ type: 'tool_completed', call_id: call, ok: false, output: 'Declined by the user.', exit_code: null, duration_ms: sim.now() - ap.created_at, tests_passed: null, tests_failed: null });
     act.status('working', 'thinking');
     return 'denied';
   }
 
   private answers = new Map<string, unknown>();
+  /** approval id → the note you sent with a "no". */
+  private notes = new Map<string, string>();
 
   /** AskUserQuestion-style question; resolves with the chosen label (or null when skipped). */
   private async question(act: Actor, question: string, header: string, options: { label: string; description: string }[]): Promise<string | null> {
@@ -673,34 +784,126 @@ export class Story {
     };
     sim.approvals.set(ap.id, ap);
     act.emit({ type: 'approval_requested', approval: ap });
-    act.status('waiting_approval', 'await_approval', header);
-    const asked = sim.now();
-    while (sim.approvals.get(ap.id)!.status === 'pending') {
-      await act.sleep(250);
-      if (sim.opts.autoplay && sim.now() - asked > 4000) this.resolveApproval(ap.id, 'allow_once', null, { [question]: options[0].label });
-    }
+    const st = await this.answered(act, ap, header, 4000, { [question]: options[0].label });
     act.status('working', 'thinking');
-    if (sim.approvals.get(ap.id)!.status !== 'approved') return null;
+    if (st !== 'approved') return null;
     const ans = this.answers.get(ap.id) as Record<string, unknown> | undefined;
     const v = ans ? (ans[question] ?? Object.values(ans)[0]) : null;
     return typeof v === 'string' && v ? v : Array.isArray(v) && typeof v[0] === 'string' ? v[0] : null;
   }
 
-  /** A Claude Code Task-tool helper: a sub-agent with its own description and status. */
-  private async subagent(act: Actor, description: string, ms: number, result: string) {
+  /**
+   * Claude's plan mode: the plan arrives as a request (`ExitPlanMode`) that no rule answers in
+   * your place. Resolves null when you accept it, and your note ("" for none) when you send it
+   * back; "Stop the turn" ends the turn.
+   */
+  private async showPlan(act: Actor, plan: string): Promise<string | null> {
+    const sim = this.sim;
+    const a = act.a;
     const call = uid('call-');
     act.emit({
-      type: 'tool_started', call_id: call, name: 'Task', activity: 'delegate',
-      target: { path: null, paths: [], command: null, query: null, url: null, server: null, tool: 'Task' },
+      type: 'tool_started', call_id: call, name: 'ExitPlanMode', activity: 'plan',
+      target: { path: null, paths: [], command: null, query: null, url: null, server: null, tool: 'ExitPlanMode' }, input: { plan }, confidence: 'observed',
+    });
+    const ap: Approval = {
+      id: uid('ap-'), agent_id: a.id, run_id: a.run_id ?? '', task_id: a.task_id, call_id: call,
+      subject: { kind: 'tool', name: 'ExitPlanMode', input: { plan } }, reason: null, choices: ['allow_once', 'deny', 'cancel'], risks: [],
+      status: 'pending', decided_by: null, created_at: sim.now(),
+    };
+    sim.approvals.set(ap.id, ap);
+    act.emit({ type: 'approval_requested', approval: ap });
+    const st = await this.answered(act, ap, 'its plan', 5000);
+    const note = this.notes.get(ap.id) ?? '';
+    act.emit({
+      type: 'tool_completed', call_id: call, ok: st === 'approved', output: st === 'approved' ? 'Plan accepted.' : note || 'Plan not accepted.', exit_code: null,
+      duration_ms: sim.now() - ap.created_at, tests_passed: null, tests_failed: null,
+    });
+    act.status('working', 'thinking');
+    if (st === 'cancelled') throw new Cancelled();
+    return st === 'approved' ? null : note;
+  }
+
+  /** In "ask for edits" a 1:1 Claude agent asks before an edit, with the change it wants to make. */
+  private async editApproval(act: Actor, path: string, diff: string): Promise<boolean> {
+    const sim = this.sim;
+    const a = act.a;
+    const ap: Approval = {
+      id: uid('ap-'), agent_id: a.id, run_id: a.run_id ?? '', task_id: a.task_id, call_id: null,
+      subject: { kind: 'file_change', paths: [path], diff }, reason: null, choices: ['allow_once', 'deny', 'cancel'], risks: [],
+      status: 'pending', decided_by: null, created_at: sim.now(),
+    };
+    sim.approvals.set(ap.id, ap);
+    act.emit({ type: 'approval_requested', approval: ap });
+    const st = await this.answered(act, ap, path.split('/').pop() ?? path, 3500);
+    act.status('working', 'thinking');
+    if (st === 'cancelled') throw new Cancelled();
+    return st === 'approved';
+  }
+
+  /**
+   * A 1:1 Claude agent does what you ask in its mode (its sheet → Controls → Mode): "plan first"
+   * shows its plan before it changes anything, "ask for edits" asks before the edit, "accept
+   * edits" makes it without asking.
+   */
+  private async soloWork(act: Actor, ask: string) {
+    const sim = this.sim;
+    const thread = `agent:${act.id}`;
+    const path = 'README.md';
+    await act.think('Read how the project is set up before changing anything.', { pace: 40 });
+    await act.tool({ name: 'Read', activity: 'read', target: { path }, ms: 600 });
+    await act.tool({ name: 'Read', activity: 'read', target: { path: 'package.json' }, ms: 500 });
+    if (act.a.permission_mode === 'plan') {
+      // Like Claude Code: a plan you send back is changed and shown again; an accepted plan
+      // ends plan mode, and the agent asks for edits from then on.
+      for (let note = await this.showPlan(act, soloPlan(ask, null)); note !== null; note = await this.showPlan(act, soloPlan(ask, note))) {
+        await act.say(note ? 'I changed the plan as you asked.' : 'The plan stays as it is until you say what to change.', { phase: 'commentary' });
+      }
+      act.set({ permission_mode: 'ask' });
+      sim.decision('permission_mode', 'rule', `Claude Code changed its mode to "${MODE_LABEL.ask}"`, { mode: 'ask' }, { agent: act.id });
+    }
+    const added = `## Notes\n\n- ${ask.replace(/\s+/g, ' ').slice(0, 200)}`;
+    const asks = (act.a.permission_mode ?? 'ask') === 'ask';
+    if (asks && !(await this.editApproval(act, path, `@@ ${path} @@\n${added.split('\n').map((l) => `+${l}`).join('\n')}`))) {
+      await act.say('Understood: I changed nothing. Tell me what to do instead.', { thread });
+      return;
+    }
+    await act.tool({ name: 'Edit', activity: 'edit', target: { path }, ms: 1200, files: [path] });
+    await act.tool({
+      name: 'Bash', activity: 'test', target: { command: 'npm test' }, ms: 2400, passed: 41, failed: 0,
+      lines: ['> acme-web@2.4.0 test', '> vitest run', '', ' Test Files  9 passed (9)', '      Tests  41 passed (41)'],
+    });
+    await act.say(`Done: I added a short note to \`${path}\` about ${quoted(ask, 80)}. 41 tests pass.`, { thread });
+  }
+
+  /**
+   * A Claude Code Task-tool helper: a sub-agent with its kind, its own calls (`steps`, over `ms`
+   * in all), how far it is, and its report.
+   */
+  private async subagent(act: Actor, description: string, steps: HelperStep[], ms: number, result: string) {
+    const sim = this.sim;
+    const call = uid('call-');
+    const started = sim.now();
+    const none: Target = { path: null, paths: [], command: null, query: null, url: null, server: null, tool: null };
+    act.emit({
+      type: 'tool_started', call_id: call, name: 'Task', activity: 'delegate', target: { ...none, tool: 'Task' },
       input: { description, subagent_type: 'Explore' }, confidence: 'observed',
     });
     act.status('working', 'delegate', 'Explore');
     act.emit({ type: 'sub_agent', call_id: call, description, status: 'running' });
     act.emit({ type: 'sub_agent_progress', call_id: call, name: 'Explore', step: null, tool_call_id: null, tool_uses: null, tokens: null, report: null });
-    await act.sleep(ms);
+    // `?helper=slow`: 20 times as long, so the row can be looked at while the helper works.
+    const each = (ms * (this.opts.slowHelper ? 20 : 1)) / steps.length;
+    for (const [i, s] of steps.entries()) {
+      const own = uid('call-');
+      act.emit({ type: 'tool_started', call_id: own, name: s.name, activity: s.activity, target: { ...none, ...s.target }, input: {}, confidence: 'observed' });
+      // Its `tool_started` came just before: this says that the call is the helper's own.
+      act.emit({ type: 'sub_agent_progress', call_id: call, name: null, step: s.step, tool_call_id: own, tool_uses: i + 1, tokens: 2100 * (i + 1), report: null });
+      await act.sleep(each);
+      act.emit({ type: 'tool_completed', call_id: own, ok: true, output: null, exit_code: null, duration_ms: Math.round(each), tests_passed: null, tests_failed: null });
+    }
     act.emit({ type: 'sub_agent_progress', call_id: call, name: null, step: null, tool_call_id: null, tool_uses: null, tokens: null, report: result });
     act.emit({ type: 'sub_agent', call_id: call, description, status: 'completed' });
-    act.emit({ type: 'tool_completed', call_id: call, ok: true, output: result, exit_code: null, duration_ms: ms, tests_passed: null, tests_failed: null });
+    act.emit({ type: 'tool_completed', call_id: call, ok: true, output: result, exit_code: null, duration_ms: sim.now() - started, tests_passed: null, tests_failed: null });
   }
 
   /** codly_ask_lead: a worker asks its plan's Lead (in that request's thread) and waits for the answer. */
@@ -732,6 +935,7 @@ export class Story {
     const ap = sim.approvals.get(id);
     if (!ap || ap.status !== 'pending') throw new Error('This request was already answered.');
     if (answers != null) this.answers.set(id, answers);
+    if (message) this.notes.set(id, message);
     const status = choice === 'deny' || choice === 'cancel' ? (choice === 'cancel' ? 'cancelled' : 'denied') : 'approved';
     sim.approvals.set(id, { ...ap, status, decided_by: 'user' });
     sim.emit({ type: 'approval_resolved', approval_id: id, status, by: 'user' }, { agent: ap.agent_id, task: ap.task_id, run: ap.run_id });
@@ -750,8 +954,11 @@ export class Story {
         cite('C2', 'src/app/layout.tsx', 1, 22, 'RootLayout', ['symbol: RootLayout', 'text: tokens.css'], 9.4),
         cite('C3', 'src/hooks/useMediaQuery.ts', 1, 19, 'useMediaQuery', ['symbol: useMediaQuery', 'text: prefers color scheme'], 8.2),
       ]);
-      await this.subagent(ada, 'Explore: find every place that reads or switches the theme', 2800,
-        'Three places: tokens.css defines `.dark` but nothing applies it; useMediaQuery.ts already wraps matchMedia; layout.tsx has no provider.');
+      await this.subagent(ada, 'Explore: find every place that reads or switches the theme', [
+        { name: 'Grep', activity: 'search', target: { query: 'theme|prefers-color-scheme' }, step: 'Searching for code that reads the theme' },
+        { name: 'Read', activity: 'read', target: { path: 'src/styles/tokens.css' }, step: 'Reading src/styles/tokens.css' },
+        { name: 'Read', activity: 'read', target: { path: 'src/hooks/useMediaQuery.ts' }, step: 'Reading src/hooks/useMediaQuery.ts' },
+      ], 2800, 'Three places: tokens.css defines `.dark` but nothing applies it; useMediaQuery.ts already wraps matchMedia; layout.tsx has no provider.');
       await ada.tool({ name: 'Grep', activity: 'search', target: { query: 'data-theme|\\.dark|prefers-color-scheme' }, ms: 900,
         output: 'src/styles/tokens.css:11:.dark {\nsrc/hooks/useMediaQuery.ts:4:  const mql = window.matchMedia(query);' });
       for (const path of ['src/styles/tokens.css', 'src/app/layout.tsx', 'src/hooks/useMediaQuery.ts'])
@@ -766,6 +973,11 @@ export class Story {
       sim.triple(`file:${files[3]}`, 'imports', `file:${files[0]}`, 'agent', { agent: ada.id });
       ada.plan([['Find where tokens and theme classes live', 'completed'], ['Add ThemeProvider with a system default', 'completed'], ['Wire the provider into the root layout', 'completed'], ['Unit tests for resolution and persistence', 'in_progress']]);
       await ada.tool({ name: 'Write', activity: 'create', target: { path: files[4] }, ms: 2000, files: [files[4]], taskKey: 't1' });
+      // A package download: the card offers "Always allow in this repo", for this command or for `npm install`.
+      const installed = await this.approval(ada, 'npm install -D @testing-library/react', 'The provider’s tests render it with React Testing Library, which this repo does not have yet.', [PACKAGE_INSTALL], [
+        'added 9 packages, and audited 412 packages in 2s',
+      ]);
+      if (installed === 'denied') await ada.say('Understood — testing the provider with plain React instead.', { phase: 'commentary' });
       await ada.tool({
         name: 'Bash', activity: 'test', target: { command: 'npm test -- theme' }, ms: 3600, passed: 12, failed: 0,
         lines: ['> acme-web@2.4.0 test', '> vitest run theme', '', ' ✓ src/theme/ThemeProvider.test.tsx (6 tests) 41ms', ' ✓ src/theme/useTheme.test.ts (6 tests) 18ms', '', ' Test Files  2 passed (2)', '      Tests  12 passed (12)', '   Duration  1.21s'],
@@ -814,7 +1026,7 @@ export class Story {
       await bo.say('Schema, migration and route are done. Cleaning `dist/` before the build so stale route bundles can’t hide errors.', { phase: 'commentary' });
       const answer = await this.approval(bo, 'rm -rf dist && npm run build', 'Clean stale build output so old route bundles can’t mask type errors in the new handler.', [
         'deletes files (rm -rf)', 'stays inside the worktree', 'no network',
-      ]);
+      ], BUILD_OUTPUT);
       if (answer === 'denied') {
         await bo.say('Understood — building without cleaning `dist/`.', { phase: 'commentary' });
         await bo.tool({ name: 'commandExecution', activity: 'execute', target: { command: 'npm run build' }, ms: 4200,
@@ -865,6 +1077,11 @@ export class Story {
       sim.artifact({ kind: 'html', mime: 'text/html', path: 'artifacts/theme-toggle-preview.html', title: 'ThemeToggle preview', bytes: bytesOf(TOGGLE_PREVIEW_HTML), agent: cy.a, caption: 'The three states of the toggle, rendered with the real tokens' });
       cy.plan([['Read useTheme() and the settings API', 'completed'], ['Add ThemeToggle to /settings', 'completed'], ['Playwright test for the three states', 'in_progress']]);
       await cy.tool({ name: 'write_file', activity: 'create', target: { path: files[2] }, ms: 1800, files: [files[2]], taskKey: 't3' });
+      // Another package download: a rule you saved for `npm install` on Ada's card answers it.
+      const axe = await this.approval(cy, 'npm install -D @axe-core/playwright', 'The e2e test checks the toggle for accessibility with axe, which this repo does not have yet.', [PACKAGE_INSTALL], [
+        'added 3 packages, and audited 415 packages in 1s',
+      ]);
+      if (axe === 'denied') await cy.say('Understood — the e2e test checks the three states without axe.', { phase: 'commentary' });
       await cy.tool({
         name: 'run_shell_command', activity: 'test', target: { command: 'npx playwright test settings-theme' }, ms: 4200, ok: false, exit: 1, passed: 2, failed: 1,
         lines: ['Running 3 tests using 3 workers', '  ✓  1 settings · theme › defaults to the system theme (812ms)', '  ✓  2 settings · theme › switching applies immediately (904ms)',
@@ -908,7 +1125,7 @@ export class Story {
       await fay.say('Lockout logic is in. Clearing the local test Redis database first so stale counters from earlier runs can’t make the tests pass by accident.', { phase: 'commentary' });
       await this.approval(fay, 'redis-cli -n 9 FLUSHDB', 'Stale sign-in counters in the local test database would make the lockout tests pass for the wrong reason.', [
         'deletes data (local Redis db 9)', 'touches a local service', 'no network',
-      ]);
+      ], ['OK']);
       await fay.tool({
         name: 'commandExecution', activity: 'test', target: { command: 'npm test -- rate-limit' }, ms: 2600, passed: 5, failed: 0, confidence: 'inferred',
         lines: ['> acme-web@2.4.0 test', '> vitest run rate-limit', '', ' ✓ src/server/rate-limit.test.ts (5 tests) 38ms', '', ' Test Files  1 passed (1)', '      Tests  5 passed (5)'],
@@ -1009,6 +1226,7 @@ export class Story {
     }
     for (const a of [...sim.agents.values()]) if (a.role === 'lead' && (a.thread ?? 'lead') === thread) sim.agents.delete(a.id);
     sim.chats = sim.chats.filter((c) => c.thread !== thread);
+    this.unread.delete(thread);
   }
 
   cancelPlan(planId: string) {
@@ -1035,6 +1253,103 @@ export class Story {
     sim.patchPlan(planId, { merged_sha: head });
     sim.decision('merge_plan', 'human', `You merged ${plan.integration_branch} into ${sim.workspace?.current_branch ?? 'main'} @ ${head.slice(0, 7)}`, { plan_id: planId, sha: head });
     return head;
+  }
+
+  /**
+   * `?merge=conflict`: the files of the plan's finished work that your branch changed too. In
+   * the demo that is the last file the plan edited (a file the plan created cannot conflict).
+   */
+  conflictFiles(planId: string): string[] {
+    const done = [...this.sim.tasks.values()].filter((t) => t.plan_id === planId && t.status === 'done');
+    const edited = done.flatMap((t) => TASK_FILES[this.fileKey(t)] ?? []).filter((f) => f.before !== null);
+    return edited.slice(-1).map((f) => f.path);
+  }
+
+  /**
+   * "Have an agent resolve it". Like the core: one more task of the plan resolves the conflict
+   * with `target` (your branch) in the plan's own worktree, the plan runs again, and it is
+   * done again when that task passed the plan's checks. Refused in the core's words.
+   */
+  resolveConflict(planId: string, target: string, files: string[]): Task {
+    const sim = this.sim;
+    const plan = sim.plans.get(planId);
+    if (!plan) throw new Error('Unknown plan');
+    if (plan.merged_sha) throw new Error('this plan is already merged into your branch');
+    if (plan.status === 'running' || plan.status === 'integrating') throw new Error('the plan is still running; wait until it is done');
+    if (plan.status === 'cancelled') throw new Error('this plan was cancelled, so no agent works on it any more; resolve the conflict yourself');
+    const branch = plan.integration_branch;
+    if (!branch || (plan.status !== 'done' && plan.status !== 'failed')) throw new Error('the plan never ran, so there is nothing to merge');
+    const tasks = [...sim.tasks.values()].filter((t) => t.plan_id === planId);
+    // "resolve", then "resolve-2"…: a plan can need this more than once.
+    let key = 'resolve';
+    for (let n = 2; tasks.some((t) => t.key === key); n++) key = `resolve-${n}`;
+    const names = files.join(', ');
+    const now = sim.now();
+    const task = sim.putTask({
+      id: uid('t-'), plan_id: planId, key, title: `Resolve conflicts with ${target}`,
+      goal: `The plan is finished, but ${target} (your branch) changed the same lines meanwhile. Codly started merging ${target} into the plan’s worktree, and these files have conflict markers: ${names}. Resolve every conflict so that the plan’s work and the changes on ${target} are both kept, and remove all markers.`,
+      acceptance: ['No conflict marker (<<<<<<<, =======, >>>>>>>) is left in any file', `The plan’s work and the changes on ${target} are both kept and work together`],
+      write_scope: files, verify: [...new Set(tasks.filter((t) => t.status === 'done').flatMap((t) => t.verify))], depends_on: [], status: 'ready',
+      assignee: null, agent_hint: null, account_hint: null, consultant: null, fresh_session: true, branch, worktree: plan.integration_worktree, attempt: 0,
+      status_reason: 'Ready: a free agent picks it up', summary: null, created_at: now, updated_at: now,
+    });
+    sim.decision('merge', 'human', `you had an agent resolve the conflicts of ${branch} with ${target} in ${names}: task ${key}`, { plan_id: planId, files }, { task: task.id });
+    sim.patchPlan(planId, { status: 'running', base_branch: target });
+    sim.chat(plan.thread, 'codly', `${target} and this plan both changed ${names}. Codly brought ${target} into the plan’s branch, in its own worktree (your checkout is not touched), and task ${key} resolves the conflicts there. Then the plan’s checks run again and you can merge it.`);
+    void this.runResolution(planId, task.id, target);
+    return task;
+  }
+
+  /** A free worker takes the resolving task; then the plan is done again, resolved or not. */
+  private async runResolution(planId: string, taskId: string, target: string) {
+    const sim = this.sim;
+    await sim.sleep(900);
+    const task = sim.tasks.get(taskId)!;
+    if (task.status === 'ready') {
+      // First a worker that knows the plan's work, then any free one.
+      const free = (a: Agent | undefined): a is Agent => !!a && a.role === 'worker' && a.status !== 'offline' && !this.running.has(a.id);
+      const ofPlan = [...sim.tasks.values()].filter((t) => t.plan_id === planId && t.assignee).map((t) => sim.agents.get(t.assignee!)).reverse();
+      const agent = ofPlan.find(free) ?? [...sim.agents.values()].find(free);
+      const act = agent ? sim.actor(agent.id) : this.spawnWorker('claude', 'Eli', 5, task);
+      act.set({ task_id: taskId, worktree: task.worktree });
+      sim.patchTask(taskId, { status: 'running', assignee: act.id, attempt: 1, status_reason: null });
+      sim.decision('route', 'rule', `${task.key} → ${act.a.name}: free, and it works in the plan’s own worktree`, { plan_id: planId, task: task.key, agent: act.a.name }, { agent: act.id, task: taskId });
+      await this.runTrack(act, task, () => this.trackResolve(act, sim.tasks.get(taskId)!, target));
+    }
+    const plan = sim.plans.get(planId)!;
+    const end = sim.tasks.get(taskId)!;
+    if (end.status === 'done') {
+      sim.decision('plan_done', 'rule', `The conflict with ${target} is resolved on ${plan.integration_branch}, and the plan’s checks passed again`, { plan_id: planId });
+    } else {
+      // Like the core: a resolution that does not finish leaves nothing in the plan's branch.
+      if (end.status !== 'cancelled') sim.patchTask(taskId, { status: 'cancelled', status_reason: 'the conflict was not resolved' });
+      sim.chat(plan.thread, 'codly', 'The conflict with your branch was not resolved. Codly took the unfinished merge back: the plan’s branch is as its tasks left it.');
+    }
+    if (plan.status === 'running') sim.patchPlan(planId, { status: 'done' });
+  }
+
+  private async trackResolve(act: Actor, task: Task, target: string) {
+    const files = task.write_scope;
+    const check = task.verify[0] ?? 'npm test';
+    const steps = ['Read both sides of the conflict', 'Keep both changes', 'Run the checks'];
+    const at = (n: number) => steps.map((text, i): [string, 'pending' | 'in_progress' | 'completed'] => [text, i < n ? 'completed' : i === n ? 'in_progress' : 'pending']);
+    await act.sleep(800);
+    await act.turn(`Task ${task.key} · ${task.title}\n\n${task.goal}`, async () => {
+      act.plan(at(0));
+      await act.think(`${target} and the plan both changed ${files.join(', ')}. Keep the plan’s work and the change on ${target}, and leave no marker.`);
+      await act.tool({ name: 'Grep', activity: 'search', target: { query: '<<<<<<<|>>>>>>>' }, ms: 700, output: files.map((f) => `${f}:8:<<<<<<< HEAD`).join('\n') });
+      for (const path of files) await act.tool({ name: 'Read', activity: 'read', target: { path }, ms: 600 });
+      act.plan(at(1));
+      for (const path of files) await act.tool({ name: 'Edit', activity: 'edit', target: { path }, ms: 1400, files: [path] });
+      act.plan(at(2));
+      await act.tool({ name: 'Bash', activity: 'test', target: { command: check }, ms: 2600, lines: [`$ ${check}`, 'ok'] });
+      act.plan(at(3));
+      await act.say(`Both sides are kept in ${files.map((f) => `\`${f}\``).join(', ')}: the plan’s work and the change on \`${target}\`. No conflict marker is left and \`${check}\` passes.`);
+    });
+    await this.gate(act, task, {
+      files, message: `codly: merge ${target} into ${task.branch}`, verify: task.verify.join(' && '), tail: 'ok',
+      summary: `Conflict with ${target} resolved in ${files.join(', ')}; both sides kept.`, integration: false,
+    });
   }
 
   /** Undo merge: the plan is done and not merged again; its work stays on the integration branch. */
@@ -1276,16 +1591,31 @@ export class Story {
     }
   }
 
-  hire(provider: Provider, model: string | null = null, title: string | null = null): Agent {
+  /** A new 1:1 agent. `named` is the name the hire wizard gave it (checked there to be free); without one it gets its CLI's stock name. */
+  hire(provider: Provider, model: string | null = null, title: string | null = null, named: string | null = null): Agent {
     const sim = this.sim;
     const names = new Set([...sim.agents.values()].map((a) => a.name));
-    let name = WORKER_NAMES[provider];
-    for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
+    let name = named ?? WORKER_NAMES[provider];
+    if (!named) for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
     const used = new Set([...sim.agents.values()].map((a) => a.color));
     const color = [0, 1, 3, 5, 2, 4, 7, 6].find((c) => !used.has(c)) ?? sim.agents.size % 8;
     const act = this.spawnWorker(provider, name, color, null, model);
     act.status('idle');
-    return title ? sim.patchAgent(act.a.id, { title }) : act.a;
+    // Like the core: a 1:1 agent works in a worktree of its own, called after its name (the
+    // hire puts it in your project folder instead when Git isolation is off). Two names can
+    // read the same in a path, so a path that is taken gets a number.
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
+    const taken = new Set([...sim.agents.values()].map((a) => a.worktree));
+    let worktree = `${WORKTREES}/${slug}`;
+    for (let i = 2; taken.has(worktree); i++) worktree = `${WORKTREES}/${slug}-${i}`;
+    return sim.patchAgent(act.a.id, { worktree, ...(title ? { title } : {}) });
+  }
+
+  /** `?mode=plan`: a 1:1 Claude agent in "plan first", asked for a small change, so its plan waits for your answer. */
+  private seedPlanner() {
+    const a = this.hire('claude', null, 'Docs');
+    this.sim.patchAgent(a.id, { permission_mode: 'plan' });
+    this.userChat(`agent:${a.id}`, 'Add a short “Theming” section to the README.');
   }
 
   /** Interrupt the agent's turn (Send now): its next queued message runs right after. */

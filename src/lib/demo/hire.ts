@@ -155,9 +155,9 @@ export function hireFromManifest(sim: Sim, story: Story, m: HireManifest, confir
   if (m.provider === CUSTOM) throw new Error('Codly can’t launch custom commands yet: pick one of its agent CLIs');
   const name = m.name.trim();
   if ([...sim.agents.values()].some((a) => !a.archived && a.name.toLowerCase() === name.toLowerCase())) throw new Error(`an agent called ${name} already exists`);
-  const a = story.hire(m.provider as Provider, m.model?.trim() || null, m.title ?? null);
+  const a = story.hire(m.provider as Provider, m.model?.trim() || null, m.title ?? null, name);
   return sim.patchAgent(a.id, {
-    name, color: m.color ?? a.color, look_seed: m.avatar ?? a.look_seed, session_id: m.resume_session ?? a.session_id,
+    color: m.color ?? a.color, look_seed: m.avatar ?? a.look_seed, session_id: m.resume_session ?? a.session_id,
     worktree: m.isolate ? a.worktree : (sim.workspace?.repo_path ?? a.worktree),
     career: { ...(m.career ?? emptyCareer()), traits: m.traits.filter((t) => TRAITS.some((x) => x.id === t)).slice(0, 3) },
   });

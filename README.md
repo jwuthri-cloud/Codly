@@ -397,6 +397,7 @@ Provider terms change. Check them before heavy parallel use.
 
 - [Architecture](docs/ARCHITECTURE.md): decisions, processes, event model, orchestration and memory.
 - [Release](docs/RELEASE.md): how a release is built, signed and published, and where the version is set.
+- [Browser demo](docs/DEMO.md): the scripted demo behind `pnpm dev`, and the URL parameters that open each screen.
 - [Research](docs/research/): the reports behind each decision, and the consolidated
   [critique](docs/research/CRITIQUE.md).
 

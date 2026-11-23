@@ -35,6 +35,20 @@ describe('the demo repo’s required checks', () => {
     expect(demo.state('a1', false).last).toBeNull();
   });
 
+  it('gives the gate your commands only while they are on', () => {
+    const demo = new ChecksDemo();
+    expect(demo.required()).toEqual([]);
+    demo.status({ allow: demo.status(null).sha });
+    expect(demo.required()).toEqual(['pnpm check', 'pnpm test']);
+    // A text that changed since you turned it on runs for no task.
+    demo.text += 'pnpm lint\n';
+    expect(demo.required()).toEqual([]);
+    // `?checks=on`: on from the start, as after a click in Settings.
+    const on = new ChecksDemo(true);
+    expect(on.status(null)).toMatchObject({ on: true, changed: false });
+    expect(on.required()).toEqual(['pnpm check', 'pnpm test']);
+  });
+
   it('runs nothing of a text that changed, and lets you turn it off without turning the new text on', () => {
     const demo = new ChecksDemo();
     demo.status({ allow: demo.status(null).sha });

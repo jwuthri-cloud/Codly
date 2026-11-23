@@ -5,7 +5,8 @@
 // ponytail: one scripted story (dark-mode toggle on acme/web); any repo path replays it.
 // URL knobs (dev only): ?speed=2 (script speed), ?skip=90 (fast-forward N seconds of script),
 // ?autoplay=1 (auto "Run plan" and auto-approve), ?ws=1 (open acme/web immediately; always on in
-// the public site demo).
+// the public site demo). More parameters start the demo in a state the script does not reach
+// (a merge conflict, a running preview, the intake dialog…): demo/states.ts, docs/DEMO.md.
 // Also answers `repo_map` (a ~300-file acme/web) and `read_artifact` (the bytes agents produced).
 import { isSiteDemo, type Transport, type UiBatch } from './api';
 import type { ApprovalRuleKind } from './gen/ApprovalRuleKind';
@@ -33,10 +34,13 @@ import type { TeamMember } from './gen/TeamMember';
 import type { WorkspaceTeam } from './gen/WorkspaceTeam';
 import type { RequestPrefs } from './gen/RequestPrefs';
 import type { LastMerge } from './gen/LastMerge';
-import type { MergeState } from './gen/MergeState';
 import type { PrSource } from './gen/PrSource';
 import type { RepoSync } from './gen/RepoSync';
 import { mockAgentGit } from './demo/agentgit';
+import { demoCloseOffice } from './demo/office';
+import { MergeConflictDemo } from './demo/mergeConflict';
+import { demoStates, opensRepo } from './demo/states';
+import { intakeUi } from './state/intake.svelte';
 import { PullRequestDemo } from './demo/pullrequest';
 import { demoIntake } from './demo/intake';
 import { PreviewDemo } from './demo/preview';
@@ -58,7 +62,7 @@ import { WorkspaceTrustDemo } from './demo/workspaceTrust';
 import type { TrustChoice } from './gen/TrustChoice';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
-import { MockApprovalRules } from './demo/approvalRules';
+import type { MockApprovalRules } from './demo/approvalRules';
 import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { MockControls } from './demo/controls';
@@ -170,7 +174,9 @@ export class MockTransport implements Transport {
   /** Demo repo: the pull requests "opened" from the app. */
   private pullRequests = new PullRequestDemo();
   /** Demo repo: the commands "run" to try a plan's or an agent's work. */
-  private previews = new PreviewDemo();
+  private previews: PreviewDemo;
+  /** Demo repo: what stands between a plan's branch and yours (`?merge=conflict`). */
+  private conflicts: MergeConflictDemo;
   /** The demo repo: a clean checkout, two merges not pushed yet (the real one runs git). */
   private demoSync(): RepoSync {
     const pushed = this.demoPushed;
@@ -186,12 +192,16 @@ export class MockTransport implements Transport {
   private takeovers = new DemoTakeovers();
   private hk: HousekeepingDemo | undefined;
   private worktrees = new WorktreeDemo();
-  private checks = new ChecksDemo();
+  private checks: ChecksDemo;
   private workspaceTrust: WorkspaceTrustDemo;
 
   constructor() {
     const p = params();
-    this.workspaceTrust = new WorkspaceTrustDemo(p.get('trust') === 'ask');
+    // The states a URL parameter starts the demo in (docs/DEMO.md).
+    const states = demoStates(p);
+    this.workspaceTrust = new WorkspaceTrustDemo(states.trustAsk);
+    this.checks = new ChecksDemo(states.checksOn);
+    this.previews = new PreviewDemo(states.previewRunning);
     const theme = (() => {
       try {
         return localStorage.getItem('codly.theme') ?? 'system';
@@ -203,9 +213,10 @@ export class MockTransport implements Transport {
       { speed: Number(p.get('speed') ?? 1) || 1, skipMs: (Number(p.get('skip') ?? 0) || 0) * 1000, autoplay: p.get('autoplay') === '1' },
       { ...SETTINGS, theme },
     );
-    this.story = new Story(this.sim);
+    this.story = new Story(this.sim, { checks: this.checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null });
+    this.conflicts = new MergeConflictDemo(states.mergeConflict, this.sim, this.story);
     this.breaker = new MockBreaker(this.sim);
-    this.approvalRules = new MockApprovalRules(this.sim, this.story);
+    this.approvalRules = this.story.rules;
     this.ctl = new MockControls(this.sim);
     this.askMe = new MockAskMe(this.sim);
     const now = this.sim.now();
@@ -217,7 +228,9 @@ export class MockTransport implements Transport {
     ];
     // Let the UI's relative times follow the virtual clock (dev only).
     (globalThis as { __codlyNow?: () => number }).__codlyNow = () => this.sim.now();
-    if (p.get('ws') === '1' || p.get('skip') || isSiteDemo()) this.story.openWorkspace(REPO);
+    if (p.get('ws') === '1' || p.get('skip') || isSiteDemo() || opensRepo(states)) this.story.openWorkspace(REPO);
+    // `?intake=issue` / `?intake=pr`: that dialog is open when the demo starts.
+    if (states.intake) intakeUi.dialog = states.intake;
   }
 
   async subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot> {
@@ -323,6 +336,7 @@ export class MockTransport implements Transport {
         return { messages: c?.messages ?? [], total: c?.messages.length ?? 0, authors: c?.authors ?? {} } satisfies ClosedTranscript;
       }
       case 'merge_plan': {
+        this.conflicts.refuse(String(a.planId));
         const sha = story.mergePlan(String(a.planId));
         this.demoMerge = { sha, branch: 'main', plan_id: String(a.planId), agent_id: null };
         this.demoPushed = false;
@@ -331,15 +345,11 @@ export class MockTransport implements Transport {
       case 'merge_plan_warning':
         return null; // the demo repo stays on main, where every plan starts
       case 'merge_state':
-      case 'resolve_merge_conflict': {
-        // Nobody commits on the demo's main while a plan runs: nothing conflicts, nothing to resolve.
-        const source = a.source as PrSource;
-        const branch = source.kind === 'plan' ? sim.plans.get(source.id)?.integration_branch : mockAgentGit(sim.agents.get(source.id), sim.now()).branch;
-        if (!branch) throw new Error(source.kind === 'plan' ? 'the plan never ran, so there is nothing to merge' : 'this agent has no worktree yet, so there is nothing to merge');
-        return { target: 'main', branch, repo: sim.workspace?.repo_path ?? '', conflicts: [], resolving: null, failed_checks: [], checks_not_run: null, behind: 0 } satisfies MergeState;
-      }
+        return this.conflicts.state(a.source as PrSource);
+      case 'resolve_merge_conflict':
+        return this.conflicts.resolve(a.source as PrSource);
       case 'stop_resolving_merge':
-        throw new Error(`${sim.agents.get(String(a.agentId))?.name ?? 'This agent'} is not resolving a merge`); // the demo never starts one
+        throw new Error(`${sim.agents.get(String(a.agentId))?.name ?? 'This agent'} is not resolving a merge`); // only a plan's task resolves one in the demo
       case 'merge_agent': {
         const sha = Math.random().toString(16).slice(2, 12).padEnd(10, '0');
         this.demoMerge = { sha, branch: 'main', plan_id: null, agent_id: String(a.agentId) };
@@ -369,7 +379,7 @@ export class MockTransport implements Transport {
         return this.pullRequests.handle(cmd, a, sim);
       case 'start_from_github':
         if (!sim.workspace) throw new Error('Open a repository first.');
-        return demoIntake(a, (thread, text) => story.userChat(thread, text));
+        return demoIntake(a, (thread, text, source) => story.userChat(thread, text, { intake: source }));
       case 'preview':
         return this.previews.handle(a, sim);
       case 'keep_plan':
@@ -516,6 +526,8 @@ export class MockTransport implements Transport {
         return demoSellLot(sim, String(a.slotId));
       case 'move_office':
         return demoMoveOffice(sim, String(a.workspaceId), String(a.slotId));
+      case 'close_office':
+        return demoCloseOffice(sim, String(a.workspaceId));
       case 'set_agent_model':
         return null;
       case 'create_task':

@@ -21,8 +21,8 @@ const registered = names(handlers.slice(0, handlers.indexOf(']')), /([a-z0-9_]+)
 const answered = names(demo + skillsDemo, /case '([a-z0-9_]+)'/g);
 /** Sent by a transport method of its own (`subscribe`, `attachPty`, `upload`), which the mock must have to compile. */
 const OWN_METHOD = ['ui_subscribe', 'pty_attach', 'save_attachment'];
-/** Known holes in the demo: the button fails there with "unknown command". Take a name out with its fix. */
-const DEMO_GAPS = ['close_office'];
+/** Known holes in the demo: the button fails there with "unknown command". None now; a new one goes here with its reason, and comes out with its fix. */
+const DEMO_GAPS: string[] = [];
 
 describe('every command', () => {
   it('the UI calls is one the app has', () => {

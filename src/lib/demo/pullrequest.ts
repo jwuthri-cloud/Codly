@@ -1,7 +1,10 @@
 // The browser demo's answer to the pull-request commands. There is no git and no gh behind it:
 // a draft is written from the story's plan (or the agent's demo worktree), Create "opens" a pull
-// request on acme/web, and Refresh shows its checks running, then done.
+// request on acme/web, and Refresh shows its checks running, then done. A plan whose request
+// started from an issue ends its description with "Closes #N" (the core's `intake::link_line`).
 import type { Agent } from '../gen/Agent';
+import type { ChatMessage } from '../gen/ChatMessage';
+import type { IntakeSource } from '../gen/IntakeSource';
 import type { Plan } from '../gen/Plan';
 import type { PrConfirm } from '../gen/PrConfirm';
 import type { PrDraft } from '../gen/PrDraft';
@@ -12,10 +15,37 @@ import type { PullRequest } from '../gen/PullRequest';
 import type { Task } from '../gen/Task';
 import { mockAgentGit } from './agentgit';
 
-/** What the demo knows: the story's plans, tasks and agents, and its clock. */
-export type DemoWorld = { plans: Map<string, Plan>; tasks: Map<string, Task>; agents: Map<string, Agent>; now(): number };
+/** What the demo knows: the story's plans, tasks, agents and messages, and its clock. */
+export type DemoWorld = { plans: Map<string, Plan>; tasks: Map<string, Task>; agents: Map<string, Agent>; chats: ChatMessage[]; now(): number };
 
 const REPO_URL = 'https://github.com/acme/web';
+/** Where the demo's pull requests are opened. */
+const PR_REPO = { host: 'github.com', owner: 'acme', repo: 'web' };
+
+function intakeOf(message: ChatMessage): IntakeSource | null {
+  const a = message.attachment;
+  return a && typeof a === 'object' && !Array.isArray(a) && a.intake ? (a.intake as unknown as IntakeSource) : null;
+}
+
+/**
+ * The issue or pull request a plan's request started from (the core's `plan_intake`): the newest
+ * "From issue…" / "From pull request…" message of the plan's thread that came before the plan.
+ * None once an earlier plan made after that message is done: its work was delivered.
+ */
+function planIntake(plan: Plan, world: DemoWorld): IntakeSource | null {
+  const asked = world.chats.filter((c) => c.thread === plan.thread && c.author === 'user' && c.ts <= plan.created_at && intakeOf(c)).pop();
+  if (!asked) return null;
+  const delivered = [...world.plans.values()].some((p) => p.id !== plan.id && p.thread === plan.thread && p.status === 'done' && p.created_at >= asked.ts && p.created_at < plan.created_at);
+  return delivered ? null : intakeOf(asked);
+}
+
+/** The last line of the description: GitHub's closing keyword for an issue of the same host, else a plain link. */
+function linkLine(source: IntakeSource): string {
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  const sameHost = same(source.host, PR_REPO.host);
+  const reference = !sameHost ? source.url : same(source.owner, PR_REPO.owner) && same(source.repo, PR_REPO.repo) ? `#${source.number}` : `${source.owner}/${source.repo}#${source.number}`;
+  return source.kind === 'issue' && sameHost ? `Closes ${reference}` : `Related to ${reference}`;
+}
 
 /** `pr_state`: where the pull request "opened" for this source stands (null: there is none). */
 function draft(source: PrSource, world: DemoWorld, pr_state: PrState | null): PrDraft {
@@ -26,7 +56,8 @@ function draft(source: PrSource, world: DemoWorld, pr_state: PrState | null): Pr
     const lines = tasks.map((t) => `- **${t.key}** ${t.title} (${t.status.replace(/_/g, ' ')})`);
     // In the story every finished task passed its checks.
     const checks = tasks.filter((t) => t.status === 'done').flatMap((t) => t.verify.map((cmd) => `- ${t.key}: \`${cmd}\` passed`));
-    const body = `## Goal\n\n${plan.request || plan.summary}\n\n## Tasks\n\n${lines.join('\n')}\n\n## Checks\n\n${checks.length ? checks.join('\n') : 'No checks ran for this plan.'}\n`;
+    const started = planIntake(plan, world);
+    const body = `## Goal\n\n${plan.request || plan.summary}\n\n## Tasks\n\n${lines.join('\n')}\n\n## Checks\n\n${checks.length ? checks.join('\n') : 'No checks ran for this plan.'}\n${started ? `\n${linkLine(started)}\n` : ''}`;
     return { remote: 'origin', branch: plan.integration_branch, base: plan.base_branch ?? 'main', title: plan.summary, body, gh_problem: null, warning: null, pr_state };
   }
   const agent = world.agents.get(source.id);

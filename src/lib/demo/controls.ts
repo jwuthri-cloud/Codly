@@ -9,6 +9,9 @@ import type { Sim } from './sim';
 
 const MAX_HELD = 32;
 
+/** The name the agent panel gives each mode (the core's `PermissionMode::label`). */
+export const MODE_LABEL: Record<PermissionMode, string> = { ask: 'ask for edits', accept_edits: 'accept edits', plan: 'plan first' };
+
 export class AgentControl {
   blockTools = false;
   stopRequested = false;
@@ -131,7 +134,7 @@ export class MockControls {
       throw new Error(`${a.name}'s permissions are "Ask first": every change asks you, so it cannot accept edits by itself. Give it other permissions first.`);
     }
     if ((a.permission_mode ?? 'ask') === mode) return a;
-    this.note(id, `${a.name} now works in the mode "${mode.replace('_', ' ')}"`);
+    this.note(id, `${a.name} now works in the mode "${MODE_LABEL[mode]}"`);
     return this.sim.patchAgent(id, { permission_mode: mode });
   }
 
