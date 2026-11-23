@@ -76,21 +76,27 @@ describe('"Approve and accept edits from now on"', () => {
   const ada = mkAgent('ada', 'Ada', 'claude', 'solo', 0, 'waiting_approval');
 
   it('is offered on a file edit of a 1:1 Claude agent that asks for edits', () => {
-    expect(acceptsEdits(edit, offered, ada)).toBe(true);
-    expect(acceptsEdits(edit, offered, { ...ada, permission_mode: 'ask' })).toBe(true);
+    expect(acceptsEdits(edit, offered, ada, 'balanced')).toBe(true);
+    expect(acceptsEdits(edit, offered, { ...ada, permission_mode: 'ask' }, 'balanced')).toBe(true);
   });
 
   it('is not offered in another mode, for a worker, a Lead, another CLI, an agent on a task, or another kind of request', () => {
-    expect(acceptsEdits(edit, offered, { ...ada, permission_mode: 'accept_edits' })).toBe(false);
-    expect(acceptsEdits(edit, offered, { ...ada, permission_mode: 'plan' })).toBe(false);
-    expect(acceptsEdits(edit, offered, mkAgent('wes', 'Wes', 'claude', 'worker', 0, 'waiting_approval'))).toBe(false);
-    expect(acceptsEdits(edit, offered, mkAgent('lea', 'Lea', 'claude', 'lead', 0, 'waiting_approval'))).toBe(false);
-    expect(acceptsEdits(edit, offered, mkAgent('bo', 'Bo', 'codex', 'solo', 0, 'waiting_approval'))).toBe(false);
-    expect(acceptsEdits(edit, offered, { ...ada, task_id: 't1' })).toBe(false);
-    expect(acceptsEdits(command, offered, ada)).toBe(false);
-    expect(acceptsEdits(edit, offered, null)).toBe(false);
+    expect(acceptsEdits(edit, offered, { ...ada, permission_mode: 'accept_edits' }, 'balanced')).toBe(false);
+    expect(acceptsEdits(edit, offered, { ...ada, permission_mode: 'plan' }, 'balanced')).toBe(false);
+    expect(acceptsEdits(edit, offered, mkAgent('wes', 'Wes', 'claude', 'worker', 0, 'waiting_approval'), 'balanced')).toBe(false);
+    expect(acceptsEdits(edit, offered, mkAgent('lea', 'Lea', 'claude', 'lead', 0, 'waiting_approval'), 'balanced')).toBe(false);
+    expect(acceptsEdits(edit, offered, mkAgent('bo', 'Bo', 'codex', 'solo', 0, 'waiting_approval'), 'balanced')).toBe(false);
+    expect(acceptsEdits(edit, offered, { ...ada, task_id: 't1' }, 'balanced')).toBe(false);
+    expect(acceptsEdits(command, offered, ada, 'balanced')).toBe(false);
+    expect(acceptsEdits(edit, offered, null, 'balanced')).toBe(false);
     // Only an edit that can be approved once.
-    expect(acceptsEdits(edit, ['deny', 'cancel'], ada)).toBe(false);
+    expect(acceptsEdits(edit, ['deny', 'cancel'], ada, 'balanced')).toBe(false);
+  });
+
+  it('is not offered under "Ask first" permissions, where every change asks you and the core refuses "Accept edits"', () => {
+    expect(acceptsEdits(edit, offered, ada, 'strict')).toBe(false);
+    expect(acceptsEdits(edit, offered, ada, 'autonomous')).toBe(true);
+    expect(acceptsEdits(edit, offered, ada, 'full')).toBe(true);
   });
 
   it('comes after "Approve once", with the hint of the mode it switches to', () => {

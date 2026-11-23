@@ -34,12 +34,28 @@ export type AskedQuestion = {
  * Whether the card's answer is still missing, so "Send answer" and ⌘↵ do nothing. Every
  * question that can be answered needs an answer: an option or your own words (either one for a
  * question with both). `free`: the text of the one answer field of a question Codly cannot list
- * (an MCP server's elicitation), null when the card lists its questions. An empty answer is
- * never sent: an agent takes it as your answer.
+ * (an MCP server's elicitation), null when the card lists its questions or the elicitation asks
+ * for no text (`envelopeAsksText`). An empty answer is never sent: an agent takes it as your answer.
  */
 export function answerMissing(questions: AskedQuestion[], free: string | null): boolean {
   if (!questions.length) return free !== null && !free.trim();
   return questions.some((q) => (q.options > 0 || q.own) && !q.answered);
+}
+
+/**
+ * Whether a question Codly cannot list (an MCP server's elicitation, in its request's envelope)
+ * asks for typed text, so the card shows its answer field and waits for some. Not a link to open
+ * ("url" mode), and not a form whose schema asks for nothing (`requestedSchema` with no property):
+ * those are only accepted or declined. A schema Codly cannot read asks for text.
+ * Shapes: codex-cli 0.166.0 `McpServerElicitationRequestParams`.
+ */
+export function envelopeAsksText(envelope: unknown): boolean {
+  if (!envelope || typeof envelope !== 'object') return true;
+  const { mode, requestedSchema } = envelope as { mode?: unknown; requestedSchema?: unknown };
+  if (mode === 'url') return false;
+  if (!requestedSchema || typeof requestedSchema !== 'object') return true;
+  const props = (requestedSchema as { properties?: unknown }).properties;
+  return !!props && typeof props === 'object' && Object.keys(props).length > 0;
 }
 
 /**

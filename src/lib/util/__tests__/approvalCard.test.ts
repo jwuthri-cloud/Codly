@@ -2,7 +2,7 @@
 // buttons in view), when its answer may be sent, and when its answer field takes the focus.
 import { afterEach, describe, expect, it } from 'vitest';
 import { cardInView, registerCardView } from '../../state/keys';
-import { answerMissing, answerTakesFocus, takesKeys, type Box } from '../approvalCard';
+import { answerMissing, answerTakesFocus, envelopeAsksText, takesKeys, type Box } from '../approvalCard';
 
 const box = (top: number, bottom: number, left = 217, right = 873): Box => ({ top, bottom, left, right });
 /** The thread's visible box at 1024x640, as the review measured it: [185, 162, 905, 494]. */
@@ -96,5 +96,30 @@ describe('the focus of a question card that becomes the one that waits', () => {
     expect(answerTakesFocus([{ options: 2, own: true }], false, false)).toBe(false);
     expect(answerTakesFocus([{ options: 0, own: true }, { options: 0, own: true }], false, false)).toBe(false);
     expect(answerTakesFocus([], false, false)).toBe(false);
+  });
+});
+
+describe('the answer field of a question Codly cannot list (an MCP server asks through Codex)', () => {
+  // The params of 'mcpServer/elicitation/request' (codex-cli 0.166.0 McpServerElicitationRequestParams; written from the generated types, not recorded).
+  const base = { threadId: 't', turnId: null, serverName: 'docs', _meta: null };
+
+  it('a form that asks for a value shows the field and waits for text', () => {
+    const form = { ...base, mode: 'form', message: 'Which space?', requestedSchema: { type: 'object', properties: { space: { type: 'string' } } } };
+    expect(envelopeAsksText(form)).toBe(true);
+    expect(answerMissing([], '')).toBe(true);
+  });
+
+  it('a link to open, or a form that asks for nothing, is only accepted or skipped: no field, nothing to type', () => {
+    const url = { ...base, mode: 'url', message: 'Sign in to docs', url: 'https://docs.example/auth', elicitationId: 'e1' };
+    const confirm = { ...base, mode: 'form', message: 'Confirm?', requestedSchema: {} };
+    const empty = { ...base, mode: 'form', message: 'Confirm?', requestedSchema: { type: 'object', properties: {} } };
+    expect([envelopeAsksText(url), envelopeAsksText(confirm), envelopeAsksText(empty)]).toEqual([false, false, false]);
+    // The card then passes no field text: "Send answer" is not held back.
+    expect(answerMissing([], null)).toBe(false);
+  });
+
+  it('a request Codly cannot read asks for text', () => {
+    expect(envelopeAsksText(null)).toBe(true);
+    expect(envelopeAsksText({ ...base, mode: 'openaiForm', message: 'Name?', requestedSchema: 'x' })).toBe(true);
   });
 });

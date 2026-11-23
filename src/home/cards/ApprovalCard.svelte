@@ -44,7 +44,7 @@
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
   import { acceptsEdits, footerButtons, noteGoes, PLAN_NOTE_HINT, type FooterButton } from '../../lib/util/approvalFooter';
-  import { answerMissing, answerTakesFocus, takesKeys } from '../../lib/util/approvalCard';
+  import { answerMissing, answerTakesFocus, envelopeAsksText, takesKeys } from '../../lib/util/approvalCard';
   import { idVar } from '../../lib/util/labels';
   import { firstQuestion, outcomeBy, settledWord, wordsOf } from '../../lib/util/outcome';
   import { permissionsAsked } from '../../lib/util/permissionsAsked';
@@ -134,7 +134,9 @@
   const asker = $derived(agent ? { provider: agent.provider, name: agent.name } : null);
   /** "Accept edits" as the agent's sheet says it: what stops asking and what still asks. */
   const acceptEditsHint = PERMISSION_MODES.find((m) => m.id === 'accept_edits')!.hint;
-  const buttons = $derived(footerButtons(plan !== null, approval.choices, subject.kind === 'permissions', asker, acceptsEdits(subject, approval.choices, agent) ? acceptEditsHint : null));
+  /** The permissions of the agent's 1:1 conversation, as the core reads them for its mode switch. */
+  const permission = $derived(store.requestPrefs[`agent:${approval.agent_id}`]?.approval_mode ?? store.settings.approval_mode);
+  const buttons = $derived(footerButtons(plan !== null, approval.choices, subject.kind === 'permissions', asker, acceptsEdits(subject, approval.choices, agent, permission) ? acceptEditsHint : null));
   /** Where a note goes when the agent's CLI takes none with a "no"; null for Claude Code. */
   const noteLine = $derived(noteGoes(asker));
   function press(b: FooterButton) {
@@ -253,11 +255,16 @@
     for (let p = node.parentElement; p; p = p.parentElement) if (/(auto|scroll)/.test(getComputedStyle(p).overflowY)) return p;
     return null;
   }
+  /** The typed answer under the body grows only into the room the other parts leave (at least two lines). */
+  const ANSWER_MIN = 56;
+  let answerMax = $state<number | null>(null);
   function measureFit(card: HTMLElement, sc: HTMLElement) {
     const cs = getComputedStyle(sc);
     const room = sc.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - 8;
     const body = bodyEl?.isConnected ? bodyEl : null;
     const fixed = card.scrollHeight - (body?.offsetHeight ?? 0) + Math.min(body?.scrollHeight ?? 0, BODY_MIN);
+    const field = ownBelow || freeField ? answerEl : undefined;
+    answerMax = field?.isConnected ? Math.max(ANSWER_MIN, Math.floor(room - fixed + field.offsetHeight)) : null;
     fit = Math.max(220, Math.floor(room), Math.ceil(fixed));
   }
   $effect(() => {
@@ -270,6 +277,8 @@
     measureFit(card, sc);
     const ro = new ResizeObserver(() => measureFit(card, sc));
     ro.observe(sc);
+    // And when a part that stays changes its size: a typed answer grows as you write.
+    for (const part of card.children) if (part !== bodyEl) ro.observe(part);
     return () => ro.disconnect();
   });
 
@@ -290,11 +299,17 @@
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => (seen = now()));
     };
+    // Again when it becomes the oldest request: the card before it may have just folded and
+    // moved this one into view with no scroll.
+    void candidate;
     update();
     sc?.addEventListener('scroll', update, { passive: true });
     window.addEventListener('resize', update);
+    // And when the card or the list it is in changes size (a card above folds, a field opens).
     const ro = new ResizeObserver(update);
     if (sc) ro.observe(sc);
+    ro.observe(card);
+    if (card.parentElement && card.parentElement !== sc) ro.observe(card.parentElement);
     // The keys read the boxes again at each press: the shown keycaps may lag a frame behind.
     const unregister = registerCardView([approval.id, ...twins.map((t) => t.id)], now);
     return () => {
@@ -395,8 +410,10 @@
   const answeredAt = (i: number) => !!picks[i]?.length || !!(own[i] ?? '').trim();
   /** The questions as far as their answer goes (`answerMissing`, `answerTakesFocus`). */
   const answerState = $derived(questions.map((q, i) => ({ options: q.options.length, own: q.own, answered: answeredAt(i) })));
-  /** The card has the one answer field of a question Codly cannot list (an MCP server's elicitation). */
-  const freeField = $derived(subject.kind === 'question' && !questions.length);
+  /** The card has the one answer field of a question Codly cannot list (an MCP server's
+   *  elicitation), when that question asks for text: a link to open or a form that asks for
+   *  nothing is only accepted or skipped. */
+  const freeField = $derived(subject.kind === 'question' && !questions.length && envelopeAsksText(subject.questions));
   /** Nothing to send yet: "Send answer" and ⌘↵ wait for an answer (an empty one is never sent). */
   const unanswered = $derived(answerMissing(answerState, freeField ? freeText : null));
   /** The one typed answer of the card stays under its body, always in view: the field of a card
@@ -472,7 +489,7 @@
     {/if}
   </div>
 {:else}
-  <article class="card" class:key={isKeyTarget} bind:this={el} style:--hue={idVar(agent?.color ?? 0)} style:max-height={fit ? `${fit}px` : null} aria-label={headline}>
+  <article class="card" class:key={isKeyTarget} bind:this={el} style:--hue={idVar(agent?.color ?? 0)} style:max-height={fit ? `${fit}px` : null} style:--answer-max={answerMax ? `${answerMax}px` : null} aria-label={headline}>
     <header data-asks={asksInHeader || undefined}>
       {#if showAgent && agent}<button class="who" onclick={() => ui.selectAgent(agent.id)}><Portrait {agent} size={24} /></button>{/if}
       <h3>{headline}{#if subject.kind === 'question' && questions[0]?.header}<span class="qh">{questions[0].header}</span>{/if}</h3>
@@ -669,6 +686,8 @@
   footer .btn .k { margin: 0; font-size: 10.5px; line-height: 12px; }
   .same { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); margin-top: -4px; }
   .own { display: flex; flex-direction: column; }
+  /* Under the body it grows only into the room the other parts leave (--answer-max, from the script), then scrolls. */
+  .own .answer { max-height: min(190px, var(--answer-max, 190px)); }
   .always { position: relative; font-size: var(--t-sm); color: var(--ink-3); }
   .always summary { width: fit-content; cursor: pointer; color: var(--ink-2); }
   .layer { position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 100%; padding: 10px 12px; border-radius: var(--r-md); background: var(--pop); box-shadow: var(--pop-shadow); }

@@ -7,6 +7,7 @@
 // switch to "Accept edits" (`acceptsEdits`), so that its next edits stop asking.
 import type { Agent } from '../gen/Agent';
 import type { ApprovalChoice } from '../gen/ApprovalChoice';
+import type { ApprovalMode } from '../gen/ApprovalMode';
 import type { ApprovalSubject } from '../gen/ApprovalSubject';
 import type { Provider } from '../gen/Provider';
 import { PROVIDER_LABEL } from './labels';
@@ -76,11 +77,20 @@ export function noteGoes(asker: Asker | null): string | null {
  * Whether a request's card offers "Approve and accept edits from now on": a file change of a
  * 1:1 Claude agent in "Ask for edits" that is on no task, and that can be approved once. Only
  * such an agent has a mode to switch (its mode waits while it is on a task). Never for a plan's
- * worker, a Lead, another CLI, or an agent already in another mode.
+ * worker, a Lead, another CLI, or an agent already in another mode. `permission`: the
+ * permissions of its conversation; under "Ask first" every change asks you and the core refuses
+ * "Accept edits", so the card does not offer it.
  */
-export function acceptsEdits(subject: ApprovalSubject, offered: readonly ApprovalChoice[], agent: Pick<Agent, 'provider' | 'role' | 'task_id' | 'permission_mode'> | null): boolean {
+export function acceptsEdits(subject: ApprovalSubject, offered: readonly ApprovalChoice[], agent: Pick<Agent, 'provider' | 'role' | 'task_id' | 'permission_mode'> | null, permission: ApprovalMode): boolean {
   return (
-    subject.kind === 'file_change' && offered.includes('allow_once') && !!agent && agent.provider === 'claude' && agent.role === 'solo' && !agent.task_id && (agent.permission_mode ?? 'ask') === 'ask'
+    subject.kind === 'file_change' &&
+    offered.includes('allow_once') &&
+    permission !== 'strict' &&
+    !!agent &&
+    agent.provider === 'claude' &&
+    agent.role === 'solo' &&
+    !agent.task_id &&
+    (agent.permission_mode ?? 'ask') === 'ask'
   );
 }
 
