@@ -4060,6 +4060,126 @@ async fn a_paused_office_starts_nothing_while_the_others_work() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn code_search_follows_the_files_and_says_what_differs_in_a_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let found = Arc::new(Mutex::new(None));
+    let seen = found.clone();
+    // The worker rewrites a file and adds one in its worktree, then searches the code (an index
+    // loads in the background: it asks for up to 5 s), and stays on its task.
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            std::fs::write(turn.spec.cwd.join("README.md"), "A line above.\n\n# demo\n").unwrap();
+            std::fs::write(turn.spec.cwd.join("notes.rs"), "pub fn task_note() {}\n").unwrap();
+            let mut reply = turn.tool("codly_search", json!({ "query": "demo" })).await;
+            for _ in 0..50 {
+                if reply["ok"] == true {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                reply = turn.tool("codly_search", json!({ "query": "demo" })).await;
+            }
+            *seen.lock().unwrap() = Some(reply);
+            std::future::pending::<()>().await;
+        })
+    });
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start_full(dir.path(), FakeSpawner { log, lead: idle, worker }, vec![claude()], true).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let task = core.create_task("Docs", "").await.unwrap();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+
+    // The index covers your checkout: the worker is told which of its files are not the same.
+    let reply = wait_for("the worker's search", 20, async || found.lock().unwrap().clone()).await;
+    let cited = &reply["result"]["citations"][0];
+    assert_eq!(cited["path"], "README.md", "{reply}");
+    assert!(cited["why"][0].as_str().is_some_and(|why| why.contains("differs in your worktree")), "{reply}");
+    let warnings = reply["result"]["warnings"].to_string();
+    assert!(warnings.contains("new in your worktree") && warnings.contains("notes.rs"), "{reply}");
+
+    // You add a file in your checkout while Codly runs: a search finds it without a restart,
+    // and a search from the checkout itself has nothing to warn about.
+    std::fs::write(repo.join("late.rs"), "pub fn late_arrival() {}\n").unwrap();
+    wait_for("the new file in the index", 15, async || {
+        let result = core.search("late_arrival").await.ok()?;
+        (result.citations.iter().any(|c| c.path == "late.rs") && result.warnings.is_empty()).then_some(())
+    })
+    .await;
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_task_brief_points_at_the_code_as_the_tasks_worktree_has_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    std::fs::write(repo.join("billing.rs"), "pub fn compute_invoice_total() -> u64 {\n    0\n}\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    sh(&repo, &["commit", "-qm", "billing"]);
+    let log = Arc::new(Mutex::new(Log::default()));
+    // Two tasks about one function: t1 moves it down, and t2 starts from the plan's branch,
+    // where t1 is merged. Your checkout, which the index covers, stays as it is.
+    let task = |id: &str, title: &str, goal: &str, file: &str, after: &[&str]| {
+        json!({ "id": id, "title": title, "goal": goal, "consultant": { "title": "Backend" },
+                "acceptance_criteria": [format!("{file} is right")], "write_scope": [file], "depends_on": after,
+                "verify": [format!("test -f {file}")], "size": "M" })
+    };
+    let plan = json!({ "summary": "Totals in cents", "tasks": [
+        task("t1", "Document compute_invoice_total", "Say above compute_invoice_total that it returns cents", "billing.rs", &[]),
+        task("t2", "Use compute_invoice_total", "Call compute_invoice_total where the monthly report is built", "report.rs", &["t1"]),
+    ] });
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        let plan = plan.clone();
+        Box::pin(async move {
+            if !turn.prompt.contains("[Codly]") {
+                let reply = turn.tool("codly_submit_plan", plan).await;
+                assert_eq!(reply["ok"], true, "{reply}");
+            }
+            turn.say("Planned.");
+        })
+    });
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly] Task t2:") {
+                // The test reads this brief; the task stays in progress.
+                return std::future::pending::<()>().await;
+            }
+            turn.write("billing.rs", "// Totals are in cents.\n\npub fn compute_invoice_total() -> u64 {\n    0\n}\n");
+            let report = json!({ "status": "done", "summary": "Said that totals are in cents.", "files_changed": ["billing.rs"] });
+            let r = turn.tool("codly_submit_report", report).await;
+            assert_eq!(r["ok"], true, "{r}");
+        })
+    });
+    let core = start_full(dir.path(), FakeSpawner { log: log.clone(), lead, worker }, vec![claude()], true).await;
+    let mut settings = Settings { auto_run_plans: true, lead_followups: false, ..Default::default() };
+    settings.worker_providers = vec![Provider::Claude];
+    core.update_settings(settings).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    // The index loads in the background, and a brief takes its pointers from it.
+    wait_for("the code index", 15, async || {
+        let found = core.search("compute_invoice_total").await.ok()?;
+        found.citations.iter().any(|c| c.path == "billing.rs").then_some(())
+    })
+    .await;
+
+    core.send_chat("lead", "Totals in cents").await.unwrap();
+    let brief_of = |key: &str| {
+        let start = format!("[Codly] Task {key}:");
+        log.lock().unwrap().prompts.iter().find(|p| p.0 == Role::Worker && p.1.contains(&start)).map(|p| p.1.clone())
+    };
+    let second = wait_for("the brief of the second task", 30, async || brief_of("t2")).await;
+    // t1 started from your commit: its pointer is the index's, as it is.
+    let first = brief_of("t1").unwrap();
+    assert!(first.contains("] billing.rs:") && !first.contains("differs in your worktree"), "{first}");
+    // t2 has t1's change, your checkout does not: the brief says that the pointer's lines are
+    // not those of the file the worker will open.
+    assert!(second.contains("] billing.rs:") && second.contains("differs in your worktree: read the file"), "{second}");
+    assert!(second.contains("Note: Cited files that differ in your worktree"), "{second}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_background_office_keeps_its_code_index() {
     let dir = tempfile::tempdir().unwrap();
     let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));

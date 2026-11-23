@@ -88,7 +88,8 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
             SEARCH,
             "Find code by behaviour or concept when you don't know the identifier (e.g. 'where are auth tokens refreshed'). \
              Returns path:line citations with a confidence level. For a known exact symbol, grep is faster. \
-             If confidence is 'low', grep with the suggested patterns instead.",
+             If confidence is 'low', grep with the suggested patterns instead. The index covers the user's checkout: \
+             'warnings' and a citation marked 'differs in your worktree' say when it does not match your files.",
             json!({ "type": "object", "properties": {
                 "query": { "type": "string", "description": "What you are looking for, in words or identifiers." },
                 "k": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max citations (default 8)." }

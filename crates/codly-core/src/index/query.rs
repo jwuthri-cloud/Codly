@@ -179,6 +179,18 @@ pub(crate) struct Ranked {
     pub result: SearchResult,
     pub meta: Vec<CitationMeta>,
     pub features: Features,
+    /// The `rg -i` patterns for the query. `result.fallback_rg` gives them at `Low` and
+    /// `Medium` confidence only.
+    pub rg_patterns: Vec<String>,
+}
+
+impl Ranked {
+    /// Set the confidence of the answer, and suggest the rg patterns when it is not a sure one.
+    pub fn set_confidence(&mut self, confidence: Confidence) {
+        self.result.confidence = confidence;
+        self.result.fallback_rg =
+            if matches!(confidence, Confidence::Low | Confidence::Medium) { self.rg_patterns.clone() } else { Vec::new() };
+    }
 }
 
 // ───────────────────────────── query parsing ─────────────────────────────
@@ -971,21 +983,23 @@ pub(crate) fn search(conn: &Connection, query: &str, k: usize, t: &Tuning) -> an
     }
     let mut features = features;
     features.phase_ms[5] = t_cit.elapsed().as_secs_f64() * 1000.0;
-    let fallback_rg =
-        if matches!(confidence, Confidence::Low | Confidence::Medium) { rg_patterns(&parsed.terms, &hy.rare) } else { Vec::new() };
     // Not the query: it can be the text of a task, and the app's log file ends up in bug reports.
     tracing::debug!(query_chars = query.chars().count(), ?confidence, agree5, p_hit, citations = cits.len(), "index search");
-    Ok(Ranked {
+    let mut ranked = Ranked {
         result: SearchResult {
             query: query.to_string(),
             confidence,
             citations: cits,
-            fallback_rg,
+            fallback_rg: Vec::new(),
             took_ms: started.elapsed().as_millis() as i64,
+            warnings: Vec::new(),
         },
         meta,
         features,
-    })
+        rg_patterns: rg_patterns(&parsed.terms, &hy.rare),
+    };
+    ranked.set_confidence(confidence);
+    Ok(ranked)
 }
 
 /// Parent directory of a file (for the dispersion feature).

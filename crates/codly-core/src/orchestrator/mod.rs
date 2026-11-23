@@ -1049,7 +1049,7 @@ impl Core {
 
     /// Code search over the workspace index (the same engine as the codly_search tool).
     pub async fn search(&self, query: &str) -> anyhow::Result<SearchResult> {
-        self.inner.search(None, query, 12).await
+        self.inner.search(None, None, query, 12).await
     }
 
     pub async fn memories(&self, query: Option<&str>, scope: Option<MemoryScope>) -> anyhow::Result<Vec<Memory>> {

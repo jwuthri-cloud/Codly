@@ -90,6 +90,17 @@ fn init(conn: &Connection, opts: &IndexOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// When the last complete refresh started (unix ms); None before the first one.
+pub(crate) fn refreshed_at(conn: &Connection) -> anyhow::Result<Option<i64>> {
+    let value: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'refreshed_at'", [], |r| r.get(0)).optional()?;
+    Ok(value.and_then(|v| v.parse().ok()))
+}
+
+pub(crate) fn set_refreshed_at(conn: &Connection, at_ms: i64) -> anyhow::Result<()> {
+    conn.prepare_cached("INSERT OR REPLACE INTO meta(key, value) VALUES ('refreshed_at', ?1)")?.execute([at_ms.to_string()])?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FileState {
     pub mtime_ns: i64,

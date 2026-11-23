@@ -268,6 +268,15 @@ and files whose header says a tool generated them. Directories that are never so
 they are build output or third-party code in most repos. If one holds your own code, add a
 `!` rule for it to `.codlyignore`, for example `!/src/vendor/`.
 
+How the code index stays true: it covers the user's checkout. A search first compares it with
+the files on disk (at most once in 3 seconds, no file watcher), so an edit, a pull or a branch
+switch is found without a restart. If that takes more than 2 seconds or fails, the search
+answers from what it has and `warnings` in the result says how old the index is. An agent
+works in a worktree on another branch: for its searches and its pointer pack, Codly asks git
+which files differ there. A match in a file the worktree does not have is left out, a match
+in a file that differs is marked "differs in your worktree: read the file", and the files
+that are new there are named (the index does not search them).
+
 ## 6. Safety
 
 - Agents run unmodified CLIs signed in by you. Codly does not read their sign-in tokens unless

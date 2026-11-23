@@ -1309,6 +1309,11 @@ pub struct SearchResult {
     /// Suggested `rg` patterns when confidence is low.
     pub fallback_rg: Vec<String>,
     pub took_ms: i64,
+    /// Why the citations may not match the files the asker sees: the index is behind the files
+    /// on disk, or files differ in the asking agent's worktree. Absent when they match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<String>>", optional)]
+    pub warnings: Vec<String>,
 }
 
 // ───────────────────────────── artifacts & repo map ─────────────────────────────
