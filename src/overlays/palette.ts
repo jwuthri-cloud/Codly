@@ -1,7 +1,10 @@
 // The command palette's guard for rows that cannot be taken back (merge, cancel a running plan,
 // answer an approval): the first Enter or click only arms the row and shows what it will do, the
 // second one runs it. Any other key, or a different row, disarms. A held ↵ and a double-click
-// are one decision, not two: their repeats do nothing on such a row.
+// are one decision, not two: their repeats do nothing on such a row. Also the rows built from
+// the store's requests and the group "This agent", away from the component so they can be tested.
+import { agentCommands, type AgentDo, type SlashContext } from '../home/composerActions';
+import { filterSlash } from '../home/composerMenu';
 import type { ApprovalSubject } from '../lib/gen/ApprovalSubject';
 import type { Provider } from '../lib/gen/Provider';
 import { permissionsAsked } from '../lib/util/permissionsAsked';
@@ -88,4 +91,34 @@ export function wants(s: ApprovalSubject, provider: Provider | null | undefined)
  */
 export function noRow(s: ApprovalSubject, provider: Provider | null | undefined, name: string, what: string): { title: string; note: boolean } {
   return showsPlan(s, provider) ? { title: `Send ${name}'s plan back with a note…`, note: true } : { title: `Deny ${name}: ${what}`, note: false };
+}
+
+/**
+ * The palette's "yes" row for a waiting request of the agent `name`: its title (`what`: the
+ * request in a few words) and the question its second ↵ answers (`full`: all of what it asks).
+ * A Claude agent's plan is accepted, as on its card.
+ */
+export function okRow(s: ApprovalSubject, provider: Provider | null | undefined, name: string, what: string, full: string): { title: string; confirm: string } {
+  return showsPlan(s, provider) ? { title: `Accept ${name}'s plan`, confirm: `Accept the plan? ${full}` } : { title: `Approve ${name}: ${what}`, confirm: `Approve once? ${full}` };
+}
+
+/** A row of the group "This agent": a control of the agent you talk to. One that cannot run has
+ *  no `run`, and says why in `sub`. */
+export type AgentRow = { id: string; section: string; title: string; sub: string; icon: string; run?: () => void };
+
+/**
+ * The group "This agent": the controls of the agent of the conversation you are on, the rows
+ * the composer's `/` menu offers for it, from the same list (`agentCommands`). A row that
+ * cannot run comes last with its reason, as in the menu; one that waits for the core's answer
+ * keeps its place. No agent: no group.
+ */
+export function agentGroup(c: SlashContext, on: AgentDo): AgentRow[] {
+  if (!c.agent) return [];
+  return filterSlash(agentCommands(c, on), '').map((r) => ({
+    id: `ctl:${c.agent!.id}:${r.name}`,
+    section: 'This agent',
+    title: r.label,
+    icon: r.icon,
+    ...('off' in r ? { sub: r.off } : { sub: r.hint, run: r.run }),
+  }));
 }

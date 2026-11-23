@@ -32,6 +32,7 @@
   import Scrapbook from './Scrapbook.svelte';
   import { sound } from './sound';
   import { bondLabel, friendScore, levelOf, type SimSheet, type SimsTracker } from './sims';
+  import { waitingLine } from './reducer';
   import { TRAITS, traitsOf } from './traits';
   import { canTrust, contextLabel, MENTORED_XP, rankProgress, titleOf, TRAITS as WORK_TRAITS, trustOf, WANT_XP, wantProgress } from '../lib/util/career';
 
@@ -148,7 +149,7 @@
     if (!st) return null;
     const n = narrate?.(agent.id);
     const home = sheet?.rest.home;
-    const nowText = home ? `At home · back in ${backIn(home.until)}` : st.approval ? `Waiting for you: ${st.approval.text}` : n?.parts?.length ? n.parts.map((p) => p.t).join('') : st.status === 'idle' ? 'Taking a break' : st.status;
+    const nowText = home ? `At home · back in ${backIn(home.until)}` : st.approval ? waitingLine(st.approval) : n?.parts?.length ? n.parts.map((p) => p.t).join('') : st.status === 'idle' ? 'Taking a break' : st.status;
     const busy = st.status !== 'idle' && st.status !== 'offline' && st.status !== 'done';
     const next = st.todo.filter((t) => !t.done && !t.active).slice(0, 4).map((t) => t.text);
     return { nowText, busy, approval: !!st.approval, next };

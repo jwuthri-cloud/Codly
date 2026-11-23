@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fileMention, filterSlash, rankFiles, triggerAt } from '../composerMenu';
+import { fileMention, filterSlash, pointerMoved, rankFiles, triggerAt, unknownSlash, unknownSlashLine } from '../composerMenu';
 
 /** The menu at the end of `text` (the caret is where typing left it). */
 const at = (text: string) => triggerAt(text, text.length);
@@ -159,5 +159,37 @@ describe('filterSlash', () => {
       const answered = asked.map((c) => (c.name === 'undo' ? { name: c.name, label: c.label, off: 'Codly kept no turn of Ada yet' } : c));
       expect(found(answered, 'u')).toEqual(['new', 'terminal (off)', 'undo (off)']);
     });
+  });
+});
+
+describe('a slash command Codly does not have', () => {
+  const names = ['new', 'stop', 'model', 'compact', 'context', 'clear', 'closed', 'undo', 'terminal', 'mcp'];
+
+  it('is held back with the action you most likely meant', () => {
+    expect(unknownSlash('/comapct', names)).toEqual({ word: 'comapct', closest: 'compact' });
+    expect(unknownSlash('/modle please', names)).toEqual({ word: 'modle', closest: 'model' });
+    expect(unknownSlash('  /termnal', names)).toEqual({ word: 'termnal', closest: 'terminal' });
+    // Nothing near: no guess.
+    expect(unknownSlash('/review this', names)).toEqual({ word: 'review', closest: null });
+    expect(unknownSlashLine({ word: 'comapct', closest: 'compact' })).toBe('No such command: /comapct. Did you mean /compact? ↵ sends nothing until you change it.');
+    expect(unknownSlashLine({ word: 'review', closest: null })).toBe('No such command: /review. Type / alone to see the actions. ↵ sends nothing until you change it.');
+  });
+
+  it('a known action, a path or a slash later in the text is not one', () => {
+    expect(unknownSlash('/compact', names)).toBeNull();
+    expect(unknownSlash('/Model', names)).toBeNull();
+    expect(unknownSlash('/usr/bin/env is missing', names)).toBeNull();
+    expect(unknownSlash('/mcp/terminal', names)).toBeNull();
+    expect(unknownSlash('look at /etc/hosts', names)).toBeNull();
+    expect(unknownSlash('/ is the root', names)).toBeNull();
+    expect(unknownSlash('', names)).toBeNull();
+  });
+});
+
+describe('the row under the pointer', () => {
+  it('becomes the active one only when the pointer moved', () => {
+    expect(pointerMoved(null, { x: 10, y: 20 })).toBe(false);
+    expect(pointerMoved({ x: 10, y: 20 }, { x: 10, y: 20 })).toBe(false); // the list scrolled under it
+    expect(pointerMoved({ x: 10, y: 20 }, { x: 10, y: 24 })).toBe(true);
   });
 });

@@ -199,7 +199,7 @@ export function applyStatus(a: AgentState, status: AgentStatus, ts: number) {
       if (a.thinkingSince == null) a.thinkingSince = ts;
       break;
     case 'waiting_approval':
-      if (!a.approval) a.approval = { id: 'status', text: '', command: false, since: ts };
+      if (!a.approval) a.approval = { id: 'status', text: '', waits: '', command: false, since: ts };
       break;
     case 'blocked':
     case 'failed':
@@ -245,6 +245,12 @@ export function approvalText(ap: Approval, provider: Provider | null): string {
 export function approvalWaits(ap: Approval, provider: Provider | null): string {
   const kind = ap.subject.kind;
   return kind === 'question' ? 'its question' : kind === 'permissions' ? 'more permissions' : approvalText(ap, provider);
+}
+
+/** The line of an agent that waits for you in the Sims panel and on its "Now" row: the ticker's
+ *  form (`approvalWaits`), so a question reads "Waiting for you: its question". */
+export function waitingLine(approval: Pick<NonNullable<AgentState['approval']>, 'waits'>): string {
+  return approval.waits ? `Waiting for you: ${approval.waits}` : 'Waiting for you';
 }
 
 /**
@@ -446,10 +452,12 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
         case 'delegate':
           tick('Briefing a helper');
           break;
-        case 'await_approval':
-          a.approval = { id: 'q:' + call.callId, text: call.query ? clean(call.query, 60) : 'a question', command: false, since: at };
+        case 'await_approval': {
+          const asks = call.query ? clean(call.query, 60) : 'a question';
+          a.approval = { id: 'q:' + call.callId, text: asks, waits: asks, command: false, since: at };
           tick('Waiting for you:', a.approval.text, 'warn');
           break;
+        }
       }
       break;
     }
@@ -495,9 +503,9 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
       if (!who || m.resolved.has(ap.id)) break;
       const ag = ensureAgent(m, who, at);
       const provider = ag.providerKnown ? ag.provider : null;
-      ag.approval = { id: ap.id, text: approvalText(ap, provider), command: ap.subject.kind === 'command', since: at };
+      ag.approval = { id: ap.id, text: approvalText(ap, provider), waits: approvalWaits(ap, provider), command: ap.subject.kind === 'command', since: at };
       m.approvals.set(ap.id, { agentId: who, denied: deniedLine(ap, provider), since: at });
-      tick('Waiting for you:', approvalWaits(ap, provider), 'warn', who);
+      tick('Waiting for you:', ag.approval.waits, 'warn', who);
       break;
     }
     case 'approval_resolved': {

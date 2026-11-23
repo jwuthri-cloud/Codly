@@ -755,7 +755,7 @@ export class SimsTracker {
     const exhausted = energy <= 0 && !m.home;
     // Moodlets: the live ones from its state, then the remembered ones still fresh.
     const live: Moodlet[] = [];
-    if (state?.approval) live.push({ key: 'approval', label: 'Waiting on you', why: state.approval.text, tone: 'bad', icon: 'hand', at: state.approval.since, until: null });
+    if (state?.approval) live.push({ key: 'approval', label: 'Waiting on you', why: state.approval.waits, tone: 'bad', icon: 'hand', at: state.approval.since, until: null });
     if (state?.rateLimited) live.push({ key: 'limit', label: 'Out of quota', why: 'Its account hit a usage limit', tone: 'bad', icon: 'moon', at: state.rateLimited.since, until: state.rateLimited.resetsAt });
     if (state?.blocked) live.push({ key: 'blocked', label: 'Stuck', why: state.blocked.reason, tone: 'bad', icon: 'alert', at: state.blocked.since, until: null });
     if (m.home) {

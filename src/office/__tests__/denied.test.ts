@@ -7,7 +7,7 @@ import type { EventRow } from '../../lib/gen/EventRow';
 import { AGENTS } from '../demo/script';
 import type { OfficeModel } from '../model';
 import { sentence } from '../narrate';
-import { approvalWaits, deniedLine, emptyModel, reduce, syncAgents } from '../reducer';
+import { approvalWaits, deniedLine, emptyModel, reduce, syncAgents, waitingLine } from '../reducer';
 
 const T0 = 1_800_000_000_000;
 let id = 0;
@@ -76,5 +76,25 @@ describe('a request you said no to, in the office', () => {
     reduce(n, row(1000, 'a-ada', { type: 'approval_requested', approval: request('a-ada', question) }), live);
     reduce(n, row(2000, 'a-ada', { type: 'approval_resolved', approval_id: 'ap', status: 'approved', by: 'user' }), live);
     expect(n.agents.get('a-ada')!.outcome).toBeNull();
+  });
+});
+
+describe('an agent that waits for you, in the Sims panel', () => {
+  /** Its "Now" row while the request waits; the reason of its moodlet is the same words after the colon. */
+  const waiting = (agent: string, subject: Approval['subject']) => {
+    const m = office();
+    reduce(m, row(1000, agent, { type: 'approval_requested', approval: request(agent, subject) }), live);
+    return waitingLine(m.agents.get(agent)!.approval!);
+  };
+
+  it('names a question, a plan and a permissions request as the ticker does', () => {
+    expect(waiting('a-ada', question)).toBe('Waiting for you: its question');
+    expect(waiting('a-ada', plan)).toBe('Waiting for you: read its plan');
+    expect(waiting('a-bo', permissions)).toBe('Waiting for you: more permissions');
+    expect(waiting('a-ada', command)).toBe('Waiting for you: rm -rf dist');
+  });
+
+  it('says only that it waits when the office knows nothing more', () => {
+    expect(waitingLine({ waits: '' })).toBe('Waiting for you');
   });
 });
