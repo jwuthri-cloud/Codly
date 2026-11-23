@@ -3,6 +3,8 @@
   words), inferred risks, and only the choices the provider offered. The oldest visible request
   takes the keyboard: ⌘↵ once · ⌥⌘↵ session · ⌘⌫ deny · ⇧⌘⌫ deny with a note.
   Questions (AskUserQuestion / requestUserInput) render as a choice to answer.
+  A plan (Claude's plan mode asks to leave it with `ExitPlanMode`) renders as the plan itself:
+  accept it, or send it back with a note.
   The same command asked by several agents is one card (`twins`): one answer goes to all.
   "Always allow in this repo" saves a rule in Codly for every agent of the repo; the card
   offers it only when the core says the request can be saved (never for what Codly always asks).
@@ -23,6 +25,7 @@
   import { idVar } from '../../lib/util/labels';
   import { oneLine, tildify } from '../../lib/util/sanitize';
   import Icon from '../../components/Icon.svelte';
+  import Markdown from '../../components/Markdown.svelte';
   import Portrait from '../../components/Portrait.svelte';
   import Provenance from '../../components/Provenance.svelte';
   import Why, { type WhyLine } from '../../components/Why.svelte';
@@ -51,8 +54,16 @@
   let noteEl: HTMLInputElement | undefined = $state();
   let el: HTMLElement | undefined = $state();
 
+  /** The plan a Claude agent in plan mode shows you before it changes anything. */
+  const plan = $derived.by(() => {
+    if (subject.kind !== 'tool' || subject.name !== 'ExitPlanMode') return null;
+    const input = subject.input as { plan?: unknown } | null;
+    return typeof input?.plan === 'string' ? input.plan : null;
+  });
+
   const headline = $derived.by(() => {
     const who = agent?.name ?? 'An agent';
+    if (plan !== null) return `${who} shows you its plan`;
     switch (subject.kind) {
       case 'command':
         if (others.length) return `${who} and ${others.length === 1 ? others[0] : `${others.length} others`} want to run the same command`;
@@ -90,6 +101,8 @@
     cancel: { label: 'Stop the turn', cls: 'danger' },
   };
   const ORDER: ApprovalChoice[] = ['allow_once', 'allow_session', 'allow_always', 'deny', 'cancel'];
+  /** A plan is accepted or rejected, not "approved once". */
+  const choiceLabel = (c: ApprovalChoice) => (plan === null ? CHOICE[c].label : c === 'allow_once' ? 'Accept the plan' : c === 'deny' ? 'Reject the plan' : CHOICE[c].label);
 
   async function decide(choice: ApprovalChoice, message: string | null = null, answers: JsonValue | null = null) {
     if (!pending || busy || !offered.has(choice)) return;
@@ -182,7 +195,7 @@
     approval.status === 'approved' ? 'Approved' : approval.status === 'denied' ? 'Denied' : approval.status === 'cancelled' ? 'Stopped' : approval.status === 'expired' ? 'Expired' : '',
   );
   const by = $derived(approval.decided_by === 'user' ? 'by you' : approval.decided_by === 'policy' ? 'by Codly’s rules' : approval.decided_by ? `by ${approval.decided_by}` : '');
-  const what = $derived(subject.kind === 'command' ? subject.command : subject.kind === 'question' ? (questions[0]?.question ?? 'a question') : subject.kind === 'file_change' ? subject.paths.join(', ') : subject.kind === 'tool' ? subject.name : 'permissions');
+  const what = $derived(subject.kind === 'command' ? subject.command : subject.kind === 'question' ? (questions[0]?.question ?? 'a question') : subject.kind === 'file_change' ? subject.paths.join(', ') : subject.kind === 'tool' ? (plan !== null ? 'its plan' : subject.name) : 'permissions');
 </script>
 
 {#if !pending}
@@ -215,6 +228,8 @@
     {:else if subject.kind === 'file_change'}
       <ul class="paths">{#each subject.paths as p (p)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
       {#if subject.diff}<pre class="diff selectable">{subject.diff}</pre>{/if}
+    {:else if plan !== null}
+      <div class="plan selectable"><Markdown text={plan} brief /></div>
     {:else if subject.kind === 'tool'}
       <pre class="diff selectable">{subject.name}({JSON.stringify(subject.input, null, 2)})</pre>
     {:else if subject.kind === 'question'}
@@ -257,16 +272,16 @@
       <form class="note" onsubmit={(e) => { e.preventDefault(); decide('deny', note.trim() || null); }}>
         <input bind:this={noteEl} class="input" placeholder="Tell {agent?.name ?? 'the agent'} what to do instead…" bind:value={note} spellcheck="true"
           onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (noteOpen = false))} />
-        <button class="btn" type="submit" disabled={busy}>Deny with note</button>
+        <button class="btn" type="submit" disabled={busy}>{plan !== null ? 'Send the plan back' : 'Deny with note'}</button>
       </form>
     {:else}
       <footer>
         {#each ORDER.filter((c) => offered.has(c)) as c (c)}
           <button class="btn {CHOICE[c].cls}" disabled={busy} onclick={() => decide(c)}>
-            {CHOICE[c].label}{#if isKeyTarget && CHOICE[c].kbd}<span class="k">{CHOICE[c].kbd}</span>{/if}
+            {choiceLabel(c)}{#if isKeyTarget && CHOICE[c].kbd}<span class="k">{CHOICE[c].kbd}</span>{/if}
           </button>
         {/each}
-        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={openNote}>Deny with a note…{#if isKeyTarget}<span class="k">⇧⌘⌫</span>{/if}</button>{/if}
+        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={openNote}>{plan !== null ? 'Send it back with a note…' : 'Deny with a note…'}{#if isKeyTarget}<span class="k">⇧⌘⌫</span>{/if}</button>{/if}
       </footer>
       {#if rulePrefix || ruleExact}
         <div class="always">
@@ -311,6 +326,7 @@
   .paths li { display: flex; align-items: center; gap: 6px; color: var(--ink-3); }
   .paths code { font-size: var(--mono); color: var(--ink-1); }
   .diff { margin: 0; max-height: 220px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: 11.5px; line-height: 17px; font-family: var(--font-mono); color: var(--ink-2); }
+  .plan { max-height: 360px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-1); }
   .q { border: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   legend { font-size: 16px; line-height: 24px; color: var(--ink-1); margin-bottom: 6px; padding: 0; }
   .opt { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-1); transition: background-color var(--d-2) var(--ease-out), box-shadow var(--d-2); }

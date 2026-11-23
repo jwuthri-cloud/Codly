@@ -521,12 +521,15 @@ impl Core {
             self.inner.sync_team(&ws)?;
         }
         self.inner.kick();
+        self.inner.permissions_changed().await;
         Ok(s)
     }
 
     /// A request thread's own mode, permissions and Lead model (None fields = Settings defaults).
     pub async fn set_request_prefs(&self, thread: &str, prefs: RequestPrefs) -> anyhow::Result<RequestPrefs> {
-        self.inner.set_request_prefs(thread, prefs)
+        let prefs = self.inner.set_request_prefs(thread, prefs)?;
+        self.inner.permissions_changed().await;
+        Ok(prefs)
     }
 
     /// The open repo's changes to the global team (switch members off, add its own).
@@ -1449,6 +1452,7 @@ impl Inner {
             away_until: None,
             away_since: None,
             tired_since: None,
+            permission_mode: None,
             created_at: now,
             updated_at: now,
         }

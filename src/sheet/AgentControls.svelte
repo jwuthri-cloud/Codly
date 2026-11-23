@@ -2,12 +2,18 @@
   Live controls for one running agent. Enforced by the core (orchestrator/controls.rs), not by
   asking nicely: blocked tools are denied, a stop waits for the step to end, a steer note is an
   ordinary prompt tagged as context, and kill ends the process.
+  A Claude agent also has a mode (a 1:1 agent: ask for edits, accept edits, plan first; kept
+  for its next runs, so it shows when the agent is not running too), a context reading and
+  "Compact now". They reach its live session with no restart.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
+  import type { ContextUsage } from '../lib/gen/ContextUsage';
+  import type { PermissionMode } from '../lib/gen/PermissionMode';
   import { stopAgent } from '../lib/state/actions';
-  import { controls, resumeAgent, setBlockTools, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
+  import { PERMISSION_MODES, compactNow, contextLine, controls, readContext, resumeAgent, setBlockTools, setPermissionMode, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
   import { steerHint } from '../lib/state/queue';
+  import { tokens } from '../lib/util/format';
   import Icon from '../components/Icon.svelte';
   import Section from '../components/Section.svelte';
 
@@ -19,7 +25,39 @@
   const c = $derived(controls.of(agent.id));
   const live = $derived(!!agent.run_id && agent.status !== 'offline');
   const isLead = $derived(agent.role === 'lead');
-  const summary = $derived(c.paused ? 'paused' : c.stop_requested ? 'stopping…' : c.block_tools ? 'tools blocked' : 'none');
+  const claude = $derived(agent.provider === 'claude');
+  /** Only a 1:1 Claude agent has a mode to switch. */
+  const hasMode = $derived(claude && agent.role === 'solo');
+  const mode = $derived(PERMISSION_MODES.find((m) => m.id === (agent.permission_mode ?? 'ask')) ?? PERMISSION_MODES[0]);
+  const summary = $derived(
+    c.paused ? 'paused' : c.stop_requested ? 'stopping…' : c.block_tools ? 'tools blocked' : hasMode && mode.id !== 'ask' ? mode.label.toLowerCase() : 'none',
+  );
+
+  let context = $state<ContextUsage | null>(null);
+  let reading = $state(false);
+  let compacting = $state(false);
+  // A reading belongs to the run it was taken from.
+  $effect(() => {
+    void agent.run_id;
+    context = null;
+  });
+
+  async function pickMode(el: HTMLSelectElement) {
+    // The select shows the agent's own mode again if the switch is refused.
+    if (!(await setPermissionMode(agent.id, el.value as PermissionMode))) el.value = mode.id;
+  }
+  async function checkContext() {
+    if (reading) return;
+    reading = true;
+    context = (await readContext(agent.id)) ?? context;
+    reading = false;
+  }
+  async function compact() {
+    if (compacting) return;
+    compacting = true;
+    if (await compactNow(agent.id)) context = null; // it changes now: read it again when the turn ends
+    compacting = false;
+  }
 
   let note = $state('');
   let sending = $state(false);
@@ -41,8 +79,19 @@
 </script>
 
 <Section id="controls" title="Controls" {summary}>
+  {#if hasMode}
+    <label class="row mode">
+      <span class="txt">
+        <b>Mode</b>
+        <span class="sub">{agent.task_id ? `${agent.name} is on a task: its mode can change when the task is done.` : mode.hint}</span>
+      </span>
+      <select class="field" value={mode.id} disabled={!!agent.task_id} aria-label="Mode" onchange={(e) => pickMode(e.currentTarget)}>
+        {#each PERMISSION_MODES as m (m.id)}<option value={m.id}>{m.label}</option>{/each}
+      </select>
+    </label>
+  {/if}
   {#if !live}
-    <p class="small">{agent.name} isn’t running. Controls appear while it has a live process.</p>
+    <p class="small">{agent.name} isn’t running. {hasMode ? 'The other controls' : 'Controls'} appear while it has a live process.</p>
   {:else}
     <div class="ctl">
       <label class="row">
@@ -82,6 +131,22 @@
         </div>
       </div>
 
+      {#if claude}
+        <div class="row">
+          <span class="txt">
+            <b>Context</b>
+            {#if context}
+              <span class="sub">{contextLine(context)}</span>
+              {#if context.parts.length}<span class="sub">{context.parts.map((p) => `${p.name} ${tokens(p.tokens)}`).join(' · ')}</span>{/if}
+            {:else}
+              <span class="sub">How full its conversation is.{hasMode ? ' Compact now makes room: Claude replaces the conversation with a summary.' : ''}</span>
+            {/if}
+          </span>
+          <button class="btn sm" disabled={reading} onclick={checkContext}>Check</button>
+          {#if hasMode}<button class="btn sm" disabled={compacting} onclick={compact}>Compact now</button>{/if}
+        </div>
+      {/if}
+
       {#if confirmKill}
         <div class="kill-confirm">
           <span>Kill {agent.name}? The process ends now; its worktree is kept.</span>
@@ -99,6 +164,8 @@
   .small { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .ctl { display: flex; flex-direction: column; gap: 14px; }
   .row { display: flex; align-items: center; gap: 12px; }
+  .mode { margin-bottom: 14px; }
+  .field { width: 150px; flex: none; font-size: var(--t-sm); }
   .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .txt b, .steer b { font-weight: var(--w-med); font-size: var(--t-md); color: var(--ink-1); }
   .sub { font-size: var(--t-xs); line-height: 16px; color: var(--ink-3); }

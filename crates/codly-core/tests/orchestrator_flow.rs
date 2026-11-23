@@ -230,7 +230,7 @@ impl Spawner for FakeSpawner {
                             send(EventKind::Exited { code: Some(0) });
                             break;
                         }
-                        AgentCmd::Interrupt | AgentCmd::Approval { .. } => {}
+                        AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. } => {}
                     }
                 }
             });
@@ -801,6 +801,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             away_until: None,
             away_since: None,
             tired_since: None,
+            permission_mode: None,
             created_at: now_ms(),
             updated_at: now_ms(),
         };

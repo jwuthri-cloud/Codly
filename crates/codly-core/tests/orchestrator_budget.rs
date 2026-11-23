@@ -94,7 +94,7 @@ impl Spawner for Fake {
                             send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
                         }
                         AgentCmd::Shutdown => return send(EventKind::Exited { code: Some(0) }),
-                        AgentCmd::Interrupt | AgentCmd::Approval { .. } => {}
+                        AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. } => {}
                     }
                 }
             });
@@ -256,7 +256,7 @@ impl Spawner for Talker {
                             send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("ok".into()), duration_ms: Some(1) });
                         }
                         AgentCmd::Shutdown => return send(EventKind::Exited { code: Some(0) }),
-                        AgentCmd::Interrupt | AgentCmd::Approval { .. } => {}
+                        AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. } => {}
                     }
                 }
             });

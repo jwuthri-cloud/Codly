@@ -92,6 +92,9 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::storage_delete_branch,
             commands::agent_checkpoints,
             commands::restore_checkpoint,
+            crate::agent_controls::set_agent_permission_mode,
+            crate::agent_controls::compact_agent,
+            crate::agent_controls::agent_context_usage,
             crate::onboarding_commands::install_cli,
             crate::onboarding_commands::byok_status,
             crate::onboarding_commands::byok_configure,
@@ -276,6 +279,17 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
     let e = invoke(&wv, "restore_checkpoint", json!({ "agentId": "nope", "checkpoint": -1 })).unwrap_err();
     assert!(!e.to_string().contains("unknown agent"), "a negative number is refused before the core is asked: {e}");
+
+    // A Claude agent's mode, "compact now" and context reading, with the keys the agent panel
+    // sends: the core answers (no agent here), not the argument check.
+    let e = invoke(&wv, "set_agent_permission_mode", json!({ "agentId": "nope", "mode": "plan" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    let e = invoke(&wv, "set_agent_permission_mode", json!({ "agentId": "nope", "mode": "bypassPermissions" })).unwrap_err();
+    assert!(!e.to_string().contains("unknown agent"), "a mode Codly does not offer is refused before the core is asked: {e}");
+    let e = invoke(&wv, "compact_agent", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    let e = invoke(&wv, "agent_context_usage", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

@@ -174,7 +174,7 @@ impl Spawner for FakeSpawner {
                             send(EventKind::Exited { code: Some(0) });
                             break;
                         }
-                        AgentCmd::Interrupt | AgentCmd::Approval { .. } => {}
+                        AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. } => {}
                     }
                 }
             });

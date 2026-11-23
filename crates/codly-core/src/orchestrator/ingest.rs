@@ -107,6 +107,9 @@ impl Inner {
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
             EventKind::TurnStarted { input } => self.checkpoint_turn(&ctx.agent_id, &ctx.run_id, input.is_some()), // the files before the turn
             EventKind::PromptSteered { .. } => self.restore_note_read(&ctx.agent_id), // the note came with that prompt
+            EventKind::Decision { decision_type, detail, .. } if decision_type == crate::adapters::MODE_CHANGED => {
+                self.control_mode_changed(&ctx.agent_id, ctx.role, detail)
+            }
             _ => {}
         }
         if let Err(e) = self.project_agent(&ctx, &r.kind) {
@@ -643,6 +646,10 @@ impl Inner {
             return; // tools are blocked for this agent
         }
         let (cwd, read_only) = lock(&self.live).get(&ctx.agent_id).map_or((None, true), |l| (Some(l.cwd.clone()), l.read_only));
+        // A 1:1 agent that plans first changes nothing before you accept its plan (Claude Code
+        // then leaves plan mode by itself, `control_mode_changed`): read-only until then.
+        let planning = ctx.role == Role::Solo && self.agent(&ctx.agent_id).is_ok_and(|a| a.permission_mode == Some(PermissionMode::Plan));
+        let read_only = read_only || planning;
         let task = ctx.task_id.as_deref().and_then(|t| self.store.task(t).ok().flatten());
         // The request the run works for (a Lead's own, a task's plan's) or a 1:1 chat may set its own permissions.
         let thread = match (&task, ctx.role) {
@@ -702,6 +709,7 @@ impl Inner {
                 });
             }
             Verdict::Ask { reason } => {
+                let reason = if planning { format!("{reason} (its mode is \"plan first\")") } else { reason };
                 let _ = self.decide(ws, ctx.task_id.as_deref(), "approval_policy", format!("asking you: {reason}"), detail(&reason));
             }
         }

@@ -158,7 +158,7 @@ impl Spawner for Fake {
                     let text = match cmd {
                         AgentCmd::Prompt(text) => text,
                         AgentCmd::Shutdown => return send(EventKind::Exited { code: Some(0) }),
-                        AgentCmd::Interrupt | AgentCmd::Approval { .. } => continue,
+                        AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. } => continue,
                     };
                     send(EventKind::TurnStarted { input: Some(text.clone()) });
                     let done = |status, result: Option<&str>| {
@@ -632,6 +632,7 @@ fn seed_task_in_checks(store: &Store, ws: &Workspace, data: &Path, key: &str, tu
         away_until: None,
         away_since: None,
         tired_since: None,
+        permission_mode: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };

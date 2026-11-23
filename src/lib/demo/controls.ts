@@ -1,7 +1,10 @@
 // The browser demo's side of the per-agent live controls. `AgentControl` mirrors the core's state
 // machine (crates/codly-core/src/orchestrator/controls.rs) so the demo behaves the same:
 // a stop waits for the running turn, held notes wait for the resume, kill clears everything.
+import type { Agent } from '../gen/Agent';
+import type { ContextUsage } from '../gen/ContextUsage';
 import type { ControlState } from '../gen/ControlState';
+import type { PermissionMode } from '../gen/PermissionMode';
 import type { Sim } from './sim';
 
 const MAX_HELD = 32;
@@ -120,6 +123,41 @@ export class MockControls {
     this.note(id, `steer note for ${a.name}: ${t.slice(0, 80)}`);
     if (this.of(id).route(t) !== null) void this.deliver(id, t);
     return this.publish(id);
+  }
+
+  /** The mode of a 1:1 Claude agent: kept on the agent, as the core keeps it. */
+  setMode(id: string, mode: PermissionMode): Agent {
+    const a = this.sim.agents.get(id);
+    if (!a) throw new Error('Unknown agent');
+    if (a.role !== 'solo' || a.provider !== 'claude') throw new Error('only a 1:1 Claude agent has a mode to switch');
+    const permissions = this.sim.requestPrefs[`agent:${id}`]?.approval_mode ?? this.sim.settings.approval_mode;
+    if (mode === 'accept_edits' && permissions === 'strict') {
+      throw new Error(`${a.name}'s permissions are "Ask first": every change asks you, so it cannot accept edits by itself. Give it other permissions first.`);
+    }
+    if ((a.permission_mode ?? 'ask') === mode) return a;
+    this.note(id, `${a.name} now works in the mode "${mode.replace('_', ' ')}"`);
+    return this.sim.patchAgent(id, { permission_mode: mode });
+  }
+
+  /** "Compact now": the demo agent's context shrinks to a quarter. */
+  compact(id: string): null {
+    const a = this.agent(id);
+    if (a.provider !== 'claude') throw new Error('only a Claude agent can be compacted from here');
+    if (this.sim.actor(id).inTurn) throw new Error(`${a.name} is still working: compact it when its turn ends`);
+    const used = a.usage.context_used ?? 0;
+    const left = Math.round(used / 4);
+    this.note(id, `asked ${a.name} to compact its conversation`);
+    this.sim.emit({ type: 'compacting', pre_tokens: used, post_tokens: left }, { agent: id });
+    this.sim.patchAgent(id, { usage: { ...a.usage, context_used: left } });
+    return null;
+  }
+
+  contextUsage(id: string): ContextUsage {
+    const a = this.agent(id);
+    if (a.provider !== 'claude') throw new Error('only a Claude agent takes this without a restart');
+    const used = a.usage.context_used ?? 0;
+    const max = a.usage.context_window ?? 200_000;
+    return { used_tokens: used, max_tokens: max, percent: Math.round((used / max) * 100), auto_compact_at: Math.round(max * 0.95), parts: [{ name: 'Messages', tokens: used }] };
   }
 
   /** The note reaches the agent on its next turn: it acknowledges it in its own thread. */

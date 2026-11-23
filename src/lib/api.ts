@@ -45,7 +45,9 @@ import type { ClosedRequest } from './gen/ClosedRequest';
 import type { ClosedTranscript } from './gen/ClosedTranscript';
 import type { InstallRun } from './gen/InstallRun';
 import type { InstallRung } from './gen/InstallRung';
+import type { ContextUsage } from './gen/ContextUsage';
 import type { ControlState } from './gen/ControlState';
+import type { PermissionMode } from './gen/PermissionMode';
 import type { EventRow } from './gen/EventRow';
 import type { IdeChange } from './gen/IdeChange';
 import type { IdeEntry } from './gen/IdeEntry';
@@ -264,6 +266,9 @@ export const api = {
   stopAgentAfterStep: (agentId: string) => call<ControlState>('stop_agent_after_step', { agentId }),
   resumeAgent: (agentId: string) => call<ControlState>('resume_agent', { agentId }),
   steerAgent: (agentId: string, text: string) => call<ControlState>('steer_agent', { agentId, text }),
+  setAgentPermissionMode: (agentId: string, mode: PermissionMode) => call<Agent>('set_agent_permission_mode', { agentId, mode }),
+  compactAgent: (agentId: string) => call<void>('compact_agent', { agentId }),
+  agentContextUsage: (agentId: string) => call<ContextUsage>('agent_context_usage', { agentId }),
   hireAgent: (provider: Provider, model: string | null = null, title: string | null = null) => call<Agent>('hire_agent', { provider, model, title }),
   listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
   // Add-agent wizard: the core judges hire manifests (import, AI draft) and starts the confirmed one.

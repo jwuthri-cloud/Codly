@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
 use super::{Inner, Live, guard, lock, read};
-use crate::adapters::{AgentCmd, AgentHandle, SessionMode, SpawnSpec};
+use crate::adapters::{AgentCmd, AgentHandle, SessionMode, SessionRequest, SpawnSpec, classify};
 use crate::mcp::ToolCtx;
 use crate::model::*;
 use crate::store::RunRow;
@@ -222,6 +222,7 @@ impl Inner {
         if !ours {
             return Err(self.spawn_failed(&req.agent.id, &run_id, &token, anyhow!("{} exited during startup", provider.label())));
         }
+        self.restore_permission_mode(&req.agent, req.role, req.read_only); // before the run's first prompt
         Ok(run_id)
     }
 
@@ -332,8 +333,9 @@ impl Inner {
         }
     }
 
-    /// Switch a 1:1 agent's model. Its session resumes on the next message with the new model,
-    /// so a live process is stopped first; a turn in progress must finish or be stopped.
+    /// Switch a 1:1 agent's model. A live Claude session takes the new model as it is
+    /// (`live_model_switch`). Otherwise the session resumes on the next message with the new
+    /// model, so a live process is stopped first; a turn in progress must finish or be stopped.
     pub(super) async fn set_agent_model(&self, agent_id: &str, model: Option<String>) -> Result<Agent> {
         let agent = self.agent(agent_id)?;
         if agent.role != Role::Solo {
@@ -341,6 +343,22 @@ impl Inner {
         }
         if agent.model == model {
             return Ok(agent);
+        }
+        if let Some(name) = self.live_model_switch(agent_id, model.as_deref()) {
+            let answer = self.ask_session(agent_id, SessionRequest::Model(name))?;
+            Self::session_answer(answer).await?;
+            if let Some(l) = lock(&self.live).get_mut(agent_id) {
+                l.model = model.clone();
+            }
+            let ws = self.store.agent_workspace(agent_id)?;
+            // (Recorded: after a switch the next request reads the conversation with no cached tokens.)
+            let text = format!(
+                "{} now works with {}, in the same conversation: no restart was needed. Its next turn reads the whole conversation again with the new model.",
+                agent.name,
+                model.as_deref().unwrap_or_default()
+            );
+            self.chat(ws.as_deref(), &format!("agent:{agent_id}"), "codly", &text, None)?;
+            return self.update_agent(agent_id, |a| a.model = model);
         }
         // Its run of a task is not a chat to restart: stopping it would strand the task.
         if agent.task_id.is_some() {
@@ -354,6 +372,17 @@ impl Inner {
             bail!("{} did not stop in time; try again", agent.name);
         }
         self.update_agent(agent_id, |a| a.model = model)
+    }
+
+    /// The name to give a live Claude session so that it changes its model with no restart
+    /// (`SessionRequest::Model`: recorded between turns and during one). None = the switch
+    /// needs the restart: another CLI, no live process, the CLI's default model (no recorded
+    /// request names it), or another reasoning effort (it is set when the process starts).
+    fn live_model_switch(&self, agent_id: &str, model: Option<&str>) -> Option<String> {
+        let (name, effort) = classify::split_model_effort(model);
+        let live = lock(&self.live);
+        let l = live.get(agent_id).filter(|l| l.provider == Provider::Claude && l.starting.is_none() && !l.stopping)?;
+        name.filter(|_| classify::split_model_effort(l.model.as_deref()).1 == effort)
     }
 
     /// Stop an agent's live run and wait (≤ 5 s) for its process to exit. False = still running.

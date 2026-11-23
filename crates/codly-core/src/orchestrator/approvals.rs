@@ -4,16 +4,18 @@
 //! repository); the broker glue lives in ingest.rs.
 //!
 //! Order of the rules:
-//! 1. questions and permission changes always go to you;
+//! 1. questions, permission changes and a plan the agent shows you (Claude's plan mode) always
+//!    go to you;
 //! 2. any risk — a provider hint, or one Codly detects (outside the worktree, deletes,
 //!    network, push, sudo, git writes, secrets shown to the model, the agent's own CLI
 //!    settings changed, unparseable shell) — goes to you, except in full mode for an agent
 //!    that is not read-only, where only touching Codly's own data dir or the agent's own CLI
 //!    settings still asks;
 //! 3. Codly's own MCP tools are allowed in every mode;
-//! 4. then the mode: strict asks for everything else; read-only agents get only reads in
-//!    every other mode; balanced allows read-only actions, the task's own verify commands and
-//!    test runners; autonomous allows anything with no detected risk; full allows everything.
+//! 4. then the mode: strict asks for everything else; read-only agents (a 1:1 Claude agent
+//!    that plans first is one until you accept its plan) get only reads in every other mode;
+//!    balanced allows read-only actions, the task's own verify commands and test runners;
+//!    autonomous allows anything with no detected risk; full allows everything.
 //!
 //! Only `allow_once` is ever chosen automatically, never a session or permanent grant.
 //!
@@ -37,6 +39,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
 
+use crate::adapters::claude::EXIT_PLAN_MODE;
 use crate::adapters::classify::{self, ShellRun, first_non_flag, git_read_only, git_sub, has, options, read_only};
 use crate::mcp::tools;
 use crate::model::*;
@@ -47,8 +50,8 @@ pub struct PolicyCtx<'a> {
     pub worktree: Option<&'a Path>,
     /// The task's own verify commands (always allowed in balanced mode).
     pub verify: &'a [String],
-    /// Lead, reviewers, between-task chats: only reads are ever auto-allowed, in any mode
-    /// (the Lead's working directory is the user's own checkout).
+    /// Lead, reviewers, between-task chats, a 1:1 agent that plans first: only reads are ever
+    /// auto-allowed, in any mode (the Lead's working directory is the user's own checkout).
     pub read_only: bool,
     /// You trust it to edit on its own (`career::trusts`, Junior): file changes inside the worktree are approved in balanced mode.
     pub edits: bool,
@@ -65,6 +68,8 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
     match &a.subject {
         ApprovalSubject::Question { .. } => return ask("the agent asked you a question".into()),
         ApprovalSubject::Permissions { .. } => return ask("the agent wants broader permissions".into()),
+        // A plan is shown to be read: no mode accepts it for you (accepted, the agent starts to act on it).
+        ApprovalSubject::Tool { name, .. } if name == EXIT_PLAN_MODE => return ask("the agent shows you its plan".into()),
         _ => {}
     }
     let mut risks = a.risks.clone();
@@ -1743,6 +1748,9 @@ mod tests {
         assert!(!allowed(eval(&q, false)));
         let p = approval(ApprovalSubject::Permissions { detail: serde_json::json!({}) });
         assert!(!allowed(eval(&p, false)));
+        let plan = approval(ApprovalSubject::Tool { name: "ExitPlanMode".into(), input: serde_json::json!({ "plan": "1. Add the line" }) });
+        let v = eval(&plan, false);
+        assert!(matches!(&v, Verdict::Ask { reason } if reason == "the agent shows you its plan"), "a plan is yours to accept: {v:?}");
         assert!(!allowed(eval(&cmd("npm install", wt), true)), "read-only agents never get writes");
         assert!(!allowed(eval(&cmd("touch a", wt), true)));
         assert!(allowed(eval(&cmd("git log -5", wt), true)));

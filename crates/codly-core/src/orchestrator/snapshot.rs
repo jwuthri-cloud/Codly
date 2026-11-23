@@ -154,6 +154,7 @@ mod tests {
             away_until: None,
             away_since: None,
             tired_since: None,
+            permission_mode: None,
             created_at: 0,
             updated_at: 0,
         };
