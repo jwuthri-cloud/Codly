@@ -107,7 +107,7 @@
 
   <main class="stage">
     {#key current}
-      <section class="panel glass" aria-labelledby="lvl-title">
+      <section class="panel glass" data-toast-beside aria-labelledby="lvl-title">
         <p class="eyebrow">Level {idx + 1} of {LEVELS.length}</p>
         <h1 id="lvl-title" class="serif">{level.title}</h1>
         <p class="blurb">{level.blurb}</p>
