@@ -311,18 +311,26 @@ struct Turn {
     reaches: bool,
 }
 
-/// An agent whose turns follow `script` (a turn the script has no entry for costs nothing and
-/// completes). It records the limit each run started with, and how many runs it was told to stop.
+/// An agent whose turns follow `script`, or `by_role` first for an agent of that role (a turn
+/// neither has an entry for costs nothing and completes; a worker's turn that completes writes
+/// a file). It records the limit each run
+/// started with, the prompts of each role, and how many runs it was told to stop.
 #[derive(Clone, Default)]
 struct Limited {
     script: Arc<Mutex<VecDeque<Turn>>>,
+    by_role: Arc<Mutex<Vec<(Role, Turn)>>>,
     limits: Arc<Mutex<Vec<(Provider, Option<f64>)>>>,
+    prompts: Arc<Mutex<Vec<Role>>>,
     stops: Arc<AtomicUsize>,
 }
 
 impl Limited {
     fn then(&self, turns: &[Turn]) {
         self.script.lock().unwrap().extend(turns.iter().copied());
+    }
+
+    fn then_for(&self, role: Role, turn: Turn) {
+        self.by_role.lock().unwrap().push((role, turn));
     }
 
     fn limits(&self) -> Vec<(Provider, Option<f64>)> {
@@ -332,12 +340,17 @@ impl Limited {
     fn stops(&self) -> usize {
         self.stops.load(Ordering::SeqCst)
     }
+
+    /// How many prompts the agents of `role` got.
+    fn prompts_of(&self, role: Role) -> usize {
+        self.prompts.lock().unwrap().iter().filter(|r| **r == role).count()
+    }
 }
 
 impl Spawner for Limited {
     fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
         self.limits.lock().unwrap().push((spec.provider, spec.max_budget_usd));
-        let (script, stops) = (self.script.clone(), self.stops.clone());
+        let (script, by_role, prompts, stops) = (self.script.clone(), self.by_role.clone(), self.prompts.clone(), self.stops.clone());
         Box::pin(async move {
             let (tx, mut rx) = mpsc::unbounded_channel::<AgentCmd>();
             let handle = AgentHandle { agent_id: spec.agent_id.clone(), run_id: spec.run_id.clone(), tx };
@@ -356,14 +369,21 @@ impl Spawner for Limited {
                 billing: Billing::ApiKey,
                 tools: vec![],
             });
-            let (name, limit) = (spec.agent_name.clone(), spec.max_budget_usd);
+            let (name, limit, role, cwd) = (spec.agent_name.clone(), spec.max_budget_usd, spec.role, spec.cwd.clone());
             tokio::spawn(async move {
                 let mut cost = 0.0;
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
                         AgentCmd::Prompt(text) => {
+                            prompts.lock().unwrap().push(role);
                             send(EventKind::TurnStarted { input: Some(text) });
-                            let turn = script.lock().unwrap().pop_front().unwrap_or(Turn { cost: 0.0, reaches: false });
+                            let turn = {
+                                let mut by_role = by_role.lock().unwrap();
+                                match by_role.iter().position(|(r, _)| *r == role) {
+                                    Some(i) => by_role.remove(i).1,
+                                    None => script.lock().unwrap().pop_front().unwrap_or(Turn { cost: 0.0, reaches: false }),
+                                }
+                            };
                             cost += turn.cost;
                             send(EventKind::UsageUpdated { usage: Usage { cost_usd: Some(cost), ..Default::default() } });
                             if turn.reaches {
@@ -372,6 +392,9 @@ impl Spawner for Limited {
                                 send(EventKind::Error { message: why.clone(), fatal: false });
                                 send(EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: Some(why), duration_ms: Some(1) });
                             } else {
+                                if role == Role::Worker {
+                                    std::fs::write(cwd.join(format!("work-{}.txt", new_id())), "done\n").unwrap();
+                                }
                                 send(EventKind::Message { item_id: new_id(), text: "ok".into(), phase: MessagePhase::Final });
                                 send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("ok".into()), duration_ms: Some(1) });
                             }
@@ -500,5 +523,113 @@ async fn a_worker_whose_run_reaches_its_limit_waits_for_the_budget() {
     })
     .await;
     assert_eq!((fake.stops(), fake.limits()), (1, vec![(Provider::Claude, Some(1.0))]), "its run ended, and no other started");
+    core.shutdown().await;
+}
+
+/// The decisions of `decision_type` so far, oldest first.
+async fn decisions(core: &Core, decision_type: &str) -> Vec<String> {
+    let mut events = core.events(None, None, 2000).await.unwrap();
+    events.sort_by_key(|e| e.id);
+    events
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Decision { decision_type: ty, summary, .. } if ty == decision_type => Some(summary),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A stop at the team's budget is no failure of the worker's: you raise the budget twice, its
+/// run stops at the budget each time, and the task waits for the budget each time, never
+/// blocked as "failed 3 times in a row", and no restart in a few seconds is promised.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_stopped_at_the_budget_again_after_a_raise_still_waits_for_the_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let fake = Limited::default();
+    let core = start_on(dir.path(), &repo, Arc::new(fake.clone()), &[Provider::Claude]).await;
+    core.set_breaker_config(BreakerConfig { cost_budget_usd: 1.0, ..Default::default() }).await.unwrap();
+    let hold = |budget: &str| format!("paused: the cost budget of ${budget} is used up; raise it or press Reset counters in Settings → Autonomy & Budgets");
+    let waits = async |task: &Task, budget: &str, runs: usize| {
+        let reason = hold(budget);
+        wait_for("the task to wait for the budget", async || {
+            let t = Some(task_now(&core, &task.id).await).filter(|t| t.status_reason.as_deref() == Some(reason.as_str()))?;
+            let worker = t.assignee.clone()?;
+            let free = core.snapshot().await.unwrap().agents.into_iter().any(|a| a.id == worker && a.run_id.is_none());
+            (free && fake.limits().len() == runs && fake.stops() == runs).then_some(t)
+        })
+        .await
+    };
+
+    fake.then(&[Turn { cost: 1.05, reaches: true }, Turn { cost: 1.0, reaches: true }, Turn { cost: 1.0, reaches: true }]);
+    let task = ready_task(&core, "Write the greeting").await;
+    assert_eq!(waits(&task, "1.00", 1).await.status, TaskStatus::Ready);
+    core.set_breaker_config(BreakerConfig { cost_budget_usd: 2.0, ..Default::default() }).await.unwrap();
+    waits(&task, "2.00", 2).await;
+    core.set_breaker_config(BreakerConfig { cost_budget_usd: 3.0, ..Default::default() }).await.unwrap();
+    let t = waits(&task, "3.00", 3).await;
+    assert_eq!(t.status, TaskStatus::Ready, "still waiting for the budget, not blocked");
+    let limits: Vec<Option<f64>> = fake.limits().into_iter().map(|(_, l)| l).collect();
+    assert_eq!(limits, [Some(1.0), Some(0.95), Some(0.95)], "each run starts with what is left then");
+    assert_eq!(decisions(&core, "retry").await, Vec::<String>::new(), "no failure counted, no restart promised");
+    core.shutdown().await;
+}
+
+/// A worker's run can reach its limit while the team's budget has room (you raised it while the
+/// turn ran): the worker fails the way a worker does, counted, and starts again after its wait
+/// with what is left now. Its thread does not tell you to send a message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_whose_run_reaches_its_limit_with_budget_left_starts_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let fake = Limited::default();
+    let core = start_on(dir.path(), &repo, Arc::new(fake.clone()), &[Provider::Claude]).await;
+    core.set_worker_retry_waits(vec![Duration::from_millis(100); 2]);
+    core.set_breaker_config(BreakerConfig { cost_budget_usd: 1.0, ..Default::default() }).await.unwrap();
+
+    fake.then(&[Turn { cost: 0.2, reaches: true }]);
+    let task = ready_task(&core, "Write the greeting").await;
+    wait_for("a second run", async || (fake.limits().len() >= 2).then_some(())).await;
+    assert_eq!(fake.limits()[..2], [(Provider::Claude, Some(1.0)), (Provider::Claude, Some(0.8))]);
+    assert_eq!(
+        decisions(&core, "retry").await,
+        ["the worker's run reached the limit it started with (1.00 USD of your budget); Codly starts it again in a moment (retry 1 of 2)"]
+    );
+    let worker = task_now(&core, &task.id).await.assignee.expect("the task keeps its worker");
+    let name = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == worker).unwrap().name;
+    assert_eq!(
+        errors_of(&core, &worker).await,
+        [format!("This run of {name} reached the limit it started with (1.00 USD of your budget were left then). Codly ends this run; the task's card says what comes next.")]
+    );
+    core.shutdown().await;
+}
+
+/// A task's reviewer whose run reaches its limit before its verdict: the review stops, and the
+/// task waits for you with the budget's reason. It is not merged without its review, the
+/// reviewer is not nudged into a run that ends, and the gate does not fail on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reviewer_whose_run_reaches_its_limit_stops_the_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let fake = Limited::default();
+    let core = start_on(dir.path(), &repo, Arc::new(fake.clone()), &[Provider::Claude]).await;
+    core.update_settings(Settings { lead_followups: false, review_gate: true, ..Default::default() }).await.unwrap();
+    core.set_breaker_config(BreakerConfig { cost_budget_usd: 1.0, ..Default::default() }).await.unwrap();
+
+    // The worker's turn costs 0.30 and completes; the reviewer's run starts with 0.70 and its
+    // turn takes the team past the budget.
+    fake.then(&[Turn { cost: 0.3, reaches: false }]);
+    fake.then_for(Role::Reviewer, Turn { cost: 0.75, reaches: true });
+    let task = ready_task(&core, "Write the greeting").await;
+    let reason = "blocked: the review stopped: the team has used about $1.05, over the cost budget of $1.00; raise the budget, then re-run the checks";
+    let blocked = wait_for("the review to stop", async || Some(task_now(&core, &task.id).await).filter(|t| t.status == TaskStatus::Blocked)).await;
+    assert_eq!(blocked.status_reason.as_deref(), Some(reason));
+    wait_for("every run to end", async || core.snapshot().await.unwrap().agents.iter().all(|a| a.run_id.is_none()).then_some(())).await;
+    assert_eq!(fake.limits(), [(Provider::Claude, Some(1.0)), (Provider::Claude, Some(0.7))]);
+    assert_eq!(fake.prompts_of(Role::Reviewer), 1, "no nudge for a verdict");
+    assert_eq!(task_now(&core, &task.id).await.status_reason.as_deref(), Some(reason), "the gate did not fail on it afterwards");
+    let review = decisions(&core, "review").await;
+    assert!(review.iter().any(|d| d.ends_with(reason)), "{review:?}");
+    assert!(!review.iter().any(|d| d.contains("no verdict")), "not merged without its review: {review:?}");
     core.shutdown().await;
 }

@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::lead::Said;
 use super::{Inner, guard, lock, merge_conflict, names, prompts, row, scheduler, write};
 use crate::adapters::AgentCmd;
 use crate::adapters::claude::EXIT_PLAN_MODE;
@@ -407,12 +408,13 @@ impl Inner {
     /// Your answer to a request, from the app. A deny with a note, to an agent whose CLI takes
     /// no note with its answer (every CLI but Claude Code), is followed by the note as your
     /// message to that agent, the way a chat message reaches it: into its running turn where
-    /// the CLI can take it there, else when that turn ends. The note is on record as said once
-    /// that message went out.
+    /// the CLI can take it there, else when that turn ends. It is a refusal, not a request of
+    /// yours: an agent held back after a message from outside Codly stays held (`Said::DenyNote`).
+    /// The note is on record as said once that message went out.
     pub(super) async fn answer_approval(self: &Arc<Self>, approval_id: &str, decision: ApprovalDecision) -> anyhow::Result<()> {
         let Some(asked) = self.resolve_approval(approval_id, decision.clone(), "user")? else { return Ok(()) };
         let note = decision.message.as_deref().map(str::trim).unwrap_or_default();
-        self.chat_agent(&asked.agent_id, &format!("About the request I just denied: {note}"))
+        self.chat_agent_from(&asked.agent_id, Said::DenyNote(note))
             .await
             .map_err(|e| e.context("the request was denied, but your note did not reach the agent"))?;
         if let Some(said) = said_with(&asked, &decision, false, true) {
