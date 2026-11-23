@@ -47,6 +47,7 @@ describe('palette confirmation', () => {
     const long = `rm -rf ${'very/long/path/'.repeat(8)}dist`;
     expect(wants({ kind: 'command', command: long, cwd: '/repo' }, 'claude')).toBe(`run ${long}\nin /repo`);
     expect(wants({ kind: 'command', command: 'ls', cwd: null }, 'codex')).toBe('run ls');
+    expect(wants({ kind: 'permissions' as const, detail: { cwd: '/Users/someone/Code/acme', reason: null, permissions: { network: null, fileSystem: { read: null, write: ['/Users/someone/Code/acme-docs'] } } } }, 'codex')).toBe('write in ../acme-docs');
     expect(wants({ kind: 'file_change', paths: ['a.ts', 'b.ts'], diff: null }, 'claude')).toBe('change a.ts, b.ts');
     expect(wants({ kind: 'tool', name: 'WebFetch', input: null }, 'claude')).toBe('use the tool WebFetch');
     // A command in Claude Code's sandbox wants a host: the whole host, not the name of the request's tool.

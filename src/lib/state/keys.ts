@@ -1,13 +1,14 @@
 // Global keyboard map. ⌘K palette · ⌘F find in the conversation · ⌘1 full office · ⌘2 full work · ⌘. focus · ⌘, settings ·
 // ⌘N new request · ⌘[ / ⌘] previous / next request · ⇧⌘N new task · ⌘O open repo · ⌘↵ the one
 // primary action (approve / run plan) · ⌥⌘↵ allow for the session · ⌘⌫ deny · ⇧⌘⌫ deny with a
-// note (both also from the empty composer; on a plan both open the note) · G-sequences to rooms · J/K lists · Esc (close,
+// note (both also from the empty composer; on a plan both open the note) · 1-9 pick an option of the question that waits · G-sequences to rooms · J/K lists · Esc (close,
 // deselect, then stop the running turn: the first press asks, the second stops) · ?.
 // ponytail: hand-rolled instead of tinykeys — one listener, sequences included.
 import type { Approval } from '../gen/Approval';
 import { showsPlan } from '../util/planRequest';
 import { openWorkspace, resolveApprovals, runPlan, stopThreadByEsc } from './actions';
 import { twinsIn } from './approvalGroups';
+import { digitPick, isTextField } from '../util/questionKeys';
 import { denyKeyInField, escStep } from './esc';
 import { requests } from './requests.svelte';
 import { store } from './store.svelte';
@@ -41,11 +42,11 @@ function inThread(a: Approval): boolean {
   return isRequestThread(ui.thread) ? store.approvalThread(a) === ui.thread : `agent:${a.agent_id}` === ui.thread;
 }
 
-/** The approval the keyboard acts on: the oldest pending one you can see in full. */
+/** The request the keyboard acts on: the oldest pending one you can see in full. A question
+ *  is one too: ⌘↵ sends its answer and its digits pick (`registerQuestionKeys`). */
 export function keyTargetApproval(): Approval | null {
   const sheetAgent = ui.selectedAgentId;
   const pending = store.pendingApprovals
-    .filter((a) => a.subject.kind !== 'question')
     .filter((a) => inThread(a) || a.agent_id === sheetAgent)
     .sort((a, b) => a.created_at - b.created_at);
   return pending[0] ?? null;
@@ -89,6 +90,21 @@ export function keyTargetChanges(): DiffTarget {
   return p && shows ? { kind: 'plan', id: p.id } : null;
 }
 
+/** What a question card does with the keys: the card knows what you picked and typed. */
+export type QuestionKeys = { options: () => number; pick: (n: number) => void; send: () => void };
+const questionKeys = new Map<string, QuestionKeys[]>();
+
+/** A question card takes its keys while it shows; the card shown last wins (the sheet over the conversation). `questionKeysOf` reads them. */
+export function registerQuestionKeys(approvalId: string, k: QuestionKeys): () => void {
+  questionKeys.set(approvalId, [...(questionKeys.get(approvalId) ?? []), k]);
+  return () => {
+    const left = (questionKeys.get(approvalId) ?? []).filter((x) => x !== k);
+    if (left.length) questionKeys.set(approvalId, left);
+    else questionKeys.delete(approvalId);
+  };
+}
+export const questionKeysOf = (id: string) => questionKeys.get(id)?.at(-1) ?? null;
+
 const workspaceOpen = () => !!store.workspace;
 
 export function installKeys(): () => void {
@@ -106,6 +122,14 @@ export function installKeys(): () => void {
     // A held key acts once: its repeats would answer the next approval, then run the plan.
     if (mod && e.key === 'Enter' && !e.repeat && !overlay && (!typing || !!(e.target as HTMLElement).closest?.('[aria-label="Composer"]'))) {
       const ap = keyTargetApproval();
+      if (ap?.subject.kind === 'question') {
+        const q = questionKeysOf(ap.id);
+        if (q && !e.altKey && !e.shiftKey) {
+          e.preventDefault();
+          q.send();
+        }
+        return;
+      }
       if (e.altKey) {
         if (ap && ap.choices.includes('allow_session')) {
           e.preventDefault();
@@ -222,6 +246,18 @@ export function installKeys(): () => void {
       return;
     }
 
+    // ── the options of the question that waits: on a radio or a checkbox too (it is no text field) ──
+    if (!overlay && /^[1-9]$/.test(e.key)) {
+      const ap = keyTargetApproval();
+      const q = ap?.subject.kind === 'question' ? questionKeysOf(ap.id) : null;
+      const n = q ? digitPick({ key: e.key, mod, alt: e.altKey, shift: e.shiftKey }, isTextField(e.target as Element | null), q.options()) : null;
+      if (q && n !== null) {
+        e.preventDefault();
+        q.pick(n);
+        return;
+      }
+    }
+
     if (typing || mod || e.altKey || overlay) return;
 
     // ── G-sequences ──
@@ -299,10 +335,11 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['@', 'Talk to one agent · mention a file'],
       ['#', 'Mention a task'],
       ['/', 'Actions: new request, stop, mode, model…'],
-      ['⌘↵', 'Approve once · run the plan'],
+      ['⌘↵', 'Approve once · send the answer · run the plan'],
       ['⌥⌘↵', 'Allow for this session'],
       ['⌘⌫', 'Deny'],
       ['⇧⌘⌫', 'Deny with a note'],
+      ['1 … 9', 'Pick an option of the question that waits'],
       ['J K', 'Next · previous'],
       ['[ ]', 'Previous · next file (Changes)'],
     ],

@@ -4,6 +4,7 @@
 // are one decision, not two: their repeats do nothing on such a row.
 import type { ApprovalSubject } from '../lib/gen/ApprovalSubject';
 import type { Provider } from '../lib/gen/Provider';
+import { permissionsAsked } from '../lib/util/permissionsAsked';
 import { showsPlan } from '../lib/util/planRequest';
 import { sandboxWants } from '../lib/util/sandbox';
 import { clean } from '../lib/util/sanitize';
@@ -50,7 +51,7 @@ export function wants(s: ApprovalSubject, provider: Provider | null | undefined)
     case 'question':
       return 'ask you a question';
     case 'permissions':
-      return 'get more permissions';
+      return permissionsAsked(s.detail).wants;
   }
 }
 

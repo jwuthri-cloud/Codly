@@ -3,10 +3,16 @@
 // puts it on record with the answer (the `approval_said` row), so it is known after a restart
 // too. A request answered before the core recorded this reads "Answered by you" without the words.
 import { SvelteMap } from 'svelte/reactivity';
+import type { ApprovalChoice } from '../gen/ApprovalChoice';
 import type { EventKind } from '../gen/EventKind';
 
 /** Your answer to a question, on one line. */
 export const yourAnswers = new SvelteMap<string, string>();
+
+/** How you allowed a request, by approval id, for the requests allowed in this window: the closed
+ *  row says "for this session" (and "for this turn" for a permissions request). The core keeps
+ *  only that it was approved. */
+export const yourChoice = new SvelteMap<string, ApprovalChoice>();
 
 /** What else you said with an answer: the note of a "no", and that a plan went ahead with your text. */
 export type Words = { note: string | null; planChanged: boolean };

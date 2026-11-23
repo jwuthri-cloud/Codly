@@ -8,6 +8,7 @@ const question = {
   subject: { kind: 'question', questions: { questions: [{ question: 'Keep the localStorage fallback?', header: 'Fallback', options: [{ label: 'Keep it' }, { label: 'Drop it' }] }] } },
 } satisfies Pick<Approval, 'subject'>;
 
+const PERMS = { kind: 'permissions' as const, detail: { cwd: '/Users/someone/Code/acme', reason: null, permissions: { network: null, fileSystem: { read: null, write: ['/Users/someone/Code/acme-docs'] } } } };
 const plan = { subject: { kind: 'tool', name: 'ExitPlanMode', input: { plan: '1. Add the line' } } } satisfies Pick<Approval, 'subject'>;
 
 describe('how a settled request reads', () => {
@@ -46,6 +47,18 @@ describe('an agent’s history', () => {
     // Only a Claude agent shows a plan this way: from another CLI it is an approval like any other.
     expect(askedLine(plan, 'codex')).toBe('Asked for approval');
     expect(askedLine(plan)).toBe('Asked for approval');
+  });
+
+  it('a permissions request says what it asked for; one Codly cannot read says so', () => {
+    expect(askedLine({ subject: PERMS })).toBe('Asked to write in ../acme-docs');
+    expect(askedLine({ subject: { kind: 'permissions', detail: {} } })).toBe('Asked for more permissions');
+  });
+
+  it('a question in its request’s envelope (an MCP elicitation) is its message', () => {
+    const elicit = { subject: { kind: 'question', questions: { serverName: 'linear', mode: 'form', message: 'Which team gets the issue?', requestedSchema: {} } } } satisfies Pick<Approval, 'subject'>;
+    expect(firstQuestion(elicit)).toBe('Which team gets the issue?');
+    expect(askedLine(elicit)).toBe('Asked you: Which team gets the issue?');
+    expect(firstQuestion({ subject: { kind: 'question', questions: { serverName: 'linear', message: '  ' } } })).toBeNull();
   });
 
   it('an answered question reads "Answered by you" with the answer, never "Approval approved"', () => {

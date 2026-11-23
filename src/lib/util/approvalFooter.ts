@@ -4,6 +4,7 @@
 // it back with a note, or stop the turn. It has no plain "no": without a note Claude Code shows
 // the same plan again, so the one way to say no opens the note field.
 import type { ApprovalChoice } from '../gen/ApprovalChoice';
+import { PERMISSION_SCOPE } from './permissionsAsked';
 
 export type FooterButton = {
   /** `choice`: answer with `choice`. `edit`: open the plan to change it. `note`: open the note field. */
@@ -28,8 +29,12 @@ const ORDER: ApprovalChoice[] = ['allow_once', 'allow_session', 'allow_always', 
 
 const answer = (choice: ApprovalChoice, label = CHOICE[choice].label): FooterButton => ({ act: 'choice', choice, label, kbd: CHOICE[choice].kbd, cls: CHOICE[choice].cls });
 
-/** `plan`: the card shows a Claude agent's plan. `offered`: the choices its CLI offered. */
-export function footerButtons(plan: boolean, offered: readonly ApprovalChoice[]): FooterButton[] {
+/** A Codex permissions request is allowed for its turn or for the session: the scope Codly answers with. */
+const SCOPED: Partial<Record<ApprovalChoice, string>> = { allow_once: PERMISSION_SCOPE.allow_once, allow_session: PERMISSION_SCOPE.allow_session };
+
+/** `plan`: the card shows a Claude agent's plan. `offered`: the choices its CLI offered.
+ *  `permissions`: the card is a permissions request. */
+export function footerButtons(plan: boolean, offered: readonly ApprovalChoice[], permissions = false): FooterButton[] {
   const has = (c: ApprovalChoice) => offered.includes(c);
   if (plan) {
     return [
@@ -38,7 +43,7 @@ export function footerButtons(plan: boolean, offered: readonly ApprovalChoice[])
       ...(has('cancel') ? [answer('cancel')] : []),
     ];
   }
-  return [...ORDER.filter(has).map((c) => answer(c)), ...(has('deny') ? [{ act: 'note', label: 'Deny with a note…', kbd: '⇧⌘⌫', cls: 'ghost' } satisfies FooterButton] : [])];
+  return [...ORDER.filter(has).map((c) => answer(c, (permissions && SCOPED[c]) || undefined)), ...(has('deny') ? [{ act: 'note', label: 'Deny with a note…', kbd: '⇧⌘⌫', cls: 'ghost' } satisfies FooterButton] : [])];
 }
 
 /** The note that goes back with a plan must say something: without one the same plan comes back. */

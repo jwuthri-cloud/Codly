@@ -5,6 +5,7 @@
 import type { Approval } from '../gen/Approval';
 import type { ApprovalStatus } from '../gen/ApprovalStatus';
 import type { Provider } from '../gen/Provider';
+import { permissionsAsked } from './permissionsAsked';
 import { yourWords, type Words } from '../state/answers';
 import { showsPlan } from './planRequest';
 import { oneLine } from './sanitize';
@@ -55,11 +56,17 @@ export function answerText(answers: unknown): string | null {
   return said.length ? said.join('; ') : null;
 }
 
-/** The first question of a question card, as the agent wrote it; null when the card has none to show. */
+/** The first question of a question card, as the agent wrote it; null when the card has none to show.
+ *  A question that comes in its request's envelope (an MCP server's elicitation through Codex:
+ *  `{ serverName, mode, message, … }`) is its `message`. */
 export function firstQuestion(asked: Asked): string | null {
   if (asked.subject.kind !== 'question') return null;
   const raw = asked.subject.questions as unknown;
   const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? (raw as { questions?: unknown }).questions : null;
+  if (!Array.isArray(list)) {
+    const message = raw && typeof raw === 'object' ? (raw as { message?: unknown }).message : null;
+    return typeof message === 'string' && message.trim() ? message : null;
+  }
   const first = Array.isArray(list) ? (list[0] as { question?: unknown; prompt?: unknown } | null) : null;
   const text = first && typeof first === 'object' ? (first.question ?? first.prompt) : null;
   return typeof text === 'string' && text ? text : null;
@@ -73,6 +80,10 @@ export function askedLine(asked: Asked, provider: Provider | null = null): strin
     return q ? `Asked you: ${oneLine(q, 80)}` : 'Asked you a question';
   }
   if (showsPlan(s, provider)) return 'Asked you to read its plan';
+  if (s.kind === 'permissions') {
+    const asks = permissionsAsked(s.detail);
+    return asks.lines.length ? `Asked to ${oneLine(asks.wants, 60)}` : 'Asked for more permissions';
+  }
   return `Asked for approval${s.kind === 'command' ? `: ${oneLine(s.command, 60)}` : ''}`;
 }
 

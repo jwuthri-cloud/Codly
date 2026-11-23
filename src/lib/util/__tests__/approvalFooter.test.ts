@@ -66,3 +66,11 @@ describe('⌘⌫ on the request the keyboard acts on', () => {
     expect(denyKeyAction(request('gone', plan), false)).toBe('deny');
   });
 });
+
+describe('the buttons of a permissions request', () => {
+  it('say how long an allow lasts, with the same keys', () => {
+    const b = footerButtons(false, ['allow_once', 'allow_session', 'deny'], true).map((x) => [x.label, x.kbd ?? '']);
+    expect(b).toEqual([['Allow for this turn', '⌘↵'], ['Allow for this session', '⌥⌘↵'], ['Deny', '⌘⌫'], ['Deny with a note…', '⇧⌘⌫']]);
+    expect(footerButtons(false, ['allow_once'])[0].label).toBe('Approve once');
+  });
+});
