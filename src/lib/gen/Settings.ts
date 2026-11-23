@@ -5,6 +5,7 @@ import type { ApprovalMode } from "./ApprovalMode";
 import type { ByokSettings } from "./ByokSettings";
 import type { NotificationSettings } from "./NotificationSettings";
 import type { Provider } from "./Provider";
+import type { ResumeOnLaunch } from "./ResumeOnLaunch";
 import type { TeamMember } from "./TeamMember";
 import type { WatchdogSettings } from "./WatchdogSettings";
 
@@ -137,4 +138,10 @@ claude_sandbox: boolean,
  * The sign-in checks run with the same variables as the agents: after a change, the
  * Settings sheet asks the CLIs again (`redetect_clis`).
  */
-claude_shell_auth: boolean, };
+claude_shell_auth: boolean, 
+/**
+ * Tasks or plans were under way when Codly last closed: ask before they go on (the
+ * default), let them go on at once, or keep them stopped until you press Resume work
+ * (`orchestrator::resume`).
+ */
+resume_on_launch: ResumeOnLaunch, };

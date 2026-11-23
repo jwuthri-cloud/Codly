@@ -75,6 +75,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::check_agent,
             commands::agent_check_state,
             commands::workspace_trust,
+            commands::resume_work,
             crate::preview_commands::preview,
             commands::breaker_config,
             commands::set_breaker_config,
@@ -304,6 +305,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "workspace_trust", json!({ "set": { "trust": "abc" } })).unwrap_err();
     assert!(e.to_string().contains("changed since you read it"), "{e}");
     assert_eq!(invoke(&wv, "workspace_trust", json!({ "set": { "trust": null } })).unwrap(), nothing);
+    // Nothing was under way when this core started: no work waits for a Resume, asked or said.
+    assert_eq!(invoke(&wv, "resume_work", json!({ "go": false })).unwrap(), Value::Null);
+    assert_eq!(invoke(&wv, "resume_work", json!({ "go": true })).unwrap(), Value::Null);
     // Run… with the keys the frontend sends. No plan ran and no agent has a worktree here, so
     // the core answers that, and no command starts.
     let plan = json!({ "kind": "plan", "id": "nope" });

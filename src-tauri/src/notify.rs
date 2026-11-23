@@ -16,8 +16,9 @@ use std::time::Duration;
 
 use codly_core::Core;
 use codly_core::blockers::{BlockerSeverity, BlockerStatus};
-use codly_core::model::{Approval, ApprovalSubject, EventKind, EventRow, PlanStatus, TaskStatus};
+use codly_core::model::{Approval, ApprovalSubject, EventKind, EventRow, PlanStatus, Task, TaskStatus};
 use codly_core::notifications::NotificationSettings;
+use codly_core::orchestrator::resume::Standing;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
@@ -139,6 +140,17 @@ pub struct Notifier {
 }
 
 impl Notifier {
+    /// A notifier that starts with Codly. What stands since before the last quit (a task that
+    /// is still blocked, a plan that still waits for you) was told then: it is told again
+    /// only after it ended and came back.
+    pub fn knowing(standing: &Standing) -> Notifier {
+        Notifier {
+            asked: HashMap::new(),
+            plans: standing.plans.iter().map(|plan| (plan.id.clone(), plan.status)).collect(),
+            stopped: standing.tasks.iter().filter(|task| stopped(task)).map(|task| (task.id.clone(), task.status)).collect(),
+        }
+    }
+
     /// The notice for this event, if it is worth one. Call it for every event: it must see a
     /// stop end to tell the next one.
     pub fn notice(&mut self, ev: &EventRow, names: Names) -> Option<Notice> {
@@ -240,11 +252,7 @@ impl Notifier {
             }
             EventKind::TaskChanged { task } => {
                 let reason = task.status_reason.as_deref().unwrap_or_default();
-                // Not a task you stopped yourself, and not one that asks you a question (its
-                // card has a notification of its own).
-                let yours = ["stopped by", "review stopped by", "waiting for you:"].iter().any(|p| reason.starts_with(p));
-                let stopped = task.status == TaskStatus::Failed || (task.status == TaskStatus::Blocked && !yours);
-                if !stopped {
+                if !stopped(task) {
                     self.stopped.remove(&task.id);
                     return None;
                 }
@@ -285,6 +293,14 @@ impl Notifier {
             _ => true,
         }
     }
+}
+
+/// Did Codly stop this task (blocked), or did it fail? Not a task you stopped yourself, and
+/// not one that asks you a question (its card has a notification of its own).
+fn stopped(task: &Task) -> bool {
+    let reason = task.status_reason.as_deref().unwrap_or_default();
+    let yours = ["stopped by", "review stopped by", "waiting for you:"].iter().any(|p| reason.starts_with(p));
+    task.status == TaskStatus::Failed || (task.status == TaskStatus::Blocked && !yours)
 }
 
 /// Is this the commit of a solo agent's turn (`ingest::solo_snapshot`)? The commits Codly makes
@@ -395,7 +411,14 @@ impl Shown {
 /// Runs for the app's lifetime: shows the notifications.
 pub async fn run<R: Runtime>(app: AppHandle<R>, core: Arc<Core>) {
     let mut rx = core.subscribe();
-    let mut notifier = Notifier::default();
+    // Listening first, then the read: every change after the read is seen here.
+    let mut notifier = match core.standing() {
+        Ok(standing) => Notifier::knowing(&standing),
+        Err(e) => {
+            tracing::warn!("what was told before this start cannot be read, so it may be told again: {e}");
+            Notifier::default()
+        }
+    };
     let mut groups = Groups::default();
     let shown = Arc::new(Mutex::new(Shown::default()));
     open_on_return(&app, shown.clone());
@@ -542,6 +565,45 @@ mod tests {
     /// A notice of `kind` that says `line`.
     fn said(kind: Kind, line: &str) -> Notice {
         Notice::new(kind, "One", line.to_string(), in_ws(What::Task { id: line.to_string() }))
+    }
+
+    /// What the core reads for a notifier that starts: the rows of these events.
+    fn standing(events: &[EventRow]) -> Standing {
+        let mut standing = Standing { tasks: vec![], plans: vec![] };
+        for ev in events {
+            match &ev.kind {
+                EventKind::TaskChanged { task } => standing.tasks.push(task.clone()),
+                EventKind::PlanChanged { plan } => standing.plans.push(plan.clone()),
+                other => panic!("not a task or a plan: {other:?}"),
+            }
+        }
+        standing
+    }
+
+    #[test]
+    fn what_stood_before_a_restart_is_not_told_again() {
+        let before = [task("blocked", "blocked: the gate failed"), plan("done", json!({}))];
+        // A notifier that knows nothing tells both at their next change: old news after a restart.
+        let mut new = Notifier::default();
+        assert!(before.iter().all(|ev| tell(&mut new, ev).is_some()));
+
+        let mut n = Notifier::knowing(&standing(&before));
+        assert_eq!(tell(&mut n, &task("blocked", "blocked: the gate failed")), None);
+        assert_eq!(tell(&mut n, &plan("done", json!({ "summary": "Sign-in page, with tests" }))), None);
+        // The task went on and stopped again: that is news.
+        assert_eq!(tell(&mut n, &task("running", "")), None);
+        assert_eq!(tell(&mut n, &task("blocked", "blocked: the gate failed")).unwrap().title, "Task blocked");
+        // So is another end of the plan.
+        assert_eq!(tell(&mut n, &plan("failed", json!({}))).unwrap().title, "Plan failed");
+    }
+
+    /// A task you stopped yourself is no stop Codly tells: it is not remembered as told
+    /// either, so Codly blocking it later is news.
+    #[test]
+    fn a_task_you_stopped_before_a_restart_is_told_when_codly_blocks_it() {
+        let mut n = Notifier::knowing(&standing(&[task("blocked", "stopped by you")]));
+        assert_eq!(tell(&mut n, &task("blocked", "stopped by you")), None);
+        assert!(tell(&mut n, &task("blocked", "blocked: the gate failed")).is_some());
     }
 
     #[test]

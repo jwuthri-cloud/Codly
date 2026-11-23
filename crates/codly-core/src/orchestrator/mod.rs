@@ -84,6 +84,7 @@ mod weak_checks;
 pub mod trust;
 mod background;
 mod outside;
+pub mod resume;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -251,7 +252,7 @@ struct Inner {
     /// (a worker turn ended while it ran).
     gating: Mutex<HashMap<Id, bool>>,
     /// Rounds used per task: fix rounds (verify, scope, review feedback) and, apart, merge
-    /// conflict rounds; a user retry resets them.
+    /// conflict rounds; a user retry resets them. Kept in the store too (`resume.rs`).
     fix_rounds: Mutex<HashMap<Id, gate::Rounds>>,
     /// Reminders sent to a run that ended without what the gate needs from it, by run: a
     /// reviewer's verdict, a worker's report.
@@ -302,6 +303,8 @@ struct Inner {
     /// One choice about the required checks at a time re-checks the tasks that waited for it
     /// (`required_checks.rs`): a second choice waits for the first one's tasks.
     rechecks: tokio::sync::Mutex<()>,
+    /// Work was under way when Codly last closed, and it waits for your Resume (`resume.rs`).
+    held_work: Mutex<Option<resume::Hold>>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -431,6 +434,7 @@ impl Core {
         let accounts =
             accounts::detect(&base_env, &clis, &settings.accounts, !fixed_clis, None, settings.claude_shell_auth).await.unwrap_or_default();
         let quota = accounts::stored_limits(&store);
+        let rounds = resume::stored_rounds(&store);
         let breaker = Mutex::new(breaker_run::Runtime::load(&store));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (artifact_copies, artifact_jobs) = mpsc::unbounded_channel();
@@ -458,7 +462,7 @@ impl Core {
             lead_lock: tokio::sync::Mutex::new(()),
             kick: Notify::new(),
             gating: Mutex::new(HashMap::new()),
-            fix_rounds: Mutex::new(HashMap::new()),
+            fix_rounds: Mutex::new(rounds),
             nudges: Mutex::new(HashMap::new()),
             leads: Mutex::new(lead::LeadPool::default()),
             shutting_down: AtomicBool::new(false),
@@ -480,6 +484,7 @@ impl Core {
             checking: Mutex::new(HashSet::new()),
             outside_turns: Mutex::new(HashMap::new()),
             rechecks: tokio::sync::Mutex::new(()),
+            held_work: Mutex::new(None),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);

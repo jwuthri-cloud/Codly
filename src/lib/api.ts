@@ -34,6 +34,7 @@ import type { CheckResult } from './gen/CheckResult';
 import type { ChecksChoice } from './gen/ChecksChoice';
 import type { RequiredChecks } from './gen/RequiredChecks';
 import type { TrustChoice } from './gen/TrustChoice';
+import type { ResumeOffer } from './gen/ResumeOffer';
 import type { WorkspaceTrust } from './gen/WorkspaceTrust';
 import type { StorageCleanup } from './gen/StorageCleanup';
 import type { StoragePolicy } from './gen/StoragePolicy';
@@ -550,6 +551,8 @@ export const api = {
   agentCheckState: (agentId: string) => call<AgentCheck>('agent_check_state', { agentId }),
   /** What the open repo makes the agent CLIs load by themselves, and your choice; pass `set` to trust the files you read or to open the repo without them. */
   workspaceTrust: (set: TrustChoice | null = null) => call<WorkspaceTrust>('workspace_trust', { set }),
+  /** The work that was under way when Codly last closed and waits for your Resume (null: nothing waits); pass `go` to let it go on. */
+  resumeWork: (go = false) => call<ResumeOffer | null>('resume_work', { go }),
   /** Default MCP servers for new agents, with their switches and whether each key is stored. */
   listConnections: () => call<Connection[]>('list_connections'),
   /** Switch a server and/or store its key (Keychain; `value: null` removes it). Applies to the next spawn. */

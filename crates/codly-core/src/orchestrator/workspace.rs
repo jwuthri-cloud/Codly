@@ -513,7 +513,7 @@ impl Inner {
                 }
                 note(&worker)?;
                 self.send_prompt(&worker, prompt)?;
-                lock(&self.fix_rounds).remove(task_id);
+                self.forget_rounds(task_id);
                 // The worker has a turn to come, and its end runs the gate whatever the task
                 // says by now: a pass that is under way sees the new message and stops short.
                 let mut in_review = false;

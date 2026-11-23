@@ -272,6 +272,7 @@ pub fn run() {
             commands::check_agent,
             commands::agent_check_state,
             commands::workspace_trust,
+            commands::resume_work,
             preview_commands::preview,
             commands::list_connections,
             commands::update_connection,

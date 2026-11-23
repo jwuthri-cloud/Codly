@@ -64,9 +64,11 @@ impl Core {
         let checks = lock(&i.gating).len();
         let settings = i.settings();
         let over_budget = i.budget_hold().is_some();
+        // Nor does a task start while the work of the last run waits for your Resume (`resume.rs`).
+        let on_hold = i.launch_hold().is_some();
         let mut plans = 0;
         for plan in i.store.plans_with_status(&[PlanStatus::Running, PlanStatus::Integrating])? {
-            let held = over_budget || settings.paused || settings.paused_offices.contains(&plan.workspace_id);
+            let held = over_budget || on_hold || settings.paused || settings.paused_offices.contains(&plan.workspace_id);
             if goes_on(&plan, &i.store.plan_tasks(&plan.id)?, held, &waiting) {
                 plans += 1;
             }

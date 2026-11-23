@@ -1,11 +1,12 @@
 //! Asking before a quit that stops agents in the middle of their work (`Settings::confirm_quit`).
 //!
-//! Agents run as children of Codly: a quit stops them, and the next start resumes their
-//! sessions. Nothing is lost, but a long run is cut short, so Codly asks once before that
-//! happens. Only a quit you ask for in the app is questioned: Quit in the menu (Cmd+Q) and the
-//! window's close button. `codly serve` stopped from its terminal quits at once, and so does
-//! a quit that macOS itself carries out (Quit in the Dock menu, a logout): those end the
-//! process without asking the app.
+//! Agents run as children of Codly: a quit stops them. Their sessions are kept, and the work
+//! can go on at the next start: at once, or after your Resume there (Settings → "Resume work
+//! when Codly opens"). Nothing is lost, but a long run is cut short, so Codly asks once before
+//! that happens. Only a quit you ask for in the app is questioned: Quit in the menu (Cmd+Q)
+//! and the window's close button. `codly serve` stopped from its terminal quits at once, and
+//! so does a quit that macOS itself carries out (Quit in the Dock menu, a logout): those end
+//! the process without asking the app.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -53,10 +54,10 @@ fn question(confirm: bool, now: Activity) -> Option<String> {
         return None;
     }
     let what = match now.agents {
-        0 if now.checks > 0 => "Codly is checking a task’s work. The checks stop now and run again when you open Codly again.".to_string(),
-        0 => "A plan is running. It stops now and goes on when you open Codly again.".to_string(),
-        1 => "1 agent is working. It stops now and resumes when you open Codly again.".to_string(),
-        n => format!("{n} agents are working. They stop now and resume when you open Codly again."),
+        0 if now.checks > 0 => "Codly is checking a task’s work. The checks stop now and can run again when you open Codly again.".to_string(),
+        0 => "A plan is running. It stops now and can go on when you open Codly again.".to_string(),
+        1 => "1 agent is working. It stops now and can go on when you open Codly again.".to_string(),
+        n => format!("{n} agents are working. They stop now and can go on when you open Codly again."),
     };
     Some(format!("{what}\n\nTo quit without this question, turn off “Ask before quitting while agents work” in Settings."))
 }
@@ -104,15 +105,20 @@ mod tests {
     fn a_quit_is_questioned_only_while_work_is_under_way() {
         assert_eq!(question(true, Activity::default()), None, "nothing runs: Codly quits at once");
         let three = Activity { agents: 3, checks: 1, plans: 1 };
-        assert_eq!(question(true, three), Some(format!("3 agents are working. They stop now and resume when you open Codly again.{HINT}")));
+        assert_eq!(question(true, three), Some(format!("3 agents are working. They stop now and can go on when you open Codly again.{HINT}")));
         assert_eq!(question(false, three), None, "you turned the question off");
     }
 
+    /// The next start may ask before the work goes on (Settings → "Resume work when Codly
+    /// opens"): the question does not say that it goes on by itself.
     #[test]
-    fn the_question_says_what_stops() {
+    fn the_question_says_what_stops_and_promises_no_resume_by_itself() {
         let ask = |now| question(true, now).unwrap();
-        assert!(ask(Activity { agents: 1, ..Default::default() }).starts_with("1 agent is working. It stops now and resumes when"));
-        assert!(ask(Activity { checks: 2, plans: 1, ..Default::default() }).starts_with("Codly is checking a task’s work. The checks stop now"));
-        assert!(ask(Activity { plans: 1, ..Default::default() }).starts_with("A plan is running. It stops now and goes on when"));
+        let one = ask(Activity { agents: 1, ..Default::default() });
+        let checks = ask(Activity { checks: 2, plans: 1, ..Default::default() });
+        let plan = ask(Activity { plans: 1, ..Default::default() });
+        assert!(one.starts_with("1 agent is working. It stops now and can go on when you open Codly again."), "{one}");
+        assert!(checks.starts_with("Codly is checking a task’s work. The checks stop now and can run again when you open Codly again."), "{checks}");
+        assert!(plan.starts_with("A plan is running. It stops now and can go on when you open Codly again."), "{plan}");
     }
 }

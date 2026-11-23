@@ -5,6 +5,7 @@
 <script lang="ts">
   import type { ApprovalMode } from '../lib/gen/ApprovalMode';
   import type { Provider } from '../lib/gen/Provider';
+  import type { ResumeOnLaunch } from '../lib/gen/ResumeOnLaunch';
   import type { Settings } from '../lib/gen/Settings';
   import { redetect, refreshAccounts, updateSettings } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
@@ -137,8 +138,9 @@
   ];
   const LONG_RUN_TOGGLES = [
     ['keep_awake', 'Keep the Mac awake while agents work', 'The Mac does not go to sleep by itself while an agent works or a plan runs. It may sleep when all work waits for you. Closing the lid still puts it to sleep.'],
-    ['confirm_quit', 'Ask before quitting while agents work', 'Agents stop when Codly quits. They resume when you open Codly again.'],
+    ['confirm_quit', 'Ask before quitting while agents work', 'Agents stop when Codly quits. Their work can go on when you open Codly again.'],
   ];
+  const RESUME_CHOICES: [ResumeOnLaunch, string][] = [['ask', 'Ask'], ['always', 'Always'], ['never', 'Never']];
   const SANDBOX_TOGGLES = [['codex_network_access', 'Let Codex agents use the network', 'Commands a Codex agent runs in its sandbox can reach the internet (package installs, downloads) without asking you. Codly’s approval rules (git push, curl | sh, package downloads) are not asked for these commands either. Off: each one asks first. Applies to agents started after the change.']];
   const OFFICE_TOGGLES = [
     ['game_rules', 'Office rules affect work', 'Agents can be at home or tired, and new hires wait for a job offer.'],
@@ -209,6 +211,15 @@
     <section>
       <h3 class="eyebrow">Long runs</h3>
       {@render toggles(LONG_RUN_TOGGLES)}
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Resume work when Codly opens</span>
+          <span class="desc">For tasks and plans that were running when Codly last closed. Ask: one question, and nothing starts before your answer. Always: the work goes on at once. Never: it stays stopped until you press Resume work.</span>
+        </div>
+        <select class="field" value={s.resume_on_launch} aria-label="Resume work when Codly opens" onchange={(e) => set({ resume_on_launch: e.currentTarget.value as ResumeOnLaunch })}>
+          {#each RESUME_CHOICES as [id, label] (id)}<option value={id}>{label}</option>{/each}
+        </select>
+      </div>
     </section>
 
     <section>

@@ -55,8 +55,10 @@ const GIT_RETRY_AFTER: Duration = Duration::from_secs(2);
 /// Merge anyway.
 const CHECK_STOPS: [&str; 4] = ["failed_check", "timed_out", "held", "required"];
 
-/// Rounds a task has used since it last started (a retry starts them again).
-#[derive(Default)]
+/// Rounds a task has used since it last started (a retry starts them again). Kept in the
+/// store (`resume.rs`), so a restart of Codly does not give a task new ones.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(super) struct Rounds {
     /// Verify, scope, conflict-marker and review feedback: the worker's own work.
     fix: u32,
@@ -65,7 +67,9 @@ pub(super) struct Rounds {
     /// Asked once, and it counts as no round.
     left_out: bool,
     /// The reviewer run of the review round under way (`start_review`): only its verdict
-    /// counts. None between rounds, and while a round's reviewer is still starting.
+    /// counts. None between rounds, and while a round's reviewer is still starting. A run
+    /// does not outlive Codly, so this is not kept in the store.
+    #[serde(skip)]
     review: Option<Id>,
 }
 
@@ -312,7 +316,7 @@ impl Inner {
         // The checks below run where the left-out files still are, so they can pass on work
         // that the commit, and then the merge, does not have. The worker hears it first, once.
         if said {
-            let asked = pass == Pass::User || std::mem::replace(&mut lock(&self.fix_rounds).entry(task.id.clone()).or_default().left_out, true);
+            let asked = pass == Pass::User || self.count_rounds(&task.id, |r| std::mem::replace(&mut r.left_out, true))?;
             if !asked {
                 return self.left_out_round(&task, &worker, &snap.left_out);
             }
@@ -559,13 +563,11 @@ impl Inner {
         let ws = ws_id.as_deref();
         let conflict = matches!(fix, Fix::Conflict { .. });
         let (kind, max) = if conflict { ("conflict", MAX_CONFLICT_ROUNDS) } else { ("fix", MAX_FIX_ROUNDS) };
-        let round = {
-            let mut m = lock(&self.fix_rounds);
-            let r = m.entry(task.id.clone()).or_default();
+        let round = self.count_rounds(&task.id, |r| {
             let n = if conflict { &mut r.conflict } else { &mut r.fix };
             *n += 1;
             *n
-        };
+        })?;
         let what = fix.short();
         if round > max {
             // A failed task's worktree is not left in the middle of a merge (markers the worker
@@ -589,7 +591,7 @@ impl Inner {
             }
             self.decide(ws, Some(&task.id), "gate", format!("{}: {reason}", task.key), detail)?;
             self.release_worker(worker, &task.id);
-            lock(&self.fix_rounds).remove(&task.id);
+            self.forget_rounds(&task.id);
             if let Some(ws) = ws_id.as_deref() {
                 self.lead_followup(
                     ws,
@@ -1423,7 +1425,7 @@ impl Inner {
             .unwrap_or_else(|| "(no summary)".into());
         // Clean up before announcing Done: "done" then means nothing is left running.
         self.release_worker(&worker, &task.id);
-        lock(&self.fix_rounds).remove(&task.id);
+        self.forget_rounds(&task.id);
         if let Some(r) = &run {
             lock(&self.nudges).remove(&r.id);
         }

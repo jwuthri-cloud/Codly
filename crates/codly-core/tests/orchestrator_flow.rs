@@ -770,6 +770,8 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
             created_at: now_ms(),
         };
         store.upsert_workspace(&ws).unwrap();
+        // "Resume work when Codly opens" is on Always: the work goes on with no question.
+        store.save_settings(&Settings { resume_on_launch: ResumeOnLaunch::Always, ..Default::default() }).unwrap();
         let ev = |kind| EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind };
         let agent_id = new_id();
         let run_id = new_id();
@@ -3320,7 +3322,10 @@ async fn a_resumed_run_keeps_its_account() {
     // What a crash leaves behind: Ada's run on the work account, its task running.
     let (task_id, agent_id) = {
         let store = Store::open(&data.join("codly.sqlite")).unwrap();
-        let settings = Settings { accounts: vec![claude_account(&perso), claude_account(&work)], lead_followups: false, ..Default::default() };
+        // "Resume work when Codly opens" is on Always: the work goes on with no question.
+        let resume_on_launch = ResumeOnLaunch::Always;
+        let settings =
+            Settings { accounts: vec![claude_account(&perso), claude_account(&work)], lead_followups: false, resume_on_launch, ..Default::default() };
         store.save_settings(&settings).unwrap();
         let ws = Workspace {
             id: new_id(),
@@ -4450,6 +4455,8 @@ async fn a_background_office_keeps_its_code_index() {
     // A restart opens "b" only: "a" gets its index back when its task goes on.
     *found.lock().unwrap() = None;
     let core = start_full(dir.path(), spawner(), vec![claude()], true).await;
+    // The task was in work when Codly closed: it waits for your Resume.
+    core.resume_work().await.unwrap();
     let reply = wait_for("the worker's search after the restart", 20, async || found.lock().unwrap().clone()).await;
     assert_eq!(reply["ok"], true, "and after a restart: {reply}");
     core.shutdown().await;
