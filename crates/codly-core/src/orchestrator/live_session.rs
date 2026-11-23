@@ -159,18 +159,15 @@ impl Inner {
         // What the run's last list calls it: a command, or a helper.
         let named = lock(&self.live).get(agent_id).and_then(|l| l.session_rows.background_task(task_id));
         let answer = self.ask_session(agent_id, SessionRequest::StopTask(task_id.to_string()))?;
-        if let Some(description) = named {
-            self.control_decision(agent_id, format!("asked {} to stop what it left running in the background: {description}", agent.name));
-            Self::session_answer(answer).await?;
-            return Ok(());
-        }
+        // The record follows the answer: the adapter refuses an id that names nothing running
+        // any more (the list on record can be behind its own), and then nothing reached the CLI.
         // In no list on record: the call id of a helper at work, which the adapter knows (and
-        // names in its answer), or a task of a list that is not on record yet. An id that is
-        // neither is refused there, and nothing reached the CLI: no record.
+        // names in its answer), or a task of a list that is not on record yet.
         let said = Self::session_answer(answer).await?;
-        let summary = match said["helper"].as_str() {
-            Some(helper) => format!("asked {} to stop its helper: {helper}", agent.name),
-            None => format!("asked {} to stop what it left running in the background", agent.name),
+        let summary = match (named, said["helper"].as_str()) {
+            (Some(description), _) => format!("asked {} to stop what it left running in the background: {description}", agent.name),
+            (None, Some(helper)) => format!("asked {} to stop its helper: {helper}", agent.name),
+            (None, None) => format!("asked {} to stop what it left running in the background", agent.name),
         };
         self.control_decision(agent_id, summary);
         Ok(())

@@ -430,6 +430,8 @@ impl Inner {
     pub(super) async fn session_answer_within(mut answer: mpsc::UnboundedReceiver<Result<Value, String>>, limit: Duration) -> Result<Value> {
         match tokio::time::timeout(limit, answer.recv()).await {
             Ok(Some(Ok(v))) => Ok(v),
+            // (the adapter's own refusal: nothing reached the CLI, so it is no answer of Claude Code)
+            Ok(Some(Err(e))) if e == crate::adapters::claude::NOT_RUNNING => bail!(e),
             Ok(Some(Err(e))) => bail!("Claude Code answered: {e}"),
             Ok(None) => bail!("the agent's process ended before it answered"),
             Err(_) => bail!("Claude Code did not answer within {} s", limit.as_secs()),

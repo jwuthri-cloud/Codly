@@ -103,6 +103,11 @@ pub const DEFAULT_MODEL: &str = "default";
 /// (`SessionRequest::Settings`).
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
+/// The adapter's own answer to a `stop_task` for an id that names nothing running beside the
+/// agent (a task that left the list, or a helper that ended, a moment before): nothing is sent
+/// to the CLI. Whoever asked shows it as it is: it is not Claude Code's answer.
+pub const NOT_RUNNING: &str = "that work is not running any more";
+
 /// The model an `assistant` line names when the CLI wrote its text itself (the output of a
 /// local command such as `/compact`): no model ran.
 const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -999,7 +1004,7 @@ impl Actor {
             SessionRequest::StopTask(id) => match self.norm.task_to_stop(id) {
                 Some(task) => ("stop_task", json!({ "task_id": task })),
                 None => {
-                    let _ = reply.send(Err(format!("nothing with the id \"{id}\" runs beside this agent: no background task and no helper at work")));
+                    let _ = reply.send(Err(NOT_RUNNING.to_string()));
                     return;
                 }
             },
@@ -6129,6 +6134,26 @@ mod tests {
             assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{name}: {events:?}");
         }
 
+        // In both recordings the `summary` of the `task_notification` repeats the error, so they
+        // alone do not show where the report comes from. Written lines in the recorded shape
+        // (`r6-fails-helper-foreground` lines 21, 27, 28) with a `summary` that is the helper's
+        // description, then with none: the report is still the error of `task_updated`.
+        let description = "Run echo hi via no-model";
+        let error = "Agent terminated early due to an API error: the model was not found";
+        for summary in [json!(description), Value::Null] {
+            let lines = [
+                json!({ "type": "system", "subtype": "task_started", "task_id": "tid-1", "tool_use_id": "toolu-1", "description": description, "subagent_type": "no-model", "is_backgrounded": false, "task_type": "local_agent" }),
+                json!({ "type": "system", "subtype": "task_updated", "task_id": "tid-1", "patch": { "status": "failed", "error": error } }),
+                json!({ "type": "system", "subtype": "task_notification", "task_id": "tid-1", "tool_use_id": "toolu-1", "status": "failed", "summary": summary }),
+            ];
+            let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+            let mut events = norm.turn_started("go");
+            events.extend(replay(&mut norm, &lines));
+            let reported: Vec<&str> = events.iter().filter_map(|e| if let EventKind::SubAgentProgress { report: Some(r), .. } = e { Some(r.as_str()) } else { None }).collect();
+            assert_eq!(reported, [error], "summary {summary}");
+            assert_eq!(subagent_ends(&events), [format!("toolu-1 failed: {description}")], "summary {summary}");
+        }
+
         let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
         let mut events = norm.turn_started("go");
         events.extend(replay(&mut norm, &recorded("r6-fails-signal-term")));
@@ -6156,7 +6181,7 @@ mod tests {
             let (reply, mut answer) = mpsc::unbounded_channel();
             cli.actor.on_cmd(AgentCmd::Session { request: SessionRequest::StopTask(unknown.into()), reply }).await;
             let refused = answer.try_recv().expect("an answer at once").unwrap_err();
-            assert!(refused.contains(&format!("nothing with the id \"{unknown}\" runs beside this agent")), "{refused}");
+            assert_eq!(refused, NOT_RUNNING, "{unknown}");
         }
         assert_eq!(requests_sent(cli.dir.path()), before);
 

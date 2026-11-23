@@ -261,10 +261,19 @@ impl Spawner for Fake {
                                     if server == "does-not-start" { Err("Connection closed".to_string()) } else { Ok(serde_json::Value::Null) }
                                 }
                                 // (recorded: `{}`, whether or not a task ended; for a helper found
-                                // by the id of its call the adapter adds its description)
+                                // by the id of its call the adapter adds its description; one that
+                                // was stopped before has ended, and the adapter refuses it)
                                 SessionRequest::StopTask(task_id) => {
-                                    s.log.push(format!("stop-task:{task_id}"));
-                                    if task_id.starts_with("toolu-") { Ok(json!({ "helper": "Run the tests" })) } else { Ok(json!({})) }
+                                    let asked = format!("stop-task:{task_id}");
+                                    let ended = s.log.contains(&asked);
+                                    s.log.push(asked);
+                                    if ended {
+                                        Err(codly_core::adapters::claude::NOT_RUNNING.to_string())
+                                    } else if task_id.starts_with("toolu-") {
+                                        Ok(json!({ "helper": "Run the tests" }))
+                                    } else {
+                                        Ok(json!({}))
+                                    }
                                 }
                             };
                             let _ = reply.send(answer);
@@ -955,6 +964,13 @@ async fn a_background_command_is_stopped_through_the_live_session() {
             format!("asked {name} to stop its helper: Run the tests"),
         ]
     );
+    // Work that ended a moment before (the list on record still names "tid-1"), and a helper
+    // that ended: the adapter refuses, in its own words, and no stop is on record.
+    for gone in ["tid-1", "toolu-1"] {
+        let e = core.stop_agent_task(&id, gone).await.unwrap_err().to_string();
+        assert_eq!(e, "that work is not running any more", "{gone}");
+    }
+    assert_eq!(your_acts(&core, &id).await.len(), 3, "a refused stop is not on record");
     let e = core.stop_agent_task(&id, "").await.unwrap_err().to_string();
     assert_eq!(e, "which background command?");
 
