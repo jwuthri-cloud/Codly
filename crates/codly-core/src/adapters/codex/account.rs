@@ -62,6 +62,7 @@ impl AccountQuery {
             mcp: None,
             use_user_setup: true,
             sandbox_network: false,
+            sandbox_shell: false,
             raw_log: self.raw_log.clone(),
             byok_command: self.byok_command.clone(),
         }
