@@ -15,6 +15,7 @@
   import type { BreakerConfig } from '../lib/gen/BreakerConfig';
   import type { BreakerStatus } from '../lib/gen/BreakerStatus';
   import { api } from '../lib/api';
+  import { budget } from '../lib/state/budget.svelte';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { spentLine } from '../lib/util/cost';
@@ -70,6 +71,18 @@
     }
   }
 
+  // The top bar's budget mark says the same as this section: it follows what is read here.
+  $effect(() => {
+    if (status) budget.hold = status.hold;
+  });
+  // That mark opens Settings here.
+  let el: HTMLElement | undefined = $state();
+  $effect(() => {
+    if (!el || !budget.reveal) return;
+    budget.reveal = false;
+    el.scrollIntoView({ block: 'start' });
+  });
+
   const agentName = (id: string | null) => store.agents.find((a) => a.id === id)?.name ?? 'An agent';
   /** The latest breaker decisions, newest first. */
   const events = $derived.by(() => {
@@ -81,7 +94,7 @@
 </script>
 
 {#if cfg}
-  <section>
+  <section bind:this={el}>
     <h3 class="eyebrow">Autonomy & Budgets</h3>
     <p class="desc">
       A guard against runaway agents and spend. Over a limit, an agent is first <b>steered</b> (a note in its current or next turn), then <b>constrained</b>
@@ -142,6 +155,8 @@
     <div class="foot">
       {#if flagged.length}
         <span class="desc">Now: {#each flagged as a, i (a.agent_id)}{i ? ', ' : ''}<b>{agentName(a.agent_id)}</b> {a.level}{/each}.</span>
+      {:else if status?.hold}
+        <span class="desc">A budget is used up: no new task starts.</span>
       {:else}
         <span class="desc">All agents healthy.</span>
       {/if}

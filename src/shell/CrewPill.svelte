@@ -3,7 +3,8 @@
   of narration. Amber when it needs you. Hover cross-highlights its task, lane and files.
   Subagents ride along as small companions. A Lead is compact: its name, and on hover the
   request it serves; clicking it opens that request. Clicking any other agent opens your 1:1
-  chat with it; Alt-click opens its sheet.
+  chat with it; Alt-click opens its sheet. An agent's sheet that is open follows the pill you
+  click, so the sheet and the chat never show two different agents.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
@@ -57,8 +58,10 @@
   const amber = $derived(isLead && !!req?.needsYou);
 
   function open(e: MouseEvent) {
-    if (isLead) ui.openRequest(agent.thread ?? 'lead');
-    else if (e.altKey) ui.selectAgent(selected ? null : agent.id);
+    if (isLead) {
+      ui.openRequest(agent.thread ?? 'lead');
+      ui.sheetFollows(agent.id);
+    } else if (e.altKey) ui.selectAgent(selected ? null : agent.id);
     else ui.openThread(store.threadOf(agent.id));
   }
   function openSub(e: MouseEvent) {

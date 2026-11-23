@@ -21,6 +21,8 @@ export class MockBreaker {
   /** What the team had used at the last Reset. */
   private baseline: Spent = { tokens: 0, cost_usd: 0 };
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** A budget was over at the last beat: said once, as the core does. */
+  private holding = false;
 
   constructor(private sim: Sim) {}
 
@@ -87,10 +89,20 @@ export class MockBreaker {
     return this.sum([...this.sim.agents.values()].filter((a) => workers.has(a.id)));
   }
 
+  /** The core's own words, once when a budget is used up and once when work goes on: the app's
+   *  budget mark and its toast follow this decision. */
+  private announce(over: { trip: string; why: string } | null) {
+    if (!!over === this.holding) return;
+    this.holding = !!over;
+    if (over) this.sim.decision('breaker', 'rule', `Budget reached: ${over.why}. No new task starts.`, { action: 'budget', level: 'constrained', trip: over.trip, reason: over.why });
+    else this.sim.decision('breaker', 'rule', 'The budget has room again: waiting tasks start.', { action: 'budget_cleared', level: 'healthy' });
+  }
+
   /** One beat (every 4 s here; 30 s in the core): over budget → one level up for each agent that is running. */
   private beat() {
     const c = this.cfg;
     const over = this.over();
+    this.announce(over);
     for (const a of this.sim.agents.values()) {
       if (a.role === 'lead') continue;
       const prev = this.levels.get(a.id) ?? 'healthy';

@@ -23,7 +23,9 @@ import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { trustOf } from '../util/career';
 import { withModel } from '../util/team';
 import { followUpRequest, reviewMessage } from '../util/review';
+import { answerText } from '../util/outcome';
 import { accounts } from './accounts.svelte';
+import { yourAnswers } from './answers';
 import { diffstats } from './diffstats.svelte';
 import { fileList, loadMergeState, resolveMergeConflict } from './mergeState.svelte';
 import { flushClosing } from './closing';
@@ -318,9 +320,13 @@ export async function pushCheckout(): Promise<RepoSync | undefined> {
 }
 
 export async function resolveApproval(approvalId: string, choice: ApprovalChoice, message: string | null = null, answers: unknown = null) {
-  await attempt('send your answer', () =>
-    api.resolveApproval(approvalId, { choice, message, answers: (answers ?? null) as never }),
-  );
+  const sent = await attempt('send your answer', async () => {
+    await api.resolveApproval(approvalId, { choice, message, answers: (answers ?? null) as never });
+    return true;
+  });
+  // The core keeps no copy of an answer: the closed card and the history show it from here.
+  const said = sent ? answerText(answers) : null;
+  if (said) yourAnswers.set(approvalId, said);
 }
 
 /** One answer for the requests that share a card: the same command asked by several agents. */

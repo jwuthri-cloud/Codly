@@ -38,6 +38,9 @@ export const ONBOARD_DEMO = typeof location !== 'undefined' && new URLSearchPara
 /** Request threads: "lead" (the first) and "lead:<id>" (parallel requests, each with its own Lead). */
 export const isRequestThread = (thread: string | null | undefined): thread is string => thread === 'lead' || !!thread?.startsWith('lead:');
 
+/** The agent a 1:1 thread ("agent:<id>") is with; null for a request thread or a closed one. */
+export const threadAgentId = (thread: string): string | null => (thread.startsWith('agent:') ? thread.slice('agent:'.length) : null);
+
 /** Closed requests on Home, read-only: the list of them (`CLOSED_LIST`) or one archive thread ("closed:<thread>:<ms>"). */
 export const CLOSED_LIST = 'closed:';
 export const isClosedThread = (thread: string): boolean => thread.startsWith(CLOSED_LIST);
@@ -242,9 +245,18 @@ class Ui {
     this.hover = h ? { agentId: h.agentId ?? null, taskId: h.taskId ?? null, path: h.path ?? null } : { agentId: null, taskId: null, path: null };
   }
 
+  /** An agent's sheet that is open moves to the agent whose chat you open: what the sheet does
+   *  (Block tools, Stop, Kill) then acts on the agent you talk to. A closed sheet stays closed,
+   *  and the sheet of a task or a file stays. */
+  sheetFollows(agentId: string) {
+    if (this.selection?.kind === 'agent' && this.selection.id !== agentId) this.selection = { kind: 'agent', id: agentId };
+  }
+
   openThread(thread: string) {
     if (isRequestThread(thread)) return this.openRequest(thread);
     this.thread = thread;
+    const agentId = threadAgentId(thread);
+    if (agentId) this.sheetFollows(agentId);
     this.go('home');
     if (this.mode === 'office') this.mode = 'blend';
   }
