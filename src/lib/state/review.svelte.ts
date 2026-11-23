@@ -1,17 +1,25 @@
 // Your review of a diff, for this session: the comments you wrote and did not send yet, the
 // files you ticked as viewed, and the files you opened or folded. Kept per diff (a task's or a
 // plan's), in memory only: a restart starts clean, and sending the comments clears them.
+// Comments on finished work are sent as the message of a new request: Send back puts them in
+// that request's composer (`hand`), and they stay on the diff until the message is sent.
 import type { DiffFile } from '../util/diff';
 import { fileMark, heavy, withComment, type Anchor, type ReviewComment } from '../util/review';
 
 /** A diff's name here: "task:<id>" or "plan:<id>". */
 export const reviewKey = (t: { kind: 'plan' | 'task'; id: string }): string => `${t.kind}:${t.id}`;
 
+/** The request whose composer holds a diff's comments: its office and thread (thread names
+ *  repeat across offices), and the message that was put there (`text`). */
+type Handed = { office: string | null; thread: string; text: string };
+
 const NONE: ReviewComment[] = [];
 const without = <T>(o: Record<string, T>, key: string): Record<string, T> => Object.fromEntries(Object.entries(o).filter(([k]) => k !== key));
 
 class Review {
   private drafts = $state.raw<Record<string, ReviewComment[]>>({});
+  /** Diff → the request that holds its comments, ready to send. */
+  private handed = $state.raw<Record<string, Handed>>({});
   /** Diff → path → the mark of the file's diff when you ticked it (`fileMark`). */
   private seen = $state.raw<Record<string, Record<string, string>>>({});
   /** Diff → path → a file you opened (false) or folded (true) by hand. */
@@ -31,6 +39,27 @@ class Review {
   /** Sent, or discarded: the diff has no comments left. */
   clear(key: string) {
     if (this.drafts[key]) this.drafts = without(this.drafts, key);
+    if (this.handed[key]) this.handed = without(this.handed, key);
+  }
+
+  /** Send back on finished work: the diff's comments are in a request's composer now. They stay on the diff. */
+  hand(key: string, to: Handed) {
+    this.handed = { ...this.handed, [key]: to };
+  }
+
+  /** The request that holds the diff's comments, if one does. */
+  handedTo(key: string): Handed | null {
+    return this.handed[key] ?? null;
+  }
+
+  /** A message was sent in a request: the comments its composer held are sent, and leave their diffs. */
+  sent(office: string | null, thread: string) {
+    for (const [key, to] of Object.entries(this.handed)) if (to.office === office && to.thread === thread) this.clear(key);
+  }
+
+  /** A request was closed with nothing sent: the comments its composer held stay on their diffs, as before Send back. */
+  unhand(office: string | null, thread: string) {
+    this.handed = Object.fromEntries(Object.entries(this.handed).filter(([, to]) => to.office !== office || to.thread !== thread));
   }
 
   private mark(f: DiffFile): string {

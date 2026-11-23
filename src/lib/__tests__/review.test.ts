@@ -3,7 +3,8 @@ import { api } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { Plan } from '../gen/Plan';
 import type { Task } from '../gen/Task';
-import { sendBack } from '../state/actions';
+import { closeRequest, sendBack, sendChat, waitingRequest } from '../state/actions';
+import { requests } from '../state/requests.svelte';
 import { review, reviewKey } from '../state/review.svelte';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
@@ -309,10 +310,16 @@ describe('Send back', () => {
     store.tasks = [];
     store.plans = [];
     store.agents = [];
+    for (const o of [...store.outbox]) store.dropOutgoing(o.id);
     ui.draftRequests = [];
     ui.composerSeed = null;
     ui.openRequest('lead');
   });
+  /** The work is finished: Send back goes to a new request. */
+  const finished = () => {
+    store.tasks = [{ ...task, status: 'done' }];
+    store.plans = [plan];
+  };
 
   it('gives a task that is not done all the comments as one message, and clears them once the core took them', async () => {
     store.tasks = [task];
@@ -337,20 +344,87 @@ describe('Send back', () => {
 
   it('opens a new request with the comments for a done task and for a whole plan', async () => {
     const core = vi.spyOn(api, 'sendBackTask');
-    store.tasks = [{ ...task, status: 'done' }];
-    store.plans = [plan];
+    finished();
     write();
     expect(await sendBack(target, ['src/a.ts'])).toBe(true);
     expect(ui.draftRequests).toHaveLength(1);
     expect(ui.request).toBe(ui.draftRequests[0].thread);
     expect(ui.composerSeed).toMatchObject({ thread: ui.request, text: `I reviewed task t1 “Add a” of the plan “Add two files”. Its work is on the branch codly/ab12/integration. Please make these changes.\n\n${message}` });
-    expect(review.comments(key)).toEqual([]);
+    // Nothing is sent yet: the comments are still on the diff, which knows where they wait.
+    expect(review.comments(key)).toHaveLength(1);
+    expect(waitingRequest(key)).toBe(ui.request);
 
     const whole = { kind: 'plan' as const, id: 'p1' };
     write(reviewKey(whole));
     expect(await sendBack(whole, ['src/a.ts'])).toBe(true);
     expect(ui.composerSeed?.text.startsWith('I reviewed the plan “Add two files”.')).toBe(true);
-    expect(review.comments(reviewKey(whole))).toEqual([]);
+    expect(review.comments(reviewKey(whole))).toHaveLength(1);
+    expect(ui.draftRequests).toHaveLength(2); // the first request holds your comments: it stays a tab
     expect(core).not.toHaveBeenCalled();
+  });
+
+  it('the request with your comments survives opening another one, and the comments leave the diff only when its message is sent', async () => {
+    vi.spyOn(api, 'sendChat').mockResolvedValue();
+    finished();
+    write();
+    await sendBack(target, ['src/a.ts']);
+    const draft = ui.request;
+    const text = ui.composerSeed!.text;
+
+    ui.openRequest('lead');
+    expect(ui.draftRequests.map((d) => d.thread)).toEqual([draft]);
+    expect(requests.get(draft)).not.toBeNull(); // still a tab
+    expect(review.comments(key)).toHaveLength(1);
+
+    // A message in another request sends nothing of the review.
+    sendChat('lead', 'Something else');
+    expect(review.comments(key)).toHaveLength(1);
+    expect(waitingRequest(key)).toBe(draft);
+
+    sendChat(draft, text);
+    expect(review.comments(key)).toEqual([]);
+    expect(waitingRequest(key)).toBeNull();
+  });
+
+  it('Send back again goes to the same request, and brings the comments as they are now', async () => {
+    finished();
+    write();
+    await sendBack(target, ['src/a.ts']);
+    const draft = ui.request;
+    const first = ui.composerSeed!.text;
+    ui.composerSeed = null; // the composer took it
+    ui.openRequest('lead');
+
+    // Nothing changed since: you are taken there, and its composer is left as you have it.
+    expect(await sendBack(target, ['src/a.ts'])).toBe(true);
+    expect(ui.request).toBe(draft);
+    expect(ui.composerSeed).toBeNull();
+    expect(ui.draftRequests).toHaveLength(1);
+
+    // One comment more: the message there is brought up to date, in place of the earlier one.
+    review.comment(key, fileAnchor('src/a.ts'), 'And add a test.');
+    expect(await sendBack(target, ['src/a.ts'])).toBe(true);
+    expect(ui.draftRequests).toHaveLength(1);
+    expect(ui.composerSeed).toMatchObject({ thread: draft, replaces: first });
+    expect(ui.composerSeed!.text).toContain('And add a test.');
+    expect(review.handedTo(key)?.text).toBe(ui.composerSeed!.text);
+  });
+
+  it('a request closed with nothing sent leaves the comments on the diff, and Send back opens a new one', async () => {
+    vi.spyOn(api, 'closeThread').mockResolvedValue();
+    vi.spyOn(store, 'resync').mockResolvedValue();
+    finished();
+    write();
+    await sendBack(target, ['src/a.ts']);
+    const draft = ui.request;
+
+    expect(await closeRequest(draft)).toBe(true);
+    expect(review.comments(key)).toHaveLength(1);
+    expect(waitingRequest(key)).toBeNull();
+
+    expect(await sendBack(target, ['src/a.ts'])).toBe(true);
+    expect(ui.request).not.toBe(draft);
+    expect(ui.draftRequests.map((d) => d.thread)).toEqual([ui.request]);
+    expect(waitingRequest(key)).toBe(ui.request);
   });
 });

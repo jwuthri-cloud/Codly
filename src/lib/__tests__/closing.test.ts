@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { api } from '../api';
 import type { ChatMessage } from '../gen/ChatMessage';
+import type { Plan } from '../gen/Plan';
+import type { PullRequest } from '../gen/PullRequest';
 import type { Workspace } from '../gen/Workspace';
 import { openWorkspace } from '../state/actions';
-import { closeWithUndo, flushClosing, UNDO_MS } from '../state/closing';
-import { requests } from '../state/requests.svelte';
+import { closeQuestion, closeWithUndo, flushClosing, UNDO_MS } from '../state/closing';
+import { prUi } from '../state/pullRequest.svelte';
+import { requests, type Request } from '../state/requests.svelte';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
@@ -154,5 +157,72 @@ describe('closing a request, with Undo', () => {
     expect(core).not.toHaveBeenCalled(); // nothing is closed in the other office
     expect(ui.closingRequests).toEqual([]);
     expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['attention', 'Request not closed', '“Fix A” is still open: another repository opened first.']]);
+  });
+});
+
+describe('what a close asks first', () => {
+  const BRANCH = 'codly/ab12/integration';
+  const plan = (o: Partial<Plan> = {}): Plan => ({ id: 'p1', thread: 'lead:a', status: 'done', integration_branch: BRANCH, merged_sha: null, kept: false, created_at: 1, ...o }) as Plan;
+  const request = (o: Partial<Request> = {}): Request => ({ thread: 'lead:a', title: 'Fix A', phase: 'done', ...o }) as Request;
+  const pr = (state: PullRequest['state']): PullRequest => ({ url: 'https://github.com/acme/web/pull/7', remote: 'origin', branch: BRANCH, base: 'main', created_at: 1, state, checks: null });
+  const kept = `Nothing is deleted: ${BRANCH} stays, and you can still merge it in Changes.`;
+  const stays = 'The pull request stays open: Codly does not close or merge it.';
+  let record: MockInstance<typeof api.pullRequest>;
+
+  beforeEach(() => {
+    record = vi.spyOn(api, 'pullRequest').mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    store.plans = [];
+    ui.keptPlans = [];
+    prUi.opened = {};
+  });
+
+  it('a request that leaves nothing behind closes at once: no plan, a cancelled or failed one, merged work, a branch you chose to keep', async () => {
+    expect(await closeQuestion(request({ phase: 'talking' }))).toBeNull();
+    for (const p of [plan({ status: 'cancelled' }), plan({ status: 'failed' }), plan({ merged_sha: 'abc1234' }), plan({ kept: true })]) {
+      store.plans = [p];
+      expect(await closeQuestion(request())).toBeNull();
+    }
+    store.plans = [plan()];
+    ui.keptPlans = ['p1']; // kept a moment ago: the plan on record does not say so yet
+    expect(await closeQuestion(request())).toBeNull();
+    // Another request's finished work is not this one's.
+    ui.keptPlans = [];
+    store.plans = [plan({ thread: 'lead:b' })];
+    expect(await closeQuestion(request())).toBeNull();
+  });
+
+  it('finished work that is not merged asks first, and says that its branch stays', async () => {
+    store.plans = [plan()];
+    expect(await closeQuestion(request())).toEqual({ ask: 'Not merged yet: its branch stays. Close?', detail: kept });
+    // Also while its Lead answers a later message (the tab then says "Thinking").
+    expect(await closeQuestion(request({ phase: 'planning' }))).toEqual({ ask: 'Not merged yet: its branch stays. Close?', detail: kept });
+    // An earlier plan of the request counts too.
+    store.plans = [plan(), plan({ id: 'p2', created_at: 2, merged_sha: 'abc1234' })];
+    expect((await closeQuestion(request({ phase: 'merged' })))?.ask).toBe('Not merged yet: its branch stays. Close?');
+  });
+
+  it('an open pull request asks first, with unmerged work and without', async () => {
+    record.mockResolvedValue(pr('open'));
+    store.plans = [plan()];
+    expect(await closeQuestion(request())).toEqual({ ask: 'Not merged yet: its branch and pull request stay. Close?', detail: `${kept} ${stays}` });
+    expect(record).toHaveBeenCalledWith({ kind: 'plan', id: 'p1' });
+
+    store.plans = [plan({ merged_sha: 'abc1234' })];
+    expect(await closeQuestion(request({ phase: 'merged' }))).toEqual({ ask: 'Its pull request stays open. Close?', detail: stays });
+    expect(record).toHaveBeenCalledTimes(1); // on record here already: not read again
+
+    // Merged or closed on its host, as last read: nothing of it is left open.
+    prUi.opened = { 'plan:p1': pr('merged') };
+    expect(await closeQuestion(request({ phase: 'merged' }))).toBeNull();
+  });
+
+  it('a running plan asks as before, and reads nothing', async () => {
+    store.plans = [plan({ status: 'running' })];
+    expect((await closeQuestion(request({ phase: 'running' })))?.ask).toBe('Cancel its running plan and close?');
+    expect(record).not.toHaveBeenCalled();
   });
 });

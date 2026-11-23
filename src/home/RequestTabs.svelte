@@ -2,13 +2,14 @@
   Your requests, side by side: one tab per thing you asked for, each with its own Lead and plan
   running in parallel. Title = your first words; the dot says where its plan is (planning ·
   waiting for you · running · done), amber when it needs you. ⌘[ / ⌘] switch, ⌘N starts one.
-  × closes a request (its Lead stops); a running plan asks first, since closing cancels it.
+  × closes a request (its Lead stops). It asks first when the close leaves work behind: a
+  running plan (closing cancels it), finished work that is not merged, an open pull request.
   A close can be taken back: the tab leaves at once and a toast offers Undo for a few seconds
   (lib/state/closing.ts). The clock at the end opens the requests you closed, to read again.
 -->
 <script lang="ts">
   import { closeRequest } from '../lib/state/actions';
-  import { closeWithUndo } from '../lib/state/closing';
+  import { closeQuestion, closeWithUndo, type CloseQuestion } from '../lib/state/closing';
   import { requests, type Request } from '../lib/state/requests.svelte';
   import { CLOSED_LIST, isClosedThread, ui } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
@@ -17,13 +18,26 @@
   let bar: HTMLDivElement | undefined = $state();
   /** You are reading the closed requests: no tab is the open one. */
   const reading = $derived(isClosedThread(ui.thread));
-  /** The running request waiting for "Close" / "Keep", and the empty one being closed. */
-  let asking = $state<string | null>(null);
+  /** The request waiting for "Close" / "Keep" with its question, and the empty one being closed. */
+  let asking = $state<({ thread: string } & CloseQuestion) | null>(null);
   let closing = $state<string | null>(null);
+  /** The requests whose × is being looked into: a second press meanwhile asks nothing new. */
+  const checking = new Set<string>();
+
+  /** ×: a close that leaves work behind asks first. */
+  async function x(r: Request) {
+    if (checking.has(r.thread)) return;
+    checking.add(r.thread);
+    const q = await closeQuestion(r);
+    checking.delete(r.thread);
+    if (q) asking = { thread: r.thread, ...q };
+    else await close(r);
+  }
 
   async function close(r: Request) {
     asking = null;
-    if (r.phase !== 'new') return closeWithUndo(r.thread, r.title);
+    // A new request that holds text you did not send can come back too.
+    if (r.phase !== 'new' || ui.draftRequests.some((d) => d.thread === r.thread && d.kept)) return closeWithUndo(r.thread, r.title);
     // Nothing was asked in it: there is nothing to bring back.
     closing = r.thread;
     await closeRequest(r.thread);
@@ -33,15 +47,19 @@
     void ui.request;
     bar?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   });
+  // A question is wider than its tab was: it comes into view with its buttons.
+  $effect(() => {
+    if (asking) bar?.querySelector('.ask')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  });
 </script>
 
 <nav class="tabs" aria-label="Requests">
   <div class="list" role="tablist" bind:this={bar}>
     {#each list as r (r.thread)}
       {@const on = !reading && ui.request === r.thread}
-      {#if asking === r.thread}
+      {#if asking?.thread === r.thread}
         <div class="ask" role="group" aria-label="Close {r.title}">
-          <span>Cancel its running plan and close?</span>
+          <span data-tip={asking.detail}>{asking.ask}</span>
           <button class="btn sm danger" onclick={() => close(r)}>Close</button>
           <button class="btn sm ghost" onclick={() => (asking = null)}>Keep</button>
         </div>
@@ -65,7 +83,7 @@
             aria-label="Close {r.title}"
             data-tip={r.phase === 'running' ? 'Close — cancels its running plan' : r.phase === 'new' ? 'Close' : 'Close — its Lead stops. You can undo for a few seconds'}
             disabled={closing === r.thread}
-            onclick={() => (r.phase === 'running' ? (asking = r.thread) : close(r))}
+            onclick={() => x(r)}
           >
             <Icon name="x" size={12} stroke={2} />
           </button>

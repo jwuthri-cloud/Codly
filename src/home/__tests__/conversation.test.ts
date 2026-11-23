@@ -179,6 +179,18 @@ describe('composer drafts', () => {
     expect(seedDraft('the old message', edit)).toEqual({ text: 'the old message', kept: false });
     expect(seedDraft('half a prompt', { text: 'Change the plan: ', keep: false })).toEqual({ text: 'Change the plan: ', kept: false });
   });
+
+  it('a seed that replaces an earlier one keeps what you wrote around it', () => {
+    const again = { text: 'Comments (2)', keep: false, replaces: 'Comments (1)' };
+    // The earlier text is still there: only that part changes.
+    expect(seedDraft('Comments (1)', again)).toEqual({ text: 'Comments (2)', kept: false });
+    expect(seedDraft('Before.\n\nComments (1)\n\nAlso run the tests.', again)).toEqual({ text: 'Before.\n\nComments (2)\n\nAlso run the tests.', kept: false });
+    // You rewrote it: your words stay, and the new text comes under them.
+    expect(seedDraft('My own words.\n', again)).toEqual({ text: 'My own words.\n\nComments (2)', kept: false });
+    // An empty composer just takes the new text.
+    expect(seedDraft('', again)).toEqual({ text: 'Comments (2)', kept: false });
+    expect(seedDraft(' \n', again)).toEqual({ text: 'Comments (2)', kept: false });
+  });
 });
 
 describe('recall (↑ in an empty composer)', () => {

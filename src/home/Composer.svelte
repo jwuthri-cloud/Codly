@@ -9,7 +9,7 @@
   and is not sent either. A CLI's own slash commands are not offered: Codly cannot run them.
   Esc on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
   draft (text and files) is kept when the composer leaves the screen, and Edit on an earlier
-  message does not replace it.
+  message does not replace it. A new request that holds a draft stays a tab when you leave it.
 -->
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
@@ -110,6 +110,13 @@
         ta?.setSelectionRange(text.length, text.length);
       });
     }
+  });
+
+  // A new request with something in its composer stays a tab when you open another one.
+  $effect(() => {
+    const here = thread;
+    const holds = !!text.trim() || files.length > 0;
+    untrack(() => ui.holdDraft(here, holds));
   });
 
   $effect(() => {
