@@ -149,6 +149,17 @@ describe("a helper's call that is open when the turn ends", () => {
   });
 });
 
+describe('a plan shown to you', () => {
+  it('is said as that in the line of its work row, whatever kind of step the call is', () => {
+    const shown = (ts: number, call: string, activity: 'plan' | 'mcp') =>
+      ev(ts, { type: 'tool_started', call_id: call, name: 'ExitPlanMode', activity, target: { ...target, tool: 'ExitPlanMode' }, input: { plan: '1. Add the line' }, confidence: 'observed' });
+    apply(ev(10, { type: 'turn_started', input: 'Plan it' }), shown(11, 'p1', 'plan'));
+    expect(workSummary(works()[0].segs)).toBe('Showed you its plan');
+    apply(completed(12, 'p1', false), shown(13, 'p2', 'mcp'), started(14, 'c1', 'Bash', 'execute'));
+    expect(workSummary(works()[0].segs)).toBe('Ran echo hi · showed you its plan 2 times');
+  });
+});
+
 describe('a helper whose turn was interrupted or failed', () => {
   const atWork = () => (store.live.l1?.subagents ?? []).filter((s) => s.status === 'running').map((s) => s.callId);
   /** As `launchEarly`, but the turn does not end normally. */

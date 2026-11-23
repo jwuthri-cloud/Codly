@@ -14,7 +14,7 @@
   import { store } from '../lib/state/store.svelte';
   import { accounts } from '../lib/state/accounts.svelte';
   import { ui } from '../lib/state/ui.svelte';
-  import { clock, shortSha } from '../lib/util/format';
+  import { clock, plural, shortSha } from '../lib/util/format';
   import { stoppedByChecks } from '../lib/util/gate';
   import { keyList, waitingOn } from '../lib/util/plan';
   import { GLOSSARY, idVar, methodProvenance, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
@@ -190,7 +190,7 @@
         {#if stat}<p class="stat num"><span class="add">+{stat.added}</span> <span class="del">−{stat.removed}</span> in {stat.files} {stat.files === 1 ? 'file' : 'files'}</p>{/if}
         <ol class="marks">
           {#each marks as m (m.eventId)}
-            <li class:bad={!m.ok}><Icon name={MARK_ICON[m.kind]} size={13} /><span class="m-k">{m.kind}</span><span class="m-t truncate">{m.kind === 'committed' ? `${shortSha(m.sha)} · ${m.files?.length ?? 0} files` : m.text}</span><time class="num">{clock(m.ts)}</time></li>
+            <li class:bad={!m.ok}><Icon name={MARK_ICON[m.kind]} size={13} /><span class="m-k">{m.kind}</span><span class="m-t truncate">{m.kind === 'committed' ? `${shortSha(m.sha)} · ${plural(m.files?.length ?? 0, 'file')}` : m.text}</span><time class="num">{clock(m.ts)}</time></li>
           {/each}
         </ol>
       </Section>

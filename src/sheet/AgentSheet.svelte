@@ -17,7 +17,7 @@
   import { store, type FileTouch } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
-  import { clock, clockSec, dur, pct, resetsIn, timer, tokens } from '../lib/util/format';
+  import { clock, clockSec, dur, pct, plural, resetsIn, timer, tokens } from '../lib/util/format';
   import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, subagentMark, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
   import { askedLine, settledLine } from '../lib/util/outcome';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
@@ -36,7 +36,7 @@
   import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
   import { historyFacts, repeatsReply, taskChangedLine, tripleLine, type Names } from './historyWords';
-  import { PLAN_TOOL, planCallEnd } from '../lib/util/planTool';
+  import { PLAN_TOOL, planCallEnd, planStep } from '../lib/util/planTool';
   import AgentMcp from './AgentMcp.svelte';
   import AgentTakeover from './AgentTakeover.svelte';
   import AgentTrust from './AgentTrust.svelte';
@@ -152,7 +152,7 @@
     const lo = live?.lastOutput;
     if (lo) {
       const s = live?.segments.find((x) => x.callId === lo.callId);
-      return { title: s ? `${pastVerb(s.activity)} ${s.label}` : 'Last output', text: lo.text, live: false, ok: lo.ok, path: segPath(s, lo.text) };
+      return { title: s ? (s.name === PLAN_TOOL ? planStep(false) : `${pastVerb(s.activity)} ${s.label}`) : 'Last output', text: lo.text, live: false, ok: lo.ok, path: segPath(s, lo.text) };
     }
     return null;
   });
@@ -202,7 +202,7 @@
   function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
     const k = e.kind;
     switch (k.type) {
-      case 'tool_started': return { icon: 'play', text: k.name === PLAN_TOOL ? 'Showed you its plan' : `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
+      case 'tool_started': return { icon: 'play', text: k.name === PLAN_TOOL ? planStep(false) :`${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
       case 'tool_completed':
         if (facts.planCalls.has(k.call_id)) return { icon: k.ok ? 'check' : 'refresh', text: `${planCallEnd(k.ok, store.approvals.find((a) => a.call_id === k.call_id)?.status ?? null)}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}` };
         return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
@@ -225,7 +225,7 @@
       case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
       case 'background_tasks': return { icon: 'info', text: k.tasks.length ? `Runs in the background: ${oneLine(k.tasks.map((t) => t.description).join(', '), 120)}` : 'Nothing runs in the background any more' };
       case 'decision': return { icon: 'help', text: k.summary };
-      case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${k.files.length} files` };
+      case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${plural(k.files.length, 'file')}` };
       case 'verified': return { icon: k.ok ? 'check-circle' : 'x-circle', text: `Verified ${k.command}`, tone: k.ok ? 'good' : 'bad' };
       case 'merged': return { icon: 'merge', text: `Merged into ${k.branch}`, tone: 'good' };
       case 'memory_added': return { icon: 'memory', text: `Saved: ${oneLine(k.memory.text, 90)}` };

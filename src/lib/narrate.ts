@@ -13,7 +13,7 @@ import type { Task } from './gen/Task';
 import type { AgentLive, RateWindow, Seg } from './state/store.svelte';
 import type { DiffStat } from './state/diffstats.svelte';
 import { timer } from './util/format';
-import { PLAN_TOOL, showsPlan } from './util/planTool';
+import { PLAN_TOOL, planStep, showsPlan } from './util/planTool';
 import { sandboxHost } from './util/sandbox';
 import { basename, oneLine, truncate } from './util/sanitize';
 
@@ -78,6 +78,8 @@ function toolName(s: Seg): string {
 
 /** What an open tool call is doing, as parts. */
 export function activityParts(s: Seg): Part[] {
+  // A plan shown to you is said as that, whatever kind of step its CLI makes of the call.
+  if (s.name === PLAN_TOOL) return [txt(planStep(true))];
   switch (s.activity) {
     case 'read':
       return [txt('Reading '), code(fileOf(s))];
@@ -104,7 +106,7 @@ export function activityParts(s: Seg): Part[] {
       return [txt('Using '), code(oneLine(name, 32))];
     }
     case 'plan':
-      return [txt(/submit_plan/.test(s.name) ? 'Submitting the plan' : s.name === PLAN_TOOL ? 'Showing you its plan' : 'Updating its plan')];
+      return [txt(/submit_plan/.test(s.name) ? 'Submitting the plan' : 'Updating its plan')];
     case 'delegate':
       return [txt('Briefing a helper')];
     case 'message':

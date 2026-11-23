@@ -9,6 +9,7 @@
   import { ui } from '../../lib/state/ui.svelte';
   import { dur } from '../../lib/util/format';
   import { pastVerb, phrase, subagentTag } from '../../lib/util/labels';
+  import { PLAN_TOOL, planStep } from '../../lib/util/planTool';
   import Icon from '../../components/Icon.svelte';
   import Provenance from '../../components/Provenance.svelte';
   import { splitHelpers } from '../helpers';
@@ -37,8 +38,9 @@
 {#snippet step(s: Seg)}
   {@const by = subagentTag(s.input)}
   <button class="step" onclick={() => ui.selectAgent(s.agentId, s.eventId)}>
-    <span class="verb">{s.end == null ? phrase(s.activity, '') : pastVerb(s.activity)}</span>
-    <code class="target truncate">{s.label || s.name}</code>
+    <!-- A plan shown to you is said as that: the name of its tool says nothing. -->
+    <span class="verb">{s.name === PLAN_TOOL ? planStep(s.end == null) : s.end == null ? phrase(s.activity, '') : pastVerb(s.activity)}</span>
+    <code class="target truncate">{s.name === PLAN_TOOL ? '' : s.label || s.name}</code>
     {#if by}<span class="by">{by}</span>{/if}
     {#if s.testsPassed != null}<span class="tests" class:bad={!!s.testsFailed}>{s.testsFailed ? `${s.testsFailed} failed` : `${s.testsPassed} passed`}</span>{/if}
     <span class="dur num">{s.end != null ? dur(s.end - s.start) : '…'}</span>

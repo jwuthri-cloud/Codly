@@ -59,12 +59,12 @@ export function missing(id: LevelId, facts: QuestFacts): Missing | null {
   const ready = crewReady(facts.clis);
   switch (id) {
     case 'crew':
-      return ready ? null : { title: 'No crew yet', body: 'No agent CLI is installed and signed in. Install one here and sign in: the level completes by itself then.' };
+      return ready ? null : { title: 'No crew yet', body: 'No agent CLI is installed and signed in. Install one on level 1 and sign in: that level then completes by itself.' };
     case 'lead':
       return ready ? null : { title: 'No Lead yet', body: `No agent is ready, so there is no Lead to appoint. ${HIRE}, then pick your Lead.` };
     case 'brains':
-      if (!facts.clis.some((c) => c.provider === 'opencode' && !!c.path)) return { title: 'No extra models yet', body: 'OpenCode is not installed, and the other models run through it. Install it on level 1, then save an OpenRouter key here.' };
-      return facts.openRouter ? null : { title: 'No extra models yet', body: 'No OpenRouter key is saved and on, so no other model is unlocked. Save one here, or later in Settings.' };
+      if (!facts.clis.some((c) => c.provider === 'opencode' && !!c.path)) return { title: 'No extra models yet', body: 'OpenCode is not installed, and the other models run through it. Install it on level 1, then save an OpenRouter key on level 3.' };
+      return facts.openRouter ? null : { title: 'No extra models yet', body: 'No OpenRouter key is saved and on, so no other model is unlocked. Save one on level 3, or later in Settings.' };
     case 'creative':
       return ready ? null : { title: 'No creative stack yet', body: `No agent is ready, so none of these models can run for you. ${HIRE}.` };
     case 'mission':

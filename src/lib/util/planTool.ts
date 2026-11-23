@@ -9,6 +9,9 @@ import { basename, oneLine } from './sanitize';
 /** The tool name of that request (crates/codly-core/src/adapters/claude.rs, `EXIT_PLAN_MODE`). */
 export const PLAN_TOOL = 'ExitPlanMode';
 
+/** A tool call of that name, as one step of the agent's work: while it waits for you, and after. */
+export const planStep = (open: boolean): string => (open ? 'Showing you its plan' : 'Showed you its plan');
+
 /** Whether `s` is the request that shows you a plan. */
 export const showsPlan = (s: ApprovalSubject): boolean => s.kind === 'tool' && s.name === PLAN_TOOL;
 
