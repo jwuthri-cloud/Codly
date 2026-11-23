@@ -654,8 +654,8 @@ impl Inner {
                     // Not a merge it has not finished resolving: that stays open for its next
                     // turn, and its conversation says that nothing was committed.
                     Ok(()) => match self.may_snapshot(ws.as_deref(), &agent, &cwd).await {
-                        Ok(true) => self.git.commit_all(&cwd, &message).await,
-                        Ok(false) => Ok(None),
+                        Ok(true) => self.git.commit_work(&cwd, &message).await,
+                        Ok(false) => Ok(crate::git::WorkCommit { commit: None, left_out: vec![] }),
                         Err(e) => Err(e),
                     },
                     Err(e) => Err(e),
@@ -664,13 +664,17 @@ impl Inner {
             }
         };
         match commit {
-            Ok(Some(c)) => {
-                let _ = self.emit(
-                    ws.as_deref(),
-                    row(Some(&agent_id), None, agent.run_id.as_deref(), EventKind::Committed { sha: c.sha, files: c.files, message }),
-                );
+            Ok(snap) => {
+                if let Err(e) = self.note_left_out(ws.as_deref(), Some(&agent_id), None, &agent.name, &cwd, &snap.left_out) {
+                    tracing::warn!("could not record what the commit for {} left out: {e}", agent.name);
+                }
+                if let Some(c) = snap.commit {
+                    let _ = self.emit(
+                        ws.as_deref(),
+                        row(Some(&agent_id), None, agent.run_id.as_deref(), EventKind::Committed { sha: c.sha, files: c.files, message }),
+                    );
+                }
             }
-            Ok(None) => {}
             Err(e) => tracing::warn!("solo snapshot for {} failed: {e}", agent.name),
         }
     }

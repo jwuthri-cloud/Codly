@@ -42,4 +42,12 @@ describe('inbound mock follows the core rules', () => {
     s = inboundMock('inbound_set_webhook', { id: w.endpoint.id, enabled: false, autoRun: true }) as InboundState;
     expect([of(s).enabled, of(s).auto_run]).toEqual([false, true]);
   });
+
+  it('takes no Slack token while Slack is not available, and removing one is always allowed', () => {
+    const config = { enabled: false, user_ids: [], channel_ids: [] };
+    expect(() => inboundMock('inbound_set_slack', { update: { config, bot_token: 'xoxb-1-new', app_token: null } })).toThrow('not available yet');
+    expect(() => inboundMock('inbound_set_slack', { update: { config, bot_token: '', app_token: 'xapp-1-new' } })).toThrow('not available yet');
+    const s = inboundMock('inbound_set_slack', { update: { config, bot_token: '', app_token: '' } }) as InboundState;
+    expect([s.slack.bot_token_set, s.slack.app_token_set, s.slack.connected]).toEqual([false, false, false]);
+  });
 });

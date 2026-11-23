@@ -17,13 +17,13 @@
   import Icon from '../../components/Icon.svelte';
   import Portrait from '../../components/Portrait.svelte';
   import RoomHead from '../RoomHead.svelte';
-  import { closeSession, disableWebgl, enableWebgl, openSession, sessions, takeoverKey, xtermTheme, type Session } from './sessions';
+  import { closeSession, disableWebgl, enableWebgl, openSession, sessionKey, sessions, takeoverKey, xtermTheme, type Session } from './sessions';
 
   /** `takeover`: the tab of an agent that is in your terminal, not a plain shell in a folder. */
   type Place = { key: string; cwd: string | null; label: string; agentId: string | null; takeover: boolean };
   const places = $derived.by((): Place[] => {
     const repo = store.workspace?.repo_path ?? null;
-    const list: Place[] = [{ key: repo ?? '(repo)', cwd: repo, label: store.workspace?.name ?? 'Repository', agentId: null, takeover: false }];
+    const list: Place[] = [{ key: sessionKey(repo), cwd: repo, label: store.workspace?.name ?? 'Repository', agentId: null, takeover: false }];
     // Agents can share a worktree (or sit in the repo itself): one tab per path, keys must be unique.
     const seen = new Set(list.map((p) => p.key));
     for (const a of store.agents) {

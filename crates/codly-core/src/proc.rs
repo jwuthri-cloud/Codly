@@ -232,12 +232,31 @@ pub fn exit_code(status: std::process::ExitStatus) -> Option<i64> {
 /// `{"codly_sent":<line>}` and Codly's own notes as `{"codly_note":"..."}`, so the file stays NDJSON.
 /// The file is owner-only. The keys of MCP servers are left out of it, in what Codly sends to a
 /// CLI (`write_json`) and in what a CLI says about its servers (`spawn_json_reader`), as are
-/// the bytes of attached images (`write_json`).
+/// the bytes of attached images (`write_json`). Each record reaches the file in one `write` as soon as it
+/// is logged (no buffer is held back: a record is on its way to the disk before it is parsed).
 pub struct RawLog {
-    file: Mutex<File>,
+    /// The file, and the buffer its records are put together in.
+    out: Mutex<(File, Vec<u8>)>,
 }
 
 const SENT_PREFIX: &[u8] = b"{\"codly_sent\":";
+/// The record buffer is given back above this size, so one huge line (a file read of some MB)
+/// does not keep its memory for the rest of the run.
+const RECORD_BUF_KEEP: usize = 64 << 10;
+
+/// Put the parts of one record together in `buf` and hand them to `w` as one `write_all`: one
+/// system call per line of a stream that has a line per token, not one per part.
+fn write_record<W: Write>(w: &mut W, buf: &mut Vec<u8>, parts: &[&[u8]]) -> std::io::Result<()> {
+    buf.clear();
+    for p in parts {
+        buf.extend_from_slice(p);
+    }
+    let written = w.write_all(buf);
+    if buf.capacity() > RECORD_BUF_KEEP {
+        *buf = Vec::new();
+    }
+    written
+}
 
 impl RawLog {
     pub fn open(path: &Path) -> std::io::Result<RawLog> {
@@ -246,7 +265,7 @@ impl RawLog {
         }
         use std::os::unix::fs::OpenOptionsExt;
         let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
-        Ok(RawLog { file: Mutex::new(file) })
+        Ok(RawLog { out: Mutex::new((file, Vec::new())) })
     }
 
     pub fn inbound(&self, line: &[u8]) {
@@ -264,12 +283,10 @@ impl RawLog {
     }
 
     fn write(&self, parts: &[&[u8]]) {
-        let mut f = self.file.lock().unwrap_or_else(|e| e.into_inner());
-        for p in parts {
-            if let Err(e) = f.write_all(p) {
-                tracing::warn!("raw log write failed: {e}");
-                return;
-            }
+        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
+        let (file, buf) = &mut *out;
+        if let Err(e) = write_record(file, buf, parts) {
+            tracing::warn!("raw log write failed: {e}");
         }
     }
 }
@@ -518,6 +535,41 @@ mod tests {
         assert_eq!(lines[0]["type"], "system");
         assert_eq!(lines[1]["codly_sent"]["type"], "user");
         assert_eq!(lines[2]["codly_note"], "dropped 5 bytes");
+    }
+
+    /// The stream has a line per token, so a record must cost one write, not one per part
+    /// (and an appended record written in one piece is never split by another writer).
+    #[test]
+    fn a_record_is_one_write() {
+        #[derive(Default)]
+        struct Counting {
+            writes: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for Counting {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1;
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (mut w, mut buf) = (Counting::default(), Vec::new());
+        write_record(&mut w, &mut buf, &[&b"{\"type\":\"system\"}"[..], b"\n"]).unwrap();
+        write_record(&mut w, &mut buf, &[SENT_PREFIX, b"{\"type\":\"user\"}", b"}\n"]).unwrap();
+        assert_eq!(w.writes, 2, "two records, two writes");
+        assert_eq!(String::from_utf8(w.bytes).unwrap(), "{\"type\":\"system\"}\n{\"codly_sent\":{\"type\":\"user\"}}\n");
+
+        // A huge record does not keep its buffer; the next record is still whole.
+        let big = vec![b'x'; RECORD_BUF_KEEP + 1];
+        let mut w = Counting::default();
+        write_record(&mut w, &mut buf, &[big.as_slice(), b"\n"]).unwrap();
+        assert_eq!((w.writes, w.bytes.len()), (1, big.len() + 1));
+        assert!(buf.capacity() <= RECORD_BUF_KEEP);
+        write_record(&mut w, &mut buf, &[&b"after"[..], b"\n"]).unwrap();
+        assert!(w.bytes.ends_with(b"x\nafter\n"));
     }
 
     /// A CLI that stopped reading its stdin: the write gives up at the deadline instead of

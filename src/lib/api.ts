@@ -281,7 +281,6 @@ export const api = {
   interruptAgent: (agentId: string) => call<void>('interrupt_agent', { agentId }),
   stopAgent: (agentId: string) => call<void>('stop_agent', { agentId }),
   /** Live controls (agent panel). Each returns the agent's controls after the change. */
-  agentControl: (agentId: string) => call<ControlState>('agent_control', { agentId }),
   setAgentBlockTools: (agentId: string, on: boolean) => call<ControlState>('set_agent_block_tools', { agentId, on }),
   stopAgentAfterStep: (agentId: string) => call<ControlState>('stop_agent_after_step', { agentId }),
   resumeAgent: (agentId: string) => call<ControlState>('resume_agent', { agentId }),
@@ -300,7 +299,6 @@ export const api = {
   openTakeoverTerminal: (agentId: string) => call<string>('open_takeover_terminal', { agentId }),
   /** Closes that terminal; the agent's next message or task resumes the same session in Codly. */
   giveBackAgent: (agentId: string) => call<TakeoverState>('give_back_agent', { agentId }),
-  hireAgent: (provider: Provider, model: string | null = null, title: string | null = null) => call<Agent>('hire_agent', { provider, model, title }),
   listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
   /** A CLI's models with the thinking efforts each one takes, and where the list comes from. */
   modelCatalog: (provider: Provider) => call<ModelCatalog>('model_catalog', { provider }),

@@ -7,6 +7,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { Placed } from '../../lib/gen/Placed';
 import { BY_ID, type Dims, type Furniture, type Piece } from '../buy';
 import { builtinModel } from './builtins';
+import { idleLease } from './lease';
 
 /** Per pack: scale to office units (a desk top at ~0.56) and the turn that makes it face +z. */
 const PACKS: Record<string, { scale: number; yaw: number }> = {
@@ -202,9 +203,26 @@ export class DecorLayer {
   }
 }
 
-// ── Catalog thumbnails: one small offscreen renderer, each model drawn once. ──
+// ── Catalog thumbnails: one small offscreen renderer, each model drawn once. The renderer is
+// released a few seconds after the last thumbnail (like the portrait renderer), so the catalog
+// does not hold a GL context after it was opened once. ──
 
-let thumbs: { r: WebGLRenderer; scene: Scene; cam: PerspectiveCamera } | null = null;
+const thumbs = idleLease(
+  () => {
+    const r = new WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+    r.setSize(96, 96, false);
+    const scene = new Scene();
+    const sun = new DirectionalLight('#fff4e6', 2.2);
+    sun.position.set(2, 4, 3);
+    scene.add(new HemisphereLight('#ffffff', new Color('#8a7a6a'), 1.6), sun);
+    return { r, scene, cam: new PerspectiveCamera(30, 1, 0.01, 50) };
+  },
+  ({ r }) => {
+    r.dispose();
+    r.forceContextLoss();
+  },
+  4000,
+);
 const shots = new Map<string, Promise<string>>();
 
 export function thumbnail(item: string): Promise<string> {
@@ -218,16 +236,7 @@ export function thumbnail(item: string): Promise<string> {
 }
 
 function shoot(m: Model): string {
-  if (!thumbs) {
-    const r = new WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
-    r.setSize(96, 96, false);
-    const scene = new Scene();
-    const sun = new DirectionalLight('#fff4e6', 2.2);
-    sun.position.set(2, 4, 3);
-    scene.add(new HemisphereLight('#ffffff', new Color('#8a7a6a'), 1.6), sun);
-    thumbs = { r, scene, cam: new PerspectiveCamera(30, 1, 0.01, 50) };
-  }
-  const { r, scene, cam } = thumbs;
+  const { r, scene, cam } = thumbs();
   const obj = m.root.clone(true);
   obj.rotation.y = -0.5;
   scene.add(obj);

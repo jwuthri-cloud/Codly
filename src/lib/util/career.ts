@@ -5,6 +5,7 @@ import type { Applicant } from '../gen/Applicant';
 import type { Career } from '../gen/Career';
 import type { Rank } from '../gen/Rank';
 import type { Role } from '../gen/Role';
+import { CLASH } from '../../office/traits';
 import { AVATARS } from './hire';
 
 export const RANKS: { rank: Rank; label: string; xp: number }[] = [
@@ -24,11 +25,6 @@ export const TRAITS: { id: string; label: string; rule: string | null }[] = [
   { id: 'hotheaded', label: 'Hot-headed', rule: null },
   { id: 'competitive', label: 'Competitive', rule: null },
   { id: 'nightowl', label: 'Night owl', rule: null },
-];
-const CLASH: [string, string][] = [
-  ['lazy', 'perfectionist'],
-  ['lazy', 'competitive'],
-  ['bookworm', 'social'],
 ];
 
 export const emptyCareer = (): Career => ({

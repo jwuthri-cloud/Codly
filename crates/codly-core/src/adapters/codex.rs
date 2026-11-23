@@ -314,19 +314,21 @@ impl AppServer {
     /// Write each line to the owning agent's raw log, then hand it over in stream order.
     fn route_line(self: &Arc<Self>, bytes: &[u8]) {
         self.last_inbound_ms.store(now_ms(), Ordering::SeqCst);
-        let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
+        let Ok(mut v) = serde_json::from_slice::<Value>(bytes) else {
             self.bootstrap_raw.inbound(bytes);
             return;
         };
+        // The parsed line is used once: its parts are taken out of it, not copied.
+        let mut part = |key: &str| v.get_mut(key).map(Value::take);
         let mut st = self.state.lock().unwrap();
-        let method = v.get("method").and_then(Value::as_str).map(str::to_owned);
-        let id = v.get("id").cloned();
+        let method = part("method").and_then(|m| m.as_str().map(str::to_owned));
+        let id = part("id");
         match (method, id) {
             (None, Some(id)) => {
                 let id = id.as_i64().unwrap_or(-1);
-                let result = match v.get("error") {
-                    Some(e) if !e.is_null() => Err(e.clone()),
-                    _ => Ok(v.get("result").cloned().unwrap_or(Value::Null)),
+                let result = match part("error") {
+                    Some(e) if !e.is_null() => Err(e),
+                    _ => Ok(part("result").unwrap_or(Value::Null)),
                 };
                 match st.pending.remove(&id) {
                     Some(Waiter::Oneshot(tx, raw)) => {
@@ -351,7 +353,7 @@ impl AppServer {
                 }
             }
             (Some(method), id) => {
-                let params = v.get("params").cloned().unwrap_or(Value::Null);
+                let params = part("params").unwrap_or(Value::Null);
                 st.adopt_subagents(&method, &params);
                 let tid = thread_of(&params).map(str::to_owned);
                 if let Some(route) = tid.as_deref().and_then(|t| st.routes.get(t)).cloned() {

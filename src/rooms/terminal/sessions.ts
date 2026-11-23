@@ -54,10 +54,15 @@ export function xtermTheme(): ITheme {
   };
 }
 
+/** The key of the shell in `cwd` (null: the repository, before its path is known). */
+export const sessionKey = (cwd: string | null) => cwd ?? '(repo)';
+
 export async function openSession(cwd: string | null, label: string, own?: OwnTerminal): Promise<Session> {
-  const key = own?.key ?? cwd ?? '(repo)';
+  const key = own?.key ?? sessionKey(cwd);
   const existing = sessions.get(key);
   if (existing && !existing.exited) return existing;
+  // A shell that ended is replaced: let its terminal (and its scrollback) go first.
+  if (existing) await closeSession(key);
 
   const [{ Terminal }, { FitAddon }] = await Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]);
   const term = new Terminal({
@@ -138,4 +143,11 @@ export async function closeSession(key: string) {
   disableWebgl(s);
   s.term.dispose();
   await api.ptyClose(s.ptyId).catch(() => {});
+}
+
+/** Close every shell whose folder is not in `keep`: the office changed, or an agent's worktree
+ *  is gone. (Leaving the Terminal room closes nothing: shells outlive the panel.) */
+export async function closeSessionsOutside(keep: Iterable<string>) {
+  const live = new Set(keep);
+  await Promise.all([...sessions.keys()].filter((key) => !live.has(key)).map(closeSession));
 }

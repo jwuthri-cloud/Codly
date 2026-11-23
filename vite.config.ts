@@ -21,5 +21,8 @@ export default defineConfig({
     // An agent's worktree (.claude/worktrees) is a whole copy of the repo: its tests are not
     // this checkout's.
     exclude: [...configDefaults.exclude, '.claude/**'],
+    // The contrast test reads the design tokens. A test gets an empty string for a CSS file
+    // that is not named here.
+    css: { include: /\/src\/styles\/tokens\.css/ },
   },
 })

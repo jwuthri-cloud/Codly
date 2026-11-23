@@ -90,7 +90,7 @@ impl Inner {
         // Owner-only: the run dir holds the MCP config with this run's token and the raw log.
         std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700).create(&dir)?;
         let raw_log = dir.join("raw.ndjson");
-        self.prepare_default_mcp(&raw_log, &req.cwd);
+        self.prepare_default_mcp(&raw_log, &req.cwd).await;
         let token =
             mcp.register(ToolCtx { agent_id: req.agent.id.clone(), run_id: run_id.clone(), task_id: req.task_id.clone(), role: req.role });
         // One run per agent, and it is live from here: a stop, an exit or a second message

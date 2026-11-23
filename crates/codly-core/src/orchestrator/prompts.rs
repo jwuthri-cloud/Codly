@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::git::{LeftOut, MAX_NEW_FILE_BYTES, MAX_NEW_FOLDER_FILES};
 use crate::model::*;
 
 /// Hard cap for the Lead's per-message board header (≈ 800 tokens).
@@ -381,13 +382,39 @@ pub fn verify_failed(cmd: &str, code: Option<i64>, tail: &str, round: u32, max: 
     )
 }
 
+/// A prompt lists at most this many paths and counts the rest: a thousand lines of paths
+/// push the instruction out of the worker's view.
+const MAX_LISTED: usize = 30;
+
 pub fn scope_violation(files: &[&String], scope: &[String], round: u32, max: u32) -> String {
-    let list: Vec<String> = files.iter().map(|f| format!("  - {f}")).collect();
+    let mut list: Vec<String> = files.iter().take(MAX_LISTED).map(|f| format!("  - {f}")).collect();
+    if files.len() > MAX_LISTED {
+        list.push(format!("  - and {} more files", files.len() - MAX_LISTED));
+    }
     format!(
         "[Codly] Scope check failed (fix round {round}/{max}): these files are outside your write scope ({}):\n{}\n\
          Revert those edits, or, if they are truly required, keep them minimal and list each one with a reason in \
          scope_exceptions when you call codly_submit_report again.",
         scope.join(", "),
+        list.join("\n")
+    )
+}
+
+/// Codly's commit left these new paths of the worker's out (`Git::commit_work`). Asked once
+/// per task, before its checks run, and it is no fix round.
+pub fn left_out(left: &[LeftOut]) -> String {
+    let mut list: Vec<String> = left.iter().take(MAX_LISTED).map(|l| format!("  - {l}")).collect();
+    if left.len() > MAX_LISTED {
+        list.push(format!("  - and {} more", left.len() - MAX_LISTED));
+    }
+    format!(
+        "[Codly] Codly did not commit these new paths in your worktree. They look like build output or downloaded files, \
+         not work (a new folder with more than {MAX_NEW_FOLDER_FILES} files, or a new file over {} MB):\n{}\n\
+         What is not committed is not merged: the task would end without it. For each path: if it is not work, add it to \
+         .gitignore (outside your write scope, list it in scope_exceptions) or delete it. If it is work, stage it with \
+         `git add <path>` and Codly commits it with the rest. Then call codly_submit_report again. This is not a fix \
+         round. Do not commit.",
+        MAX_NEW_FILE_BYTES >> 20,
         list.join("\n")
     )
 }
@@ -780,6 +807,30 @@ pub fn inbound_message(source: &str, text: &str, may_start_work: bool) -> String
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A scope failure over a great many files names the first ones and counts the rest.
+    #[test]
+    fn a_long_scope_violation_names_the_first_files_and_counts_the_rest() {
+        let files: Vec<String> = (0..MAX_LISTED + 12).map(|i| format!("out/{i}.js")).collect();
+        let refs: Vec<&String> = files.iter().collect();
+        let scope = ["src/**".to_string()];
+        let long = scope_violation(&refs, &scope, 1, 2);
+        assert_eq!(long.matches("\n  - ").count(), MAX_LISTED + 1, "{long}");
+        assert!(long.contains("  - out/29.js\n  - and 12 more files\n") && !long.contains("out/30.js"), "{long}");
+        let short = scope_violation(&refs[..3], &scope, 1, 2);
+        assert!(short.contains("  - out/2.js\nRevert") && !short.contains("more files"), "{short}");
+    }
+
+    /// What Codly's commit left out, as the worker reads it: each path with its size, and the
+    /// three things it can do.
+    #[test]
+    fn a_left_out_prompt_names_the_paths_and_what_to_do() {
+        let left = [LeftOut::Folder { path: "web/node_modules/".into(), files: 20_000 }, LeftOut::File { path: "data.bin".into(), bytes: 31 << 20 }];
+        let said = left_out(&left);
+        assert!(said.contains("\n  - web/node_modules/ (20000 new files)\n  - data.bin (31 MB)\nWhat is not committed"), "{said}");
+        assert!(said.contains(".gitignore") && said.contains("delete it") && said.contains("`git add <path>`"), "{said}");
+        assert!(said.contains("more than 2000 files") && said.contains("over 25 MB") && said.contains("not a fix round"), "{said}");
+    }
 
     /// An inbound message cannot pass for the user or for Codly: all of it is inside the block.
     #[test]

@@ -10,6 +10,9 @@
 //! - a merge conflict has its own rounds (two used fix rounds do not fail the task), and a
 //!   task that fails with conflict markers is not left in the middle of a merge;
 //! - a worker whose turn ends with no report is asked for it once before its work is checked;
+//! - a huge new folder the repository does not ignore (a dependency folder) is left out of
+//!   Codly's commit: the task says so once, the worker is asked about it once before the checks
+//!   run, and the folder costs no fix round;
 //! - a turn that failed while the work was reviewed is not checked when the review ends: the
 //!   worker is asked to continue first, and a turn that ended on the usage limit (nobody is
 //!   asked to continue) does not leave the task waiting;
@@ -769,6 +772,67 @@ async fn a_worker_that_never_reports_is_asked_once_and_then_checked() {
     let prompts = worker_prompts(&turns);
     assert!(prompts.len() == 2 && prompts[1].contains(NO_REPORT), "asked once, then its work is checked as it is: {prompts:?}");
     assert_eq!(verified(&events(&core).await), [(HELLO_CHECK.to_string(), true)]);
+    core.shutdown().await;
+}
+
+/// A worker leaves a dependency folder that the repository forgot to ignore. Codly commits the
+/// work without it, says so in the task and asks the worker about it once, before the checks
+/// run. The worker leaves it (and the folder grows): the work is checked and merged without
+/// the folder, which is not held against the task's scope and stays in the worktree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_huge_new_folder_is_left_out_of_the_commit_and_the_worker_is_asked_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    let cwd: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+    let seen = cwd.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            // The second turn is the answer to Codly's question: the same folder, with more files.
+            let files = codly_core::git::MAX_NEW_FOLDER_FILES + if turn.prompt.contains("did not commit") { 10 } else { 1 };
+            let deps = turn.spec.cwd.join("node_modules");
+            for i in 0..files {
+                let sub = deps.join(format!("m{}", i % 40));
+                std::fs::create_dir_all(&sub).unwrap();
+                std::fs::write(sub.join(format!("{i}.js")), "x").unwrap();
+            }
+            *seen.lock().unwrap() = Some(turn.spec.cwd.clone());
+            turn.done().await;
+        })
+    });
+    let core = start(dir.path(), FakeSpawner { lead: lead_with(hello_plan()), worker, turns: turns.clone() }, auto()).await;
+
+    wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(task_by_key(&core, "t1").await.unwrap().status, TaskStatus::Done);
+    let all = events(&core).await;
+    // Said once: the same folder with more files in it is not news.
+    let said: Vec<_> = decisions(&all).into_iter().filter(|d| d.1.starts_with("t1: Codly did not commit")).collect();
+    assert_eq!(said.len(), 1, "said once in the task: {:?}", decisions(&all));
+    assert!(said[0].1.contains("node_modules/ (2001 new files)") && said[0].1.contains(".gitignore"), "{}", said[0].1);
+    assert_eq!(said[0].2["left_out"], json!(["node_modules/"]));
+    let committed: Vec<&String> = all
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Committed { files, .. } => Some(files),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(committed.iter().any(|f| *f == "hello.txt"), "the work is committed: {committed:?}");
+    assert!(!committed.iter().any(|f| f.starts_with("node_modules")), "the folder is not");
+    // Asked once, before any check ran, and as no fix round.
+    let prompts = worker_prompts(&turns);
+    assert_eq!(prompts.len(), 2, "the brief, then Codly's question: {prompts:?}");
+    assert!(prompts[1].contains("node_modules/ (2001 new files)") && prompts[1].contains(".gitignore") && prompts[1].contains("git add"), "{}", prompts[1]);
+    assert_eq!(verified(&all), [(HELLO_CHECK.to_string(), true)], "the checks ran once, after the worker's answer");
+    assert!(!decisions(&all).iter().any(|d| d.1.contains("fix round")), "the folder is not a scope failure: {:?}", decisions(&all));
+    // What the plan merged has the work and not the folder, and the folder was not deleted.
+    let branch = core.snapshot().await.unwrap().plans.remove(0).integration_branch.unwrap();
+    let merged = String::from_utf8(git(&dir.path().join("repo"), &["ls-tree", "-r", "--name-only", &branch]).stdout).unwrap();
+    assert!(merged.contains("hello.txt") && !merged.contains("node_modules"), "{merged}");
+    let worktree = cwd.lock().unwrap().clone().unwrap();
+    assert!(worktree.join("node_modules/m0/0.js").exists(), "left where it was");
     core.shutdown().await;
 }
 

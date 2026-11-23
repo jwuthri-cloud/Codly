@@ -406,8 +406,6 @@ export class MockTransport implements Transport {
         story.interrupt(String(a.agentId), true);
         this.ctl.clear(String(a.agentId));
         return null;
-      case 'agent_control':
-        return this.ctl.state(String(a.agentId));
       case 'set_agent_block_tools':
         return this.ctl.setBlockTools(String(a.agentId), !!a.on);
       case 'stop_agent_after_step':
@@ -437,8 +435,6 @@ export class MockTransport implements Transport {
       }
       case 'give_back_agent':
         return this.takeovers.giveBack(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
-      case 'hire_agent':
-        return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':
         return demoCatalog(a.provider as Provider).models.map((m) => m.id);
       case 'model_catalog':

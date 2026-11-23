@@ -31,7 +31,9 @@
 //! not before the prompt goes out: a CLI that wrote a file within that moment would have the
 //! write in the checkpoint. "Ignored" is what the worktree's ignore rules say when git looks: a
 //! file that a turn un-ignored is not in the checkpoint before that turn, so a restore to it
-//! removes the file from disk (the checkpoint taken just before the restore has it). A restore
+//! removes the file from disk (the checkpoint taken just before the restore has it). What
+//! Codly's commit leaves out (`git.rs`: a new folder with more than 2,000 files, a new file over
+//! 25 MB) is like an ignored file: no checkpoint keeps it, and a restore leaves it alone. A restore
 //! looks twice that the worktree is at rest, the second time right before it writes the first
 //! file; a prompt sent while it writes still starts a turn on files that change under it.
 

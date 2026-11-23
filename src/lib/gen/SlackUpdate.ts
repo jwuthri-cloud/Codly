@@ -3,6 +3,7 @@ import type { SlackConfig } from "./SlackConfig";
 
 export type SlackUpdate = { config: SlackConfig, 
 /**
- * None keeps the stored token, "" removes it, anything else replaces it.
+ * None keeps the stored token, "" removes it. Anything else is refused while Slack is not
+ * available (`InboundHub::set_slack`).
  */
 bot_token: string | null, app_token: string | null, };

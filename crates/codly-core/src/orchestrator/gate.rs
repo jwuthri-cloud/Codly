@@ -9,6 +9,10 @@
 //! command with a risk nobody allowed) blocks the task for you: its card re-runs the checks
 //! or merges anyway (only a task its checks stopped). Every outcome is a Decision.
 //!
+//! Codly's commit leaves out a huge new folder or file (`git.rs`). The first time, the worker
+//! is asked what it is before anything is checked: the checks run where those files still are,
+//! and would pass on work that the merge does not get. That question uses no round.
+//!
 //! A turn that ends with no report (`codly_submit_report`) may not be the worker's finish (it
 //! answered a message of yours, or stopped early): the worker is asked for its report once,
 //! and the end of that turn is checked as it is.
@@ -28,7 +32,7 @@ use tokio::io::AsyncReadExt;
 use super::required_checks::{self, Required};
 use super::scope::ScopeMatcher;
 use super::{Inner, approvals, lock, merge_conflict, names, prompts, row, runs::RunReq, runs::new_session, scheduler};
-use crate::git::MergeOutcome;
+use crate::git::{LeftOut, MAX_NEW_FILE_BYTES, MAX_NEW_FOLDER_FILES, MergeOutcome, name_list};
 use crate::model::*;
 use crate::store;
 
@@ -51,6 +55,9 @@ pub(super) struct Rounds {
     /// Verify, scope, conflict-marker and review feedback: the worker's own work.
     fix: u32,
     conflict: u32,
+    /// The worker was asked about what Codly's commit left out (`Inner::left_out_round`).
+    /// Asked once, and it counts as no round.
+    left_out: bool,
 }
 
 pub(super) struct VerifyOut {
@@ -275,16 +282,26 @@ impl Inner {
             }
         }
         let message = format!("codly({}): {}", task.key, prompts::clip(&task.title, 60));
-        let commit = {
+        let snap = {
             let _g = self.repo_lock.lock().await;
-            self.git_step(&task, ws, || self.git.commit_all(&wt, &message)).await?
+            self.git_step(&task, ws, || self.git.commit_work(&wt, &message)).await?
         };
-        if let Some(c) = commit {
+        let said = self.note_left_out(ws, None, Some(&task), &task.key, &wt, &snap.left_out)?;
+        if let Some(c) = snap.commit {
             self.store.set_task_commits(task_id, None, Some(&c.sha))?;
             self.emit(
                 ws,
                 row(agent, Some(task_id), run.as_ref().map(|r| r.id.as_str()), EventKind::Committed { sha: c.sha, files: c.files, message }),
             )?;
+        }
+        // The checks below run where the left-out files still are, so they can pass on work
+        // that the commit, and then the merge, does not have. The worker hears it first, once.
+        // (Your own pass goes on: the task's record says what was left out.)
+        if said && pass == Pass::Turn {
+            let asked = std::mem::replace(&mut lock(&self.fix_rounds).entry(task.id.clone()).or_default().left_out, true);
+            if !asked {
+                return self.left_out_round(&task, &worker, &snap.left_out);
+            }
         }
 
         // 3. Verify, in the worktree, as Codly (the worker's own claims are advisory).
@@ -594,6 +611,11 @@ impl Inner {
             Ok(())
         })?;
         self.decide(ws, Some(&task.id), "gate", format!("{}: {reason}", task.key), json!({ "plan_id": task.plan_id, "round": round }))?;
+        self.back_to_worker(task, worker, prompt)
+    }
+
+    /// Send the gate's feedback to the task's worker: now, or with the next run of the task.
+    fn back_to_worker(&self, task: &Task, worker: &str, prompt: String) -> Result<()> {
         // Only a run of this task takes its feedback: after your own pass the agent may be in
         // a chat or on other work by now.
         if self.works_on(worker, &task.id) {
@@ -608,6 +630,21 @@ impl Inner {
             self.kick();
         }
         Ok(())
+    }
+
+    /// Codly's commit left something out that the task's record did not name before
+    /// (`note_left_out` just said it): the worker gets one turn to ignore it, delete it or
+    /// stage it as work, before the work is checked and merged without it. Not a fix round:
+    /// it uses none, and the end of that turn is checked whatever the worker did.
+    fn left_out_round(&self, task: &Task, worker: &str, left: &[LeftOut]) -> Result<()> {
+        let paths: Vec<&str> = left.iter().map(LeftOut::path).collect();
+        let reason = format!("Codly did not commit {}; the worker was asked what it is", name_list(&paths));
+        self.update_task(&task.id, |t| {
+            t.status = TaskStatus::Running;
+            t.status_reason = Some(reason.clone());
+            Ok(())
+        })?;
+        self.back_to_worker(task, worker, prompts::left_out(left))
     }
 
     /// Shut a worker's run of this task down and free the agent for the next task. A run of
@@ -683,6 +720,34 @@ impl Inner {
             bail!("{} has no finished work yet; Retry lets its worker go on", t.key);
         }
         Ok((t, wt))
+    }
+
+    /// Say what Codly's commit in `wt` left out (`Git::commit_work`: a huge new folder or
+    /// file), in the task's record, or in the agent's when it works alone. Every later
+    /// commit leaves the same paths out, so it is said once per task (or agent), and again
+    /// when the paths change (not when a folder only gets more files, or a file grows).
+    /// True = said now.
+    pub(super) fn note_left_out(&self, ws: Option<&str>, agent: Option<&str>, task: Option<&Task>, who: &str, wt: &Path, left: &[LeftOut]) -> Result<bool> {
+        let key = format!("left_out:{}:{}", task.map(|t| t.id.as_str()).or(agent).unwrap_or_default(), wt.display());
+        let paths = json!(left.iter().map(LeftOut::path).collect::<Vec<_>>());
+        if self.store.kv_get(&key)?.unwrap_or_else(|| "[]".into()) == paths.to_string() {
+            return Ok(false);
+        }
+        self.store.kv_set(&key, &paths.to_string())?;
+        if left.is_empty() {
+            return Ok(false);
+        }
+        let list = left.iter().map(LeftOut::to_string).collect::<Vec<_>>().join(", ");
+        let summary = format!(
+            "{who}: Codly did not commit {list}. This looks like build output or downloaded files, not work (a new folder with more \
+             than {MAX_NEW_FOLDER_FILES} files, or a new file over {} MB). It is still in the worktree: add it to .gitignore or delete \
+             it, or commit it yourself if it is work.",
+            MAX_NEW_FILE_BYTES >> 20
+        );
+        let detail = json!({ "plan_id": task.and_then(|t| t.plan_id.clone()), "left_out": paths, "worktree": wt.to_string_lossy() });
+        let kind = EventKind::Decision { id: new_id(), decision_type: "commit".into(), method: "rule".into(), summary, detail };
+        self.emit(ws, row(agent, task.map(|t| t.id.as_str()), None, kind))?;
+        Ok(true)
     }
 
     /// Did its checks stop the task? Then its last decision is the gate's, with one of
