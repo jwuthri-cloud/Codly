@@ -25,7 +25,7 @@ Parameters go in the URL and can be combined. They are read once, when the page 
 
 ## States the script does not reach
 
-Each of these opens `acme/web` at once, except `?trust=ask`.
+Each of these opens `acme/web` at once, except `?trust=ask` and `?hour=`.
 
 | Parameter | What you get | Where to look |
 | --- | --- | --- |
@@ -36,6 +36,33 @@ Each of these opens `acme/web` at once, except `?trust=ask`.
 | `?helper=slow` | The helper (sub-agent) that Ada starts in her first task works for about a minute, not three seconds. | Ada's work in the first request: `?helper=slow&autoplay=1&skip=20` |
 | `?checks=on` | The repo's required checks are on, so Codly runs them for each task after the task's own checks. | A finished task's sheet, under its checks ("required by you"): `?checks=on&autoplay=1&skip=180` |
 | `?mode=plan` | Eli, a 1:1 Claude agent in the mode "plan first", was asked for a small change and shows a plan. Send it back with a note and it comes again; accept it and Eli asks before the edit. | Eli's conversation; the mode switch is in Eli's sheet, under Controls. |
+| `?hour=13` | The demo's clock says 13:00 when the page loads, and goes on from there (from `0`, below `24`; `21.5` is 21:30). The office and the map are lit for the hour of the clock, so this sets their light; every time on screen follows. It opens no repo. | The office and the map: `?hour=13&ws=1` with the app's dark theme (a bright office under a dark app), `?hour=23&ws=1` with its light theme. |
+
+### A kind of request (`?approval=`)
+
+The script asks before commands, and one question with two short options. Each value below makes
+a 1:1 agent ask another kind of request once, a few seconds after the page loads. One value for
+each page load. Approve, deny or answer as on the other cards: the agent goes on from your answer.
+
+| Parameter | Who asks what | Where to look |
+| --- | --- | --- |
+| `?approval=file` | Eli (Claude Code, "ask for edits") asks before it changes `README.md`, and shows the change. | Eli's conversation. |
+| `?approval=plan` | Eli (Claude Code, "plan first") shows its plan. The same as `?mode=plan`. | Eli's conversation. |
+| `?approval=network` | Ned (Claude Code): a command in Claude Code's sandbox wants to reach `registry.npmjs.org`. Gil (Gemini CLI): a tool with the same name, `SandboxNetworkAccess`, asks to run. Only Ned's is the sandbox's request. | Ned's conversation and Gil's, side by side. |
+| `?approval=permissions` | Kit (Codex) asks for more permissions: to write in `../acme-docs`, outside its worktree. | Kit's conversation. |
+| `?approval=question-long` | Ned (Claude Code) asks a question with two options of about 120 characters each. Kit (Codex) passes on a question of an MCP server that has no options: you write the answer. | Answer both (write a long answer for Kit), then look at the two closed rows. |
+
+## The second office: `billing-api`
+
+`acme/web` is not the only office of the demo. The tab `billing-api` says that two of its tasks
+are in flight and that one request waits for you. Open it and the demo switches for real: it has
+its own crew of three (Otto, Rex and Pia), one request with a plan that runs, and Otto's request
+before `docker compose up -d stripe-mock`. Answer it and the plan finishes. Go back to `acme/web`
+and it is as you left it, plus what its agents did meanwhile: both offices keep working, and a
+request that waits in the one you are not looking at shows as a notice. A draft you typed in a
+request of one office is there again when you come back to it.
+
+`docs-site`, the third office, is a tab with numbers only: opening it changes nothing.
 
 ## What the demo does as the app does
 
@@ -50,9 +77,17 @@ Each of these opens `acme/web` at once, except `?trust=ask`.
 - Close office (on the map) refuses while the office has unfinished work or an agent is in a turn.
   In the demo, `billing-api` has agents at work, `docs-site` closes, and `acme/web` closes once its
   open tasks are done or cancelled.
+- MCP servers: the first Lead of an office (a Claude Code one) reports three when its session
+  starts: `codly` is connected, `linear` needs a sign-in, `postgres` did not start. Its sheet shows
+  the section "MCP servers". Reconnect connects `postgres` after a second; `linear` still needs
+  its sign-in, and the row says so.
 
 ## What the demo cannot show
 
 There is no git, no `gh` and no shell behind it. A diff, a commit, a pull request and the output of
 a command are made up. A 1:1 agent's branch always merges without a conflict. Look at these in the
 app.
+
+`billing-api` has its own agents, requests, plan and diffs, but the demo has one made-up repo: the
+code map, the file browser, the search and the terminal of `billing-api` show `acme/web`'s files,
+and its Lead plans nothing new there.
