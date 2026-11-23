@@ -1,0 +1,9 @@
+# The default rules, plus one allowance: recorded CLI output carries Anthropic API message ids
+# (`"api_message_id":"msg_…"`), which the generic-api-key rule takes for keys.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "API message ids in recorded CLI output"
+regexTarget = "match"
+regexes = ['''api_message_id"\s*:\s*"msg_[A-Za-z0-9]+"?''']
