@@ -16,6 +16,7 @@
   import { PLAN_SPENT_TIP, spentLine } from '../../lib/util/cost';
   import { clock } from '../../lib/util/format';
   import { methodProvenance, PLAN_STATUS_LABEL } from '../../lib/util/labels';
+  import { isHeld } from '../../lib/util/held';
   import { keyList, stuckPlan } from '../../lib/util/plan';
   import Icon from '../../components/Icon.svelte';
   import Why, { type WhyLine } from '../../components/Why.svelte';
@@ -68,6 +69,8 @@
     const n = `${tasks.length} task${tasks.length === 1 ? '' : 's'}`;
     if (plan.status === 'planning') return `Plan · drafting · ${n}`;
     if (plan.status === 'awaiting_approval') return `Plan · waiting for your go · ${n}${startable ? ` · ${startable} start right away` : ''}`;
+    // Since Codly restarted its tasks wait for your "Resume work", and none of them works.
+    if (live && tasks.some(isHeld) && !tasks.some((t) => ['running', 'verifying', 'reviewing', 'merging'].includes(t.status))) return `Plan · on hold since Codly restarted · ${done} of ${tasks.length} done`;
     if (live) return `Plan · ${plan.status === 'integrating' ? 'integrating' : 'running'} · ${done} of ${tasks.length} done`;
     return `Plan · ${PLAN_STATUS_LABEL[plan.status]} · ${done} of ${tasks.length} done`;
   });

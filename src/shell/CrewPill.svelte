@@ -63,7 +63,11 @@
       ui.openRequest(agent.thread ?? 'lead');
       ui.sheetFollows(agent.id);
     } else if (e.altKey) ui.selectAgent(selected ? null : agent.id);
-    else ui.openThread(store.threadOf(agent.id));
+    else {
+      // You open a 1:1 to write to the agent: the caret is in its composer.
+      ui.openThread(store.threadOf(agent.id));
+      ui.composerFocus++;
+    }
   }
   function openSub(e: MouseEvent) {
     e.stopPropagation();

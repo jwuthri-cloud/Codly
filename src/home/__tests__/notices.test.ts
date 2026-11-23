@@ -6,7 +6,7 @@ import type { EventRow } from '../../lib/gen/EventRow';
 import type { Snapshot } from '../../lib/gen/Snapshot';
 import { store } from '../../lib/state/store.svelte';
 import { mkAgent } from '../../office/demo/script';
-import { moreOf, noticeRows } from '../notices';
+import { headline, moreOf, noticeRows } from '../notices';
 import { buildSpine, keepRows, type Item } from '../spine';
 
 let id = 0;
@@ -105,6 +105,36 @@ describe('noticeRows', () => {
     const [mixed] = noticeRows([turn(), notice('a'), notice('b'), notice('a'), turnEnd()], 'l1');
     const [one] = noticeRows([notice('a')], 'l1');
     expect([moreOf(same), moreOf(mixed), moreOf(one)]).toEqual(['2 times', 'and 2 more', null]);
+  });
+});
+
+describe('headline', () => {
+  it('a joined row shows its worst notice: an MCP server that did not start before a goal', () => {
+    const [row] = noticeRows([notice('MCP server A did not start, so this agent works without its tools.'), notice('MCP server B did not start, so this agent works without its tools.'), notice('Goal: ship it')], 'l1');
+    expect(headline(row).text).toBe('MCP server B did not start, so this agent works without its tools.');
+    expect(moreOf(row)).toBe('and 2 more');
+  });
+
+  it('with no failure in the row, the newest one', () => {
+    const [row] = noticeRows([notice('Goal: ship it'), notice('Codex hook Stop (hooks.json) added context: ok')], 'l1');
+    expect(headline(row).text).toBe('Codex hook Stop (hooks.json) added context: ok');
+  });
+
+  it('a hook that blocked and a turn on another model are failures too', () => {
+    const [blocked] = noticeRows([notice('Codex hook PreToolUse (hooks.json) blocked: no'), notice('Goal: ship it')], 'l1');
+    const [rerouted] = noticeRows([notice('Codex ran this turn on gpt-5 instead of gpt-6.'), notice('Goal cleared')], 'l1');
+    expect([headline(blocked).text, headline(rerouted).text]).toEqual(['Codex hook PreToolUse (hooks.json) blocked: no', 'Codex ran this turn on gpt-5 instead of gpt-6.']);
+  });
+
+  it('the words of a goal or of what a hook said do not make a failure', () => {
+    const mcp = 'MCP server A did not start, so this agent works without its tools.';
+    for (const plain of ['Goal: fix the failed checkout test', 'Goal: find why the build stopped', 'Codex hook Stop (hooks.json) added context: 2 tests failed', 'Goal: run it on gpt-5 instead of gpt-6']) {
+      const [row] = noticeRows([notice(mcp), notice(plain)], 'l1');
+      expect(headline(row).text).toBe(mcp);
+    }
+    // A goal that is blocked is the core's word, not the goal's.
+    const [goal] = noticeRows([notice('Goal: ship it'), notice('Goal blocked: ship it'), notice('Goal: ship it again')], 'l1');
+    expect(headline(goal).text).toBe('Goal blocked: ship it');
   });
 });
 

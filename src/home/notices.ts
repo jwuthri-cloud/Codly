@@ -58,7 +58,30 @@ export function noticeRows(events: EventRow[], agentId: string): Note[][] {
 }
 
 /**
- * What a row of several notices says next to its newest one: how often it was told when all
+ * A notice that says something went wrong or changed under the agent: an MCP server that did
+ * not start, a hook that blocked, failed, stopped, warned or asked to stop, a turn run on another
+ * model, a goal that is blocked or stopped at a limit. Each is the core's own sentence, matched
+ * from its start (adapters/codex.rs `mcp_start_failed`, `hook_row`, `rerouted_text`,
+ * `goal_text`): what a goal or a hook says is free text, and its words do not count ("Goal: fix
+ * the failed test" is a plain note). The others (a goal, a hook's context, the run's start) are
+ * plain notes.
+ */
+const WORSE = [
+  /^MCP server .+ did not start\b/,
+  /^Codex hook \S+(?: \([^)]*\))? (?:blocked|failed|stopped|reported an error|gave a warning|asked to stop)(?::|$)/,
+  /^Codex ran this turn on .+ instead of /,
+  /^Goal (?:blocked|stopped at)\b/,
+];
+const worse = (n: Note) => WORSE.some((re) => re.test(n.text));
+
+/** The notice a row shows: its newest of the worst kind (a failure before a plain note). */
+export function headline(notes: Note[]): Note {
+  for (let i = notes.length - 1; i >= 0; i--) if (worse(notes[i])) return notes[i];
+  return notes[notes.length - 1];
+}
+
+/**
+ * What a row of several notices says next to its headline: how often it was told when all
  * say the same, how many others the row holds when they differ. Null for a single notice.
  */
 export function moreOf(notes: Note[]): string | null {

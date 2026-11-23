@@ -13,6 +13,7 @@
 //
 // A row's key is made from the id of what it shows (a chat row, a message of the agent, a
 // call, an event), never from its words: an agent that says the same thing twice has two rows.
+import type { Agent } from '../lib/gen/Agent';
 import type { Approval } from '../lib/gen/Approval';
 import type { ChatMessage } from '../lib/gen/ChatMessage';
 import type { MessagePhase } from '../lib/gen/MessagePhase';
@@ -20,7 +21,7 @@ import type { JsonValue } from '../lib/gen/serde_json/JsonValue';
 import { store, type AgentMsg, type Outgoing, type Seg, type SubAgent, type Thought } from '../lib/state/store.svelte';
 import { groupSame } from '../lib/state/approvalGroups';
 import { isSlotNote } from '../lib/state/queue';
-import { killedAt, killLine, stoppedByYou } from '../lib/state/stops';
+import { killedAt, killLine, stoppedByYou, stoppedTurns } from '../lib/state/stops';
 import { isRequestThread } from '../lib/state/ui.svelte';
 import { noticeRows, type Note } from './notices';
 import { canRetry, endedByKill, messageOf, troublesOf, type TroubleKind } from './outcomes';
@@ -167,6 +168,8 @@ export function buildSpine(thread: string): Item[] {
   const owner = store.threadAgent(thread);
   const isLead = isRequestThread(thread);
   const items: Item[] = [];
+  /** When a notice row or a task-done card began (its first note, its first mark): see `lastOfPlan`. */
+  const began = new Map<Item, number>();
 
   // ── persisted chat ──
   const chats = store.chats.filter((c) => c.thread === thread);
@@ -287,14 +290,23 @@ export function buildSpine(thread: string): Item[] {
 
     // ── what its CLI told about the run: one row for a turn, where the newest was told (so
     // after the work it was told in) ──
-    for (const notes of noticeRows(store.events, owner.id))
-      items.push({ kind: 'notice', key: `n:${notes[0].eventId}`, ts: notes[notes.length - 1].ts, agentId: owner.id, notes });
+    for (const notes of noticeRows(store.events, owner.id)) {
+      const row: Item = { kind: 'notice', key: `n:${notes[0].eventId}`, ts: notes[notes.length - 1].ts, agentId: owner.id, notes };
+      items.push(row);
+      began.set(row, notes[0].ts);
+    }
   }
 
   // ── approvals, where they happened (a worker's land in its plan's request) ──
   // The same waiting request from several agents is one card, where the first one asked.
   const here = store.approvals.filter((ap) => (isLead ? store.approvalThread(ap) === thread : ap.agent_id === owner?.id));
   for (const { approval: ap, twins } of groupSame(here)) items.push({ kind: 'approval', key: `a:${ap.id}`, ts: ap.created_at, approval: ap, twins });
+  // A turn you stopped while one of these cards waited: the agent's whose card it is (a worker's
+  // in its request, the agent's own in a 1:1).
+  for (const agentId of new Set(here.filter((ap) => ap.status === 'cancelled').map((ap) => ap.agent_id))) {
+    const agent = store.agentMap.get(agentId);
+    if (agent) items.push(...stoppedWhileWaiting(agent, here));
+  }
 
   // ── finished tasks (observed in this session) ──
   for (const t of store.tasks) {
@@ -302,10 +314,13 @@ export function buildSpine(thread: string): Item[] {
     if (isLead ? store.taskThread(t.id) !== thread : t.assignee !== owner?.id) continue;
     const marks = store.taskMarks[t.id];
     if (!marks?.length) continue;
-    items.push({ kind: 'task-done', key: `d:${t.id}`, ts: marks[marks.length - 1].ts, taskId: t.id });
+    const row: Item = { kind: 'task-done', key: `d:${t.id}`, ts: marks[marks.length - 1].ts, taskId: t.id };
+    items.push(row);
+    began.set(row, marks[0].ts);
   }
 
   items.sort((a, b) => a.ts - b.ts || RANK[a.kind] - RANK[b.kind]);
+  lastOfPlan(items, began);
   uniqueKeys(items);
   // Who speaks is shown once for messages in a row (a work row between two does not count).
   let before: Item | null = null;
@@ -315,6 +330,44 @@ export function buildSpine(thread: string): Item[] {
     before = it;
   }
   return items;
+}
+
+/**
+ * A line for each turn of `agent` that you stopped (Stop, Interrupt, Send now) while one of its
+ * `cards` waited for your answer: the card's closed row says that its CLI stopped, which is how
+ * the CLI tells it; this line says that you did. A turn that a Kill ended has its own line
+ * ("You killed …").
+ */
+function stoppedWhileWaiting(agent: Agent, cards: Approval[]): Item[] {
+  const stopped = stoppedTurns(agent.id);
+  const kills = killedAt(agent.id);
+  const lines: Item[] = [];
+  for (const turn of store.live[agent.id]?.turns ?? []) {
+    const end = turn.end;
+    if (end == null || !stopped.includes(turn.start)) continue;
+    if (endedByKill({ what: 'interrupted', ts: end, turn }, kills)) continue;
+    const waited = cards.some((ap) => ap.agent_id === agent.id && ap.status === 'cancelled' && ap.created_at >= turn.start && ap.created_at <= end);
+    if (waited) lines.push({ kind: 'system', key: `s:${agent.id}:${turn.start}`, ts: end, text: `You stopped ${agent.name} while it waited for your answer`, card: null });
+  }
+  return lines;
+}
+
+/**
+ * A finished plan's card is the last row of its plan: a notice row or a task-done card that
+ * began before the plan's done message goes above the card, also when its last note or mark is
+ * newer (it rides on that). Rows that began later stay below. `items`: sorted; changed in place.
+ */
+function lastOfPlan(items: Item[], began: Map<Item, number>) {
+  for (let i = 0; i < items.length; i++) {
+    const card = items[i];
+    if ((card.kind !== 'system' && card.kind !== 'say') || card.card?.type !== 'plan-done') continue;
+    const earlier = items.slice(i + 1).filter((it) => (began.get(it) ?? Infinity) < card.ts);
+    if (!earlier.length) continue;
+    const moved = new Set(earlier);
+    const after = items.slice(i + 1).filter((it) => !moved.has(it));
+    items.splice(i, items.length - i, ...earlier, card, ...after);
+    i += earlier.length;
+  }
 }
 
 /** The same value, the same list of the same objects, or an object with the same fields. */

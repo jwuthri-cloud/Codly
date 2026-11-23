@@ -36,6 +36,8 @@
   import LoadEarlier from './LoadEarlier.svelte';
   import NextRow from './NextRow.svelte';
   import { buildSpine, keepRows, openStreams, streamText, thinkingText, type Item } from './spine';
+  import { meets, newBelow, nextMove, oldestWaiting, revealTop } from './threadScroll';
+  import { workingTodo } from './todoLine';
   import { copyText, resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
   import { busy, queued, queuedHint, sendNowTip, type Sent } from '../lib/state/queue';
   import { isRequestThread } from '../lib/state/ui.svelte';
@@ -109,25 +111,99 @@
     const last = items[items.length - 1];
     return last?.kind === 'say' && last.streaming;
   });
+  // ── while a card waits for you: it stays where it is (see threadScroll.ts) ──
+  /** The oldest card that waits for your answer: new rows do not move it. */
+  const waitingCard = $derived(oldestWaiting(items));
+  /** The card the thread holds now, and its top in the scroller's box (px from the box's top). */
+  let heldKey: string | null = null;
+  let heldAt = 0;
+  /** You were at the newest line when the thread began to hold a card: it goes back there after the last one. */
+  let followed = false;
+  /** The rows there were when you were last at the newest line: the others below the view are counted. */
+  let seen = new Set<string>();
+  let below = $state(0);
+  const rowEl = (key: string) => list?.querySelector<HTMLElement>(`:scope > li[data-key="${CSS.escape(key)}"]`) ?? null;
+  // From the layout, not the screen box: the newest row rises in (a transform) and must not count.
+  // A row and the scroller have the same offset parent (`.conv`).
+  const offsetOf = (el: HTMLElement) => (scroller ? el.offsetTop - scroller.offsetTop - scroller.scrollTop : 0);
+  const atEnd = () => !!scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 2;
+  function countBelow() {
+    if (!scroller || !list) return (below = 0);
+    const rows = [...list.children].map((li) => ({ key: (li as HTMLElement).dataset.key ?? '', top: offsetOf(li as HTMLElement) }));
+    // The bottom padding fades out: a row that begins there is not in view yet.
+    below = newBelow(rows, seen, scroller.clientHeight - parseFloat(getComputedStyle(scroller).paddingBottom));
+  }
+  /** The held card showed in the view, where it was last held or scrolled to. */
+  const heldShows = (el: HTMLElement) => !!scroller && meets({ top: 0, bottom: scroller.clientHeight }, { top: heldAt, bottom: heldAt + el.offsetHeight });
+  /** The held card back where it was, after rows came in or grew above it. Only when it moved:
+   *  a write to scrollTop ends a smooth scroll on its way (to a card, to the newest line). */
+  function hold(el: HTMLElement) {
+    if (!scroller) return;
+    const moved = offsetOf(el) - heldAt;
+    if (moved) scroller.scrollTop += moved;
+  }
+  /** The card that became the oldest waiting one, whole in view: its command and its buttons. */
+  function reveal(el: HTMLElement) {
+    if (!scroller) return;
+    const top = offsetOf(el);
+    const box = { top, bottom: top + el.offsetHeight };
+    scroller.scrollTop = revealTop(scroller.scrollTop, { top: 0, bottom: scroller.clientHeight }, box, parseFloat(getComputedStyle(scroller).paddingTop));
+  }
+  /** After the rows changed: hold the waiting card, or follow the newest line while you are there (see `nextMove`). */
+  function settle(added: boolean) {
+    if (!scroller) return;
+    const key = waitingCard;
+    const held = heldKey !== null;
+    if (key && !held) followed = atBottom;
+    const el = key ? rowEl(key) : null;
+    const move = nextMove({ card: !!el, fresh: key !== heldKey, held, inView: !!el && heldShows(el), atBottom, followed, added: added || streamingLast });
+    heldKey = key;
+    if (!key) followed = false;
+    if (el && move === 'hold') hold(el);
+    else if (el && move === 'reveal') reveal(el);
+    else if (move === 'bottom') {
+      atBottom = true;
+      toBottom();
+    } else if (move === 'mark') unseen = true;
+    if (el) heldAt = offsetOf(el);
+    // Rows that came in below the held card: you are not at the newest line any more.
+    if (move === 'hold' || move === 'reveal') atBottom = atEnd();
+    if (atBottom) seen = new Set(items.map((it) => it.key));
+    countBelow();
+  }
   function onScroll() {
     if (!scroller) return;
     // Any scroll up lets go of the newest line; coming back down within 60px takes it again.
     const d = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
     atBottom = d < 2 || (scroller.scrollTop >= lastTop && d < 60);
     lastTop = scroller.scrollTop;
-    if (atBottom) unseen = false;
+    if (atBottom) {
+      unseen = false;
+      seen = new Set(items.map((it) => it.key));
+    }
+    // Where you scrolled the held card to is where it stays.
+    const el = heldKey ? rowEl(heldKey) : null;
+    if (el) heldAt = offsetOf(el);
+    countBelow();
   }
   function toBottom(smooth = false) {
     if (!scroller) return;
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth && !ui.reducedMotion ? 'smooth' : 'auto' });
   }
   // A message or a thought being written grows its row without a change of the list: while the
-  // thread's agent writes, the height of the list says when to follow, at most once per frame.
+  // thread's agent writes, the height of the list says when to follow, at most once per frame
+  // (or, while a card waits, to keep the card where it is: the row may grow above it).
   // Not at any other time: a row you open yourself also grows the list, and must stay in place.
   let list: HTMLOListElement | undefined = $state();
   $effect(() => {
     if (!list || !streams) return;
-    const grown = new ResizeObserver(() => atBottom && toBottom());
+    const grown = new ResizeObserver(() => {
+      const el = heldKey ? rowEl(heldKey) : null;
+      if (el && heldShows(el)) {
+        hold(el);
+        countBelow();
+      } else if (atBottom) toBottom();
+    });
     grown.observe(list);
     return () => grown.disconnect();
   });
@@ -137,14 +213,20 @@
     const grew = items.length > lastCount && items[0]?.key === lastFirst;
     lastCount = items.length;
     lastFirst = items[0]?.key;
-    if (atBottom) tick().then(() => toBottom());
-    else if (grew || streamingLast) unseen = true;
+    tick().then(() => settle(grew));
   });
   $effect(() => {
     void thread;
     atBottom = true;
     unseen = false;
-    tick().then(() => toBottom());
+    heldKey = null;
+    followed = false;
+    tick().then(() => {
+      settle(false);
+      // What the thread held when you opened it is not new, wherever the view is.
+      seen = new Set(items.map((it) => it.key));
+      countBelow();
+    });
   });
   // What you just sent is always in view.
   let sentCount = 0;
@@ -152,12 +234,19 @@
     const n = store.outbox.filter((o) => o.thread === thread).length;
     if (n > sentCount) {
       atBottom = true;
-      tick().then(() => toBottom(true));
+      // While a card waits, at once: a smooth scroll would end where the card is held.
+      tick().then(() => toBottom(!heldKey));
     }
     sentCount = n;
   });
 
   const ownerNow = $derived(owner && !isRequest ? narrate(owner.id) : null);
+  /** Its own todo list while it works: "3 of 7 · <the step it is on>". */
+  const ownerTodo = $derived.by(() => {
+    if (!owner) return null;
+    void store.revBy.get(owner.id);
+    return workingTodo(ownerNow?.tone, store.live[owner.id]?.todo ?? []);
+  });
   const backTo = $derived(ui.request);
   const EXAMPLES = [
     'Add a dark mode toggle to Settings, persisted per user',
@@ -172,7 +261,7 @@
       <Portrait agent={owner} size={26} />
       <div class="o-txt">
         <p class="o-name">1:1 with <b>{owner.name}</b><span class="o-prov">{PROVIDER_LABEL[owner.provider]} ({COMPANY_LABEL[owner.provider]}){owner.model ? ` · ${prettyModel(owner.model)}` : ''}</span></p>
-        {#if ownerNow}<p class="o-now truncate"><Say parts={ownerNow.parts} /></p>{/if}
+        {#if ownerNow}<p class="o-now truncate">{#if ownerTodo}<span class="o-todo num">{`${ownerTodo} · `}</span>{/if}<Say parts={ownerNow.parts} /></p>{/if}
       </div>
       <RetryButton task={owner.task_id ? store.taskMap.get(owner.task_id) : null} />
       <button class="btn ghost sm" onclick={() => ui.selectAgent(owner.id)}>Details</button>
@@ -201,7 +290,7 @@
     {:else}
       <ol class="items" bind:this={list}>
         {#each items as it, i (it.key)}
-          <li class="it k-{it.kind}">
+          <li class="it k-{it.kind}" data-key={it.key}>
             {#if it.kind === 'user'}
               {@const q = waiting.get(it.key)}
               {@const failed = it.outgoing?.error ?? null}
@@ -273,7 +362,9 @@
   </div>
 
   <div class="bottom">
-    {#if unseen}
+    {#if below}
+      <button class="newer" onclick={() => toBottom(!streamingLast && !heldKey)}><Icon name="chevron-down" size={13} /><span class="num">{below}</span> new below</button>
+    {:else if unseen}
       <button class="newer" onclick={() => toBottom(!streamingLast)}><Icon name="chevron-down" size={13} />New activity</button>
     {/if}
     <NextRow {thread} queued={waiting.size} />
@@ -296,6 +387,7 @@
   .one > .btn { flex-shrink: 0; }
   .one > .btn:last-child { margin-left: auto; }
   .o-now { font-size: var(--t-sm); color: var(--ink-3); }
+  .o-todo { color: var(--ink-2); }
   .scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; padding: 28px 0 28px; scroll-padding-bottom: 20px; mask-image: linear-gradient(180deg, transparent 0, #000 28px, #000 calc(100% - 10px), transparent 100%); }
   .hero { height: 100%; display: grid; place-items: center; }
   .ex { height: 32px; padding: 0 14px; border-radius: var(--r-full); background: var(--surface-2); color: var(--ink-2); font-size: var(--t-sm); }

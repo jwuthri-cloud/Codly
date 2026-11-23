@@ -1,12 +1,13 @@
 <!--
   One task as a checklist line: state mark, key, title, what it waits on or what it is doing,
-  and who does it (the assigned agent, or the provider the Lead suggested). Used by the plan
-  card in the conversation and by the Plan room's list. Click → the task sheet.
+  and who does it (the assigned agent, or the provider the Lead suggested). A running task whose
+  worker keeps its own todo list says how far it is and the step it is on ("3 of 7 · …"). A task
+  held since Codly restarted says so, not "Starting…". Used by the plan card in the conversation
+  and by the Plan room's list. Click → the task sheet.
 -->
 <script lang="ts">
   import type { Plan } from '../../lib/gen/Plan';
   import type { Task } from '../../lib/gen/Task';
-  import type { Tone } from '../../lib/narrate';
   import { moveTask } from '../../lib/state/actions';
   import { accounts } from '../../lib/state/accounts.svelte';
   import { narrate } from '../../lib/state/narration';
@@ -19,6 +20,9 @@
   import Portrait from '../../components/Portrait.svelte';
   import Say from '../../components/Say.svelte';
   import { retryTarget } from '../../lib/util/retry';
+  import { HELD_LINE, isHeld } from '../../lib/util/held';
+  import { taskTone, waitLine } from '../threadWords';
+  import { workingTodo } from '../todoLine';
   import StateMark from '../../components/StateMark.svelte';
 
   interface Props {
@@ -37,25 +41,24 @@
   const unmet = $derived(deps.filter((d) => d.status !== 'done'));
   const proposing = $derived(!plan || plan.status === 'planning' || plan.status === 'awaiting_approval');
   const keys = (ts: Task[]) => ts.map((t) => t.key).join(', ');
-
-  const tone = $derived.by((): Tone => {
-    if (n?.tone === 'wait') return 'wait';
-    switch (task.status) {
-      case 'running': case 'verifying': case 'reviewing': case 'merging': case 'ready': return 'live';
-      case 'done': return 'done';
-      case 'blocked': case 'failed': case 'changes_requested': return 'blocked';
-      case 'cancelled': return 'off';
-      default: return 'idle';
-    }
+  const held = $derived(isHeld(task));
+  const waits = $derived(waitLine(unmet));
+  /** The worker's own todo list while the task runs and the worker works (the same rule as the Plan room's ring). */
+  const todo = $derived.by(() => {
+    if (task.status !== 'running' || !agent || !n) return null;
+    void store.revBy.get(agent.id);
+    return workingTodo(n.tone, store.live[agent.id]?.todo ?? []);
   });
+
+  const tone = $derived(taskTone({ status: task.status, held, stuck: !!waits?.stuck, proposing, worker: n?.tone ?? null }));
 
   /** What it waits on, or what is happening to it, in one line. */
   const line = $derived.by((): string => {
     switch (task.status) {
       case 'pending':
         if (proposing || !plan) return deps.length ? `After ${keys(deps)}` : plan ? 'Starts right away' : 'In the backlog';
-        return unmet.length ? `Waiting on ${keys(unmet)}` : 'Up next';
-      case 'ready': return unmet.length ? `Waiting on ${keys(unmet)}` : 'Starting…';
+        return waits?.text ?? 'Up next';
+      case 'ready': return held ? HELD_LINE : (waits?.text ?? 'Starting…');
       case 'running': return 'In progress';
       case 'verifying': return task.verify[0] ? `Checking · ${task.verify[0]}` : 'Checking';
       case 'reviewing': return 'In review';
@@ -89,7 +92,8 @@
     {#if detail}<div class="goal"><Markdown text={task.goal} brief /></div>{:else if goal}<span class="goal clamp"><InlineText text={task.goal} /></span>{/if}
     <span class="line">
       {#if task.status === 'pending' && deps.length}<Icon name="branch" size={11} />{/if}
-      {#if n && (task.status === 'running' || n.tone === 'wait')}<Say parts={n.parts} />{:else}<span class="truncate">{line}</span>{/if}
+      {#if todo}<span class="truncate">{todo}</span>
+      {:else if n && (task.status === 'running' || n.tone === 'wait')}<Say parts={n.parts} />{:else}<span class="truncate">{line}</span>{/if}
     </span>
     {#if detail && (task.acceptance.length || task.write_scope.length)}
       <span class="more">
