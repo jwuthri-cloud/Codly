@@ -1470,7 +1470,7 @@ esac
             let path = if kind == IntakeKind::Issue { "issues" } else { "pull" };
             let url = format!("https://github.com/acme/{repo}/{path}/{number}");
             let started = IntakeSource { kind, host: "github.com".into(), owner: "acme".into(), repo: repo.into(), number, url, title: "Dark mode resets".into() };
-            let message = ChatMessage { id: new_id(), thread: "lead".into(), author: "user".into(), text: "Work on it.".into(), attachment: Some(json!({ "intake": started })), ts };
+            let message = ChatMessage { id: new_id(), thread: "lead".into(), author: "user".into(), text: "Work on it.".into(), attachment: Some(json!({ "intake": started })), ts, item_id: None };
             i.emit(Some(&ws.id), row(None, None, None, EventKind::Chat { message })).unwrap();
         };
         let body = async || b.core.draft_pull_request(&source).await.unwrap().body;

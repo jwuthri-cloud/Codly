@@ -307,7 +307,6 @@ export const api = {
   openTakeoverTerminal: (agentId: string) => call<string>('open_takeover_terminal', { agentId }),
   /** Closes that terminal; the agent's next message or task resumes the same session in Codly. */
   giveBackAgent: (agentId: string) => call<TakeoverState>('give_back_agent', { agentId }),
-  listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
   /** A CLI's models with the thinking efforts each one takes, and where the list comes from. */
   modelCatalog: (provider: Provider) => call<ModelCatalog>('model_catalog', { provider }),
   // Add-agent wizard: the core judges hire manifests (import, AI draft) and starts the confirmed one.

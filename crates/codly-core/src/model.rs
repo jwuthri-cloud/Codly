@@ -1203,6 +1203,12 @@ pub struct ChatMessage {
     /// Optional structured attachment, e.g. {"plan_id": "..."} renders a plan card.
     pub attachment: Option<Value>,
     pub ts: i64,
+    /// The agent's message this row shows (`EventKind::Message::item_id`), so the conversation
+    /// shows the message and its row as one. None: the row shows no message of an agent
+    /// (yours, Codly's, a turn result no message carried), or it was stored before rows had it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub item_id: Option<String>,
 }
 
 /// A request you closed, in the list of closed requests. Its messages stay under its archive

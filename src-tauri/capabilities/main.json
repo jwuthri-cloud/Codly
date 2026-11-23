@@ -50,7 +50,6 @@
     "allow-remove-approval-rule",
     "allow-interrupt-agent",
     "allow-stop-agent",
-    "allow-list-models",
     "allow-model-catalog",
     "allow-set-agent-model",
     "allow-set-agent-look",

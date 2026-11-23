@@ -28,11 +28,14 @@ const ev = (agent: string | null, kind: unknown, ts = (clock += 10)): EventRow =
 /** A streamed word: an event that is in no log. */
 const word = (agent: string, item: string, text: string): EventRow => ({ id: 0, ts: (clock += 10), agent_id: agent, task_id: null, run_id: null, kind: { type: 'text_delta', item_id: item, text } });
 const said = (agent: string, item: string, text: string, ts?: number) => ev(agent, { type: 'message', item_id: item, text, phase: 'final' }, ts);
-/** A chat row: what you sent, or what the core posts to the thread right after an agent's message. */
-const chat = (cid: string, thread: string, author: string, text: string, ts = (clock += 10)) =>
-  ev(author === 'user' ? null : author, { type: 'chat', message: { id: cid, thread, author, text, attachment: null, ts } }, ts);
-/** An agent's reply as the core sends it: the message, then its chat row with the same words. */
-const reply = (agent: string, thread: string, item: string, text: string, ts?: number) => [said(agent, item, text, ts), chat(`c-${item}`, thread, agent, text, ts)];
+/** A chat row: what you sent, or what the core posts to the thread right after an agent's
+ *  message (`item`: the id of that message, which the core writes on the row). */
+const chat = (cid: string, thread: string, author: string, text: string, ts = (clock += 10), item?: string) =>
+  ev(author === 'user' ? null : author, { type: 'chat', message: { id: cid, thread, author, text, attachment: null, ts, ...(item ? { item_id: item } : {}) } }, ts);
+/** An agent's reply as the core sends it: the message, then its chat row with the same words and the message's id. */
+const reply = (agent: string, thread: string, item: string, text: string, ts?: number) => [said(agent, item, text, ts), chat(`c-${item}`, thread, agent, text, ts, item)];
+/** A reply whose chat row was stored before rows had the message's id: the row has the words only. */
+const oldReply = (agent: string, thread: string, item: string, text: string, ts?: number) => [said(agent, item, text, ts), chat(`c-${item}`, thread, agent, text, ts)];
 const turn = (agent: string) => ev(agent, { type: 'turn_started', input: null });
 const turnEnd = (agent: string) => ev(agent, { type: 'turn_completed', status: 'completed', result_text: null, duration_ms: null });
 const read = (agent: string, call: string, path: string) => [
@@ -82,7 +85,7 @@ describe('a reply the agent repeats', () => {
     expect(says(rows).map((r) => [r.key, r.streaming, r.text])).toEqual([['say:m1', false, 'Done.'], ['say:m2', false, 'Done.']]);
     keys(rows);
 
-    apply(chat('c-m2', 'lead', 'l1', 'Done.'));
+    apply(chat('c-m2', 'lead', 'l1', 'Done.', undefined, 'm2'));
     rows = keepRows(rows, buildSpine('lead'));
     expect(keys(rows)).toEqual(['say:m1', 'say:m2']);
     expect(rows[0]).toBe(first); // the first reply's row was there all along
@@ -90,6 +93,16 @@ describe('a reply the agent repeats', () => {
 
   it('is two rows when both were said in the same millisecond', () => {
     apply(...reply('l1', 'lead', 'm1', 'Ok.', 2000), ...reply('l1', 'lead', 'm2', 'Ok.', 2000));
+    expect(keys(buildSpine('lead'))).toEqual(['say:m1', 'say:m2']);
+  });
+
+  it('keeps its key when it comes in the millisecond of the first reply’s chat row', () => {
+    // The second message is there, its chat row is not yet. The first chat row still shows the
+    // first message: matched by words and time it would take the second one, the newest with
+    // its words, and the two keys would change places until the second chat row comes.
+    apply(...reply('l1', 'lead', 'm1', 'Ok.', 2000), said('l1', 'm2', 'Ok.', 2000));
+    expect(keys(buildSpine('lead'))).toEqual(['say:m1', 'say:m2']);
+    apply(chat('c-m2', 'lead', 'l1', 'Ok.', 2000, 'm2'));
     expect(keys(buildSpine('lead'))).toEqual(['say:m1', 'say:m2']);
   });
 
@@ -101,6 +114,68 @@ describe('a reply the agent repeats', () => {
   it('is a row next to an equal chat row whose message is not held any more', () => {
     apply(chat('a1', 'lead', 'l1', 'Done.'), ...reply('l1', 'lead', 'm2', 'Done.'));
     expect(keys(buildSpine('lead'))).toEqual(['c:a1', 'say:m2']);
+  });
+});
+
+describe('a chat row shows the message whose id it carries', () => {
+  it('whatever their words are: the words are not compared', () => {
+    apply(said('l1', 'm1', 'Yes, all done.'), said('l1', 'm2', 'Yes.'), chat('c1', 'lead', 'l1', 'Yes.', undefined, 'm1'));
+    const rows = says(buildSpine('lead'));
+    // The row with the id of m1 is the row of m1, though m2 has its words. m2 has no chat row
+    // yet, so it shows where it was said: before the chat row.
+    expect(rows.map((r) => [r.key, r.itemId])).toEqual([['say:m2', 'm2'], ['say:m1', 'm1']]);
+  });
+
+  it('once, when that message is not held any more', () => {
+    apply(chat('c1', 'lead', 'l1', 'Done.', undefined, 'gone'));
+    expect(says(buildSpine('lead')).map((r) => [r.key, r.itemId, r.text])).toEqual([['c:c1', null, 'Done.']]);
+  });
+
+  it('and leaves a later message alone when its CLI uses the id again in another session', () => {
+    // The store holds one message for an id: the second "msg-1" takes the place of the first.
+    apply(...reply('l1', 'lead', 'msg-1', 'First.'), said('l1', 'msg-1', 'Second.'));
+    let rows = says(buildSpine('lead'));
+    // The new reply shows before its chat row has come: the old row does not take it.
+    expect(rows.map((r) => [r.key, r.text])).toEqual([['c:c-msg-1', 'First.'], ['say:msg-1', 'Second.']]);
+    apply(chat('c2', 'lead', 'l1', 'Second.', undefined, 'msg-1'));
+    rows = says(buildSpine('lead'));
+    expect(rows.map((r) => [r.key, r.text])).toEqual([['c:c-msg-1', 'First.'], ['say:msg-1', 'Second.']]);
+  });
+
+  it('and a turn result the core posted with no message shows no message', () => {
+    apply(...reply('l1', 'lead', 'm1', 'Done.'), chat('c2', 'lead', 'l1', 'Done.'));
+    expect(says(buildSpine('lead')).map((r) => [r.key, r.itemId])).toEqual([['say:m1', 'm1'], ['c:c2', null]]);
+  });
+});
+
+describe('a chat row stored before rows had the id', () => {
+  it('shows the message with its words that was said before it', () => {
+    apply(chat('u1', 'lead', 'user', 'Is it done?'), ...oldReply('l1', 'lead', 'm1', 'Yes, all done.'));
+    expect(keys(buildSpine('lead'))).toEqual(['c:u1', 'say:m1']);
+  });
+
+  it('is a row of its own for each reply with the same words', () => {
+    apply(chat('u1', 'lead', 'user', 'Is it done?'), ...oldReply('l1', 'lead', 'm1', 'Yes, all done.'), chat('u2', 'lead', 'user', 'Are you sure?'), ...oldReply('l1', 'lead', 'm2', 'Yes, all done.'));
+    expect(keys(buildSpine('lead'))).toEqual(['c:u1', 'say:m1', 'c:u2', 'say:m2']);
+  });
+
+  it('is two rows when both replies were said in the same millisecond', () => {
+    apply(...oldReply('l1', 'lead', 'm1', 'Ok.', 2000), ...oldReply('l1', 'lead', 'm2', 'Ok.', 2000));
+    expect(keys(buildSpine('lead'))).toEqual(['say:m1', 'say:m2']);
+  });
+
+  it('is a row next to an equal message that has no chat row', () => {
+    apply(said('l1', 'm0', 'On it.'), ...oldReply('l1', 'lead', 'm1', 'On it.'));
+    expect(keys(buildSpine('lead'))).toEqual(['say:m0', 'say:m1']);
+  });
+
+  it('never takes the message of a row that names it', () => {
+    // The old row's own message is not held; a newer one with its words has a row that names it.
+    apply(chat('a1', 'lead', 'l1', 'Done.'), ...reply('l1', 'lead', 'm2', 'Done.'), chat('a3', 'lead', 'l1', 'Done.'));
+    expect(keys(buildSpine('lead'))).toEqual(['c:a1', 'say:m2', 'c:a3']);
+    // An old reply and a new one with the same words: each row has its own message.
+    apply(...oldReply('l1', 'lead', 'm4', 'Fixed.'), ...reply('l1', 'lead', 'm5', 'Fixed.'));
+    expect(keys(buildSpine('lead')).slice(3)).toEqual(['say:m4', 'say:m5']);
   });
 });
 

@@ -1331,8 +1331,19 @@ impl Inner {
     }
 
     fn chat(&self, ws: Option<&str>, thread: &str, author: &str, text: &str, attachment: Option<Value>) -> anyhow::Result<EventRow> {
+        self.post_chat(ws, thread, author, text, attachment, None)
+    }
+
+    /// The chat row of a message an agent said (`EventKind::Message`). It carries the message's
+    /// item id, so the conversation shows the two as one without comparing their words. A
+    /// message whose CLI gave it no id gets a row without one.
+    fn chat_of_message(&self, ws: Option<&str>, thread: &str, author: &str, item_id: &str, text: &str, attachment: Option<Value>) -> anyhow::Result<EventRow> {
+        self.post_chat(ws, thread, author, text, attachment, Some(item_id).filter(|id| !id.is_empty()).map(String::from))
+    }
+
+    fn post_chat(&self, ws: Option<&str>, thread: &str, author: &str, text: &str, attachment: Option<Value>, item_id: Option<String>) -> anyhow::Result<EventRow> {
         let message =
-            ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment, ts: now_ms() };
+            ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment, ts: now_ms(), item_id };
         // Attributed to the agent of a 1:1 thread, or to the agent who wrote it (the Lead).
         let agent = thread.strip_prefix("agent:").or((author != "user" && author != "codly").then_some(author));
         self.emit(ws, row(agent, None, None, EventKind::Chat { message }))

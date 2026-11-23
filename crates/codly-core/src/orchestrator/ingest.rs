@@ -389,10 +389,10 @@ impl Inner {
             EventKind::SessionStarted { session_id: Some(s), .. } => {
                 let _ = self.store.set_run_session(&ctx.run_id, s);
             }
-            EventKind::Message { text, .. } if !text.trim().is_empty() => {
+            EventKind::Message { item_id, text, .. } if !text.trim().is_empty() => {
                 // A Lead turn answering a worker's codly_ask_lead links back to the asker.
                 let reply_to = (ctx.role == Role::Lead).then(|| lock(&self.leads).reply_to(&ctx.agent_id)).flatten();
-                let _ = self.chat(ws, &thread(), &ctx.agent_id, text, reply_to.map(|id| json!({ "reply_to": id })));
+                let _ = self.chat_of_message(ws, &thread(), &ctx.agent_id, item_id, text, reply_to.map(|id| json!({ "reply_to": id })));
             }
             EventKind::TurnCompleted { status, result_text, .. } => {
                 let (had_message, last) = lock(&self.live)

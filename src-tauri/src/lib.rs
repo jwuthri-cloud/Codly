@@ -155,7 +155,6 @@ pub fn run() {
             takeover_commands::open_takeover_terminal,
             takeover_commands::give_back_agent,
             commands::stop_agent,
-            commands::list_models,
             commands::model_catalog,
             commands::set_workspace_team,
             commands::set_request_prefs,
