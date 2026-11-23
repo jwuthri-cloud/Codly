@@ -5,7 +5,7 @@
 // that request's composer (`hand`), and they stay on the diff until the message is sent.
 import type { Task } from '../gen/Task';
 import type { DiffFile } from '../util/diff';
-import { fileMark, fileOwners, heavy, sameSpot, sentIn, withComment, type Anchor, type ReviewComment } from '../util/review';
+import { fileMark, fileOwners, heavy, splitOwners, sameSpot, sentIn, withComment, type Anchor, type ReviewComment } from '../util/review';
 import { store } from './store.svelte';
 
 /** A diff's name here: "task:<id>", "plan:<id>" or "agent:<id>" (a 1:1 agent's whole work). */
@@ -119,12 +119,25 @@ class Review {
 
 export const review = new Review();
 
-/** Which task wrote each file of a plan's or a task's diff (`fileOwners`), from what Codly saw:
- *  the files of its commits, then the ones its agent changes now. */
+/** The files of a task's commits, as Codly saw them. */
+function* committedFiles(t: Task): Generator<string> {
+  for (const m of store.taskMarks[t.id] ?? []) yield* m.files ?? [];
+}
+
+/** The files of a task's commits, then the ones its agent changes now. */
+function* knownFiles(t: Task): Generator<string> {
+  yield* committedFiles(t);
+  const live = t.assignee ? store.live[t.assignee]?.files : null;
+  if (live) for (const [path, f] of Object.entries(live)) if (f.modified) yield path;
+}
+
+/** Which task wrote each file of a task's diff (`fileOwners`), from what Codly saw. */
 export function taskOwners(scope: readonly Task[]): Map<string, Task> {
-  return fileOwners(scope, function* (t) {
-    for (const m of store.taskMarks[t.id] ?? []) yield* m.files ?? [];
-    const live = t.assignee ? store.live[t.assignee]?.files : null;
-    if (live) for (const [path, f] of Object.entries(live)) if (f.modified) yield path;
-  });
+  return fileOwners(scope, knownFiles);
+}
+
+/** Which task each file of a plan's whole diff is of, and so who takes its comments
+ *  (`splitOwners`: a done task's commit wins over a task at work). */
+export function planOwners(scope: readonly Task[]): Map<string, Task> {
+  return splitOwners(scope, committedFiles, knownFiles);
 }

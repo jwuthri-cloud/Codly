@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { Agent } from '../gen/Agent';
 import type { Task } from '../gen/Task';
 import { reviewKey } from '../state/review.svelte';
-import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, diffGroup, fileAnchor, fileOwners, splitByTask, splitWords, type ReviewComment } from '../util/review';
+import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, diffGroup, fileAnchor, fileOwners, splitByTask, splitOwners, splitWords, type ReviewComment } from '../util/review';
 
 const agent = (o: Partial<Agent>) => ({ id: 's1', name: 'Eli', role: 'solo', worktree: '/wt/eli', archived: false, ...o }) as Agent;
 const task = (o: Partial<Task>) => ({ id: 't1', key: 't1', status: 'running', assignee: 'w1', plan_id: 'p1', ...o }) as Task;
@@ -51,10 +51,12 @@ describe('the 1:1 agents the Changes room lists', () => {
   });
 
   it('a file opens in the agent’s own worktree, or in your project folder for an agent that works there', () => {
-    expect(agentEditorPlace(eli, '/repo')).toEqual({ agentId: 's1', tip: 'Opens the file in Eli’s worktree' });
-    expect(agentEditorPlace(agent({ worktree: '/repo' }), '/repo')).toEqual({ agentId: 's1', tip: 'Opens the file in your project folder' });
-    expect(agentEditorPlace(fresh, '/repo').agentId).toBeNull();
-    expect(agentEditorPlace(null, '/repo').agentId).toBeNull();
+    expect(agentEditorPlace(eli, '/repo', null)).toEqual({ agentId: 's1', tip: 'Opens the file in Eli’s worktree' });
+    expect(agentEditorPlace(agent({ worktree: '/repo' }), '/repo', null)).toEqual({ agentId: 's1', tip: 'Opens the file in your project folder' });
+    expect(agentEditorPlace(fresh, '/repo', null).agentId).toBeNull();
+    expect(agentEditorPlace(null, '/repo', null).agentId).toBeNull();
+    // Its last turn while it is on a task is in the task's worktree, not in its own.
+    expect(agentEditorPlace(eli, '/repo', 't2')).toEqual({ agentId: null, tip: 'This file is in the worktree of t2, not in Eli’s own' });
   });
 
   it('the review bar says where Send takes the comments', () => {
@@ -85,6 +87,17 @@ describe('Send back on a plan that still runs', () => {
       ['t1', ['a.ts', 'shared.ts']],
     ]);
     expect(rest.map((c) => c.path)).toEqual(['c.ts', 'd.ts', 'nobody.ts']);
+  });
+
+  it('on a plan’s diff, a file a done task committed is that task’s in any order; a task at work takes only what no done task names', () => {
+    const committed: Record<string, string[]> = { t1: ['a.ts'], t3: ['a.ts', 'c.ts'] };
+    // An agent's files now: Cy (t3, done) has b.ts open again, Ada (t1) has a.ts and e.ts.
+    const now: Record<string, string[]> = { t1: ['a.ts', 'e.ts'], t3: ['b.ts'] };
+    const known = (t: Task) => [...(committed[t.id] ?? []), ...(now[t.id] ?? [])];
+    for (const scope of [[t1, t3], [t3, t1]]) {
+      const owners = splitOwners(scope, (t) => committed[t.id] ?? [], known);
+      expect([owners.get('a.ts'), owners.get('c.ts'), owners.get('e.ts'), owners.get('b.ts')]).toEqual([t3, t3, t1, undefined]);
+    }
   });
 
   it('the split in words, before and after the press', () => {

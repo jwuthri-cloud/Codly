@@ -434,7 +434,8 @@ pub async fn agent_git(state: State<'_, AppState>, agent_id: String) -> R<codly_
 }
 
 /// The Changes room's "All changes" of a 1:1 agent: its commits, its uncommitted edits and its
-/// new files as one diff from where its branch left yours. Read-only.
+/// new files as one diff from where its branch left yours. No file and no index changes (its
+/// own worktree is read as a checkpoint reads it; your project folder is only read).
 #[tauri::command]
 pub async fn agent_diff(state: State<'_, AppState>, agent_id: String) -> R<String> {
     state.core().await?.agent_diff(&agent_id).await.map_err(err)

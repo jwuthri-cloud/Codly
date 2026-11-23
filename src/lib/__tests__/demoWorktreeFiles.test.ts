@@ -1,11 +1,13 @@
 // The browser demo's Git tab and "All changes" of an agent: the files are what the demo agent
 // wrote in its own conversation, the diff has exactly the files the Git tab lists, and an agent
-// that changed nothing lists no file and has an empty diff.
+// that changed nothing lists no file and has an empty diff (and its pull request still drafts).
 import { describe, expect, it } from 'vitest';
 import type { Agent } from '../gen/Agent';
 import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import { mockAgentDiff, mockAgentGit, ownFiles } from '../demo/agentgit';
+import { PullRequestDemo } from '../demo/pullrequest';
+import type { PrDraft } from '../gen/PrDraft';
 import { parseDiff } from '../util/diff';
 
 const eli = { id: 's1', name: 'Eli', role: 'solo', worktree: '/demo/.codly/solo/eli' } as Agent;
@@ -46,5 +48,12 @@ describe('the demo agent’s worktree', () => {
     const none = { ...eli, worktree: null } as Agent;
     expect(mockAgentGit(none, 0, [wrote('s1', null, 'a.ts')]).worktree).toBeNull();
     expect(mockAgentDiff(none, [wrote('s1', null, 'a.ts')])).toBe('');
+  });
+
+  it('the pull request of an agent with no commit of its own is drafted, with no Commits part', () => {
+    const world = { plans: new Map(), tasks: new Map(), agents: new Map([[eli.id, eli]]), chats: [], now: () => 1000 };
+    const draft = new PullRequestDemo().handle('draft_pull_request', { source: { kind: 'agent', id: eli.id } }, world) as PrDraft;
+    expect(draft).toMatchObject({ branch: 'codly/eli', base: 'main', title: "Eli's work" });
+    expect(draft.body).toBe('## Checks\n\nNo checks ran in Codly: Eli worked alone, outside a plan.\n');
   });
 });

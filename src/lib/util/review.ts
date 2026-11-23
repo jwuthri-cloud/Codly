@@ -282,8 +282,10 @@ export function editorPlace(task: Task | null, plan: Plan | null, worker: Agent 
 }
 
 /** Where a file of a 1:1 agent's diff opens: its own worktree (your project folder for an agent
- *  that works there), as it is now. */
-export function agentEditorPlace(agent: Agent | null, projectFolder: string | null): EditorPlace {
+ *  that works there), as it is now. `onTask`: the key of the task whose worktree the diff on
+ *  screen is of (its last turn, while it is on that task): the file is not in its own worktree. */
+export function agentEditorPlace(agent: Agent | null, projectFolder: string | null, onTask: string | null): EditorPlace {
+  if (agent && onTask) return { agentId: null, tip: `This file is in the worktree of ${onTask}, not in ${agent.name}’s own` };
   if (!agent?.worktree) return { agentId: null, tip: 'No worktree has this file' };
   return { agentId: agent.id, tip: agent.worktree === projectFolder ? 'Opens the file in your project folder' : `Opens the file in ${agent.name}’s worktree` };
 }
@@ -326,6 +328,20 @@ export function agentsWithChanges(agents: readonly Agent[], changed: (a: Agent) 
 export function fileOwners(scope: readonly Task[], filesOf: (t: Task) => Iterable<string>): Map<string, Task> {
   const out = new Map<string, Task>();
   for (const t of scope) for (const path of filesOf(t)) if (!out.has(path)) out.set(path, t);
+  return out;
+}
+
+/**
+ * Who takes the comments on each file of a plan's whole diff, for Send back (`splitByTask`).
+ * That diff holds merged work only, and a task is merged on its way to Done: a file that a done
+ * task's commits name is that task's (`committed`), even when a task at work touched it too, so
+ * its comments go to a new request. A task at work takes a file only when no done task names
+ * it (`filesOf`: the files of its commits, then the ones its agent changes now; an agent's
+ * files now are of its current task, not of a task it finished).
+ */
+export function splitOwners(scope: readonly Task[], committed: (t: Task) => Iterable<string>, filesOf: (t: Task) => Iterable<string>): Map<string, Task> {
+  const out = fileOwners(scope.filter((t) => t.status === 'done'), committed);
+  for (const [path, t] of fileOwners(scope.filter((t) => t.status !== 'done'), filesOf)) if (!out.has(path)) out.set(path, t);
   return out;
 }
 

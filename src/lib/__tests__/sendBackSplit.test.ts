@@ -25,6 +25,7 @@ afterEach(() => {
   store.plans = [];
   store.agents = [];
   store.taskMarks = {};
+  store.live = {};
   for (const o of [...store.outbox]) store.dropOutgoing(o.id);
   ui.draftRequests = [];
   ui.composerSeed = null;
@@ -117,6 +118,33 @@ describe('Send back on the diff of a plan that still runs', () => {
       ['error', 'Couldn’t send your comments back to t1', 't1 is merging — your comments stay on the diff.'],
       ['success', 'Comments sent back', '1 comment to Bo (t2); 1 is in a new request'],
     ]);
+  });
+
+  it('a file a done task committed is that task’s, whichever comes first: a task at work that touched it too does not get its comments', async () => {
+    for (const order of [['t1', 't3'], ['t3', 't1']]) {
+      setUp();
+      store.tasks = order.map((id) => tasks.find((t) => t.id === id)!);
+      // Ada (t1, at work) touched a.ts too, in a commit and in her worktree now; Cy's merged t3 wrote the lines on screen.
+      store.taskMarks = { t1: committed(['a.ts']), t3: committed(['a.ts', 'c.md']) };
+      store.live = { w1: { files: { 'a.ts': { modified: true } } } } as unknown as typeof store.live;
+      const core = vi.spyOn(api, 'sendBackTask');
+      expect(await sendBack(target, all)).toBe(true);
+      expect(core, order.join(',')).not.toHaveBeenCalled();
+      expect(ui.composerSeed?.text).toContain('`a.ts:3`');
+      review.clear(key);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('a task at work takes a file no done task names, even one its agent only has in its worktree now', async () => {
+    setUp();
+    store.taskMarks = { t3: committed(['c.md']) };
+    store.live = { w1: { files: { 'a.ts': { modified: true } } }, w3: { files: { 'b.ts': { modified: true } } } } as unknown as typeof store.live;
+    const core = vi.spyOn(api, 'sendBackTask').mockImplementation(async (id) => ({ ...tasks.find((t) => t.id === id)!, status: 'changes_requested' }));
+    expect(await sendBack(target, all)).toBe(true);
+    // Cy's live b.ts is not of the done t3 (an agent's files now are of its current task): it goes to the request.
+    expect(core.mock.calls.map(([id]) => id)).toEqual(['t1']);
+    expect(paths(key).sort()).toEqual(['b.ts', 'c.md']);
   });
 
   it('with no task at work, everything goes to the new request as before', async () => {

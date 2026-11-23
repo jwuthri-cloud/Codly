@@ -1,7 +1,8 @@
 //! A 1:1 agent's whole diff for the Changes room (`Core::agent_diff`): its commits, its
 //! uncommitted edits and its new files, from where its branch left yours, with the worktree and
 //! its index as they were. An agent that works in your project folder itself shows its
-//! uncommitted changes only. No agent CLI runs: the files are written by the test.
+//! uncommitted changes only, read without writing into your repository. No agent CLI runs: the
+//! files are written by the test.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -109,13 +110,21 @@ async fn an_agent_in_the_project_folder_shows_its_uncommitted_changes() {
     assert_eq!(agent.worktree.as_deref(), repo.to_str());
 
     commit(&repo, "done.txt", "committed already\n");
+    commit(&repo, ".gitignore", "*.log\n");
     std::fs::write(repo.join("README.md"), "# demo\nshorter\n").unwrap();
+    std::fs::create_dir_all(repo.join("notes")).unwrap();
+    std::fs::write(repo.join("notes/new.md"), "a new note\n").unwrap();
+    std::fs::write(repo.join("build.log"), "ignored\n").unwrap();
     let before = state(&repo);
+    let objects = git(&repo, &["count-objects", "-v"]);
 
     let diff = core.agent_diff(&agent.id).await.unwrap();
     assert!(diff.contains("+++ b/README.md") && diff.contains("+shorter"), "{diff}");
+    assert!(diff.contains("+++ b/notes/new.md") && diff.contains("+a new note"), "its new file is its work: {diff}");
     assert!(!diff.contains("done.txt"), "what HEAD has is not in it: {diff}");
+    assert!(!diff.contains("build.log"), "an ignored file is not work: {diff}");
     assert_eq!(state(&repo), before, "your checkout and its index are as they were");
+    assert_eq!(git(&repo, &["count-objects", "-v"]), objects, "no object was written into your repository");
     core.shutdown().await;
 }
 

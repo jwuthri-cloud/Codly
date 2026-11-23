@@ -29,8 +29,9 @@ export function ownFiles(agent: Agent, log: readonly EventRow[]): string[] {
   return [...out];
 }
 
-/** `log`: the demo's event log, where its changed files come from; a caller that reads only the
- *  branch (the demo's merge and pull request) leaves it out. */
+/** `log`: the demo's event log, where its changed files come from; a caller that needs no file
+ *  (the demo's merge, and its pull request, which reads the branch and the log) leaves it out.
+ *  The agent has no commit of its own: what it wrote is not committed yet. */
 export function mockAgentGit(agent: Agent | undefined, now: number, log: readonly EventRow[] = []): AgentGit {
   if (!agent?.worktree) return { worktree: null, branch: null, files: [], branches: [], log: [], note: 'This agent has no worktree yet.' };
   const slug = agent.worktree.split('/').pop() ?? agent.name.toLowerCase();

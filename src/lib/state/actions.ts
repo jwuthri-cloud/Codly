@@ -34,7 +34,7 @@ import { flushClosing } from './closing';
 import { ESC_STOP_WINDOW, escStop } from './esc';
 import { busy } from './queue';
 import { requests } from './requests.svelte';
-import { review, reviewKey, taskOwners } from './review.svelte';
+import { planOwners, review, reviewKey } from './review.svelte';
 import { noteKill, noteStop, stopping } from './stops';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
@@ -434,7 +434,7 @@ export async function sendBack(target: { kind: 'plan' | 'task' | 'agent'; id: st
   }
   let rest = list;
   if (!task && plan) {
-    const split = splitByTask(list, taskOwners(store.tasks.filter((t) => t.plan_id === plan.id)));
+    const split = splitByTask(list, planOwners(store.tasks.filter((t) => t.plan_id === plan.id)));
     if (split.tasks.length) {
       const parts: SplitPart[] = [];
       for (const { task: owner, comments } of split.tasks) {

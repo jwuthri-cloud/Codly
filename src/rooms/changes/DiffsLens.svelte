@@ -29,7 +29,7 @@
   import type { Task } from '../../lib/gen/Task';
   import { discardReview, mergePlan, reviewDraft, sendBack, waitingRequest } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
-  import { review, reviewKey, taskOwners } from '../../lib/state/review.svelte';
+  import { planOwners, review, reviewKey, taskOwners } from '../../lib/state/review.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { diffStats, type DiffFile } from '../../lib/util/diff';
@@ -50,18 +50,18 @@
   // Tasks with no plan shown above them: no plan, or a cancelled one.
   const loose = $derived(tasks.filter((t) => !plans.some((p) => p.id === t.plan_id)));
   const merged = $derived(allPlans.filter((p) => settled.has(p.id)));
-  /** 1:1 agents with changes in their worktree, each with how many files Codly saw it change. */
+  /** 1:1 agents with changes in their worktree, as far as Codly saw (its files are per agent, so
+   *  they also hold what it wrote on a task: only the diff says how many are its own). */
   const solo = $derived.by(() => {
     void store.rev;
-    const changed = (id: string) => Object.values(store.live[id]?.files ?? {}).filter((f) => f.modified).length;
     const picked = ui.diffTarget?.kind === 'agent' ? ui.diffTarget.id : null;
-    return agentsWithChanges(store.agents, (a) => changed(a.id) > 0, picked).map((agent) => ({ agent, n: changed(agent.id) }));
+    return agentsWithChanges(store.agents, (a) => Object.values(store.live[a.id]?.files ?? {}).some((f) => f.modified), picked);
   });
   // The request you are on picks its plan first, as in the Plan room.
   const first = $derived(plans.find((p) => p.id === store.planOf(ui.request)?.id) ?? plans[0]);
   const target = $derived(
     ui.diffTarget ??
-      (first ? { kind: 'plan' as const, id: first.id } : tasks[0] ? { kind: 'task' as const, id: tasks[0].id } : merged[0] ? { kind: 'plan' as const, id: merged[0].id } : solo[0] ? { kind: 'agent' as const, id: solo[0].agent.id } : null),
+      (first ? { kind: 'plan' as const, id: first.id } : tasks[0] ? { kind: 'task' as const, id: tasks[0].id } : merged[0] ? { kind: 'plan' as const, id: merged[0].id } : solo[0] ? { kind: 'agent' as const, id: solo[0].id } : null),
   );
   // The chip you are in: a plan's id, 'loose' (tasks with no plan shown), 'merged' or the 1:1 agents.
   const group = $derived(diffGroup(target, (id) => store.taskMap.get(id)?.plan_id, settled, (pid) => plans.some((p) => p.id === pid)));
@@ -92,7 +92,7 @@
   }
   function choose(id: string) {
     if (id === 'loose') ui.diffTarget = { kind: 'task', id: loose[0].id };
-    else if (id === AGENTS_GROUP) ui.diffTarget = { kind: 'agent', id: solo[0].agent.id };
+    else if (id === AGENTS_GROUP) ui.diffTarget = { kind: 'agent', id: solo[0].id };
     else ui.diffTarget = { kind: 'plan', id: id === 'merged' ? merged[0].id : id };
   }
 
@@ -191,10 +191,13 @@
     const worker = targetAgent ?? (lastTurn && targetTask?.assignee ? store.agentMap.get(targetTask.assignee) : null);
     return worker && inTurn(worker.status) ? ` ${worker.name} is working: this is read again when its turn ends.` : '';
   });
-  /** Which task wrote each file (`taskOwners`: the first task of the scope that has it). */
+  /** A 1:1 agent's last turn ran in a task's worktree (it is on that task), not in its own. */
+  const turnTask = $derived(lastTurn && targetAgent ? (turn?.task ?? null) : null);
+  const turnTaskNote = $derived(turnTask && targetAgent ? ` ${targetAgent.name} is on task ${turnTask}: this is its last turn in that task’s worktree, not in its own.` : '');
+  /** Which task wrote each file: on a plan's diff (merged work), a done task's commit first (`planOwners`); on a task's, that task. */
   const ownerTasks = $derived.by(() => {
     void store.rev;
-    return taskOwners(target?.kind === 'plan' ? store.tasks.filter((t) => t.plan_id === target.id) : targetTask ? [targetTask] : []);
+    return target?.kind === 'plan' ? planOwners(store.tasks.filter((t) => t.plan_id === target.id)) : taskOwners(targetTask ? [targetTask] : []);
   });
   /** Which task and agent wrote each file. */
   const owners = $derived(new Map<string, { task: Task; agent: Agent | null }>([...ownerTasks].map(([path, t]) => [path, { task: t, agent: (t.assignee && store.agentMap.get(t.assignee)) || null }])));
@@ -226,7 +229,7 @@
   /** Where a file opens in the editor: the worktree of the task that wrote it, or your
    *  repository once the plan is merged (see `editorPlace`). */
   function placeOf(path: string) {
-    if (target?.kind === 'agent') return agentEditorPlace(targetAgent, store.workspace?.repo_path ?? null);
+    if (target?.kind === 'agent') return agentEditorPlace(targetAgent, store.workspace?.repo_path ?? null, turnTask);
     const task = targetTask ?? owners.get(path)?.task ?? null;
     const planId = target?.kind === 'plan' ? target.id : task?.plan_id;
     const plan = (planId && store.planMap.get(planId)) || null;
@@ -326,10 +329,10 @@
         {/each}
       {:else if group === AGENTS_GROUP}
         <p class="eyebrow">1:1 agents</p>
-        {#each solo as { agent: a, n } (a.id)}
+        {#each solo as a (a.id)}
           <button class="scope" class:on={target?.kind === 'agent' && target.id === a.id} style:--hue={idVar(a.color)} onclick={() => (ui.diffTarget = { kind: 'agent', id: a.id })} onpointerenter={() => ui.setHover({ agentId: a.id })} onpointerleave={() => ui.setHover(null)} data-tip={a.worktree ?? undefined}>
             <span class="dot"></span><span class="s-t truncate">{a.name}</span>
-            {#if n}<span class="s-n">{plural(n, 'file')}</span>{/if}
+            {#if target.kind === 'agent' && target.id === a.id && !lastTurn && loaded === key && files.length}<span class="s-n">{plural(files.length, 'file')}</span>{/if}
           </button>
         {/each}
       {/if}
@@ -366,11 +369,11 @@
       {:else if loading && !files.length}<EmptyState compact title="Loading the diff…" />
       {:else if lastTurn && !turn && !loading && targetAgent}<EmptyState compact title="No turn to show for {targetAgent.name}." body={`Codly keeps the files before each turn in ${targetAgent.name}’s own worktree. No turn ran there yet, or it works in your project folder, where Codly keeps none.${turnNote}`} />
       {:else if lastTurn && !turn && !loading}<EmptyState compact title="No turn to show for this task." body={`Codly keeps the files before each turn in the task’s worktree. That worktree is gone or holds other work now, or no turn ran there yet.${turnNote}`} />
-      {:else if lastTurn && turn && !files.length && !loading}<EmptyState compact title="The last turn changed no file." body={`It started with “${turn.label}” (${ago(turn.ts, ui.now)}).${turnNote}`} />
+      {:else if lastTurn && turn && !files.length && !loading}<EmptyState compact title="The last turn changed no file." body={`It started with “${turn.label}” (${ago(turn.ts, ui.now)}).${turnTaskNote}${turnNote}`} />
       {:else if !files.length && !loading && target.kind === 'agent'}<EmptyState compact title="Nothing changed yet." body={turnNote.trim() || undefined} />
       {:else if !files.length && !loading}<EmptyState compact title="No changes in this scope yet." />
       {:else}
-        {#if lastTurn && turn}<p class="turn-h">Since the turn that started with “{turn.label}” ({ago(turn.ts, ui.now)}). To comment, switch to {wholeLabel}.{turnNote}</p>
+        {#if lastTurn && turn}<p class="turn-h">Since the turn that started with “{turn.label}” ({ago(turn.ts, ui.now)}). To comment, switch to {wholeLabel}.{turnTaskNote}{turnNote}</p>
         {:else if target.kind === 'agent' && turnNote}<p class="turn-h">{turnNote.trim()}</p>{/if}
         {#each files as f (f.path)}
           {@const o = owners.get(f.path)}
