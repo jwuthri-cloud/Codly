@@ -636,7 +636,7 @@ mod tests {
         let first = take(&git, &wt, "ada", "add the form").await;
         std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
         std::fs::write(wt.join("form.txt"), "form\n").unwrap();
-        git.commit_all(&wt, "codly: the turn").await.unwrap().unwrap();
+        git.commit_work(&wt, "codly: the turn").await.unwrap().commit.unwrap();
         let head = sh(&wt, &["rev-parse", "HEAD"]);
 
         let done = put_back(&git, &wt, "ada", first).await.unwrap();
@@ -675,7 +675,7 @@ mod tests {
         let (_d, repo, wt, git) = worktree().await;
         let first = take(&git, &wt, "ada", "start").await;
         std::fs::write(wt.join("a.txt"), "mine\n").unwrap();
-        git.commit_all(&wt, "mine").await.unwrap().unwrap();
+        git.commit_work(&wt, "mine").await.unwrap().commit.unwrap();
         std::fs::write(repo.join("a.txt"), "theirs\n").unwrap();
         sh(&repo, &["commit", "-qam", "theirs"]);
         assert_eq!(git.merge_for_resolution(&wt, "main").await.unwrap(), ["a.txt"]);

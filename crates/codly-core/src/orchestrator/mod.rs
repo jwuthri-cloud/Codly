@@ -45,6 +45,7 @@ pub use breaker_run::{AgentBreaker, BreakerStatus};
 mod controls;
 mod ask_me;
 mod gate;
+mod left_out;
 mod ide;
 mod hires;
 pub mod housekeeping;

@@ -265,6 +265,9 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   over 25 MB (build output or a dependency folder that the repository does not ignore). The task says
   what was left out, its worker is asked once to ignore it, delete it or stage it (`git add`) as work
   before the checks run, and the files stay in the worktree. Checkpoints leave the same paths out.
+  Every commit Codly makes says it in the same way, also the one before a merge, a push or a pull
+  request of a solo agent's branch. When no worker turn follows (you re-run a task's checks or merge
+  it anyway), the task goes on without the files, and the Lead tells you when **Lead follow-ups** is on.
 - Codly changes your branch only when you press a button: **Merge** (a plan's integration branch, or one
   agent's branch, into the branch you have checked out), **Commit** (your own uncommitted changes) and
   **Push** (the branch you have checked out, to its remote, through your own SSH agent).
@@ -297,7 +300,10 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   the repo lists (same syntax as `.gitignore`). Codly copies a file only when git ignores it in your
   checkout and in the new worktree too, so that it stays out of the commits: commit the `.gitignore`
   line first, or the task says that the file was not copied. To copy one file from a folder that git
-  ignores as a whole, write its path (`secrets/dev.env`), not only its name.
+  ignores as a whole, write its path (`secrets/dev.env`), not only its name. Codly remembers what it
+  copied into each worktree: on a branch that does not ignore a copy, its commit leaves the copy out
+  and says so. The worker is then asked for the `.gitignore` line only, never to delete or commit the
+  copy.
 - To try work before you merge it, a finished plan and a solo agent's Git tab have **Run…** and **Open
   in terminal**. Run… runs a command you type (for example `pnpm dev --port $CODLY_PORT_BASE`) in that
   worktree and shows its output. Codly keeps your last command for the repo and never picks one for

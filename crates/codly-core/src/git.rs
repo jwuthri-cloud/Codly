@@ -19,6 +19,13 @@
 //! somebody staged (`git add`) is work, whatever its size, and is committed. A checkpoint
 //! (`snapshot`) leaves out the same paths.
 //!
+//! The same goes for what Codly copied into a worktree from the user's checkout (installed
+//! dependencies, local settings: `orchestrator/worktree_setup.rs`). It is copied only where
+//! the branch ignores it, but a worktree outlives that branch and a branch can lose an ignore
+//! rule. Each copy is on the worktree's record (`note_copied`), and a commit or a checkpoint
+//! on a branch that does not ignore it leaves it out and reports it like the rest. A file
+//! that the branch tracks in a copied folder is the branch's own: its changes are committed.
+//!
 //! The user's checkout is theirs too: Codly never merges into it while they are in the middle
 //! of a merge, rebase or cherry-pick of their own, only aborts a merge it started itself, and
 //! takes a merge back (`undo_merge`) only while that loses nothing.
@@ -61,6 +68,8 @@ const TIMED_OUT: &str = "timed out after";
 const LOCKED: &str = ".lock': File exists";
 /// In the error of a merge that ran out of time and could not be aborted.
 const MERGE_LEFT: &str = "the merge is still in progress";
+/// In a worktree's own git dir: what Codly copied into the worktree (`Git::note_copied`).
+const COPIED_FILE: &str = "codly-copied";
 /// Stable links to the newest forwarded SSH agent, under the home directory (see `Git::push`).
 const AGENT_LINKS: [&str; 2] = [".ssh/agent.sock", ".ssh/ssh_auth_sock"];
 
@@ -104,22 +113,27 @@ pub enum LeftOut {
     Folder { path: String, files: usize },
     /// A new file of more than `MAX_NEW_FILE_BYTES`.
     File { path: String, bytes: u64 },
+    /// A file or folder (`path` ends in `/`) that Codly copied into the worktree
+    /// (`Git::note_copied`), on a branch that does not ignore it. Of a folder, only the new
+    /// files: a change to a file in it that the branch tracks is work, and is committed.
+    Copied { path: String },
 }
 
 impl LeftOut {
     pub fn path(&self) -> &str {
         match self {
-            LeftOut::Folder { path, .. } | LeftOut::File { path, .. } => path,
+            LeftOut::Folder { path, .. } | LeftOut::File { path, .. } | LeftOut::Copied { path } => path,
         }
     }
 }
 
-/// `node_modules/ (20000 new files)`, `data/dump.bin (41 MB)`.
+/// `node_modules/ (20000 new files)`, `data/dump.bin (41 MB)`, `.env (copied in by Codly)`.
 impl std::fmt::Display for LeftOut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LeftOut::Folder { path, files } => write!(f, "{path} ({files} new files)"),
             LeftOut::File { path, bytes } => write!(f, "{path} ({} MB)", bytes >> 20),
+            LeftOut::Copied { path } => write!(f, "{path} (copied in by Codly)"),
         }
     }
 }
@@ -769,21 +783,24 @@ impl Git {
         Ok(flags)
     }
 
-    /// Commit everything in a worktree (`add -A` + commit), without the new folders and files
-    /// that are too big to be work (see the module doc): those stay untracked and are
-    /// reported. No commit when nothing else changed. Also concludes a merge in progress
-    /// (MERGE_HEAD), which is how a worker's conflict resolution becomes a merge commit
-    /// without the worker touching `.git`.
+    /// Commit everything in a worktree (`add -A` + commit), without the new paths that are
+    /// not work (see the module doc: too big, or copied in by Codly): those stay untracked
+    /// and are reported. No commit when nothing else changed. Also concludes a merge in
+    /// progress (MERGE_HEAD), which is how a worker's conflict resolution becomes a merge
+    /// commit without the worker touching `.git`. Every commit Codly makes of an agent's
+    /// work is this one, and the orchestrator puts what it reports on record
+    /// (`orchestrator/left_out.rs`).
     pub async fn commit_work(&self, wt: &Path, message: &str) -> Result<WorkCommit> {
         let [c1, hooks, c2, fsmonitor] = Self::SAFE;
-        let left_out = self.too_big(wt).await?;
+        let left_out = self.not_work(wt, &self.git_path(wt, "--git-dir").await?).await?;
         if !left_out.is_empty() {
             tracing::info!("commit in {}: left out: {}", wt.display(), left_out.iter().map(LeftOut::to_string).collect::<Vec<_>>().join(", "));
         }
-        let add = add_all_but(&left_out);
-        let mut args = vec![c1, hooks, c2, fsmonitor];
-        args.extend(add.iter().map(String::as_str));
-        self.ok(wt, &args, false).await?;
+        for add in add_all_but(&left_out) {
+            let mut args = vec![c1, hooks, c2, fsmonitor];
+            args.extend(add.iter().map(String::as_str));
+            self.ok(wt, &args, false).await?;
+        }
         let files =
             split_z(&self.ok(wt, &[c1, hooks, c2, fsmonitor, "diff", "--cached", "--name-only", "--no-renames", "-z"], false).await?);
         let merging = self.in_merge(wt).await;
@@ -798,17 +815,33 @@ impl Git {
         Ok(WorkCommit { commit: Some(Commit { sha, files }), left_out })
     }
 
-    /// `commit_work`, for a caller that only needs the commit. None when nothing changed.
-    pub async fn commit_all(&self, wt: &Path, message: &str) -> Result<Option<Commit>> {
-        Ok(self.commit_work(wt, message).await?.commit)
+    /// Put `rel` (a file or a folder, no `/` at its end) on the record of what Codly copied
+    /// into the worktree `wt`, before the copy is there. The record is a file in the
+    /// worktree's own git dir: no checkout has it, and it goes with the worktree.
+    pub async fn note_copied(&self, wt: &Path, rel: &str) -> Result<()> {
+        let dir = self.git_path(wt, "--git-dir").await?;
+        let mut record = read_copied(&dir)?;
+        if record.iter().any(|r| r == rel) {
+            return Ok(());
+        }
+        record.push(rel.to_string());
+        // Written beside and moved in: a write that stops half-way does not lose the record.
+        let (file, new) = (dir.join(COPIED_FILE), dir.join(format!("{COPIED_FILE}.new")));
+        let written = std::fs::write(&new, record.join("\0")).and_then(|()| std::fs::rename(&new, &file));
+        written.map_err(|e| anyhow!("cannot write {}: {e}", file.display()))
     }
 
-    /// The new (untracked, not ignored) folders and files of a worktree that are too big to
-    /// be work: what `commit_work` and `snapshot` leave out.
-    async fn too_big(&self, wt: &Path) -> Result<Vec<LeftOut>> {
+    /// The new (untracked, not ignored) paths of a worktree that are not work: what Codly
+    /// copied in, then the folders and files that are too big. This is what `commit_work`
+    /// and `snapshot` leave out. `dir`: the worktree's git dir.
+    async fn not_work(&self, wt: &Path, dir: &Path) -> Result<Vec<LeftOut>> {
         let [c1, hooks, c2, fsmonitor] = Self::SAFE;
         let list = [c1, hooks, c2, fsmonitor, "ls-files", "-z", "--others", "--exclude-standard"];
-        let files = split_z(&self.ok(wt, &list, true).await?);
+        let mut files = split_z(&self.ok(wt, &list, true).await?);
+        // A copy that this branch ignores is not in the list, and one that it tracks is the
+        // branch's own file.
+        let copied = copied_among(&read_copied(dir)?, &files);
+        files.retain(|f| !copied.iter().any(|c| f == c || (c.ends_with('/') && f.starts_with(c.as_str()))));
         let mut folders = vec![];
         // Only with this many new files can a folder hold too many. Then git says which
         // folders are new as a whole (one entry each, ending in `/`).
@@ -823,7 +856,8 @@ impl Git {
             (meta.is_file() && meta.len() > MAX_NEW_FILE_BYTES).then(|| LeftOut::File { path: f.clone(), bytes: meta.len() })
         });
         let big: Vec<LeftOut> = big.collect();
-        Ok(folders.into_iter().map(|(path, files)| LeftOut::Folder { path, files }).chain(big).collect())
+        let copied = copied.into_iter().map(|path| LeftOut::Copied { path });
+        Ok(copied.chain(folders.into_iter().map(|(path, files)| LeftOut::Folder { path, files })).chain(big).collect())
     }
 
     /// Merge `branch` into the worktree's HEAD with a merge commit. On conflict the merge is
@@ -891,7 +925,7 @@ impl Git {
 
     /// Start merging `branch` into the worktree without committing, leaving conflict markers
     /// for an agent to resolve. Returns the conflicted paths (empty = merged cleanly, still
-    /// uncommitted until `commit_all`). Used when a task branch falls behind integration.
+    /// uncommitted until `commit_work`). Used when a task branch falls behind integration.
     pub async fn merge_for_resolution(&self, wt: &Path, branch: &str) -> Result<Vec<String>> {
         let mut args = self.internal_flags(wt).await?;
         args.extend(["merge", "--no-ff", "--no-commit", "--no-verify", branch].map(String::from));
@@ -1008,14 +1042,43 @@ fn split_z(s: &str) -> Vec<String> {
     s.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
 
-/// `git add -A` for everything in a worktree but the paths in `left_out`.
-fn add_all_but(left_out: &[LeftOut]) -> Vec<String> {
-    let mut add = vec!["add".to_string(), "-A".to_string()];
-    if !left_out.is_empty() {
-        add.extend(["--".to_string(), ".".to_string()]);
-        add.extend(left_out.iter().map(|l| format!(":(exclude,literal){}", l.path())));
+/// What Codly copied into a worktree, from the record in its git dir `dir`. No record: no copy.
+fn read_copied(dir: &Path) -> Result<Vec<String>> {
+    let file = dir.join(COPIED_FILE);
+    match std::fs::read_to_string(&file) {
+        Ok(record) => Ok(split_z(&record)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => bail!("cannot read {}: {e}", file.display()),
     }
-    add
+}
+
+/// The entries of `record` (what Codly copied into a worktree) that are among `files`, the
+/// worktree's untracked files that git does not ignore: a folder as `name/`, a file by its
+/// name.
+fn copied_among(record: &[String], files: &[String]) -> Vec<String> {
+    let found = |rel: &String| {
+        let folder = format!("{rel}/");
+        if files.iter().any(|f| f.starts_with(&folder)) { Some(folder) } else { files.contains(rel).then(|| rel.clone()) }
+    };
+    record.iter().filter_map(found).collect()
+}
+
+/// The `git add` calls, in order, that stage everything in a worktree but the paths in
+/// `left_out`: `add -A` without them. A folder that is too big is new as a whole, but a folder
+/// that Codly copied in can hold files that the branch tracks (an older branch of the same
+/// worktree, a file that somebody staged), and leaving the folder out leaves their changes
+/// out too. So with such a folder, `add -u` first takes every change to a tracked file,
+/// wherever it is: only the new files of the folder stay out.
+fn add_all_but(left_out: &[LeftOut]) -> Vec<Vec<String>> {
+    let mut all = vec!["add".to_string(), "-A".to_string()];
+    if left_out.is_empty() {
+        return vec![all];
+    }
+    all.extend(["--".to_string(), ".".to_string()]);
+    all.extend(left_out.iter().map(|l| format!(":(exclude,literal){}", l.path())));
+    let copied_folder = left_out.iter().any(|l| matches!(l, LeftOut::Copied { path } if path.ends_with('/')));
+    let tracked = copied_folder.then(|| vec!["add".to_string(), "-u".to_string()]);
+    tracked.into_iter().chain([all]).collect()
 }
 
 /// The new folders with more than `max` files, as (folder, files in it). `roots`: the
@@ -1193,11 +1256,13 @@ impl Drop for ScratchIndex {
 impl Git {
     /// Everything in the worktree, staged in a private index: tracked and untracked files, no
     /// ignored one, and nothing that `commit_work` leaves out (a huge new folder or file is
-    /// not stored, and not read again at every checkpoint). The index starts as a copy of the
-    /// worktree's own, whose file stats keep git from reading the files that did not change.
+    /// not stored, and not read again at every checkpoint; nor is what Codly copied in, apart
+    /// from the files of a copied folder that the branch tracks). The
+    /// index starts as a copy of the worktree's own, whose file stats keep git from reading
+    /// the files that did not change.
     async fn stage_apart(&self, wt: &Path) -> Result<ScratchIndex> {
-        let left_out = self.too_big(wt).await?;
         let dir = self.git_path(wt, "--git-dir").await?;
+        let left_out = self.not_work(wt, &dir).await?;
         let index = ScratchIndex(dir.join(format!("codly-index-{}", uuid::Uuid::new_v4())));
         // The copy keeps the time of the worktree's index. A file that changed in the second
         // its index was written can have the stats the index knows (the same size, the same
@@ -1215,8 +1280,9 @@ impl Git {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // nothing was ever staged there
             Err(e) => bail!("cannot copy the index of {}: {e}", wt.display()),
         }
-        let add = add_all_but(&left_out);
-        self.on_index(wt, &index, &add.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+        for add in add_all_but(&left_out) {
+            self.on_index(wt, &index, &add.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+        }
         Ok(index)
     }
 
@@ -1274,8 +1340,9 @@ impl Git {
 
     /// Put the worktree's files back to `tree`: files that changed or were deleted since come
     /// back, files that are not in `tree` are removed, and ignored files are left alone. So
-    /// is what `present` left out (a huge new folder or file; `tree` can only write a file
-    /// there that it has itself): it is not kept, so it must not be removed. HEAD, the branch
+    /// is what `present` left out (a huge new folder or file, a copy of Codly's; `tree` can
+    /// only write a file there that it has itself): it is not kept, so it must not be
+    /// removed. HEAD, the branch
     /// and the worktree's own index stay as they are, so the difference shows as uncommitted
     /// changes. `present` is the worktree as it is (`snapshot`): its tree is what to keep if
     /// the present state must not be lost, and with the files already read, this call only
@@ -1495,7 +1562,6 @@ mod tests {
         // The next one has nothing to commit, and says the same.
         let again = git.commit_work(&repo, "snapshot").await.unwrap();
         assert_eq!((again.commit, again.left_out.as_slice()), (None, &left[..]));
-        assert_eq!(git.commit_all(&repo, "snapshot").await.unwrap(), None);
 
         // A checkpoint leaves the same paths out (they are not stored, and not read again at
         // every turn), and a restore leaves them where they are.
@@ -1523,6 +1589,103 @@ mod tests {
         assert!(ignored.left_out.is_empty());
     }
 
+    /// What Codly copied into a worktree is on that worktree's record. While the branch ignores
+    /// it, git does not see it. On a branch that does not, the commit and the checkpoint leave
+    /// it out by name, whatever its size, and a restore leaves it where it is.
+    #[tokio::test]
+    async fn a_commit_leaves_out_what_codly_copied_in() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        std::fs::write(repo.join(".gitignore"), "node_modules/\n.env\n").unwrap();
+        sh(&repo, &["add", ".gitignore"]);
+        sh(&repo, &["commit", "-qm", "ignore"]);
+        // On record before the copy is there, once each. The last one was never copied.
+        for rel in [".env", "node_modules", "node_modules", "config/local.json"] {
+            git.note_copied(&repo, rel).await.unwrap();
+        }
+        std::fs::create_dir_all(repo.join("node_modules/dep")).unwrap();
+        std::fs::write(repo.join("node_modules/dep/index.js"), "x").unwrap();
+        std::fs::write(repo.join(".env"), "TOKEN=1\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "work\n").unwrap();
+        let ignored = git.commit_work(&repo, "work").await.unwrap();
+        assert_eq!(ignored.commit.unwrap().files, ["b.txt"]);
+        assert!(ignored.left_out.is_empty(), "the branch ignores the copies: {:?}", ignored.left_out);
+
+        // The branch loses its rules (an older branch in the same worktree, an edit).
+        std::fs::write(repo.join(".gitignore"), "").unwrap();
+        // A name that only starts like a copied one is work.
+        std::fs::write(repo.join("node_modules.md"), "notes\n").unwrap();
+        let snap = git.commit_work(&repo, "rules").await.unwrap();
+        let left = [LeftOut::Copied { path: ".env".into() }, LeftOut::Copied { path: "node_modules/".into() }];
+        assert_eq!(snap.left_out, left);
+        assert_eq!(left.iter().map(LeftOut::to_string).collect::<Vec<_>>(), [".env (copied in by Codly)", "node_modules/ (copied in by Codly)"]);
+        assert_eq!(snap.commit.unwrap().files, [".gitignore", "node_modules.md"]);
+        let untracked = "?? .env\0?? node_modules/\0";
+        assert_eq!(git.read(&repo, &["status", "--porcelain=v1", "-z"]).await.unwrap(), untracked);
+        let again = git.commit_work(&repo, "rules").await.unwrap();
+        assert_eq!((again.commit, again.left_out.as_slice()), (None, &left[..]));
+
+        // A checkpoint does not keep them, and a restore does not remove them.
+        let tree = git.worktree_tree(&repo).await.unwrap();
+        let kept = git.read(&repo, &["ls-tree", "-r", "--name-only", &tree]).await.unwrap();
+        assert_eq!(kept.lines().collect::<Vec<_>>(), [".gitignore", "a.txt", "b.txt", "node_modules.md"]);
+        std::fs::write(repo.join("later.txt"), "made later\n").unwrap();
+        let present = git.snapshot(&repo).await.unwrap();
+        git.restore_tree(&repo, present, &tree).await.unwrap();
+        assert!(!repo.join("later.txt").exists(), "the restore ran");
+        assert_eq!(std::fs::read_to_string(repo.join(".env")).unwrap(), "TOKEN=1\n");
+        assert!(repo.join("node_modules/dep/index.js").exists());
+
+        // A record that cannot be read stops the commit: nothing is taken by mistake.
+        let record = repo.join(".git").join(COPIED_FILE);
+        std::fs::remove_file(&record).unwrap();
+        std::fs::create_dir(&record).unwrap();
+        std::fs::write(repo.join("c.txt"), "more\n").unwrap();
+        let e = git.commit_work(&repo, "more").await.unwrap_err().to_string();
+        assert!(e.contains("cannot read") && e.contains(COPIED_FILE), "{e}");
+        assert_eq!(git.read(&repo, &["status", "--porcelain=v1", "-z"]).await.unwrap(), "?? .env\0?? c.txt\0?? node_modules/\0");
+    }
+
+    /// A folder that Codly copied in can hold files that the branch tracks. A change to one
+    /// of them is work: the checkpoint and the commit have it, and only the new files of the
+    /// folder stay out.
+    #[tokio::test]
+    async fn a_change_to_a_tracked_file_in_a_copied_folder_is_committed() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        // This branch tracks two files of the folder and ignores nothing.
+        std::fs::create_dir(repo.join("conf")).unwrap();
+        std::fs::write(repo.join("conf/app.json"), "{}\n").unwrap();
+        std::fs::write(repo.join("conf/old.json"), "{}\n").unwrap();
+        sh(&repo, &["add", "conf"]);
+        sh(&repo, &["commit", "-qm", "conf"]);
+        git.note_copied(&repo, "conf").await.unwrap();
+        std::fs::write(repo.join("conf/local.env"), "TOKEN=1\n").unwrap();
+
+        // The agent's work: one tracked file of the folder changed, one deleted.
+        std::fs::write(repo.join("conf/app.json"), "{\"a\": 1}\n").unwrap();
+        std::fs::remove_file(repo.join("conf/old.json")).unwrap();
+        std::fs::write(repo.join("b.txt"), "work\n").unwrap();
+        let tree = git.worktree_tree(&repo).await.unwrap();
+        let kept = git.read(&repo, &["ls-tree", "-r", "--name-only", &tree]).await.unwrap();
+        assert_eq!(kept.lines().collect::<Vec<_>>(), ["a.txt", "b.txt", "conf/app.json"], "the checkpoint has the work, not the copy");
+        assert_eq!(git.read(&repo, &["show", &format!("{tree}:conf/app.json")]).await.unwrap().trim(), "{\"a\": 1}");
+        let snap = git.commit_work(&repo, "work").await.unwrap();
+        assert_eq!(snap.left_out, [LeftOut::Copied { path: "conf/".into() }]);
+        assert_eq!(snap.commit.unwrap().files, ["b.txt", "conf/app.json", "conf/old.json"]);
+        assert_eq!(git.read(&repo, &["show", "HEAD:conf/app.json"]).await.unwrap().trim(), "{\"a\": 1}");
+        assert_eq!(git.read(&repo, &["status", "--porcelain=v1", "-z"]).await.unwrap(), "?? conf/local.env\0");
+
+        // A file that somebody staged there is tracked from then on: a later edit is work too.
+        std::fs::write(repo.join("conf/new.ts"), "export {};\n").unwrap();
+        sh(&repo, &["add", "conf/new.ts"]);
+        std::fs::write(repo.join("conf/new.ts"), "export const a = 1;\n").unwrap();
+        let snap = git.commit_work(&repo, "more").await.unwrap();
+        assert_eq!(snap.left_out, [LeftOut::Copied { path: "conf/".into() }]);
+        assert_eq!(snap.commit.unwrap().files, ["conf/new.ts"]);
+        assert_eq!(git.read(&repo, &["show", "HEAD:conf/new.ts"]).await.unwrap().trim(), "export const a = 1;");
+    }
+
     /// Codly's own commits never run a configured fsmonitor program.
     #[tokio::test]
     async fn internal_commits_do_not_run_fsmonitor() {
@@ -1533,7 +1696,7 @@ mod tests {
         sh(&repo, &["config", "core.fsmonitor", &hook.to_string_lossy()]);
         std::fs::write(repo.join("b.txt"), "b").unwrap();
         let git = Git::from_process_env();
-        assert!(git.commit_all(&repo, "snapshot").await.unwrap().is_some());
+        assert!(git.commit_work(&repo, "snapshot").await.unwrap().commit.is_some());
         assert!(!marker.exists(), "fsmonitor ran during a Codly commit");
     }
 
@@ -1962,7 +2125,7 @@ mod tests {
         std::fs::create_dir(wt.join("later")).unwrap();
         std::fs::write(wt.join("later/made.txt"), "made later\n").unwrap();
         std::fs::write(wt.join("build.log"), "ignored, written later\n").unwrap();
-        git.commit_all(&wt, "the turn").await.unwrap().unwrap();
+        git.commit_work(&wt, "the turn").await.unwrap().commit.unwrap();
         std::fs::write(wt.join("after.txt"), "not committed\n").unwrap();
         let head = out(&wt, &["rev-parse", "HEAD"]);
         let after = git.worktree_tree(&wt).await.unwrap();
@@ -2076,11 +2239,11 @@ mod tests {
         std::fs::write(repo.join("b.txt"), "b\n").unwrap();
         let lock = repo.join(".git/index.lock");
         std::fs::write(&lock, "").unwrap();
-        let e = git.commit_all(&repo, "work").await.unwrap_err();
+        let e = git.commit_work(&repo, "work").await.unwrap_err();
         assert!(transient(&e), "{e:#}");
         assert!(e.to_string().starts_with("git add failed:"), "{e}");
         std::fs::remove_file(&lock).unwrap();
-        let commit = git.commit_all(&repo, "work").await.unwrap().expect("the same call works once the lock is gone");
+        let commit = git.commit_work(&repo, "work").await.unwrap().commit.expect("the same call works once the lock is gone");
         assert_eq!(commit.files, ["b.txt"]);
 
         let e = git.merge(&repo, "no-such-branch", "m", true).await.unwrap_err();

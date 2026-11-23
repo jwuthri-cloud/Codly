@@ -9,9 +9,12 @@
 //! command with a risk nobody allowed) blocks the task for you: its card re-runs the checks
 //! or merges anyway (only a task its checks stopped). Every outcome is a Decision.
 //!
-//! Codly's commit leaves out a huge new folder or file (`git.rs`). The first time, the worker
-//! is asked what it is before anything is checked: the checks run where those files still are,
-//! and would pass on work that the merge does not get. That question uses no round.
+//! Codly's commit leaves out a huge new folder or file (`git.rs`), and the task's record says
+//! so (`left_out.rs`). The first time, the worker is asked what it is before anything is
+//! checked: the checks run where those files still are, and would pass on work that the merge
+//! does not get. That question uses no round. When no worker turn follows (your own pass from
+//! the task's card, a worker that was asked already, a merge Codly concludes), the task goes
+//! on without the files and the Lead hears it.
 //!
 //! A turn that ends with no report (`codly_submit_report`) may not be the worker's finish (it
 //! answered a message of yours, or stopped early): the worker is asked for its report once,
@@ -35,7 +38,7 @@ use tokio::io::AsyncReadExt;
 use super::required_checks::{self, Required};
 use super::scope::ScopeMatcher;
 use super::{Inner, approvals, lock, merge_conflict, names, prompts, row, runs::RunReq, runs::new_session, scheduler};
-use crate::git::{LeftOut, MAX_NEW_FILE_BYTES, MAX_NEW_FOLDER_FILES, MergeOutcome, name_list};
+use crate::git::{LeftOut, MergeOutcome, name_list};
 use crate::model::*;
 use crate::store;
 
@@ -308,12 +311,14 @@ impl Inner {
         }
         // The checks below run where the left-out files still are, so they can pass on work
         // that the commit, and then the merge, does not have. The worker hears it first, once.
-        // (Your own pass goes on: the task's record says what was left out.)
-        if said && pass == Pass::Turn {
-            let asked = std::mem::replace(&mut lock(&self.fix_rounds).entry(task.id.clone()).or_default().left_out, true);
+        if said {
+            let asked = pass == Pass::User || std::mem::replace(&mut lock(&self.fix_rounds).entry(task.id.clone()).or_default().left_out, true);
             if !asked {
                 return self.left_out_round(&task, &worker, &snap.left_out);
             }
+            // No worker turn follows (your own pass has none, and a worker is asked once): the
+            // pass goes on without the files, and the Lead hears what the merge will not have.
+            self.lead_followup(&ws_id, &self.task_thread(&task), &prompts::left_out_unasked(&task, &snap.left_out)).await;
         }
 
         // 3. Verify, in the worktree, as Codly (the worker's own claims are advisory).
@@ -732,34 +737,6 @@ impl Inner {
             bail!("{} has no finished work yet; Retry lets its worker go on", t.key);
         }
         Ok((t, wt))
-    }
-
-    /// Say what Codly's commit in `wt` left out (`Git::commit_work`: a huge new folder or
-    /// file), in the task's record, or in the agent's when it works alone. Every later
-    /// commit leaves the same paths out, so it is said once per task (or agent), and again
-    /// when the paths change (not when a folder only gets more files, or a file grows).
-    /// True = said now.
-    pub(super) fn note_left_out(&self, ws: Option<&str>, agent: Option<&str>, task: Option<&Task>, who: &str, wt: &Path, left: &[LeftOut]) -> Result<bool> {
-        let key = format!("left_out:{}:{}", task.map(|t| t.id.as_str()).or(agent).unwrap_or_default(), wt.display());
-        let paths = json!(left.iter().map(LeftOut::path).collect::<Vec<_>>());
-        if self.store.kv_get(&key)?.unwrap_or_else(|| "[]".into()) == paths.to_string() {
-            return Ok(false);
-        }
-        self.store.kv_set(&key, &paths.to_string())?;
-        if left.is_empty() {
-            return Ok(false);
-        }
-        let list = left.iter().map(LeftOut::to_string).collect::<Vec<_>>().join(", ");
-        let summary = format!(
-            "{who}: Codly did not commit {list}. This looks like build output or downloaded files, not work (a new folder with more \
-             than {MAX_NEW_FOLDER_FILES} files, or a new file over {} MB). It is still in the worktree: add it to .gitignore or delete \
-             it, or commit it yourself if it is work.",
-            MAX_NEW_FILE_BYTES >> 20
-        );
-        let detail = json!({ "plan_id": task.and_then(|t| t.plan_id.clone()), "left_out": paths, "worktree": wt.to_string_lossy() });
-        let kind = EventKind::Decision { id: new_id(), decision_type: "commit".into(), method: "rule".into(), summary, detail };
-        self.emit(ws, row(agent, task.map(|t| t.id.as_str()), None, kind))?;
-        Ok(true)
     }
 
     /// Did its checks stop the task? Then its last decision is the gate's, with one of
@@ -1408,15 +1385,20 @@ impl Inner {
         if started.is_empty() && depth == 0 {
             // It merged cleanly inside the worktree after all: conclude and retry once.
             let _g = self.repo_lock.lock().await;
-            self.git.commit_all(&wt, &format!("codly({}): merge {integ}", task.key)).await?;
+            let snap = self.git.commit_work(&wt, &format!("codly({}): merge {integ}", task.key)).await?;
             drop(_g);
+            // What the checks or the review left there since the task's commit: no worker
+            // turn follows, so the Lead hears what the merge will not have.
+            if self.note_left_out(Some(&ws_id), None, Some(&task), &task.key, &wt, &snap.left_out)? {
+                self.lead_followup(&ws_id, &self.task_thread(&task), &prompts::left_out_unasked(&task, &snap.left_out)).await;
+            }
             return Box::pin(self.merge_task(task_id, depth + 1)).await;
         }
         let files = if started.is_empty() { conflicts } else { started };
         self.fix_round(&task, &worker, Fix::Conflict { files, integration: integ, sha }).await
     }
 
-    async fn finish_task(self: &Arc<Self>, task: &Task, merged: Option<(String, i64)>) -> Result<()> {
+    pub(super) async fn finish_task(self: &Arc<Self>, task: &Task, merged: Option<(String, i64)>) -> Result<()> {
         let ws_id = self.store.task_workspace(&task.id)?;
         let ws = ws_id.as_deref();
         let worker = task.assignee.clone().unwrap_or_default();
@@ -1437,6 +1419,7 @@ impl Inner {
         self.clear_feedback(&task.id)?;
         lock(&self.retries).forget(&task.id);
         self.store.kv_write(&[(checks_key(&task.id), None)])?;
+        self.forget_left_out(&task.id)?;
         // A merged, clean worktree is disposable; anything else is kept.
         if merged.is_some()
             && let (Some(wt), Some(plan_id)) = (task.worktree.as_deref(), task.plan_id.as_deref())
