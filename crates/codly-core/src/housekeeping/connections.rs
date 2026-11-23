@@ -190,10 +190,8 @@ impl SecretStore for KeychainStore {
 
     fn set(&self, account: &str, value: &str) -> anyhow::Result<()> {
         use std::io::Write;
-        anyhow::ensure!(!account.contains(['"', '\'', '\\', ' ', '\n']), "bad account name");
-        let hex: String = value.bytes().map(|b| format!("{b:02x}")).collect();
+        let cmd = add_line(account, value)?;
         let mut child = Command::new("security").arg("-i").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
-        let cmd = format!("add-generic-password -U -s {KEYCHAIN_SERVICE} -a {account} -X {hex}\n");
         child.stdin.take().ok_or_else(|| anyhow::anyhow!("no stdin"))?.write_all(cmd.as_bytes())?;
         let out = child.wait_with_output()?;
         anyhow::ensure!(out.status.success() && out.stderr.is_empty(), "the Keychain refused the key: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -210,6 +208,14 @@ impl SecretStore for KeychainStore {
             .status()?;
         Ok(())
     }
+}
+
+/// The `security -i` line that stores `value`: hex after `-X`, so no character of the key can
+/// end the word or the line.
+fn add_line(account: &str, value: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(!account.contains(['"', '\'', '\\', ' ', '\n']), "bad account name");
+    let hex: String = value.bytes().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("add-generic-password -U -s {KEYCHAIN_SERVICE} -a {account} -X {hex}\n"))
 }
 
 /// All slots of an entry have a key.
@@ -369,6 +375,14 @@ pub(crate) mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn the_keychain_line_carries_the_key_as_hex_on_one_line() {
+        assert_eq!(add_line("github:GITHUB_TOKEN", "a b\"\n").unwrap(), "add-generic-password -U -s codly-mcp -a github:GITHUB_TOKEN -X 612062220a\n");
+        for bad in ["a b", "a\"b", "a'b", "a\\b", "a\nb"] {
+            assert!(add_line(bad, "k").is_err(), "{bad:?}");
+        }
+    }
 
     #[derive(Default)]
     pub struct MemoryStore(RefCell<HashMap<String, String>>);
