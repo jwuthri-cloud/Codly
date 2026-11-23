@@ -198,7 +198,7 @@ function makeDesk(sim: Sim, states: DemoStates, billing = false): Desk {
   const checks = new ChecksDemo(states.checksOn);
   const story = new Story(sim, {
     checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null, ask: states.approval, billing,
-    resumeAsk: states.resumeAsk, background: states.background, failFirstTurn: states.turnFailed,
+    resumeAsk: states.resumeAsk, background: states.background, failFirstTurn: states.turnFailed, twoRequests: states.twoRequests,
   });
   const trouble = states.mergeConflict ? 'conflict' : states.mergeChecks ? 'checks' : null;
   return {

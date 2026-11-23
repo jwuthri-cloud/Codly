@@ -48,6 +48,8 @@ export const REQUEST =
 export const AMEND = 'Also make the toggle fully keyboard-accessible: arrow keys should move between the options.';
 /** The second request, opened in parallel (⌘N) a little later. */
 export const REQUEST_B = 'Lock sign-in for 15 minutes after 5 failed attempts, and tell people clearly when they’re locked out.';
+/** The second request's thread: the same on every page load, so a reload can open on it (`?requests=two`). */
+export const REQUEST_B_THREAD = 'lead:lockout';
 /** The one request of the demo's second office, billing-api: asked before you opened it. */
 export const REQUEST_BILLING = 'Try a failed invoice payment again, once a day and three times at most. After the last try, email the customer.';
 
@@ -162,6 +164,8 @@ export type StoryOptions = {
   background?: boolean;
   /** `?turn=failed`: the first turn of the first 1:1 agent you talk to fails (the API is overloaded). */
   failFirstTurn?: boolean;
+  /** `?requests=two`: both scripted requests are there when the repo opens, not 1.6 and 24 seconds later. */
+  twoRequests?: boolean;
 };
 
 /**
@@ -293,15 +297,25 @@ export class Story {
     if (this.opts.yourRequestFirst) return sim.workspace;
     // The demo's "you": ask for the feature, add a detail while the Lead is still planning (it
     // reads it after its current step, or it queues), then open a second request in parallel.
+    const first = () => {
+      if (!sim.chats.some((c) => c.thread === 'lead' && c.author === 'user')) this.userChat('lead', REQUEST);
+    };
+    const second = () => {
+      if (!sim.chats.some((c) => c.thread.startsWith('lead:') && c.author === 'user')) this.userChat(REQUEST_B_THREAD, REQUEST_B);
+    };
+    // `?requests=two`: both are in the first snapshot, where the UI looks for the request you left.
+    if (this.opts.twoRequests) {
+      first();
+      second();
+    }
     void (async () => {
       await sim.sleep(1600);
-      if (!sim.chats.some((c) => c.thread === 'lead' && c.author === 'user')) this.userChat('lead', REQUEST);
+      first();
       await sim.sleep(5400);
       const lead = this.leadActor('lead');
       if (lead?.inTurn && !this.req('lead').planId && !sim.chats.some((c) => c.thread === 'lead' && c.text === AMEND)) this.userChat('lead', AMEND);
       await sim.sleep(17_000);
-      const others = sim.chats.some((c) => c.thread.startsWith('lead:') && c.author === 'user');
-      if (!others) this.userChat(`lead:${Math.random().toString(36).slice(2, 8)}`, REQUEST_B);
+      second();
     })();
     return sim.workspace;
   }
@@ -1374,9 +1388,12 @@ export class Story {
     for (const [i, s] of steps.entries()) {
       const own = this.helperCalls(act, call, s, i + 1);
       background.waitedIn(act.id, call, own);
-      await act.sleep(each);
-      // Stopped from the agent's sheet meanwhile: its calls ended with it, and the turn goes on.
-      if (background.waiting(act.id, call) === null) return false;
+      // In short slices: stopped from the agent's sheet meanwhile, its calls ended with it, and
+      // the turn goes on at once (recorded: the agent answers about a second after the stop).
+      for (let left = each; left > 0; left -= 250) {
+        await act.sleep(Math.min(250, left));
+        if (background.waiting(act.id, call) === null) return false;
+      }
       act.emit({ type: 'tool_completed', call_id: own, ok: true, output: null, exit_code: null, duration_ms: Math.round(each), tests_passed: null, tests_failed: null });
     }
     background.reported(act.id, call);

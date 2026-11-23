@@ -1,7 +1,11 @@
 // The browser demo's id for its repo, acme/web: one for each browser profile, kept in the
-// browser's storage, as the core keeps an office's id. The UI keeps things per office under it
-// (the request you were last on, the office's look in `codly.sims.<id>`), so after a reload
-// the demo opens where you left it, and the storage holds one office's keys, not one per load.
+// browser's storage, as the core keeps an office's id. The UI keeps the request you were last on
+// under it (`codly.request.<id>`), so with `?requests=two` (both scripted requests there when the
+// page loads) a reload opens on the request you left.
+//
+// The office's look (`codly.sims.<id>`) is not kept: the demo's agents get new ids on each load,
+// so nothing kept under an earlier load applies, and keeping it would add that load's agents to
+// the key on every reload. Every `codly.sims.ws-…` key goes when the page loads.
 import { uid } from './sim';
 
 const KEY = 'codly.demo.workspace';
@@ -18,10 +22,9 @@ export function demoWorkspaceId(): string {
       id = uid('ws-');
       localStorage.setItem(KEY, id);
     }
-    // The look of the demo office under an id of an earlier load (one key was added per load).
     for (let i = localStorage.length - 1; i >= 0; i--) {
       const key = localStorage.key(i);
-      if (key?.startsWith(`${LOOK}ws-`) && key !== `${LOOK}${id}`) localStorage.removeItem(key);
+      if (key?.startsWith(`${LOOK}ws-`)) localStorage.removeItem(key);
     }
     return id;
   } catch {

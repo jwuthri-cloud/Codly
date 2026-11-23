@@ -504,17 +504,17 @@ describe('the MCP servers of a Lead you stop', () => {
 
 describe('the demo states of docs/DEMO.md', () => {
   it('reads each parameter, and a value it does not know starts nothing', () => {
-    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on&turn=failed&pr=open&search=fail'));
+    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on&turn=failed&pr=open&search=fail&requests=two'));
     expect(all).toEqual({
       trustAsk: true, mergeConflict: true, mergeChecks: false, previewRunning: true, checksOn: true, slowHelper: true, planMode: true, intake: 'pull_request', approval: 'question-long', hour: 21.5,
-      resumeAsk: true, background: true, turnFailed: true, prOpen: true, searchFails: true,
+      resumeAsk: true, background: true, turnFailed: true, prOpen: true, searchFails: true, twoRequests: true,
     });
     expect(demoStates(new URLSearchParams('merge=checks'))).toMatchObject({ mergeConflict: false, mergeChecks: true });
     expect(demoStates(new URLSearchParams('intake=issue')).intake).toBe('issue');
-    const none = demoStates(new URLSearchParams('merge=yes&preview=1&checks=off&helper=fast&mode=ask&intake=linear&speed=2&approval=all&hour=24&resume=always&background=off&turn=ok&pr=closed&search=ok'));
+    const none = demoStates(new URLSearchParams('merge=yes&preview=1&checks=off&helper=fast&mode=ask&intake=linear&speed=2&approval=all&hour=24&resume=always&background=off&turn=ok&pr=closed&search=ok&requests=2'));
     expect(none).toEqual({
       trustAsk: false, mergeConflict: false, mergeChecks: false, previewRunning: false, checksOn: false, slowHelper: false, planMode: false, intake: null, approval: null, hour: null,
-      resumeAsk: false, background: false, turnFailed: false, prOpen: false, searchFails: false,
+      resumeAsk: false, background: false, turnFailed: false, prOpen: false, searchFails: false, twoRequests: false,
     });
     // Midnight is an hour; a parameter with no value, or with words, is none.
     expect(['hour=0', 'hour=', 'hour=noon', 'hour=-1'].map((q) => demoStates(new URLSearchParams(q)).hour)).toEqual([0, null, null, null]);
@@ -527,7 +527,7 @@ describe('the demo states of docs/DEMO.md', () => {
     expect(opensRepo({ ...none, approval: 'file' })).toBe(true);
     expect(opensRepo({ ...none, resumeAsk: true })).toBe(true);
     expect(opensRepo({ ...none, background: true })).toBe(true);
-    for (const on of ['mergeChecks', 'turnFailed', 'prOpen', 'searchFails'] as const) expect(opensRepo({ ...none, [on]: true })).toBe(true);
+    for (const on of ['mergeChecks', 'turnFailed', 'prOpen', 'searchFails', 'twoRequests'] as const) expect(opensRepo({ ...none, [on]: true })).toBe(true);
   });
 
   it('a helper shows its kind, its own calls and its report; `?checks=on` runs your checks for each task', async () => {
@@ -889,8 +889,10 @@ describe('“Stop” on a helper whose call waits for it', () => {
     const ended = (call: string) => events(sim, 'tool_completed', ada).find((c) => c.call_id === call);
     expect(ended(own)).toMatchObject({ ok: false });
     expect(ended(row.call_id)).toMatchObject({ ok: false, output: '[Request interrupted by user for tool use]' });
-    // As recorded: the turn that waited for the helper says so and goes on; no turn of its own starts.
-    await until(() => events(sim, 'message', ada).some((m) => m.text.startsWith('The helper was stopped')));
+    // As recorded: the turn that waited for the helper says so and goes on, about a second after
+    // the stop (a slow helper's step is 19 s long: the turn does not wait for its end); no turn of its own starts.
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(events(sim, 'message', ada).some((m) => m.text.startsWith('The helper was stopped'))).toBe(true);
     expect(events(sim, 'turn_completed', ada)).toEqual([]);
     await until(() => sim.taskByKey('t1')?.status === 'done');
     expect(events(sim, 'turn_started', ada)).toHaveLength(1);

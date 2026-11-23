@@ -39,6 +39,8 @@ export type DemoStates = {
   prOpen: boolean;
   /** `?search=fail`: every code search fails. */
   searchFails: boolean;
+  /** `?requests=two`: both scripted requests are there when the page loads. */
+  twoRequests: boolean;
 };
 
 export function demoStates(params: URLSearchParams): DemoStates {
@@ -61,6 +63,7 @@ export function demoStates(params: URLSearchParams): DemoStates {
     turnFailed: params.get('turn') === 'failed',
     prOpen: params.get('pr') === 'open',
     searchFails: params.get('search') === 'fail',
+    twoRequests: params.get('requests') === 'two',
   };
 }
 
@@ -71,6 +74,6 @@ export function demoStates(params: URLSearchParams): DemoStates {
 export function opensRepo(s: DemoStates): boolean {
   return (
     s.mergeConflict || s.mergeChecks || s.previewRunning || s.checksOn || s.slowHelper || s.planMode || s.intake !== null || s.approval !== null || s.resumeAsk || s.background ||
-    s.turnFailed || s.prOpen || s.searchFails
+    s.turnFailed || s.prOpen || s.searchFails || s.twoRequests
   );
 }

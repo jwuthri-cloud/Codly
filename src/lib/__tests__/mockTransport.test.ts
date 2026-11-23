@@ -18,7 +18,7 @@ import type { ResumeOffer } from '../gen/ResumeOffer';
 import type { Snapshot } from '../gen/Snapshot';
 import type { Task } from '../gen/Task';
 import type { Workspace } from '../gen/Workspace';
-import { HELD } from '../demo/story';
+import { HELD, REQUEST, REQUEST_B, REQUEST_B_THREAD } from '../demo/story';
 import { MockTransport } from '../mock';
 import { intakeUi } from '../state/intake.svelte';
 import { ofLiveRun, withMcpServer, type McpServer } from '../state/session';
@@ -238,6 +238,27 @@ describe('the demo transport', () => {
     it('holds nothing without the parameter', async () => {
       expect(await offer(open('?ws=1'))).toBeNull();
     });
+  });
+
+  it('`?requests=two`: after a reload the request you left is in the first snapshot, under the same office', async () => {
+    // The browser's storage, as the page before the reload left it: the demo office's id and
+    // the request you were on in it (state/ui.svelte.ts keeps it per office).
+    const kept = new Map([['codly.demo.workspace', 'ws-0198-7abc'], ['codly.request.ws-0198-7abc', REQUEST_B_THREAD]]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => kept.get(key) ?? null,
+      setItem: (key: string, value: string) => void kept.set(key, value),
+      removeItem: (key: string) => void kept.delete(key),
+      key: (i: number) => [...kept.keys()][i] ?? null,
+      get length() {
+        return kept.size;
+      },
+    });
+    const s = await snapshot(open('?requests=two'));
+    expect(s.workspace).toMatchObject({ id: 'ws-0198-7abc', name: 'acme/web' });
+    const asked = s.chats.filter((c) => c.author === 'user').map((c) => [c.thread, c.text]);
+    expect(asked).toEqual([['lead', REQUEST], [kept.get('codly.request.ws-0198-7abc'), REQUEST_B]]);
+    // Without it, the second request comes later in the script: the first snapshot has only the repo.
+    expect((await snapshot(open('?ws=1'))).chats.filter((c) => c.author === 'user')).toEqual([]);
   });
 
   it('opens billing-api as an office of its own, and acme/web is as you left it when you come back', async () => {
