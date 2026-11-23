@@ -341,6 +341,12 @@ they are build output or third-party code in most repos. If one holds your own c
   worktree, never in the user's checkout: a plan gets one more task that resolves it in the
   integration worktree and passes the gate, then the plan finishes again; a solo agent resolves
   it in its own conversation. Codly never commits a merge while conflict markers are left.
+  A resolution that does not finish leaves nothing behind: when its task is cancelled (also by
+  Cancel plan, which then cancels the resolution and not the finished plan), the plan's branch
+  goes back to where it was before the user's branch came in (`settle_resolution`), and a solo
+  agent's open merge can be taken out of its worktree (`stop_resolving_merge`). A plan that
+  did not start from the checked-out branch is resolved only after the user confirms that
+  branch, like the merge itself.
 - The workspace IDE saves files where its agent works (`ide_write`, `ide_create`): in the
   agent's worktree, or in the user's checkout when the agent has none (the Lead, or an agent
   hired with Git isolation off). It never commits.

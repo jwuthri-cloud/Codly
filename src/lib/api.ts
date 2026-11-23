@@ -373,8 +373,11 @@ export const api = {
   /** What stands between a plan's branch (or a solo agent's) and your branch: the files that conflict,
    *  and the plan's checks that failed on the merge result. Reads only. */
   mergeState: (source: PrSource) => call<MergeState>('merge_state', { source }),
-  /** Have an agent resolve the conflict with your branch, in Codly's own worktree (your checkout is not touched). */
-  resolveMergeConflict: (source: PrSource) => call<MergeState>('resolve_merge_conflict', { source }),
+  /** Have an agent resolve the conflict with your branch, in Codly's own worktree (your checkout is not touched).
+   *  `into`: the branch you confirmed after `mergePlanWarning`, for a plan that did not start from it. */
+  resolveMergeConflict: (source: PrSource, into: string | null = null) => call<MergeState>('resolve_merge_conflict', { source, into }),
+  /** Stop a solo agent's conflict resolution: the merge is taken out of its worktree, its branch is as before. */
+  stopResolvingMerge: (agentId: string) => call<MergeState>('stop_resolving_merge', { agentId }),
   /** What to confirm before merging a plan: your checkout is not on the branch it started from (null: nothing). */
   mergePlanWarning: (planId: string) => call<MergeWarning | null>('merge_plan_warning', { planId }),
   /** Undo the last merge Codly made into your branch (`sha` from `repoSync().last_merge`). */

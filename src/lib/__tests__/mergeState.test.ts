@@ -3,12 +3,12 @@ import { api } from '../api';
 import type { MergeState } from '../gen/MergeState';
 import type { PrSource } from '../gen/PrSource';
 import { mergeAgent, mergePlan } from '../state/actions';
-import { fileList, loadMergeState, mergeByHand, mergeKey, mergeUi, resolveMergeConflict } from '../state/mergeState.svelte';
+import { fileList, loadMergeState, mergeByHand, mergeKey, mergeUi, resolveMergeConflict, stopResolvingMerge } from '../state/mergeState.svelte';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 
 const plan: PrSource = { kind: 'plan', id: 'p1' };
-const clean: MergeState = { target: 'main', branch: 'codly/dark-mode-ab12/integration', repo: '/Users/me/web', conflicts: [], resolving: null, failed_checks: [] };
+const clean: MergeState = { target: 'main', branch: 'codly/dark-mode-ab12/integration', repo: '/Users/me/web', conflicts: [], resolving: null, failed_checks: [], checks_not_run: null };
 const conflict: MergeState = { ...clean, conflicts: ['src/theme.ts', 'README.md'] };
 const said = () => toasts.list.map((t) => [t.kind, t.title, t.body]);
 
@@ -63,7 +63,7 @@ describe('a merge that cannot go straight in', () => {
 
     stop!.action!.run();
     await vi.waitFor(() => expect(toasts.list.some((t) => t.title === 'An agent is resolving the conflict')).toBe(true));
-    expect(resolve).toHaveBeenCalledWith(plan);
+    expect(resolve).toHaveBeenCalledWith(plan, null);
     expect(mergeUi.states[mergeKey(plan)]?.resolving).toBe('t9');
     // The task that resolves it is one click away.
     expect(toasts.list.find((t) => t.title === 'An agent is resolving the conflict')?.action?.label).toBe('Open the task');
@@ -101,9 +101,67 @@ describe('a merge that cannot go straight in', () => {
       .mockResolvedValueOnce({ ...clean, branch: 'codly/solo/ada-1f2e', conflicts: ['notes.md'] })
       .mockRejectedValueOnce(new Error('Ada is still working; ask again when its turn ends'));
     expect(await resolveMergeConflict(agent, 'Ada')).toBe(true);
-    expect(core).toHaveBeenCalledWith(agent);
+    expect(core).toHaveBeenCalledWith(agent, null);
     expect(said().at(-1)).toEqual(['success', 'An agent is resolving the conflict', 'Ada resolves it in its conversation. Merge again when its turn ends.']);
     expect(await resolveMergeConflict(agent, 'Ada')).toBe(false);
     expect(said().at(-1)).toEqual(['error', 'Couldn’t have an agent resolve it', 'Ada is still working; ask again when its turn ends']);
+  });
+
+  it('a plan that started from another branch is resolved only after you confirm that branch', async () => {
+    const warning = { target: 'feature-x', message: 'This plan started from main, and your checkout is on feature-x now.' };
+    const warn = vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(warning);
+    const resolve = vi.spyOn(api, 'resolveMergeConflict').mockResolvedValue({ ...conflict, target: 'feature-x', resolving: 't9' });
+    expect(await resolveMergeConflict(plan)).toBe(false);
+    expect(resolve).not.toHaveBeenCalled();
+    const ask = toasts.list.find((t) => t.title === 'Bring feature-x into this plan?');
+    expect(ask?.kind).toBe('attention');
+    expect(ask?.body).toBe(
+      'This plan started from main, and your checkout is on feature-x now. To resolve the conflict, an agent brings feature-x into the plan’s branch: from then on the plan builds on feature-x.',
+    );
+    expect(ask?.action?.label).toBe('Go on');
+
+    // Go on: the branch you confirmed goes with the request, and nothing asks twice.
+    ask!.action!.run();
+    await vi.waitFor(() => expect(resolve).toHaveBeenCalledWith(plan, 'feature-x'));
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('checks that could not run on the merge result stop the merge until you choose Merge anyway', async () => {
+    vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(null);
+    const why = 'the plan’s checks could not run on the merge result, so nothing was merged and main is unchanged: .codly/setup.sh failed (exit 1)';
+    const merge = vi.spyOn(api, 'mergePlan').mockRejectedValueOnce(new Error(why)).mockResolvedValueOnce('abc1234def');
+    vi.spyOn(api, 'mergeState').mockResolvedValue({ ...clean, checks_not_run: '.codly/setup.sh failed (exit 1)' });
+    const chat = vi.spyOn(api, 'sendChat');
+    await mergePlan('p1');
+    expect(chat).not.toHaveBeenCalled();
+    const stop = toasts.list.find((t) => t.title === 'Not merged into main');
+    expect([stop?.body, stop?.action?.label]).toEqual([why, 'Merge anyway']);
+
+    stop!.action!.run();
+    await vi.waitFor(() => expect(merge).toHaveBeenLastCalledWith('p1', null, true));
+    await vi.waitFor(() => expect(store.mergeOf('p1')?.sha).toBe('abc1234def'));
+  });
+
+  it('a solo agent that is on the conflict can be stopped; a merge then says what is left', async () => {
+    const agent: PrSource = { kind: 'agent', id: 'a1' };
+    const open: MergeState = { ...clean, branch: 'codly/solo/ada-1f2e', conflicts: ['notes.md'], resolving: 'a1' };
+    // Merge while it is on it: the core's own words, and no second "have it resolve it".
+    const left = 'Ada has not finished resolving a merge: notes.md still has conflict markers. Ask it to finish, then try again.';
+    vi.spyOn(api, 'mergeAgent').mockRejectedValue(new Error(left));
+    vi.spyOn(api, 'mergeState').mockResolvedValue(open);
+    expect(await mergeAgent('a1')).toBe(false);
+    const stop = toasts.list.find((t) => t.kind === 'error');
+    expect([stop?.body, stop?.action]).toEqual([left, undefined]);
+
+    const core = vi
+      .spyOn(api, 'stopResolvingMerge')
+      .mockResolvedValueOnce({ ...open, resolving: null })
+      .mockRejectedValueOnce(new Error('Ada is not resolving a merge'));
+    expect(await stopResolvingMerge('a1', 'Ada')).toBe(true);
+    expect(core).toHaveBeenCalledWith('a1');
+    expect(mergeUi.states[mergeKey(agent)]?.resolving).toBeNull();
+    expect(said().at(-1)).toEqual(['success', 'Stopped resolving', 'Ada’s branch is as it was before the merge. The conflict is still there.']);
+    expect(await stopResolvingMerge('a1', 'Ada')).toBe(false);
+    expect(said().at(-1)).toEqual(['error', 'Couldn’t stop resolving', 'Ada is not resolving a merge']);
   });
 });

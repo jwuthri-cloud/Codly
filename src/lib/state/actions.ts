@@ -241,11 +241,11 @@ export async function mergePlan(planId: string, into: string | null = null, unch
     const state = await loadMergeState(source);
     if (state?.conflicts.length) {
       const body = `${state.target} and this plan both changed ${fileList(state.conflicts)}. ${state.target} is unchanged. An agent can resolve it in Codly’s own worktree, or you can do it yourself: see the plan’s card.`;
-      const resolve = { label: 'Have an agent resolve it', run: () => void resolveMergeConflict(source) };
+      const resolve = { label: 'Have an agent resolve it', run: () => void resolveMergeConflict(source, null, into) };
       toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${state.target}`, body, action: resolve, duration: 0 });
       return;
     }
-    if (state?.failed_checks.length) {
+    if (state?.failed_checks.length || state?.checks_not_run) {
       const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, into, true) };
       toastsUpdate(id, { kind: 'error', title: `Not merged into ${state.target}`, body: msg(e), action: goOn, duration: 0 });
       return;
@@ -267,10 +267,11 @@ export async function mergeAgent(agentId: string): Promise<boolean> {
     toastsUpdate(id, { kind: 'success', title: `Merged into ${target}`, body: `${a?.name ?? 'Agent'} · ${shortSha(sha)}` });
     return true;
   } catch (e) {
-    // A conflict can go back to the agent: it resolves it in its own worktree.
+    // A conflict can go back to the agent: it resolves it in its own worktree. Not while it
+    // is on it already: then the core's own words say what is left to do.
     const source = { kind: 'agent' as const, id: agentId };
     const state = await loadMergeState(source);
-    if (state?.conflicts.length) {
+    if (state?.conflicts.length && !state.resolving) {
       const who = a?.name ?? 'the agent';
       const body = `${state.target} and ${who} both changed ${fileList(state.conflicts)}. ${state.target} is unchanged.`;
       const resolve = { label: `Have ${who} resolve it`, run: () => void resolveMergeConflict(source, a?.name ?? null) };

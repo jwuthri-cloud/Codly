@@ -21,11 +21,18 @@ repo: string,
  */
 conflicts: Array<string>, 
 /**
- * The plan's task that resolves the conflicts, while it is not finished.
+ * Who resolves the conflicts now: the plan's task, while it is not finished; the solo
+ * agent, while the merge Codly started is open in its worktree.
  */
 resolving: string | null, 
 /**
  * The plan's checks that failed on the result of this very merge the last time it was
  * tried (the merge was not made). Empty once either branch moved.
  */
-failed_checks: Array<string>, };
+failed_checks: Array<string>, 
+/**
+ * Why the plan's checks could not run on the result of this very merge the last time it
+ * was tried (the worktree for them could not be set up; the merge was not made). None
+ * once either branch moved.
+ */
+checks_not_run: string | null, };

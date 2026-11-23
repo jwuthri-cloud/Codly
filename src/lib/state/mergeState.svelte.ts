@@ -4,6 +4,7 @@
 // is polled. An agent resolves a conflict in Codly's own worktree: your checkout is not touched.
 import { api } from '../api';
 import type { MergeState } from '../gen/MergeState';
+import type { MergeWarning } from '../gen/MergeWarning';
 import type { PrSource } from '../gen/PrSource';
 import { toast, toasts } from './toasts.svelte';
 import { ui } from './ui.svelte';
@@ -54,24 +55,54 @@ export async function loadMergeState(source: PrSource): Promise<MergeState | nul
   }
 }
 
-/** Have an agent resolve it. `who`: the solo agent's name; a plan gets a task of its own. */
-export async function resolveMergeConflict(source: PrSource, who: string | null = null): Promise<boolean> {
+/** Have an agent resolve it. `who`: the solo agent's name; a plan gets a task of its own. When
+ *  your checkout is not on the branch the plan started from, nothing starts yet: a toast says
+ *  what that brings and offers to go on (`into` is then the branch you confirmed). */
+export async function resolveMergeConflict(source: PrSource, who: string | null = null, into: string | null = null): Promise<boolean> {
+  if (source.kind === 'plan' && !into) {
+    let warning: MergeWarning | null;
+    try {
+      warning = await api.mergePlanWarning(source.id);
+    } catch (e) {
+      toast({ kind: 'error', title: 'Couldn’t have an agent resolve it', body: msg(e) });
+      return false;
+    }
+    if (warning) {
+      const target = warning.target;
+      const goOn = { label: 'Go on', run: () => void resolveMergeConflict(source, who, target) };
+      const body = `${warning.message} To resolve the conflict, an agent brings ${target} into the plan’s branch: from then on the plan builds on ${target}.`;
+      toast({ kind: 'attention', title: `Bring ${target} into this plan?`, body, action: goOn, duration: 0 });
+      return false;
+    }
+  }
   const id = toast({ kind: 'progress', title: 'Bringing your branch into Codly’s own worktree…' });
   try {
-    const merge = await api.resolveMergeConflict(source);
+    const merge = await api.resolveMergeConflict(source, into);
     mergeUi.states[mergeKey(source)] = merge;
     const body = !merge.conflicts.length
       ? `No conflict after all.${source.kind === 'plan' ? ' The plan’s checks run again; then you can merge it.' : ' You can merge it now.'}`
       : source.kind === 'plan'
         ? 'A task of the plan resolves it. When the plan is checked again, you can merge it.'
         : `${who ?? 'The agent'} resolves it in its conversation. Merge again when its turn ends.`;
-    // The plan's new task is on the board: one click away.
-    const task = merge.resolving;
+    // The plan's new task is on the board: one click away. (A solo agent has no task.)
+    const task = source.kind === 'plan' ? merge.resolving : null;
     const action = task ? { label: 'Open the task', run: () => ui.selectTask(task) } : undefined;
     toasts.update(id, { kind: 'success', title: merge.conflicts.length ? 'An agent is resolving the conflict' : `${merge.target} is in Codly’s branch now`, body, action });
     return true;
   } catch (e) {
     toasts.update(id, { kind: 'error', title: 'Couldn’t have an agent resolve it', body: msg(e) });
+    return false;
+  }
+}
+
+/** Stop a solo agent's conflict resolution: the merge is taken out of its worktree. */
+export async function stopResolvingMerge(agentId: string, who: string | null = null): Promise<boolean> {
+  try {
+    mergeUi.states[mergeKey({ kind: 'agent', id: agentId })] = await api.stopResolvingMerge(agentId);
+    toast({ kind: 'success', title: 'Stopped resolving', body: `${who ?? 'The agent'}’s branch is as it was before the merge. The conflict is still there.` });
+    return true;
+  } catch (e) {
+    toast({ kind: 'error', title: 'Couldn’t stop resolving', body: msg(e) });
     return false;
   }
 }

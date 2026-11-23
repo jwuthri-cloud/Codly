@@ -378,10 +378,17 @@ impl Inner {
             PlanStatus::Running | PlanStatus::Integrating => Some(self.merge_lock.lock().await),
             _ => None,
         };
-        self.update_plan(&plan.id, |p| {
-            p.status = PlanStatus::Cancelled;
-            Ok(())
-        })?;
+        // A plan that was finished and runs again only to resolve a conflict with your branch:
+        // the resolution is cancelled, not the finished work. The plan stays running, and its
+        // next pass finishes it again as it was (`settle_resolution` takes the merge back).
+        let resolving = plan.status == PlanStatus::Running && self.open_resolution(plan)?.is_some();
+        if !resolving {
+            self.update_plan(&plan.id, |p| {
+                p.status = PlanStatus::Cancelled;
+                Ok(())
+            })?;
+        }
+        let what = if resolving { "conflict resolution" } else { "plan" };
         for t in self.store.plan_tasks(&plan.id)? {
             if matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled) {
                 continue;
@@ -391,19 +398,20 @@ impl Inner {
             // `by_user`: a cancel takes a blocked task too (the loop must not stop halfway).
             self.update_task_as(&t.id, true, |t| {
                 t.status = TaskStatus::Cancelled;
-                t.status_reason = Some(format!("plan {why}"));
+                t.status_reason = Some(format!("{what} {why}"));
                 Ok(())
             })?;
             self.release_task_agents(&t);
         }
         // Branches and worktrees are kept: never delete unmerged work.
-        self.decide(
-            Some(&plan.workspace_id),
-            None,
-            "schedule",
-            format!("plan \"{}\" {why}", prompts::clip(&plan.summary, 60)),
-            json!({ "plan_id": plan.id }),
-        )?;
+        let summary = match resolving {
+            true => format!("the conflict resolution of plan \"{}\" was {why}; the plan finishes again as it was", prompts::clip(&plan.summary, 60)),
+            false => format!("plan \"{}\" {why}", prompts::clip(&plan.summary, 60)),
+        };
+        self.decide(Some(&plan.workspace_id), None, "schedule", summary, json!({ "plan_id": plan.id }))?;
+        if resolving {
+            self.kick();
+        }
         Ok(())
     }
 
@@ -1235,13 +1243,13 @@ impl Inner {
             .as_array()
             .map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let wt = plan.integration_worktree.as_deref().map(PathBuf::from);
-        // A conflict resolution you cancelled half-way leaves no open merge behind: the checks
-        // run on the branch as the finished tasks left it.
-        if let Some(wt) = &wt {
+        // A conflict resolution that did not finish (you cancelled its task) is taken back: the
+        // checks run on the branch as the finished tasks left it.
+        let plan = &{
             let _g = self.repo_lock.lock().await;
-            self.git.abort_merge(wt).await?;
-        }
+            self.settle_resolution(plan).await?
+        };
+        let wt = plan.integration_worktree.as_deref().map(PathBuf::from);
         let mut failed = vec![];
         // Not run: the approval rules see a risk in them, and nobody could allow them.
         let mut refused: Vec<HeldCheck> = vec![];

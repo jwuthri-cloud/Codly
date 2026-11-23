@@ -309,8 +309,10 @@ export class MockTransport implements Transport {
         const source = a.source as PrSource;
         const branch = source.kind === 'plan' ? sim.plans.get(source.id)?.integration_branch : mockAgentGit(sim.agents.get(source.id), sim.now()).branch;
         if (!branch) throw new Error(source.kind === 'plan' ? 'the plan never ran, so there is nothing to merge' : 'this agent has no worktree yet, so there is nothing to merge');
-        return { target: 'main', branch, repo: sim.workspace?.repo_path ?? '', conflicts: [], resolving: null, failed_checks: [] } satisfies MergeState;
+        return { target: 'main', branch, repo: sim.workspace?.repo_path ?? '', conflicts: [], resolving: null, failed_checks: [], checks_not_run: null } satisfies MergeState;
       }
+      case 'stop_resolving_merge':
+        throw new Error(`${sim.agents.get(String(a.agentId))?.name ?? 'This agent'} is not resolving a merge`); // the demo never starts one
       case 'merge_agent': {
         const sha = Math.random().toString(16).slice(2, 12).padEnd(10, '0');
         this.demoMerge = { sha, branch: 'main', plan_id: null, agent_id: String(a.agentId) };

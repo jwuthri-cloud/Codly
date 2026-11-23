@@ -745,6 +745,13 @@ impl Git {
         Ok(true)
     }
 
+    /// Put the branch of one of Codly's own worktrees back to `sha`: the commits after it, a
+    /// merge left open and the changes to tracked files go. Never for the user's checkout.
+    pub async fn reset_to(&self, wt: &Path, sha: &str) -> Result<()> {
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        self.ok(wt, &[c1, hooks, c2, fsmonitor, "reset", "--hard", "--quiet", sha], false).await.map(drop)
+    }
+
     /// Take back the merge commit `merged` of `source` in the user's checkout: `branch` goes
     /// back to `before`, the commit it was at. Refused with the reason unless
     /// `undo_merge_blocker` finds it safe. The merged work always stays on a branch: when

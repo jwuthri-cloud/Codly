@@ -844,7 +844,7 @@ impl Inner {
         }
     }
 
-    async fn other_branch_warning(&self, repo: &Path, p: &Plan, target: &str) -> anyhow::Result<Option<MergeWarning>> {
+    pub(super) async fn other_branch_warning(&self, repo: &Path, p: &Plan, target: &str) -> anyhow::Result<Option<MergeWarning>> {
         let Some(base) = p.base_commit.as_deref() else { return Ok(None) };
         let from = p.base_branch.as_deref().filter(|b| *b != target);
         // Commits the plan was built on that the checked-out branch does not have: the merge
@@ -897,6 +897,12 @@ impl Inner {
         let branch = p.integration_branch.clone().ok_or_else(|| anyhow!("the plan never ran, so there is nothing to merge"))?;
         let ws = self.store.workspace(&p.workspace_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
         let repo = PathBuf::from(&ws.repo_path);
+        // A conflict resolution that did not finish is not merged: it is taken back first, if
+        // the plan's last pass could not do it.
+        let p = {
+            let _g = self.repo_lock.lock().await;
+            self.settle_resolution(&p).await?
+        };
         // Before the repo lock: the checks can take minutes.
         let checked = match unchecked {
             true => None,
