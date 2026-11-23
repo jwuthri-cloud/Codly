@@ -1,10 +1,12 @@
 <!--
-  The toast stack: top right, under the top bar (and under the Resume bar while that one shows),
+  The toast stack: top right, under the top bar (and under the Resume bar while that one shows;
+  not while the editor overlay is drawn over that bar),
   so it never sits on the composer's Send or a sheet's footer. While the agent or task sheet is open the stack moves left of it, off the
   sheet's own controls. Dialogs are drawn above it. The newest toast is at the top.
   Nothing on the page moves for a toast: the stack lies over the page. It is put where it covers
-  nothing you can press: if a control of the page is under it, it goes down to just under that
-  control, a few times at most, not far and never out of the window (lib/util/toastPlace.ts).
+  nothing you can press, and on no card that waits for your answer: if one is under it, it goes
+  down to just under it, a few times at most, not far and never out of the window
+  (lib/util/toastPlace.ts). A few pixels at an edge do not count.
   When the whole stack finds no free place, it folds: one toast shows (the newest, or the newest
   error) with "+2 more" under it, and that smaller stack looks for a place the same way. With no
   free place for it either it stays where it last looked. A press on "+2 more" shows the whole
@@ -14,6 +16,13 @@
   A toast's text shows six lines; "Show all" opens a longer one in place. The place counts the
   short height: a text you opened moves nothing. A stack that is higher than the window ends at
   the window's bottom and scrolls.
+  The same message shows once, with a count ("×3"). With two or more toasts that you can dismiss,
+  "Dismiss all" closes them (a progress toast stays). Esc dismisses the newest toast that waits for
+  you (lib/state/esc.ts).
+  A new toast, a change of the window or of the page's layout: the stack looks for its place from
+  the top bar down. A toast that goes or changes, or what arrives in the page, moves nothing: the
+  stack keeps its place while that is free (toastPlace.ts `lookFor`). While the pointer is on the
+  stack or the keyboard's focus is in it, that look waits until you leave it.
   It looks for its place when the toasts change (also the height of one), when the window's size
   changes, and when the page's layout changes under it: the sheet, the Ask me panel, the IDE,
   the find bar or the Resume bar opens or closes, the rail gets wider, the office takes the whole
@@ -33,7 +42,7 @@
   import { store } from '../lib/state/store.svelte';
   import { toasts } from '../lib/state/toasts.svelte';
   import { ui } from '../lib/state/ui.svelte';
-  import { contentWatch, controlBoxes, frontToast, grown, ms, paced, reachDown, restLook, stackPlace, type Shape } from '../lib/util/toastPlace';
+  import { barRoom, contentWatch, controlBoxes, frontToast, grown, lookFor, ms, paced, reachDown, restLook, stackPlace, type Shape, type StackChange } from '../lib/util/toastPlace';
   import Icon from './Icon.svelte';
   import Kbd from './Kbd.svelte';
   import { RESUME_BAR_ROOM } from './ResumeWork.svelte';
@@ -50,7 +59,7 @@
   const EDGE = 12;
   /** The gap between two toasts, in px. */
   const GAP = 8;
-  /** The height of the line "+2 more" under a folded stack, in px. */
+  /** The height of the line under the stack ("+2 more", "Dismiss all"), in px. */
   const MORE = 22;
   /** What arrives in the page makes the stack look again at most once in this many ms. */
   const PACE = 250;
@@ -81,6 +90,19 @@
   let opened = $state<Record<number, number>>({});
   /** The pointer is on the stack. */
   let over = false;
+  /** A look for the stack's place waits until you no longer work on it (`lookFor`). */
+  let owed = false;
+  /** The look when the page is at rest looks from the top bar down: the page's layout changed since the last one. */
+  let restFresh = false;
+  /** The toasts at the stack's last change: one that is not among them is new. */
+  let known = new Set<number>();
+  /** "Dismiss all" shows: two or more toasts can be dismissed. */
+  const all = $derived(toasts.dismissible.length >= 2);
+  /** "+2 more" shows. */
+  const more = $derived(folded && toasts.list.length > 1);
+
+  /** You work on the stack: the pointer is on it, or the keyboard's focus is in it. */
+  const working = () => over || !!stack?.querySelector(':focus-visible');
 
   /** All toasts but `front` are put away. */
   const hides = $derived(folded && !unfolded);
@@ -97,18 +119,32 @@
     el.style.overflowY = 'auto';
   }
 
-  /** Puts the stack at its place: how far down it is, and whether it is folded. */
-  function place(el: HTMLDivElement) {
-    // What an earlier call set is taken off: the stack has its whole height.
+  const stacked = (heights: number[]) => heights.reduce((sum, h) => sum + h, 0) + GAP * (heights.length - 1);
+
+  /** The stack's toasts and its heights as they are now, with the window's fit taken off: the stack has its whole height. */
+  function measure(el: HTMLDivElement) {
     el.style.maxHeight = '';
     el.style.overflowY = '';
-    const top = el.offsetTop;
     // Not a toast that is fading out.
     const here = new Set(toasts.list.map((t) => t.id));
     const items = [...el.querySelectorAll<HTMLElement>('.toast')].filter((t) => here.has(Number(t.dataset.id)));
     const first = items.find((t) => Number(t.dataset.id) === front?.id);
-    const stacked = (heights: number[]) => heights.reduce((sum, h) => sum + h, 0) + GAP * (heights.length - 1);
-    const real = stacked(items.map((t) => t.offsetHeight));
+    /** The line "Dismiss all" under the whole stack. */
+    const foot = all ? GAP + MORE : 0;
+    const real = stacked(items.map((t) => t.offsetHeight)) + foot;
+    return { top: el.offsetTop, items, first, foot, real };
+  }
+
+  /** The window's fit alone, where the stack is: a look that waits moves nothing, but a stack that
+   *  became higher than the room under it (you unfolded it, or opened a long text) scrolls at once. */
+  function refit(el: HTMLDivElement) {
+    const { top, first, real } = measure(el);
+    fit(el, top + down, hides && first ? first.offsetHeight + GAP + MORE : real);
+  }
+
+  /** Puts the stack at its place: how far down it is, and whether it is folded. `keep`: it keeps the place it has while that is free. */
+  function place(el: HTMLDivElement, keep: boolean) {
+    const { top, items, first, foot, real } = measure(el);
     if (unfolded) {
       // You unfolded it: it stays where it is.
       fit(el, top + down, real);
@@ -117,14 +153,14 @@
     /** What the place counts for a toast: its short height, also when you opened its text. */
     const counted = (t: HTMLElement) => opened[Number(t.dataset.id)] ?? t.offsetHeight;
     const shape = (h: number): Shape => ({ height: h, reach: reachDown(window.innerHeight, REACH, top, h, EDGE) });
-    const whole = shape(stacked(items.map(counted)));
+    const whole = shape(stacked(items.map(counted)) + foot);
     const one = first && items.length > 1 ? shape(counted(first) + GAP + MORE) : null;
     const now = el.getBoundingClientRect();
     const sides = { left: now.left, right: now.right };
     // Everything the stack can reach, with the gap around it.
     const area = grown({ ...sides, top, bottom: top + whole.height + whole.reach }, CLEAR);
     const controls = controlBoxes(el, area).map((c) => grown(c, CLEAR));
-    const at = stackPlace(sides, whole, one, controls, top, MOVES);
+    const at = stackPlace(sides, whole, one, controls, top, MOVES, keep ? top + down : null);
     down = at.top - top;
     folded = at.folded;
     // Higher than the window (three long errors in a small window): it scrolls, the newest toast in view.
@@ -140,7 +176,11 @@
     () => (stack ? settled(stack) : 0),
     () => {
       slides = true;
-      if (stack && toasts.list.length) place(stack);
+      if (!stack || !toasts.list.length) return;
+      if (restFresh) place(stack, false);
+      else if (working()) owed = true;
+      else place(stack, true);
+      restFresh = false;
     },
   );
   const arrived = paced(() => arrivals++, PACE);
@@ -158,8 +198,8 @@
     });
   }
 
-  /** Looks for the stack's place now, and once more when the page is at rest. `moved`: the page's layout changed. */
-  function look(moved: boolean) {
+  /** Looks for the stack's place now, and once more when the page is at rest (see `lookFor`). `busy`: you work on the stack. */
+  function look(change: StackChange, busy = working()) {
     const el = stack;
     if (!el || !toasts.list.length) {
       rest.stop();
@@ -170,12 +210,23 @@
       slides = false;
       folded = false;
       unfolded = false;
+      owed = false;
+      restFresh = false;
+      known = new Set();
       return;
     }
     if (toasts.list.length < 2) unfolded = false;
-    place(el);
+    const how = lookFor(change, busy);
+    if (how === 'wait') {
+      owed = true;
+      refit(el);
+      return;
+    }
+    owed = false;
+    if (change === 'layout') restFresh = true;
+    place(el, how === 'keep');
     content.look();
-    rest.after(moved);
+    rest.after(change === 'layout');
     showMoves();
   }
 
@@ -187,12 +238,22 @@
       ui.railOpen, ui.mode, ui.room, ui.planLens, ui.changesLens, ui.knowledgeLens, ui.thread, ui.closedRev,
       store.workspace?.id, ui.onboarded, ui.onboardingOpen, ui.layoutRev,
     ];
-    untrack(() => look(true));
+    untrack(() => look('layout'));
   });
-  // The stack changes, or what is in the page: no box of the page moves.
+  // The stack changes: no box of the page moves.
   $effect(() => {
-    void [toasts.list, height, unfolded, arrivals];
-    untrack(() => look(false));
+    void [toasts.list, height, unfolded];
+    untrack(() => {
+      const ids = toasts.list.map((t) => t.id);
+      const added = ids.some((id) => !known.has(id));
+      known = new Set(ids);
+      look(added ? 'added' : 'changed');
+    });
+  });
+  // What is in the page's main column got higher or lower.
+  $effect(() => {
+    void arrivals;
+    untrack(() => look('page'));
   });
   $effect(() => () => {
     rest.stop();
@@ -227,15 +288,27 @@
     if (toast) opened = { ...opened, [id]: toast.offsetHeight };
   }
 
-  /** The pointer left the stack: it folds again, unless the keyboard's focus is in it (a press
+  /** You no longer work on the stack: it folds again, and the look that waits comes now. */
+  function letGo() {
+    unfolded = false;
+    if (owed) look('changed', false);
+  }
+  /** The pointer left the stack: you let go of it, unless the keyboard's focus is in it (a press
    *  with the pointer also leaves the focus on a button: that one does not hold the stack open). */
   function left() {
     over = false;
-    if (!stack?.querySelector(':focus-visible')) unfolded = false;
+    if (!stack?.querySelector(':focus-visible')) letGo();
   }
-  /** The focus left the stack: it folds again, unless the pointer is on it. */
+  /** The focus left the stack: you let go of it, unless the pointer is on it. */
   function blurred(e: FocusEvent) {
-    if (!over && !(e.relatedTarget instanceof Node && stack?.contains(e.relatedTarget))) unfolded = false;
+    if (!over && !(e.relatedTarget instanceof Node && stack?.contains(e.relatedTarget))) letGo();
+  }
+  /** A toast has gone from the page. The button that had the focus may have gone with it, and no
+   *  'focusout' comes for that: once it is out of the page, you let go unless you still work on it. */
+  function gone() {
+    requestAnimationFrame(() => {
+      if (!working()) letGo();
+    });
   }
   // The stack itself takes no press and has no role: it only hears what happens to its toasts.
   $effect(() => {
@@ -263,7 +336,7 @@
   bind:this={stack}
   bind:clientHeight={height}
   style:gap="{GAP}px"
-  style:--bar-room="{resumeWork.offer ? RESUME_BAR_ROOM : 0}px"
+  style:--bar-room="{barRoom(!!resumeWork.offer, ide.visible, RESUME_BAR_ROOM)}px"
   style:transform="translateY({down}px)"
   aria-live="polite"
   aria-relevant="additions text"
@@ -276,29 +349,36 @@
       role={t.kind === 'error' ? 'alert' : 'status'}
       onpointerenter={() => toasts.pause(t.id)}
       onpointerleave={() => toasts.resume(t.id)}
+      onoutroend={gone}
       out:fade={{ duration: ui.reducedMotion ? 0 : 120 }}
     >
       <span class="ic" class:spin={t.kind === 'progress'}><Icon name={ICON[t.kind]} size={16} /></span>
       <div class="txt">
-        <p class="title">{t.title}</p>
+        <p class="title">{t.title}{#if t.count > 1}<span class="count num">×{t.count}</span>{/if}</p>
         {#if t.body}
           <p class="body selectable" class:clamp={opened[t.id] === undefined}>{t.body}</p>
           {#if long[t.id] && opened[t.id] === undefined}<button class="all" onclick={(e) => showAll(t.id, e.currentTarget)}>Show all</button>{/if}
         {/if}
+        <!-- Under the text: the text keeps the toast's whole width, so a toast with a button is not a tall narrow column. -->
+        {#if t.action}
+          <button class="btn sm act" onclick={() => { t.action!.run(); toasts.dismiss(t.id); }}>
+            {t.action.label}
+            {#if t.action.kbd}<Kbd keys={t.action.kbd} subtle />{/if}
+          </button>
+        {/if}
       </div>
-      {#if t.action}
-        <button class="btn sm" onclick={() => { t.action!.run(); toasts.dismiss(t.id); }}>
-          {t.action.label}
-          {#if t.action.kbd}<Kbd keys={t.action.kbd} subtle />{/if}
-        </button>
-      {/if}
       <button class="icon-btn sm close" aria-label="Dismiss" onclick={() => toasts.dismiss(t.id)}><Icon name="x" size={14} /></button>
     </div>
   {/each}
-  {#if folded && toasts.list.length > 1}
-    <button class="more" style:height="{MORE}px" aria-expanded={unfolded} onclick={() => (unfolded = !unfolded)}>
-      {unfolded ? 'Show less' : `+${toasts.list.length - 1} more`}
-    </button>
+  {#if more || all}
+    <div class="foot" style:height="{MORE}px">
+      {#if more}
+        <button class="more" aria-expanded={unfolded} onclick={() => (unfolded = !unfolded)}>
+          {unfolded ? 'Show less' : `+${toasts.list.length - 1} more`}
+        </button>
+      {/if}
+      {#if all}<button class="more" onclick={() => toasts.dismissAll()}>Dismiss all</button>{/if}
+    </div>
   {/if}
 </div>
 
@@ -323,12 +403,14 @@
   .txt { flex: 1; min-width: 0; }
   /* A long word with no place to break (a branch, a file name) breaks anywhere: it stays in its toast. */
   .title { font-weight: var(--w-med); color: var(--ink-1); overflow-wrap: anywhere; }
+  .count { margin-left: 6px; color: var(--ink-3); }
   .body { margin-top: 2px; color: var(--ink-2); font-size: var(--t-sm); line-height: var(--lh-sm); overflow-wrap: anywhere; }
   /* Six lines; a longer text ends with "Show all" (no scroll inside a toast). */
   .body.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
   .all { margin-top: 2px; font-size: var(--t-sm); line-height: var(--lh-sm); font-weight: var(--w-med); color: var(--ink-1); text-decoration: underline; text-underline-offset: 2px; }
-  .btn { margin-top: -2px; }
+  .act { margin-top: 8px; }
   .close { margin: -3px -2px 0 -2px; color: var(--ink-3); }
-  .more { flex-shrink: 0; align-self: center; pointer-events: auto; padding: 0 12px; border-radius: var(--r-full); background: var(--pop); box-shadow: var(--pop-shadow); font-size: var(--t-sm); font-weight: var(--w-med); color: var(--ink-2); }
+  .foot { flex-shrink: 0; align-self: center; display: flex; gap: 6px; }
+  .more { pointer-events: auto; padding: 0 12px; border-radius: var(--r-full); background: var(--pop); box-shadow: var(--pop-shadow); font-size: var(--t-sm); font-weight: var(--w-med); color: var(--ink-2); }
   .more:hover { color: var(--ink-1); }
 </style>

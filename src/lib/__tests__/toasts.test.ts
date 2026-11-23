@@ -148,3 +148,125 @@ describe('the pointer on a toast', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('the same message', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    for (const t of [...toasts.list]) toasts.dismiss(t.id);
+    toasts.putAway([]);
+    vi.useRealTimers();
+  });
+
+  it('shows once: three equal toasts are one toast with a count of 3', () => {
+    const first = toasts.show({ kind: 'error', title: 'Couldn’t copy', body: 'The clipboard is not available.' });
+    expect(toasts.show({ kind: 'error', title: 'Couldn’t copy', body: 'The clipboard is not available.' })).toBe(first);
+    toasts.show({ kind: 'error', title: 'Couldn’t copy', body: 'The clipboard is not available.' });
+    expect(toasts.list.map((t) => [t.title, t.count])).toEqual([['Couldn’t copy', 3]]);
+  });
+
+  it('another text, title or kind is another toast', () => {
+    toasts.show({ kind: 'error', title: 'Couldn’t copy', body: 'The clipboard is not available.' });
+    toasts.show({ kind: 'error', title: 'Couldn’t copy', body: 'Nothing to copy.' });
+    toasts.show({ kind: 'info', title: 'Couldn’t copy', body: 'Nothing to copy.' });
+    expect(toasts.list.map((t) => [t.kind, t.body, t.count])).toEqual([
+      ['error', 'The clipboard is not available.', 1],
+      ['error', 'Nothing to copy.', 1],
+      ['info', 'Nothing to copy.', 1],
+    ]);
+  });
+
+  it('keeps its place in the stack', () => {
+    toasts.show({ kind: 'error', title: 'Push failed' });
+    toasts.show({ kind: 'error', title: 'Couldn’t copy' });
+    toasts.show({ kind: 'error', title: 'Push failed' });
+    expect(titles()).toEqual(['Push failed', 'Couldn’t copy']);
+  });
+
+  it('starts its time again', () => {
+    toasts.show({ kind: 'success', title: 'Copied' });
+    vi.advanceTimersByTime(3000);
+    toasts.show({ kind: 'success', title: 'Copied' });
+    vi.advanceTimersByTime(3999);
+    expect(titles()).toEqual(['Copied']);
+    vi.advanceTimersByTime(1);
+    expect(titles()).toEqual([]);
+  });
+
+  it('a toast with an action is never joined: each keeps its own id and its own action', () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const a = toasts.show({ kind: 'info', title: 'Request closed', action: { label: 'Undo', run: first } });
+    const b = toasts.show({ kind: 'info', title: 'Request closed', action: { label: 'Undo', run: second } });
+    expect(b).not.toBe(a);
+    expect(toasts.list.map((t) => t.count)).toEqual([1, 1]);
+    toasts.list[0].action!.run();
+    toasts.list[1].action!.run();
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+    // Dismissing one by its id leaves the other.
+    toasts.dismiss(a);
+    expect(toasts.list.map((t) => t.id)).toEqual([b]);
+  });
+
+  it('an equal toast with and without an action are two toasts', () => {
+    toasts.show({ kind: 'success', title: 'Copied' });
+    toasts.show({ kind: 'success', title: 'Copied', action: { label: 'Open', run: () => {} } });
+    toasts.show({ kind: 'success', title: 'Copied' });
+    expect(toasts.list.map((t) => [!!t.action, t.count])).toEqual([[false, 2], [true, 1]]);
+  });
+
+  it('under the pointer its time stands still, and it gets its whole time when the pointer leaves', () => {
+    const id = toasts.show({ kind: 'success', title: 'Copied' });
+    vi.advanceTimersByTime(3000);
+    toasts.pause(id);
+    toasts.show({ kind: 'success', title: 'Copied' });
+    vi.advanceTimersByTime(60_000);
+    expect(titles()).toEqual(['Copied']);
+    toasts.resume(id);
+    vi.advanceTimersByTime(3999);
+    expect(titles()).toEqual(['Copied']);
+    vi.advanceTimersByTime(1);
+    expect(titles()).toEqual([]);
+  });
+
+  it('a progress toast is never joined: each one tells of its own work', () => {
+    toasts.show({ kind: 'progress', title: 'Pushing…' });
+    toasts.show({ kind: 'progress', title: 'Pushing…' });
+    expect(toasts.list.map((t) => t.count)).toEqual([1, 1]);
+  });
+});
+
+describe('Dismiss all, and the toast that Esc dismisses', () => {
+  afterEach(() => {
+    for (const t of [...toasts.list]) toasts.dismiss(t.id);
+    toasts.putAway([]);
+  });
+
+  it('dismisses every toast but a progress toast', () => {
+    toasts.show({ kind: 'error', title: 'Push failed' });
+    toasts.show({ kind: 'progress', title: 'Merging…' });
+    toasts.show({ kind: 'info', title: 'Branch kept' });
+    expect(toasts.dismissible.map((t) => t.title)).toEqual(['Push failed', 'Branch kept']);
+    toasts.dismissAll();
+    expect(titles()).toEqual(['Merging…']);
+    expect(toasts.dismissible).toEqual([]);
+  });
+
+  it('Esc takes the newest toast that waits for you: an error or one with no time limit, never a progress toast', () => {
+    expect(toasts.waiting).toBeUndefined();
+    toasts.show({ kind: 'success', title: 'Copied' });
+    toasts.show({ kind: 'progress', title: 'Merging…' });
+    expect(toasts.waiting).toBeUndefined();
+    toasts.show({ kind: 'error', title: 'Push failed' });
+    expect(toasts.waiting?.title).toBe('Push failed');
+    toasts.show({ kind: 'info', title: 'Not sent', duration: 0 });
+    expect(toasts.waiting?.title).toBe('Not sent');
+  });
+
+  it('Esc does not take a toast that a folded stack has put away: it is not seen', () => {
+    const hidden = toasts.show({ kind: 'info', title: 'Not sent', duration: 0 });
+    toasts.show({ kind: 'error', title: 'Push failed' });
+    toasts.putAway([hidden]);
+    expect(toasts.waiting?.title).toBe('Push failed');
+  });
+});

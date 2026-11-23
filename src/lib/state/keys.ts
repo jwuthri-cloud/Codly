@@ -1,17 +1,18 @@
 // Global keyboard map. ⌘K palette · ⌘F find in the conversation · ⌘1 full office · ⌘2 full work · ⌘. focus · ⌘, settings ·
 // ⌘N new request · ⌘[ / ⌘] previous / next request · ⇧⌘N new task · ⌘O open repo · ⌘↵ the one
 // primary action (approve / run plan) · ⌥⌘↵ allow for the session · ⌘⌫ deny · ⇧⌘⌫ deny with a
-// note (both also from the empty composer; on a plan both open the note) · 1-9 pick an option of the question that waits · G-sequences to rooms · J/K lists · Esc (close,
-// deselect, then stop the running turn: the first press asks, the second stops) · ?.
+// note (both also from the empty composer; on a plan both open the note) · 1-9 pick an option of the question that waits · G-sequences to rooms · J/K lists · Esc (a toast that
+// waits for you, close, deselect, then stop the running turn: the first press asks, the second stops) · ?.
 // ponytail: hand-rolled instead of tinykeys — one listener, sequences included.
 import type { Approval } from '../gen/Approval';
 import { showsPlan } from '../util/planRequest';
 import { openWorkspace, resolveApprovals, runPlan, stopThreadByEsc } from './actions';
 import { twinsIn } from './approvalGroups';
 import { digitPick, isTextField } from '../util/questionKeys';
-import { denyKeyInField, escStep } from './esc';
+import { denyKeyInField, escStep, openOne } from './esc';
 import { requests } from './requests.svelte';
 import { store } from './store.svelte';
+import { toasts } from './toasts.svelte';
 import { ROOMS, isClosedThread, isRequestThread, ui, type DiffTarget, type Room } from './ui.svelte';
 
 export type ListNav = { next: () => void; prev: () => void; open?: () => void };
@@ -142,7 +143,8 @@ export function installKeys(): () => void {
     const mod = e.metaKey || e.ctrlKey;
     const typing = isTyping(e.target);
     const k = e.key.toLowerCase();
-    const overlay = ui.paletteOpen || ui.settingsOpen || ui.shortcutsOpen || !!document.querySelector('[aria-modal="true"]');
+    // A dialog that is closing is not an overlay any more: an Esc while it fades goes to what is under it.
+    const overlay = ui.paletteOpen || ui.settingsOpen || ui.shortcutsOpen || openOne(document.querySelectorAll('[aria-modal="true"]'));
 
     // ── the primary action (approve / run plan) ──
     // Other text fields (a deny note…) are not the composer: ⌘↵ there must not approve.
@@ -256,20 +258,23 @@ export function installKeys(): () => void {
         (e.target as HTMLElement).blur();
         return;
       }
-      // One step per press: close, deselect, leave the full office, close the find bar, leave a
-      // closed request, and only then stop the running turn.
+      // One step per press: dismiss the toast that waits for you, close, deselect, leave the full
+      // office, close the find bar, leave a closed request, and only then stop the running turn.
+      const waiting = toasts.waiting;
       const step = escStep({
         repeat: e.repeat,
         artifactOpen: !!ui.artifactOpen,
         selection: !!ui.selection,
         mode: ui.mode,
         room: ui.room,
-        popupOpen: !!document.querySelector('[role="dialog"], [role="menu"]'),
+        popupOpen: openOne(document.querySelectorAll('[role="dialog"], [role="menu"]')),
         inOffice: !!(e.target as HTMLElement).closest?.('[role="application"]'),
         findOpen: ui.findOpen,
         readingClosed: isClosedThread(ui.thread),
+        toastWaits: waiting !== undefined,
       });
-      if (step === 'close-artifact') ui.artifactOpen = null;
+      if (step === 'dismiss-toast') toasts.dismiss(waiting!.id);
+      else if (step === 'close-artifact') ui.artifactOpen = null;
       else if (step === 'deselect') ui.selection = null;
       else if (step === 'leave-office') ui.mode = 'blend';
       else if (step === 'close-find') ui.findOpen = false;
@@ -347,7 +352,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['⇧⌘N', 'New task'],
       ['⌘O', 'Open repository'],
       ['⌘,', 'Settings'],
-      ['Esc', 'Close · deselect · press twice to stop the running turn'],
+      ['Esc', 'Dismiss a toast that waits · close · deselect · press twice to stop the running turn'],
       ['?', 'This sheet'],
     ],
   },

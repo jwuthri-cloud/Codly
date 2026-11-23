@@ -4,7 +4,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import tokens from '../../../styles/tokens.css?raw';
 import toastsView from '../../../components/Toasts.svelte?raw';
-import { countedBox, counts, frontToast, grown, ms, onTop, paced, reachDown, restLook, stackPlace, toastTop, visiblePart, type Box, type Seen, type Shape } from '../toastPlace';
+import approvalCard from '../../../home/cards/ApprovalCard.svelte?raw';
+import { barRoom, countedBox, counts, covers, frontToast, grown, heightChanged, lookFor, ms, onTop, paced, reachDown, restLook, stackPlace, toastTop, visiblePart, WAITING_CARD, watchedHeight, type Box, type Seen, type Shape } from '../toastPlace';
 
 const box = (left: number, top: number, right: number, bottom: number): Box => ({ left, top, right, bottom });
 
@@ -174,8 +175,8 @@ describe('stackPlace: the place, and whether the stack folds', () => {
   });
 
   it('with no free place for the folded stack either, it stays folded where it last looked: a list of task rows (Home, 1440 x 900, the sheet open)', () => {
-    // The request tabs, the plan header, three task rows (each one button, 632 px wide: not wider
-    // than twice the stack, so each counts whole) and "Plan room" under them.
+    // The request tabs, the plan header, three task rows (as boxes that reach under the stack: a
+    // row whose text runs to its right end) and "Plan room" under them.
     const page = controls(
       box(452, 72, 678, 102), box(678, 77, 698, 97), box(824, 72, 854, 102), box(862, 72, 892, 102),
       box(204, 110, 712.4, 162), box(718.4, 125, 740.4, 147), box(736.4, 125, 758.4, 147), box(768.4, 123, 856, 149), box(868, 124, 892, 148),
@@ -219,8 +220,9 @@ describe('frontToast: the one toast of a folded stack', () => {
   });
 });
 
-describe('countedBox: a control much wider than the stack counts by what it shows', () => {
-  const STACK = 360;
+describe('countedBox: a control wider than the stack counts by what it shows', () => {
+  /** The stack at the right of a 1440 px window, sheet closed. */
+  const STACK = { left: 1066, right: 1426 };
   const never = () => {
     throw new Error('not asked');
   };
@@ -253,19 +255,41 @@ describe('countedBox: a control much wider than the stack counts by what it show
     expect(countedBox(box(100, 70, 900, 102), STACK, false, () => box(120, 20, 400, 60))).toBeNull();
   });
 
-  it('a control up to twice as wide as the stack counts whole: what it shows is not asked for', () => {
-    // A task row of Home is 632 px wide; a control of exactly twice the stack's width.
-    expect(countedBox(box(228, 222, 860, 302), STACK, false, never)).toEqual(box(228, 222, 860, 302));
-    expect(countedBox(box(100, 70, 820, 102), STACK, false, never)).toEqual(box(100, 70, 820, 102));
+  it('a task row of Home (632 px, its label at the left) beside the stack counts by its label: the stack has its free place', () => {
+    // The sheet open at 1440: the stack is at x 648 to 1008, the row at x 228 to 860. The stack
+    // could cover 212 px of the row's 632: less than half.
+    const sides = { left: 648, right: 1008 };
+    const row = box(228, 221.9, 860, 301.9);
+    const label = box(268, 240, 520, 256);
+    expect(countedBox(row, sides, false, () => label)).toEqual(label);
+    const stack = box(648, 222, 1008, 285);
+    expect(toastTop(stack, [grown(row, 4)], 222, MOVES, REACH_900)).toBe(305.9);
+    expect(toastTop(stack, [grown(countedBox(row, sides, false, () => label)!, 4)], 222, MOVES, REACH_900)).toBe(222);
+  });
+
+  it('a control no wider than the stack counts whole: what it shows is not asked for', () => {
+    // A 300 px button under the stack.
+    expect(countedBox(box(900, 222, 1200, 254), STACK, false, never)).toEqual(box(900, 222, 1200, 254));
+    expect(countedBox(box(1066, 70, 1426, 102), STACK, false, never)).toEqual(box(1066, 70, 1426, 102));
+  });
+
+  it('a control wider than the stack that it could cover for half its width or more counts whole', () => {
+    // 600 px wide, 300 of them under the stack; 500 px wide, 360 of them under it.
+    expect(countedBox(box(766, 70, 1366, 102), STACK, false, never)).toEqual(box(766, 70, 1366, 102));
+    expect(countedBox(box(950, 70, 1450, 102), STACK, false, never)).toEqual(box(950, 70, 1450, 102));
+    // 600 px wide, 299 of them under it: by what it shows.
+    expect(countedBox(box(765, 70, 1365, 102), STACK, false, () => null)).toBeNull();
   });
 
   it('a field you type in counts whole, however wide: its text can be anywhere in it', () => {
     expect(countedBox(box(100, 70, 1100, 104), STACK, true, never)).toEqual(box(100, 70, 1100, 104));
   });
 
-  it('follows the stack’s width: a narrow window has a narrower stack', () => {
-    // The stack is 300 px wide: a 632 px row is wider than twice of it.
-    expect(countedBox(box(10, 222, 642, 302), 300, false, () => box(24, 240, 200, 256))).toEqual(box(24, 240, 200, 256));
+  it('follows the stack’s place and width: a narrow window has a narrower stack', () => {
+    // The stack is 300 px wide at the right of the row: it could cover 200 px of the 632.
+    expect(countedBox(box(10, 222, 642, 302), { left: 442, right: 742 }, false, () => box(24, 240, 200, 256))).toEqual(box(24, 240, 200, 256));
+    // The same stack over the row's middle could cover 300 px of it, not half: by what it shows too.
+    expect(countedBox(box(10, 222, 642, 302), { left: 100, right: 400 }, false, () => box(24, 240, 200, 256))).toEqual(box(24, 240, 200, 256));
   });
 });
 
@@ -376,10 +400,130 @@ describe('restLook: the look when the page has come to rest', () => {
 });
 
 describe('grown', () => {
-  it('keeps a gap around a control: "+" is 3 px left of the stack, and counts with a 4 px gap', () => {
+  it('keeps a gap around a control, and a few pixels at an edge are not covering', () => {
     const plus = box(1033, 72, 1063, 102);
     expect(grown(plus, 4)).toEqual(box(1029, 68, 1067, 106));
-    expect(toastTop(box(1066, 68, 1426, 131), [grown(plus, 4)], TOP, MOVES, REACH_900)).toBe(106);
+    // "+" ends 3 px left of the stack: with the gap the stack is 1 px over it, which is not covering.
+    expect(toastTop(box(1066, 68, 1426, 131), [grown(plus, 4)], TOP, MOVES, REACH_900)).toBe(68);
+    // A control that reaches 4 px under the stack: 8 px with the gap, it covers.
+    const tab = box(1033, 72, 1070, 102);
+    expect(toastTop(box(1066, 68, 1426, 131), [grown(tab, 4)], TOP, MOVES, REACH_900)).toBe(106);
+  });
+});
+
+describe('covers: a few pixels are not covering', () => {
+  const stack = box(1066, 106, 1426, 169);
+
+  it('needs 8 px of overlap on both axes', () => {
+    expect(covers(box(1000, 100, 1074, 200), stack)).toBe(true);
+    expect(covers(box(1000, 100, 1073, 200), stack)).toBe(false);
+    expect(covers(box(1100, 161, 1200, 200), stack)).toBe(true);
+    expect(covers(box(1100, 162, 1200, 200), stack)).toBe(false);
+  });
+
+  it('measured: a 3 px overlap with Home’s task rows does not send a single toast 300 px down (1440 x 900)', () => {
+    // The request tabs, and three task rows whose right end is 3 px under the stack (7 px with the gap).
+    const tabs = [box(1033, 72, 1063, 102), box(1071, 72, 1101, 102)].map((c) => grown(c, 4));
+    const rows = [0, 1, 2].map((i) => grown(box(437, 160 + i * 82, 1069, 240 + i * 82), 4));
+    const one = { height: 63, reach: reachDown(900, 0.4, TOP, 63, 12) };
+    // The rows only touched the stack: before, it went down row by row.
+    expect(rows.some((r) => r.left < 1426 && 1066 < r.right && r.top < 169 && 106 < r.bottom)).toBe(true);
+    expect(stackPlace({ left: 1066, right: 1426 }, one, null, [...tabs, ...rows], TOP, MOVES)).toEqual({ top: 106, folded: false });
+  });
+});
+
+describe('stackPlace with a place to keep: a dismissal moves nothing', () => {
+  const sides = { left: 1066, right: 1426 };
+  const shape = (height: number): Shape => ({ height, reach: reachDown(900, 0.4, TOP, height, 12) });
+  /** A control that three toasts reach and one toast does not. */
+  const low = grown(box(1100, 190, 1200, 220), 4);
+
+  it('three toasts go under the control; when two go, the one that stays keeps its place', () => {
+    expect(stackPlace(sides, shape(151), shape(75), [low], TOP, MOVES)).toEqual({ top: 224, folded: false });
+    // Looked for anew (a new toast, a change of layout) one toast would be at the top bar.
+    expect(stackPlace(sides, shape(45), null, [low], TOP, MOVES)).toEqual({ top: 68, folded: false });
+    expect(stackPlace(sides, shape(45), null, [low], TOP, MOVES, 224)).toEqual({ top: 224, folded: false });
+  });
+
+  it('it moves when it would cover something where it is, or is further down than it may be', () => {
+    const below = grown(box(1100, 240, 1200, 260), 4);
+    expect(stackPlace(sides, shape(45), null, [low, below], TOP, MOVES, 224)).toEqual({ top: 68, folded: false });
+    // 68 + 360 is as far as it may go.
+    expect(stackPlace(sides, shape(45), null, [], TOP, MOVES, 429)).toEqual({ top: 68, folded: false });
+    expect(stackPlace(sides, shape(45), null, [], TOP, MOVES, 428)).toEqual({ top: 428, folded: false });
+  });
+
+  it('a folded stack that fits whole where it is shows whole there', () => {
+    expect(stackPlace(sides, shape(98), shape(75), [low], TOP, MOVES, 224)).toEqual({ top: 224, folded: false });
+  });
+});
+
+describe('lookFor: may the stack move now?', () => {
+  it('a new toast, or a change of the window or the page’s layout: it looks from the top bar down, also under your hand', () => {
+    expect(lookFor('added', false)).toBe('fresh');
+    expect(lookFor('added', true)).toBe('fresh');
+    expect(lookFor('layout', false)).toBe('fresh');
+    expect(lookFor('layout', true)).toBe('fresh');
+  });
+
+  it('a toast that went or joined another, or what arrived in the page: it keeps its place while that is free', () => {
+    expect(lookFor('changed', false)).toBe('keep');
+    expect(lookFor('page', false)).toBe('keep');
+  });
+
+  it('while the pointer is on it or the focus is in it, that waits until you leave it', () => {
+    expect(lookFor('changed', true)).toBe('wait');
+    expect(lookFor('page', true)).toBe('wait');
+  });
+});
+
+describe('barRoom: the room for the Resume bar follows the bar on screen', () => {
+  it('is kept while the bar is offered and shows', () => {
+    expect(barRoom(true, false, 70)).toBe(70);
+  });
+
+  it('is not kept with no bar, or while the editor overlay is drawn over the bar', () => {
+    expect(barRoom(false, false, 70)).toBe(0);
+    expect(barRoom(true, true, 70)).toBe(0);
+  });
+});
+
+describe('contentWatch: what counts as a change of height', () => {
+  it('the first report of a box is not a change: it is only its size', () => {
+    expect(heightChanged(watchedHeight(120), 120)).toBe(false);
+    expect(heightChanged(watchedHeight(120), 300)).toBe(false);
+  });
+
+  it('a box that was 0 px high when it was watched: its first report is its growth, a change', () => {
+    expect(watchedHeight(0)).toBe(0);
+    expect(heightChanged(watchedHeight(0), 180)).toBe(true);
+    expect(heightChanged(watchedHeight(0), 0)).toBe(false);
+  });
+
+  it('a later report is a change when the height is another', () => {
+    expect(heightChanged(300, 300)).toBe(false);
+    expect(heightChanged(300, 340)).toBe(true);
+  });
+});
+
+describe('a card that waits for your answer counts whole', () => {
+  it('the selector finds the waiting card of ApprovalCard.svelte: "Waiting since" in its header', () => {
+    expect(WAITING_CARD).toContain('article.card');
+    expect(approvalCard).toMatch(/<article class="card"[^>]*>\s*<header>[\s\S]*?<span class="since num" data-tip="Waiting since /);
+  });
+
+  it('three toasts over the card with the sheet open fold to one toast: no pile over the card (1024 x 640)', () => {
+    // Built from the review's boxes: the stack at x 232 to 592, a network card from y 200 to 470
+    // in the conversation beside the sheet, its buttons at its bottom.
+    const sides = { left: 232, right: 592 };
+    const shape = (height: number): Shape => ({ height, reach: reachDown(640, 0.4, TOP, height, 12) });
+    const tabs = [box(453, 72, 679, 102)].map((c) => grown(c, 4));
+    const buttons = [box(205, 430, 300, 462), box(310, 430, 420, 462)].map((c) => grown(c, 4));
+    const card = grown(box(205, 200, 873, 470), 4);
+    // Only its buttons counted: the stack lay over the card's title and text.
+    expect(stackPlace(sides, shape(151), shape(75), [...tabs, ...buttons], TOP, MOVES)).toEqual({ top: 106, folded: false });
+    // The whole card counts: no free place within reach, so the stack folds.
+    expect(stackPlace(sides, shape(151), shape(75), [...tabs, ...buttons, card], TOP, MOVES).folded).toBe(true);
   });
 });
 
@@ -533,5 +677,10 @@ describe('a toast’s words stay in the toast', () => {
 
   it('the text column can get narrower than its longest word', () => {
     expect(rule('.txt')).toContain('min-width: 0;');
+  });
+
+  it('a toast’s button is under its text: the text keeps the toast’s width (the merge-refused toast)', () => {
+    const column = /<div class="txt">([\s\S]*?)\n {6}<\/div>/.exec(toastsView);
+    expect(column?.[1]).toContain('t.action.label');
   });
 });

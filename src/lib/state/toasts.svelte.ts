@@ -1,8 +1,8 @@
 // Toasts (design §4): top-right under the top bar, laid over the page at a place where they cover
 // nothing you can press (see components/Toasts.svelte), max 3, progress updates in place, success 4 s, info 6 s,
 // errors persist. Hover pauses dismissal, and so does a folded stack for the toasts it has put
-// away (`putAway`): a toast does not go before it was shown. Approvals are never toast-only: an
-// approval toast is just a pointer into the Inbox.
+// away (`putAway`): a toast does not go before it was shown. The same message shows once, with a
+// count. Approvals are never toast-only: an approval toast is just a pointer into the Inbox.
 
 export type ToastKind = 'progress' | 'success' | 'info' | 'error' | 'attention';
 export type ToastAction = { label: string; run: () => void; kbd?: string };
@@ -15,6 +15,8 @@ export type Toast = {
   /** ms; 0 = sticky */
   duration: number;
   createdAt: number;
+  /** How often this message was shown: an equal one joins the toast that shows (`show`). */
+  count: number;
 };
 
 const DEFAULT_DURATION: Record<ToastKind, number> = { progress: 0, success: 4000, info: 6000, error: 0, attention: 8000 };
@@ -29,10 +31,23 @@ class Toasts {
   /** The toasts that are put away now (`putAway`): none of them counts down. */
   private away = new Set<number>();
 
+  /**
+   * Shows a toast, and gives its id. A toast with the kind, the title and the text of one that
+   * shows is not added: that one counts it, takes its time (which starts again) and keeps its
+   * place. Never joined: a progress toast (each one tells of its own work), and a toast with an
+   * action, new or showing (its action and its id are its own: an Undo, a pointer to one approval).
+   */
   show(t: { kind?: ToastKind; title: string; body?: string; action?: ToastAction; duration?: number }): number {
     const kind = t.kind ?? 'info';
+    const duration = t.duration ?? DEFAULT_DURATION[kind];
+    const same = kind === 'progress' || t.action ? undefined : this.list.find((x) => !x.action && x.kind === kind && x.title === t.title && x.body === t.body);
+    if (same) {
+      this.list = this.list.map((x) => (x.id === same.id ? { ...x, duration, count: x.count + 1 } : x));
+      this.restart(same.id, duration);
+      return same.id;
+    }
     const id = ++this.seq;
-    const toast: Toast = { id, kind, title: t.title, body: t.body, action: t.action, duration: t.duration ?? DEFAULT_DURATION[kind], createdAt: Date.now() };
+    const toast: Toast = { id, kind, title: t.title, body: t.body, action: t.action, duration, createdAt: Date.now(), count: 1 };
     const next = [...this.list, toast];
     // Drop the oldest dismissible toasts beyond the cap.
     while (next.length > MAX) {
@@ -57,6 +72,22 @@ class Toasts {
     clearTimeout(this.timers.get(id));
     this.timers.delete(id);
     this.list = this.list.filter((t) => t.id !== id);
+  }
+
+  /** The toasts you can dismiss: all but the progress toasts, which go when their work ends. */
+  get dismissible(): Toast[] {
+    return this.list.filter((t) => t.kind !== 'progress');
+  }
+
+  /** "Dismiss all": every toast you can dismiss goes; a progress toast stays. */
+  dismissAll() {
+    for (const t of this.dismissible) this.dismiss(t.id);
+  }
+
+  /** The newest toast that shows and waits for you (Esc dismisses it): an error, or one with no
+   *  time limit; never a progress toast, and not one that a folded stack has put away. */
+  get waiting(): Toast | undefined {
+    return this.dismissible.findLast((t) => (t.kind === 'error' || t.duration === 0) && !this.away.has(t.id));
   }
 
   pause(id: number) {
@@ -86,6 +117,12 @@ class Toasts {
     this.away = new Set(ids);
     for (const id of this.away) if (!before.has(id)) this.pause(id);
     for (const id of before) if (!this.away.has(id)) this.resume(id);
+  }
+
+  /** Its time starts again. One that stands still now (the pointer is on it, or it is put away) gets the whole time when it goes on. */
+  private restart(id: number, ms: number) {
+    if (ms && !this.timers.has(id) && this.remaining.has(id)) this.remaining.set(id, ms);
+    else this.arm(id, ms);
   }
 
   private arm(id: number, ms: number) {

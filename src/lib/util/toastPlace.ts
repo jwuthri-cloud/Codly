@@ -8,6 +8,17 @@ export type Box = { left: number; top: number; right: number; bottom: number };
 /** Do the two boxes share an area? Boxes that only touch do not. */
 const overlap = (a: Box, b: Box): boolean => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 
+/** Less than this many px of overlap, on either axis, is not covering (see `covers`). */
+const MIN_COVER = 8;
+
+/**
+ * Does the stack's `box` cover the control `c`? Only when they share at least `MIN_COVER` px on
+ * both axes: a few pixels at an edge leave the control free to press. The controls come with the
+ * gap kept around them (`grown`, 4 px), so the stack then lies less than 4 px over the control itself.
+ */
+export const covers = (c: Box, box: Box): boolean =>
+  Math.min(c.right, box.right) - Math.max(c.left, box.left) >= MIN_COVER && Math.min(c.bottom, box.bottom) - Math.max(c.top, box.top) >= MIN_COVER;
+
 /**
  * The top edge of the toast stack, in px from the window's top.
  *
@@ -26,7 +37,7 @@ export function toastTop(stack: Box, controls: Box[], top: number, maxMoves: num
   let at = top;
   for (let moves = 0; ; moves++) {
     const box: Box = { left: stack.left, right: stack.right, top: at, bottom: at + height };
-    const under = controls.filter((c) => overlap(c, box));
+    const under = controls.filter((c) => covers(c, box));
     if (!under.length || moves === maxMoves) return at;
     const reachable = under.map((c) => c.bottom).filter((bottom) => bottom <= top + maxDistance);
     if (!reachable.length) return at;
@@ -45,12 +56,20 @@ export type Shape = { height: number; reach: number };
  * looks for a place the same way. With no free place for it either it stays folded at the last
  * place it tried: it covers less than the whole stack would. `folded` is the shape of the folded
  * stack, null for a stack that cannot fold (one toast).
+ *
+ * `stay`: the top the stack has now, when it may keep it (`lookFor` said 'keep': a toast went or
+ * changed, nothing of the page's layout moved). The whole stack stays there while it is free there
+ * and within its reach: the toasts that stay do not move. Null: it looks from the top bar down.
  */
-export function stackPlace(sides: { left: number; right: number }, whole: Shape, folded: Shape | null, controls: Box[], top: number, maxMoves: number): { top: number; folded: boolean } {
+export function stackPlace(sides: { left: number; right: number }, whole: Shape, folded: Shape | null, controls: Box[], top: number, maxMoves: number, stay: number | null = null): { top: number; folded: boolean } {
+  const freeAt = (at: number, shape: Shape) => {
+    const box: Box = { ...sides, top: at, bottom: at + shape.height };
+    return !controls.some((c) => covers(c, box));
+  };
+  if (stay !== null && stay >= top && stay - top <= whole.reach && freeAt(stay, whole)) return { top: stay, folded: false };
   const look = (shape: Shape) => {
     const at = toastTop({ ...sides, top, bottom: top + shape.height }, controls, top, maxMoves, shape.reach);
-    const box: Box = { ...sides, top: at, bottom: at + shape.height };
-    return { at, free: !controls.some((c) => overlap(c, box)) };
+    return { at, free: freeAt(at, shape) };
   };
   const all = look(whole);
   if (all.free || !folded) return { top: all.at, folded: false };
@@ -113,18 +132,59 @@ export const counts = (c: Seen): boolean => !c.inStack && !c.above && !c.disable
 /**
  * The box a control counts with, null when it does not count.
  *
- * A control that is wider than twice the stack can never be more than half under it. It counts
- * by what it shows: `content()` gives the smallest box around its text and its pictures, null
- * when it shows nothing of its own (the press area that lies over a whole row). So a toast at
- * the right stays at the top over a whole-width row whose label is at the left. Any narrower
- * control counts with its whole box (`part`: the part of it that shows), and so does a field you
- * type in: its text can be anywhere in it.
+ * A control that is wider than the stack, and that the stack could cover for less than half of
+ * its width (`sides`: the stack's left and right edge), counts by what it shows: `content()`
+ * gives the smallest box around its text and its pictures, null when it shows nothing of its own
+ * (the press area that lies over a whole row). So a toast at the right stays at the top over a
+ * whole-width row whose label is at the left (a task row of Home, 632 px wide). Any other control
+ * counts with its whole box (`part`: the part of it that shows), and so does a field you type in:
+ * its text can be anywhere in it.
  */
-export function countedBox(part: Box, stackWidth: number, field: boolean, content: () => Box | null): Box | null {
-  if (field || part.right - part.left <= 2 * stackWidth) return part;
+export function countedBox(part: Box, sides: { left: number; right: number }, field: boolean, content: () => Box | null): Box | null {
+  const width = part.right - part.left;
+  const under = Math.min(part.right, sides.right) - Math.max(part.left, sides.left);
+  if (field || width <= sides.right - sides.left || 2 * under >= width) return part;
   const shown = content();
   return shown && visiblePart(shown, [part]);
 }
+
+/**
+ * What a change asks of the stack: 'fresh', look for its place from the top bar down; 'keep',
+ * keep the place it has while that is free (`stackPlace`'s `stay`); 'wait', no look now, one
+ * when you stop working on the stack.
+ *
+ * 'layout': the page's layout or the window changed: its boxes moved, the place is looked for anew.
+ * 'added': a new toast came: a new stack, it goes to the place a stack of its size has.
+ * 'changed': a toast went, joined an equal one or changed its text, or the stack folded or unfolded.
+ * 'page': what is in the page's main column got higher or lower.
+ * `working`: the pointer is on the stack or the keyboard's focus is in it: the stack does not
+ * move under your hand for a change of its own content or of the page's.
+ */
+export type StackChange = 'layout' | 'added' | 'changed' | 'page';
+export function lookFor(change: StackChange, working: boolean): 'fresh' | 'keep' | 'wait' {
+  if (change === 'layout' || change === 'added') return 'fresh';
+  return working ? 'wait' : 'keep';
+}
+
+/**
+ * The room kept over the stack for the Resume bar, in px: `room` while the bar is offered and
+ * shows. The editor overlay is drawn over the bar: while it is open the stack starts at its usual place.
+ */
+export const barRoom = (offered: boolean, ideOpen: boolean, room: number): number => (offered && !ideOpen ? room : 0);
+
+/**
+ * Is a report of a watched box a change of its height (`contentWatch`)? `before`: the height of
+ * its last report (`watchedHeight` before the first one); undefined: none to compare with.
+ */
+export const heightChanged = (before: number | undefined, now: number): boolean => before !== undefined && before !== now;
+
+/**
+ * The height a box is known to have when the watch starts, given its height on screen then. A
+ * box that is 0 px high may get no first report (a ResizeObserver need not report it before it
+ * grows), so its first report can be its growth: a card that arrives in an empty list is a change. Any other
+ * box: unknown until its first report, which is only its size then, not a change.
+ */
+export const watchedHeight = (heightNow: number): number | undefined => (heightNow === 0 ? 0 : undefined);
 
 /**
  * Is `el` what a press at a point reaches? `hits` is everything at that point, the topmost
@@ -202,6 +262,12 @@ export function restLook(wait: () => number, look: () => void): { after(moved: b
 
 /** What you press or type in: a toast must not lie on one of these. */
 const CONTROLS = 'button, a[href], input, select, textarea, [role="button"], [role="link"], [role="tab"], [role="switch"]';
+/**
+ * An approval or question card that waits for your answer (home/cards/ApprovalCard.svelte: the
+ * card with "Waiting since" in its header; an answered one is a row, not a card). A toast keeps
+ * off the whole card: who asks, what and why are read before a button is pressed.
+ */
+export const WAITING_CARD = 'article.card:has(> header > .since[data-tip^="Waiting since"])';
 
 const boxOf = (el: Element): Box => {
   const r = el.getBoundingClientRect();
@@ -284,15 +350,17 @@ function contentBox(el: Element): Box | null {
 
 /**
  * The boxes of the page's controls that show inside `area` and that a toast must keep off
- * (see `counts`). A box is the part of the control that shows: not what is scrolled out of its
- * list or lies outside the window. A control much wider than the stack counts by what it shows
- * (see `countedBox`).
+ * (see `counts`), and those of the cards that wait for your answer (`WAITING_CARD`). A box is the
+ * part that shows: not what is scrolled out of its list or lies outside the window. A control
+ * much wider than the stack counts by what it shows (see `countedBox`); a waiting card counts whole.
  */
 export function controlBoxes(stack: HTMLElement, area: Box): Box[] {
   const above = layers(stack);
-  const stackWidth = stack.offsetWidth;
+  const own = stack.getBoundingClientRect();
+  const sides = { left: own.left, right: own.right };
+  const cards = new Set(document.querySelectorAll<HTMLElement>(WAITING_CARD));
   const boxes: Box[] = [];
-  for (const el of document.querySelectorAll<HTMLElement>(CONTROLS)) {
+  for (const el of [...document.querySelectorAll<HTMLElement>(CONTROLS), ...cards]) {
     const box = boxOf(el);
     if (!overlap(box, area)) continue;
     const part = visiblePart(box, [windowBox(), ...clips(el)]);
@@ -307,7 +375,7 @@ export function controlBoxes(stack: HTMLElement, area: Box): Box[] {
       onTop: reached(el, part, stack, above),
     };
     if (!counts(seen)) continue;
-    const counted = countedBox(part, stackWidth, el.matches(FIELDS), () => contentBox(el));
+    const counted = cards.has(el) ? part : countedBox(part, sides, el.matches(FIELDS), () => contentBox(el));
     if (counted && overlap(counted, area)) boxes.push(counted);
   }
   return boxes;
@@ -326,7 +394,7 @@ function scrollBoxes(el: Element, out: Element[]) {
  * card that arrives, rows that load. A control can then be under a toast that was put there
  * before. It watches the boxes that scroll in each `main` of the page and what is in them
  * (`scrollBoxes`), and calls `changed` when the height of one changes. Not when one is seen for
- * the first time, and not when the page scrolls.
+ * the first time (unless it was 0 px high then: `watchedHeight`), and not when the page scrolls.
  *
  * `look()` reads the page again (after a change of layout other boxes scroll); `stop()` ends
  * the watch.
@@ -337,9 +405,8 @@ export function contentWatch(changed: () => void): { look(): void; stop(): void 
   const observer = new ResizeObserver((entries) => {
     let any = false;
     for (const entry of entries) {
-      const before = heights.get(entry.target);
       const now = entry.contentRect.height;
-      if (before !== undefined && before !== now) any = true;
+      if (heightChanged(heights.get(entry.target), now)) any = true;
       heights.set(entry.target, now);
     }
     if (any) changed();
@@ -356,7 +423,7 @@ export function contentWatch(changed: () => void): { look(): void; stop(): void 
       }
       for (const el of now) {
         if (heights.has(el)) continue;
-        heights.set(el, undefined);
+        heights.set(el, watchedHeight(el.getBoundingClientRect().height));
         observer.observe(el);
       }
     },

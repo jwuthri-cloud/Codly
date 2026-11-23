@@ -1,6 +1,8 @@
-// What Esc does outside a text field and outside an overlay: one step per press. It closes what
-// is open first (the find bar and a closed request you are reading count); with nothing left to
-// close, on Home, it stops the running turn: the first press only asks, a second press stops.
+// What Esc does outside a text field and outside an overlay: one step per press. A toast that
+// waits for you goes first; then it closes what is open (the find bar and a closed request you
+// are reading count); with nothing left to close, on Home, it stops the running turn: the first
+// press only asks, a second press stops.
+import { CLOSING } from '../util/modal';
 import type { Mode, Room } from './ui.svelte';
 
 export type EscState = {
@@ -18,10 +20,15 @@ export type EscState = {
   findOpen: boolean;
   /** Home shows the closed requests, not a conversation. */
   readingClosed: boolean;
+  /** A toast that does not go by itself shows (an error, or one with no time limit). */
+  toastWaits: boolean;
 };
-export type EscStep = 'close-artifact' | 'deselect' | 'leave-office' | 'close-find' | 'leave-closed' | 'stop';
+export type EscStep = 'dismiss-toast' | 'close-artifact' | 'deselect' | 'leave-office' | 'close-find' | 'leave-closed' | 'stop';
 
 export function escStep(s: EscState): EscStep | null {
+  // The toast and nothing else. A held key dismisses no more of them: its repeats do nothing while
+  // one waits. A dialog, a menu and the office keep their own Esc.
+  if (s.toastWaits && !s.popupOpen && !s.inOffice) return s.repeat ? null : 'dismiss-toast';
   if (s.artifactOpen) return 'close-artifact';
   if (s.selection) return 'deselect';
   if (s.mode === 'office' || s.mode === 'map') return 'leave-office';
@@ -31,6 +38,12 @@ export function escStep(s: EscState): EscStep | null {
   // A held key never stops a turn: the repeats of the Esc that closed a sheet end here.
   return s.repeat ? null : 'stop';
 }
+
+/**
+ * Is one of `found` (the page's dialogs, menus or modal layers) open? One that is closing is
+ * not: it fades out for a moment, and an Esc in that moment goes to what is under it.
+ */
+export const openOne = (found: Iterable<{ closest(selector: string): unknown }>): boolean => [...found].some((el) => !el.closest(CLOSING));
 
 /** How long "Press Esc again to stop …" stays, and how long a second Esc counts as its answer. */
 export const ESC_STOP_WINDOW = 2000;
