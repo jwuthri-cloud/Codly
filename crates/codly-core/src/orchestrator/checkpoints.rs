@@ -27,6 +27,12 @@
 //! its run works in, and the note goes when a turn in that worktree took a prompt. So after a
 //! restore in a task's worktree, a 1:1 message to the same agent (read in the agent's own
 //! worktree) neither shows the note nor uses it up: the task's next prompt starts with it.
+//! The note also says what it was written for, a task or the agent's 1:1 conversation, and
+//! only a prompt for the same reads it. A worktree can go on to another task of the agent (a
+//! team member has one for all its tasks): a note that the first task never read is dropped
+//! there, not shown to the next one, which finds other files. A task that waits for you has
+//! let its agent go, and its files are still in the worktree: a restore there is written for
+//! that task, so the prompt that takes the task up again starts with the note.
 //!
 //! Only a linked worktree of the repository is ever touched (`Git::check_worktree`). An agent
 //! hired with Git isolation off works in the user's own checkout: it has no checkpoints.
@@ -467,6 +473,27 @@ fn note_key(agent_id: &str, wt: &Path) -> String {
     format!("checkpoint_note:{agent_id}:{}", wt.display())
 }
 
+/// Where a note waited before notes were kept by worktree (kv). Nothing says which run such
+/// a note was for, so none is read any more: the agent's next prompt drops it.
+fn old_note_key(agent_id: &str) -> String {
+    format!("checkpoint_note:{agent_id}")
+}
+
+/// A note about restored files, as it waits in the store.
+#[derive(Serialize, Deserialize)]
+struct Note {
+    /// What the agent was on in that worktree when the files went back: a task's id, or
+    /// `ONE_TO_ONE` (`Inner::note_for`). Only a prompt for the same reads the note
+    /// (`Inner::reads`): a worktree can go on to another task of the agent, which finds other
+    /// files there.
+    #[serde(rename = "for")]
+    meant_for: String,
+    text: String,
+}
+
+/// A note for the agent's own conversation with you, outside every task.
+const ONE_TO_ONE: &str = "1:1";
+
 /// A worktree that checkpoints apply to.
 struct Spot {
     /// The repository it belongs to.
@@ -606,13 +633,18 @@ impl Inner {
         // would look like lost work.
         let note = restore_note(kind, &label, &files, only.is_none());
         let shared = self.store.agents(&ws)?.into_iter().filter(|a| a.id != agent.id && a.worktree.as_deref().map(Path::new) == Some(wt.as_path()));
-        for id in shared.map(|a| a.id).chain([agent.id.clone()]) {
-            let key = note_key(&id, &wt);
-            let note = match self.store.kv_get(&key)? {
-                Some(earlier) => format!("{earlier}\n{note}"),
+        let readers: Vec<Agent> = shared.chain([agent.clone()]).collect();
+        for reader in readers {
+            let key = note_key(&reader.id, &wt);
+            let meant_for = self.note_for(&reader, &wt).await?;
+            // An earlier note for the same is not read yet: this one follows it. One for
+            // something else (a task that is over) gives way.
+            let earlier = self.store.kv_get(&key)?.and_then(|saved| serde_json::from_str::<Note>(&saved).ok()).filter(|n| n.meant_for == meant_for);
+            let text = match earlier {
+                Some(earlier) => format!("{}\n{note}", earlier.text),
                 None => note.clone(),
             };
-            self.store.kv_set(&key, &note)?;
+            self.store.kv_set(&key, &serde_json::to_string(&Note { meant_for, text })?)?;
         }
         let what = restored_what(only, files.len(), &agent.name, kind, &label);
         let detail = json!({ "agent_id": agent_id, "checkpoint": n, "undo": undo, "files": files });
@@ -665,14 +697,66 @@ impl Inner {
         lock(&self.live).get(agent_id).map(|l| l.cwd.clone())
     }
 
+    /// The task `agent` is on in the worktree `wt`: the task of its run in that worktree, else
+    /// the task it holds whose worktree that is (its run is over, or it reads a message of
+    /// yours between two turns of the task). None: it is on no task there.
+    fn task_in(&self, agent: &Agent, wt: &Path) -> Result<Option<Id>> {
+        let run_task = lock(&self.live).get(&agent.id).filter(|l| l.cwd.as_path() == wt).and_then(|l| l.task_id.clone());
+        if run_task.is_some() {
+            return Ok(run_task);
+        }
+        let held = agent.task_id.as_deref().map(|id| self.store.task(id)).transpose()?.flatten();
+        Ok(held.filter(|t| t.worktree.as_deref().map(Path::new) == Some(wt)).map(|t| t.id))
+    }
+
+    /// The tasks of `agent` that are not over and whose worktree is `wt`. One that waits for
+    /// you (it is blocked, or you stopped it) has let the agent go, and its files are still
+    /// there: Retry, Re-run checks or Send back gives it to the same agent in that worktree.
+    /// A team member has one worktree for all its tasks, so there can be several.
+    fn open_in(&self, agent: &Agent, wt: &Path) -> Result<Vec<Task>> {
+        let Some(ws) = self.store.agent_workspace(&agent.id)? else { return Ok(vec![]) };
+        let here = |t: &Task| t.assignee.as_deref() == Some(agent.id.as_str()) && t.worktree.as_deref().map(Path::new) == Some(wt);
+        let open = |t: &Task| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled);
+        Ok(self.store.tasks(&ws)?.into_iter().filter(|t| here(t) && open(t)).collect())
+    }
+
+    /// What a note about a restore in the worktree `wt` is written for, for `agent`: the task
+    /// it is on there (`task_in`); else its task that waits there with the files that went
+    /// back, which is the one whose branch the worktree is on (`open_in`); else its own
+    /// conversation with you (`ONE_TO_ONE`).
+    async fn note_for(&self, agent: &Agent, wt: &Path) -> Result<String> {
+        if let Some(task) = self.task_in(agent, wt)? {
+            return Ok(task);
+        }
+        let open = self.open_in(agent, wt)?;
+        if open.is_empty() {
+            return Ok(ONE_TO_ONE.to_string());
+        }
+        let branch = self.git.checked_out_branch(wt).await?;
+        let waits = open.into_iter().find(|t| branch.is_some() && t.branch == branch);
+        Ok(waits.map_or_else(|| ONE_TO_ONE.to_string(), |t| t.id))
+    }
+
+    /// Is a note written for `meant_for` (`note_for`) one for the prompt that `agent`'s run
+    /// reads in the worktree `wt` now? A run on a task there reads that task's note and no
+    /// other. A conversation with you between tasks reads its own note, and the note of a
+    /// task of the agent that waits there: it is the same agent in the same files, as before
+    /// notes said what they were for. (No look at the branch here: a prompt goes out with no
+    /// wait for git. The prompt that takes a task up again is read by a run of that task.)
+    fn reads(&self, agent: &Agent, wt: &Path, meant_for: &str) -> Result<bool> {
+        Ok(match self.task_in(agent, wt)? {
+            Some(task) => task == meant_for,
+            None => meant_for == ONE_TO_ONE || self.open_in(agent, wt)?.iter().any(|t| t.id == meant_for),
+        })
+    }
+
     /// `text` with the note in front about files the user put back, since the agent's last
     /// turn there, in the worktree its run works in, if there is one. A note about another
     /// worktree waits for a prompt that is read there. The note stays until a turn takes a
     /// prompt (`restore_note_read`), so a prompt that never reaches the agent does not take it
     /// along.
     pub(super) fn with_restore_note(&self, agent_id: &str, text: String) -> String {
-        let Some(wt) = self.prompt_worktree(agent_id) else { return text };
-        match self.store.kv_get(&note_key(agent_id, &wt)) {
+        match self.waiting_note(agent_id) {
             Ok(Some(note)) => format!("{note}\n\n{text}"),
             Ok(None) => text,
             Err(e) => {
@@ -680,6 +764,33 @@ impl Inner {
                 text
             }
         }
+    }
+
+    /// The note that waits for the prompt the agent's run reads now: the one of the worktree
+    /// that run works in, when it was written for what the run is on there (`reads`). A note
+    /// written for something else is dropped: the task it was for ended with no prompt after
+    /// the restore, or the worktree went on to another task, with other files. A note under
+    /// the old key (`old_note_key`) is dropped too.
+    fn waiting_note(&self, agent_id: &str) -> Result<Option<String>> {
+        let old = old_note_key(agent_id);
+        if self.store.kv_get(&old)?.is_some() {
+            self.store.kv_write(&[(old, None)])?;
+        }
+        let Some(wt) = self.prompt_worktree(agent_id) else { return Ok(None) };
+        let key = note_key(agent_id, &wt);
+        let Some(saved) = self.store.kv_get(&key)? else { return Ok(None) };
+        // None: from before a note said what it was for.
+        let note = serde_json::from_str::<Note>(&saved).ok();
+        let agent = self.agent(agent_id)?;
+        let for_this = match &note {
+            Some(note) => self.reads(&agent, &wt, &note.meant_for)?,
+            None => false,
+        };
+        if !for_this {
+            self.store.kv_write(&[(key, None)])?;
+            return Ok(None);
+        }
+        Ok(note.map(|note| note.text))
     }
 
     /// A prompt reached the agent (it started a turn, or the running turn took it in): it
