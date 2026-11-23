@@ -566,11 +566,13 @@ export class Story {
           if (works) await this.soloWork(act, text);
           else await act.say(reply, { thread });
         });
-        if (!this.running.has(agentId)) act.status('idle');
       } catch (e) {
         if (!(e instanceof Cancelled)) console.error(e);
         sim.cancelled.delete(agentId);
       }
+      // However the turn ended (done, "Stop the turn", Send now), the agent waits for you
+      // again, unless you stopped the agent itself or it is on a task.
+      if (act.a.status !== 'offline' && !this.running.has(agentId)) act.status('idle');
     });
     this.agentChains.set(agentId, next);
     await next;
@@ -1589,18 +1591,24 @@ export class Story {
     }
   }
 
-  hire(provider: Provider, model: string | null = null, title: string | null = null): Agent {
+  /** A new 1:1 agent. `named` is the name the hire wizard gave it (checked there to be free); without one it gets its CLI's stock name. */
+  hire(provider: Provider, model: string | null = null, title: string | null = null, named: string | null = null): Agent {
     const sim = this.sim;
     const names = new Set([...sim.agents.values()].map((a) => a.name));
-    let name = WORKER_NAMES[provider];
-    for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
+    let name = named ?? WORKER_NAMES[provider];
+    if (!named) for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
     const used = new Set([...sim.agents.values()].map((a) => a.color));
     const color = [0, 1, 3, 5, 2, 4, 7, 6].find((c) => !used.has(c)) ?? sim.agents.size % 8;
     const act = this.spawnWorker(provider, name, color, null, model);
     act.status('idle');
-    // Like the core: a 1:1 agent works in a worktree of its own (the hire puts it in your
-    // project folder instead when Git isolation is off).
-    return sim.patchAgent(act.a.id, { worktree: `${WORKTREES}/${name.toLowerCase().replace(/\s+/g, '-')}`, ...(title ? { title } : {}) });
+    // Like the core: a 1:1 agent works in a worktree of its own, called after its name (the
+    // hire puts it in your project folder instead when Git isolation is off). Two names can
+    // read the same in a path, so a path that is taken gets a number.
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
+    const taken = new Set([...sim.agents.values()].map((a) => a.worktree));
+    let worktree = `${WORKTREES}/${slug}`;
+    for (let i = 2; taken.has(worktree); i++) worktree = `${WORKTREES}/${slug}-${i}`;
+    return sim.patchAgent(act.a.id, { worktree, ...(title ? { title } : {}) });
   }
 
   /** `?mode=plan`: a 1:1 Claude agent in "plan first", asked for a small change, so its plan waits for your answer. */

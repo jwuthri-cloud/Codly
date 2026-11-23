@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { rulePrefix } from '../demo/approvalRules';
 import { ChecksDemo } from '../demo/checks';
+import { demoDraft, hireFromManifest, reviewHire } from '../demo/hire';
 import { demoIntake } from '../demo/intake';
 import { MergeConflictDemo } from '../demo/mergeConflict';
 import { PullRequestDemo } from '../demo/pullrequest';
@@ -219,6 +220,44 @@ describe('a 1:1 Claude agent works in its mode', () => {
     expect(events(sim, 'turn_completed', id)[0].status).toBe('interrupted');
     expect(sim.agents.get(id)!.permission_mode).toBe('plan');
     expect(events(sim, 'files_changed', id)).toEqual([]);
+    // No turn runs any more: the agent waits for you, it does not look busy.
+    await until(() => sim.agents.get(id)!.status === 'idle');
+    expect(sim.agents.get(id)!.activity).toBeNull();
+  });
+
+  it('“Stop the turn” on an edit ends the turn, and the agent waits for you again', async () => {
+    const { sim, story } = demo({ story: { yourRequestFirst: true } });
+    const id = story.hire('claude').id;
+    story.userChat(`agent:${id}`, 'Add a line about the changelog.');
+    const edits = () => requests(sim, (a) => a.subject.kind === 'file_change' && a.agent_id === id);
+    await until(() => edits().length === 1);
+    story.resolveApproval(edits()[0].id, 'cancel', null);
+    await until(() => events(sim, 'turn_completed', id).length === 1);
+    expect(events(sim, 'turn_completed', id)[0].status).toBe('interrupted');
+    expect(events(sim, 'files_changed', id)).toEqual([]);
+    await until(() => sim.agents.get(id)!.status === 'idle');
+    expect(sim.agents.get(id)!.activity).toBeNull();
+  });
+});
+
+describe('agents you hire in the demo', () => {
+  it('each get a worktree of their own, called after their name', () => {
+    const { sim, story } = demo({ story: { yourRequestFirst: true } });
+    const wizard = (brief: string) => hireFromManifest(sim, story, reviewHire(demoDraft(brief)).manifest!, false);
+    const dot = wizard('Keep the docs up to date');
+    const tri = wizard('Triage new bugs');
+    expect([dot.name, tri.name]).toEqual(['Dot', 'Tri']);
+    expect(dot.worktree).toMatch(/\/dot$/);
+    expect(tri.worktree).toMatch(/\/tri$/);
+    // Two names that read the same in a path, and two hires without a name of their own.
+    const twins = ['Dot 2', 'dot-2'].map((name) => hireFromManifest(sim, story, { ...reviewHire(demoDraft('docs')).manifest!, name }, false));
+    const stock = [story.hire('claude'), story.hire('claude')];
+    expect(stock.map((a) => a.name)).toEqual(['Eli', 'Eli 2']);
+    const worktrees = [dot, tri, ...twins, ...stock].map((a) => a.worktree);
+    expect(new Set(worktrees).size).toBe(worktrees.length);
+    // With Git isolation off the agent works in your project folder.
+    const here = hireFromManifest(sim, story, { ...reviewHire(demoDraft('Cut the release')).manifest!, isolate: false }, false);
+    expect(here.worktree).toBe(REPO);
   });
 });
 
