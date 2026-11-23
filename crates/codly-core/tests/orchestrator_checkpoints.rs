@@ -737,6 +737,78 @@ async fn a_note_under_the_old_key_is_dropped_at_the_agents_next_prompt() {
     o.core.shutdown().await;
 }
 
+/// A team member, Ana, on a task you gave her, which you stop in its first turn. The task
+/// waits for you (Blocked), Ana is let go of it and has no run, and her worktree still holds
+/// the task's files on the task's branch: the state of every member's task that waits for
+/// you. Returns Ana's id, her worktree and the task.
+async fn a_members_task_that_waits_for_you(o: &Office) -> (Id, PathBuf, Task) {
+    let ana = TeamMember { name: "Ana".into(), role: "Backend dev".into(), ..Default::default() };
+    o.core.update_settings(Settings { team: vec![ana], lead_followups: false, ..Default::default() }).await.unwrap();
+    let id = o.core.snapshot().await.unwrap().agents.into_iter().find(|a| a.name == "Ana").expect("Ana is on the team").id;
+    let task = o.core.create_task("Say hello", "Write hello.txt").await.unwrap();
+    o.core.assign_task(&task.id, Some(&id)).await.unwrap();
+    wait_for("the checkpoint before the task's first turn", async || (o.core.agent_checkpoints(&id).await.unwrap().checkpoints.len() == 1).then_some(())).await;
+    let task = o.core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+    let wt = PathBuf::from(task.worktree.clone().unwrap());
+    // The turn writes a file (here the test is the agent's hands), and then you stop the task.
+    std::fs::write(wt.join("hello.txt"), "hello\n").unwrap();
+    let task = o.core.move_task(&task.id, TaskStatus::Blocked).await.unwrap();
+    run_over(o, &id).await;
+    let ana = o.core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == id).unwrap();
+    assert_eq!((ana.task_id.as_deref(), ana.worktree.as_deref()), (None, task.worktree.as_deref()), "Ana holds no task, and her worktree is the task's");
+    (id, wt, task)
+}
+
+/// The prompts that were read in the folder `dir`, in order.
+fn read_in(o: &Office, dir: &Path) -> Vec<String> {
+    let seen = o.seen.lock().unwrap();
+    seen.prompts.iter().zip(&seen.read_in).filter(|(_, at)| at.as_path() == dir).map(|(prompt, _)| prompt.clone()).collect()
+}
+
+const ONE_FILE_BACK: &str = "[Codly] The user put one file in your worktree back to how it was before the turn that started with <untrusted>";
+
+/// A member's task waits for you, and its member holds no task meanwhile. You put a file
+/// back in the member's Git tab: those are the task's files. The note is written for that
+/// task, and when you click Retry, the prompt that takes the task up again starts with it:
+/// the member does not go on in files that changed with no word.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_while_a_members_task_waits_for_you_is_told_when_the_task_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = office(dir.path()).await;
+    let (id, wt, task) = a_members_task_that_waits_for_you(&o).await;
+    let store = Store::open(&dir.path().join("data/codly.sqlite")).unwrap();
+
+    let done = o.core.restore_checkpoint_file(&id, 1, "hello.txt").await.unwrap();
+    assert_eq!(done.files, files(&["hello.txt"]));
+    assert!(!wt.join("hello.txt").exists());
+    let note = store.kv_get(&note_key(&id, &wt)).unwrap().expect("a note waits in the member's worktree");
+    let read: serde_json::Value = serde_json::from_str(&note).unwrap();
+    assert_eq!(read["for"], task.id.as_str(), "the note is for the task that waits there: {note}");
+
+    // Retry: the task goes back to Ana, in the same worktree.
+    o.core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    let told = wait_for("the prompt that takes the task up again", async || read_in(&o, &wt).get(1).cloned()).await;
+    assert!(told.starts_with(ONE_FILE_BACK), "{told}");
+    assert!(told.contains(", and left the other files as they are. 1 file changed: <untrusted>hello.txt</untrusted>."), "{told}");
+    o.core.shutdown().await;
+}
+
+/// The same restore, and then you write to the member before the task goes on. That
+/// conversation is read in the same worktree, by the same agent: it starts with the note, as
+/// it did before a note said what it was written for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_while_a_members_task_waits_for_you_is_told_in_the_members_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = office(dir.path()).await;
+    let (id, wt, _task) = a_members_task_that_waits_for_you(&o).await;
+    o.core.restore_checkpoint_file(&id, 1, "hello.txt").await.unwrap();
+
+    o.core.send_chat(&format!("agent:{id}"), "what happened?").await.unwrap();
+    let told = wait_for("the message to reach the member", async || read_in(&o, &wt).get(1).cloned()).await;
+    assert!(told.starts_with(ONE_FILE_BACK) && told.contains("[User] what happened?"), "{told}");
+    o.core.shutdown().await;
+}
+
 /// An agent that reviews a task reads the task's files and changes none, and no turn of a
 /// review is kept. Its Git tab says so: it does not promise checkpoints that never come.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

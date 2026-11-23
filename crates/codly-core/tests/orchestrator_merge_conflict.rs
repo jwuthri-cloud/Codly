@@ -1294,11 +1294,17 @@ async fn the_new_files_of_a_resolution_that_did_not_finish_go() {
 /// Makes the store refuse one write of a resolution's start (`write`: the trigger's event, in
 /// SQL), or lets every write through again (None).
 fn store_refuses(root: &Path, write: Option<&str>) {
+    store_trigger(root, "refused", write);
+}
+
+/// The same under a name of its own, for a second write that the store refuses at the same
+/// time.
+fn store_trigger(root: &Path, name: &str, write: Option<&str>) {
     let db = rusqlite::Connection::open(root.join("data/codly.sqlite")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
     let sql = match write {
-        Some(write) => format!("CREATE TRIGGER refused BEFORE {write} BEGIN SELECT RAISE(ABORT, 'the disk is full'); END"),
-        None => "DROP TRIGGER refused".to_string(),
+        Some(write) => format!("CREATE TRIGGER {name} BEFORE {write} BEGIN SELECT RAISE(ABORT, 'the disk is full'); END"),
+        None => format!("DROP TRIGGER {name}"),
     };
     db.execute_batch(&sql).unwrap();
 }
@@ -1527,6 +1533,90 @@ async fn a_take_back_that_cannot_be_written_down_still_says_the_branch_is_back()
     let second = core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.key == "resolve-2").expect("a second resolving task");
     assert_eq!(state.resolving.as_deref(), Some(second.id.as_str()));
     wait_plan(&core, PlanStatus::Done).await;
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
+    core.shutdown().await;
+}
+
+/// The write that cancels a task.
+const A_TASK_CANCELLED: &str = "UPDATE OF status ON task WHEN NEW.status = 'cancelled'";
+
+/// Codly was closed in the middle of a start, later than in the test of the start with no
+/// task: the task that resolves the conflict was made, and the plan did not run again yet.
+/// On record are the start, where the plan stood, and a task that waits; the merge is open in
+/// the plan's worktree. The next Merge takes the merge out and cancels that task: left
+/// waiting, it would start beside the task of the next resolution, in the same worktree. The
+/// next resolution has one task, and the old one never runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_start_cut_short_after_its_task_was_made_cancels_that_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let lead = lead_with("greeting.txt", "grep -q plan greeting.txt", &[]);
+    let (core, repo) = start(dir.path(), lead, plan_worker(), turns.clone()).await;
+    core.send_chat("lead", "Please change the greeting").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    let tip = sh(&repo, &["rev-parse", &branch]);
+    let mine = commit(&repo, "greeting.txt", "hello from main\n");
+
+    // That state, made with Codly's own writes as far as they go: a start that fails once its
+    // task is made, and whose take-back cannot cancel the task. The start, where the plan
+    // stood and the task stay on record.
+    store_refuses(dir.path(), Some(A_MERGE_RECORD));
+    store_trigger(dir.path(), "kept", Some(A_TASK_CANCELLED));
+    let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
+    assert!(err.contains(&format!("Codly took the merge of main back: {branch} is as it was. It could not write that down: ")), "{err}");
+    store_refuses(dir.path(), None);
+    store_trigger(dir.path(), "kept", None);
+    // The rest by hand: the start is one of another run of Codly, and the merge it made is
+    // still open in the plan's worktree (that run was closed before it could take it back).
+    let (start_key, start) = kv_rows(dir.path(), "merge_start:").pop().expect("the start is on record");
+    let mut start: Value = serde_json::from_str(&start).unwrap();
+    start["run"] = json!("an earlier run");
+    let db = rusqlite::Connection::open(dir.path().join("data/codly.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(db.execute("UPDATE kv SET value = ?2 WHERE key = ?1", [start_key, start.to_string()]).unwrap(), 1);
+    drop(db);
+    assert!(!git(&integ_wt, &["merge", "main"]).status.success(), "the merge of main conflicts");
+    assert!(in_merge(&integ_wt) && std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap().contains("<<<<<<<"));
+    let s = core.snapshot().await.unwrap();
+    let task = s.tasks.iter().find(|t| t.key == "resolve").expect("the task had reached the store").clone();
+    let stood = s.plans.iter().find(|p| p.id == plan.id).unwrap();
+    assert_eq!((task.status, stood.status, &stood.base_commit), (TaskStatus::Pending, PlanStatus::Done, &plan.base_commit));
+    assert_eq!(start_records(dir.path()).len(), 2, "{:?}", start_records(dir.path()));
+
+    // The next Merge takes the start back first: the merge is out, and the task is cancelled.
+    let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
+    assert!(err.contains("merging into main conflicts in greeting.txt"), "{err}");
+    let s = core.snapshot().await.unwrap();
+    let old = s.tasks.iter().find(|t| t.id == task.id).unwrap();
+    assert_eq!((old.status, old.status_reason.as_deref()), (TaskStatus::Cancelled, Some("Codly could not start it")));
+    assert_eq!(core.merge_state(&source).await.unwrap().resolving, None);
+    assert_eq!((sh(&repo, &["rev-parse", &branch]), in_merge(&integ_wt), sh(&integ_wt, &["status", "--porcelain"])), (tip.clone(), false, String::new()));
+    assert_eq!(std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap(), "hello from the plan\n", "no marker is left");
+    let record = decisions(&core).await;
+    let taken_back = format!("bringing main into {branch} did not finish when Codly closed; {branch} is back where it was before it");
+    assert_eq!(record.iter().filter(|d| **d == taken_back).count(), 1, "{record:?}");
+    assert_eq!(start_records(dir.path()), Vec::<String>::new());
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["rev-parse", &branch])), (mine, tip));
+
+    // The next resolution has a task of its own, the only one that runs, and the merge goes
+    // through.
+    let state = core.resolve_merge_conflict(&source).await.unwrap();
+    let second = core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.key == "resolve-2").expect("a second resolving task");
+    assert_eq!(state.resolving.as_deref(), Some(second.id.as_str()));
+    wait_plan(&core, PlanStatus::Done).await;
+    let briefed: Vec<String> = turns
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(role, _, _)| *role == Role::Worker)
+        .filter_map(|(_, _, prompt)| prompt.split("[Codly] Task resolve").nth(1).and_then(|rest| rest.split(':').next()).map(|n| format!("resolve{n}")))
+        .collect();
+    assert_eq!(briefed, ["resolve-2"], "the task of the start that was cut short never ran");
+    assert_eq!(core.snapshot().await.unwrap().tasks.iter().find(|t| t.id == task.id).unwrap().status, TaskStatus::Cancelled);
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
     core.shutdown().await;
