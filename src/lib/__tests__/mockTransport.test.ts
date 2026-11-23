@@ -2,6 +2,8 @@
 // of docs/DEMO.md starts it in its state, and the commands of that screen are answered.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import resumeRs from '../../../crates/codly-core/src/orchestrator/resume.rs?raw';
+import { demoDraft, reviewHire } from '../demo/hire';
+import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
 import type { EventRow } from '../gen/EventRow';
 import type { LotSlot } from '../gen/LotSlot';
@@ -9,6 +11,8 @@ import type { MergeState } from '../gen/MergeState';
 import type { Office } from '../gen/Office';
 import type { Plan } from '../gen/Plan';
 import type { Preview } from '../gen/Preview';
+import type { PullRequest } from '../gen/PullRequest';
+import type { RepoSync } from '../gen/RepoSync';
 import type { RequiredChecks } from '../gen/RequiredChecks';
 import type { ResumeOffer } from '../gen/ResumeOffer';
 import type { Snapshot } from '../gen/Snapshot';
@@ -130,14 +134,31 @@ describe('the demo transport', () => {
       const held = await tasks(t);
       // Each says why it waits, in the core's own words.
       expect(HELD).toBe(/pub const HELD: &str = "([^"]+)";/.exec(resumeRs)?.[1]);
-      expect([held.t1, held.t2].map((x) => [x.status, x.status_reason, x.assignee])).toEqual([['ready', HELD, null], ['ready', HELD, null]]);
+      expect([held.t1, held.t2].map((x) => [x.status, x.status_reason, x.attempt, x.branch])).toEqual([
+        ['ready', HELD, 1, 'codly/dark-mode/t1'],
+        ['ready', HELD, 1, 'codly/dark-mode/t2'],
+      ]);
       expect(held.t3.status).toBe('pending');
+      // Each keeps its worker of the last run: offline (its process ended with Codly), in the task's worktree.
+      const workers = (await snapshot(t)).agents.filter((x) => x.role === 'worker');
+      const of = (task: Task) => workers.find((x) => x.id === task.assignee);
+      expect([of(held.t1), of(held.t2)].map((x) => [x?.name, x?.status, x?.run_id, x?.task_id, x?.worktree])).toEqual([
+        ['Ada', 'offline', null, held.t1.id, held.t1.worktree],
+        ['Bo', 'offline', null, held.t2.id, held.t2.worktree],
+      ]);
 
-      // Your Resume: nothing waits any more, the tasks go on, and their history says so.
+      // Your Resume: nothing waits any more, the tasks go on with the same workers and attempt, and their history says so.
       expect(await offer(t, true)).toBeNull();
       await vi.advanceTimersByTimeAsync(3000);
       const now = await tasks(t);
-      expect([now.t1.status, now.t2.status]).toEqual(['running', 'running']);
+      expect([now.t1, now.t2].map((x) => [x.status, x.assignee, x.attempt, x.worktree])).toEqual([
+        ['running', held.t1.assignee, 1, held.t1.worktree],
+        ['running', held.t2.assignee, 1, held.t2.worktree],
+      ]);
+      const after = await snapshot(t);
+      expect(after.agents.filter((x) => x.role === 'worker').map((x) => x.name).sort()).toEqual(['Ada', 'Bo']);
+      // No new route: the worker goes on where it stopped.
+      expect(after.events.filter((e) => e.kind.type === 'decision' && e.kind.decision_type === 'route' && [held.t1.id, held.t2.id].includes(e.task_id ?? ''))).toEqual([]);
       const resumed = (await snapshot(t)).events.filter((e) => e.kind.type === 'decision' && e.kind.decision_type === 'retry');
       expect(resumed.map((e) => [e.task_id, e.kind.type === 'decision' && e.kind.summary])).toEqual([
         [held.t1.id, 'Resumed after restart: its worker goes on where it stopped'],
@@ -161,7 +182,7 @@ describe('the demo transport', () => {
       await vi.advanceTimersByTimeAsync(20_000);
       const s = await snapshot(t);
       expect(s.tasks.filter((x) => ['running', 'verifying', 'merging', 'done'].includes(x.status) && x.plan_id)).toEqual([]);
-      expect(s.agents.filter((a) => a.role === 'worker')).toEqual([]);
+      expect(s.agents.filter((a) => a.role === 'worker' && a.status !== 'offline')).toEqual([]);
       // Its first task says why it waits, in the core's words; the count is still of the two that were in work.
       expect(s.tasks.find((x) => x.plan_id === second!.id && x.key === 't1')).toMatchObject({ status: 'ready', status_reason: HELD });
       expect(await offer(t)).toEqual({ tasks: 2 });
@@ -172,8 +193,10 @@ describe('the demo transport', () => {
       expect(after.tasks.filter((x) => x.status === 'running').map((x) => x.key).sort()).toEqual(['t1', 't1', 't2']);
     });
 
-    /** The tasks of the first plan that a worker has, or had. */
-    const started = async (t: MockTransport) => Object.values(await tasks(t)).filter((x) => x.assignee || !['pending', 'ready', 'cancelled'].includes(x.status)).map((x) => x.key);
+    /** The tasks of the first plan that were started since the page loaded. */
+    const started = async (t: MockTransport) => Object.values(await tasks(t)).filter((x) => !['pending', 'ready', 'cancelled'].includes(x.status)).map((x) => x.key);
+    /** The workers at work now (the held tasks' workers of the last run are offline). */
+    const working = async (t: MockTransport) => (await snapshot(t)).agents.filter((x) => x.role === 'worker' && x.status !== 'offline').map((x) => x.name);
 
     it('counts one less when you cancel a waiting task, and ends by itself when none is left', async () => {
       const t = open('?resume=ask');
@@ -189,7 +212,7 @@ describe('the demo transport', () => {
       await vi.advanceTimersByTimeAsync(5000);
       expect(Object.values(await tasks(t)).map((x) => x.status)).toEqual(['cancelled', 'cancelled', 'cancelled']);
       expect(await started(t)).toEqual([]);
-      expect((await snapshot(t)).agents.filter((x) => x.role === 'worker')).toEqual([]);
+      expect(await working(t)).toEqual([]);
       // No hold is left: a task you start from here on needs no Resume.
       const task = await call<Task>(t, 'create_task', { title: 'Sort the imports', goal: '' });
       await call(t, 'move_task', { taskId: task.id, status: 'ready' });
@@ -209,7 +232,7 @@ describe('the demo transport', () => {
       const now = await tasks(t);
       expect([now.t1.status, now.t2.status, now.t3.status]).toEqual(['running', 'cancelled', 'pending']);
       expect(await started(t)).toEqual(['t1']);
-      expect((await snapshot(t)).agents.filter((x) => x.role === 'worker').map((x) => x.name)).toEqual(['Ada']);
+      expect(await working(t)).toEqual(['Ada']);
     });
 
     it('holds nothing without the parameter', async () => {
@@ -348,6 +371,74 @@ describe('the demo transport', () => {
     }
   });
 
+  /** Let the scripted story play until its first plan is done (`?autoplay=1`). */
+  async function finished(t: MockTransport): Promise<Plan> {
+    let plan: Plan | undefined;
+    for (let i = 0; i < 300 && !plan; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      plan = (await snapshot(t)).plans.find((p) => p.thread === 'lead' && p.status === 'done');
+    }
+    expect(plan, 'a plan finished').toBeDefined();
+    return plan!;
+  }
+
+  it('counts the commits not on origin yet from what you did: a merge adds them, an undo and a push take them away', async () => {
+    const t = open('?autoplay=1&ws=1');
+    const plan = await finished(t);
+    const ahead = async () => (await call<RepoSync>(t, 'repo_sync')).ahead;
+    /** What `git status` says in the terminal. */
+    const status = async () => {
+      const id = await call<string>(t, 'pty_open', { cwd: null });
+      let out = '';
+      await t.attachPty(id, (bytes) => (out += new TextDecoder().decode(bytes)));
+      await call(t, 'pty_write', { ptyId: id, data: 'git status\r' });
+      return out.split('\n').find((l) => l.startsWith('Your branch'))?.trim();
+    };
+    expect(await ahead()).toBe(0);
+    expect(await status()).toBe("Your branch is up to date with 'origin/main'.");
+
+    // The commit of each of its three tasks, and the merge commit.
+    const sha = await call<string>(t, 'merge_plan', { planId: plan.id, into: null, unchecked: false });
+    expect(await ahead()).toBe(4);
+    expect(await status()).toBe("Your branch is ahead of 'origin/main' by 4 commits.");
+    expect((await call<RepoSync>(t, 'undo_merge', { sha })).ahead).toBe(0);
+
+    await call(t, 'merge_plan', { planId: plan.id, into: null, unchecked: false });
+    expect((await call<RepoSync>(t, 'push_checkout')).ahead).toBe(0);
+    expect(await status()).toBe("Your branch is up to date with 'origin/main'.");
+  });
+
+  it('"Keep the branch" answers with the kept plan', async () => {
+    const t = open('?autoplay=1&ws=1');
+    const plan = await finished(t);
+    expect(plan.kept).toBe(false);
+    expect(await call<Plan>(t, 'keep_plan', { planId: plan.id })).toMatchObject({ id: plan.id, kept: true, status: 'done' });
+    expect((await snapshot(t)).plans.find((p) => p.id === plan.id)!.kept).toBe(true);
+    await expect(call(t, 'keep_plan', { planId: 'p-nobody' })).rejects.toThrow('Unknown plan');
+  });
+
+  it('`?pr=open`: the finished plan has an open pull request, and Refresh reads its checks running, then passed', async () => {
+    const t = open('?pr=open&autoplay=1');
+    const plan = await finished(t);
+    const source = { kind: 'plan', id: plan.id };
+    const pr = await call<PullRequest>(t, 'pull_request', { source });
+    expect(pr).toMatchObject({ state: 'open', checks: null, branch: plan.integration_branch, base: 'main' });
+    // The same one each time it is read, also from the dialog.
+    expect((await call<PullRequest>(t, 'pull_request', { source })).url).toBe(pr.url);
+    expect((await call<{ pr_state: string | null }>(t, 'draft_pull_request', { source })).pr_state).toBe('open');
+    expect((await call<PullRequest>(t, 'refresh_pull_request', { source })).checks).toMatchObject({ passed: 1, pending: 2, failed: 0 });
+    expect((await call<PullRequest>(t, 'refresh_pull_request', { source })).checks).toMatchObject({ passed: 3, pending: 0, failed: 0 });
+    // Without the parameter no pull request is open before you open one.
+    const plain = open('?autoplay=1&ws=1');
+    const done = await finished(plain);
+    expect(await call(plain, 'pull_request', { source: { kind: 'plan', id: done.id } })).toBeNull();
+  });
+
+  it('`?search=fail`: a code search fails with a reason; without it, it answers', async () => {
+    await expect(call(open('?search=fail'), 'search_code', { query: 'theme' })).rejects.toThrow('the code index could not be read');
+    expect((await call<{ query: string }>(open('?ws=1'), 'search_code', { query: 'theme' })).query).toBe('theme');
+  });
+
   // The last test of this file: the demo's neighbourhood is one for the page, and an office that closed stays closed.
   it('answers Close office: the open office closes once its tasks are over, and its plot is free', async () => {
     // (`?intake=issue` opens the repo and starts no scripted request: no agent is in a turn)
@@ -356,8 +447,13 @@ describe('the demo transport', () => {
     const home = (await call<LotSlot[]>(t, 'lots')).find((l) => l.name === 'acme/web')!;
     expect(home.workspace_id).toBe(s.workspace!.id);
     for (const task of s.tasks.filter((x) => x.status !== 'done')) await call(t, 'move_task', { taskId: task.id, status: 'cancelled' });
+    // An agent you hired is at rest, with its run.
+    const dot = await call<Agent>(t, 'hire_from_manifest', { manifest: reviewHire(demoDraft('Keep the docs up to date')).manifest, confirmShell: false });
+    expect(dot.run_id).toBeTruthy();
     const after = await call<LotSlot[]>(t, 'close_office', { workspaceId: home.workspace_id });
     expect(after.find((l) => l.id === home.id)).toMatchObject({ owned: true, workspace_id: null });
+    // Its agents stopped, and no run is left: their processes ended with the office.
+    expect((await snapshot(t)).agents.map((x) => [x.name, x.status, x.run_id])).toEqual([['Dot', 'offline', null]]);
     expect(after.find((l) => l.name === 'billing-api')).toMatchObject({ owned: true, workspace_id: 'demo-office-billing' });
   });
 });

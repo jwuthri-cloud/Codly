@@ -4,13 +4,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { rulePrefix } from '../demo/approvalRules';
 import { ChecksDemo } from '../demo/checks';
+import { MockControls } from '../demo/controls';
 import { demoDraft, hireFromManifest, reviewHire } from '../demo/hire';
 import { demoIntake } from '../demo/intake';
 import { MergeConflictDemo } from '../demo/mergeConflict';
 import { PullRequestDemo } from '../demo/pullrequest';
 import { REPO, Sim } from '../demo/sim';
 import { demoStates, opensRepo } from '../demo/states';
-import { AMEND, REQUEST, Story, type StoryOptions } from '../demo/story';
+import { AMEND, REQUEST, REQUEST_B, Story, type StoryOptions } from '../demo/story';
 import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
 import type { EventKind } from '../gen/EventKind';
@@ -308,12 +309,11 @@ describe('`?approval=…`: a 1:1 agent asks that kind of request once', () => {
     expect(sim.approvals.get(ap.id)!.status).toBe('denied');
   });
 
-  it('`network`: Claude Code’s sandbox asks for a host, and a Gemini tool of the same name asks as a tool', async () => {
+  it('`network`: Claude Code’s sandbox asks for a host on behalf of a command, and the step is that command', async () => {
     const { sim, story } = asking('network');
-    await until(() => all(sim).length === 2);
-    const [claude, gemini] = [of(sim, 'claude'), of(sim, 'gemini')];
-    const sandbox = all(sim).find((a) => a.agent_id === claude.id)!;
-    const tool = all(sim).find((a) => a.agent_id === gemini.id)!;
+    await until(() => all(sim).length === 1);
+    const claude = of(sim, 'claude');
+    const sandbox = all(sim)[0];
     const subject = { kind: 'tool', name: 'SandboxNetworkAccess', input: { host: 'registry.npmjs.org' } };
     // The sandbox's request asks in the CLI's words and has an id of its own as its call: no
     // call of the agent has that id. The command it holds up is the agent's Bash call.
@@ -322,23 +322,33 @@ describe('`?approval=…`: a 1:1 agent asks that kind of request once', () => {
     });
     expect(sandbox.call_id).toEqual(expect.any(String));
     expect(events(sim, 'tool_started', claude.id).map((e) => e.call_id)).not.toContain(sandbox.call_id);
-    expect(call(sim, claude.id).started).toMatchObject({ name: 'Bash', input: { command: 'npm view react version' } });
-    expect(tool).toMatchObject({ subject, call_id: call(sim, gemini.id).started.call_id, risks: [], choices: ['allow_once', 'deny'], status: 'pending' });
-    expect(call(sim, gemini.id).started.name).toBe('SandboxNetworkAccess');
+    expect(call(sim, claude.id).started).toMatchObject({ name: 'Bash', activity: 'execute', input: { command: 'npm view react version' } });
+    // No step of the thread is named after the request: it is the command's.
+    expect(events(sim, 'tool_started').map((e) => e.name)).not.toContain('SandboxNetworkAccess');
 
     story.resolveApproval(sandbox.id, 'allow_once', null);
-    story.resolveApproval(tool.id, 'deny', null);
-    await until(() => said(sim, claude.id).length === 1 && said(sim, gemini.id).length === 1);
+    await until(() => said(sim, claude.id).length === 1);
     expect(call(sim, claude.id).ended).toMatchObject({ ok: true, output: '19.2.3', exit_code: 0 });
     expect(said(sim, claude.id)).toEqual(['The newest react on npm is 19.2.3.']);
-    expect(call(sim, gemini.id).ended).toMatchObject({ ok: false, output: 'Declined by the user.' });
-    expect(said(sim, gemini.id)[0]).toMatch(/^Understood:/);
-    expect(all(sim).map((a) => a.status).sort()).toEqual(['approved', 'denied']);
+  });
+
+  it('`network`: after a "no" the command ends with the sandbox’s network error', async () => {
+    const { sim, story } = asking('network');
+    await until(() => all(sim).length === 1);
+    const id = of(sim, 'claude').id;
+    story.resolveApproval(all(sim)[0].id, 'deny', null);
+    await until(() => said(sim, id).length === 1);
+    const ended = call(sim, id).ended!;
+    expect(ended).toMatchObject({ ok: false, exit_code: 1 });
+    expect(ended.output).toContain('npm error 403 403 user denied - GET https://registry.npmjs.org/react');
+    expect(ended.output).toContain('<sandbox_violations>\ndeny network-outbound registry.npmjs.org:443 (user denied)\n</sandbox_violations>');
+    expect(said(sim, id)).toEqual(['The sandbox did not let npm reach registry.npmjs.org, so I cannot tell from here.']);
+    expect(agent(sim, (a) => a.provider === 'gemini')).toBeUndefined();
   });
 
   it('`network`: “Stop the turn” ends the command with a network error, then the turn', async () => {
     const { sim, story } = asking('network');
-    await until(() => all(sim).length === 2);
+    await until(() => all(sim).length === 1);
     const id = of(sim, 'claude').id;
     story.resolveApproval(all(sim).find((a) => a.agent_id === id)!.id, 'cancel', null);
     await until(() => events(sim, 'turn_completed', id).length === 1);
@@ -494,16 +504,17 @@ describe('the MCP servers of a Lead you stop', () => {
 
 describe('the demo states of docs/DEMO.md', () => {
   it('reads each parameter, and a value it does not know starts nothing', () => {
-    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on'));
+    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on&turn=failed&pr=open&search=fail'));
     expect(all).toEqual({
-      trustAsk: true, mergeConflict: true, previewRunning: true, checksOn: true, slowHelper: true, planMode: true, intake: 'pull_request', approval: 'question-long', hour: 21.5,
-      resumeAsk: true, background: true,
+      trustAsk: true, mergeConflict: true, mergeChecks: false, previewRunning: true, checksOn: true, slowHelper: true, planMode: true, intake: 'pull_request', approval: 'question-long', hour: 21.5,
+      resumeAsk: true, background: true, turnFailed: true, prOpen: true, searchFails: true,
     });
+    expect(demoStates(new URLSearchParams('merge=checks'))).toMatchObject({ mergeConflict: false, mergeChecks: true });
     expect(demoStates(new URLSearchParams('intake=issue')).intake).toBe('issue');
-    const none = demoStates(new URLSearchParams('merge=yes&preview=1&checks=off&helper=fast&mode=ask&intake=linear&speed=2&approval=all&hour=24&resume=always&background=off'));
+    const none = demoStates(new URLSearchParams('merge=yes&preview=1&checks=off&helper=fast&mode=ask&intake=linear&speed=2&approval=all&hour=24&resume=always&background=off&turn=ok&pr=closed&search=ok'));
     expect(none).toEqual({
-      trustAsk: false, mergeConflict: false, previewRunning: false, checksOn: false, slowHelper: false, planMode: false, intake: null, approval: null, hour: null,
-      resumeAsk: false, background: false,
+      trustAsk: false, mergeConflict: false, mergeChecks: false, previewRunning: false, checksOn: false, slowHelper: false, planMode: false, intake: null, approval: null, hour: null,
+      resumeAsk: false, background: false, turnFailed: false, prOpen: false, searchFails: false,
     });
     // Midnight is an hour; a parameter with no value, or with words, is none.
     expect(['hour=0', 'hour=', 'hour=noon', 'hour=-1'].map((q) => demoStates(new URLSearchParams(q)).hour)).toEqual([0, null, null, null]);
@@ -516,6 +527,7 @@ describe('the demo states of docs/DEMO.md', () => {
     expect(opensRepo({ ...none, approval: 'file' })).toBe(true);
     expect(opensRepo({ ...none, resumeAsk: true })).toBe(true);
     expect(opensRepo({ ...none, background: true })).toBe(true);
+    for (const on of ['mergeChecks', 'turnFailed', 'prOpen', 'searchFails'] as const) expect(opensRepo({ ...none, [on]: true })).toBe(true);
   });
 
   it('a helper shows its kind, its own calls and its report; `?checks=on` runs your checks for each task', async () => {
@@ -560,12 +572,12 @@ describe('the demo states of docs/DEMO.md', () => {
     const plan = planOf(sim, 'lead')!;
     const source = { kind: 'plan' as const, id: plan.id };
     // Without the parameter nothing conflicts, and there is nothing to resolve.
-    const clean = new MergeConflictDemo(false, sim, story);
+    const clean = new MergeConflictDemo(null, sim, story);
     expect(clean.state(source)).toMatchObject({ conflicts: [], resolving: null });
     expect(() => clean.refuse(plan.id)).not.toThrow();
     expect(() => clean.resolve(source)).toThrow('there is nothing to resolve; merge it');
 
-    const merge = new MergeConflictDemo(true, sim, story);
+    const merge = new MergeConflictDemo('conflict', sim, story);
     expect(merge.state(source)).toEqual({
       target: 'main', branch: 'codly/dark-mode/integration', repo: REPO, conflicts: ['src/app/settings/page.tsx'], resolving: null, failed_checks: [], checks_not_run: null, behind: 1,
     });
@@ -638,19 +650,39 @@ describe('a plan whose request started from GitHub', () => {
     expect(sim.plans.get(plan.id)!.status).toBe('running');
   });
 
-  it('has no reason on its card in a request that asks you before every plan, and a typed request still runs at once', async () => {
+  it('has no reason on its card in a request that asks you before every plan', async () => {
     // The Settings default: every plan waits for you, and the card says nothing more.
     const asks = demo({ story: { yourRequestFirst: true } });
     fromIssue(asks.story);
     await until(() => planOf(asks.sim, 'lead')?.status === 'awaiting_approval');
     expect(waitReason(decisions(asks.sim), planOf(asks.sim, 'lead')!.id)).toBeNull();
     expect(asks.sim.chats.find((c) => c.author === 'codly')!.text).toBe('Plan ready: Dark mode toggle in Settings (3 tasks). Review it on the board, then click Run plan.');
+  });
+});
 
-    // "Run plans at once", and a request you typed: nothing holds its plan.
-    const typed = demo({ settings: { auto_run_plans: true }, story: { yourRequestFirst: true } });
-    typed.story.userChat('lead', REQUEST);
-    await until(() => planOf(typed.sim, 'lead')?.status === 'running');
-    expect(waitReason(decisions(typed.sim), planOf(typed.sim, 'lead')!.id)).toBeNull();
+describe('a typed request in a request that runs its plans at once', () => {
+  const said = (sim: Sim) => sim.chats.filter((c) => c.author === 'codly').map((c) => c.text);
+  const records = (sim: Sim) => events(sim, 'decision').filter((d) => d.decision_type === 'plan_validate').map((d) => [d.summary, d.detail]);
+
+  it('runs a plan that asks you nothing, and Codly’s line says so', async () => {
+    const { sim, story } = demo({ settings: { auto_run_plans: true }, story: { yourRequestFirst: true } });
+    story.userChat('lead', REQUEST_B);
+    await until(() => planOf(sim, 'lead')?.status === 'running');
+    expect(said(sim)).toEqual(['Plan ready: Sign-in lockout after failed attempts (2 tasks). Running it now.']);
+    expect(records(sim)).toEqual([]);
+  });
+
+  it('does not run a plan with an open question: it waits for you, and the record says why', async () => {
+    const { sim, story } = demo({ settings: { auto_run_plans: true }, story: { yourRequestFirst: true } });
+    story.userChat('lead', REQUEST);
+    await until(() => planOf(sim, 'lead')?.status === 'awaiting_approval');
+    const plan = planOf(sim, 'lead')!;
+    expect(plan.open_questions).toHaveLength(1);
+    // The core's record (`submit_plan_inner`, rule `open_questions`) and its line.
+    expect(records(sim)).toEqual([['not auto-running: the plan has open questions for you', { rule: 'open_questions', plan_id: plan.id }]]);
+    expect(said(sim)).toEqual(['Plan ready: Dark mode toggle in Settings (3 tasks). Review it on the board, then click Run plan.']);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(sim.plans.get(plan.id)!.status).toBe('awaiting_approval');
   });
 });
 
@@ -747,5 +779,168 @@ describe('your re-run of a stopped task’s checks', () => {
     story.recheckTask(sim.taskByKey('a2')!.id);
     // crates/codly-core/src/orchestrator/gate.rs, `Rerun::You`: "you re-ran the checks of {key}".
     expect(events(sim, 'decision').filter((d) => d.decision_type === 'gate').map((d) => [d.method, d.summary])).toEqual([['human', 'you re-ran the checks of a2']]);
+  });
+});
+
+describe('a 1:1 Claude agent you said no to', () => {
+  const said = (sim: Sim, id: string) => sim.chats.filter((c) => c.thread === `agent:${id}` && c.author === id).map((c) => c.text);
+  async function denied(note: string | null) {
+    const { sim, story } = demo({ story: { yourRequestFirst: true } });
+    const id = story.hire('claude').id;
+    story.userChat(`agent:${id}`, 'Add a line about the changelog.');
+    const edit = () => requests(sim, (a) => a.subject.kind === 'file_change' && a.agent_id === id)[0];
+    await until(() => !!edit());
+    story.resolveApproval(edit().id, 'deny', note);
+    await until(() => said(sim, id).length === 1);
+    expect(events(sim, 'files_changed', id)).toEqual([]);
+    return said(sim, id)[0];
+  }
+
+  it('takes up your note when you sent one', async () => {
+    expect(await denied('Put it in CHANGELOG.md instead, under Unreleased.')).toBe('Understood: “Put it in CHANGELOG.md instead, under Unreleased.”. I will do that.');
+  });
+
+  it('asks what to do instead when you sent none', async () => {
+    expect(await denied(null)).toBe('Understood: I changed nothing. Tell me what to do instead.');
+  });
+});
+
+describe('the list of a 1:1 Claude agent', () => {
+  it('has four steps, and the agent ticks them off as it works', async () => {
+    const { sim, story } = demo({ story: { yourRequestFirst: true } });
+    const id = story.hire('claude').id;
+    sim.patchAgent(id, { permission_mode: 'accept_edits' });
+    expect(sim.edited.has(id)).toBe(false);
+    story.userChat(`agent:${id}`, 'Add a line about the changelog.');
+    await until(() => events(sim, 'turn_completed', id).length === 1);
+    const lists = events(sim, 'plan_updated', id).map((p) => p.steps.map((s) => s.status));
+    expect(events(sim, 'plan_updated', id)[0].steps.map((s) => s.text)).toEqual(['Read README.md and package.json', 'Add the note to README.md', 'Run the tests', 'Tell you what changed']);
+    expect(lists).toEqual([
+      ['in_progress', 'pending', 'pending', 'pending'],
+      ['completed', 'in_progress', 'pending', 'pending'],
+      ['completed', 'completed', 'in_progress', 'pending'],
+      ['completed', 'completed', 'completed', 'in_progress'],
+      ['completed', 'completed', 'completed', 'completed'],
+    ]);
+    // Its work changed a file: from now on it has checkpoints (mock.ts reads `edited`).
+    expect(sim.edited.has(id)).toBe(true);
+  });
+});
+
+describe('`?turn=failed`: the first turn of a 1:1 agent fails', () => {
+  it('ends failed with the reason, as the adapter writes it, and sending again works', async () => {
+    const { sim, story } = demo({ story: { yourRequestFirst: true, failFirstTurn: true } });
+    const id = story.hire('claude').id;
+    sim.patchAgent(id, { permission_mode: 'accept_edits' });
+    const ask = 'Add a line about the changelog.';
+    story.userChat(`agent:${id}`, ask);
+    await until(() => events(sim, 'turn_completed', id).length === 1);
+    const reason = "Anthropic's servers are overloaded: wait a moment, then try again";
+    expect(events(sim, 'turn_started', id)[0].input).toBe(ask);
+    expect(events(sim, 'error', id)).toEqual([{ type: 'error', message: reason, fatal: false }]);
+    expect(events(sim, 'turn_completed', id)[0]).toMatchObject({ status: 'failed', result_text: reason });
+    await until(() => sim.agents.get(id)!.status === 'idle');
+
+    // "Send again": the same message, and this time the turn does the work.
+    story.userChat(`agent:${id}`, ask);
+    await until(() => events(sim, 'turn_completed', id).length === 2);
+    expect(events(sim, 'turn_completed', id)[1].status).toBe('completed');
+    expect(events(sim, 'files_changed', id).map((e) => e.paths)).toEqual([['README.md']]);
+  });
+
+  it('fails nothing without the parameter', async () => {
+    const { sim, story } = demo({ story: { yourRequestFirst: true } });
+    const id = story.hire('codex').id;
+    story.userChat(`agent:${id}`, 'Are you free?');
+    await until(() => events(sim, 'turn_completed', id).length === 1);
+    expect(events(sim, 'turn_completed', id)[0].status).toBe('completed');
+  });
+});
+
+describe('a plan’s worker', () => {
+  it('is never a 1:1 agent you hired with its name: a new worker starts, with a second name', async () => {
+    const { sim, story } = demo({ autoplay: true, story: { yourRequestFirst: true } });
+    // A Codex agent you hire for a chat gets Codex's stock name: the one the lockout plan's t1 asks for.
+    const fay = story.hire('codex');
+    expect(fay.name).toBe('Fay');
+    story.userChat('lead', REQUEST_B);
+    await until(() => !!planOf(sim, 'lead') && !!task(sim, planOf(sim, 'lead')!.id, 't1')?.assignee);
+    const worker = sim.agents.get(task(sim, planOf(sim, 'lead')!.id, 't1')!.assignee!)!;
+    expect(worker.id).not.toBe(fay.id);
+    expect([worker.name, worker.role, worker.provider]).toEqual(['Fay 2', 'worker', 'codex']);
+    expect(sim.agents.get(fay.id)).toMatchObject({ role: 'solo', task_id: null });
+  });
+});
+
+describe('“Stop” on a helper whose call waits for it', () => {
+  it('ends the helper, its call returns an error, and the agent’s turn goes on', async () => {
+    const { sim } = demo({ autoplay: true, story: { slowHelper: true } });
+    await until(() => events(sim, 'sub_agent').length === 1);
+    const ada = named(sim, 'Ada')!.id;
+    const row = events(sim, 'sub_agent', ada)[0];
+    // The call of its own the helper is in now.
+    const own = events(sim, 'sub_agent_progress', ada).filter((p) => p.tool_call_id).pop()!.tool_call_id!;
+    const before = sim.log.length;
+    expect(new MockControls(sim).stopTask(ada, row.call_id)).toBeNull();
+
+    const decisions = sim.log.slice(before).flatMap((e) => (e.kind.type === 'decision' ? [e.kind.summary] : []));
+    expect(decisions).toEqual(['asked Ada to stop its helper: Explore: find every place that reads or switches the theme']);
+    expect(events(sim, 'sub_agent', ada).map((s) => s.status)).toEqual(['running', 'stopped']);
+    const ended = (call: string) => events(sim, 'tool_completed', ada).find((c) => c.call_id === call);
+    expect(ended(own)).toMatchObject({ ok: false });
+    expect(ended(row.call_id)).toMatchObject({ ok: false, output: '[Request interrupted by user for tool use]' });
+    // As recorded: the turn that waited for the helper says so and goes on; no turn of its own starts.
+    await until(() => events(sim, 'message', ada).some((m) => m.text.startsWith('The helper was stopped')));
+    expect(events(sim, 'turn_completed', ada)).toEqual([]);
+    await until(() => sim.taskByKey('t1')?.status === 'done');
+    expect(events(sim, 'turn_started', ada)).toHaveLength(1);
+    expect(events(sim, 'turn_completed', ada).map((t) => t.status)).toEqual(['completed']);
+    // A second Stop finds it over.
+    expect(new MockControls(sim).stopTask(ada, row.call_id)).toBeNull();
+    expect(events(sim, 'sub_agent', ada).map((s) => s.status)).toEqual(['running', 'stopped']);
+  });
+});
+
+describe('`?merge=checks`: a check of the finished plan fails on its merge', () => {
+  it('refuses the merge in the core’s words, and an agent’s fix makes it merge', async () => {
+    const { sim, story } = demo({ autoplay: true });
+    await until(() => planOf(sim, 'lead')?.status === 'done');
+    const plan = planOf(sim, 'lead')!;
+    const source = { kind: 'plan' as const, id: plan.id };
+    const merge = new MergeConflictDemo('checks', sim, story);
+    // Before a try nothing is known to fail; main has moved by one commit.
+    expect(merge.state(source)).toMatchObject({ conflicts: [], failed_checks: [], resolving: null, behind: 1 });
+    // "Merge anyway" runs no check.
+    expect(() => merge.refuse(plan.id, true)).not.toThrow();
+    expect(() => merge.refuse(plan.id)).toThrow('with the plan merged into main, `npx playwright test settings-theme` failed, so nothing was merged and main is unchanged');
+    expect(sim.chats.filter((c) => c.thread === 'lead' && c.author === 'codly').pop()!.text).toBe(
+      'Not merged: with "Dark mode toggle in Settings" merged into main, `npx playwright test settings-theme` failed. main was not changed. main has commits the plan was never checked with; have an agent fix it (on the plan\'s card), or merge anyway if you know why it fails.',
+    );
+    expect(merge.state(source).failed_checks).toEqual(['npx playwright test settings-theme']);
+
+    // "Ask an agent to fix it": one more task of the plan, in its own worktree.
+    const during = merge.resolve(source);
+    const fix = sim.tasks.get(during.resolving!)!;
+    expect(fix).toMatchObject({ key: 'fix-checks', title: 'Fix the checks with main merged in', branch: plan.integration_branch, worktree: plan.integration_worktree });
+    expect(fix.acceptance[0]).toBe('`npx playwright test settings-theme` passes');
+    expect(fix.write_scope).toContain('src/app/settings/page.tsx');
+    expect(sim.plans.get(plan.id)!.status).toBe('running');
+    expect(events(sim, 'decision').filter((d) => d.decision_type === 'merge').pop()!.summary).toBe(
+      `you had an agent fix \`npx playwright test settings-theme\` on ${plan.integration_branch} with main merged in: task fix-checks`,
+    );
+    await until(() => sim.plans.get(plan.id)!.status === 'done');
+    expect(sim.tasks.get(fix.id)!.status).toBe('done');
+    expect(merge.state(source)).toMatchObject({ failed_checks: [], resolving: null, behind: 0 });
+    expect(() => merge.refuse(plan.id)).not.toThrow();
+  });
+
+  it('a cancelled plan’s refusal says to fix the checks yourself', async () => {
+    const { sim, story } = demo({ autoplay: true });
+    await until(() => sim.taskByKey('t1')?.status === 'done' && planOf(sim, 'lead')?.status === 'running');
+    const plan = planOf(sim, 'lead')!;
+    story.cancelPlan(plan.id);
+    const merge = new MergeConflictDemo('checks', sim, story);
+    expect(() => merge.refuse(plan.id)).toThrow('failed, so nothing was merged');
+    expect(() => merge.resolve({ kind: 'plan', id: plan.id })).toThrow('this plan was cancelled, so no agent works on it any more; fix the checks yourself');
   });
 });

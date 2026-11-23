@@ -42,6 +42,13 @@ export class Cancelled extends Error {
   }
 }
 
+/** Thrown in a turn's body: the turn ends failed, with `reason` as the CLI's adapter says it (`Actor.turn`). */
+export class TurnFailed extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+  }
+}
+
 export const HOME = '/Users/demo';
 export const REPO = `${HOME}/Code/acme-web`;
 export const WORKTREES = `${HOME}/.codly/worktrees/acme-web`;
@@ -104,6 +111,8 @@ export class Sim {
   cancelled = new Set<string>();
   /** task key → paths written so far (diffs grow as agents edit). */
   touched = new Map<string, Set<string>>();
+  /** The agents that changed a file so far (an agent that changed nothing has no checkpoint). */
+  edited = new Set<string>();
   /** Runs after each tool call of an agent's turn, while the turn goes on (the story sets it). */
   afterStep: ((act: Actor) => Promise<void>) | null = null;
   /** Runs when an agent's turn was stopped, after its `turn_completed` (the story sets it). */
@@ -468,6 +477,12 @@ export class Actor {
       this.emit({ type: 'turn_completed', status: 'completed', result_text: null, duration_ms: this.sim.now() - started });
     } catch (e) {
       this.inTurn = false;
+      if (e instanceof TurnFailed) {
+        // As the adapters say a failed turn: why, then the end with the same reason. The agent waits for you again.
+        this.emit({ type: 'error', message: e.reason, fatal: false });
+        this.emit({ type: 'turn_completed', status: 'failed', result_text: e.reason, duration_ms: this.sim.now() - started });
+        return;
+      }
       if (e instanceof Cancelled) {
         this.emit({ type: 'turn_completed', status: 'interrupted', result_text: null, duration_ms: this.sim.now() - started });
         this.sim.turnStopped?.(this);
@@ -544,6 +559,7 @@ export class Actor {
     } else await this.sleep(s.ms * (0.8 + Math.random() * 0.4));
     if (s.files?.length) {
       this.emit({ type: 'files_changed', call_id: callId, paths: s.files, source: 'tool_input' });
+      this.sim.edited.add(this.id);
       if (s.taskKey) {
         const set = this.sim.touched.get(s.taskKey) ?? new Set<string>();
         for (const f of s.files) set.add(f);

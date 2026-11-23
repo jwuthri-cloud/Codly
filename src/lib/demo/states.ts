@@ -13,6 +13,8 @@ export type DemoStates = {
   trustAsk: boolean;
   /** `?merge=conflict`: your branch changed a file that each finished plan changed too. */
   mergeConflict: boolean;
+  /** `?merge=checks`: your branch moved, and a check of each finished plan fails on the merge result. */
+  mergeChecks: boolean;
   /** `?preview=running`: a command you started earlier runs in each worktree you look at. */
   previewRunning: boolean;
   /** `?checks=on`: the repo's required checks are turned on, so each task runs them. */
@@ -31,6 +33,12 @@ export type DemoStates = {
   resumeAsk: boolean;
   /** `?background=on`: a 1:1 Claude agent left a command and a helper at work in the background. */
   background: boolean;
+  /** `?turn=failed`: the first turn of the first 1:1 agent you talk to fails. */
+  turnFailed: boolean;
+  /** `?pr=open`: a finished plan has an open pull request whose checks are not read yet. */
+  prOpen: boolean;
+  /** `?search=fail`: every code search fails. */
+  searchFails: boolean;
 };
 
 export function demoStates(params: URLSearchParams): DemoStates {
@@ -40,6 +48,7 @@ export function demoStates(params: URLSearchParams): DemoStates {
   return {
     trustAsk: params.get('trust') === 'ask',
     mergeConflict: params.get('merge') === 'conflict',
+    mergeChecks: params.get('merge') === 'checks',
     previewRunning: params.get('preview') === 'running',
     checksOn: params.get('checks') === 'on',
     slowHelper: params.get('helper') === 'slow',
@@ -49,6 +58,9 @@ export function demoStates(params: URLSearchParams): DemoStates {
     hour: hour >= 0 && hour < 24 ? hour : null,
     resumeAsk: params.get('resume') === 'ask',
     background: params.get('background') === 'on',
+    turnFailed: params.get('turn') === 'failed',
+    prOpen: params.get('pr') === 'open',
+    searchFails: params.get('search') === 'fail',
   };
 }
 
@@ -57,5 +69,8 @@ export function demoStates(params: URLSearchParams): DemoStates {
  * asked when you open the repo. `?hour=` does not either: it only moves the clock.
  */
 export function opensRepo(s: DemoStates): boolean {
-  return s.mergeConflict || s.previewRunning || s.checksOn || s.slowHelper || s.planMode || s.intake !== null || s.approval !== null || s.resumeAsk || s.background;
+  return (
+    s.mergeConflict || s.mergeChecks || s.previewRunning || s.checksOn || s.slowHelper || s.planMode || s.intake !== null || s.approval !== null || s.resumeAsk || s.background ||
+    s.turnFailed || s.prOpen || s.searchFails
+  );
 }
