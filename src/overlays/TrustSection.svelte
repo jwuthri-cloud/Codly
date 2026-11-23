@@ -10,6 +10,7 @@
   import { workspaceTrust } from '../lib/state/workspaceTrust.svelte';
   import { startsOwnCodexServers, trustChoices, trustStatus, withoutTrust } from '../lib/util/workspaceTrust';
   import LoadError from '../components/LoadError.svelte';
+  import MoreAbout from './MoreAbout.svelte';
   import TrustFiles from './TrustFiles.svelte';
   import TrustWorktree from './TrustWorktree.svelte';
 
@@ -31,9 +32,14 @@
     <h3 class="eyebrow">This folder’s own CLI configuration</h3>
     <p class="desc">
       A repo can carry configuration that an agent CLI loads by itself when it starts there, before any approval: project settings with
-      hooks or allow rules, and project MCP servers. Codly lets the CLIs load the files that git tracks in {store.workspace.name} only once you
-      trusted them. The choice is about the repo’s files: your own files that Codly copies into a new worktree stay yours there.
+      hooks or allow rules, and project MCP servers.
     </p>
+    <MoreAbout id="trust">
+      <p class="desc">
+        Codly lets the CLIs load the files that git tracks in {store.workspace.name} only once you trusted them. The choice is about the repo’s
+        files: your own files that Codly copies into a new worktree stay yours there.
+      </p>
+    </MoreAbout>
     {#if t}
       {@const can = trustChoices(t)}
       <p class="status" class:warn={t.state === 'ask'} role="status">{trustStatus(t)}</p>

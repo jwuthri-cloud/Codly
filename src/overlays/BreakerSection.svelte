@@ -11,7 +11,7 @@
   today's total is shown beside it.
 -->
 <script lang="ts">
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type { BreakerConfig } from '../lib/gen/BreakerConfig';
   import type { BreakerStatus } from '../lib/gen/BreakerStatus';
   import { api } from '../lib/api';
@@ -20,7 +20,11 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { spentLine } from '../lib/util/cost';
   import { ago, tokens, usd } from '../lib/util/format';
-  import { holdAtTop } from '../lib/util/holdAtTop';
+  import MoreAbout from './MoreAbout.svelte';
+
+  /** Called with each value the section shows, as it is read or saved: the line under the
+   *  page's name in the list follows it. */
+  let { onvalue }: { onvalue?: (cfg: BreakerConfig) => void } = $props();
 
   let cfg = $state<BreakerConfig | null>(null);
   let status = $state<BreakerStatus | null>(null);
@@ -78,18 +82,10 @@
     const now = status;
     if (now) untrack(() => budget.setHold(now.hold));
   });
-  // That mark opens Settings here. The sections above show their rows after this one is in
-  // place, so it is held there until you scroll, click or press a key.
-  let el: HTMLElement | undefined = $state();
-  let letGo: (() => void) | undefined;
   $effect(() => {
-    if (!el || !budget.reveal) return;
-    budget.reveal = false;
-    letGo?.();
-    letGo = holdAtTop(el);
+    const now = cfg;
+    if (now) untrack(() => onvalue?.(now));
   });
-  onDestroy(() => letGo?.());
-
   const agentName = (id: string | null) => store.agents.find((a) => a.id === id)?.name ?? 'An agent';
   /** The latest breaker decisions, newest first. */
   const events = $derived.by(() => {
@@ -101,12 +97,15 @@
 </script>
 
 {#if cfg}
-  <section bind:this={el}>
+  <section>
     <h3 class="eyebrow">Autonomy & Budgets</h3>
     <p class="desc">
       A guard against runaway agents and spend. Over a limit, an agent is first <b>steered</b> (a note in its current or next turn), then <b>constrained</b>
-      (interrupted and told to stop), and with Hard stop <b>stopped</b>. One step every 30 seconds; it steps back down as the agent recovers. The Lead is exempt.
+      (interrupted and told to stop), and with Hard stop <b>stopped</b>.
     </p>
+    <MoreAbout id="breaker">
+      <p class="desc">One step every 30 seconds; it steps back down as the agent recovers. The Lead is exempt.</p>
+    </MoreAbout>
 
     <label class="row toggle">
       <div class="r-text"><span class="r-title">Circuit breaker</span><span class="desc">Watch every agent against the limits below.</span></div>
@@ -132,6 +131,9 @@
           <span class="r-title">Cost budget</span>
           <span class="desc">The same, in dollars, as the CLIs report cost: an estimate at list price for Claude Code, also on a subscription. Codex and Gemini report no cost, so only the token budget counts them.
             {#if status}<b>{usd(status.used.cost_usd)}</b> used.{/if}</span>
+          <MoreAbout id="breaker-cost">
+            <span class="desc">A Claude Code agent also gets what is left of this budget as its own limit when it starts, so one long turn stops at it. Several agents at once can together pass it until their turns end.</span>
+          </MoreAbout>
         </div>
         <input class="field" type="number" min="0" step="1" value={cfg.cost_budget_usd || ''} placeholder="Off" disabled={!cfg.enabled} aria-label="Cost budget in dollars" onchange={(e) => save({ cost_budget_usd: dollars(e) })} />
         <span class="unit">$</span>
@@ -151,10 +153,15 @@
         <input class="field" type="number" min="0" step="1" value={cfg.error_storm_limit || ''} placeholder="Off" disabled={!cfg.enabled} aria-label="Error storm limit" onchange={(e) => save({ error_storm_limit: num(e) })} />
         <span class="unit">errors</span>
       </div>
-      <label class="row toggle">
-        <div class="r-text"><span class="r-title">Hard stop</span><span class="desc">Kill an agent that is still over a limit of its own (token velocity, repeated tool call, error storm) after being constrained. A used-up budget never kills: the agent stays constrained. Off: the breaker never goes past constraining. A stopped task is blocked until you retry it.</span></div>
+      <!-- Not a <label>: only the switch itself changes it, never a click on the text. -->
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Hard stop</span>
+          <span class="desc">Kill an agent that is still over a limit of its own (token velocity, repeated tool call, error storm) after being constrained. A used-up budget never kills: the agent stays constrained. Off: the breaker never goes past constraining.</span>
+          <MoreAbout id="breaker-hard-stop"><span class="desc">A stopped task is blocked until you retry it.</span></MoreAbout>
+        </div>
         <input type="checkbox" class="switch" checked={cfg.hard_stop} disabled={!cfg.enabled} aria-label="Hard stop" onchange={(e) => save({ hard_stop: e.currentTarget.checked })} />
-      </label>
+      </div>
     </div>
 
     {#if status}<p class="desc">Today, all agents: <b>{spentLine(status.today)}</b>.</p>{/if}

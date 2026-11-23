@@ -26,7 +26,6 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const t of toasts.list) toasts.dismiss(t.id);
   budget.setHold(null);
-  budget.reveal = false;
   ui.settingsOpen = false;
   ui.settingsTab = null;
 });
@@ -89,13 +88,12 @@ describe('the budget mark', () => {
 
   it('opens Settings on the Safety tab, at the budgets (the toast’s button does the same)', () => {
     budget.openSettings();
-    expect([ui.settingsOpen, ui.settingsTab, budget.reveal]).toEqual([true, 'safety', true]);
+    expect([ui.settingsOpen, ui.settingsTab]).toEqual([true, 'safety/budgets']);
     ui.settingsOpen = false;
     ui.settingsTab = null;
-    budget.reveal = false;
     budget.observe(reached());
     toasts.list[0].action!.run();
-    expect([ui.settingsOpen, ui.settingsTab, budget.reveal]).toEqual([true, 'safety', true]);
+    expect([ui.settingsOpen, ui.settingsTab]).toEqual([true, 'safety/budgets']);
   });
 });
 
