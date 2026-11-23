@@ -9,7 +9,8 @@
   error) with "+2 more" under it, and that smaller stack looks for a place the same way. With no
   free place for it either it stays where it last looked. A press on "+2 more" shows the whole
   stack for as long as the pointer or the focus is on it; it may then cover a control, by your
-  own act.
+  own act. A toast that is put away does not count down: its time goes on when it shows again,
+  so none goes without ever being seen.
   A toast's text shows six lines; "Show all" opens a longer one in place. The place counts the
   short height: a text you opened moves nothing. A stack that is higher than the window ends at
   the window's bottom and scrolls.
@@ -83,6 +84,10 @@
 
   /** All toasts but `front` are put away. */
   const hides = $derived(folded && !unfolded);
+  /** The toasts that are put away now. */
+  const away = $derived(hides ? newestFirst.filter((t) => t.id !== front?.id).map((t) => t.id) : []);
+  // None of them counts down: it would go without ever being seen.
+  $effect(() => toasts.putAway(away));
 
   /** The stack ends at the window's bottom and scrolls, when it is higher than the room under `at`. */
   function fit(el: HTMLDivElement, at: number, stackHeight: number) {
@@ -194,6 +199,8 @@
     arrived.stop();
     content.stop();
     cancelAnimationFrame(painted);
+    // With no stack on screen no toast is put away.
+    toasts.putAway([]);
   });
 
   // Which texts are longer than they show. Read again when a text or the stack's width changes.
@@ -264,7 +271,7 @@
   {#each newestFirst as t (t.id)}
     <div
       class="toast k-{t.kind}"
-      class:away={hides && t.id !== front?.id}
+      class:away={away.includes(t.id)}
       data-id={t.id}
       role={t.kind === 'error' ? 'alert' : 'status'}
       onpointerenter={() => toasts.pause(t.id)}
@@ -305,7 +312,7 @@
   .stack.unfolded { pointer-events: auto; }
   /* No shrink: a stack higher than the window scrolls, its toasts keep their height. */
   .toast { flex-shrink: 0; pointer-events: auto; display: flex; align-items: flex-start; gap: 10px; padding: 12px 10px 12px 14px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); animation: pop-in var(--d-3) var(--spring); }
-  /* Put away in a folded stack: not seen, not pressed, not read out. It keeps its width, so its height can be measured. */
+  /* Put away in a folded stack: not seen, not pressed, not read out, and its time stands still. It keeps its width, so its height can be measured. */
   .toast.away { position: absolute; top: 0; left: 0; right: 0; visibility: hidden; pointer-events: none; }
   .ic { margin-top: 2px; color: var(--ink-2); }
   .k-success .ic { color: var(--ok); }

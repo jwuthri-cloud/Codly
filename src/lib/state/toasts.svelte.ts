@@ -1,7 +1,8 @@
 // Toasts (design §4): top-right under the top bar, laid over the page at a place where they cover
 // nothing you can press (see components/Toasts.svelte), max 3, progress updates in place, success 4 s, info 6 s,
-// errors persist. Hover pauses dismissal. Approvals are never toast-only: an approval toast
-// is just a pointer into the Inbox.
+// errors persist. Hover pauses dismissal, and so does a folded stack for the toasts it has put
+// away (`putAway`): a toast does not go before it was shown. Approvals are never toast-only: an
+// approval toast is just a pointer into the Inbox.
 
 export type ToastKind = 'progress' | 'success' | 'info' | 'error' | 'attention';
 export type ToastAction = { label: string; run: () => void; kbd?: string };
@@ -25,6 +26,8 @@ class Toasts {
   private timers = new Map<number, ReturnType<typeof setTimeout>>();
   private remaining = new Map<number, number>();
   private startedAt = new Map<number, number>();
+  /** The toasts that are put away now (`putAway`): none of them counts down. */
+  private away = new Set<number>();
 
   show(t: { kind?: ToastKind; title: string; body?: string; action?: ToastAction; duration?: number }): number {
     const kind = t.kind ?? 'info';
@@ -66,15 +69,36 @@ class Toasts {
   }
 
   resume(id: number) {
+    // Not one that is put away (the pointer can leave it at the moment the stack folds), and not one that went.
+    if (this.away.has(id) || !this.list.some((t) => t.id === id)) return;
     const rem = this.remaining.get(id);
     if (rem != null && !this.timers.has(id)) this.arm(id, rem);
+  }
+
+  /**
+   * Says which toasts are put away: in the list, but not shown (components/Toasts.svelte folds a
+   * stack that finds no free place, and shows one toast of it). A toast that is put away does not
+   * count down: it would go without ever being seen. When it shows again it goes on with the time
+   * it had left, 1.2 s at least. `ids`: all toasts that are put away now.
+   */
+  putAway(ids: number[]) {
+    const before = this.away;
+    this.away = new Set(ids);
+    for (const id of this.away) if (!before.has(id)) this.pause(id);
+    for (const id of before) if (!this.away.has(id)) this.resume(id);
   }
 
   private arm(id: number, ms: number) {
     clearTimeout(this.timers.get(id));
     this.timers.delete(id);
-    if (!ms) return;
+    if (!ms) {
+      // It stays from now on: the time it had left before must not start again (`resume`).
+      this.remaining.delete(id);
+      return;
+    }
     this.remaining.set(id, ms);
+    // Put away: its time starts when it shows again.
+    if (this.away.has(id)) return;
     this.startedAt.set(id, Date.now());
     this.timers.set(id, setTimeout(() => this.dismiss(id), ms));
   }
