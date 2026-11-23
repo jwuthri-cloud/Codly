@@ -1,6 +1,5 @@
 // Where the toast stack goes (components/Toasts.svelte). Nothing on the page moves for a toast:
-// the stack is laid over the page, at the right under the top bar. In a wide window it stands
-// beside the page's panel, as wide as the free room there. Everywhere it is put where it lies
+// the stack is laid over the page, at the right under the top bar, and it is put where it lies
 // on nothing you can press. The geometry is here, apart from the page, so it has tests.
 
 /** A box on screen, in px from the window's top left corner. */
@@ -42,17 +41,6 @@ export function toastTop(stack: Box, controls: Box[], top: number, maxMoves: num
  */
 export function reachDown(windowHeight: number, part: number, top: number, height: number, edge: number): number {
   return Math.max(0, Math.min(part * windowHeight, windowHeight - edge - top - height));
-}
-
-/**
- * How wide the stack is when it stands beside the page's panel, in the free room at the panel's
- * right: from `gap` px after the panel's right edge to the stack's own right edge, and `most`
- * px at most. Null: less than `least` px are free there (a narrow window, an open sheet, a room
- * as wide as the window), so the stack keeps its own width and lies over the panel.
- */
-export function widthBeside(panelRight: number, stackRight: number, gap: number, least: number, most: number): number | null {
-  const room = stackRight - panelRight - gap;
-  return room >= least ? Math.min(room, most) : null;
 }
 
 /**
@@ -114,10 +102,6 @@ export function ms(time: string): number {
 
 // From here on: what reads the page.
 
-/** The attribute on a panel the stack may stand beside: Home's conversation column and the
- *  first-run quest's level. A test checks that both carry it. */
-export const BESIDE = 'data-toast-beside';
-
 /** What you press or type in: a toast must not lie on one of these. */
 const CONTROLS = 'button, a[href], input, select, textarea, [role="button"], [role="link"], [role="tab"], [role="switch"]';
 
@@ -145,13 +129,12 @@ function layers(stack: Element): (el: Element) => boolean {
   return (el) => layerOf(el) > own;
 }
 
-/** Does a press at a point of `part` (a box of `el`) reach `el`, with the toast stack and the
- *  layers above it aside? The point is `across` of the way from left to right and `along` of the
- *  way from top to bottom: 0.5 and 0.5 is the centre. */
-const reached = (el: Element, part: Box, across: number, along: number, stack: Element, above: (el: Element) => boolean): boolean =>
+/** Does a press at the centre of `part` (a box of `el`) reach `el`, with the toast stack and the
+ *  layers above it aside? */
+const reached = (el: Element, part: Box, stack: Element, above: (el: Element) => boolean): boolean =>
   onTop<Element>(
     el,
-    document.elementsFromPoint(part.left + across * (part.right - part.left), part.top + along * (part.bottom - part.top)),
+    document.elementsFromPoint((part.left + part.right) / 2, (part.top + part.bottom) / 2),
     (hit) => stack.contains(hit) || above(hit),
   );
 
@@ -188,20 +171,9 @@ export function controlBoxes(stack: HTMLElement, area: Box): Box[] {
       disabled: el.matches(':disabled, [aria-disabled="true"]'),
       visibility: own.visibility,
       pointerEvents: own.pointerEvents,
-      onTop: reached(el, part, 0.5, 0.5, stack, above),
+      onTop: reached(el, part, stack, above),
     };
     if (counts(seen)) boxes.push(part);
   }
   return boxes;
-}
-
-/** Is this panel on screen, and not under another layer of the page (the office's column under
- *  the first-run quest or the IDE)? A dialog over it does not count: it goes away again. Asked
- *  at the centre and around it: a menu that is open over one place hides no panel. */
-export function panelShows(panel: Element, stack: HTMLElement): boolean {
-  const part = visiblePart(boxOf(panel), [windowBox()]);
-  if (!part) return false;
-  const above = layers(stack);
-  const places = [0.5, 0.25, 0.75];
-  return places.some((across) => places.some((along) => reached(panel, part, across, along, stack, above)));
 }
