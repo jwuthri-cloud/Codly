@@ -291,6 +291,7 @@ pub fn run() {
             merge_commands::merge_state,
             merge_commands::resolve_merge_conflict,
             merge_commands::stop_resolving_merge,
+            pr_commands::start_from_github,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codly");

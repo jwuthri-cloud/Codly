@@ -294,7 +294,13 @@ connected yet). An inbound message is never the user's: the thread stores and sh
 source's name, the Lead reads it as quoted untrusted data, and a plan made after it waits for Run plan
 unless you let that endpoint run plans without asking (off for every new endpoint). Your next message
 in the thread, or a schedule of yours that fires there, ends the wait for the plans that follow. One
-agent picked to answer instead of the Lead makes no plan, so this gate does not cover it. Secrets live in the
+agent picked to answer instead of the Lead makes no plan, so this gate does not cover it. A request can
+also start from GitHub on your click (`orchestrator/intake.rs`, "From issue…" and "From pull request…"
+in the composer's `/` menu and the palette): your `gh` reads the issue or the pull request, your message
+in the thread holds only the link and your own note, and the Lead gets GitHub's text (description,
+comments, and for a pull request its reviews, comments on the code and failing checks) inside one
+`<untrusted>` block with a cap on each part and on the whole. It is your request, so its plan follows the
+request's mode; for an issue, the pull-request step ends that plan's description with "Closes #N". Secrets live in the
 Keychain. `dictation.rs` is opt-in voice input: a clip goes to Groq Whisper with your own key and the
 transcript lands in the composer draft, never auto-sent.
 
@@ -477,7 +483,8 @@ that are new there are named (the index does not search them).
   the Claude usage read when switched on, `git push` on Push and on Create pull request, and
   the user's `gh` for the pull-request step (`gh auth status` for the dialog, plus `gh pr view`
   when a pull request is on record; `gh pr create`; `gh pr view` and `gh pr checks` once per
-  Refresh: no polling). Inbound webhooks and
+  Refresh: no polling) and to start a request from an issue or a pull request (`gh issue view` or
+  `gh pr view`, then for a pull request one `gh api` GET and `gh pr checks`; read only). Inbound webhooks and
   `codly serve` listen on 127.0.0.1 (`codly serve --host` changes that).
 
 ## 7. Deliberately deferred (ponytail list)
@@ -526,6 +533,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
                       pull_request.rs                     the pull-request step: push a Codly branch, `gh pr create`, checks
                       merge_conflict.rs                   a merge that cannot go straight in: conflict files, an agent resolves it, checks on the merge result
+                      intake.rs                           a request from a GitHub issue or pull request, read with `gh`
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
                       takeover.rs                         "Open in my terminal": a session goes to you, and comes back
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses

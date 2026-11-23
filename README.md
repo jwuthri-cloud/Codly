@@ -344,7 +344,9 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   before.
 - Codly itself goes online only to install a CLI or a skill when you click, to fetch the tool servers
   that agents start with (through `npx` or `uvx`), to push when you press Push or Create pull request
-  (your `gh` then opens the pull request, and reads its state and checks when you press Refresh), and for two
+  (your `gh` then opens the pull request, and reads its state and checks when you press Refresh), to read
+  an issue or a pull request with your `gh` when you start a request from one (**From issue…**, **From
+  pull request…**: the Lead gets its text as quoted data, and nothing is written to GitHub), and for two
   features that
   are off until you turn them on: dictation (audio goes to Groq with your key) and Show Claude usage.
   The voice relay in `voice/` talks to OpenAI, and only if you run it.

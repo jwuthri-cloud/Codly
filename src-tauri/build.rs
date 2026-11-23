@@ -32,6 +32,7 @@ fn main() {
         "merge_state", "resolve_merge_conflict", "stop_resolving_merge",
         "required_checks", "check_agent",
         "start_problem", "recover_database",
+        "start_from_github",
     ])))
     .expect("tauri-build failed");
 }

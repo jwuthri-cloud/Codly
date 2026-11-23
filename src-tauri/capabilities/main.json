@@ -196,6 +196,7 @@
     "allow-required-checks",
     "allow-check-agent",
     "allow-start-problem",
-    "allow-recover-database"
+    "allow-recover-database",
+    "allow-start-from-github"
   ]
 }

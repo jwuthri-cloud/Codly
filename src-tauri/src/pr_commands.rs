@@ -1,8 +1,10 @@
 //! Tauri commands for the pull-request step (one per `api.*PullRequest` / `api.pushPrBranch`
 //! call in src/lib/api.ts). `create_pull_request` and `push_pr_branch` push one of Codly's own
 //! `codly/…` branches, and only what `confirm` names: the remote, the branch and the base the
-//! user saw in the dialog.
+//! user saw in the dialog. `start_from_github` is the way in from GitHub (`api.startFromGithub`):
+//! it reads an issue or a pull request with the user's `gh` and writes nothing there.
 
+use codly_core::orchestrator::intake::{Intake, IntakeKind};
 use codly_core::orchestrator::pull_request::{PrConfirm, PrDraft, PrPushed, PrSource, PullRequest};
 use tauri::State;
 
@@ -37,4 +39,9 @@ pub async fn push_pr_branch(state: State<'_, AppState>, source: PrSource, confir
 #[tauri::command]
 pub async fn refresh_pull_request(state: State<'_, AppState>, source: PrSource) -> R<PullRequest> {
     state.core().await?.refresh_pull_request(&source).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn start_from_github(state: State<'_, AppState>, thread: String, kind: IntakeKind, reference: String, note: String) -> R<Intake> {
+    state.core().await?.start_from_github(&thread, kind, &reference, &note).await.map_err(err)
 }

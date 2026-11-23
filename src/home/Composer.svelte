@@ -3,7 +3,8 @@
   shows at once, and if the agent is mid-turn it queues (the conversation says so). Start with
   `@agent` to talk to one agent 1:1 (the thread switches and shows as a chip); `@` mid-sentence
   mentions an agent or a file of the repo (its path, which the agent reads), `#` refers to a task.
-  `/` alone on the line lists Codly's own actions (new request, stop, mode, model, clear…) and ↵
+  `/` alone on the line lists Codly's own actions (new request, from an issue or a pull request,
+  stop, mode, model, clear…) and ↵
   runs one; it is not sent. One that cannot run right now (stop, with nothing running) says why
   and is not sent either. A CLI's own slash commands are not offered: Codly cannot run them.
   Esc on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
@@ -14,6 +15,7 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import { api } from '../lib/api';
   import { sendChat, setRequestPrefs, stopThread } from '../lib/state/actions';
+  import { intakeUi } from '../lib/state/intake.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { busy, busyHint } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
@@ -173,6 +175,10 @@
   const commands = $derived.by((): SlashCommand[] => {
     const inRequest = 'Only in a request';
     const list: SlashCommand[] = [{ name: 'new', label: 'New request', hint: 'Its own Lead, in parallel', icon: 'plus', run: () => ui.newRequest() }];
+    list.push(
+      { name: 'issue', label: 'From issue…', hint: 'A GitHub link or number', icon: 'link', run: () => (intakeUi.dialog = 'issue') },
+      { name: 'pr', label: 'From pull request…', hint: 'Its reviews and failing checks', icon: 'merge', run: () => (intakeUi.dialog = 'pull_request') },
+    );
     const stop = { name: 'stop', label: `Stop ${agent?.name ?? 'the agent'}`, icon: 'stop' };
     list.push(isBusy ? { ...stop, hint: 'Ends the running turn', run: () => void stopThread(thread) } : { ...stop, off: 'Nothing is running' });
     for (const m of MODES) {

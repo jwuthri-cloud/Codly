@@ -12,9 +12,11 @@
   import SkillsManager from './overlays/SkillsManager.svelte';
   import { skillsUi } from './lib/state/skills.svelte';
   import PullRequestDialog from './overlays/PullRequestDialog.svelte';
+  import IntakeDialog from './overlays/IntakeDialog.svelte';
   import { prUi } from './lib/state/pullRequest.svelte';
   import TrustDialog from './overlays/TrustDialog.svelte';
   import { workspaceTrust } from './lib/state/workspaceTrust.svelte';
+  import { intakeUi } from './lib/state/intake.svelte';
   import IdeOverlay from './ide/IdeOverlay.svelte';
   import Logo from './components/Logo.svelte';
   import StartFailed from './components/StartFailed.svelte';
@@ -96,6 +98,7 @@
 {#if skillsUi.open}<SkillsManager />{/if}
 {#if prUi.dialog}<PullRequestDialog />{/if}
 {#if workspaceTrust.asking}<TrustDialog />{/if}
+{#if intakeUi.dialog}<IntakeDialog />{/if}
 <IdeOverlay />
 <Toasts />
 <TooltipHost />

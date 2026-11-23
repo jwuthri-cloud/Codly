@@ -29,6 +29,7 @@
   import Portrait from '../components/Portrait.svelte';
   import StateMark from '../components/StateMark.svelte';
   import { skillsUi } from '../lib/state/skills.svelte';
+  import { intakeUi } from '../lib/state/intake.svelte';
   import { press, wants } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
@@ -110,6 +111,8 @@
       { id: 'view:work', section: 'View', title: ui.mode === 'work' ? 'Bring the office back' : 'Full work (hide the office)', icon: 'workspace', kbd: '⌘2', run: () => ui.toggleMode('work') },
       { id: 'view:focus', section: 'View', title: ui.focus ? 'End focus' : 'Focus: dim the office', icon: 'focus', kbd: '⌘.', run: () => (ui.focus = !ui.focus) },
       { id: 'request:new', section: 'Work', title: 'New request', sub: 'Its own Lead plans it, in parallel with the others', icon: 'plus', kbd: '⌘N', run: () => ui.newRequest() },
+      { id: 'request:issue', section: 'Work', title: 'From issue…', sub: 'Start a request from a GitHub issue', icon: 'link', run: () => (intakeUi.dialog = 'issue') },
+      { id: 'request:pr', section: 'Work', title: 'From pull request…', sub: 'Its reviews, comments on the code and failing checks go to the Lead', icon: 'merge', run: () => (intakeUi.dialog = 'pull_request') },
       { id: 'task:new', section: 'Work', title: 'New task…', icon: 'plus', kbd: '⇧⌘N', keep: true, run: () => setScope('+') },
       { id: 'repo:open', section: 'Work', title: 'Open repository…', icon: 'folder', kbd: '⌘O', run: () => openWorkspace() },
       { id: 'settings', section: 'App', title: 'Settings', icon: 'settings', kbd: '⌘,', run: () => (ui.settingsOpen = true) },

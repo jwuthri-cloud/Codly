@@ -47,6 +47,7 @@ mod ide;
 mod hires;
 pub mod housekeeping;
 mod ingest;
+pub mod intake;
 mod lead;
 mod lots;
 pub mod merge_conflict;
