@@ -428,13 +428,17 @@ async fn a_worker_whose_resume_codly_refused_keeps_its_session() {
 
     seen.lock().unwrap().resume_refused = true;
     core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
-    let refused = |t: &Task| t.status_reason.as_deref().is_some_and(|r| r.contains("could not start the worker: Claude Code did not turn its sandbox on"));
+    // No wait turns a sandbox on: the task is blocked at once, with the reason.
+    let refused = |t: &Task| {
+        t.status == TaskStatus::Blocked && t.status_reason.as_deref().is_some_and(|r| r.contains("could not start the worker: Claude Code did not turn its sandbox on"))
+    };
     wait_for("the refused start on the task", async || Some(task_now(&core, &task.id).await).filter(refused)).await;
     assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1"], "no new session was tried");
     assert!(codly_said(&core, &worker).await.is_empty(), "no conversation was lost: nothing to say about one");
 
-    // The sandbox is on again: the start Codly tries next resumes the same session.
+    // The sandbox is on again: your Retry resumes the same session.
     seen.lock().unwrap().resume_refused = false;
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
     wait_for("the worker's next turn", async || (seen.lock().unwrap().prompts.len() == 2).then_some(())).await;
     assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1", "resume sess-1"]);
     assert!(codly_said(&core, &worker).await.is_empty());

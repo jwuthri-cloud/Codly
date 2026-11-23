@@ -1,14 +1,18 @@
 //! What you do from the agent sheet to the things that run beside a live Claude agent's own
-//! calls: its MCP servers and the commands it left running in the background. Both go to the
-//! live session as the control requests its CLI takes (`SessionRequest`, sent as the other
-//! live controls are: controls.rs), and both are on record as your act.
+//! calls: its MCP servers and what it left running in the background. All go to the live
+//! session as the control requests its CLI takes (`SessionRequest`, sent as the other live
+//! controls are: controls.rs), and all are on record as your act.
 //!
 //! - **Reconnect** an MCP server (`mcp_reconnect`). The CLI's answer is yours to read: when
 //!   the server still does not connect, its own reason is the error. The adapter then asks the
 //!   CLI where its servers stand, so the agent's `McpServer` events follow.
-//! - **Stop** a background command (`stop_task`). The CLI answers the same whether or not a
-//!   command ended; its next list of background tasks (`BackgroundTasks`) says that the
-//!   command was stopped.
+//! - **Turn off** and **Turn on** an MCP server (`mcp_toggle`), for this run: the CLI's
+//!   process holds the switch, nothing is saved, and the agent's next run starts every server
+//!   again. The server's state follows as after a reconnect. Codly's own server stays on:
+//!   the agent reports through it.
+//! - **Stop** a background command or helper (`stop_task`). The CLI answers the same whether
+//!   or not something ended; its next list of background tasks (`BackgroundTasks`) says that
+//!   it was stopped.
 //!
 //! The sheet knows the servers and the background work from the run's events: a server's
 //! `McpServer` event when its state changes, and the CLI's whole list of background tasks at
@@ -32,10 +36,14 @@ use super::{Inner, lock};
 use crate::adapters::SessionRequest;
 use crate::model::{EventKind, EventRow, Id, McpServerStatus};
 
-/// How long Claude Code has to answer a reconnect. It answers when its try to connect is over
-/// (recorded: the answer carries the connect error), and it gives a server `MCP_TIMEOUT` to
-/// start: 30 s unless you set another (docs/research/cli-claude-codex.md).
+/// How long Claude Code has to answer a reconnect, or a server turned on (which starts the
+/// server again). It answers when its try to connect is over (recorded: the answer carries
+/// the connect error), and it gives a server `MCP_TIMEOUT` to start: 30 s unless you set
+/// another (docs/research/cli-claude-codex.md).
 const RECONNECT_ANSWER_LIMIT: Duration = Duration::from_secs(60);
+
+/// Codly's own MCP server in every run (`claude::mcp_config`): the agent reports through it.
+const CODLY_SERVER: &str = "codly";
 
 /// Per agent: where each of its MCP servers stood in the last `McpServer` row on record, by
 /// the server's name (its state and the CLI's reason). Kept while Codly runs: after a
@@ -57,6 +65,14 @@ impl SessionRows {
             _ => return,
         }
         self.0.push(row.clone());
+    }
+
+    /// What the run's last list of background tasks says the task `id` is.
+    fn background_task(&self, id: &str) -> Option<String> {
+        self.0.iter().find_map(|r| match &r.kind {
+            EventKind::BackgroundTasks { tasks, .. } => tasks.iter().find(|t| t.id == id).map(|t| t.description.clone()),
+            _ => None,
+        })
     }
 }
 
@@ -105,14 +121,33 @@ impl Inner {
         Ok(())
     }
 
+    async fn set_mcp_enabled(&self, agent_id: &str, server: &str, on: bool) -> Result<()> {
+        let agent = self.live_agent(agent_id)?;
+        let server = server.trim();
+        if server.is_empty() {
+            bail!("which MCP server?");
+        }
+        if server == CODLY_SERVER {
+            bail!("{CODLY_SERVER} is Codly's own server: {} reports to Codly through it, so it stays on", agent.name);
+        }
+        let answer = self.ask_session(agent_id, SessionRequest::McpEnabled(server.to_string(), on))?;
+        let switched = if on { "on" } else { "off" };
+        self.control_decision(agent_id, format!("you turned {server} {switched} for {}'s run", agent.name));
+        Self::session_answer_within(answer, RECONNECT_ANSWER_LIMIT).await?;
+        Ok(())
+    }
+
     async fn stop_background_task(&self, agent_id: &str, task_id: &str) -> Result<()> {
         let agent = self.live_agent(agent_id)?;
         let task_id = task_id.trim();
         if task_id.is_empty() {
             bail!("which background command?");
         }
+        // What the run's last list calls it: a command, or a helper.
+        let named = lock(&self.live).get(agent_id).and_then(|l| l.session_rows.background_task(task_id));
         let answer = self.ask_session(agent_id, SessionRequest::StopTask(task_id.to_string()))?;
-        self.control_decision(agent_id, format!("asked {} to stop a command it left running in the background", agent.name));
+        let what = named.map(|description| format!(": {description}")).unwrap_or_default();
+        self.control_decision(agent_id, format!("asked {} to stop what it left running in the background{what}", agent.name));
         Self::session_answer(answer).await?;
         Ok(())
     }
@@ -127,9 +162,18 @@ impl super::Core {
         self.inner.reconnect_mcp(agent_id, server).await
     }
 
-    /// Stop a command that a live Claude agent left running in the background (`task_id`: its
-    /// id in the agent's `BackgroundTasks` event). The agent's next event of that kind says
-    /// that the command was stopped.
+    /// Turn one MCP server of a live Claude agent's session off or on, for this run of the
+    /// agent: nothing is saved, and its next run starts every server again. The agent's
+    /// `McpServer` events say where the server stands then. Err = Claude Code's own reason
+    /// (a server that is turned on and does not start), or a refusal: Codly's own server
+    /// stays on.
+    pub async fn set_agent_mcp_enabled(&self, agent_id: &str, server: &str, enabled: bool) -> Result<()> {
+        self.inner.set_mcp_enabled(agent_id, server, enabled).await
+    }
+
+    /// Stop what a live Claude agent left running in the background: a command or a helper
+    /// (`task_id`: its id in the agent's `BackgroundTasks` event). The agent's next event of
+    /// that kind says that it was stopped.
     pub async fn stop_agent_task(&self, agent_id: &str, task_id: &str) -> Result<()> {
         self.inner.stop_background_task(agent_id, task_id).await
     }
@@ -169,6 +213,9 @@ mod tests {
         // The list is the CLI's whole list each time: one row per run, the newest.
         rows.seen(&row(5, list(&["tid-1", "tid-2"])));
         assert_eq!(kept(&rows), [3, 4, 5]);
+        // "Stop" names what it stops by that list.
+        assert_eq!(rows.background_task("tid-2").as_deref(), Some("npm run dev"));
+        assert_eq!(rows.background_task("tid-9"), None, "not in the run's last list");
         // An empty list is the newest list too: the sheet reads from it what ended last.
         rows.seen(&row(6, list(&[])));
         assert_eq!(kept(&rows), [3, 4, 6]);

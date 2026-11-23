@@ -15,6 +15,8 @@ describe('the watchdog limits in Settings', () => {
     // watchdog.rs: flagged at the limit, interrupted at twice the limit, stopped one limit later.
     expect(body.quiet_secs).toBe('Codly marks a turn as stalled after this long with no output. At twice this time it interrupts the turn, and when the agent stays silent this long once more, it stops the agent.');
     expect(body.quiet_tool_secs).toContain('the same three steps');
+    // watchdog.rs `has_heartbeat`: Claude Code says that these calls still run, so they keep the first limit.
+    expect(body.quiet_tool_secs).toContain('A Claude agent’s commands, MCP tools and helpers say every 30 s that they still run, so the limit above counts for them.');
     // An idle worker is only marked.
     expect(body.idle_secs).toContain('It does nothing else');
   });

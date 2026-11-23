@@ -535,6 +535,8 @@ export class MockTransport implements Transport {
         return this.ctl.contextUsage(String(a.agentId));
       case 'reconnect_agent_mcp':
         return this.ctl.reconnectMcp(String(a.agentId), String(a.server ?? ''));
+      case 'set_agent_mcp_enabled':
+        return this.ctl.setMcpEnabled(String(a.agentId), String(a.server ?? ''), a.enabled === true);
       case 'stop_agent_task':
         return this.ctl.stopTask(String(a.agentId));
       case 'agent_takeover':

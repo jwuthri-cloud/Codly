@@ -1154,7 +1154,9 @@ impl CodexAgent {
                     self.start_turn(text).await;
                 }
             }
-            AgentCmd::Interrupt => self.interrupt().await,
+            AgentCmd::Interrupt => {
+                self.interrupt().await;
+            }
             AgentCmd::Approval { approval_id, decision } => match self.norm.answer(&approval_id, &decision) {
                 Some((reply, events)) => match self.server.send(&reply, &self.raw).await {
                     Ok(()) => self.emit_all(events),
@@ -1228,43 +1230,55 @@ impl CodexAgent {
         self.request("turn/steer", params, Pending::Steer(text)).await;
     }
 
-    async fn interrupt(&mut self) {
+    /// False: a request could not be written. The server takes no more lines, the error of
+    /// that request said so (`request`), and no further one was tried: it would only fail
+    /// with the same words.
+    async fn interrupt(&mut self) -> bool {
         match (self.thread_id.clone(), self.active_turn.clone()) {
             (Some(tid), Some(turn)) => {
                 self.norm.interrupt_requested = true;
-                self.request("turn/interrupt", json!({ "threadId": tid, "turnId": turn }), Pending::Interrupt).await;
-                self.interrupt_subagents().await;
+                let own = self.request("turn/interrupt", json!({ "threadId": tid, "turnId": turn }), Pending::Interrupt).await;
+                let sent = own && self.interrupt_subagents().await;
                 self.wait_at_most(INTERRUPT_TIMEOUT);
+                sent
             }
             // The limit of its `turn/start` still runs.
-            _ if self.turn_pending => self.interrupt_after_start = true,
+            _ if self.turn_pending => {
+                self.interrupt_after_start = true;
+                true
+            }
             // No turn of its own, but its subagents may still work.
             _ => self.interrupt_subagents().await,
         }
     }
 
     /// A subagent's turn runs on its own thread: stopping the agent's turn does not stop it,
-    /// and nobody else can.
-    async fn interrupt_subagents(&mut self) {
+    /// and nobody else can. False: as for `interrupt`.
+    async fn interrupt_subagents(&mut self) -> bool {
         for (thread, turn) in self.norm.subagent_turns() {
-            self.request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }), Pending::Interrupt).await;
+            if !self.request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }), Pending::Interrupt).await {
+                return false;
+            }
         }
+        true
     }
 
     /// interrupt the turn (≤ 5 s) → thread/unsubscribe (≤ 3 s) → done. The server keeps
-    /// running for the other agents.
+    /// running for the other agents. A server that takes no more lines is asked nothing
+    /// after the first request that fails: the run ends at once, with that one error.
     async fn begin_shutdown(&mut self) {
         if self.stage != Stage::Running {
             return;
         }
         self.queue.clear();
         self.steer_queue.clear();
+        if !self.interrupt().await {
+            return self.finish();
+        }
         if self.active_turn.is_some() || self.turn_pending {
-            self.interrupt().await;
             self.stage = Stage::Interrupting;
             self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
         } else {
-            self.interrupt_subagents().await;
             self.unsubscribe().await;
         }
     }
@@ -3521,6 +3535,40 @@ mod tests {
         assert!(server.state.lock().unwrap().routes.is_empty(), "the agent's threads are let go");
     }
 
+    /// The same server when the stopped agent's subagent is in a turn: one cause, said once,
+    /// and nothing is waited for. Before, every request of the stop failed with the same
+    /// words: the interrupt of the agent's turn, the one of the subagent's turn, then (5 s
+    /// later, with a turn of the agent's own) the request that lets the thread go.
+    /// (`thread/started` and `turn/started` lines of a subagent's thread, written from the
+    /// codex-cli 0.166.0 schema types. Not verified live.)
+    #[tokio::test]
+    async fn a_server_that_takes_no_more_lines_is_said_once_when_a_subagent_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        // the agent's own turn runs too (true), or only its subagent's (false)
+        for own_turn in [true, false] {
+            let server = fake_server(dir.path()); // every write fails
+            let (mut agent, mut events) = fake_agent(&server);
+            (agent.started, agent.thread_id) = (true, Some("t".into()));
+            agent.active_turn = own_turn.then(|| "u".to_string());
+            agent.norm.thread = agent.thread_id.clone();
+            server.state.lock().unwrap().routes.insert("t".into(), agent.route.clone());
+            server.route_line(br#"{"method":"thread/started","params":{"thread":{"id":"s","parentThreadId":"t"}}}"#);
+            agent.on_notification("turn/started", &json!({ "threadId": "s", "turn": { "id": "su" } })).await;
+            assert_eq!(agent.norm.subagent_turns(), [("s".to_string(), "su".to_string())]);
+            emitted(&mut events);
+
+            agent.on_cmd(AgentCmd::Shutdown).await;
+            assert_eq!(agent.stage, Stage::Done, "own turn {own_turn}: nothing to wait for, no request went out");
+            let kinds = emitted(&mut events);
+            let errors: Vec<&str> = kinds.iter().filter_map(|e| if let EventKind::Error { message, .. } = e { Some(message.as_str()) } else { None }).collect();
+            assert_eq!(errors, ["turn/interrupt: codex app-server stdin is closed"], "own turn {own_turn}");
+            // The agent's own turn is closed as interrupted: a failed one would send a stopped worker to the gate.
+            assert_eq!(turn_ends(&kinds), if own_turn { vec![TurnStatus::Interrupted] } else { vec![] }, "own turn {own_turn}: {kinds:?}");
+            assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
+            assert!(server.state.lock().unwrap().routes.is_empty(), "the agent's threads are let go");
+        }
+    }
+
     /// A subagent's turn ends on its own thread: the agent's turn goes on. Its end is neither
     /// kept back behind a steer nor taken for the end of the agent's turn.
     #[tokio::test]
@@ -3845,7 +3893,11 @@ mod tests {
     #[tokio::test]
     async fn shutdown_closes_the_open_turn_as_interrupted() {
         let dir = tempfile::tempdir().unwrap();
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        // an app-server that takes every line and answers none
+        let mut sink = proc::command(Path::new("/bin/sh"), &["-c".into(), "cat > /dev/null".into()], dir.path(), &env).spawn().unwrap();
         let server = fake_server(dir.path());
+        *server.stdin.lock().await = sink.stdin.take();
         // the turn runs (false), or its `turn/start` is not answered yet (true)
         for pending in [false, true] {
             let (mut agent, mut events) = fake_agent(&server);
@@ -3854,6 +3906,8 @@ mod tests {
             agent.turn_pending = pending;
             agent.on_cmd(AgentCmd::Shutdown).await;
             assert_eq!(agent.stage, Stage::Interrupting);
+            agent.on_deadline().await;
+            assert_eq!(agent.stage, Stage::Unsubscribing, "the thread is let go, and that request gets no answer either");
             agent.on_deadline().await;
             assert_eq!(agent.stage, Stage::Done);
             let kinds = emitted(&mut events);

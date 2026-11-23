@@ -233,12 +233,17 @@ and the agent sheet shows it, with Stop on a command. The sheet also shows the r
 servers; a new run whose servers stand as the agent's last run recorded them writes no rows.
 
 **No agent sits "running" without end.** A watchdog looks at every live run each 15 s. A turn that
-gives no event for 10 minutes (60 with a tool call open; `Settings.watchdog`) is flagged on its
+gives no event for 10 minutes (60 with a tool call open that gives no sign of life;
+`Settings.watchdog`) is flagged on its
 task ("stalled: no output for 10 min") and you are notified. At twice that its turn is interrupted
 and the agent is asked to continue, once. Silent for as long again, the run is stopped: a worker's
 task goes back in line (blocked from its third start on), a Lead or a 1:1 agent resumes with your
 next message. A turn that waits for your answer is not silent, and neither is a long command
-under Claude Code: the CLI says every 30 s that the call still runs, and that counts as output. A
+under Claude Code: the CLI says every 30 s that the call still runs, and that counts as output.
+That heartbeat is recorded for a command, a tool of an MCP server and the call that waits for a
+helper. So a Claude run with only such calls open keeps the 10 minutes: a call that hangs is
+noticed after 20 missed heartbeats, not after an hour. Any other open tool (WebFetch, WebSearch:
+not recorded) and every other CLI keep the 60. A
 worker that sits between turns
 for 2 minutes on a task that still runs (you interrupted it) is flagged as idle; nothing is done
 to it. Below that, each adapter gives Stop a limit: a turn that has not ended 8 s (Claude) or 15 s
@@ -540,7 +545,10 @@ that are new there are named (the index does not search them).
   choice for it; once an agent changes the copy it counts. Every file is hashed whatever
   its size; `.claude/worktrees/` (Claude Code's own worktrees) is not configuration. No worktree ever loads `.claude/settings.local.json`; in the checkout it
   loads when it is the user's own (untracked) or trusted. Instruction files (CLAUDE.md,
-  AGENTS.md, GEMINI.md) are listed with the question and are not part of it.
+  AGENTS.md, GEMINI.md) are listed with the question and are not part of it. A choice is for
+  the next start: a Claude run that started without the folder's files because they were not
+  trusted says so on its own record (one notice per run, `runs.rs`), and goes on without them
+  until the agent starts again.
 - By itself, Codly removes a worktree only when it is clean and merged, and deletes a
   `codly/…` branch only when its work is merged and its plan is over (merged, cancelled or
   failed) for a day: the housekeeping sweep, which can be switched off. A dirty or unmerged
@@ -659,7 +667,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       preview.rs                          try work before a merge: your command in a plan's or an agent's worktree
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
                       takeover.rs                         "Open in my terminal": a session goes to you, and comes back
-                      live_session.rs                     a live Claude session from the agent sheet: reconnect an MCP server, stop a background command; its servers and its last list of background tasks for a snapshot
+                      live_session.rs                     a live Claude session from the agent sheet: reconnect an MCP server, turn one off or on for this run, stop a background command; its servers and its last list of background tasks for a snapshot
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
@@ -710,7 +718,7 @@ src-tauri/src/            the macOS shell
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
   merge_commands.rs onboarding_commands.rs pr_commands.rs preview_commands.rs    the other commands, one file per topic
   takeover_commands.rs  "Open in my terminal": the take-over commands and the terminal they open
-  session_commands.rs   the agent sheet's "Reconnect" (an MCP server) and "Stop" (a background command)
+  session_commands.rs   the agent sheet's "Reconnect", "Turn off" and "Turn on" (an MCP server) and "Stop" (a background command)
   ui_bus.rs         one ordered Channel of coalesced event batches per webview
   notify.rs         native notifications: event → notice, one per kind within a few seconds, the switches
   web.rs            `codly serve`: the same UI over HTTP; passes /api/voice/ws to the voice relay

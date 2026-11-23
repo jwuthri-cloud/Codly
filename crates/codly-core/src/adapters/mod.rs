@@ -153,9 +153,14 @@ pub enum SessionRequest {
     Model(String),
     /// `get_context_usage`: how full the context is.
     ContextUsage,
-    /// `mcp_reconnect`: try again to connect the MCP server of this name. Recorded for
-    /// servers that still could not connect: the answer is an error with the CLI's reason.
+    /// `mcp_reconnect`: try again to connect the MCP server of this name. Recorded: for a
+    /// server that still cannot connect the answer is an error with the CLI's reason; for one
+    /// that connects it is a success with no body (part 3 §10, n=1).
     McpReconnect(String),
+    /// `mcp_toggle`: turn the MCP server of this name off (false) or on (true) for this
+    /// process. Recorded (part 3 §10, n=1): a success with no body either way; the server is
+    /// then `disabled`, or started again and `connected`. Where it stands is in `mcp_status`.
+    McpEnabled(String, bool),
     /// `stop_task`, with the id of a background task (`BackgroundTask::id`): the CLI ends it.
     /// The answer is empty also when nothing was stopped (recorded, part 2 §6): the CLI's next
     /// list of its background tasks says whether the task is gone.

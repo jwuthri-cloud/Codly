@@ -8,7 +8,7 @@ import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Snapshot } from '../gen/Snapshot';
-import { MCP_HINT, MCP_LABEL, backgroundKind, backgroundSummary, canReconnect, canStop, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, stopBackgroundTask } from '../state/session';
+import { MCP_HINT, MCP_LABEL, backgroundKind, backgroundSummary, canReconnect, canStop, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, stopBackgroundTask, switchMcp } from '../state/session';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { mkAgent } from '../../office/demo/script';
@@ -93,6 +93,50 @@ describe('the MCP servers of an agent', () => {
     // A server that connected has nothing to say.
     apply(server(80_000, 'r2', 'tracker', 'connected'));
     expect(reconnectAnswer(tracker(), { text: 'x', seen: 80_000 })).toBeNull();
+    // Whatever the times: an answer about the server as it stands now is no line under one
+    // that works, nor under one you switched off.
+    expect(reconnectAnswer(tracker(), { ...late, seen: tracker().ts })).toBeNull();
+    apply(server(90_000, 'r2', 'tracker', 'disabled'));
+    expect(reconnectAnswer(tracker(), { ...late, seen: tracker().ts })).toBeNull();
+  });
+
+  it('a connected server can be turned off and a switched-off one on, for this run; Codly\'s own stays on', () => {
+    apply(
+      server(10, 'r2', 'codly', 'connected'),
+      server(10, 'r2', 'docs', 'connected'),
+      server(10, 'r2', 'old', 'disabled'),
+      server(10, 'r2', 'slow', 'connecting'),
+      server(11, 'r2', 'tracker', 'failed', 'Connection closed'),
+      server(12, 'r2', 'linear', 'needs_sign_in', REFUSED),
+    );
+    const servers = ofLiveRun(live().mcp, bo.run_id);
+    // Each row: its switch, and whether it has Reconnect. Never both.
+    expect(servers.map((s) => [s.name, mcpSwitch(s)?.label ?? null, canReconnect(s)])).toEqual([
+      ['codly', null, false],
+      ['docs', 'Turn off', false],
+      ['old', 'Turn on', false],
+      ['slow', null, false],
+      ['tracker', null, true],
+      ['linear', null, true],
+    ]);
+    expect(mcpSwitch(servers[1])).toEqual({ label: 'Turn off', busy: 'Turning off…', enabled: false });
+    expect(mcpSwitch(servers[2])).toEqual({ label: 'Turn on', busy: 'Turning on…', enabled: true });
+    // Nothing is saved: the button says how far the switch goes.
+    expect(mcpSwitchHint('Bo')).toBe('For this run of Bo. Its next run starts every server again.');
+    expect(MCP_HINT.disabled).toBe('This server is switched off: the agent works without its tools. Turn on starts it again.');
+    expect(mcpSummary(servers)).toBe('2 connected · 1 connecting · 1 needs sign-in · 1 did not start · 1 switched off');
+  });
+
+  it('the switch goes to Claude Code, and a refusal is said with its reason', async () => {
+    for (const t of toasts.list) toasts.dismiss(t.id);
+    const flip = vi.spyOn(api, 'setAgentMcpEnabled').mockResolvedValueOnce(undefined).mockRejectedValueOnce('Claude Code answered: Connection closed');
+    expect(await switchMcp('a1', 'docs', false)).toBe(true);
+    expect(flip).toHaveBeenLastCalledWith('a1', 'docs', false);
+    expect(toasts.list).toEqual([]);
+    expect(await switchMcp('a1', 'docs', true)).toBe(false);
+    expect(flip).toHaveBeenLastCalledWith('a1', 'docs', true);
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t turn docs on', 'Claude Code answered: Connection closed']]);
+    for (const t of toasts.list) toasts.dismiss(t.id);
   });
 });
 

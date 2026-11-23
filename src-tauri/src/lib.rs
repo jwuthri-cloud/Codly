@@ -148,6 +148,7 @@ pub fn run() {
             agent_controls::compact_agent,
             agent_controls::agent_context_usage,
             session_commands::reconnect_agent_mcp,
+            session_commands::set_agent_mcp_enabled,
             session_commands::stop_agent_task,
             takeover_commands::agent_takeover,
             takeover_commands::list_takeovers,

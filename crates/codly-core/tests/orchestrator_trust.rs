@@ -1039,3 +1039,85 @@ async fn full_access_asks_before_work_is_lost_in_your_project_folder() {
     assert_eq!(answers.lock().unwrap().len(), 1, "nothing more was answered for you");
     core.shutdown().await;
 }
+
+/// What a Claude run says when it started without the folder's own Claude Code configuration.
+const WITHOUT_CLAUDE: &str =
+    "Started without this folder's Claude Code configuration (its settings, hooks and MCP servers): you have not trusted these files. See Settings → Safety.";
+
+/// The notices on record for an agent, oldest first: the run of each, and its text.
+async fn notices(core: &Core, agent_id: &str) -> Vec<(Option<Id>, String)> {
+    let mut events = core.events(Some(agent_id), None, 500).await.unwrap();
+    events.sort_by_key(|e| e.id);
+    events
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Notice { text } => Some((e.run_id, text)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Settings → Safety says where your choice stands, and a choice changes nothing for an agent
+/// that runs already. So each run says, on its own record, when it started without the
+/// folder's configuration for its CLI because you have not trusted the files: once per run. A
+/// run that loads them says nothing, and neither does one in a folder that has none for its
+/// CLI, nor one that leaves them out for another reason ("Use my own CLI setup" is off).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claude_run_says_when_it_started_without_the_folders_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path(), "here");
+    write(&repo, ".claude/settings.json", HOOKS);
+    write(&repo, ".codex/config.toml", "[mcp_servers.db]\ncommand = \"npx\"\n");
+    commit(&repo, "agent config");
+
+    let (core, specs) = recording(dir.path(), vec![cli(Provider::Claude), cli(Provider::Codex)]).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let asked = core.workspace_trust(None).await.unwrap();
+    assert_eq!(asked.state, TrustState::Ask);
+    let last_run = || specs.lock().unwrap().last().expect("an agent was started").run_id.clone();
+    let said = |run: &Id| (Some(run.clone()), WITHOUT_CLAUDE.to_string());
+
+    // Not trusted: each run of a Claude agent says so, once.
+    let ana = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    core.send_chat(&format!("agent:{}", ana.id), "hi").await.unwrap();
+    let first = last_run();
+    assert_eq!(notices(&core, &ana.id).await, [said(&first)]);
+    restart(&core, &ana.id).await;
+    let second = last_run();
+    assert_ne!(first, second);
+    assert_eq!(notices(&core, &ana.id).await, [said(&first), said(&second)], "one per run");
+
+    // Codex keeps its own gate for a project's files, so Codly does not know what it loads
+    // there and says nothing.
+    let cody = core.hire_agent(Provider::Codex, None, None).await.unwrap();
+    core.send_chat(&format!("agent:{}", cody.id), "hi").await.unwrap();
+    assert_eq!(last_setup(&specs).0, Provider::Codex);
+    assert!(notices(&core, &cody.id).await.is_empty());
+
+    // "Use my own CLI setup" off: no run loads the folder's files, trusted or not. That is
+    // your switch, and trusting the files would change nothing: nothing is said about trust.
+    core.update_settings(Settings { use_my_claude_setup: false, ..core.settings() }).await.unwrap();
+    restart(&core, &ana.id).await;
+    assert_eq!(notices(&core, &ana.id).await.len(), 2);
+    core.update_settings(Settings { use_my_claude_setup: true, ..core.settings() }).await.unwrap();
+
+    // Trusted: the next run loads the files, and says nothing.
+    core.workspace_trust(Some(TrustChoice { trust: asked.fingerprint })).await.unwrap();
+    restart(&core, &ana.id).await;
+    assert_eq!(last_setup(&specs), (Provider::Claude, true));
+    assert_eq!(notices(&core, &ana.id).await.len(), 2);
+
+    // Opened without them: a run says so again.
+    core.workspace_trust(Some(TrustChoice { trust: None })).await.unwrap();
+    restart(&core, &ana.id).await;
+    let third = last_run();
+    assert_eq!(notices(&core, &ana.id).await, [said(&first), said(&second), said(&third)]);
+
+    // The folder has no file for Claude Code any more (Codex's do not count for a Claude run):
+    // nothing was left out, so there is nothing to say.
+    let (worktree, _, _) = last_start(&specs);
+    std::fs::remove_dir_all(worktree.join(".claude")).unwrap();
+    restart(&core, &ana.id).await;
+    assert_eq!(notices(&core, &ana.id).await.len(), 3);
+    core.shutdown().await;
+}

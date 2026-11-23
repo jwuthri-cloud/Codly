@@ -107,6 +107,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             crate::agent_controls::compact_agent,
             crate::agent_controls::agent_context_usage,
             crate::session_commands::reconnect_agent_mcp,
+            crate::session_commands::set_agent_mcp_enabled,
             crate::session_commands::stop_agent_task,
             crate::takeover_commands::agent_takeover,
             crate::takeover_commands::list_takeovers,
@@ -394,6 +395,11 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "stop_agent_task", json!({ "agentId": "nope", "taskId": "tid-1" })).unwrap_err();
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
     assert!(invoke(&wv, "stop_agent_task", json!({ "agentId": "nope" })).is_err(), "the command to stop is required");
+    // "Turn off" and "Turn on" on an MCP server, with the keys the agent sheet sends.
+    let e = invoke(&wv, "set_agent_mcp_enabled", json!({ "agentId": "nope", "server": "linear", "enabled": false })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    let e = invoke(&wv, "set_agent_mcp_enabled", json!({ "agentId": "nope", "server": "linear" })).unwrap_err();
+    assert!(!e.to_string().contains("unknown agent"), "off or on is required, and is checked before the core is asked: {e}");
     // The model pickers and the agent panel's Compact, with the keys the frontend sends. Claude
     // has no list to ask for, so its catalog is Codly's own and no CLI runs here.
     let catalog = invoke(&wv, "model_catalog", json!({ "provider": "claude" })).unwrap();
