@@ -4,14 +4,15 @@
   ordinary prompt tagged as context, and kill ends the process.
   A Claude agent also has a mode (a 1:1 agent: ask for edits, accept edits, plan first; kept
   for its next runs, so it shows when the agent is not running too), a context reading and
-  "Compact now". They reach its live session with no restart.
+  "Compact now". They reach its live session with no restart. A Codex agent can also be asked
+  to compact its conversation between turns (Codex does it; the core says when it may start).
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
   import type { ContextUsage } from '../lib/gen/ContextUsage';
   import type { PermissionMode } from '../lib/gen/PermissionMode';
   import { stopAgent } from '../lib/state/actions';
-  import { PERMISSION_MODES, compactNow, contextLine, controls, readContext, resumeAgent, setBlockTools, setPermissionMode, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
+  import { PERMISSION_MODES, compactAgent, compactNow, contextLine, controls, readContext, resumeAgent, setBlockTools, setPermissionMode, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
   import { steerHint } from '../lib/state/queue';
   import { tokens } from '../lib/util/format';
   import Icon from '../components/Icon.svelte';
@@ -55,13 +56,18 @@
   async function compact() {
     if (compacting) return;
     compacting = true;
-    if (await compactNow(agent.id)) context = null; // it changes now: read it again when the turn ends
+    if (claude) {
+      if (await compactNow(agent.id)) context = null; // it changes now: read it again when the turn ends
+    } else await compactAgent(agent.id, agent.name);
     compacting = false;
   }
 
   let note = $state('');
   let sending = $state(false);
   let confirmKill = $state(false);
+  // The core has the last word (a turn may start meanwhile); this only keeps the button honest.
+  const inTurn = $derived(['starting', 'thinking', 'working', 'waiting_approval'].includes(agent.status));
+  const compactWhy = $derived(agent.task_id ? 'It is on a task. Compact it between tasks.' : inTurn ? 'Wait until its turn ends.' : null);
 
   async function send() {
     const text = note.trim();
@@ -121,6 +127,16 @@
           <button class="btn sm" onclick={() => stopAfterStep(agent.id)}><Icon name="pause" size={12} />Stop after step</button>
         {/if}
       </div>
+
+      {#if agent.provider === 'codex'}
+        <div class="row">
+          <span class="txt">
+            <b>Compact conversation</b>
+            <span class="sub">{compactWhy ?? 'Codex sums up the conversation so far to free context. Use it between turns of a long-lived agent.'}</span>
+          </span>
+          <button class="btn sm" disabled={!!compactWhy || compacting} onclick={compact}><Icon name="layers" size={12} />Compact now</button>
+        </div>
+      {/if}
 
       <div class="steer">
         <b>Steer note</b>

@@ -1,6 +1,6 @@
 //! Per-agent live controls (agent panel): thin wrappers over `Core`'s block-tools, stop-after-
-//! step, resume and steer-note calls, and for a Claude agent its mode, "compact now" and the
-//! context reading. Kill is the existing `stop_agent` command.
+//! step, resume and steer-note calls, for a Claude agent its mode and the context reading, and
+//! "compact now" for a Claude or a Codex agent. Kill is the existing `stop_agent` command.
 
 use codly_core::model::{Agent, ContextUsage, ControlState, PermissionMode};
 use tauri::State;

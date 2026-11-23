@@ -176,6 +176,7 @@ mod tests {
             read_only: false,
             mcp: None,
             use_user_setup: false,
+            sandbox_network: false,
             raw_log: "/tmp/raw.ndjson".into(),
             byok_command: None,
             sandbox_shell: false,

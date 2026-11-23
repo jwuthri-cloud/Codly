@@ -525,7 +525,7 @@ impl Inner {
     /// "Compact now": Claude Code summarizes the conversation to free context. It is a turn of
     /// its own, so only between turns, and only for a 1:1 agent: for a worker, a reviewer or
     /// the Lead the end of a turn means its work is ready to be checked.
-    pub(super) fn compact_agent(&self, agent_id: &str) -> Result<()> {
+    pub(super) fn compact_claude(&self, agent_id: &str) -> Result<()> {
         let agent = self.live_agent(agent_id)?;
         if self.control_holding(agent_id) {
             bail!("{} is paused: resume it first", agent.name);
@@ -534,7 +534,7 @@ impl Inner {
             let mut live = lock(&self.live);
             let l = live.get_mut(agent_id).ok_or_else(|| anyhow!("{} is not running", agent.name))?;
             if l.provider != Provider::Claude {
-                bail!("only a Claude agent can be compacted from here");
+                bail!("only a Claude or a Codex agent can be compacted from here");
             }
             if l.role != Role::Solo {
                 if agent.role == Role::Solo {
@@ -601,9 +601,14 @@ impl super::Core {
         self.inner.set_permission_mode(agent_id, mode).await
     }
 
-    /// Ask a live 1:1 Claude agent, between turns, to compact its conversation now.
+    /// Ask a live agent, between turns, to compact its conversation now: a Codex agent off a
+    /// task (`thread/compact/start`), or a 1:1 Claude agent (Claude Code's own command).
     pub async fn compact_agent(&self, agent_id: &str) -> Result<()> {
-        self.inner.compact_agent(agent_id)
+        if self.inner.agent(agent_id).is_ok_and(|a| a.provider == Provider::Codex) {
+            self.inner.compact_codex(agent_id).await
+        } else {
+            self.inner.compact_claude(agent_id)
+        }
     }
 
     /// How full a live Claude agent's context is, as its CLI counts it right now.

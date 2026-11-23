@@ -2096,6 +2096,7 @@ mod tests {
             read_only,
             mcp: Some(McpLaunch { command: "/Applications/Codly.app/Contents/MacOS/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "t".into())] }),
             use_user_setup: false,
+            sandbox_network: false,
             raw_log: PathBuf::from("/tmp/x/raw.ndjson"),
             byok_command: None,
             sandbox_shell: false,

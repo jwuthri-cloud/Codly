@@ -1,4 +1,4 @@
-// Per-agent live controls (agent panel): block tools, stop after this step, steer note.
+// Per-agent live controls (agent panel): block tools, stop after this step, steer note, compact.
 // The core owns the state machine (orchestrator/controls.rs); this mirrors its latest
 // `control_changed` event per agent (store.svelte.ts feeds `set`) and sends the intents.
 // Kill is the existing `stopAgent` action. A Claude agent also has its mode, "compact now"
@@ -100,4 +100,17 @@ export async function readContext(agentId: string): Promise<ContextUsage | null>
 export function contextLine(u: ContextUsage): string {
   const line = `${tokens(u.used_tokens)} of ${tokens(u.max_tokens)} tokens (${Math.round(u.percent)}%)`;
   return u.auto_compact_at == null ? line : `${line} · compacts by itself at ${tokens(u.auto_compact_at)}`;
+}
+
+/** Ask Codex to compact the agent's conversation now. The toast says whether Codex took the
+ *  request; the compaction itself shows in the agent's history. */
+export async function compactAgent(agentId: string, name: string): Promise<boolean> {
+  try {
+    await api.compactAgent(agentId);
+    toast({ kind: 'success', title: `Codex is compacting ${name}’s conversation`, body: 'Its context meter updates when Codex is done.' });
+    return true;
+  } catch (e) {
+    toast({ kind: 'error', title: 'Couldn’t compact the conversation', body: msg(e) });
+    return false;
+  }
 }

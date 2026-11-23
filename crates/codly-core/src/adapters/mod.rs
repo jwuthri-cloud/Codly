@@ -96,9 +96,13 @@ pub struct SpawnSpec {
     /// `--tools` list; Codex: sandbox read-only; ACP: deny edit permissions.
     pub read_only: bool,
     pub mcp: Option<McpLaunch>,
-    /// Claude only: load the user's own Claude Code setup (their MCP servers, plugins, skills,
-    /// project settings) beside Codly's, instead of Codly's servers alone.
+    /// Load the user's own setup beside Codly's, instead of Codly's servers alone. Claude: their
+    /// MCP servers, plugins, skills and project settings. Codex: the MCP servers of their Codex
+    /// config (off = each is switched off for this thread). ACP agents ignore it.
     pub use_user_setup: bool,
+    /// Codex only: commands in the workspace-write sandbox may use the network without asking
+    /// (`Settings.codex_network_access`).
+    pub sandbox_network: bool,
     /// `<data>/runs/<run_id>/raw.ndjson`, append-only.
     pub raw_log: PathBuf,
     /// BYOK token command (byok.rs) the CLI runs itself, re-running it when the token expires:

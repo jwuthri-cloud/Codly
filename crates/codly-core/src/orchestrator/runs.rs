@@ -190,6 +190,7 @@ impl Inner {
             read_only: req.read_only,
             mcp: Some(mcp.launch(&self.cfg.app_exe, &token)),
             use_user_setup: self.settings().use_my_claude_setup,
+            sandbox_network: self.settings().codex_network_access,
             raw_log,
             byok_command,
             sandbox_shell: self.settings().claude_sandbox,

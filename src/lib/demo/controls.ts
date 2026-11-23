@@ -139,10 +139,18 @@ export class MockControls {
     return this.sim.patchAgent(id, { permission_mode: mode });
   }
 
-  /** "Compact now": the demo agent's context shrinks to a quarter. */
+  /** "Compact now", as in the core: a Codex agent between turns and off a task, a Claude agent
+   *  between turns (the demo agent's context shrinks to a quarter). */
   compact(id: string): null {
     const a = this.agent(id);
-    if (a.provider !== 'claude') throw new Error('only a Claude agent can be compacted from here');
+    if (a.provider === 'codex') {
+      if (this.sim.actor(id).inTurn) throw new Error(`${a.name} is working. Compact it when its turn ends.`);
+      if (a.task_id) throw new Error(`${a.name} is on a task. Compact it between tasks.`);
+      this.note(id, `you asked Codex to compact ${a.name}’s conversation`);
+      this.sim.emit({ type: 'compacting', pre_tokens: null, post_tokens: null }, { agent: id });
+      return null;
+    }
+    if (a.provider !== 'claude') throw new Error('only a Claude or a Codex agent can be compacted from here');
     if (this.sim.actor(id).inTurn) throw new Error(`${a.name} is still working: compact it when its turn ends`);
     const used = a.usage.context_used ?? 0;
     const left = Math.round(used / 4);

@@ -48,6 +48,7 @@ import type { InstallRung } from './gen/InstallRung';
 import type { ContextUsage } from './gen/ContextUsage';
 import type { ControlState } from './gen/ControlState';
 import type { PermissionMode } from './gen/PermissionMode';
+import type { ModelCatalog } from './gen/ModelCatalog';
 import type { EventRow } from './gen/EventRow';
 import type { IdeChange } from './gen/IdeChange';
 import type { IdeEntry } from './gen/IdeEntry';
@@ -267,10 +268,13 @@ export const api = {
   resumeAgent: (agentId: string) => call<ControlState>('resume_agent', { agentId }),
   steerAgent: (agentId: string, text: string) => call<ControlState>('steer_agent', { agentId, text }),
   setAgentPermissionMode: (agentId: string, mode: PermissionMode) => call<Agent>('set_agent_permission_mode', { agentId, mode }),
+  /** Ask a running Claude or Codex agent to compact its conversation now. Resolves when the CLI took the request. */
   compactAgent: (agentId: string) => call<void>('compact_agent', { agentId }),
   agentContextUsage: (agentId: string) => call<ContextUsage>('agent_context_usage', { agentId }),
   hireAgent: (provider: Provider, model: string | null = null, title: string | null = null) => call<Agent>('hire_agent', { provider, model, title }),
   listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
+  /** A CLI's models with the thinking efforts each one takes, and where the list comes from. */
+  modelCatalog: (provider: Provider) => call<ModelCatalog>('model_catalog', { provider }),
   // Add-agent wizard: the core judges hire manifests (import, AI draft) and starts the confirmed one.
   hireReview: (raw: string) => call<HireReview>('hire_review', { raw }),
   hireLaunchPreview: (provider: string, model: string | null, command: string | null) => call<LaunchPreview>('hire_launch_preview', { provider, model, command }),

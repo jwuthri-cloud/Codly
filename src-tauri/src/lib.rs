@@ -145,6 +145,7 @@ pub fn run() {
             commands::stop_agent,
             commands::hire_agent,
             commands::list_models,
+            commands::model_catalog,
             commands::set_workspace_team,
             commands::set_request_prefs,
             commands::set_agent_model,

@@ -46,6 +46,7 @@
     "allow-stop-agent",
     "allow-hire-agent",
     "allow-list-models",
+    "allow-model-catalog",
     "allow-set-agent-model",
     "allow-set-agent-look",
     "allow-set-workspace-team",

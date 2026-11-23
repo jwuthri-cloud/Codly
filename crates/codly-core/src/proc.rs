@@ -564,6 +564,7 @@ mod tests {
             read_only: false,
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), token.into())] }),
             use_user_setup: false,
+            sandbox_network: false,
             raw_log: "/nonexistent/r/raw.ndjson".into(),
             byok_command: None,
             sandbox_shell: false,
@@ -584,7 +585,7 @@ mod tests {
         }));
         let acp = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": "/w", "mcpServers": servers } });
         // Codex `thread/start`, the same way (as `codex::thread_request` builds it).
-        let (method, mut params) = crate::adapters::codex::thread_request(&spec_with_token(Provider::Codex, TOKEN), None, None);
+        let (method, mut params) = crate::adapters::codex::thread_request(&spec_with_token(Provider::Codex, TOKEN), None, None, &[]);
         params["config"]["mcp_servers"]["github"] = serde_json::json!({ "command": "npx", "args": [], "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": PAT } });
         let codex = serde_json::json!({ "id": 2, "method": method, "params": params });
 
