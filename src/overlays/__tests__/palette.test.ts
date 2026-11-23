@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { press, wants } from '../palette';
+import { bySection, press, wants } from '../palette';
+
+describe('palette sections', () => {
+  const row = (id: string, section: string) => ({ id, section });
+
+  it('shows each section once, in the order of its best row', () => {
+    const ranked = [row('settings', 'App'), row('art1', 'Artifacts'), row('theme', 'App'), row('t1', 'Tasks'), row('art2', 'Artifacts')];
+    expect(bySection(ranked).map((r) => r.id)).toEqual(['settings', 'theme', 'art1', 'art2', 't1']);
+  });
+
+  it('leaves rows that are already grouped as they are', () => {
+    const grouped = [row('a', 'Go to'), row('b', 'Go to'), row('c', 'View')];
+    expect(bySection(grouped)).toEqual(grouped);
+    expect(bySection([])).toEqual([]);
+  });
+});
 
 describe('palette confirmation', () => {
   const merge = { id: 'plan:merge:p1', confirm: 'Merge “Dark mode” into main?' };

@@ -1,6 +1,7 @@
 <!--
   First run as a quest: five levels on a map, 100 XP each, all skippable, reopenable from Settings.
-  The crew level completes itself the moment one CLI is ready; the others when you press Continue.
+  The crew level completes itself the moment one CLI is ready (Continue alone never completes
+  it); the others when you press Continue.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -12,7 +13,7 @@
   import Icon from '../components/Icon.svelte';
   import Logo from '../components/Logo.svelte';
   import { blip } from './sound';
-  import { LEVELS, XP_PER_LEVEL, complete, crewReady, levelIndex, nextLevel, progress, rank, xp, type LevelId } from './quest';
+  import { LEVELS, XP_PER_LEVEL, complete, crewReady, earned, levelIndex, nextLevel, progress, rank, xp, type LevelId } from './quest';
   import LevelBrains from './LevelBrains.svelte';
   import LevelCreative from './LevelCreative.svelte';
   import LevelCrew from './LevelCrew.svelte';
@@ -43,7 +44,8 @@
     if (crewReady(store.clis) && !untrack(() => ui.quest.includes('crew'))) award('crew');
   });
   function next() {
-    award(current);
+    // "Crew hired" is for a crew that exists: Continue with no ready CLI moves on without it.
+    if (earned(current, store.clis)) award(current);
     blip('tap', sound);
     if (idx < LEVELS.length - 1) current = LEVELS[idx + 1].id;
   }

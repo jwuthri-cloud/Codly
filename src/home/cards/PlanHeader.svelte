@@ -81,8 +81,9 @@
 <style>
   .ph { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 12px 0 20px; box-shadow: inset 0 -1px 0 var(--line); flex-shrink: 0; }
   .main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 14px; height: 100%; text-align: left; }
-  .title { font-size: 19px; color: var(--ink-1); flex: 0 1 auto; min-width: 60px; }
-  .bar { display: flex; gap: 3px; width: 120px; flex-shrink: 0; }
+  /* When the row is short the title gives way first, then the bar; the status is cut last. */
+  .title { font-size: 19px; color: var(--ink-1); flex: 0 1000 auto; min-width: 60px; }
+  .bar { display: flex; gap: 3px; flex: 0 10 120px; min-width: 40px; }
   .bar i { flex: 1; height: 5px; border-radius: 3px; background: var(--line-2); transition: background var(--d-4) var(--ease-out); }
   .bar i.s-done { background: var(--hue); }
   .bar i.s-running, .bar i.s-verifying, .bar i.s-reviewing, .bar i.s-merging { background: linear-gradient(90deg, var(--hue), var(--aurora-a), var(--aurora-b), var(--hue)); background-size: 200% 100%; animation: aurora-drift 2.4s linear infinite; }

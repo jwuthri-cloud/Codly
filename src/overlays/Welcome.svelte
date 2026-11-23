@@ -115,7 +115,7 @@
             </li>
           {/each}
         </ul>
-        <p class="fine">Codly does not read your CLIs’ sign-in tokens, in the Keychain or on disk, unless you turn on “Show Claude usage” in Settings → Accounts. Agents run the unmodified CLIs you signed in to; costs on a subscription are list-price estimates, included in your plan.</p>
+        <p class="fine">Codly does not read your CLIs’ sign-in tokens, in the Keychain or on disk, unless you turn on “Show Claude usage” in Settings → Team → Accounts. Agents run the unmodified CLIs you signed in to; costs on a subscription are list-price estimates, included in your plan.</p>
       </section>
     </div>
     <footer class="foot">

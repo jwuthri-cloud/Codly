@@ -1,3 +1,8 @@
+<!--
+  The toast stack: top right, under the top bar, so it never sits on the composer's Send, a
+  card's buttons or a sheet's footer. While the agent or task sheet is open the stack moves
+  left of it, off the sheet's own controls. Dialogs are drawn above it.
+-->
 <script lang="ts">
   import { fade } from 'svelte/transition';
   import { toasts } from '../lib/state/toasts.svelte';
@@ -8,7 +13,7 @@
   const ICON: Record<string, string> = { success: 'check-circle', error: 'x-circle', info: 'info', progress: 'refresh', attention: 'flag' };
 </script>
 
-<div class="stack" aria-live="polite" aria-relevant="additions text">
+<div class="stack" class:beside-sheet={ui.sheetOpen} aria-live="polite" aria-relevant="additions text">
   {#each toasts.list as t (t.id)}
     <div
       class="toast k-{t.kind}"
@@ -34,8 +39,10 @@
 </div>
 
 <style>
-  .stack { position: fixed; right: 18px; bottom: 18px; z-index: var(--z-toast); display: flex; flex-direction: column; gap: 8px; width: 360px; pointer-events: none; }
-  .toast { pointer-events: auto; display: flex; align-items: flex-start; gap: 10px; padding: 12px 10px 12px 14px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); animation: rise-in var(--d-3) var(--spring); }
+  /* column-reverse: the newest toast is the one next to the top bar */
+  .stack { position: fixed; right: var(--gutter); top: calc(var(--top-h) + 4px); z-index: var(--z-toast); display: flex; flex-direction: column-reverse; gap: 8px; width: min(360px, calc(100vw - 2 * var(--gutter))); pointer-events: none; transition: right var(--d-4) var(--spring); }
+  .stack.beside-sheet { right: calc(var(--sheet-w) + var(--gutter) * 2); }
+  .toast { pointer-events: auto; display: flex; align-items: flex-start; gap: 10px; padding: 12px 10px 12px 14px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); animation: pop-in var(--d-3) var(--spring); }
   .ic { margin-top: 2px; color: var(--ink-2); }
   .k-success .ic { color: var(--ok); }
   .k-error .ic { color: var(--bad); }

@@ -90,6 +90,19 @@ fn snippet(text: &str, at: usize, len: usize) -> (String, u32, u32) {
     (out, off as u32, len as u32)
 }
 
+/// Characters of a memory's first line shown as its hit's title.
+const TITLE_CHARS: usize = 60;
+
+/// A memory's title in the results: its first line, ending in "…" when it was cut.
+fn memory_title(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("");
+    let mut title: String = line.chars().take(TITLE_CHARS).collect();
+    if line.chars().nth(TITLE_CHARS).is_some() {
+        title = format!("{}…", title.trim_end());
+    }
+    title
+}
+
 /// Case-insensitive literal search over tasks (title, key, goal, acceptance, summary, status
 /// reason) and memories (text; superseded ones are skipped). Title matches rank first, then
 /// newest. A blank query matches nothing. At most `limit` hits.
@@ -121,8 +134,7 @@ pub fn exact_search(query: &str, tasks: &[Task], memories: &[Memory], limit: usi
         if let Some(at) = find_chars(&fold(&m.text), &needle) {
             let (snippet, at, len) = snippet(&m.text, at, needle.len());
             let kind = if m.kind == MemoryKind::Note { HitKind::Board } else { HitKind::Memory };
-            let title: String = m.text.lines().next().unwrap_or("").chars().take(60).collect();
-            hits.push((false, ExactHit { kind, id: m.id.clone(), title, snippet, field: "text".into(), at, len, who: Some(m.author.clone()), ts: m.created_at }));
+            hits.push((false, ExactHit { kind, id: m.id.clone(), title: memory_title(&m.text), snippet, field: "text".into(), at, len, who: Some(m.author.clone()), ts: m.created_at }));
         }
     }
     hits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.ts.cmp(&a.1.ts)).then_with(|| a.1.id.cmp(&b.1.id)));
@@ -530,6 +542,19 @@ mod tests {
         assert!(h.snippet.starts_with('…') && h.snippet.ends_with('…'));
         let c: Vec<char> = h.snippet.chars().collect();
         assert_eq!(c[h.at as usize..(h.at + h.len) as usize].iter().collect::<String>(), "needle");
+    }
+
+    #[test]
+    fn a_memory_title_that_was_cut_says_so() {
+        let long = format!("needle {}", "word ".repeat(30));
+        let hits = exact_search("needle", &[], &[mem("m", MemoryKind::Fact, &long, "user", 1)], 5);
+        let cut: String = long.chars().take(60).collect();
+        assert_eq!(hits[0].title, format!("{}…", cut.trim_end()));
+        // A first line that fits is shown as it is; the lines after it are not part of the title.
+        let hits = exact_search("needle", &[], &[mem("m", MemoryKind::Fact, "A short needle\nand more", "user", 1)], 5);
+        assert_eq!(hits[0].title, "A short needle");
+        let exact = "x".repeat(60);
+        assert_eq!(exact_search("x", &[], &[mem("m", MemoryKind::Fact, &exact, "user", 1)], 5)[0].title, exact);
     }
 
     #[test]

@@ -90,7 +90,7 @@
 
     <label class="row toggle">
       <div class="r-text"><span class="r-title">Circuit breaker</span><span class="desc">Watch every agent against the limits below.</span></div>
-      <input type="checkbox" class="switch" checked={cfg.enabled} onchange={(e) => save({ enabled: e.currentTarget.checked })} />
+      <input type="checkbox" class="switch" checked={cfg.enabled} aria-label="Circuit breaker" onchange={(e) => save({ enabled: e.currentTarget.checked })} />
     </label>
 
     {#if status?.hold}
@@ -133,7 +133,7 @@
       </div>
       <label class="row toggle">
         <div class="r-text"><span class="r-title">Hard stop</span><span class="desc">Kill an agent that is still over a limit of its own (token velocity, repeated tool call, error storm) after being constrained. A used-up budget never kills: the agent stays constrained. Off: the breaker never goes past constraining. A stopped task is blocked until you move it to Ready.</span></div>
-        <input type="checkbox" class="switch" checked={cfg.hard_stop} disabled={!cfg.enabled} onchange={(e) => save({ hard_stop: e.currentTarget.checked })} />
+        <input type="checkbox" class="switch" checked={cfg.hard_stop} disabled={!cfg.enabled} aria-label="Hard stop" onchange={(e) => save({ hard_stop: e.currentTarget.checked })} />
       </label>
     </div>
 

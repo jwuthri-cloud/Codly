@@ -41,7 +41,7 @@
     <p class="desc">
       Commands you saved from an approval card with “Always allow in this repo”. Codly approves them for every agent in
       {store.workspace?.name ?? 'this repo'} without asking. It still asks about deletes, <code>git push</code>, <code>sudo</code>, secrets and
-      anything outside the agent’s worktree, and about everything in Strict mode. Remove a rule and Codly asks again.
+      anything outside the agent’s worktree, and about everything in the “Ask first” mode. Remove a rule and Codly asks again.
     </p>
     {#if rules.length}
       <ul class="rules">

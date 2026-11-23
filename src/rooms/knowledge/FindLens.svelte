@@ -16,6 +16,7 @@
   import { ago } from '../../lib/util/format';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
+  import InlineText from '../../components/InlineText.svelte';
   import Provenance from '../../components/Provenance.svelte';
 
   type Mode = 'exact' | 'meaning';
@@ -113,8 +114,8 @@
               <button class="hit" class:static={h.kind !== 'task'} onclick={() => openHit(h)}>
                 <span class="kind k-{h.kind}">{KIND[h.kind]}</span>
                 <span class="body">
-                  <span class="title truncate">{h.title}</span>
-                  <span class="snip selectable">{a}<mark>{m}</mark>{b}</span>
+                  <span class="title truncate"><InlineText text={h.title} /></span>
+                  <span class="snip selectable"><InlineText text={a} /><mark>{m}</mark><InlineText text={b} /></span>
                   <span class="meta"><span>in {h.field}</span>{#if who(h.who)}<span>{who(h.who)}</span>{/if}<span class="num">{ago(h.ts, ui.now)}</span></span>
                 </span>
               </button>
@@ -128,7 +129,7 @@
       <section>
         <h2 class="eyebrow">Memories <span class="num">{meaning.memories.length}</span></h2>
         {#each meaning.memories as m (m.id)}
-          <p class="mem selectable"><span class="kind k-{m.kind === 'note' ? 'board' : 'memory'}">{m.kind}</span>{m.text}<span class="meta"><span>{who(m.author) ?? m.author}</span><span class="num">{ago(m.created_at, ui.now)}</span></span></p>
+          <p class="mem selectable"><span class="kind k-{m.kind === 'note' ? 'board' : 'memory'}">{m.kind}</span><span><InlineText text={m.text} /></span><span class="meta"><span>{who(m.author) ?? m.author}</span><span class="num">{ago(m.created_at, ui.now)}</span></span></p>
         {:else}
           <p class="none">Nothing remembered about this.</p>
         {/each}

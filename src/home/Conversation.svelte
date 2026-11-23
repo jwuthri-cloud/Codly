@@ -275,11 +275,16 @@
 
 <style>
   .conv { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .one { display: flex; align-items: center; gap: 10px; padding: 12px 14px 12px 22px; box-shadow: inset 0 -1px 0 var(--line); }
-  .o-txt { flex: 1; min-width: 0; }
-  .o-name { font-size: var(--t-md); color: var(--ink-2); display: flex; align-items: baseline; gap: 8px; }
-  .o-name b { color: var(--ink-1); font-weight: var(--w-semi); }
-  .o-prov { font-size: var(--t-xs); color: var(--ink-3); }
+  /* In a narrow panel (a small window with the sheet open) the last button goes to a second row,
+     so the name keeps 170px or more and nothing lies on anything. */
+  .one { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 12px 14px 12px 22px; box-shadow: inset 0 -1px 0 var(--line); }
+  .o-txt { flex: 1 1 170px; min-width: 0; }
+  /* The name stays on one line: the CLI and model give way first, then the name, each with an ellipsis. */
+  .o-name { font-size: var(--t-md); color: var(--ink-2); display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
+  .o-name b { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink-1); font-weight: var(--w-semi); }
+  .o-prov { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--t-xs); color: var(--ink-3); }
+  .one > .btn { flex-shrink: 0; }
+  .one > .btn:last-child { margin-left: auto; }
   .o-now { font-size: var(--t-sm); color: var(--ink-3); }
   .scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; padding: 28px 0 28px; scroll-padding-bottom: 20px; mask-image: linear-gradient(180deg, transparent 0, #000 28px, #000 calc(100% - 10px), transparent 100%); }
   .hero { height: 100%; display: grid; place-items: center; }
@@ -305,6 +310,8 @@
   .acts { position: absolute; top: 100%; left: -7px; z-index: 1; display: flex; gap: 2px; opacity: 0; transition: opacity var(--d-2); }
   .acts.mine { left: auto; right: 0; }
   .it:hover > .acts, .acts:focus-within { opacity: 1; }
+  /* A work row sits 8px closer (.k-work): give the actions their 20px back, so they never lie on it. */
+  .it:has(> .acts):has(+ .k-work) { margin-bottom: 8px; }
   .act { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; border-radius: var(--r-full); font-size: var(--t-xs); font-weight: var(--w-med); color: var(--ink-3); }
   .act:hover { background: var(--surface-3); color: var(--ink-1); }
   .mention { display: inline; padding: 0 3px; margin: 0 -1px; border-radius: 4px; color: var(--ink-1); font-weight: var(--w-semi); background: var(--surface-3); font-size: inherit; line-height: inherit; }

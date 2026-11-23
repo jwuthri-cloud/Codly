@@ -123,6 +123,12 @@
   ];
   let tab = $state(ui.settingsTab ?? 'general');
   ui.settingsTab = null;
+  // Another tab starts at its top, not where the last one was scrolled to.
+  let panel: HTMLDivElement | undefined = $state();
+  $effect(() => {
+    void tab;
+    if (panel) panel.scrollTop = 0;
+  });
   // Office sound (kept on this machine, not in the core's settings).
   let soundOn = $state(!sound.muted);
   let volume = $state(sound.volume);
@@ -155,12 +161,12 @@
         <button role="tab" aria-selected={tab === t.id} class:on={tab === t.id} onclick={() => (tab = t.id)}><Icon name={t.icon} size={15} />{t.label}</button>
       {/each}
     </nav>
-    <div class="body" role="tabpanel">
+    <div class="body" role="tabpanel" bind:this={panel}>
     {#snippet toggles(list: string[][])}
       {#each list as [k, title, body] (k)}
         <label class="row toggle">
           <div class="r-text"><span class="r-title">{title}</span><span class="desc">{body}</span></div>
-          <input type="checkbox" class="switch" checked={s[k as 'auto_run_plans']} onchange={(e) => set({ [k]: (e.currentTarget as HTMLInputElement).checked })} />
+          <input type="checkbox" class="switch" checked={s[k as 'auto_run_plans']} aria-label={title} onchange={(e) => set({ [k]: (e.currentTarget as HTMLInputElement).checked })} />
         </label>
       {/each}
     {/snippet}
@@ -247,7 +253,7 @@
       <h3 class="eyebrow">Sound</h3>
       <label class="row toggle">
         <div class="r-text"><span class="r-title">Office sounds</span><span class="desc">Pool balls, the PS5 and the TV match, typing, the kitchen, jingles for merges and promotions, and music in Build/Buy. Off by default; quiet when the window is hidden.</span></div>
-        <input type="checkbox" class="switch" checked={soundOn} onchange={(e) => sound.setMuted(!(e.currentTarget as HTMLInputElement).checked)} />
+        <input type="checkbox" class="switch" checked={soundOn} aria-label="Office sounds" onchange={(e) => sound.setMuted(!(e.currentTarget as HTMLInputElement).checked)} />
       </label>
       <div class="row">
         <div class="r-text"><span class="r-title">Volume</span><span class="desc">{Math.round(volume * 100)}%</span></div>

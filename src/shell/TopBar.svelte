@@ -69,8 +69,11 @@
 <style>
   .top { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; height: var(--top-h); }
   .where { display: flex; align-items: center; min-width: 0; }
-  .ws { display: inline-flex; align-items: baseline; gap: 10px; height: 34px; padding: 0 12px; margin-left: -12px; border-radius: var(--r-full); min-width: 0; }
-  .ws:hover { background: var(--surface-2); }
+  /* The office behind the bar keeps its own hour (a bright scene under the night theme, a dark
+     one under the day theme), so the name and the branch stand on a backing of the app's theme:
+     the inks hold AA on --glass-strong over any scene (src/styles/__tests__/contrast.test.ts). */
+  .ws { display: inline-flex; align-items: baseline; gap: 10px; height: 34px; padding: 0 14px; border-radius: var(--r-full); min-width: 0; background: var(--glass-strong); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-edge); }
+  .ws:hover { box-shadow: var(--glass-edge), inset 0 0 0 1px var(--line-3); }
   .name { font-size: 22px; line-height: 34px; font-style: italic; color: var(--ink-1); white-space: nowrap; }
   .branch { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
   /* centred on the stage (and so on the conversation column), whatever sits left and right;

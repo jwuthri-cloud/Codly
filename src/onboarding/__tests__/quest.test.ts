@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CliInfo } from '../../lib/gen/CliInfo';
 import { catalog } from '../catalog';
-import { LEVELS, XP_PER_LEVEL, complete, crewReady, nextLevel, progress, rank, xp } from '../quest';
+import { LEVELS, XP_PER_LEVEL, complete, crewReady, earned, nextLevel, progress, rank, xp } from '../quest';
 
 const cli = (over: Partial<CliInfo>): CliInfo => ({ provider: 'claude', path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: null, transport: 'stream-json', ...over }) as CliInfo;
 
@@ -29,6 +29,17 @@ describe('quest', () => {
   it('a crew is ready as soon as one CLI is installed and signed in', () => {
     expect(crewReady([cli({}), cli({ provider: 'codex', path: '/bin/codex', logged_in: false })])).toBe(false);
     expect(crewReady([cli({}), cli({ provider: 'codex', path: '/bin/codex', logged_in: true })])).toBe(true);
+  });
+});
+
+describe('what Continue rewards', () => {
+  it('the crew level only with a CLI that is ready to work', () => {
+    expect(earned('crew', [])).toBe(false);
+    expect(earned('crew', [cli({}), cli({ provider: 'codex', path: '/bin/codex', logged_in: false })])).toBe(false);
+    expect(earned('crew', [cli({ path: '/bin/claude', logged_in: true })])).toBe(true);
+  });
+  it('every other level as you move on, with or without a CLI', () => {
+    for (const l of LEVELS.filter((x) => x.id !== 'crew')) expect(earned(l.id, [])).toBe(true);
   });
 });
 

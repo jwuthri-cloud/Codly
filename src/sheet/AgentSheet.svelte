@@ -30,6 +30,7 @@
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
   import AgentControls from './AgentControls.svelte';
+  import { taskChangedLine, tripleLine, type Names } from './historyWords';
   import AgentTakeover from './AgentTakeover.svelte';
   import AgentTrust from './AgentTrust.svelte';
   import TaskChecks from './TaskChecks.svelte';
@@ -185,6 +186,7 @@
     }
     return out;
   });
+  const names: Names = { agent: (id) => store.agentMap.get(id)?.name, task: (id) => store.taskMap.get(id)?.key };
   function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
     const k = e.kind;
     switch (k.type) {
@@ -211,7 +213,8 @@
       case 'merged': return { icon: 'merge', text: `Merged into ${k.branch}`, tone: 'good' };
       case 'memory_added': return { icon: 'memory', text: `Saved: ${oneLine(k.memory.text, 90)}` };
       case 'artifact_added': return { icon: 'image', text: `Made ${k.artifact.title}` };
-      case 'triple_added': return { icon: 'graph', text: `${k.triple.subject.split(':').pop()} ${k.triple.predicate} ${k.triple.object.split(':').pop()}` };
+      case 'triple_added': return { icon: 'graph', text: tripleLine(k.triple, names) };
+      case 'task_changed': return { icon: 'plan', text: taskChangedLine(k.task) };
       case 'exited': return { icon: 'stop', text: `Process exited${k.code != null ? ` (${k.code})` : ''}` };
       case 'compacting': return { icon: 'layers', text: `Compacted context${k.pre_tokens ? ` ${tokens(k.pre_tokens)} → ${tokens(k.post_tokens)}` : ''}` };
       case 'retrying': return { icon: 'refresh', text: `Retrying (${k.attempt}): ${k.reason}`, tone: 'warn' };

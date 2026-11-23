@@ -68,6 +68,18 @@ describe.each([
     expect(contrast(ink(4), bg)).toBeGreaterThanOrEqual(AA_LARGE);
   });
 
+  // The top bar's repo name, branch and "+" sit on --glass-strong over the office, whose scene
+  // keeps its own hour: the lightest and the darkest thing it can paint are the two worst cases.
+  const scenes: [string, Rgb][] = [
+    ['a white scene', [255, 255, 255]],
+    ['a black scene', [0, 0, 0]],
+  ];
+  it.each(scenes)('--ink-1 and --ink-3 are readable on --glass-strong over %s', (_scene, scene) => {
+    const bg = over(color(t.get('--glass-strong')!), scene);
+    expect(contrast(ink(1), bg)).toBeGreaterThanOrEqual(AA_TEXT);
+    expect(contrast(ink(3), bg)).toBeGreaterThanOrEqual(AA_TEXT);
+  });
+
   it('the four inks stay four visible steps', () => {
     const bg = solids[0][1];
     const ratios = [1, 2, 3, 4].map((n) => contrast(ink(n), bg));

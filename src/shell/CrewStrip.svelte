@@ -74,6 +74,8 @@
      justify-content: center would put out of reach. */
   .strip > :global(:first-child) { margin-left: auto; }
   .strip > :global(:last-child) { margin-right: auto; }
-  .add { flex-shrink: 0; color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line-2); border-radius: var(--r-full); }
+  /* on a backing of its own, like the repo name: readable over any office scene (see TopBar) */
+  .add { flex-shrink: 0; color: var(--ink-3); background: var(--glass-strong); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-edge), inset 0 0 0 1px var(--line-2); border-radius: var(--r-full); }
+  .add:hover { background: var(--glass-strong); color: var(--ink-1); }
   .sep { width: 1px; height: 22px; background: var(--line-2); flex-shrink: 0; margin: 0 2px; }
 </style>

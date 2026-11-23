@@ -149,7 +149,7 @@
 </ul>
 <div class="row">
   <button class="btn ghost sm" onclick={recheck} disabled={checking}><Icon name="refresh" size={13} />{checking ? 'Checking…' : 'Check again'}</button>
-  <p class="fine">Codly checks each sign-in with the CLI's own command or settings file. It does not read your CLIs' sign-in tokens, in the Keychain or on disk, unless you turn on “Show Claude usage” in Settings → Accounts. One ready agent is enough to continue.</p>
+  <p class="fine">Codly checks each sign-in with the CLI's own command or settings file. It does not read your CLIs' sign-in tokens, in the Keychain or on disk, unless you turn on “Show Claude usage” in Settings → Team → Accounts. One ready agent is enough to continue.</p>
 </div>
 
 <style>
