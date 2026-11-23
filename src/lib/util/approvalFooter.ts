@@ -3,12 +3,20 @@
 // A plan (a Claude agent in plan mode) has its own set: accept it, change it and accept, send
 // it back with a note, or stop the turn. It has no plain "no": without a note Claude Code shows
 // the same plan again, so the one way to say no opens the note field.
+// A file edit of a 1:1 Claude agent that asks for edits can also be approved together with a
+// switch to "Accept edits" (`acceptsEdits`), so that its next edits stop asking.
+import type { Agent } from '../gen/Agent';
 import type { ApprovalChoice } from '../gen/ApprovalChoice';
+import type { ApprovalMode } from '../gen/ApprovalMode';
+import type { ApprovalSubject } from '../gen/ApprovalSubject';
+import type { Provider } from '../gen/Provider';
+import { PROVIDER_LABEL } from './labels';
 import { PERMISSION_SCOPE } from './permissionsAsked';
 
 export type FooterButton = {
-  /** `choice`: answer with `choice`. `edit`: open the plan to change it. `note`: open the note field. */
-  act: 'choice' | 'edit' | 'note';
+  /** `choice`: answer with `choice`. `edit`: open the plan to change it. `note`: open the note
+   *  field. `accept_edits`: approve once, then switch the agent to "Accept edits". */
+  act: 'choice' | 'edit' | 'note' | 'accept_edits';
   /** The answer a `choice` button sends. */
   choice?: ApprovalChoice;
   label: string;
@@ -16,6 +24,8 @@ export type FooterButton = {
   kbd?: string;
   /** The button's look: 'primary', 'ghost', 'danger', or '' for a plain one. */
   cls: string;
+  /** What it does beyond its label, for its tooltip. */
+  hint?: string;
 };
 
 const CHOICE: Record<ApprovalChoice, { label: string; kbd?: string; cls: string }> = {
@@ -32,9 +42,14 @@ const answer = (choice: ApprovalChoice, label = CHOICE[choice].label): FooterBut
 /** A Codex permissions request is allowed for its turn or for the session: the scope Codly answers with. */
 const SCOPED: Partial<Record<ApprovalChoice, string>> = { allow_once: PERMISSION_SCOPE.allow_once, allow_session: PERMISSION_SCOPE.allow_session };
 
+/** Who asks: the CLI of the agent and its name. */
+export type Asker = { provider: Provider; name: string };
+
 /** `plan`: the card shows a Claude agent's plan. `offered`: the choices its CLI offered.
- *  `permissions`: the card is a permissions request. */
-export function footerButtons(plan: boolean, offered: readonly ApprovalChoice[], permissions = false): FooterButton[] {
+ *  `permissions`: the card is a permissions request. `asker`: who asks (null: an agent Codly
+ *  does not know). `acceptEdits`: the hint of "Accept edits" when the card offers to switch to
+ *  it (`acceptsEdits`), else null. */
+export function footerButtons(plan: boolean, offered: readonly ApprovalChoice[], permissions = false, asker: Asker | null = null, acceptEdits: string | null = null): FooterButton[] {
   const has = (c: ApprovalChoice) => offered.includes(c);
   if (plan) {
     return [
@@ -43,7 +58,40 @@ export function footerButtons(plan: boolean, offered: readonly ApprovalChoice[],
       ...(has('cancel') ? [answer('cancel')] : []),
     ];
   }
-  return [...ORDER.filter(has).map((c) => answer(c, (permissions && SCOPED[c]) || undefined)), ...(has('deny') ? [{ act: 'note', label: 'Deny with a note…', kbd: '⇧⌘⌫', cls: 'ghost' } satisfies FooterButton] : [])];
+  const edits: FooterButton[] = acceptEdits !== null ? [{ act: 'accept_edits', label: 'Approve and accept edits from now on', cls: '', hint: acceptEdits }] : [];
+  const choices = ORDER.filter(has).flatMap((c) => [answer(c, (permissions && SCOPED[c]) || undefined), ...(c === 'allow_once' ? edits : [])]);
+  return [...choices, ...(has('deny') ? [{ act: 'note', label: noteLabel(asker), kbd: '⇧⌘⌫', cls: 'ghost' } satisfies FooterButton] : [])];
+}
+
+/** Claude Code takes a note with its "no". Every other CLI takes none: Codly sends your note to
+ *  the agent as your next message, and the button and the field say so. */
+const otherCli = (asker: Asker | null): asker is Asker => !!asker && asker.provider !== 'claude';
+const noteLabel = (asker: Asker | null): string => (otherCli(asker) ? `Deny and tell ${asker.name} why…` : 'Deny with a note…');
+
+/** The line under the note field of an agent whose CLI takes no note with a "no"; null for Claude Code and for an agent Codly does not know. */
+export function noteGoes(asker: Asker | null): string | null {
+  return otherCli(asker) ? `${PROVIDER_LABEL[asker.provider]} takes no note with a deny. Codly sends yours to ${asker.name} as your next message.` : null;
+}
+
+/**
+ * Whether a request's card offers "Approve and accept edits from now on": a file change of a
+ * 1:1 Claude agent in "Ask for edits" that is on no task, and that can be approved once. Only
+ * such an agent has a mode to switch (its mode waits while it is on a task). Never for a plan's
+ * worker, a Lead, another CLI, or an agent already in another mode. `permission`: the
+ * permissions of its conversation; under "Ask first" every change asks you and the core refuses
+ * "Accept edits", so the card does not offer it.
+ */
+export function acceptsEdits(subject: ApprovalSubject, offered: readonly ApprovalChoice[], agent: Pick<Agent, 'provider' | 'role' | 'task_id' | 'permission_mode'> | null, permission: ApprovalMode): boolean {
+  return (
+    subject.kind === 'file_change' &&
+    offered.includes('allow_once') &&
+    permission !== 'strict' &&
+    !!agent &&
+    agent.provider === 'claude' &&
+    agent.role === 'solo' &&
+    !agent.task_id &&
+    (agent.permission_mode ?? 'ask') === 'ask'
+  );
 }
 
 /** The note that goes back with a plan must say something: without one the same plan comes back. */

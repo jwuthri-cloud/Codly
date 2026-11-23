@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { bySection, noRow, press, wants } from '../palette';
+import type { AgentDo, SlashContext } from '../../home/composerActions';
+import type { Agent } from '../../lib/gen/Agent';
+import { mkAgent } from '../../office/demo/script';
+import { agentGroup, bySection, noRow, okRow, press, wants } from '../palette';
 
 describe('palette sections', () => {
   const row = (id: string, section: string) => ({ id, section });
@@ -73,5 +76,84 @@ describe('palette confirmation', () => {
     // A request with the plan's name from another CLI, or from an agent Codly does not know, is a tool by its name.
     expect(noRow(plan, 'codex', 'Eli', 'tool')).toEqual({ title: 'Deny Eli: tool', note: false });
     expect(noRow(plan, undefined, 'agent', 'tool')).toEqual({ title: 'Deny agent: tool', note: false });
+  });
+});
+
+describe('the palette rows of a waiting request', () => {
+  it('a Claude agent’s plan is accepted, as on its card; every other request is approved once', () => {
+    const plan = { kind: 'tool', name: 'ExitPlanMode', input: { plan: '1. Add the line' } } as const;
+    expect(okRow(plan, 'claude', 'Eli', 'show you its plan', 'Eli wants to show you its plan')).toEqual({ title: "Accept Eli's plan", confirm: 'Accept the plan? Eli wants to show you its plan' });
+    expect(okRow({ kind: 'command', command: 'ls', cwd: null }, 'claude', 'Eli', 'ls', 'Eli wants to run ls')).toEqual({ title: 'Approve Eli: ls', confirm: 'Approve once? Eli wants to run ls' });
+    // That request is Claude Code's own: from another CLI it is a tool by its name.
+    expect(okRow(plan, 'codex', 'Bo', 'use the tool ExitPlanMode', 'Bo wants to use the tool ExitPlanMode').title).toBe('Approve Bo: use the tool ExitPlanMode');
+  });
+});
+
+describe('the group "This agent"', () => {
+  /** An agent with a live process, between turns, that took a turn before. */
+  function running(id: string, provider: Agent['provider'], role: Agent['role']): Agent {
+    const a = mkAgent(id, id[0].toUpperCase() + id.slice(1), provider, role, 1, 'idle');
+    return { ...a, run_id: `run-${id}`, usage: { ...a.usage, input_tokens: 1200, output_tokens: 300 } };
+  }
+  function recorder() {
+    const calls: string[] = [];
+    const of = (what: string) => (a: Agent) => void calls.push(`${what} ${a.id}`);
+    const on: AgentDo = {
+      stop: () => void calls.push('stop'), agentMode: (a, mode) => void calls.push(`agentMode ${a.id} ${mode}`), agentModel: of('agentModel'),
+      compact: of('compact'), context: of('context'), undo: of('undo'), terminal: of('terminal'), showTerminal: of('showTerminal'), mcp: of('mcp'),
+    };
+    return { on, calls };
+  }
+  const at = (over: Partial<SlashContext>): SlashContext => ({ oneToOne: false, agent: null, busy: false, changes: false, modes: [], mcp: [], takeover: { takeover: null, blocked: null }, turns: { off: null }, ...over });
+  /** Title, then what its line says: what it does, or why it cannot run ("off: …"). */
+  const shown = (c: SlashContext) => agentGroup(c, recorder().on).map((r) => [r.title, r.run ? r.sub : `off: ${r.sub}`]);
+
+  it('in a request: the Lead’s controls, the ones that cannot run last with their reason', () => {
+    const lead = running('lea', 'claude', 'lead');
+    expect(shown(at({ agent: lead, busy: true, turns: { off: 'Lea has no worktree of its own, so there are no checkpoints.' } }))).toEqual([
+      ['Stop Lea', 'Ends the running turn'],
+      ['Check Lea’s context', 'How full its conversation is'],
+      ['Continue in your terminal', 'Codly stops its own process first, and sends it nothing until you give it back'],
+      ['Compact Lea’s context', 'off: Only a Codex agent or a 1:1 Claude agent'],
+      ['Undo Lea’s last turn…', 'off: Lea has no worktree of its own, so there are no checkpoints.'],
+      ['MCP servers', 'off: Lea’s run reports no MCP server'],
+    ]);
+    expect(agentGroup(at({ agent: lead }), recorder().on).every((r) => r.section === 'This agent')).toBe(true);
+  });
+
+  it('in a 1:1 chat with a Claude agent: its ways of working and its model too, and a row runs what the menu runs', () => {
+    const ada = running('ada', 'claude', 'solo');
+    const c = at({ oneToOne: true, agent: ada });
+    expect(shown(c).map((r) => r[0])).toEqual(['Ask for edits', 'Plan first', 'Accept edits', 'Model', 'Compact Ada’s context', 'Check Ada’s context', 'Undo Ada’s last turn…', 'Continue in your terminal', 'Stop Ada', 'MCP servers']);
+    const { on, calls } = recorder();
+    const rows = agentGroup(c, on);
+    rows.find((r) => r.title === 'Accept edits')!.run!();
+    rows.find((r) => r.title === 'Undo Ada’s last turn…')!.run!();
+    expect(calls).toEqual(['agentMode ada accept_edits', 'undo ada']);
+  });
+
+  it('in a 1:1 chat with a Codex agent: what is Claude Code’s says so, and goes last', () => {
+    const cody = running('cody', 'codex', 'solo');
+    const rows = shown(at({ oneToOne: true, agent: cody, turns: null }));
+    expect(rows.slice(0, 4)).toEqual([
+      ['Model', 'Cody’s model'],
+      ['Compact Cody’s context', expect.stringContaining('Codex sums up the conversation so far')],
+      // The core has not answered yet: the row waits in its place.
+      ['Undo Cody’s last turn…', 'off: Reading what Codly kept of its turns…'],
+      ['Continue in your terminal', 'Codly stops its own process first, and sends it nothing until you give it back'],
+    ]);
+    expect(rows.slice(4)).toEqual([
+      ['Stop Cody', 'off: Nothing is running'],
+      ['Ask for edits', 'off: Only a 1:1 Claude agent has a mode to switch'],
+      ['Plan first', 'off: Only a 1:1 Claude agent has a mode to switch'],
+      ['Accept edits', 'off: Only a 1:1 Claude agent has a mode to switch'],
+      ['Check Cody’s context', 'off: Only Claude Code can be asked for it'],
+      ['MCP servers', 'off: Cody’s run reports no MCP server'],
+    ]);
+  });
+
+  it('with no agent there is no group', () => {
+    expect(agentGroup(at({}), recorder().on)).toEqual([]);
+    expect(agentGroup(at({ oneToOne: true }), recorder().on)).toEqual([]);
   });
 });

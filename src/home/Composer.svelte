@@ -7,7 +7,10 @@
   stop, mode, model, clear…) and the controls of the agent you talk to (compact, context, its
   way of working, undo, your terminal, its MCP servers: composerActions.ts), and ↵
   runs one; it is not sent. One that cannot run right now (stop, with nothing running) says why
-  and is not sent either. A CLI's own slash commands are not offered: Codly cannot run them.
+  and is not sent either. A CLI's own slash commands are not offered: Codly cannot run them, and
+  a message that starts with a slash command Codly does not have is not sent (the composer names
+  the closest action). While the agent is in your terminal the composer says so and offers
+  "Give it back".
   Esc twice on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
   draft (text and files) is kept when the composer leaves the screen, and Edit on an earlier
   message does not replace it. A new request that holds a draft stays a tab when you leave it.
@@ -19,10 +22,9 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import { api } from '../lib/api';
   import type { Agent } from '../lib/gen/Agent';
-  import { sendChat, setRequestPrefs, stopThread, stopThreadByEsc } from '../lib/state/actions';
-  import { compactAgent, setPermissionMode, showContext } from '../lib/state/control.svelte';
-  import { ofLiveRun } from '../lib/state/session';
-  import { loadTakeover, openInTerminal, showTerminal, takeovers } from '../lib/state/takeover.svelte';
+  import { sendChat, setRequestPrefs, stopThreadByEsc } from '../lib/state/actions';
+  import { setPermissionMode } from '../lib/state/control.svelte';
+  import { giveBack, loadTakeover, takeovers } from '../lib/state/takeover.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { busy, busyHint, stoppedHint, waitingHint } from '../lib/state/queue';
@@ -42,8 +44,9 @@
   import { messageWithFiles } from './attached';
   import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from './drafts';
   import { recall, type Recalled } from './recall';
-  import { noTurn, slashCommands, type SlashDo } from './composerActions';
-  import { fileMention, filterSlash, rankFiles, triggerAt, type Trigger } from './composerMenu';
+  import { agentTurns } from './agentTurns';
+  import { agentDo, slashCommands, slashContext, type SlashDo } from './composerActions';
+  import { fileMention, filterSlash, pointerMoved, rankFiles, triggerAt, unknownSlash, unknownSlashLine, type Trigger } from './composerMenu';
   import { repoFiles } from './repoFiles';
 
   interface Props {
@@ -151,8 +154,11 @@
   const fresh = $derived(!oneToOne && !agent && !store.chats.some((c) => c.thread === thread) && !store.outbox.some((o) => o.thread === thread));
   /** Its turn stands still on a request of its own, shown in this conversation: it waits for you, it is not at work. */
   const waitsForYou = $derived(isBusy && !!agent && store.pendingApprovals.some((a) => a.agent_id === agent.id));
+  /** The agent is in your terminal: Codly sends it nothing until you give it back. */
+  const inTerminal = $derived(!!agent && takeovers.has(agent.id));
   const placeholder = $derived(
-    waitsForYou ? waitingHint(agent?.name ?? 'The agent', agent?.provider)
+    inTerminal && agent ? `${agent.name} is in your terminal: give it back to message it here`
+    : waitsForYou ? waitingHint(agent?.name ?? 'The agent', agent?.provider)
     : isBusy ? busyHint(agent?.name ?? 'The agent', agent?.provider)
     : oneToOne && agent?.status === 'offline' ? stoppedHint(agent.name)
     : oneToOne ? `Message ${agent?.name ?? 'the agent'} directly…`
@@ -195,69 +201,41 @@
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
     files = [];
   }
-  /** What the core keeps of the agent's turns, for `/undo`: read when `/` opens the menu (the read starts git). */
-  let turns = $state<{ agent: string; off: string | null } | null>(null);
-  /** `/` opened the menu: ask the core what only it knows about the agent you talk to. */
-  function loadControls() {
-    const a = agent;
+  /** `/` opened the menu: ask the core what only it knows about the agent you talk to (its
+   *  terminal, and what it keeps of its turns: the read starts git). Kept per agent. */
+  function loadControls(a: Agent | null) {
     if (!a) return;
     void loadTakeover(a.id);
-    api.agentCheckpoints(a.id).then(
-      (kept) => (turns = { agent: a.id, off: noTurn(kept, a.name) }),
-      (e) => (turns = { agent: a.id, off: e instanceof Error ? e.message : String(e) }),
-    );
+    void agentTurns.ask(a);
   }
-  /** The agent's sheet, open at one of its sections. */
-  function openSheet(a: Agent, section: string) {
-    ui.sheetFocus = section;
-    ui.selectAgent(a.id);
-  }
-  /** What each action of `/` does. */
+  /** What each action of `/` does: the agent's controls are the palette's too (`agentDo`). */
   const actions: SlashDo = {
+    ...agentDo(() => thread),
     newRequest: () => ui.newRequest(),
     fromIssue: () => (intakeUi.dialog = 'issue'),
     fromPullRequest: () => (intakeUi.dialog = 'pull_request'),
-    stop: () => void stopThread(thread),
     requestMode: (mode) => void setRequestPrefs(thread, { mode }),
-    agentMode: (a, mode) => void setPermissionMode(a.id, mode),
     leadModels: () => lead?.showModels(),
-    // A block body: an assignment's value would be the object, not the state's proxy of it.
-    agentModel: (a) => {
-      ui.modelDialog = { provider: a.provider, agentId: a.id };
-    },
-    compact: (a) => void compactAgent(a.id, a.name),
-    context: (a) => void showContext(a.id, a.name),
     changes: () => {
       if (plan) ui.openDiff({ kind: 'plan', id: plan.id });
     },
-    // Its checkpoints are in the Git tab of the sheet's last section: the sheet opens there.
-    undo: (a) => openSheet(a, 'tabs'),
-    terminal: (a) => void openInTerminal(a.id),
-    showTerminal: (a) => showTerminal(a.id),
-    mcp: (a) => openSheet(a, 'mcp'),
     clear: clearDraft,
     closed: () => ui.openThread(CLOSED_LIST),
     settings: () => (ui.settingsOpen = true),
     shortcuts: () => (ui.shortcutsOpen = true),
   };
   /** What `/` offers: Codly's actions and the agent's controls (composerActions.ts). */
-  const commands = $derived.by(() => {
-    const a = agent;
-    // The servers of its live run change with its events, which the store counts per agent.
-    if (a) void [store.revBy.get(a.id), store.liveRevBy.get(a.id)];
-    return slashCommands(
-      {
-        oneToOne,
-        agent: a,
-        busy: isBusy,
-        changes: !!plan?.integration_branch,
-        modes: MODES,
-        mcp: a ? ofLiveRun(store.live[a.id]?.mcp ?? [], a.run_id) : [],
-        takeover: a ? takeovers.of(a.id) : null,
-        turns: a && turns?.agent === a.id ? turns : null,
-      },
-      actions,
-    );
+  const commands = $derived(slashCommands(slashContext(thread, MODES), actions));
+  /** The line starts with a slash command Codly does not have: it is not sent. */
+  const unknown = $derived(unknownSlash(text, commands.map((c) => c.name)));
+  // Another conversation while the menu is open: ask about its agent (once per agent, not on
+  // each of its updates).
+  const agentId = $derived(agent?.id ?? null);
+  $effect(() => {
+    void agentId;
+    untrack(() => {
+      if (mention?.trigger === '/') loadControls(agent);
+    });
   });
 
   const options = $derived.by((): Opt[] => {
@@ -284,7 +262,7 @@
     if (!ta) return;
     const next = triggerAt(text, ta.selectionStart ?? 0);
     if (next?.trigger === '@' && mention?.trigger !== '@') loadFiles();
-    if (next?.trigger === '/' && mention?.trigger !== '/') loadControls();
+    if (next?.trigger === '/' && mention?.trigger !== '/') loadControls(agent);
     mention = next;
     if (next) mi = 0;
   }
@@ -327,6 +305,14 @@
     });
   }
 
+  /** Where the pointer was last seen over the menu: a row takes the arrow keys' place only when it really moved. */
+  let lastPointer: { x: number; y: number } | null = null;
+  function hover(e: PointerEvent, i: number) {
+    const now = { x: e.clientX, y: e.clientY };
+    if (pointerMoved(lastPointer, now)) mi = i;
+    lastPointer = now;
+  }
+
   /** The menu scrolls when it is long (every action, in a low window): the row the arrow keys are on stays in view. */
   let menu: HTMLUListElement | undefined = $state();
   function showActive() {
@@ -344,7 +330,7 @@
 
   /** Never blocks: clear the line, show the message, send in the background. */
   function send() {
-    if (!canSend) return;
+    if (!canSend || unknown) return;
     sendChat(thread, messageWithFiles(text, ready.flatMap((f) => (f.path ? [f.path] : []))));
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
     files = [];
@@ -452,7 +438,7 @@
         {#if o.kind === 'agent' && i === 0 && mention?.atStart}<li class="mh eyebrow">Talk 1:1 with</li>{/if}
         {#if o.kind === 'file' && options[i - 1]?.kind !== 'file'}<li class="mh eyebrow">Files</li>{/if}
         <li>
-          <button class="opt" class:active={i === mi} class:off={o.kind === 'command' && !o.run} role="option" aria-selected={i === mi} aria-disabled={o.kind === 'command' && !o.run} onpointerenter={() => (mi = i)} onmousedown={(e) => { e.preventDefault(); pick(o); }}>
+          <button class="opt" class:active={i === mi} class:off={o.kind === 'command' && !o.run} role="option" aria-selected={i === mi} aria-disabled={o.kind === 'command' && !o.run} onpointermove={(e) => hover(e, i)} onmousedown={(e) => { e.preventDefault(); pick(o); }}>
             {#if o.kind === 'agent'}<Portrait agent={store.agentMap.get(o.agentId)} size={20} />{:else}<Icon name={o.kind === 'command' ? o.icon : o.kind === 'file' ? 'file' : 'plan'} size={14} />{/if}
             <span class="ol" class:truncate={o.kind !== 'command'}>{o.label}{#if o.kind === 'command'}<span class="oh">{o.hint}</span>{/if}</span>
             <span class="os truncate">{o.sub}</span>
@@ -461,6 +447,8 @@
       {/each}
       {#if noFiles}<li class="mh bad" role="alert">Couldn’t list the repo’s files</li>{/if}
     </ul>
+  {:else if unknown}
+    <p class="nosuch" role="status">{unknownSlashLine(unknown)}</p>
   {/if}
   {#if files.length}
     <ul class="atts" aria-label="Attachments">
@@ -473,7 +461,7 @@
       {/each}
     </ul>
   {/if}
-  <div class="composer" class:has={canSend} class:one={oneToOne} style:--hue={idVar(agent?.color ?? 0)}>
+  <div class="composer" class:has={canSend && !unknown} class:one={oneToOne} style:--hue={idVar(agent?.color ?? 0)}>
     {#if oneToOne && agent}
       <button class="to" onclick={() => ui.openRequest(ui.request)} data-tip="Back to the request (⌫ on an empty line)">
         <Portrait {agent} size={18} />{agent.name}<Icon name="x" size={11} stroke={2} />
@@ -494,11 +482,15 @@
       ></textarea>
       {#if !text}<span class="hint" aria-hidden="true">{placeholder}</span>{/if}
     </div>
+    {#if inTerminal && agent}
+      {@const back = agent}
+      <button class="btn sm give" onclick={() => void giveBack(back.id)} data-tip="Codly closes the terminal it opened; your next message goes on in Codly">Give it back</button>
+    {/if}
     <input bind:this={picker} type="file" multiple hidden onchange={() => { addFiles([...(picker?.files ?? [])]); if (picker) picker.value = ''; }} />
     <button class="attach" onclick={() => picker?.click()} aria-label="Attach files" data-tip="Attach images or files — or paste or drop them"><Icon name="paperclip" size={15} stroke={1.6} /></button>
     <DictationButton target={ta} thread={slot} onText={dictated} />
     <VoiceButton {thread} />
-    <button class="send" disabled={!canSend} onclick={send} aria-label={isBusy ? 'Queue' : 'Send'} data-tip={isBusy ? 'Send — it queues until the turn ends' : 'Send'} data-tip-kbd="↵">
+    <button class="send" disabled={!canSend || !!unknown} onclick={send} aria-label={isBusy ? 'Queue' : 'Send'} data-tip={isBusy ? 'Send — it queues until the turn ends' : 'Send'} data-tip-kbd="↵">
       <Icon name="send" size={15} stroke={1.8} />
     </button>
   </div>
@@ -538,6 +530,8 @@
   .actions .opt { height: auto; min-height: 36px; padding: 6px 10px; }
   .actions .ol { min-width: 0; line-height: 18px; }
   .actions .os { flex-shrink: 0; }
+  .nosuch { position: absolute; left: 6px; bottom: calc(100% + 8px); width: min(480px, calc(100% - 12px)); padding: 8px 12px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); z-index: var(--z-pop); }
+  .give { align-self: center; flex-shrink: 0; }
   .mh { padding: 6px 10px 4px; }
   .mh.bad { font-size: var(--t-sm); color: var(--bad); }
   .opt { display: flex; align-items: center; gap: 9px; width: 100%; height: 36px; padding: 0 10px; border-radius: var(--r-md); text-align: left; }

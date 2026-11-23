@@ -1,13 +1,20 @@
 <!--
   An approval, inline where it happened. Exactly what will run and where, why (the agent's
-  words), inferred risks, and only the choices the provider offered. The oldest visible request
-  takes the keyboard: ⌘↵ once · ⌥⌘↵ session · ⌘⌫ deny · ⇧⌘⌫ deny with a note.
+  words), inferred risks, and only the choices the provider offered. The oldest request on screen
+  takes the keyboard (⌘↵ once · ⌥⌘↵ session · ⌘⌫ deny · ⇧⌘⌫ deny with a note), and shows its
+  keycaps, only while what it asks and its buttons are in view (`takesKeys`): a key pressed while
+  they are not only brings the card into view.
   Questions (AskUserQuestion / requestUserInput) render as a choice to answer: 1-9 pick, ↵ in the
   answer field or ⌘↵ send. A question that comes in its request's envelope (an MCP server's
   elicitation) shows its text, the envelope folded under "Details".
   A Codex permissions request says in words what it wants (`permissionsAsked`), its detail folded.
-  The card is never taller than the thread that shows it: its title, its command and its buttons
-  stay, and the rest scrolls inside it (the "Always allow" choices fold when it is short of room).
+  The card is never taller than the thread that shows it: its title, its command, the agent's
+  reason, the risks, the field of a typed answer and its buttons stay, on one row of buttons
+  (keycaps under the labels), and the rest scrolls inside it. The "Always allow" choices open as
+  a layer over the card. A question that can only be answered in words takes the focus when it
+  becomes the card that waits, unless you are typing somewhere else.
+  On a file edit of a 1:1 Claude agent that asks for edits, "Approve and accept edits from now
+  on" approves it and switches the agent to "Accept edits" (`acceptsEdits`).
   A plan (Claude's plan mode asks to leave it with `ExitPlanMode`) renders as the plan itself:
   accept it, accept it with your changes (Claude Code takes your text as the plan), or send it
   back with a note. It has no plain "no" (`footerButtons`): ⌘⌫ opens the note field too.
@@ -31,18 +38,19 @@
   import { api } from '../../lib/api';
   import { copyText, resolveApprovals, saveApprovalRule } from '../../lib/state/actions';
   import { yourAnswers, yourChoice } from '../../lib/state/answers';
-  import { changedPlan } from '../../lib/state/control.svelte';
-  import { keyTargetApproval, registerQuestionKeys } from '../../lib/state/keys';
+  import { changedPlan, PERMISSION_MODES, setPermissionMode } from '../../lib/state/control.svelte';
+  import { keyTargetApproval, registerCardView, registerQuestionKeys } from '../../lib/state/keys';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
-  import { footerButtons, PLAN_NOTE_HINT, type FooterButton } from '../../lib/util/approvalFooter';
+  import { acceptsEdits, footerButtons, noteGoes, PLAN_NOTE_HINT, type FooterButton } from '../../lib/util/approvalFooter';
+  import { answerMissing, answerTakesFocus, envelopeAsksText, takesKeys } from '../../lib/util/approvalCard';
   import { idVar } from '../../lib/util/labels';
   import { firstQuestion, outcomeBy, settledWord, wordsOf } from '../../lib/util/outcome';
   import { permissionsAsked } from '../../lib/util/permissionsAsked';
   import { shownPlan } from '../../lib/util/planRequest';
-  import { digitQuestion, sendsFromField } from '../../lib/util/questionKeys';
-  import { HOST_ALLOW_LASTS, sandboxHost, sandboxWants } from '../../lib/util/sandbox';
+  import { digitQuestion, isTextField, sendsFromField } from '../../lib/util/questionKeys';
+  import { HOST_ALLOW_LASTS, HOST_DENY_LASTS, sandboxHost, sandboxWants } from '../../lib/util/sandbox';
   import { oneLine, tildify } from '../../lib/util/sanitize';
   import Icon from '../../components/Icon.svelte';
   import Markdown from '../../components/Markdown.svelte';
@@ -66,7 +74,11 @@
   const pending = $derived(approval.status === 'pending');
   const subject = $derived(approval.subject);
   const offered = $derived(new Set(approval.choices));
-  const isKeyTarget = $derived(pending && keyTargetApproval()?.id === approval.id);
+  /** The oldest request on screen: the keys are its own once you can see it (`seen`). */
+  const candidate = $derived(pending && keyTargetApproval()?.id === approval.id);
+  /** What it asks and its buttons are in view of the scroller that shows it (`takesKeys`). */
+  let seen = $state(false);
+  const isKeyTarget = $derived(candidate && seen);
 
   let noteOpen = $state(false);
   let note = $state('');
@@ -119,20 +131,36 @@
 
   /** The buttons under the request: a plan has its own set, with no plain "no"; a permissions
    *  request is allowed for this turn or for this session. */
-  const buttons = $derived(footerButtons(plan !== null, approval.choices, subject.kind === 'permissions'));
+  const asker = $derived(agent ? { provider: agent.provider, name: agent.name } : null);
+  /** "Accept edits" as the agent's sheet says it: what stops asking and what still asks. */
+  const acceptEditsHint = PERMISSION_MODES.find((m) => m.id === 'accept_edits')!.hint;
+  /** The permissions of the agent's 1:1 conversation, as the core reads them for its mode switch. */
+  const permission = $derived(store.requestPrefs[`agent:${approval.agent_id}`]?.approval_mode ?? store.settings.approval_mode);
+  const buttons = $derived(footerButtons(plan !== null, approval.choices, subject.kind === 'permissions', asker, acceptsEdits(subject, approval.choices, agent, permission) ? acceptEditsHint : null));
+  /** Where a note goes when the agent's CLI takes none with a "no"; null for Claude Code. */
+  const noteLine = $derived(noteGoes(asker));
   function press(b: FooterButton) {
     if (b.act === 'edit') openEdit();
     else if (b.act === 'note') openNote();
+    else if (b.act === 'accept_edits') approveAndAcceptEdits();
     else if (b.choice) decide(b.choice);
   }
 
-  async function decide(choice: ApprovalChoice, message: string | null = null, answers: JsonValue | null = null) {
-    if (!pending || busy || !offered.has(choice)) return;
+  /** Returns whether the core took the answer. */
+  async function decide(choice: ApprovalChoice, message: string | null = null, answers: JsonValue | null = null): Promise<boolean> {
+    if (!pending || busy || !offered.has(choice)) return false;
     busy = true;
-    await resolveApprovals([approval, ...twins].map((a) => a.id), choice, message, answers);
+    const sent = await resolveApprovals([approval, ...twins].map((a) => a.id), choice, message, answers);
     busy = false;
     noteOpen = false;
     editOpen = false;
+    return sent;
+  }
+  /** This edit, then the agent's next edits without a request. A refused switch leaves the
+   *  approval as it is; its toast says why. */
+  async function approveAndAcceptEdits() {
+    const who = agent;
+    if (who && (await decide('allow_once'))) await setPermissionMode(who.id, 'accept_edits');
   }
 
   // ── a plan you change before you accept it ──
@@ -217,53 +245,104 @@
 
   // ── the card fits the thread ──
   // At most as tall as the part of the scroller that shows it, less its padding: brought to the
-  // bottom (the thread follows the newest line) or to the centre, it is whole. `tight`: with the
-  // "Always allow" choices open its body would scroll, so they fold.
+  // bottom (the thread follows the newest line) or to the centre, it is whole. What must stay in
+  // view (title, command, reason, risks, a typed answer, buttons) does not scroll: only the body
+  // gives way. Should those alone be taller than the room, the card grows to hold them.
+  const BODY_MIN = 48;
   let fit = $state<number | null>(null);
-  let tight = $state(false);
   let bodyEl: HTMLElement | undefined = $state();
   function scrollerOf(node: HTMLElement): HTMLElement | null {
     for (let p = node.parentElement; p; p = p.parentElement) if (/(auto|scroll)/.test(getComputedStyle(p).overflowY)) return p;
     return null;
   }
+  /** The typed answer under the body grows only into the room the other parts leave (at least two lines). */
+  const ANSWER_MIN = 56;
+  let answerMax = $state<number | null>(null);
+  function measureFit(card: HTMLElement, sc: HTMLElement) {
+    const cs = getComputedStyle(sc);
+    const room = sc.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - 8;
+    const body = bodyEl?.isConnected ? bodyEl : null;
+    const fixed = card.scrollHeight - (body?.offsetHeight ?? 0) + Math.min(body?.scrollHeight ?? 0, BODY_MIN);
+    const field = ownBelow || freeField ? answerEl : undefined;
+    answerMax = field?.isConnected ? Math.max(ANSWER_MIN, Math.floor(room - fixed + field.offsetHeight)) : null;
+    fit = Math.max(220, Math.floor(room), Math.ceil(fixed));
+  }
   $effect(() => {
     if (!el || !pending) return;
-    const sc = scrollerOf(el);
+    const card = el;
+    const sc = scrollerOf(card);
     if (!sc) return;
-    const measure = () => {
-      const cs = getComputedStyle(sc);
-      const room = sc.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - 8;
-      fit = Math.max(220, Math.floor(room));
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
+    // Again when what stays changes: the rule choices come, a field opens or closes.
+    void [ruleOffer, noteOpen, editOpen];
+    measureFit(card, sc);
+    const ro = new ResizeObserver(() => measureFit(card, sc));
     ro.observe(sc);
+    // And when a part that stays changes its size: a typed answer grows as you write.
+    for (const part of card.children) if (part !== bodyEl) ro.observe(part);
     return () => ro.disconnect();
   });
+
+  // ── the keys are the card's while you can see what it asks and its buttons ──
+  /** Now, from the boxes on screen: what it asks (`data-asks`) and its buttons (`data-answers`) inside the scroller's box. */
+  function inView(card: HTMLElement, sc: HTMLElement): boolean {
+    const asks = card.querySelector('[data-asks]');
+    const answers = card.querySelector('[data-answers]');
+    return !!asks && !!answers && takesKeys([asks.getBoundingClientRect(), answers.getBoundingClientRect()], sc.getBoundingClientRect());
+  }
   $effect(() => {
-    void fit;
-    void ruleOffer;
-    tight = false;
-    tick().then(() => {
-      if (bodyEl && bodyEl.scrollHeight > bodyEl.clientHeight + 1) tight = true;
-    });
+    if (!el || !pending) return;
+    const card = el;
+    const sc = scrollerOf(card);
+    const now = () => !!sc && card.isConnected && inView(card, sc);
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => (seen = now()));
+    };
+    // Again when it becomes the oldest request: the card before it may have just folded and
+    // moved this one into view with no scroll.
+    void candidate;
+    update();
+    sc?.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    // And when the card or the list it is in changes size (a card above folds, a field opens).
+    const ro = new ResizeObserver(update);
+    if (sc) ro.observe(sc);
+    ro.observe(card);
+    if (card.parentElement && card.parentElement !== sc) ro.observe(card.parentElement);
+    // The keys read the boxes again at each press: the shown keycaps may lag a frame behind.
+    const unregister = registerCardView([approval.id, ...twins.map((t) => t.id)], now);
+    return () => {
+      cancelAnimationFrame(frame);
+      sc?.removeEventListener('scroll', update);
+      window.removeEventListener('resize', update);
+      ro.disconnect();
+      unregister();
+    };
   });
-  // When it becomes the request the keyboard answers, the thread shows it whole; and again when
+
+  // When it becomes the oldest request on screen, the thread shows it whole; and again when
   // the "Always allow" choices come (a moment after the card) while you see its top.
   function showWhole() {
     const card = el;
     // After the thread's own follow of the newest line (its tick) has run.
     if (card) setTimeout(() => card.isConnected && card.scrollIntoView({ block: 'nearest', behavior: 'auto' }), 0);
   }
-  let wasKey = false;
+  let wasCandidate = false;
   $effect(() => {
-    const now = isKeyTarget;
-    if (now && !wasKey) tick().then(showWhole);
-    wasKey = now;
+    const now = candidate;
+    if (now && !wasCandidate) {
+      tick().then(showWhole);
+      // A question answered only in words: its field, unless you are typing somewhere else.
+      const active = document.activeElement;
+      const typing = isTextField(active) && (!!(active as HTMLElement).isContentEditable || !!(active as HTMLInputElement).value?.trim());
+      if (answerTakesFocus(answerState, freeField, typing)) tick().then(() => answerEl?.focus({ preventScroll: true }));
+    }
+    wasCandidate = now;
   });
   $effect(() => {
     void ruleOffer;
-    if (!el || !isKeyTarget) return;
+    if (!el || !candidate) return;
     const card = el;
     tick().then(() => {
       const top = card.getBoundingClientRect().top;
@@ -329,7 +408,20 @@
     decide(offered.has('allow_once') ? 'allow_once' : approval.choices[0], null, answers);
   }
   const answeredAt = (i: number) => !!picks[i]?.length || !!(own[i] ?? '').trim();
-  const unanswered = $derived(questions.some((q, i) => (q.options.length > 0 || q.own) && !answeredAt(i)));
+  /** The questions as far as their answer goes (`answerMissing`, `answerTakesFocus`). */
+  const answerState = $derived(questions.map((q, i) => ({ options: q.options.length, own: q.own, answered: answeredAt(i) })));
+  /** The card has the one answer field of a question Codly cannot list (an MCP server's
+   *  elicitation), when that question asks for text: a link to open or a form that asks for
+   *  nothing is only accepted or skipped. */
+  const freeField = $derived(subject.kind === 'question' && !questions.length && envelopeAsksText(subject.questions));
+  /** Nothing to send yet: "Send answer" and ⌘↵ wait for an answer (an empty one is never sent). */
+  const unanswered = $derived(answerMissing(answerState, freeField ? freeText : null));
+  /** The one typed answer of the card stays under its body, always in view: the field of a card
+   *  with one question that takes your own words, or of a question Codly cannot list. */
+  const ownBelow = $derived(questions.length === 1 && questions[0].own);
+  let answerEl: HTMLTextAreaElement | HTMLInputElement | undefined = $state();
+  /** What the card asks, for the keys (`data-asks`): its command, its question, else its title. */
+  const asksInHeader = $derived(subject.kind !== 'command' && !(subject.kind === 'question' && (questions.length > 0 || !!envelope)));
   /** ↵ (not ⇧↵) and ⌘↵ in an answer field send. */
   function onAnswerKey(e: KeyboardEvent) {
     if (sendsFromField({ key: e.key, mod: e.metaKey || e.ctrlKey, alt: e.altKey, shift: e.shiftKey, composing: e.isComposing })) {
@@ -397,17 +489,32 @@
     {/if}
   </div>
 {:else}
-  <article class="card" class:key={isKeyTarget} bind:this={el} style:--hue={idVar(agent?.color ?? 0)} style:max-height={fit ? `${fit}px` : null} aria-label={headline}>
-    <header>
+  <article class="card" class:key={isKeyTarget} bind:this={el} style:--hue={idVar(agent?.color ?? 0)} style:max-height={fit ? `${fit}px` : null} style:--answer-max={answerMax ? `${answerMax}px` : null} aria-label={headline}>
+    <header data-asks={asksInHeader || undefined}>
       {#if showAgent && agent}<button class="who" onclick={() => ui.selectAgent(agent.id)}><Portrait {agent} size={24} /></button>{/if}
       <h3>{headline}{#if subject.kind === 'question' && questions[0]?.header}<span class="qh">{questions[0].header}</span>{/if}</h3>
       <span class="since num" data-tip="Waiting since {clock(approval.created_at)}">{timer(ui.now - approval.created_at)}</span>
     </header>
 
     {#if subject.kind === 'command'}
-      <div class="cmd selectable">
+      <div class="cmd selectable" data-asks>
         <span class="dollar">$</span><code>{subject.command}</code>
         <button class="icon-btn sm copy" aria-label="Copy command" data-tip="Copy" onclick={() => copyText(subject.command, 'Command copied')}><Icon name="copy" size={13} /></button>
+      </div>
+    {/if}
+
+    <!-- Why it asks and what it risks: never inside the part that scrolls. -->
+    {#if (approval.reason && approval.reason !== envelope) || approval.risks.length}
+      <div class="said">
+        {#if approval.reason && approval.reason !== envelope}
+          <p class="reason selectable"><Provenance kind="model" compact /><span>“{oneLine(approval.reason, 280)}”</span></p>
+        {/if}
+        {#if approval.risks.length}
+          <div class="risks">
+            {#each approval.risks as r, ri (ri)}<span class="risk">{r}</span>{/each}
+            <Provenance kind="inferred" />
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -429,14 +536,14 @@
         <div class="plan selectable"><Markdown text={plan} brief /></div>
       {/if}
     {:else if netHost !== null}
-      <p class="net selectable">A shell command of {agent?.name ?? 'the agent'}, inside Claude Code’s sandbox, wants to connect to {#if netHost}<code>{netHost}</code>{:else}a host on the network{/if}. {HOST_ALLOW_LASTS} If you deny, the command gets a network error.</p>
+      <p class="net selectable">A shell command of {agent?.name ?? 'the agent'}, inside Claude Code’s sandbox, wants to connect to {#if netHost}<code>{netHost}</code>{:else}a host on the network{/if}. {HOST_ALLOW_LASTS} {HOST_DENY_LASTS}</p>
     {:else if subject.kind === 'tool'}
       <pre class="diff selectable">{subject.name}({JSON.stringify(subject.input, null, 2)})</pre>
     {:else if subject.kind === 'question'}
       {#if questions.length}
         {#each questions as q, qi (qi)}
           <fieldset class="q">
-            <legend>{q.question}</legend>
+            <legend data-asks={qi === 0 || undefined}>{q.question}</legend>
             {#each q.options as o, oi (oi)}
               <label class="opt" class:on={(picks[qi] ?? []).includes(o.label)}>
                 <input type={q.multiSelect ? 'checkbox' : 'radio'} name="q-{approval.id}-{qi}" checked={(picks[qi] ?? []).includes(o.label)} onchange={() => toggle(qi, o.label, !!q.multiSelect)} />
@@ -444,7 +551,7 @@
                 {#if isKeyTarget && qi === digitAt && oi < 9}<span class="k num" aria-hidden="true">{oi + 1}</span>{/if}
               </label>
             {/each}
-            {#if q.own}
+            {#if q.own && !ownBelow}
               {#if q.secret}
                 <input class="input" type="password" autocomplete="off" placeholder="Your answer…" aria-label="Your answer to: {q.question}"
                   value={own[qi] ?? ''} oninput={(e) => typeOwn(qi, e.currentTarget.value, !!q.multiSelect)} onkeydown={onAnswerKey} />
@@ -457,12 +564,11 @@
         {/each}
       {:else}
         {#if envelope}
-          <p class="ask selectable">{envelope}</p>
+          <p class="ask selectable" data-asks>{envelope}</p>
           {#if envelopeUrl}<p class="same">It asks you to open <code class="selectable">{envelopeUrl}</code></p>{/if}
         {:else}
           <p class="same">Codly cannot read this question in words: what the agent sent is under Details.</p>
         {/if}
-        <textarea class="input answer" rows="1" use:grow spellcheck="true" placeholder="Your answer…" aria-label="Your answer" bind:value={freeText} onkeydown={onAnswerKey}></textarea>
         <details class="raw"><summary>Details</summary><pre class="diff selectable">{JSON.stringify(subject.questions, null, 2)}</pre></details>
       {/if}
     {:else if perms}
@@ -483,72 +589,77 @@
       {#if offered.has('allow_once') && offered.has('allow_session')}<p class="same">“For this turn” lasts until {agent?.name ?? 'the agent'}’s turn ends, “for this session” until it stops.</p>{/if}
       <details class="raw"><summary>Details</summary><pre class="diff selectable">{JSON.stringify(subject.detail, null, 2)}</pre></details>
     {/if}
-
-    {#if approval.reason && approval.reason !== envelope}
-      <p class="reason selectable"><Provenance kind="model" compact /><span>“{oneLine(approval.reason, 280)}”</span></p>
-    {/if}
-    {#if approval.risks.length}
-      <div class="risks">
-        {#each approval.risks as r, ri (ri)}<span class="risk">{r}</span>{/each}
-        <Provenance kind="inferred" />
-      </div>
-    {/if}
     <Why lines={why} />
     </div>
 
+    <!-- The one typed answer stays in view under the body, as the buttons do. -->
+    {#if ownBelow}
+      {@const q = questions[0]}
+      <div class="own">
+        {#if q.secret}
+          <input bind:this={answerEl} class="input" type="password" autocomplete="off" placeholder="Your answer…" aria-label="Your answer to: {q.question}"
+            value={own[0] ?? ''} oninput={(e) => typeOwn(0, e.currentTarget.value, !!q.multiSelect)} onkeydown={onAnswerKey} />
+        {:else}
+          <textarea bind:this={answerEl} class="input answer" rows="1" use:grow spellcheck="true" placeholder={q.options.length ? 'Or write your own answer…' : 'Your answer…'} aria-label="Your answer to: {q.question}"
+            value={own[0] ?? ''} oninput={(e) => typeOwn(0, e.currentTarget.value, !!q.multiSelect)} onkeydown={onAnswerKey}></textarea>
+        {/if}
+      </div>
+    {:else if freeField}
+      <div class="own">
+        <textarea bind:this={answerEl} class="input answer" rows="1" use:grow spellcheck="true" placeholder="Your answer…" aria-label="Your answer" bind:value={freeText} onkeydown={onAnswerKey}></textarea>
+      </div>
+    {/if}
+
+    {#snippet keyed(label: string, kbd: string | undefined)}
+      <span class="bl">{label}</span>{#if isKeyTarget && kbd}<span class="k">{kbd}</span>{/if}
+    {/snippet}
     {#if subject.kind === 'question'}
-      <footer>
-        <button class="btn primary" disabled={busy || unanswered} onclick={submitAnswers}>Send answer{#if isKeyTarget}<span class="k">⌘↵</span>{/if}</button>
-        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={() => decide('deny')}>Skip{#if isKeyTarget}<span class="k">⌘⌫</span>{/if}</button>{/if}
+      <footer data-answers>
+        <button class="btn primary" disabled={busy || unanswered} onclick={submitAnswers}>{@render keyed('Send answer', '⌘↵')}</button>
+        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={() => decide('deny')}>{@render keyed('Skip', '⌘⌫')}</button>{/if}
       </footer>
     {:else if noteOpen}
-      <form class="note" onsubmit={(e) => { e.preventDefault(); sendNote(); }}>
+      <form class="note" data-answers onsubmit={(e) => { e.preventDefault(); sendNote(); }}>
         <input bind:this={noteEl} class="input" placeholder="Tell {agent?.name ?? 'the agent'} what to do instead…" bind:value={note} spellcheck="true"
           onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (noteOpen = false))} />
         <button class="btn" type="submit" disabled={busy || (plan !== null && !note.trim())}>{plan !== null ? 'Send the plan back' : 'Deny with note'}</button>
         <button class="btn ghost" type="button" disabled={busy} onclick={() => (noteOpen = false)}>Cancel</button>
       </form>
-      {#if plan !== null}<p class="same">{PLAN_NOTE_HINT}</p>{/if}
+      {#if plan !== null}<p class="same">{PLAN_NOTE_HINT}</p>{:else if noteLine}<p class="same">{noteLine}</p>{/if}
     {:else if editOpen}
-      <footer>
+      <footer data-answers>
         <button class="btn primary" disabled={busy || !edited.trim()} onclick={acceptEdited}>Accept with my changes</button>
         <button class="btn ghost" disabled={busy} onclick={() => (editOpen = false)}>Keep its plan</button>
       </footer>
       <p class="same">{agent?.name ?? 'The agent'} then works from your text: Claude Code takes it as the plan.</p>
     {:else}
-      <footer>
+      <footer data-answers>
         {#each buttons as b (b.label)}
-          <button class="btn {b.cls}" disabled={busy} onclick={() => press(b)}>
-            {b.label}{#if isKeyTarget && b.kbd}<span class="k">{b.kbd}</span>{/if}
-          </button>
+          <button class="btn {b.cls}" disabled={busy} data-tip={b.hint} onclick={() => press(b)}>{@render keyed(b.label, b.kbd)}</button>
         {/each}
       </footer>
       {#if rulePrefix || ruleExact}
-        {#snippet ruleButtons()}
-          {#if rulePrefix}<button class="btn sm" disabled={busy} onclick={() => saveRule('prefix')}>Commands that start with <code>{rulePrefix}</code></button>{/if}
-          {#if ruleExact}<button class="btn sm" disabled={busy} onclick={() => saveRule('exact')}>{subject.kind === 'tool' ? 'This tool' : 'This exact command'}</button>{/if}
-        {/snippet}
-        {#if tight}
-          <details class="always folded">
-            <summary>Always allow in this repo…</summary>
-            <div class="always">{@render ruleButtons()}</div>
-          </details>
-        {:else}
-          <div class="always">
-            <span class="a-l" data-tip="Codly approves this request and stops asking about it, for every agent in this repo. Remove the rule in Settings → Safety.">Always allow in this repo, for every agent:</span>
-            {@render ruleButtons()}
+        <!-- The choices open as a layer over the card: they take no room from what it shows. -->
+        <details class="always">
+          <summary data-tip="Codly approves this request and stops asking about it, for every agent in this repo. Remove the rule in Settings → Safety.">Always allow in this repo…</summary>
+          <div class="layer">
+            <p class="a-l">Always allow in this repo, for every agent:</p>
+            {#if rulePrefix}<button class="btn sm" disabled={busy} onclick={() => saveRule('prefix')}>Commands that start with <code>{rulePrefix}</code></button>{/if}
+            {#if ruleExact}<button class="btn sm" disabled={busy} onclick={() => saveRule('exact')}>{subject.kind === 'tool' ? 'This tool' : 'This exact command'}</button>{/if}
           </div>
-        {/if}
+        </details>
       {/if}
     {/if}
   </article>
 {/if}
 
 <style>
-  .card { position: relative; display: flex; flex-direction: column; gap: 12px; padding: 16px 20px 16px; border-radius: var(--r-lg); background: linear-gradient(180deg, var(--amber-soft), transparent 70%), var(--surface-1); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 30%, transparent); scroll-margin: 80px; }
-  /* Never taller than the thread (max-height from the script): the title, the command and the buttons stay, the body gives way and scrolls. */
+  /* At 1024x640 the thread is 332 px high (268 px of room inside its padding). What stays of a command card: title 24 + command 43 (one line) + a two-line reason and the risks 68 + buttons 38 + "Always allow" 18, with paddings 28 and gaps 40, is 259 px; with the smallest body (48 px) the card is 307 px, inside the 332 px it is seen in. */
+  .card { position: relative; display: flex; flex-direction: column; gap: 8px; padding: 14px 18px; border-radius: var(--r-lg); background: linear-gradient(180deg, var(--amber-soft), transparent 70%), var(--surface-1); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 30%, transparent); scroll-margin: 80px; }
+  /* Never taller than the thread (max-height from the script): the title, the command, the reason, the risks, a typed answer and the buttons stay; the body gives way and scrolls. */
   .card > * { flex-shrink: 0; }
-  .card > .body { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 12px; padding: 2px; margin: -2px; }
+  .card > .body { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding: 2px; margin: -2px; }
+  .said { display: flex; flex-direction: column; gap: 6px; }
   .body:empty { display: none; }
   .card.key { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 60%, transparent), 0 0 0 4px color-mix(in srgb, var(--amber) 12%, transparent); }
   header { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -556,7 +667,8 @@
   h3 { flex: 1; min-width: 0; font-size: var(--t-lg); font-weight: var(--w-semi); color: var(--ink-1); }
   .qh { margin-left: 8px; font-size: var(--t-xs); font-weight: var(--w-semi); letter-spacing: 0.06em; text-transform: uppercase; color: var(--amber-ink); }
   .since { font-size: var(--t-sm); color: var(--amber-ink); }
-  .cmd { position: relative; display: flex; gap: 10px; padding: 12px 40px 12px 14px; border-radius: var(--r-md); background: var(--code-bg); font-family: var(--font-mono); font-size: 12.5px; line-height: 19px; }
+  /* A long command scrolls in its own box (seven lines): the reason and the buttons stay in view. */
+  .cmd { position: relative; display: flex; gap: 10px; max-height: 157px; overflow-y: auto; padding: 12px 40px 12px 14px; border-radius: var(--r-md); background: var(--code-bg); font-family: var(--font-mono); font-size: 12.5px; line-height: 19px; }
   .dollar { color: var(--ink-3); }
   .cmd code { color: var(--ink-1); white-space: pre-wrap; word-break: break-all; }
   .copy { position: absolute; right: 6px; top: 7px; }
@@ -568,14 +680,19 @@
   .reason :global(.pv) { margin-top: 1px; }
   .risks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .risk { height: 22px; padding: 0 9px; border-radius: var(--r-full); font-size: var(--t-sm); line-height: 22px; color: var(--ink-2); background: var(--surface-2); }
-  footer { display: flex; flex-wrap: wrap; gap: 6px; }
+  /* One row of buttons, whatever the width: a keycap goes under its label, and a long label takes a second line inside its button. */
+  footer { display: flex; flex-wrap: nowrap; align-items: stretch; gap: 6px; }
+  footer .btn { flex: 0 1 auto; flex-direction: column; gap: 1px; height: auto; min-height: 32px; padding: 5px 12px; white-space: normal; text-align: center; line-height: 15px; }
+  footer .btn .k { margin: 0; font-size: 10.5px; line-height: 12px; }
   .same { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); margin-top: -4px; }
-  .always { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--ink-3); }
-  .a-l { margin-right: 2px; }
+  .own { display: flex; flex-direction: column; }
+  /* Under the body it grows only into the room the other parts leave (--answer-max, from the script), then scrolls. */
+  .own .answer { max-height: min(190px, var(--answer-max, 190px)); }
+  .always { position: relative; font-size: var(--t-sm); color: var(--ink-3); }
+  .always summary { width: fit-content; cursor: pointer; color: var(--ink-2); }
+  .layer { position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 100%; padding: 10px 12px; border-radius: var(--r-md); background: var(--pop); box-shadow: var(--pop-shadow); }
+  .a-l { flex: 1 0 100%; color: var(--ink-2); }
   .always code { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-1); }
-  .always.folded { display: block; }
-  .always.folded summary { width: fit-content; cursor: pointer; color: var(--ink-2); }
-  .always.folded .always { margin-top: 6px; }
   .note { display: flex; gap: 6px; }
   .note .input { flex: 1; }
   .paths { display: flex; flex-direction: column; gap: 4px; }
@@ -584,7 +701,8 @@
   .diff { margin: 0; max-height: 220px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: 11.5px; line-height: 17px; font-family: var(--font-mono); color: var(--ink-2); }
   .net { font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-2); }
   .net code { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-1); word-break: break-all; }
-  .plan { max-height: 360px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-1); }
+  /* The plan scrolls with the body, not in a box of its own: at 1024x640 it shows about eight lines, three steps or more. */
+  .plan { padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-1); }
   .plan-edit { resize: vertical; min-height: 120px; max-height: 360px; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-family: var(--font-mono); font-size: 12.5px; line-height: 19px; color: var(--ink-1); }
   .plan-edit:focus-visible { outline: 2px solid var(--live); outline-offset: 1px; }
   .perms { display: flex; flex-direction: column; gap: 6px; }

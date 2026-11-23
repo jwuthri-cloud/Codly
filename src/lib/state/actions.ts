@@ -341,21 +341,29 @@ export async function pushCheckout(): Promise<RepoSync | undefined> {
   }
 }
 
-export async function resolveApproval(approvalId: string, choice: ApprovalChoice, message: string | null = null, answers: unknown = null) {
+/** Returns whether the core took the answer. */
+export async function resolveApproval(approvalId: string, choice: ApprovalChoice, message: string | null = null, answers: unknown = null): Promise<boolean> {
   const sent = await attempt('send your answer', async () => {
     await api.resolveApproval(approvalId, { choice, message, answers: (answers ?? null) as never });
     return true;
   });
-  // The core puts the answer on record (`approval_said`); until that row is here, the closed
-  // card and the history show it from this.
-  const said = sent ? answerText(answers) : null;
-  if (said) yourAnswers.set(approvalId, said);
-  if (sent) yourChoice.set(approvalId, choice);
+  if (!sent) return false;
+  // The core puts the answer to a question on record (`approval_said`); until that row is here,
+  // the closed card and the history show it from this. A row that came while the answer was on
+  // its way is the core's word and stays. What goes with a plan accepted with your changes is
+  // the plan, not an answer.
+  const question = store.approvals.find((a) => a.id === approvalId)?.subject.kind === 'question';
+  const said = question ? answerText(answers) : null;
+  if (said && !yourAnswers.has(approvalId)) yourAnswers.set(approvalId, said);
+  yourChoice.set(approvalId, choice);
+  return true;
 }
 
-/** One answer for the requests that share a card: the same command asked by several agents. */
-export async function resolveApprovals(approvalIds: string[], choice: ApprovalChoice, message: string | null = null, answers: unknown = null) {
-  await Promise.all(approvalIds.map((id) => resolveApproval(id, choice, message, answers)));
+/** One answer for the requests that share a card: the same command asked by several agents.
+ *  Returns whether the core took it for every one of them. */
+export async function resolveApprovals(approvalIds: string[], choice: ApprovalChoice, message: string | null = null, answers: unknown = null): Promise<boolean> {
+  const sent = await Promise.all(approvalIds.map((id) => resolveApproval(id, choice, message, answers)));
+  return sent.every(Boolean);
 }
 
 /** "Always allow in this repo": save the rule a card offers. The core answers the requests it covers. */

@@ -9,7 +9,8 @@ import type { LeadMode } from '../../lib/gen/LeadMode';
 import { showContext } from '../../lib/state/control.svelte';
 import type { McpServer } from '../../lib/state/session';
 import { toasts } from '../../lib/state/toasts.svelte';
-import { noTurn, slashCommands, type SlashContext, type SlashDo } from '../composerActions';
+import { AgentTurns, noTurn } from '../agentTurns';
+import { slashCommands, type SlashContext, type SlashDo } from '../composerActions';
 import { filterSlash } from '../composerMenu';
 
 /** The modes of a request, as LeadControls lists them. */
@@ -31,8 +32,11 @@ function recorder() {
   return { on, calls };
 }
 
-/** An agent with a live process, between turns. */
-const running = (id: string, provider: Agent['provider'], role: Agent['role']): Agent => ({ ...mkAgent(id, id[0].toUpperCase() + id.slice(1), provider, role, 1, 'idle'), run_id: `run-${id}` });
+/** An agent with a live process, between turns, that took a turn before. */
+function running(id: string, provider: Agent['provider'], role: Agent['role']): Agent {
+  const a = mkAgent(id, id[0].toUpperCase() + id.slice(1), provider, role, 1, 'idle');
+  return { ...a, run_id: `run-${id}`, usage: { ...a.usage, input_tokens: 1200, output_tokens: 300 } };
+}
 const server = (name: string, status: McpServer['status']): McpServer => ({ name, status, error: null, runId: 'run-ada', ts: 1 });
 
 /** A conversation where the core has answered: the agent may go to your terminal, and a turn of it is kept. */
@@ -148,6 +152,10 @@ describe('the actions of /', () => {
     expect(chat(running('wes', 'claude', 'worker'))).toMatchObject({ edits: 'Only a 1:1 Claude agent has a mode to switch', model: 'Not for this agent', compact: 'Only a Codex agent or a 1:1 Claude agent' });
     // Undo: the core's word on what it kept.
     expect(chat(ada, { turns: { off: 'Codly kept no turn of Ada yet' } }).undo).toBe('Codly kept no turn of Ada yet');
+    // Compact: not before its first turn, when there is nothing to sum up.
+    const fresh = { ...ada, usage: { ...ada.usage, input_tokens: 0, output_tokens: 0 } };
+    expect(chat(fresh).compact).toBe('Nothing to compact yet: Ada has not taken a turn');
+    expect(pick(at({ oneToOne: true, agent: fresh }), 'compact')).toEqual([]);
   });
 
   it('your terminal: the core says whether the agent can go, and an agent that is there is shown', () => {
@@ -169,7 +177,7 @@ describe('what only the core knows, right after / opened the menu', () => {
     // "New request" holds a u, and "Compact Ada’s context" holds "te": they run, and they are not first.
     expect(typed(opened, 'u')[0]).toEqual({ name: 'undo', label: 'Undo Ada’s last turn…', icon: 'arrow-left', off: 'Reading what Codly kept of its turns…', wait: true });
     expect(typed(opened, 'u')[1]).toMatchObject({ name: 'new', run: expect.any(Function) });
-    expect(typed(opened, 'te')[0]).toEqual({ name: 'terminal', label: 'Continue in your terminal…', icon: 'terminal', off: 'Asking Codly if it can go…', wait: true });
+    expect(typed(opened, 'te')[0]).toEqual({ name: 'terminal', label: 'Continue in your terminal', icon: 'terminal', off: 'Asking Codly if it can go…', wait: true });
     expect(typed(opened, 'te')[1]).toMatchObject({ name: 'compact', run: expect.any(Function) });
     expect(pick(opened, 'undo')).toEqual([]);
     expect(pick(opened, 'terminal')).toEqual([]);
@@ -193,6 +201,31 @@ describe('what /undo can open', () => {
     expect(noTurn({ off: null, checkpoints: [point] }, 'Ada')).toBeNull();
     expect(noTurn({ off: null, checkpoints: [] }, 'Ada')).toBe('Codly kept no turn of Ada yet');
     expect(noTurn({ off: 'Ada has no worktree now, so there are no checkpoints.', checkpoints: [] }, 'Ada')).toBe('Ada has no worktree now, so there are no checkpoints.');
+  });
+
+  it('the core’s answers are kept per agent: a late one for another agent changes nothing here', async () => {
+    const answers = new Map<string, (kept: { off: string | null; checkpoints: Checkpoint[] }) => void>();
+    const turns = new AgentTurns((id) => new Promise((done) => answers.set(id, done as never)));
+    const asked = [turns.ask({ id: 'ada', name: 'Ada' }), turns.ask({ id: 'cody', name: 'Cody' })];
+    expect([turns.of('ada'), turns.of('cody')]).toEqual([null, null]);
+    // You moved to Cody's chat; Ada's answer comes late, then Cody's.
+    answers.get('ada')!({ off: null, checkpoints: [point] });
+    answers.get('cody')!({ off: null, checkpoints: [] });
+    await Promise.all(asked);
+    expect(turns.of('ada')).toEqual({ off: null });
+    expect(turns.of('cody')).toEqual({ off: 'Codly kept no turn of Cody yet' });
+    // An agent whose answer came keeps it while it is asked again: no "Reading…" any more.
+    const again = turns.ask({ id: 'ada', name: 'Ada' });
+    expect(turns.of('ada')).toEqual({ off: null });
+    answers.get('ada')!({ off: 'Ada has no worktree now, so there are no checkpoints.', checkpoints: [] });
+    await again;
+    expect(turns.of('ada')).toEqual({ off: 'Ada has no worktree now, so there are no checkpoints.' });
+  });
+
+  it('a refusal is the reason the row gives', async () => {
+    const turns = new AgentTurns(() => Promise.reject(new Error('git is not installed')));
+    await turns.ask({ id: 'ada', name: 'Ada' });
+    expect(turns.of('ada')).toEqual({ off: 'git is not installed' });
   });
 });
 

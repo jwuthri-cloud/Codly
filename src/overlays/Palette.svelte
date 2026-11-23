@@ -3,7 +3,8 @@
   ↵ runs the primary action, ⌘↵ the secondary. Esc pops the scope, then closes. Recents first;
   "Ask the Lead…" is always the last row, so a query never dead-ends. A row that cannot be taken
   back (merge, cancel a running plan, approve or deny) asks first: ↵ shows what it will do, ↵
-  again does it.
+  again does it. "This agent" lists the controls of the agent of the conversation you are on, the
+  rows its `/` menu offers (one list: composerActions.ts); one that cannot run says why.
   ponytail: no Raycast-style ⌘K action panel yet — ⌘↵ runs the row's one secondary action.
 -->
 <script lang="ts">
@@ -33,7 +34,11 @@
   import { skillsUi } from '../lib/state/skills.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
   import { quickStart } from '../lib/state/hireWizard';
-  import { bySection, noRow, offersAsk, press, rankRows, wants } from './palette';
+  import { loadTakeover } from '../lib/state/takeover.svelte';
+  import { agentTurns } from '../home/agentTurns';
+  import { agentDo, slashContext } from '../home/composerActions';
+  import { MODES } from '../home/LeadControls.svelte';
+  import { agentGroup, bySection, noRow, offersAsk, okRow, press, rankRows, wants } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
   type Row = {
@@ -46,7 +51,8 @@
     state?: Tone;
     kbd?: string;
     hint?: string;
-    run: () => void;
+    /** None: the row cannot run now, and its `sub` says why (a control of "This agent"). */
+    run?: () => void;
     alt?: { label: string; run: () => void };
     keep?: boolean;
     /** It cannot be taken back: what it will do, in full, shown before the second ↵ runs it. */
@@ -107,8 +113,21 @@
   }
 
   // ───────────── sources ─────────────
+  /** The conversation you are on, whose agent's controls the palette offers ("This agent"). */
+  const here = ui.room === 'home' && ui.mode !== 'office' && ui.mode !== 'map' ? ui.thread : null;
+  const hereDo = agentDo(() => here ?? '');
+  const controls = $derived(here ? agentGroup(slashContext(here, MODES), hereDo) : []);
+  onMount(() => {
+    // What only the core knows about that agent, as the `/` menu asks it.
+    const a = here ? store.threadAgent(here) : null;
+    if (a) {
+      void loadTakeover(a.id);
+      void agentTurns.ask(a);
+    }
+  });
+
   const commands = $derived.by((): Row[] => {
-    const rows: Row[] = [];
+    const rows: Row[] = [...controls];
     for (const r of ROOMS) rows.push({ id: `go:${r.id}`, section: 'Go to', title: `Go to ${r.label}`, sub: r.hint, icon: r.icon, kbd: `G ${r.key}`, run: () => ui.go(r.id) });
     rows.push(
       { id: 'go:artifacts', section: 'Go to', title: 'Go to Artifacts', sub: 'Everything the agents made', icon: 'image', run: () => ((ui.changesLens = 'artifacts'), ui.go('changes')) },
@@ -146,7 +165,10 @@
       const what = ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : oneLine(wants(ap.subject, a?.provider), 50);
       // The title shows 50 characters: the confirmation shows all of what is asked.
       const full = `${a?.name ?? 'An agent'} wants to ${wants(ap.subject, a?.provider)}`;
-      if (ap.choices.includes('allow_once')) rows.push({ id: `ap:ok:${ap.id}`, section: 'Needs you', title: `Approve ${a?.name ?? 'agent'}: ${what}`, icon: 'check', run: () => resolveApproval(ap.id, 'allow_once'), confirm: `Approve once? ${full}` });
+      if (ap.choices.includes('allow_once')) {
+        const ok = okRow(ap.subject, a?.provider, a?.name ?? 'agent', what, full);
+        rows.push({ id: `ap:ok:${ap.id}`, section: 'Needs you', title: ok.title, icon: 'check', run: () => resolveApproval(ap.id, 'allow_once'), confirm: ok.confirm });
+      }
       if (ap.choices.includes('deny')) {
         const no = noRow(ap.subject, a?.provider, a?.name ?? 'agent', what);
         // A row that opens the note field answers nothing yet: it needs no second ↵.
@@ -298,12 +320,14 @@
 
   /** `again`: a held ↵ repeating, or a later click of a double-click (see ./palette.ts). */
   function exec(r: Row, alt: boolean, again: boolean) {
+    const run = alt && r.alt ? r.alt.run : r.run;
+    if (!run) return; // its line says why it cannot run now
     const p = press(r, armed, again);
     armed = p.armed;
     if (!p.run) return;
     remember(r.id);
     if (!r.keep) close();
-    (alt && r.alt ? r.alt.run : r.run)();
+    run();
   }
   /** Another row under the pointer or the arrows: the armed one is let go. */
   function move(i: number) {
@@ -416,8 +440,10 @@
         <button
           id="pr-{i}"
           class="row"
+          class:off={!r.run}
           role="option"
           aria-selected={i === active}
+          aria-disabled={!r.run}
           data-active={i === active}
           onpointermove={() => move(i)}
           onclick={(e) => exec(r, e.metaKey || e.ctrlKey, e.detail > 1)}
@@ -467,6 +493,7 @@
   .section { padding: 12px 12px 4px; }
   .row { display: flex; align-items: center; gap: 12px; width: 100%; height: 40px; padding: 0 12px; border-radius: var(--r-md); text-align: left; color: var(--ink-1); }
   .row[data-active='true'] { background: var(--surface-3); }
+  .row.off .title, .row.off .lead { color: var(--ink-3); }
   .lead { width: 20px; display: grid; place-items: center; color: var(--ink-2); flex-shrink: 0; }
   .title { flex-shrink: 1; min-width: 40px; font-size: var(--t-md); }
   .title mark { background: none; color: var(--ink-1); font-weight: var(--w-semi); text-decoration: underline; text-decoration-color: var(--aurora-m); text-underline-offset: 3px; }

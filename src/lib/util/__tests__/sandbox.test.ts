@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ApprovalSubject } from '../../gen/ApprovalSubject';
 import type { JsonValue } from '../../gen/serde_json/JsonValue';
-import { HOST_ALLOW_LASTS, sandboxHost, sandboxWants } from '../sandbox';
+import { HOST_ALLOW_LASTS, HOST_DENY_LASTS, sandboxHost, sandboxWants } from '../sandbox';
 
 /** The subject the core makes of the sandbox's request for a host (input as recorded: `{ host }`). */
 const hostRequest = (input: JsonValue): ApprovalSubject => ({ kind: 'tool', name: 'SandboxNetworkAccess', input });
@@ -63,5 +63,9 @@ describe('a command in Claude Code’s sandbox wants a host', () => {
     expect(HOST_ALLOW_LASTS).toBe(
       'Approve once lets this command connect. Claude Code then does not ask again for this host while this agent keeps running. When the agent starts again (Codly restarts, or a change that restarts the agent) it asks again.',
     );
+  });
+
+  it('says what a deny does as the recordings show it: for that one command, and the next one asks again', () => {
+    expect(HOST_DENY_LASTS).toBe('If you deny, this command gets a network error. Claude Code asks again the next time a command wants this host.');
   });
 });

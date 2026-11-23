@@ -10,6 +10,7 @@ import type { EventRow } from '../gen/EventRow';
 import type { Snapshot } from '../gen/Snapshot';
 import type { Task } from '../gen/Task';
 import type { Workspace } from '../gen/Workspace';
+import { resolveApproval } from '../state/actions';
 import { yourAnswers, yourWords } from '../state/answers';
 import { store } from '../state/store.svelte';
 
@@ -88,5 +89,29 @@ describe('what you said with an answer', () => {
     await store.loadEarlier('lead');
     expect(store.approvals.map((a) => [a.id, a.status])).toEqual([['ap0', 'denied']]);
     expect([...yourWords]).toEqual([['ap0', { note: 'not on main', planChanged: false }]]);
+  });
+});
+
+describe('what this window keeps of the answer it sent', () => {
+  it('leaves the line the core recorded while the answer was on its way', async () => {
+    await sync(snap({ tasks: [t1], approvals: [approval('ap-q', question, 'pending')] }));
+    // The core's row comes before the call returns: its words are the record.
+    vi.spyOn(api, 'resolveApproval').mockImplementation(async () => apply(said(1, 'ap-q', { answer: 'Red, the brand red' })));
+    expect(await resolveApproval('ap-q', 'allow_once', null, { 'Colour?': 'Red' })).toBe(true);
+    expect([...yourAnswers]).toEqual([['ap-q', 'Red, the brand red']]);
+  });
+
+  it('keeps the answer to a question until the core’s row comes', async () => {
+    await sync(snap({ tasks: [t1], approvals: [approval('ap-q', question, 'pending')] }));
+    vi.spyOn(api, 'resolveApproval').mockResolvedValue();
+    await resolveApproval('ap-q', 'allow_once', null, { 'Colour?': 'Red' });
+    expect([...yourAnswers]).toEqual([['ap-q', 'Red']]);
+  });
+
+  it('stores no plan text as an answer when you accept a plan with your changes', async () => {
+    await sync(snap({ tasks: [t1], approvals: [approval('ap-plan', plan, 'pending')] }));
+    vi.spyOn(api, 'resolveApproval').mockResolvedValue();
+    await resolveApproval('ap-plan', 'allow_once', null, { plan: '1. Add the line\n2. Test it' });
+    expect(yourAnswers.size).toBe(0);
   });
 });

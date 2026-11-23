@@ -77,3 +77,51 @@ export function filterSlash<T extends { name: string; label: string; off?: strin
   const refused = (c: T) => c.off !== undefined && !c.wait;
   return [...found.filter((c) => !refused(c)), ...found.filter(refused)];
 }
+
+/**
+ * A message whose first word is a slash command that Codly does not have: it is not sent (it
+ * would start a turn the agent is paid for), and the composer says so. Only a first word made
+ * of "/" and a name counts: a path ("/usr/bin", "/mcp/terminal") or a slash later in the text is
+ * plain text. `closest`: the action you most likely meant, null when none is near.
+ */
+export function unknownSlash(text: string, names: readonly string[]): { word: string; closest: string | null } | null {
+  const m = /^\s*\/([\w-]+)(?=\s|$)/.exec(text);
+  if (!m || names.includes(m[1].toLowerCase())) return null;
+  return { word: m[1], closest: closestName(m[1].toLowerCase(), names) };
+}
+
+/** What the composer says about it, above the line: ↵ sends nothing until the text changes. */
+export function unknownSlashLine(u: { word: string; closest: string | null }): string {
+  return `No such command: /${u.word}. ${u.closest ? `Did you mean /${u.closest}?` : 'Type / alone to see the actions.'} ↵ sends nothing until you change it.`;
+}
+
+/** The name that is fewest letters away from `word` (a typo: a letter missing, extra, changed or two swapped), at most two away. */
+function closestName(word: string, names: readonly string[]): string | null {
+  let best: { name: string; d: number } | null = null;
+  for (const name of names) {
+    const d = typos(word, name);
+    if (d <= 2 && (!best || d < best.d)) best = { name, d };
+  }
+  return best?.name ?? null;
+}
+
+/** How many typos turn `a` into `b`: letters added, removed or changed, and two neighbours swapped. */
+function typos(a: string, b: string): number {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[a.length][b.length];
+}
+
+/**
+ * Whether the pointer really moved over the menu: only then does the row under it become the
+ * one ↵ runs. A list that scrolls under a resting pointer sends it events at the same place,
+ * and those must not take the row from the arrow keys. The first event only tells where it is.
+ */
+export function pointerMoved(last: { x: number; y: number } | null, now: { x: number; y: number }): boolean {
+  return !!last && (last.x !== now.x || last.y !== now.y);
+}

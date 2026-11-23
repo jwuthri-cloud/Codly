@@ -24,6 +24,15 @@ const SANDBOX_NETWORK = 'SandboxNetworkAccess';
 export const HOST_ALLOW_LASTS = 'Approve once lets this command connect. Claude Code then does not ask again for this host while this agent keeps running. When the agent starts again (Codly restarts, or a change that restarts the agent) it asks again.';
 
 /**
+ * What a deny does, on the request's card. As recorded on Claude Code 2.1.311
+ * (docs/research/cli-claude-stream-json-2.1.311-part4.md, section 6): a deny is for that one
+ * command, and the next command to the same host asks again, 4 times of 4 in two recordings
+ * (`r6-sandbox-network-deny-1`, `r6-sandbox-network-deny-2`). Only an allow is remembered, and no
+ * rule is written.
+ */
+export const HOST_DENY_LASTS = 'If you deny, this command gets a network error. Claude Code asks again the next time a command wants this host.';
+
+/**
  * The host that a sandboxed command wants to reach, when `s` is the sandbox's own request
  * ('' when the request names no host). null: `s` is another request, or `provider` (the CLI of
  * the agent that asks) is not Claude. The host is whole: the end of a host name says whose it

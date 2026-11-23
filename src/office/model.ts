@@ -61,7 +61,8 @@ export interface AgentState {
   compactingSince: number | null;
   retrying: { attempt: number; since: number } | null;
   /** What it waits for you with. `command`: `text` is a command line ("May I run …?"); any other text starts with what it wants to do ("edit x.ts"). */
-  approval: { id: string; text: string; command: boolean; since: number } | null;
+  /** `waits`: the same after "Waiting for you:" (`approvalWaits`), '' when the office knows only that it waits. */
+  approval: { id: string; text: string; waits: string; command: boolean; since: number } | null;
   blocked: { reason: string; since: number } | null;
   /** The last fatal error, kept for the "Stuck: …" line while the status says blocked. */
   lastError: string | null;

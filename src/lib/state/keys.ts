@@ -42,14 +42,41 @@ function inThread(a: Approval): boolean {
   return isRequestThread(ui.thread) ? store.approvalThread(a) === ui.thread : `agent:${a.agent_id}` === ui.thread;
 }
 
-/** The request the keyboard acts on: the oldest pending one you can see in full. A question
- *  is one too: ⌘↵ sends its answer and its digits pick (`registerQuestionKeys`). */
+/** The request the keyboard acts on: the oldest pending one on screen. It takes the keys only
+ *  while you can see what it asks and its buttons (`cardInView`); a key pressed while you cannot
+ *  only brings it into view (`broughtIntoView`). A question is one too: ⌘↵ sends its answer and
+ *  its digits pick (`registerQuestionKeys`). */
 export function keyTargetApproval(): Approval | null {
   const sheetAgent = ui.selectedAgentId;
   const pending = store.pendingApprovals
     .filter((a) => inThread(a) || a.agent_id === sheetAgent)
     .sort((a, b) => a.created_at - b.created_at);
   return pending[0] ?? null;
+}
+
+/** Each shown card of a request says whether you see what it asks and its buttons (`takesKeys`). */
+const cardViews = new Map<string, (() => boolean)[]>();
+
+/** A card registers while it shows, for its request and the twins it answers too. */
+export function registerCardView(approvalIds: string[], seen: () => boolean): () => void {
+  for (const id of approvalIds) cardViews.set(id, [...(cardViews.get(id) ?? []), seen]);
+  return () => {
+    for (const id of approvalIds) {
+      const left = (cardViews.get(id) ?? []).filter((x) => x !== seen);
+      if (left.length) cardViews.set(id, left);
+      else cardViews.delete(id);
+    }
+  };
+}
+
+/** Whether a card of the request is in view now (the sheet's or the conversation's). */
+export const cardInView = (approvalId: string): boolean => (cardViews.get(approvalId) ?? []).some((seen) => seen());
+
+/** A key for a card you cannot see does nothing but bring it into view, where it takes the next press. True: it did. */
+function broughtIntoView(ap: Approval): boolean {
+  if (cardInView(ap.id)) return false;
+  ui.revealApproval = ap.id;
+  return true;
 }
 
 /** The requests one key press answers: the key target and, in the conversation, the other
@@ -122,6 +149,10 @@ export function installKeys(): () => void {
     // A held key acts once: its repeats would answer the next approval, then run the plan.
     if (mod && e.key === 'Enter' && !e.repeat && !overlay && (!typing || !!(e.target as HTMLElement).closest?.('[aria-label="Composer"]'))) {
       const ap = keyTargetApproval();
+      if (ap && broughtIntoView(ap)) {
+        e.preventDefault();
+        return;
+      }
       if (ap?.subject.kind === 'question') {
         const q = questionKeysOf(ap.id);
         if (q && !e.altKey && !e.shiftKey) {
@@ -157,6 +188,7 @@ export function installKeys(): () => void {
       const ap = keyTargetApproval();
       if (!ap || !ap.choices.includes('deny')) return;
       e.preventDefault();
+      if (broughtIntoView(ap)) return;
       if (denyKeyAction(ap, e.shiftKey) === 'note') ui.denyNoteFor = ap.id;
       else resolveApprovals(keyTargetIds(ap), 'deny');
       return;
@@ -251,9 +283,9 @@ export function installKeys(): () => void {
       const ap = keyTargetApproval();
       const q = ap?.subject.kind === 'question' ? questionKeysOf(ap.id) : null;
       const n = q ? digitPick({ key: e.key, mod, alt: e.altKey, shift: e.shiftKey }, isTextField(e.target as Element | null), q.options()) : null;
-      if (q && n !== null) {
+      if (ap && q && n !== null) {
         e.preventDefault();
-        q.pick(n);
+        if (!broughtIntoView(ap)) q.pick(n);
         return;
       }
     }
