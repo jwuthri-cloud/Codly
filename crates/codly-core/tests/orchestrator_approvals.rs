@@ -477,6 +477,39 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
     }
 }
 
+/// Runners that each start the next (`uv run uv run … x`): the command behind each is found
+/// again behind every runner in front of it, and is still read once, so a long line gets its
+/// answer at once. The same for a line for a shell that stands behind many of them.
+#[test]
+fn a_long_line_of_runners_gets_its_offer_at_once() {
+    let behind = |runner: &str, last: &str| format!("{}{last}", runner.repeat(40));
+    let cases = [
+        (behind("uv run ", "true"), true),
+        // The word after an option npx does not know is read both ways.
+        (behind("npx --a ", "true"), true),
+        // The command at the end of the line is still read.
+        (behind("uv run ", "git config user.name me"), false),
+        // Each `bun exec` takes the rest of the line as a line for a shell, and that line
+        // holds the next one: each is read once too. Lines so deep inside each other are
+        // not checked, so nothing is offered.
+        (behind("uv run bun exec ", "true"), false),
+    ];
+    let mut late = vec![];
+    for (line, offered) in cases {
+        let (done, answer) = std::sync::mpsc::channel();
+        let request = cmd(&line);
+        std::thread::spawn(move || {
+            // Nobody waits for an answer that comes too late.
+            let _ = done.send(offer(&request, ApprovalMode::Balanced));
+        });
+        match answer.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(o) => assert_eq!((o.exact, o.prefix), (offered.then(|| line.clone()), None), "{line}"),
+            Err(_) => late.push(line),
+        }
+    }
+    assert!(late.is_empty(), "no offer after 10 seconds: {late:#?}");
+}
+
 #[test]
 fn a_saved_rule_allows_only_the_requests_that_offer_it() {
     let covers = |rule: &ApprovalRule, c: &str| offer(&cmd(c), ApprovalMode::Balanced).offers(rule);

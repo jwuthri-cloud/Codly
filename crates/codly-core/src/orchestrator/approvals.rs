@@ -51,6 +51,7 @@
 //! that write or run something; risks look through wrappers (`timeout 5 git push`) and nested
 //! `sh -c`; a word whose value the shell computes (`$HOME/x`) counts as outside the worktree.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
 
@@ -274,23 +275,52 @@ fn own_account(cmd: &str, depth: u8) -> bool {
 }
 
 /// `own_account` for the words of one command: the program behind its wrappers, and every
-/// command that program starts (`started_by`).
+/// command that program starts (`started_by`), and the ones those start in turn.
+///
+/// Each command is read once. A command a program starts is a part of these same words, and
+/// the same part is found again behind each program in front of it (`uv run uv run uv run x`:
+/// the last `uv run x` behind the first `uv` and behind the second), so the work stays small
+/// on a long line, as in `command_risks`.
 fn runs_own_account(words: &[String], depth: u8) -> bool {
-    let Some((prog, args)) = classify::command_start(words).and_then(|i| words[i..].split_first()) else { return false };
-    let prog = basename(prog);
     // Deeper than this, `command_risks` says "runs dynamic code": nothing is offered.
     let line = |inner: &str| depth < 3 && own_account(inner, depth + 1);
-    if classify::SHELLS.contains(&prog) {
-        return matches!(classify::shell_run(args), ShellRun::Command(inner) if line(inner));
+    // The commands to read, and where each one stands in `words` (the same place is the same
+    // command).
+    let mut commands = vec![words];
+    let mut places = HashSet::from([std::ptr::from_ref(words)]);
+    let mut read = 0;
+    while let Some(&command) = commands.get(read) {
+        read += 1;
+        let Some(start) = classify::command_start(command) else { continue };
+        let Some((prog, args)) = command[start..].split_first() else { continue };
+        let prog = basename(prog);
+        if classify::SHELLS.contains(&prog) {
+            if matches!(classify::shell_run(args), ShellRun::Command(inner) if line(inner)) {
+                return true;
+            }
+            continue;
+        }
+        // Behind an option's value too (`npm --prefix web config set …`).
+        let subs = if prog == "git" { git_sub(args).0.into_iter().collect() } else { subcommands(prog, args) };
+        if SUBCOMMAND_TOOLS.contains(&prog) && subs.iter().any(|sub| OWN_ACCOUNT.contains(sub) || names_config(prog, sub)) {
+            return true;
+        }
+        for started in started_by(prog, args) {
+            match started {
+                Started::Program(next) => {
+                    if places.insert(std::ptr::from_ref(next)) {
+                        commands.push(next);
+                    }
+                }
+                Started::ShellLine(inner) => {
+                    if line(&inner) {
+                        return true;
+                    }
+                }
+            }
+        }
     }
-    // Behind an option's value too (`npm --prefix web config set …`).
-    let subs = if prog == "git" { git_sub(args).0.into_iter().collect() } else { subcommands(prog, args) };
-    (SUBCOMMAND_TOOLS.contains(&prog) && subs.iter().any(|sub| OWN_ACCOUNT.contains(sub) || names_config(prog, sub)))
-        || started_by(prog, args).into_iter().any(|started| match started {
-            // Fewer words each time, so this ends.
-            Started::Program(command) => runs_own_account(command, depth),
-            Started::ShellLine(inner) => line(&inner),
-        })
+    false
 }
 
 /// Do these words only say that something runs, so the next word names what
@@ -1270,6 +1300,28 @@ fn program_outside(w: &Word, base: Option<&Path>, root: Option<&Path>) -> bool {
 }
 
 fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8) -> Vec<String> {
+    line_risks(cmd, cwd, worktree, depth, &mut InnerLines::new())
+}
+
+/// The risks of the lines that stand inside one command line (`sh -c '…'`, `bun exec '…'`),
+/// by line and by how deep it stands. The same line can stand behind many commands of one
+/// request (`uv run bun exec uv run bun exec …`: each `bun exec` holds the rest of the line,
+/// and that rest holds the next one again); it is read once.
+type InnerLines = HashMap<(String, u8), Vec<String>>;
+
+/// `line_risks` of a line inside the line, read once for each depth it stands at.
+fn inner_risks(line: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8, inner: &mut InnerLines) -> Vec<String> {
+    let key = (line.to_string(), depth);
+    if let Some(risks) = inner.get(&key) {
+        return risks.clone();
+    }
+    let risks = line_risks(line, cwd, worktree, depth, inner);
+    inner.insert(key, risks.clone());
+    risks
+}
+
+/// `command_risks`, with the lines inside the line that were read already (`InnerLines`).
+fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8, inner: &mut InnerLines) -> Vec<String> {
     let p = parse(cmd);
     let mut risks = vec![];
     let mut add = |r: &str| {
@@ -1348,30 +1400,33 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
             add(NESTED_REPO);
         }
         // Programs that run other programs: check what they run.
-        let mut runs: Vec<(String, Vec<String>)> = vec![(prog.clone(), args.to_vec())];
+        let mut runs: Vec<(&str, &[String])> = vec![(prog.as_str(), args)];
         if prog == "find"
             && let Some(i) = args.iter().position(|a| ["-exec", "-execdir", "-ok", "-okdir"].contains(&a.as_str()))
             && let Some(x) = args.get(i + 1)
         {
-            runs.push((basename(x).to_string(), args[i + 2..].to_vec()));
+            runs.push((basename(x), &args[i + 2..]));
         }
         if (ENV_RUNNERS.contains(&prog.as_str()) || NODE_RUNNERS.contains(&prog.as_str()))
             && let Some(i) = args.iter().position(|a| classify::is_interpreter(basename(a)))
         {
-            runs.push((basename(&args[i]).to_string(), args[i + 1..].to_vec()));
+            runs.push((basename(&args[i]), &args[i + 1..]));
         }
         // `pnpm exec npm publish`, `npx npm publish` and `uv run npm publish` run npm: the
         // command a runner starts is read like any other command, and so is one that it
-        // starts in turn.
+        // starts in turn. Each is read once: where its arguments stand among the words of
+        // the line says which command it is (`uv run uv run npm publish`: the same
+        // `npm publish` behind the first `uv` and behind the second).
+        let mut places: HashSet<*const [String]> = runs.iter().map(|(_, args)| std::ptr::from_ref(*args)).collect();
         let mut read = 0;
-        while let Some((runner, runner_args)) = runs.get(read).cloned() {
+        while let Some(&(runner, runner_args)) = runs.get(read) {
             read += 1;
-            for command in started_by(&runner, &runner_args) {
+            for command in started_by(runner, runner_args) {
                 let words = match command {
                     Started::Program(words) => words,
                     // A line for a shell is read as `sh -c` is.
                     Started::ShellLine(line) if depth < 3 => {
-                        for r in command_risks(&line, cwd, worktree, depth + 1) {
+                        for r in inner_risks(&line, cwd, worktree, depth + 1, inner) {
                             add(&r);
                         }
                         continue;
@@ -1390,36 +1445,34 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
                     add("sudo");
                 }
                 let Some(name) = words.get(at) else { continue };
-                let started = (basename(name).to_string(), words[at + 1..].to_vec());
-                if !runs.contains(&started) {
-                    runs.push(started);
+                let started_args = &words[at + 1..];
+                if places.insert(std::ptr::from_ref(started_args)) {
+                    runs.push((basename(name), started_args));
                 }
             }
         }
         // `python -m pip install x` runs pip.
-        let modules: Vec<(String, Vec<String>)> =
-            runs.iter().filter_map(|(prog, args)| classify::python_module(prog, args)).map(|(module, rest)| (module.to_string(), rest.to_vec())).collect();
+        let modules: Vec<(&str, &[String])> = runs.iter().filter_map(|&(prog, args)| classify::python_module(prog, args)).collect();
         runs.extend(modules);
         // Does `npx <args>` run a tool the project has installed, seen from where it runs?
         let npx_local = |args: &[String]| dir.as_deref().is_some_and(|d| classify::npx_runs_local(args, d, root));
-        for (prog, args) in runs {
-            let a = args.as_slice();
-            for r in classify::exposure(&prog, a, root) {
+        for (prog, a) in runs {
+            for r in classify::exposure(prog, a, root) {
                 add(r);
             }
-            if installs_outside(&prog, a) {
+            if installs_outside(prog, a) {
                 add("outside worktree");
             }
-            if classify::inline_code(&prog, a) {
+            if classify::inline_code(prog, a) {
                 add("runs dynamic code");
             }
-            if publishes(&prog, a) {
+            if publishes(prog, a) {
                 add("publish");
             }
-            if changes_settings(&prog, a) {
+            if changes_settings(prog, a) {
                 add(OWN_SETUP);
             }
-            match prog.as_str() {
+            match prog {
                 "sudo" | "doas" | "su" => add("sudo"),
                 p if DELETES.contains(&p) => add("deletes files"),
                 "find" if has(a, &["-delete"]) => add("deletes files"),
@@ -1444,8 +1497,8 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
                 "docker" | "podman" => add("containers"),
                 "eval" | "source" | "." => add("runs dynamic code"),
                 p if classify::SHELLS.contains(&p) => match classify::shell_run(a) {
-                    ShellRun::Command(inner) if depth < 3 => {
-                        for r in command_risks(inner, cwd, worktree, depth + 1) {
+                    ShellRun::Command(line) if depth < 3 => {
+                        for r in inner_risks(line, cwd, worktree, depth + 1, inner) {
                             add(&r);
                         }
                     }
@@ -1472,14 +1525,14 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
                 }
                 // The subcommand, wherever it stands (`pnpm --filter web add left-pad`).
                 "npm" | "pnpm" | "yarn" | "bun" => {
-                    for (sub, rest) in pm_subs(&prog, a) {
+                    for (sub, rest) in pm_subs(prog, a) {
                         match sub {
                             "install" | "i" | "add" | "ci" | "update" | "upgrade" | "up" | "remove" | "rm" | "uninstall" | "dlx" | "x"
                             | "create" => add(PACKAGE_INSTALL),
                             "exec" if package_flag(a) => add(PACKAGE_INSTALL),
                             // Only a `-c` of the package manager's own, not one of the
                             // program it starts (`pnpm exec eslint -c x.json`).
-                            "exec" if call_flag(exec_options(&prog, a, rest)) => add("runs dynamic code"),
+                            "exec" if call_flag(exec_options(prog, a, rest)) => add("runs dynamic code"),
                             // `npm exec` is npx: it downloads what the project does not have
                             // (pnpm and yarn only run what is installed).
                             "exec" if prog == "npm" && !npx_local(rest) => add(NPX_DOWNLOAD),
