@@ -1065,6 +1065,12 @@ pub struct BackgroundTask {
     pub kind: String,
     /// The command, or what the helper was asked to do.
     pub description: String,
+    /// When the first list that named it came (ms), as the adapter saw it: later lists keep
+    /// it, so a row read again from a later list still knows how long the work runs. None
+    /// from an adapter that does not say it, and in rows written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub started_at: Option<i64>,
 }
 
 /// Something that left the list of a run's background work (`EventKind::BackgroundTasks`).

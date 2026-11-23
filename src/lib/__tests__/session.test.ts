@@ -357,4 +357,19 @@ describe('when background work started', () => {
     expect(live().messages).toHaveLength(4);
     expect(starts()).toEqual([['tid-1', 'running', 20_000]]);
   });
+
+  // The Claude adapter gives each task the time of the first list that named it. Before, a row
+  // read from the first list of a snapshot showed "running" with no timer for the rest of its
+  // life (after you switched to another office and back).
+  it('is the start the list carries, also in the first list of a snapshot; work without one is as before', () => {
+    const carried = (ts: number, started: Record<string, number>, ids: string[]): EventRow =>
+      ev(ts, 'r2', { type: 'background_tasks', tasks: ids.map((id) => ({ ...task(id), ...(started[id] != null ? { started_at: started[id] } : {}) })), ended: [] });
+    fresh({ as_of: 900, events: [{ ...carried(500, { 'tid-1': 120 }, ['tid-1', 'tid-2']), id: 890 }, said(899), said(900)] });
+    expect(starts()).toEqual([['tid-1', 'running', 120], ['tid-2', 'running', null]]);
+    // A later list keeps it; one it ends with keeps it too.
+    apply({ ...carried(20_000, { 'tid-1': 120 }, ['tid-1']), id: 901 });
+    expect(starts()).toEqual([['tid-1', 'running', 120], ['tid-2', 'ended', null]]);
+    apply({ ...list(30_000, 'r2', [], [['tid-1', 'stopped']]), id: 902 });
+    expect(live().background.map((w) => [w.id, w.status, w.startedAt, w.endedAt])).toContainEqual(['tid-1', 'stopped', 120, 30_000]);
+  });
 });

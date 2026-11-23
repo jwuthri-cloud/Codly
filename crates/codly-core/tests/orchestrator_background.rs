@@ -65,7 +65,7 @@ fn cli(provider: Provider) -> CliInfo {
 }
 
 fn background(id: &str, kind: &str, description: &str) -> BackgroundTask {
-    BackgroundTask { id: id.into(), kind: kind.into(), description: description.into() }
+    BackgroundTask { id: id.into(), kind: kind.into(), description: description.into(), started_at: None }
 }
 
 /// Claude Code's whole list of background tasks, as it says it at every change. (What ended
@@ -92,6 +92,9 @@ struct WorkerCli {
     stoppable: Vec<String>,
     /// What it says when it is interrupted.
     on_interrupt: Vec<EventKind>,
+    /// Knob: an interrupt ends the helpers it lists, and it says its list without them, as
+    /// Claude Code was recorded to do with no turn running (part 4 §1 and §2).
+    interrupt_ends_helpers: bool,
 }
 
 type Cli = Arc<Mutex<WorkerCli>>;
@@ -232,7 +235,12 @@ impl Spawner for FakeSpawner {
                             let said = {
                                 let mut cli = cli.lock().unwrap();
                                 cli.stops.push("interrupt".into());
-                                cli.on_interrupt.clone()
+                                let mut said = cli.on_interrupt.clone();
+                                if cli.interrupt_ends_helpers {
+                                    cli.open.retain(|t| t.kind != "helper");
+                                    said.push(listed(cli.open.clone()));
+                                }
+                                said
                             };
                             said.into_iter().for_each(&send);
                         }
@@ -416,7 +424,8 @@ async fn a_codex_subagent_that_still_works_holds_the_gate_until_it_ends() {
 async fn background_work_that_does_not_end_is_stopped_when_the_wait_runs_out() {
     let dir = tempfile::tempdir().unwrap();
     let cli = Cli::default();
-    // A dev server that `stop_task` ends, and a helper that it does not end.
+    // A dev server that `stop_task` ends, and a helper that the interrupt does not end (no
+    // recording has such a helper: this is the way out when one does not stop).
     let open = vec![background("tid-1", "command", "npm run dev"), background("tid-2", "helper", "Run the tests")];
     {
         let mut cli = cli.lock().unwrap();
@@ -433,10 +442,11 @@ async fn background_work_that_does_not_end_is_stopped_when_the_wait_runs_out() {
     let both = "the background command `npm run dev`, the helper `Run the tests`";
     assert_eq!(held.status_reason, Some(format!("its worker left {both} running; Codly checks the work when that ends, and stops them after 1 s")));
 
-    // Nothing ends by itself. After the wait Codly asks the CLI to stop both, reads from its
-    // list which one is gone, and checks the work as it is.
+    // Nothing ends by itself. After the wait Codly asks the CLI to stop both (the helper with
+    // an interrupt, the command with `stop_task`), reads from its list which one is gone, and
+    // checks the work as it is.
     wait_plan_done(&core).await;
-    assert_eq!(cli.lock().unwrap().stops, ["tid-1", "tid-2"]);
+    assert_eq!(cli.lock().unwrap().stops, ["interrupt", "tid-1"]);
     let after = events(&core).await;
     let said = background_decisions(&after);
     assert_eq!(said.len(), 2, "{said:?}");
@@ -462,7 +472,7 @@ async fn background_work_that_does_not_end_is_stopped_when_the_wait_runs_out() {
 async fn a_turn_while_codly_stops_the_work_does_not_leave_the_task_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let cli = Cli::default();
-    // A helper that `stop_task` does not end.
+    // A helper that the interrupt does not end.
     let open = vec![background("tid-2", "helper", "Run the tests")];
     cli.lock().unwrap().open = open.clone();
     let worker: Behavior = Arc::new(move |turn: FakeTurn| {
@@ -484,7 +494,7 @@ async fn a_turn_while_codly_stops_the_work_does_not_leave_the_task_waiting() {
     // The helper is still listed, and nobody waits for it a second time: the task is checked
     // as it is, at once, and does not stay in a wait that nothing ends.
     wait_plan_done(&core).await;
-    assert_eq!(cli.lock().unwrap().stops, ["tid-2"], "asked to stop once");
+    assert_eq!(cli.lock().unwrap().stops, ["interrupt"], "asked to stop once");
     let after = events(&core).await;
     let said: Vec<String> = background_decisions(&after).into_iter().map(|(summary, _)| summary).collect();
     let waits = "t1: not checked yet, its worker left the helper `Run the tests` running; Codly checks the work when that ends, and stops it after 6 s";
@@ -509,8 +519,12 @@ async fn a_worker_that_waits_for_its_own_command_is_not_asked_for_a_report_first
     });
     let core = start(dir.path(), Provider::Claude, worker, &cli, None).await;
 
-    // The pass waits for the command. It does not ask for the report first.
-    wait_held(&core).await;
+    // The pass waits for the command. It does not ask for the report first, and it says that
+    // the report is the next step. (Before, it said "Codly checks the work when that ends".)
+    let held = wait_held(&core).await;
+    let reason = "its worker left the background command `sleep 8; echo hello > hello.txt` running; \
+                  Codly asks the worker for its report when that ends, and stops it after 5 min";
+    assert_eq!(held.status_reason.as_deref(), Some(reason));
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(cli.lock().unwrap().prompts.len(), 1, "no question while the worker's command runs");
 
@@ -796,6 +810,85 @@ async fn a_codex_subagent_that_does_not_end_is_interrupted_when_the_wait_runs_ou
     assert_eq!(said.len(), 2, "{said:?}");
     assert_eq!(said[1].0, format!("t1: the helper `{HELPER}` still ran after 1 s. Codly stopped it and checks the work now"));
     assert_eq!(said[1].1["not_stopped"], json!([]));
+    assert_eq!(verified(&after), [true]);
+    core.shutdown().await;
+}
+
+/// A Claude worker leaves a helper and a command running. When the wait runs out, the helper
+/// gets one interrupt (recorded with no turn running: it ends every helper and starts no turn,
+/// part 4 §1 and §2) and the command gets `stop_task`. Before, the helper got `stop_task` too,
+/// after which Claude Code starts a turn by itself, whose end ran the gate a second time. Now
+/// the record's "checks the work now" is what happens: one check, and no other turn. (A
+/// command alone gets no interrupt: `the_question_about_a_missing_report_comes_once_after_the_wait`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claude_workers_helper_is_stopped_with_an_interrupt_and_its_command_with_stop_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::default();
+    let open = vec![background("tid-1", "command", "npm run dev"), background("tid-2", "helper", "Run the tests")];
+    {
+        let mut cli = cli.lock().unwrap();
+        cli.open = open.clone();
+        cli.stoppable = vec!["tid-1".into()];
+        cli.interrupt_ends_helpers = true;
+    }
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let open = open.clone();
+        Box::pin(async move { turn.work("hello\n", listed(open)).await })
+    });
+    let core = start(dir.path(), Provider::Claude, worker, &cli, Some(Duration::from_secs(1))).await;
+
+    wait_plan_done(&core).await;
+    assert_eq!(cli.lock().unwrap().stops, ["interrupt", "tid-1"], "one interrupt for the helper, `stop_task` for the command");
+    let after = events(&core).await;
+    let said = background_decisions(&after);
+    assert_eq!(said.len(), 2, "{said:?}");
+    let both = "the background command `npm run dev`, the helper `Run the tests`";
+    assert_eq!(said[1].0, format!("t1: {both} still ran after 1 s. Codly stopped them and checks the work now"));
+    assert_eq!(said[1].1["not_stopped"], json!([]));
+    assert_eq!(verified(&after), [true], "checked once");
+    assert_eq!(cli.lock().unwrap().prompts.len(), 1);
+    core.shutdown().await;
+}
+
+/// A wait with nothing left of its budget, for a worker that gave no report: the task says
+/// that Codly stops the work now and asks the worker for its report, which is what the pass
+/// does next. (Before, it said "and checks the work".)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wait_with_nothing_left_names_the_question_about_the_report_as_the_next_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::default();
+    // A helper that the interrupt does not end. The worker reports only when Codly asks.
+    let open = vec![background("tid-2", "helper", "Run the tests")];
+    cli.lock().unwrap().open = open.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let open = open.clone();
+        Box::pin(async move {
+            if turn.prompt.starts_with(REPORT_QUESTION) {
+                turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Did it." })).await;
+            } else {
+                std::fs::write(turn.spec.cwd.join("hello.txt"), "hello\n").unwrap();
+                turn.emit(listed(open));
+            }
+        })
+    });
+    let core = start(dir.path(), Provider::Claude, worker, &cli, Some(Duration::from_secs(6))).await;
+
+    wait_held(&core).await;
+    // The wait runs out and Codly asks the CLI to stop the helper. A short turn of the CLI's
+    // own meanwhile: the pass at its end has nothing left of the budget.
+    wait_for("Codly to ask the CLI to stop the helper", 20, async || (!cli.lock().unwrap().stops.is_empty()).then_some(())).await;
+    emit(&cli, EventKind::TurnStarted { input: None });
+    emit(&cli, EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("Still at it.".into()), duration_ms: Some(5) });
+    let now = "its worker left the helper `Run the tests` running; Codly stops it now and asks the worker for its report";
+    wait_for("the turn's pass to say what comes next", 20, async || the_task(&core).await.filter(|t| t.status_reason.as_deref() == Some(now))).await;
+
+    wait_plan_done(&core).await;
+    let after = events(&core).await;
+    let stopped = "t1: the helper `Run the tests` still ran after 6 s. Codly could not stop it, and asks the worker for its report";
+    assert!(background_decisions(&after).iter().any(|(summary, _)| summary == stopped), "{:?}", background_decisions(&after));
+    let prompts = cli.lock().unwrap().prompts.clone();
+    assert_eq!(prompts.len(), 2, "the task, and the question: {prompts:?}");
+    assert!(prompts[1].starts_with(REPORT_QUESTION), "{}", prompts[1]);
     assert_eq!(verified(&after), [true]);
     core.shutdown().await;
 }

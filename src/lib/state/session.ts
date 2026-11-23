@@ -49,10 +49,12 @@ export function withMcpServer(list: McpServer[], k: McpEvent, runId: string | nu
  * the event is over too (the event of its end is not at hand: "ended"). The work of an earlier
  * run is gone with that run's process. Of the ended work the last ones are kept.
  *
- * The event has no start time: work starts with the list that names it first. `replayed`: the
- * list was read from a snapshot or from stored rows (the store says so), not as it came. Such
- * a list with nothing of its run before it (the window was loaded again) can be a late list
- * of a long run: the work it names started at a time nobody knows, and its row shows no timer.
+ * A task's start is the `started_at` its adapter gives it (Claude Code's: when the first list
+ * that named it came). Without one (another CLI, a row written before it was kept), work starts
+ * with the list that names it first. `replayed`: the list was read from a snapshot or from
+ * stored rows (the store says so), not as it came. Such a list with nothing of its run before
+ * it (the window was loaded again) can be a late list of a long run: the work it names with no
+ * `started_at` started at a time nobody knows, and its row shows no timer.
  */
 export function withBackgroundTasks(list: BackgroundWork[], k: TasksEvent, runId: string | null, ts: number, replayed = false): BackgroundWork[] {
   const same = list.filter((w) => w.runId === runId);
@@ -62,7 +64,8 @@ export function withBackgroundTasks(list: BackgroundWork[], k: TasksEvent, runId
   const running = new Map<string, BackgroundWork>();
   for (const t of k.tasks) {
     const was = ran.get(t.id);
-    running.set(t.id, { id: t.id, kind: t.kind, description: t.description, status: 'running', runId, startedAt: was ? was.startedAt : startsHere ? ts : null, endedAt: null });
+    const startedAt = t.started_at ?? (was ? was.startedAt : startsHere ? ts : null);
+    running.set(t.id, { id: t.id, kind: t.kind, description: t.description, status: 'running', runId, startedAt, endedAt: null });
   }
   const said = new Set([...k.tasks, ...k.ended].map((t) => t.id));
   const lost = [...ran.values()].filter((w) => !said.has(w.id)).map((w): BackgroundWork => ({ ...w, status: 'ended', endedAt: ts }));
