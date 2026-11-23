@@ -4,7 +4,7 @@
 // Comments on finished work are sent as the message of a new request: Send back puts them in
 // that request's composer (`hand`), and they stay on the diff until the message is sent.
 import type { DiffFile } from '../util/diff';
-import { fileMark, heavy, sameSpot, withComment, type Anchor, type ReviewComment } from '../util/review';
+import { fileMark, heavy, sameSpot, sentIn, withComment, type Anchor, type ReviewComment } from '../util/review';
 
 /** A diff's name here: "task:<id>" or "plan:<id>". */
 export const reviewKey = (t: { kind: 'plan' | 'task'; id: string }): string => `${t.kind}:${t.id}`;
@@ -62,16 +62,19 @@ class Review {
   }
 
   /**
-   * A message (`text`) was sent in a request. Where it has the message Send back put in the
-   * request's composer, the comments of that message are sent and leave their diff: a comment
-   * you wrote or changed since is not in it, and stays. A message without it sent no comment:
-   * they all stay on their diff, and the request does not hold them any more.
+   * A message (`text`) was sent in a request. The comments Send back put in that request's
+   * composer that the message still names (`sentIn`: you may have changed the words around
+   * them first) are sent and leave their diff. A comment you wrote or changed on the diff
+   * since is not in the message, and stays; so does one you took out of the message. A message
+   * that names none sent no comment: they all stay on their diff. In each case the request
+   * does not hold them any more.
    */
   sent(office: string | null, thread: string, text: string) {
     for (const [key, to] of Object.entries(this.handed)) {
       if (to.office !== office || to.thread !== thread) continue;
-      if (text.includes(to.text)) {
-        const left = this.comments(key).filter((c) => !holds(to, c));
+      const went = { ...to, comments: sentIn(text, to.comments) };
+      if (went.comments.length) {
+        const left = this.comments(key).filter((c) => !holds(went, c));
         this.drafts = left.length ? { ...this.drafts, [key]: left } : without(this.drafts, key);
       }
       this.handed = without(this.handed, key);

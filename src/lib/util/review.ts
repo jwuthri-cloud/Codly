@@ -98,15 +98,25 @@ export function inOrder(list: ReviewComment[], paths: string[]): ReviewComment[]
 /** A quoted line is context, not the whole file: a very long one (minified code) is cut. */
 const QUOTE_MAX = 200;
 
+/** How the message names a comment, above your words: its file and line, then the quoted line. */
+function commentHead(c: ReviewComment): string {
+  const where = c.line == null ? `\`${c.path}\` (the whole file)` : `\`${c.path}:${c.line}\`${c.side === 'old' ? ' (a line the change removes)' : ''}`;
+  return c.quote == null ? where : `${where}\n   > ${c.quote.length > QUOTE_MAX ? `${c.quote.slice(0, QUOTE_MAX - 1)}…` : c.quote}`;
+}
+
 /** Every comment as one message. For each: the file and line, the quoted line, the comment. */
 export function reviewMessage(list: ReviewComment[], paths: string[]): string {
-  const items = inOrder(list, paths).map((c, i) => {
-    const where = c.line == null ? `\`${c.path}\` (the whole file)` : `\`${c.path}:${c.line}\`${c.side === 'old' ? ' (a line the change removes)' : ''}`;
-    const quote = c.quote == null ? [] : [`   > ${c.quote.length > QUOTE_MAX ? `${c.quote.slice(0, QUOTE_MAX - 1)}…` : c.quote}`];
-    return [`${i + 1}. ${where}`, ...quote, ...c.text.split('\n').map((l) => `   ${l}`)].join('\n');
-  });
+  const items = inOrder(list, paths).map((c, i) => [`${i + 1}. ${commentHead(c)}`, ...c.text.split('\n').map((l) => `   ${l}`)].join('\n'));
   return `Review comments (${items.length}):\n\n${items.join('\n\n')}`;
 }
+
+/**
+ * The comments of a message Send back built (`comments`) that a message you sent (`text`) still
+ * names: the file and line, and the quoted line, as Send back wrote them. You may have changed
+ * the words around them and your own words under them before you sent it: a comment that is
+ * still named went with the message. One whose lines you took out of it did not.
+ */
+export const sentIn = (text: string, comments: ReviewComment[]): ReviewComment[] => comments.filter((c) => text.includes(commentHead(c)));
 
 /** The request that a review of merged or finished work opens: what you reviewed, where its work
  *  is, then the comments. A new Lead reads it, so it names everything. */

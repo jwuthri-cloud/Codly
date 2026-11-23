@@ -155,3 +155,10 @@ export function compactionLine(events: EventRow[], agent: Pick<Agent, 'id' | 'ru
   }
   return null;
 }
+
+/** `/context` in the composer: read how full the agent's context is and say it in a toast. A
+ *  read that fails says why (`readContext`). */
+export async function showContext(agentId: string, name: string): Promise<void> {
+  const u = await readContext(agentId);
+  if (u) toast({ kind: 'info', title: `${name}’s context`, body: contextLine(u) });
+}

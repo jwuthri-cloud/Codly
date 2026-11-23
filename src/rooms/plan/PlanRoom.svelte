@@ -44,9 +44,9 @@
     await cancelPlan(id);
     if (cancelling === id) cancelling = null;
   }
+  /** A request's chip: you are on that request now, as by its tab (an open Lead's sheet follows, and a restart lands on it). */
   function pick(planId: string, thread: string) {
-    ui.planId = planId;
-    ui.request = thread;
+    ui.openPlan(planId, thread);
   }
 </script>
 

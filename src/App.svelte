@@ -31,6 +31,7 @@
   import { installNoticeOpener } from './lib/state/openNotice';
   import { installTooltips } from './lib/state/tooltip.svelte';
   import { resumeWork } from './lib/state/resumeWork.svelte';
+  import { reopenLastRequest } from './lib/state/actions';
 
   // Dev-only handle for debugging and browser tests (stripped from production builds).
   if (import.meta.env.DEV) (window as unknown as { __codly: unknown }).__codly = { store, ui };
@@ -54,6 +55,15 @@
   const coreUp = $derived(store.ready && !store.error);
   $effect(() => {
     if (coreUp) untrack(() => void resumeWork.check());
+  });
+
+  // The office the core has open at the start shows the request you last had open in it. Once:
+  // from then on you choose the request.
+  let landed = false;
+  $effect(() => {
+    if (!coreUp || landed) return;
+    landed = true;
+    untrack(reopenLastRequest);
   });
 
   // Theme: always resolved onto [data-theme] ("system" follows the OS live).
