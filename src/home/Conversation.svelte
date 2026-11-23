@@ -6,6 +6,8 @@
   takes it (Claude Code and Codex after their current step, the other CLIs as the next turn);
   the first one offers Send now (interrupt the turn, so the agent reads it at once).
   An error or a turn that failed is a line of its own, where it happened, with the reason.
+  What the agent's CLI told about the run (a hook, a goal, an MCP server that did not start) is
+  a quiet line; a click opens the agent's history there.
   Hover a message (or tab to it) to copy it; one of yours can go back to the composer.
 -->
 <script lang="ts">
@@ -15,6 +17,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import { clock } from '../lib/util/format';
   import { COMPANY_LABEL, PROVIDER_LABEL, prettyModel } from '../lib/util/labels';
+  import { clean } from '../lib/util/sanitize';
   import EmptyState from '../components/EmptyState.svelte';
   import Icon from '../components/Icon.svelte';
   import Markdown from '../components/Markdown.svelte';
@@ -249,6 +252,8 @@
             {:else if it.kind === 'trouble'}
               {@const again = it.retry}
               <TroubleRow agentId={it.agentId} eventId={it.eventId} ts={it.ts} what={it.what} reason={it.reason} onretry={again && i > lastSaid && !isBusy ? () => sendChat(thread, again) : undefined} />
+            {:else if it.kind === 'notice'}
+              <button class="sys notice" onclick={() => ui.selectAgent(it.agentId, it.eventId)}><span>{clean(it.text)}</span><time class="num">{clock(it.ts)}</time></button>
             {:else if it.kind === 'work'}
               <WorkRow segs={it.segs} thoughts={it.thoughts} thinking={thinkingText(it)} helpers={it.helpers} />
             {:else if it.kind === 'approval'}
@@ -317,6 +322,10 @@
   .mention { display: inline; padding: 0 3px; margin: 0 -1px; border-radius: 4px; color: var(--ink-1); font-weight: var(--w-semi); background: var(--surface-3); font-size: inherit; line-height: inherit; }
   .sys { display: flex; justify-content: center; gap: 8px; font-size: var(--t-sm); color: var(--ink-3); }
   .sys time { color: var(--ink-4); }
+  .notice { width: 100%; text-align: center; }
+  .notice span { min-width: 0; overflow-wrap: anywhere; }
+  .notice time { white-space: nowrap; }
+  .notice:hover { color: var(--ink-2); }
   .who { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .face { display: grid; border-radius: 50%; }
   .name { font-weight: var(--w-semi); font-size: var(--t-md); }

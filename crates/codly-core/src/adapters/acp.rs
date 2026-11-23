@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
 use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, attachments, startup};
+use crate::housekeeping::connections::{self, ReadyMcp};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, EventKind, Id,
     MessagePhase, PlanStep, Provider, TurnStatus, Usage, new_id, now_ms,
@@ -98,8 +99,9 @@ pub fn launch(spec: &SpawnSpec, policy_path: Option<&Path>) -> (Vec<String>, Vec
     }
 }
 
-/// The codly stdio MCP server in ACP's shape (env as `[{name, value}]`).
-pub fn mcp_servers(spec: &SpawnSpec) -> Value {
+/// The codly stdio MCP server in ACP's shape (env as `[{name, value}]`). `ready`: the user's
+/// default servers with their keys (`connections::load_ready`), looked up once per spawn.
+pub fn mcp_servers(spec: &SpawnSpec, ready: &[ReadyMcp]) -> Value {
     match &spec.mcp {
         Some(m) => {
             let mut servers = vec![json!({
@@ -107,7 +109,7 @@ pub fn mcp_servers(spec: &SpawnSpec) -> Value {
                 "env": m.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
             })];
             // The user's default servers (Settings → Connections), as enabled when this run started.
-            for x in crate::housekeeping::connections::load_ready(&spec.raw_log) {
+            for x in ready {
                 servers.push(json!({
                     "name": x.name, "command": x.command, "args": x.args,
                     "env": x.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
@@ -121,6 +123,12 @@ pub fn mcp_servers(spec: &SpawnSpec) -> Value {
 
 pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> anyhow::Result<AgentHandle> {
     let raw = Arc::new(RawLog::open(&spec.raw_log).with_context(|| format!("cannot open raw log {}", spec.raw_log.display()))?);
+    // The keys of the default servers come from the Keychain through a subprocess, which can
+    // wait on a permission dialog: once per spawn, and not on a runtime thread.
+    let ready = {
+        let raw_log = spec.raw_log.clone();
+        tokio::task::spawn_blocking(move || connections::load_ready(&raw_log)).await.context("reading the default MCP servers")?
+    };
     let policy = if spec.provider == Provider::Gemini {
         let path = spec.raw_log.with_file_name("gemini-policy.toml");
         std::fs::write(&path, GEMINI_POLICY).with_context(|| format!("cannot write {}", path.display()))?;
@@ -154,6 +162,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         // Kept for a resume too: dropped once the session is resumed, sent if it falls back to new.
         system_prompt: Some(spec.system_prompt.clone()).filter(|s| !s.trim().is_empty()),
         spec,
+        ready,
         events,
         stdin: Some(stdin),
         raw,
@@ -200,6 +209,8 @@ enum Stage {
 
 struct Actor {
     spec: SpawnSpec,
+    /// The user's default MCP servers with their keys, for the session's `mcpServers`.
+    ready: Vec<ReadyMcp>,
     events: mpsc::UnboundedSender<AdapterEvent>,
     stdin: Option<ChildStdin>,
     raw: Arc<RawLog>,
@@ -311,7 +322,7 @@ impl Actor {
         self.takes_images = takes_images(&init);
         let caps = &init["agentCapabilities"];
         let cwd = self.spec.cwd.to_string_lossy().into_owned();
-        let mcp = mcp_servers(&self.spec);
+        let mcp = mcp_servers(&self.spec, &self.ready);
         let session = match self.spec.session.clone() {
             SessionMode::Resume { session_id } if !caps["sessionCapabilities"]["resume"].is_null() => {
                 let r = self.call("session/resume", json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp }), lines).await?;
@@ -1541,6 +1552,7 @@ mod tests {
         use crate::model::Role;
         let mut spec = SpawnSpec {
             agent_id: "a".into(),
+            agent_name: "Ada".into(),
             run_id: "r".into(),
             provider: Provider::Gemini,
             role: Role::Worker,
@@ -1563,7 +1575,14 @@ mod tests {
         let (a, env) = launch(&spec, Some(Path::new("/tmp/r/gemini-policy.toml")));
         assert_eq!(a, ["--acp", "--skip-trust", "-m", "gemini-2.5-flash", "--policy", "/tmp/r/gemini-policy.toml"]);
         assert!(env.is_empty());
-        assert_eq!(mcp_servers(&spec), json!([{ "name": "codly", "command": "/x/codly", "args": ["mcp"], "env": [{ "name": "CODLY_MCP_TOKEN", "value": "t" }] }]));
+        let codly = json!({ "name": "codly", "command": "/x/codly", "args": ["mcp"], "env": [{ "name": "CODLY_MCP_TOKEN", "value": "t" }] });
+        assert_eq!(mcp_servers(&spec, &[]), json!([codly]));
+        // The default servers (Settings → Connections) are handed in with their keys, looked
+        // up by the caller; an agent without Codly's server gets none of them.
+        let docs = ReadyMcp { name: "docs".into(), command: "npx".into(), args: vec!["docs-mcp".into()], env: vec![("TOKEN".into(), "k".into())], read_only: true };
+        let with_docs = json!([codly, { "name": "docs", "command": "npx", "args": ["docs-mcp"], "env": [{ "name": "TOKEN", "value": "k" }] }]);
+        assert_eq!(mcp_servers(&spec, std::slice::from_ref(&docs)), with_docs);
+        assert_eq!(mcp_servers(&SpawnSpec { mcp: None, ..spec.clone() }, &[docs]), json!([]));
         spec.provider = Provider::Opencode;
         let (a, env) = launch(&spec, None);
         assert_eq!(a, ["acp"]);
@@ -1594,6 +1613,7 @@ mod tests {
         let mut child = proc::command(Path::new("/bin/sh"), &["-c".into(), "cat > /dev/null".into()], dir, &env).spawn().unwrap();
         let spec = SpawnSpec {
             agent_id: "a".into(),
+            agent_name: "Ada".into(),
             run_id: "r".into(),
             provider: Provider::Gemini,
             role: crate::model::Role::Worker,
@@ -1632,6 +1652,7 @@ mod tests {
             stage: Stage::Running,
             deadline: None,
             interrupt_failed: false,
+            ready: Vec::new(),
             spec,
         };
         (actor, events_rx, child)

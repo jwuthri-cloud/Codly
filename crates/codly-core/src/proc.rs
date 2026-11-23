@@ -621,6 +621,7 @@ mod tests {
         use crate::adapters::{McpLaunch, SessionMode, SpawnSpec};
         SpawnSpec {
             agent_id: "a".into(),
+            agent_name: "Ada".into(),
             run_id: "r".into(),
             provider,
             role: crate::model::Role::Worker,
@@ -649,14 +650,14 @@ mod tests {
         const TOKEN: &str = "tok-5f1e2d3c4b5a";
         const PAT: &str = "ghp_connectionSecret0123456789";
         // ACP `session/new`, with a Connection server beside codly's (as `acp::mcp_servers` builds them).
-        let mut servers = crate::adapters::acp::mcp_servers(&spec_with_token(Provider::Gemini, TOKEN));
+        let mut servers = crate::adapters::acp::mcp_servers(&spec_with_token(Provider::Gemini, TOKEN), &[]);
         servers.as_array_mut().unwrap().push(serde_json::json!({
             "name": "github", "command": "npx", "args": ["-y", "server-github"],
             "env": [{ "name": "GITHUB_PERSONAL_ACCESS_TOKEN", "value": PAT }],
         }));
         let acp = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": "/w", "mcpServers": servers } });
         // Codex `thread/start`, the same way (as `codex::thread_request` builds it).
-        let (method, mut params) = crate::adapters::codex::thread_request(&spec_with_token(Provider::Codex, TOKEN), None, None, &[]);
+        let (method, mut params) = crate::adapters::codex::thread_request(&spec_with_token(Provider::Codex, TOKEN), None, None, &[], &[]);
         params["config"]["mcp_servers"]["github"] = serde_json::json!({ "command": "npx", "args": [], "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": PAT } });
         let codex = serde_json::json!({ "id": 2, "method": method, "params": params });
 

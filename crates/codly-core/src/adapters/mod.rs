@@ -73,6 +73,9 @@ pub enum SessionMode {
 #[derive(Debug, Clone)]
 pub struct SpawnSpec {
     pub agent_id: Id,
+    /// The agent's name as the user knows it. Codex: the name a new thread gets in Codex's own
+    /// lists. The other CLIs do not use it.
+    pub agent_name: String,
     pub run_id: Id,
     pub provider: Provider,
     pub role: Role,

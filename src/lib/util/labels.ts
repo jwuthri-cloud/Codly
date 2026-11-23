@@ -128,15 +128,22 @@ export function targetLabel(t: Target | null | undefined, a?: ActivityKind): str
 }
 
 /**
- * " · subagent Ada (explorer)" for a tool call one of the agent's subagents made, '' for the
- * agent's own. The Codex adapter marks such a call's input with `subagent: { thread, name }`.
+ * Who made a tool call, when it was one of the agent's subagents: "subagent Ada (explorer)",
+ * or "subagent" when it has no name. '' for the agent's own call. The Codex adapter marks such
+ * a call's input with `subagent: { thread, name }`.
  */
-export function subagentMark(input: unknown): string {
+export function subagentTag(input: unknown): string {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return '';
   const sub = (input as { subagent?: unknown }).subagent;
   if (!sub || typeof sub !== 'object') return '';
   const name = (sub as { name?: unknown }).name;
-  return typeof name === 'string' && name ? ` · subagent ${oneLine(name, 40)}` : ' · subagent';
+  return typeof name === 'string' && name ? `subagent ${oneLine(name, 40)}` : 'subagent';
+}
+
+/** `subagentTag` as the end of a line of text: " · subagent Ada (explorer)", or ''. */
+export function subagentMark(input: unknown): string {
+  const tag = subagentTag(input);
+  return tag ? ` · ${tag}` : '';
 }
 
 /** "Editing app.ts", "Running npm test", "Searching “useAuth”". */

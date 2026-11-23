@@ -2455,6 +2455,7 @@ mod tests {
     fn spec(role: Role, read_only: bool) -> SpawnSpec {
         SpawnSpec {
             agent_id: "0192aaaa-bbbb-7ccc-8ddd-eeeeffff0001".into(),
+            agent_name: "Ada".into(),
             run_id: "run-1".into(),
             provider: Provider::Claude,
             role,

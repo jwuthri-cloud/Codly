@@ -1,13 +1,14 @@
 <!--
   The agent's own work between two messages, folded into one quiet line ("Read 6 files ·
   searched twice"). Open it for each step (with provenance) and the reasoning summary. A
-  helper (subagent) is one step, with its own calls under it.
+  helper (subagent) is one step, with its own calls under it. A step that a subagent made
+  among the agent's own (Codex) says whose it is.
 -->
 <script lang="ts">
   import type { Seg, SubAgent, Thought } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { dur } from '../../lib/util/format';
-  import { pastVerb, phrase } from '../../lib/util/labels';
+  import { pastVerb, phrase, subagentTag } from '../../lib/util/labels';
   import Icon from '../../components/Icon.svelte';
   import Provenance from '../../components/Provenance.svelte';
   import { splitHelpers } from '../helpers';
@@ -34,9 +35,11 @@
 </script>
 
 {#snippet step(s: Seg)}
+  {@const by = subagentTag(s.input)}
   <button class="step" onclick={() => ui.selectAgent(s.agentId, s.eventId)}>
     <span class="verb">{s.end == null ? phrase(s.activity, '') : pastVerb(s.activity)}</span>
     <code class="target truncate">{s.label || s.name}</code>
+    {#if by}<span class="by">{by}</span>{/if}
     {#if s.testsPassed != null}<span class="tests" class:bad={!!s.testsFailed}>{s.testsFailed ? `${s.testsFailed} failed` : `${s.testsPassed} passed`}</span>{/if}
     <span class="dur num">{s.end != null ? dur(s.end - s.start) : '…'}</span>
     <Provenance kind={s.confidence === 'observed' ? 'observed' : 'inferred'} compact />
@@ -90,6 +93,7 @@
   .step:hover { background: var(--surface-1); }
   .verb { color: var(--ink-2); white-space: nowrap; }
   .target { flex: 1; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-1); }
+  .by { color: var(--ink-3); white-space: nowrap; }
   .tests { color: var(--ok); white-space: nowrap; }
   .tests.bad { color: var(--bad); }
   .dur { color: var(--ink-3); white-space: nowrap; }

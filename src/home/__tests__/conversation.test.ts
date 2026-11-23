@@ -132,6 +132,18 @@ describe('the conversation', () => {
     expect(troubles().map((t) => t.what)).toEqual(['interrupted']);
   });
 
+  it("what the agent's CLI told about the run is a line where it was told, and only in its own thread", () => {
+    store.agents = [lead];
+    store.chats = [chat('c1', 1, 'Fix the login')];
+    const notice = (text: string, o: Partial<EventRow> = {}) => row({ type: 'notice', text }, o);
+    const begun = started('Fix the login', { ts: 2 });
+    const said = notice('MCP server linear did not start, so this agent works without its tools: connection refused', { ts: 3 });
+    apply(begun, said, notice('Goal: ship it', { ts: 4, agent_id: 'w1' }), ended('completed', { ts: 5 }));
+    const notices = buildSpine('lead').flatMap((i) => (i.kind === 'notice' ? [i] : []));
+    expect(notices).toMatchObject([{ agentId: 'l1', eventId: said.id, ts: 3, text: 'MCP server linear did not start, so this agent works without its tools: connection refused' }]);
+    expect(buildSpine('lead').map((i) => i.kind)).toEqual(['user', 'notice']);
+  });
+
   it('a fatal error toasts only when you are not reading that conversation', () => {
     const off = installNotifications();
     store.agents = [lead];
