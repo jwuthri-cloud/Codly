@@ -51,6 +51,6 @@ export class WorkspaceTrustDemo {
     }
     const state: TrustState = this.trusted.includes(now) ? 'trusted' : this.without === now ? 'without' : 'ask';
     const changed = state === 'ask' && (this.trusted.length > 0 || this.without !== null);
-    return { state, changed, files: this.files, instructions: ['CLAUDE.md'], fingerprint: now, problem: null };
+    return { state, changed, files: this.files, instructions: ['CLAUDE.md'], fingerprint: now, problem: null, worktrees: [] };
   }
 }

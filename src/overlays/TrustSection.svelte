@@ -1,7 +1,8 @@
 <!--
   Settings → Safety: the open repo's own CLI configuration (project settings with hooks or allow
   rules, project MCP servers) and your choice about it. The same two choices as the open-repo
-  question; a choice is for the files as they are now and for agents started after it.
+  question; a choice is for the files as they are now and for agents started after it. Below
+  them: each worktree whose files are not the ones of your folder, to trust by itself.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -10,6 +11,7 @@
   import { trustChoices, trustStatus, withoutTrust } from '../lib/util/workspaceTrust';
   import LoadError from '../components/LoadError.svelte';
   import TrustFiles from './TrustFiles.svelte';
+  import TrustWorktree from './TrustWorktree.svelte';
 
   const t = $derived(workspaceTrust.value);
   let loading = $state(false);
@@ -35,7 +37,7 @@
       {@const can = trustChoices(t)}
       <p class="status" class:warn={t.state === 'ask'} role="status">{trustStatus(t)}</p>
       {#if t.state !== 'nothing'}
-        <TrustFiles trust={t} />
+        <TrustFiles files={t.files} problem={t.problem} instructions={t.instructions} />
         {#if t.state !== 'trusted'}
           <ul class="desc">{#each withoutTrust(t) as line (line)}<li>{line}</li>{/each}</ul>
         {/if}
@@ -45,6 +47,7 @@
         </div>
         <p class="desc">A choice applies to agents started after it. If the files change, Codly asks again.</p>
       {/if}
+      {#each t.worktrees as w (w.path)}<TrustWorktree worktree={w} />{/each}
     {:else if workspaceTrust.error}
       <LoadError what="this repo’s own CLI configuration" error={workspaceTrust.error} {loading} onretry={load} />
     {:else}

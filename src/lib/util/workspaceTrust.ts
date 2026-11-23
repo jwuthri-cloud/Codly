@@ -2,13 +2,23 @@
 // repo's own CLI configuration (the core's orchestrator/trust.rs decides what loads).
 
 import type { Provider } from '../gen/Provider';
+import type { TrustFile } from '../gen/TrustFile';
 import type { WorkspaceTrust } from '../gen/WorkspaceTrust';
 import { PROVIDER_LABEL } from './labels';
 
-/** Is the question due on screen? Only while you have not decided about the files as they are
- *  now, and not again for files you closed the question on (`later` is their fingerprint). */
-export function shouldAsk(t: WorkspaceTrust, later: string | null): boolean {
-  return t.state === 'ask' && t.fingerprint !== later;
+/** The sets of files the question is about, by their fingerprints: your checkout's while you
+ *  have not decided about it, and each worktree's that differs from it. After "open without"
+ *  the question asks nothing more: Settings → Safety still shows the worktrees. */
+export function asked(t: WorkspaceTrust): string[] {
+  if (t.state === 'without') return [];
+  const checkout = t.state === 'ask' && t.fingerprint ? [t.fingerprint] : [];
+  return [...checkout, ...t.worktrees.map((w) => w.fingerprint)];
+}
+
+/** Is the question due on screen? Only for files you have not decided about as they are now,
+ *  and not again for files you closed the question on (`later`: their fingerprints). */
+export function shouldAsk(t: WorkspaceTrust, later: readonly string[]): boolean {
+  return asked(t).some((fingerprint) => !later.includes(fingerprint));
 }
 
 export interface TrustChoices {
@@ -56,4 +66,14 @@ function withoutTrustOf(cli: Provider): string {
  *  in the order of the files. */
 export function withoutTrust(t: WorkspaceTrust): string[] {
   return [...new Set(t.files.map((f) => f.cli))].map(withoutTrustOf);
+}
+
+/** How many files a list shows. A repo can carry thousands (skills with their assets). */
+export const MAX_SHOWN_FILES = 200;
+
+/** The files a list shows, and how many more there are: the ones Codly read something in
+ *  first (what they run, allow or start), then the rest, each in the order given. */
+export function shownFiles(files: TrustFile[]): { shown: TrustFile[]; more: number } {
+  const ordered = [...files.filter((f) => f.what.length > 0), ...files.filter((f) => f.what.length === 0)];
+  return { shown: ordered.slice(0, MAX_SHOWN_FILES), more: Math.max(0, files.length - MAX_SHOWN_FILES) };
 }

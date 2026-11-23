@@ -230,14 +230,16 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   branch: when yours has commits that the remote does not have yet, they go with the push, and the
   dialog says how many before you confirm.
 - One kind of agent edits your project folder directly: an agent that you hire with **Git isolation**
-  switched off. The hire screen warns you about it. For that agent, a command that can lose work in
-  your folder (a history rewrite, `git reset --hard`, `git clean`, a force push, `rm -rf` outside the
-  build folders) asks you first in every approval mode, Full access included.
+  switched off. The hire screen warns you about it. A command that can lose work in your folder (a
+  history rewrite, `git reset --hard`, `git clean`, a force push, `rm -rf` outside the build
+  folders) asks you first in every approval mode, Full access included: from that agent, and from
+  any agent that points such a command at your folder from its worktree.
 - A repo's own agent configuration (Claude Code project settings with hooks or allow rules, project
   MCP servers, and the like for the other CLIs) loads only after you trusted the folder. Codly asks
   when it opens such a repo and again when those files change. Until then Claude Code starts
   without them, and a CLI that Codly cannot start without them (Gemini CLI, OpenCode, Cursor) is not
-  started in that repo.
+  started in that repo: it takes no task and reviews none. A worktree whose files are not the ones
+  of your folder (an agent changed them there) is shown with its own files, to trust by itself.
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
   access, which approves it.
 - By itself, Codly removes a worktree only when it is clean and merged, and deletes a `codly/…` branch

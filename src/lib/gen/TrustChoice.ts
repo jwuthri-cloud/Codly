@@ -5,7 +5,8 @@
  */
 export type TrustChoice = { 
 /**
- * `WorkspaceTrust::fingerprint` of the files you read; None = open the repo without
- * its own CLI configuration.
+ * The fingerprint of the files you read: `WorkspaceTrust::fingerprint` (your checkout's)
+ * or a `WorktreeTrust::fingerprint`. None = open the repo without its own CLI
+ * configuration, in every folder.
  */
 trust: string | null, };

@@ -1,11 +1,12 @@
 // Workspace trust, from the screen's side: the open repo's own CLI configuration, your choice
 // about it, and whether the question is on screen. The question comes when a repo with such
 // files opens, and again when the core records that an agent started without files you have
-// not decided about (they changed since). Closing it without an answer puts it off for those
-// files: agents keep starting without them, and Settings → Safety has the same two choices.
+// not decided about (they changed since, or a worktree holds other files than your folder).
+// Closing it without an answer puts it off for those files: agents keep starting without
+// them, and Settings → Safety has the same choices.
 import { api } from '../api';
 import type { WorkspaceTrust } from '../gen/WorkspaceTrust';
-import { shouldAsk } from '../util/workspaceTrust';
+import { asked, shouldAsk } from '../util/workspaceTrust';
 import { store } from './store.svelte';
 import { toast } from './toasts.svelte';
 
@@ -20,8 +21,8 @@ class Trust {
   asking = $state(false);
   /** The office `value` belongs to. */
   private ws: string | null = null;
-  /** The fingerprint of the files you closed the question on. */
-  private putOff: string | null = null;
+  /** The fingerprints of the files you closed the question on. */
+  private putOff: string[] = [];
   private started = false;
 
   /** Listen for the core's record that an agent started without files you have not decided about (once). */
@@ -43,7 +44,7 @@ class Trust {
       this.value = null;
       this.error = null;
       this.asking = false;
-      this.putOff = null;
+      this.putOff = [];
     }
     if (!ws) return;
     try {
@@ -57,7 +58,8 @@ class Trust {
     }
   }
 
-  /** Trust the files shown (`trust` = their fingerprint) or open the repo without them (null). */
+  /** Trust the files shown (`trust` = their fingerprint: your folder's, or a worktree's) or
+   *  open the repo without its own CLI configuration (null). */
   async choose(trust: string | null) {
     const ws = store.workspace?.id ?? null;
     try {
@@ -72,7 +74,7 @@ class Trust {
 
   /** Close the question without an answer: not asked again until the files change. */
   notNow() {
-    this.putOff = this.value?.fingerprint ?? null;
+    if (this.value) this.putOff = [...new Set([...this.putOff, ...asked(this.value)])];
     this.asking = false;
   }
 

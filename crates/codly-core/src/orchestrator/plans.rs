@@ -488,7 +488,8 @@ impl Inner {
         settings.paused |= settings.paused_offices.contains(&ws.id);
         // A quiet 1:1 chat does not keep an agent from its task (it is stopped for it).
         let busy: HashSet<Id> = self.busy_agents();
-        let accounts = self.account_states();
+        // A CLI that is not started in this repo until you trust its files takes no task (`trust.rs`).
+        let accounts = self.park_untrusted(ws, &clis, self.account_states()).await;
         let now = now_ms();
         let not_before = lock(&self.retries).holds(now);
         let hold = self.budget_hold();

@@ -9,8 +9,9 @@
 //!    network, push, sudo, git writes, secrets shown to the model, the agent's own CLI
 //!    settings changed, unparseable shell) — goes to you, except in full mode for an agent
 //!    that is not read-only, where only touching Codly's own data dir or the agent's own CLI
-//!    settings still asks, and, for an agent that works in your project folder itself (Git
-//!    isolation off), a command that can lose work there (`loses_work`);
+//!    settings still asks, and so does a command that can lose work in your project folder
+//!    itself (`loses_work`): from an agent that works there (Git isolation off), or one that
+//!    points the command there from its worktree;
 //! 3. Codly's own MCP tools are allowed in every mode;
 //! 4. then the mode: strict asks for everything else; read-only agents get only reads in
 //!    every other mode; balanced allows read-only actions, the task's own verify commands and
@@ -53,10 +54,12 @@ pub struct PolicyCtx<'a> {
     pub read_only: bool,
     /// You trust it to edit on its own (`career::trusts`, Junior): file changes inside the worktree are approved in balanced mode.
     pub edits: bool,
-    /// The agent works in your project folder itself (hired with Git isolation off), not in a
-    /// Codly worktree: no branch of its own and no checkpoint stands between a command and
-    /// your work, so full mode still asks before one that can lose it (`loses_work`).
-    pub own_checkout: bool,
+    /// Your project folder: the checkout of the repo the agent works for. An agent hired with
+    /// Git isolation off works in it (`worktree` is this folder); any other agent can point a
+    /// command at it from its worktree (`cd`, `git -C`, a path). No branch of the agent's own
+    /// and no checkpoint stands between a command that acts there and your work, so full mode
+    /// still asks before one that can lose it (`loses_work`). None: no repo is known.
+    pub checkout: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,7 +90,8 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
     // One more floor, in your own project folder only: in a Codly worktree the same command
     // stays allowed.
     if full && let Some(loss) = checkout_loss(&a.subject, ctx) {
-        return ask(format!("{loss} in your project folder itself (Git isolation is off): full access still asks"));
+        let how = if ctx.worktree == ctx.checkout { "Git isolation is off" } else { "outside the agent's worktree" };
+        return ask(format!("{loss} in your project folder itself ({how}): full access still asks"));
     }
     let allow = |rule: String| {
         if a.choices.is_empty() || a.choices.contains(&ApprovalChoice::AllowOnce) {
@@ -1014,38 +1018,102 @@ const BUILD_DIRS: &[&str] = &[
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", ".gradle",
 ];
 
-/// What the request can lose for good when the agent works in your project folder itself
-/// (`PolicyCtx::own_checkout`). None in a Codly worktree: there the agent's own branch and
-/// its checkpoints stand between the command and your work.
+/// What the request can lose for good in your project folder itself (`PolicyCtx::checkout`).
+/// None for a command that acts in a Codly worktree: there the agent's own branch and its
+/// checkpoints stand between the command and your work.
 fn checkout_loss(subject: &ApprovalSubject, ctx: &PolicyCtx) -> Option<&'static str> {
-    match subject {
-        ApprovalSubject::Command { command, .. } if ctx.own_checkout => loses_work(command, 0),
-        _ => None,
-    }
+    let (ApprovalSubject::Command { command, cwd }, Some(checkout)) = (subject, ctx.checkout) else { return None };
+    let start = cwd.as_deref().map(Path::new).filter(|dir| dir.is_absolute()).or(ctx.worktree);
+    loses_work(command, start, checkout, 0)
 }
 
-/// Does the line run a command that can lose work for good: git history rewritten, work that
-/// is not committed dropped, a force push, a recursive delete outside the build folders?
-/// Behind a wrapper or `sh -c` too. Like every rule here it reads the command line: what a
-/// script does is not looked into.
-fn loses_work(cmd: &str, depth: u8) -> Option<&'static str> {
+/// Does the line run a command that can lose work for good in `checkout`, your project
+/// folder: git history rewritten, work that is not committed dropped, a force push, a
+/// recursive delete outside the build folders? Behind a wrapper or `sh -c` too. `start` is
+/// where the line runs; `cd`, `git -C` and the paths on the line say where each command acts.
+/// A folder the line does not name (`cd $DIR`, no `start`) may be yours, and counts as yours.
+/// Like every rule here it reads the command line: what a script does is not looked into.
+fn loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, depth: u8) -> Option<&'static str> {
+    // Where the next simple command runs: `cd` moves it.
+    let mut dir = start.map(lexical);
     parse(cmd).segments.iter().find_map(|seg| {
         let texts: Vec<String> = seg.iter().map(|w| w.text.clone()).collect();
-        let (first, rest) = seg.get(classify::command_start(&texts)?..)?.split_first()?;
+        let at = classify::command_start(&texts)?;
+        let (first, rest) = seg.get(at..)?.split_first()?;
         let args: Vec<String> = rest.iter().map(|w| w.text.clone()).collect();
+        let here = dir.as_deref();
         match basename(&first.text) {
+            // `cd`, `cd -` and `popd` go home or back: not named on the line.
+            "cd" | "pushd" | "popd" => {
+                dir = rest.iter().find(|w| !w.text.starts_with('-')).and_then(|to| written_path(to, here));
+                None
+            }
             prog if classify::SHELLS.contains(&prog) => match classify::shell_run(&args) {
-                ShellRun::Command(inner) if depth < 3 => loses_work(inner, depth + 1),
+                ShellRun::Command(inner) if depth < 3 => loses_work(inner, here, checkout, depth + 1),
                 _ => None,
             },
-            "git" => git_loss(&args),
-            "rm" if short_flag(&args, "rR") || long_flag(&args, &["recursive"]) => deletes_work(rest.iter().filter(|w| !w.text.starts_with('-'))),
+            "git" => git_loss(&args).filter(|_| git_acts_in(&seg[..at], rest, here, checkout)),
+            "rm" if short_flag(&args, "rR") || long_flag(&args, &["recursive"]) => {
+                deletes_work(rest.iter().filter(|w| !w.text.starts_with('-')), here, checkout)
+            }
             // `find` deletes what it finds below the folders it starts from (its words before
             // the first test), by itself or through `rm`.
-            "find" if has(&args, &["-delete"]) || exec_rm(&args) => deletes_work(rest.iter().take_while(|w| !w.text.starts_with(['-', '(', '!']))),
+            "find" if has(&args, &["-delete"]) || exec_rm(&args) => {
+                deletes_work(rest.iter().take_while(|w| !w.text.starts_with(['-', '(', '!'])), here, checkout)
+            }
             _ => None,
         }
     })
+}
+
+/// The path a word names on a line that runs in `dir`, absolute and without `.` or `..`. A
+/// `~`, `$HOME` or `${HOME}` at its start is your home folder. None = the line does not say:
+/// another `$` expansion, a wildcard at its start, `~user`, a relative path when `dir` is
+/// not known.
+fn written_path(w: &Word, dir: Option<&Path>) -> Option<PathBuf> {
+    let home = ["~", "$HOME", "${HOME}"].iter().find_map(|h| w.text.strip_prefix(h)).filter(|rest| rest.is_empty() || rest.starts_with('/'));
+    let text = match home {
+        Some(rest) if !rest.contains('$') => format!("{}{rest}", std::env::var("HOME").ok()?),
+        None if !w.var && !w.glob && !w.text.starts_with('~') => w.text.clone(),
+        _ => return None,
+    };
+    let path = Path::new(&text);
+    Some(lexical(&if path.is_absolute() { path.to_path_buf() } else { dir?.join(path) }))
+}
+
+/// `p` from the top of `root` when it is that folder or inside it, as written or once links
+/// are followed. Both are absolute, without `.` or `..`.
+fn below(p: &Path, root: &Path) -> Option<PathBuf> {
+    let written = p.strip_prefix(root).ok().map(Path::to_path_buf);
+    written.or_else(|| classify::real_path(p).strip_prefix(classify::real_path(root)).ok().map(Path::to_path_buf))
+}
+
+/// Is the folder a command runs in your project folder, or inside it? One the line does not
+/// name may be.
+fn yours(dir: Option<&Path>, checkout: &Path) -> bool {
+    dir.is_none_or(|d| below(d, checkout).is_some())
+}
+
+/// Does a git command act on `checkout`: it runs there, or `-C`, `--git-dir`, `--work-tree`
+/// (`opts`: its words, of which those before the subcommand are read) or `GIT_DIR`,
+/// `GIT_WORK_TREE` (`env`: the words before `git`) point into it?
+fn git_acts_in(env: &[Word], opts: &[Word], dir: Option<&Path>, checkout: &Path) -> bool {
+    let mut cur = dir.map(Path::to_path_buf);
+    // The value glued to an option or a variable, as a word of its own.
+    let glued = |w: &Word, keys: [&str; 2]| keys.iter().find_map(|k| w.text.strip_prefix(k)).map(|v| Word { text: v.to_string(), ..w.clone() });
+    let mut places: Vec<Option<PathBuf>> = env.iter().filter_map(|w| glued(w, ["GIT_DIR=", "GIT_WORK_TREE="])).map(|v| written_path(&v, dir)).collect();
+    let mut i = 0;
+    while let Some(w) = opts.get(i).filter(|w| w.text.starts_with('-')) {
+        let next = opts.get(i + 1);
+        match w.text.as_str() {
+            "-C" => cur = next.and_then(|to| written_path(to, cur.as_deref())),
+            "--git-dir" | "--work-tree" => places.push(next.and_then(|to| written_path(to, cur.as_deref()))),
+            _ => places.extend(glued(w, ["--git-dir=", "--work-tree="]).map(|v| written_path(&v, cur.as_deref()))),
+        }
+        i += if matches!(w.text.as_str(), "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace") { 2 } else { 1 };
+    }
+    places.push(cur);
+    places.iter().any(|place| yours(place.as_deref(), checkout))
 }
 
 /// `find … -exec rm …` (or `-execdir`, `-ok`, `-okdir`).
@@ -1053,11 +1121,31 @@ fn exec_rm(args: &[String]) -> bool {
     args.windows(2).any(|w| ["-exec", "-execdir", "-ok", "-okdir"].contains(&w[0].as_str()) && basename(&w[1]) == "rm")
 }
 
-/// A recursive delete of `targets` loses work unless each one is a build folder or inside
-/// one. No target on the line (`xargs rm -rf`) names nothing that can be checked.
-fn deletes_work<'a>(targets: impl Iterator<Item = &'a Word>) -> Option<&'static str> {
+/// A recursive delete of `targets`, on a line that runs in `dir`, loses work of yours unless
+/// each target is outside `checkout`, a build folder or inside one. No target on the line
+/// (`xargs rm -rf`) names nothing that can be checked: it deletes where it runs.
+fn deletes_work<'a>(targets: impl Iterator<Item = &'a Word>, dir: Option<&Path>, checkout: &Path) -> Option<&'static str> {
     let mut targets = targets.peekable();
-    (targets.peek().is_none() || !targets.all(in_build_dir)).then_some(DELETES_FOLDERS)
+    let lost = if targets.peek().is_none() { yours(dir, checkout) } else { targets.any(|w| deletes_yours(w, dir, checkout)) };
+    lost.then_some(DELETES_FOLDERS)
+}
+
+/// Can a recursive delete of the word take work out of `checkout`?
+/// - On a line that runs there: unless the word is a build folder or inside one
+///   (`in_build_dir`).
+/// - On a line that runs elsewhere (an agent in its own worktree): when the word names your
+///   folder, a folder above it, or something inside it that is not in a build folder. What
+///   the line does not say (`$DIR`, `*`) is deleted where the line runs, not in your folder.
+fn deletes_yours(w: &Word, dir: Option<&Path>, checkout: &Path) -> bool {
+    if yours(dir, checkout) {
+        return !in_build_dir(w);
+    }
+    let Some(all) = classify::braces(&w.text) else { return false };
+    let mut named = all.into_iter().filter_map(|text| written_path(&Word { glob: text.starts_with(['*', '?', '[']), var: w.var, text }, dir));
+    named.any(|path| match below(&path, checkout) {
+        Some(inside) => !inside.components().any(|part| part.as_os_str().to_str().is_some_and(|name| BUILD_DIRS.contains(&name))),
+        None => below(checkout, &path).is_some(),
+    })
 }
 
 /// Is every path the word can stand for a build folder below where the command runs, or
@@ -1489,7 +1577,7 @@ mod tests {
     }
 
     fn eval_in(root: &Path, mode: ApprovalMode, read_only: bool, subject: ApprovalSubject) -> Verdict {
-        evaluate(&approval(subject), &PolicyCtx { mode, worktree: Some(root), verify: &[], read_only, edits: false, own_checkout: false })
+        evaluate(&approval(subject), &PolicyCtx { mode, worktree: Some(root), verify: &[], read_only, edits: false, checkout: None })
     }
 
     fn command(c: &str, cwd: &Path) -> ApprovalSubject {
@@ -1848,7 +1936,7 @@ mod tests {
         };
         let cmd = |c: &str, cwd: &str| approval(ApprovalSubject::Command { command: c.into(), cwd: Some(cwd.into()) });
         let eval = |a: &Approval, read_only| {
-            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only, edits: false, own_checkout: false })
+            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only, edits: false, checkout: None })
         };
         let allowed = |v: Verdict| matches!(v, Verdict::Allow { choice: ApprovalChoice::AllowOnce, .. });
 

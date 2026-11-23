@@ -64,11 +64,12 @@ impl Failure {
     }
 }
 
-/// A start error only you can fix: no wait installs a CLI, signs you in or turns an account on.
-/// (The texts are `runs.rs`'s. One this list does not know is retried, then blocks with its
-/// own words.)
+/// A start error only you can fix: no wait installs a CLI, signs you in, turns an account on
+/// or trusts a folder's own CLI configuration. (The texts are `runs.rs`'s and `trust.rs`'s.
+/// One this list does not know is retried, then blocks with its own words.)
 pub(super) fn needs_you(error: &str) -> bool {
-    const CAUSES: [&str; 5] = ["not installed", "not signed in", "turned off", "no longer available", "binary not found"];
+    const CAUSES: [&str; 6] =
+        ["not installed", "not signed in", "turned off", "no longer available", "binary not found", super::trust::NOT_STARTED];
     let e = error.to_lowercase();
     CAUSES.iter().any(|c| e.contains(c))
 }
@@ -349,6 +350,7 @@ mod tests {
             "the Claude Code account 'work' is not signed in: run `claude /login` in a terminal",
             "the Codex account codex:/h/.codex-2 is no longer available",
             "Gemini CLI binary not found",
+            "Gemini CLI is not started in this folder: it has its own Gemini CLI configuration that you have not trusted",
         ] {
             assert!(needs_you(e), "{e}");
             assert!(Failure::Start(e.into()).needs_you(), "{e}");

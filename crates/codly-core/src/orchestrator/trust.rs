@@ -16,6 +16,9 @@
 //! - in a Codly worktree, every file, tracked or not: an agent may have written it. Only an
 //!   untracked `.claude/settings.local.json` is left out, because no run there loads it.
 //!
+//! `.claude/worktrees/` is left out everywhere: Claude Code keeps its own worktrees (whole
+//! checkouts) there, and loads no configuration from it.
+//!
 //! Instruction files (CLAUDE.md, AGENTS.md, GEMINI.md) are listed with the question and are
 //! not part of it: they are text for the model, and what the model then does still goes
 //! through the approval rules.
@@ -30,10 +33,16 @@
 //! - Gemini CLI, OpenCode and Cursor have no switch that Codly has verified, so an agent on
 //!   one of them is not started while the folder has files for that CLI.
 //!
-//! A worktree whose files are not the ones you trusted (an agent changed them) starts
-//! without them, even in a repo you trust.
+//! A worktree whose files are not the ones you trusted (an agent changed them, or it holds
+//! other files than your checkout) starts without them, even in a repo you trust. Codly
+//! remembers such a worktree (`note_untrusted`), and the question and Settings → Safety show
+//! its files next to the checkout's: you trust them by their own fingerprint.
+//!
+//! A start that is refused is a `NotStarted` error: the callers do not retry it, do not start
+//! a new session for it and do not skip a review because of it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -42,6 +51,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
+use super::scheduler::AccountState;
 use super::{Core, Inner, prompts};
 use crate::model::*;
 
@@ -67,14 +77,34 @@ const INSTRUCTIONS: &[&str] = &["CLAUDE.md", "AGENTS.md", "GEMINI.md"];
 /// Claude Code's local settings: yours when git does not track the file.
 const CLAUDE_LOCAL: &str = ".claude/settings.local.json";
 
-/// More files, or a bigger one, than this is not read, and what is not read is not trusted.
-const MAX_FILES: usize = 400;
-const MAX_FILE_BYTES: u64 = 512 * 1024;
+/// Claude Code's own worktrees, inside its folder: whole checkouts, not configuration.
+const CLAUDE_WORKTREES: &str = ".claude/worktrees";
+
+/// A bigger file than this is part of the fingerprint like every other, but Codly does not
+/// read what it does (`describe`).
+const MAX_DESCRIBED_BYTES: u64 = 512 * 1024;
 /// How many sets of files stay trusted for one repo: the current one, and the ones older
 /// worktrees still hold.
 const MAX_TRUSTED: usize = 32;
 /// `decision_type` of the records: your choice, and the note that asks you.
 const DECISION: &str = "workspace_trust";
+/// The words every `NotStarted` error has: `retry::needs_you` knows a start that only your
+/// choice can fix by them.
+pub(super) const NOT_STARTED: &str = "is not started in this folder";
+
+/// A CLI that Codly did not start: the folder has files of its own for it that you have not
+/// trusted, and the CLI has no switch to start without them (`Inner::repo_config`). Only your
+/// choice changes that: no wait and no new session does.
+#[derive(Debug)]
+pub(super) struct NotStarted(String);
+
+impl std::fmt::Display for NotStarted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotStarted {}
 
 /// Where the question about a repo's own CLI configuration stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -119,7 +149,26 @@ pub struct WorkspaceTrust {
     pub instructions: Vec<String>,
     /// The fingerprint of `files`: send it back to trust them. None = no files.
     pub fingerprint: Option<String>,
-    /// Why these files cannot be trusted as they are (a link, too many, too big).
+    /// Why these files cannot be trusted as they are (one is a link, or cannot be read).
+    pub problem: Option<String>,
+    /// Worktrees of this repo where an agent did not get the folder's CLI configuration,
+    /// because it is not what you decided about for your checkout.
+    pub worktrees: Vec<WorktreeTrust>,
+}
+
+/// The CLI configuration of one worktree that is not what you decided about for your
+/// checkout: an agent changed it there, or the worktree holds other files (an older commit,
+/// files copied in when it was made). Agents there start without it until you trust it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorktreeTrust {
+    /// The worktree's folder.
+    pub path: String,
+    /// Every file there that a CLI loads by itself, tracked or not.
+    pub files: Vec<TrustFile>,
+    /// The fingerprint of `files`: send it back (`TrustChoice::trust`) to trust them.
+    pub fingerprint: String,
+    /// Why these files cannot be trusted as they are (one is a link, or cannot be read).
     pub problem: Option<String>,
 }
 
@@ -127,8 +176,9 @@ pub struct WorkspaceTrust {
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct TrustChoice {
-    /// `WorkspaceTrust::fingerprint` of the files you read; None = open the repo without
-    /// its own CLI configuration.
+    /// The fingerprint of the files you read: `WorkspaceTrust::fingerprint` (your checkout's)
+    /// or a `WorktreeTrust::fingerprint`. None = open the repo without its own CLI
+    /// configuration, in every folder.
     pub trust: Option<String>,
 }
 
@@ -185,9 +235,32 @@ fn saved_key(ws_id: &str) -> String {
     format!("workspace_trust:{ws_id}")
 }
 
-/// The fingerprint the "agents start without it" note was last written for.
+/// The folders of a repo where an agent did not get files you had not decided about (kv,
+/// JSON): folder → the fingerprint of those files (`Inner::note_untrusted`).
 fn noted_key(ws_id: &str) -> String {
     format!("workspace_trust_noted:{ws_id}")
+}
+
+/// What one folder supplies and where your choice about it stands, for one start.
+struct FolderTrust {
+    /// The repo the folder belongs to, if Codly has it.
+    ws: Option<Workspace>,
+    kind: Folder,
+    scan: Scan,
+    state: TrustState,
+}
+
+impl FolderTrust {
+    /// CLIs load the folder's files: there are none, or you trusted them.
+    fn trusted(&self) -> bool {
+        matches!(self.state, TrustState::Nothing | TrustState::Trusted)
+    }
+
+    /// `provider` would load files you have not trusted, and has no switch to start without
+    /// them.
+    fn keeps_out(&self, provider: Provider) -> bool {
+        !self.trusted() && !STARTS_WITHOUT.contains(&provider) && self.scan.files.iter().any(|file| file.cli == provider)
+    }
 }
 
 /// The CLI whose configuration `path` is.
@@ -196,8 +269,14 @@ fn cli_of(path: &str) -> Option<Provider> {
     CONFIG.iter().find(|(name, _)| top.eq_ignore_ascii_case(name)).map(|(_, cli)| *cli)
 }
 
+/// Is `path` (from the top of a folder) inside Claude Code's own worktrees folder?
+fn in_claude_worktrees(path: &str) -> bool {
+    let n = CLAUDE_WORKTREES.len();
+    path.as_bytes().get(n) == Some(&b'/') && path.get(..n).is_some_and(|top| top.eq_ignore_ascii_case(CLAUDE_WORKTREES))
+}
+
 /// The files on disk under the names of `CONFIG` at the top of `dir`, as paths from `dir`.
-/// Links are listed, not followed. Stops once there are more than `MAX_FILES`.
+/// Links are listed, not followed. Claude Code's own worktrees are not looked into.
 fn on_disk(dir: &Path) -> std::io::Result<Vec<String>> {
     let mut todo = vec![];
     for entry in std::fs::read_dir(dir)? {
@@ -208,18 +287,91 @@ fn on_disk(dir: &Path) -> std::io::Result<Vec<String>> {
     }
     let mut out = vec![];
     while let Some(path) = todo.pop() {
-        if out.len() > MAX_FILES {
-            break;
-        }
-        if std::fs::symlink_metadata(&path)?.is_dir() {
+        let Ok(rel) = path.strip_prefix(dir) else { continue };
+        let rel = rel.to_string_lossy().into_owned();
+        if !std::fs::symlink_metadata(&path)?.is_dir() {
+            out.push(rel);
+        } else if !rel.eq_ignore_ascii_case(CLAUDE_WORKTREES) {
             for entry in std::fs::read_dir(&path)? {
                 todo.push(entry?.path());
             }
-        } else if let Ok(rel) = path.strip_prefix(dir) {
-            out.push(rel.to_string_lossy().into_owned());
         }
     }
     Ok(out)
+}
+
+/// The SHA-256 of a file of `len` bytes, and its bytes when the file is small enough for
+/// `describe`. A bigger file is read piece by piece.
+fn digest(file: &Path, len: u64) -> std::io::Result<(Vec<u8>, Option<Vec<u8>>)> {
+    if len <= MAX_DESCRIBED_BYTES {
+        let bytes = std::fs::read(file)?;
+        return Ok((Sha256::digest(&bytes).to_vec(), Some(bytes)));
+    }
+    let mut from = std::fs::File::open(file)?;
+    let mut hash = Sha256::new();
+    let mut piece = vec![0u8; 64 * 1024];
+    loop {
+        let n = from.read(&mut piece)?;
+        if n == 0 {
+            return Ok((hash.finalize().to_vec(), None));
+        }
+        hash.update(&piece[..n]);
+    }
+}
+
+/// The CLI configuration `dir` supplies, read and hashed whatever its size. `tracked`: what
+/// git lists there under the names of `CONFIG`. Blocking: a set can be large.
+fn read_set(dir: &Path, tracked: &[String], kind: Folder) -> Result<Scan> {
+    let mut paths: BTreeSet<String> = tracked.iter().cloned().collect();
+    if kind != Folder::Checkout {
+        let is_tracked = |path: &str| tracked.iter().any(|t| t.eq_ignore_ascii_case(path));
+        // What no run in a worktree loads, and what git lists already under another case.
+        let counts = |path: &String| !is_tracked(path.as_str()) && !(kind == Folder::Worktree && path.eq_ignore_ascii_case(CLAUDE_LOCAL));
+        let found = on_disk(dir).with_context(|| format!("read the CLI configuration in {}", dir.display()))?;
+        paths.extend(found.into_iter().filter(counts));
+    }
+    let mut problems = vec![];
+    let mut files = vec![];
+    let mut hash = Sha256::new();
+    for path in paths {
+        let Some(cli) = cli_of(&path).filter(|_| !in_claude_worktrees(&path)) else { continue };
+        let file = dir.join(&path);
+        let meta = match std::fs::symlink_metadata(&file) {
+            Ok(meta) => meta,
+            // Tracked, and not in the folder: no CLI loads it from here.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                problems.push(format!("cannot read {path}: {e}"));
+                continue;
+            }
+        };
+        let (digest, what) = if !meta.is_file() {
+            problems.push(format!("{path} is not a regular file (a link or a folder)"));
+            (vec![], vec![])
+        } else {
+            match digest(&file, meta.len()) {
+                Ok((digest, Some(bytes))) => (digest, describe(&path, &bytes)),
+                Ok((digest, None)) if is_json(&path) => {
+                    (digest, vec![format!("Codly did not read what this file does: it is over {} KB", MAX_DESCRIBED_BYTES >> 10)])
+                }
+                Ok((digest, None)) => (digest, vec![]),
+                Err(e) => {
+                    problems.push(format!("cannot read {path}: {e}"));
+                    (vec![], vec![])
+                }
+            }
+        };
+        hash.update(path.as_bytes());
+        // A path holds no NUL, and a digest is 32 bytes or (not read) none.
+        hash.update([0u8, digest.len() as u8]);
+        hash.update(&digest);
+        files.push(TrustFile { what, path, cli });
+    }
+    let problem = (!problems.is_empty()).then(|| problems.join("; "));
+    // A set of files Codly could not read whole is its own fingerprint, never a trusted one.
+    hash.update(problem.as_deref().unwrap_or_default().as_bytes());
+    let fingerprint = (!files.is_empty() || problem.is_some()).then(|| format!("{:x}", hash.finalize()));
+    Ok(Scan { files, fingerprint, problem })
 }
 
 /// One line of text from a file of the repo, for the question: no line breaks, cut short.
@@ -267,11 +419,16 @@ fn server_start(server: &Value) -> String {
     line.join(" ")
 }
 
+/// A JSON file by its name: the ones `describe` reads.
+fn is_json(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".json")
+}
+
 /// What a JSON configuration file makes its CLI do, in words for the question. Empty for a
 /// file that is not JSON (a skill, a command, a rule file): Codly lists it and reads nothing
 /// in it.
 fn describe(path: &str, bytes: &[u8]) -> Vec<String> {
-    if !path.to_ascii_lowercase().ends_with(".json") {
+    if !is_json(path) {
         return vec![];
     }
     let Ok(Value::Object(doc)) = serde_json::from_slice::<Value>(bytes) else {
@@ -325,55 +482,8 @@ impl Inner {
             Folder::Plain => vec![],
             Folder::Checkout | Folder::Worktree => self.git.tracked(dir, &roots).await.context("list the CLI configuration files git tracks")?,
         };
-        let mut paths: BTreeSet<String> = tracked.iter().cloned().collect();
-        if kind != Folder::Checkout {
-            let is_tracked = |path: &str| tracked.iter().any(|t| t.eq_ignore_ascii_case(path));
-            // What no run in a worktree loads, and what git lists already under another case.
-            let counts = |path: &String| !is_tracked(path.as_str()) && !(kind == Folder::Worktree && path.eq_ignore_ascii_case(CLAUDE_LOCAL));
-            let found = on_disk(dir).with_context(|| format!("read the CLI configuration in {}", dir.display()))?;
-            paths.extend(found.into_iter().filter(counts));
-        }
-        let mut problems = vec![];
-        if paths.len() > MAX_FILES {
-            problems.push(format!("there are more than {MAX_FILES} CLI configuration files"));
-        }
-        let mut files = vec![];
-        let mut hash = Sha256::new();
-        for path in paths.into_iter().take(MAX_FILES) {
-            let Some(cli) = cli_of(&path) else { continue };
-            let file = dir.join(&path);
-            let meta = match std::fs::symlink_metadata(&file) {
-                Ok(meta) => meta,
-                // Tracked, and not in the folder: no CLI loads it from here.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => {
-                    problems.push(format!("cannot read {path}: {e}"));
-                    continue;
-                }
-            };
-            let bytes = if !meta.is_file() {
-                problems.push(format!("{path} is not a regular file (a link or a folder)"));
-                vec![]
-            } else if meta.len() > MAX_FILE_BYTES {
-                problems.push(format!("{path} is over {} KB", MAX_FILE_BYTES >> 10));
-                vec![]
-            } else {
-                std::fs::read(&file).unwrap_or_else(|e| {
-                    problems.push(format!("cannot read {path}: {e}"));
-                    vec![]
-                })
-            };
-            hash.update(path.as_bytes());
-            hash.update([0u8]);
-            hash.update((bytes.len() as u64).to_le_bytes());
-            hash.update(&bytes);
-            files.push(TrustFile { what: describe(&path, &bytes), path, cli });
-        }
-        let problem = (!problems.is_empty()).then(|| problems.join("; "));
-        // A set of files Codly could not read whole is its own fingerprint, never a trusted one.
-        hash.update(problem.as_deref().unwrap_or_default().as_bytes());
-        let fingerprint = (!files.is_empty() || problem.is_some()).then(|| format!("{:x}", hash.finalize()));
-        Ok(Scan { files, fingerprint, problem })
+        let dir = dir.to_path_buf();
+        tokio::task::spawn_blocking(move || read_set(&dir, &tracked, kind)).await.context("read the CLI configuration")?
     }
 
     fn saved_trust(&self, ws_id: &str) -> Result<Saved> {
@@ -383,6 +493,41 @@ impl Inner {
         }
     }
 
+    /// The folders of the repo where an agent did not get files you had not decided about:
+    /// folder → the fingerprint of those files.
+    fn noted(&self, ws_id: &str) -> Result<BTreeMap<String, String>> {
+        match self.store.kv_get(&noted_key(ws_id))? {
+            Some(text) => serde_json::from_str(&text).context("read the folders whose CLI configuration waits for your choice"),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    /// The worktrees of the repo where an agent did not get the folder's CLI configuration,
+    /// with the files they hold now, while those are still not ones you decided about. A
+    /// worktree that holds your checkout's files is left out: the checkout's question is its
+    /// question.
+    async fn untrusted_worktrees(&self, ws: &Workspace, checkout: &Scan, saved: &Saved) -> Result<Vec<(String, Scan)>> {
+        let mut out = vec![];
+        for folder in self.noted(&ws.id)?.into_keys() {
+            let dir = Path::new(&folder);
+            if folder == ws.repo_path || !dir.is_dir() {
+                continue;
+            }
+            let set = match self.scan(dir, Folder::Worktree).await {
+                Ok(set) => set,
+                // No checkout any more (its worktree was removed by hand): no agent starts there.
+                Err(e) => {
+                    tracing::warn!("could not read the CLI configuration in {folder}: {e:#}");
+                    continue;
+                }
+            };
+            if saved.state(&set) == TrustState::Ask && set.fingerprint != checkout.fingerprint {
+                out.push((folder, set));
+            }
+        }
+        Ok(out)
+    }
+
     async fn trust_status(&self, ws: &Workspace) -> Result<WorkspaceTrust> {
         let repo = Path::new(&ws.repo_path);
         let scan = self.scan(repo, Folder::Checkout).await?;
@@ -390,53 +535,73 @@ impl Inner {
         let state = saved.state(&scan);
         let changed = state == TrustState::Ask && (!saved.trusted.is_empty() || saved.without.is_some());
         let instructions = INSTRUCTIONS.iter().filter(|name| repo.join(name).is_file()).map(|name| name.to_string()).collect();
-        Ok(WorkspaceTrust { state, changed, files: scan.files, instructions, fingerprint: scan.fingerprint, problem: scan.problem })
+        let worktrees = self.untrusted_worktrees(ws, &scan, &saved).await?;
+        let worktrees = worktrees
+            .into_iter()
+            .filter_map(|(path, set)| Some(WorktreeTrust { path, fingerprint: set.fingerprint?, files: set.files, problem: set.problem }))
+            .collect();
+        Ok(WorkspaceTrust { state, changed, files: scan.files, instructions, fingerprint: scan.fingerprint, problem: scan.problem, worktrees })
     }
 
     async fn choose_trust(&self, ws: &Workspace, choice: TrustChoice) -> Result<()> {
         let scan = self.scan(Path::new(&ws.repo_path), Folder::Checkout).await?;
         let mut saved = self.saved_trust(&ws.id)?;
-        let summary = match (choice.trust, scan.fingerprint) {
-            (None, None) => return Ok(()),
-            (None, Some(now)) => {
+        let (summary, detail) = match choice.trust {
+            None => {
+                let Some(now) = scan.fingerprint else { return Ok(()) };
                 if saved.trusted.is_empty() && saved.without.as_ref() == Some(&now) {
                     return Ok(());
                 }
                 saved = Saved { trusted: vec![], without: Some(now) };
-                format!("you opened {} without its own CLI configuration: agents start without it", ws.name)
+                (format!("you opened {} without its own CLI configuration: agents start without it", ws.name), json!({ "files": paths_of(&scan.files) }))
             }
-            (Some(read), now) => {
-                if now.as_ref() != Some(&read) {
-                    bail!("the repo's CLI configuration changed since you read it. Read it again, then choose");
-                }
-                if let Some(problem) = scan.problem {
+            Some(read) => {
+                // The files you read: your checkout's, or those of a worktree that waits for you.
+                let (set, worktree) = if scan.fingerprint.as_ref() == Some(&read) {
+                    (scan, None)
+                } else {
+                    let waiting = self.untrusted_worktrees(ws, &scan, &saved).await?;
+                    match waiting.into_iter().find(|(_, set)| set.fingerprint.as_ref() == Some(&read)) {
+                        Some((folder, set)) => (set, Some(folder)),
+                        None => bail!("the repo's CLI configuration changed since you read it. Read it again, then choose"),
+                    }
+                };
+                if let Some(problem) = set.problem {
                     bail!("Codly cannot read all of the repo's CLI configuration ({problem}), so it cannot be trusted as it is");
                 }
-                if saved.trusted.last() == Some(&read) && saved.without.is_none() {
+                // Your choice for the checkout ends an "open without"; a worktree's files are
+                // trusted next to whatever you chose for the checkout.
+                if saved.trusted.last() == Some(&read) && (worktree.is_some() || saved.without.is_none()) {
                     return Ok(());
                 }
                 saved.trusted.retain(|old| *old != read);
                 saved.trusted.push(read);
                 let extra = saved.trusted.len().saturating_sub(MAX_TRUSTED);
                 saved.trusted.drain(..extra);
-                saved.without = None;
-                format!("you trusted {}'s own CLI configuration ({} files): agents started from now on load it", ws.name, scan.files.len())
+                let (name, n, files) = (&ws.name, set.files.len(), paths_of(&set.files));
+                match worktree {
+                    None => {
+                        saved.without = None;
+                        (format!("you trusted {name}'s own CLI configuration ({n} files): agents started from now on load it"), json!({ "files": files }))
+                    }
+                    Some(folder) => (
+                        format!("you trusted the CLI configuration of a worktree of {name} ({n} files): agents started there from now on load it"),
+                        json!({ "files": files, "folder": folder }),
+                    ),
+                }
             }
         };
         self.store.kv_set(&saved_key(&ws.id), &serde_json::to_string(&saved)?)?;
-        let files: Vec<&str> = scan.files.iter().map(|file| file.path.as_str()).collect();
-        self.decide_by(Some(&ws.id), None, DECISION, "human", summary, json!({ "files": files }))?;
+        self.decide_by(Some(&ws.id), None, DECISION, "human", summary, detail)?;
         Ok(())
     }
 
-    /// What the run of a `provider` agent that starts in `cwd` may load of that folder's own
-    /// CLI configuration. Read from the folder at every start: what you trusted is the exact
-    /// files, wherever they are. Err = a CLI that would load files you have not trusted, and
-    /// that Codly cannot start without them.
-    pub(super) async fn repo_config(&self, ws_id: Option<&str>, cwd: &Path, provider: Provider) -> Result<RepoConfig> {
-        // A folder that is gone supplies nothing; the adapter says that it is gone.
+    /// What the folder `cwd` supplies and where your choice about it stands. Read from the
+    /// folder at every start: what you trusted is the exact files, wherever they are. None =
+    /// the folder is gone: it supplies nothing, and the adapter says that it is gone.
+    async fn folder_trust(&self, ws_id: Option<&str>, cwd: &Path) -> Result<Option<FolderTrust>> {
         if !cwd.is_dir() {
-            return Ok(RepoConfig { project: false, local: false });
+            return Ok(None);
         }
         let ws = match ws_id {
             Some(id) => self.store.workspace(id)?,
@@ -452,45 +617,126 @@ impl Inner {
             Some(ws) => self.saved_trust(&ws.id)?.state(&scan),
             None => Saved::default().state(&scan),
         };
-        let trusted = matches!(state, TrustState::Nothing | TrustState::Trusted);
-        if !trusted && !STARTS_WITHOUT.contains(&provider) && scan.files.iter().any(|file| file.cli == provider) {
-            let cli = provider.label();
-            bail!(
-                "{cli} is not started in this folder: it has its own {cli} configuration that you have not trusted, and Codly cannot keep {cli} from loading it. Trust the folder in Settings → Safety, or use another CLI"
-            );
-        }
         if let (TrustState::Ask, Some(ws)) = (state, &ws) {
-            self.note_untrusted(ws, &scan, kind);
+            self.note_untrusted(ws, cwd, &scan, kind);
         }
-        // In your checkout an untracked local settings file is your own, trusted repo or not.
-        let local_is_the_repos = scan.files.iter().any(|file| file.path.eq_ignore_ascii_case(CLAUDE_LOCAL));
-        Ok(RepoConfig { project: trusted, local: kind == Folder::Checkout && (trusted || !local_is_the_repos) })
+        Ok(Some(FolderTrust { ws, kind, scan, state }))
     }
 
-    /// Record, once for a set of files, that agents start without them: the app asks you
-    /// when it sees this record.
-    fn note_untrusted(&self, ws: &Workspace, scan: &Scan, kind: Folder) {
-        let key = noted_key(&ws.id);
-        let now = scan.fingerprint.as_deref().unwrap_or_default();
-        let noted = self.store.kv_get(&key).unwrap_or_else(|e| {
-            tracing::warn!("could not read {key}: {e}");
-            None
-        });
-        if noted.as_deref() == Some(now) {
-            return;
+    /// What the run of a `provider` agent that starts in `cwd` may load of that folder's own
+    /// CLI configuration. Err (`NotStarted`) = a CLI that would load files you have not
+    /// trusted, and that Codly cannot start without them.
+    pub(super) async fn repo_config(&self, ws_id: Option<&str>, cwd: &Path, provider: Provider) -> Result<RepoConfig> {
+        let Some(folder) = self.folder_trust(ws_id, cwd).await? else { return Ok(RepoConfig { project: false, local: false }) };
+        if folder.keeps_out(provider) {
+            return Err(self.not_started(&folder, provider).await.into());
         }
-        let summary = match kind {
-            Folder::Checkout => format!("{} has its own CLI configuration that you have not trusted: agents start without it. Settings → Safety shows it", ws.name),
-            Folder::Worktree | Folder::Plain => {
-                format!("a worktree of {} has CLI configuration that is not what you trusted: the agent there starts without it", ws.name)
+        let trusted = folder.trusted();
+        // In your checkout an untracked local settings file is your own, trusted repo or not.
+        let local_is_the_repos = folder.scan.files.iter().any(|file| file.path.eq_ignore_ascii_case(CLAUDE_LOCAL));
+        Ok(RepoConfig { project: trusted, local: folder.kind == Folder::Checkout && (trusted || !local_is_the_repos) })
+    }
+
+    /// The CLIs Codly does not start in `cwd` as it is (`repo_config` refuses them): for a
+    /// caller that picks who works there, before it starts anyone.
+    pub(super) async fn not_started_in(&self, ws_id: Option<&str>, cwd: &Path) -> Result<Vec<Provider>> {
+        Ok(match self.folder_trust(ws_id, cwd).await? {
+            Some(folder) => Provider::ALL.into_iter().filter(|p| folder.keeps_out(*p)).collect(),
+            None => vec![],
+        })
+    }
+
+    /// Why `provider` is not started in the folder, and what you can do about it.
+    async fn not_started(&self, folder: &FolderTrust, provider: Provider) -> NotStarted {
+        let cli = provider.label();
+        // A worktree that waits for a choice of its own holds other files than your checkout.
+        let differs = match (&folder.ws, folder.kind, folder.state) {
+            (Some(ws), Folder::Worktree, TrustState::Ask) => match self.scan(Path::new(&ws.repo_path), Folder::Checkout).await {
+                Ok(checkout) => checkout.fingerprint != folder.scan.fingerprint,
+                Err(e) => {
+                    tracing::warn!("could not read the CLI configuration of {}: {e:#}", ws.name);
+                    false
+                }
+            },
+            _ => false,
+        };
+        NotStarted(if differs {
+            format!(
+                "{cli} {NOT_STARTED}: this worktree's {cli} configuration is not what you trusted for the repo (an agent changed it, or the worktree holds other files), and Codly cannot keep {cli} from loading it. Settings → Safety shows this worktree's files: trust them there, or use another CLI"
+            )
+        } else {
+            format!(
+                "{cli} {NOT_STARTED}: it has its own {cli} configuration that you have not trusted, and Codly cannot keep {cli} from loading it. Trust the folder in Settings → Safety, or use another CLI"
+            )
+        })
+    }
+
+    /// For the scheduler: the accounts of a CLI that Codly does not start in the repo as it
+    /// is are parked, so a task goes to another CLI, or waits and says why. (A new worktree
+    /// holds the files git tracks in your checkout.)
+    pub(super) async fn park_untrusted(&self, ws: &Workspace, clis: &[CliInfo], mut accounts: Vec<AccountState>) -> Vec<AccountState> {
+        let repo = Path::new(&ws.repo_path);
+        // Most repos have no file of a CLI without a switch: then there is nothing to read.
+        let has_files = |p: Provider| !STARTS_WITHOUT.contains(&p) && CONFIG.iter().any(|(name, cli)| *cli == p && repo.join(name).exists());
+        if !clis.iter().any(|c| c.path.is_some() && has_files(c.provider)) {
+            return accounts;
+        }
+        let kept_out = match self.not_started_in(Some(&ws.id), repo).await {
+            Ok(kept_out) => kept_out,
+            // Not known: tasks are routed as before, and a start says what is wrong.
+            Err(e) => {
+                tracing::warn!("could not read the CLI configuration of {}: {e:#}", ws.name);
+                return accounts;
             }
         };
-        let files: Vec<&str> = scan.files.iter().map(|file| file.path.as_str()).collect();
-        let written = self.store.kv_set(&key, now).and_then(|()| self.decide(Some(&ws.id), None, DECISION, summary, json!({ "files": files })));
-        if let Err(e) = written {
-            tracing::warn!("could not record that {} has untrusted CLI configuration: {e}", ws.name);
+        for cli in clis.iter().filter(|c| c.path.is_some() && kept_out.contains(&c.provider)) {
+            if !accounts.iter().any(|a| a.provider == cli.provider) {
+                accounts.push(AccountState::implicit(cli));
+            }
+            // An account that is parked already keeps its own reason.
+            for account in accounts.iter_mut().filter(|a| a.provider == cli.provider && a.parked.is_none()) {
+                account.parked = Some("its files in this repo wait for your trust: Settings → Safety".to_string());
+            }
+        }
+        accounts
+    }
+
+    /// Remember that an agent in `folder` does not get these files, and record it once for a
+    /// set of files: the app asks you when it sees this record.
+    fn note_untrusted(&self, ws: &Workspace, folder: &Path, scan: &Scan, kind: Folder) {
+        let place = folder.to_string_lossy().into_owned();
+        let now = scan.fingerprint.clone().unwrap_or_default();
+        let write = || -> Result<()> {
+            let mut noted = self.noted(&ws.id)?;
+            if noted.get(&place) == Some(&now) {
+                return Ok(());
+            }
+            let asked = noted.values().any(|fingerprint| *fingerprint == now);
+            noted.retain(|dir, _| Path::new(dir).is_dir());
+            noted.insert(place.clone(), now.clone());
+            self.store.kv_set(&noted_key(&ws.id), &serde_json::to_string(&noted)?)?;
+            // One record for a set of files, in however many folders agents start with it.
+            if asked {
+                return Ok(());
+            }
+            let summary = match kind {
+                Folder::Checkout => format!("{} has its own CLI configuration that you have not trusted: agents start without it. Settings → Safety shows it", ws.name),
+                Folder::Worktree | Folder::Plain => {
+                    format!("a worktree of {} has CLI configuration that is not what you trusted: agents there start without it. Settings → Safety shows it", ws.name)
+                }
+            };
+            self.decide(Some(&ws.id), None, DECISION, summary, json!({ "files": paths_of(&scan.files), "folder": place }))?;
+            Ok(())
+        };
+        if let Err(e) = write() {
+            tracing::warn!("could not record that {} has untrusted CLI configuration: {e:#}", ws.name);
         }
     }
+}
+
+/// The paths of `files`, for a record.
+fn paths_of(files: &[TrustFile]) -> Vec<&str> {
+    files.iter().map(|file| file.path.as_str()).collect()
 }
 
 impl Core {
@@ -553,5 +799,15 @@ mod tests {
         assert_eq!(cli_of(".cursor/mcp.json"), Some(Provider::Cursor));
         assert_eq!(cli_of("src/.claude/settings.json"), None, "only the top of the folder a CLI starts in");
         assert_eq!(cli_of("CLAUDE.md"), None);
+    }
+
+    #[test]
+    fn claude_codes_own_worktrees_are_not_configuration() {
+        assert!(in_claude_worktrees(".claude/worktrees/fix-1/.claude/settings.json"));
+        assert!(in_claude_worktrees(".Claude/Worktrees/fix-1/README.md"), "names compare without case, as on macOS");
+        // The folder's name alone, and names that only start like it, are files like every other.
+        for path in [".claude/worktrees", ".claude/worktrees.json", ".claude/worktreesx/a", ".claude/settings.json", ".mcp.json"] {
+            assert!(!in_claude_worktrees(path), "{path}");
+        }
     }
 }

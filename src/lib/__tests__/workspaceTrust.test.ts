@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { WorkspaceTrustDemo } from '../demo/workspaceTrust';
+import type { TrustFile } from '../gen/TrustFile';
 import type { WorkspaceTrust } from '../gen/WorkspaceTrust';
-import { shouldAsk, trustChoices, trustStatus, withoutTrust } from '../util/workspaceTrust';
+import type { WorktreeTrust } from '../gen/WorktreeTrust';
+import { MAX_SHOWN_FILES, asked, shouldAsk, shownFiles, trustChoices, trustStatus, withoutTrust } from '../util/workspaceTrust';
 
 describe('the demo repo’s own CLI configuration', () => {
   it('is a question until you answer it, for the files shown', () => {
     const demo = new WorkspaceTrustDemo(true);
     const asked = demo.trust(null);
-    expect(asked).toMatchObject({ state: 'ask', changed: false, problem: null });
+    expect(asked).toMatchObject({ state: 'ask', changed: false, problem: null, worktrees: [] });
     expect(asked.files.map((f) => f.path)).toEqual(['.claude/settings.json', '.mcp.json']);
 
     // Another set of files than the one shown is refused, as the core refuses it.
@@ -47,15 +49,51 @@ describe('what the question and Settings offer', () => {
     instructions: [],
     fingerprint: 'abc',
     problem: null,
+    worktrees: [],
   };
   const nothing: WorkspaceTrust = { ...base, state: 'nothing', files: [], fingerprint: null };
+  /** A worktree where an agent added a command file. */
+  const worktree: WorktreeTrust = {
+    path: '/data/worktrees/app/solo/ana',
+    files: [{ path: '.claude/commands/deploy.md', cli: 'claude', what: [] }],
+    fingerprint: 'wt1',
+    problem: null,
+  };
 
   it('asks once for a set of files, and again when they change', () => {
-    expect(shouldAsk(base, null)).toBe(true);
+    expect(shouldAsk(base, [])).toBe(true);
     // You closed the question on these files: not again until they change.
-    expect(shouldAsk(base, 'abc')).toBe(false);
-    expect(shouldAsk({ ...base, fingerprint: 'def', changed: true }, 'abc')).toBe(true);
-    for (const state of ['trusted', 'without', 'nothing'] as const) expect(shouldAsk({ ...base, state }, null)).toBe(false);
+    expect(shouldAsk(base, ['abc'])).toBe(false);
+    expect(shouldAsk({ ...base, fingerprint: 'def', changed: true }, ['abc'])).toBe(true);
+    for (const state of ['trusted', 'without', 'nothing'] as const) expect(shouldAsk({ ...base, state }, [])).toBe(false);
+  });
+
+  it('asks about a worktree whose files are not the ones of your folder', () => {
+    // Whatever you chose for the folder itself, also when it has no such files.
+    for (const t of [{ ...base, state: 'trusted' as const }, nothing]) {
+      const withWorktree = { ...t, worktrees: [worktree] };
+      expect(asked(withWorktree)).toEqual(['wt1']);
+      expect(shouldAsk(withWorktree, [])).toBe(true);
+      expect(shouldAsk(withWorktree, ['wt1'])).toBe(false);
+    }
+    // Both at once: closing the question puts both off, and a new worktree set asks again.
+    const both = { ...base, worktrees: [worktree] };
+    expect(asked(both)).toEqual(['abc', 'wt1']);
+    expect(shouldAsk(both, ['abc'])).toBe(true);
+    expect(shouldAsk(both, ['abc', 'wt1'])).toBe(false);
+    expect(shouldAsk({ ...both, worktrees: [{ ...worktree, fingerprint: 'wt2' }] }, ['abc', 'wt1'])).toBe(true);
+    // You opened the repo without its files: the question asks nothing more (Settings shows the worktree).
+    expect(shouldAsk({ ...both, state: 'without' }, [])).toBe(false);
+  });
+
+  it('lists what Codly read something in first, and counts what it does not show', () => {
+    const plain = (n: number): TrustFile[] => Array.from({ length: n }, (_, i) => ({ path: `.claude/skills/s${i}.md`, cli: 'claude' as const, what: [] }));
+    const hooks: TrustFile = { path: '.claude/settings.json', cli: 'claude', what: ['runs commands by itself (hooks): ./x.sh'] };
+    expect(shownFiles(base.files)).toEqual({ shown: base.files, more: 0 });
+    const many = shownFiles([...plain(MAX_SHOWN_FILES + 5), hooks]);
+    expect(many.shown).toHaveLength(MAX_SHOWN_FILES);
+    expect(many.shown[0]).toBe(hooks);
+    expect(many.more).toBe(6);
   });
 
   it('offers only the choices that change something', () => {

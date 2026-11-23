@@ -739,7 +739,9 @@ impl Inner {
         let started = self.spawn_run(req).await;
         match self.spawned_or_live(agent_id, started) {
             Ok(()) => {}
-            Err(e) if resumed => {
+            // Not started because of the folder's own files (`trust.rs`): its session is fine,
+            // and a new one would not start either. It resumes once you trust the folder.
+            Err(e) if resumed && !e.is::<super::trust::NotStarted>() => {
                 tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
                 self.update_agent(agent_id, |a| a.session_id = None)?;
                 Box::pin(self.chat_agent_spawn_fresh(agent_id, prompt)).await?;
