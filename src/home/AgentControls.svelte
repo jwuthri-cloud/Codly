@@ -8,7 +8,7 @@
   import type { Agent } from '../lib/gen/Agent';
   import type { ApprovalMode } from '../lib/gen/ApprovalMode';
   import { setRequestPrefs } from '../lib/state/actions';
-  import { PERMISSION_MODES } from '../lib/state/control.svelte';
+  import { PERMISSION_MODES, cyclesMode } from '../lib/state/control.svelte';
   import { store } from '../lib/state/store.svelte';
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
@@ -30,6 +30,11 @@
   /** A 1:1 Claude agent in the mode "plan first": only reads are approved for it until you accept its plan, whatever the permissions. */
   const planFirst = $derived(!request && agent?.role === 'solo' && agent.provider === 'claude' && agent.permission_mode === 'plan');
   const planLabel = PERMISSION_MODES.find((m) => m.id === 'plan')!.label;
+  /** A 1:1 Claude agent in the mode "accept edits": its edits run without asking; the permissions are for the rest. */
+  const acceptEdits = $derived(!request && agent?.role === 'solo' && agent.provider === 'claude' && agent.permission_mode === 'accept_edits');
+  const acceptLabel = PERMISSION_MODES.find((m) => m.id === 'accept_edits')!.label;
+  /** ⇧⇥ in the composer switches the mode shown here. */
+  const cycles = $derived(!request && !!agent && cyclesMode(agent));
 
   let open = $state(false);
   let btn: HTMLButtonElement | undefined = $state();
@@ -40,8 +45,8 @@
 </script>
 
 <div class="controls">
-  <button class="chip" bind:this={btn} aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)} data-tip={request ? 'How much every agent on this request asks you before it acts' : planFirst ? 'It reads and plans first: until you accept its plan, only reads are approved for it. After that, this is how much it asks you before it acts' : 'How much this agent asks you before it acts'}>
-    <Icon name="lock" size={13} />{#if planFirst}{planLabel}<span class="sub">· then {label}</span>{:else}{label}{#if request}<span class="sub">· whole request</span>{:else if !own}<span class="sub">· Settings</span>{/if}{/if}<Icon name="chevron-down" size={12} />
+  <button class="chip" bind:this={btn} aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)} data-tip={request ? 'How much every agent on this request asks you before it acts' : planFirst ? 'It reads and plans first: until you accept its plan, only reads are approved for it. After that, this is how much it asks you before it acts' : acceptEdits ? 'Its edits run without asking you. This is how much it asks you before anything else' : 'How much this agent asks you before it acts'} data-tip-kbd={cycles ? '⇧⇥' : undefined}>
+    <Icon name="lock" size={13} />{#if planFirst}{planLabel}<span class="sub">· then {label}</span>{:else if acceptEdits}{acceptLabel}<span class="sub">· {label}</span>{:else}{label}{#if request}<span class="sub">· whole request</span>{:else if !own}<span class="sub">· Settings</span>{/if}{/if}<Icon name="chevron-down" size={12} />
   </button>
   <UsageChip {agent} />
 </div>
