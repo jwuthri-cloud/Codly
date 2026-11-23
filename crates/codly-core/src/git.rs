@@ -2179,7 +2179,7 @@ mod tests {
             n += 1;
             std::fs::write(&file, format!("{n} as committed\n")).unwrap();
             let made = second(&file);
-            git.commit_all(&repo, "work").await.unwrap().expect("a commit");
+            git.commit_work(&repo, "work").await.unwrap().commit.expect("a commit");
             let now = format!("{n} rewritten ok\n");
             std::fs::write(&file, &now).unwrap();
             if second(&repo.join(".git/index")) == made && second(&file) == made {
@@ -2260,7 +2260,7 @@ mod tests {
         std::fs::remove_file(wt.join("staged.txt")).unwrap();
         std::fs::create_dir(wt.join("staged.txt")).unwrap();
         std::fs::write(wt.join("staged.txt/inside.txt"), "in the way\n").unwrap();
-        git.commit_all(&wt, "the turn").await.unwrap().unwrap();
+        git.commit_work(&wt, "the turn").await.unwrap().commit.unwrap();
         let head = out(&wt, &["rev-parse", "HEAD"]);
         let admin = git.git_path(&wt, "--git-dir").await.unwrap();
         let index = std::fs::read(admin.join("index")).unwrap();

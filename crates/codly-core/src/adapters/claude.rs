@@ -2669,7 +2669,7 @@ mod tests {
         let a = approval_of(&norm.on_message(&lines[at]));
         assert!(matches!(&a.subject, ApprovalSubject::Command { command, .. } if command == "echo hi > inside.txt"), "{:?}", a.subject);
         assert!(!a.risks.iter().any(|r| r == UNSANDBOXED), "{:?}", a.risks);
-        let ctx = |mode| PolicyCtx { mode, worktree: Some(solo.cwd.as_path()), verify: &[], read_only: false, edits: true, checkout: None };
+        let ctx = |mode| PolicyCtx { mode, worktree: Some(solo.cwd.as_path()), verify: &[], read_only: false, edits: true, checkout: None, own_mcp: &[] };
         for mode in [ApprovalMode::Balanced, ApprovalMode::Strict] {
             assert!(matches!(evaluate(&a, &ctx(mode)), Verdict::Ask { .. }), "{mode:?}");
         }

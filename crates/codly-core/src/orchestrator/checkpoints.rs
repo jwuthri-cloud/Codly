@@ -988,7 +988,7 @@ mod tests {
         assert_eq!(last_turn(&git, &wt, Some("ada")).await.unwrap(), None, "no turn was kept yet");
         take(&git, &wt, "ada", "first").await;
         std::fs::write(wt.join("a.txt"), "first\n").unwrap();
-        git.commit_all(&wt, "codly: the first turn").await.unwrap().unwrap();
+        git.commit_work(&wt, "codly: the first turn").await.unwrap().commit.unwrap();
         take(&git, &wt, "ada", "second").await;
         let quiet = last_turn(&git, &wt, Some("ada")).await.unwrap().unwrap();
         assert_eq!((quiet.label.as_str(), quiet.diff.as_str()), ("second", ""), "the turn changed nothing yet");
@@ -1001,7 +1001,7 @@ mod tests {
         assert!(turn.diff.contains("diff --git a/new.txt b/new.txt") && turn.diff.contains("+new\n"), "{}", turn.diff);
         assert!(!turn.diff.contains("-a\n"), "the turn before is not in it: {}", turn.diff);
         // The same after Codly committed the turn's work: the diff is between files, not commits.
-        git.commit_all(&wt, "codly: the second turn").await.unwrap().unwrap();
+        git.commit_work(&wt, "codly: the second turn").await.unwrap().commit.unwrap();
         assert_eq!(last_turn(&git, &wt, Some("ada")).await.unwrap().unwrap().diff, turn.diff);
 
         // The point that a restore takes is not a turn: the last turn is still the second one,
