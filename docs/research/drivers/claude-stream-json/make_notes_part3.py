@@ -9,132 +9,11 @@ import json
 import os
 import sys
 
-from notes_lib import OUT, argv_flags, block, control, fx, is_cli, j, quiet, sent, slim
+from notes_lib import (OUT, TASK, after_request, block, check, closing, control, cost, flags, fx, has_text, has_tool_use, is_cli,
+                       is_tool_result, j, kind, meta, metas, quiet, reqs, results, sent, slim, sub, tl)
 
 P = []
 w = P.append
-
-
-def check(ok, what):
-    if not ok:
-        raise SystemExit("the text no longer matches the fixtures: " + what)
-
-
-def flags(name):
-    return "`%s`" % argv_flags(name)
-
-
-def slimp(l, text=200, brief=False):
-    """slim(), but a line of a subagent keeps the keys that say so."""
-    out = slim(l, text, brief)
-    if l.get("type") in ("assistant", "user") and is_cli(l) and l.get("parent_tool_use_id"):
-        tail = out.pop("…")
-        out["parent_tool_use_id"] = l["parent_tool_use_id"]
-        if "agent_id" in l:
-            out["agent_id"] = l["agent_id"]
-        out["…"] = tail
-    return out
-
-
-def tl(name, pred, start=None, stop=None, text=200, brief=True, **kw):
-    """Lines with their time (`# t=…`: seconds since the process started). start / stop: predicates that open and
-    close the window (the stop line is included)."""
-    out, t, on = [], 0.0, start is None
-    for l in fx(name):
-        if set(l) == {"_t"}:
-            t = l["_t"]
-            continue
-        if "_t" in l:
-            t = l["_t"]
-        if not on and start(l):
-            on = True
-        if on and quiet(l) and pred(l):
-            out.append("# t=%.2f" % t)
-            out.append(j(slimp(l, text, brief), **kw))
-        if on and stop is not None and stop(l):
-            break
-    return out
-
-
-def kind(l):
-    if "_sent" in l:
-        return "sent"
-    if "_meta" in l:
-        return "meta"
-    if "_stderr" in l:
-        return "stderr"
-    return l.get("type")
-
-
-def sub(l):
-    return l.get("subtype") if l.get("type") == "system" else None
-
-
-TASK = ("task_started", "task_updated", "task_notification", "background_tasks_changed")
-
-
-def is_tool_result(l):
-    c = l.get("message", {}).get("content")
-    return l.get("type") == "user" and isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c)
-
-
-def has_text(l):
-    return l.get("type") == "assistant" and any(b["type"] == "text" for b in l["message"]["content"])
-
-
-def has_tool_use(l):
-    return l.get("type") == "assistant" and any(b["type"] == "tool_use" for b in l["message"]["content"])
-
-
-def closing(l):
-    return "_meta" in l and ("closing_stdin" in l["_meta"] or "exit_code" in l["_meta"])
-
-
-def meta(name, key):
-    return [l["_meta"] for l in fx(name) if "_meta" in l and key in l["_meta"]]
-
-
-def metas(name, key=None, **kw):
-    return [j(l, **kw) for l in fx(name) if "_meta" in l and not closing(l) and (key is None or key in l["_meta"])]
-
-
-def reqs(name, tool=None, n=None):
-    """can_use_tool requests of a fixture, each followed by the driver's answer."""
-    lines, out = fx(name), []
-    for i, l in enumerate(lines):
-        if l.get("type") == "control_request" and l["request"].get("subtype") == "can_use_tool" and (tool is None or l["request"]["tool_name"] == tool):
-            out.append(j(l))
-            for m in lines[i + 1:]:
-                if "_sent" in m and m["_sent"].get("type") == "control_response" and m["_sent"]["response"].get("request_id") == l["request_id"]:
-                    out.append(j(m["_sent"]))
-                    break
-    return out if n is None else out[:2 * n]
-
-
-def results(name):
-    return [l for l in fx(name) if l.get("type") == "result"]
-
-
-def cost(names):
-    total = 0.0
-    for n in names:
-        last = {}
-        for r in results(n):
-            last[r.get("session_id")] = r.get("total_cost_usd") or 0.0
-        total += sum(last.values())
-    return total
-
-
-def after_request(name, subtype, nth=0):
-    """A predicate that is true from the nth host request of that subtype on."""
-    seen = {"n": -1}
-
-    def pred(l):
-        if "_sent" in l and l["_sent"].get("type") == "control_request" and l["_sent"]["request"]["subtype"] == subtype:
-            seen["n"] += 1
-        return seen["n"] >= nth
-    return pred
-
 
 ALL = sorted(f[:-len(".ndjson")] for f in os.listdir(os.environ.get("FIXTURES_DIR") or os.path.join(OUT, "fixtures")) if f.startswith("r5-"))
 # The CLI's total for a session goes on after --resume (section 14): the four budget runs are one session, and so
@@ -316,20 +195,45 @@ m4 = meta(N4, "result_after_interrupt_s")[0]
 ex4 = [l for l in fx(N4) if "_meta" in l and "exit_code" in l["_meta"]][0]
 cl4 = [l for l in fx(N4) if "_meta" in l and "closing_stdin" in l["_meta"]][0]
 check(ex4["_meta"]["exit_code"] == 1 and meta(N4, "after_the_exit")[0]["after_the_exit"] == {"sleep_307_alive": False, "sleep_61_alive": False}, "end of the stop sequence")
-w("""What the adapter can rely on (n=1; an earlier recording of the same script, not kept, had the same order of lines,
-0.20 s to the result and exit code 1):
+
+
+def sequence_times():
+    """Times of the stop sequence from the fixture's own time stamps. A stdout line has no stamp of its own: a `_t`
+    mark is written before it when 0.25 s have passed since the last stamp. So "no mark between a request and a line"
+    means the line came less than 0.25 s after the request."""
+    lines = fx(N4)
+    at = {l["_sent"]["request"]["subtype"]: i for i, l in enumerate(lines) if "_sent" in l and l["_sent"].get("type") == "control_request"}
+    result = [i for i, l in enumerate(lines) if l.get("type") == "result" and i > at["interrupt"]][0]
+    answer = [i for i, l in enumerate(lines) if l.get("type") == "control_response" and i > at["stop_task"]][0]
+    note = [i for i, l in enumerate(lines) if "_meta" in l and "result_after_interrupt_s" in l["_meta"]][0]
+    check(not any(set(l) == {"_t"} for l in lines[at["interrupt"]:result]), "no time mark between the interrupt and the stopped turn's result")
+    check(not any(set(l) == {"_t"} for l in lines[at["stop_task"]:answer]) and answer < note, "no time mark between stop_task and its answer")
+    return lines[at["stop_task"]]["_t"] - lines[at["interrupt"]]["_t"], lines[note]["_t"] - lines[at["stop_task"]]["_t"]
+
+
+SENT_LATER4, ANSWERED4 = sequence_times()
+# The driver's note is the time around a wait that looks every 0.2 s: it is the poll, and the text must not call it a latency.
+check(abs(m4["result_after_interrupt_s"] - SENT_LATER4) < 0.01, "the driver's note of the stop sequence is the time at which it wrote stop_task")
+w("""What the adapter can rely on (n=1; an earlier recording of the same script, not kept, had the same order of lines
+and exit code 1):
 - The three steps work in this order with no wait between them other than "read until the `result`":
   1. `interrupt {"cancel_queued":true}`: the waiting message gets `cancelled`, the answer names it in `cancelled`, the
-     running tool call is rejected, the turn's error `result` comes (%.2f s after the request by the driver's clock,
-     the same time stamp in the stream), then `cancelled` for the turn's own message.
-  2. `stop_task` for the background command: `killed` / `stopped` / list `[]` / answer `{}`, answered %.3f s after the
-     interrupt. No turn starts.
+     running tool call is rejected, the turn's error `result` comes, then `cancelled` for the turn's own message. By
+     the stream's own time stamps all of this came less than 0.25 s after the request: the fixture has no time mark
+     between the request and the `result`, and a mark is written once 0.25 s have passed.
+  2. `stop_task` for the background command: `killed` / `stopped` / list `[]` / answer `{}`, within %.3f s of the
+     request (the driver's next note has that stamp). No turn starts.
   3. stdin closed: the driver noted the exit %.1f s later (it notes it 0.3 s after the fact), exit code 1 (the last
      `result` was the interrupted one: as in part 2, scenario 8).
+- Correction (made with part 4): an earlier text of this section gave "%.2f s after the request" for the `result` and
+  "%.3f s" for the `stop_task` answer. Those are the driver's notes `result_after_interrupt_s` and
+  `stop_task_answered_after_s`, taken around a wait that looks for the `result` every 0.2 s: they are the driver's
+  poll interval (the driver wrote `stop_task` %.3f s after the interrupt, when its poll saw the `result`), not a
+  latency of the CLI. Part 4, section 2, measures the same steps with the time stamp of each line.
 - After the exit neither `sleep 307` nor `sleep 61` was alive. Nothing had to be signalled.
 - Not in this run: a background SUBAGENT at shutdown. Section 1 says its stop starts a turn; a shutdown that stops a
-  helper has to interrupt or outwait that turn before stdin close (not recorded as one run).
-""" % (m4["result_after_interrupt_s"], m4["stop_task_answered_after_s"], ex4["_t"] - cl4["_t"]))
+  helper has to interrupt or outwait that turn before stdin close (not recorded as one run here: part 4, section 2).
+""" % (ANSWERED4, ex4["_t"] - cl4["_t"], m4["result_after_interrupt_s"], m4["stop_task_answered_after_s"], SENT_LATER4))
 w("### Three messages wait, then the interrupt\n")
 w("Turn 1 runs `sleep 15`; three messages (`banana`, `cherry`, `damson`) are written 0.3 s apart and wait. Plain `interrupt`:\n")
 PRED4 = lambda l: kind(l) in ("sent", "control_response", "result", "command_lifecycle") or sub(l) == "init" or has_text(l)
@@ -825,7 +729,7 @@ w("""## Table: question -> answer -> fixture
 | 1 | `stop_task` on a background subagent | Works: `killed` / `stopped` / list `[]`, then `{}`. The helper's tool call is rejected, the helper ends, its `sleep` is gone. The CLI then starts a turn by itself. `get_task_output` on its id is an error | 2 | `r5-stop-subagent-1`, `-2` |
 | 2 | Background command with exit 1; who is listed | `task_notification.status` `failed` (`patch.status` `failed`), then list `[]`, then a self-started turn. Background subagent: listed (`task_type:"local_agent"`, `subagent_type`, `description`, ids). Foreground helper or command: never listed, unless the host sends `background_tasks` (then listed, `patch.is_backgrounded:true`) | 1 | `r5-background-fail` |
 | 3 | `tool_progress` for other tools | Same heartbeat line: `tool_use_id` `<call id>-heartbeat-N`, `parent_tool_use_id` = the call id (never null), `tool_name` = the tool, at 30, 60, 90 s. MCP tool and `Agent` recorded; a Bash call inside a helper has none; WebFetch not recorded | 1 each | `r5-tool-progress-mcp`, `-subagent`, `-webfetch` |
-| 4 | Stop sequence; three waiting; folded | Sequence works: 0.2 s to the stopped turn's `result` and the task's stop, exit about 1 s after stdin close, exit code 1, nothing left running. Three waiting: `still_queued` in written order; plain = ONE turn with all three; `cancel_queued` = three `cancelled` lines before the answer. Folded: not in the answer, `cancelled` with the turn, not run again | 1 each | `r5-stop-sequence`, `r5-stop-three-plain`, `-cancel`, `r5-stop-folded-plain`, `-cancel` |
+| 4 | Stop sequence; three waiting; folded | Sequence works: the stopped turn's `result` and the task's stop each come less than 0.25 s after their request (the stream's time stamps), the exit is noted 1.0 s after stdin close, exit code 1, nothing left running. Three waiting: `still_queued` in written order; plain = ONE turn with all three; `cancel_queued` = three `cancelled` lines before the answer. Folded: not in the answer, `cancelled` with the turn, not run again | 1 each | `r5-stop-sequence`, `r5-stop-three-plain`, `-cancel`, `r5-stop-folded-plain`, `-cancel` |
 | 5 | Sandbox + no auto-allow: `git push`, `curl` | Both ask, in `acceptEdits` and in `manual`, exactly as with the sandbox off; `curl` then also gets the network request | 1 per mode | `r5-commands-noauto`, `r5-commands-manual-noauto` (against `r5-commands-off`, `r5-commands-manual-off`) |
 | 6 | Second command to an allowed host | After a plain allow: not asked again in the same process (%d s later; %d s later with another turn in between), asked again in a new process that resumes the session. After a saved rule: not asked again. `network_allowed_domains` stays `[]`. `updatedPermissions` saves `WebFetch(domain:…)` (local file or session) | 1 per run (plain allow in one process: 2) | `r5-sandbox-network-once`, `-once-later`, `-once-restart-a`, `-b`, `-rule-local`, `-rule-session` |
 | 7 | Effort on a `--effort high` process | `get_settings` shows the new level at once; `null` gives `medium`, not the start flag's `high`. The turn's use of it: not visible | 1 | `r5-effort-started-high`, `-none` |
