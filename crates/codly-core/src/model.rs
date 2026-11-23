@@ -1881,9 +1881,10 @@ pub struct Settings {
     pub confirm_quit: bool,
     /// Claude agents that have a shell (workers and 1:1 agents) run its commands inside Claude
     /// Code's own OS sandbox (`adapters::claude::settings_json`): a command can write only in
-    /// the agent's working folder, a temporary folder and the repository's git data. Sandboxed
-    /// commands run without a request, so the approval rules do not see them; a command Claude
-    /// wants to run outside the sandbox asks you in every approval mode but Full access. Off
+    /// the agent's working folder, a temporary folder and the repository's git data. A
+    /// sandboxed command still asks as it does without the sandbox, so the approval rules
+    /// decide it as before; a command Claude wants to run outside the sandbox asks you in
+    /// every approval mode but Full access. A run whose sandbox is not on does not start. Off
     /// (the default): the approval rules are the only check on a Claude agent's shell. Codex
     /// always has its own sandbox, and the ACP agents (Gemini, OpenCode, Cursor, Copilot) have
     /// none.

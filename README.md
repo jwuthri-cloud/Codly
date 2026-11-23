@@ -292,8 +292,7 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   The choice is about the repo's files, not yours: a Codex agent starts the MCP servers of your own
   Codex config in every folder, trusted or not ("Use my own CLI setup" turns them off).
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
-  access, which approves it. One exception: with **Sandbox Claude's shell** on (below), a Claude agent's
-  sandboxed commands do not ask.
+  access, which approves it. That holds with **Sandbox Claude's shell** on too (below).
 - By itself, Codly removes a worktree only when it is clean and merged, and deletes a `codly/…` branch
   only when its work is merged and its plan has been over for a day. Work that is not committed or not
   merged stays until you delete it in **Settings → Storage**, which first names what you would lose.
@@ -345,12 +344,16 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   - It can reach only the hosts that your Claude Code settings allow. Codly adds no host and no folder.
     When a command wants another host, Codly asks you, in every approval mode except Full access: the
     approval card names the host. If you allow it, the host stays allowed for the rest of that agent's
-    session, for every later command (a `git push` or an upload too).
-  - Sandboxed commands run without asking, in every approval mode: the approval rules do not see them.
-    This includes git commands that change the repository (a commit, a branch, the stash), and a push
-    or an upload to a host that is allowed.
+    session, for every later command. If you deny it, the command gets a network error.
+  - Commands still go through the approval rules, as they do with the switch off: what the rules ask
+    about (a `git push`, an `rm -rf`, a download) still asks you first. The sandbox is a second check
+    under the rules, not a way around them. So one command can ask twice: once for itself, and once
+    for a host it wants.
   - A command that Claude wants to run outside the sandbox asks you first, in every approval mode except
     Full access. The approval card says that it runs outside the sandbox.
+  - When an agent starts, Codly asks Claude Code whether its sandbox is really on. If it is not (your
+    system cannot run it, or a setting of your organization changes it), the agent does not start
+    and Codly tells you why.
   - The sandbox covers shell commands only. File edits and tool servers (MCP) are not sandboxed: they go
     through approvals as before. Codly's own checks (a task's verify commands, the setup script) are
     not sandboxed either.

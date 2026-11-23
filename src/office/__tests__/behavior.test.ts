@@ -2,6 +2,7 @@
 // layer turns that state into where each character goes, its pose, prop and emote — with the
 // honesty rules (excursion thresholds, minimum dwell, errands only for real instant events).
 import { describe, expect, it } from 'vitest';
+import type { Approval } from '../../lib/gen/Approval';
 import type { EventKind } from '../../lib/gen/EventKind';
 import type { EventRow } from '../../lib/gen/EventRow';
 import { ACT_MS, breakIntent, CHEER_MS, deriveIntent, Dwell, DWELL_MS, Errands, intentKey, LONG_IDLE_MS, placeKey, PLAY_AFTER_MS, THINK_HOLD_MS, type Intent } from '../behavior';
@@ -9,7 +10,7 @@ import { breakDelay, traitsOf } from '../traits';
 import { AGENTS, TASKS } from '../demo/script';
 import type { Fx, OfficeModel } from '../model';
 import { sentence } from '../narrate';
-import { emptyModel, reduce, syncAgents, syncTasks } from '../reducer';
+import { approvalText, emptyModel, reduce, syncAgents, syncTasks } from '../reducer';
 
 const T0 = 1_800_000_000_000;
 let id = 0;
@@ -137,6 +138,16 @@ describe('events → behaviour', () => {
     expect(sentence(ada(m), T0 + 2000)).toMatchObject({ pre: 'May I run', code: 'rm -rf dist', tone: 'warn' });
     reduce(m, row(3000, 'a-ada', { type: 'approval_resolved', approval_id: 'ap', status: 'approved', by: 'user' }), live);
     expect(intent(m, 3100).intent.emote).toBeNull();
+  });
+
+  it('a host that a sandboxed command wants is said as the host, not as the name of the request’s tool', () => {
+    const subject = (name: string, input: Record<string, string>): Approval['subject'] => ({ kind: 'tool', name, input });
+    const text = (s: Approval['subject']) => approvalText({ id: 'ap', agent_id: 'a-ada', run_id: 'r', task_id: null, call_id: null, subject: s, reason: null, choices: ['allow_once', 'deny'], risks: [], status: 'pending', decided_by: null, created_at: 0 });
+    expect(text(subject('SandboxNetworkAccess', { host: 'example.com' }))).toBe('reach example.com');
+    expect(text(subject('SandboxNetworkAccess', {}))).toBe('use the network');
+    // A bubble is one short line: a long host is cut there (the approval card shows it whole).
+    expect(text(subject('SandboxNetworkAccess', { host: `${'a'.repeat(40)}.example` }))).toBe(`reach ${'a'.repeat(29)}…`);
+    expect(text(subject('WebFetch', { url: 'https://example.com' }))).toBe('use WebFetch');
   });
 
   it('blocked slumps under a rain cloud; rate limited sleeps (zZ); long idle falls asleep at 10 min', () => {

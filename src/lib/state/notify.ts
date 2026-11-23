@@ -3,6 +3,7 @@
 import type { Approval } from '../gen/Approval';
 import type { EventRow } from '../gen/EventRow';
 import type { Office } from '../gen/Office';
+import { sandboxWants } from '../util/sandbox';
 import { oneLine } from '../util/sanitize';
 import { openWorkspace } from './actions';
 import { blockers } from './blockers.svelte';
@@ -14,7 +15,8 @@ import { ui } from './ui.svelte';
 /** Whether you are reading that request's conversation right now. */
 const watching = (thread: string) => ui.room === 'home' && ui.mode !== 'office' && ui.mode !== 'map' && ui.thread === thread;
 
-const asks = (s: Approval['subject']) => (s.kind === 'command' ? oneLine(s.command, 80) : s.kind === 'question' ? 'Answer it in the conversation' : `Wants to ${s.kind.replace('_', ' ')}`);
+const asks = (s: Approval['subject']) =>
+  s.kind === 'command' ? oneLine(s.command, 80) : s.kind === 'question' ? 'Answer it in the conversation' : `Wants to ${sandboxWants(s, 80) ?? s.kind.replace('_', ' ')}`;
 
 /** Something that waits for you in an office you are not looking at, and how to get to it once there. */
 type Need = { line: string; body: string; open: () => void };

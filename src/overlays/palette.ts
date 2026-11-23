@@ -3,6 +3,7 @@
 // second one runs it. Any other key, or a different row, disarms. A held ↵ and a double-click
 // are one decision, not two: their repeats do nothing on such a row.
 import type { ApprovalSubject } from '../lib/gen/ApprovalSubject';
+import { sandboxWants } from '../lib/util/sandbox';
 import { clean } from '../lib/util/sanitize';
 
 /**
@@ -38,7 +39,8 @@ export function wants(s: ApprovalSubject): string {
     case 'file_change':
       return `change ${s.paths.map(clean).join(', ')}`;
     case 'tool':
-      return `use the tool ${clean(s.name)}`;
+      // A command in Claude Code's sandbox wants a host: said as that, with the whole host.
+      return sandboxWants(s) ?? `use the tool ${clean(s.name)}`;
     case 'question':
       return 'ask you a question';
     case 'permissions':

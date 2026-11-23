@@ -49,5 +49,9 @@ describe('palette confirmation', () => {
     expect(wants({ kind: 'command', command: 'ls', cwd: null })).toBe('run ls');
     expect(wants({ kind: 'file_change', paths: ['a.ts', 'b.ts'], diff: null })).toBe('change a.ts, b.ts');
     expect(wants({ kind: 'tool', name: 'WebFetch', input: null })).toBe('use the tool WebFetch');
+    // A command in Claude Code's sandbox wants a host: the whole host, not the name of the request's tool.
+    const host = `github.com.${'a'.repeat(96)}.evil.example`;
+    expect(wants({ kind: 'tool', name: 'SandboxNetworkAccess', input: { host } })).toBe(`reach ${host}`);
+    expect(wants({ kind: 'tool', name: 'SandboxNetworkAccess', input: {} })).toBe('use the network');
   });
 });
