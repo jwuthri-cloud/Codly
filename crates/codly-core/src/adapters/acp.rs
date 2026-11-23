@@ -1556,6 +1556,7 @@ mod tests {
             use_user_setup: false,
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: None,
+            sandbox_shell: false,
         };
         let (a, env) = launch(&spec, Some(Path::new("/tmp/r/gemini-policy.toml")));
         assert_eq!(a, ["--acp", "--skip-trust", "-m", "gemini-2.5-flash", "--policy", "/tmp/r/gemini-policy.toml"]);
@@ -1606,6 +1607,7 @@ mod tests {
             use_user_setup: false,
             raw_log: dir.join("raw.ndjson"),
             byok_command: None,
+            sandbox_shell: false,
         };
         let (events, events_rx) = mpsc::unbounded_channel();
         let actor = Actor {

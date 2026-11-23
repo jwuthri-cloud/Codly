@@ -118,6 +118,8 @@ const SETTINGS: Settings = {
   notifications: { approval: true, question: true, plan_done: true, plan_failed: true, task_blocked: true, agent_stalled: true, budget: true, merge_ready: true, only_in_background: true },
   keep_awake: true,
   confirm_quit: true,
+  claude_sandbox: false,
+  claude_shell_auth: false,
   world_ambient: false,
   theme: 'system',
   team: [],

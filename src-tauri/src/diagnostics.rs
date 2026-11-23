@@ -31,12 +31,14 @@ pub struct Diagnostics {
 pub async fn diagnostics<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>) -> Result<Diagnostics, String> {
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     // Not `state.core()`: that waits for the core, and this must answer when it never starts.
-    let core = match &*state.core.borrow() {
-        None => "starting".to_string(),
-        Some(Ok(_)) => "running".to_string(),
-        Some(Err(e)) => format!("did not start: {e}"),
+    // The CLIs are asked as the core asks them: with your shell's Claude sign-in only if the
+    // setting is on (off when the core is not there to say).
+    let (core, shell_auth) = match &*state.core.borrow() {
+        None => ("starting".to_string(), false),
+        Some(Ok(core)) => ("running".to_string(), core.settings().claude_shell_auth),
+        Some(Err(e)) => (format!("did not start: {e}"), false),
     };
-    let clis = codly_core::env::detect_all(state.shell_env().await).await;
+    let clis = codly_core::env::detect_all(state.shell_env().await, shell_auth).await;
     let log_dir = logging::dir();
     tokio::task::spawn_blocking(move || {
         let facts = Facts {

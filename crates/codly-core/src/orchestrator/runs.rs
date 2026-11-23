@@ -71,6 +71,10 @@ impl Inner {
             tracing::debug!("{e}; using the base env");
             self.base_env.clone()
         });
+        // Your shell's Bedrock, Vertex or token sign-in for Claude, only if you asked for it.
+        if self.settings().claude_shell_auth {
+            crate::env::apply_shell_auth(&mut env, &self.base_env, provider);
+        }
         // The sign-in: CLAUDE_CONFIG_DIR / CODEX_HOME / GEMINI_CLI_HOME of that account.
         if let Some(acct) = &info {
             crate::env::apply_account(&mut env, provider, acct.home.as_deref());
@@ -188,6 +192,7 @@ impl Inner {
             use_user_setup: self.settings().use_my_claude_setup,
             raw_log,
             byok_command,
+            sandbox_shell: self.settings().claude_sandbox,
         };
         // A panicking adapter (or a stub) must fail this run, not the caller's task.
         let fut = self.spawner.spawn(spec, self.events_tx.clone());
@@ -425,7 +430,7 @@ impl Inner {
         let listed = read(&self.accounts).iter().any(|a| a.provider == provider);
         let Some(id) = id else {
             if cli.logged_in == Some(false) {
-                bail!("{label} is not signed in{}", cli.problem.as_deref().map(|p| format!(": {p}")).unwrap_or_default());
+                bail!("{label} is not signed in{}", signed_out_fix(cli.problem.as_deref(), None));
             }
             return Ok(None);
         };
@@ -433,8 +438,7 @@ impl Inner {
             Some(a) if a.provider != provider => bail!("{id} is not a {label} account"),
             Some(a) if !a.enabled => bail!("the {label} account '{}' is turned off in Settings", a.label),
             Some(a) if a.logged_in == Some(false) => {
-                let cmd = a.login_command.as_deref().map(|c| format!(": run `{c}` in a terminal")).unwrap_or_default();
-                bail!("the {label} account '{}' is not signed in{cmd}", a.label)
+                bail!("the {label} account '{}' is not signed in{}", a.label, signed_out_fix(a.problem.as_deref(), a.login_command.as_deref()))
             }
             Some(a) => Ok(Some(a)),
             None if listed => bail!("the {label} account {id} is no longer available"),
@@ -458,5 +462,34 @@ impl Inner {
                 limits: vec![],
             })),
         }
+    }
+}
+
+/// What follows "… is not signed in" in a start error: what to do about it. `problem` is the
+/// sign-in check's own line (env.rs: "not signed in: run `…` in a terminal", or what to do
+/// when your shell selects the sign-in), which knows more than the login command alone.
+fn signed_out_fix(problem: Option<&str>, login_command: Option<&str>) -> String {
+    match (problem, login_command) {
+        (Some(p), _) => format!(": {}", p.strip_prefix("not signed in: ").unwrap_or(p)),
+        (None, Some(cmd)) => format!(": run `{cmd}` in a terminal"),
+        (None, None) => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::signed_out_fix;
+
+    #[test]
+    fn a_signed_out_start_says_what_the_sign_in_check_found() {
+        let login = Some("claude auth login");
+        assert_eq!(signed_out_fix(Some("not signed in: run `claude auth login` in a terminal"), login), ": run `claude auth login` in a terminal");
+        // Your shell selects the sign-in (Bedrock, Vertex or a token): the check's advice, not the login command.
+        let shell = "not signed in: your shell sets CLAUDE_CODE_USE_BEDROCK, and Codly takes that out of an agent's environment. \
+                     Turn on \"Use my shell's Claude sign-in\" in Settings → Safety, or run `claude auth login` in a terminal";
+        assert_eq!(signed_out_fix(Some(shell), login), format!(": {}", &shell["not signed in: ".len()..]));
+        assert_eq!(signed_out_fix(Some("the sign-in check timed out"), login), ": the sign-in check timed out");
+        assert_eq!(signed_out_fix(None, login), ": run `claude auth login` in a terminal");
+        assert_eq!(signed_out_fix(None, None), "");
     }
 }

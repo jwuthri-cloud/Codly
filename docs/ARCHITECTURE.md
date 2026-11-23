@@ -245,7 +245,8 @@ hands the work to a team member or consultant at once).
 
 **Approval modes** (`orchestrator/approvals.rs`): balanced (rules decide the obvious, else ask you),
 strict (ask for everything), autonomous (allow what shows no risk; the rules read the command line,
-not what a script or program then does, so this is not a sandbox) and **Full access**
+not what a script or program then does, so this is a deny-list and not a sandbox: §6 says which
+agents have an OS sandbox) and **Full access**
 (auto-approve everything, risky commands included, except the hard floors: questions, permission
 changes, changes to the agent's own CLI settings, writes by read-only agents and Codly's own data
 dir still ask).
@@ -311,12 +312,40 @@ that are new there are named (the index does not search them).
 - Worktree isolation; Codex `workspace-write` sandbox; Claude workers in `acceptEdits` with
   shell commands routed to the broker; Lead and reviewers read-only. The exception is an agent
   hired with Git isolation off: it edits the user's checkout directly (the wizard warns).
+- OS sandbox, per CLI. Codex: always (`workspace-write`, `read-only` for read-only roles).
+  Claude: only with `Settings.claude_sandbox` (off by default). Then every Claude agent that
+  has a shell (workers and 1:1 agents) starts with `--settings {"sandbox":{"enabled":true,
+  "failIfUnavailable":true}}` (`adapters/claude.rs` `settings_json`, one document with the BYOK
+  `apiKeyHelper`). Recorded on macOS with 2.1.311 (docs/research/cli-claude-stream-json-2.1.311.md
+  §9): a sandboxed shell command sends no `can_use_tool` request, so the broker and its rules
+  do not see it, in any approval mode; a write outside the working directory fails; a command
+  the model wants to run outside the sandbox sends `can_use_tool` with `decision_reason_type:
+  "sandboxOverride"`, which the adapter marks with the risk "runs outside the sandbox": it asks
+  the user in every mode but Full access, and no saved rule covers it. The same risk is set
+  when the request's input has `dangerouslyDisableSandbox: true` without that reason. Codly
+  passes no write folders and no hosts: the CLI's defaults (per its documentation: the working
+  directory, a temporary folder and a worktree's shared `.git` for writes; an empty list of
+  hosts) and the user's own Claude Code settings decide them. For a host they do not allow,
+  the CLI asks the host app: `can_use_tool` with `tool_name: "SandboxNetworkAccess"` and
+  `input.host` (read in the 2.1.311 bundle, not recorded). The adapter gives it the risk
+  "network (<host>)", so it asks the user in every mode but Full access, and offers allow or
+  deny only: on allow the CLI keeps the host for the rest of its session. A sandboxed command
+  itself is never seen by the rules, so this request is the only check on what it sends
+  (a push, an upload). Not recorded: the network rules in `-p` mode, `failIfUnavailable`
+  (asked for so that Claude Code does not start where it cannot sandbox), and Linux. The
+  sandbox wraps the shell only: file edits, MCP servers and Codly's own verify
+  commands are outside it. ACP agents (Gemini, OpenCode, Cursor, Copilot) have no OS sandbox.
+- Child environments (`env.rs`): every `CLAUDE_CODE_*` variable of a parent Claude Code session
+  and every API-key variable that would switch billing is removed. Two opt-in exceptions: the
+  user's own key for the CLI's vendor (BYOK), and `Settings.claude_shell_auth`, which leaves
+  `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_OAUTH_TOKEN` of the login
+  shell in a Claude agent's env (and in the sign-in probes, so the status matches).
 - Approval broker: rules (path outside worktree, symlinks followed; `rm -rf`, `git push`,
   `curl | sh`, `sudo`, `npx`/`uvx` downloads, `printenv` and `.env` reads, changes to an agent's
   own CLI settings, git inside a nested repository → ask you, except in Full access, which
   approves them), then you. No silent timeouts; choices mirror the provider's. The rules read
   the command line only: what a test, a script or an interpreter does once it runs is not
-  checked (only Codex has an OS sandbox).
+  checked (Codex has an OS sandbox; Claude has one only with `claude_sandbox` on).
 - The gate runs the plan's verify and integration commands (the Lead wrote them) through the
   same risk rules: one with a risk is not run until you allow it on its task (an integration
   check is refused: the plan is still done, and its message names the check to run yourself).

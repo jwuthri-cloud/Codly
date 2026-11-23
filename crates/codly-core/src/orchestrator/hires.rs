@@ -90,7 +90,10 @@ impl Inner {
     /// Nothing is started; the caller reviews the result like an imported file.
     pub(super) async fn hire_draft(&self, brief: &str) -> anyhow::Result<hire::HireReview> {
         let bin = crate::env::resolve_bin(Provider::Claude, &self.base_env).ok_or_else(|| anyhow!("Claude is not installed"))?;
-        let env = crate::env::child_env_with(&self.base_env, Provider::Claude, None);
+        let mut env = crate::env::child_env_with(&self.base_env, Provider::Claude, None);
+        if self.settings().claude_shell_auth {
+            crate::env::apply_shell_auth(&mut env, &self.base_env, Provider::Claude);
+        }
         let args: Vec<String> = vec![
             "-p".into(),
             hire::draft_prompt(brief),

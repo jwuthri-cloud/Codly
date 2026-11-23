@@ -987,6 +987,15 @@ Not verified:
   made no such call).
 - The setting given in a settings file (only the `--settings` JSON string was used), and Linux.
 
+Read in the installed 2.1.311 bundle, not recorded (no run reached for a host):
+- For a host that the sandbox's network rules do not allow, the CLI asks the host app (StructuredIO
+  `createSandboxAskCallback`): `can_use_tool` with `"tool_name":"SandboxNetworkAccess"`, `"input":{"host":"<host>"}`,
+  one `permission_suggestions` entry (`addRules` with `"ruleContent":"domain:<host>"`, `"behavior":"allow"`), a new
+  `tool_use_id` and `"description":"Allow network connection to <host>?"`. The permission mode decides first: it
+  allows, denies, classifies (auto mode) or sends this request. With `--permission-prompts none` no request is sent.
+- Every answer but `"behavior":"allow"` blocks the connection. On allow the CLI calls `addSessionAllowedHost(host)`:
+  the host stays allowed for the rest of the session, with or without `updatedPermissions`.
+
 ## 10. permission-request-shapes
 
 Fixtures: `permission-request-shapes` and `permission-updated-permissions` (`--permission-mode default --tools Bash,Read,Edit`), `permission-plan-mode` (`--permission-mode plan --tools Bash,Read,Edit,Write,ExitPlanMode`), `permission-askuserquestion` (`--permission-mode default --tools Read,AskUserQuestion`).

@@ -7,7 +7,7 @@
   import type { Provider } from '../lib/gen/Provider';
   import type { Settings } from '../lib/gen/Settings';
   import { api } from '../lib/api';
-  import { updateSettings } from '../lib/state/actions';
+  import { redetect, refreshAccounts, updateSettings } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { usable as accountUsable } from '../lib/util/accounts';
   import { skillsUi } from '../lib/state/skills.svelte';
@@ -97,13 +97,19 @@
   const MODES: { id: ApprovalMode; title: string; body: string }[] = [
     { id: 'balanced', title: 'Balanced', body: 'Codly’s rules settle the obvious cases; anything risky (rm -rf, git push, outside the worktree, network installs) asks you.' },
     { id: 'strict', title: 'Ask first', body: 'Every command and edit the CLI would ask about comes to you.' },
-    { id: 'autonomous', title: 'Autonomous', body: 'Commands and edits run without asking unless Codly sees a risk in them (rm -rf, git push, network, paths outside the worktree). Codly reads the command, not what a script or program does once it runs.' },
+    { id: 'autonomous', title: 'Autonomous', body: 'Commands and edits run without asking unless Codly sees a risk in them (rm -rf, git push, network, paths outside the worktree). This is a list of risky commands, not a sandbox: Codly reads the command, not what a script or program does once it runs. Codex agents run in their own OS sandbox. Claude agents have one only with “Sandbox Claude’s shell” on (below). Gemini, OpenCode, Cursor and Copilot agents have none.' },
     { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, changes to an agent’s own CLI settings, Codly’s private data and read-only agents still ask.' },
   ];
   let confirmFull = $state(false);
   function pickMode(m: ApprovalMode) {
     confirmFull = m === 'full' && s.approval_mode !== 'full';
     if (!confirmFull) set({ approval_mode: m });
+  }
+  /** Claude is asked who is signed in again at once: with your shell's sign-in, or without it. */
+  async function setShellAuth(on: boolean) {
+    await updateSettings({ claude_shell_auth: on });
+    await redetect();
+    await refreshAccounts();
   }
 
   const TABS = [
@@ -306,6 +312,25 @@
         {/each}
       </div>
       {#if confirmFull}<FullAccessConfirm onconfirm={() => ((confirmFull = false), set({ approval_mode: 'full' }))} oncancel={() => (confirmFull = false)} />{/if}
+    </section>
+
+    <section>
+      <h3 class="eyebrow">Claude Code</h3>
+      <!-- Not <label>s: only the switch itself changes these, never a click on the text. -->
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Sandbox Claude’s shell</span>
+          <span class="desc">For Claude Code agents that have a shell: workers and 1:1 agents. Off: a shell command runs with your account’s rights, and Codly’s approval rules are the only check. On: Claude Code runs each shell command in its own OS sandbox. A sandboxed command can write only in the agent’s folder, a temporary folder and the repository’s git data. It can still read your other files. It can reach only the hosts that your Claude Code settings allow: for another host Codly asks you, in every mode except Full access, and a host you allow stays allowed for the rest of that agent’s session. Sandboxed commands run without asking: Codly’s approval rules do not see them, in “Ask first” too. That includes git commands that change the repository, and a push or an upload to an allowed host. A command that Claude wants to run outside the sandbox asks you first, in every mode except Full access. File edits and tool servers are not sandboxed. Codex agents always run in Codex’s own sandbox. Gemini, OpenCode, Cursor and Copilot agents have no sandbox. Applies to agents started after the change.</span>
+        </div>
+        <input type="checkbox" class="switch" checked={s.claude_sandbox} aria-label="Sandbox Claude’s shell" onchange={(e) => set({ claude_sandbox: e.currentTarget.checked })} />
+      </div>
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Use my shell’s Claude sign-in</span>
+          <span class="desc">Off: Codly takes <code>CLAUDE_CODE_USE_BEDROCK</code>, <code>CLAUDE_CODE_USE_VERTEX</code> and <code>CLAUDE_CODE_OAUTH_TOKEN</code> out of an agent’s environment, so Claude agents use only the sign-in of <code>claude auth login</code>. On: Claude agents keep these variables from your login shell, as Claude Code does in your terminal, and that account pays: Amazon Bedrock, Google Vertex AI, or the subscription of the token. Codly does not store the token. For a token from <code>claude setup-token</code>, check Anthropic’s terms first: they may not allow another app to use it. Applies to agents started after the change.</span>
+        </div>
+        <input type="checkbox" class="switch" checked={s.claude_shell_auth} aria-label="Use my shell’s Claude sign-in" onchange={(e) => setShellAuth(e.currentTarget.checked)} />
+      </div>
     </section>
 
     <ApprovalRulesSection />

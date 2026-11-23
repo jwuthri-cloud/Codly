@@ -566,6 +566,7 @@ mod tests {
             use_user_setup: false,
             raw_log: "/nonexistent/r/raw.ndjson".into(),
             byok_command: None,
+            sandbox_shell: false,
         }
     }
 
