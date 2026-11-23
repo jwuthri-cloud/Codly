@@ -415,7 +415,9 @@ async fn the_third_failure_in_a_row_blocks_the_task_and_your_retry_starts_it_at_
         blocked.status_reason.as_deref(),
         Some(format!("blocked: the worker failed 3 times in a row (last: could not start the worker: {HANDSHAKE}); fix the cause, then Retry").as_str())
     );
-    assert_eq!(decisions(&core, "retry").await.len(), 3, "two retries, then the block");
+    // The block's decision is a row of its own, written right after the task's: waited for.
+    let retries = wait_for("the decision of the block", async || Some(decisions(&core, "retry").await).filter(|d| d.len() >= 3)).await;
+    assert_eq!(retries.len(), 3, "two retries, then the block");
 
     // The cause is fixed and you retry: no wait is left over from the failures.
     broken.store(false, std::sync::atomic::Ordering::SeqCst);

@@ -604,8 +604,9 @@ impl Inner {
             }
             "started a read-only chat"
         };
-        self.send_prompt(&agent.id, prompt)?;
-        if let Some(l) = lock(&self.live).get_mut(&agent.id) {
+        // The answer is owed in one step with the send: a turn that reads the message and ends
+        // right away already finds whom its reply goes to.
+        self.send_prompt_then(&agent.id, prompt, |l| {
             // The message a run was started for is its first turn, ahead of what was sent while
             // it started. Any other one is the last in the queue, behind that first message if
             // it has not gone out yet (`Live::waited`). One that goes into the running turn
@@ -613,7 +614,7 @@ impl Inner {
             let behind_first = (l.starting.is_some() || !l.waited.is_empty()) as u64;
             let due = if first { 1 } else { l.turns + l.turn_active as u64 + l.queued as u64 + behind_first };
             l.answers.push(Answer { due, ws_id: ws.id.clone(), thread });
-        }
+        })?;
         Ok(json!({ "ok": true, "delivery": delivery, "note": format!("{}'s answer arrives as a later [Codly] message.", agent.name) }))
     }
 

@@ -392,10 +392,20 @@ impl Inner {
         // next pass finishes it again as it was (`settle_resolution` takes the merge back).
         let resolving = plan.status == PlanStatus::Running && self.open_resolution(plan)?.is_some();
         if !resolving {
+            // Checked in the write: `plan` is as the caller read it, before the wait above. A
+            // plan that finished since stays finished: it said "Plan done", and its work is
+            // yours to merge.
+            let mut over = false;
             self.update_plan(&plan.id, |p| {
-                p.status = PlanStatus::Cancelled;
+                over = matches!(p.status, PlanStatus::Done | PlanStatus::Cancelled);
+                if !over {
+                    p.status = PlanStatus::Cancelled;
+                }
                 Ok(())
             })?;
+            if over {
+                return Ok(());
+            }
         }
         let what = if resolving { "conflict resolution" } else { "plan" };
         for t in self.store.plan_tasks(&plan.id)? {
@@ -1424,5 +1434,57 @@ mod tests {
         let before = head_stamp(dir.path()).expect("a reflog gives a stamp");
         std::fs::write(logs.join("HEAD"), "a\nb\n").unwrap();
         assert_ne!(head_stamp(dir.path()), Some(before));
+    }
+
+    /// A cancel works on the plan as its caller read it, and it can wait behind a merge. A
+    /// plan whose last check ended meanwhile is done: the cancel that comes after changes
+    /// nothing. One that is still integrating is cancelled.
+    #[tokio::test]
+    async fn a_cancel_that_comes_after_the_plan_finished_changes_nothing() {
+        use crate::orchestrator::{Core, CoreConfig, StartOptions};
+        let root = tempfile::tempdir().unwrap();
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: root.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let inner = &core.inner;
+        // An office with no folder: no scheduling pass touches its plans.
+        let ws = Workspace {
+            id: new_id(),
+            repo_path: root.path().join("gone").to_string_lossy().into_owned(),
+            name: "repo".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: now_ms(),
+        };
+        inner.store.upsert_workspace(&ws).unwrap();
+        let plan = |status: &str| -> Plan {
+            serde_json::from_value(json!({
+                "id": new_id(), "workspace_id": ws.id, "request": "Add a hello file", "summary": "Add a hello file",
+                "assumptions": [], "open_questions": [], "status": status, "base_commit": null,
+                "integration_branch": null, "integration_worktree": null, "created_at": now_ms(), "updated_at": now_ms(),
+            }))
+            .unwrap()
+        };
+        let save = |p: &Plan| inner.emit(Some(&ws.id), row(None, None, None, EventKind::PlanChanged { plan: p.clone() })).unwrap();
+        let cancelled = |p: &Plan| {
+            let said = format!("plan \"{}\" cancelled by you", p.summary);
+            let events = inner.store.events(Some(&ws.id), None, None, 100).unwrap();
+            events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, detail, .. } if *summary == said && detail["plan_id"] == p.id.as_str()))
+        };
+
+        // Read while its checks ran; they ended before the cancel went on.
+        let read = plan("integrating");
+        save(&Plan { status: PlanStatus::Done, ..read.clone() });
+        inner.cancel_plan_inner(&read, "cancelled by you").await.unwrap();
+        assert_eq!(inner.plan(&read.id).unwrap().status, PlanStatus::Done);
+        assert!(!cancelled(&read), "nothing says that a finished plan was cancelled");
+
+        let running = plan("integrating");
+        save(&running);
+        inner.cancel_plan_inner(&running, "cancelled by you").await.unwrap();
+        assert_eq!(inner.plan(&running.id).unwrap().status, PlanStatus::Cancelled);
+        assert!(cancelled(&running));
+        core.shutdown().await;
     }
 }

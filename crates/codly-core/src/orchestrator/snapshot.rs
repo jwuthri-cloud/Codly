@@ -121,12 +121,12 @@ mod tests {
         // An agent in the middle of work: its session, worktree, branch, task and a prompt.
         let worktree = root.path().join("data/worktrees/ada-feature-login");
         let session = "sess-7f3e9b2c-4d1a-4c8e-9f00-123456789abc";
-        let mut career = Career { xp: 300, rank: Rank::Senior, legend: false, stamina: 42, traits: vec!["bookworm".into()], ..Default::default() };
+        let mut career = Career { xp: 300, rank: Rank::Senior, legend: false, traits: vec!["bookworm".into()], ..Default::default() };
         career.stats.merged = 12;
         career.stats.checks_passed = 30;
         career.stats.reviews_done = 7;
         career.milestones.push(Milestone { at: 1, text: "Merged codly/ada/feature-login".into() });
-        let ada = Agent {
+        let mut ada = Agent {
             id: "ada".into(),
             name: "Ada".into(),
             provider: Provider::Claude,
@@ -158,6 +158,11 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
+        // Its stamina as Codly keeps it: every save of the agent works it out again from this
+        // record, and a scheduling pass saves this one when it finds the worktree gone.
+        super::super::refresh_career(&mut ada);
+        let stamina = ada.career.stamina;
+        assert!(stamina > 0, "this record has stamina to export");
         let row = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: None, run_id: None, workspace_id: None, kind: EventKind::AgentChanged { agent: ada } };
         core.inner.store.append_event(Some(&ws.id), &row).unwrap();
         crate::memory::panel::write_memory_file(&core.inner.data("memory"), "ada", "Ada", "# Ada\n\n- the staging password lives in vault\n").unwrap();
@@ -168,7 +173,7 @@ mod tests {
         assert_eq!(v["lot"]["template"], "garage");
         assert!(v["lot"]["furniture"].as_array().unwrap().iter().any(|p| p["item"] == "office.leadDesk"));
         let a = v["crew"].as_array().unwrap().iter().find(|a| a["name"] == "Ada").unwrap();
-        assert_eq!((&a["rank"], &a["stamina"], &a["stats"]["merged"], &a["stats"]["reviews_done"]), (&"senior".into(), &42.into(), &12.into(), &7.into()));
+        assert_eq!((&a["rank"], &a["stamina"], &a["stats"]["merged"], &a["stats"]["reviews_done"]), (&"senior".into(), &stamina.into(), &12.into(), &7.into()));
         assert_eq!((&a["look"]["seed"], &a["traits"][0], &a["title"]), (&"ada".into(), &"bookworm".into(), &"Backend".into()));
 
         // Nothing of the work.

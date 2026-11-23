@@ -1199,8 +1199,19 @@ impl Git {
         let left_out = self.too_big(wt).await?;
         let dir = self.git_path(wt, "--git-dir").await?;
         let index = ScratchIndex(dir.join(format!("codly-index-{}", uuid::Uuid::new_v4())));
-        match std::fs::copy(dir.join("index"), &index.0) {
-            Ok(_) => {}
+        // The copy keeps the time of the worktree's index. A file that changed in the second
+        // its index was written can have the stats the index knows (the same size, the same
+        // second), so git reads every file that is as new as the index file. A copy stamped
+        // later would say that such a file is as the index has it, and the checkpoint would
+        // keep its old content. The time is read before the copy: an index written in between
+        // then looks older than it is, which only makes git read more.
+        let own = dir.join("index");
+        let copied = std::fs::metadata(&own).and_then(|m| m.modified()).and_then(|written| {
+            std::fs::copy(&own, &index.0)?;
+            std::fs::File::options().write(true).open(&index.0)?.set_modified(written)
+        });
+        match copied {
+            Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // nothing was ever staged there
             Err(e) => bail!("cannot copy the index of {}: {e}", wt.display()),
         }
@@ -1297,10 +1308,13 @@ mod tests {
         (dir, repo)
     }
 
+    /// A script that can be run at once. A child process writes it, not this one: a file that
+    /// this process has open for writing is also open in every child that another test starts
+    /// at that moment, until that child runs its program, and the system refuses to run a
+    /// file that is open for writing ("Text file busy").
     fn executable(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, body).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let written = Command::new("sh").args(["-c", "printf %s \"$1\" > \"$0\" && chmod 755 \"$0\""]).arg(path).arg(body).status().unwrap();
+        assert!(written.success(), "the script {} was not written", path.display());
     }
 
     /// An agent rewrites its worktree's `.git` to point at a repository it wrote (whose config
@@ -1900,6 +1914,35 @@ mod tests {
         assert!(git.create_ref(&repo, "refs/codly/checkpoints/a/1", head.trim()).await.is_err(), "a checkpoint is never written over");
         git.delete_ref(&repo, "refs/codly/checkpoints/a/1").await.unwrap();
         assert_eq!(out(&repo, &["for-each-ref", "refs/codly"]), "");
+    }
+
+    /// A file rewritten with the same size, in the second in which the worktree's index was
+    /// written, has the stats that index knows. Git reads such a file again because the index
+    /// file is as new as the file. The private index keeps that time, so a checkpoint taken a
+    /// second later has the file as it is now.
+    #[tokio::test]
+    async fn a_worktree_tree_has_a_same_size_rewrite_made_in_the_second_of_the_last_commit() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        let file = repo.join("a.txt");
+        let second = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        // The file, its commit and its rewrite in one second: again when a second ended in between.
+        let mut n = 0;
+        let now = loop {
+            n += 1;
+            std::fs::write(&file, format!("{n} as committed\n")).unwrap();
+            let made = second(&file);
+            git.commit_all(&repo, "work").await.unwrap().expect("a commit");
+            let now = format!("{n} rewritten ok\n");
+            std::fs::write(&file, &now).unwrap();
+            if second(&repo.join(".git/index")) == made && second(&file) == made {
+                break now;
+            }
+            assert!(n < 9, "the commit and the rewrite never fell in one second");
+        };
+        tokio::time::sleep(Duration::from_millis(1100)).await; // the checkpoint is taken in a later second
+        let tree = git.worktree_tree(&repo).await.unwrap();
+        assert_eq!(out(&repo, &["show", &format!("{tree}:a.txt")]), now);
     }
 
     /// Restore: changed and deleted files come back, files made later go, ignored files stay,
