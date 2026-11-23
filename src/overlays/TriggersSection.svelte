@@ -136,10 +136,6 @@
       <p class="desc">This saves the setting and answers the permission check for connections Codly will make later; nothing listens on the network yet.</p>
     </details>
 
-    <!-- Slot: Webhooks and Slack (their own agent) go here, as <h4 class="r-title"> blocks. -->
-    <h4 class="r-title">Webhooks and Slack</h4>
-    <p class="desc">Inbound triggers from other tools. Not set up yet.</p>
-
     {#if log.length}
       <h4 class="r-title">Recent activity</h4>
       <ul class="log">

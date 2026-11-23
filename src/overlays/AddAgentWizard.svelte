@@ -332,7 +332,7 @@
         <span class="eyebrow">Project folder</span>
         <div class="path" title={folder?.repo_path}>
           <Icon name="reveal" size={14} />
-          <span class="mono">{folder?.repo_path ?? 'No project open'}</span>
+          <span class="mono"><bdi>{folder?.repo_path ?? 'No project open'}</bdi></span>
           {#if folder?.current_branch}<span class="muted small">on {folder.current_branch}</span>{/if}
         </div>
         <p class="muted small">Agents start in the project that is open. Open another repository from the Welcome screen to hire into it.</p>
@@ -477,6 +477,8 @@
   .swatch { width: 26px; height: 26px; border-radius: 50%; background: var(--hue); box-shadow: inset 0 0 0 2px var(--pop); }
   .swatch.on { box-shadow: inset 0 0 0 2px var(--pop), 0 0 0 2px var(--ink-1); }
   .path { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 12px; border-radius: var(--r-md); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); min-width: 0; }
+  /* A long path loses its start, not its end: the box is right-to-left so the ellipsis is on the
+     left, and the path itself stays left-to-right in its <bdi> (without it the leading "/" moves to the end). */
   .path .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; flex: 1; min-width: 0; }
   .check { display: flex; align-items: flex-start; gap: 10px; font-size: var(--t-md); cursor: pointer; }
   .check input { margin-top: 3px; flex-shrink: 0; }

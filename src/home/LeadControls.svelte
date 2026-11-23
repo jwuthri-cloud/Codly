@@ -128,7 +128,8 @@
 {#if open === 'model' && modelBtn}<Menu anchor={modelBtn} items={modelItems} onclose={() => ((open = null), (query = ''))} width={260} bind:search={() => (models.length > SHOWN ? query : null), (v) => (query = v ?? '')} searchPlaceholder="Search models" />{/if}
 
 <style>
-  .controls { display: flex; gap: 4px; padding: 6px 10px 0; }
+  /* In a narrow panel the context and cost chip goes to a line of its own; it is never cut. */
+  .controls { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px 0; }
   .chip { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px 0 9px; border-radius: var(--r-full); font-size: var(--t-sm); font-weight: var(--w-med); color: var(--ink-2); }
   .chip:hover, .chip[aria-expanded='true'] { background: var(--surface-2); color: var(--ink-1); }
   .chip.direct { color: var(--amber-ink); }

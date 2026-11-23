@@ -16,6 +16,20 @@ export function press(row: { id: string; confirm?: string }, armed: string | nul
   return { run: false, armed: row.id };
 }
 
+/**
+ * Rows grouped by section, so each section's header shows once. The sections keep the order
+ * of their best row, and the rows of a section keep their order: the best match stays first.
+ */
+export function bySection<T extends { section: string }>(rows: T[]): T[] {
+  const groups = new Map<string, T[]>();
+  for (const r of rows) {
+    const g = groups.get(r.section);
+    if (g) g.push(r);
+    else groups.set(r.section, [r]);
+  }
+  return [...groups.values()].flat();
+}
+
 /** What an approval asks for, in full, after "<agent> wants to" (a row's title shows 50 characters of it). */
 export function wants(s: ApprovalSubject): string {
   switch (s.kind) {

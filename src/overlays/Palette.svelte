@@ -30,7 +30,7 @@
   import StateMark from '../components/StateMark.svelte';
   import { skillsUi } from '../lib/state/skills.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
-  import { press, wants } from './palette';
+  import { bySection, press, wants } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
   type Row = {
@@ -120,8 +120,8 @@
       { id: 'onboarding', section: 'App', title: 'Replay the quest', sub: 'Install agents, add models, images, voice and video', icon: 'flag', run: () => (ui.onboardingOpen = true) },
       { id: 'shortcuts', section: 'App', title: 'Keyboard shortcuts', icon: 'keyboard', kbd: '?', run: () => (ui.shortcutsOpen = true) },
       { id: 'theme:system', section: 'App', title: 'Theme: follow the system', icon: 'monitor', run: () => updateSettings({ theme: 'system' }) },
-      { id: 'theme:dark', section: 'App', title: 'Theme: dark', icon: 'moon', run: () => updateSettings({ theme: 'dark' }) },
-      { id: 'theme:light', section: 'App', title: 'Theme: light', icon: 'sun', run: () => updateSettings({ theme: 'light' }) },
+      { id: 'theme:dark', section: 'App', title: 'Theme: Night', sub: 'The dark theme', icon: 'moon', run: () => updateSettings({ theme: 'dark' }) },
+      { id: 'theme:light', section: 'App', title: 'Theme: Day', sub: 'The light theme', icon: 'sun', run: () => updateSettings({ theme: 'light' }) },
       { id: 'clis:detect', section: 'App', title: 'Check agent CLIs again', icon: 'refresh', run: () => redetect().then(() => toast({ kind: 'success', title: 'CLIs re-detected' })) },
     );
     for (const p of store.plans) {
@@ -213,17 +213,20 @@
   type Scored = Row & { hits: number[] };
   const rows = $derived.by((): Scored[] => {
     const q = query.trim();
+    // Ranked by score, then grouped: a section's header shows once, the best match stays first.
     const rank = (list: Row[], limit = 50): Scored[] => {
-      if (!q) return list.slice(0, limit).map((r) => ({ ...r, hits: [] }));
-      return list
-        .map((r) => {
-          const sub = r.sub ? fuzzy(q, r.sub) : null;
-          return { r, m: fuzzy(q, r.title) ?? (sub ? { score: sub.score / 3, hits: [] as number[] } : null) };
-        })
-        .filter((x) => x.m)
-        .sort((a, b) => b.m!.score - a.m!.score + (recents.indexOf(b.r.id) >= 0 ? 2 : 0) - (recents.indexOf(a.r.id) >= 0 ? 2 : 0))
-        .slice(0, limit)
-        .map((x) => ({ ...x.r, hits: x.m!.hits }));
+      if (!q) return bySection(list.slice(0, limit).map((r) => ({ ...r, hits: [] })));
+      return bySection(
+        list
+          .map((r) => {
+            const sub = r.sub ? fuzzy(q, r.sub) : null;
+            return { r, m: fuzzy(q, r.title) ?? (sub ? { score: sub.score / 3, hits: [] as number[] } : null) };
+          })
+          .filter((x) => x.m)
+          .sort((a, b) => b.m!.score - a.m!.score + (recents.indexOf(b.r.id) >= 0 ? 2 : 0) - (recents.indexOf(a.r.id) >= 0 ? 2 : 0))
+          .slice(0, limit)
+          .map((x) => ({ ...x.r, hits: x.m!.hits })),
+      );
     };
     if (scope === '>') return rank(commands);
     if (scope === '@') return rank(agentRows);

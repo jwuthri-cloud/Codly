@@ -104,7 +104,8 @@
     {#if toPush}
       <div class="row">
         <span class="what"><Icon name="branch" size={12} />{sync.upstream ? `${sync.ahead} ${sync.ahead === 1 ? 'commit' : 'commits'} not on ${remote} yet` : `${sync.branch} is not on the remote yet`}</span>
-        <button class="btn sm primary" disabled={busy} onclick={push}><Icon name="arrow-right" size={12} />Push to {remote}</button>
+        <!-- The next step only once this card's merge has landed: before it, Merge is the one primary button. -->
+        <button class="btn sm" class:primary={!!merge} disabled={busy} onclick={push}><Icon name="arrow-right" size={12} />Push to {remote}</button>
       </div>
     {/if}
   </div>

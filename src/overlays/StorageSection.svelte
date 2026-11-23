@@ -136,7 +136,7 @@
         {#if r}
           Run logs: {plural(r.logs.items, 'run')}, {bytes(r.logs.bytes)}. Copies of files agents made: {plural(r.artifacts.items, 'file')}, {bytes(r.artifacts.bytes)}.
         {:else}
-          Worktrees, branches and run logs, with their size. Measuring them can take a moment.
+          Worktrees, branches, run logs and the backups of Codly’s data, with their size. Measuring them can take a moment.
         {/if}
       </span>
     </div>

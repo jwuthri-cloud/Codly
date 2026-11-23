@@ -42,7 +42,8 @@
 {#if open && btn}<Menu anchor={btn} items={items} onclose={() => (open = false)} width={300} />{/if}
 
 <style>
-  .controls { display: flex; gap: 4px; padding: 6px 10px 0; }
+  /* In a narrow panel the context and cost chip goes to a line of its own; it is never cut. */
+  .controls { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px 0; }
   .chip { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px 0 9px; border-radius: var(--r-full); font-size: var(--t-sm); font-weight: var(--w-med); color: var(--ink-2); }
   .chip:hover, .chip[aria-expanded='true'] { background: var(--surface-2); color: var(--ink-1); }
   .sub { color: var(--ink-3); font-weight: var(--w-reg); }

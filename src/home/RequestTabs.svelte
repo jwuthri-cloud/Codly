@@ -103,7 +103,8 @@
   .tabs { display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 12px 0 14px; box-shadow: inset 0 -1px 0 var(--line); flex-shrink: 0; }
   .list { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent); }
   .list::-webkit-scrollbar { display: none; }
-  .tab { display: inline-flex; align-items: center; height: 30px; padding-right: 4px; border-radius: var(--r-full); max-width: 250px; flex-shrink: 0; color: var(--ink-3); font-size: var(--t-sm); font-weight: var(--w-med); transition: background-color var(--d-2), color var(--d-2), opacity var(--d-2); }
+  /* Tabs get narrower (their title ends in an ellipsis) down to 72px; only then the list scrolls. */
+  .tab { display: inline-flex; align-items: center; height: 30px; padding-right: 4px; border-radius: var(--r-full); max-width: 250px; min-width: 72px; flex-shrink: 1; color: var(--ink-3); font-size: var(--t-sm); font-weight: var(--w-med); transition: background-color var(--d-2), color var(--d-2), opacity var(--d-2); }
   .tab:hover { background: var(--surface-2); color: var(--ink-1); }
   .tab.closing { opacity: 0.45; }
   .pick { display: inline-flex; align-items: center; gap: 8px; height: 100%; min-width: 0; padding: 0 4px 0 10px; color: inherit; font: inherit; }

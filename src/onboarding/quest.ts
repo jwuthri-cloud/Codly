@@ -35,6 +35,12 @@ export const rank = (points: number) => RANKS.find(([min]) => points >= min)![1]
 /** Level 1 completes by itself as soon as one CLI is ready to work. */
 export const crewReady = (clis: readonly CliInfo[]) => clis.some(cliOk);
 
+/**
+ * Continue rewards the level you leave only when it is earned. The crew level is earned by one
+ * ready CLI, never by the button; every other level is optional and earned by moving on.
+ */
+export const earned = (id: LevelId, clis: readonly CliInfo[]) => id !== 'crew' || crewReady(clis);
+
 /** Mark a level done once, in map order. */
 export function complete(done: readonly string[], id: LevelId): string[] {
   return done.includes(id) ? [...done] : LEVELS.map((l) => l.id).filter((x) => x === id || done.includes(x));
