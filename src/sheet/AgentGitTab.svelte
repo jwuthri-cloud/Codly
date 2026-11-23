@@ -66,6 +66,7 @@
   <div class="top">
     <span class="br"><Icon name="branch" size={12} /><code>{view?.branch ?? (view?.worktree ? 'detached HEAD' : 'no worktree')}</code></span>
     <span class="acts">
+      {#if agent.role === 'solo' && view?.worktree}<button class="btn sm" onclick={() => ui.openDiff({ kind: 'agent', id: agent.id })} data-tip="Read all its changes, comment on lines and send them to {agent.name}"><Icon name="diff" size={12} />View in Changes</button>{/if}
       {#if agent.role === 'solo' && view?.branch}
         <button class="btn sm primary" disabled={merging || !resting} onclick={merge} data-tip={resting ? `Merge ${view.branch} into ${target}` : 'Wait until its turn ends'}><Icon name="merge" size={12} />Merge into {target}</button>
       {/if}

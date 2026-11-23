@@ -14,6 +14,7 @@ import type { MemoryScope } from '../gen/MemoryScope';
 import type { Provider } from '../gen/Provider';
 import type { Rank } from '../gen/Rank';
 import type { Settings } from '../gen/Settings';
+import type { Task } from '../gen/Task';
 import type { TaskStatus } from '../gen/TaskStatus';
 import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
 import type { RequestPrefs } from '../gen/RequestPrefs';
@@ -22,7 +23,7 @@ import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { trustOf } from '../util/career';
 import { withModel } from '../util/team';
-import { followUpRequest, reviewMessage, sameSpot, type ReviewDraft } from '../util/review';
+import { followUpRequest, reviewMessage, sameSpot, splitByTask, splitWords, type ReviewComment, type ReviewDraft, type SplitPart } from '../util/review';
 import { answerText } from '../util/outcome';
 import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
 import { accounts } from './accounts.svelte';
@@ -33,7 +34,7 @@ import { flushClosing } from './closing';
 import { ESC_STOP_WINDOW, escStop } from './esc';
 import { busy } from './queue';
 import { requests } from './requests.svelte';
-import { review, reviewKey } from './review.svelte';
+import { planOwners, review, reviewKey } from './review.svelte';
 import { noteKill, noteStop, stopping } from './stops';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
@@ -408,32 +409,44 @@ export function waitingRequest(key: string): string | null {
  * changed while the call was on its way stays. Merged or finished work (a done task, a whole
  * plan) opens a new request
  * with the comments ready to send: they stay on the diff until you send that message, and Send
- * back again goes to the same request (with the comments as they are now). `paths`: the diff's
- * files, in order. True: the comments went to the worker, or are in a request's composer; false:
- * nothing happened (nothing to send, or the core refused and a toast says why).
+ * back again goes to the same request (with the comments as they are now). On a plan that still
+ * runs, each comment goes where its file's work is (`splitByTask`): the comments on the files of
+ * a task still at work go to that task's worker, one call per task, and only the others go to
+ * the new request; a call that is refused keeps its comments on the diff. A 1:1 agent's diff
+ * sends them as one message of yours in its 1:1 chat. `paths`: the diff's files, in order. True:
+ * the comments went to an agent, or are in a request's composer; false: nothing happened
+ * (nothing to send, or the core refused and a toast says why).
  */
-export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, paths: string[]): Promise<boolean> {
+export async function sendBack(target: { kind: 'plan' | 'task' | 'agent'; id: string }, paths: string[]): Promise<boolean> {
   const key = reviewKey(target);
   const list = review.comments(key);
+  if (!list.length) return false;
+  if (target.kind === 'agent') return sendToAgent(target.id, key, list, paths);
   const task = target.kind === 'task' ? (store.taskMap.get(target.id) ?? null) : null;
   const planId = target.kind === 'plan' ? target.id : task?.plan_id;
   const plan = (planId && store.planMap.get(planId)) || null;
-  if (!list.length || (!task && !plan)) return false;
+  if (!task && !plan) return false;
   if (task && task.status !== 'done') {
-    const ws = store.workspace?.id;
-    const t = await attempt('send your comments back', () => api.sendBackTask(task.id, reviewMessage(list, paths)), 'your comments stay on the diff.');
+    const t = await sendToTask(task, key, list, paths, 'send your comments back');
     if (!t) return false;
-    if (store.isOpen(ws)) store.upsertTask(t);
-    // The worker got `list`. A comment written or changed while the call was on its way is
-    // not in it: it stays on the diff.
-    const now = review.comments(key);
-    for (const c of list) if (now.some((n) => sameSpot(n, c) && n.text === c.text)) review.comment(key, c, '');
-    if (!review.comments(key).length) review.clear(key);
-    const who = (t.assignee && store.agentMap.get(t.assignee)?.name) || 'its worker';
-    toast({ kind: 'success', title: `${t.key} sent back to ${who}`, body: list.length === 1 ? '1 comment' : `${list.length} comments` });
+    toast({ kind: 'success', title: `${t.key} sent back to ${workerName(t)}`, body: list.length === 1 ? '1 comment' : `${list.length} comments` });
     return true;
   }
-  const text = followUpRequest(task, plan, list, paths);
+  let rest = list;
+  if (!task && plan) {
+    const split = splitByTask(list, planOwners(store.tasks.filter((t) => t.plan_id === plan.id)));
+    if (split.tasks.length) {
+      const parts: SplitPart[] = [];
+      for (const { task: owner, comments } of split.tasks) {
+        const t = await sendToTask(owner, key, comments, paths, `send your comments back to ${owner.key}`);
+        if (t) parts.push({ n: comments.length, who: workerName(t), key: t.key });
+      }
+      if (parts.length) toast({ kind: 'success', title: 'Comments sent back', body: splitWords(parts, split.rest.length, true) });
+      if (!split.rest.length) return parts.length > 0;
+      rest = split.rest;
+    }
+  }
+  const text = followUpRequest(task, plan, rest, paths);
   const waiting = waitingRequest(key);
   const was = review.handedTo(key)?.text ?? null;
   if (!waiting) {
@@ -441,7 +454,49 @@ export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, pa
     ui.seedComposer(ui.request, text);
   } else if (was === text) ui.openRequest(waiting);
   else ui.seedComposer(waiting, text, false, was);
-  review.hand(key, { office: store.workspace?.id ?? null, thread: ui.request, text, comments: list });
+  review.hand(key, { office: store.workspace?.id ?? null, thread: ui.request, text, comments: rest });
+  return true;
+}
+
+const workerName = (t: Task) => (t.assignee && store.agentMap.get(t.assignee)?.name) || 'its worker';
+
+/** `sent` went out: those of them still on the diff as they were leave it. A comment written or
+ *  changed while the call was on its way is not in what went: it stays. */
+function dropSent(key: string, sent: ReviewComment[]) {
+  const now = review.comments(key);
+  for (const c of sent) if (now.some((n) => sameSpot(n, c) && n.text === c.text)) review.comment(key, c, '');
+  if (!review.comments(key).length) review.clear(key);
+}
+
+/** Review comments to a task that is not done, through the core (`what`: the toast's words if it
+ *  refuses). The task as the core left it; undefined when it refused. */
+async function sendToTask(task: Task, key: string, comments: ReviewComment[], paths: string[], what: string): Promise<Task | undefined> {
+  const ws = store.workspace?.id;
+  const t = await attempt(what, () => api.sendBackTask(task.id, reviewMessage(comments, paths)), 'your comments stay on the diff.');
+  if (!t) return undefined;
+  if (store.isOpen(ws)) store.upsertTask(t);
+  dropSent(key, comments);
+  return t;
+}
+
+/** Review comments on a 1:1 agent's diff: one message of yours in its 1:1 chat, the call a chat
+ *  message makes (it waits its turn while the agent works). They leave the diff when the core
+ *  took the message; a refused one is not left in the chat: the comments stay on the diff. */
+async function sendToAgent(agentId: string, key: string, list: ReviewComment[], paths: string[]): Promise<boolean> {
+  const agent = store.agentMap.get(agentId);
+  if (!agent) return false;
+  const thread = `agent:${agentId}`;
+  const text = reviewMessage(list, paths);
+  const id = store.queueOutgoing(thread, text, wallNow());
+  try {
+    await api.sendChat(thread, text);
+  } catch (e) {
+    store.dropOutgoing(id);
+    toast({ kind: 'error', title: `Couldn’t send your comments to ${agent.name}`, body: `${msg(e)} — your comments stay on the diff.` });
+    return false;
+  }
+  dropSent(key, list);
+  toast({ kind: 'success', title: `${list.length === 1 ? '1 comment' : `${list.length} comments`} sent to ${agent.name}` });
   return true;
 }
 

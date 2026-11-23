@@ -1178,6 +1178,24 @@ impl Git {
         let out = self.run(wt, &["-c", "core.fsmonitor=false", "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U3", "--", "/dev/null", rel], true).await?;
         Ok(out.stdout)
     }
+
+    /// All the uncommitted work of a checkout as one diff, read only: no index is written and
+    /// no object is stored (a private index, as `snapshot` uses, would store every changed
+    /// file in the repository). The tracked files against HEAD, then each new file that is
+    /// work (untracked, not ignored, and not what `commit_work` leaves out: a copy of Codly's,
+    /// a new folder or file that is too big) against nothing. The checkout must have a commit.
+    pub async fn uncommitted_diff(&self, wt: &Path) -> Result<String> {
+        let mut out = self.read(wt, &["diff", "HEAD", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "-U3", "--"]).await?;
+        let dir = self.git_path(wt, "--git-dir").await?;
+        let left_out = self.not_work(wt, &dir).await?;
+        // A folder's path ends in `/`.
+        let covers = |l: &LeftOut, f: &str| l.path() == f || (l.path().ends_with('/') && f.starts_with(l.path()));
+        let new = split_z(&self.read(wt, &["ls-files", "-z", "--others", "--exclude-standard"]).await?);
+        for f in new.iter().filter(|f| !left_out.iter().any(|l| covers(l, f))) {
+            out.push_str(&self.diff_file(wt, f, true).await?);
+        }
+        Ok(out)
+    }
 }
 
 /// A local branch as Settings → Storage lists it.

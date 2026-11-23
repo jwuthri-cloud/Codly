@@ -149,6 +149,7 @@
     "allow-storage-delete-branch",
     "allow-storage-delete-backup",
     "allow-agent-git",
+    "allow-agent-diff",
     "allow-agent-checkpoints",
     "allow-restore-checkpoint",
     "allow-last-turn-diff",

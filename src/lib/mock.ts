@@ -39,7 +39,7 @@ import type { LastMerge } from './gen/LastMerge';
 import type { PrSource } from './gen/PrSource';
 import type { RepoSync } from './gen/RepoSync';
 import type { Workspace } from './gen/Workspace';
-import { mockAgentGit } from './demo/agentgit';
+import { mockAgentDiff, mockAgentGit } from './demo/agentgit';
 import { setWallHour } from './demo/clock';
 import { BILLING, demoCloseOffice, demoMovedTo, demoPlays } from './demo/office';
 import { MergeConflictDemo } from './demo/mergeConflict';
@@ -777,7 +777,9 @@ export class MockTransport implements Transport {
         return this.byokStatus();
       }
       case 'agent_git':
-        return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now());
+        return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now(), sim.log);
+      case 'agent_diff':
+        return mockAgentDiff(sim.agents.get(String(a.agentId)), sim.log);
       case 'agent_checkpoints':
         return this.checkpoints.list(sim.agents.get(String(a.agentId)), sim.now());
       case 'restore_checkpoint':

@@ -3,11 +3,13 @@
 // plan's), in memory only: a restart starts clean, and sending the comments clears them.
 // Comments on finished work are sent as the message of a new request: Send back puts them in
 // that request's composer (`hand`), and they stay on the diff until the message is sent.
+import type { Task } from '../gen/Task';
 import type { DiffFile } from '../util/diff';
-import { fileMark, heavy, sameSpot, sentIn, withComment, type Anchor, type ReviewComment } from '../util/review';
+import { fileMark, fileOwners, heavy, splitOwners, sameSpot, sentIn, withComment, type Anchor, type ReviewComment } from '../util/review';
+import { store } from './store.svelte';
 
-/** A diff's name here: "task:<id>" or "plan:<id>". */
-export const reviewKey = (t: { kind: 'plan' | 'task'; id: string }): string => `${t.kind}:${t.id}`;
+/** A diff's name here: "task:<id>", "plan:<id>" or "agent:<id>" (a 1:1 agent's whole work). */
+export const reviewKey = (t: { kind: 'plan' | 'task' | 'agent'; id: string }): string => `${t.kind}:${t.id}`;
 
 /** The request whose composer holds a diff's comments: its office and thread (thread names
  *  repeat across offices), the message that was put there (`text`), and the comments that
@@ -116,3 +118,26 @@ class Review {
 }
 
 export const review = new Review();
+
+/** The files of a task's commits, as Codly saw them. */
+function* committedFiles(t: Task): Generator<string> {
+  for (const m of store.taskMarks[t.id] ?? []) yield* m.files ?? [];
+}
+
+/** The files of a task's commits, then the ones its agent changes now. */
+function* knownFiles(t: Task): Generator<string> {
+  yield* committedFiles(t);
+  const live = t.assignee ? store.live[t.assignee]?.files : null;
+  if (live) for (const [path, f] of Object.entries(live)) if (f.modified) yield path;
+}
+
+/** Which task wrote each file of a task's diff (`fileOwners`), from what Codly saw. */
+export function taskOwners(scope: readonly Task[]): Map<string, Task> {
+  return fileOwners(scope, knownFiles);
+}
+
+/** Which task each file of a plan's whole diff is of, and so who takes its comments
+ *  (`splitOwners`: a done task's commit wins over a task at work). */
+export function planOwners(scope: readonly Task[]): Map<string, Task> {
+  return splitOwners(scope, committedFiles, knownFiles);
+}

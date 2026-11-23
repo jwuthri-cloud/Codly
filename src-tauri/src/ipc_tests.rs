@@ -103,6 +103,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::agent_checkpoints,
             commands::restore_checkpoint,
             commands::last_turn_diff,
+            commands::agent_diff,
             crate::agent_controls::set_agent_permission_mode,
             crate::agent_controls::compact_agent,
             crate::agent_controls::agent_context_usage,
@@ -377,6 +378,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "last_turn_diff", json!({ "source": { "kind": "task", "id": "nope" } })).unwrap_err();
     assert!(e.to_string().contains("unknown task nope"), "{e}");
     assert!(invoke(&wv, "last_turn_diff", json!({ "source": { "kind": "plan", "id": "nope" } })).is_err(), "only an agent or a task");
+    // "All changes" of a 1:1 agent, with the key the Changes room sends.
+    let e = invoke(&wv, "agent_diff", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
 
     // A Claude agent's mode, "compact now" and context reading, with the keys the agent panel
     // sends: the core answers (no agent here), not the argument check.

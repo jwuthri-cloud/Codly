@@ -63,9 +63,11 @@ function draft(source: PrSource, world: DemoWorld, pr_state: PrState | null): Pr
   const agent = world.agents.get(source.id);
   const git = mockAgentGit(agent, world.now());
   if (!agent || !git.branch) throw new Error('this agent has no worktree yet, so there is nothing to push');
+  // As the core writes it: a branch with no commit of the agent's yet has no Commits part.
   const commits = git.log.filter((c) => c.author === agent.name);
-  const body = `## Commits\n\n${commits.map((c) => `- ${c.subject} (${c.sha})`).join('\n')}\n\n## Checks\n\nNo checks ran in Codly: ${agent.name} worked alone, outside a plan.\n`;
-  return { remote: 'origin', branch: git.branch, base: 'main', title: commits[0].subject, body, gh_problem: null, warning: null, pr_state };
+  const listed = commits.length ? `## Commits\n\n${commits.map((c) => `- ${c.subject} (${c.sha})`).join('\n')}\n\n` : '';
+  const body = `${listed}## Checks\n\nNo checks ran in Codly: ${agent.name} worked alone, outside a plan.\n`;
+  return { remote: 'origin', branch: git.branch, base: 'main', title: commits[0]?.subject ?? `${agent.name}'s work`, body, gh_problem: null, warning: null, pr_state };
 }
 
 export class PullRequestDemo {
