@@ -128,19 +128,20 @@ export function targetLabel(t: Target | null | undefined, a?: ActivityKind): str
 }
 
 /**
- * Who made a tool call, when it was one of the agent's subagents: "subagent Ada (explorer)",
- * or "subagent" when it has no name. '' for the agent's own call. The Codex adapter marks such
- * a call's input with `subagent: { thread, name }`.
+ * Who made a tool call, when it was one of the agent's helpers (subagents): "helper Ada
+ * (explorer)", or "helper" when it has no name. '' for the agent's own call. The Codex adapter
+ * marks such a call's input with `subagent: { thread, name }`. One word for it on every screen:
+ * "helper".
  */
 export function subagentTag(input: unknown): string {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return '';
   const sub = (input as { subagent?: unknown }).subagent;
   if (!sub || typeof sub !== 'object') return '';
   const name = (sub as { name?: unknown }).name;
-  return typeof name === 'string' && name ? `subagent ${oneLine(name, 40)}` : 'subagent';
+  return typeof name === 'string' && name ? `helper ${oneLine(name, 40)}` : 'helper';
 }
 
-/** `subagentTag` as the end of a line of text: " · subagent Ada (explorer)", or ''. */
+/** `subagentTag` as the end of a line of text: " · helper Ada (explorer)", or ''. */
 export function subagentMark(input: unknown): string {
   const tag = subagentTag(input);
   return tag ? ` · ${tag}` : '';

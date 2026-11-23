@@ -69,6 +69,35 @@ describe('the focus of the window and “Check the work”', () => {
     expect(asked()).toEqual([agent, agent]);
   });
 
+  // Before, the stored timer handle was only a flag: the focus's question was asked anyway.
+  it('a focus that waits asks nothing when a newer question answered meanwhile', async () => {
+    agentChecks.focused(agent);
+    later(2000);
+    agentChecks.focused(agent); // too soon: it waits until 10 s after the first question
+    later(1000);
+    // The Git tab read the worktree again: its answer is about the files as they are after that focus.
+    await agentChecks.load(agent);
+    expect(asked()).toEqual([agent, agent]);
+    later(FOCUS_READ_MS * 2);
+    expect(asked()).toEqual([agent, agent]);
+  });
+
+  it('a focus that waits still asks when the only answer since is to an older question', async () => {
+    let answer: (v: AgentCheck) => void = () => {};
+    agentChecks.focused(agent);
+    // The first question has not answered yet when the second focus comes.
+    vi.mocked(api.agentCheckState).mockReturnValueOnce(new Promise((ok) => (answer = ok)));
+    later(1000);
+    const old = agentChecks.load(agent); // asked before the focus below
+    later(1000);
+    agentChecks.focused(agent);
+    answer(idle);
+    await old;
+    expect(asked()).toEqual([agent, agent]);
+    later(FOCUS_READ_MS);
+    expect(asked()).toEqual([agent, agent, agent]);
+  });
+
   it('is by agent: one agent’s focus does not hold back another’s', () => {
     agentChecks.focused(agent);
     agentChecks.focused(`${agent}-other`);

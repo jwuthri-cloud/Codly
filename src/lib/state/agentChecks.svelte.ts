@@ -22,19 +22,27 @@ class AgentChecks {
   private asked: Record<string, number> = {};
   /** When the core was last asked about each agent. */
   private askedAt: Record<string, number> = {};
-  /** By agent: the question of a focus that came too soon after the last one, until it is asked. */
-  private waiting: Record<string, ReturnType<typeof setTimeout>> = {};
+  /** By agent: the question of a focus that came too soon after the last one, until it is asked
+   *  (`timer`), with when that focus came (`since`). */
+  private waiting: Record<string, { timer: ReturnType<typeof setTimeout>; since: number }> = {};
 
   /** Ask the core what it has for the agent now: when its Git tab opens, when its worktree was
-   *  read again, after a run, and while a run is on its way. (The window's focus: `focused`.) */
+   *  read again, after a run, and while a run is on its way. (The window's focus: `focused`.)
+   *  An answer to a question asked after a focus that waits is about the files as they were
+   *  after that focus: the focus's own question is not asked any more. */
   async load(agentId: string) {
     const mine = (this.asked[agentId] = (this.asked[agentId] ?? 0) + 1);
-    this.askedAt[agentId] = Date.now();
+    const askedAt = (this.askedAt[agentId] = Date.now());
     try {
       const now = await api.agentCheckState(agentId);
       if (this.asked[agentId] !== mine) return;
       this.state = { ...this.state, [agentId]: now };
       this.unread = { ...this.unread, [agentId]: null };
+      const wait = this.waiting[agentId];
+      if (wait && wait.since <= askedAt) {
+        clearTimeout(wait.timer);
+        delete this.waiting[agentId];
+      }
     } catch (e) {
       if (this.asked[agentId] === mine) this.unread = { ...this.unread, [agentId]: message(e) };
     }
@@ -54,10 +62,11 @@ class AgentChecks {
       void this.load(agentId);
       return;
     }
-    this.waiting[agentId] = setTimeout(() => {
+    const timer = setTimeout(() => {
       delete this.waiting[agentId];
       void this.load(agentId);
     }, wait);
+    this.waiting[agentId] = { timer, since: Date.now() };
   }
 
   /** Run the repo's required checks in the agent's worktree. One run for an agent at a time. */

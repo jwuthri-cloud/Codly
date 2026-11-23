@@ -3,12 +3,16 @@
 // skipped, and says what you answered. A "no" says the note you sent with it, and a plan says
 // when it went ahead with your changes: your words, as the core recorded them (state/answers).
 import type { Approval } from '../gen/Approval';
+import type { ApprovalRule } from '../gen/ApprovalRule';
 import type { ApprovalStatus } from '../gen/ApprovalStatus';
 import type { Provider } from '../gen/Provider';
 import { permissionsAsked } from './permissionsAsked';
 import { yourWords, type Words } from '../state/answers';
-import { showsPlan } from './planRequest';
+import { ruleWords } from './approvalRules';
+import { showsPlan, wantsTo } from './planRequest';
+import { sandboxWants } from './sandbox';
 import { oneLine } from './sanitize';
+import { toolInWords } from './toolWords';
 
 type Asked = Pick<Approval, 'subject'>;
 /** A request as the store holds it: what you said with its answer is on record under its id. */
@@ -84,7 +88,9 @@ export function askedLine(asked: Asked, provider: Provider | null = null): strin
     const asks = permissionsAsked(s.detail);
     return asks.lines.length ? `Asked to ${oneLine(asks.wants, 60)}` : 'Asked for more permissions';
   }
-  return `Asked for approval${s.kind === 'command' ? `: ${oneLine(s.command, 60)}` : ''}`;
+  if (s.kind === 'file_change') return `Asked to ${wantsTo(s, provider)}`;
+  if (s.kind === 'tool') return `Asked to ${sandboxWants(s, provider, 60) ?? `use ${oneLine(toolInWords(s.name), 60)}`}`;
+  return `Asked for approval: ${oneLine(s.command, 60)}`;
 }
 
 /**
@@ -109,12 +115,26 @@ export function settledWord(status: ApprovalStatus, asked: Asked | null, provide
   return outcomeWord(status, asked);
 }
 
+/**
+ * A rule you saved with your answer, as the end of a sentence: "commands that start with npm
+ * install", "the command npm test", "the tool create_issue of the MCP server linear".
+ */
+export function savedRuleWords(rule: Pick<ApprovalRule, 'kind' | 'command'>): string {
+  const w = ruleWords(rule);
+  if (!w.code) return w.text[0].toLowerCase() + w.text.slice(1);
+  return rule.kind === 'prefix' ? `commands that start with ${oneLine(w.text, 60)}` : `the command ${oneLine(w.text, 60)}`;
+}
+
 /** An agent's history: how that request ended ("Approved by you", "Denied by you: use pnpm",
- *  "Closed by Codly"). `asked` is the request when it is still known (the line of a question or
- *  of a plan says so, and your note is found by its id), `answer` what you answered to a question. */
-export function settledLine(status: ApprovalStatus, by: string, asked: Held | null, answer: string | null, provider: Provider | null = null): string {
+ *  "Closed by Codly", "Plan accepted by you, with your changes"). `asked` is the request when it
+ *  is still known (the line of a question or of a plan says so, and your note is found by its
+ *  id), `answer` what you answered to a question, `rule` the rule you saved with an approval
+ *  ("Approved by you, and from now on: commands that start with npm install"). */
+export function settledLine(status: ApprovalStatus, by: string, asked: Held | null, answer: string | null, provider: Provider | null = null, rule: Pick<ApprovalRule, 'kind' | 'command'> | null = null): string {
   const said = wordsOf(asked, by);
-  const line = `${settledWord(status, asked, provider, !!said?.planChanged)} ${outcomeBy(by)}`.trim();
+  const changed = !!said?.planChanged && status === 'approved' && !!asked && showsPlan(asked.subject, provider);
+  const line = `${settledWord(status, asked, provider, false)} ${outcomeBy(by)}`.trim() + (changed ? ', with your changes' : '');
   if (asked?.subject.kind === 'question' && status === 'approved' && answer) return `${line}: ${oneLine(answer, 80)}`;
+  if (rule && status === 'approved') return `${line}, and from now on: ${savedRuleWords(rule)}`;
   return said?.note ? `${line}: ${oneLine(said.note, 80)}` : line;
 }
