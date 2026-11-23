@@ -186,7 +186,7 @@
           <span class="desc">Empty uses {PROVIDER_LABEL[leadCli]}’s default. A request can pick its own under the composer. Leads switch on their next message and keep their conversation.</span>
         </div>
         <input class="field" list="lead-models" value={leadModel.name} placeholder="Default" spellcheck="false" autocomplete="off" aria-label="Lead model" onchange={(e) => pickLeadModel(e.currentTarget.value)} />
-        <datalist id="lead-models">{#each leadCatalog?.models ?? [] as m (m.id)}<option value={m.id}>{optionLabel(m)}</option>{/each}</datalist>
+        <datalist id="lead-models">{#each leadCatalog?.models ?? [] as m, i (i)}<option value={m.id}>{optionLabel(m)}</option>{/each}</datalist>
       </div>
       {#if leadListTrouble}<p class="desc warn" role="status">{leadListTrouble} <button class="link" onclick={() => catalogs.ask(leadCli, true)}>Try again</button></p>{/if}
       {#if leadEfforts.length}

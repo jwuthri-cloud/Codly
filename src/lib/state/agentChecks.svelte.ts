@@ -18,7 +18,7 @@ class AgentChecks {
   private asked: Record<string, number> = {};
 
   /** Ask the core what it has for the agent now: when its Git tab opens, when its worktree was
-   *  read again, and while a run is on its way. */
+   *  read again, when Codly's window gets the focus back, and while a run is on its way. */
   async load(agentId: string) {
     const mine = (this.asked[agentId] = (this.asked[agentId] ?? 0) + 1);
     try {

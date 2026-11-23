@@ -14,7 +14,7 @@
   import { Loader } from '../lib/state/loader.svelte';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
-  import { setupChoices } from '../lib/util/worktree';
+  import { checksTurnTrouble, setupChoices } from '../lib/util/worktree';
   import LoadError from '../components/LoadError.svelte';
 
   const checks = new Loader<RequiredChecks>(() => api.requiredChecks());
@@ -23,15 +23,32 @@
     if (store.workspace) void checks.load();
   });
 
+  /** Your choice is on its way to the core: the switch and the buttons wait for its answer, so
+   *  a second click does not send it twice. */
+  let busy = $state(false);
+
   /** Turn the checks on for the text shown (`allow` = its fingerprint) or off (null). The
-   *  section shows what the core saved; a refusal (the file changed meanwhile) reloads it. */
+   *  section shows what the core saved. After an error the checks are read again, and the toast
+   *  says what is true: a refusal (the file changed meanwhile) saved nothing, but an error that
+   *  came after the choice was saved did change them. */
   async function turn(allow: string | null) {
+    if (busy) return;
+    busy = true;
     try {
       checks.set(await api.requiredChecks({ allow }));
     } catch (e) {
-      toast({ kind: 'error', title: 'Couldn’t change the required checks', body: e instanceof Error ? e.message : String(e) });
-      void checks.load();
+      const read = await checks.load();
+      toast({ kind: 'error', title: checksTurnTrouble(allow, read ? checks.value : null), body: e instanceof Error ? e.message : String(e) });
+    } finally {
+      busy = false;
     }
+  }
+
+  /** The switch: it shows what the core has when the answer is there, also after a refusal
+   *  (the click moved it, and nothing else would move it back). */
+  async function flip(box: HTMLInputElement, on: string | null) {
+    await turn(box.checked ? on : null);
+    box.checked = checks.value?.on ?? false;
   }
 </script>
 
@@ -60,13 +77,14 @@
             {/if}
           </span>
         </div>
+        {#if busy && !can.ask}<span class="busy" role="status">Saving…</span>{/if}
         <input
           type="checkbox"
           class="switch"
           checked={s.on}
-          disabled={can.ask || (!can.on && !can.off)}
+          disabled={busy || can.ask || (!can.on && !can.off)}
           aria-label="Run the repo’s required checks"
-          onchange={(e) => turn(e.currentTarget.checked ? can.on : null)}
+          onchange={(e) => flip(e.currentTarget, can.on)}
         />
       </label>
       {#if can.ask}
@@ -77,11 +95,12 @@
             {:else}
               The checks file changed since you turned it on. Codly does not run it, and no task passes its checks, until you read it and turn it on again, or turn it off.
             {/if}
-            When you turn the checks on or off here, Codly checks the tasks that waited again by itself.
+            When you turn the checks on or off here, Codly checks the waiting tasks again by itself. A task whose own check needs your OK stays where it is.
           </p>
           <div class="choices">
-            {#if can.on}<button class="btn sm" onclick={() => turn(can.on)}>Turn on this text</button>{/if}
-            <button class="btn sm" onclick={() => turn(null)}>Turn off</button>
+            {#if can.on}<button class="btn sm" disabled={busy} onclick={() => turn(can.on)}>Turn on this text</button>{/if}
+            <button class="btn sm" disabled={busy} onclick={() => turn(null)}>Turn off</button>
+            {#if busy}<span class="busy">Saving…</span>{/if}
           </div>
         </div>
       {/if}
@@ -111,7 +130,8 @@
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .r-title { font-weight: var(--w-med); }
   .changed { display: flex; flex-direction: column; gap: 8px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--bad); }
-  .choices { display: flex; gap: 8px; }
+  .choices { display: flex; align-items: center; gap: 8px; }
+  .busy { flex: none; font-size: var(--t-sm); color: var(--ink-3); }
   .cmds { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-1); font-size: var(--t-sm); line-height: var(--lh-sm); }
   .cmds li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
   .cmds code { overflow-wrap: anywhere; }

@@ -5,6 +5,7 @@
   button. It stays until you press it: the waiting tasks name this button.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { resumeWork } from '../lib/state/resumeWork.svelte';
   import { store } from '../lib/state/store.svelte';
   import { asksNow, resumeQuestion } from '../lib/util/resumeWork';
@@ -12,6 +13,17 @@
 
   const offer = $derived(resumeWork.offer);
   const asking = $derived(asksNow(store.settings.resume_on_launch, resumeWork.later));
+
+  // What the bar says was true when the core was asked. While it is on screen, a task or a plan
+  // that changes may have changed it (the tasks that waited were cancelled): the core is asked
+  // again (`changed` waits a second, so many changes are one read), and once when the bar shows.
+  const shown = $derived(offer != null);
+  $effect(() => {
+    if (!shown) return;
+    void store.tasks;
+    void store.plans;
+    untrack(() => resumeWork.changed());
+  });
 </script>
 
 {#if offer}

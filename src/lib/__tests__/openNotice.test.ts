@@ -6,6 +6,7 @@ import type { Plan } from '../gen/Plan';
 import type { Workspace } from '../gen/Workspace';
 import { openWorkspace } from '../state/actions';
 import { blockers } from '../state/blockers.svelte';
+import { budget } from '../state/budget.svelte';
 import { offices } from '../state/offices.svelte';
 import { openNotice } from '../state/openNotice';
 import { store } from '../state/store.svelte';
@@ -39,6 +40,7 @@ describe('opening what a notification names', () => {
     ui.revealApproval = null;
     ui.settingsOpen = false;
     ui.settingsTab = null;
+    budget.reveal = false;
     blockers.panel = false;
     ui.openRequest('lead');
   });
@@ -84,6 +86,8 @@ describe('opening what a notification names', () => {
     await openNotice({ workspace_id: null, kind: 'budgets' });
     expect(ui.settingsOpen).toBe(true);
     expect(ui.settingsTab).toBe('safety');
+    // At the budgets, not at the top of the tab: the same way as the toast and the mark in the top bar.
+    expect(budget.reveal).toBe(true);
     expect(openWorkspace).not.toHaveBeenCalled();
   });
 

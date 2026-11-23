@@ -43,6 +43,10 @@
   });
 </script>
 
+<!-- Back in Codly's window: a file you changed in your editor meanwhile is not the checked one
+     any more, and no event says so. The core is asked again, once each time the window gets the focus. -->
+<svelte:window onfocus={() => void agentChecks.load(agent.id)} />
+
 <div class="checks">
   <div class="head">
     <span class="what" role="status">{running ? 'Running your required checks…' : shown ? `${checksLine(shown.results)} · checked at ${clock(shown.at)}` : 'Codly has not checked this work as it is now.'}</span>

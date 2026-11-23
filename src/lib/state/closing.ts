@@ -5,6 +5,7 @@
 // If Codly quits before the time is up, the request is simply still open the next time.
 // Opening another repository does not wait: what was closed is closed first (`flushClosing`).
 // A close that leaves work behind asks before any of this (`closeQuestion`).
+import type { Plan } from '../gen/Plan';
 import { closeRequest } from './actions';
 import { loadPullRequest, prKey, prUi } from './pullRequest.svelte';
 import { requests, type Request } from './requests.svelte';
@@ -47,9 +48,10 @@ export type CloseQuestion = { ask: string; detail: string; yes: 'Close' | 'Disca
  * closes at once, with Undo. The core deletes no work on a close: a running plan is cancelled,
  * but every branch and worktree stays, a finished plan stays in Changes (where it can still be
  * merged), and a pull request is not touched. The request's tab is where that work is merged
- * from, though: a close with finished work that is not merged, or with a pull request still
- * open, first says what becomes of them. A new request with nothing asked in it has no work:
- * it asks only when its composer holds text you did not send.
+ * from, though: a close with finished work that is not merged (a finished plan, or the done
+ * tasks of a plan that failed or was cancelled), or with a pull request still open, first says
+ * what becomes of them. A new request with nothing asked in it has no work: it asks only when
+ * its composer holds text you did not send.
  */
 export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
   if (r.phase === 'new') {
@@ -62,10 +64,20 @@ export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
   // Their pull requests, from Codly's own record (no network), where nothing read them yet.
   await Promise.all(finished.filter((p) => !(pr(p.id) in prUi.opened)).map((p) => loadPullRequest({ kind: 'plan', id: p.id })));
   // Not merged, and not kept on its branch by your own choice: "Ready to merge".
-  const unmerged = finished.filter((p) => !store.mergeOf(p.id) && !p.kept && !ui.keptPlans.includes(p.id));
+  const notMerged = (p: Plan) => !store.mergeOf(p.id) && !p.kept && !ui.keptPlans.includes(p.id);
+  const unmerged = finished.filter(notMerged);
   const open = finished.some((p) => prUi.opened[pr(p.id)]?.state === 'open');
-  if (!unmerged.length && !open) return null;
+  // A plan that failed or was cancelled finished some of its tasks: their work is on the plan's
+  // branch, in no branch of yours, and the request's tab is where you see that.
+  const stopped = store.plans.filter((p) => (p.thread || 'lead') === r.thread && (p.status === 'failed' || p.status === 'cancelled') && notMerged(p));
+  const left = store.tasks.filter((t) => t.status === 'done' && stopped.some((p) => p.id === t.plan_id)).length;
+  if (!unmerged.length && !open && !left) return null;
   const stays = 'The pull request stays open: Codly does not close or merge it.';
+  if (!unmerged.length && left) {
+    const ask = left === 1 ? 'A task is done and not merged: its work stays on the plan’s branch. Close?' : 'Some tasks are done and not merged: their work stays on the plan’s branch. Close?';
+    const kept = 'Nothing is deleted: you can still merge it in Changes.';
+    return { ask, detail: open ? `${kept} ${stays}` : kept, yes: 'Close' };
+  }
   if (!unmerged.length) return { ask: 'Its pull request stays open. Close?', detail: stays, yes: 'Close' };
   const branch = unmerged.length === 1 ? unmerged[0].integration_branch : null;
   const kept = `Nothing is deleted: ${branch ?? 'its work'} stays, and you can still merge it in Changes.`;

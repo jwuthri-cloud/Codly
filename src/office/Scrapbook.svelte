@@ -29,7 +29,7 @@
 
 {#if short && big.length}
   <ol class="book">
-    {#each big as m (m.at + m.text)}
+    {#each big as m, i (i)}
       <li><div class="page"><span class="ic" aria-hidden="true">{icon(m.text)}</span><b>{m.text}</b><span class="t">{new Date(Number(m.at)).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span></div></li>
     {/each}
   </ol>
@@ -40,7 +40,7 @@
     {#each days as d (d.day)}
       <li>
         <span class="day">{d.day}</span>
-        {#each d.items as m (m.at + m.text)}
+        {#each d.items as m, i (i)}
           <div class="page"><span class="ic" aria-hidden="true">{icon(m.text)}</span><b>{m.text}</b><span class="t">{new Date(Number(m.at)).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</span></div>
         {/each}
       </li>

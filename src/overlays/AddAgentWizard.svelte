@@ -280,7 +280,7 @@
     {/if}
     {#if notice.length}
       <div class="callout bad" role="alert">
-        {#each notice as n (n)}<div>{n}</div>{/each}
+        {#each notice as n, i (i)}<div>{n}</div>{/each}
       </div>
     {/if}
 
@@ -381,7 +381,7 @@
           <span class="eyebrow">Model</span>
           <div class="choices" role="radiogroup" aria-label="Model">
             <button type="button" class="choice" role="radio" aria-checked={!picked.name} class:on={!picked.name} onclick={() => pickModel('')}><span class="radio"></span>CLI default</button>
-            {#each (catalog?.models ?? []).slice(0, 8) as option (option.id)}
+            {#each (catalog?.models ?? []).slice(0, 8) as option, oi (oi)}
               <button type="button" class="choice" role="radio" aria-checked={picked.name === option.id} class:on={picked.name === option.id} onclick={() => pickModel(option.id)}><span class="radio"></span>{optionLabel(option)}</button>
             {/each}
           </div>

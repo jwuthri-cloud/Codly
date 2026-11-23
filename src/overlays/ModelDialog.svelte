@@ -62,7 +62,7 @@
           <span class="eyebrow">Model</span>
           <input list="model-options" bind:value={model} placeholder={loading ? 'Loading models…' : 'CLI default'} spellcheck="false" autocomplete="off" />
           <datalist id="model-options">
-            {#each models as m (m.id)}<option value={m.id}>{optionLabel(m)}</option>{/each}
+            {#each models as m, i (i)}<option value={m.id}>{optionLabel(m)}</option>{/each}
           </datalist>
         </label>
         {#if efforts.length}

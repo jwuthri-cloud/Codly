@@ -10,6 +10,7 @@ import { isTauriApp } from '../api';
 import type { Office } from '../gen/Office';
 import { openWorkspace } from './actions';
 import { blockers } from './blockers.svelte';
+import { budget } from './budget.svelte';
 import { offices } from './offices.svelte';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
@@ -85,8 +86,7 @@ function show(t: NoticeTarget) {
       ui.selectAgent(t.id);
       break;
     case 'budgets':
-      ui.settingsTab = 'safety';
-      ui.settingsOpen = true;
+      budget.openSettings();
       break;
   }
 }

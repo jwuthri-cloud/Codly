@@ -390,7 +390,7 @@
 
     <div class="list" id="palette-list" role="listbox" bind:this={listEl}>
       <!-- Why the matches may not be the files on disk: the index is behind them. -->
-      {#each search?.warnings ?? [] as w (w)}<p class="warn" role="status">{w}</p>{/each}
+      {#each search?.warnings ?? [] as w, wi (wi)}<p class="warn" role="status">{w}</p>{/each}
       {#if searchError}
         <p class="hint-empty">Search failed: {searchError}</p>
       {:else if scope === '/' && !search && query.trim().length < 2}
