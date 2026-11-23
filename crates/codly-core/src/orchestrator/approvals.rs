@@ -7,12 +7,12 @@
 //! 1. questions, permission changes and a plan the agent shows you (Claude's plan mode) always
 //!    go to you;
 //! 2. any risk — a provider hint, or one Codly detects (outside the worktree, deletes,
-//!    network, push, sudo, git writes, secrets shown to the model, the agent's own CLI
-//!    settings changed, unparseable shell) — goes to you, except in full mode for an agent
-//!    that is not read-only, where only touching Codly's own data dir or the agent's own CLI
-//!    settings still asks, and so does a command that can lose work in your project folder
-//!    itself (`loses_work`): from an agent that works there (Git isolation off), or one that
-//!    points the command there from its worktree;
+//!    network, push, publish, sudo, git writes, secrets shown to the model, the agent's own
+//!    CLI settings or a package manager's settings changed, unparseable shell) — goes to you,
+//!    except in full mode for an agent that is not read-only, where only touching Codly's own
+//!    data dir or the agent's own CLI settings still asks, and so does a command that can
+//!    lose work in your project folder itself (`loses_work`): from an agent that works there
+//!    (Git isolation off), or one that points the command there from its worktree;
 //! 3. Codly's own MCP tools are allowed in every mode;
 //! 4. then the mode: strict asks for everything else; read-only agents (a 1:1 Claude agent
 //!    that plans first is one until you accept its plan) get only reads in every other mode;
@@ -29,15 +29,18 @@
 //!    read (`cd web && cargo test 2>&1 | tail -5`). A saved rule covers a package download
 //!    into the project and a git command that changes the repository; the exact command also
 //!    covers other network use. Every other risk still asks, and so do strict mode, read-only
-//!    agents and a command that changes your own account or settings (`cargo login`). A tool
-//!    of an MCP server can be saved by its name, when the request shows no risk.
+//!    agents and a command that changes your own account or settings (`cargo login`,
+//!    `npm config set …`). A tool of an MCP server can be saved by its name, when the request
+//!    shows no risk and comes from a CLI that names the tool itself (`names_mcp_tools`).
 //!
 //! What the rules cannot see: they read the command line, not what a program does. A script,
 //! an interpreter (`python x.py`), `make` or a test the agent wrote can do anything the
 //! agent's user account can, so no mode proves that an allowed command stays inside the
 //! worktree. Only an OS sandbox does: Codex runs its commands in one, and Claude Code does
-//! when "Sandbox Claude's shell" is on in Settings (its sandboxed commands then send no
-//! request, so these rules never see them). The other CLIs have none.
+//! when "Sandbox Claude's shell" is on in Settings. That sandbox is a second wall, not a way
+//! around these rules: Codly starts it with `autoAllowBashIfSandboxed: false`
+//! (`adapters/claude.rs`, `settings_json`), so a sandboxed command still sends its request
+//! and is judged here like any other. The other CLIs have no sandbox.
 //!
 //! The shell checks err toward asking: a "read-only command" is a bare program name (no path,
 //! no `VAR=x` prefix, no wrapper, no `$` expansion) whose arguments use none of its options
@@ -73,6 +76,17 @@ pub struct PolicyCtx<'a> {
     /// on, with their keys, when the run started (`connections::given`). A server of any other
     /// name comes from your own CLI setup or from the repo.
     pub own_mcp: &'a [String],
+    /// The CLI of the agent that asks. None: not known, and nothing is taken from a tool's
+    /// name (`names_mcp_tools`).
+    pub provider: Option<Provider>,
+}
+
+/// Does this CLI name the tool of an MCP server itself, as `mcp__<server>__<tool>`? Only Claude
+/// Code is recorded to (`mcp_server`). An ACP agent (Gemini, OpenCode, Cursor, Copilot) names
+/// a request by a title, which is free text: a title that reads like a tool's name says
+/// nothing about the tool, so no rule is saved or followed for it. Codex sends no such request.
+fn names_mcp_tools(provider: Option<Provider>) -> bool {
+    provider == Some(Provider::Claude)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -171,6 +185,8 @@ pub fn with_trust(mode: ApprovalMode, trusted: bool) -> ApprovalMode {
 ///   mode, with a worktree to check paths against and a one-time allow to answer with.
 /// - A tool of an MCP server is saved by its full name (`mcp__linear__create_issue`), as an
 ///   exact rule, and only when the request shows no risk at all. Codly's own tools never ask.
+///   Only for a request of a CLI that names the tool itself (`names_mcp_tools`): the title of
+///   another CLI's request offers no rule and matches none.
 /// - Every risk of a command must be one a rule may cover: `PACKAGE_INSTALL`,
 ///   `NPX_DOWNLOAD`, `GIT_WRITE`, and for the exact command any other "network". A delete, a
 ///   push, sudo, a pipe into a shell, a secret, a path outside the worktree (an install for
@@ -192,7 +208,7 @@ pub fn rule_offer(a: &Approval, ctx: &PolicyCtx) -> ApprovalRuleOffer {
     let command = match &a.subject {
         // A command line that reads like a tool's name would be allowed by that tool's rule.
         ApprovalSubject::Command { command, .. } if !command.trim().is_empty() && mcp_server(command.trim()).is_none() => command,
-        ApprovalSubject::Tool { name, .. } if no_risk && mcp_server(name).is_some() && !is_codly_tool(name) => {
+        ApprovalSubject::Tool { name, .. } if no_risk && names_mcp_tools(ctx.provider) && mcp_server(name).is_some() && !is_codly_tool(name) => {
             return ApprovalRuleOffer { exact: Some(name.clone()), prefix: None };
         }
         _ => return none,
@@ -238,7 +254,8 @@ const MANY_TARGETS: &[&str] = &["make", "just", "task", "gradle", "mvn"];
 
 /// Subcommands that change your own account or settings, or publish under your name: never
 /// saved as a rule, the exact command included (a `cargo login <token>` rule would keep the
-/// token and show it in Settings).
+/// token and show it in Settings). The ones that publish or sign in ask as "publish"
+/// (`PUBLISHES`), and a write to a package manager's settings asks as `OWN_SETUP`.
 const OWN_ACCOUNT: &[&str] = &["config", "login", "logout", "publish"];
 
 /// Does the line run one of the `OWN_ACCOUNT` subcommands (`cargo login x`,
@@ -306,9 +323,23 @@ fn rule_prefix(cmd: &str) -> Option<String> {
     }
     let mut prefix = vec![prog, sub];
     while names_what_runs(&prefix) {
-        prefix.push(words.next().filter(name)?.text.as_str());
+        let next = words.next().filter(name)?.text.as_str();
+        // A program with subcommands of its own, started by another (`pnpm exec npm …`,
+        // `uv run cargo …`): these words would cover everything it can do, which the prefix
+        // of the plain command (`npm install`) never does.
+        if starts_a_program(&prefix) && SUBCOMMAND_TOOLS.contains(&next) {
+            return None;
+        }
+        prefix.push(next);
     }
     Some(prefix.join(" "))
+}
+
+/// Is the next word, after these words that only say that something runs (`names_what_runs`),
+/// the name of a program (`pnpm exec <program>`, `uv run <program>`) and not of a script, a
+/// package or a subcommand (`npm run <script>`, `pnpm create <package>`, `uv pip <subcommand>`)?
+fn starts_a_program(words: &[&str]) -> bool {
+    matches!(words, [_, "exec" | "x" | "dlx"] | ["uv" | "poetry", "run"] | ["uv", "tool", "run"])
 }
 
 fn short(s: &str) -> String {
@@ -807,7 +838,7 @@ fn installs_outside(prog: &str, args: &[String]) -> bool {
     let sub = words.next().unwrap_or("");
     match prog {
         "npm" | "pnpm" | "yarn" | "bun" => {
-            sub == "global"
+            pm_subs(prog, args).iter().any(|(sub, _)| *sub == "global")
                 || flag(&["-g", "--global", "--location=global"])
                 || args.windows(2).any(|w| w[0] == "--location" && w[1] == "global")
         }
@@ -902,9 +933,100 @@ fn subcommands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a str> {
     found
 }
 
+/// Options of npm, pnpm, yarn and bun that stand before the subcommand and take a value in
+/// the next word (`pnpm --filter web add x`, `npm --prefix web install`). With `=` the value
+/// is in the option's own word.
+const PM_VALUED: &[&str] = &["--filter", "-F", "-C", "--dir", "--prefix", "-w", "--workspace", "--cwd"];
+
+/// The words of an npm, pnpm, yarn or bun line that can be its subcommand, each with the
+/// words after it: the first word that is not an option, wherever it stands
+/// (`pnpm --filter web add left-pad`: `add`).
+///
+/// Which of the four takes a value for which option of `PM_VALUED` is not listed, so the word
+/// after such an option is read both ways: as the option's value with the subcommand behind
+/// it, and as the subcommand itself. One switch is known: pnpm's `-w` is the workspace root
+/// (`pnpm -w add x`), not npm's `-w <name>`. yarn names a workspace first
+/// (`yarn workspace web add x`).
+fn pm_subs<'a>(prog: &str, args: &'a [String]) -> Vec<(&'a str, &'a [String])> {
+    let (mut found, mut i) = (vec![], 0);
+    while let Some(a) = args.get(i).map(String::as_str) {
+        i += 1;
+        let valued = PM_VALUED.contains(&a) && !(prog == "pnpm" && a == "-w");
+        if a.starts_with('-') && !valued {
+            continue;
+        }
+        if valued {
+            let Some(next) = args.get(i).map(String::as_str).filter(|next| !next.starts_with('-')) else { continue };
+            i += 1;
+            found.push((next, &args[i..]));
+        } else if prog == "yarn" && a == "workspace" {
+            i += 1; // the workspace's name
+        } else {
+            found.push((a, &args[i..]));
+            break;
+        }
+    }
+    found
+}
+
+/// The commands a package runner starts, each as its words: what follows `npx` or `bunx`,
+/// and what follows the `exec` (`x`, `dlx`) of npm, pnpm, yarn or bun. The runner's own
+/// options are not part of it: `-p pkg`, `--package pkg`, `-c 'cmd'` and `--call 'cmd'` take
+/// the next word, and a `--` ends them.
+fn runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a [String]> {
+    let command = |words: &'a [String]| {
+        let mut i = 0;
+        while let Some(option) = words.get(i).map(String::as_str).filter(|word| word.starts_with('-')) {
+            i += if matches!(option, "-p" | "--package" | "-c" | "--call") { 2 } else { 1 };
+            if option == "--" {
+                break;
+            }
+        }
+        words.get(i..).filter(|command| !command.is_empty())
+    };
+    match prog {
+        "npx" | "bunx" => command(args).into_iter().collect(),
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            pm_subs(prog, args).into_iter().filter(|(sub, _)| matches!(*sub, "exec" | "x" | "dlx")).filter_map(|(_, rest)| command(rest)).collect()
+        }
+        _ => vec![],
+    }
+}
+
+/// The words after a package manager's `config` subcommand, when the line has one, behind an
+/// option's value too (`subcommands`).
+fn config_args<'a>(prog: &str, args: &'a [String]) -> Option<&'a [String]> {
+    let at = args.iter().position(|a| a == "config")?;
+    subcommands(prog, &args[..=at]).contains(&"config").then(|| &args[at + 1..])
+}
+
+/// Does a package manager's command write its settings (`npm config set registry …`,
+/// `pip config unset …`, `poetry config <key> <value>`, `gem sources --add …`)? They are your
+/// own setup, for every project on this Mac: a registry, a proxy, a token. A command that
+/// only reads them (`npm config get`, `pip config list`, `poetry config --list`) is not one.
+fn changes_settings(prog: &str, args: &[String]) -> bool {
+    /// What `config` is told to do when it writes.
+    const WRITES: &[&str] = &["set", "delete", "del", "rm", "unset", "edit", "fix"];
+    let config_writes = || config_args(prog, args).is_some_and(|rest| first_non_flag(rest).is_some_and(|action| WRITES.contains(&action)));
+    match prog {
+        // `npm set key value` is `npm config set key value`.
+        "npm" | "pnpm" => config_writes() || pm_subs(prog, args).iter().any(|(sub, _)| *sub == "set"),
+        "yarn" | "pip" | "pip3" => config_writes(),
+        // poetry has no `set`: a key with a value writes it, and `--unset` removes it.
+        "poetry" => config_args(prog, args).is_some_and(|rest| has(rest, &["--unset"]) || rest.iter().filter(|a| !a.starts_with('-')).count() >= 2),
+        // `gem sources` lists them; `--add`, `--remove` and the like change the list.
+        "gem" => first_non_flag(args) == Some("sources") && options(args).any(|option| !matches!(option, "-l" | "--list")),
+        _ => false,
+    }
+}
+
 /// Programs that start another program in the project's environment (`uv run python -c …`,
 /// `pnpm exec node -e …`, `bundle exec ruby -e …`): an interpreter they start is read too.
+/// What npm, pnpm, yarn, bun, npx and bunx start is read whole (`runner_commands`).
 const STARTERS: &[&str] = &["uv", "poetry", "pipenv", "pdm", "hatch", "rye", "conda", "mise", "bundle", "npm", "pnpm", "yarn", "bun", "npx", "bunx"];
+
+/// The risk label for a command that writes a package manager's settings (`changes_settings`).
+const OWN_SETUP: &str = "changes package manager settings";
 
 /// The risk labels a saved rule can cover (`rule_offer`): a package manager's download, an
 /// npx download, a git command that changes the repository.
@@ -1051,6 +1173,27 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
         {
             runs.push((basename(&args[i]).to_string(), args[i + 1..].to_vec()));
         }
+        // `pnpm exec npm publish` and `npx npm publish` run npm: the command a package runner
+        // starts is read like any other command, and so is one that it starts in turn.
+        let mut read = 0;
+        while let Some((runner, runner_args)) = runs.get(read).cloned() {
+            read += 1;
+            for words in runner_commands(&runner, &runner_args) {
+                // Past a wrapper in front of it (`pnpm exec env CI=1 npm publish`).
+                let Some(at) = classify::command_start(words) else {
+                    add("runs dynamic code");
+                    continue;
+                };
+                if words[..at].iter().any(|w| matches!(basename(w), "sudo" | "doas")) {
+                    add("sudo");
+                }
+                let Some(name) = words.get(at) else { continue };
+                let started = (basename(name).to_string(), words[at + 1..].to_vec());
+                if !runs.contains(&started) {
+                    runs.push(started);
+                }
+            }
+        }
         // `python -m pip install x` runs pip.
         let modules: Vec<(String, Vec<String>)> =
             runs.iter().filter_map(|(prog, args)| classify::python_module(prog, args)).map(|(module, rest)| (module.to_string(), rest.to_vec())).collect();
@@ -1070,6 +1213,9 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
             }
             if publishes(&prog, a) {
                 add("publish");
+            }
+            if changes_settings(&prog, a) {
+                add(OWN_SETUP);
             }
             match prog.as_str() {
                 "sudo" | "doas" | "su" => add("sudo"),
@@ -1122,16 +1268,21 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
                         _ => {}
                     }
                 }
-                "npm" | "pnpm" | "yarn" | "bun" => match first_non_flag(a).unwrap_or("") {
-                    "install" | "i" | "add" | "ci" | "update" | "upgrade" | "up" | "remove" | "rm" | "uninstall" | "dlx" | "x"
-                    | "create" => add(PACKAGE_INSTALL),
-                    "exec" if package_flag(a) => add(PACKAGE_INSTALL),
-                    "exec" if call_flag(a) => add("runs dynamic code"),
-                    // `npm exec` is npx: it downloads what the project does not have (pnpm and
-                    // yarn only run what is installed).
-                    "exec" if prog == "npm" && !npx_local(a.split(|x| x == "exec").nth(1).unwrap_or_default()) => add(NPX_DOWNLOAD),
-                    _ => {}
-                },
+                // The subcommand, wherever it stands (`pnpm --filter web add left-pad`).
+                "npm" | "pnpm" | "yarn" | "bun" => {
+                    for (sub, rest) in pm_subs(&prog, a) {
+                        match sub {
+                            "install" | "i" | "add" | "ci" | "update" | "upgrade" | "up" | "remove" | "rm" | "uninstall" | "dlx" | "x"
+                            | "create" => add(PACKAGE_INSTALL),
+                            "exec" if package_flag(a) => add(PACKAGE_INSTALL),
+                            "exec" if call_flag(a) => add("runs dynamic code"),
+                            // `npm exec` is npx: it downloads what the project does not have
+                            // (pnpm and yarn only run what is installed).
+                            "exec" if prog == "npm" && !npx_local(rest) => add(NPX_DOWNLOAD),
+                            _ => {}
+                        }
+                    }
+                }
                 "npx" | "bunx" if !npx_local(a) => add(NPX_DOWNLOAD),
                 "pip" | "pip3" | "poetry" | "uv" | "pipx" | "gem" | "bundle" | "brew" | "apt" | "apt-get" | "yum" | "dnf" | "composer" => {
                     let sub = first_non_flag(a);
@@ -1499,16 +1650,57 @@ const CHECK_TARGETS: &[&str] = &["test", "tests", "check", "lint", "fmt", "forma
 /// Is every target on a `make`, `just`, `task` or `ninja` line a check? These programs run
 /// each target they are given, so `make test deploy` also deploys: one target that is not in
 /// `CHECK_TARGETS` (or no target, which runs the default one) makes the line an unknown
-/// command. Not targets: a variable (`make test V=1`; ninja has none) and the folder or file
-/// an option names (`make -C web test`, `just -f other.just test`).
+/// command. Not targets: a variable (`make test V=1`; ninja has none) and the value an option
+/// takes in the next word (`make -C web test`, `make -j 8 test`, `just -f other.just test`).
 fn only_check_targets(prog: &str, args: &[String]) -> bool {
-    let valued = match prog {
-        "make" | "ninja" => "Cf",
-        "just" => "fd",
-        _ => "dt",
+    let words = match prog {
+        "make" | "ninja" => build_targets(prog, args),
+        "just" => operands(args, "fd"),
+        _ => operands(args, "dt"),
     };
-    let mut targets = operands(args, valued).into_iter().filter(|word| prog == "ninja" || !classify::is_assignment(word)).peekable();
+    let mut targets = words.into_iter().filter(|word| prog == "ninja" || !classify::is_assignment(word)).peekable();
     targets.peek().is_some() && targets.all(|target| CHECK_TARGETS.contains(&target))
+}
+
+/// The words of a `make` or `ninja` line that are neither an option nor an option's value.
+/// The options read here, and no other, take their value in the next word when it is not
+/// glued to them:
+/// - a folder or a file: make's `-C`, `-f`, `-I`, `-o`, `-W`, `--directory`, `--file`,
+///   `--include-dir`, and ninja's `-C`, `-f`;
+/// - a number: make's `-j`, `-l`, `--jobs`, and ninja's `-j`, `-l`, `-k`. make's may stand
+///   alone, so only a number after it is its value (`make -j test` builds `test`).
+///
+/// A word after any other option stays a target, and so asks unless it is a check.
+fn build_targets<'a>(prog: &str, args: &'a [String]) -> Vec<&'a str> {
+    let make = prog == "make";
+    let (named, counted) = if make { ("CfIoW", "jl") } else { ("Cf", "jkl") };
+    // A load limit (`-l 2.5`) may have a decimal point; a count of jobs is whole.
+    let number = |word: Option<&String>, load: bool| {
+        word.is_some_and(|word| !word.is_empty() && word.chars().all(|c| c.is_ascii_digit() || (load && c == '.')))
+    };
+    let (mut out, mut i, mut done) = (vec![], 0, false);
+    while let Some(a) = args.get(i).map(String::as_str) {
+        i += 1;
+        let next = args.get(i);
+        if done || a == "-" || !a.starts_with('-') {
+            out.push(a);
+        } else if a == "--" {
+            done = true;
+        } else if a.starts_with("--") {
+            let takes_next = match a {
+                "--directory" | "--file" | "--include-dir" => make,
+                "--jobs" => make && number(next, false),
+                _ => false,
+            };
+            i += usize::from(takes_next);
+        } else if let Some((at, option)) = a.char_indices().skip(1).find(|(_, c)| named.contains(*c) || counted.contains(*c))
+            && at + option.len_utf8() == a.len()
+        {
+            // The last letter of its word: its value is the next word (`-kj 2`), not glued on (`-j8`).
+            i += usize::from(named.contains(option) || number(next, option == 'l'));
+        }
+    }
+    out
 }
 
 fn test_runner(prog: &str, args: &[String]) -> bool {
@@ -1811,7 +2003,7 @@ mod tests {
     }
 
     fn eval_in(root: &Path, mode: ApprovalMode, read_only: bool, subject: ApprovalSubject) -> Verdict {
-        evaluate(&approval(subject), &PolicyCtx { mode, worktree: Some(root), verify: &[], read_only, edits: false, checkout: None, own_mcp: &[] })
+        evaluate(&approval(subject), &PolicyCtx { mode, worktree: Some(root), verify: &[], read_only, edits: false, checkout: None, own_mcp: &[], provider: Some(Provider::Claude) })
     }
 
     fn command(c: &str, cwd: &Path) -> ApprovalSubject {
@@ -2170,7 +2362,7 @@ mod tests {
         };
         let cmd = |c: &str, cwd: &str| approval(ApprovalSubject::Command { command: c.into(), cwd: Some(cwd.into()) });
         let eval = |a: &Approval, read_only| {
-            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only, edits: false, checkout: None, own_mcp: &[] })
+            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only, edits: false, checkout: None, own_mcp: &[], provider: Some(Provider::Claude) })
         };
         let allowed = |v: Verdict| matches!(v, Verdict::Allow { choice: ApprovalChoice::AllowOnce, .. });
 
@@ -2269,6 +2461,26 @@ mod tests {
             "task -d web test",
             "ninja test",
             "ninja -C out build",
+            // the value of an option, in the next word
+            "make -j 8 test",
+            "make -k -j 2 check",
+            "make -kj 2 check",
+            "make -j test",
+            "make --jobs 4 test",
+            "make --jobs=4 test",
+            "make -l 2.5 test",
+            "make -I dir test",
+            "make -o old.o test",
+            "make -W src/a.c build",
+            "make --directory web test",
+            "make --directory=web test",
+            "make --file ci.mk tests",
+            "make --include-dir inc test",
+            "make -C web -j 8 test lint",
+            "ninja -j 8 test",
+            "ninja -k 0 test",
+            "ninja -l 4 build",
+            "ninja -j8 -C out test",
         ] {
             assert_eq!(classify_command(c, &[]), Some(TEST_RUNNER), "{c}");
         }
@@ -2280,8 +2492,25 @@ mod tests {
             "make test install",
             "make all",
             "make -C web",
-            "make -j 8 test",
             "make test-deploy",
+            // the number or the folder is no target, and what is left must be a check
+            "make -j 8",
+            "make -j 8 deploy",
+            "make -j test deploy",
+            "make -j 8 test deploy",
+            "make -I deploy",
+            "make --directory web",
+            "make --directory web deploy",
+            "make --jobs deploy",
+            // a count of jobs is whole: `2.5` is a target here
+            "make -j 2.5 test",
+            // an option that is not read: the word after it stays a target
+            "make --makefile ci.mk test",
+            "make --old-file old.o test",
+            "ninja -j 8 install",
+            "ninja -t clean",
+            "ninja -d stats test",
+            "ninja --directory out test",
             "just",
             "just deploy",
             "just test unit",
@@ -2352,6 +2581,21 @@ mod tests {
             "cargo --manifest-path web/Cargo.toml publish",
             "uv --directory web publish",
             "poetry -C web publish",
+            // behind a package runner: the command it starts is read like the plain one
+            "pnpm exec npm publish",
+            "npx npm publish",
+            "bunx npm publish",
+            "npx -y npm publish",
+            "npm exec -- npm publish",
+            "npm x npm publish",
+            "yarn dlx npm publish",
+            "pnpm --filter web exec npm publish",
+            "pnpm exec env CI=1 npm publish",
+            "pnpm exec sh -c 'npm publish'",
+            "npx npx npm publish",
+            "pnpm exec cargo publish",
+            "pnpm exec npm token create",
+            "npx npm login",
         ] {
             assert!(risks(c).iter().any(|r| r == "publish"), "{c}: {:?}", risks(c));
         }
@@ -2377,11 +2621,175 @@ mod tests {
             "uv pip install twine",
             "mvn test",
             "gradle build",
+            "pnpm exec vitest run",
+            "pnpm exec npm run build",
+            "pnpm exec echo publish",
+            "npx prettier --check .",
+            "npx -p npm publish-docs",
         ] {
             assert!(!risks(c).iter().any(|r| r == "publish"), "{c}: {:?}", risks(c));
         }
         // `cargo login` is your account, not a download a saved rule may cover.
         assert_eq!(risks("cargo login abc"), ["publish"]);
+    }
+
+    /// The subcommand of npm, pnpm, yarn and bun is read wherever it stands: behind an
+    /// option's value, behind a workspace's name, and behind a package runner. The plain
+    /// forms are read as before.
+    #[test]
+    fn a_package_managers_subcommand_is_read_wherever_it_stands() {
+        for c in [
+            // the plain forms
+            "pnpm add left-pad",
+            "npm install",
+            "npm ci",
+            "npm i -D left-pad",
+            "npm install --prefix web",
+            "yarn add left-pad",
+            "bun add left-pad",
+            "pnpm -r update",
+            "pnpm dlx create-vite app",
+            // behind an option's value
+            "pnpm --filter web add left-pad",
+            "pnpm -F web add left-pad",
+            "pnpm --filter=web add left-pad",
+            "pnpm --filter web --filter api add left-pad",
+            "pnpm -C packages/web install",
+            "pnpm --dir packages/web install",
+            "pnpm -w add left-pad",
+            "npm --prefix web install",
+            "npm -w web install left-pad",
+            "npm --workspace web ci",
+            "yarn --cwd web add left-pad",
+            "bun --cwd web add left-pad",
+            "yarn workspace web add left-pad",
+            // behind a package runner
+            "pnpm exec npm install left-pad",
+            "npx npm install left-pad",
+            "bunx npm install left-pad",
+            "npm exec -- pnpm add left-pad",
+            "pnpm --filter web exec npm install",
+            "pnpm exec pip install requests",
+            "pnpm exec env CI=1 npm ci",
+            "npx npx npm install left-pad",
+        ] {
+            assert!(risks(c).iter().any(|r| r == PACKAGE_INSTALL), "{c}: {:?}", risks(c));
+        }
+        // A script, a test run or a tool of the project, behind the same options: no risk.
+        for c in [
+            "pnpm --filter web run build",
+            "pnpm --filter web test",
+            "pnpm -F web build",
+            "pnpm -r run build",
+            "pnpm -w run ci",
+            "npm --prefix web run build",
+            "npm -w web test",
+            "npm run add-user",
+            "npm test -- add",
+            "yarn workspace web build",
+            "yarn --cwd web test",
+            "bun run build",
+            "pnpm exec vitest run",
+            "pnpm exec tsc --noEmit",
+        ] {
+            assert!(risks(c).is_empty(), "{c}: {:?}", risks(c));
+        }
+        // An install for the whole machine and `sudo` are seen behind the same words.
+        for (c, risk) in [
+            ("npx npm install -g typescript", "outside worktree"),
+            ("pnpm exec npm install --global typescript", "outside worktree"),
+            ("yarn --cwd web global add typescript", "outside worktree"),
+            ("pnpm exec sudo npm install", "sudo"),
+            ("pnpm exec git push", "push"),
+            ("npx rm -rf dist", "deletes files"),
+        ] {
+            assert!(risks(c).iter().any(|r| r == risk), "{c}: {:?}", risks(c));
+        }
+        // The test runs that balanced mode allows stay test runs.
+        for c in ["pnpm exec vitest run", "pnpm --filter web test", "pnpm -F web exec vitest run", "npm --prefix web test"] {
+            assert_eq!(classify_command(c, &[]), Some(TEST_RUNNER), "{c}");
+        }
+    }
+
+    /// A write to a package manager's settings changes your own setup, for every project: it
+    /// asks in every mode but full access. A command that only reads them does not.
+    #[test]
+    fn writes_to_a_package_managers_settings_ask() {
+        let wt = Path::new("/w/t1");
+        for c in [
+            "npm config set registry http://localhost:4873",
+            "npm config delete registry",
+            "npm config edit",
+            "npm config --global set registry http://localhost:4873",
+            "npm set registry http://localhost:4873",
+            "npm --prefix web config set registry http://localhost:4873",
+            "pnpm config set store-dir .pnpm-store",
+            "pnpm -C web config set registry http://localhost:4873",
+            "yarn config set registry http://localhost:4873",
+            "yarn config delete registry",
+            "yarn config unset npmRegistryServer",
+            "pip config set global.index-url http://localhost:3141",
+            "pip config unset global.index-url",
+            "pip config edit --editor vi",
+            "pip3 config set global.index-url http://localhost:3141",
+            "python -m pip config set global.index-url http://localhost:3141",
+            "poetry config virtualenvs.in-project true",
+            "poetry config repositories.local http://localhost:3141",
+            "poetry config --unset repositories.local",
+            "poetry config --local virtualenvs.create false",
+            "gem sources --add http://localhost:9292",
+            "gem sources -a http://localhost:9292",
+            "gem sources --remove https://rubygems.org",
+            // behind a wrapper, a shell or a package runner
+            "timeout 60 npm config set registry http://localhost:4873",
+            "sh -c 'pip config set global.index-url http://localhost:3141'",
+            "pnpm exec npm config set registry http://localhost:4873",
+            "cd web && npm config set registry http://localhost:4873",
+        ] {
+            assert!(risks(c).iter().any(|r| r == OWN_SETUP), "{c}: {:?}", risks(c));
+            for mode in [ApprovalMode::Balanced, ApprovalMode::Autonomous] {
+                let v = eval_in(wt, mode, false, command(c, wt));
+                assert!(asks_about(&v, OWN_SETUP), "{c} in {mode:?}: {v:?}");
+            }
+            let v = eval_in(wt, ApprovalMode::Full, false, command(c, wt));
+            assert!(matches!(v, Verdict::Allow { .. }), "full access allows it: {c}: {v:?}");
+        }
+        // `cargo login` is your account at the registry: it asks the same way, as a publish.
+        for mode in [ApprovalMode::Balanced, ApprovalMode::Autonomous] {
+            assert!(asks_about(&eval_in(wt, mode, false, command("cargo login abc", wt)), "publish"), "{mode:?}");
+        }
+        assert!(matches!(eval_in(wt, ApprovalMode::Full, false, command("cargo login abc", wt)), Verdict::Allow { .. }));
+
+        // Reads of the settings, and words that only look like a write.
+        for c in [
+            "npm config get registry",
+            "npm config list",
+            "npm config ls -l",
+            "npm config",
+            "npm get registry",
+            "pnpm config get store-dir",
+            "pnpm config list",
+            "yarn config get registry",
+            "yarn config list",
+            "yarn config",
+            "yarn set version stable",
+            "pip config list",
+            "pip config get global.index-url",
+            "pip config debug",
+            "poetry config --list",
+            "poetry config virtualenvs.in-project",
+            "poetry config",
+            "gem sources",
+            "gem sources --list",
+            "gem sources -l",
+            "npm run config set registry",
+            "npm run set-version",
+        ] {
+            assert!(risks(c).is_empty(), "{c}: {:?}", risks(c));
+            let v = eval_in(wt, ApprovalMode::Autonomous, false, command(c, wt));
+            assert!(matches!(v, Verdict::Allow { .. }), "{c}: {v:?}");
+        }
+        assert!(!risks("npm install config").iter().any(|r| r == OWN_SETUP), "a package named config");
     }
 
     #[test]
@@ -2554,7 +2962,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join("docs"), root.join("dist")).unwrap();
         std::os::unix::fs::symlink(root.join("src"), root.join("node_modules/pkg")).unwrap();
         let full = |c: &str| {
-            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(root.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()), own_mcp: &[] };
+            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(root.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()), own_mcp: &[], provider: Some(Provider::Claude) };
             evaluate(&approval(command(c, &root)), &ctx)
         };
         for (c, why) in [
@@ -2593,7 +3001,7 @@ mod tests {
         // From a worktree, a build folder of yours that is a link is not a build folder either.
         let (_tmp2, wt) = worktree();
         let from_wt = |c: &str| {
-            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(wt.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()), own_mcp: &[] };
+            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(wt.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()), own_mcp: &[], provider: Some(Provider::Claude) };
             evaluate(&approval(command(c, &wt)), &ctx)
         };
         let v = from_wt(&format!("rm -rf {}/dist/guide", root.display()));

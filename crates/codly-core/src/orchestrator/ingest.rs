@@ -744,6 +744,7 @@ impl Inner {
             edits: trusts(Rank::Junior),
             checkout: checkout.as_deref(),
             own_mcp: &own_mcp,
+            provider: self.agent(&ctx.agent_id).ok().map(|a| a.provider),
         };
         let verdict = match approvals::evaluate(approval, &pctx) {
             Verdict::Allow { choice, rule } if mode != base => {

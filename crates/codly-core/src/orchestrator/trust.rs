@@ -169,7 +169,9 @@ pub struct WorkspaceTrust {
 pub struct WorktreeTrust {
     /// The worktree's folder.
     pub path: String,
-    /// Every file there that a CLI loads by itself, tracked or not.
+    /// The files there that a CLI loads by itself and that are the worktree's own: what git
+    /// tracks, and what an agent may have written. Not listed: your own files that Codly
+    /// copied in from your checkout, and Claude Code's local settings file.
     pub files: Vec<TrustFile>,
     /// The fingerprint of `files`: send it back (`TrustChoice::trust`) to trust them.
     pub fingerprint: String,
@@ -750,7 +752,9 @@ impl Inner {
     pub(super) async fn park_untrusted(&self, ws: &Workspace, clis: &[CliInfo], mut accounts: Vec<AccountState>) -> Vec<AccountState> {
         let repo = Path::new(&ws.repo_path);
         // Most repos have no file of a CLI without a switch: then there is nothing to read.
-        let has_files = |p: Provider| !STARTS_WITHOUT.contains(&p) && CONFIG.iter().any(|(name, cli)| *cli == p && repo.join(name).exists());
+        // An entry of that name counts whatever it is: a link too, also one that leads nowhere.
+        let has_files =
+            |p: Provider| !STARTS_WITHOUT.contains(&p) && CONFIG.iter().any(|(name, cli)| *cli == p && repo.join(name).symlink_metadata().is_ok());
         if !clis.iter().any(|c| c.path.is_some() && has_files(c.provider)) {
             return accounts;
         }

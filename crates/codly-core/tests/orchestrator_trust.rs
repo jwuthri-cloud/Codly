@@ -930,6 +930,33 @@ async fn a_task_for_a_cli_that_waits_for_your_trust_says_so_and_starts_when_you_
     core.shutdown().await;
 }
 
+/// A link named like a CLI's folder is an entry of that CLI, whatever it points at: here
+/// `.gemini`, tracked, leads nowhere. The scheduler sees it as it sees a folder: the task waits
+/// and says why (files like these cannot be trusted), and no worker start is tried and refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_named_like_a_clis_folder_makes_the_task_wait_for_your_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path(), "here");
+    std::os::unix::fs::symlink("nowhere", repo.join(".gemini")).unwrap();
+    commit(&repo, "a link");
+
+    let settings = Settings { lead_provider: Some(Provider::Claude), worker_providers: vec![Provider::Gemini], ..reviewed() };
+    let (core, specs, _) = team(dir.path(), &repo, vec![cli(Provider::Claude), cli(Provider::Gemini)], &[], settings).await;
+    core.send_chat("lead", "Please do it").await.unwrap();
+    let waiting = wait_for("t1 to say what it waits for", async || {
+        core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.key == "t1" && t.status == TaskStatus::Ready && t.status_reason.is_some())
+    })
+    .await;
+    let cannot = "waiting: no free worker (Gemini CLI is not started while this folder's files cannot be trusted as they are: Settings → Safety)";
+    assert_eq!(waiting.status_reason.as_deref(), Some(cannot));
+    assert!(started(&specs, Role::Worker).is_empty());
+    let status = core.workspace_trust(None).await.unwrap();
+    assert!(status.problem.as_deref().is_some_and(|why| why.contains(".gemini is not a regular file")), "{:?}", status.problem);
+    let blocks: Vec<String> = decisions(&core).await.into_iter().filter(|d| d.0 == "retry").map(|d| d.1).collect();
+    assert!(blocks.is_empty(), "no start was tried: {blocks:?}");
+    core.shutdown().await;
+}
+
 /// Your folder is trusted, but the task's worktree holds other files for the worker's CLI
 /// (here: you changed the file in your folder and did not commit it, so a new worktree has
 /// the committed one). The scheduler cannot know that before the worktree exists. The start

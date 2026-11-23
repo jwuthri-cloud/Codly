@@ -14,11 +14,36 @@
 //! way. An outside prompt is looked for first, because its quoted text may repeat the user's
 //! words. What cannot be told counts as the stranger's.
 //!
-//! Kept in memory, per agent: it ends when Codly quits, as the turn itself does.
+//! The hold is kept in memory and, as one row per agent, in the store (`HELD`): an agent's
+//! session keeps what it read when Codly restarts, so the hold lasts as long. A task that is
+//! resumed after a restart, or any other turn that the user's own message did not start, is
+//! still judged by the approval mode alone. The row is written before the outside prompt goes
+//! out (a prompt on its way already counts as held), and removed when a turn begins that the
+//! user's own message started. The prompts on their way are in memory only: after a restart
+//! no turn reads them any more.
 
-use anyhow::Result;
+use std::collections::HashMap;
+
+use anyhow::{Context, Result};
 
 use super::{Inner, lock};
+use crate::model::Id;
+use crate::store::Store;
+
+/// Where the store keeps an agent's hold: a row while the agent is held back, none otherwise.
+const HELD: &str = "outside_held:";
+
+fn held_key(agent_id: &str) -> String {
+    format!("{HELD}{agent_id}")
+}
+
+/// The agents that were held back when Codly last closed. Each is held back again, with no
+/// prompt on its way. A store that cannot be read fails the start: a hold is never dropped
+/// without a word.
+pub(super) fn stored(store: &Store) -> Result<HashMap<Id, Turns>> {
+    let rows = store.kv_prefixed(HELD).context("read which agents a message from outside Codly holds back")?;
+    Ok(rows.into_iter().map(|(key, _)| (key[HELD.len()..].to_string(), Turns { held: true, ..Default::default() })).collect())
+}
 
 /// One agent's chat prompts that no turn has read yet, and whether its turns are held back.
 #[derive(Default)]
@@ -85,31 +110,39 @@ impl Turns {
 impl Inner {
     /// `send_prompt` for the prompt of a message in an agent's 1:1 chat: the user's own, or one
     /// from outside Codly (`from_outside`). What it is, is noted before it goes out, so the turn
-    /// that reads it is known.
+    /// that reads it is known. An outside message whose hold cannot be written to the store
+    /// does not go out: that hold would end with the next restart.
     pub(super) fn send_chat_prompt(&self, agent_id: &str, from_outside: bool, prompt: String) -> Result<()> {
-        {
-            let mut turns = lock(&self.outside_turns);
-            if from_outside {
-                turns.entry(agent_id.to_string()).or_default().sent_outside(&prompt);
-            } else if let Some(t) = turns.get_mut(agent_id) {
-                t.sent_own(&prompt); // nothing to note for an agent that no outside message reached
+        if from_outside {
+            if let Err(e) = self.note_outside_turns(agent_id, true, |t| t.sent_outside(&prompt)) {
+                self.chat_prompt_not_sent(agent_id, &prompt);
+                return Err(e.context("the message from outside Codly was not sent"));
             }
+        } else {
+            // Nothing to note for an agent that no outside message reached. Your own prompt on
+            // its way changes no hold, so nothing is written.
+            self.note_outside_turns(agent_id, false, |t| t.sent_own(&prompt))?;
         }
         let sent = self.send_prompt(agent_id, prompt.clone());
         if sent.is_err() {
-            self.outside_turns_of(agent_id, |t| t.not_sent(&prompt));
+            self.chat_prompt_not_sent(agent_id, &prompt);
         }
         sent
     }
 
+    /// That prompt did not go out after all.
+    fn chat_prompt_not_sent(&self, agent_id: &str, prompt: &str) {
+        self.change_outside_turns(agent_id, |t| t.not_sent(prompt));
+    }
+
     /// A turn of the agent began with `input` (`starts`), or its running turn took `input` in.
     pub(super) fn chat_prompt_read(&self, agent_id: &str, input: &str, starts: bool) {
-        self.outside_turns_of(agent_id, |t| t.read(input, starts));
+        self.change_outside_turns(agent_id, |t| t.read(input, starts));
     }
 
     /// The agent's run ended, or did not start: the prompts still on their way to it are lost.
     pub(super) fn chat_prompts_lost(&self, agent_id: &str) {
-        self.outside_turns_of(agent_id, Turns::run_ended);
+        self.change_outside_turns(agent_id, Turns::run_ended);
     }
 
     /// Is the agent held back: did one of its turns read a message from outside Codly (or is one
@@ -118,14 +151,36 @@ impl Inner {
         lock(&self.outside_turns).get(agent_id).is_some_and(Turns::held)
     }
 
-    /// Change what is noted for the agent, and forget an agent that has nothing noted any more.
-    fn outside_turns_of(&self, agent_id: &str, change: impl FnOnce(&mut Turns)) {
+    /// `note_outside_turns` for an agent that has something noted, where no caller can stop for
+    /// a store that fails. Only the end of a hold is written from here (a hold begins in
+    /// `send_chat_prompt`): a row that stays keeps the agent held back after a restart, until
+    /// the user's next message to it.
+    fn change_outside_turns(&self, agent_id: &str, change: impl FnOnce(&mut Turns)) {
+        if let Err(e) = self.note_outside_turns(agent_id, false, change) {
+            tracing::warn!("the hold of agent {agent_id} after a message from outside Codly is not up to date in the store: {e:#}");
+        }
+    }
+
+    /// Change what is noted for the agent (`new`: also for an agent with nothing noted yet),
+    /// write a hold that began or ended to the store, and forget an agent that has nothing
+    /// noted any more. What is noted in memory stands when the store fails.
+    fn note_outside_turns(&self, agent_id: &str, new: bool, change: impl FnOnce(&mut Turns)) -> Result<()> {
         let mut turns = lock(&self.outside_turns);
-        let Some(t) = turns.get_mut(agent_id) else { return };
+        if new {
+            turns.entry(agent_id.to_string()).or_default();
+        }
+        let Some(t) = turns.get_mut(agent_id) else { return Ok(()) };
+        let was = t.held();
         change(t);
-        if !t.held() && t.own.is_empty() {
+        let now = t.held();
+        if !now && t.own.is_empty() {
             turns.remove(agent_id);
         }
+        if was == now {
+            return Ok(());
+        }
+        // Under the lock: of two changes, the row of the later one stays.
+        self.store.kv_write(&[(held_key(agent_id), now.then(|| "1".to_string()))]).context("write the hold to the store")
     }
 }
 
@@ -202,5 +257,51 @@ mod tests {
         t.sent_outside(WEBHOOK);
         t.not_sent(WEBHOOK);
         assert!(!t.held());
+    }
+
+    /// The hold is a row in the store from the moment an outside prompt is on its way, through
+    /// the end of the run, until a turn begins that your own message started. A start of Codly
+    /// reads the rows: the agent is held back again, and your own message still ends it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_hold_is_in_the_store_until_your_own_message_starts_a_turn() {
+        use crate::orchestrator::{Core, CoreConfig, StartOptions};
+
+        let dir = tempfile::tempdir().unwrap();
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: dir.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let inner = &core.inner;
+        let rows = || inner.store.kv_prefixed(HELD).unwrap().into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+
+        // A prompt that cannot go out (no run of that agent) leaves nothing behind.
+        assert!(inner.send_chat_prompt("a1", true, WEBHOOK.to_string()).is_err());
+        assert!(!inner.works_for_outside("a1") && rows().is_empty());
+        // Your own message to an agent that no outside message reached notes nothing.
+        inner.note_outside_turns("a1", false, |t| t.sent_own(MINE)).unwrap();
+        assert!(lock(&inner.outside_turns).is_empty() && rows().is_empty());
+
+        // On its way: held, and on record.
+        inner.note_outside_turns("a1", true, |t| t.sent_outside(WEBHOOK)).unwrap();
+        assert!(inner.works_for_outside("a1"));
+        assert_eq!(rows(), ["outside_held:a1"]);
+        // The run ends before a turn read it: still held, still on record.
+        inner.chat_prompts_lost("a1");
+        assert!(inner.works_for_outside("a1"));
+        assert_eq!(rows(), ["outside_held:a1"]);
+
+        // What the next start of Codly reads: the agent is held back, with nothing on its way.
+        let mut after_restart = stored(&inner.store).unwrap();
+        assert_eq!(after_restart.keys().collect::<Vec<_>>(), ["a1"]);
+        let t = after_restart.get_mut("a1").unwrap();
+        assert!(t.held() && t.outside.is_empty() && t.own.is_empty());
+        // A turn that your message did not start (a resumed task) leaves it held.
+        t.read(&wrapped("[Codly] Go on with your task."), true);
+        assert!(t.held());
+
+        // Your own message starts a turn: the hold ends, in memory and in the store.
+        inner.note_outside_turns("a1", false, |t| t.sent_own(MINE)).unwrap();
+        inner.chat_prompt_read("a1", &wrapped(MINE), true);
+        assert!(!inner.works_for_outside("a1") && rows().is_empty());
+        assert!(lock(&inner.outside_turns).is_empty() && stored(&inner.store).unwrap().is_empty());
+        core.shutdown().await;
     }
 }

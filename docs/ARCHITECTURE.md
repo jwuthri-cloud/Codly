@@ -325,11 +325,12 @@ read (`cd web && cargo test 2>&1 | tail -5`); a line with a second command that 
 that substitutes anything, never matches a prefix, and neither does a second target
 (`make docs deploy`) or a form that reaches past the agent's own worktree and branch
 (`git checkout -B main`). A tool of an MCP server is saved by its full name, when the request shows
-no risk. A rule covers a package download into
+no risk and comes from a Claude Code agent: only Claude Code names the tool itself, and the title
+another CLI gives its request offers no rule and matches none. A rule covers a package download into
 the project and a git command that changes the repository (the exact command also covers other
 network use); deletes, `git push`, `sudo`, a pipe into a shell, secrets, paths outside the
 worktree (an install for the whole machine too: `npm install -g`), a publish, a change to your own
-account or settings (`cargo login`) and what cannot be checked always ask, and so do strict mode
+account or settings (`cargo login`, `npm config set …`) and what cannot be checked always ask, and so do strict mode
 and read-only agents. Settings → Safety lists the rules; removing one makes Codly ask again.
 
 **Triggers and inbound** (Settings → Triggers / Inbound). `triggers.rs` holds the pure policy and
@@ -349,8 +350,8 @@ agent picked to answer instead of the Lead makes no plan, so this gate does not 
 agent, whatever its role (a 1:1 agent, a team member at work on a task), the trust you gave it answers
 nothing from the turn that reads such a message until a turn that your own message to it starts: the
 approval mode alone judges its requests (`orchestrator/outside.rs`, read by the broker in `ingest.rs`).
-What you write while that turn runs does not change it. The mark is kept in memory and ends when Codly
-quits, as the turn does. A request can
+What you write while that turn runs does not change it. The mark is also a row in Codly's store, so it
+holds after a restart of Codly: the agent's session keeps what it read. A request can
 also start from GitHub on your click (`orchestrator/intake.rs`, "From issue…" and "From pull request…"
 in the composer's `/` menu and the palette): your `gh` reads the issue or the pull request, your message
 in the thread holds only the link and your own note, and the Lead gets GitHub's text (description,
