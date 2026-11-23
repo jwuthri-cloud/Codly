@@ -154,6 +154,7 @@ pub fn state_of(a: &AccountInfo, now: i64) -> AccountState {
         logged_in: a.logged_in,
         parked: parked_until(&a.limits, now, local_clock),
         used: load(&a.limits, now).used.unwrap_or(UNKNOWN_USED),
+        waits_for_you: None,
     }
 }
 

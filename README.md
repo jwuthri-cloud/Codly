@@ -288,6 +288,8 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   without them, and a CLI that Codly cannot start without them (Gemini CLI, OpenCode, Cursor) is not
   started in that repo: it takes no task and reviews none. A worktree whose files are not the ones
   of your folder (an agent changed them there) is shown with its own files, to trust by itself.
+  The choice is about the repo's files, not yours: a Codex agent starts the MCP servers of your own
+  Codex config in every folder, trusted or not ("Use my own CLI setup" turns them off).
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
   access, which approves it. One exception: with **Sandbox Claude's shell** on (below), a Claude agent's
   sandboxed commands do not ask.

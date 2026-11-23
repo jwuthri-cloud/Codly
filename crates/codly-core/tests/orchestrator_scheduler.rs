@@ -171,6 +171,7 @@ fn acct(label: &str, used: f64) -> AccountState {
         logged_in: Some(true),
         parked: None,
         used,
+        waits_for_you: None,
     }
 }
 
@@ -418,6 +419,31 @@ fn parked_providers_are_skipped_with_the_reason() {
     assert!(summary_of(&a, "t1").contains("Claude Code parked (91% of 5h used, resets in 2h)"), "{}", summary_of(&a, "t1"));
     w.accounts.push(AccountState { parked: Some("7d limit reached".into()), ..AccountState::implicit(&cli(Provider::Codex, Some(true))) });
     assert!(waits(&w.run())[0].1.contains("Codex parked (7d limit reached)"));
+}
+
+/// A CLI that waits for a choice of yours (its files in the repo are not trusted yet) is not
+/// "parked": that word is for a usage limit, which ends by itself. The task says what it
+/// waits for, also when the same account is over a limit.
+#[test]
+fn a_cli_that_waits_for_your_choice_says_so_and_not_parked() {
+    const CHOICE: &str = "waits for your choice about this folder's files: Settings → Safety";
+    let mut assigned = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    assigned.assignee = Some("m1".into());
+    let mut w = World::new(vec![assigned, task("t2", "p", TaskStatus::Ready, &["b/**"], &[])]);
+    w.agents = vec![member("m1", "Ana")];
+    w.accounts = vec![AccountState { waits_for_you: Some(CHOICE.into()), parked: Some("91% of 5h used, resets in 2h".into()), ..acct("default", 0.91) }];
+    let a = w.run();
+    // Ana's task waits for her CLI, with its own reason; the other task goes to the next CLI.
+    assert_eq!(waits(&a), [("t1".to_string(), format!("waiting: Ana (assigned): Claude Code {CHOICE}"))]);
+    assert_eq!(starts(&a)[0].1, Provider::Codex);
+    assert!(summary_of(&a, "t2").ends_with(&format!("; Claude Code {CHOICE}")), "{}", summary_of(&a, "t2"));
+    // No other CLI: every task waits for your choice, and none says "parked".
+    w.settings.worker_providers = vec![Provider::Claude];
+    let reasons: Vec<String> = waits(&w.run()).into_iter().map(|w| w.1).collect();
+    assert_eq!(reasons, [format!("waiting: Ana (assigned): Claude Code {CHOICE}"), format!("waiting: no free worker (Claude Code {CHOICE})")]);
+    // After your choice the usage limit is what is left, under its own word.
+    w.accounts[0].waits_for_you = None;
+    assert_eq!(waits(&w.run())[0].1, "waiting: Ana (assigned): Claude Code parked (91% of 5h used, resets in 2h)");
 }
 
 // ───────────── accounts ─────────────

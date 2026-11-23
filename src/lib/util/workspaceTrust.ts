@@ -1,7 +1,9 @@
 // Workspace trust: what the open-repo question and Settings → Safety say and offer about the
 // repo's own CLI configuration (the core's orchestrator/trust.rs decides what loads).
 
+import type { CliInfo } from '../gen/CliInfo';
 import type { Provider } from '../gen/Provider';
+import type { Settings } from '../gen/Settings';
 import type { TrustFile } from '../gen/TrustFile';
 import type { WorkspaceTrust } from '../gen/WorkspaceTrust';
 import { PROVIDER_LABEL } from './labels';
@@ -62,10 +64,24 @@ function withoutTrustOf(cli: Provider): string {
   }
 }
 
+/** What does not wait for the choice, because it is yours and not the repo's (the core's
+ *  runs.rs: a Codex agent's own servers follow "Use my own CLI setup" alone). */
+export const CODEX_OWN_SERVERS =
+  'A Codex agent starts the MCP servers of your own Codex config in every folder, trusted or not: they are yours, not this repo’s. “Use my own CLI setup” in Settings turns them off.';
+
+/** Do Codex agents start the MCP servers of your own Codex config? Only then is there
+ *  something to say about them: "Use my own CLI setup" is on and Codex is installed. */
+export function startsOwnCodexServers(settings: Pick<Settings, 'use_my_claude_setup'>, clis: readonly Pick<CliInfo, 'provider' | 'path'>[]): boolean {
+  return settings.use_my_claude_setup && clis.some((c) => c.provider === 'codex' && c.path !== null);
+}
+
 /** What each CLI that has files here does while you have not trusted them: one line per CLI,
- *  in the order of the files. */
-export function withoutTrust(t: WorkspaceTrust): string[] {
-  return [...new Set(t.files.map((f) => f.cli))].map(withoutTrustOf);
+ *  in the order of the files. Then, when Codex agents start your own servers (`codexOwn`),
+ *  the line that says they do so in every folder: the one thing a Claude agent loses without
+ *  trust and a Codex agent keeps. */
+export function withoutTrust(t: WorkspaceTrust, codexOwn: boolean): string[] {
+  const lines = [...new Set(t.files.map((f) => f.cli))].map(withoutTrustOf);
+  return codexOwn && lines.length > 0 ? [...lines, CODEX_OWN_SERVERS] : lines;
 }
 
 /** How many files a list shows. A repo can carry thousands (skills with their assets). */

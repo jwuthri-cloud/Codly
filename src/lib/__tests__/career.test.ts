@@ -66,8 +66,17 @@ describe('trust is a safety setting, not a rank', () => {
     for (const t of TRUST) expect(t.allows).not.toMatch(/\b(above|below)\b/i);
     // The top level: working alone needs Balanced permissions, the review is skipped whatever they are.
     expect(trustOf('staff').allows).toBe(
-      'Where permissions are Balanced, it works inside its own worktree without asking (risky actions still ask). Whatever the permissions, its work merges without the cross-vendor review.',
+      'Where permissions are Balanced, it works on its own where the approval rules see no risk (they read the command line, not what a script does). Whatever the permissions, its work merges without the cross-vendor review.',
     );
+  });
+
+  it('working on its own promises no place: the rules cannot check what a command does', () => {
+    for (const level of ['senior', 'staff'] as const) {
+      expect(trustOf(level).allows).toContain('where the approval rules see no risk');
+      expect(trustOf(level).allows).not.toMatch(/inside its own worktree|without asking/);
+    }
+    // A file edit names its paths: for edits the place is checked.
+    expect(trustOf('junior').allows).toContain('edits files inside its own worktree');
   });
 
   it('a change is a raise only when it gives more than the agent has', () => {
@@ -95,7 +104,7 @@ describe('trust is a safety setting, not a rank', () => {
     demoTrust(sim, 'ana', 'staff'); // the same level: nothing to record
     expect(demoTrust(sim, 'ana', 'intern').career.trust).toBe('intern');
     expect(decisions).toEqual([
-      ['trust', 'human', 'you trust Ana to work inside its own worktree without asking, and to merge without the cross-vendor review', { agent: 'ana', name: 'Ana', from: 'intern', to: 'staff' }, { agent: 'ana' }],
+      ['trust', 'human', 'you trust Ana to work on its own where the approval rules see no risk (they read the command line, not what a script does), and to merge without the cross-vendor review', { agent: 'ana', name: 'Ana', from: 'intern', to: 'staff' }, { agent: 'ana' }],
       ['trust', 'human', 'you took back your trust in Ana: it asks like every other agent', { agent: 'ana', name: 'Ana', from: 'staff', to: 'intern' }, { agent: 'ana' }],
     ]);
 

@@ -4,18 +4,20 @@
   again when those files change. Two answers: trust the folder, or open it without the repo's
   own CLI configuration. A worktree whose files are not the ones of your folder is asked about
   here too, with its own files. Closing the question answers nothing: agents start without the
-  files, and Settings → Safety has the same choices.
+  files, and Settings → Safety has the same choices. The list of what each CLI does without
+  trust also says what does not depend on the choice: a Codex agent's own MCP servers.
 -->
 <script lang="ts">
   import { store } from '../lib/state/store.svelte';
   import { workspaceTrust } from '../lib/state/workspaceTrust.svelte';
-  import { trustChoices, withoutTrust } from '../lib/util/workspaceTrust';
+  import { startsOwnCodexServers, trustChoices, withoutTrust } from '../lib/util/workspaceTrust';
   import Dialog from '../components/Dialog.svelte';
   import TrustFiles from './TrustFiles.svelte';
   import TrustWorktree from './TrustWorktree.svelte';
 
   const t = $derived(workspaceTrust.value);
   const name = $derived(store.workspace?.name ?? 'This repo');
+  const codexOwn = $derived(startsOwnCodexServers(store.settings, store.clis));
   let saving = $state(false);
 
   async function choose(trust: string | null) {
@@ -40,7 +42,7 @@
         <TrustFiles files={t.files} problem={t.problem} instructions={t.instructions} />
         <div class="without">
           <p class="eyebrow">Until you trust this folder</p>
-          <ul>{#each withoutTrust(t) as line (line)}<li>{line}</li>{/each}</ul>
+          <ul>{#each withoutTrust(t, codexOwn) as line (line)}<li>{line}</li>{/each}</ul>
         </div>
         <p class="desc">Your choice is for these files as they are now, and for agents started after it. If the files change, Codly asks again. You can change it in Settings → Safety.</p>
         <div class="actions">

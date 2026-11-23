@@ -43,12 +43,17 @@ pub fn trusts(c: &Career, level: Rank) -> bool {
 /// What a trust level lets an agent do, as the decision that records it says it ("you trust
 /// Ana to …"). The levels reuse `Rank`'s names in saved data and each includes the ones below
 /// it; None for Intern, the default: no extra trust, it asks like every other agent.
+///
+/// The words promise only what the approval rules keep (`approvals::with_trust`). A file edit
+/// names its paths, so "inside its own worktree" is checked for it. A command is not: the
+/// rules read the command line, not what a script or a program does, so the higher levels say
+/// "where the approval rules see no risk" and name no place.
 pub fn trust_allows(level: Rank) -> Option<&'static str> {
     match level {
         Rank::Intern => None,
         Rank::Junior => Some("edit files inside its own worktree without asking"),
-        Rank::Senior => Some("work inside its own worktree without asking"),
-        Rank::Staff => Some("work inside its own worktree without asking, and to merge without the cross-vendor review"),
+        Rank::Senior => Some("work on its own where the approval rules see no risk (they read the command line, not what a script does)"),
+        Rank::Staff => Some("work on its own where the approval rules see no risk (they read the command line, not what a script does), and to merge without the cross-vendor review"),
     }
 }
 
@@ -516,6 +521,12 @@ mod tests {
         assert_eq!(trust_allows(Rank::Intern), None);
         assert!(trust_allows(Rank::Junior).unwrap().contains("edit files"));
         assert!(trust_allows(Rank::Staff).unwrap().contains("without the cross-vendor review"));
+        // Working on its own is "where the rules see no risk": the rules cannot prove that a
+        // command stays inside the worktree, so the words do not promise it.
+        for level in [Rank::Senior, Rank::Staff] {
+            let says = trust_allows(level).unwrap();
+            assert!(says.contains("where the approval rules see no risk") && !says.contains("inside its own worktree") && !says.contains("without asking"), "{says}");
+        }
     }
 
     #[test]

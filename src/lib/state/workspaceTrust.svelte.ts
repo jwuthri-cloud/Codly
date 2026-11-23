@@ -6,6 +6,7 @@
 // them, and Settings → Safety has the same choices.
 import { api } from '../api';
 import type { WorkspaceTrust } from '../gen/WorkspaceTrust';
+import { oneAtATime } from '../util/oneAtATime';
 import { asked, shouldAsk } from '../util/workspaceTrust';
 import { store } from './store.svelte';
 import { toast } from './toasts.svelte';
@@ -24,13 +25,17 @@ class Trust {
   /** The fingerprints of the files you closed the question on. */
   private putOff: string[] = [];
   private started = false;
+  /** The read that a record asks for. Records come in bursts (several agents start together,
+   *  a window that was hidden gets what it missed at once): one read at a time, and one more
+   *  after the burst, not one read per record. */
+  private readonly recorded = oneAtATime(() => this.check());
 
   /** Listen for the core's record that an agent started without files you have not decided about (once). */
   start() {
     if (this.started) return;
     this.started = true;
     store.onEvent((ev) => {
-      if (ev.kind.type === 'decision' && ev.kind.decision_type === 'workspace_trust' && ev.kind.method === 'rule') void this.check();
+      if (ev.kind.type === 'decision' && ev.kind.decision_type === 'workspace_trust' && ev.kind.method === 'rule') void this.recorded();
     });
   }
 

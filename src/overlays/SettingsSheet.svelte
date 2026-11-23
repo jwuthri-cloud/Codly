@@ -133,7 +133,7 @@
   const PLAN_TOGGLES = [
     ['auto_run_plans', 'Run plans without asking', 'New requests start in Auto instead of Plan (switch per request under the composer, or ⇧⇥). You can still cancel at any time.'],
     ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
-    ['use_my_claude_setup', 'Use my own CLI setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings once you trusted the folder (Safety). Codex agents also start the MCP servers of your Codex config. Off: agents get Codly’s tools and your Connections only. Applies to agents started after the change; approvals still go through Codly.'],
+    ['use_my_claude_setup', 'Use my own CLI setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings once you trusted the folder (Safety). Codex agents also start the MCP servers of your Codex config, in every folder, trusted or not: they are yours, not the repo’s. Off: agents get Codly’s tools and your Connections only. Applies to agents started after the change; approvals still go through Codly.'],
   ];
   const LONG_RUN_TOGGLES = [
     ['keep_awake', 'Keep the Mac awake while agents work', 'The Mac does not go to sleep by itself while an agent works or a plan runs. It may sleep when all work waits for you. Closing the lid still puts it to sleep.'],

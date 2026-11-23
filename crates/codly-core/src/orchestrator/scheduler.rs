@@ -64,6 +64,10 @@ pub struct AccountState {
     pub parked: Option<String>,
     /// Highest use of its live usage windows, 0..1.
     pub used: f64,
+    /// Takes no task until you decide something, whatever its usage: what it waits for, in
+    /// words that follow its name ("waits for your choice about this folder's files",
+    /// `trust.rs`).
+    pub waits_for_you: Option<String>,
 }
 
 impl AccountState {
@@ -78,6 +82,7 @@ impl AccountState {
             logged_in: cli.logged_in,
             parked: None,
             used: 0.0,
+            waits_for_you: None,
         }
     }
 
@@ -376,8 +381,9 @@ struct Route {
 }
 
 impl RouteCtx<'_> {
-    /// An account of `p` with a free slot that is not parked: the first of `prefer` that
-    /// qualifies, else by the strategy. Err = why none does, one reason per account.
+    /// An account of `p` with a free slot that is not parked and does not wait for you: the
+    /// first of `prefer` that qualifies, else by the strategy. Err = why none does, one reason
+    /// per account.
     fn account_for(&self, p: Provider, prefer: &[&str]) -> Result<AccountPick<'_>, Vec<String>> {
         if !self.clis.iter().any(|c| c.provider == p && c.path.is_some()) {
             return Err(vec![format!("{} not installed", p.label())]);
@@ -395,6 +401,11 @@ impl RouteCtx<'_> {
         let mut open: Vec<(&AccountState, usize)> = vec![];
         for a in all.into_iter().filter(|a| a.usable()) {
             let n = self.per.get(&a.id).copied().unwrap_or(0);
+            // Its own reason, before any usage limit: no reset ends this wait.
+            if let Some(why) = &a.waits_for_you {
+                skipped.push(format!("{} {why}", self.accounts.name(a)));
+                continue;
+            }
             match &a.parked {
                 Some(why) => skipped.push(format!("{} parked ({why})", self.accounts.name(a))),
                 None if n >= cap => skipped.push(format!("{} {n}/{cap} busy", self.accounts.name(a))),
