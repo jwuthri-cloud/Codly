@@ -252,6 +252,9 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         // A program with subcommands of its own, started by another: the exact command only.
         ("pnpm exec npm install left-pad", None),
         ("uv run cargo test", None),
+        ("uv run npm install left-pad", None),
+        ("pnpm exec git add -A", None),
+        ("uv run git add -A", None),
         // The subcommand behind an option's value: the exact command only.
         ("pnpm --filter web add left-pad", None),
         // Not a program that takes a subcommand, or no plain subcommand: the exact command only.
@@ -273,7 +276,29 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         ("git switch --force-create main", None),
         ("git checkout -f main", None),
         ("git switch --discard-changes main", None),
+        // make: options that say how to build, not what, stand beside the one target.
+        ("make test -j 8", Some("make test")),
+        ("make test -j8", Some("make test")),
+        ("make test -j", Some("make test")),
+        ("make test -k", Some("make test")),
+        ("make test -s", Some("make test")),
+        ("make test -kj 2", Some("make test")),
+        ("make test --jobs 4", Some("make test")),
+        ("make test --jobs=4 --keep-going", Some("make test")),
+        // An option that changes what runs, or a variable: the exact command only.
+        ("make test -C web", None),
+        ("make test -Cweb", None),
+        ("make test -f ci.mk", None),
+        ("make test --file=ci.mk", None),
+        ("make test --directory web", None),
+        ("make test -I inc", None),
+        ("make test --eval=x", None),
+        ("make test -B", None),
+        ("make test -n", None),
+        ("make test V=1", None),
         // A second target on the line is a second command.
+        ("make test -j 8 deploy", None),
+        ("make test -j deploy", None),
         ("make docs deploy", None),
         ("just build web", None),
         ("task a b", None),
@@ -378,6 +403,27 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
         "bunx -c 'npm publish'",
         "bun exec 'npm publish'",
         "pnpm --shell-mode exec 'npm publish'",
+        // Your own account or settings behind a package runner, with no other risk on the line.
+        "pnpm exec git config user.name me",
+        "npx git config user.name me",
+        "npm exec -- git config user.name me",
+        "npx -c 'git config user.name me'",
+        "bun exec 'git config user.name me'",
+        "pnpm exec env CI=1 git config user.name me",
+        "pnpm exec sh -c 'git config user.name me'",
+        "npx npx git config user.name me",
+        // Behind another runner, where the command is read by its name.
+        "uv run git config user.name me",
+        "bundle exec git config user.name me",
+        "uv run npm publish",
+        "poetry run twine upload dist/pkg.tar.gz",
+        "bundle exec gem push pkg.gem",
+        "uv run git push",
+        // More writers of a package manager's settings.
+        "bundle config set path vendor/bundle",
+        "bundle config path vendor/bundle",
+        "composer config minimum-stability dev",
+        "composer global require phpunit/phpunit",
         // npm's short name for `config`, and an option's value in front of what it is told to do.
         "npm c set registry http://localhost:4873",
         "npm c get registry",
@@ -429,6 +475,39 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
     for a in [edit, fetch, question] {
         assert!(offer(&a, ApprovalMode::Balanced).is_empty(), "{:?}", a.subject);
     }
+}
+
+/// Runners that each start the next (`uv run uv run … x`): the command behind each is found
+/// again behind every runner in front of it, and is still read once, so a long line gets its
+/// answer at once. The same for a line for a shell that stands behind many of them.
+#[test]
+fn a_long_line_of_runners_gets_its_offer_at_once() {
+    let behind = |runner: &str, last: &str| format!("{}{last}", runner.repeat(40));
+    let cases = [
+        (behind("uv run ", "true"), true),
+        // The word after an option npx does not know is read both ways.
+        (behind("npx --a ", "true"), true),
+        // The command at the end of the line is still read.
+        (behind("uv run ", "git config user.name me"), false),
+        // Each `bun exec` takes the rest of the line as a line for a shell, and that line
+        // holds the next one: each is read once too. Lines so deep inside each other are
+        // not checked, so nothing is offered.
+        (behind("uv run bun exec ", "true"), false),
+    ];
+    let mut late = vec![];
+    for (line, offered) in cases {
+        let (done, answer) = std::sync::mpsc::channel();
+        let request = cmd(&line);
+        std::thread::spawn(move || {
+            // Nobody waits for an answer that comes too late.
+            let _ = done.send(offer(&request, ApprovalMode::Balanced));
+        });
+        match answer.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(o) => assert_eq!((o.exact, o.prefix), (offered.then(|| line.clone()), None), "{line}"),
+            Err(_) => late.push(line),
+        }
+    }
+    assert!(late.is_empty(), "no offer after 10 seconds: {late:#?}");
 }
 
 #[test]
@@ -495,6 +574,11 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
         ("uv pip install", "uv pip install --system some-pkg"),
         ("cargo publish", "cargo publish"),
         ("make docs", "make docs deploy"),
+        ("make test", "make test -j 8 deploy"),
+        ("make test", "make test -C web"),
+        ("make test", "make test -f other.mk"),
+        ("make test", "make test --eval=x"),
+        ("make test", "make test CC=other"),
         ("mvn test", "mvn test deploy"),
         ("gradle check", "gradle check publish"),
         ("task a", "task a b"),
@@ -514,6 +598,8 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
         ("pip install", "pip install requests"),
         ("git checkout", "git checkout feature"),
         ("make docs", "make docs -j4"),
+        ("make test", "make test -j 8"),
+        ("make test", "make test -k -s"),
         ("uv tool run ruff", "uv tool run ruff check src"),
     ] {
         assert!(covers(&saved(ApprovalRuleKind::Prefix, rule), c), "`{rule}` covers `{c}`");
