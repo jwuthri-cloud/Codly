@@ -12,6 +12,7 @@
 //! - `gate`     commit → verify → scope → review → merge queue → done
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
+//! - `preview`  try the work before a merge: your command in a plan's or an agent's worktree
 //! - `approval_rules` "always allow in this repo": saved rules the approval broker follows
 //! - `accounts` the sign-in registry (several accounts per CLI), usage windows, account choice
 //! - `triggers` schedules and context rules run on a clock (policy: `crate::triggers`)
@@ -55,6 +56,7 @@ pub mod names;
 pub mod planner;
 mod plans;
 pub mod prompts;
+pub mod preview;
 mod retry;
 pub mod pull_request;
 mod runs;

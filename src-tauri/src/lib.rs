@@ -16,6 +16,7 @@ mod onboarding_commands;
 mod pr_commands;
 mod quit;
 mod takeover_commands;
+mod preview_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod logging;
@@ -268,6 +269,7 @@ pub fn run() {
             commands::required_checks,
             commands::check_agent,
             commands::workspace_trust,
+            preview_commands::preview,
             commands::list_connections,
             commands::update_connection,
             commands::storage_report,

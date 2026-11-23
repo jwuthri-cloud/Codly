@@ -11,6 +11,7 @@
   import MergeConflictStep from '../components/MergeConflictStep.svelte';
   import RepoSyncBar from '../components/RepoSyncBar.svelte';
   import PullRequestStep from '../components/PullRequestStep.svelte';
+  import PreviewStep from '../components/PreviewStep.svelte';
   import AgentCheckpoints from './AgentCheckpoints.svelte';
   import AgentChecks from './AgentChecks.svelte';
 
@@ -68,6 +69,8 @@
       <button class="icon-btn" aria-label="Refresh" data-tip="Refresh" disabled={busy} onclick={() => load(agent.id)}><Icon name="refresh" size={13} /></button>
     </span>
   </div>
+  <!-- A solo agent's own worktree only: a task's worktree is the gate's (also while a solo agent has the task), and in your project folder your own terminal is the place. -->
+  {#if agent.role === 'solo' && !agent.task_id && view?.worktree && view.worktree !== store.workspace?.repo_path}<PreviewStep source={{ kind: 'agent', id: agent.id }} worktree={view.worktree} agentId={agent.id} />{/if}
   {#if agent.role === 'solo' && view?.worktree}<AgentChecks {agent} {resting} />{/if}
   {#if agent.role === 'solo' && view?.branch}<MergeConflictStep source={{ kind: 'agent', id: agent.id }} refresh={`${merges}:${agent.status}`} who={agent.name} wait={resting ? null : 'Wait until its turn ends'} />{/if}
   {#if agent.role === 'solo'}<RepoSyncBar refresh={merges} agentId={agent.id} />{/if}

@@ -17,6 +17,7 @@
   import MergeConflictStep from '../../components/MergeConflictStep.svelte';
   import RepoSyncBar from '../../components/RepoSyncBar.svelte';
   import PullRequestStep from '../../components/PullRequestStep.svelte';
+  import PreviewStep from '../../components/PreviewStep.svelte';
 
   interface Props {
     planId: string;
@@ -90,6 +91,8 @@
         <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {/if}
     </footer>
+    <!-- Until the merge: Codly removes the plan's worktree then. -->
+    {#if plan.integration_worktree && !merged}<PreviewStep source={{ kind: 'plan', id: planId }} worktree={plan.integration_worktree} />{/if}
     {#if !merged && !kept}<MergeConflictStep source={{ kind: 'plan', id: planId }} refresh={busy} onunchecked={() => merge(true)} />{/if}
     {#if !kept}<RepoSyncBar refresh={merged?.sha ?? busy} {planId} />{/if}
     {#if plan.integration_branch}<PullRequestStep source={{ kind: 'plan', id: planId }} canPush={!merged} />{/if}

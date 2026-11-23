@@ -46,6 +46,10 @@ import type { PrDraft } from './gen/PrDraft';
 import type { PrPushed } from './gen/PrPushed';
 import type { PrSource } from './gen/PrSource';
 import type { PullRequest } from './gen/PullRequest';
+import type { Preview } from './gen/Preview';
+import type { PreviewAction } from './gen/PreviewAction';
+import type { PreviewSeen } from './gen/PreviewSeen';
+import type { PreviewSource } from './gen/PreviewSource';
 import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
@@ -436,6 +440,9 @@ export const api = {
   refreshPullRequest: (source: PrSource) => call<PullRequest>('refresh_pull_request', { source }),
   /** "From issue…" / "From pull request…": read it with your own `gh` and start work on it in the request `thread`. Writes nothing to GitHub. */
   startFromGithub: (thread: string, kind: IntakeKind, reference: string, note: string) => call<Intake>('start_from_github', { thread, kind, reference, note }),
+  /** The preview of a plan's or an agent's worktree: the repo's command and the run there, with its output after `seen`. `action` starts your command or stops it first. */
+  preview: (source: PreviewSource, action: PreviewAction | null = null, seen: PreviewSeen | null = null) =>
+    call<Preview>('preview', { source, action, seen }),
   keepPlan: (planId: string) => call<Plan>('keep_plan', { planId }),
   events: (agentId: string | null, before: number | null, limit = 500) =>
     call<EventRow[]>('get_events', { agentId, before, limit }),

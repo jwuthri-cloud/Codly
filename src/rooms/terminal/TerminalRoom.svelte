@@ -1,5 +1,6 @@
 <!--
-  Terminal room: a real shell (portable-pty in the core) in the repo or any agent's worktree.
+  Terminal room: a real shell (portable-pty in the core) in the repo, any agent's worktree, or
+  a plan's integration worktree (Open in terminal on its card).
   An agent that is in your terminal ("Open in my terminal" in its sheet) has a tab of its own,
   where the core types its CLI's resume command. Sessions survive room switches; WebGL
   rendering only while visible.
@@ -33,6 +34,13 @@
     for (const t of takeovers.active) {
       const a = store.agentMap.get(t.agent_id);
       if (a) list.push({ key: takeoverKey(a.id), cwd: t.cwd, label: `${a.name} in ${PROVIDER_LABEL[a.provider]}`, agentId: a.id, takeover: true });
+    }
+    // A plan's integration worktree: when its card sent you here, and while a shell is open there.
+    for (const p of store.plans) {
+      const wt = p.integration_worktree;
+      if (!wt || seen.has(wt) || (wt !== ui.terminalCwd && !openKeys.includes(wt))) continue;
+      seen.add(wt);
+      list.push({ key: wt, cwd: wt, label: `Plan: ${p.summary}`, agentId: null });
     }
     return list;
   });

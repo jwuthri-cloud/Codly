@@ -168,6 +168,15 @@ one the plan started from. The last merge Codly made there can be taken back wit
 that merge commit, no remote branch has it, and no tracked file has uncommitted changes. The
 merged work always stays on a branch: if its branch was deleted since, the undo puts it back.
 
+**Try it before you merge.** A finished plan's card and a solo agent's Git tab have Run… and Open
+in terminal (`preview.rs`). Run… runs a command the user typed, in the plan's integration worktree
+or the solo agent's worktree, with the user's login environment and the worktree's
+`CODLY_PORT_BASE`; the last command is kept per repo and shown again, never guessed, and each run
+is a Decision. A task's worktree is refused: the gate commits everything in it. The command leads
+its own process group, which ends on Stop, when the worktree is removed, when Codly quits, and
+before a merge of that work commits anything (SIGTERM, then SIGKILL for what is left of the group
+2 s later). Its output is kept in memory only. A crash of Codly leaves the command running.
+
 Every routing, scheduling, gate and merge choice is written to the `decision` table and
 emitted as an event, so "Why did Codex get this task?" always has an answer.
 
@@ -534,6 +543,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       pull_request.rs                     the pull-request step: push a Codly branch, `gh pr create`, checks
                       merge_conflict.rs                   a merge that cannot go straight in: conflict files, an agent resolves it, checks on the merge result
                       intake.rs                           a request from a GitHub issue or pull request, read with `gh`
+                      preview.rs                          try work before a merge: your command in a plan's or an agent's worktree
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
                       takeover.rs                         "Open in my terminal": a session goes to you, and comes back
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
@@ -581,7 +591,7 @@ src-tauri/src/            the macOS shell
   diagnostics.rs    Settings → Troubleshooting: the scrubbed report for a bug report
   commands.rs       most Tauri commands: thin wrappers over Core
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
-  merge_commands.rs onboarding_commands.rs pr_commands.rs    the other commands, one file per topic
+  merge_commands.rs onboarding_commands.rs pr_commands.rs preview_commands.rs    the other commands, one file per topic
   takeover_commands.rs  "Open in my terminal": the take-over commands and the terminal they open
   ui_bus.rs         one ordered Channel of coalesced event batches per webview
   notify.rs         native notifications: event → notice, one per kind within a few seconds, the switches

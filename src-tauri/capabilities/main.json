@@ -185,6 +185,7 @@
     "allow-finish-plan",
     "allow-worktree-setup",
     "allow-workspace-trust",
+    "allow-preview",
     "allow-pull-request",
     "allow-draft-pull-request",
     "allow-create-pull-request",
