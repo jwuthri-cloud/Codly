@@ -7,7 +7,7 @@
   It is also where you review: comment on a line or a file, tick files as viewed, open one in
   the editor, and Send back gives all your comments to the agent that did the work (a new
   request, for work that is merged or finished: the comments stay here until you send its
-  message). A comment on a file that left the diff since stays in the bar above Send back,
+  message; Discard takes them out of that request too). A comment on a file that left the diff since stays in the bar above Send back,
   where you can read and remove it.
 -->
 <script lang="ts">
@@ -15,14 +15,14 @@
   import { api } from '../../lib/api';
   import type { Agent } from '../../lib/gen/Agent';
   import type { Task } from '../../lib/gen/Task';
-  import { mergePlan, sendBack, waitingRequest } from '../../lib/state/actions';
+  import { discardReview, mergePlan, reviewDraft, sendBack, waitingRequest } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
   import { review, reviewKey } from '../../lib/state/review.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { diffStats, type DiffFile } from '../../lib/util/diff';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
-  import { editorPlace, heavy, HEAVY_LABEL, offDiff, parseDiffKeeping, placeId, type DiffParts, type ReviewComment } from '../../lib/util/review';
+  import { discardWords, editorPlace, heavy, HEAVY_LABEL, offDiff, parseDiffKeeping, placeId, reviewBarWords, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
@@ -187,11 +187,11 @@
     await sendBack(target, files.map((f) => f.path));
     sending = false;
   }
-  /** Discard asks once more: the comments are not kept anywhere else. */
-  let discarding = $state(false);
+  /** Discard asks once more, and says where else the comments are (`draft`, read at the first press). */
+  let discarding = $state<{ draft: ReviewDraft } | null>(null);
   $effect(() => {
     void comments;
-    discarding = false;
+    discarding = null;
   });
   function onKey(e: KeyboardEvent) {
     const el = e.target as HTMLElement;
@@ -319,12 +319,12 @@
             </ul>
           {/if}
           <div class="r-row">
-            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {toWorker ? `Send back gives them to ${workerName}; Codly checks the work again after the changes.` : waiting ? 'They are in a new request, ready to send, and stay here until you send its message. Send back opens that request.' : 'This work is finished: Send back opens a new request with your comments, ready to send.'}</p>
+            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {discarding ? discardWords(comments.length, discarding.draft) : reviewBarWords(comments.length, toWorker ? workerName : null, waiting ? review.inHand(key) : null)}</p>
             {#if discarding}
-              <button class="btn sm danger" onclick={() => review.clear(key)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
-              <button class="btn sm ghost" onclick={() => (discarding = false)}>Keep</button>
+              <button class="btn sm danger" onclick={() => discardReview(key)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
+              <button class="btn sm ghost" onclick={() => (discarding = null)}>Keep</button>
             {:else}
-              <button class="btn sm ghost" onclick={() => (discarding = true)}>Discard</button>
+              <button class="btn sm ghost" onclick={() => (discarding = { draft: reviewDraft(key) })}>Discard</button>
               <button class="btn sm primary" disabled={sending} onclick={send}><Icon name="send" size={13} />Send back</button>
             {/if}
           </div>

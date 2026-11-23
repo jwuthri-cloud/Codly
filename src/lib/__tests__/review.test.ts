@@ -3,7 +3,8 @@ import { api } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { Plan } from '../gen/Plan';
 import type { Task } from '../gen/Task';
-import { closeRequest, sendBack, sendChat, waitingRequest } from '../state/actions';
+import { draftSlot, loadDraft, saveDraft } from '../../home/drafts';
+import { closeRequest, discardReview, reviewDraft, sendBack, sendChat, waitingRequest } from '../state/actions';
 import { requests } from '../state/requests.svelte';
 import { review, reviewKey } from '../state/review.svelte';
 import { store } from '../state/store.svelte';
@@ -11,8 +12,8 @@ import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
 import { parseDiff, type DiffFile } from '../util/diff';
 import {
-  editorPlace, fileAnchor, fileMark, firstLines, followUpRequest, heavy, inOrder, LARGE_FILE, lineAnchor, lineCount, linePlace,
-  linesToDraw, offDiff, parseDiffKeeping, placeComments, placeId, reviewMessage, withComment, type ReviewComment,
+  discardWords, editorPlace, fileAnchor, fileMark, firstLines, followUpRequest, heavy, inOrder, LARGE_FILE, lineAnchor, lineCount, linePlace,
+  linesToDraw, offDiff, parseDiffKeeping, placeComments, placeId, reviewBarWords, reviewMessage, withComment, type ReviewComment,
 } from '../util/review';
 
 const A = `diff --git a/src/a.ts b/src/a.ts
@@ -153,6 +154,34 @@ describe('the message Send back builds', () => {
     );
     expect(followUpRequest(null, { ...plan, merged_sha: 'abc' }, one, paths).split('\n')[0]).toBe('I reviewed the plan “Add two files”. Its work is merged. Please make these changes.');
     expect(followUpRequest({ ...task, plan_id: null }, null, one, paths).split('\n')[0]).toBe('I reviewed task t2 “Add b”. Its work is on the branch codly/ab12/t2. Please make these changes.');
+  });
+});
+
+describe('what the review bar says', () => {
+  it('one comment is "it", several are "them"', () => {
+    expect(reviewBarWords(1, 'Ana', null)).toBe('Send back gives it to Ana; Codly checks the work again after the changes.');
+    expect(reviewBarWords(2, 'Ana', null)).toBe('Send back gives them to Ana; Codly checks the work again after the changes.');
+    expect(reviewBarWords(1, null, null)).toBe('This work is finished: Send back opens a new request with your comment, ready to send.');
+    expect(reviewBarWords(3, null, null)).toBe('This work is finished: Send back opens a new request with your comments, ready to send.');
+    expect(reviewBarWords(1, null, 1)).toBe('It is in a new request, ready to send, and stays here until you send its message. Send back opens that request.');
+    expect(reviewBarWords(2, null, 2)).toBe('They are in a new request, ready to send, and stay here until you send its message. Send back opens that request.');
+  });
+
+  it('after Send back, a comment written or changed since is counted apart: it is not in the request yet', () => {
+    expect(reviewBarWords(2, null, 1)).toBe('1 is in a new request, ready to send; 1 is not in it yet. Send back puts it in that request too.');
+    expect(reviewBarWords(5, null, 2)).toBe('2 are in a new request, ready to send; 3 are not in it yet. Send back puts them in that request too.');
+    // Every comment changed since: the request holds none of them as they are now.
+    expect(reviewBarWords(1, null, 0)).toBe('A new request holds your comment as it was at Send back, not as it is now. Send back brings that request up to date.');
+    expect(reviewBarWords(2, null, 0)).toBe('A new request holds your comments as they were at Send back, not as they are now. Send back brings that request up to date.');
+  });
+
+  it('before a discard, says where else the comments are', () => {
+    expect(discardWords(1, null)).toBe('It is not kept anywhere else.');
+    expect(discardWords(2, null)).toBe('They are not kept anywhere else.');
+    expect(discardWords(1, 'seeded')).toBe('Discard also takes it out of the new request.');
+    expect(discardWords(2, 'seeded')).toBe('Discard also takes them out of the new request.');
+    expect(discardWords(1, 'edited')).toBe('It is also in a draft request, in a message you changed: that draft stays as you wrote it.');
+    expect(discardWords(2, 'edited')).toBe('They are also in a draft request, in a message you changed: that draft stays as you wrote it.');
   });
 });
 
@@ -481,5 +510,78 @@ describe('Send back', () => {
     expect(ui.request).not.toBe(draft);
     expect(ui.draftRequests.map((d) => d.thread)).toEqual([ui.request]);
     expect(waitingRequest(key)).toBe(ui.request);
+  });
+
+  it('counts the comments that are in the request as they are now', async () => {
+    finished();
+    write();
+    expect(review.inHand(key)).toBe(0); // no Send back yet
+    await sendBack(target, ['src/a.ts']);
+    expect(review.inHand(key)).toBe(1);
+    review.comment(key, fileAnchor('src/a.ts'), 'And add a test.');
+    expect([review.comments(key).length, review.inHand(key)]).toEqual([2, 1]);
+    review.comment(key, lineAnchor('src/a.ts', fresh), 'Call it `after`.');
+    expect([review.comments(key).length, review.inHand(key)]).toEqual([2, 0]);
+  });
+
+  /** Send back from the request `lead`, then back to Changes: the composer took the message and keeps it as its draft, off screen. */
+  const sentBack = async (around = (message: string) => message) => {
+    finished();
+    write();
+    await sendBack(target, ['src/a.ts']);
+    const draft = ui.request;
+    const slot = draftSlot(store.workspace?.id, draft);
+    saveDraft(slot, around(ui.composerSeed!.text), []);
+    ui.composerSeed = null;
+    ui.go('changes');
+    return { draft, slot };
+  };
+
+  it('Discard after Send back takes the comments out of the request too, and drops a request that then holds nothing', async () => {
+    expect(reviewDraft(key)).toBeNull(); // in no request
+    const { draft, slot } = await sentBack();
+    expect(reviewDraft(key)).toBe('seeded');
+
+    discardReview(key);
+    expect(review.comments(key)).toEqual([]);
+    expect(loadDraft(slot)).toEqual({ text: '', files: [] });
+    expect(ui.draftRequests).toEqual([]);
+    expect(requests.get(draft)).toBeNull(); // not a tab any more
+    // You were on that request: you are on the one beside it now, still in Changes.
+    expect([ui.request, ui.thread, ui.room]).toEqual(['lead', 'lead', 'changes']);
+  });
+
+  it('Discard leaves what you wrote around the comments, in a request that stays', async () => {
+    const { draft, slot } = await sentBack((message) => `Start with the names.\n\n${message}\n\nThen run the tests.`);
+    expect(reviewDraft(key)).toBe('seeded');
+
+    discardReview(key);
+    expect(review.comments(key)).toEqual([]);
+    expect(loadDraft(slot).text).toBe('Start with the names.\n\nThen run the tests.');
+    expect(ui.draftRequests.map((d) => d.thread)).toEqual([draft]);
+    expect(ui.request).toBe(draft);
+    saveDraft(slot, '', []);
+  });
+
+  it('Discard leaves a message you changed: the draft is yours', async () => {
+    const { draft, slot } = await sentBack((message) => message.replace('Call it `next`.', 'Call it `after`.'));
+    expect(reviewDraft(key)).toBe('edited');
+
+    discardReview(key);
+    expect(review.comments(key)).toEqual([]);
+    expect(loadDraft(slot).text).toContain('Call it `after`.');
+    expect(ui.draftRequests.map((d) => d.thread)).toEqual([draft]);
+    saveDraft(slot, '', []);
+  });
+
+  it('Discard with no Send back clears the diff and touches no request', () => {
+    finished();
+    write();
+    ui.newRequest();
+    const other = ui.request;
+    ui.holdDraft(other, true);
+    discardReview(key);
+    expect(review.comments(key)).toEqual([]);
+    expect(ui.draftRequests.map((d) => d.thread)).toEqual([other]);
   });
 });

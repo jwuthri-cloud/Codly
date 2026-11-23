@@ -10,7 +10,7 @@ import { store } from '../../lib/state/store.svelte';
 import { toasts } from '../../lib/state/toasts.svelte';
 import { ui } from '../../lib/state/ui.svelte';
 import { mkAgent } from '../../office/demo/script';
-import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from '../drafts';
+import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, withoutSeed, type Att } from '../drafts';
 import { canRetry, messageOf, troublesOf, troubleTitle } from '../outcomes';
 import { recall } from '../recall';
 import { buildSpine } from '../spine';
@@ -190,6 +190,15 @@ describe('composer drafts', () => {
     // An empty composer just takes the new text.
     expect(seedDraft('', again)).toEqual({ text: 'Comments (2)', kept: false });
     expect(seedDraft(' \n', again)).toEqual({ text: 'Comments (2)', kept: false });
+  });
+
+  it('a seed taken out again leaves what you wrote around it, and only a seed that is still as it was put', () => {
+    expect(withoutSeed('Comments (1)', 'Comments (1)')).toBe('');
+    expect(withoutSeed('Before.\n\nComments (1)\n\nAlso run the tests.', 'Comments (1)')).toBe('Before.\n\nAlso run the tests.');
+    expect(withoutSeed('Comments (1)\n\nAlso run the tests.', 'Comments (1)')).toBe('Also run the tests.');
+    // You changed it: it is your text now, and nothing is taken out.
+    expect(withoutSeed('Comments (one)', 'Comments (1)')).toBeNull();
+    expect(withoutSeed('', 'Comments (1)')).toBeNull();
   });
 });
 

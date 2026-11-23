@@ -101,6 +101,38 @@ export function followUpRequest(task: Task | null, plan: Plan | null, list: Revi
   return `${[`I reviewed ${what}.`, ...where, 'Please make these changes.'].join(' ')}\n\n${reviewMessage(list, paths)}`;
 }
 
+/**
+ * What the review bar says after "N comments not sent.": where Send back takes them. `worker`:
+ * the agent of a task that is not done (it gets them itself). `inRequest`: for finished work
+ * whose comments are in a new request already, how many of them that request's message holds
+ * as they are now (one you wrote or changed since Send back is not in it yet); null when no
+ * request holds them.
+ */
+export function reviewBarWords(total: number, worker: string | null, inRequest: number | null): string {
+  const one = total === 1;
+  if (worker) return `Send back gives ${one ? 'it' : 'them'} to ${worker}; Codly checks the work again after the changes.`;
+  if (inRequest == null) return `This work is finished: Send back opens a new request with your ${one ? 'comment' : 'comments'}, ready to send.`;
+  const rest = total - inRequest;
+  if (!rest) return `${one ? 'It is' : 'They are'} in a new request, ready to send, and ${one ? 'stays' : 'stay'} here until you send its message. Send back opens that request.`;
+  if (!inRequest) return `A new request holds your ${one ? 'comment as it was' : 'comments as they were'} at Send back, not as ${one ? 'it is' : 'they are'} now. Send back brings that request up to date.`;
+  return `${inRequest} ${inRequest === 1 ? 'is' : 'are'} in a new request, ready to send; ${rest} ${rest === 1 ? 'is' : 'are'} not in it yet. Send back puts ${rest === 1 ? 'it' : 'them'} in that request too.`;
+}
+
+/**
+ * Where a diff's comments are besides the diff, when you are about to discard them. `seeded`: a
+ * draft request holds them as Send back put them, and Discard takes them out of it. `edited`:
+ * you changed that message since, so the draft is yours and stays. Null: nowhere else.
+ */
+export type ReviewDraft = 'seeded' | 'edited' | null;
+
+/** What the review bar says while Discard waits for your second press. */
+export function discardWords(total: number, draft: ReviewDraft): string {
+  const one = total === 1;
+  if (draft === 'seeded') return `Discard also takes ${one ? 'it' : 'them'} out of the new request.`;
+  if (draft === 'edited') return `${one ? 'It is' : 'They are'} also in a draft request, in a message you changed: that draft stays as you wrote it.`;
+  return `${one ? 'It is' : 'They are'} not kept anywhere else.`;
+}
+
 // ───────────── large diffs ─────────────
 
 /** A file with more changed lines than this opens collapsed. */

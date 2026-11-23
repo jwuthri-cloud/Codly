@@ -22,8 +22,9 @@ import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { trustOf } from '../util/career';
 import { withModel } from '../util/team';
-import { followUpRequest, reviewMessage } from '../util/review';
+import { followUpRequest, reviewMessage, type ReviewDraft } from '../util/review';
 import { answerText } from '../util/outcome';
+import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
 import { accounts } from './accounts.svelte';
 import { yourAnswers } from './answers';
 import { diffstats } from './diffstats.svelte';
@@ -423,6 +424,43 @@ export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, pa
   else ui.seedComposer(waiting, text, false, was);
   review.hand(key, { office: store.workspace?.id ?? null, thread: ui.request, text, comments: list });
   return true;
+}
+
+/** The composer's draft of the request that holds a diff's comments since Send back; null when no request does. */
+function handedDraft(key: string): { slot: string; thread: string; text: string; files: Att[]; seed: string } | null {
+  const to = review.handedTo(key);
+  const thread = waitingRequest(key);
+  if (!to || !thread) return null;
+  const slot = draftSlot(to.office, thread);
+  return { slot, thread, ...loadDraft(slot), seed: to.text };
+}
+
+/** Where a diff's comments are besides the diff, asked when you press Discard (see `ReviewDraft`). */
+export function reviewDraft(key: string): ReviewDraft {
+  const d = handedDraft(key);
+  if (!d) return null;
+  return d.text.includes(d.seed) ? 'seeded' : 'edited';
+}
+
+/**
+ * Discard a diff's comments. After Send back they are also the message of a draft request:
+ * that message leaves the draft's composer too, and a draft that then holds nothing is dropped
+ * (you stay in the room you are in). A message you changed since is yours: its draft stays as
+ * you wrote it, and `reviewDraft` says so before you discard. The draft is read where the
+ * composer keeps it while it is off screen: Discard is pressed in Changes, never beside a composer.
+ */
+export function discardReview(key: string): void {
+  const d = handedDraft(key);
+  const rest = d && withoutSeed(d.text, d.seed);
+  if (d && rest != null) {
+    saveDraft(d.slot, rest, d.files);
+    if (!rest && !d.files.length) {
+      const list = requests.list;
+      const i = list.findIndex((r) => r.thread === d.thread);
+      ui.dropDraft(d.thread, (list[i + 1] ?? list[i - 1])?.thread ?? 'lead');
+    }
+  }
+  review.clear(key);
 }
 
 export async function assignTask(taskId: string, agentId: string | null) {

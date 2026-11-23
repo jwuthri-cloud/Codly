@@ -15,6 +15,8 @@ export const reviewKey = (t: { kind: 'plan' | 'task'; id: string }): string => `
 type Handed = { office: string | null; thread: string; text: string; comments: ReviewComment[] };
 
 const NONE: ReviewComment[] = [];
+/** The message Send back put in a request holds this comment as it is now. */
+const holds = (to: Handed, c: ReviewComment): boolean => to.comments.some((s) => sameSpot(s, c) && s.text === c.text);
 const without = <T>(o: Record<string, T>, key: string): Record<string, T> => Object.fromEntries(Object.entries(o).filter(([k]) => k !== key));
 
 class Review {
@@ -53,6 +55,12 @@ class Review {
     return this.handed[key] ?? null;
   }
 
+  /** How many of the diff's comments, as they are now, are in the message Send back put in a request (0 when none was). */
+  inHand(key: string): number {
+    const to = this.handed[key];
+    return to ? this.comments(key).filter((c) => holds(to, c)).length : 0;
+  }
+
   /**
    * A message (`text`) was sent in a request. Where it has the message Send back put in the
    * request's composer, the comments of that message are sent and leave their diff: a comment
@@ -63,7 +71,7 @@ class Review {
     for (const [key, to] of Object.entries(this.handed)) {
       if (to.office !== office || to.thread !== thread) continue;
       if (text.includes(to.text)) {
-        const left = this.comments(key).filter((c) => !to.comments.some((s) => sameSpot(s, c) && s.text === c.text));
+        const left = this.comments(key).filter((c) => !holds(to, c));
         this.drafts = left.length ? { ...this.drafts, [key]: left } : without(this.drafts, key);
       }
       this.handed = without(this.handed, key);

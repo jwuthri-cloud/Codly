@@ -287,6 +287,13 @@ class Ui {
     this.composerFocus++;
   }
 
+  /** A draft request that holds nothing any more goes, and you stay in the room you are in: if it was the request you were on, `next` is now. */
+  dropDraft(thread: string, next: string) {
+    this.draftRequests = this.draftRequests.filter((d) => d.thread !== thread);
+    if (this.request === thread) this.request = next;
+    if (this.thread === thread) this.thread = next;
+  }
+
   /** The composer of a draft request holds text or files (`on`), or none any more: one that does stays a tab when you leave it. */
   holdDraft(thread: string, on: boolean) {
     if (this.draftRequests.some((d) => d.thread === thread && !!d.kept !== on)) this.draftRequests = this.draftRequests.map((d) => (d.thread === thread ? { ...d, kept: on } : d));
