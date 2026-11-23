@@ -499,7 +499,13 @@ impl Inner {
         let thread = super::lead::thread_of(&lead).to_string();
         let ws_id = self.store.agent_workspace(lead_id)?.ok_or_else(|| anyhow!("no workspace"))?;
         let ws = self.store.workspace(&ws_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
-        let mut input: TaskInput = serde_json::from_value(args.clone()).map_err(|e| anyhow!("Reassign rejected: {e}"))?;
+        // The arguments carry a task's staffing, not the task: `TaskInput` wants its id, title
+        // and goal too. The id is set below; the other two are not read here.
+        let mut staffing = args.as_object().cloned().unwrap_or_default();
+        for field in ["id", "title", "goal"] {
+            staffing.insert(field.into(), json!(""));
+        }
+        let mut input: TaskInput = serde_json::from_value(Value::Object(staffing)).map_err(|e| anyhow!("Reassign rejected: {e}"))?;
         let key = args["task"].as_str().map(str::trim).unwrap_or_default().to_string();
         let plan_id = args["plan_id"].as_str().map(str::trim).filter(|p| !p.is_empty());
         let plans: Vec<Plan> = self
@@ -529,6 +535,8 @@ impl Inner {
         let mut one = [input];
         let notes = self.check_team(&ws, &mut one)?;
         let [input] = one;
+        // The reassignment could go through: after a message from outside, the user says so first.
+        self.ask_user_first(&lead, &ws.id, &format!("reassign {}", task.key))?;
         let member = input.member().and_then(|n| self.member_by_name(&ws.id, n));
         let from = task.assignee.as_deref().and_then(|a| self.agent(a).ok()).map_or_else(|| "nobody".into(), |a| a.name);
         let to = match (&member, input.consultant_spec()) {
@@ -579,6 +587,8 @@ impl Inner {
         if super::kept_home(self.settings().game_rules, &agent, now_ms()).is_some() {
             bail!("{}", away_note(&agent, now_ms()));
         }
+        // The message has someone to go to: after a message from outside, the user says so first.
+        self.ask_user_first(&lead, &ws.id, &format!("message {}", agent.name))?;
         let hands_off = agent
             .task_id
             .as_deref()

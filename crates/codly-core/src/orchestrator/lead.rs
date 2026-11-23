@@ -667,6 +667,7 @@ impl Inner {
         // In your terminal (takeover.rs): refused here, before the message is recorded.
         self.not_in_terminal(&agent)?;
         let thread = format!("agent:{agent_id}");
+        let outside = matches!(said, Said::Outside(_));
         let prompt = match said {
             Said::User(text) => {
                 self.chat(ws_id.as_deref(), &thread, "user", text, None)?;
@@ -674,7 +675,9 @@ impl Inner {
             }
             // Not your message: recorded under its source's name, read as quoted data. One
             // agent makes no plan, so no Run plan click stands between it and the work: it is
-            // told to report and suggest, whatever the endpoint's "Run plans without asking".
+            // told to report and suggest, whatever the endpoint's "Run plans without asking",
+            // and the user's trust in it answers no request of the turn that reads this
+            // (`send_chat_prompt`, outside.rs).
             Said::Outside(msg) => {
                 self.chat(ws_id.as_deref(), &thread, "codly", &msg.shown(), Some(msg.attachment()))?;
                 prompts::inbound_message(&msg.source, &msg.text, false)
@@ -682,7 +685,7 @@ impl Inner {
         };
         let stopping = lock(&self.live).get(agent_id).map(|l| l.stopping);
         match stopping {
-            Some(false) => return self.send_prompt(agent_id, prompt),
+            Some(false) => return self.send_chat_prompt(agent_id, outside, prompt),
             // A run that is shutting down takes no more turns: this one starts (resumes) the next.
             Some(true) if !self.stop_and_wait(agent_id).await => {
                 bail!("{} is still shutting down; send your message again in a moment", agent.name)
@@ -700,7 +703,7 @@ impl Inner {
         if agent.member.is_some() {
             let started = self.spawn_member_chat(&ws, &agent).await;
             self.spawned_or_live(agent_id, started)?;
-            return self.send_prompt(agent_id, prompt);
+            return self.send_chat_prompt(agent_id, outside, prompt);
         }
         let session = match &agent.session_id {
             Some(s) => SessionMode::Resume { session_id: s.clone() },
@@ -753,13 +756,13 @@ impl Inner {
             Err(e) if resumed && !self.in_terminal(agent_id)? && !e.is::<super::trust::NotStarted>() => {
                 tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
                 self.update_agent(agent_id, |a| a.session_id = None)?;
-                Box::pin(self.chat_agent_spawn_fresh(agent_id, prompt)).await?;
+                Box::pin(self.chat_agent_spawn_fresh(agent_id, outside, prompt)).await?;
                 self.resume_failed(&agent, agent.role, Some(&ws.id), None, &e);
                 return Ok(());
             }
             Err(e) => return Err(e),
         }
-        self.send_prompt(agent_id, prompt)
+        self.send_chat_prompt(agent_id, outside, prompt)
     }
 
     /// The outcome of starting an agent's run, for a caller that only wants it running: a
@@ -772,7 +775,7 @@ impl Inner {
         }
     }
 
-    async fn chat_agent_spawn_fresh(self: &Arc<Self>, agent_id: &str, prompt: String) -> Result<()> {
+    async fn chat_agent_spawn_fresh(self: &Arc<Self>, agent_id: &str, outside: bool, prompt: String) -> Result<()> {
         let agent = self.agent(agent_id)?;
         let ws = match self.store.agent_workspace(agent_id)? {
             Some(id) => self.store.workspace(&id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
@@ -798,7 +801,7 @@ impl Inner {
         };
         let started = self.spawn_run(req).await;
         self.spawned_or_live(agent_id, started)?;
-        self.send_prompt(agent_id, prompt)
+        self.send_chat_prompt(agent_id, outside, prompt)
     }
 }
 

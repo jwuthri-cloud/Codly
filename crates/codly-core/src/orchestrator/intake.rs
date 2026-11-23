@@ -10,7 +10,12 @@
 //! - the user's own words (the request to work on it, and what they add) stay outside that
 //!   block, and no text from GitHub is stored as the user's message;
 //! - the link stays with the request (the `intake` attachment of the user's message), so the
-//!   pull-request step can end its description with "Closes #N".
+//!   pull-request step can end its description with "Closes #N";
+//! - the work itself is described by GitHub's text, so a plan of that request never starts by
+//!   itself: it waits for the user's Run plan in every mode (`plan_intake`, read by
+//!   `Inner::submit_plan_inner`), until a plan made for it is done. What is said in the request
+//!   meanwhile (the user's note, a schedule that fires) does not end the wait: the Lead still
+//!   plans from GitHub's text.
 //!
 //! Every `gh` argv comes from a builder (`view_args`, `code_comments_args`, and
 //! `pull_request::checks_args`), so a test can check what would run without running `gh`.
@@ -531,6 +536,8 @@ impl Inner {
     /// "From pull request…" message of the plan's thread that came before the plan. None once
     /// an earlier plan made after that message is done: the work that message asked for was
     /// delivered, and a later plan in the same request is new work.
+    /// Such a plan ends its pull request with the link (`link_line`) and waits for Run plan in
+    /// every mode (`submit_plan_inner`, which asks for a plan it has not stored yet).
     pub(super) fn plan_intake(&self, plan: &Plan) -> Result<Option<IntakeSource>> {
         let found: Option<(String, i64)> = self.store.with(|db| {
             Ok(db

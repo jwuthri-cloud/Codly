@@ -121,17 +121,14 @@ impl Inner {
             self.cancel_plan_inner(&old, "superseded by a newer plan from the Lead").await?;
         }
 
-        // Messages from outside Codly (a webhook, Slack) that came in after the user's last own
-        // words (a message they wrote, or a schedule of theirs that fired): the plan may answer
-        // them, so it carries no "user's words", and it waits for Run plan unless each of them
-        // came from an endpoint the user lets run plans alone.
-        let outside = self.store.inbound_since_user(Some(&ws.id), &thread)?;
+        // The user's last own words in the request (a message they wrote, or a schedule of theirs
+        // that fired), and the messages from outside Codly (a webhook, Slack) that came in after
+        // them. The plan may answer those messages, so it then carries no "user's words", and it
+        // waits for Run plan unless each of them came from an endpoint the user lets run plans
+        // alone. Without them the plan carries the user's words: for a schedule, its own line.
+        let (own, outside) = self.store.since_user(Some(&ws.id), &thread)?;
         let outside_waits = outside.iter().any(|m| crate::inbound::needs_ok(m.attachment.as_ref()));
-        let request = if outside.is_empty() {
-            self.store.last_chat_by(Some(&ws.id), &thread, "user")?.unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let request = if outside.is_empty() { own.map(|m| m.text).unwrap_or_default() } else { String::new() };
 
         let plan_id = new_id();
         let plan = Plan {
@@ -152,6 +149,11 @@ impl Inner {
             created_at: now,
             updated_at: now,
         };
+        // A request that started from an issue or a pull request asks for what GitHub's text
+        // says, and other people write that text: its plans wait for Run plan, whatever the
+        // mode and whatever was said in the request since (a schedule that fired, the user's
+        // own note), until a plan made for it is done (`plan_intake`).
+        let from_github = self.plan_intake(&plan)?.is_some();
         let ids: HashMap<String, Id> = valid.plan.tasks.iter().map(|t| (t.id.clone(), new_id())).collect();
         let tasks: Vec<Task> = valid
             .plan
@@ -183,10 +185,10 @@ impl Inner {
                 updated_at: now + i as i64,
             })
             .collect();
-        // Auto and Direct requests run at once (unless the plan has questions for the user, or
-        // may answer a message from outside that the user has not said OK to).
+        // Auto and Direct requests run at once (unless the plan has questions for the user, may
+        // answer a message from outside that the user has not said OK to, or started from GitHub).
         let runs_at_once = matches!(mode, LeadMode::Auto | LeadMode::Direct);
-        let auto = runs_at_once && !outside_waits && valid.plan.open_questions.is_empty();
+        let auto = runs_at_once && !outside_waits && !from_github && valid.plan.open_questions.is_empty();
         let plan_json = serde_json::to_value(&valid.plan)?;
         let rows = self.store.tx(|tx| {
             let mut out = vec![];
@@ -215,6 +217,11 @@ impl Inner {
                 decisions.push((
                     "not auto-running: a message from outside Codly came in after your last one, so the plan waits for you".into(),
                     json!({ "rule": "inbound", "sources": outside.iter().filter_map(|m| m.attachment.as_ref()?["inbound"]["source"].as_str()).collect::<Vec<_>>() }),
+                ));
+            } else if runs_at_once && from_github {
+                decisions.push((
+                    "not auto-running: this request started from GitHub, and other people write there, so the plan waits for you".into(),
+                    json!({ "rule": "intake" }),
                 ));
             } else if runs_at_once && !auto {
                 decisions.push(("not auto-running: the plan has open questions for you".into(), json!({ "rule": "open_questions" })));
@@ -250,6 +257,8 @@ impl Inner {
                 " Running it now."
             } else if runs_at_once && outside_waits {
                 " A message from outside Codly came in, so it waits for you: review it on the board, then click Run plan."
+            } else if runs_at_once && from_github {
+                " This request started from GitHub, and other people write there, so it waits for you: review it on the board, then click Run plan."
             } else {
                 " Review it on the board, then click Run plan."
             }

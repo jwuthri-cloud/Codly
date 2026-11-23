@@ -664,7 +664,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// The text of the latest message `author` wrote in `thread` (the user's request for a plan).
+    /// The text of the latest message `author` wrote in `thread`.
     pub fn last_chat_by(&self, workspace_id: Option<&str>, thread: &str, author: &str) -> Result<Option<String>> {
         let s: Option<String> = self
             .conn()
@@ -678,26 +678,32 @@ impl Store {
         Ok(s.and_then(|s| serde_json::from_str::<ChatMessage>(&s).ok()).map(|m| m.text))
     }
 
-    /// The messages of `thread` that came from outside Codly (a webhook, Slack: an `inbound`
-    /// attachment) after the user's last own words there, newest first. The user's own words
-    /// are a message they wrote, or a schedule of theirs that fired (`triggers::is_schedule`).
-    /// The read stops at them, so its cost follows what came in since, not the length of the
-    /// thread.
-    pub fn inbound_since_user(&self, workspace_id: Option<&str>, thread: &str) -> Result<Vec<ChatMessage>> {
+    /// The user's last own words in `thread` (None: they said nothing there), and the messages
+    /// that came from outside Codly (a webhook, Slack: an `inbound` attachment) after them,
+    /// newest first: what a plan made now answers. The user's own words are a message they
+    /// wrote, or a schedule of theirs that fired (`triggers::is_schedule`). The read stops at
+    /// them, so its cost follows what came in since, not the length of the thread.
+    pub fn since_user(&self, workspace_id: Option<&str>, thread: &str) -> Result<(Option<ChatMessage>, Vec<ChatMessage>)> {
         let conn = self.conn();
         let mut newest_first = conn.prepare_cached("SELECT json FROM chat WHERE workspace_id IS ?1 AND thread = ?2 ORDER BY ts DESC, rowid DESC")?;
         let mut rows = newest_first.query(params![workspace_id, thread])?;
-        let mut out = vec![];
+        let mut inbound = vec![];
         while let Some(row) = rows.next()? {
             let Ok(m) = serde_json::from_str::<ChatMessage>(&row.get::<_, String>(0)?) else { continue };
             if m.author == "user" || crate::triggers::is_schedule(m.attachment.as_ref()) {
-                break;
+                return Ok((Some(m), inbound));
             }
             if crate::inbound::is_inbound(m.attachment.as_ref()) {
-                out.push(m);
+                inbound.push(m);
             }
         }
-        Ok(out)
+        Ok((None, inbound))
+    }
+
+    /// The messages of `thread` that came from outside Codly after the user's last own words
+    /// there, newest first (`since_user`).
+    pub fn inbound_since_user(&self, workspace_id: Option<&str>, thread: &str) -> Result<Vec<ChatMessage>> {
+        Ok(self.since_user(workspace_id, thread)?.1)
     }
 
     pub fn task_workspace(&self, id: &str) -> Result<Option<String>> {
@@ -1436,22 +1442,30 @@ mod tests {
             let found = store.inbound_since_user(None, thread).unwrap();
             found.iter().map(|m| m.attachment.as_ref().unwrap()["inbound"]["source"].as_str().unwrap().to_string()).collect()
         };
+        // The text of your last own words in a thread.
+        let own = |thread: &str| store.since_user(None, thread).unwrap().0.map(|m| m.text);
 
         say("lead", "codly", inbound("old"));
+        assert_eq!((since("lead"), own("lead")), (vec!["old".to_string()], None), "you said nothing there yet");
         say("lead", "user", None);
         assert!(since("lead").is_empty(), "your message came after it");
+        assert_eq!(own("lead").as_deref(), Some("m2"));
         say("lead", "codly", inbound("a"));
         say("lead", "codly", Some(serde_json::json!({ "plan_id": "p1" })));
         say("lead:2", "user", None);
         say("lead", "codly", inbound("b"));
         assert_eq!(since("lead"), vec!["b", "a"], "newest first, back to your message");
+        assert_eq!(own("lead").as_deref(), Some("m2"), "what came in since does not replace your words");
         assert!(since("lead:2").is_empty());
 
         // Your schedule fires: what came in before it no longer counts, what comes in after does.
+        // Its line is your last own words now, not the message you typed before it.
         say("lead", "codly", schedule);
         assert!(since("lead").is_empty());
+        assert_eq!(own("lead").as_deref(), Some("m7"));
         say("lead", "codly", inbound("c"));
         assert_eq!(since("lead"), vec!["c"]);
+        assert_eq!(own("lead").as_deref(), Some("m7"));
     }
 
     #[test]

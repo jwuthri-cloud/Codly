@@ -70,6 +70,19 @@ export function weakTasks(decisions: Decision[], planId: string): WeakTask[] {
   return marked;
 }
 
+/** Why a plan did not start by itself in a request that runs its plans at once (Auto, Direct): the
+ *  words for its card, above Run plan. Read from the plan's `plan_validate` decision that says so
+ *  (the core's `submit_plan_inner`): rule `inbound` or `intake`. Null: it waits because the request
+ *  asks you before every plan, or for its open questions, which the card lists. */
+export function waitReason(decisions: Decision[], planId: string): string | null {
+  for (const { type, detail } of decisions) {
+    if (type !== 'plan_validate' || !detail || typeof detail !== 'object' || Array.isArray(detail) || detail.plan_id !== planId) continue;
+    if (detail.rule === 'inbound') return 'A message from outside Codly came in after your last one, so this plan did not start by itself. Read it, then run it if it is what you want.';
+    if (detail.rule === 'intake') return 'This request started from GitHub, and other people write there, so this plan did not start by itself. Read it, then run it if it is what you want.';
+  }
+  return null;
+}
+
 /** What you can do about a task with no real check, by where its plan is. Null: nothing any more
  *  (the plan is cancelled, or its work is merged into your branch). */
 export function weakAdvice(plan: Pick<Plan, 'status' | 'merged_sha'>): string | null {

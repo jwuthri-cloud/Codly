@@ -141,8 +141,16 @@ impl Inner {
         match &r.kind {
             EventKind::TurnCompleted { .. } => self.control_turn_done(&ctx.agent_id),
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
-            EventKind::TurnStarted { input } => self.checkpoint_turn(&ctx.agent_id, &ctx.run_id, input.is_some()), // the files before the turn
-            EventKind::PromptSteered { .. } => self.restore_note_read(&ctx.agent_id), // the note came with that prompt
+            EventKind::TurnStarted { input } => {
+                self.checkpoint_turn(&ctx.agent_id, &ctx.run_id, input.is_some()); // the files before the turn
+                if let Some(input) = input {
+                    self.chat_prompt_read(&ctx.agent_id, input, true); // whose words the turn works for
+                }
+            }
+            EventKind::PromptSteered { input } => {
+                self.restore_note_read(&ctx.agent_id); // the note came with that prompt
+                self.chat_prompt_read(&ctx.agent_id, input, false);
+            }
             EventKind::Decision { decision_type, detail, .. } if decision_type == crate::adapters::MODE_CHANGED => {
                 self.control_mode_changed(&ctx.agent_id, ctx.role, detail)
             }
@@ -713,10 +721,15 @@ impl Inner {
         };
         let verify = task.map(|t| t.verify).unwrap_or_default();
         let base = self.approval_mode_for(ws, thread.as_deref());
-        let trusts = |r| {
+        let trusted = |r| {
             !read_only
                 && self.agent(&ctx.agent_id).is_ok_and(|a| matches!(a.role, Role::Worker | Role::Solo) && career::trusts(&a.career, r))
         };
+        // An agent whose turn reads a message from outside Codly may be working for what a
+        // stranger wrote: until a turn that the user's own message to it starts, their trust
+        // in it answers nothing, and the approval mode alone judges (outside.rs).
+        let held_back = trusted(Rank::Junior) && self.works_for_outside(&ctx.agent_id);
+        let trusts = |r| !held_back && trusted(r);
         let mode = approvals::with_trust(base, trusts(Rank::Senior));
         // Your project folder: where an agent hired with Git isolation off works, and where any agent can point a command.
         let checkout = ws.and_then(|w| self.store.workspace(w).ok().flatten()).map(|w| std::path::PathBuf::from(w.repo_path));
@@ -765,6 +778,17 @@ impl Inner {
             }
             Verdict::Ask { reason } => {
                 let reason = if planning { format!("{reason} (its mode is \"plan first\")") } else { reason };
+                // The user's trust in it would have answered this one: say why it asks.
+                let trust_answers = held_back
+                    && matches!(
+                        approvals::evaluate(approval, &PolicyCtx { mode: approvals::with_trust(base, trusted(Rank::Senior)), edits: true, ..pctx }),
+                        Verdict::Allow { .. }
+                    );
+                let reason = if trust_answers {
+                    format!("{reason} (a message from outside Codly came into its chat: what you trust it to do alone waits for your next message to it)")
+                } else {
+                    reason
+                };
                 let _ = self.decide(ws, ctx.task_id.as_deref(), "approval_policy", format!("asking you: {reason}"), detail(&reason));
             }
         }
@@ -783,6 +807,7 @@ impl Inner {
         }
         if removed.is_some() {
             self.control_clear(&ctx.agent_id); // controls do not outlive the process
+            self.chat_prompts_lost(&ctx.agent_id);
         }
         let stopping = removed.as_ref().is_none_or(|l| l.stopping);
         // Its adapter ended it because the turn did not stop after an interrupt: Codly's doing
