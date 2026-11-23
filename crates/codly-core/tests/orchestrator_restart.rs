@@ -5,9 +5,13 @@
 //! task says so in its history; the fix rounds a task used are not handed out again; and a
 //! task that waits for your answer keeps its files. The question counts what still waits: a
 //! hold whose tasks you cancelled ends by itself (also when only the scheduler looks), a
-//! pause does not end a hold, an office whose folder is not there holds nothing, a task whose
-//! worktree is gone goes on through its worker, and a review that was under way is done again
-//! by a new reviewer.
+//! pause does not end a hold (nor keeps one from starting: work paused at the launch is held
+//! too), an office whose folder is not there holds nothing, a task whose worktree is gone goes
+//! on through its worker, and a review that was under way is done again by a new reviewer.
+//! Setting Codly to "always" while work waits resumes it then. A hold whose own end is not
+//! written stays on with no worker behind it, and a task its gate sent back meanwhile goes to
+//! its worker at the next Resume. A conflict resolution whose start a quit cut short is taken
+//! back at the next start.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -707,10 +711,10 @@ async fn a_question_left_open_in_a_paused_office_is_asked_again() {
     core.shutdown().await;
 }
 
-/// Codly asked, you chose "always" in Settings and closed it without an answer. At the next
-/// start the tasks that waited go on at once, as resumed tasks: each has its line, the one
-/// that only had its checks left gets no worker turn, and the other's worker is told why it
-/// is back.
+/// Codly asked, and you closed it without an answer. At the next start the settings say
+/// "always" (the settings file was saved with it while Codly was closed). The tasks that
+/// waited go on at once, as resumed tasks: each has its line, the one that only had its
+/// checks left gets no worker turn, and the other's worker is told why it is back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn work_you_left_waiting_goes_on_at_the_next_start_once_you_chose_always() {
     let dir = tempfile::tempdir().unwrap();
@@ -724,11 +728,12 @@ async fn work_you_left_waiting_goes_on_at_the_next_start_once_you_chose_always()
     let seen = Arc::new(Mutex::new(Seen::default()));
     let core = start_core(dir.path(), &seen, works()).await;
     assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 2 }));
-    core.update_settings(Settings { resume_on_launch: ResumeOnLaunch::Always, ..core.settings() }).await.unwrap();
     passes(&core).await;
-    assert!(seen.lock().unwrap().runs.is_empty(), "the choice is for the next start: this one still waits for your Resume");
+    assert!(seen.lock().unwrap().runs.is_empty(), "nothing goes on before your Resume");
+    let always = Settings { resume_on_launch: ResumeOnLaunch::Always, ..core.settings() };
     core.shutdown().await;
     drop(core);
+    store_of(dir.path()).save_settings(&always).unwrap();
 
     let core = start_core(dir.path(), &seen, works()).await;
     assert_eq!(core.resume_offer(), None, "always: nothing waits for a Resume");
@@ -1098,4 +1103,245 @@ async fn a_review_that_was_under_way_is_done_again_by_a_new_reviewer() {
         assert_eq!(resumed(&core).await, ["Resumed after restart: Codly checks its work again"], "{choice:?}");
         core.shutdown().await;
     }
+}
+
+/// Codly asked, and while the question is open you set Codly to always resume. That is your
+/// answer too: the hold ends now, as Resume work ends it. Each task goes on with its line,
+/// and one line in the office says why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn setting_always_while_work_waits_resumes_it_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let data = dir.path().join("data");
+    let (over, mid) = {
+        let store = store_of(dir.path());
+        let ws = seed_office(&store, &repo, Settings::default());
+        (seed_task_in_checks(&store, &ws, &data, "a1", Left::Checked), seed_task_in_checks(&store, &ws, &data, "b1", Left::MidTurn))
+    };
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 2 }));
+
+    core.update_settings(Settings { resume_on_launch: ResumeOnLaunch::Always, ..core.settings() }).await.unwrap();
+    assert_eq!(core.resume_offer(), None, "the hold is over");
+    for (task_id, _) in [&over, &mid] {
+        let task = task_ended(&core, task_id).await;
+        assert_eq!(task.status, TaskStatus::Done, "{}: {:?}", task.key, task.status_reason);
+    }
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.runs.len(), 1, "only the worker that was in a turn: {:?}", seen.runs);
+        assert!(seen.runs[0].0 == mid.1 && matches!(&seen.runs[0].1, SessionMode::Resume { session_id } if session_id == "sess-b1"), "{:?}", seen.runs);
+    }
+    let lines = [
+        "Resumed after restart: Codly checks its work again",
+        "Resumed after restart: its worker goes on where it stopped",
+        "Resumed after restart: you set Codly to always resume",
+    ];
+    assert_eq!(resumed(&core).await, lines);
+    core.shutdown().await;
+    drop(core);
+    assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "the store forgot the hold");
+}
+
+/// The store does not take the last write of a hold's end: its own row stays.
+const HOLD_STAYS: &str =
+    "CREATE TRIGGER hold_stays BEFORE DELETE ON kv WHEN OLD.key = 'resume_hold' BEGIN SELECT RAISE(ABORT, 'no room to end the hold'); END";
+
+/// Run SQL on Codly's store through a connection of the test's own (a trigger that makes it
+/// refuse a write, or its removal).
+fn store_sql(dir: &Path, sql: &str) {
+    store_of(dir).with(|db| Ok(db.execute_batch(sql)?)).unwrap();
+}
+
+/// Your Resume writes each task first and takes the hold out of the store last. That last
+/// write fails (as a crash before it would leave things): the hold is still on, here and in
+/// the store, and no worker starts behind it. It counts the task that still waits, and the
+/// task that only had its checks left is not left without its gate. A second Resume ends the
+/// hold, and the waiting task's worker goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hold_whose_end_is_not_written_stays_on_until_the_next_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let data = dir.path().join("data");
+    let (over, mid) = {
+        let store = store_of(dir.path());
+        let ws = seed_office(&store, &repo, Settings::default());
+        (seed_task_in_checks(&store, &ws, &data, "a1", Left::Checked), seed_task_in_checks(&store, &ws, &data, "b1", Left::MidTurn))
+    };
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 2 }));
+    store_sql(dir.path(), HOLD_STAYS);
+
+    let refused = core.resume_work().await.unwrap_err().to_string();
+    assert!(refused.starts_with("not all of the work could be resumed") && refused.ends_with("press 'Resume work' again"), "{refused}");
+    passes(&core).await;
+    assert!(seen.lock().unwrap().runs.is_empty(), "no worker starts behind a hold that is on");
+    assert_eq!(task_now(&core, &mid.0).await.status, TaskStatus::Ready);
+    assert_ne!(task_now(&core, &over.0).await.status, TaskStatus::Ready, "the task that only had its checks left went to them");
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 1 }), "the hold is on, for the task that still waits");
+    assert!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap().is_some(), "the next start would find the hold");
+
+    store_sql(dir.path(), "DROP TRIGGER hold_stays");
+    core.resume_work().await.unwrap();
+    assert_eq!(core.resume_offer(), None, "the second Resume ended the hold");
+    assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None);
+    for (task_id, _) in [&over, &mid] {
+        let task = task_ended(&core, task_id).await;
+        assert_eq!(task.status, TaskStatus::Done, "{}: {:?}", task.key, task.status_reason);
+    }
+    let runs = seen.lock().unwrap().runs.clone();
+    assert!(runs.len() == 1 && runs[0].0 == mid.1, "only the waiting task's worker ran, after the second Resume: {runs:?}");
+    core.shutdown().await;
+}
+
+/// Codly asked, and the task that only had its checks left has unfinished work: its check
+/// fails. Your Resume sends it to its gate, and the hold's own end is not written, so the
+/// hold stays on. The gate sends the task back to its worker with its feedback, and no worker
+/// starts behind the hold. The second Resume gives the task to its worker with that feedback:
+/// its gate does not run a second time on the same work, and one fix round is used.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_task_its_gate_sent_back_goes_to_its_worker_at_the_next_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let data = dir.path().join("data");
+    let (task_id, worker) = {
+        let store = store_of(dir.path());
+        let ws = seed_office(&store, &repo, Settings::default());
+        seed_task_in_checks(&store, &ws, &data, "a1", Left::Unfinished)
+    };
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 1 }));
+    store_sql(dir.path(), HOLD_STAYS);
+
+    core.resume_work().await.unwrap_err();
+    let feedback = format!("task_feedback:{task_id}");
+    wait_for("the gate to send the task back with its feedback", async || {
+        let back = store_of(dir.path()).kv_get(&feedback).unwrap().is_some() && task_now(&core, &task_id).await.status == TaskStatus::Ready;
+        back.then_some(())
+    })
+    .await;
+    passes(&core).await;
+    assert!(seen.lock().unwrap().runs.is_empty(), "no worker starts behind a hold that is on");
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 1 }));
+
+    store_sql(dir.path(), "DROP TRIGGER hold_stays");
+    core.resume_work().await.unwrap();
+    let task = task_ended(&core, &task_id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    {
+        let seen = seen.lock().unwrap();
+        assert!(seen.runs.len() == 1 && seen.runs[0].0 == worker, "{:?}", seen.runs);
+        assert!(seen.prompts[0].contains("Verification failed (fix round 1/2)"), "its first prompt is the feedback: {}", seen.prompts[0]);
+        assert!(!seen.prompts.iter().any(|p| p.contains("fix round 2/2")), "{:?}", seen.prompts);
+    }
+    let rounds = fix_rounds(&core).await;
+    assert!(rounds.len() == 1 && rounds[0].starts_with("a1: fix round 1/2"), "the feedback was given once: {rounds:?}");
+    let check = "test -f a1.txt".to_string();
+    let mut ran = checks_run(&core).await;
+    ran.sort();
+    assert_eq!(ran, [(check.clone(), false), (check, true)], "once on the unfinished work, once after the worker's turn");
+    core.shutdown().await;
+}
+
+/// "Never" (or "ask"), and you had paused everything before you closed Codly: a plan was
+/// about to start its next task. A pause is no reason to hold nothing: the start holds the
+/// work, and when you take the pause off nothing starts until you press Resume work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_is_held_also_when_everything_was_paused_at_the_launch() {
+    for choice in [ResumeOnLaunch::Never, ResumeOnLaunch::Ask] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = temp_repo(dir.path());
+        let data = dir.path().join("data");
+        let (_, task_id) = {
+            let store = store_of(dir.path());
+            let ws = seed_office(&store, &repo, Settings { resume_on_launch: choice, paused: true, ..Default::default() });
+            seed_plan(&store, &ws, &data, "running", "ready")
+        };
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let core = start_core(dir.path(), &seen, works()).await;
+        assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }), "{choice:?}: the plan was about to start a task");
+
+        core.update_settings(Settings { paused: false, ..core.settings() }).await.unwrap();
+        passes(&core).await;
+        let waits = wait_for("the task to wait for your Resume", async || Some(task_now(&core, &task_id).await).filter(|t| t.status_reason.as_deref() == Some(HELD))).await;
+        assert_eq!(waits.status, TaskStatus::Ready, "{choice:?}");
+        assert!(seen.lock().unwrap().runs.is_empty(), "{choice:?}: no worker started before your Resume");
+        assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }), "{choice:?}");
+
+        core.resume_work().await.unwrap();
+        let task = task_ended(&core, &task_id).await;
+        assert_eq!(task.status, TaskStatus::Done, "{choice:?}: {:?}", task.status_reason);
+        assert_eq!(seen.lock().unwrap().runs.len(), 1, "{choice:?}: the plan's task started after your Resume");
+        core.shutdown().await;
+    }
+}
+
+/// Codly closed in the middle of the start of a conflict resolution: it had written the start
+/// and where the plan stood, made the task that resolves the conflict, and brought your branch
+/// into the plan's branch, where the merge is open with its markers. The plan did not run
+/// again yet. At the next start, before you press anything, the merge is taken back: the plan
+/// is done as it was, its branch is at its old tip, the task is cancelled, and the record says
+/// that the start did not finish when Codly closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resolution_cut_short_by_a_quit_is_taken_back_at_the_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let data = dir.path().join("data");
+    let branch = "codly/p1/integration";
+    let (plan_id, task_id, base, tip, wt) = {
+        let store = store_of(dir.path());
+        let ws = seed_office(&store, &repo, Settings::default());
+        let (plan_id, _) = seed_plan(&store, &ws, &data, "done", "done");
+        let plan = store.plan(&plan_id).unwrap().expect("the seeded plan");
+        let (base, wt) = (plan.base_commit.clone().unwrap(), PathBuf::from(plan.integration_worktree.clone().unwrap()));
+        // The plan and your branch both changed the README.
+        std::fs::write(wt.join("README.md"), "# the plan\n").unwrap();
+        git(&wt, &["commit", "-qam", "the plan"]);
+        let tip = git(&wt, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("README.md"), "# yours\n").unwrap();
+        git(&repo, &["commit", "-qam", "yours"]);
+        let mine = git(&repo, &["rev-parse", "HEAD"]);
+        // The task that resolves it, which never started.
+        let task_id = new_id();
+        let mut task = adhoc_task(&task_id, "resolve", "pending");
+        task["plan_id"] = json!(plan_id);
+        task["branch"] = json!(branch);
+        task["worktree"] = json!(wt);
+        let kind = EventKind::TaskChanged { task: serde_json::from_value(task).unwrap() };
+        let ev = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: Some(task_id.clone()), run_id: None, workspace_id: None, kind };
+        store.append_event(Some(&ws.id), &ev).unwrap();
+        // As a start of an earlier run of Codly writes them.
+        let start = json!({ "tip": tip, "target": "main", "head": mine, "run": "an earlier run" });
+        let stood = json!({ "task": task_id, "tip": tip, "base_commit": base, "base_branch": "main", "untracked": [] });
+        store.kv_set(&format!("merge_start:{plan_id}"), &start.to_string()).unwrap();
+        store.kv_set(&format!("resolution:{plan_id}"), &stood.to_string()).unwrap();
+        let merged = Command::new("git").arg("-C").arg(&wt).args(["merge", "-q", "main"]).env("LC_ALL", "C").output().unwrap();
+        assert!(!merged.status.success(), "the merge conflicts");
+        (plan_id, task_id, base, tip, wt)
+    };
+    let in_merge = |wt: &Path| Command::new("git").arg("-C").arg(wt).args(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).output().unwrap().status.success();
+    assert!(in_merge(&wt));
+
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    let plan = plan_now(&core, &plan_id).await;
+    assert_eq!((plan.status, plan.base_commit.as_deref()), (PlanStatus::Done, Some(base.as_str())), "the plan is as it was");
+    let task = task_now(&core, &task_id).await;
+    assert_eq!((task.status, task.status_reason.as_deref()), (TaskStatus::Cancelled, Some("Codly could not start it")));
+    assert_eq!(git(&repo, &["rev-parse", branch]), tip, "the plan's branch is at its old tip");
+    assert!(!in_merge(&wt), "the merge is out of the plan's worktree");
+    assert_eq!(git(&wt, &["status", "--porcelain"]), "");
+    let store = store_of(dir.path());
+    for key in [format!("merge_start:{plan_id}"), format!("resolution:{plan_id}")] {
+        assert_eq!(store.kv_get(&key).unwrap(), None, "{key}");
+    }
+    let taken_back = format!("bringing main into {branch} did not finish when Codly closed; {branch} is back where it was before it");
+    let record = decisions(&core, "merge").await;
+    assert_eq!(record.iter().filter(|d| **d == taken_back).count(), 1, "{record:?}");
+    assert_eq!(core.resume_offer(), None, "nothing waits for a Resume");
+    assert!(seen.lock().unwrap().runs.is_empty());
+    core.shutdown().await;
 }

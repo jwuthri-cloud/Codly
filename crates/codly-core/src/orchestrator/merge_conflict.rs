@@ -140,6 +140,10 @@ fn start_key(plan_id: &str) -> String {
     format!("merge_start:{plan_id}")
 }
 
+/// In the detail of the line that says a start was taken back: the start's record as the
+/// store kept it, so a later `settle_resolution` that finds the record does not say it twice.
+const TAKEN_BACK: &str = "taken_back";
+
 /// This run of Codly. A start on record from another run was cut short when Codly closed;
 /// one from this run, when a step of it failed and its record could not be removed.
 static THIS_RUN: LazyLock<Id> = LazyLock::new(new_id);
@@ -508,7 +512,8 @@ impl Inner {
     pub(super) async fn settle_resolution(&self, plan: &Plan) -> Result<Plan> {
         let (key, start_key) = (resolution_key(&plan.id), start_key(&plan.id));
         let was: Option<Resolution> = self.store.kv_get(&key)?.map(|v| serde_json::from_str(&v)).transpose()?;
-        let start: Option<MergeStart> = self.store.kv_get(&start_key)?.map(|v| serde_json::from_str(&v)).transpose()?;
+        let start_row = self.store.kv_get(&start_key)?;
+        let start: Option<MergeStart> = start_row.as_deref().map(serde_json::from_str).transpose()?;
         if was.is_none() && start.is_none() {
             return Ok(plan.clone());
         }
@@ -574,7 +579,16 @@ impl Inner {
                 Ok(())
             })?;
         }
+        // A take-back that wrote its line and then could not remove the records of its start
+        // (`take_back_start`): what happened is on record once already.
+        let said = match (&cut_short, &start_row) {
+            (Some(_), Some(row)) => self.start_taken_back(&plan.id, row)?,
+            _ => false,
+        };
         self.store.kv_write(&forget)?;
+        if said {
+            return Ok(plan);
+        }
         let ws_id = Some(ws.id.as_str());
         let (summary, text) = match (&cut_short, task.as_ref().is_some_and(fixes_checks)) {
             (Some(start), _) => {
@@ -606,6 +620,38 @@ impl Inner {
         self.decide(ws_id, on_task, "merge", summary, json!({ "plan_id": plan.id, "tip": tip, "removed": removed }))?;
         self.chat(ws_id, &plan.thread, "codly", &text, None)?;
         Ok(plan)
+    }
+
+    /// The plans with a start on record that was cut short (`MergeStart`: the plan does not
+    /// build on the user's branch it brought in): their merge may be on the plan's branch with
+    /// no task on it, until `settle_resolution` takes it back. A record that cannot be read,
+    /// or whose plan is gone, is passed over.
+    pub(super) fn starts_cut_short(&self) -> Result<Vec<Plan>> {
+        let prefix = start_key("");
+        let mut plans = vec![];
+        for (key, row) in self.store.kv_prefixed(&prefix)? {
+            let start: MergeStart = match serde_json::from_str(&row) {
+                Ok(start) => start,
+                Err(e) => {
+                    tracing::warn!("the start of a conflict resolution in {key} cannot be read: {e}");
+                    continue;
+                }
+            };
+            if let Some(plan) = self.store.plan(&key[prefix.len()..])?
+                && plan.base_commit.as_deref() != Some(start.head.as_str())
+            {
+                plans.push(plan);
+            }
+        }
+        Ok(plans)
+    }
+
+    /// Is the take-back of this start (`row`, as the store keeps it) on record already?
+    fn start_taken_back(&self, plan_id: &str, row: &str) -> Result<bool> {
+        self.store.with(|db| {
+            let sql = "SELECT EXISTS(SELECT 1 FROM decision WHERE plan_id = ?1 AND type = 'merge' AND json_extract(detail, ?2) = ?3)";
+            Ok(db.query_row(sql, rusqlite::params![plan_id, format!("$.{TAKEN_BACK}"), row], |r| r.get(0))?)
+        })
     }
 
     /// A plan an agent can still work on, and that is not in the user's branch yet.
@@ -795,6 +841,8 @@ impl Inner {
     /// the merge. That is one of three things: it could not be taken back (the start stays on
     /// record, and `settle_resolution` tries again before the plan is merged); it was taken
     /// back and that could not be written down (the same record says it later); or both worked.
+    /// When only the records of the start cannot be removed after the line is written, both
+    /// worked: `settle_resolution` removes them later and finds the line (`TAKEN_BACK`).
     async fn take_back_start(&self, plan: &Plan, target: &str, branch: &str, wt: &Path, before: &str, why: anyhow::Error) -> anyhow::Error {
         // The merge commit, a merge left open, and what it changed in the files. No worker
         // ran there, so no new file is its own.
@@ -805,8 +853,8 @@ impl Inner {
                 wt.display()
             );
         }
+        let key = resolution_key(&plan.id);
         let noted = || -> Result<()> {
-            let key = resolution_key(&plan.id);
             if let Some(saved) = self.store.kv_get(&key)? {
                 let was: Resolution = serde_json::from_str(&saved)?;
                 if self.store.task(&was.task)?.is_some() {
@@ -817,15 +865,21 @@ impl Inner {
                     })?;
                 }
             }
+            let start = self.store.kv_get(&start_key(&plan.id))?;
             let summary = format!("bringing {target} into {branch} did not start ({}); {branch} is back where it was before it", prompts::clip(&format!("{why:#}"), 160));
-            self.decide(Some(&plan.workspace_id), None, "merge", summary, json!({ "plan_id": plan.id, "tip": before }))?;
-            // Last: while the line above is not on record, the start is.
-            self.store.kv_write(&[(key, None), (start_key(&plan.id), None)])
+            let mut detail = json!({ "plan_id": plan.id, "tip": before });
+            detail[TAKEN_BACK] = json!(start);
+            self.decide(Some(&plan.workspace_id), None, "merge", summary, detail)?;
+            Ok(())
         };
-        match noted() {
-            Ok(()) => anyhow!("{why:#}. Codly took the merge of {target} back: {branch} is as it was"),
-            Err(e) => anyhow!("{why:#}. Codly took the merge of {target} back: {branch} is as it was. It could not write that down: {e:#}"),
+        if let Err(e) = noted() {
+            return anyhow!("{why:#}. Codly took the merge of {target} back: {branch} is as it was. It could not write that down: {e:#}");
         }
+        // Last: while the line above is not on record, the start is.
+        if let Err(e) = self.store.kv_write(&[(key, None), (start_key(&plan.id), None)]) {
+            tracing::warn!("the start of a resolution of plan {} stays on record after it was taken back: {e:#}", plan.id);
+        }
+        anyhow!("{why:#}. Codly took the merge of {target} back: {branch} is as it was")
     }
 
     /// Bring the user's branch into the plan's integration branch, in the plan's own worktree.

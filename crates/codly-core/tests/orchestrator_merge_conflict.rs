@@ -1961,3 +1961,49 @@ async fn a_merge_of_a_solo_agents_branch_keeps_your_branch_as_it_was() {
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (again, Some(yours)));
     core.shutdown().await;
 }
+
+/// The last write of a take-back: the records of the start go.
+const THE_START_FORGOTTEN: &str = "DELETE ON kv WHEN OLD.key LIKE 'merge_start:%'";
+
+/// A start fails after the merge, and Codly takes the merge back and writes that down. Only
+/// the last write fails: the records of the start stay. The error does not say that it could
+/// not be written down (the line is on record), and the next Merge, which removes the records,
+/// finds that line and does not write a second one for the same start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_take_back_whose_records_stay_says_it_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let lead = lead_with("greeting.txt", "grep -q plan greeting.txt", &[]);
+    let (core, repo) = start(dir.path(), lead, plan_worker(), Default::default()).await;
+    core.send_chat("lead", "Please change the greeting").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    let tip = sh(&repo, &["rev-parse", &branch]);
+    let mine = commit(&repo, "greeting.txt", "hello from main\n");
+
+    store_refuses(dir.path(), Some(THE_TASKS_BASE));
+    store_trigger(dir.path(), "kept", Some(THE_START_FORGOTTEN));
+    let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
+    assert!(err.contains("the disk is full") && err.ends_with(&format!(". Codly took the merge of main back: {branch} is as it was")), "{err}");
+    assert!(!err.contains("could not write that down"), "{err}");
+    assert_eq!((sh(&repo, &["rev-parse", &branch]), in_merge(&integ_wt), sh(&integ_wt, &["status", "--porcelain"])), (tip.clone(), false, String::new()));
+    let task = core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.key == "resolve").expect("the task had reached the store");
+    assert_eq!((task.status, task.status_reason.as_deref()), (TaskStatus::Cancelled, Some("Codly could not start it")));
+    assert_eq!(start_records(dir.path()).len(), 2, "the start is still on record: {:?}", start_records(dir.path()));
+    let did_not_start = |record: &[String]| record.iter().filter(|d| d.starts_with(&format!("bringing main into {branch} did not start ("))).count();
+    assert_eq!(did_not_start(&decisions(&core).await), 1);
+
+    // The store takes writes again. The next Merge removes the records, finds the plan as it
+    // was (the conflict), and says nothing more about the start.
+    store_refuses(dir.path(), None);
+    store_trigger(dir.path(), "kept", None);
+    let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
+    assert!(err.contains("merging into main conflicts in greeting.txt"), "{err}");
+    assert_eq!(start_records(dir.path()), Vec::<String>::new());
+    let record = decisions(&core).await;
+    assert_eq!(did_not_start(&record), 1, "{record:?}");
+    assert!(!record.iter().any(|d| d.contains("did not finish")), "no second line for the same start: {record:?}");
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["rev-parse", &branch])), (mine, tip));
+    core.shutdown().await;
+}
