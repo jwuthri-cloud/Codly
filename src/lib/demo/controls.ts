@@ -213,14 +213,17 @@ export class MockControls {
   }
 
   /** "Stop" on a background command: its CLI ends it, and the agent's next list says "stopped".
-   *  (An agent of the demo leaves one command running at most, so the request names none.) */
-  stopTask(id: string): null {
+   *  A helper is stopped the same way, and the agent is then told in a turn of its own
+   *  (demo/background.ts). `taskId`: the id the agent's list gives the one to stop. Like Claude
+   *  Code, a stop of something that is over already answers and changes nothing. */
+  stopTask(id: string, taskId: string): null {
     const a = this.agent(id);
+    if (!taskId.trim()) throw new Error('which background command?');
     const background = demoBackground(this.sim);
-    const running = background.of(id);
-    if (!running.length) throw new Error(`${a.name} has no command running in the background`);
-    this.note(id, `asked ${a.name} to stop a command it left running in the background`);
-    for (const task of running) background.end(id, task.id, 'stopped');
+    const task = background.of(id).find((t) => t.id === taskId);
+    if (!task) return null;
+    this.note(id, `asked ${a.name} to stop what it left running in the background: ${task.description}`);
+    background.end(id, task.id, 'stopped');
     return null;
   }
 

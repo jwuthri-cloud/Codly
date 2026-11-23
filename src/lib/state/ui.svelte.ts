@@ -1,9 +1,11 @@
 // UI state shared by every surface. One selection drives everything: click an agent, a task or a
 // file anywhere and the sheet opens on it, the office follows it, the plan scrolls to it. One
 // hover cross-highlights (crew pill ↔ task card ↔ timeline lane ↔ the agent in the office).
-// Small preferences persist in localStorage.
+// Small preferences persist in localStorage, and so does the request you were last on in each
+// office: a restart lands on it.
 
 import type { Provider } from '../gen/Provider';
+import { store } from './store.svelte';
 
 /** Home + four rooms (REDESIGN §2). */
 export type Room = 'home' | 'plan' | 'changes' | 'knowledge' | 'terminal';
@@ -54,6 +56,9 @@ export function shortId(): string {
   crypto.getRandomValues(b);
   return Array.from(b, (x) => (x % 36).toString(36)).join('');
 }
+
+/** Where the request you were last on in an office is kept across a restart: one key per office. */
+const lastRequestKey = (office: string): string => `codly.request.${office}`;
 
 type Prefs = {
   room: Room;
@@ -182,6 +187,10 @@ class Ui {
   /** Composer draft injected by other surfaces (palette "Ask the Lead…", file mentions). */
   composerSeed = $state<{ thread: string; text: string; keep: boolean; replaces: string | null; nonce: number } | null>(null);
 
+  /** Bumped when the page changes in a way no other field here tells: a menu or a dialog comes or
+   *  goes, the first-run quest shows another level. The toast stack then looks for its place again. */
+  layoutRev = $state(0);
+
   systemDark = $state(mq('(prefers-color-scheme: dark)')?.matches ?? true);
   reducedMotion = $state(mq('(prefers-reduced-motion: reduce)')?.matches ?? false);
   width = $state(typeof window !== 'undefined' ? window.innerWidth : 1440);
@@ -271,12 +280,56 @@ class Ui {
     if (this.mode === 'office') this.mode = 'blend';
   }
 
+  /**
+   * You are on this request now. It is kept for the open office, so a restart lands on it
+   * (`lastRequest`). And an open sheet that shows a Lead shows this request's Lead from now on,
+   * whatever took you here (a tab, ⌘[ / ⌘], the palette): what the sheet does (Stop, Kill) never
+   * acts on the Lead of a request you left. A request with no Lead yet has none to show: that
+   * sheet closes. The sheet of a worker, a 1:1 agent, a task or a file stays.
+   */
+  private setRequest(thread: string) {
+    const moved = thread !== this.request;
+    this.request = thread;
+    const office = store.workspace?.id;
+    // Between two offices the request on screen is the old office's, and `store` names the new one.
+    if (office && !this.between) this.keepLastRequest(office);
+    if (!moved || this.selection?.kind !== 'agent') return;
+    const shown = store.agentMap.get(this.selection.id);
+    if (shown?.role !== 'lead') return;
+    const lead = store.leadOf(thread);
+    if (lead?.id !== shown.id) this.selection = lead ? { kind: 'agent', id: lead.id } : null;
+  }
+
+  /** The request you are on is the last one of `office`, also after a restart. */
+  private keepLastRequest(office: string) {
+    try {
+      localStorage.setItem(lastRequestKey(office), this.request);
+    } catch {
+      /* private mode */
+    }
+  }
+
+  /** The request you were last on in an office, as kept across restarts. Null: none is kept there, or the storage cannot be read. */
+  lastRequest(office: string): string | null {
+    try {
+      return localStorage.getItem(lastRequestKey(office));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Codly starts on an office: you are on the request you last had open there. The room you were in stays. */
+  resumeRequest(thread: string) {
+    this.setRequest(thread);
+    this.thread = thread;
+  }
+
   /** Switch to a request thread (its Lead, its plan, its approvals). Empty drafts you leave are dropped. */
   openRequest(thread: string) {
     // A draft you leave has a message by now (the chat list carries it), or holds text you did
     // not send (it stays a tab until you send or close it), or is dropped.
     this.draftRequests = this.draftRequests.filter((d) => d.thread === thread || d.kept);
-    this.request = thread;
+    this.setRequest(thread);
     this.thread = thread;
     this.go('home');
     if (this.mode === 'office') this.mode = 'blend';
@@ -293,7 +346,7 @@ class Ui {
   /** A draft request that holds nothing any more goes, and you stay in the room you are in: if it was the request you were on, `next` is now. */
   dropDraft(thread: string, next: string) {
     this.draftRequests = this.draftRequests.filter((d) => d.thread !== thread);
-    if (this.request === thread) this.request = next;
+    if (this.request === thread) this.setRequest(next);
     if (this.thread === thread) this.thread = next;
   }
 
@@ -305,24 +358,29 @@ class Ui {
   /**
    * Another office is about to show (`office`: the one on screen, null when none was open).
    * Where you were is remembered now, while the tabs and the composer are still this office's:
-   * the request you were on, and the draft requests that hold text. A switch that overtakes
-   * another one has nothing to add: the office in between never showed its requests.
+   * the request you were on (also for after a restart), and the draft requests that hold text.
+   * A switch that overtakes another one has nothing to add: the office in between never showed
+   * its requests.
    */
   leaveOffice(office: string | null) {
     if (this.between) return;
     this.between = true;
-    if (office) this.left.set(office, { request: this.request, drafts: this.draftRequests.filter((d) => d.kept) });
+    if (office) {
+      this.left.set(office, { request: this.request, drafts: this.draftRequests.filter((d) => d.kept) });
+      this.keepLastRequest(office);
+    }
     this.draftRequests = [];
   }
 
   /** An office's requests are on screen: its drafts that hold text are tabs again. Returns the
-   *  request you were on when you left it (null: you were not there in this session). */
+   *  request you were on when you left it: in this session, else before the last restart
+   *  (null: no request of it is kept). */
   enterOffice(office: string): string | null {
     this.between = false;
     const was = this.left.get(office);
     this.left.delete(office);
     this.draftRequests = was?.drafts ?? [];
-    return was?.request ?? null;
+    return was?.request ?? this.lastRequest(office);
   }
 
   openDiff(target: DiffTarget) {
@@ -340,7 +398,7 @@ class Ui {
   /** The Plan room on a plan (and on the request it answers, when given). */
   openPlan(planId?: string | null, thread?: string | null) {
     if (planId) this.planId = planId;
-    if (thread && isRequestThread(thread)) this.request = thread;
+    if (thread && isRequestThread(thread)) this.setRequest(thread);
     this.go('plan');
   }
 
@@ -376,7 +434,7 @@ class Ui {
   /** `keep`: a draft being typed there is not replaced (the composer says so). `replaces`: the
    *  text an earlier seed put there, which this one stands in for (`seedDraft`). */
   seedComposer(thread: string, text: string, keep = false, replaces: string | null = null) {
-    if (isRequestThread(thread)) this.request = thread;
+    if (isRequestThread(thread)) this.setRequest(thread);
     this.thread = thread;
     this.composerSeed = { thread, text, keep, replaces, nonce: Math.random() };
     // A draft request holds this text from now on, also before its composer is on screen.

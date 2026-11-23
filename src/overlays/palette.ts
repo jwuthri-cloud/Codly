@@ -78,3 +78,13 @@ export function wants(s: ApprovalSubject, provider: Provider | null | undefined)
       return 'get more permissions';
   }
 }
+
+/**
+ * The palette's "no" row for a waiting request of the agent `name`; `what`: the request in a few
+ * words. `note`: the row answers nothing, it opens the note field on the request's card. A Claude
+ * agent's plan gets that row: it has no plain "no", since without a note Claude Code shows the
+ * same plan again.
+ */
+export function noRow(s: ApprovalSubject, provider: Provider | null | undefined, name: string, what: string): { title: string; note: boolean } {
+  return showsPlan(s, provider) ? { title: `Send ${name}'s plan back with a note…`, note: true } : { title: `Deny ${name}: ${what}`, note: false };
+}

@@ -11,7 +11,8 @@ import { api } from '../api';
 import { switchAgentModel } from '../state/actions';
 import { offersAsk, rankRows } from '../../overlays/palette';
 import { closeQuestion } from '../state/closing';
-import { cyclesMode, nextPermissionMode, PERMISSION_MODES } from '../state/control.svelte';
+import { PERMISSION_MODES } from '../state/control.svelte';
+import { nextWay, wayOf } from '../../home/agentPicker';
 import { quickManifest } from '../state/hireWizard';
 import { SHORTCUTS } from '../state/keys';
 import type { Request } from '../state/requests.svelte';
@@ -20,32 +21,33 @@ import { store, type AgentLive } from '../state/store.svelte';
 import { confirmKey } from '../util/confirm';
 import { firstRow, pickRows } from '../util/modelPick';
 import { retryTarget } from '../util/retry';
+import { endedByKill, KILL_GRACE } from '../../home/outcomes';
 
 describe('⇧⇥ in a 1:1', () => {
   it('cycles the modes of the sheet’s select, in its order, round', () => {
     const order = PERMISSION_MODES.map((m) => m.id);
     expect(order).toEqual(['ask', 'accept_edits', 'plan']);
-    expect(nextPermissionMode('ask', 'balanced')).toBe('accept_edits');
-    expect(nextPermissionMode('accept_edits', 'balanced')).toBe('plan');
-    expect(nextPermissionMode('plan', 'autonomous')).toBe('ask');
+    expect(nextWay('ask', 'balanced')).toBe('accept_edits');
+    expect(nextWay('accept_edits', 'balanced')).toBe('plan');
+    expect(nextWay('plan', 'autonomous')).toBe('ask');
     // An agent with no mode set is in "ask for edits".
-    expect(nextPermissionMode(undefined, 'balanced')).toBe('accept_edits');
-    expect(nextPermissionMode(null, 'balanced')).toBe('accept_edits');
+    expect(nextWay(wayOf({ role: 'solo', provider: 'claude', permission_mode: undefined }, false)!, 'balanced')).toBe('accept_edits');
   });
 
   it('skips "accept edits" under "Ask first", where the core refuses it, so "plan first" stays in reach', () => {
-    expect(nextPermissionMode('ask', 'strict')).toBe('plan');
-    expect(nextPermissionMode('plan', 'strict')).toBe('ask');
+    expect(nextWay('ask', 'strict')).toBe('plan');
+    expect(nextWay('plan', 'strict')).toBe('ask');
     // An agent left in "accept edits" before the permissions changed moves on.
-    expect(nextPermissionMode('accept_edits', 'strict')).toBe('ask');
+    expect(nextWay('accept_edits', 'strict')).toBe('ask');
   });
 
-  it('only a 1:1 Claude agent off a task has a mode the key switches', () => {
-    expect(cyclesMode({ provider: 'claude', role: 'solo', task_id: null })).toBe(true);
-    expect(cyclesMode({ provider: 'claude', role: 'solo', task_id: 't1' })).toBe(false);
-    for (const provider of ['codex', 'gemini', 'opencode'] as const) expect(cyclesMode({ provider, role: 'solo', task_id: null })).toBe(false);
-    expect(cyclesMode({ provider: 'claude', role: 'worker', task_id: null })).toBe(false);
-    expect(cyclesMode({ provider: 'claude', role: 'lead', task_id: null })).toBe(false);
+  it('only where the picker has a way to switch: a 1:1 Claude agent in its own chat (wayOf)', () => {
+    expect(wayOf({ provider: 'claude', role: 'solo', permission_mode: 'plan' }, false)).toBe('plan');
+    // On a task its chat shows the task's request's picker: no way to switch.
+    expect(wayOf({ provider: 'claude', role: 'solo', permission_mode: 'ask' }, true)).toBeNull();
+    for (const provider of ['codex', 'gemini', 'opencode'] as const) expect(wayOf({ provider, role: 'solo', permission_mode: undefined }, false)).toBeNull();
+    expect(wayOf({ provider: 'claude', role: 'worker', permission_mode: undefined }, false)).toBeNull();
+    expect(wayOf(null, false)).toBeNull();
   });
 
   it('is in the shortcuts sheet', () => {
@@ -154,6 +156,20 @@ describe('a Kill of yours', () => {
     expect(killedAt('k1')).toEqual([2000]);
     expect(killedAt('someone-else')).toEqual([]);
     expect(killLine('Eli')).toBe('You killed Eli');
+  });
+
+  it('takes the place of the “turn was interrupted” line of the turn it cut', () => {
+    const kills = [10_000];
+    // The turn started before the kill and ended after it.
+    expect(endedByKill({ what: 'interrupted', ts: 11_000, turn: { start: 5_000, input: null } }, kills)).toBe(true);
+    // No turn on record (the run ended first): an interruption soon after the kill.
+    expect(endedByKill({ what: 'interrupted', ts: 12_000, turn: null }, kills)).toBe(true);
+    expect(endedByKill({ what: 'interrupted', ts: 10_000 + KILL_GRACE + 1, turn: null }, kills)).toBe(false);
+    // A later turn, an earlier interruption, or another trouble is reported as before.
+    expect(endedByKill({ what: 'interrupted', ts: 40_000, turn: { start: 30_000, input: null } }, kills)).toBe(false);
+    expect(endedByKill({ what: 'interrupted', ts: 8_000, turn: { start: 5_000, input: null } }, kills)).toBe(false);
+    expect(endedByKill({ what: 'failed', ts: 11_000, turn: { start: 5_000, input: null } }, kills)).toBe(false);
+    expect(endedByKill({ what: 'interrupted', ts: 11_000, turn: { start: 5_000, input: null } }, [])).toBe(false);
   });
 });
 

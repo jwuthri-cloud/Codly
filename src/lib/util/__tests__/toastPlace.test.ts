@@ -1,10 +1,10 @@
 // The toast stack lies over the page and must cover nothing you can press. The boxes below
 // are the ones measured in the app (left, top, right, bottom in px): a one-line toast is
 // 360 x 63, the stack starts 68 px under the window's top.
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import tokens from '../../../styles/tokens.css?raw';
 import toastsView from '../../../components/Toasts.svelte?raw';
-import { counts, grown, ms, onTop, reachDown, toastTop, visiblePart, type Box, type Seen } from '../toastPlace';
+import { countedBox, counts, frontToast, grown, ms, onTop, paced, reachDown, restLook, stackPlace, toastTop, visiblePart, type Box, type Seen, type Shape } from '../toastPlace';
 
 const box = (left: number, top: number, right: number, bottom: number): Box => ({ left, top, right, bottom });
 
@@ -136,6 +136,242 @@ describe('reachDown', () => {
     expect(reach(640, 700)).toBe(0);
     // No reach: no move, even off a control right under the top bar.
     expect(toastTop(box(650, 68, 1010, 628), [box(863, 72, 893, 102)], TOP, MOVES, 0)).toBe(68);
+  });
+});
+
+describe('stackPlace: the place, and whether the stack folds', () => {
+  /** As the stack measures: each control with 4 px around it. */
+  const controls = (...boxes: Box[]) => boxes.map((c) => grown(c, 4));
+  /** A stack of this height in a window of this height: it may go down 40 percent of the window, and stays 12 px inside it. */
+  const shape = (height: number, windowHeight: number): Shape => ({ height, reach: reachDown(windowHeight, 0.4, TOP, height, 12) });
+  /** Measured: a one-line toast is 45 px high, three of them with 8 px between are 151. */
+  const THREE = 151;
+  /** One toast, 8 px, and the 22 px line "+2 more". */
+  const FOLDED = 75;
+
+  it('a stack with a free place does not fold', () => {
+    const closed = box(1071, 72, 1101, 102);
+    expect(stackPlace({ left: 1066, right: 1426 }, shape(THREE, 900), shape(FOLDED, 900), controls(closed), TOP, MOVES)).toEqual({ top: 106, folded: false });
+    expect(stackPlace({ left: 1066, right: 1426 }, shape(THREE, 900), shape(FOLDED, 900), [], TOP, MOVES)).toEqual({ top: 68, folded: false });
+  });
+
+  it('folds off "Deny": three toasts over an approval card (Home, 1024 x 640)', () => {
+    // Measured on the page: the request tabs, the plan header, the card's "Copy command" and "Deny".
+    const page = controls(
+      box(453, 72, 679, 102), box(679, 77, 699, 97), box(825, 72, 855, 102), box(863, 72, 893, 102),
+      box(205, 110, 713.4, 162), box(719.4, 125, 741.4, 147), box(737.4, 125, 759.4, 147), box(769.4, 123, 857, 149), box(869, 124, 893, 148),
+      box(823, 160.9, 847, 184.9),
+      box(596.3, 302.9, 686.2, 334.9),
+    );
+    const sides = { left: 650, right: 1010 };
+    // The whole stack: 68 -> 188.9, under "Copy command". There it ends at 339.9, on "Deny" (298.9 to 338.9),
+    // and under "Deny" is further than it may go (68 + 256).
+    expect(toastTop(box(650, 68, 1010, 68 + THREE), page, TOP, MOVES, shape(THREE, 640).reach)).toBe(188.9);
+    // Folded, it ends at 263.9: 35 px over "Deny".
+    expect(stackPlace(sides, shape(THREE, 640), shape(FOLDED, 640), page, TOP, MOVES)).toEqual({ top: 188.9, folded: true });
+    // Two toasts (98 px) end at 286.9: free, not folded.
+    expect(stackPlace(sides, shape(98, 640), shape(FOLDED, 640), page, TOP, MOVES)).toEqual({ top: 188.9, folded: false });
+  });
+
+  it('with no free place for the folded stack either, it stays folded where it last looked: a list of task rows (Home, 1440 x 900, the sheet open)', () => {
+    // The request tabs, the plan header, three task rows (each one button, 632 px wide: not wider
+    // than twice the stack, so each counts whole) and "Plan room" under them.
+    const page = controls(
+      box(452, 72, 678, 102), box(678, 77, 698, 97), box(824, 72, 854, 102), box(862, 72, 892, 102),
+      box(204, 110, 712.4, 162), box(718.4, 125, 740.4, 147), box(736.4, 125, 758.4, 147), box(768.4, 123, 856, 149), box(868, 124, 892, 148),
+      box(228, 221.9, 860, 301.9), box(228, 303.9, 860, 365.9), box(228, 367.9, 860, 429.9),
+      box(755.4, 439.9, 850, 465.9),
+    );
+    // Whole and folded: 68 -> under the header or the first row -> under the second row. The third
+    // row ends further down than the stack may go (68 + 360).
+    expect(stackPlace({ left: 648, right: 1008 }, shape(THREE, 900), shape(FOLDED, 900), page, TOP, MOVES)).toEqual({ top: 369.9, folded: true });
+  });
+
+  it('a stack of one toast cannot fold: it stays where it last looked', () => {
+    const rows = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => box(1000, 70 + i * 40, 1400, 100 + i * 40));
+    expect(stackPlace({ left: 1066, right: 1426 }, shape(63, 900), null, rows, TOP, MOVES)).toEqual({ top: 300, folded: false });
+  });
+
+  it('the folded stack looks with its own reach: it may go where the whole stack would leave the window', () => {
+    // Three long errors, 511 px high, in a 640 px high window: the whole stack can go down 49 px.
+    const findClose = box(849, 116, 875, 142);
+    const page = [box(863, 72, 893, 102), findClose];
+    expect(shape(511, 640).reach).toBe(49);
+    // The whole stack stays on the find bar's button; folded (one long error and the line), it goes under it.
+    expect(stackPlace({ left: 650, right: 1010 }, shape(511, 640), shape(195, 640), page, TOP, MOVES)).toEqual({ top: 142, folded: true });
+  });
+});
+
+describe('frontToast: the one toast of a folded stack', () => {
+  const toast = (id: number, kind: string) => ({ id, kind });
+
+  it('is the newest toast', () => {
+    expect(frontToast([toast(3, 'info'), toast(2, 'success'), toast(1, 'progress')])?.id).toBe(3);
+  });
+
+  it('is the newest error when the stack has one: an error is never the one that is hidden', () => {
+    expect(frontToast([toast(3, 'info'), toast(2, 'error'), toast(1, 'error')])?.id).toBe(2);
+    expect(frontToast([toast(3, 'error'), toast(2, 'info')])?.id).toBe(3);
+  });
+
+  it('is nothing for no toast', () => {
+    expect(frontToast([])).toBeUndefined();
+  });
+});
+
+describe('countedBox: a control much wider than the stack counts by what it shows', () => {
+  const STACK = 360;
+  const never = () => {
+    throw new Error('not asked');
+  };
+
+  it('a whole-width row whose label is at the left: the stack at the right stays at the top', () => {
+    // Measured in the Plan room (1440 x 900): the header "Not in a plan" is one button, 860 px wide,
+    // and its text ends at x 715. Here it is right under the top bar.
+    const row = box(323, 70, 1183, 102);
+    const label = box(337, 78, 715, 93);
+    expect(countedBox(row, STACK, false, () => label)).toEqual(label);
+    const stack = box(1066, 68, 1426, 113);
+    expect(toastTop(stack, [grown(row, 4)], TOP, MOVES, REACH_900)).toBe(106);
+    expect(toastTop(stack, [grown(countedBox(row, STACK, false, () => label)!, 4)], TOP, MOVES, REACH_900)).toBe(68);
+  });
+
+  it('a row that shows something at the right too still counts there', () => {
+    // The question row of the Plan room: its text starts at x 337, its time ends at x 1169.
+    const row = box(323, 70, 1183, 104);
+    const shown = countedBox(row, STACK, false, () => box(337, 79, 1169, 94))!;
+    expect(toastTop(box(1066, 68, 1426, 113), [grown(shown, 4)], TOP, MOVES, REACH_900)).toBe(98);
+  });
+
+  it('a press area that shows nothing of its own (it lies over a whole task row) does not count', () => {
+    expect(countedBox(box(323, 378, 1183, 576), STACK, false, () => null)).toBeNull();
+  });
+
+  it('what a control shows counts only inside the part of it that shows', () => {
+    // A label that is cut at the row's right edge, and one that lies outside the part that shows.
+    expect(countedBox(box(100, 70, 900, 102), STACK, false, () => box(120, 78, 1040, 93))).toEqual(box(120, 78, 900, 93));
+    expect(countedBox(box(100, 70, 900, 102), STACK, false, () => box(120, 20, 400, 60))).toBeNull();
+  });
+
+  it('a control up to twice as wide as the stack counts whole: what it shows is not asked for', () => {
+    // A task row of Home is 632 px wide; a control of exactly twice the stack's width.
+    expect(countedBox(box(228, 222, 860, 302), STACK, false, never)).toEqual(box(228, 222, 860, 302));
+    expect(countedBox(box(100, 70, 820, 102), STACK, false, never)).toEqual(box(100, 70, 820, 102));
+  });
+
+  it('a field you type in counts whole, however wide: its text can be anywhere in it', () => {
+    expect(countedBox(box(100, 70, 1100, 104), STACK, true, never)).toEqual(box(100, 70, 1100, 104));
+  });
+
+  it('follows the stack’s width: a narrow window has a narrower stack', () => {
+    // The stack is 300 px wide: a 632 px row is wider than twice of it.
+    expect(countedBox(box(10, 222, 642, 302), 300, false, () => box(24, 240, 200, 256))).toEqual(box(24, 240, 200, 256));
+  });
+});
+
+describe('paced: at most one run in a time', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('runs at once, and once more at the end of the time for all the calls in it', () => {
+    const run = vi.fn();
+    const call = paced(run, 250);
+    call();
+    expect(run).toHaveBeenCalledTimes(1);
+    call();
+    call();
+    vi.advanceTimersByTime(249);
+    expect(run).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('text that streams in for a second makes five runs, not one for each change', () => {
+    const run = vi.fn();
+    const call = paced(run, 250);
+    for (let at = 0; at < 1000; at += 10) {
+      call();
+      vi.advanceTimersByTime(10);
+    }
+    // At 0, 250, 500, 750 and 1000 ms.
+    expect(run).toHaveBeenCalledTimes(5);
+  });
+
+  it('with no call in the time it does not run again, and the next call runs at once', () => {
+    const run = vi.fn();
+    const call = paced(run, 250);
+    call();
+    vi.advanceTimersByTime(1000);
+    expect(run).toHaveBeenCalledTimes(1);
+    call();
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('stop drops the run that waits', () => {
+    const run = vi.fn();
+    const call = paced(run, 250);
+    call();
+    call();
+    call.stop();
+    vi.advanceTimersByTime(1000);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('restLook: the look when the page has come to rest', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+  /** `--d-4` and two frames. */
+  const WAIT = 414;
+
+  it('a second toast within the wait does not start the wait over: the look comes once, at the end of the first wait', () => {
+    const look = vi.fn();
+    const rest = restLook(() => WAIT, look);
+    rest.after(false);
+    vi.advanceTimersByTime(200);
+    rest.after(false);
+    vi.advanceTimersByTime(213);
+    expect(look).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(look).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1000);
+    expect(look).toHaveBeenCalledTimes(1);
+  });
+
+  it('a progress toast that changes every 100 ms still gets its look, and a change after it starts a new wait', () => {
+    const look = vi.fn();
+    const rest = restLook(() => WAIT, look);
+    for (let at = 0; at < 1000; at += 100) {
+      rest.after(false);
+      vi.advanceTimersByTime(100);
+    }
+    // The first wait ends at 414 ms; the change at 500 ms starts the second, which ends at 914 ms.
+    expect(look).toHaveBeenCalledTimes(2);
+  });
+
+  it('a change of the page’s layout starts the wait over: its boxes move from then on', () => {
+    const look = vi.fn();
+    const rest = restLook(() => WAIT, look);
+    rest.after(false);
+    vi.advanceTimersByTime(300);
+    rest.after(true);
+    vi.advanceTimersByTime(413);
+    expect(look).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(look).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop drops the look that waits (the last toast went)', () => {
+    const look = vi.fn();
+    const rest = restLook(() => WAIT, look);
+    rest.after(false);
+    rest.stop();
+    vi.advanceTimersByTime(1000);
+    expect(look).not.toHaveBeenCalled();
+    // The next toast starts a wait of its own.
+    rest.after(false);
+    vi.advanceTimersByTime(WAIT);
+    expect(look).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -94,3 +94,16 @@ export function messageOf(turn: Trouble['turn'], yours: { ts: number; text: stri
   for (const m of yours) if (m.ts <= turn.start && (!best || m.ts > best.ts) && prompt.includes(norm(m.text))) best = m;
   return best?.text ?? null;
 }
+
+/** How long after a Kill the end of a turn it cut can come (the CLI's shutdown ladder). */
+export const KILL_GRACE = 15_000;
+
+/**
+ * Whether this trouble is the end of a turn you killed (`kills`: when, on the wall clock), so
+ * the line "You killed …" already says it. A turn that started before the kill, or an
+ * interruption with no turn on record that came within `KILL_GRACE` of it.
+ */
+export function endedByKill(t: Pick<Trouble, 'what' | 'ts' | 'turn'>, kills: number[]): boolean {
+  if (t.what !== 'interrupted') return false;
+  return kills.some((k) => k <= t.ts + 1000 && (t.turn ? k >= t.turn.start : t.ts - k <= KILL_GRACE));
+}

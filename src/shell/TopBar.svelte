@@ -93,7 +93,7 @@
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 22px; line-height: 34px; font-style: italic; color: var(--ink-1); white-space: nowrap; }
   .branch { display: inline-flex; flex-shrink: 0; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
   .crew { min-width: 0; height: 100%; display: flex; align-items: center; }
-  .crew > :global(.strip) { min-width: 0; }
+  .crew > :global(.crew-strip) { min-width: 0; }
   .actions { display: flex; justify-self: end; align-items: center; gap: 8px; }
   .demo { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px; border-radius: var(--r-full); color: var(--ink-2); font-size: var(--t-sm); font-weight: var(--w-med); background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-edge); }
   .demo:hover { color: var(--ink-1); }

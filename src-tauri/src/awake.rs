@@ -82,11 +82,16 @@ impl Drop for Awake {
 /// `caffeinate -i -w <pid>`: no idle sleep until this process is ended, or Codly is gone.
 fn caffeinate() -> io::Result<Child> {
     Command::new("/usr/bin/caffeinate")
-        .args(["-i", "-w", &std::process::id().to_string()])
+        .args(caffeinate_args(std::process::id()))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
+}
+
+/// `-i`: no idle sleep (the display may still sleep). `-w <pid>`: until that process ends.
+fn caffeinate_args(pid: u32) -> [String; 3] {
+    ["-i".into(), "-w".into(), pid.to_string()]
 }
 
 /// Keep the Mac awake while work is under way, for as long as Codly runs. Only macOS has the
@@ -123,6 +128,11 @@ mod tests {
 
     fn pid(awake: &Awake) -> Option<u32> {
         awake.helper.as_ref().map(Child::id)
+    }
+
+    #[test]
+    fn caffeinate_holds_off_idle_sleep_only_while_codly_runs() {
+        assert_eq!(caffeinate_args(4242), ["-i", "-w", "4242"]);
     }
 
     #[test]

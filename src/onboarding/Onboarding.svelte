@@ -28,6 +28,11 @@
   const points = $derived(xp(ui.quest));
   const sound = $derived(ui.questSound && !ui.reducedMotion);
   const level = $derived(LEVELS[idx]);
+  // Another level is another page: the toast stack looks for its place again.
+  $effect(() => {
+    void current;
+    untrack(() => ui.layoutRev++);
+  });
 
   // Someone who already has repositories is not new here: don't walk them through it uninvited.
   onMount(() => {

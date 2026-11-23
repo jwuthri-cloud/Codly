@@ -6,7 +6,6 @@
 // control for a Codex agent and a 1:1 Claude agent.
 import { api } from '../api';
 import type { Agent } from '../gen/Agent';
-import type { ApprovalMode } from '../gen/ApprovalMode';
 import type { ContextUsage } from '../gen/ContextUsage';
 import type { ControlState } from '../gen/ControlState';
 import type { EventRow } from '../gen/EventRow';
@@ -70,21 +69,6 @@ export const PERMISSION_MODES: { id: PermissionMode; label: string; hint: string
     hint: 'It reads and plans first. Until you accept its plan, Codly approves only reads for it, whatever your permissions. The plan comes to you as a card: accept it, change it, or send it back.',
   },
 ];
-
-/** Whether ⇧⇥ in its 1:1 switches the agent's mode: a 1:1 Claude agent (the only CLI whose mode
- *  switch is recorded and built), off a task (the sheet's select is off while it is on one). */
-export const cyclesMode = (agent: Pick<Agent, 'provider' | 'role' | 'task_id'>): boolean => agent.provider === 'claude' && agent.role === 'solo' && !agent.task_id;
-
-/**
- * The mode ⇧⇥ switches to: the next one of the sheet's select, in its order, round. "Accept
- * edits" is left out under "Ask first" permissions, where the core refuses it: the key would
- * stop on a refusal and never reach "plan first".
- */
-export function nextPermissionMode(now: PermissionMode | null | undefined, permissions: ApprovalMode): PermissionMode {
-  const offered = PERMISSION_MODES.filter((m) => !(m.id === 'accept_edits' && permissions === 'strict'));
-  const at = offered.findIndex((m) => m.id === (now ?? 'ask'));
-  return offered[(at + 1) % offered.length].id;
-}
 
 /** Returns whether the agent switched. The agent's own `agent_changed` event carries the new mode. */
 export async function setPermissionMode(agentId: string, mode: PermissionMode): Promise<boolean> {
@@ -170,4 +154,11 @@ export function compactionLine(events: EventRow[], agent: Pick<Agent, 'id' | 'ru
     return `Compacted at ${clock(e.ts)}${pre == null ? '' : ` · ${tokens(pre)} → ${tokens(post)} tokens`}`;
   }
   return null;
+}
+
+/** `/context` in the composer: read how full the agent's context is and say it in a toast. A
+ *  read that fails says why (`readContext`). */
+export async function showContext(agentId: string, name: string): Promise<void> {
+  const u = await readContext(agentId);
+  if (u) toast({ kind: 'info', title: `${name}’s context`, body: contextLine(u) });
 }

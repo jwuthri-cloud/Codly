@@ -25,15 +25,37 @@ const sim = {
     return next;
   },
 } as unknown as Sim;
+// The demo's other office once it is open: a Sim of its own on the same machine.
+const billing = { agents: new Map<string, Agent>() } as unknown as Sim;
+const machine = [sim, billing];
+Object.assign(sim, { machine });
+Object.assign(billing, { machine });
 
 describe("the demo's neighbourhood", () => {
+  it('has one wallet for both offices: the XP of each crew counts, whichever office is open', () => {
+    const worker = (id: string, xp: number) => ({ id, name: id, role: 'worker', career: { ...emptyCareer(), xp } }) as Agent;
+    const before = demoWallet(sim).earned;
+    agents.set('ada', worker('ada', 120));
+    billing.agents.set('otto', worker('otto', 75));
+    try {
+      expect(demoWallet(sim).earned).toBe(before + 195);
+      // Open the other office: the same balance, not one that jumps.
+      expect(demoWallet(billing)).toEqual(demoWallet(sim));
+    } finally {
+      agents.delete('ada');
+      billing.agents.delete('otto');
+    }
+    expect(demoWallet(billing).earned).toBe(before);
+  });
+
   it('buys, builds, moves and sells as the core does, never for a profit', () => {
     const start = demoWallet(sim).balance;
     const all = demoLots(sim);
     expect(all).toHaveLength(12);
     const home = all.find((s) => s.workspace_id === 'ws-demo')!;
     expect(home).toMatchObject({ size: 'large', owned: true, gift: true, template: 'studio', name: 'codly', sells_for: 0 });
-    expect(all.filter((s) => s.owned)).toHaveLength(3);
+    // Two offices: acme/web's and billing-api's. No third one.
+    expect(all.filter((s) => s.owned).map((s) => s.name).sort()).toEqual(['billing-api', 'codly']);
 
     const plot = all.find((s) => !s.owned && s.size === 'medium')!;
     const price = readyMadePrice('medium', 'garage')!;
@@ -65,12 +87,8 @@ describe("the demo's neighbourhood", () => {
     expect(() => demoCloseOffice(sim, 'no-such-office')).toThrow('no such office');
     // Agents are at work in billing-api: it does not close.
     expect(() => demoCloseOffice(sim, 'demo-office-billing')).toThrow('Otto is in the middle of a turn in billing-api: wait for it, or stop it first');
-    expect(demoOffices(sim).map((o) => o.name)).toEqual(['docs-site', 'billing-api']);
-
-    const docs = plotOf('demo-office-docs')!;
-    const after = demoCloseOffice(sim, 'demo-office-docs').find((s) => s.id === docs.id)!;
-    expect(after).toMatchObject({ owned: true, workspace_id: null, name: null, crew: 0, template: docs.template });
     expect(demoOffices(sim).map((o) => o.name)).toEqual(['billing-api']);
+    // The demo has no third office.
     expect(() => demoCloseOffice(sim, 'demo-office-docs')).toThrow('no such office');
 
     // The open repo: not while a task is unfinished, not while an agent is in a turn.

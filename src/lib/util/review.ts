@@ -8,6 +8,7 @@ import type { Plan } from '../gen/Plan';
 import type { Task } from '../gen/Task';
 import type { TaskStatus } from '../gen/TaskStatus';
 import { parseDiff, type DiffFile, type DiffHunk, type DiffLine } from './diff';
+import { uniqueKeys } from './keys';
 
 /** Where a comment sits: a line of a file's diff (in the new file, or in the old one for a line
  *  the change removes), or the whole file (`line` null). `quote` is that line as the diff shows it. */
@@ -73,6 +74,18 @@ export function offDiff(list: ReviewComment[], paths: string[]): ReviewComment[]
   return list.filter((c) => !inDiff.has(c.path));
 }
 
+/**
+ * A key for the row of each comment, in the list's order: no two the same, and a comment keeps
+ * its key when another one is removed, so its row (and a button in it that has the focus) goes
+ * with it and is never handed to the next comment. A comment has no id and no time of its own:
+ * its file, its place and the line as you quoted it name it (`sameSpot`, one comment per such
+ * place). Should two ever share all three, the later one adds its position among them.
+ */
+export function commentKeys(list: readonly ReviewComment[]): string[] {
+  // As JSON: the three parts cannot run into each other, whatever a path or a quoted line holds.
+  return uniqueKeys(list, (c) => JSON.stringify([c.path, placeId(c), c.quote]));
+}
+
 /** Reading order: the diff's file order; in a file, its own comment first, then by line (a removed
  *  line before the new line with the same number). A file that left the diff comes last. */
 export function inOrder(list: ReviewComment[], paths: string[]): ReviewComment[] {
@@ -85,15 +98,25 @@ export function inOrder(list: ReviewComment[], paths: string[]): ReviewComment[]
 /** A quoted line is context, not the whole file: a very long one (minified code) is cut. */
 const QUOTE_MAX = 200;
 
+/** How the message names a comment, above your words: its file and line, then the quoted line. */
+function commentHead(c: ReviewComment): string {
+  const where = c.line == null ? `\`${c.path}\` (the whole file)` : `\`${c.path}:${c.line}\`${c.side === 'old' ? ' (a line the change removes)' : ''}`;
+  return c.quote == null ? where : `${where}\n   > ${c.quote.length > QUOTE_MAX ? `${c.quote.slice(0, QUOTE_MAX - 1)}…` : c.quote}`;
+}
+
 /** Every comment as one message. For each: the file and line, the quoted line, the comment. */
 export function reviewMessage(list: ReviewComment[], paths: string[]): string {
-  const items = inOrder(list, paths).map((c, i) => {
-    const where = c.line == null ? `\`${c.path}\` (the whole file)` : `\`${c.path}:${c.line}\`${c.side === 'old' ? ' (a line the change removes)' : ''}`;
-    const quote = c.quote == null ? [] : [`   > ${c.quote.length > QUOTE_MAX ? `${c.quote.slice(0, QUOTE_MAX - 1)}…` : c.quote}`];
-    return [`${i + 1}. ${where}`, ...quote, ...c.text.split('\n').map((l) => `   ${l}`)].join('\n');
-  });
+  const items = inOrder(list, paths).map((c, i) => [`${i + 1}. ${commentHead(c)}`, ...c.text.split('\n').map((l) => `   ${l}`)].join('\n'));
   return `Review comments (${items.length}):\n\n${items.join('\n\n')}`;
 }
+
+/**
+ * The comments of a message Send back built (`comments`) that a message you sent (`text`) still
+ * names: the file and line, and the quoted line, as Send back wrote them. You may have changed
+ * the words around them and your own words under them before you sent it: a comment that is
+ * still named went with the message. One whose lines you took out of it did not.
+ */
+export const sentIn = (text: string, comments: ReviewComment[]): ReviewComment[] => comments.filter((c) => text.includes(commentHead(c)));
 
 /** The request that a review of merged or finished work opens: what you reviewed, where its work
  *  is, then the comments. A new Lead reads it, so it names everything. */

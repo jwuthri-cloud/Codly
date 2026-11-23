@@ -1,5 +1,6 @@
-// The closed card of a question and the agent's history show what you answered. The core keeps
-// no copy of an answer, so the app remembers the ones it sent.
+// The closed card of a question and the agent's history show what you answered. The app
+// remembers the answers it sent, so they show before the core's record of them comes back
+// (that record: approvalSaid.test.ts).
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import { resolveApproval, resolveApprovals } from '../state/actions';

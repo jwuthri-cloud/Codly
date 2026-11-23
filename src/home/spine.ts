@@ -23,7 +23,7 @@ import { isSlotNote } from '../lib/state/queue';
 import { killedAt, killLine, stoppedByYou } from '../lib/state/stops';
 import { isRequestThread } from '../lib/state/ui.svelte';
 import { noticeRows, type Note } from './notices';
-import { canRetry, messageOf, troublesOf, type TroubleKind } from './outcomes';
+import { canRetry, endedByKill, messageOf, troublesOf, type TroubleKind } from './outcomes';
 
 export type Item =
   | { kind: 'user'; key: string; ts: number; msg: ChatMessage; outgoing: Outgoing | null }
@@ -37,8 +37,10 @@ export type Item =
        * The message of the agent this row shows: its key, and the words it reads while they are
        * written. Null for a chat row with no held message behind it: the message is not held
        * (any more), the row's author is not the thread's agent (another Lead served the request
-       * then, or the thread has no agent now), or the core posted the row for a turn result
-       * that no message carried.
+       * then, the thread has no agent now, or a Lead wrote to a worker: the core posts that in
+       * the worker's thread with the Lead as author), the row's id belongs to a later message by
+       * now (a CLI used the id again: a newer row shows that message, or it was said after this
+       * row), or the core posted the row for a turn result that no message carried.
        */
       itemId: string | null;
       text: string;
@@ -274,8 +276,8 @@ export function buildSpine(thread: string): Item[] {
     const yours = chats.filter((c) => c.author === 'user');
     // A turn you killed says so in its own line ("You killed …"): its end is not a trouble.
     const kills = killedAt(owner.id);
-    for (const t of troublesOf(store.events, owner.id, (start) => stoppedByYou(owner.id, start) || kills.some((k) => k >= start)))
-      items.push({
+    for (const t of troublesOf(store.events, owner.id, (start) => stoppedByYou(owner.id, start)))
+      if (!endedByKill(t, kills)) items.push({
         kind: 'trouble', key: `e:${t.eventId}`, ts: t.ts, agentId: owner.id, eventId: t.eventId, what: t.what, reason: t.reason,
         retry: canRetry(t.what) ? messageOf(t.turn, yours) : null,
       });

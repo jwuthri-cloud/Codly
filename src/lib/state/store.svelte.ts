@@ -45,8 +45,9 @@ import type { Provider } from '../gen/Provider';
 import { targetLabel, type Provenance } from '../util/labels';
 import { transferredOut } from '../util/transfer';
 import { accounts } from './accounts.svelte';
+import { recordSaid } from './answers';
 import { controls } from './control.svelte';
-import { withBackgroundTasks, withMcpServer, type BackgroundWork, type McpServer } from './session';
+import { withBackgroundTasks, withKnownStarts, withMcpServer, type BackgroundWork, type McpServer } from './session';
 
 export const LOG_CAP = 5000;
 const SEG_CAP = 1500;
@@ -61,7 +62,7 @@ const EARLIER_PAGE = 500;
 /** Event kinds whose derivation is no part of one agent's own state (`AgentLive`). */
 const SHARED_KINDS: ReadonlySet<EventKind['type']> = new Set([
   'control_changed', 'text_delta', 'reasoning_delta', 'tool_output', 'rate_limit', 'decision',
-  'approval_requested', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged',
+  'approval_requested', 'approval_said', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged',
 ]);
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -859,8 +860,11 @@ class CodlyStore {
           const t = l.turns;
           if (t.length && t[t.length - 1].end == null) l.turns = [...t.slice(0, -1), { ...t[t.length - 1], end: ev.ts }];
           // A turn that was interrupted or that failed takes its helpers with it: none of them
-          // is at work any more.
-          if ((k.status === 'interrupted' || k.status === 'failed') && l.subagents.some((s) => s.status === 'running'))
+          // is at work any more. Not so for a Claude agent: a helper in the background works on
+          // after such a turn, and its adapter says which helpers ended with the turn (a
+          // `sub_agent` row "stopped" for each, right after this one), so its rows decide.
+          const cli = (aid ? this.agentMap.get(aid)?.provider : undefined) ?? l.session?.provider;
+          if (cli !== 'claude' && (k.status === 'interrupted' || k.status === 'failed') && l.subagents.some((s) => s.status === 'running'))
             l.subagents = l.subagents.map((s) => (s.status === 'running' ? { ...s, status: 'stopped', ts: ev.ts } : s));
           // A helper that is still at work when a turn ends normally goes on after it: a call of its
           // own stays open until its result comes, or until the helper is over (`sub_agent`, `exited`).
@@ -1041,7 +1045,7 @@ class CodlyStore {
         if (l) l.mcp = withMcpServer(l.mcp, k, ev.run_id, ev.ts);
         break;
       case 'background_tasks':
-        if (l) l.background = withBackgroundTasks(l.background, k, ev.run_id, ev.ts);
+        if (l) l.background = withBackgroundTasks(l.background, k, ev.run_id, ev.ts, replay);
         break;
       case 'error':
         if (l) l.errors = [...l.errors, { message: k.message, fatal: k.fatal, ts: ev.ts }].slice(-20);
@@ -1059,6 +1063,10 @@ class CodlyStore {
         // Replay only (a live one is an entity): an approval that no longer waits shows as it
         // was asked, then as it was answered.
         if (replay) this.pastApproval(k.approval);
+        break;
+      case 'approval_said':
+        // What you said with an answer: the closed card and the history show it from here.
+        recordSaid(k);
         break;
       case 'approval_resolved': {
         const a = replay ? this.approvals.find((x) => x.id === k.approval_id) : undefined;
@@ -1178,6 +1186,7 @@ class CodlyStore {
       const mark = markOf(ev);
       if (k.type === 'chat' && k.message.thread === thread && !known.has(k.message.id)) said.push(k.message);
       else if (k.type === 'approval_requested') this.pastApproval(k.approval); // the core sends it as it ended
+      else if (k.type === 'approval_said') recordSaid(k);
       else if (mark && ev.task_id) this.addMark(ev.task_id, mark);
     }
     if (said.length) this.chats = [...this.chats, ...said].sort((a, b) => a.ts - b.ts);
@@ -1198,6 +1207,8 @@ class CodlyStore {
       // Nor is a server that stands where an earlier run recorded it. The servers as held are
       // the newest there are: older rows add nothing to them.
       if (prev) l.mcp = prev.mcp;
+      // A start of background work that the window saw is known, though the rows do not say it.
+      if (prev) l.background = withKnownStarts(l.background, prev.background);
       this.live[owner] = l;
       this.bump(this.revBy, [owner]);
     }

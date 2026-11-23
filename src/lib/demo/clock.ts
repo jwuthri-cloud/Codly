@@ -79,7 +79,8 @@ export function setWallHour(hour: number) {
   const at = new Real();
   // Today, at that hour, on the local clock (so a change of summer time today does not move it).
   const wanted = new Real(at.getTime());
-  wanted.setHours(Math.floor(hour), Math.round((hour % 1) * 60), 0, 0);
+  // (minutes stop at 59: a part of an hour that rounds up to 60 would be the next hour, and after 23 the next day)
+  wanted.setHours(Math.floor(hour), Math.min(59, Math.round((hour % 1) * 60)), 0, 0);
   const offset = wanted.getTime() - at.getTime();
   globalThis.Date = new Proxy(Real, {
     // `new Date()` is now; a date made from a value is that value.

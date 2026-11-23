@@ -9,6 +9,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { api } from '../lib/api';
+  import type { Approval } from '../lib/gen/Approval';
   import type { Citation } from '../lib/gen/Citation';
   import type { Provider } from '../lib/gen/Provider';
   import type { SearchResult } from '../lib/gen/SearchResult';
@@ -32,7 +33,7 @@
   import { skillsUi } from '../lib/state/skills.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
   import { quickStart } from '../lib/state/hireWizard';
-  import { bySection, offersAsk, press, rankRows, wants } from './palette';
+  import { bySection, noRow, offersAsk, press, rankRows, wants } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
   type Row = {
@@ -98,6 +99,12 @@
     ui.paletteOpen = false;
     ui.paletteSeed = '';
   }
+  /** Go to the request's card and open its note field: the "no" is sent from there, with your note. */
+  function openDenyNote(ap: Approval) {
+    ui.openThread(store.approvalThread(ap));
+    ui.revealApproval = ap.id;
+    ui.denyNoteFor = ap.id;
+  }
 
   // ───────────── sources ─────────────
   const commands = $derived.by((): Row[] => {
@@ -140,7 +147,12 @@
       // The title shows 50 characters: the confirmation shows all of what is asked.
       const full = `${a?.name ?? 'An agent'} wants to ${wants(ap.subject, a?.provider)}`;
       if (ap.choices.includes('allow_once')) rows.push({ id: `ap:ok:${ap.id}`, section: 'Needs you', title: `Approve ${a?.name ?? 'agent'}: ${what}`, icon: 'check', run: () => resolveApproval(ap.id, 'allow_once'), confirm: `Approve once? ${full}` });
-      if (ap.choices.includes('deny')) rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: `Deny ${a?.name ?? 'agent'}: ${what}`, icon: 'x', run: () => resolveApproval(ap.id, 'deny'), confirm: `Deny? ${full}` });
+      if (ap.choices.includes('deny')) {
+        const no = noRow(ap.subject, a?.provider, a?.name ?? 'agent', what);
+        // A row that opens the note field answers nothing yet: it needs no second ↵.
+        if (no.note) rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: no.title, icon: 'x', run: () => openDenyNote(ap) });
+        else rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: no.title, icon: 'x', run: () => resolveApproval(ap.id, 'deny'), confirm: `Deny? ${full}` });
+      }
     }
     for (const c of store.clis)
       if (c.path && !c.problem)

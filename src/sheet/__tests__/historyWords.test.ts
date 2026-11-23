@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { EventKind } from '../../lib/gen/EventKind';
 import type { EventRow } from '../../lib/gen/EventRow';
 import type { TaskStatus } from '../../lib/gen/TaskStatus';
-import { backgroundLine, entityWord, historyFacts, repeatsReply, taskChangedLine, tripleLine, withoutRepeatedTaskRows, type Names } from '../historyWords';
+import { backgroundLine, compactionRowLine, entityWord, helperRowLine, historyFacts, repeatsReply, taskChangedLine, tripleLine, withoutRepeatedTaskRows, type Names } from '../historyWords';
 
 let eid = 0;
 const ev = (agent: string, kind: unknown): EventRow => ({ id: ++eid, ts: eid, agent_id: agent, task_id: null, run_id: null, kind: kind as EventKind });
@@ -96,6 +96,46 @@ describe('a change of what an agent runs in the background', () => {
   it('says what ended, in Claude Code\'s word, and what still runs', () => {
     expect(backgroundLine({ tasks: [], ended: [ended('command', 'sleep 8; echo woke', 'completed')] })).toBe('Background command completed: sleep 8; echo woke');
     expect(backgroundLine({ tasks: [task('command', 'npm test')], ended: [ended('command', 'npm run dev', 'stopped')] })).toBe('Background command stopped: npm run dev · still runs: npm test');
-    expect(backgroundLine({ tasks: [], ended: [ended('helper', 'Run the tests', 'ended'), ended('task', 'x', 'completed')] })).toBe('Helper ended: Run the tests; Background task completed: x');
+    expect(backgroundLine({ tasks: [], ended: [ended('command', 'npm test', 'ended'), ended('task', 'x', 'completed')] })).toBe('Background command ended: npm test; Background task completed: x');
+  });
+
+  // Before, the end of a background helper was two rows with two words: "Subagent completed: Run
+  // the tests" (its own row) and "Helper completed: Run the tests" (the list's row).
+  it('leaves the end of a helper to the helper\'s own row: a list that ends a command and a helper names the command', () => {
+    const k = { tasks: [task('command', 'npm run dev')], ended: [ended('command', 'npm test', 'completed'), ended('helper', 'Run the tests', 'stopped')] };
+    expect(backgroundLine(k)).toBe('Background command completed: npm test · still runs: npm run dev');
+  });
+
+  it('a list that ends only a helper has nothing left to say: it is no row', () => {
+    expect(backgroundLine({ tasks: [], ended: [ended('helper', 'Run the tests', 'stopped')] })).toBeNull();
+    expect(backgroundLine({ tasks: [task('command', 'npm run dev')], ended: [ended('helper', 'Run the tests', 'completed'), ended('helper', 'Read the docs', 'ended')] })).toBeNull();
+  });
+});
+
+describe('the row of a helper', () => {
+  it('calls it a helper, with its CLI\'s word for where it stands', () => {
+    expect(helperRowLine({ description: 'Run the tests', status: 'completed' })).toBe('Helper completed: Run the tests');
+    expect(helperRowLine({ description: 'Run the\ntests', status: 'stopped' })).toBe('Helper stopped: Run the tests');
+    expect(helperRowLine({ description: 'Run the tests', status: 'running' })).toBe('Helper running: Run the tests');
+  });
+});
+
+// Before, every `compacting` row read "Compacted context", also the one that only says that a
+// compaction began.
+describe('the row of a compaction', () => {
+  it('says "Compacted context" only for a row with token numbers, as the row under "Compact now" does', () => {
+    expect(compactionRowLine({ pre_tokens: 180_000, post_tokens: 40_000 }, 'claude')).toBe('Compacted context 180k → 40k');
+    expect(compactionRowLine({ pre_tokens: null, post_tokens: 800 }, 'claude')).toBe('Compacted context');
+    expect(compactionRowLine({ pre_tokens: 180_000, post_tokens: 40_000 }, 'codex')).toBe('Compacted context 180k → 40k');
+  });
+
+  it('a Claude row with no numbers says that a compaction started', () => {
+    expect(compactionRowLine({ pre_tokens: null, post_tokens: null }, 'claude')).toBe('Compaction started');
+  });
+
+  it('a row with no numbers from another CLI can be the start or the end: it says neither', () => {
+    for (const cli of ['codex', 'gemini', 'opencode', null] as const) {
+      expect(compactionRowLine({ pre_tokens: null, post_tokens: null }, cli)).toBe('Context compaction');
+    }
   });
 });

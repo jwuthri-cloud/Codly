@@ -124,7 +124,8 @@ export interface OfficeModel {
   /** Outcomes of recent test runs (oldest first). */
   testHistory: boolean[];
   artifacts: Map<string, Artifact>;
-  approvals: Map<string, { agentId: string; text: string; since: number }>;
+  /** The requests that wait: who asked, and the agent's line if you say no (`deniedLine`). */
+  approvals: Map<string, { agentId: string; denied: { text: string; code: string | null }; since: number }>;
   resolved: Set<string>;
   lastEventId: number;
 }
