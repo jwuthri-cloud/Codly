@@ -164,7 +164,12 @@ impl Notifier {
                         ApprovalSubject::Command { command, .. } => (Kind::Approval, format!("run `{}`", truncate(command, 60))),
                         ApprovalSubject::FileChange { paths, .. } => (Kind::Approval, format!("change {}", files(paths.len()))),
                         ApprovalSubject::Question { .. } => (Kind::Question, "ask you a question".to_string()),
-                        ApprovalSubject::Tool { name, .. } => (Kind::Approval, format!("use {name}")),
+                        // A command in Claude Code's sandbox wants a host: said as that, not by the request's tool name.
+                        ApprovalSubject::Tool { name, input } => match codly_core::adapters::claude::sandbox_host(name, input) {
+                            Some("") => (Kind::Approval, "use the network".to_string()),
+                            Some(host) => (Kind::Approval, format!("reach {}", truncate(host, 60))),
+                            None => (Kind::Approval, format!("use {name}")),
+                        },
                         ApprovalSubject::Permissions { .. } => (Kind::Approval, "get more permissions".to_string()),
                     };
                     // Who, and in which office: it may not be the one on screen.
@@ -566,6 +571,9 @@ mod tests {
             (json!({ "kind": "file_change", "paths": ["a", "b"], "diff": null }), Kind::Approval, "It wants to change 2 files."),
             (json!({ "kind": "file_change", "paths": ["a"], "diff": null }), Kind::Approval, "It wants to change 1 file."),
             (json!({ "kind": "tool", "name": "WebFetch", "input": {} }), Kind::Approval, "It wants to use WebFetch."),
+            // The request of Claude Code's sandbox for a host: the host, not the tool's name.
+            (json!({ "kind": "tool", "name": "SandboxNetworkAccess", "input": { "host": "example.com" } }), Kind::Approval, "It wants to reach example.com."),
+            (json!({ "kind": "tool", "name": "SandboxNetworkAccess", "input": {} }), Kind::Approval, "It wants to use the network."),
             (json!({ "kind": "permissions", "detail": {} }), Kind::Approval, "It wants to get more permissions."),
             (json!({ "kind": "question", "questions": [] }), Kind::Question, "It wants to ask you a question."),
         ];

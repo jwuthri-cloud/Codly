@@ -23,6 +23,7 @@
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
   import { idVar } from '../../lib/util/labels';
+  import { sandboxHost, sandboxWants } from '../../lib/util/sandbox';
   import { oneLine, tildify } from '../../lib/util/sanitize';
   import Icon from '../../components/Icon.svelte';
   import Markdown from '../../components/Markdown.svelte';
@@ -61,9 +62,14 @@
     return typeof input?.plan === 'string' ? input.plan : null;
   });
 
+  /** The host a command in Claude Code's sandbox wants to reach ('' = it names none); null for every other request. */
+  const netHost = $derived(sandboxHost(subject));
+
   const headline = $derived.by(() => {
     const who = agent?.name ?? 'An agent';
     if (plan !== null) return `${who} shows you its plan`;
+    const net = sandboxWants(subject);
+    if (net !== null) return `${who} wants to ${net}`;
     switch (subject.kind) {
       case 'command':
         if (others.length) return `${who} and ${others.length === 1 ? others[0] : `${others.length} others`} want to run the same command`;
@@ -195,7 +201,7 @@
     approval.status === 'approved' ? 'Approved' : approval.status === 'denied' ? 'Denied' : approval.status === 'cancelled' ? 'Stopped' : approval.status === 'expired' ? 'Expired' : '',
   );
   const by = $derived(approval.decided_by === 'user' ? 'by you' : approval.decided_by === 'policy' ? 'by Codly’s rules' : approval.decided_by ? `by ${approval.decided_by}` : '');
-  const what = $derived(subject.kind === 'command' ? subject.command : subject.kind === 'question' ? (questions[0]?.question ?? 'a question') : subject.kind === 'file_change' ? subject.paths.join(', ') : subject.kind === 'tool' ? (plan !== null ? 'its plan' : subject.name) : 'permissions');
+  const what = $derived(subject.kind === 'command' ? subject.command : subject.kind === 'question' ? (questions[0]?.question ?? 'a question') : subject.kind === 'file_change' ? subject.paths.join(', ') : subject.kind === 'tool' ? (plan !== null ? 'its plan' : netHost !== null ? (netHost ? `network access to ${netHost}` : 'network access') : subject.name) : 'permissions');
 </script>
 
 {#if !pending}
@@ -230,6 +236,8 @@
       {#if subject.diff}<pre class="diff selectable">{subject.diff}</pre>{/if}
     {:else if plan !== null}
       <div class="plan selectable"><Markdown text={plan} brief /></div>
+    {:else if netHost !== null}
+      <p class="net selectable">A shell command of {agent?.name ?? 'the agent'}, inside Claude Code’s sandbox, wants to connect to {#if netHost}<code>{netHost}</code>{:else}a host on the network{/if}. The sandbox blocks this host until you allow it. If you deny, the command gets a network error.</p>
     {:else if subject.kind === 'tool'}
       <pre class="diff selectable">{subject.name}({JSON.stringify(subject.input, null, 2)})</pre>
     {:else if subject.kind === 'question'}
@@ -326,6 +334,8 @@
   .paths li { display: flex; align-items: center; gap: 6px; color: var(--ink-3); }
   .paths code { font-size: var(--mono); color: var(--ink-1); }
   .diff { margin: 0; max-height: 220px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: 11.5px; line-height: 17px; font-family: var(--font-mono); color: var(--ink-2); }
+  .net { font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-2); }
+  .net code { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-1); word-break: break-all; }
   .plan { max-height: 360px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-1); }
   .q { border: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   legend { font-size: 16px; line-height: 24px; color: var(--ink-1); margin-bottom: 6px; padding: 0; }

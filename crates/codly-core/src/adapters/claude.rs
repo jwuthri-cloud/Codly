@@ -93,8 +93,8 @@ pub fn tools_for(spec: &SpawnSpec) -> Vec<&'static str> {
     t
 }
 
-/// Workers edit freely inside their own worktree (Bash still asks, unless the shell is
-/// sandboxed: `settings_json`). Solo agents work in the user's checkout and read-only roles
+/// Workers edit freely inside their own worktree (Bash still asks, with the shell sandbox
+/// too: `settings_json`). Solo agents work in the user's checkout and read-only roles
 /// have nothing to accept, so both ask for everything.
 pub fn permission_mode(spec: &SpawnSpec) -> &'static str {
     if spec.role == Role::Worker && !spec.read_only { "acceptEdits" } else { "manual" }
@@ -129,9 +129,22 @@ fn default_mcp_allowed(ready: &[ReadyMcp]) -> Vec<String> {
 pub const UNSANDBOXED: &str = "runs outside the sandbox";
 
 /// The tool name of the sandbox's own request: a sandboxed command wants to reach a host that
-/// Claude Code's settings do not allow (`input.host`). Read in the 2.1.311 bundle, not
-/// recorded (docs/research/cli-claude-stream-json-2.1.311.md §9).
+/// Claude Code's settings do not allow (`input.host`). Recorded on 2.1.311
+/// (docs/research/cli-claude-stream-json-2.1.311-part2.md, scenario 14): allowed, the command
+/// goes on; denied, it ends with an error that names the sandbox.
 const SANDBOX_NETWORK: &str = "SandboxNetworkAccess";
+
+/// The host that a `SANDBOX_NETWORK` request asks for ("" when it names none), for what is
+/// shown to the user: the tool's own name says nothing to them. None: `tool` is another tool.
+pub fn sandbox_host<'a>(tool: &str, input: &'a Value) -> Option<&'a str> {
+    (tool == SANDBOX_NETWORK).then(|| input["host"].as_str().unwrap_or_default())
+}
+
+/// Does this run ask for Claude Code's shell sandbox? An agent with a shell and
+/// `Settings.claude_sandbox` on.
+fn sandboxed(spec: &SpawnSpec) -> bool {
+    spec.sandbox_shell && !spec.read_only
+}
 
 /// The run's `--settings` document: it goes above the user's own settings files and below
 /// managed ones. None when Codly sets nothing.
@@ -139,23 +152,51 @@ const SANDBOX_NETWORK: &str = "SandboxNetworkAccess";
 ///   re-runs it on expiry.
 /// - `sandbox`: Claude Code's own OS sandbox for the shell (`Settings.claude_sandbox`), for
 ///   an agent that has a shell. Recorded on macOS with 2.1.311
-///   (docs/research/cli-claude-stream-json-2.1.311.md §9): with `enabled`, a shell command
-///   sends no permission request, and a write outside the working directory fails; a command
-///   the model wants to run outside the sandbox still asks, marked `sandboxOverride`
-///   (`UNSANDBOXED`). Codly passes no list of folders or hosts: the CLI's defaults and the
-///   user's own Claude Code settings decide them, and for a host they do not allow the CLI
-///   asks Codly (`SANDBOX_NETWORK`), which asks the user. `failIfUnavailable` is in the CLI's
-///   settings schema; what it does is from the CLI's documentation, not recorded: where
-///   Claude Code cannot sandbox, it does not start, instead of running unsandboxed.
+///   (docs/research/cli-claude-stream-json-2.1.311.md §9 and -part2.md, scenarios 14 to 16):
+///   with `enabled`, a write outside the working directory fails. By itself the sandbox would
+///   also run every shell command with no permission request. `autoAllowBashIfSandboxed:
+///   false` puts the shell back under the permission mode: a command asks as it does without
+///   the sandbox, so Codly's approval rules still decide it, and the sandbox is the floor
+///   under them. A command the model wants to run outside the sandbox asks, marked
+///   `sandboxOverride` (`UNSANDBOXED`). Codly passes no list of folders or hosts: the CLI's
+///   defaults and the user's own Claude Code settings decide them, and for a host they do
+///   not allow the CLI asks Codly (`SANDBOX_NETWORK`), which asks the user.
+///   `failIfUnavailable` is in the CLI's settings schema; what it does is from the CLI's
+///   documentation, not recorded: where Claude Code cannot sandbox, it does not start. Codly
+///   does not rely on it: it asks the CLI once the session is up (`sandbox_refusal`).
 pub fn settings_json(spec: &SpawnSpec) -> Option<Value> {
     let mut doc = serde_json::Map::new();
     if let Some(cmd) = &spec.byok_command {
         doc.insert("apiKeyHelper".into(), json!(cmd));
     }
-    if spec.sandbox_shell && !spec.read_only {
-        doc.insert("sandbox".into(), json!({ "enabled": true, "failIfUnavailable": true }));
+    if sandboxed(spec) {
+        doc.insert("sandbox".into(), json!({ "enabled": true, "failIfUnavailable": true, "autoAllowBashIfSandboxed": false }));
     }
     (!doc.is_empty()).then(|| Value::Object(doc))
+}
+
+/// Why a run that asked for the shell sandbox must not go on, read from the CLI's answer to
+/// `get_sandbox_dialog` (`resp`: the `response` of the control response). None: the sandbox
+/// is on and shell commands ask. The answer is recorded on 2.1.311 with the sandbox off
+/// (`enabled: false`), on as Codly asks for it (`mode: "regular"`), and on with the CLI's
+/// default (`mode: "auto-allow"`: commands run with no request). Codly's own `--settings`
+/// never give the last one; settings above them (managed ones) can.
+fn sandbox_refusal(resp: &Value) -> Option<String> {
+    const FIX: &str = "Check Claude Code's sandbox on this computer, or turn off \"Sandbox Claude's shell\" in Settings → Safety";
+    if resp["subtype"] != "success" {
+        let error = resp["error"].as_str().map_or_else(|| resp["error"].to_string(), str::to_owned);
+        return Some(format!("Codly could not check that Claude Code's sandbox is on ({error}), so it did not start this agent. {FIX}"));
+    }
+    let status = &resp["response"];
+    if status["enabled"] != true {
+        return Some(format!("Claude Code did not turn its sandbox on, so Codly did not start this agent. {FIX}"));
+    }
+    if status["mode"] == "auto-allow" {
+        return Some(format!(
+            "Claude Code's sandbox would run this agent's commands without asking, so Codly's approval rules would not see them (a Claude Code setting above Codly's own decides that). Codly did not start this agent. {FIX}"
+        ));
+    }
+    None
 }
 
 /// The settings files Claude loads: the user's own always; the project's with the user's
@@ -283,6 +324,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         start_failed: false,
         interrupt_failed: false,
         _mcp_file: mcp_file,
+        sandbox_check: sandboxed(&spec).then_some(SandboxCheck::Due),
     };
     tokio::spawn(actor.run(cmds, lines, exit_rx, ready_tx));
     match tokio::time::timeout(INIT_TIMEOUT, ready_rx).await {
@@ -357,6 +399,16 @@ enum Stage {
     Killing,
 }
 
+/// The check that the shell sandbox a run asked for is really on. The start is not over
+/// before the CLI said so: a run that would work unsandboxed is not started.
+enum SandboxCheck {
+    /// To ask once the CLI answered the `initialize` request.
+    Due,
+    /// Asked (`get_sandbox_dialog`, under this request id). The session's first event waits
+    /// with it: a start that fails has no events.
+    Asked { request_id: String, started: EventKind },
+}
+
 struct Actor {
     agent_id: Id,
     run_id: Id,
@@ -391,6 +443,9 @@ struct Actor {
     interrupt_failed: bool,
     /// Held, never read: dropping the actor removes the file (`PrivateFile`).
     _mcp_file: Option<PrivateFile>,
+    /// Set while a run that asked for the shell sandbox starts; None for every other run, and
+    /// once the CLI said that the sandbox is on.
+    sandbox_check: Option<SandboxCheck>,
 }
 
 impl Actor {
@@ -505,6 +560,14 @@ impl Actor {
                 let Some(r) = ready.take() else { return };
                 if resp["subtype"] == "success" {
                     let started = self.norm.on_initialize(&resp["response"]);
+                    if self.sandbox_check.is_some() {
+                        // The run asked for the shell sandbox: it has not started before the
+                        // CLI says that the sandbox is on (`on_sandbox_status`).
+                        let request_id = self.control("get_sandbox_dialog", json!({})).await;
+                        self.sandbox_check = Some(SandboxCheck::Asked { request_id, started });
+                        *ready = Some(r);
+                        return;
+                    }
                     self.emit(started);
                     let _ = r.send(Ok(()));
                 } else {
@@ -512,6 +575,11 @@ impl Actor {
                     self.start_failed = true; // spawn() returned the error: no events for this run
                     self.begin_shutdown().await;
                 }
+            } else if let Some(SandboxCheck::Asked { request_id, .. }) = &self.sandbox_check
+                && resp["request_id"] == request_id.as_str()
+            {
+                let Some(SandboxCheck::Asked { started, .. }) = self.sandbox_check.take() else { return };
+                self.on_sandbox_status(started, resp, ready).await;
             } else if let Some((request, reply)) = resp["request_id"].as_str().and_then(|id| self.session_replies.remove(id)) {
                 self.session_answered(request, reply, resp);
             } else {
@@ -560,6 +628,25 @@ impl Actor {
             }
         } else if init && self.stage == Stage::Running {
             self.flush().await; // what was held until the CLI said it reports on its messages
+        }
+    }
+
+    /// The CLI's answer to `get_sandbox_dialog`, asked once at the start of a run with the
+    /// shell sandbox (shapes: cli-claude-stream-json-2.1.311 §9 and -part2, scenario 16). The
+    /// run starts when the sandbox is on. When it is not, the start fails with the reason
+    /// (`sandbox_refusal`) and the process is ended: no command of this run was run.
+    async fn on_sandbox_status(&mut self, started: EventKind, resp: &Value, ready: &mut Option<oneshot::Sender<anyhow::Result<()>>>) {
+        let Some(r) = ready.take() else { return };
+        match sandbox_refusal(resp) {
+            None => {
+                self.emit(started);
+                let _ = r.send(Ok(()));
+            }
+            Some(why) => {
+                let _ = r.send(Err(anyhow!(why)));
+                self.start_failed = true; // spawn() returned the error: no events for this run
+                self.begin_shutdown().await;
+            }
         }
     }
 
@@ -1880,8 +1967,9 @@ impl ClaudeNormalizer {
         let input = req["input"].clone();
         let cwd = self.cwd.clone();
         // A host request of the sandbox has one answer, allow or deny. The CLI keeps an allowed
-        // host for the rest of its session whatever the scope, so "once" and "for this session"
-        // would be the same, and the rule it suggests (a domain rule) is not passed back.
+        // host for the rest of its session whatever the scope (read in its bundle, not
+        // recorded), so "once" and "for this session" would be the same, and the rule it
+        // suggests (a `WebFetch` domain rule, recorded) is not passed back.
         let suggestions = if tool == SANDBOX_NETWORK { vec![] } else { grantable(&tool, &req["permission_suggestions"], &cwd) };
         let mut risks: Vec<String> = Vec::new();
         let subject = match tool.as_str() {
@@ -1899,9 +1987,10 @@ impl ClaudeNormalizer {
             }
             "AskUserQuestion" => ApprovalSubject::Question { questions: input["questions"].clone() },
             SANDBOX_NETWORK => {
-                // The command that wants the host is sandboxed and was never shown to the
-                // rules: this request is the only place where its network access can ask.
-                risks.push(match input["host"].as_str() {
+                // The rules read the text of the command that wants the host, not what it
+                // does once it runs: this request names the host it really reaches for. Its
+                // `tool_use_id` is an id of its own, so it does not say which command that is.
+                risks.push(match sandbox_host(&tool, &input) {
                     Some(host) if !host.is_empty() => format!("network ({host})"),
                     _ => "network".into(),
                 });
@@ -2159,11 +2248,12 @@ mod tests {
     }
 
     /// The sandbox goes to the agents that have a shell, as the document recorded in
-    /// docs/research/fixtures/claude-2.1.311/sandbox-allow.ndjson (`sandbox.enabled`), in one
-    /// `--settings` document with the BYOK token command.
+    /// docs/research/fixtures/claude-2.1.311/r4-sandbox-manual-noauto.ndjson (`sandbox.enabled`
+    /// with `autoAllowBashIfSandboxed: false`, so that commands still ask), in one `--settings`
+    /// document with the BYOK token command.
     #[test]
     fn the_shell_sandbox_is_passed_to_agents_with_a_shell() {
-        let sandbox = json!({ "enabled": true, "failIfUnavailable": true });
+        let sandbox = json!({ "enabled": true, "failIfUnavailable": true, "autoAllowBashIfSandboxed": false });
         for role in [Role::Worker, Role::Solo] {
             let off = spec(role, false);
             assert_eq!(settings_arg(&build_args(&off, "s", None, &[])), None, "off by default: {role:?}");
@@ -2178,10 +2268,109 @@ mod tests {
         }
         let both = SpawnSpec { sandbox_shell: true, byok_command: Some("op read key".into()), ..spec(Role::Worker, false) };
         assert_eq!(settings_arg(&build_args(&both, "s", None, &[])), Some(json!({ "apiKeyHelper": "op read key", "sandbox": sandbox })));
-        // The recorded run used exactly this key.
-        let recorded = &fixture("claude-2.1.311/sandbox-allow.ndjson")[0]["_argv"];
+        // The recorded run used exactly these two keys (`failIfUnavailable` is recorded apart:
+        // r4-sandbox-required-available).
+        let recorded = &fixture("claude-2.1.311/r4-sandbox-manual-noauto.ndjson")[0]["_argv"];
         let argv: Vec<String> = recorded.as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).collect();
-        assert_eq!(settings_arg(&argv).unwrap()["sandbox"]["enabled"], json!(true));
+        assert_eq!(settings_arg(&argv).unwrap()["sandbox"], json!({ "enabled": true, "autoAllowBashIfSandboxed": false }));
+    }
+
+    /// With the sandbox on, a shell command is still Codly's rules' to decide: the CLI sends
+    /// the ordinary request for it (recorded with `autoAllowBashIfSandboxed: false` in mode
+    /// `manual`, the mode of a 1:1 agent), and the answer Codly writes is the recorded one.
+    #[test]
+    fn a_sandboxed_command_still_asks_the_rules() {
+        use crate::model::ApprovalMode;
+        use crate::orchestrator::approvals::{PolicyCtx, Verdict, evaluate};
+        let lines = fixture("claude-2.1.311/r4-sandbox-manual-noauto.ndjson");
+        let mut solo = spec(Role::Solo, false);
+        solo.cwd = PathBuf::from(lines[0]["_cwd"].as_str().unwrap());
+        let mut norm = ClaudeNormalizer::new(&solo, "s".into());
+        let at = lines.iter().position(|l| l["type"] == "control_request").expect("a permission request");
+        let a = approval_of(&norm.on_message(&lines[at]));
+        assert!(matches!(&a.subject, ApprovalSubject::Command { command, .. } if command == "echo hi > inside.txt"), "{:?}", a.subject);
+        assert!(!a.risks.iter().any(|r| r == UNSANDBOXED), "{:?}", a.risks);
+        let ctx = |mode| PolicyCtx { mode, worktree: Some(solo.cwd.as_path()), verify: &[], read_only: false, edits: true, checkout: None };
+        for mode in [ApprovalMode::Balanced, ApprovalMode::Strict] {
+            assert!(matches!(evaluate(&a, &ctx(mode)), Verdict::Ask { .. }), "{mode:?}");
+        }
+        let (reply, _) = norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).unwrap();
+        assert_eq!(reply, lines[at + 1]["_sent"], "the recorded allow");
+    }
+
+    /// The answer to `get_sandbox_dialog` says whether a run with the sandbox may go on: only
+    /// when the sandbox is on and commands ask. Answers as recorded on 2.1.311.
+    #[test]
+    fn the_sandbox_status_decides_whether_the_run_goes_on() {
+        let status = |name: &str| recorded_control(&recording(name), &json!({ "subtype": "get_sandbox_dialog" })).1["response"].clone();
+        // On, as Codly asks for it: commands ask (`mode: "regular"`).
+        for name in ["r4-sandbox-noauto", "r4-sandbox-manual-noauto"] {
+            assert_eq!(sandbox_refusal(&status(name)), None, "{name}");
+        }
+        // Off: the run would work with no sandbox at all.
+        let off = sandbox_refusal(&status("sandbox-off")).expect("the sandbox is off");
+        assert!(off.starts_with("Claude Code did not turn its sandbox on"), "{off}");
+        // On, but commands would run with no request (`mode: "auto-allow"`).
+        let unasked = sandbox_refusal(&status("r4-sandbox-required-available")).expect("commands would not ask");
+        assert!(unasked.contains("without asking"), "{unasked}");
+        // A CLI that cannot answer: nothing says that the sandbox is on. (The shape is the one
+        // of every refused control request; the error text here is made up.)
+        let refused = sandbox_refusal(&json!({ "subtype": "error", "request_id": "codly-2", "error": "Unsupported control request subtype: get_sandbox_dialog" }));
+        assert!(refused.as_deref().is_some_and(|r| r.starts_with("Codly could not check") && r.contains("Unsupported control request subtype")), "{refused:?}");
+        for why in [off, unasked, refused.unwrap()] {
+            assert!(why.contains("did not start this agent") && why.ends_with("in Settings → Safety"), "{why}");
+        }
+    }
+
+    /// A run with the sandbox does not start before the CLI says that its sandbox is on:
+    /// Codly asks once, right after the handshake, and the session's first event waits for
+    /// the answer. A run that must not go on fails its start, with no events, and its process
+    /// is ended. Request and answers as recorded on 2.1.311.
+    #[tokio::test]
+    async fn a_run_with_the_sandbox_starts_only_when_the_sandbox_is_on() {
+        let asked = json!({ "subtype": "get_sandbox_dialog" });
+        let (_, init) = recorded_control(&recording("r4-sandbox-required-available"), &json!({ "subtype": "initialize", "hooks": null }));
+        let init_id = init["response"]["request_id"].as_str().unwrap().to_owned();
+        // The recording whose sandbox status is the answer, and whether the run then starts.
+        for (status_of, starts) in [("r4-sandbox-noauto", true), ("sandbox-off", false), ("r4-sandbox-required-available", false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, mut events, _child) = silent_actor(dir.path());
+            actor.sandbox_check = Some(SandboxCheck::Due);
+            let (tx, mut started) = oneshot::channel();
+            let mut ready = Some(tx);
+
+            actor.on_json(init.clone(), &init_id, &mut ready).await;
+            let wrote = last_sent(dir.path());
+            let (sent, mut status) = recorded_control(&recording(status_of), &asked);
+            assert_eq!((&wrote["type"], &wrote["request"]), (&sent["type"], &sent["request"]), "Codly writes the recorded request");
+            assert!(ready.is_some() && started.try_recv().is_err(), "{status_of}: not started before the answer");
+            assert!(emitted(&mut events).is_empty(), "{status_of}: no event before the answer");
+
+            status["response"]["request_id"] = wrote["request_id"].clone();
+            actor.on_json(status, &init_id, &mut ready).await;
+            let outcome = started.try_recv().expect("the start is decided");
+            let kinds = emitted(&mut events);
+            if starts {
+                assert!(outcome.is_ok(), "{status_of}: {outcome:?}");
+                assert!(matches!(&kinds[..], [EventKind::SessionStarted { .. }]), "{status_of}: {kinds:?}");
+                assert!(actor.stage == Stage::Running && actor.stdin.is_some(), "{status_of}");
+            } else {
+                let why = outcome.expect_err("the run must not start").to_string();
+                assert!(why.contains("did not start this agent"), "{status_of}: {why}");
+                assert!(kinds.is_empty(), "{status_of}: a start that failed has no events: {kinds:?}");
+                assert!(actor.start_failed && actor.stage == Stage::Closing && actor.stdin.is_none(), "{status_of}: the process is ended");
+            }
+            assert!(actor.sandbox_check.is_none(), "{status_of}: asked once");
+        }
+
+        // A run without the sandbox asks nothing: the handshake alone starts it.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        let (tx, mut started) = oneshot::channel();
+        actor.on_json(init, &init_id, &mut Some(tx)).await;
+        assert!(started.try_recv().expect("the start is decided").is_ok());
+        assert!(matches!(&emitted(&mut events)[..], [EventKind::SessionStarted { .. }]));
+        assert!(!std::fs::read_to_string(dir.path().join("raw.ndjson")).unwrap().contains("get_sandbox_dialog"));
     }
 
     /// A settings file saved before the two Claude switches existed loads with both off.
@@ -2247,21 +2436,18 @@ mod tests {
         assert!(matches!(evaluate(&a, &ctx(ApprovalMode::Autonomous)), Verdict::Allow { .. }));
     }
 
-    /// A sandboxed command sends no request of its own, so the host it reaches for is the
-    /// user's to decide: the sandbox's host request asks in every approval mode but Full
-    /// access, with the host on the card and one answer (allow or deny).
+    /// The host a sandboxed command reaches for is the user's to decide: the sandbox's host
+    /// request asks in every approval mode but Full access, with the host on the card and one
+    /// answer (allow or deny). The request and both answers as recorded on 2.1.311 (`curl`
+    /// in the sandbox: r4-sandbox-network-allow, r4-sandbox-network-deny).
     #[test]
     fn a_host_the_sandbox_does_not_allow_always_asks() {
         use crate::model::ApprovalMode;
         use crate::orchestrator::approvals::{PolicyCtx, Verdict, evaluate, rule_offer};
-        // Written from the request that the 2.1.311 bundle builds (StructuredIO
-        // `createSandboxAskCallback`), not from a recording. Codly reads `tool_name`,
-        // `input.host` and `description`; the rule's tool name here is a placeholder.
-        let request = json!({ "type": "control_request", "request_id": "req-7", "request": {
-            "subtype": "can_use_tool", "tool_name": "SandboxNetworkAccess", "input": { "host": "example.com" },
-            "permission_suggestions": [{ "type": "addRules", "rules": [{ "toolName": "WebFetch", "ruleContent": "domain:example.com" }], "behavior": "allow", "destination": "session" }],
-            "tool_use_id": "toolu-7", "description": "Allow network connection to example.com?"
-        }});
+        let allowed = fixture("claude-2.1.311/r4-sandbox-network-allow.ndjson");
+        let at = allowed.iter().position(|l| l["type"] == "control_request").expect("the host request");
+        let request = allowed[at].clone();
+        assert_eq!(request["request"]["tool_name"], json!("SandboxNetworkAccess"));
         let solo = spec(Role::Solo, false);
         let mut norm = ClaudeNormalizer::new(&solo, "s".into());
         let a = approval_of(&norm.on_message(&request));
@@ -2275,9 +2461,17 @@ mod tests {
             assert!(rule_offer(&a, &ctx(mode)).is_empty(), "{mode:?}: no rule to save");
         }
         assert!(matches!(evaluate(&a, &ctx(ApprovalMode::Full)), Verdict::Allow { .. }));
-        // The answer carries no permission rule: the CLI's suggestion is not passed back.
+        // The answer carries no permission rule: the CLI's suggestion is not passed back. It
+        // is the answer of the recording, after which the command went on.
         let (reply, _) = norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).unwrap();
         assert_eq!(reply["response"]["response"], json!({ "behavior": "allow", "updatedInput": { "host": "example.com" } }));
+        assert_eq!(reply, allowed[at + 1]["_sent"]);
+        // Deny, as recorded: the command then ends with an error of the sandbox.
+        let denied = fixture("claude-2.1.311/r4-sandbox-network-deny.ndjson");
+        let at = denied.iter().position(|l| l["type"] == "control_request").expect("the host request");
+        let a = approval_of(&norm.on_message(&denied[at]));
+        let (reply, _) = norm.answer(&a.id, &ApprovalDecision { choice: ApprovalChoice::Deny, message: None, answers: None }).unwrap();
+        assert_eq!(reply, denied[at + 1]["_sent"]);
 
         // A request that names no host still asks.
         let mut nameless = request.clone();
@@ -3213,6 +3407,7 @@ mod tests {
             start_failed: false,
             interrupt_failed: false,
             _mcp_file: None,
+            sandbox_check: None,
         };
         (actor, events_rx, child)
     }

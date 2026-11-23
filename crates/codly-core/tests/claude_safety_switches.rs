@@ -88,4 +88,6 @@ async fn the_claude_switches_are_off_by_default_and_reach_the_next_agent() {
     let at = args.iter().position(|a| a == "--settings").expect("the sandbox is passed to the CLI");
     let settings: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
     assert_eq!(settings["sandbox"]["enabled"], serde_json::json!(true));
+    // The sandbox is a floor under the approval rules, not a way around them: commands still ask.
+    assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], serde_json::json!(false));
 }
