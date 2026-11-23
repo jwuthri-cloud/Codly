@@ -204,7 +204,8 @@ pub(super) struct Look {
     turn_active: bool,
     /// In a turn, or sent a prompt that no turn has taken yet.
     busy: bool,
-    /// A failed turn's continue prompt is owed (`Live::continue_owed`): Codly is about to act.
+    /// A failed turn's continue prompt is owed (`Live::continue_owed`), or the gate waits for
+    /// the run's background work (background.rs): Codly is about to act.
     retrying: bool,
     /// How long ago its last event came.
     quiet: Duration,
@@ -221,7 +222,7 @@ impl Look {
             ws: l.workspace_id.clone(),
             turn_active: l.turn_active,
             busy: l.turn_active || l.queued > 0,
-            retrying: l.continue_owed.is_some(),
+            retrying: l.continue_owed.is_some() || l.background.holds_gate(),
             quiet: now.duration_since(l.watch.last_event),
             watch: l.watch,
         }

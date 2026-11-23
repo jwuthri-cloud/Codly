@@ -55,8 +55,8 @@ use super::classify::{self, OUTPUT_MAX};
 use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SessionReply, SessionRequest, SpawnSpec, attachments, startup};
 use crate::housekeeping::connections::{self, ReadyMcp};
 use crate::model::{
-    ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, Billing, EventKind,
-    Id, MessagePhase, PermissionMode, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
+    ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, BackgroundTask, Billing,
+    EventKind, Id, MessagePhase, PermissionMode, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
 };
 use crate::proc::{self, Inbound, RawLog, StderrTail};
 
@@ -767,6 +767,7 @@ impl Actor {
             SessionRequest::PermissionMode(mode) => ("set_permission_mode", json!({ "mode": mode.cli() })),
             SessionRequest::Model(model) => ("set_model", json!({ "model": model })),
             SessionRequest::ContextUsage => ("get_context_usage", json!({})),
+            SessionRequest::StopTask(task) => ("stop_task", json!({ "task_id": task })),
         };
         let id = self.control(subtype, body).await;
         if self.stdin.is_none() {
@@ -1354,8 +1355,11 @@ impl ClaudeNormalizer {
             // session title, the CLI's own summaries, a task's change of state that its
             // `task_notification` says again, a commit that its tool call already shows):
             // known lines, kept in the raw log only.
-            "hook_started" | "hook_progress" | "hook_response" | "commands_changed" | "session_title_changed" | "background_tasks_changed"
-            | "files_persisted" | "post_turn_summary" | "task_updated" | "vcs_state_changed" => {}
+            "hook_started" | "hook_progress" | "hook_response" | "commands_changed" | "session_title_changed" | "files_persisted"
+            | "post_turn_summary" | "task_updated" | "vcs_state_changed" => {}
+            // The whole list of what the CLI still runs in the background, said at every change
+            // (cli-claude-stream-json-2.1.311-part2 §6). No request reads it: Codly keeps the last one.
+            "background_tasks_changed" => out.push(EventKind::BackgroundTasks { tasks: background_tasks(&v["tasks"]) }),
             "compact_boundary" => {
                 let m = &v["compact_metadata"];
                 out.push(EventKind::Compacting { pre_tokens: m["pre_tokens"].as_i64(), post_tokens: m["post_tokens"].as_i64() });
@@ -2136,6 +2140,20 @@ fn cli_errors(result: &Value) -> String {
     let errors: Vec<&str> =
         result["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|e| !e.starts_with("[ede_diagnostic]")).collect();
     errors.join("; ")
+}
+
+/// The `tasks` of a `system/background_tasks_changed` line (recorded: `task_id`, `task_type`
+/// "local_bash" for a command and "local_agent" for a subagent, `description`).
+fn background_tasks(tasks: &Value) -> Vec<BackgroundTask> {
+    let task = |t: &Value| {
+        let kind = match t["task_type"].as_str() {
+            Some("local_bash") => "command",
+            Some("local_agent") => "helper",
+            _ => "task",
+        };
+        Some(BackgroundTask { id: t["task_id"].as_str()?.to_string(), kind: kind.into(), description: t["description"].as_str().unwrap_or_default().to_string() })
+    };
+    tasks.as_array().into_iter().flatten().filter_map(task).collect()
 }
 
 /// A `user` line the CLI wrote itself, not something the user or a tool said (recorded,
@@ -2992,7 +3010,7 @@ mod tests {
         assert_eq!(errors(&ev), [("The model refused this request, and Claude Code has no fallback model to go on with", false)]);
 
         // Bookkeeping lines make no rows; a subtype Codly does not know still does.
-        for subtype in ["hook_started", "hook_progress", "hook_response", "commands_changed", "session_title_changed", "background_tasks_changed", "files_persisted", "post_turn_summary", "task_updated"] {
+        for subtype in ["hook_started", "hook_progress", "hook_response", "commands_changed", "session_title_changed", "files_persisted", "post_turn_summary", "task_updated"] {
             assert!(norm.on_message(&system(subtype, json!({}))).is_empty(), "{subtype}");
         }
         // The line the CLI writes after a commit, as recorded (the commit's tool call shows it).
@@ -3165,6 +3183,31 @@ mod tests {
             assert_eq!(subagent_lines(&events), Vec::<String>::new(), "{name}");
             assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{name}: {events:?}");
         }
+    }
+
+    /// Recordings `r4-background-life` and `subagent`: the CLI says its whole list of
+    /// background tasks at every change, a command and a subagent alike, and an empty list
+    /// when the last one ended (by itself, or stopped by the host).
+    #[test]
+    fn the_list_of_background_tasks_is_told_at_every_change() {
+        let lists = |name: &str| -> Vec<Vec<BackgroundTask>> {
+            let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+            let mut events = norm.turn_started("go");
+            events.extend(replay(&mut norm, &recorded(name)));
+            events.into_iter().filter_map(|e| if let EventKind::BackgroundTasks { tasks } = e { Some(tasks) } else { None }).collect()
+        };
+        let task = |id: &str, kind: &str, description: &str| vec![BackgroundTask { id: id.into(), kind: kind.into(), description: description.into() }];
+        assert_eq!(
+            lists("r4-background-life"),
+            [task("tid-1", "command", "sleep 8; echo woke"), vec![], task("tid-2", "command", "sleep 127; echo late"), vec![]]
+        );
+        assert_eq!(lists("subagent"), [task("tid-1", "helper", "Run echo hi via Bash"), vec![]]);
+        // A kind of task Codly has no name for is still listed; an entry with no id is not.
+        // (A line written here, not a recorded one: no recording has another `task_type`.)
+        let tasks = json!([{ "task_id": "tid-9", "task_type": "remote", "description": "x" }, { "description": "y" }]);
+        let odd = json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": tasks });
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        assert!(matches!(&norm.on_message(&odd)[..], [EventKind::BackgroundTasks { tasks }] if *tasks == task("tid-9", "task", "x")));
     }
 
     /// Recording `broken-mcp`: two servers that cannot start. The init line names them; the
@@ -4088,6 +4131,19 @@ mod tests {
         let (reply, mut answer) = mpsc::unbounded_channel();
         actor.on_cmd(AgentCmd::Session { request: SessionRequest::ContextUsage, reply }).await;
         assert_eq!(answer.try_recv().unwrap(), Err("Claude Code is shutting down".to_string()));
+    }
+
+    /// Recording `r4-background-life`: `stop_task` on a background command that runs. The
+    /// answer is empty: the CLI's list of its background tasks says that the task is gone.
+    #[tokio::test]
+    async fn stop_task_goes_out_and_comes_back_as_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _events, _child) = silent_actor(dir.path());
+        let lines = recording("r4-background-life");
+        let request = json!({ "subtype": "stop_task", "task_id": "tid-2" });
+        let answer = ask_as_recorded(&mut actor, dir.path(), &lines, SessionRequest::StopTask("tid-2".into()), request).await;
+        assert_eq!(answer, Ok(json!({})));
+        assert!(actor.session_replies.is_empty());
     }
 
     /// The plan-mode recording: `ExitPlanMode` arrives as a request with the plan in it. Sent

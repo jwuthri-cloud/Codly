@@ -209,6 +209,7 @@
       case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
       case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
+      case 'background_tasks': return { icon: 'info', text: k.tasks.length ? `Runs in the background: ${oneLine(k.tasks.map((t) => t.description).join(', '), 120)}` : 'Nothing runs in the background any more' };
       case 'decision': return { icon: 'help', text: k.summary };
       case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${k.files.length} files` };
       case 'verified': return { icon: k.ok ? 'check-circle' : 'x-circle', text: `Verified ${k.command}`, tone: k.ok ? 'good' : 'bad' };

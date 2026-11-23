@@ -182,8 +182,9 @@ fn turn_label(prompt: Option<&str>) -> String {
     if flat.is_empty() { "a turn".into() } else { prompts::clip(&flat, 120) }
 }
 
-/// The label of a turn that no prompt started: the CLI began it by itself.
-const SELF_STARTED: &str = "a turn the agent started by itself";
+/// The label of a turn that no prompt started: the CLI began it by itself. Also what Codly's
+/// commit after such a turn of a 1:1 agent is named for (ingest.rs `solo_snapshot`).
+pub(super) const SELF_STARTED: &str = "a turn the agent started by itself";
 
 /// Keep `tree` (the files of `wt`, from `Git::worktree_tree`) as the agent's next checkpoint.
 /// Returns its number.

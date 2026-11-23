@@ -233,6 +233,15 @@ impl Inner {
                 l.turn_messages = 0;
                 l.last_text = None;
                 l.last_error = None;
+                l.self_started = input.is_none();
+                l.background.turn_started();
+            }
+            EventKind::BackgroundTasks { tasks } => l.background.listed(tasks),
+            // A Codex subagent works on a thread of its own, and its turn can go on after the
+            // agent's own ended ("running" until that turn ends). From the types of codex-cli
+            // 0.166.0: not verified on a live run. (Claude Code lists its helpers itself.)
+            EventKind::SubAgent { call_id, description, status } if l.provider == Provider::Codex => {
+                l.background.helper(call_id, description, status == "running")
             }
             // Delivered into the running turn: no turn of its own will take it off the count,
             // and the answers owed by the turns behind the running one come a turn sooner.
@@ -412,6 +421,8 @@ impl Inner {
             EventKind::ApprovalRequested { approval } => self.broker(ctx, approval),
             EventKind::Exited { code } => self.on_exit(ctx, *code),
             EventKind::PromptSteered { .. } if ctx.role == Role::Lead => lock(&self.leads).steered(&ctx.agent_id),
+            // The gate may wait for this work (background.rs).
+            EventKind::BackgroundTasks { .. } | EventKind::SubAgent { .. } => self.background_changed(&ctx.agent_id, &ctx.run_id),
             _ => {}
         }
     }
@@ -639,7 +650,9 @@ impl Inner {
 
     /// Codly commits a solo agent's worktree after each turn (C7: agents never commit).
     async fn solo_snapshot(self: Arc<Self>, agent_id: Id, ws: Option<Id>) {
+        // A turn the CLI started by itself read no prompt: it is not named for the last one.
         let (cwd, prompt) = match lock(&self.live).get(&agent_id) {
+            Some(l) if l.self_started => (l.cwd.clone(), Some(super::checkpoints::SELF_STARTED.to_string())),
             Some(l) => (l.cwd.clone(), l.last_prompt.clone()),
             None => return,
         };

@@ -185,6 +185,11 @@ impl Spawner for Fake {
                                         "autoCompactThreshold": 967000, "isAutoCompactEnabled": true,
                                     }))
                                 }
+                                // (no test here leaves a background task open)
+                                SessionRequest::StopTask(task) => {
+                                    s.log.push(format!("stop:{task}"));
+                                    Ok(json!({}))
+                                }
                             };
                             let _ = reply.send(answer);
                         }
