@@ -324,7 +324,7 @@ describe('the demo states of docs/DEMO.md', () => {
 
     const merge = new MergeConflictDemo(true, sim, story);
     expect(merge.state(source)).toEqual({
-      target: 'main', branch: 'codly/dark-mode/integration', repo: REPO, conflicts: ['src/app/settings/page.tsx'], resolving: null, failed_checks: [], checks_not_run: null,
+      target: 'main', branch: 'codly/dark-mode/integration', repo: REPO, conflicts: ['src/app/settings/page.tsx'], resolving: null, failed_checks: [], checks_not_run: null, behind: 1,
     });
     expect(() => merge.refuse(plan.id)).toThrow('merging into main conflicts in src/app/settings/page.tsx; the merge was aborted and your branch is unchanged.');
 
