@@ -9,4 +9,14 @@ off: string | null,
 /**
  * Newest first: those of the worktree and branch the agent is on now.
  */
-checkpoints: Array<Checkpoint>, };
+checkpoints: Array<Checkpoint>, 
+/**
+ * The key of the task whose worktree these are the files of: a 1:1 agent on a task works
+ * there, not in its own worktree. None: the agent's own worktree.
+ */
+task: string | null, 
+/**
+ * What is in that worktree now and in no checkpoint: the new folders and files that are
+ * too big to keep ("node_modules/ (20000 new files)"). A restore leaves them as they are.
+ */
+left_out: Array<string>, };

@@ -197,6 +197,7 @@ pub fn run() {
             commands::agent_git,
             commands::agent_checkpoints,
             commands::restore_checkpoint,
+            commands::last_turn_diff,
             commands::get_triggers,
             commands::set_triggers,
             commands::list_skills,

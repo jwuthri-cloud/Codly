@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-last-turn-diff"
+description = "Enables the last_turn_diff command without any pre-configured scope."
+commands.allow = ["last_turn_diff"]
+
+[[permission]]
+identifier = "deny-last-turn-diff"
+description = "Denies the last_turn_diff command without any pre-configured scope."
+commands.deny = ["last_turn_diff"]

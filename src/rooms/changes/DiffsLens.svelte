@@ -8,11 +8,15 @@
   the editor, and Send back gives all your comments to the agent that did the work (a new
   request, for work that is merged or finished). A comment on a file that left the diff since
   stays in the bar above Send back, where you can read and remove it.
+  A task's diff has a second scope, "Last turn": only what the last turn in the task's worktree
+  changed, committed or not (from the checkpoint Codly kept before that turn). It is for
+  reading: comments go on the whole task's diff, and the ones you wrote wait there.
 -->
 <script lang="ts">
   import { ide } from '../../ide/ide.svelte';
   import { api } from '../../lib/api';
   import type { Agent } from '../../lib/gen/Agent';
+  import type { LastTurn } from '../../lib/gen/LastTurn';
   import type { Task } from '../../lib/gen/Task';
   import { mergePlan, sendBack } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
@@ -20,6 +24,7 @@
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { diffStats, type DiffFile } from '../../lib/util/diff';
+  import { ago } from '../../lib/util/format';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import { editorPlace, heavy, HEAVY_LABEL, offDiff, parseDiffKeeping, placeId, type DiffParts, type ReviewComment } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
@@ -81,11 +86,19 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let active = $state<string | null>(null);
-  /** The diff on screen: its name (`reviewKey`), its text, and each file's part of it, parsed. */
+  /** The diff on screen: its name (`key`), its text, and each file's part of it, parsed. */
   let drawn: { key: string; text: string; parts: DiffParts } | null = null;
-  /** The diff whose files are on screen (its `reviewKey`); null while another one loads. */
+  /** The diff whose files are on screen (its `key`); null while another one loads. */
   let loaded = $state<string | null>(null);
-  const key = $derived(target ? reviewKey(target) : '');
+  /** You picked "Last turn": a task's diff shows only what its last turn changed. */
+  let turnOnly = $state(false);
+  const lastTurn = $derived(turnOnly && target?.kind === 'task');
+  /** The turn on screen in the "Last turn" scope; null when Codly kept no turn of the task. */
+  let turn = $state.raw<LastTurn | null>(null);
+  /** Your comments are on the task or the plan, whichever scope is on screen. */
+  const notesKey = $derived(target ? reviewKey(target) : '');
+  /** The diff on screen: the last turn of a task has its own folds and ticks. */
+  const key = $derived(lastTurn ? `${notesKey}:turn` : notesKey);
   let main = $state<HTMLElement | null>(null);
 
   const version = $derived.by(() => {
@@ -105,7 +118,7 @@
     void retry;
     if (!t) return;
     const my = ++seq;
-    const name = reviewKey(t);
+    const name = key;
     // Another diff: the one on screen goes at once, so no comment lands on a diff you left.
     if (drawn?.key !== name) {
       drawn = null;
@@ -113,11 +126,16 @@
       loaded = null;
     }
     loading = true;
-    (t.kind === 'plan' ? api.planDiff(t.id) : api.taskDiff(t.id))
-      .then((text) => {
+    const read: Promise<{ text: string; turn: LastTurn | null }> = lastTurn
+      ? api.lastTurnDiff({ kind: 'task', id: t.id }).then((kept) => ({ text: kept?.diff ?? '', turn: kept }))
+      : (t.kind === 'plan' ? api.planDiff(t.id) : api.taskDiff(t.id)).then((text) => ({ text, turn: null }));
+    read
+      .then((got) => {
         if (my !== seq) return;
+        const text = got.text;
         error = null;
         loaded = name;
+        turn = got.turn;
         // The same text again (a task changed status, the code did not): nothing to draw.
         if (drawn?.text === text) return;
         // Files whose part of the text did not change keep their objects, so only the others are drawn again.
@@ -156,14 +174,15 @@
   // ───────────── review: comments, viewed, the editor ─────────────
 
   const NONE: ReviewComment[] = [];
-  const comments = $derived(review.comments(key));
+  const comments = $derived(review.comments(notesKey));
   const byFile = $derived.by(() => {
     const out = new Map<string, ReviewComment[]>();
     for (const c of comments) out.set(c.path, [...(out.get(c.path) ?? []), c]);
     return out;
   });
-  /** Comments on files that left the diff since you wrote them: no file on screen shows them. */
-  const gone = $derived(loaded === key && !error ? offDiff(comments, files.map((f) => f.path)) : NONE);
+  /** Comments on files that left the diff since you wrote them: no file on screen shows them.
+   *  (The last turn shows a part of the task's diff: a file that is not in it did not leave.) */
+  const gone = $derived(!lastTurn && loaded === key && !error ? offDiff(comments, files.map((f) => f.path)) : NONE);
   const viewedCount = $derived(files.filter((f) => review.viewed(key, f)).length);
   /** Where a file opens in the editor: the worktree of the task that wrote it, or your
    *  repository once the plan is merged (see `editorPlace`). */
@@ -255,6 +274,12 @@
           <div class="sub">{#each allTasks.filter((t) => t.plan_id === p.id) as t (t.id)}{@render taskRow(t)}{/each}</div>
         {/each}
       {/if}
+      {#if target.kind === 'task'}
+        <div class="lenses turn-pick" role="radiogroup" aria-label="Which changes of the task">
+          <button role="radio" aria-checked={!turnOnly} onclick={() => (turnOnly = false)} data-tip="Everything the task changed and Codly committed">Whole task</button>
+          <button role="radio" aria-checked={turnOnly} onclick={() => (turnOnly = true)} data-tip="Only what the last turn in the task’s worktree changed, committed or not">Last turn</button>
+        </div>
+      {/if}
       {#if files.length}
         <p class="eyebrow files-h">{files.length} files · <span class="num"><span class="add">+{totals.added}</span> <span class="del">−{totals.removed}</span></span>{#if viewedCount} · {viewedCount} viewed{/if}</p>
         <ul class="files">
@@ -276,8 +301,11 @@
     <div class="main" bind:this={main}>
       {#if error}<p class="err">Couldn’t load the diff: {error}<button class="btn sm" disabled={loading} onclick={() => retry++}>Try again</button></p>
       {:else if loading && !files.length}<EmptyState compact title="Loading the diff…" />
+      {:else if lastTurn && !turn && !loading}<EmptyState compact title="No turn to show for this task." body="Codly keeps the files before each turn in the task’s worktree. That worktree is gone or holds other work now, or no turn ran there yet." />
+      {:else if lastTurn && turn && !files.length && !loading}<EmptyState compact title="The last turn changed no file." body={`It started with “${turn.label}” (${ago(turn.ts, ui.now)}).`} />
       {:else if !files.length && !loading}<EmptyState compact title="No changes in this scope yet." />
       {:else}
+        {#if lastTurn && turn}<p class="turn-h">Since the turn that started with “{turn.label}” ({ago(turn.ts, ui.now)}). To comment, switch to Whole task.</p>{/if}
         {#each files as f (f.path)}
           {@const o = owners.get(f.path)}
           {@const why = heavy(f)}
@@ -291,8 +319,8 @@
             root={main}
             collapsed={review.folded(key, f)}
             ontoggle={() => review.fold(key, f.path, !review.folded(key, f))}
-            comments={byFile.get(f.path) ?? NONE}
-            oncomment={(at, text) => review.comment(key, at, text)}
+            comments={lastTurn ? NONE : (byFile.get(f.path) ?? NONE)}
+            oncomment={lastTurn ? undefined : (at, text) => review.comment(notesKey, at, text)}
             viewed={review.viewed(key, f)}
             onviewed={(on) => review.setViewed(key, f, on)}
             openTip={place.tip}
@@ -310,19 +338,24 @@
                   <p class="g-w"><span class="mono">{c.path}{c.line == null ? '' : `:${c.line}`}</span> is not in this diff any more. Send back still sends your comment{c.quote == null ? '' : ', with the line as it was'}.</p>
                   {#if c.quote != null}<p class="g-q">{c.quote}</p>{/if}
                   <p class="g-t">{c.text}</p>
-                  <button class="btn sm ghost" onclick={() => review.comment(key, c, '')}>Remove</button>
+                  <button class="btn sm ghost" onclick={() => review.comment(notesKey, c, '')}>Remove</button>
                 </li>
               {/each}
             </ul>
           {/if}
           <div class="r-row">
+            {#if lastTurn}
+              <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {comments.length === 1 ? 'It is' : 'They are'} on the whole task’s diff.</p>
+              <button class="btn sm" onclick={() => (turnOnly = false)}>Whole task</button>
+            {:else}
             <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {toWorker ? `Send back gives them to ${workerName}; Codly checks the work again after the changes.` : 'This work is finished: Send back opens a new request with your comments, ready to send.'}</p>
             {#if discarding}
-              <button class="btn sm danger" onclick={() => review.clear(key)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
+              <button class="btn sm danger" onclick={() => review.clear(notesKey)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
               <button class="btn sm ghost" onclick={() => (discarding = false)}>Keep</button>
             {:else}
               <button class="btn sm ghost" onclick={() => (discarding = true)}>Discard</button>
               <button class="btn sm primary" disabled={sending} onclick={send}><Icon name="send" size={13} />Send back</button>
+            {/if}
             {/if}
           </div>
         </div>
@@ -344,6 +377,8 @@
   .st { color: var(--ink-3); font-weight: var(--w-reg); white-space: nowrap; font-size: var(--t-xs); font-family: var(--font-mono); }
   .sub { padding-left: 12px; }
   .land { margin: 6px 8px 2px; align-self: flex-start; }
+  .turn-pick { margin: 12px 8px 0; align-self: flex-start; flex-shrink: 0; }
+  .turn-h { flex-shrink: 0; padding: 0 8px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .all-in { padding: 6px 10px; color: var(--ink-3); font-size: var(--t-sm); }
   .scope, .fl { display: flex; align-items: center; gap: 8px; width: 100%; height: 34px; padding: 0 10px; border-radius: var(--r-md); text-align: left; font-size: var(--t-md); color: var(--ink-2); }
   .scope:hover, .fl:hover { background: var(--surface-1); color: var(--ink-1); }

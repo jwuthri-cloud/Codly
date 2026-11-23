@@ -41,6 +41,7 @@ import { PullRequestDemo } from './demo/pullrequest';
 import { demoIntake } from './demo/intake';
 import { PreviewDemo } from './demo/preview';
 import { DemoCheckpoints } from './demo/checkpoints';
+import type { TurnSource } from './gen/TurnSource';
 import { MockAskMe } from './demo/askme';
 import type { HireManifest } from './gen/HireManifest';
 import { demoDraft, exportDemoAgent, hireFromManifest, launchPreview, reviewHire } from './demo/hire';
@@ -658,7 +659,13 @@ export class MockTransport implements Transport {
       case 'agent_checkpoints':
         return this.checkpoints.list(sim.agents.get(String(a.agentId)), sim.now());
       case 'restore_checkpoint':
-        return this.checkpoints.restore(sim.agents.get(String(a.agentId)), Number(a.checkpoint), sim.now());
+        return this.checkpoints.restore(sim.agents.get(String(a.agentId)), Number(a.checkpoint), sim.now(), (a.path as string | null) ?? null);
+      case 'last_turn_diff': {
+        // A task's last turn is the one of the agent that works on it.
+        const source = a.source as TurnSource;
+        const agentId = source.kind === 'agent' ? source.id : sim.tasks.get(source.id)?.assignee;
+        return this.checkpoints.lastTurn(agentId ? sim.agents.get(agentId) : undefined, sim.now());
+      }
       case 'get_triggers':
         return (this.triggers ??= seedTriggers());
       case 'set_triggers':

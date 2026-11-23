@@ -3,7 +3,8 @@
 //! undone, the agent is told with its next prompt, a running turn refuses the restore (also the
 //! turn of another agent in the same worktree), an agent that works in the project folder
 //! itself has no checkpoints at all, and a turn the CLI starts by itself does not use up the
-//! note about a restore.
+//! note about a restore. One file goes back alone, "Last turn" is the diff since the newest
+//! checkpoint, and a 1:1 agent on a task has checkpoints of the task's worktree.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +14,7 @@ use std::time::Duration;
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SpawnSpec};
 use codly_core::hire::{HireManifest, SCHEMA};
 use codly_core::model::*;
-use codly_core::orchestrator::checkpoints::CheckpointKind;
+use codly_core::orchestrator::checkpoints::{CheckpointKind, TurnSource};
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use codly_core::store::Store;
 use tokio::sync::{Notify, mpsc};
@@ -66,7 +67,8 @@ struct Seen {
 
 /// A fake agent. A turn starts, waits for the test's `go`, edits files in its folder, ends.
 /// On the test's `wake` it starts a turn by itself, as a CLI does when a background task of
-/// it ends: no prompt, and a prompt that comes while that turn runs goes into it.
+/// it ends: no prompt, and a prompt that comes while that turn runs goes into it. Asked to
+/// shut down while a turn waits, it exits at once, as a CLI that is stopped does.
 struct Fake {
     seen: Arc<Mutex<Seen>>,
     go: Arc<Notify>,
@@ -92,8 +94,12 @@ impl Spawner for Fake {
                 tools: vec![],
             });
             tokio::spawn(async move {
+                // What came while a turn waited for the test: read when the turn is over.
+                let mut waiting = std::collections::VecDeque::new();
                 loop {
                     let cmd = tokio::select! {
+                        biased; // what waited comes first, in the order it came
+                        Some(cmd) = std::future::ready(waiting.pop_front()) => Some(cmd),
                         cmd = rx.recv() => cmd,
                         _ = wake.notified() => {
                             send(EventKind::TurnStarted { input: None });
@@ -115,7 +121,19 @@ impl Spawner for Fake {
                         Some(AgentCmd::Prompt(text)) => {
                             seen.lock().unwrap().prompts.push(text.clone());
                             send(EventKind::TurnStarted { input: Some(text) });
-                            go.notified().await;
+                            let stopped = loop {
+                                tokio::select! {
+                                    _ = go.notified() => break false,
+                                    cmd = rx.recv() => match cmd {
+                                        Some(AgentCmd::Shutdown) | None => break true,
+                                        Some(cmd) => waiting.push_back(cmd),
+                                    },
+                                }
+                            };
+                            if stopped {
+                                send(EventKind::Exited { code: Some(0) });
+                                break;
+                            }
                             let edits = std::mem::take(&mut seen.lock().unwrap().edits);
                             for (file, content) in edits {
                                 match content {
@@ -287,6 +305,106 @@ async fn files_go_back_to_before_a_turn_and_the_agent_is_told() {
     o.finish(&id, &wt).await;
     assert!(o.core.restore_checkpoint(&id, 999).await.unwrap_err().to_string().starts_with("that point is gone"));
     assert!(o.core.agent_checkpoints("nobody").await.is_err());
+    o.core.shutdown().await;
+}
+
+/// "Restore this file" puts one file of a checkpoint back and leaves the others: the present
+/// files are kept first, it is on record, and the agent's next prompt says which file it was.
+/// "Last turn" is what the last turn changed, also after Codly committed it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_file_goes_back_and_the_agent_is_told_which() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = office(dir.path()).await;
+    let agent = o.core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let (id, wt) = (agent.id.clone(), PathBuf::from(agent.worktree.clone().unwrap()));
+    let last_turn = async || o.core.last_turn(&TurnSource::Agent(id.clone())).await.unwrap();
+    assert_eq!(last_turn().await, None, "no turn yet");
+    o.turn(&id, &wt, "add the form", &[("a.txt", Some("1\n")), ("b.txt", Some("b\n"))]).await;
+
+    let turn = last_turn().await.unwrap();
+    assert_eq!(turn.label, "add the form");
+    assert!(turn.diff.contains("diff --git a/a.txt b/a.txt") && turn.diff.contains("+1\n") && turn.diff.contains("diff --git a/b.txt b/b.txt"), "{}", turn.diff);
+    assert!(!turn.diff.contains("README.md"), "only what the turn changed: {}", turn.diff);
+
+    // Only a.txt goes back to before the turn.
+    let head = git(&wt, &["rev-parse", "HEAD"]);
+    let done = o.core.restore_checkpoint_file(&id, 1, "a.txt").await.unwrap();
+    assert_eq!((done.files.clone(), done.undo), (files(&["a.txt"]), 2));
+    assert!(!wt.join("a.txt").exists(), "the file the turn made is gone");
+    assert_eq!(std::fs::read_to_string(wt.join("b.txt")).unwrap(), "b\n", "the other file of the turn stays");
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head, "files only: no commit moved");
+    let points = o.points(&id).await;
+    assert_eq!(points[0], (2, CheckpointKind::Restore, "add the form".to_string(), files(&["a.txt"])), "the way back is the newest point");
+    assert_eq!(points[1].3, files(&["b.txt"]), "what the first point would still put back");
+
+    // It is on record, and in the conversation with the agent.
+    let s = o.core.snapshot().await.unwrap();
+    let said = format!("Put a.txt of {0} back to before “add the form”. The other files stay as they are, and {0} still remembers the later turns.", agent.name);
+    assert!(s.chats.iter().any(|c| c.thread == format!("agent:{id}") && c.author == "codly" && c.text.starts_with(&said)), "{:?}", s.chats);
+    assert!(s.events.iter().any(|e| matches!(&e.kind, EventKind::Decision { decision_type, method, .. } if decision_type == "checkpoint" && method == "human")));
+
+    // A file that is the same at that point is not put back, and a path is never a pattern
+    // or a way out of the worktree: only a file that differs from the point is taken.
+    for same in ["README.md", "*.txt", "../outside.txt"] {
+        let e = o.core.restore_checkpoint_file(&id, 1, same).await.unwrap_err().to_string();
+        assert_eq!(e, format!("{same} is already as it was at that point"));
+    }
+    assert_eq!(std::fs::read_to_string(wt.join("b.txt")).unwrap(), "b\n");
+    assert_eq!(o.points(&id).await.len(), 2, "no point for a restore that did not happen");
+
+    // The agent's next prompt says which file went back: once.
+    o.turn(&id, &wt, "go on", &[]).await;
+    {
+        let seen = o.seen.lock().unwrap();
+        let note = "[Codly] The user put one file in your worktree back to how it was before the turn that started with \
+                    <untrusted>add the form</untrusted>, and left the other files as they are. 1 file changed: <untrusted>a.txt</untrusted>.";
+        assert!(seen.prompts[1].starts_with(note) && seen.prompts[1].contains("\n\n[User] go on"), "{}", seen.prompts[1]);
+    }
+    // That turn changed nothing: it is the last one now.
+    let quiet = last_turn().await.unwrap();
+    assert_eq!((quiet.label.as_str(), quiet.diff.as_str()), ("go on", ""));
+    o.core.shutdown().await;
+}
+
+/// A 1:1 agent that takes a task works in the task's worktree, not in its own. Its turns
+/// there are kept too: its list is the one of the task's worktree and says so, and the task's
+/// last turn shows what the turn wrote so far.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_1_to_1_agent_on_a_task_has_checkpoints_of_the_task_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = office(dir.path()).await;
+    let agent = o.core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let (id, own) = (agent.id.clone(), PathBuf::from(agent.worktree.clone().unwrap()));
+
+    // A task you give it. Its first turn stays open.
+    let task = o.core.create_task("Say hello", "Write hello.txt").await.unwrap();
+    o.core.assign_task(&task.id, Some(&id)).await.unwrap();
+    let view = wait_for("the checkpoint before the task's first turn", async || {
+        let view = o.core.agent_checkpoints(&id).await.unwrap();
+        (view.checkpoints.len() == 1).then_some(view)
+    })
+    .await;
+    let task = o.core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+    let task_wt = PathBuf::from(task.worktree.clone().unwrap());
+    assert_ne!(task_wt, own, "the task has a worktree of its own");
+    assert_eq!((view.off.clone(), view.task.as_deref()), (None, Some(task.key.as_str())), "the list says whose worktree it is of");
+    assert_eq!(view.checkpoints[0].kind, CheckpointKind::Turn);
+
+    // The turn writes in the task's worktree (here the test is the agent's hands).
+    std::fs::write(task_wt.join("hello.txt"), "hello\n").unwrap();
+    let view = o.core.agent_checkpoints(&id).await.unwrap();
+    assert_eq!(view.checkpoints[0].files, files(&["hello.txt"]), "the point is of the task's worktree");
+    for source in [TurnSource::Task(task.id.clone()), TurnSource::Agent(id.clone())] {
+        let turn = o.core.last_turn(&source).await.unwrap().unwrap();
+        assert!(turn.diff.contains("diff --git a/hello.txt b/hello.txt") && turn.diff.contains("+hello\n"), "{source:?}: {}", turn.diff);
+    }
+    assert!(!own.join("hello.txt").exists());
+
+    // Nothing goes back under the agent's hands.
+    let e = o.core.restore_checkpoint(&id, 1).await.unwrap_err().to_string();
+    assert_eq!(e, format!("{} is still working; restore files when its turn ends", agent.name));
+    assert!(task_wt.join("hello.txt").exists());
+    assert!(o.core.last_turn(&TurnSource::Task("nope".into())).await.is_err(), "an unknown task is an error, not an empty answer");
     o.core.shutdown().await;
 }
 

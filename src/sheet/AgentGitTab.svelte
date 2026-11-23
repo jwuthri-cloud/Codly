@@ -1,4 +1,4 @@
-<!-- Git: the agent's worktree. Changed files, local branches, recent commits; a solo agent's work is checked (your required checks) and its branch merges into yours from here, and a conflict with your branch can go back to the agent. -->
+<!-- Git: the agent's worktree. Changed files (what is not committed, or what the last turn changed), local branches, recent commits; a solo agent's work is checked (your required checks) and its branch merges into yours from here, and a conflict with your branch can go back to the agent. -->
 <script lang="ts">
   import { api } from '../lib/api';
   import type { Agent } from '../lib/gen/Agent';
@@ -14,6 +14,7 @@
   import PreviewStep from '../components/PreviewStep.svelte';
   import AgentCheckpoints from './AgentCheckpoints.svelte';
   import AgentChecks from './AgentChecks.svelte';
+  import AgentLastTurn from './AgentLastTurn.svelte';
 
   interface Props {
     agent: Agent;
@@ -23,6 +24,8 @@
   let view = $state<AgentGit | null>(null);
   let error = $state<string | null>(null);
   let busy = $state(false);
+  /** Changes shows what the last turn changed (committed or not), not what is uncommitted now. */
+  let turnOnly = $state(false);
 
   async function load(id: string) {
     busy = true;
@@ -84,8 +87,16 @@
     <p class="small">{view.note ?? 'This agent has no worktree.'}</p>
   {:else}
     {#if view.note}<p class="small bad">{view.note}</p>{/if}
-    <h4 class="eyebrow">Changes · {view.files.length}</h4>
-    {#if view.files.length}
+    <div class="changes-h">
+      <h4 class="eyebrow">Changes{turnOnly ? '' : ` · ${view.files.length}`}</h4>
+      <div class="lenses" role="radiogroup" aria-label="Which changes">
+        <button role="radio" aria-checked={!turnOnly} onclick={() => (turnOnly = false)} data-tip="The files that differ from the last commit">Not committed</button>
+        <button role="radio" aria-checked={turnOnly} onclick={() => (turnOnly = true)} data-tip="What the last turn changed, committed or not">Last turn</button>
+      </div>
+    </div>
+    {#if turnOnly}
+      <AgentLastTurn {agent} refresh={view} />
+    {:else if view.files.length}
       <ul class="files">
         {#each view.files as f (f.path)}
           <li><button class="file" onclick={() => ui.selectFile(f.path)}><code class="code">{f.code.replace(' ', '·')}</code><span class="path truncate">{f.path}</span><span class="st">{word(f.code)}</span></button></li>
@@ -123,6 +134,8 @@
   .br { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--ink-3); }
   .br code { font-size: 11.5px; color: var(--ink-1); overflow-wrap: anywhere; }
   .eyebrow { margin-top: 8px; }
+  .changes-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+  .changes-h .eyebrow { margin-top: 0; }
   .small { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .small.bad { color: var(--bad); }
   ul { display: flex; flex-direction: column; }

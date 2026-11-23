@@ -99,6 +99,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::storage_delete_branch,
             commands::agent_checkpoints,
             commands::restore_checkpoint,
+            commands::last_turn_diff,
             crate::agent_controls::set_agent_permission_mode,
             crate::agent_controls::compact_agent,
             crate::agent_controls::agent_context_usage,
@@ -344,6 +345,15 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
     let e = invoke(&wv, "restore_checkpoint", json!({ "agentId": "nope", "checkpoint": -1 })).unwrap_err();
     assert!(!e.to_string().contains("unknown agent"), "a negative number is refused before the core is asked: {e}");
+    // "Restore this file" is the same command with the file's path.
+    let e = invoke(&wv, "restore_checkpoint", json!({ "agentId": "nope", "checkpoint": 3, "path": "src/a.rs" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    // "Last turn", with the keys the Git tab and the Changes room send.
+    let e = invoke(&wv, "last_turn_diff", json!({ "source": { "kind": "agent", "id": "nope" } })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    let e = invoke(&wv, "last_turn_diff", json!({ "source": { "kind": "task", "id": "nope" } })).unwrap_err();
+    assert!(e.to_string().contains("unknown task nope"), "{e}");
+    assert!(invoke(&wv, "last_turn_diff", json!({ "source": { "kind": "plan", "id": "nope" } })).is_err(), "only an agent or a task");
 
     // A Claude agent's mode, "compact now" and context reading, with the keys the agent panel
     // sends: the core answers (no agent here), not the argument check.
