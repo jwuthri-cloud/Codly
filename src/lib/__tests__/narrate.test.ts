@@ -66,6 +66,8 @@ describe('narration', () => {
     expect(tool('SandboxNetworkAccess', { host: 'example.com' })).toBe('Waiting for you: reach `example.com`');
     expect(tool('SandboxNetworkAccess', {})).toBe('Waiting for you: use the network');
     expect(tool('WebFetch', { url: 'https://example.com' })).toBe('Waiting for you: use `WebFetch`');
+    // A plan to read is said as that, not by the name of the request's tool.
+    expect(tool('ExitPlanMode', { plan: '1. Add the line' })).toBe('Waiting for you: read its plan');
   });
 
   it('a task waiting for you narrates as wait', () => {

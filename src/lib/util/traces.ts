@@ -1,10 +1,12 @@
 // The Traces tab: an agent's tool calls, built from the events Codly records. A call is a
 // `tool_started` paired with its `tool_completed` by call id. Duration is what the CLI reported
 // when it did (Observed); else the gap between the two events (Measured by Codly); a call with no
-// completion yet is still running and has no duration.
+// completion yet is still running and has no duration. A call that showed you a plan is named
+// as that, and a plan you did not accept is no failed call.
 import type { ActivityKind } from '../gen/ActivityKind';
 import type { EventRow } from '../gen/EventRow';
 import { subagentTag, targetLabel } from './labels';
+import { PLAN_TOOL } from './planTool';
 
 export interface TraceCall {
   callId: string;
@@ -24,6 +26,8 @@ export interface TraceCall {
   exitCode: number | null;
   testsPassed: number | null;
   testsFailed: number | null;
+  /** The call showed you a plan and you did not accept it: `ok` is false, and nothing failed. */
+  planSentBack: boolean;
 }
 
 export interface TraceSummary {
@@ -37,14 +41,17 @@ export interface TraceSummary {
 /** Chronological (oldest first). `events` may hold any agents' events, in any order of arrival. */
 export function buildTraces(events: readonly EventRow[], agentId: string): TraceCall[] {
   const calls = new Map<string, TraceCall>();
+  const plans = new Set<string>();
   for (const e of events) {
     if (e.agent_id !== agentId) continue;
     const k = e.kind;
     if (k.type === 'tool_started') {
+      const plan = k.name === PLAN_TOOL;
       calls.set(k.call_id, {
-        callId: k.call_id, name: k.name, activity: k.activity, label: targetLabel(k.target, k.activity), subagent: subagentTag(k.input), start: e.ts,
-        durationMs: null, source: null, ok: null, exitCode: null, testsPassed: null, testsFailed: null,
+        callId: k.call_id, name: plan ? 'Its plan' : k.name, activity: k.activity, label: plan ? 'shown to you' : targetLabel(k.target, k.activity), subagent: subagentTag(k.input), start: e.ts,
+        durationMs: null, source: null, ok: null, exitCode: null, testsPassed: null, testsFailed: null, planSentBack: false,
       });
+      if (plan) plans.add(k.call_id);
     } else if (k.type === 'tool_completed') {
       const c = calls.get(k.call_id);
       if (!c) continue; // completion of a call older than the loaded history
@@ -55,6 +62,7 @@ export function buildTraces(events: readonly EventRow[], agentId: string): Trace
       c.exitCode = k.exit_code;
       c.testsPassed = k.tests_passed;
       c.testsFailed = k.tests_failed;
+      c.planSentBack = !k.ok && plans.has(k.call_id);
     }
   }
   return [...calls.values()].sort((a, b) => a.start - b.start);
@@ -63,7 +71,7 @@ export function buildTraces(events: readonly EventRow[], agentId: string): Trace
 export function summarize(calls: readonly TraceCall[]): TraceSummary {
   return {
     calls: calls.length,
-    failed: calls.filter((c) => c.ok === false).length,
+    failed: calls.filter((c) => c.ok === false && !c.planSentBack).length,
     running: calls.filter((c) => c.ok === null).length,
     totalMs: calls.reduce((n, c) => n + (c.durationMs ?? 0), 0),
   };

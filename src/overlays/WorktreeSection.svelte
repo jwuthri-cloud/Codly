@@ -92,7 +92,7 @@
         <p class="desc">
           This is code from the repo, and once it is on it runs without asking again.
           {#if s.risks.length}The approval rules see in it: {s.risks.join(', ')}.{:else}The approval rules see no risk in it.{/if}
-          Turning it on is for this text only: if the file changes, Codly asks you again.
+          You turn on this script as it is written now: if the file changes, it is off until Codly has asked you again.
         </p>
       {/if}
     {:else if setup.error}

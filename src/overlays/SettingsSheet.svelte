@@ -336,7 +336,12 @@
       <div class="row">
         <div class="r-text">
           <span class="r-title">Sandbox Claude’s shell</span>
-          <span class="desc">For Claude Code agents that have a shell: workers and 1:1 agents. Off: a shell command runs with your account’s rights, and Codly’s approval rules are the only check. On: Claude Code runs each shell command in its own OS sandbox. A sandboxed command can write only in the agent’s folder, a temporary folder and the repository’s git data. It can still read your other files. It can reach only the hosts that your Claude Code settings allow: for another host Codly asks you, in every mode except Full access, and a host you allow stays allowed for the rest of that agent’s session. Commands still go through Codly’s approval rules, as they do with the switch off: the sandbox is a second check under the rules, not a way around them. So a command can ask you once for itself and once more for a host. A command that Claude wants to run outside the sandbox asks you first, in every mode except Full access. If Claude Code does not turn its sandbox on, the agent does not start, and Codly tells you why. File edits and tool servers are not sandboxed. Codex agents always run in Codex’s own sandbox. Gemini, OpenCode, Cursor and Copilot agents have no sandbox. Applies to agents started after the change.</span>
+          <!-- One long help text, in short paragraphs: what the switch does, what a sandboxed command may do, how it sits with the approval rules, what it does not cover. -->
+          <span class="desc">For Claude Code agents that have a shell: workers and 1:1 agents. Off: a shell command runs with your account’s rights, and Codly’s approval rules are the only check. On: Claude Code runs each shell command in its own OS sandbox.</span>
+          <span class="desc">A sandboxed command can write only in the agent’s folder, a temporary folder and the repository’s git data. It can still read your other files. It can reach only the hosts that your Claude Code settings allow: for another host Codly asks you, in every mode except Full access, and a host you allow stays allowed for the rest of that agent’s session.</span>
+          <span class="desc">Commands still go through Codly’s approval rules, as they do with the switch off: the sandbox is a second check under the rules, not a way around them. So a command can ask you once for itself and once more for a host. A command that Claude wants to run outside the sandbox asks you first, in every mode except Full access.</span>
+          <span class="desc">If Claude Code does not turn its sandbox on, the agent does not start, and Codly tells you why. File edits and tool servers are not sandboxed.</span>
+          <span class="desc">Codex agents always run in Codex’s own sandbox. Gemini, OpenCode, Cursor and Copilot agents have no sandbox. Applies to agents started after the change.</span>
         </div>
         <input type="checkbox" class="switch" checked={s.claude_sandbox} aria-label="Sandbox Claude’s shell" onchange={(e) => set({ claude_sandbox: e.currentTarget.checked })} />
       </div>
@@ -418,6 +423,8 @@
   .grow { flex: 1; }
   .row { display: flex; align-items: center; gap: 16px; min-height: 42px; }
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  /* A help text in several paragraphs. */
+  .r-text .desc + .desc { margin-top: 6px; }
   .r-title { font-weight: var(--w-med); }
   .field { width: 180px; font-size: var(--t-sm); }
   .stepper { display: inline-flex; align-items: center; gap: 4px; padding: 2px; border-radius: var(--r-full); background: var(--surface-1); }

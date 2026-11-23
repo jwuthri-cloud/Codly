@@ -849,8 +849,12 @@ class CodlyStore {
           if (l.turn) l.turn = { ...l.turn, endedAt: ev.ts, status: k.status };
           const t = l.turns;
           if (t.length && t[t.length - 1].end == null) l.turns = [...t.slice(0, -1), { ...t[t.length - 1], end: ev.ts }];
-          // A helper that is still at work goes on after the turn: a call of its own stays
-          // open until its result comes, or until the helper is over (`sub_agent`, `exited`).
+          // A turn that was interrupted or that failed takes its helpers with it: none of them
+          // is at work any more.
+          if ((k.status === 'interrupted' || k.status === 'failed') && l.subagents.some((s) => s.status === 'running'))
+            l.subagents = l.subagents.map((s) => (s.status === 'running' ? { ...s, status: 'stopped', ts: ev.ts } : s));
+          // A helper that is still at work when a turn ends normally goes on after it: a call of its
+          // own stays open until its result comes, or until the helper is over (`sub_agent`, `exited`).
           const atWork = new Set(l.subagents.filter((s) => s.status === 'running').map((s) => s.callId));
           this.closeOpen(l, ev.ts, !into, (seg) => seg.parent == null || !atWork.has(seg.parent));
           if (!into) this.dropStreams(aid);

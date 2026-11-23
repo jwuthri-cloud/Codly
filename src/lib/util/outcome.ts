@@ -3,25 +3,40 @@
 // skipped, and says what you answered.
 import type { Approval } from '../gen/Approval';
 import type { ApprovalStatus } from '../gen/ApprovalStatus';
+import { showsPlan } from './planTool';
 import { oneLine } from './sanitize';
 
 type Asked = Pick<Approval, 'subject'>;
 
-/** "Approved", "Denied", "Stopped", "Expired"; for a question "Answered" and "Skipped". Empty while it waits. */
-export function outcomeWord(status: ApprovalStatus, asked: Asked): string {
-  const question = asked.subject.kind === 'question';
+/**
+ * "Approved", "Denied", "Stopped", "Closed"; for a question "Answered" and "Skipped". Empty while
+ * it waits. "Closed": the request went away unanswered with the agent's run (you killed the
+ * agent, it exited, Codly restarted). `asked` null: a request that is not known any more.
+ */
+export function outcomeWord(status: ApprovalStatus, asked: Asked | null): string {
+  const question = asked?.subject.kind === 'question';
   switch (status) {
     case 'approved': return question ? 'Answered' : 'Approved';
     case 'denied': return question ? 'Skipped' : 'Denied';
     case 'cancelled': return 'Stopped';
-    case 'expired': return 'Expired';
+    case 'expired': return 'Closed';
     case 'pending': return '';
   }
 }
 
-/** Who settled it: "by you", "by Codly’s rules", "by <who>". Empty when nobody is on record. */
+/**
+ * Who settled it: "by you", "by Codly’s rules", "by Codly" (it closed the request when the
+ * agent's run ended), "by its CLI" (the agent's CLI took the request back), "by <who>". Empty
+ * when nobody is on record.
+ */
 export function outcomeBy(decidedBy: string | null): string {
-  return decidedBy === 'user' ? 'by you' : decidedBy === 'policy' ? 'by Codly’s rules' : decidedBy ? `by ${decidedBy}` : '';
+  switch (decidedBy) {
+    case 'user': return 'by you';
+    case 'policy': return 'by Codly’s rules';
+    case 'codly': return 'by Codly';
+    case 'provider': return 'by its CLI';
+    default: return decidedBy ? `by ${decidedBy}` : '';
+  }
 }
 
 /** The answers a question card sends, on one line: "Keep it"; "Red · Small, Fast" for several
@@ -51,13 +66,16 @@ export function askedLine(asked: Asked): string {
     const q = firstQuestion(asked);
     return q ? `Asked you: ${oneLine(q, 80)}` : 'Asked you a question';
   }
+  if (showsPlan(s)) return 'Asked you to read its plan';
   return `Asked for approval${s.kind === 'command' ? `: ${oneLine(s.command, 60)}` : ''}`;
 }
 
-/** An agent's history: how that request ended. `asked` is the request when it is still known
- *  (the line of a question says so), `answer` what you answered when this window sent it. */
+/** An agent's history: how that request ended ("Approved by you", "Denied by you", "Closed by
+ *  Codly"). `asked` is the request when it is still known (the line of a question or of a plan
+ *  says so), `answer` what you answered when this window sent it. */
 export function settledLine(status: ApprovalStatus, by: string, asked: Asked | null, answer: string | null): string {
-  if (asked?.subject.kind !== 'question') return `Approval ${status} by ${by === 'user' ? 'you' : by}`;
-  const line = `${outcomeWord(status, asked)} ${outcomeBy(by)}`.trim();
-  return status === 'approved' && answer ? `${line}: ${oneLine(answer, 80)}` : line;
+  const plan = !!asked && showsPlan(asked.subject);
+  const word = plan && status === 'approved' ? 'Plan accepted' : plan && status === 'denied' ? 'Plan sent back' : outcomeWord(status, asked);
+  const line = `${word} ${outcomeBy(by)}`.trim();
+  return asked?.subject.kind === 'question' && status === 'approved' && answer ? `${line}: ${oneLine(answer, 80)}` : line;
 }

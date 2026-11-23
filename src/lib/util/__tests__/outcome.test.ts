@@ -7,14 +7,16 @@ const question = {
   subject: { kind: 'question', questions: { questions: [{ question: 'Keep the localStorage fallback?', header: 'Fallback', options: [{ label: 'Keep it' }, { label: 'Drop it' }] }] } },
 } satisfies Pick<Approval, 'subject'>;
 
+const plan = { subject: { kind: 'tool', name: 'ExitPlanMode', input: { plan: '1. Add the line' } } } satisfies Pick<Approval, 'subject'>;
+
 describe('how a settled request reads', () => {
   it('a permission is approved or denied; a question is answered or skipped', () => {
-    expect((['approved', 'denied', 'cancelled', 'expired', 'pending'] as const).map((s) => outcomeWord(s, command))).toEqual(['Approved', 'Denied', 'Stopped', 'Expired', '']);
-    expect((['approved', 'denied', 'cancelled', 'expired', 'pending'] as const).map((s) => outcomeWord(s, question))).toEqual(['Answered', 'Skipped', 'Stopped', 'Expired', '']);
+    expect((['approved', 'denied', 'cancelled', 'expired', 'pending'] as const).map((s) => outcomeWord(s, command))).toEqual(['Approved', 'Denied', 'Stopped', 'Closed', '']);
+    expect((['approved', 'denied', 'cancelled', 'expired', 'pending'] as const).map((s) => outcomeWord(s, question))).toEqual(['Answered', 'Skipped', 'Stopped', 'Closed', '']);
   });
 
   it('says who settled it', () => {
-    expect(['user', 'policy', 'provider', null].map(outcomeBy)).toEqual(['by you', 'by Codly’s rules', 'by provider', '']);
+    expect(['user', 'policy', 'codly', 'provider', 'Mira', null].map(outcomeBy)).toEqual(['by you', 'by Codly’s rules', 'by Codly', 'by its CLI', 'by Mira', '']);
   });
 
   it('puts the answers a question card sends on one line', () => {
@@ -39,6 +41,7 @@ describe('an agent’s history', () => {
     expect(askedLine({ subject: { kind: 'file_change', paths: ['a.ts'], diff: null } })).toBe('Asked for approval');
     expect(askedLine(question)).toBe('Asked you: Keep the localStorage fallback?');
     expect(askedLine({ subject: { kind: 'question', questions: [] } })).toBe('Asked you a question');
+    expect(askedLine(plan)).toBe('Asked you to read its plan');
   });
 
   it('an answered question reads "Answered by you" with the answer, never "Approval approved"', () => {
@@ -46,12 +49,25 @@ describe('an agent’s history', () => {
     // Answered before this window opened: the core keeps no copy of the answer.
     expect(settledLine('approved', 'user', question, null)).toBe('Answered by you');
     expect(settledLine('denied', 'user', question, null)).toBe('Skipped by you');
-    expect(settledLine('cancelled', 'provider', question, 'Keep it')).toBe('Stopped by provider');
+    expect(settledLine('cancelled', 'provider', question, 'Keep it')).toBe('Stopped by its CLI');
   });
 
-  it('an approval keeps its words, also when the request itself is no longer held', () => {
-    expect(settledLine('approved', 'user', command, null)).toBe('Approval approved by you');
-    expect(settledLine('denied', 'policy', command, null)).toBe('Approval denied by policy');
-    expect(settledLine('approved', 'user', null, null)).toBe('Approval approved by you');
+  it('an approval reads as its closed card does, also when the request itself is no longer held', () => {
+    expect(settledLine('approved', 'user', command, null)).toBe('Approved by you');
+    expect(settledLine('denied', 'policy', command, null)).toBe('Denied by Codly’s rules');
+    expect(settledLine('approved', 'user', null, null)).toBe('Approved by you');
+  });
+
+  it('a request that went away with its agent is closed, and says who closed it', () => {
+    // You killed the agent: Codly closes what it had asked.
+    expect(settledLine('expired', 'codly', command, null)).toBe('Closed by Codly');
+    // You stopped its turn: its CLI takes the request back.
+    expect(settledLine('cancelled', 'provider', command, null)).toBe('Stopped by its CLI');
+  });
+
+  it('a plan is accepted or sent back, not approved or denied', () => {
+    expect(settledLine('approved', 'user', plan, null)).toBe('Plan accepted by you');
+    expect(settledLine('denied', 'user', plan, null)).toBe('Plan sent back by you');
+    expect(settledLine('cancelled', 'user', plan, null)).toBe('Stopped by you');
   });
 });

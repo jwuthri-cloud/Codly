@@ -150,6 +150,14 @@ describe('events → behaviour', () => {
     expect(text(subject('WebFetch', { url: 'https://example.com' }))).toBe('use WebFetch');
   });
 
+  it('an agent that shows its plan waits for you to read it: no tool name, and nothing to "run"', () => {
+    const m = fresh();
+    const ap = { id: 'ap', agent_id: 'a-ada', run_id: 'r', task_id: null, call_id: null, subject: { kind: 'tool', name: 'ExitPlanMode', input: { plan: '1. Add the line' } }, reason: null, choices: ['allow_once', 'deny'], risks: [], status: 'pending', decided_by: null, created_at: 0 } satisfies Approval;
+    expect(approvalText(ap)).toBe('read its plan');
+    reduce(m, row(1000, 'a-ada', { type: 'approval_requested', approval: ap }), live);
+    expect(sentence(ada(m), T0 + 2000)).toMatchObject({ pre: 'Waiting for you: read its plan', code: null, tone: 'warn' });
+  });
+
   it('blocked slumps under a rain cloud; rate limited sleeps (zZ); long idle falls asleep at 10 min', () => {
     const m = fresh();
     reduce(m, row(0, 'a-ada', { type: 'error', message: 'ESLint config not found', fatal: true }), live);

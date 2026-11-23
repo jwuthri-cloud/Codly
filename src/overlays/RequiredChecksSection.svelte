@@ -93,7 +93,7 @@
         </ul>
         <p class="desc">
           These commands come from the repo, and once they are on they run without asking again, also the ones with a risk shown beside them.
-          Turning them on is for this text only: if the file changes, Codly asks you again.
+          You turn on these commands as they are written now: if the file changes, they are off until Codly has asked you again.
         </p>
       {/if}
     {:else if checks.error}

@@ -43,4 +43,11 @@ describe('buildTraces', () => {
     expect(buildTraces([], 'a')).toEqual([]);
     expect(summarize([])).toEqual({ calls: 0, failed: 0, running: 0, totalMs: 0 });
   });
+
+  it('a call that showed a plan is named as that, and a plan sent back is not a failed call', () => {
+    const plan = (ts: number, call_id: string) => started('a', ts, call_id, 'ExitPlanMode');
+    const t = buildTraces([plan(T0, 'p1'), done('a', T0 + 1000, 'p1', { ok: false }), plan(T0 + 2000, 'p2'), done('a', T0 + 3000, 'p2'), started('a', T0 + 4000, 'c1'), done('a', T0 + 5000, 'c1', { ok: false })], 'a');
+    expect(t.map((c) => [c.name, c.label, c.ok, c.planSentBack])).toEqual([['Its plan', 'shown to you', false, true], ['Its plan', 'shown to you', true, false], ['Bash', 'pnpm test', false, false]]);
+    expect(summarize(t)).toMatchObject({ calls: 3, failed: 1 });
+  });
 });

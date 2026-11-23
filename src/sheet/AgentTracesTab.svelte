@@ -30,14 +30,14 @@
     {#each shown as c (c.callId)}
       <li>
         <div class="row">
-          <span class="ic" class:bad={c.ok === false} class:run={c.ok === null}><Icon name={c.ok === null ? 'play' : c.ok ? 'check' : 'x-circle'} size={12} /></span>
+          <span class="ic" class:bad={c.ok === false && !c.planSentBack} class:quiet={c.planSentBack} class:run={c.ok === null}><Icon name={c.ok === null ? 'play' : c.ok ? 'check' : c.planSentBack ? 'refresh' : 'x-circle'} size={12} /></span>
           <span class="nm">{c.name}</span>
           <span class="lb truncate">{c.label}</span>
           {#if c.subagent}<span class="sub">{c.subagent}</span>{/if}
           <time class="num" data-tip={c.source === 'reported' ? 'Duration reported by the CLI' : c.source === 'measured' ? 'Measured by Codly between start and finish' : 'Still running'}>{c.durationMs == null ? 'running' : dur(c.durationMs)}</time>
         </div>
-        <div class="bar" aria-hidden="true"><i style:width="{c.durationMs == null ? 0 : Math.max(2, (c.durationMs / slowest) * 100)}%" class:bad={c.ok === false}></i></div>
-        <p class="meta num">{clockSec(c.start)}{c.exitCode != null && c.exitCode !== 0 ? ` · exit ${c.exitCode}` : ''}{c.testsPassed != null ? ` · ${c.testsPassed} passed${c.testsFailed ? `, ${c.testsFailed} failed` : ''}` : ''}{c.source === 'measured' ? ' · measured' : ''}</p>
+        <div class="bar" aria-hidden="true"><i style:width="{c.durationMs == null ? 0 : Math.max(2, (c.durationMs / slowest) * 100)}%" class:bad={c.ok === false && !c.planSentBack}></i></div>
+        <p class="meta num">{clockSec(c.start)}{c.planSentBack ? ' · you sent it back' : ''}{c.exitCode != null && c.exitCode !== 0 ? ` · exit ${c.exitCode}` : ''}{c.testsPassed != null ? ` · ${c.testsPassed} passed${c.testsFailed ? `, ${c.testsFailed} failed` : ''}` : ''}{c.source === 'measured' ? ' · measured' : ''}</p>
       </li>
     {/each}
   </ul>
@@ -53,6 +53,7 @@
   .row { display: flex; align-items: center; gap: 8px; width: 100%; font-size: var(--t-sm); color: var(--ink-2); }
   .ic { display: grid; color: var(--ok); }
   .ic.bad { color: var(--bad); }
+  .ic.quiet { color: var(--ink-3); }
   .ic.run { color: var(--live); }
   .nm { font-weight: var(--w-med); color: var(--ink-1); }
   .lb { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); }

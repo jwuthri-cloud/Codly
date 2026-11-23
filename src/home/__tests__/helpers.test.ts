@@ -149,6 +149,46 @@ describe("a helper's call that is open when the turn ends", () => {
   });
 });
 
+describe('a helper whose turn was interrupted or failed', () => {
+  const atWork = () => (store.live.l1?.subagents ?? []).filter((s) => s.status === 'running').map((s) => s.callId);
+  /** As `launchEarly`, but the turn does not end normally. */
+  function cut(status: 'interrupted' | 'failed') {
+    apply(
+      ev(10, { type: 'turn_started', input: 'Have a subagent run the tests' }),
+      helper(11, 'toolu-1', 'running'),
+      started(11, 'toolu-1', 'Agent', 'delegate'),
+      started(13, 'toolu-2', 'Bash', 'execute'),
+      progress(13, 'toolu-1', { tool_call_id: 'toolu-2' }),
+      ev(14, { type: 'turn_completed', status, result_text: null, duration_ms: null }),
+    );
+  }
+
+  it.each(['interrupted', 'failed'] as const)('is stopped with a turn that was %s, and so is its open call', (status) => {
+    cut(status);
+    expect(atWork()).toEqual([]);
+    expect(callOf('toolu-2')).toMatchObject({ end: 14, ok: null });
+    expect(store.now('l1')).toBeNull();
+    const [row] = works();
+    expect(row.helpers).toMatchObject([{ callId: 'toolu-1', status: 'stopped', ts: 14 }]);
+    expect(helperTitle(row.helpers[0], helperState(row.helpers[0], row.segs[0]))).toBe('Helper stopped');
+  });
+
+  it('a retry shows one helper at work, not the stopped one too', () => {
+    cut('interrupted');
+    apply(
+      ev(20, { type: 'turn_started', input: 'Have a subagent run the tests' }),
+      helper(21, 'toolu-9', 'running'),
+      started(21, 'toolu-9', 'Agent', 'delegate'),
+    );
+    expect(atWork()).toEqual(['toolu-9']);
+  });
+
+  it('a helper still at work when its turn ends normally goes on', () => {
+    launchEarly();
+    expect(atWork()).toEqual(['toolu-1']);
+  });
+});
+
 describe('a Codex helper', () => {
   // What the Codex adapter emits when the subagent's own turn starts before the `spawnAgent`
   // call names its thread: nothing for that turn's start, then the helper when the call ends,

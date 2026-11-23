@@ -35,7 +35,8 @@
   import UsageBars from '../components/UsageBars.svelte';
   import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
-  import { taskChangedLine, tripleLine, type Names } from './historyWords';
+  import { historyFacts, repeatsReply, taskChangedLine, tripleLine, type Names } from './historyWords';
+  import { PLAN_TOOL, planCallEnd } from '../lib/util/planTool';
   import AgentMcp from './AgentMcp.svelte';
   import AgentTakeover from './AgentTakeover.svelte';
   import AgentTrust from './AgentTrust.svelte';
@@ -175,6 +176,10 @@
   // ── history ──
   let filter = $state<'all' | 'tools' | 'files' | 'decisions' | 'errors'>('all');
   let rawOpen = $state<number | null>(null);
+  const facts = $derived.by(() => {
+    void store.revBy.get(agent.id);
+    return historyFacts(store.events, agent.id);
+  });
   const log = $derived.by(() => {
     void store.rev;
     const out: EventRow[] = [];
@@ -187,7 +192,8 @@
       if (filter === 'tools' && t !== 'tool_started' && t !== 'tool_completed') continue;
       if (filter === 'files' && t !== 'files_changed' && !(t === 'tool_started' && ['read', 'edit', 'create', 'delete'].includes((e.kind as { activity: string }).activity))) continue;
       if (filter === 'decisions' && t !== 'decision') continue;
-      if (filter === 'errors' && t !== 'error' && !(t === 'tool_completed' && !(e.kind as { ok: boolean }).ok)) continue;
+      if (filter === 'errors' && t !== 'error' && !(e.kind.type === 'tool_completed' && !e.kind.ok && !facts.planCalls.has(e.kind.call_id))) continue;
+      if (repeatsReply(e, agent.id, facts)) continue;
       out.push(e);
     }
     return out;
@@ -196,8 +202,10 @@
   function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
     const k = e.kind;
     switch (k.type) {
-      case 'tool_started': return { icon: 'play', text: `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
-      case 'tool_completed': return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
+      case 'tool_started': return { icon: 'play', text: k.name === PLAN_TOOL ? 'Showed you its plan' : `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
+      case 'tool_completed':
+        if (facts.planCalls.has(k.call_id)) return { icon: k.ok ? 'check' : 'refresh', text: `${planCallEnd(k.ok, store.approvals.find((a) => a.call_id === k.call_id)?.status ?? null)}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}` };
+        return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
       case 'files_changed': return { icon: 'diff', text: `Changed ${k.paths.map(basename).join(', ')}` };
       case 'message': return { icon: 'chat', text: oneLine(k.text, 120) };
       case 'reasoning': return { icon: 'chat', text: `Thought: ${oneLine(k.text, 110)}` };
