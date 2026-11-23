@@ -101,6 +101,8 @@ export class Sim {
   cancelled = new Set<string>();
   /** task key → paths written so far (diffs grow as agents edit). */
   touched = new Map<string, Set<string>>();
+  /** Runs after each tool call of an agent's turn, while the turn goes on (the story sets it). */
+  afterStep: ((act: Actor) => Promise<void>) | null = null;
   private waiters = new Set<Waiter>();
 
   constructor(opts: SimOptions, settings: Settings) {
@@ -511,6 +513,7 @@ export class Actor {
       tests_failed: s.failed ?? null,
     });
     this.usage(900 + Math.round(Math.random() * 2400), 40 + Math.round(Math.random() * 160), true);
+    await this.sim.afterStep?.(this);
     return callId;
   }
 

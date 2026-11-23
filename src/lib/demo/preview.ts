@@ -1,5 +1,7 @@
 // The browser demo's answer to `preview`. There is no process behind it: Run "starts" a dev
 // server whose output appears over a few seconds, on the worktree's own port, and Stop ends it.
+// With `?preview=running` (docs/DEMO.md) a command you started earlier runs in every worktree
+// you look at, so the step shows its running state at once.
 import type { Preview } from '../gen/Preview';
 import type { PreviewAction } from '../gen/PreviewAction';
 import type { PreviewRun } from '../gen/PreviewRun';
@@ -12,6 +14,9 @@ const PORT_FIRST = 20_000;
 const PORT_BLOCK = 10;
 
 type Run = { id: string; command: string; started_at: number; stopped_at: number | null };
+
+/** The command of `?preview=running`, started this long before you look. */
+const EARLIER = { command: 'pnpm dev --port $CODLY_PORT_BASE', ms: 5000 };
 
 /** What the demo dev server prints, and after how many ms. */
 function script(port: number): [number, string][] {
@@ -34,6 +39,15 @@ export class PreviewDemo {
   private runs = new Map<string, Run>();
   private ports = new Map<string, number>();
   private seq = 0;
+
+  /** `running` (`?preview=running`): each worktree starts with a command that runs. */
+  constructor(private running = false) {}
+
+  private start(worktree: string, command: string, at: number) {
+    if (!this.ports.has(worktree)) this.ports.set(worktree, PORT_FIRST + PORT_BLOCK * this.ports.size);
+    this.command = command;
+    this.runs.set(worktree, { id: `preview-${++this.seq}`, command, started_at: at, stopped_at: null });
+  }
 
   private worktree(source: PreviewSource, world: DemoWorld): string {
     if (source.kind === 'plan') {
@@ -68,14 +82,13 @@ export class PreviewDemo {
   handle(a: Record<string, unknown>, world: DemoWorld): Preview {
     const worktree = this.worktree(a.source as PreviewSource, world);
     const action = (a.action as PreviewAction | null) ?? null;
+    if (this.running && !this.runs.has(worktree)) this.start(worktree, EARLIER.command, world.now() - EARLIER.ms);
     const live = this.runs.get(worktree);
     if (action?.do === 'start') {
       const command = action.command.trim();
       if (!command) throw new Error('write the command to run first');
       if (live && live.stopped_at === null) throw new Error('a command already runs in this worktree; stop it first');
-      if (!this.ports.has(worktree)) this.ports.set(worktree, PORT_FIRST + PORT_BLOCK * this.ports.size);
-      this.command = command;
-      this.runs.set(worktree, { id: `preview-${++this.seq}`, command, started_at: world.now(), stopped_at: null });
+      this.start(worktree, command, world.now());
     } else if (action?.do === 'stop' && live && live.stopped_at === null) {
       live.stopped_at = world.now();
     }

@@ -202,6 +202,36 @@ export function demoMoveOffice(sim: Sim, workspaceId: string, slotId: string): L
   return demoLots(sim);
 }
 
+/**
+ * Close an office (orchestrator/workspace.rs `close_office`): the repo leaves Codly and its plot
+ * is freed, building included, to sell or to move another office to. Refused, as in the core,
+ * while the office has unfinished work or an agent is in the middle of a turn. Nothing is
+ * deleted: opening the repo again brings it back.
+ */
+export function demoCloseOffice(sim: Sim, workspaceId: string): LotSlot[] {
+  const ws = here(sim, workspaceId);
+  const other = OFFICES.find((o) => o.id === ws);
+  if (ws !== HERE && !other) throw new Error('no such office');
+  const plot = homeOf(ws);
+  if (other) {
+    // The demo's other offices: one has agents at work, the other is quiet.
+    if (other.working) throw new Error(`${other.crew[0]} is in the middle of a turn in ${other.name}: wait for it, or stop it first`);
+    OFFICES.splice(OFFICES.indexOf(other), 1);
+  } else {
+    const name = sim.workspace?.name ?? 'This repo';
+    const open = [...sim.tasks.values()].find((t) => !['done', 'failed', 'cancelled'].includes(t.status));
+    if (open) throw new Error(`${name} still has unfinished work (${open.key} "${open.title}"): finish or cancel it first`);
+    const busy = [...sim.agents.values()].find((a) => sim.actor(a.id).inTurn);
+    if (busy) throw new Error(`${busy.name} is in the middle of a turn in ${name}: wait for it, or stop it first`);
+    // Its agents stop, and the repo is no longer in the recent list.
+    for (const a of [...sim.agents.values()]) if (a.status !== 'offline') sim.patchAgent(a.id, { status: 'offline', activity: null, activity_label: null });
+    sim.recent = sim.recent.filter((r) => r.repo_path !== sim.workspace?.repo_path);
+    sim.workspace = null;
+  }
+  plot.workspace = null;
+  return demoLots(sim);
+}
+
 function seeded(sim: Sim): Agent[] {
   if (ghosts) return ghosts;
   const day = 86_400_000;

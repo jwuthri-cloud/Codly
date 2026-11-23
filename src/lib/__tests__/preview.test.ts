@@ -104,6 +104,7 @@ describe('the demo’s preview', () => {
     ]),
     tasks: new Map(),
     agents: new Map([['a1', { id: 'a1', name: 'Ada', worktree: '/wt/ada' } as Agent]]),
+    chats: [],
     now: () => now,
   };
 
@@ -133,5 +134,16 @@ describe('the demo’s preview', () => {
     expect(stopped.ended).toBe('stopped');
     now += 10_000;
     expect(demo.handle({ source: plan, action: null, seen: null }, world).run!.printed).toBe(7);
+  });
+
+  it('`?preview=running`: a command you started earlier runs in each worktree, until you stop it', () => {
+    const demo = new PreviewDemo(true);
+    const first = demo.handle({ source: plan, action: null, seen: null }, world);
+    expect(first).toMatchObject({ command: 'pnpm dev --port $CODLY_PORT_BASE', port_base: 20000, run: { ended: null, url: 'http://localhost:20000/', printed: 8 } });
+    expect(() => demo.handle({ source: plan, action: { do: 'start', command: 'pnpm dev' }, seen: null }, world)).toThrow('already runs');
+    expect(demo.handle({ source: { kind: 'agent', id: 'a1' }, action: null, seen: null }, world)).toMatchObject({ port_base: 20010, run: { ended: null } });
+    // Stopped, it stays stopped: nothing starts by itself a second time.
+    expect(demo.handle({ source: plan, action: { do: 'stop' }, seen: null }, world).run!.ended).toBe('stopped');
+    expect(demo.handle({ source: plan, action: null, seen: null }, world).run!.ended).toBe('stopped');
   });
 });
