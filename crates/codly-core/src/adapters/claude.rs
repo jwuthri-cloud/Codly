@@ -10,21 +10,30 @@
 //!   `SessionStarted` is emitted twice: at spawn from the `initialize` handshake (tools empty)
 //!   and once more from `system/init`. Treat it as an upsert.
 //!
-//! Turns follow the CLI's own lines (recorded on 2.1.311: cli-claude-stream-json-2.1.311 §1, §5):
+//! Turns follow the CLI's own lines (recorded on 2.1.311: cli-claude-stream-json-2.1.311 §1, §5,
+//! and its part 2, §1 to §8):
 //! - Every user message carries a `uuid`. A prompt for an idle CLI starts a turn at once. One
 //!   sent while a turn runs is written at once too: the CLI keeps it and takes it into the
 //!   running turn at the next tool boundary (`PromptSteered`), or runs it as a turn of its own
 //!   when the turn ends first (`TurnStarted`). Its `command_lifecycle` line (`started`) says
-//!   which; until then the prompt waits and the orchestrator counts it as queued.
+//!   which; until then the prompt waits and the orchestrator counts it as queued. Several
+//!   prompts that wait are taken together: into the running turn, or as one new turn (the
+//!   first opens it, the others join it).
 //! - Codly holds a prompt back until the turn ends only when the CLI has no such lines, when a
 //!   stop is on its way (the prompt after an interrupt is the next turn), and for a slash
-//!   command (recorded only as a turn of its own).
-//! - A stop can reach the CLI while a prompt waits in it. The answer to the interrupt lists what
-//!   the CLI still holds (`still_queued`): a prompt it does not name is Codly's to send again.
-//!   When the agent itself is stopped, such a prompt is given up and the process is ended
-//!   before the CLI can run it.
-//! - The CLI starts a turn by itself when a background task ends. `system/init` opens every
-//!   turn, so one that comes while no turn is open is such a turn: `TurnStarted` with no input.
+//!   command (written mid-turn, the CLI itself runs it as a turn of its own after the running
+//!   one: holding it keeps its place among the prompts sent after it).
+//! - A stop can reach the CLI while a prompt waits in it. The answer to the interrupt lists the
+//!   uuids of the prompts the CLI still holds (`still_queued`): it runs those as the next turn
+//!   by itself, and a prompt the answer does not name is Codly's to send again.
+//! - When the agent itself is stopped, the interrupt says `cancel_queued`: the CLI drops the
+//!   prompts that wait in it and writes a `cancelled` line for each. The background commands
+//!   it still tracks are ended with `stop_task`, and only then is stdin closed: with one of
+//!   them open the CLI does not exit, it waits for the command and runs a turn after it. A
+//!   prompt the CLI did not drop would run next: its process is ended before it can.
+//! - The CLI starts a turn by itself when a background task ends while it is idle.
+//!   `system/init` opens every turn, so one that comes while no turn is open is such a turn:
+//!   `TurnStarted` with no input.
 //!
 //! `AgentCmd::Session` (permission mode, model, context use) is written at once as a control
 //! request: the CLI answers those between turns and during one. Request and answer shapes,
@@ -79,7 +88,13 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// How long a turn has to end after an interrupt request. Past it the CLI is stuck: its process
 /// is ended (stdin closed, then SIGTERM, then SIGKILL) and the session resumes with the next run.
+/// (Recorded: the `result` of a turn interrupted in a tool call came within 0.01 s, part 2 §8.)
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// How long the CLI has, when an agent is stopped, to say that the background commands Codly
+/// asked it to stop are gone (recorded: at once, part 2 §6). Past it the CLI gets SIGTERM, at
+/// which it ends them itself. Short, so that both fit in the time the app waits at exit.
+const STOP_TASKS_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn tools_for(spec: &SpawnSpec) -> Vec<&'static str> {
     let mut t = if spec.read_only { READ_ONLY_TOOLS } else { WORKER_TOOLS }.to_vec();
@@ -253,7 +268,8 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
     let lines = proc::spawn_json_reader(child.stdout.take().context("no stdout")?, raw.clone());
     let stderr = StderrTail::spawn(child.stderr.take().context("no stderr")?, 64 << 10);
     let (exit_tx, exit_rx) = oneshot::channel();
-    // Also ends what the CLI left running in its group (a dev server, a watcher) once it is gone.
+    // Also ends what is left in the CLI's process group once it is gone. That is not what its
+    // Bash calls started: each of those is a group of its own (`proc::command`).
     proc::reap(child, move |code| {
         let _ = exit_tx.send(code);
     });
@@ -275,6 +291,8 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         interrupts: HashMap::new(),
         left_in_cli: false,
         lifecycle: false,
+        cancels_queued: false,
+        background: Vec::new(),
         turn_active: false,
         next_req: 0,
         session_replies: HashMap::new(),
@@ -351,6 +369,9 @@ enum Stage {
     Running,
     /// Shutdown asked while a turn ran: interrupt sent, waiting for its `result`.
     Interrupting,
+    /// Shutdown, the turn is over: `stop_task` sent for each background command, waiting for
+    /// the CLI to say that none is left.
+    StoppingTasks,
     /// stdin closed, waiting for the process to exit.
     Closing,
     /// SIGTERM → SIGKILL ladder running.
@@ -374,11 +395,18 @@ struct Actor {
     /// Interrupt requests with no answer yet, by request id: the uuids of the prompts that
     /// waited in the CLI when each was written.
     interrupts: HashMap<String, Vec<String>>,
-    /// Codly gave up a prompt that waited in the CLI (the agent is stopped, or its turn did not
-    /// stop). The CLI would still run it, so its process is not left to exit by itself.
+    /// Codly gave up a prompt that still waited in the CLI (the agent is stopped and the CLI did
+    /// not drop it, or its turn did not stop). The CLI would still run it, so its process is
+    /// not left to exit by itself.
     left_in_cli: bool,
     /// The CLI reports what it does with each user message (`msg_lifecycle_v1` in `system/init`).
     lifecycle: bool,
+    /// An interrupt can tell the CLI to drop the prompts that wait in it
+    /// (`interrupt_cancel_queued_v1` in `system/init`).
+    cancels_queued: bool,
+    /// The background commands the CLI tracks now, by task id: the `local_bash` entries of its
+    /// last `system/background_tasks_changed` line.
+    background: Vec<String>,
     turn_active: bool,
     next_req: u64,
     /// Session requests the CLI has not answered yet, by control request id.
@@ -524,6 +552,10 @@ impl Actor {
             }
             return;
         }
+        // Followed in every stage: a stop waits for this list to be empty (`wind_down`).
+        if v["type"] == "system" && v["subtype"] == "background_tasks_changed" {
+            self.on_background_tasks(&v);
+        }
         // The agent is being stopped and its turn is over. What the CLI does from here (a turn
         // for a prompt it still held, a turn of its own) is not shown as this agent's work.
         if self.stage != Stage::Running && !self.turn_active {
@@ -534,7 +566,9 @@ impl Actor {
         }
         let init = v["type"] == "system" && v["subtype"] == "init";
         if init {
-            self.lifecycle = v["capabilities"].as_array().is_some_and(|c| c.iter().any(|x| x.as_str() == Some("msg_lifecycle_v1")));
+            let can = |name: &str| v["capabilities"].as_array().is_some_and(|c| c.iter().any(|x| x.as_str() == Some(name)));
+            self.lifecycle = can("msg_lifecycle_v1");
+            self.cancels_queued = can("interrupt_cancel_queued_v1");
         }
         // No prompt of Codly's opened this turn: the CLI started it by itself (a background task
         // that ended woke it). `system/init` opens every turn, and a `result` ends one: it never
@@ -553,7 +587,7 @@ impl Actor {
         if turn_done {
             self.turn_active = false;
             if self.stage == Stage::Interrupting {
-                self.close_stdin();
+                self.wind_down().await;
             } else if self.stage == Stage::Running {
                 self.deadline = None; // an interrupted turn ended in time
                 self.flush().await;
@@ -565,10 +599,13 @@ impl Actor {
 
     /// `command_lifecycle`: what the CLI does with a user message, named by the uuid Codly put
     /// on it. Only the prompts written while a turn ran are followed here: the one that opened
-    /// its turn was announced when it was written.
+    /// its turn was announced when it was written. (The stopped turn's own prompt gets a
+    /// `cancelled` line too, and a prompt a turn took gets `completed`: neither waits here.)
     async fn on_lifecycle(&mut self, v: &Value) {
         let Some(at) = self.waiting.iter().position(|(uuid, _)| v["command_uuid"] == uuid.as_str()) else { return };
         match v["state"].as_str() {
+            // A turn took it: the running one, or a new one that it opens. Prompts that start
+            // together after a turn make one turn: the first opens it, the others join it.
             Some("started") => {
                 let (_, text) = self.waiting.remove(at);
                 if self.turn_active {
@@ -577,29 +614,44 @@ impl Actor {
                     self.open_turn(Some(&text));
                 }
             }
-            // The CLI dropped it before a turn took it: it is sent again, as a turn of its own.
+            // It never reached the model (recorded for a prompt the host withdrew: part 2 §1,
+            // §5). At a stop of the agent Codly withdrew it itself (`cancel_queued`) and gives
+            // it up. In any other case the CLI gave it up: it is sent again, as a turn of its own.
             Some("cancelled") => {
                 let (_, text) = self.waiting.remove(at);
-                self.take_back(vec![text]).await;
+                if self.stage == Stage::Running {
+                    self.take_back(vec![text]).await;
+                }
             }
             _ => {} // "queued": it waits. "completed": the turn's `result` says so.
         }
     }
 
-    /// The answer to an interrupt lists the messages the CLI still holds (`still_queued`). A
-    /// prompt that waited in the CLI when the interrupt was written, and that the answer does
-    /// not name, is gone from the CLI: it is sent again, as a turn of its own.
-    /// The recorded answers are all `[]` (no message waited). What an entry looks like is not
-    /// recorded, so a prompt counts as named when its uuid is anywhere in the list.
+    /// The answer to an interrupt lists the prompts the CLI still holds, by the uuid Codly put
+    /// on each (`still_queued`, plain strings: part 2 §1). The CLI runs those as the next turn
+    /// by itself, so they are not sent again. A prompt that waited in the CLI when the
+    /// interrupt was written, and that the answer does not name, is gone from the CLI: it is
+    /// sent again, as a turn of its own.
     async fn on_interrupt_answer(&mut self, still_queued: &Value, waited: &[String]) {
-        if !still_queued.is_array() {
-            return; // no list: only the `command_lifecycle` lines say where the prompts went
-        }
-        let held = still_queued.to_string();
-        let (gone, kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.waiting).into_iter().partition(|(uuid, _)| waited.contains(uuid) && !held.contains(uuid.as_str()));
+        // No list: only the `command_lifecycle` lines say where the prompts went.
+        let Some(held) = still_queued.as_array() else { return };
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.waiting)
+            .into_iter()
+            .partition(|(uuid, _)| waited.contains(uuid) && !held.iter().any(|h| h.as_str() == Some(uuid.as_str())));
         self.waiting = kept;
         self.take_back(gone.into_iter().map(|(_, text)| text).collect()).await;
+    }
+
+    /// `system/background_tasks_changed`: the full list of what runs in the background now
+    /// (part 2 §6). Kept: the commands (`local_bash`), which a stop of the agent ends with
+    /// `stop_task`. A background subagent is in the list too; what `stop_task` does to one is
+    /// not recorded, so it is left to the later steps of the stop.
+    fn on_background_tasks(&mut self, v: &Value) {
+        let tasks = v["tasks"].as_array().into_iter().flatten();
+        self.background = tasks.filter(|t| t["task_type"] == "local_bash").filter_map(|t| t["task_id"].as_str().map(str::to_owned)).collect();
+        if self.stage == Stage::StoppingTasks && self.background.is_empty() {
+            self.close_stdin();
+        }
     }
 
     /// Prompts the CLI gave up before a turn took them: back to the front of what Codly holds,
@@ -632,8 +684,11 @@ impl Actor {
 
     /// May this prompt be written to a busy CLI? Only when the CLI says what it does with it
     /// (`command_lifecycle`), when no stop is on its way (the prompt behind an interrupt is the
-    /// next turn, not a part of the stopped one), and when it is no slash command (those are
-    /// recorded only as a turn of their own).
+    /// next turn, not a part of the stopped one), and when it is no slash command. The CLI
+    /// takes one written mid-turn, never into the running turn: it runs it as a turn of its
+    /// own right after (part 2 §3). Held here, it does the same and keeps its place among the
+    /// prompts sent after it (a slash command and a message that wait together in the CLI are
+    /// not recorded).
     fn can_steer(&self, text: &str) -> bool {
         self.lifecycle && !self.norm.interrupt_requested && !text.starts_with('/')
     }
@@ -769,21 +824,43 @@ impl Actor {
         }
     }
 
-    /// Shutdown ladder: interrupt (≤ 5 s for the result) → close stdin (≤ 3 s) → SIGTERM → SIGKILL.
-    /// With a prompt that waits in the CLI there is no wait after stdin is closed (`close_stdin`).
+    /// Shutdown ladder: interrupt (≤ 5 s for the result) → stop the background commands (≤ 2 s)
+    /// → close stdin (≤ 3 s) → SIGTERM → SIGKILL. With a prompt that still waits in the CLI, or
+    /// a background command it did not report as stopped, the CLI would not exit when stdin
+    /// closes: there SIGTERM comes at once.
     async fn begin_shutdown(&mut self) {
         if self.stage != Stage::Running {
             return;
         }
-        self.drop_unsent();
-        if self.turn_active {
-            self.norm.interrupt_requested = true;
-            self.control("interrupt", json!({})).await;
-            self.stage = Stage::Interrupting;
-            self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
-        } else {
-            self.close_stdin();
+        self.queue.clear();
+        if !self.turn_active {
+            return self.wind_down().await;
         }
+        self.norm.interrupt_requested = true;
+        // `cancel_queued`: the CLI drops the prompts that wait in it, and its `cancelled` line
+        // for each takes it off `waiting` (part 2 §1). Without it the CLI runs them as its next
+        // turn the moment this one ends.
+        let request = if self.cancels_queued && !self.waiting.is_empty() { json!({ "cancel_queued": true }) } else { json!({}) };
+        self.control("interrupt", request).await;
+        self.stage = Stage::Interrupting;
+        self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+    }
+
+    /// The stopped agent's turn is over, or none ran: end the background commands the CLI
+    /// still tracks, then close stdin. With one of them open the CLI does not exit when stdin
+    /// closes: it waits for the command and then runs a turn (recorded: 43 s, part 2 §7).
+    /// `stop_task` ends a running command at once and starts no turn (part 2 §6).
+    async fn wind_down(&mut self) {
+        self.drop_unsent();
+        // (A CLI that still holds a prompt is not asked for anything more: its process is ended.)
+        if self.left_in_cli || self.background.is_empty() || self.stdin.is_none() {
+            return self.close_stdin();
+        }
+        for task_id in self.background.clone() {
+            self.control("stop_task", json!({ "task_id": task_id })).await;
+        }
+        self.stage = Stage::StoppingTasks;
+        self.deadline = Some(tokio::time::Instant::now() + STOP_TASKS_TIMEOUT);
     }
 
     /// Give up the prompts no turn took: the ones Codly holds and the ones that wait in the CLI.
@@ -795,6 +872,8 @@ impl Actor {
 
     /// Close stdin, so that the CLI exits by itself. A CLI that still holds a prompt would run
     /// it first (it starts that turn the moment the running one ends): its process is ended.
+    /// One that still has background work (a command that did not stop, a subagent) stays
+    /// past the limit: at the SIGTERM that follows it ends the commands it tracks (part 2 §7).
     fn close_stdin(&mut self) {
         self.stdin = None;
         if self.left_in_cli {
@@ -804,6 +883,8 @@ impl Actor {
         self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(3));
     }
 
+    /// SIGTERM, then SIGKILL 3 s later. At SIGTERM the CLI ends the background commands it
+    /// tracks; after a SIGKILL they run on (part 2 §7).
     fn kill(&mut self) {
         self.stage = Stage::Killing;
         self.deadline = None;
@@ -812,7 +893,17 @@ impl Actor {
 
     async fn on_deadline(&mut self) {
         match self.stage {
-            Stage::Interrupting => self.close_stdin(),
+            // The turn did not end: nothing more is asked of this CLI.
+            Stage::Interrupting => {
+                self.drop_unsent();
+                self.close_stdin();
+            }
+            // A command is still open as far as the CLI says. With stdin closed the CLI would
+            // wait for it; at SIGTERM it ends it.
+            Stage::StoppingTasks => {
+                self.stdin = None;
+                self.kill();
+            }
             Stage::Closing => self.kill(),
             // The turn did not end after the interrupt: the CLI is stuck in a tool or a request
             // that ignores it. End the process; the session resumes with the next run.
@@ -1194,8 +1285,13 @@ impl ClaudeNormalizer {
             "rate_limit_event" => self.on_rate_limit(v, &mut out),
             "control_request" => self.on_control_request(v, &mut out),
             "control_cancel_request" => self.on_cancel(v, &mut out),
-            // elapsed-time heartbeat only; Claude has no live command output (CRITIQUE G7)
-            "tool_progress" => {}
+            // A heartbeat every 30 s while a Bash call runs, with the call's id in
+            // `parent_tool_use_id` and no output (part 2 §8): a life sign for the watchdog.
+            "tool_progress" => {
+                if let Some(call_id) = v["parent_tool_use_id"].as_str() {
+                    out.push(EventKind::ToolProgress { call_id: call_id.into() });
+                }
+            }
             "control_response" => self.on_control_response(&v["response"], &mut out),
             // what the CLI does with each user message: the actor follows it (`on_lifecycle`)
             "command_lifecycle" => {}
@@ -1256,9 +1352,10 @@ impl ClaudeNormalizer {
             }
             // Bookkeeping the timeline has no use for (the user's hooks, command lists, the
             // session title, the CLI's own summaries, a task's change of state that its
-            // `task_notification` says again): known lines, kept in the raw log only.
+            // `task_notification` says again, a commit that its tool call already shows):
+            // known lines, kept in the raw log only.
             "hook_started" | "hook_progress" | "hook_response" | "commands_changed" | "session_title_changed" | "background_tasks_changed"
-            | "files_persisted" | "post_turn_summary" | "task_updated" => {}
+            | "files_persisted" | "post_turn_summary" | "task_updated" | "vcs_state_changed" => {}
             "compact_boundary" => {
                 let m = &v["compact_metadata"];
                 out.push(EventKind::Compacting { pre_tokens: m["pre_tokens"].as_i64(), post_tokens: m["post_tokens"].as_i64() });
@@ -2898,6 +2995,10 @@ mod tests {
         for subtype in ["hook_started", "hook_progress", "hook_response", "commands_changed", "session_title_changed", "background_tasks_changed", "files_persisted", "post_turn_summary", "task_updated"] {
             assert!(norm.on_message(&system(subtype, json!({}))).is_empty(), "{subtype}");
         }
+        // The line the CLI writes after a commit, as recorded (the commit's tool call shows it).
+        let commit = recorded("r4-sandbox-worktree-plain").into_iter().find(|l| l["subtype"] == "vcs_state_changed").expect("the recorded line");
+        assert_eq!((&commit["kind"], &commit["branch"]), (&json!("commit"), &json!("main")));
+        assert!(norm.on_message(&commit).is_empty());
         let ev = norm.on_message(&system("brand_new_subtype", json!({})));
         assert!(matches!(&ev[..], [EventKind::Unknown { raw_type }] if raw_type == "system/brand_new_subtype"));
 
@@ -2921,6 +3022,27 @@ mod tests {
     /// without the lines of the recording driver (`_note`, `_t`, `_sent`, `_stderr`, `_meta`).
     fn recorded(name: &str) -> Vec<Value> {
         fixture(&format!("claude-2.1.311/{name}.ndjson")).into_iter().filter(|l| l.get("type").is_some()).collect()
+    }
+
+    /// While a long command runs the CLI writes a heartbeat every 30 s (recorded: a loop of
+    /// 96 s, three heartbeats). Each becomes a live event that names the call: a life sign for
+    /// the watchdog, and no row of the timeline.
+    #[test]
+    fn a_long_command_gives_a_life_sign_every_30_s() {
+        let lines = recorded("r4-tool-progress-output");
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "sess-1".into());
+        norm.turn_started("go");
+        let events = replay(&mut norm, &lines);
+        let at = |wanted: fn(&EventKind) -> bool| events.iter().enumerate().filter(|(_, e)| wanted(e)).map(|(i, _)| i).collect::<Vec<_>>();
+        let beats = at(|e| matches!(e, EventKind::ToolProgress { call_id } if call_id == "toolu-1"));
+        let started = at(|e| matches!(e, EventKind::ToolStarted { call_id, .. } if call_id == "toolu-1"));
+        let completed = at(|e| matches!(e, EventKind::ToolCompleted { call_id, .. } if call_id == "toolu-1"));
+        assert_eq!(beats.len(), 3, "{events:?}");
+        assert!(started[0] < beats[0] && beats[2] < completed[0], "while the call is open");
+        assert!(beats.iter().all(|i| events[*i].is_ephemeral()), "live only: never stored");
+        assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { raw_type } if raw_type == "tool_progress")));
+        // A line with no call to name (not recorded) says nothing.
+        assert!(norm.on_message(&json!({ "type": "tool_progress", "elapsed_time_seconds": 30 })).is_empty());
     }
 
     /// The subagent events, one short line each: only what the event says.
@@ -3205,6 +3327,8 @@ mod tests {
             interrupts: HashMap::new(),
             left_in_cli: false,
             lifecycle: false,
+            cancels_queued: false,
+            background: Vec::new(),
             turn_active: false,
             next_req: 0,
             session_replies: HashMap::new(),
@@ -3336,11 +3460,17 @@ mod tests {
     /// A recording of the real CLI (docs/research/fixtures/claude-2.1.311) played to an actor:
     /// each user message its driver sent is a prompt for the actor, each stdout line is a line
     /// the actor reads. The recording's `user-msg-N` (the driver's uuid on its N-th message)
-    /// stands for the uuid the actor put on the N-th message it wrote.
+    /// stands for the uuid the actor put on the N-th message it wrote. A control request of
+    /// the driver is not the actor's to send: the test gives the actor the command that makes
+    /// it write that request (`in_place_of_the_drivers_request`).
     struct Replay {
         actor: Actor,
         events: mpsc::UnboundedReceiver<AdapterEvent>,
         lines: VecDeque<Value>,
+        /// The control request of the driver that `play` passed last.
+        drivers_request: Option<Value>,
+        /// The driver's request ids that stand for a request of the actor: recorded id → the actor's.
+        answers: HashMap<String, Value>,
         dir: tempfile::TempDir,
         _child: tokio::process::Child,
     }
@@ -3349,11 +3479,21 @@ mod tests {
         fn of(name: &str) -> Replay {
             let dir = tempfile::tempdir().unwrap();
             let (actor, events, child) = silent_actor(dir.path());
-            Replay { actor, events, lines: fixture(&format!("claude-2.1.311/{name}.ndjson")).into(), dir, _child: child }
+            let lines = fixture(&format!("claude-2.1.311/{name}.ndjson")).into();
+            Replay { actor, events, lines, drivers_request: None, answers: HashMap::new(), dir, _child: child }
         }
 
         fn written(&self) -> Vec<Value> {
             prompts_sent(self.dir.path())
+        }
+
+        /// `user-msg-N` in a recorded line becomes the uuid of the N-th message the actor
+        /// wrote. One the actor has not written (it holds that prompt back) stays as it is.
+        fn own_uuid(&self, recorded: &mut Value) {
+            let nth = recorded.as_str().and_then(|id| id.strip_prefix("user-msg-")).and_then(|n| n.parse::<usize>().ok());
+            if let Some(uuid) = nth.and_then(|n| self.written().get(n - 1).map(|m| m["uuid"].clone())) {
+                *recorded = uuid;
+            }
         }
 
         /// Play the recording up to and with the first line `stop` accepts (to its end when
@@ -3364,10 +3504,24 @@ mod tests {
                 if line["_sent"]["type"] == "user" {
                     let text = line["_sent"]["message"]["content"].as_str().unwrap().to_string();
                     self.actor.on_cmd(AgentCmd::Prompt(text)).await;
+                } else if line["_sent"]["type"] == "control_request" {
+                    self.drivers_request = Some(line["_sent"].clone());
                 } else if line.as_object().is_some_and(|o| !o.keys().any(|k| k.starts_with('_'))) {
-                    let nth = line["command_uuid"].as_str().and_then(|id| id.strip_prefix("user-msg-")).and_then(|n| n.parse::<usize>().ok());
-                    if let Some(n) = nth {
-                        line["command_uuid"] = self.written()[n - 1]["uuid"].clone();
+                    if line["type"] == "command_lifecycle" {
+                        self.own_uuid(&mut line["command_uuid"]);
+                    } else if line["type"] == "control_response" {
+                        let own_request = line["response"]["request_id"].as_str().and_then(|id| self.answers.get(id)).cloned();
+                        if let Some(id) = own_request {
+                            line["response"]["request_id"] = id;
+                        }
+                        // the uuids an interrupt's answer lists
+                        for list in ["still_queued", "cancelled"] {
+                            let mut uuids = line["response"]["response"][list].as_array().cloned().unwrap_or_default();
+                            if !uuids.is_empty() {
+                                uuids.iter_mut().for_each(|uuid| self.own_uuid(uuid));
+                                line["response"]["response"][list] = uuids.into();
+                            }
+                        }
                     }
                     self.actor.on_json(line, "codly-0", &mut None).await;
                 }
@@ -3376,6 +3530,17 @@ mod tests {
                 }
             }
             emitted(&mut self.events)
+        }
+
+        /// Give the actor `cmd` at the point where the driver wrote the control request that
+        /// `play` passed last. The actor must write that same request; the CLI's recorded
+        /// answer to it then comes back as the answer to the actor's.
+        async fn in_place_of_the_drivers_request(&mut self, cmd: AgentCmd) {
+            let recorded = self.drivers_request.take().expect("play passed a control request of the driver");
+            self.actor.on_cmd(cmd).await;
+            let wrote = last_sent(self.dir.path());
+            assert_eq!((&wrote["type"], &wrote["request"]), (&recorded["type"], &recorded["request"]), "Codly writes the recorded request");
+            self.answers.insert(recorded["request_id"].as_str().unwrap().to_string(), wrote["request_id"].clone());
         }
     }
 
@@ -3493,9 +3658,10 @@ mod tests {
         assert!(actor.waiting.is_empty());
     }
 
-    /// A message the CLI drops before a turn took it is sent again when the turn has ended.
-    /// (The recordings have `cancelled` for the message of a turn that was stopped. The line
-    /// for a message that still waited is written here from that shape.)
+    /// A message the CLI gives up before a turn took it is sent again when the turn has ended:
+    /// a `cancelled` message never reached the model. (The line is recorded for a waiting
+    /// message that the host withdrew, `r4-cancel-async-message`. Codly withdraws none while
+    /// the agent runs, so here the CLI gave it up by itself, which no recording shows.)
     #[tokio::test]
     async fn a_waiting_message_the_cli_drops_is_sent_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -3513,10 +3679,113 @@ mod tests {
         assert_eq!(prompts_sent(dir.path()).len(), 3);
     }
 
-    /// Stop while a message waits in the CLI. The recording is a stop with no message waiting
-    /// (none has one that waits): its answer, `still_queued: []`, says the CLI holds no message.
-    /// So the one Codly wrote before the stop is Codly's to send again, as the turn after the
-    /// stopped one, whether or not the CLI says a word about it.
+    /// Stop while a message waits in the CLI, as recorded: the answer to the interrupt names
+    /// the message (`still_queued`), and the CLI starts its turn in the instant the stopped one
+    /// ends. Codly follows that: it does not send the message again, and the agent does not
+    /// look busy afterwards.
+    #[tokio::test]
+    async fn a_message_that_waits_in_the_cli_at_a_stop_runs_next_and_is_not_sent_again() {
+        let mut cli = Replay::of("r4-queue-interrupt-plain");
+        let kinds = cli.play(|l| l["_sent"]["type"] == "control_request").await;
+        assert_eq!(turns(&kinds), ["start:Run"]);
+        assert_eq!((cli.actor.waiting.len(), cli.actor.queue.len()), (1, 0), "written at once: it waits in the CLI");
+
+        cli.in_place_of_the_drivers_request(AgentCmd::Interrupt).await;
+        let kinds = cli.play(|l| l["type"] == "control_response").await;
+        assert!(turns(&kinds).is_empty(), "{kinds:?}");
+        assert_eq!((cli.actor.waiting.len(), cli.actor.queue.len()), (1, 0), "the CLI keeps it: nothing to send again");
+        assert!(cli.actor.interrupts.is_empty());
+
+        // the stopped turn's result, then `started` for the message, its turn and its result
+        let kinds = cli.play(|l| l["_meta"]["results_seen"] == 2).await;
+        assert_eq!(turns(&kinds), ["end:Interrupted", "start:Reply", "end:Completed"]);
+        assert!(kinds.iter().any(|k| matches!(k, EventKind::TurnCompleted { result_text: Some(text), .. } if text == "banana")), "{kinds:?}");
+        assert_eq!(cli.written().len(), 2, "each message was written once");
+        assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.queue.is_empty() && cli.actor.deadline.is_none());
+    }
+
+    /// Two messages sent while a turn runs. The CLI takes both at the next tool boundary, in
+    /// the order sent, and the turn ends with one result.
+    #[tokio::test]
+    async fn two_messages_sent_mid_turn_go_into_the_running_turn_together() {
+        let mut cli = Replay::of("r4-two-queued-tools");
+        let kinds = cli.play(|l| l["_sent"]["uuid"] == "user-msg-3").await;
+        assert_eq!(turns(&kinds), ["start:Run"]);
+        assert_eq!((cli.written().len(), cli.actor.waiting.len()), (3, 2));
+
+        let kinds = cli.play(|_| false).await;
+        assert_eq!(turns(&kinds), ["steer:also", "steer:and", "end:Completed"]);
+        assert!(kinds.iter().any(|k| matches!(k, EventKind::TurnCompleted { result_text: Some(text), .. } if text == "done banana cherry")), "{kinds:?}");
+        assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.queue.is_empty());
+    }
+
+    /// The same two messages behind a turn that has no tool call: nothing takes them until the
+    /// turn ends. The CLI then runs both as ONE new turn: the first opens it, the second joins
+    /// it, and one result ends it. Every prompt is accounted for once.
+    #[tokio::test]
+    async fn two_messages_the_turn_did_not_take_are_one_next_turn() {
+        let mut cli = Replay::of("r4-two-queued-notool");
+        let kinds = cli.play(|l| l["type"] == "result").await;
+        assert_eq!(turns(&kinds), ["start:Write", "end:Completed"]);
+        assert_eq!((cli.written().len(), cli.actor.waiting.len()), (3, 2), "both still wait");
+
+        let kinds = cli.play(|_| false).await;
+        assert_eq!(turns(&kinds), ["start:also", "steer:and", "end:Completed"]);
+        assert_eq!(cli.written().len(), 3);
+        assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.queue.is_empty());
+    }
+
+    /// A slash command sent while a turn runs. The recorded CLI got it mid-turn and ran it as
+    /// a turn of its own right after the running one. Codly holds it until the turn ends and
+    /// writes it then: the same turns in the same order, each with its own result.
+    #[tokio::test]
+    async fn a_slash_command_sent_mid_turn_is_the_turn_after() {
+        for (name, command) in [("r4-slash-mid-turn-context", "/context"), ("r4-slash-mid-turn-compact", "/compact")] {
+            let mut cli = Replay::of(name);
+            let kinds = cli.play(|l| l["_sent"]["uuid"] == "user-msg-2").await;
+            assert_eq!(turns(&kinds), ["start:Run"], "{name}");
+            assert_eq!((cli.written().len(), cli.actor.queue.len(), cli.actor.waiting.len()), (1, 1, 0), "{name}: held until the turn ends");
+
+            let kinds = cli.play(|l| l["type"] == "result").await;
+            assert_eq!(turns(&kinds), ["end:Completed", format!("start:{command}").as_str()], "{name}");
+            assert_eq!((cli.written().len(), cli.actor.queue.len()), (2, 0), "{name}");
+
+            let kinds = cli.play(|_| false).await;
+            assert_eq!(turns(&kinds), ["end:Completed"], "{name}: the command's own result ends its turn");
+            assert_eq!(kinds.iter().any(|k| matches!(k, EventKind::Compacting { .. })), command == "/compact", "{name}: {kinds:?}");
+            assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.queue.is_empty(), "{name}");
+        }
+    }
+
+    /// A background command ends while a turn runs and a message waits. The running turn takes
+    /// the message at its next tool boundary, and the CLI starts no turn of its own for the
+    /// command that ended: nothing is left open.
+    #[tokio::test]
+    async fn a_background_command_that_ends_mid_turn_starts_no_turn_of_its_own() {
+        let mut cli = Replay::of("r4-background-and-queue-fold");
+        let kinds = cli.play(|l| l["_sent"]["uuid"] == "user-msg-3").await;
+        assert_eq!(turns(&kinds), ["start:Run", "end:Completed", "start:Run"]);
+        assert_eq!(cli.actor.background, ["tid-1"], "the command of the first turn still runs");
+        assert_eq!(cli.actor.waiting.len(), 1);
+
+        let kinds = cli.play(|_| false).await;
+        assert_eq!(turns(&kinds), ["steer:Reply", "end:Completed"]);
+        assert!(cli.actor.background.is_empty());
+        assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.queue.is_empty());
+
+        // The CLI made the message wait for the turn's end (`priority: "later"`, which Codly
+        // does not send): the turn that runs still uses up the command's end, then the
+        // message is a turn of its own.
+        let mut cli = Replay::of("r4-background-and-queue-later");
+        let kinds = cli.play(|_| false).await;
+        assert_eq!(turns(&kinds), ["start:Run", "end:Completed", "start:Run", "end:Completed", "start:Reply", "end:Completed"]);
+        assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.background.is_empty());
+    }
+
+    /// Stop while the actor counts a message as waiting in the CLI, and the CLI's answer names
+    /// none (`still_queued: []`: the recorded answer of a stop with nothing waiting, played to
+    /// an actor that wrote a message the recorded CLI never got). The CLI does not hold it, so
+    /// it is Codly's to send again, as the turn after the stopped one.
     #[tokio::test]
     async fn a_message_that_waited_in_the_cli_at_a_stop_is_the_next_turn() {
         let mut cli = Replay::of("control-requests");
@@ -3543,11 +3812,10 @@ mod tests {
         assert!(cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.queue.is_empty() && cli.actor.interrupts.is_empty());
     }
 
-    /// A message the answer to the interrupt still names stays with the CLI: Codly does not send
-    /// it twice, and the CLI's `started` line opens its turn. (No recording has an answer with
-    /// an entry. The uuid as a plain string is written here; the actor looks for the uuid
-    /// anywhere in the list.) An answer for an interrupt written before the message is not
-    /// about it.
+    /// Two stops, one before the message and one after it (lines written here in the recorded
+    /// shapes: `still_queued` lists plain uuid strings). An answer for an interrupt written
+    /// before the message is not about it; the answer that names it leaves it with the CLI,
+    /// whose `started` line opens its turn.
     #[tokio::test]
     async fn a_message_the_cli_keeps_through_a_stop_is_not_sent_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -3573,11 +3841,35 @@ mod tests {
         assert_eq!(prompts_sent(dir.path()).len(), 2);
     }
 
-    /// Stop agent (or quit) while a message waits in the CLI. In this recording the CLI starts
-    /// the waiting message's turn in the instant the running turn ends. A stopped agent must
-    /// not do that work: the message is given up, the process is ended as soon as the turn is
-    /// (no wait for an exit by itself), and the turn the CLI starts meanwhile is not shown, so
-    /// the exit leaves no open turn to fail.
+    /// Stop agent (or quit) while a message waits in the CLI, as recorded: the interrupt says
+    /// `cancel_queued`, the CLI drops the message (`cancelled`) and only the stopped turn's
+    /// result follows. Nothing is left for the CLI to run, so stdin is closed and it may exit
+    /// by itself.
+    #[tokio::test]
+    async fn a_stopped_agent_has_the_cli_drop_the_message_that_waited_in_it() {
+        let mut cli = Replay::of("r4-queue-interrupt-cancel-queued");
+        cli.play(|l| l["_sent"]["type"] == "control_request").await;
+        assert_eq!(cli.actor.waiting.len(), 1);
+
+        cli.in_place_of_the_drivers_request(AgentCmd::Shutdown).await;
+        assert!(cli.actor.stage == Stage::Interrupting && cli.actor.stdin.is_some());
+        let kinds = cli.play(|l| l["type"] == "result").await;
+        assert_eq!(turns(&kinds), ["end:Interrupted"]);
+        assert!(cli.actor.waiting.is_empty() && !cli.actor.left_in_cli, "the CLI dropped it");
+        assert!(cli.actor.stage == Stage::Closing && cli.actor.stdin.is_none() && cli.actor.deadline.is_some(), "{:?}", cli.actor.stage);
+        assert_eq!(cli.written().len(), 2, "the dropped message is not sent again");
+
+        // What the recording's driver did next (a third message) is not this agent's any more.
+        let kinds = cli.play(|_| false).await;
+        assert!(kinds.is_empty(), "{kinds:?}");
+        assert_eq!(cli.written().len(), 2);
+    }
+
+    /// The same stop on a CLI that does not drop the message (this recording's CLI was not
+    /// asked to, and starts the message's turn in the instant the running turn ends). A stopped
+    /// agent must not do that work: the message is given up, the process is ended as soon as
+    /// the turn is (no wait for an exit by itself), and the turn the CLI starts meanwhile is
+    /// not shown, so the exit leaves no open turn to fail.
     #[tokio::test]
     async fn a_stopped_agent_does_not_run_the_message_that_waited_in_the_cli() {
         let mut cli = Replay::of("mid-turn-user-message-uuid-now");
@@ -3585,7 +3877,7 @@ mod tests {
         assert_eq!(cli.actor.waiting.len(), 1);
 
         cli.actor.on_cmd(AgentCmd::Shutdown).await;
-        assert!(cli.actor.stage == Stage::Interrupting && cli.actor.waiting.is_empty());
+        assert!(cli.actor.stage == Stage::Interrupting && cli.actor.waiting.len() == 1, "no `cancelled` line for it yet");
         let kinds = cli.play(|l| l["type"] == "result").await;
         assert_eq!(turns(&kinds), ["end:Interrupted"]);
         assert!(cli.actor.stage == Stage::Killing && cli.actor.stdin.is_none(), "{:?}", cli.actor.stage);
@@ -3610,6 +3902,86 @@ mod tests {
         actor.on_json(json!({ "type": "result", "subtype": "error_during_execution", "is_error": true, "duration_ms": 5 }), "codly-0", &mut None).await;
         assert_eq!(turns(&emitted(&mut events)), ["end:Interrupted"]);
         assert!(actor.stage == Stage::Closing && actor.deadline.is_some());
+    }
+
+    /// A stopped agent whose turn does not end within the limit: stdin is closed anyway, and a
+    /// CLI that still holds a message gets no time to exit by itself.
+    #[tokio::test]
+    async fn a_stop_does_not_wait_for_a_turn_that_does_not_end() {
+        for waits_in_the_cli in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, _events, _child) = silent_actor(dir.path());
+            actor.lifecycle = waits_in_the_cli;
+            actor.on_cmd(AgentCmd::Prompt("build it".into())).await;
+            actor.on_cmd(AgentCmd::Prompt("then test it".into())).await;
+            assert_eq!(actor.waiting.len(), usize::from(waits_in_the_cli));
+            actor.on_cmd(AgentCmd::Shutdown).await;
+            assert_eq!(actor.stage, Stage::Interrupting);
+            actor.on_deadline().await;
+            assert_eq!(actor.stage, if waits_in_the_cli { Stage::Killing } else { Stage::Closing });
+            assert!(actor.stdin.is_none() && actor.waiting.is_empty() && actor.queue.is_empty());
+        }
+    }
+
+    /// Stop agent while a background command still runs, as recorded. With stdin closed the
+    /// CLI would wait for the command and then run a turn. So the command is stopped first
+    /// (`stop_task`), and stdin is closed when the CLI says that nothing runs in the
+    /// background any more.
+    #[tokio::test]
+    async fn a_stopped_agent_ends_its_background_command_before_stdin_is_closed() {
+        let mut cli = Replay::of("r4-background-life");
+        // Two turns that each start a background command, and the turn the CLI starts by
+        // itself when the first command ends. The driver stops the second command 2 s later.
+        let kinds = cli.play(|l| l["_sent"]["request"] == json!({ "subtype": "stop_task", "task_id": "tid-2" })).await;
+        assert_eq!(turns(&kinds), ["start:Run", "end:Completed", "start", "end:Completed", "start:Run", "end:Completed"]);
+        assert_eq!(cli.actor.background, ["tid-2"]);
+
+        cli.in_place_of_the_drivers_request(AgentCmd::Shutdown).await;
+        assert!(cli.actor.stage == Stage::StoppingTasks && cli.actor.stdin.is_some() && cli.actor.deadline.is_some(), "{:?}", cli.actor.stage);
+
+        // `task_updated` (killed), `task_notification` (stopped), then the empty list
+        let kinds = cli.play(|l| l["subtype"] == "background_tasks_changed").await;
+        assert!(kinds.is_empty(), "not shown as this agent's work: {kinds:?}");
+        assert!(cli.actor.background.is_empty());
+        assert!(cli.actor.stage == Stage::Closing && cli.actor.stdin.is_none() && cli.actor.deadline.is_some(), "{:?}", cli.actor.stage);
+    }
+
+    /// A background command the CLI does not report as stopped is not waited for without end,
+    /// and a CLI that still holds a message is asked for nothing more: its process is ended.
+    #[tokio::test]
+    async fn a_background_command_that_does_not_stop_does_not_hold_the_stop() {
+        let tasks = json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [
+            { "task_id": "tid-1", "run_id": "run-1", "task_type": "local_bash", "description": "npm run dev" },
+            { "task_id": "tid-2", "run_id": "run-2", "task_type": "local_agent", "subagent_type": "general-purpose", "description": "Look at the tests" },
+        ] });
+        // The task ids of the `stop_task` requests Codly wrote to the CLI.
+        let stops_sent = |dir: &Path| {
+            let log = std::fs::read_to_string(dir.join("raw.ndjson")).unwrap();
+            let sent = log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"]["request"].clone());
+            let stopped: Vec<Value> = sent.filter(|r| r["subtype"] == "stop_task").map(|r| r["task_id"].clone()).collect();
+            stopped
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _events, _child) = silent_actor(dir.path());
+        actor.on_json(tasks.clone(), "codly-0", &mut None).await;
+        assert_eq!(actor.background, ["tid-1"], "the command; `stop_task` on a subagent is not recorded");
+        actor.on_cmd(AgentCmd::Shutdown).await;
+        assert_eq!(stops_sent(dir.path()), [json!("tid-1")]);
+        assert_eq!(actor.stage, Stage::StoppingTasks);
+        actor.on_deadline().await;
+        assert!(actor.stage == Stage::Killing && actor.stdin.is_none(), "SIGTERM makes the CLI end it: {:?}", actor.stage);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _events, _child) = silent_actor(dir.path());
+        actor.lifecycle = true;
+        actor.on_json(tasks, "codly-0", &mut None).await;
+        actor.on_cmd(AgentCmd::Prompt("build it".into())).await;
+        actor.on_cmd(AgentCmd::Prompt("also run the tests".into())).await;
+        actor.on_cmd(AgentCmd::Shutdown).await;
+        actor.on_json(json!({ "type": "result", "subtype": "error_during_execution", "is_error": true, "duration_ms": 5 }), "codly-0", &mut None).await;
+        assert!(actor.stage == Stage::Killing && actor.stdin.is_none(), "{:?}", actor.stage);
+        assert!(stops_sent(dir.path()).is_empty(), "SIGTERM makes the CLI end what it tracks");
     }
 
     /// A `result` never ends a turn that is not open: one that comes with no turn announced

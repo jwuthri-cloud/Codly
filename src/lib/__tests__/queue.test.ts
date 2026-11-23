@@ -43,9 +43,12 @@ describe('waitingOf', () => {
     expect(keys(waitingOf(turns, sent, 410))).toEqual(['a']);
   });
 
-  it('a turn without a recorded prompt takes the oldest', () => {
+  it('a turn the agent started by itself (no prompt) delivers no message', () => {
     const sent = [msg('a', 150), msg('b', 160)];
-    expect(keys(waitingOf([turn(100, 400), turn(401, null, null)], sent, 410))).toEqual(['b']);
+    // A background task ended and woke the CLI: that turn is not the answer to what waits.
+    expect(keys(waitingOf([turn(100, 400, 'go'), turn(401, null, null)], sent, 410))).toEqual(['a', 'b']);
+    // The turn that carries the first message still delivers it, after the CLI's own turn.
+    expect(keys(waitingOf([turn(100, 400, 'go'), turn(401, 450, null), turn(451, null, 'a')], sent, 460))).toEqual(['b']);
   });
 
   it('a message the running turn took in stops waiting, and the one behind it does not', () => {

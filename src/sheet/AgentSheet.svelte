@@ -197,7 +197,7 @@
       case 'files_changed': return { icon: 'diff', text: `Changed ${k.paths.map(basename).join(', ')}` };
       case 'message': return { icon: 'chat', text: oneLine(k.text, 120) };
       case 'reasoning': return { icon: 'chat', text: `Thought: ${oneLine(k.text, 110)}` };
-      case 'turn_started': return { icon: 'arrow-right', text: `Turn started${k.input ? `: ${oneLine(k.input, 80)}` : ''}` };
+      case 'turn_started': return { icon: 'arrow-right', text: k.input ? `Turn started: ${oneLine(k.input, 80)}` : 'Started a turn by itself' };
       case 'prompt_steered': return { icon: 'arrow-right', text: `Took a message into its turn: ${oneLine(k.input, 80)}` };
       case 'turn_completed': return { icon: 'check-circle', text: `Turn ${k.status}${k.duration_ms ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.status === 'completed' ? undefined : 'warn' };
       case 'status_changed': return { icon: 'refresh', text: `Status → ${k.status.replace('_', ' ')}` };
