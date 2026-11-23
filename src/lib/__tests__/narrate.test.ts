@@ -61,13 +61,17 @@ describe('narration', () => {
     expect(n.key).toBe('Waiting for you: `rm -rf dist`');
     expect(n.tone).toBe('wait');
     // A command in Claude Code's sandbox wants a host: the host, not the name of the request's tool.
-    const tool = (name: string, asked: Record<string, string>) =>
-      narrateFrom(input({ agent: agent({ status: 'waiting_approval' }), approvals: [{ ...ap, subject: { kind: 'tool', name, input: asked } }] })).key;
+    const tool = (name: string, asked: Record<string, string>, provider: Agent['provider'] = 'claude') =>
+      narrateFrom(input({ agent: agent({ status: 'waiting_approval', provider }), approvals: [{ ...ap, subject: { kind: 'tool', name, input: asked } }] })).key;
     expect(tool('SandboxNetworkAccess', { host: 'example.com' })).toBe('Waiting for you: reach `example.com`');
     expect(tool('SandboxNetworkAccess', {})).toBe('Waiting for you: use the network');
     expect(tool('WebFetch', { url: 'https://example.com' })).toBe('Waiting for you: use `WebFetch`');
-    // A plan to read is said as that, not by the name of the request's tool.
+    // A Claude agent's plan to read is said as that, not by the name of the request's tool.
     expect(tool('ExitPlanMode', { plan: '1. Add the line' })).toBe('Waiting for you: read its plan');
+    // Those requests are Claude Code's own: from another CLI the same name is a tool like any other.
+    expect(tool('SandboxNetworkAccess', { host: 'example.com' }, 'codex')).toBe('Waiting for you: use `SandboxNetworkAccess`');
+    expect(tool('SandboxNetworkAccess', { host: 'example.com' }, 'gemini')).toBe('Waiting for you: use `SandboxNetworkAccess`');
+    expect(tool('ExitPlanMode', { plan: '1. Add the line' }, 'codex')).toBe('Waiting for you: use `ExitPlanMode`');
   });
 
   it('a task waiting for you narrates as wait', () => {

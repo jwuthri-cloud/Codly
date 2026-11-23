@@ -151,8 +151,7 @@
   .bar i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--aurora-a), var(--aurora-m), var(--aurora-b)); transition: width var(--d-5) var(--spring); }
   .pts { font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); white-space: nowrap; }
   .right { display: flex; align-items: center; gap: 8px; }
-  /* The map and all under it give way to the toast stack ("+100 XP"), which sits under the top row. */
-  .map { position: relative; width: min(1040px, calc(100vw - 48px)); margin: calc(18px + var(--toast-room)) auto 0; display: flex; align-items: flex-start; justify-content: space-between; }
+  .map { position: relative; width: min(1040px, calc(100vw - 48px)); margin: 18px auto 0; display: flex; align-items: flex-start; justify-content: space-between; }
   .node { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 110px; color: var(--ink-3); transition: color var(--d-2); }
   .node:hover { color: var(--ink-1); }
   .dot { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; background: var(--surface-1); box-shadow: inset 0 0 0 1px var(--line-2); transition: transform var(--d-3) var(--spring), box-shadow var(--d-3), background-color var(--d-3); }

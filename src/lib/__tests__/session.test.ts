@@ -7,7 +7,7 @@ import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Snapshot } from '../gen/Snapshot';
-import { MCP_LABEL, backgroundSummary, canReconnect, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, stopBackgroundCommand } from '../state/session';
+import { MCP_HINT, MCP_LABEL, backgroundSummary, canReconnect, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, stopBackgroundCommand } from '../state/session';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { mkAgent } from '../../office/demo/script';
@@ -48,6 +48,13 @@ describe('the MCP servers of an agent', () => {
     // A server that needs a sign-in says so: it is not one that "did not start".
     expect(MCP_LABEL.needs_sign_in).toBe('Needs sign-in');
     expect(servers.map(canReconnect)).toEqual([false, true, true]);
+  });
+
+  it('a server that needs a sign-in says where to sign in, by its name, and what to do then', () => {
+    expect(signInSteps('linear')).toBe(
+      'Open Claude Code in a terminal and sign in to linear in Claude Code’s own MCP settings. Then press Reconnect here. If this server uses an API key, check the key in its settings instead.',
+    );
+    expect(MCP_HINT.needs_sign_in).toBe('The agent works without this server’s tools until you sign in to it in Claude Code’s own MCP settings. Then press Reconnect.');
   });
 
   it('belong to one run: an earlier run\'s servers are gone with its process', () => {

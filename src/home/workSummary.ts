@@ -1,10 +1,12 @@
 // One-line summary of a folded work group: "Read 4 files · searched twice · ran npm test".
+import type { Provider } from '../lib/gen/Provider';
 import type { Seg } from '../lib/state/store.svelte';
-import { PLAN_TOOL } from '../lib/util/planTool';
+import { isPlanCall } from '../lib/util/planRequest';
 
-export function workSummary(all: Seg[]): string {
-  // A plan shown to you is said as that, whatever kind of step its CLI makes of the call.
-  const segs = all.filter((s) => s.name !== PLAN_TOOL);
+/** `provider`: the CLI of the agent whose steps these are (none when Codly does not know the agent). */
+export function workSummary(all: Seg[], provider: Provider | null = null): string {
+  // A Claude agent's plan shown to you is said as that, whatever kind of step the call is.
+  const segs = all.filter((s) => !isPlanCall(s.name, provider));
   const shown = all.length - segs.length;
   const count = (pred: (s: Seg) => boolean) => segs.filter(pred).length;
   const parts: string[] = [];

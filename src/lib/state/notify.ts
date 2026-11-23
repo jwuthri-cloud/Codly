@@ -3,7 +3,8 @@
 import type { Approval } from '../gen/Approval';
 import type { EventRow } from '../gen/EventRow';
 import type { Office } from '../gen/Office';
-import { showsPlan, wantsTo } from '../util/planTool';
+import type { Provider } from '../gen/Provider';
+import { showsPlan, wantsTo } from '../util/planRequest';
 import { oneLine } from '../util/sanitize';
 import { openWorkspace } from './actions';
 import { blockers } from './blockers.svelte';
@@ -30,16 +31,19 @@ export function cardInView(at: Looking, threads: readonly string[]): boolean {
 
 const looking = (): Looking => ({ room: ui.room, mode: ui.mode, thread: ui.thread, focused: typeof document === 'undefined' || document.hasFocus() });
 
-/** The toast's first line for a request: who asks, and for what kind of answer. */
-export const asksTitle = (name: string, s: Approval['subject']) =>
-  s.kind === 'question' ? `${name} has a question` : showsPlan(s) ? `${name} shows you its plan` : `${name} needs your approval`;
+/** The toast's first line for a request: who asks, and for what kind of answer. `provider`: the
+ *  CLI of the agent that asks (none when Codly does not know the agent). */
+export const asksTitle = (name: string, s: Approval['subject'], provider: Provider | null | undefined) =>
+  s.kind === 'question' ? `${name} has a question` : showsPlan(s, provider) ? `${name} shows you its plan` : `${name} needs your approval`;
 
-/** The toast's second line: what is asked, in words (a command as it is). */
-export const asks = (s: Approval['subject']) =>
-  s.kind === 'command' ? oneLine(s.command, 80)
-  : s.kind === 'question' ? 'Answer it in the conversation'
-  : showsPlan(s) ? 'Read it in the conversation'
-  : `Wants to ${wantsTo(s, 80)}`;
+/** What a request asks, as the one line of its toast: a command as it is, the rest in words. A
+ *  Claude agent's plan is read in the conversation; every other tool request says the tool's name. */
+export function asks(s: Approval['subject'], provider: Provider | null | undefined): string {
+  if (s.kind === 'command') return oneLine(s.command, 80);
+  if (s.kind === 'question') return 'Answer it in the conversation';
+  if (showsPlan(s, provider)) return 'Read it in the conversation';
+  return `Wants to ${wantsTo(s, provider, 80)}`;
+}
 
 /** Something that waits for you in an office you are not looking at, and how to get to it once there. */
 type Need = { line: string; body: string; open: () => void };
@@ -68,8 +72,8 @@ export function installNotifications(): () => void {
         const id = k.approval.id;
         const tid = toast({
           kind: 'attention',
-          title: asksTitle(a?.name ?? 'An agent', s),
-          body: asks(s),
+          title: asksTitle(a?.name ?? 'An agent', s, a?.provider),
+          body: asks(s, a?.provider),
           action: { label: 'Review', run: () => { ui.openThread(thread); ui.revealApproval = id; } },
         });
         approvalToast.set(id, { toast: tid, threads });
@@ -122,8 +126,9 @@ export function installNotifications(): () => void {
   // a plan to approve) is pointed at too: one toast per office, and Review takes you there. Their
   // finished and failed work stays quiet: the tab's count and the office itself show it.
   const away = new Map<string, { toast: number; needs: Map<string, Need> }>();
-  /** Their agents are not in this view: names come from their own `agent_changed` events. */
+  /** Their agents are not in this view: names and CLIs come from their own `agent_changed` events. */
   const names = new Map<string, string>();
+  const providers = new Map<string, Provider>();
   let recount: ReturnType<typeof setTimeout> | undefined;
   const name = (agentId: string) => names.get(agentId) ?? 'An agent';
   /** The office you are in now: what waited there is in front of you, not behind a toast. */
@@ -157,13 +162,14 @@ export function installNotifications(): () => void {
     switch (k.type) {
       case 'agent_changed':
         names.set(k.agent.id, k.agent.name);
+        providers.set(k.agent.id, k.agent.provider);
         return;
       case 'approval_requested': {
         const id = k.approval.id;
         key = `a:${id}`;
         need = {
-          line: asksTitle(name(k.approval.agent_id), k.approval.subject),
-          body: asks(k.approval.subject),
+          line: asksTitle(name(k.approval.agent_id), k.approval.subject, providers.get(k.approval.agent_id)),
+          body: asks(k.approval.subject, providers.get(k.approval.agent_id)),
           open: () => {
             const ap = store.approvals.find((a) => a.id === id);
             ui.openThread(ap ? store.approvalThread(ap) : 'lead');

@@ -133,6 +133,8 @@ describe('what the question and Settings offer', () => {
     expect(lines).toHaveLength(4);
     expect(lines[3]).toBe(CODEX_OWN_SERVERS);
     expect(CODEX_OWN_SERVERS).toMatch(/in every folder, trusted or not: they are yours, not this repo’s/);
+    // The switch is named by what you do with it, not by what it "turns off".
+    expect(CODEX_OWN_SERVERS).toMatch(/To keep them out, turn off “Use my own CLI setup” in Settings\.$/);
     // Also for a repo that has no Codex files of its own.
     const claudeOnly = { ...base, files: base.files.filter((f) => f.cli === 'claude') };
     expect(withoutTrust(claudeOnly, true)).toHaveLength(2);

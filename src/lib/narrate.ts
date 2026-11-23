@@ -9,11 +9,12 @@
 // `narrateFrom` is pure (unit-tested); `narrate(agentId)` binds it to the live store.
 import type { Agent } from './gen/Agent';
 import type { Approval } from './gen/Approval';
+import type { Provider } from './gen/Provider';
 import type { Task } from './gen/Task';
 import type { AgentLive, RateWindow, Seg } from './state/store.svelte';
 import type { DiffStat } from './state/diffstats.svelte';
 import { timer } from './util/format';
-import { PLAN_TOOL, planStep, showsPlan } from './util/planTool';
+import { isPlanCall, PLAN_ASK, planStep, showsPlan } from './util/planRequest';
 import { sandboxHost } from './util/sandbox';
 import { basename, oneLine, truncate } from './util/sanitize';
 
@@ -76,10 +77,10 @@ function toolName(s: Seg): string {
   return raw.replace(/^mcp__codly__/, '').replace(/^codly\./, '');
 }
 
-/** What an open tool call is doing, as parts. */
-export function activityParts(s: Seg): Part[] {
-  // A plan shown to you is said as that, whatever kind of step its CLI makes of the call.
-  if (s.name === PLAN_TOOL) return [txt(planStep(true))];
+/** What an open tool call is doing, as parts. `provider`: the CLI of the agent that makes the call. */
+export function activityParts(s: Seg, provider: Provider | null | undefined): Part[] {
+  // A Claude agent's plan shown to you is said as that, whatever kind of step the call is.
+  if (isPlanCall(s.name, provider)) return [txt(planStep(true))];
   switch (s.activity) {
     case 'read':
       return [txt('Reading '), code(fileOf(s))];
@@ -126,7 +127,8 @@ export function activityParts(s: Seg): Part[] {
   }
 }
 
-function approvalParts(ap: Approval): Part[] {
+/** `provider`: the CLI of the agent that asks. */
+function approvalParts(ap: Approval, provider: Provider): Part[] {
   const s = ap.subject;
   switch (s.kind) {
     case 'command':
@@ -134,10 +136,10 @@ function approvalParts(ap: Approval): Part[] {
     case 'file_change':
       return s.paths.length === 1 ? [txt('Waiting for you: change '), code(basename(s.paths[0]))] : [txt(`Waiting for you: change ${s.paths.length} files`)];
     case 'tool': {
-      // A plan to read, or a host that a command in Claude Code's sandbox wants: said as that,
-      // not by the request's tool name.
-      if (showsPlan(s)) return [txt('Waiting for you: read its plan')];
-      const host = sandboxHost(s);
+      // A Claude agent's plan to read, or a host that a command in Claude Code's sandbox wants:
+      // said as that, not by the request's tool name.
+      if (showsPlan(s, provider)) return [txt(`Waiting for you: ${PLAN_ASK}`)];
+      const host = sandboxHost(s, provider);
       if (host === null) return [txt('Waiting for you: use '), code(oneLine(s.name, 32))];
       return host ? [txt('Waiting for you: reach '), code(truncate(host, 44))] : [txt('Waiting for you: use the network')];
     }
@@ -180,7 +182,7 @@ export function narrateFrom(i: NarrationInput): Narration {
 
   // 1 · It needs you: say exactly what is asked.
   const ap = [...i.approvals].sort((x, y) => y.created_at - x.created_at)[0];
-  if (ap) return out(approvalParts(ap), 'wait', ap.created_at, true);
+  if (ap) return out(approvalParts(ap, a.provider), 'wait', ap.created_at, true);
   if (a.status === 'waiting_approval') return out([txt('Waiting for you')], 'wait', live?.statusSince ?? null, true);
 
   // 2 · It can't move.
@@ -207,7 +209,7 @@ export function narrateFrom(i: NarrationInput): Narration {
   }
   if (open) {
     const slow = open.activity === 'execute' || open.activity === 'test';
-    return out(activityParts(open), 'live', open.start, slow);
+    return out(activityParts(open, a.provider), 'live', open.start, slow);
   }
 
   // 4 · Streaming.

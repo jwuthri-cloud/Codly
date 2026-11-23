@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { WorktreeDemo } from '../demo/worktree';
 import type { WorktreeSetup } from '../gen/WorktreeSetup';
-import { setupChoices } from '../util/worktree';
+import type { RequiredChecks } from '../gen/RequiredChecks';
+import { checksTurnTrouble, setupChoices } from '../util/worktree';
 
 describe('the demo repo’s worktree setup', () => {
   it('keeps the setup script off until it is turned on for the text shown', () => {
@@ -52,5 +53,29 @@ describe('what you can do with the setup script', () => {
     expect(setupChoices(odd)).toEqual({ on: null, off: true, ask: true });
     // Never turned on: nothing to turn off either.
     expect(setupChoices({ ...odd, changed: false })).toEqual({ on: null, off: false, ask: false });
+  });
+});
+
+describe('a change of the required checks that ended with an error', () => {
+  const off: RequiredChecks = { text: 'pnpm check\n', sha: 'abc', commands: [{ command: 'pnpm check', risks: [] }], on: false, changed: false, problem: null };
+  const on = { ...off, on: true };
+  /** You turned on another text: the file changed since. */
+  const changed = { ...off, sha: 'def', changed: true };
+
+  it('says that nothing changed when the core did not save the choice', () => {
+    expect(checksTurnTrouble('abc', off)).toBe('Couldn’t change the required checks');
+    expect(checksTurnTrouble(null, on)).toBe('Couldn’t change the required checks');
+    // The file changed while you read it: the text you turned on is not the one that is there.
+    expect(checksTurnTrouble('abc', changed)).toBe('Couldn’t change the required checks');
+    expect(checksTurnTrouble(null, changed)).toBe('Couldn’t change the required checks');
+  });
+
+  it('says that the choice is saved when the error came after it', () => {
+    expect(checksTurnTrouble('abc', on)).toBe('The required checks are on now, but Codly may not have checked the waiting tasks again');
+    expect(checksTurnTrouble(null, off)).toBe('The required checks are off now, but Codly may not have checked the waiting tasks again');
+  });
+
+  it('says neither when the checks could not be read after it', () => {
+    expect(checksTurnTrouble('abc', null)).toBe('Couldn’t tell whether the required checks changed');
   });
 });

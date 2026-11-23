@@ -137,7 +137,7 @@
       const a = store.agentMap.get(ap.agent_id);
       const what = ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : ap.subject.kind;
       // The title shows 50 characters: the confirmation shows all of what is asked.
-      const full = `${a?.name ?? 'An agent'} wants to ${wants(ap.subject)}`;
+      const full = `${a?.name ?? 'An agent'} wants to ${wants(ap.subject, a?.provider)}`;
       if (ap.choices.includes('allow_once')) rows.push({ id: `ap:ok:${ap.id}`, section: 'Needs you', title: `Approve ${a?.name ?? 'agent'}: ${what}`, icon: 'check', run: () => resolveApproval(ap.id, 'allow_once'), confirm: `Approve once? ${full}` });
       if (ap.choices.includes('deny')) rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: `Deny ${a?.name ?? 'agent'}: ${what}`, icon: 'x', run: () => resolveApproval(ap.id, 'deny'), confirm: `Deny? ${full}` });
     }
@@ -391,7 +391,7 @@
 
     <div class="list" id="palette-list" role="listbox" bind:this={listEl}>
       <!-- Why the matches may not be the files on disk: the index is behind them. -->
-      {#each search?.warnings ?? [] as w (w)}<p class="warn" role="status">{w}</p>{/each}
+      {#each search?.warnings ?? [] as w, wi (wi)}<p class="warn" role="status">{w}</p>{/each}
       {#if searchError}
         <p class="hint-empty">Search failed: {searchError}</p>
       {:else if scope === '/' && !search && query.trim().length < 2}

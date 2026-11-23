@@ -233,15 +233,25 @@ impl std::fmt::Display for SandboxNotOn {
 impl std::error::Error for SandboxNotOn {}
 
 impl SandboxNotOn {
-    /// What to do about it: the end of every text.
-    const FIX: &'static str = "Check Claude Code's sandbox on this computer, or turn off \"Sandbox Claude's shell\" in Settings → Safety";
+    /// The way out that ends every text: the switch that asked for the sandbox.
+    const SWITCH: &'static str = "turn off \"Sandbox Claude's shell\" in Settings → Safety";
 
-    /// Claude Code did not turn its sandbox on at all: the CLI said so (`sandbox_refusal`), or
-    /// it ended at its start because of it (`startup::explain`).
+    /// Claude Code did not turn its sandbox on and gave no reason: the CLI said so
+    /// (`sandbox_refusal`), or it ended at its start because of it (`startup::explain`).
     pub(super) fn off() -> Self {
-        Self(format!("Claude Code did not turn its sandbox on, so Codly did not start this agent. {}", Self::FIX))
+        Self(format!("Claude Code did not turn its sandbox on, so Codly did not start this agent. Check Claude Code's sandbox on this computer, or {}", Self::SWITCH))
+    }
+
+    /// The CLI answered the `initialize` request and then not Codly's check of its sandbox
+    /// (`get_sandbox_dialog`) before the time for a start was over.
+    fn no_answer() -> Self {
+        let waited = INIT_TIMEOUT.as_secs();
+        Self(format!("Claude Code did not answer Codly's check of its sandbox within {waited} s, so Codly did not start this agent. Try again, or {}", Self::SWITCH))
     }
 }
+
+/// How much of the CLI's own reasons a refusal shows.
+const SANDBOX_ERRORS_MAX: usize = 300;
 
 /// Why a run that asked for the shell sandbox must not go on, read from the CLI's answer to
 /// `get_sandbox_dialog` (`resp`: the `response` of the control response). None: the sandbox
@@ -249,19 +259,45 @@ impl SandboxNotOn {
 /// (`enabled: false`), on as Codly asks for it (`mode: "regular"`), and on with the CLI's
 /// default (`mode: "auto-allow"`: commands run with no request). Codly's own `--settings`
 /// never give the last one; settings above them (managed ones) can.
+///
+/// The text says what the answer says. `supported` and `dependencies.errors` are in every
+/// recorded answer, as `true` and an empty list: no machine at hand has a sandbox that cannot
+/// run. So what an error is made of is not recorded: a text is shown as it is, anything else
+/// as its JSON. They only choose the words: `enabled` and `mode` alone decide the refusal.
 fn sandbox_refusal(resp: &Value) -> Option<SandboxNotOn> {
-    const FIX: &str = SandboxNotOn::FIX;
+    const SWITCH: &str = SandboxNotOn::SWITCH;
     if resp["subtype"] != "success" {
         let error = resp["error"].as_str().map_or_else(|| resp["error"].to_string(), str::to_owned);
-        return Some(SandboxNotOn(format!("Codly could not check that Claude Code's sandbox is on ({error}), so it did not start this agent. {FIX}")));
+        // A CLI that does not know the request answers as it does to every request it does not
+        // know (recorded: "Unsupported control request subtype: <name>"): it is too old to say.
+        let fix = if error.starts_with("Unsupported control request subtype") {
+            "Update Claude Code (run `claude update` in a terminal)"
+        } else {
+            "Check Claude Code's sandbox on this computer"
+        };
+        return Some(SandboxNotOn(format!("Codly could not check that Claude Code's sandbox is on ({error}), so it did not start this agent. {fix}, or {SWITCH}")));
     }
     let status = &resp["response"];
     if status["enabled"] != true {
+        let errors: Vec<String> = status["dependencies"]["errors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|e| e.as_str().map_or_else(|| e.to_string(), |text| text.trim().trim_end_matches('.').to_owned()))
+            .filter(|e| !e.is_empty())
+            .collect();
+        if !errors.is_empty() {
+            let errors = classify::truncate_chars(&errors.join("; "), SANDBOX_ERRORS_MAX);
+            return Some(SandboxNotOn(format!("Claude Code says its sandbox cannot run here: {errors}. Codly did not start this agent. Fix that, or {SWITCH}")));
+        }
+        if status["supported"] == false {
+            return Some(SandboxNotOn(format!("Claude Code says its sandbox cannot run on this computer, so Codly did not start this agent. To work without the sandbox, {SWITCH}")));
+        }
         return Some(SandboxNotOn::off());
     }
     if status["mode"] == "auto-allow" {
         return Some(SandboxNotOn(format!(
-            "Claude Code's sandbox would run this agent's commands without asking, so Codly's approval rules would not see them (a Claude Code setting above Codly's own decides that). Codly did not start this agent. {FIX}"
+            "Claude Code's sandbox would run this agent's commands without asking, so Codly's approval rules would not see them (a setting of your organization or of this computer's Claude Code decides that: sandbox.autoAllowBashIfSandboxed). Codly did not start this agent. Change that setting, or {SWITCH}"
         )));
     }
     None
@@ -370,6 +406,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
 
     let (tx, cmds) = mpsc::unbounded_channel();
     let (ready_tx, ready_rx) = oneshot::channel();
+    let (sandbox_asked_tx, mut sandbox_asked) = oneshot::channel();
     let norm = ClaudeNormalizer::new(&spec, session_id.clone());
     let actor = Actor {
         agent_id: spec.agent_id.clone(),
@@ -395,7 +432,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         start_failed: false,
         interrupt_failed: false,
         _mcp_file: mcp_file,
-        sandbox_check: sandboxed(&spec).then_some(SandboxCheck::Due),
+        sandbox_check: sandboxed(&spec).then_some(SandboxCheck::Due { asked: sandbox_asked_tx }),
     };
     tokio::spawn(actor.run(cmds, lines, exit_rx, ready_tx));
     match tokio::time::timeout(INIT_TIMEOUT, ready_rx).await {
@@ -404,9 +441,20 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         Ok(Err(_)) => Err(anyhow!("claude adapter stopped during startup")),
         Err(_) => {
             let _ = tx.send(AgentCmd::Shutdown);
-            Err(anyhow!("claude did not answer the initialize request within {} s", INIT_TIMEOUT.as_secs()))
+            Err(start_timed_out(sandbox_asked.try_recv().is_ok()))
         }
     }
+}
+
+/// The start got no answer within `INIT_TIMEOUT`. `sandbox_asked`: the CLI answered the
+/// `initialize` request, and the answer that did not come is the one to Codly's check of its
+/// sandbox (`SandboxCheck`). That is a `SandboxNotOn`, as every other outcome of that check
+/// but "on": nothing is wrong with the conversation.
+fn start_timed_out(sandbox_asked: bool) -> anyhow::Error {
+    if sandbox_asked {
+        return SandboxNotOn::no_answer().into();
+    }
+    anyhow!("claude did not answer the initialize request within {} s", INIT_TIMEOUT.as_secs())
 }
 
 /// Name of the `--mcp-config` document in a run's folder.
@@ -476,8 +524,9 @@ enum Stage {
 /// The check that the shell sandbox a run asked for is really on. The start is not over
 /// before the CLI said so: a run that would work unsandboxed is not started.
 enum SandboxCheck {
-    /// To ask once the CLI answered the `initialize` request.
-    Due,
+    /// To ask once the CLI answered the `initialize` request. `asked` tells whoever waits for
+    /// the start that the check is what it waits for from then on (`start_timed_out`).
+    Due { asked: oneshot::Sender<()> },
     /// Asked (`get_sandbox_dialog`, under this request id). The session's first event waits
     /// with it: a start that fails has no events.
     Asked { request_id: String, started: EventKind },
@@ -641,10 +690,11 @@ impl Actor {
                 let Some(r) = ready.take() else { return };
                 if resp["subtype"] == "success" {
                     let started = self.norm.on_initialize(&resp["response"]);
-                    if self.sandbox_check.is_some() {
+                    if let Some(SandboxCheck::Due { asked }) = self.sandbox_check.take() {
                         // The run asked for the shell sandbox: it has not started before the
                         // CLI says that the sandbox is on (`on_sandbox_status`).
                         let request_id = self.control("get_sandbox_dialog", json!({})).await;
+                        let _ = asked.send(()); // (an error: nobody waits for this start any more)
                         self.sandbox_check = Some(SandboxCheck::Asked { request_id, started });
                         *ready = Some(r);
                         return;
@@ -949,12 +999,9 @@ impl Actor {
             // A refused switch leaves the CLI in the mode it had, which this request overwrote
             // here: its next status line says which one it is.
             (SessionRequest::PermissionMode(_), Err(_)) => self.norm.permission_mode = None,
-            (SessionRequest::Model(model), Ok(answer)) => {
+            (SessionRequest::Model(model), Ok(_)) => {
                 self.norm.model = Some(model.clone()).filter(|m| m != DEFAULT_MODEL);
-                // The answer names the model the session is on now (`{"model": "<id>"}`).
-                if let Some(id) = answer["model"].as_str() {
-                    self.norm.session_model_is(id);
-                }
+                self.norm.model_switched();
             }
             // Connected or not, the server's state may be another now: the CLI is asked, and
             // the answer is reported like the one at the start of the run.
@@ -1114,7 +1161,8 @@ struct Helper {
     done: bool,
 }
 
-/// The id of the `mcp_status` requests of a run (the actor's own ids are `codly-<n>`).
+/// The id of the `mcp_status` requests of a run (the actor's own ids are `codly-<n>`). They
+/// share it: which answer is whose is their order (`ClaudeNormalizer::mcp_asked`).
 const MCP_STATUS_REQUEST: &str = "codly-mcp-status";
 
 /// Where an MCP server stands, from the CLI's `status` word for it (`system/init` and the
@@ -1249,8 +1297,9 @@ pub struct ClaudeNormalizer {
     worker: bool,
     session_id: String,
     model: Option<String>,
-    /// The model id the CLI says the session is on: `system/init` of every turn, and the answer
-    /// to a model switch.
+    /// The model id the CLI says the session is on, from the `system/init` line of every turn.
+    /// None before the first one, and from a switch Codly asked for until the next one
+    /// (`model_switched`).
     session_model: Option<String>,
     /// The other model the agent's own lines last named, once the timeline said so
     /// (`on_turn_model`). None: they name the session's model.
@@ -1274,8 +1323,12 @@ pub struct ClaudeNormalizer {
     tools_seen: HashSet<String>,
     /// The subagents of this run, by the id of the tool call that started each.
     helpers: HashMap<String, Helper>,
-    /// The user's MCP servers that `system/init` gave as failed, until `mcp_status` says why.
-    mcp_failed: Vec<String>,
+    /// The `mcp_status` requests with no answer yet, oldest first: for each, the user's MCP
+    /// servers that `system/init` gave as failed when it was written, until its answer says
+    /// why (none for a request after a reconnect or at the end of a turn). The CLI answers
+    /// its control requests in the order it reads them (as in every recording), so the next
+    /// answer is the one to the oldest request.
+    mcp_asked: VecDeque<Vec<String>>,
     /// The user's MCP servers as the CLI last gave them, by name: its `status` word and its
     /// reason. A server is reported when one of the two changes.
     mcp: HashMap<String, (String, Option<String>)>,
@@ -1329,7 +1382,7 @@ impl ClaudeNormalizer {
             tools: HashMap::new(),
             tools_seen: HashSet::new(),
             helpers: HashMap::new(),
-            mcp_failed: Vec::new(),
+            mcp_asked: VecDeque::new(),
             mcp: HashMap::new(),
             background: HashMap::new(),
             plan: Vec::new(),
@@ -1602,13 +1655,23 @@ impl ClaudeNormalizer {
         OPTIONAL_TOOLS.contains(&tool) && !(tool == EXIT_PLAN_MODE && self.permission_mode == Some(PermissionMode::Plan))
     }
 
-    /// The CLI named the session's model: `system/init` of a turn, or the answer to a switch.
-    /// After a change, a line on that model is no news (`on_turn_model`).
+    /// The CLI named the session's model in the `system/init` line of a turn. After a change,
+    /// a line on that model is no news (`on_turn_model`).
     fn session_model_is(&mut self, model: &str) {
         if self.session_model.as_deref() != Some(model) {
             self.session_model = Some(model.to_string());
             self.turn_model = None;
         }
+    }
+
+    /// The CLI took a model switch that Codly asked for, and whoever asked says so. A request
+    /// that is on its way still writes lines on the model the session had (not recorded: no
+    /// recording has a line after a switch during a turn), and the switch itself is no news
+    /// of the CLI's. So nothing is said about the model of a line before the next turn's
+    /// `system/init` names the session's model again.
+    fn model_switched(&mut self) {
+        self.session_model = None;
+        self.turn_model = None;
     }
 
     fn on_init(&mut self, v: &Value, out: &mut Vec<EventKind>) {
@@ -1663,20 +1726,31 @@ impl ClaudeNormalizer {
             }
             if status != "failed" {
                 self.mcp_server(name, status, None, out);
-            } else if self.mcp.get(name).is_none_or(|(known, _)| known != "failed") {
+            } else if self.mcp.get(name).is_none_or(|(known, _)| known != "failed") && !self.mcp_reason_asked(name) {
                 failed.push(name.to_string());
             }
         }
         if !failed.is_empty() {
-            self.mcp_failed = failed;
-            self.ask_mcp_status();
+            self.ask_why_mcp_failed(failed);
         }
     }
 
     /// Ask the CLI where its MCP servers stand. The actor writes the request (`outbox`) and
     /// gives the answer back (`asked`).
     pub fn ask_mcp_status(&mut self) {
+        self.ask_why_mcp_failed(Vec::new());
+    }
+
+    /// `ask_mcp_status`, for servers that an init line gave as failed: the answer to this
+    /// request, and no other, says why each did not start (`on_control_response`).
+    fn ask_why_mcp_failed(&mut self, failed: Vec<String>) {
+        self.mcp_asked.push_back(failed);
         self.outbox.push(json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } }));
+    }
+
+    /// Does a request with no answer yet wait to say why this server did not start?
+    fn mcp_reason_asked(&self, name: &str) -> bool {
+        self.mcp_asked.iter().flatten().any(|asked| asked == name)
     }
 
     /// A turn is over and a server was still connecting when the CLI last gave it: the CLI is
@@ -1713,12 +1787,15 @@ impl ClaudeNormalizer {
     /// gave them and are failed now. A server that started since is left out of that line. So
     /// is one that wants a sign-in: it is the lasting state of a server nobody signed in to,
     /// not a failure of this run, and its state says it. When the CLI cannot answer, the names
-    /// the init line gave as failed are still said.
+    /// the init line gave as failed are still said. Every request has its own answer: the
+    /// failed servers of an init line wait for the answer to the request that line made
+    /// (`mcp_asked`), not for the answer to an earlier request, which can be older than the
+    /// line.
     fn on_control_response(&mut self, resp: &Value, out: &mut Vec<EventKind>) {
         if !self.asked(resp) {
             return;
         }
-        let mut failed = std::mem::take(&mut self.mcp_failed);
+        let mut failed = self.mcp_asked.pop_front().unwrap_or_default();
         let servers = if resp["subtype"] == "success" { resp["response"]["mcpServers"].as_array() } else { None };
         let reason = |s: &Value| s["error"].as_str().map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned);
         for s in servers.into_iter().flatten() {
@@ -1726,7 +1803,8 @@ impl ClaudeNormalizer {
                 && name != "codly"
             {
                 let was_connecting = self.mcp.get(name).is_some_and(|(known, _)| known == "pending");
-                if status == "failed" && was_connecting && !failed.iter().any(|f| f == name) {
+                // (one that a later request waits for is said by that request's answer)
+                if status == "failed" && was_connecting && !failed.iter().any(|f| f == name) && !self.mcp_reason_asked(name) {
                     failed.push(name.to_string());
                 }
                 self.mcp_server(name, status, reason(s).as_deref(), out);
@@ -2694,13 +2772,87 @@ mod tests {
         // On, but commands would run with no request (`mode: "auto-allow"`).
         let unasked = refusal(&status("r4-sandbox-required-available")).expect("commands would not ask");
         assert!(unasked.contains("without asking"), "{unasked}");
-        // A CLI that cannot answer: nothing says that the sandbox is on. (The shape is the one
-        // of every refused control request; the error text here is made up.)
-        let refused = refusal(&json!({ "subtype": "error", "request_id": "codly-2", "error": "Unsupported control request subtype: get_sandbox_dialog" }));
-        assert!(refused.as_deref().is_some_and(|r| r.starts_with("Codly could not check") && r.contains("Unsupported control request subtype")), "{refused:?}");
-        for why in [off, unasked, refused.unwrap()] {
+        assert!(unasked.contains("a setting of your organization or of this computer's Claude Code decides that"), "{unasked}");
+        // A CLI that does not know the request: nothing says that the sandbox is on, and the
+        // way out is a newer Claude Code. (The recorded answer to a request the CLI does not
+        // know, `control-requests` `host-35`: the same shape and words, with another name.)
+        let unknown = recording("control-requests").into_iter().find(|l| l["response"]["request_id"] == "host-35").expect("the recorded refusal")["response"].clone();
+        assert_eq!(unknown["error"], "Unsupported control request subtype: definitely_not_a_subtype");
+        let refused = refusal(&unknown).expect("no answer to the check");
+        assert_eq!(
+            refused,
+            "Codly could not check that Claude Code's sandbox is on (Unsupported control request subtype: definitely_not_a_subtype), so it did not start this agent. \
+             Update Claude Code (run `claude update` in a terminal), or turn off \"Sandbox Claude's shell\" in Settings → Safety"
+        );
+        // Another error (made up: none is recorded for this request) is no reason to update.
+        let failed = refusal(&json!({ "subtype": "error", "request_id": "codly-2", "error": "sandbox status is not ready" })).expect("no answer to the check");
+        assert!(failed.starts_with("Codly could not check") && failed.contains("sandbox status is not ready") && !failed.contains("claude update"), "{failed}");
+
+        // The CLI's own reasons are said. `supported` and `dependencies.errors` are in every
+        // recorded answer (`true` and `[]`); the values here are written by hand into the
+        // recorded answer of `sandbox-off`: no machine at hand has a sandbox that cannot run.
+        let with = |supported: bool, errors: Value| {
+            let mut answer = status("sandbox-off");
+            assert_eq!((&answer["response"]["supported"], &answer["response"]["dependencies"]["errors"]), (&json!(true), &json!([])));
+            answer["response"]["supported"] = json!(supported);
+            answer["response"]["dependencies"]["errors"] = errors;
+            refusal(&answer).expect("the sandbox is off")
+        };
+        let missing = with(false, json!(["ripgrep (rg) not found", "bubblewrap (bwrap) is not installed."]));
+        assert_eq!(
+            missing,
+            "Claude Code says its sandbox cannot run here: ripgrep (rg) not found; bubblewrap (bwrap) is not installed. \
+             Codly did not start this agent. Fix that, or turn off \"Sandbox Claude's shell\" in Settings → Safety"
+        );
+        // An error that is no text is shown as the CLI wrote it.
+        let odd = with(true, json!([{ "dependency": "bwrap" }]));
+        assert!(odd.starts_with("Claude Code says its sandbox cannot run here: {\"dependency\":\"bwrap\"}. Codly did not start this agent."), "{odd}");
+        let unsupported = with(false, json!([]));
+        assert_eq!(
+            unsupported,
+            "Claude Code says its sandbox cannot run on this computer, so Codly did not start this agent. \
+             To work without the sandbox, turn off \"Sandbox Claude's shell\" in Settings → Safety"
+        );
+        // They only choose the words: a sandbox that is on as Codly asked for it starts the run.
+        let mut on = status("r4-sandbox-noauto");
+        on["response"]["dependencies"]["errors"] = json!(["a warning in the wrong list"]);
+        assert_eq!(refusal(&on), None);
+
+        for why in [off, unasked, refused, failed, missing, odd, unsupported] {
             assert!(why.contains("did not start this agent") && why.ends_with("in Settings → Safety"), "{why}");
         }
+    }
+
+    /// The CLI answers the `initialize` request and then not Codly's check of its sandbox.
+    /// Before, the start then failed with "claude did not answer the initialize request",
+    /// which was not true, and with no type: a 1:1 agent that resumed lost its conversation.
+    #[tokio::test]
+    async fn a_sandbox_check_with_no_answer_is_not_called_a_missing_initialize_answer() {
+        let (_, init) = recorded_control(&recording("r4-sandbox-required-available"), &json!({ "subtype": "initialize", "hooks": null }));
+        let init_id = init["response"]["request_id"].as_str().unwrap().to_owned();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        let (asked_tx, mut asked) = oneshot::channel();
+        actor.sandbox_check = Some(SandboxCheck::Due { asked: asked_tx });
+        let (tx, mut started) = oneshot::channel();
+        let mut ready = Some(tx);
+
+        // No answer at all: the `initialize` request is the one without an answer.
+        let e = start_timed_out(asked.try_recv().is_ok());
+        assert_eq!(e.to_string(), "claude did not answer the initialize request within 90 s");
+        assert!(!e.is::<SandboxNotOn>());
+
+        // The handshake is answered, the check is written, and its answer never comes.
+        actor.on_json(init, &init_id, &mut ready).await;
+        assert_eq!(last_sent(dir.path())["request"], json!({ "subtype": "get_sandbox_dialog" }));
+        assert!(ready.is_some() && started.try_recv().is_err() && emitted(&mut events).is_empty(), "not started");
+        let e = start_timed_out(asked.try_recv().is_ok());
+        assert_eq!(
+            e.to_string(),
+            "Claude Code did not answer Codly's check of its sandbox within 90 s, so Codly did not start this agent. \
+             Try again, or turn off \"Sandbox Claude's shell\" in Settings → Safety"
+        );
+        assert!(e.is::<SandboxNotOn>(), "the callers that resume keep the conversation: {e:?}");
     }
 
     /// A run with the sandbox does not start before the CLI says that its sandbox is on:
@@ -2716,7 +2868,7 @@ mod tests {
         for (status_of, starts) in [("r4-sandbox-noauto", true), ("sandbox-off", false), ("r4-sandbox-required-available", false)] {
             let dir = tempfile::tempdir().unwrap();
             let (mut actor, mut events, _child) = silent_actor(dir.path());
-            actor.sandbox_check = Some(SandboxCheck::Due);
+            actor.sandbox_check = Some(SandboxCheck::Due { asked: oneshot::channel().0 });
             let (tx, mut started) = oneshot::channel();
             let mut ready = Some(tx);
 
@@ -3561,6 +3713,52 @@ mod tests {
         norm.turn_started("again");
         norm.on_message(&result);
         assert_eq!(norm.outbox, [asked]);
+    }
+
+    /// Two `mcp_status` requests with no answer yet: one after a reconnect, then the one of a
+    /// turn's init line that names servers as failed. Each answer is handled for its own
+    /// request. Before, the two shared one list of failed servers and the first answer took
+    /// it, so the reconnect's answer spoke for the init line: with these answers one server
+    /// was said there and the other in a second line. Recording `broken-mcp`: the init line
+    /// and the answers `host-1` (one server still connects) and `host-2` (both failed), in an
+    /// order written by hand.
+    #[test]
+    fn each_mcp_status_request_has_its_own_answer() {
+        use McpServerStatus::{Connecting, Failed};
+        let lines = recorded("broken-mcp");
+        let init = lines.iter().find(|l| l["subtype"] == "init").unwrap();
+        let ours = |host: &str| {
+            let mut answer = lines.iter().find(|l| l["response"]["request_id"] == host).unwrap_or_else(|| panic!("no answer {host}")).clone();
+            answer["response"]["request_id"] = json!(MCP_STATUS_REQUEST);
+            answer
+        };
+        let enoent = "ENOENT: no such file or directory, posix_spawn 'stdio'";
+        let both = "These MCP servers did not start, so the agent works without their tools in this run: \
+                    exits-at-once (Connection closed), no-such-command (ENOENT: no such file or directory, posix_spawn 'stdio')";
+
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.ask_mcp_status(); // as after the answer to a reconnect (`Actor::session_answered`)
+        norm.turn_started("Reply with the single word: pong");
+        norm.on_message(init);
+        assert_eq!(norm.outbox.len(), 2, "two requests wait for their answers");
+        // The answer to the first request: where the servers stand, and no word yet about
+        // the ones the init line named.
+        let ev = norm.on_message(&ours("host-1"));
+        assert_eq!(mcp_states(&ev), [("exits-at-once", Connecting, None), ("no-such-command", Failed, Some(enoent))]);
+        assert!(errors(&ev).is_empty(), "the init line's request has its own answer: {ev:?}");
+        // The answer to the init line's request: both, in one line, each with its reason.
+        let ev = norm.on_message(&ours("host-2"));
+        assert_eq!(mcp_states(&ev), [("exits-at-once", Failed, Some("Connection closed"))]);
+        assert_eq!(errors(&ev), [(both, false)]);
+        assert!(norm.on_message(&ours("host-2")).is_empty(), "said once");
+
+        // Two init lines before the first answer: the servers are asked about once, and said once.
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.on_message(init);
+        norm.on_message(init);
+        assert_eq!(norm.outbox.len(), 1, "the first request still waits to say why");
+        assert_eq!(errors(&norm.on_message(&ours("host-2"))), [(both, false)]);
+        assert!(norm.mcp_asked.is_empty());
     }
 
     /// The MCP server events, as (name, state, reason).
@@ -4946,7 +5144,7 @@ mod tests {
         let model = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::Model(DEFAULT_MODEL.into()), request).await;
         assert_eq!(model, Ok(json!({ "model": "claude-opus-5-5" })));
         assert_eq!(actor.norm.model, None, "\"default\" is not a model name to show");
-        assert_eq!(actor.norm.session_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(actor.norm.session_model, None, "the next turn's init line names the session's model");
 
         // An effort level: the answer is a bare success, and the settings say what the session
         // works with.
@@ -4975,6 +5173,74 @@ mod tests {
         assert!(actor.session_replies.is_empty());
         let kinds = emitted(&mut events);
         assert!(kinds.is_empty(), "{kinds:?}");
+    }
+
+    /// A model switch of Codly's while a turn runs (recording `control-requests`: the turn of
+    /// `sleep 20`, with `set_model` written while the command runs). Before, the lines the
+    /// turn still wrote on the model it had made two false rows after Codly's own "now works
+    /// with sonnet": "now runs on haiku, not on sonnet", then "runs on sonnet again". The
+    /// lines after the switch are written by hand, from recorded lines of this session with
+    /// another text or model name: the recorded turn was stopped right after the switch.
+    #[tokio::test]
+    async fn a_model_switch_of_codlys_makes_no_rows_about_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        let lines = recording("control-requests");
+        let dir = dir.path();
+        let notices = |events: &mut mpsc::UnboundedReceiver<AdapterEvent>| -> Vec<String> {
+            emitted(events).into_iter().filter_map(|e| if let EventKind::Notice { text } = e { Some(text) } else { None }).collect()
+        };
+        // An `assistant` line of this session, as the CLI would write it for this text on this model.
+        let said = |from: &Value, id: &str, model: &str| {
+            let mut line = from.clone();
+            line["message"]["id"] = json!(id);
+            line["message"]["model"] = json!(model);
+            line["message"]["content"] = json!([{ "type": "text", "text": "ok" }]);
+            line
+        };
+
+        // The turn as recorded, up to the command that runs: the session is on haiku.
+        let prompt = lines.iter().position(|l| l["_sent"]["message"]["content"].as_str().is_some_and(|c| c.contains("sleep 20"))).expect("the recorded prompt");
+        let switch = lines.iter().position(|l| l["_sent"]["request_id"] == "host-39").expect("the recorded switch");
+        let turn: Vec<&Value> = lines[prompt..switch].iter().filter(|l| l["type"].is_string()).collect();
+        let init = *turn.iter().find(|l| l["subtype"] == "init").expect("the turn's init line");
+        let on_haiku = *turn.iter().find(|l| l["type"] == "assistant").expect("a line of the turn");
+        assert_eq!((&init["model"], &on_haiku["message"]["model"]), (&json!("claude-haiku-5-5"), &json!("claude-haiku-5-5")));
+        actor.on_cmd(AgentCmd::Prompt("Run the Bash command `sleep 20`".into())).await;
+        for line in &turn {
+            actor.on_json((*line).clone(), "codly-0", &mut None).await;
+        }
+        assert!(actor.turn_active && notices(&mut events).is_empty());
+
+        // Codly's switch while the turn runs: the request and the answer as recorded then (`host-39`).
+        let request = json!({ "subtype": "set_model", "model": "sonnet" });
+        assert_eq!(lines[switch]["_sent"]["request"], request);
+        let recorded = lines.iter().find(|l| l["response"]["request_id"] == "host-39").expect("the recorded answer");
+        let model = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::Model("sonnet".into()), request).await;
+        assert_eq!(model.as_ref(), Ok(&recorded["response"]["response"]));
+        assert_eq!(model, Ok(json!({ "model": "claude-sonnet-5-5" })));
+        let echo = &lines[switch + 1]; // the CLI's own line about the switch, as recorded
+        assert!(echo["isReplay"] == true && echo["message"]["content"].as_str().is_some_and(|c| c.contains("Set model to")));
+        actor.on_json(echo.clone(), "codly-0", &mut None).await;
+
+        // (by hand) The request that was on its way still answers on the model the session had.
+        actor.on_json(said(on_haiku, "msg-after-switch", "claude-haiku-5-5"), "codly-0", &mut None).await;
+        assert_eq!(notices(&mut events), Vec::<String>::new(), "the switch was Codly's own, and whoever asked for it says so");
+        // The turn ends (the recorded result of the turn before), and the next one starts:
+        // (by hand) its init line names the new model, and its lines are on it.
+        let result = lines[..prompt].iter().rev().find(|l| l["type"] == "result").expect("a recorded result");
+        actor.on_json(result.clone(), "codly-0", &mut None).await;
+        assert!(!actor.turn_active);
+        actor.on_cmd(AgentCmd::Prompt("again".into())).await;
+        let mut next_init = init.clone();
+        next_init["model"] = json!("claude-sonnet-5-5");
+        actor.on_json(next_init, "codly-0", &mut None).await;
+        actor.on_json(said(on_haiku, "msg-next-turn", "claude-sonnet-5-5"), "codly-0", &mut None).await;
+        assert_eq!(notices(&mut events), Vec::<String>::new(), "\"again\" would be false: the session never ran on sonnet before");
+
+        // From that init line on the notice works as before: another model than the session's is said.
+        actor.on_json(said(on_haiku, "msg-other-model", "claude-haiku-5-5"), "codly-0", &mut None).await;
+        assert_eq!(notices(&mut events), ["Claude Code now runs on claude-haiku-5-5, not on claude-sonnet-5-5"]);
     }
 
     /// Plan mode on a session started as Codly starts a 1:1 agent (part 2, scenarios 10 and

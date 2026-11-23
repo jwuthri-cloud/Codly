@@ -153,7 +153,7 @@
             <label class="field">
               <span class="f-label">Model</span>
               <input class="input" list={`models-${i}`} value={model.name} placeholder="Default" spellcheck="false" autocomplete="off" onchange={(e) => patch(i, { model: joinModel(e.currentTarget.value, keptEffort(catalog, m.provider, e.currentTarget.value.trim(), model.effort)) })} />
-              <datalist id={`models-${i}`}>{#each catalog?.models ?? [] as x (x.id)}<option value={x.id}>{optionLabel(x)}</option>{/each}</datalist>
+              <datalist id={`models-${i}`}>{#each catalog?.models ?? [] as x, xi (xi)}<option value={x.id}>{optionLabel(x)}</option>{/each}</datalist>
             </label>
             {#if efforts.length}
               <label class="field">

@@ -140,9 +140,11 @@ describe('events → behaviour', () => {
     expect(intent(m, 3100).intent.emote).toBeNull();
   });
 
+  const request = (agent: string, s: Approval['subject']): Approval => ({ id: 'ap', agent_id: agent, run_id: 'r', task_id: null, call_id: null, subject: s, reason: null, choices: ['allow_once', 'deny'], risks: [], status: 'pending', decided_by: null, created_at: 0 });
+  const subject = (name: string, input: Record<string, string>): Approval['subject'] => ({ kind: 'tool', name, input });
+
   it('a host that a sandboxed command wants is said as the host, not as the name of the request’s tool', () => {
-    const subject = (name: string, input: Record<string, string>): Approval['subject'] => ({ kind: 'tool', name, input });
-    const text = (s: Approval['subject']) => approvalText({ id: 'ap', agent_id: 'a-ada', run_id: 'r', task_id: null, call_id: null, subject: s, reason: null, choices: ['allow_once', 'deny'], risks: [], status: 'pending', decided_by: null, created_at: 0 });
+    const text = (s: Approval['subject']) => approvalText(request('a-ada', s), 'claude');
     expect(text(subject('SandboxNetworkAccess', { host: 'example.com' }))).toBe('reach example.com');
     expect(text(subject('SandboxNetworkAccess', {}))).toBe('use the network');
     // A bubble is one short line: a long host is cut there (the approval card shows it whole).
@@ -150,12 +152,50 @@ describe('events → behaviour', () => {
     expect(text(subject('WebFetch', { url: 'https://example.com' }))).toBe('use WebFetch');
   });
 
-  it('an agent that shows its plan waits for you to read it: no tool name, and nothing to "run"', () => {
-    const m = fresh();
-    const ap = { id: 'ap', agent_id: 'a-ada', run_id: 'r', task_id: null, call_id: null, subject: { kind: 'tool', name: 'ExitPlanMode', input: { plan: '1. Add the line' } }, reason: null, choices: ['allow_once', 'deny'], risks: [], status: 'pending', decided_by: null, created_at: 0 } satisfies Approval;
-    expect(approvalText(ap)).toBe('read its plan');
-    reduce(m, row(1000, 'a-ada', { type: 'approval_requested', approval: ap }), live);
-    expect(sentence(ada(m), T0 + 2000)).toMatchObject({ pre: 'Waiting for you: read its plan', code: null, tone: 'warn' });
+  it('a Claude agent that shows its plan waits for you to read it: no tool name, and nothing to "run" or to allow', () => {
+    const plan = subject('ExitPlanMode', { plan: '1. Add the line' });
+    expect(approvalText(request('a-ada', plan), 'claude')).toBe('read its plan');
+    const asked = (agent: string) => {
+      const m = fresh();
+      reduce(m, row(1000, agent, { type: 'approval_requested', approval: request(agent, plan) }), live);
+      return sentence(m.agents.get(agent)!, T0 + 2000);
+    };
+    expect(asked('a-ada')).toMatchObject({ pre: 'Waiting for you: read its plan', code: null, tone: 'warn' });
+    // That request is Claude Code's own: from Bo (Codex), or an agent the office does not know, it is a tool by its name.
+    expect(approvalText(request('a-bo', plan), 'codex')).toBe('use ExitPlanMode');
+    expect(asked('a-bo').text).toBe('May I use ExitPlanMode?');
+    expect(asked('a-new').text).toBe('May I use ExitPlanMode?');
+  });
+
+  it('that request is Claude Code’s own: from another CLI, or an agent the office does not know, it is a tool by its name', () => {
+    const host = subject('SandboxNetworkAccess', { host: 'example.com' });
+    expect(approvalText(request('a-bo', host), 'codex')).toBe('use SandboxNetworkAccess');
+    expect(approvalText(request('a-new', host), null)).toBe('use SandboxNetworkAccess');
+    // Through the reducer: Ada runs Claude Code, Bo runs Codex, and "a-new" is in no roster yet.
+    const asked = (agent: string) => {
+      const m = fresh();
+      reduce(m, row(0, agent, { type: 'approval_requested', approval: request(agent, host) }), live);
+      return sentence(m.agents.get(agent)!, T0 + 10).text;
+    };
+    expect(asked('a-ada')).toBe('May I reach example.com?');
+    expect(asked('a-bo')).toBe('May I use SandboxNetworkAccess?');
+    expect(asked('a-new')).toBe('May I use SandboxNetworkAccess?');
+  });
+
+  it('“May I run …?” is for a command only: every other request says what it wants to do', () => {
+    const asked = (s: Approval['subject']) => {
+      const m = fresh();
+      reduce(m, row(0, 'a-ada', { type: 'approval_requested', approval: request('a-ada', s) }), live);
+      return sentence(ada(m), T0 + 10).text;
+    };
+    expect(asked({ kind: 'command', command: 'rm -rf dist', cwd: null })).toBe('May I run rm -rf dist?');
+    expect(asked({ kind: 'file_change', paths: ['src/x.ts'], diff: null })).toBe('May I edit x.ts?');
+    expect(asked({ kind: 'file_change', paths: ['src/x.ts', 'src/y.ts'], diff: null })).toBe('May I edit x.ts +1?');
+    expect(asked({ kind: 'file_change', paths: [], diff: null })).toBe('May I change files?');
+    expect(asked(subject('SandboxNetworkAccess', { host: 'example.com' }))).toBe('May I reach example.com?');
+    expect(asked(subject('WebFetch', { url: 'https://example.com' }))).toBe('May I use WebFetch?');
+    expect(asked({ kind: 'question', questions: [] })).toBe('May I ask a question?');
+    expect(asked({ kind: 'permissions', detail: {} })).toBe('May I get more permissions?');
   });
 
   it('blocked slumps under a rain cloud; rate limited sleeps (zZ); long idle falls asleep at 10 min', () => {

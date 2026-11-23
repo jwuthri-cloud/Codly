@@ -16,6 +16,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
   import { defaultEffortLabel, effortOptions, keptEffort, optionLabel, troubleNote } from '../lib/util/models';
+  import { HOST_ALLOW_LASTS } from '../lib/util/sandbox';
   import { joinModel, splitModel } from '../lib/util/team';
   import AccountsSection from './AccountsSection.svelte';
   import ApiKeysSection from './ApiKeysSection.svelte';
@@ -186,7 +187,7 @@
           <span class="desc">Empty uses {PROVIDER_LABEL[leadCli]}’s default. A request can pick its own under the composer. Leads switch on their next message and keep their conversation.</span>
         </div>
         <input class="field" list="lead-models" value={leadModel.name} placeholder="Default" spellcheck="false" autocomplete="off" aria-label="Lead model" onchange={(e) => pickLeadModel(e.currentTarget.value)} />
-        <datalist id="lead-models">{#each leadCatalog?.models ?? [] as m (m.id)}<option value={m.id}>{optionLabel(m)}</option>{/each}</datalist>
+        <datalist id="lead-models">{#each leadCatalog?.models ?? [] as m, i (i)}<option value={m.id}>{optionLabel(m)}</option>{/each}</datalist>
       </div>
       {#if leadListTrouble}<p class="desc warn" role="status">{leadListTrouble} <button class="link" onclick={() => catalogs.ask(leadCli, true)}>Try again</button></p>{/if}
       {#if leadEfforts.length}
@@ -338,7 +339,7 @@
           <span class="r-title">Sandbox Claude’s shell</span>
           <!-- One long help text, in short paragraphs: what the switch does, what a sandboxed command may do, how it sits with the approval rules, what it does not cover. -->
           <span class="desc">For Claude Code agents that have a shell: workers and 1:1 agents. Off: a shell command runs with your account’s rights, and Codly’s approval rules are the only check. On: Claude Code runs each shell command in its own OS sandbox.</span>
-          <span class="desc">A sandboxed command can write only in the agent’s folder, a temporary folder and the repository’s git data. It can still read your other files. It can reach only the hosts that your Claude Code settings allow: for another host Codly asks you, in every mode except Full access, and a host you allow stays allowed for the rest of that agent’s session.</span>
+          <span class="desc">A sandboxed command can write only in the agent’s folder, a temporary folder and the repository’s git data. It can still read your other files. It can reach only the hosts that your Claude Code settings allow: for another host Codly asks you, in every mode except Full access. {HOST_ALLOW_LASTS}</span>
           <span class="desc">Commands still go through Codly’s approval rules, as they do with the switch off: the sandbox is a second check under the rules, not a way around them. So a command can ask you once for itself and once more for a host. A command that Claude wants to run outside the sandbox asks you first, in every mode except Full access.</span>
           <span class="desc">If Claude Code does not turn its sandbox on, the agent does not start, and Codly tells you why. File edits and tool servers are not sandboxed.</span>
           <span class="desc">Codex agents always run in Codex’s own sandbox. Gemini, OpenCode, Cursor and Copilot agents have no sandbox. Applies to agents started after the change.</span>

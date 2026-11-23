@@ -3,10 +3,11 @@
 // calls showed a plan, and which conversation rows only repeat a reply.
 // Pure, so the sheet and the tests agree; the sheet passes the names.
 import type { EventRow } from '../lib/gen/EventRow';
+import type { Provider } from '../lib/gen/Provider';
 import type { Task } from '../lib/gen/Task';
 import type { Triple } from '../lib/gen/Triple';
 import { TASK_STATUS_LABEL } from '../lib/util/labels';
-import { PLAN_TOOL } from '../lib/util/planTool';
+import { isPlanCall } from '../lib/util/planRequest';
 
 /** How the sheet looks up what an id is called: an agent's name, a task's key ("t1"). */
 export type Names = { agent: (id: string) => string | undefined; task: (id: string) => string | undefined };
@@ -38,11 +39,12 @@ export type HistoryFacts = {
   said: Set<string>;
 };
 
-export function historyFacts(events: readonly EventRow[], agentId: string): HistoryFacts {
+/** `provider`: the agent's CLI (none when Codly does not know the agent): only a Claude agent's call of the plan tool shows a plan. */
+export function historyFacts(events: readonly EventRow[], agentId: string, provider: Provider | null = null): HistoryFacts {
   const facts: HistoryFacts = { planCalls: new Set(), said: new Set() };
   for (const e of events) {
     if (e.agent_id !== agentId) continue;
-    if (e.kind.type === 'tool_started' && e.kind.name === PLAN_TOOL) facts.planCalls.add(e.kind.call_id);
+    if (e.kind.type === 'tool_started' && isPlanCall(e.kind.name, provider)) facts.planCalls.add(e.kind.call_id);
     else if (e.kind.type === 'message') facts.said.add(e.kind.text);
   }
   return facts;

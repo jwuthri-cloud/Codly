@@ -3,7 +3,8 @@
 // skipped, and says what you answered.
 import type { Approval } from '../gen/Approval';
 import type { ApprovalStatus } from '../gen/ApprovalStatus';
-import { showsPlan } from './planTool';
+import type { Provider } from '../gen/Provider';
+import { showsPlan } from './planRequest';
 import { oneLine } from './sanitize';
 
 type Asked = Pick<Approval, 'subject'>;
@@ -60,21 +61,21 @@ export function firstQuestion(asked: Asked): string | null {
 }
 
 /** An agent's history: what it asked you. */
-export function askedLine(asked: Asked): string {
+export function askedLine(asked: Asked, provider: Provider | null = null): string {
   const s = asked.subject;
   if (s.kind === 'question') {
     const q = firstQuestion(asked);
     return q ? `Asked you: ${oneLine(q, 80)}` : 'Asked you a question';
   }
-  if (showsPlan(s)) return 'Asked you to read its plan';
+  if (showsPlan(s, provider)) return 'Asked you to read its plan';
   return `Asked for approval${s.kind === 'command' ? `: ${oneLine(s.command, 60)}` : ''}`;
 }
 
 /** An agent's history: how that request ended ("Approved by you", "Denied by you", "Closed by
  *  Codly"). `asked` is the request when it is still known (the line of a question or of a plan
  *  says so), `answer` what you answered when this window sent it. */
-export function settledLine(status: ApprovalStatus, by: string, asked: Asked | null, answer: string | null): string {
-  const plan = !!asked && showsPlan(asked.subject);
+export function settledLine(status: ApprovalStatus, by: string, asked: Asked | null, answer: string | null, provider: Provider | null = null): string {
+  const plan = !!asked && showsPlan(asked.subject, provider);
   const word = plan && status === 'approved' ? 'Plan accepted' : plan && status === 'denied' ? 'Plan sent back' : outcomeWord(status, asked);
   const line = `${word} ${outcomeBy(by)}`.trim();
   return asked?.subject.kind === 'question' && status === 'approved' && answer ? `${line}: ${oneLine(answer, 80)}` : line;

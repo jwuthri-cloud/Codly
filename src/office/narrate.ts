@@ -6,7 +6,7 @@
 import type { ActivityKind } from '../lib/gen/ActivityKind';
 import { dominant } from './behavior';
 import type { AgentState, Tone, ToolCall } from './model';
-import { PLAN_ASK } from './reducer';
+import { PLAN_ASK } from '../lib/util/planRequest';
 import { basename, clean, clock, commandHead, hhmm, host } from './text';
 
 export interface Sentence {
@@ -98,9 +98,11 @@ export function sentence(a: AgentState, now: number): Sentence {
   if (!a.present) return make('Offline', null, '', 'muted');
   if (a.approval) {
     if (a.approval.id.startsWith('q:')) return make('Your turn:', a.approval.text, '', 'warn');
-    // A plan is read, not run.
-    if (a.approval.text === PLAN_ASK) return make(`Waiting for you: ${PLAN_ASK}`, null, '', 'warn');
-    return a.approval.text ? make('May I run', a.approval.text, '?', 'warn') : make('Waiting for you', null, '', 'warn');
+    if (!a.approval.text) return make('Waiting for you', null, '', 'warn');
+    // A plan is read, not run and not asked for: the agent waits for you to read it.
+    if (!a.approval.command && a.approval.text === PLAN_ASK) return make(`Waiting for you: ${PLAN_ASK}`, null, '', 'warn');
+    // "May I run <command>?" only for a command: any other request says itself what it wants to do.
+    return make(a.approval.command ? 'May I run' : 'May I', a.approval.text, '?', 'warn');
   }
   if (a.rateLimited || a.status === 'rate_limited') {
     const r = a.rateLimited?.resetsAt;

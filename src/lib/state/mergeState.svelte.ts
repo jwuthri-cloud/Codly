@@ -83,13 +83,17 @@ export async function resolveMergeConflict(source: PrSource, who: string | null 
     try {
       warning = await api.mergePlanWarning(source.id);
     } catch (e) {
-      toast({ kind: 'error', title: 'Couldn’t have an agent resolve it', body: msg(e) });
+      toast({ kind: 'error', title: 'Couldn’t start the agent', body: msg(e) });
       return false;
     }
     if (warning) {
       const target = warning.target;
       const goOn = { label: 'Go on', run: () => void resolveMergeConflict(source, who, target) };
-      const body = `${warning.message} To resolve the conflict, an agent brings ${target} into the plan’s branch: from then on the plan builds on ${target}.`;
+      // What the agent is for, from what the core last said about this merge: files that
+      // conflict, or checks that failed on the merge result with no conflict.
+      const last = mergeUi.states[mergeKey(source)];
+      const opening = last?.conflicts.length ? 'To resolve the conflict, an agent' : last?.failed_checks.length ? 'To make the checks pass, an agent' : 'An agent';
+      const body = `${warning.message} ${opening} brings ${target} into the plan’s branch: from then on the plan builds on ${target}.`;
       toast({ kind: 'attention', title: `Bring ${target} into this plan?`, body, action: goOn, duration: 0 });
       return false;
     }
@@ -114,7 +118,7 @@ export async function resolveMergeConflict(source: PrSource, who: string | null 
     toasts.update(id, { kind: 'success', title, body, action });
     return true;
   } catch (e) {
-    toasts.update(id, { kind: 'error', title: 'Couldn’t have an agent resolve it', body: msg(e) });
+    toasts.update(id, { kind: 'error', title: 'Couldn’t start the agent', body: msg(e) });
     return false;
   }
 }

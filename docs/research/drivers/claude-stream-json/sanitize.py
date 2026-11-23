@@ -27,7 +27,8 @@ USER = getpass.getuser()
 HOME = os.path.expanduser("~")
 DOC_NAME = os.environ.get("DOC_NAME", "the document next to the fixtures")
 # MCP servers the scenarios themselves configure. Every other server name is this machine's and is removed.
-OWN_MCP = ("exits-at-once", "no-such-command", "needs-login", "ping-project")
+OWN_MCP = ("exits-at-once", "no-such-command", "needs-login", "ping-project",
+           "ping-slow", "ping-flaky", "ping-config", "ping-same", "ping-user")
 
 
 def cli_version():

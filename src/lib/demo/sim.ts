@@ -14,6 +14,7 @@ import type { Citation } from '../gen/Citation';
 import type { CliInfo } from '../gen/CliInfo';
 import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
+import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Memory } from '../gen/Memory';
 import type { MemoryKind } from '../gen/MemoryKind';
 import type { MemoryScope } from '../gen/MemoryScope';
@@ -77,6 +78,8 @@ export class Sim {
   private nextId = 1;
   log: EventRow[] = [];
   private queue: EventRow[] = [];
+  /** The last `mcp_server` event of each agent's server: the log is cut, and a snapshot still says where a server stands. */
+  private servers = new Map<string, EventRow>();
   sink: ((b: UiBatch) => void) | null = null;
 
   clis: CliInfo[] = [];
@@ -113,6 +116,19 @@ export class Sim {
     setInterval(() => this.flush(), 33);
   }
 
+  /**
+   * Another office of the same machine: the settings, the installed CLIs, the sign-ins and the
+   * recent repositories are the first office's, whichever of the two reads or changes them.
+   */
+  sameMachineAs(first: Sim) {
+    const share = <K extends 'settings' | 'clis' | 'recent' | 'signIns'>(key: K) =>
+      Object.defineProperty(this, key, { get: () => first[key], set: (v: Sim[K]) => void (first[key] = v), enumerable: true, configurable: true });
+    share('settings');
+    share('clis');
+    share('recent');
+    share('signIns');
+  }
+
   now() {
     return this.clock.now();
   }
@@ -132,6 +148,7 @@ export class Sim {
     if (!ephemeral) {
       this.log.push(row);
       if (this.log.length > 8000) this.log = this.log.slice(-6000);
+      if (kind.type === 'mcp_server') this.servers.set(`${row.agent_id}:${kind.name}`, row);
     }
     this.queue.push(row);
     this.check();
@@ -149,8 +166,16 @@ export class Sim {
     return this.nextId - 1;
   }
 
+  /** Where an agent's MCP server stands, as it last reported (null: it reported none by that name). */
+  mcpStatus(agentId: string, name: string): McpServerStatus | null {
+    const k = this.servers.get(`${agentId}:${name}`)?.kind;
+    return k?.type === 'mcp_server' ? k.status : null;
+  }
+
   snapshot(): Snapshot {
     this.flush();
+    const events = this.log.slice(-2000);
+    const from = events[0]?.id ?? 0;
     return {
       as_of: this.lastId,
       clis: this.clis,
@@ -167,8 +192,9 @@ export class Sim {
       memories: [...this.memories.values()],
       triples: this.triples,
       artifacts: [...this.artifacts.values()],
-      events: this.log.slice(-2000),
-      session_events: [], // the demo's agents have no MCP servers and leave no command running
+      events,
+      // Like the core: where each MCP server stands, when that is older than `events`. (The demo's agents leave no command running.)
+      session_events: [...this.servers.values()].filter((e) => e.id < from).sort((a, b) => a.id - b.id),
     };
   }
 

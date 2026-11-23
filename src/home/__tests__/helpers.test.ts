@@ -149,14 +149,17 @@ describe("a helper's call that is open when the turn ends", () => {
   });
 });
 
-describe('a plan shown to you', () => {
+describe('a plan a Claude agent shows you', () => {
   it('is said as that in the line of its work row, whatever kind of step the call is', () => {
     const shown = (ts: number, call: string, activity: 'plan' | 'mcp') =>
       ev(ts, { type: 'tool_started', call_id: call, name: 'ExitPlanMode', activity, target: { ...target, tool: 'ExitPlanMode' }, input: { plan: '1. Add the line' }, confidence: 'observed' });
     apply(ev(10, { type: 'turn_started', input: 'Plan it' }), shown(11, 'p1', 'plan'));
-    expect(workSummary(works()[0].segs)).toBe('Showed you its plan');
+    expect(workSummary(works()[0].segs, 'claude')).toBe('Showed you its plan');
     apply(completed(12, 'p1', false), shown(13, 'p2', 'mcp'), started(14, 'c1', 'Bash', 'execute'));
-    expect(workSummary(works()[0].segs)).toBe('Ran echo hi · showed you its plan 2 times');
+    expect(workSummary(works()[0].segs, 'claude')).toBe('Ran echo hi · showed you its plan 2 times');
+    // From another CLI, or an agent Codly does not know, calls of that name are steps like any other.
+    expect(workSummary(works()[0].segs, 'codex')).toBe('Ran echo hi · updated its plan · 1 other step');
+    expect(workSummary(works()[0].segs)).toBe('Ran echo hi · updated its plan · 1 other step');
   });
 });
 

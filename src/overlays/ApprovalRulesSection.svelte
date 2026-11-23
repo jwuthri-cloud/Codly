@@ -8,6 +8,7 @@
   import { api } from '../lib/api';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
+  import { ruleWords } from '../lib/util/approvalRules';
   import Icon from '../components/Icon.svelte';
 
   let rules = $state<ApprovalRule[] | null>(null);
@@ -39,22 +40,27 @@
   <section>
     <h3 class="eyebrow">Always allowed in this repo</h3>
     <p class="desc">
-      Commands you saved from an approval card with “Always allow in this repo”. Codly approves them for every agent in
+      Commands and tools of MCP servers you saved from an approval card with “Always allow in this repo”. Codly approves them for every agent in
       {store.workspace?.name ?? 'this repo'} without asking. It still asks about deletes, <code>git push</code>, <code>sudo</code>, secrets and
       anything outside the agent’s worktree, and about everything in the “Ask first” mode. Remove a rule and Codly asks again.
     </p>
     {#if rules.length}
       <ul class="rules">
         {#each rules as r (r.id)}
+          {@const w = ruleWords(r)}
           <li>
-            <span class="kind">{r.kind === 'prefix' ? 'Starts with' : 'Exactly'}</span>
-            <code class="selectable">{r.command}</code>
+            <span class="kind">{w.kind}</span>
+            {#if w.code}
+              <code class="selectable">{w.text}</code>
+            {:else}
+              <span class="tool"><span class="selectable">{w.text}</span>{#if w.note}<span class="note">{w.note}</span>{/if}</span>
+            {/if}
             <button class="btn sm ghost rm" aria-label={`Remove the rule for ${r.command}`} onclick={() => remove(r)}><Icon name="trash" size={13} />Remove</button>
           </li>
         {/each}
       </ul>
     {:else}
-      <p class="desc">No rules yet. An approval card offers “Always allow in this repo” when its command can be saved.</p>
+      <p class="desc">No rules yet. An approval card offers “Always allow in this repo” when its command or tool can be saved.</p>
     {/if}
   </section>
 {/if}
@@ -68,4 +74,6 @@
   .rules li + li { box-shadow: inset 0 1px 0 var(--line); }
   .kind { flex-shrink: 0; width: 76px; font-size: var(--t-sm); color: var(--ink-3); }
   .rules code { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 12px; line-height: 18px; color: var(--ink-1); white-space: pre-wrap; word-break: break-all; }
+  .tool { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-1); overflow-wrap: anywhere; }
+  .note { color: var(--ink-3); }
 </style>

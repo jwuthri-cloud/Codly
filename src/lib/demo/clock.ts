@@ -67,3 +67,23 @@ export class VirtualClock {
     this.reschedule();
   }
 }
+
+/**
+ * `?hour=13` (docs/DEMO.md): the page's clock is moved so that it is that hour of the day now,
+ * and it goes on from there. The office and the map light their scene by `new Date()`, so they
+ * are lit for that hour, and every time on screen follows. `Date` is wrapped, not the scene:
+ * the product reads its clock as it always does. Call it before the first virtual clock is made.
+ */
+export function setWallHour(hour: number) {
+  const Real = Date;
+  const at = new Real();
+  // Today, at that hour, on the local clock (so a change of summer time today does not move it).
+  const wanted = new Real(at.getTime());
+  wanted.setHours(Math.floor(hour), Math.round((hour % 1) * 60), 0, 0);
+  const offset = wanted.getTime() - at.getTime();
+  globalThis.Date = new Proxy(Real, {
+    // `new Date()` is now; a date made from a value is that value.
+    construct: (target, args, newTarget) => Reflect.construct(target, args.length ? args : [target.now() + offset], newTarget),
+    get: (target, key, receiver) => (key === 'now' ? () => target.now() + offset : Reflect.get(target, key, receiver)),
+  });
+}

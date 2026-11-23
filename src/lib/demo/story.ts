@@ -11,6 +11,8 @@
 // verifies and merges, and each Lead reports back in its own thread. Everything is expressed as
 // real EventKinds, so every panel and the office render it exactly like a live session.
 // A 1:1 Claude agent you hire works in its mode (plan first, ask for edits, accept edits).
+// The demo's second office, billing-api, has a Story of its own (`openBilling`): one request
+// whose plan runs, and one request of a worker's that waits for you.
 // docs/DEMO.md lists the URL parameters that start the demo in a state the script does not reach.
 import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
@@ -26,9 +28,11 @@ import type { Workspace } from '../gen/Workspace';
 import { describeRule, MockApprovalRules, PACKAGE_INSTALL } from './approvalRules';
 import { bytesOf, contrastCsv, contrastSvg, ILLUSTRATION_PROMPT, illustrationPng, SETTINGS_API_MD, TOGGLE_PREVIEW_HTML } from './artifacts';
 import { ChecksDemo } from './checks';
-import { MODE_LABEL } from './controls';
-import { diffOf, INDEX, INDEX_AFTER, NEXT_BUMP, TASK_FILES, type RepoFile } from './repo';
-import { Actor, Cancelled, REPO, Sim, WORKTREES, sha, uid, type ToolSpec } from './sim';
+import { DEMO_MCP, MODE_LABEL } from './controls';
+import { BILLING } from './office';
+import { BILLING_FILES, diffOf, INDEX, INDEX_AFTER, NEXT_BUMP, TASK_FILES, type RepoFile } from './repo';
+import { Actor, Cancelled, HOME, REPO, Sim, WORKTREES, sha, uid, type ToolSpec } from './sim';
+import type { AskKind } from './states';
 import { waitingOn } from '../util/plan';
 import { memberTitle } from '../util/team';
 
@@ -38,6 +42,8 @@ export const REQUEST =
 export const AMEND = 'Also make the toggle fully keyboard-accessible: arrow keys should move between the options.';
 /** The second request, opened in parallel (⌘N) a little later. */
 export const REQUEST_B = 'Lock sign-in for 15 minutes after 5 failed attempts, and tell people clearly when they’re locked out.';
+/** The one request of the demo's second office, billing-api: asked before you opened it. */
+export const REQUEST_BILLING = 'Try a failed invoice payment again, once a day and three times at most. After the last try, email the customer.';
 
 const HOUR = 3_600_000;
 const cite = (id: string, path: string, s: number, e: number, symbol: string | null, why: string[], score: number): Citation => ({
@@ -50,7 +56,8 @@ const WORKER_MODELS: Record<Provider, string | null> = {
 };
 const PROVIDER_NAME: Record<Provider, string> = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI', opencode: 'OpenCode', cursor: 'Cursor', copilot: 'Copilot' };
 
-type Spec = 'theme' | 'lockout';
+/** The plans the demo scripts: two in acme/web, and `retries` in billing-api. */
+type Spec = 'theme' | 'lockout' | 'retries';
 /** Who takes each planned task, and why (the route decision says it). */
 const ROUTES: Record<Spec, Record<string, { provider: Provider; name: string; color: number; why: string; alternatives: string[] }>> = {
   theme: {
@@ -62,10 +69,24 @@ const ROUTES: Record<Spec, Record<string, { provider: Provider; name: string; co
     t1: { provider: 'codex', name: 'Fay', color: 0, why: 'server + Redis work; planner hint codex; 1 of 2 Codex slots free', alternatives: ['Claude Code: 2 of 2 slots busy', 'OpenCode: kept for t2'] },
     t2: { provider: 'opencode', name: 'Dee', color: 3, why: 'small UI change + e2e; planner hint opencode; OpenCode idle', alternatives: ['Gemini CLI: busy with the other request', 'Codex: authored t1'] },
   },
+  retries: {
+    t1: { provider: 'codex', name: 'Otto', color: 4, why: 'payment code + tests; planner hint codex; Codex idle', alternatives: ['Claude Code: kept for t2', 'Gemini CLI: Pia is at home'] },
+    t2: { provider: 'claude', name: 'Rex', color: 7, why: 'a small new module; planner hint claude; Claude Code idle', alternatives: ['Codex: assigned t1', 'Gemini CLI: Pia is at home'] },
+  },
 };
-const BRANCH: Record<Spec, string> = { theme: 'codly/dark-mode', lockout: 'codly/sign-in-lockout' };
-/** Task key → the demo files it writes (TASK_FILES key). */
-const FILES: Record<Spec, Record<string, string>> = { theme: { t1: 't1', t2: 't2', t3: 't3' }, lockout: { t1: 'l1', t2: 'l2' } };
+const BRANCH: Record<Spec, string> = { theme: 'codly/dark-mode', lockout: 'codly/sign-in-lockout', retries: 'codly/payment-retries' };
+/** Task key → the demo files it writes (the key of `filesOf`). */
+const FILES: Record<Spec, Record<string, string>> = { theme: { t1: 't1', t2: 't2', t3: 't3' }, lockout: { t1: 'l1', t2: 'l2' }, retries: { t1: 'b1', t2: 'b2' } };
+/** The demo files of a task, by its file key (acme/web's, or billing-api's). */
+const filesOf = (key: string): RepoFile[] | undefined => TASK_FILES[key] ?? BILLING_FILES[key];
+/** A plan that is done: what its Lead offers when you write again. */
+const FOLLOW_UP: Record<Spec, string> = {
+  theme: 'A good next step is rendering the theme on the server so the first paint never flashes',
+  lockout: 'A good next step is an admin unlock and an email to the account owner after a lockout',
+  retries: 'A good next step is a page where the customer can pay an unpaid invoice with another card',
+};
+/** The tool a CLI runs a shell command with, as its other calls in the story name it. */
+const shellTool = (provider: Provider) => (provider === 'claude' ? 'Bash' : provider === 'codex' ? 'commandExecution' : 'run_shell_command');
 const KEYBOARD = /keyboard|arrow|a11y|accessib/i;
 /** Claude Code and Codex take a message into the turn that runs; the other CLIs run it as the next turn (state/queue.ts). */
 const readsMidTurn = (provider: Provider) => provider === 'claude' || provider === 'codex';
@@ -109,6 +130,46 @@ export type StoryOptions = {
   planMode?: boolean;
   /** `?intake=…`: the scripted requests do not start, so the request you start from GitHub is the first. */
   yourRequestFirst?: boolean;
+  /** `?approval=…`: a 1:1 agent asks that kind of request when the repo opens. */
+  ask?: AskKind | null;
+  /** The demo's second office, billing-api: its own crew and its one request (`openBilling`), and no scripted plan for what you ask there. */
+  billing?: boolean;
+};
+
+/**
+ * `?approval=…`: who asks (a 1:1 agent of that CLI), and what you asked it. `plan` and `file`
+ * are a 1:1 Claude agent in its mode (`soloWork`). The names are none of the plans' workers
+ * (`ROUTES`): a plan takes a free agent with its worker's name.
+ */
+const ASKERS: Record<Exclude<AskKind, 'plan' | 'file'>, { provider: Provider; name: string; title: string; text: string }[]> = {
+  // The same tool name from two CLIs: only Claude Code's is its sandbox asking for a host.
+  network: [
+    { provider: 'claude', name: 'Ned', title: 'Tools', text: 'Which version of react is the newest on npm?' },
+    { provider: 'gemini', name: 'Gil', title: 'Tools', text: 'Which version of react is the newest on npm?' },
+  ],
+  permissions: [{ provider: 'codex', name: 'Kit', title: 'Release', text: 'Add the dark mode toggle to the changelog in ../acme-docs.' }],
+  // Options to pick from (Claude Code), and a question with a free answer (an MCP server asks through Codex).
+  'question-long': [
+    { provider: 'claude', name: 'Ned', title: 'Docs', text: 'Write the release note for the dark mode toggle.' },
+    { provider: 'codex', name: 'Kit', title: 'Triage', text: 'Open an issue in Linear for the flaky checkout test.' },
+  ],
+};
+/** `?approval=network`: the host both agents ask for. */
+const NPM_HOST = 'registry.npmjs.org';
+/** `?approval=question-long`: each option is about 120 characters, so the closed row shows a long answer. */
+const LONG_QUESTION = {
+  question: 'The release note for the dark mode toggle can be one note for everyone, or one for users and one for developers. Which do you want?',
+  header: 'Release note',
+  options: [
+    {
+      label: 'One note for everyone: where the toggle is, that it follows the system by default, and that the choice is saved per user',
+      description: 'Short, and enough for most readers. Developers find the new theme tokens in the pull request, not in the release note.',
+    },
+    {
+      label: 'Two notes: a short one for users about where the toggle is, and a longer one for developers about the new theme tokens',
+      description: 'More to write and to keep up to date, but a developer who builds a new screen knows which tokens to use from day one.',
+    },
+  ],
 };
 
 export class Story {
@@ -123,13 +184,18 @@ export class Story {
   private userAssigned = new Set<string>(); // task ids you assigned by hand
   private agentChains = new Map<string, Promise<void>>();
   private specOfPlan = new Map<string, Spec>();
-  /** task id → its TASK_FILES key (plans reuse keys t1, t2… so files are keyed apart). */
+  /** task id → its file key for `filesOf` (plans reuse keys t1, t2… so files are keyed apart). */
   private fileKeys = new Map<string, string>();
   private nextAdhoc = 4;
+  /** Where the office's worktrees are. */
+  private worktrees: string;
+  /** agent id → what a 1:1 agent does in its next turn, in place of its stock answer (`seedAsk`). */
+  private scripted = new Map<string, (act: Actor) => Promise<void>>();
 
   constructor(private sim: Sim, private opts: StoryOptions = {}) {
     this.rules = new MockApprovalRules(sim, this);
     this.checks = opts.checks ?? new ChecksDemo();
+    this.worktrees = opts.billing ? `${HOME}/.codly/worktrees/${BILLING.name}` : WORKTREES;
     sim.afterStep = (act) => this.readMidTurn(act);
   }
 
@@ -138,6 +204,7 @@ export class Story {
   openWorkspace(path: string): Workspace {
     const sim = this.sim;
     if (sim.workspace) return sim.workspace;
+    if (this.opts.billing) return this.openBilling();
     const now = sim.now();
     const isDemo = /acme/i.test(path) || path === REPO;
     const name = isDemo ? 'acme/web' : (path.replace(/\/+$/, '').split('/').pop() ?? 'repo');
@@ -179,7 +246,9 @@ export class Story {
     sim.triple(`task:${a3.id}`, 'modified', 'file:package.json', 'observed', { emit: false });
     sim.triple('concept:checkout e2e', 'flaky_because', 'concept:Stripe test key', 'agent', { emit: false, confidence: 0.6 });
 
-    if (this.opts.planMode) this.seedPlanner();
+    const ask = this.opts.ask;
+    if (this.opts.planMode || ask === 'plan') this.seedPlanner();
+    if (ask && ask !== 'plan') this.seedAsk(ask);
     if (this.opts.yourRequestFirst) return sim.workspace;
     // The demo's "you": ask for the feature, add a detail while the Lead is still planning (it
     // reads it after its current step, or it queues), then open a second request in parallel.
@@ -194,6 +263,57 @@ export class Story {
       if (!others) this.userChat(`lead:${Math.random().toString(36).slice(2, 8)}`, REQUEST_B);
     })();
     return sim.workspace;
+  }
+
+  /**
+   * The demo's second office as you find it when you open it: the crew of three its tab
+   * counts, one request whose plan runs (Otto and Rex each on a task), and the one request
+   * that waits for you (Otto's). From there it plays on like the first office.
+   */
+  private openBilling(): Workspace {
+    const sim = this.sim;
+    const now = sim.now();
+    sim.workspace = {
+      id: BILLING.id, repo_path: BILLING.repo_path, name: BILLING.name, default_branch: 'main', current_branch: 'main',
+      head: '9b2f4c1d7e0a3f5b8c6d1e2f9a0b7c3d5e4f6a1b', dirty: false, created_at: now - 12 * 86_400_000,
+    };
+    sim.recent = [{ repo_path: BILLING.repo_path, name: BILLING.name, opened_at: now }, ...sim.recent.filter((r) => r.repo_path !== BILLING.repo_path)];
+    this.syncTeam();
+    const r = this.req('lead');
+    r.spec = 'retries';
+    r.words.push(REQUEST_BILLING);
+    sim.chat('lead', 'user', REQUEST_BILLING);
+    const lead = this.ensureLead('lead');
+    const plan = this.submitRetries(lead, r);
+    this.postPlanReady(r, plan, 2);
+    // Pia has no task in this plan: she is at home for seven more minutes (on the wall clock, as the office counts it).
+    const pia = sim.newAgent({ name: 'Pia', provider: 'gemini', model: WORKER_MODELS.gemini, role: 'worker', color: 1, billing: 'subscription', status: 'idle' });
+    sim.putAgent({ ...pia, run_id: null, away_since: Date.now() - 3 * 60_000, away_until: Date.now() + 7 * 60_000 });
+    // Both tasks are in flight when you look: started here, not a moment later by `coordinate`.
+    this.runPlan(plan.id);
+    this.startPlanned(plan.id, 't1');
+    this.startPlanned(plan.id, 't2');
+    return sim.workspace;
+  }
+
+  private submitRetries(lead: Actor, r: Req): Plan {
+    const sim = this.sim;
+    const plan = this.newPlan(r, 'retries', {
+      summary: 'Retries for failed invoice payments',
+      assumptions: ['A payment is tried again once a day, three times at most', 'The email goes out only after the last try failed'],
+      open_questions: [],
+    });
+    const t1 = this.newTask(plan, 'retries', 't1', 'Retry schedule for failed payments', 'Add `src/invoices/retry.ts`: a failed payment is tried again one day later, three times at most, then the invoice is `unpaid`.', {
+      acceptance: ['A failed payment has its next try one day later', 'After the third retry the invoice is `unpaid`', 'Unit tests cover each retry and the last one'],
+      write_scope: ['src/invoices/**'], verify: ['npm test -- retry'], agent_hint: 'codex',
+    });
+    const t2 = this.newTask(plan, 'retries', 't2', 'Email after the last failed try', 'Add `src/mail/paymentFailed.ts`: the email a customer gets when the last try failed, with the invoice number and the amount.', {
+      acceptance: ['The email names the invoice and the amount', 'A unit test covers the text'],
+      write_scope: ['src/mail/**'], verify: ['npm test -- mail'], agent_hint: 'claude',
+    });
+    sim.decision('plan_validated', 'rule', 'Plan is a valid DAG: 2 tasks, no dependencies, no cycles', { plan_id: plan.id, tasks: 2, edges: 0 }, { agent: lead.id });
+    sim.decision('scope_check', 'rule', 'Write scopes are disjoint, so t1 and t2 can run in parallel', { plan_id: plan.id, t1: t1.write_scope, t2: t2.write_scope }, { agent: lead.id });
+    return sim.patchPlan(plan.id, { status: 'awaiting_approval' });
   }
 
   // ───────────── chat ─────────────
@@ -221,7 +341,9 @@ export class Story {
   private take(thread: string, sent: Sent): boolean {
     const waiting = this.unread.get(thread) ?? [];
     if (!waiting.includes(sent)) return false;
-    this.unread.set(thread, waiting.filter((m) => m !== sent));
+    const rest = waiting.filter((m) => m !== sent);
+    if (rest.length) this.unread.set(thread, rest);
+    else this.unread.delete(thread);
     return true;
   }
 
@@ -265,6 +387,9 @@ export class Story {
       session_id: lead.session_id, billing: 'subscription',
       tools: ['Read', 'Grep', 'Glob', 'WebFetch', 'mcp__codly__codly_search', 'mcp__codly__codly_submit_plan', 'mcp__codly__codly_memory_search'],
     });
+    // Like Claude Code when a session starts: where each of its MCP servers stands. The office's
+    // first Lead has one of each kind, so its sheet shows the section "MCP servers".
+    if (!n && provider === 'claude') for (const server of DEMO_MCP) act.emit({ type: 'mcp_server', ...server });
     act.status('idle');
     return act;
   }
@@ -295,6 +420,8 @@ export class Story {
   }
 
   private specFor(thread: string, text: string): Spec | null {
+    // billing-api has its one plan: the demo scripts no other there.
+    if (this.opts.billing) return null;
     const used = new Set([...this.reqs.values()].map((r) => r.spec).filter(Boolean));
     if (/lock|sign.?in|login|password|attempt|brute/i.test(text) && !used.has('lockout')) return 'lockout';
     if (/dark|theme|toggle|appearance/i.test(text) && !used.has('theme')) return 'theme';
@@ -513,7 +640,8 @@ export class Story {
         reply = 'Good call — added to **t3**: arrow keys move between System, Light and Dark, and the toggle is a proper radiogroup. The Playwright test will cover it too.';
       } else reply = 't3 is already underway; I’ll ask Cy to make arrow keys move between the options before it hands back, and check it in review.';
     } else if (!plan && !r.spec) {
-      if (/flaky|checkout/i.test(text))
+      if (this.opts.billing) reply = 'Tell me what you’d like built and I’ll read the code and draft a plan for it. (This browser demo scripts its plans in acme/web; billing-api has the one you see.)';
+      else if (/flaky|checkout/i.test(text))
         reply = 'There’s already a card for that: **a2 · Fix flaky checkout e2e test** is blocked because it needs `STRIPE_TEST_KEY` in `.env.test`. Add the key, move a2 to Ready, and a free agent picks it up.';
       else if (/auth|session/i.test(text))
         reply = '`requireUser()` in `src/server/auth.ts` reads the session cookie through `readSession()` (`src/server/session.ts`) and redirects to `/sign-in` when it is missing. Sessions live in Postgres; `createSession()` sets an httpOnly cookie for 30 days.';
@@ -524,10 +652,7 @@ export class Story {
     else if (plan.status === 'running' || plan.status === 'integrating') {
       const live = tasks.filter((t) => t.status !== 'done' && t.status !== 'pending').map((t) => `${t.key} is ${t.status === 'running' ? 'in progress' : t.status.replace('_', ' ')}`);
       reply = `${done} of ${tasks.length} tasks merged${live.length ? '; ' + live.join(', ') : ''}. Noted “${text.slice(0, 60)}${text.length > 60 ? '…' : ''}” — anything that changes scope goes into a follow-up plan you approve.`;
-    } else if (plan.status === 'done')
-      reply = this.specOfPlan.get(plan.id) === 'theme'
-        ? 'Happy to plan a follow-up. A good next step is rendering the theme on the server so the first paint never flashes — want a plan for that?'
-        : 'Happy to plan a follow-up. A good next step is an admin unlock and an email to the account owner after a lockout — want a plan for that?';
+    } else if (plan.status === 'done') reply = `Happy to plan a follow-up. ${FOLLOW_UP[this.specOfPlan.get(plan.id) ?? 'lockout']} — want a plan for that?`;
     else reply = 'That plan is cancelled. Tell me what you’d like instead and I’ll draft a new one.';
     await lead.sleep(400);
     await lead.turn(text, async () => {
@@ -540,9 +665,10 @@ export class Story {
 
   private async agentRespond(agentId: string, sent: Sent) {
     const sim = this.sim;
-    if (!sim.agents.get(agentId)) return;
-    const act = sim.actor(agentId);
     const thread = `agent:${agentId}`;
+    // Nobody is there to read it (the agent is gone): it does not wait for ever.
+    if (!sim.agents.get(agentId)) return void this.take(thread, sent);
+    const act = sim.actor(agentId);
     const text = sent.text;
     // One FIFO per agent: a message to a busy worker waits for its turn to end, unless the
     // worker read it during that turn (`readMidTurn`).
@@ -558,12 +684,16 @@ export class Story {
       const busy = this.running.has(agentId) && !!task;
       // A 1:1 Claude agent does what you ask, in its mode; the demo's other agents only answer.
       const works = !busy && a.role === 'solo' && a.provider === 'claude';
+      // `?approval=…`: what this agent does with the message the demo sent it, once.
+      const script = busy ? undefined : this.scripted.get(agentId);
+      if (script) this.scripted.delete(agentId);
       const reply = busy
         ? `Noted. I’m finishing **${task!.key} · ${task!.title}** — I’ll take “${text.slice(0, 48)}${text.length > 48 ? '…' : ''}” into account before Codly merges it.`
         : 'I’m free. Assign me a task from the Plan room, or ask a Lead to plan something and I’ll pick it up.';
       try {
         await act.turn(text, async () => {
-          if (works) await this.soloWork(act, text);
+          if (script) await script(act);
+          else if (works) await this.soloWork(act, text);
           else await act.say(reply, { thread });
         });
       } catch (e) {
@@ -587,7 +717,7 @@ export class Story {
     if (!plan || !spec || plan.status !== 'awaiting_approval') throw new Error('This plan is not waiting to run.');
     const base = sim.workspace?.head ?? sha();
     const branch = `${BRANCH[spec]}/integration`;
-    sim.patchPlan(planId, { status: 'running', base_commit: base, base_branch: 'main', integration_branch: branch, integration_worktree: `${WORKTREES}/${spec}-integration` });
+    sim.patchPlan(planId, { status: 'running', base_commit: base, base_branch: 'main', integration_branch: branch, integration_worktree: `${this.worktrees}/${spec}-integration` });
     sim.decision('integration_branch', 'rule', `Created ${branch} from main @ ${base.slice(0, 7)}`, { plan_id: planId, base });
     const tasks = [...sim.tasks.values()].filter((t) => t.plan_id === planId);
     for (const t of tasks) {
@@ -601,9 +731,10 @@ export class Story {
     void this.coordinate(planId);
   }
 
-  private spawnWorker(provider: Provider, name: string, color: number, task: Task | null, model?: string | null): Actor {
+  /** `home`: where a 1:1 agent works (a worker on a task works in that task's worktree). */
+  private spawnWorker(provider: Provider, name: string, color: number, task: Task | null, model?: string | null, home: string | null = null): Actor {
     const sim = this.sim;
-    const worktree = task ? `${WORKTREES}/${task.key}-${name.toLowerCase()}` : null;
+    const worktree = task ? `${this.worktrees}/${task.key}-${name.toLowerCase()}` : home;
     const a = sim.putAgent(sim.newAgent({
       name, provider, model: model ?? WORKER_MODELS[provider], role: task ? 'worker' : 'solo', color, billing: provider === 'opencode' ? 'third_party' : 'subscription',
       taskId: task?.id ?? null, worktree,
@@ -623,7 +754,7 @@ export class Story {
 
   private assign(task: Task, act: Actor, branchRoot: string) {
     const sim = this.sim;
-    const worktree = `${WORKTREES}/${task.key}-${act.a.name.toLowerCase()}`;
+    const worktree = `${this.worktrees}/${task.key}-${act.a.name.toLowerCase()}`;
     act.set({ task_id: task.id, worktree, role: act.a.role === 'lead' ? 'lead' : 'worker' });
     sim.patchTask(task.id, {
       status: 'running', assignee: act.id, branch: `${branchRoot}/${task.key}`, worktree, attempt: task.attempt + 1, status_reason: null,
@@ -653,9 +784,13 @@ export class Story {
       plan_id: plan.id, task: key, chosen: a.provider, agent: a.name, alternatives: route.alternatives,
     }, { agent: a.id, task: task.id });
     this.assign(task, act, BRANCH[spec]);
-    const body =
-      spec === 'theme' ? { t1: () => this.trackT1(act!, task), t2: () => this.trackT2(act!, task), t3: () => this.trackT3(act!, task) }[key]
-      : { t1: () => this.trackL1(act!, task), t2: () => this.trackL2(act!, task) }[key];
+    const worker = act;
+    const tracks: Record<Spec, Record<string, () => Promise<void>>> = {
+      theme: { t1: () => this.trackT1(worker, task), t2: () => this.trackT2(worker, task), t3: () => this.trackT3(worker, task) },
+      lockout: { t1: () => this.trackL1(worker, task), t2: () => this.trackL2(worker, task) },
+      retries: { t1: () => this.trackB1(worker, task), t2: () => this.trackB2(worker, task) },
+    };
+    const body = tracks[spec][key];
     if (body) void this.runTrack(act, task, body);
   }
 
@@ -737,7 +872,7 @@ export class Story {
     const a = act.a;
     const call = uid('call-');
     act.emit({
-      type: 'tool_started', call_id: call, name: 'commandExecution', activity: 'execute',
+      type: 'tool_started', call_id: call, name: shellTool(a.provider), activity: 'execute',
       target: { path: null, paths: [], command, query: null, url: null, server: null, tool: null }, input: { command }, confidence: 'observed',
     });
     const ap: Approval = {
@@ -838,6 +973,154 @@ export class Story {
     act.status('working', 'thinking');
     if (st === 'cancelled') throw new Cancelled();
     return st === 'approved';
+  }
+
+  /**
+   * A request of another kind (a tool, more permissions, a question with a free answer): it
+   * waits for your answer as the others do. `label`: what the agent's status line says
+   * meanwhile. Resolves with the request as you answered it; the caller ends the call it was
+   * for, and the turn when you chose "Stop the turn".
+   */
+  private async request(act: Actor, subject: Approval['subject'], o: { label: string; choices: Approval['choices']; reason?: string; risks?: string[]; callId?: string }): Promise<Approval> {
+    const sim = this.sim;
+    const a = act.a;
+    const ap: Approval = {
+      id: uid('ap-'), agent_id: a.id, run_id: a.run_id ?? '', task_id: a.task_id, call_id: o.callId ?? null,
+      subject, reason: o.reason ?? null, choices: o.choices, risks: o.risks ?? [], status: 'pending', decided_by: null, created_at: sim.now(),
+    };
+    sim.approvals.set(ap.id, ap);
+    act.emit({ type: 'approval_requested', approval: ap });
+    await this.answered(act, ap, o.label, 3500);
+    act.status('working', 'thinking');
+    return sim.approvals.get(ap.id)!;
+  }
+
+  /** The start of a call that waits for your answer before it runs (`ended` is its end). */
+  private started(act: Actor, name: string, activity: 'execute' | 'fetch', target: Partial<Target>, input: JsonValue): string {
+    const call = uid('call-');
+    act.emit({
+      type: 'tool_started', call_id: call, name, activity, target: { path: null, paths: [], command: null, query: null, url: null, server: null, tool: null, ...target }, input,
+      confidence: 'observed',
+    });
+    return call;
+  }
+
+  private ended(act: Actor, call: string, since: number, ok: boolean, output: string, exit: number | null = null) {
+    act.emit({ type: 'tool_completed', call_id: call, ok, output, exit_code: exit, duration_ms: this.sim.now() - since, tests_passed: null, tests_failed: null });
+  }
+
+  /**
+   * `?approval=…` (docs/DEMO.md): a 1:1 agent, asked for something small, asks that kind of
+   * request once, and takes your answer as the story's other agents do.
+   */
+  private seedAsk(kind: Exclude<AskKind, 'plan'>) {
+    if (kind === 'file') {
+      // A 1:1 Claude agent in "ask for edits" asks before its edit, with the change (`soloWork`).
+      this.userChat(`agent:${this.hire('claude', null, 'Docs').id}`, 'Add a short “Theming” section to the README.');
+      return;
+    }
+    for (const who of ASKERS[kind]) {
+      const a = this.hire(who.provider, null, who.title, who.name);
+      this.scripted.set(a.id, (act) => this.asking(kind, act));
+      this.userChat(`agent:${a.id}`, who.text);
+    }
+  }
+
+  private asking(kind: Exclude<AskKind, 'plan' | 'file'>, act: Actor): Promise<void> {
+    const claude = act.a.provider === 'claude';
+    if (kind === 'network') return claude ? this.askSandboxHost(act) : this.askNamedTool(act);
+    if (kind === 'permissions') return this.askPermissions(act);
+    return claude ? this.askLongQuestion(act) : this.askFreeAnswer(act);
+  }
+
+  /**
+   * Claude Code's shell sandbox: a command wants a host that the sandbox does not allow yet,
+   * and the CLI asks with a request of its own (`SandboxNetworkAccess`). As in the recording
+   * `r4-sandbox-network-allow`, the request has the CLI's question as its reason and an id of
+   * its own as its call: it does not say which command it is for.
+   */
+  private async askSandboxHost(act: Actor) {
+    const command = 'npm view react version';
+    await act.think('The registry knows the newest version: ask npm.', { pace: 40 });
+    const since = this.sim.now();
+    const call = this.started(act, 'Bash', 'execute', { command }, { command });
+    const ap = await this.request(act, { kind: 'tool', name: 'SandboxNetworkAccess', input: { host: NPM_HOST } }, {
+      label: NPM_HOST, choices: ['allow_once', 'deny', 'cancel'], risks: [`network (${NPM_HOST})`],
+      reason: `Allow network connection to ${NPM_HOST}?`, callId: uid(),
+    });
+    const ok = ap.status === 'approved';
+    this.ended(act, call, since, ok, ok ? '19.2.3' : `npm error code ENOTFOUND\nnpm error network request to https://${NPM_HOST}/react failed`, ok ? 0 : 1);
+    if (ap.status === 'cancelled') throw new Cancelled();
+    await act.say(ok ? 'The newest react on npm is 19.2.3.' : `The sandbox did not let npm reach ${NPM_HOST}, so I cannot tell from here.`, { thread: `agent:${act.id}` });
+  }
+
+  /**
+   * A tool of another CLI that has the name of Claude Code's sandbox request. It is a tool
+   * like any other: the request shows its name and its input.
+   */
+  private async askNamedTool(act: Actor) {
+    const input = { host: NPM_HOST };
+    await act.think('One of my tools can ask the registry for the newest version.', { pace: 40 });
+    const since = this.sim.now();
+    const call = this.started(act, 'SandboxNetworkAccess', 'fetch', { tool: 'SandboxNetworkAccess' }, input);
+    const ap = await this.request(act, { kind: 'tool', name: 'SandboxNetworkAccess', input }, { label: 'SandboxNetworkAccess', choices: ['allow_once', 'deny'], callId: call });
+    const ok = ap.status === 'approved';
+    this.ended(act, call, since, ok, ok ? 'react 19.2.3' : 'Declined by the user.');
+    await act.say(ok ? 'The newest react on npm is 19.2.3.' : 'Understood: without that tool I cannot tell which version is the newest.', { thread: `agent:${act.id}` });
+  }
+
+  /**
+   * Codex asks for more than its sandbox gives it: to write outside its worktree. The detail
+   * has the shape of `PermissionsRequestApprovalParams` of codex-cli 0.166.0 (written from its
+   * schema types, not from a recording).
+   */
+  private async askPermissions(act: Actor) {
+    const a = act.a;
+    const thread = `agent:${act.id}`;
+    const docs = `${HOME}/Code/acme-docs`;
+    const reason = 'The changelog is in ../acme-docs, outside my worktree.';
+    await act.think('The changelog is not in this repo: it is in the docs repo next to it, and I may not write there.', { pace: 40 });
+    const detail = {
+      threadId: a.session_id ?? '', turnId: uid('turn-'), itemId: uid('item-'), environmentId: null, startedAtMs: this.sim.now(), cwd: a.worktree ?? REPO, reason,
+      permissions: { network: null, fileSystem: { read: null, write: [docs] } },
+    };
+    const ap = await this.request(act, { kind: 'permissions', detail }, { label: 'more permissions', choices: ['allow_once', 'allow_session', 'deny'], reason });
+    if (ap.status !== 'approved') {
+      await act.say('Understood: I stay inside my worktree. The line for the changelog is: “Added: a dark mode toggle in Settings.”', { thread });
+      return;
+    }
+    await act.tool({ name: 'fileChange', activity: 'edit', target: { path: `${docs}/CHANGELOG.md` }, ms: 1200, files: [`${docs}/CHANGELOG.md`] });
+    await act.say('Done: the changelog in `../acme-docs` has a line about the dark mode toggle.', { thread });
+  }
+
+  /** Claude Code's AskUserQuestion with long options: the one you pick is the answer the closed row shows. */
+  private async askLongQuestion(act: Actor) {
+    const [one, two] = LONG_QUESTION.options;
+    await act.think('Who reads the release note decides what goes into it: ask before writing.', { pace: 40 });
+    const picked = await this.question(act, LONG_QUESTION.question, LONG_QUESTION.header, LONG_QUESTION.options);
+    const reply = picked === two.label ? 'Two notes then: a short one for users, and one for developers about the theme tokens.'
+      : picked === one.label ? 'One note for everyone then: where the toggle is, the system default, and the saved choice.'
+      : 'No answer: I write one short note for everyone, and you can ask for the second one later.';
+    await act.say(reply, { thread: `agent:${act.id}` });
+  }
+
+  /**
+   * A question with no options: an MCP server asks through Codex, and you write the answer.
+   * The request has the shape of `McpServerElicitationRequestParams` of codex-cli 0.166.0, mode
+   * "form" (written from its schema types, not from a recording).
+   */
+  private async askFreeAnswer(act: Actor) {
+    const message = 'Which team gets the new issue? Write the team’s name, and why it is that team if the checkout is not theirs.';
+    await act.think('Linear wants a team for the issue, and I do not know who owns the checkout tests.', { pace: 40 });
+    const questions = {
+      threadId: act.a.session_id ?? '', turnId: uid('turn-'), serverName: 'linear', mode: 'form', _meta: null, message,
+      requestedSchema: { type: 'object', properties: { team: { type: 'string', title: 'Team' } }, required: ['team'] },
+    };
+    const ap = await this.request(act, { kind: 'question', questions }, { label: 'Linear', choices: ['allow_once', 'deny', 'cancel'], reason: message });
+    if (ap.status === 'cancelled') throw new Cancelled();
+    const said = (this.answers.get(ap.id) as { answer?: unknown } | undefined)?.answer;
+    const team = ap.status === 'approved' && typeof said === 'string' ? said.trim() : '';
+    await act.say(team ? `The issue is open in Linear, for the team you named: ${quoted(team, 200)}.` : 'No team, so I did not open an issue.', { thread: `agent:${act.id}` });
   }
 
   /**
@@ -1166,6 +1449,59 @@ export class Story {
     });
   }
 
+  /** billing-api, t1. Otto's request is the one that waits for you there: it is asked as the task starts, with no pause before it. */
+  private async trackB1(otto: Actor, task: Task) {
+    const files = BILLING_FILES.b1.map((f) => f.path);
+    const steps = ['Read how an invoice is charged', 'Add the retry schedule', 'Unit tests for each retry'];
+    const at = (n: number) => steps.map((text, i): [string, 'pending' | 'in_progress' | 'completed'] => [text, i < n ? 'completed' : i === n ? 'in_progress' : 'pending']);
+    await otto.turn(`Task t1 · ${task.title}\n\n${task.goal}`, async () => {
+      otto.plan(at(1));
+      const up = await this.approval(otto, 'docker compose up -d stripe-mock', 'The retry tests charge a card: they need the local Stripe mock to answer.', [
+        'starts a local service', 'network (pulls an image)',
+      ], [' ✔ Container billing-api-stripe-mock-1  Started']);
+      if (up === 'denied') await otto.say('Understood: the tests use a stub of the Stripe client, not the mock server.', { phase: 'commentary' });
+      await otto.tool({ name: 'fileChange', activity: 'create', target: { path: files[0] }, ms: 1800, files: [files[0]], taskKey: 'b1' });
+      otto.plan(at(2));
+      await otto.tool({ name: 'fileChange', activity: 'create', target: { path: files[1] }, ms: 1300, files: [files[1]], taskKey: 'b1' });
+      await otto.tool({
+        name: 'commandExecution', activity: 'test', target: { command: 'npm test -- retry' }, ms: 2400, passed: 2, failed: 0, confidence: 'inferred',
+        lines: ['> billing-api@1.9.0 test', '> vitest run retry', '', ' ✓ src/invoices/retry.test.ts (2 tests) 12ms', '', ' Test Files  1 passed (1)', '      Tests  2 passed (2)'],
+      });
+      otto.plan(at(3));
+      await otto.say('A failed payment is now tried again one day later, three times at most; after the last try the invoice is `unpaid`. 2 unit tests pass.');
+    });
+    await this.gate(otto, task, {
+      files, message: 't1: Retry schedule for failed payments', verify: 'npm test -- retry', tail: '      Tests  2 passed (2)',
+      summary: 'A failed payment is tried again one day later, three times at most, then the invoice is unpaid. 2 unit tests.', integration: true,
+    });
+  }
+
+  /** billing-api, t2. */
+  private async trackB2(rex: Actor, task: Task) {
+    const files = BILLING_FILES.b2.map((f) => f.path);
+    await rex.sleep(900);
+    await rex.turn(`Task t2 · ${task.title}\n\n${task.goal}`, async () => {
+      rex.plan([['Read how the other emails are written', 'in_progress'], ['Write the “payment failed” email', 'pending'], ['Unit test for its text', 'pending']]);
+      await rex.think('The other emails are plain functions that return `to`, `subject` and `text`. This one needs the invoice number and the amount.');
+      await rex.tool({ name: 'Glob', activity: 'search', target: { query: 'src/mail/*.ts' }, ms: 700, output: 'src/mail/send.ts\nsrc/mail/receipt.ts\nsrc/mail/welcome.ts' });
+      await rex.tool({ name: 'Read', activity: 'read', target: { path: 'src/mail/receipt.ts' }, ms: 650 });
+      rex.plan([['Read how the other emails are written', 'completed'], ['Write the “payment failed” email', 'in_progress'], ['Unit test for its text', 'pending']]);
+      await rex.tool({ name: 'Write', activity: 'create', target: { path: files[0] }, ms: 2200, files: [files[0]], taskKey: 'b2' });
+      rex.plan([['Read how the other emails are written', 'completed'], ['Write the “payment failed” email', 'completed'], ['Unit test for its text', 'in_progress']]);
+      await rex.tool({ name: 'Write', activity: 'create', target: { path: files[1] }, ms: 1500, files: [files[1]], taskKey: 'b2' });
+      await rex.tool({
+        name: 'Bash', activity: 'test', target: { command: 'npm test -- mail' }, ms: 2600, passed: 1, failed: 0,
+        lines: ['> billing-api@1.9.0 test', '> vitest run mail', '', ' ✓ src/mail/paymentFailed.test.ts (1 test) 9ms', '', ' Test Files  1 passed (1)', '      Tests  1 passed (1)'],
+      });
+      rex.plan([['Read how the other emails are written', 'completed'], ['Write the “payment failed” email', 'completed'], ['Unit test for its text', 'completed']]);
+      await rex.say('Added the “payment failed” email: it names the invoice and the amount, and asks the customer to update the card. 1 unit test passes.');
+    });
+    await this.gate(rex, task, {
+      files, message: 't2: Email after the last failed try', verify: 'npm test -- mail', tail: '      Tests  1 passed (1)',
+      summary: 'The “payment failed” email, with the invoice number and the amount. 1 unit test.', integration: true,
+    });
+  }
+
   /** Starts each task once what it waits on is merged; when all are, integrates and tells its Lead. */
   private async coordinate(planId: string) {
     const sim = this.sim;
@@ -1180,6 +1516,8 @@ export class Story {
         if (started.has(t.id) || t.status === 'done' || t.status === 'cancelled') continue;
         if (t.depends_on.some((d) => sim.tasks.get(d)?.status !== 'done')) continue;
         started.add(t.id);
+        // At work already (billing-api's tasks are, when you open it): not started a second time.
+        if (t.status !== 'pending' && t.status !== 'ready') continue;
         if (t.status === 'pending') {
           sim.patchTask(t.id, { status: 'ready', status_reason: 'Dependencies merged; starting' });
           await sim.sleep(900);
@@ -1192,7 +1530,7 @@ export class Story {
     sim.patchPlan(planId, { status: 'integrating' });
     await sim.sleep(1500);
     const plan = sim.plans.get(planId)!;
-    const all = tasks().flatMap((t) => TASK_FILES[this.fileKey(t)] ?? []);
+    const all = tasks().flatMap((t) => filesOf(this.fileKey(t)) ?? []);
     const s = stats(all);
     const n = tasks().length;
     sim.decision('plan_done', 'rule', `All ${n} tasks merged into ${plan.integration_branch}: ${s.files} files, +${s.added} −${s.removed}`, { plan_id: planId, ...s });
@@ -1204,6 +1542,11 @@ export class Story {
         '- **t2** `theme` column with a migration, validated in `PATCH /api/settings` · 8 API tests\n' +
         '- **t3** System / Light / Dark toggle on Settings · 3 e2e tests (Cy caught and fixed a reload race)\n\n' +
         '`main` is untouched. Review the diff, then merge when you’re ready.'
+      : spec === 'retries'
+      ? `Both tasks are merged into \`${plan.integration_branch}\` — ${s.files} files, +${s.added} −${s.removed}.\n\n` +
+        '- **t1** a failed payment is tried again one day later, three times at most · 2 unit tests\n' +
+        '- **t2** the “payment failed” email, with the invoice number and the amount · 1 unit test\n\n' +
+        '`main` is untouched until you merge.'
       : `Both tasks are merged into \`${plan.integration_branch}\` — ${s.files} files, +${s.added} −${s.removed}.\n\n` +
         '- **t1** failures counted per email in Redis; 5 in 15 minutes → `LOCKED` · 5 unit tests\n' +
         '- **t2** clear lockout message on `/sign-in`, form disabled while locked · 2 e2e tests\n\n' +
@@ -1261,7 +1604,7 @@ export class Story {
    */
   conflictFiles(planId: string): string[] {
     const done = [...this.sim.tasks.values()].filter((t) => t.plan_id === planId && t.status === 'done');
-    const edited = done.flatMap((t) => TASK_FILES[this.fileKey(t)] ?? []).filter((f) => f.before !== null);
+    const edited = done.flatMap((t) => filesOf(this.fileKey(t)) ?? []).filter((f) => f.before !== null);
     return edited.slice(-1).map((f) => f.path);
   }
 
@@ -1311,10 +1654,13 @@ export class Story {
       const ofPlan = [...sim.tasks.values()].filter((t) => t.plan_id === planId && t.assignee).map((t) => sim.agents.get(t.assignee!)).reverse();
       const agent = ofPlan.find(free) ?? [...sim.agents.values()].find(free);
       const act = agent ? sim.actor(agent.id) : this.spawnWorker('claude', 'Eli', 5, task);
+      const own = act.a.worktree;
       act.set({ task_id: taskId, worktree: task.worktree });
       sim.patchTask(taskId, { status: 'running', assignee: act.id, attempt: 1, status_reason: null });
       sim.decision('route', 'rule', `${task.key} → ${act.a.name}: free, and it works in the plan’s own worktree`, { plan_id: planId, task: task.key, agent: act.a.name }, { agent: act.id, task: taskId });
       await this.runTrack(act, task, () => this.trackResolve(act, sim.tasks.get(taskId)!, target));
+      // The plan's worktree was the worker's for this task only: it has its own again (none, when it had none).
+      if (sim.agents.get(act.id)?.worktree === task.worktree) act.set({ worktree: own });
     }
     const plan = sim.plans.get(planId)!;
     const end = sim.tasks.get(taskId)!;
@@ -1591,27 +1937,31 @@ export class Story {
     }
   }
 
-  /** A new 1:1 agent. `named` is the name the hire wizard gave it (checked there to be free); without one it gets its CLI's stock name. */
-  hire(provider: Provider, model: string | null = null, title: string | null = null, named: string | null = null): Agent {
+  /**
+   * A new 1:1 agent. `named` is the name the hire wizard gave it (checked there to be free);
+   * without one it gets its CLI's stock name. `isolate` false: Git isolation is off, so it works
+   * in your project folder.
+   */
+  hire(provider: Provider, model: string | null = null, title: string | null = null, named: string | null = null, isolate = true): Agent {
     const sim = this.sim;
     const names = new Set([...sim.agents.values()].map((a) => a.name));
     let name = named ?? WORKER_NAMES[provider];
     if (!named) for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
     const used = new Set([...sim.agents.values()].map((a) => a.color));
     const color = [0, 1, 3, 5, 2, 4, 7, 6].find((c) => !used.has(c)) ?? sim.agents.size % 8;
-    const act = this.spawnWorker(provider, name, color, null, model);
-    act.status('idle');
-    // Like the core: a 1:1 agent works in a worktree of its own, called after its name (the
-    // hire puts it in your project folder instead when Git isolation is off). Two names can
-    // read the same in a path, so a path that is taken gets a number.
+    // Like the core: a 1:1 agent works in a worktree of its own, called after its name. Two
+    // names can read the same in a path, so a path that is taken gets a number. Its session
+    // starts there: the folder is known before the agent is.
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
     const taken = new Set([...sim.agents.values()].map((a) => a.worktree));
-    let worktree = `${WORKTREES}/${slug}`;
-    for (let i = 2; taken.has(worktree); i++) worktree = `${WORKTREES}/${slug}-${i}`;
-    return sim.patchAgent(act.a.id, { worktree, ...(title ? { title } : {}) });
+    let worktree = `${this.worktrees}/${slug}`;
+    for (let i = 2; taken.has(worktree); i++) worktree = `${this.worktrees}/${slug}-${i}`;
+    const act = this.spawnWorker(provider, name, color, null, model, isolate ? worktree : (sim.workspace?.repo_path ?? REPO));
+    act.status('idle');
+    return title ? sim.patchAgent(act.a.id, { title }) : act.a;
   }
 
-  /** `?mode=plan`: a 1:1 Claude agent in "plan first", asked for a small change, so its plan waits for your answer. */
+  /** `?mode=plan` (and `?approval=plan`): a 1:1 Claude agent in "plan first", asked for a small change, so its plan waits for your answer. */
   private seedPlanner() {
     const a = this.hire('claude', null, 'Docs');
     this.sim.patchAgent(a.id, { permission_mode: 'plan' });
@@ -1646,14 +1996,14 @@ export class Story {
     if (!t) throw new Error('Unknown task');
     if (t.key === 'a3' && !t.plan_id) return diffOf(NEXT_BUMP);
     const fk = this.fileKey(t);
-    const files = TASK_FILES[fk] ?? TASK_FILES.adhoc;
+    const files = filesOf(fk) ?? TASK_FILES.adhoc;
     const touched = this.sim.touched.get(fk) ?? new Set<string>();
     return diffOf(files.filter((f) => touched.has(f.path)));
   }
 
   planDiff(id: string): string {
     const tasks = [...this.sim.tasks.values()].filter((t) => t.plan_id === id && t.status === 'done');
-    return diffOf(tasks.flatMap((t) => TASK_FILES[this.fileKey(t)] ?? []));
+    return diffOf(tasks.flatMap((t) => filesOf(this.fileKey(t)) ?? []));
   }
 
   searchIndex() {

@@ -213,14 +213,14 @@ export async function finishPlan(planId: string) {
 export async function closeRequest(thread: string): Promise<boolean> {
   const list = requests.list;
   const i = list.findIndex((r) => r.thread === thread);
-  const ws = store.workspace?.id ?? null;
   const ok = await attempt('close the request', async () => {
     await api.closeThread(thread);
     return true;
   });
   if (!ok) return false;
+  // Review comments its composer held and did not send stay on their diff: a request that is
+  // no tab any more holds none (`waitingRequest`), and its thread name is never given again.
   ui.draftRequests = ui.draftRequests.filter((d) => d.thread !== thread);
-  review.unhand(ws, thread); // review comments it held and did not send stay on their diff
   if (ui.request === thread) ui.openRequest((list[i + 1] ?? list[i - 1])?.thread ?? 'lead');
   await store.resync(); // its messages moved out of the thread without events
   return true;

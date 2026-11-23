@@ -3,6 +3,7 @@
   import type { Agent } from '../lib/gen/Agent';
   import { store } from '../lib/state/store.svelte';
   import { clockSec, dur } from '../lib/util/format';
+  import { uniqueKeys } from '../lib/util/keys';
   import { buildTraces, summarize } from '../lib/util/traces';
   import Icon from '../components/Icon.svelte';
 
@@ -14,10 +15,12 @@
   // Built from this agent's events only, so only when one of them arrives.
   const calls = $derived.by(() => {
     void store.revBy.get(agent.id);
-    return buildTraces(store.events, agent.id);
+    return buildTraces(store.events, agent.id, agent.provider);
   });
   const sum = $derived(summarize(calls));
-  const shown = $derived(calls.slice(-200).reverse());
+  // A row's key is its call id. A CLI may use an id again in a later turn: the later call adds its place.
+  const keys = $derived(uniqueKeys(calls, (c) => c.callId));
+  const shown = $derived(calls.map((c, i) => ({ c, key: keys[i] })).slice(-200).reverse());
   /** Longest known call: the bars are relative to it. */
   const slowest = $derived(calls.reduce((ms, c) => Math.max(ms, c.durationMs ?? 0), 1));
 </script>
@@ -27,7 +30,7 @@
     {sum.calls} {sum.calls === 1 ? 'call' : 'calls'} · {dur(sum.totalMs)} in tools{sum.failed ? ` · ${sum.failed} failed` : ''}{sum.running ? ` · ${sum.running} running` : ''}
   </p>
   <ul class="tr">
-    {#each shown as c (c.callId)}
+    {#each shown as { c, key } (key)}
       <li>
         <div class="row">
           <span class="ic" class:bad={c.ok === false && !c.planSentBack} class:quiet={c.planSentBack} class:run={c.ok === null}><Icon name={c.ok === null ? 'play' : c.ok ? 'check' : c.planSentBack ? 'refresh' : 'x-circle'} size={12} /></span>

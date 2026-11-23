@@ -128,7 +128,7 @@
     {#if held.length}
       <div class="ask" role="alertdialog" aria-label="Checks that need your OK">
         <p>The Lead wrote {held.length === 1 ? 'a check' : 'checks'} that can do more than test this task. Codly runs {held.length === 1 ? 'it' : 'them'} only with your OK:</p>
-        <ul>{#each held as h (h.command)}<li><code class="selectable">{h.command}</code><span>{h.risks.join(', ')}</span></li>{/each}</ul>
+        <ul>{#each held as h, i (i)}<li><code class="selectable">{h.command}</code><span>{h.risks.join(', ')}</span></li>{/each}</ul>
         <div class="ask-acts">
           <button class="btn sm ghost" onclick={() => (held = [])}>Not now</button>
           <button class="btn sm amber" onclick={() => recheck(held.map((h) => h.command))}>Allow and run</button>

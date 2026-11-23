@@ -8,8 +8,9 @@ import type { Agent } from '../lib/gen/Agent';
 import type { AgentStatus } from '../lib/gen/AgentStatus';
 import type { Approval } from '../lib/gen/Approval';
 import type { EventRow } from '../lib/gen/EventRow';
+import type { Provider } from '../lib/gen/Provider';
 import type { Task } from '../lib/gen/Task';
-import { showsPlan } from '../lib/util/planTool';
+import { PLAN_ASK, showsPlan } from '../lib/util/planRequest';
 import { sandboxWants } from '../lib/util/sandbox';
 import { columnOf, emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type ToolCall } from './model';
 import { basename, clean, commandHead, hash, host } from './text';
@@ -42,6 +43,7 @@ function placeholder(id: string, ts: number): AgentState {
     id,
     name: 'Agent',
     provider: 'claude',
+    providerKnown: false,
     role: 'worker',
     badge: null,
     color: hash(id) % 8,
@@ -93,6 +95,7 @@ const RANK_ORDER = ['intern', 'junior', 'senior', 'staff'];
 function copyAgent(a: AgentState, ag: Agent, now: number) {
   a.name = clean(ag.name, 32) || 'Agent';
   a.provider = ag.provider;
+  a.providerKnown = true;
   a.role = ag.role;
   a.badge = clean(ag.title ?? '', 24) || (ag.consultant ? 'Consultant' : null);
   a.color = ag.color;
@@ -195,7 +198,7 @@ export function applyStatus(a: AgentState, status: AgentStatus, ts: number) {
       if (a.thinkingSince == null) a.thinkingSince = ts;
       break;
     case 'waiting_approval':
-      if (!a.approval) a.approval = { id: 'status', text: '', since: ts };
+      if (!a.approval) a.approval = { id: 'status', text: '', command: false, since: ts };
       break;
     case 'blocked':
     case 'failed':
@@ -207,24 +210,27 @@ export function applyStatus(a: AgentState, status: AgentStatus, ts: number) {
   }
 }
 
-/** What an agent that shows you its plan waits for (after "Waiting for you:"). */
-export const PLAN_ASK = 'read its plan';
-
-export function approvalText(ap: Approval): string {
+/**
+ * What a request asks, in a few words: a command by its first words, every other request by
+ * what the agent wants to do, so that it reads after "May I" and after "Waiting for you:". A
+ * Claude agent's plan is `PLAN_ASK`: what you do with it, since a plan is read, not allowed.
+ * `provider`: the CLI of the agent that asks (null: the office does not know it).
+ */
+export function approvalText(ap: Approval, provider: Provider | null): string {
   const s = ap.subject;
   switch (s.kind) {
     case 'command':
       return commandHead(s.command, 4);
     case 'file_change':
-      return s.paths.length ? `edit ${clean(basename(s.paths[0]), 28)}${s.paths.length > 1 ? ` +${s.paths.length - 1}` : ''}` : 'a file change';
+      return s.paths.length ? `edit ${clean(basename(s.paths[0]), 28)}${s.paths.length > 1 ? ` +${s.paths.length - 1}` : ''}` : 'change files';
     case 'tool':
-      // A plan to read, or a host that a command in Claude Code's sandbox wants: said as that,
-      // not by the request's tool name.
-      return showsPlan(s) ? PLAN_ASK : (sandboxWants(s, 30) ?? `use ${clean(s.name, 30)}`);
+      // A Claude agent's plan to read, or a host that a command in Claude Code's sandbox wants:
+      // said as that, not by the request's tool name.
+      return showsPlan(s, provider) ? PLAN_ASK : (sandboxWants(s, provider, 30) ?? `use ${clean(s.name, 30)}`);
     case 'question':
-      return 'a question';
+      return 'ask a question';
     default:
-      return 'permissions';
+      return 'get more permissions';
   }
 }
 
@@ -304,6 +310,7 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
     case 'session_started':
       if (a && own) {
         a.provider = k.provider;
+        a.providerKnown = true;
         a.present = true;
       }
       break;
@@ -408,7 +415,7 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
           tick('Briefing a helper');
           break;
         case 'await_approval':
-          a.approval = { id: 'q:' + call.callId, text: call.query ? clean(call.query, 60) : 'a question', since: at };
+          a.approval = { id: 'q:' + call.callId, text: call.query ? clean(call.query, 60) : 'a question', command: false, since: at };
           tick('Waiting for you:', a.approval.text, 'warn');
           break;
       }
@@ -455,8 +462,8 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
       const who = ap.agent_id || aid;
       if (!who || m.resolved.has(ap.id)) break;
       const ag = ensureAgent(m, who, at);
-      const text = approvalText(ap);
-      ag.approval = { id: ap.id, text, since: at };
+      const text = approvalText(ap, ag.providerKnown ? ag.provider : null);
+      ag.approval = { id: ap.id, text, command: ap.subject.kind === 'command', since: at };
       m.approvals.set(ap.id, { agentId: who, text, since: at });
       tick('Waiting for you:', text, 'warn', who);
       break;

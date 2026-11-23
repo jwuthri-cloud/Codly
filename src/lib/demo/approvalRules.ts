@@ -18,8 +18,8 @@ import type { Story } from './story';
 
 /** The core's own risk labels for what a rule may cover. */
 export const PACKAGE_INSTALL = 'network (package install)';
-export const NPX_DOWNLOAD = 'network (npx)';
-export const GIT_WRITE = 'git write (Codly commits and merges for you)';
+const NPX_DOWNLOAD = 'network (npx)';
+const GIT_WRITE = 'git write (Codly commits and merges for you)';
 const BY_PREFIX = [PACKAGE_INSTALL, NPX_DOWNLOAD, GIT_WRITE];
 const BY_EXACT = [...BY_PREFIX, 'network'];
 

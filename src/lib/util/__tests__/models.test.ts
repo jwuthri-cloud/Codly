@@ -28,6 +28,20 @@ describe('effortsFor', () => {
     expect(effortsFor(builtIn, 'codex', '')).toEqual(['low', 'high']);
   });
 
+  it('offers no level for a model that the CLI’s own list names without one', () => {
+    const mixed: ModelCatalog = { source: 'cli', problem: null, models: [model('gpt-6-nova', []), model('gpt-6-luna', ['low', 'high'])] };
+    expect(effortsFor(mixed, 'codex', 'gpt-6-nova')).toEqual([]);
+    // A name the list does not have was typed by hand: nothing says what it takes, so every level of the list.
+    expect(effortsFor(mixed, 'codex', 'typed-by-hand')).toEqual(['low', 'high']);
+    // The same model in Codly's built-in list: Codly did not ask the CLI, so the list's levels stay on offer.
+    expect(effortsFor({ ...mixed, source: 'built_in', problem: 'Codex is not signed in' }, 'codex', 'gpt-6-nova')).toEqual(['low', 'high']);
+  });
+
+  it('offers a level once when the CLI names it twice', () => {
+    const twice: ModelCatalog = { source: 'cli', problem: null, models: [model('gpt-7', ['low', 'high', 'low'])] };
+    expect(effortsFor(twice, 'codex', 'gpt-7')).toEqual(['low', 'high']);
+  });
+
   it('uses Codly’s table only for a CLI that lists no levels: Claude Code', () => {
     expect(effortsFor(null, 'claude', 'opus')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
     expect(effortsFor({ source: 'built_in', problem: null, models: [model('opus', [])] }, 'claude', 'opus')).toContain('max');
@@ -58,6 +72,13 @@ describe('keptEffort', () => {
     // A list that names no level at all: the CLI takes none.
     expect(keptEffort({ source: 'cli', problem: null, models: [model('big-pickle', [])] }, 'opencode', 'big-pickle', 'high')).toBe('');
   });
+
+  it('drops the effort for a model that the CLI’s own list names without a level', () => {
+    const mixed: ModelCatalog = { source: 'cli', problem: null, models: [model('gpt-6-nova', []), model('gpt-6-luna', ['low', 'high'])] };
+    expect(keptEffort(mixed, 'codex', 'gpt-6-nova', 'high')).toBe('');
+    // A name typed by hand keeps a level the list names.
+    expect(keptEffort(mixed, 'codex', 'typed-by-hand', 'high')).toBe('high');
+  });
 });
 
 describe('effortOptions', () => {
@@ -75,6 +96,12 @@ describe('effortOptions', () => {
       { id: 'low', label: 'Low' },
       { id: 'xhigh', label: 'Extra high (not listed for this model)' },
     ]);
+  });
+
+  it('shows only the saved level, marked, for a model that the CLI’s own list names without a level', () => {
+    const mixed: ModelCatalog = { source: 'cli', problem: null, models: [model('gpt-6-nova', []), model('gpt-6-luna', ['low', 'high'])] };
+    expect(effortOptions(mixed, 'codex', 'gpt-6-nova', 'high')).toEqual([{ id: 'high', label: 'High (not listed for this model)' }]);
+    expect(effortOptions(mixed, 'codex', 'gpt-6-nova', '')).toEqual([]);
   });
 
   it('shows a saved level as it is while the list is not read', () => {

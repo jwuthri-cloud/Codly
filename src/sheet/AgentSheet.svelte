@@ -36,7 +36,7 @@
   import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
   import { historyFacts, repeatsReply, taskChangedLine, tripleLine, type Names } from './historyWords';
-  import { PLAN_TOOL, planCallEnd, planStep } from '../lib/util/planTool';
+  import { isPlanCall, planCallEnd, planStep } from '../lib/util/planRequest';
   import AgentMcp from './AgentMcp.svelte';
   import AgentTakeover from './AgentTakeover.svelte';
   import AgentTrust from './AgentTrust.svelte';
@@ -152,7 +152,7 @@
     const lo = live?.lastOutput;
     if (lo) {
       const s = live?.segments.find((x) => x.callId === lo.callId);
-      return { title: s ? (s.name === PLAN_TOOL ? planStep(false) : `${pastVerb(s.activity)} ${s.label}`) : 'Last output', text: lo.text, live: false, ok: lo.ok, path: segPath(s, lo.text) };
+      return { title: s ? (isPlanCall(s.name, agent.provider) ? planStep(false) : `${pastVerb(s.activity)} ${s.label}`) : 'Last output', text: lo.text, live: false, ok: lo.ok, path: segPath(s, lo.text) };
     }
     return null;
   });
@@ -178,7 +178,7 @@
   let rawOpen = $state<number | null>(null);
   const facts = $derived.by(() => {
     void store.revBy.get(agent.id);
-    return historyFacts(store.events, agent.id);
+    return historyFacts(store.events, agent.id, agent.provider);
   });
   const log = $derived.by(() => {
     void store.rev;
@@ -202,7 +202,7 @@
   function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
     const k = e.kind;
     switch (k.type) {
-      case 'tool_started': return { icon: 'play', text: k.name === PLAN_TOOL ? planStep(false) :`${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
+      case 'tool_started': return { icon: 'play', text: isPlanCall(k.name, agent.provider) ? planStep(false) : `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
       case 'tool_completed':
         if (facts.planCalls.has(k.call_id)) return { icon: k.ok ? 'check' : 'refresh', text: `${planCallEnd(k.ok, store.approvals.find((a) => a.call_id === k.call_id)?.status ?? null)}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}` };
         return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
@@ -214,8 +214,8 @@
       case 'turn_completed': return { icon: 'check-circle', text: `Turn ${k.status}${k.duration_ms ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.status === 'completed' ? undefined : 'warn' };
       case 'status_changed': return { icon: 'refresh', text: `Status → ${k.status.replace('_', ' ')}` };
       case 'plan_updated': return { icon: 'list', text: `Its list: ${k.steps.filter((s) => s.status === 'completed').length} of ${k.steps.length} done` };
-      case 'approval_requested': return { icon: 'flag', text: askedLine(k.approval), tone: 'warn' };
-      case 'approval_resolved': return { icon: 'flag', text: settledLine(k.status, k.by, store.approvals.find((a) => a.id === k.approval_id) ?? null, yourAnswers.get(k.approval_id) ?? null), tone: k.status === 'approved' ? 'good' : 'bad' };
+      case 'approval_requested': return { icon: 'flag', text: askedLine(k.approval, agent.provider), tone: 'warn' };
+      case 'approval_resolved': return { icon: 'flag', text: settledLine(k.status, k.by, store.approvals.find((a) => a.id === k.approval_id) ?? null, yourAnswers.get(k.approval_id) ?? null, agent.provider), tone: k.status === 'approved' ? 'good' : 'bad' };
       case 'retrieval': return { icon: 'link', text: `Codly provided ${k.citations.length} citations for “${oneLine(k.query, 50)}”` };
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
       case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
@@ -257,8 +257,9 @@
     tick().then(() => root?.querySelector(`[data-section="${f}"]`)?.scrollIntoView({ block: 'start', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
   });
 
-  /** The head with the agent's name has scrolled away: a slim bar keeps saying whose sheet this is. */
+  /** The agent's name in the head has scrolled out of view: a slim bar keeps saying whose sheet this is. */
   let headGone = $state(false);
+  let nameEl: HTMLHeadingElement | undefined = $state();
 
   // ── menu ──
   let moreBtn: HTMLButtonElement | undefined = $state();
@@ -296,13 +297,13 @@
   ]);
 </script>
 
-<div class="as" bind:this={root} style:--hue={idVar(agent.color)} onscroll={() => (headGone = (root?.scrollTop ?? 0) > 72)}>
+<div class="as" bind:this={root} style:--hue={idVar(agent.color)} onscroll={() => (headGone = !!root && !!nameEl && nameEl.getBoundingClientRect().bottom <= root.getBoundingClientRect().top)}>
   <!-- The name again (the head's own stays for screen readers): what you press below acts on this agent. -->
   <div class="pin" class:on={headGone} aria-hidden="true"><div class="pin-bar"><Portrait {agent} size={22} /><b class="truncate">{agent.name}</b></div></div>
   <header class="head">
     {#if n}<Orbit size={64} progress={n.progress} tone={n.tone} stroke={2.5}><Portrait {agent} size={50} /></Orbit>{/if}
     <div class="h-text">
-      <h2 class="serif">{agent.name}</h2>
+      <h2 class="serif" bind:this={nameEl}>{agent.name}</h2>
       <p class="h-sub">{agentTitle(agent) ? `${agentTitle(agent)} · ` : ''}{PROVIDER_LABEL[agent.provider]} ({COMPANY_LABEL[agent.provider]}){#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{` · ${model}`}</p>
       <div class="h-tags">
         <BillingBadge billing={agent.billing} plan={account?.plan ?? cli?.plan} />
@@ -544,7 +545,8 @@
   /* No height of its own: the bar lies over the top of what scrolls and takes no room. */
   .pin { position: sticky; top: 0; z-index: 1; height: 0; flex-shrink: 0; }
   .pin-bar { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 56px 0 22px; background: var(--glass-solid); box-shadow: 0 1px 0 var(--line); opacity: 0; pointer-events: none; transition: opacity var(--d-2) var(--ease-out); }
-  .pin.on .pin-bar { opacity: 1; pointer-events: auto; }
+  /* It is there at once (the head's name has just left), and fades only on its way out. */
+  .pin.on .pin-bar { opacity: 1; pointer-events: auto; transition: none; }
   .pin-bar b { font-weight: var(--w-semi); color: var(--ink-1); }
   .head { display: flex; gap: 16px; align-items: center; padding: 24px 22px 10px; background: radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--hue) 14%, transparent), transparent 60%); }
   .h-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-right: 30px; }

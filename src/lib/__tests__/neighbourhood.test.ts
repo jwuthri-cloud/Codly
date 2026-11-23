@@ -48,11 +48,11 @@ describe("the demo's neighbourhood", () => {
     const moved = demoMoveOffice(sim, 'ws-demo', plot.id);
     expect(moved.find((s) => s.id === plot.id)!.workspace_id).toBe('ws-demo');
     // The Studio filled its plot: off the Garage's, so the chair waits in storage there.
-    expect(demoLot().storage?.some((p) => p.uid === 'c1')).toBe(true);
-    expect(demoLot().size).toEqual({ w: 16, d: 12 });
+    expect(demoLot(sim).storage?.some((p) => p.uid === 'c1')).toBe(true);
+    expect(demoLot(sim).size).toEqual({ w: 16, d: 12 });
 
     // A save is priced; the old plot keeps its (gift) building and sells for nothing.
-    const lot = demoLot();
+    const lot = demoLot(sim);
     lot.walls.push({ id: 'n1', x0: 1, z0: 1, x1: 1, z1: 3, kind: 'solid' });
     expect(demoSaveLot(sim, lot).cost).toBe(20);
     demoSellLot(sim, home.id);
@@ -65,12 +65,12 @@ describe("the demo's neighbourhood", () => {
     expect(() => demoCloseOffice(sim, 'no-such-office')).toThrow('no such office');
     // Agents are at work in billing-api: it does not close.
     expect(() => demoCloseOffice(sim, 'demo-office-billing')).toThrow('Otto is in the middle of a turn in billing-api: wait for it, or stop it first');
-    expect(demoOffices().map((o) => o.name)).toEqual(['docs-site', 'billing-api']);
+    expect(demoOffices(sim).map((o) => o.name)).toEqual(['docs-site', 'billing-api']);
 
     const docs = plotOf('demo-office-docs')!;
     const after = demoCloseOffice(sim, 'demo-office-docs').find((s) => s.id === docs.id)!;
     expect(after).toMatchObject({ owned: true, workspace_id: null, name: null, crew: 0, template: docs.template });
-    expect(demoOffices().map((o) => o.name)).toEqual(['billing-api']);
+    expect(demoOffices(sim).map((o) => o.name)).toEqual(['billing-api']);
     expect(() => demoCloseOffice(sim, 'demo-office-docs')).toThrow('no such office');
 
     // The open repo: not while a task is unfinished, not while an agent is in a turn.

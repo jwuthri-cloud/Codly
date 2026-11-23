@@ -41,7 +41,10 @@ describe('an agent’s history', () => {
     expect(askedLine({ subject: { kind: 'file_change', paths: ['a.ts'], diff: null } })).toBe('Asked for approval');
     expect(askedLine(question)).toBe('Asked you: Keep the localStorage fallback?');
     expect(askedLine({ subject: { kind: 'question', questions: [] } })).toBe('Asked you a question');
-    expect(askedLine(plan)).toBe('Asked you to read its plan');
+    expect(askedLine(plan, 'claude')).toBe('Asked you to read its plan');
+    // Only a Claude agent shows a plan this way: from another CLI it is an approval like any other.
+    expect(askedLine(plan, 'codex')).toBe('Asked for approval');
+    expect(askedLine(plan)).toBe('Asked for approval');
   });
 
   it('an answered question reads "Answered by you" with the answer, never "Approval approved"', () => {
@@ -65,9 +68,11 @@ describe('an agent’s history', () => {
     expect(settledLine('cancelled', 'provider', command, null)).toBe('Stopped by its CLI');
   });
 
-  it('a plan is accepted or sent back, not approved or denied', () => {
-    expect(settledLine('approved', 'user', plan, null)).toBe('Plan accepted by you');
-    expect(settledLine('denied', 'user', plan, null)).toBe('Plan sent back by you');
-    expect(settledLine('cancelled', 'user', plan, null)).toBe('Stopped by you');
+  it('a Claude agent’s plan is accepted or sent back, not approved or denied', () => {
+    expect(settledLine('approved', 'user', plan, null, 'claude')).toBe('Plan accepted by you');
+    expect(settledLine('denied', 'user', plan, null, 'claude')).toBe('Plan sent back by you');
+    expect(settledLine('cancelled', 'user', plan, null, 'claude')).toBe('Stopped by you');
+    expect(settledLine('denied', 'user', plan, null, 'codex')).toBe('Denied by you');
+    expect(settledLine('approved', 'user', plan, null)).toBe('Approved by you');
   });
 });

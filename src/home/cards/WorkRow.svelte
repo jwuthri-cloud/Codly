@@ -5,11 +5,12 @@
   among the agent's own (Codex) says whose it is.
 -->
 <script lang="ts">
-  import type { Seg, SubAgent, Thought } from '../../lib/state/store.svelte';
+  import { store, type Seg, type SubAgent, type Thought } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { dur } from '../../lib/util/format';
+  import { uniqueKeys } from '../../lib/util/keys';
   import { pastVerb, phrase, subagentTag } from '../../lib/util/labels';
-  import { PLAN_TOOL, planStep } from '../../lib/util/planTool';
+  import { isPlanCall, planStep } from '../../lib/util/planRequest';
   import Icon from '../../components/Icon.svelte';
   import Provenance from '../../components/Provenance.svelte';
   import { splitHelpers } from '../helpers';
@@ -27,20 +28,24 @@
   let open = $state(false);
   /** The agent's own steps, and each helper's calls apart from them. */
   const split = $derived(splitHelpers(segs, helpers));
+  /** One key per step, its call id. A CLI may use an id again in a later turn of the same stretch: that step adds its place. */
+  const ownKeys = $derived(uniqueKeys(split.own, (s) => s.callId));
   const helperOf = (s: Seg) => helpers.find((h) => h.callId === s.callId);
   const running = $derived(segs.some((s) => s.end == null) || thinking != null || helpers.some((h) => h.status === 'running'));
   /** Only the latest outcome counts: a failing run fixed later in the same stretch is not a failure. */
   const failed = $derived(split.own.filter((s) => s.ok != null).at(-1)?.ok === false);
-  const summary = $derived(workSummary(split.own) || (thinking != null ? 'Thinking' : thoughts.length ? 'Thought it through' : ''));
+  /** The CLI of the agent whose work this is: only a Claude agent's call of the plan tool is its plan. */
+  const provider = $derived(store.agentMap.get(segs[0]?.agentId ?? '')?.provider ?? null);
+  const summary = $derived(workSummary(split.own, provider) || (thinking != null ? 'Thinking' : thoughts.length ? 'Thought it through' : ''));
   const steps = $derived(split.own.length + thoughts.length);
 </script>
 
 {#snippet step(s: Seg)}
   {@const by = subagentTag(s.input)}
   <button class="step" onclick={() => ui.selectAgent(s.agentId, s.eventId)}>
-    <!-- A plan shown to you is said as that: the name of its tool says nothing. -->
-    <span class="verb">{s.name === PLAN_TOOL ? planStep(s.end == null) : s.end == null ? phrase(s.activity, '') : pastVerb(s.activity)}</span>
-    <code class="target truncate">{s.name === PLAN_TOOL ? '' : s.label || s.name}</code>
+    <!-- A Claude agent's plan shown to you is said as that: the name of its tool says nothing. -->
+    <span class="verb">{isPlanCall(s.name, provider) ? planStep(s.end == null) : s.end == null ? phrase(s.activity, '') : pastVerb(s.activity)}</span>
+    <code class="target truncate">{isPlanCall(s.name, provider) ? '' : s.label || s.name}</code>
     {#if by}<span class="by">{by}</span>{/if}
     {#if s.testsPassed != null}<span class="tests" class:bad={!!s.testsFailed}>{s.testsFailed ? `${s.testsFailed} failed` : `${s.testsPassed} passed`}</span>{/if}
     <span class="dur num">{s.end != null ? dur(s.end - s.start) : '…'}</span>
@@ -60,7 +65,7 @@
     </button>
     {#if open}
       <ol class="steps">
-        {#each split.own as s (s.callId)}
+        {#each split.own as s, si (ownKeys[si])}
           {@const helper = helperOf(s)}
           <li>
             {#if helper}

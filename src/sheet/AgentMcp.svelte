@@ -8,7 +8,7 @@
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
-  import { MCP_HINT, MCP_LABEL, canReconnect, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, type McpServer, type ReconnectAnswer } from '../lib/state/session';
+  import { MCP_HINT, MCP_LABEL, canReconnect, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, type McpServer, type ReconnectAnswer } from '../lib/state/session';
   import { store } from '../lib/state/store.svelte';
   import { clean } from '../lib/util/sanitize';
   import Provenance from '../components/Provenance.svelte';
@@ -54,7 +54,7 @@
               <button class="btn sm ghost" disabled={busy != null} onclick={() => reconnect(s)}>{busy === key(s.name) ? 'Reconnecting…' : 'Reconnect'}</button>
             {/if}
           </div>
-          {#if s.status === 'needs_sign_in'}<p class="why">Sign in to this server in Claude Code, then reconnect.</p>{/if}
+          {#if s.status === 'needs_sign_in'}<p class="why">{signInSteps(clean(s.name))}</p>{/if}
           {#if s.error}<p class="why selectable">{clean(s.error)}</p>{/if}
           {#if answer}<p class="why selectable">{clean(answer)}</p>{/if}
         </li>

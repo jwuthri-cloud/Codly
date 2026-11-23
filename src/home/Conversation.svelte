@@ -284,9 +284,11 @@
      so the name keeps 170px or more and nothing lies on anything. */
   .one { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 12px 14px 12px 22px; box-shadow: inset 0 -1px 0 var(--line); }
   .o-txt { flex: 1 1 170px; min-width: 0; }
-  /* The name stays on one line: the CLI and model give way first, then the name, each with an ellipsis. */
+  /* The name stays on one line: the CLI and model give way first, then the name, each with an ellipsis.
+     The name itself does not shrink: it is whole up to the room of the line less "1:1 with" and
+     the two gaps (5em), and cut only past that. */
   .o-name { font-size: var(--t-md); color: var(--ink-2); display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
-  .o-name b { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink-1); font-weight: var(--w-semi); }
+  .o-name b { flex: 0 0 auto; max-width: calc(100% - 5em); overflow: hidden; text-overflow: ellipsis; color: var(--ink-1); font-weight: var(--w-semi); }
   .o-prov { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--t-xs); color: var(--ink-3); }
   .one > .btn { flex-shrink: 0; }
   .one > .btn:last-child { margin-left: auto; }

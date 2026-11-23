@@ -32,17 +32,22 @@ describe('whether a request’s card is in front of you', () => {
 });
 
 describe('the words of a toast that points at a request', () => {
-  it('a plan is shown to you: the name of its tool is not', () => {
-    expect([asksTitle('Eli', plan), asks(plan)]).toEqual(['Eli shows you its plan', 'Read it in the conversation']);
+  it('a Claude agent’s plan is shown to you: the name of its tool is not', () => {
+    expect([asksTitle('Eli', plan, 'claude'), asks(plan, 'claude')]).toEqual(['Eli shows you its plan', 'Read it in the conversation']);
+  });
+
+  it('the same request from another CLI, or from an agent Codly does not know, is a tool by its name', () => {
+    for (const provider of ['codex', 'gemini', null, undefined] as const)
+      expect([asksTitle('Eli', plan, provider), asks(plan, provider)], String(provider)).toEqual(['Eli needs your approval', 'Wants to use ExitPlanMode']);
   });
 
   it('every other request is a sentence: no bare kind, and a tool by its name', () => {
-    expect(asksTitle('Eli', { kind: 'tool', name: 'WebFetch', input: {} })).toBe('Eli needs your approval');
-    expect(asks({ kind: 'tool', name: 'WebFetch', input: {} })).toBe('Wants to use WebFetch');
-    expect(asks({ kind: 'file_change', paths: ['README.md'], diff: null })).toBe('Wants to change README.md');
-    expect(asks({ kind: 'permissions', detail: {} })).toBe('Wants to get more permissions');
-    expect(asks({ kind: 'command', command: 'pnpm test', cwd: null })).toBe('pnpm test');
-    expect([asksTitle('Eli', { kind: 'question', questions: [] }), asks({ kind: 'question', questions: [] })]).toEqual(['Eli has a question', 'Answer it in the conversation']);
+    expect(asksTitle('Eli', { kind: 'tool', name: 'WebFetch', input: {} }, 'claude')).toBe('Eli needs your approval');
+    expect(asks({ kind: 'tool', name: 'WebFetch', input: {} }, 'claude')).toBe('Wants to use WebFetch');
+    expect(asks({ kind: 'file_change', paths: ['README.md'], diff: null }, 'codex')).toBe('Wants to change README.md');
+    expect(asks({ kind: 'permissions', detail: {} }, 'codex')).toBe('Wants to get more permissions');
+    expect(asks({ kind: 'command', command: 'pnpm test', cwd: null }, 'claude')).toBe('pnpm test');
+    expect([asksTitle('Eli', { kind: 'question', questions: [] }, 'claude'), asks({ kind: 'question', questions: [] }, 'claude')]).toEqual(['Eli has a question', 'Answer it in the conversation']);
   });
 });
 

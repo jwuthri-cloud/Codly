@@ -64,6 +64,11 @@ struct Seen {
     refuses_modes: bool,
     /// Ends the turn of a prompt with "HOLD-THE-TURN".
     release: Arc<Notify>,
+    /// Knob: the model id the CLI names for the session when it starts, as Claude Code does
+    /// for a short name ("opus" is "claude-opus-5-5"). None: it names no model.
+    names_model: Option<String>,
+    /// The model of every spawn, in order: what the CLI's model and effort options are made of.
+    models: Vec<Option<String>>,
 }
 
 impl Seen {
@@ -94,14 +99,15 @@ impl Spawner for Fake {
                     let _ = events.send(AdapterEvent { agent_id: agent_id.clone(), run_id: run_id.clone(), kind });
                 }
             };
-            let release = {
+            let (release, names_model) = {
                 let mut s = seen.lock().unwrap();
                 s.runs.push(spec.run_id.clone());
-                s.release.clone()
+                s.models.push(spec.model.clone());
+                (s.release.clone(), s.names_model.clone())
             };
             send(EventKind::SessionStarted {
                 provider: spec.provider,
-                model: None,
+                model: names_model,
                 cwd: spec.cwd.to_string_lossy().into_owned(),
                 cli_version: None,
                 session_id: Some("sess".into()),
@@ -529,6 +535,46 @@ async fn a_live_claude_agent_changes_its_effort_and_takes_the_default_model_with
         assert!(!s.log.iter().any(|l| l == "effort:minimal"), "{:?}", s.log);
         assert_eq!(s.shutdowns, 3);
     }
+    core.shutdown().await;
+}
+
+/// A 1:1 agent with a short model name and an effort ("opus:high"). Claude Code names the
+/// session's model by its id, which has no effort in it. Before, the agent's row took that id
+/// alone: the effort was gone from the row, and the next run started without it. And another
+/// effort picked for the model the row shows went out as a change of model too, with a line
+/// that said so, because the run had started under the short name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_agents_row_keeps_its_effort_and_an_effort_alone_is_no_change_of_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen { names_model: Some("claude-opus-5-5".into()), ..Seen::default() }));
+    let (core, id) = hired_agent(dir.path(), &seen).await;
+    // (it does not run yet: its row takes the choice as it is)
+    let a = core.set_agent_model(&id, Some("opus:high".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus:high"));
+
+    // Its first run: the row shows the id the CLI named, with the effort the row had.
+    turn(&core, &id, "hello").await;
+    assert_eq!(seen.lock().unwrap().models, [Some("opus:high".to_string())]);
+    assert_eq!(agent(&core, &id).await.model.as_deref(), Some("claude-opus-5-5:high"));
+
+    // Another effort for the model the row shows: it is the model of the session that started
+    // as "opus", so only the effort goes out, and the thread speaks of the effort only.
+    let asked = seen.lock().unwrap().log.len();
+    let a = core.set_agent_model(&id, Some("claude-opus-5-5:low".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("claude-opus-5-5:low"));
+    {
+        let s = seen.lock().unwrap();
+        assert_eq!(s.log[asked..], ["effort:low"], "the model was not asked for again");
+        assert_eq!((s.runs.len(), s.shutdowns), (1, 0), "the same process goes on");
+    }
+    assert!(codly_said(&core, &id, "now works with thinking effort low, in the same conversation: no restart was needed.").await);
+    assert!(!codly_said(&core, &id, "reads the whole conversation again").await, "the model did not change");
+
+    // The next run starts with that model and that effort, and the row still shows both.
+    stop(&core, &id).await;
+    turn(&core, &id, "again").await;
+    assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("claude-opus-5-5:low".to_string())));
+    assert_eq!(agent(&core, &id).await.model.as_deref(), Some("claude-opus-5-5:low"));
     core.shutdown().await;
 }
 

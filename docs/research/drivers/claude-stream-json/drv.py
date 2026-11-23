@@ -42,10 +42,11 @@ def make_repo(name):
 class Session:
     def __init__(self, name, extra=(), mode="acceptEdits", session_id="new", hard_timeout=180,
                  on_can_use_tool="allow", repo=None, model="haiku", raw_name=None,
-                 strict_mcp=True, setting_sources="local", cwd=None, own_group=False):
+                 strict_mcp=True, setting_sources="local", cwd=None, own_group=False, env=None):
         """strict_mcp / setting_sources: the two flags that keep the user's own setup out.
         cwd: use this folder (it must exist) and not work/<repo>. own_group: start the CLI as the leader of a new
-        process group (what the app does), so that the group can be inspected and signalled."""
+        process group (what the app does), so that the group can be inspected and signalled.
+        env: variables set on top of the cleaned environment (a throw-away HOME); the recording notes them."""
         self.name = name
         self.cwd = cwd or make_repo(repo or name)
         self.sid = str(uuid.uuid4())
@@ -71,7 +72,9 @@ class Session:
         self.t0 = time.time()
         self.exit_code = None
         self._log("meta", {"argv": args, "cwd": self.cwd})
-        self.p = subprocess.Popen(args, cwd=self.cwd, env=clean_env(), stdin=subprocess.PIPE,
+        if env:
+            self._log("meta", {"env_set": env})
+        self.p = subprocess.Popen(args, cwd=self.cwd, env=clean_env() | (env or {}), stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
                                   **({"process_group": 0} if own_group else {}))
         threading.Thread(target=self._read_out, daemon=True).start()
@@ -201,8 +204,9 @@ class Session:
             r = [e for e in self.events if e.get("type") == "result"]
         return r[-1].get("total_cost_usd") if r else 0.0
 
-    def close(self, wait=15):
-        """Close stdin, wait for the exit, kill if needed. Returns the exit code."""
+    def close(self, wait=15, after_exit=None):
+        """Close stdin, wait for the exit, kill if needed. Returns the exit code.
+        after_exit: a function called once the process is gone; the dict it returns becomes the last note."""
         self._log("meta", {"closing_stdin": True, "alive_before_close": self.alive()})
         try:
             self.p.stdin.close()
@@ -217,6 +221,8 @@ class Session:
         time.sleep(0.3)
         self.killer.cancel()
         self._log("meta", {"exit_code": self.exit_code})
+        if after_exit:
+            self._log("meta", after_exit())
         self.raw.close()
         return self.exit_code
 

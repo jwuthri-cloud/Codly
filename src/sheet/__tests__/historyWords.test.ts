@@ -11,10 +11,15 @@ const chat = (agent: string, author: string, text: string) => ev(agent, { type: 
 
 describe('what a history row knows about the agent’s other events', () => {
   const events = [call('eli', 'p1', 'ExitPlanMode'), call('eli', 'c1', 'Bash'), call('ada', 'p9', 'ExitPlanMode'), message('eli', 'Done: the section is in.'), message('ada', 'Mine.')];
-  const facts = historyFacts(events, 'eli');
+  const facts = historyFacts(events, 'eli', 'claude');
 
-  it('which of its calls showed a plan', () => {
+  it('which of a Claude agent’s calls showed a plan', () => {
     expect([...facts.planCalls]).toEqual(['p1']);
+  });
+
+  it('for another CLI, or an agent Codly does not know, a call of that name is a call like any other', () => {
+    expect([...historyFacts(events, 'eli', 'codex').planCalls]).toEqual([]);
+    expect([...historyFacts(events, 'eli').planCalls]).toEqual([]);
   });
 
   it('a reply is listed once: its row in the conversation only repeats it', () => {

@@ -45,13 +45,21 @@ describe('palette confirmation', () => {
 
   it('says in full what an approval asks for', () => {
     const long = `rm -rf ${'very/long/path/'.repeat(8)}dist`;
-    expect(wants({ kind: 'command', command: long, cwd: '/repo' })).toBe(`run ${long}\nin /repo`);
-    expect(wants({ kind: 'command', command: 'ls', cwd: null })).toBe('run ls');
-    expect(wants({ kind: 'file_change', paths: ['a.ts', 'b.ts'], diff: null })).toBe('change a.ts, b.ts');
-    expect(wants({ kind: 'tool', name: 'WebFetch', input: null })).toBe('use the tool WebFetch');
+    expect(wants({ kind: 'command', command: long, cwd: '/repo' }, 'claude')).toBe(`run ${long}\nin /repo`);
+    expect(wants({ kind: 'command', command: 'ls', cwd: null }, 'codex')).toBe('run ls');
+    expect(wants({ kind: 'file_change', paths: ['a.ts', 'b.ts'], diff: null }, 'claude')).toBe('change a.ts, b.ts');
+    expect(wants({ kind: 'tool', name: 'WebFetch', input: null }, 'claude')).toBe('use the tool WebFetch');
     // A command in Claude Code's sandbox wants a host: the whole host, not the name of the request's tool.
     const host = `github.com.${'a'.repeat(96)}.evil.example`;
-    expect(wants({ kind: 'tool', name: 'SandboxNetworkAccess', input: { host } })).toBe(`reach ${host}`);
-    expect(wants({ kind: 'tool', name: 'SandboxNetworkAccess', input: {} })).toBe('use the network');
+    expect(wants({ kind: 'tool', name: 'SandboxNetworkAccess', input: { host } }, 'claude')).toBe(`reach ${host}`);
+    expect(wants({ kind: 'tool', name: 'SandboxNetworkAccess', input: {} }, 'claude')).toBe('use the network');
+    // That request is Claude Code's own: from another CLI, or an agent Codly does not know, it is a tool by its name.
+    expect(wants({ kind: 'tool', name: 'SandboxNetworkAccess', input: { host } }, 'codex')).toBe('use the tool SandboxNetworkAccess');
+    expect(wants({ kind: 'tool', name: 'SandboxNetworkAccess', input: { host } }, undefined)).toBe('use the tool SandboxNetworkAccess');
+    // The same for a plan: a Claude agent shows you its plan, any other agent uses a tool of that name.
+    const plan = { kind: 'tool', name: 'ExitPlanMode', input: { plan: '1. Add the line' } } as const;
+    expect(wants(plan, 'claude')).toBe('show you its plan');
+    expect(wants(plan, 'codex')).toBe('use the tool ExitPlanMode');
+    expect(wants(plan, undefined)).toBe('use the tool ExitPlanMode');
   });
 });
