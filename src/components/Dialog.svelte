@@ -4,7 +4,7 @@
   was (`modal`). `onkeydown` sees a key before the dialog does: stopPropagation() there keeps it.
 -->
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { onMount, type Snippet } from 'svelte';
   import { fade } from 'svelte/transition';
   import { ui } from '../lib/state/ui.svelte';
   import { modal } from '../lib/util/modal';
@@ -25,6 +25,12 @@
     children: Snippet;
   }
   let { label, onclose, width = 620, style, divider = true, onkeydown, actions, children }: Props = $props();
+
+  // The toast stack looks for its place again when a dialog comes and when it goes.
+  onMount(() => {
+    ui.layoutRev++;
+    return () => void ui.layoutRev++;
+  });
 </script>
 
 <!-- The exit runs through the Web Animations API, which the CSS reduced-motion override does not

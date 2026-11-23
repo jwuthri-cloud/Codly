@@ -68,7 +68,7 @@
   .ask.has { color: var(--ink-1); }
   .ask b { font-size: var(--t-sm); font-weight: var(--w-semi); }
   .ask.blocked { color: var(--amber-ink); background: color-mix(in srgb, var(--amber) 16%, var(--glass)); box-shadow: var(--glass-edge), inset 0 0 0 1px color-mix(in srgb, var(--amber) 45%, transparent); }
-  .panel { position: fixed; z-index: var(--z-pop); top: calc(var(--top-h) + 6px); right: var(--gutter); width: min(440px, calc(100vw - 2 * var(--gutter))); max-height: calc(100vh - var(--top-h) - 24px); display: flex; flex-direction: column; border-radius: var(--r-xl); background: var(--glass-solid); overflow: hidden; animation: rise-in var(--d-3) var(--spring); }
+  .panel { position: fixed; z-index: var(--z-pop); top: calc(var(--top-h) + 6px); right: var(--gutter); width: min(var(--ask-w), calc(100vw - 2 * var(--gutter))); max-height: calc(100vh - var(--top-h) - 24px); display: flex; flex-direction: column; border-radius: var(--r-xl); background: var(--glass-solid); overflow: hidden; animation: rise-in var(--d-3) var(--spring); }
   header { display: flex; align-items: baseline; gap: 10px; padding: 14px 18px 8px; }
   h2 { font-size: var(--t-lg); font-weight: var(--w-semi); }
   .sub { font-size: var(--t-sm); color: var(--ink-3); }

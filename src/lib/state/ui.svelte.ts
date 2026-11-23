@@ -187,6 +187,10 @@ class Ui {
   /** Composer draft injected by other surfaces (palette "Ask the Lead…", file mentions). */
   composerSeed = $state<{ thread: string; text: string; keep: boolean; replaces: string | null; nonce: number } | null>(null);
 
+  /** Bumped when the page changes in a way no other field here tells: a menu or a dialog comes or
+   *  goes, the first-run quest shows another level. The toast stack then looks for its place again. */
+  layoutRev = $state(0);
+
   systemDark = $state(mq('(prefers-color-scheme: dark)')?.matches ?? true);
   reducedMotion = $state(mq('(prefers-reduced-motion: reduce)')?.matches ?? false);
   width = $state(typeof window !== 'undefined' ? window.innerWidth : 1440);

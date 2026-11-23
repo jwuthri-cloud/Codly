@@ -1,6 +1,8 @@
 <!--
   The crew strip: everyone across your requests. Each request's Lead is a small pill first
   (hover: the request it serves; click: that request), then one pill per active worker.
+  With more pills than room the strip scrolls sideways; "Start an agent" stands after it,
+  outside what scrolls, so it is always in view.
   Status changes are mirrored to a polite live region for screen readers.
 -->
 <script lang="ts">
@@ -51,14 +53,18 @@
   });
 </script>
 
-<div class="strip" role="group" aria-label="Your crew">
-  {#each leads as a (a.id)}
-    <CrewPill agent={a} compact />
-  {/each}
-  {#if leads.length && crew.length}<span class="sep" aria-hidden="true"></span>{/if}
-  {#each crew as a (a.id)}
-    <CrewPill agent={a} {compact} />
-  {/each}
+<div class="crew-strip" role="group" aria-label="Your crew">
+  {#if leads.length || crew.length}
+    <div class="strip">
+      {#each leads as a (a.id)}
+        <CrewPill agent={a} compact />
+      {/each}
+      {#if leads.length && crew.length}<span class="sep" aria-hidden="true"></span>{/if}
+      {#each crew as a (a.id)}
+        <CrewPill agent={a} {compact} />
+      {/each}
+    </div>
+  {/if}
   {#if store.workspace && starter}
     <button class="icon-btn sm add" aria-label="Start an agent" data-tip="Start an agent" onclick={() => (ui.modelDialog = { provider: starter, agentId: null })}>
       <Icon name="plus" size={14} />
@@ -68,7 +74,9 @@
 <p class="sr-only" aria-live="polite">{announce}</p>
 
 <style>
-  /* 12px at each end, the width of the fade: scrolled to an end, the first pill and "Start an agent" are clear of it. */
+  /* The strip takes what "Start an agent" leaves, and scrolls in it; the button never shrinks. */
+  .crew-strip { display: flex; align-items: center; min-width: 0; }
+  /* 12px at each end, the width of the fade: scrolled to an end, the first and the last pill are clear of it. */
   .strip { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 12px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%); }
   .strip::-webkit-scrollbar { display: none; }
   /* Centred while it fits; when it overflows it scrolls from the start (the Leads), which
