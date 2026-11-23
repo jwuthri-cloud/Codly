@@ -3,6 +3,7 @@ import type { AccountConfig } from "./AccountConfig";
 import type { AccountStrategy } from "./AccountStrategy";
 import type { ApprovalMode } from "./ApprovalMode";
 import type { ByokSettings } from "./ByokSettings";
+import type { NotificationSettings } from "./NotificationSettings";
 import type { Provider } from "./Provider";
 import type { TeamMember } from "./TeamMember";
 import type { WatchdogSettings } from "./WatchdogSettings";
@@ -96,4 +97,8 @@ verify_timeout_secs: number,
  * When the watchdog flags, interrupts and stops an agent that gives no output, and flags
  * a worker that sits idle on a running task.
  */
-watchdog: WatchdogSettings, };
+watchdog: WatchdogSettings, 
+/**
+ * Which events raise a notification of your system, and when (Settings → Notifications).
+ */
+notifications: NotificationSettings, };

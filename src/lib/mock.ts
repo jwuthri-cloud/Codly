@@ -114,6 +114,7 @@ const SETTINGS: Settings = {
   developer_mode: false,
   verify_timeout_secs: 600,
   watchdog: { quiet_secs: 600, quiet_tool_secs: 3600, idle_secs: 120 },
+  notifications: { approval: true, question: true, plan_done: true, plan_failed: true, task_blocked: true, agent_stalled: true, budget: true, merge_ready: true, only_in_background: true },
   world_ambient: false,
   theme: 'system',
   team: [],

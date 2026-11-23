@@ -1831,6 +1831,9 @@ pub struct Settings {
     /// a worker that sits idle on a running task.
     #[serde(default)]
     pub watchdog: crate::orchestrator::watchdog::WatchdogSettings,
+    /// Which events raise a notification of your system, and when (Settings → Notifications).
+    #[serde(default)]
+    pub notifications: crate::notifications::NotificationSettings,
 }
 
 fn yes() -> bool {
@@ -1878,6 +1881,7 @@ impl Default for Settings {
             developer_mode: false,
             verify_timeout_secs: verify_timeout_secs(),
             watchdog: Default::default(),
+            notifications: Default::default(),
         }
     }
 }

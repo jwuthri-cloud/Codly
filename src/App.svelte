@@ -24,6 +24,7 @@
   import { ui } from './lib/state/ui.svelte';
   import { installKeys } from './lib/state/keys';
   import { installNotifications } from './lib/state/notify';
+  import { installNoticeOpener } from './lib/state/openNotice';
   import { installTooltips } from './lib/state/tooltip.svelte';
 
   // Dev-only handle for debugging and browser tests (stripped from production builds).
@@ -31,7 +32,7 @@
 
   onMount(() => {
     store.connect();
-    const off = [installKeys(), installTooltips(), installVisibility(), installNotifications()];
+    const off = [installKeys(), installTooltips(), installVisibility(), installNotifications(), installNoticeOpener()];
     return () => off.forEach((f) => f());
   });
 
