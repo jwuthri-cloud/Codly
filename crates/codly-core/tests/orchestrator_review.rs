@@ -4,7 +4,8 @@
 //! - a review that is under way stops, and the work with your changes gets a review of its own;
 //! - a task the gate stopped starts again with the comments, with new fix rounds;
 //! - a done task takes none, and what you asked stays in the task's record and in the
-//!   worker's conversation.
+//!   worker's conversation;
+//! - a reviewer of an earlier round that reports late does not decide the next round.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -101,6 +102,9 @@ struct FakeSpawner {
     turns: Turns,
     /// Some: a reviewer's CLI is up only once this says so (a slow start).
     reviewer_up: Option<Arc<Notify>>,
+    /// Some: a reviewer that is told to stop mid-turn closes its turn only once this says so
+    /// (a CLI that is slow to stop).
+    reviewer_stops_late: Option<Arc<Notify>>,
 }
 
 impl Spawner for FakeSpawner {
@@ -108,6 +112,7 @@ impl Spawner for FakeSpawner {
         let behavior = if spec.role == Role::Lead { lead() } else { self.worker.clone() };
         let turns = self.turns.clone();
         let wait = self.reviewer_up.clone().filter(|_| spec.role == Role::Reviewer);
+        let stops_late = self.reviewer_stops_late.clone().filter(|_| spec.role == Role::Reviewer);
         Box::pin(async move {
             if let Some(up) = wait {
                 up.notified().await;
@@ -163,6 +168,9 @@ impl Spawner for FakeSpawner {
                                 }
                             };
                             if stopped {
+                                if let Some(late) = &stops_late {
+                                    late.notified().await;
+                                }
                                 send(EventKind::TurnCompleted { status: TurnStatus::Interrupted, result_text: None, duration_ms: Some(5) });
                                 send(EventKind::Exited { code: Some(0) });
                                 break;
@@ -204,7 +212,7 @@ fn lead() -> Behavior {
 
 /// A core with one open repo, where a request runs its plan at once.
 async fn start(root: &Path, worker: Behavior, turns: Turns) -> Arc<Core> {
-    start_with(root, FakeSpawner { worker, turns, reviewer_up: None }, false).await
+    start_with(root, FakeSpawner { worker, turns, reviewer_up: None, reviewer_stops_late: None }, false).await
 }
 
 /// `start` with your own agents, and with or without a review of each task before it merges.
@@ -414,7 +422,7 @@ fn verdicts(events: &[EventRow]) -> Vec<String> {
 async fn comments_sent_during_a_review_stop_it_and_the_new_work_gets_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let turns = Turns::default();
-    let spawner = FakeSpawner { worker: reviewed_work(true), turns: turns.clone(), reviewer_up: None };
+    let spawner = FakeSpawner { worker: reviewed_work(true), turns: turns.clone(), reviewer_up: None, reviewer_stops_late: None };
     let core = start_with(dir.path(), spawner, true).await;
 
     let t = wait_task(&core, TaskStatus::Reviewing).await;
@@ -450,7 +458,7 @@ async fn comments_wait_while_a_review_is_starting() {
     let dir = tempfile::tempdir().unwrap();
     let turns = Turns::default();
     let up = Arc::new(Notify::new());
-    let spawner = FakeSpawner { worker: reviewed_work(false), turns: turns.clone(), reviewer_up: Some(up.clone()) };
+    let spawner = FakeSpawner { worker: reviewed_work(false), turns: turns.clone(), reviewer_up: Some(up.clone()), reviewer_stops_late: None };
     let core = start_with(dir.path(), spawner, true).await;
 
     let t = wait_task(&core, TaskStatus::Reviewing).await;
@@ -469,5 +477,78 @@ async fn comments_wait_while_a_review_is_starting() {
     wait_plan_done(&core).await;
     assert_eq!(worker_prompts(&turns).len(), 1, "the worker read nothing of it");
     assert_eq!(verdicts(&events(&core).await), ["approve"]);
+    core.shutdown().await;
+}
+
+/// A reviewer that was told to stop can report late: its turn ends when the next review round
+/// is already under way. It read the work as it was before your comments, so its verdict is
+/// not this round's: the round's own reviewer decides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_verdict_of_an_earlier_round_does_not_count_for_the_next_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    // `said`: the first reviewer gave its verdict. `late`: its turn ends, long after it was
+    // told to stop. `second`: the second reviewer gives its verdict.
+    let (said, late, second) = (Arc::new(Notify::new()), Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let reviews = Arc::new(AtomicUsize::new(0));
+    let worker: Behavior = {
+        let (said, second) = (said.clone(), second.clone());
+        Arc::new(move |turn: FakeTurn| {
+            let (reviews, said, second) = (reviews.clone(), said.clone(), second.clone());
+            Box::pin(async move {
+                if turn.spec.role == Role::Reviewer {
+                    let criteria = json!([{ "criterion": "hello.txt is right", "met": true }]);
+                    let approve = json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] });
+                    if reviews.fetch_add(1, Ordering::SeqCst) == 0 {
+                        // Its verdict is on record, and its turn does not end by itself.
+                        turn.tool("codly_submit_review", approve).await;
+                        said.notify_one();
+                        return std::future::pending::<()>().await;
+                    }
+                    second.notified().await;
+                    turn.tool("codly_submit_review", approve).await;
+                    return;
+                }
+                let answer = turn.prompt.contains("sent it back");
+                if answer {
+                    tokio::time::sleep(Duration::from_millis(300)).await; // as in `reviewed_work`
+                }
+                std::fs::write(turn.spec.cwd.join("hello.txt"), if answer { "hello, reviewed twice\n" } else { "hello, reviewed\n" }).unwrap();
+                turn.done().await;
+            })
+        })
+    };
+    let spawner = FakeSpawner { worker, turns: turns.clone(), reviewer_up: None, reviewer_stops_late: Some(late.clone()) };
+    let core = start_with(dir.path(), spawner, true).await;
+
+    let t = wait_task(&core, TaskStatus::Reviewing).await;
+    said.notified().await;
+    let first = reviewers(&turns)[0].clone();
+    core.send_back_task(&t.id, COMMENTS).await.unwrap();
+    // The worker answers, its work is checked, and a second review starts while the first
+    // reviewer has still not closed its turn.
+    let other = wait_for("the second review", 40, async || reviewers(&turns).get(1).cloned()).await;
+    assert_ne!(other, first, "the first reviewer still runs: another one reads the new work");
+    assert_eq!(the_task(&core).await.unwrap().status, TaskStatus::Reviewing);
+
+    // Now the first reviewer's turn ends, with its approval of the old work on record.
+    late.notify_one();
+    wait_for("the first reviewer to exit", 40, async || {
+        let exited = |e: &EventRow| e.agent_id.as_deref() == Some(first.as_str()) && matches!(e.kind, EventKind::Exited { .. });
+        events(&core).await.iter().any(exited).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(the_task(&core).await.unwrap().status, TaskStatus::Reviewing, "the second review is still under way");
+    assert!(verdicts(&events(&core).await).is_empty(), "the late verdict was not read");
+
+    second.notify_one();
+    wait_plan_done(&core).await;
+    let all = events(&core).await;
+    let read: Vec<&EventRow> = all.iter().filter(|e| matches!(e.kind, EventKind::Reviewed { .. })).collect();
+    assert_eq!(verdicts(&all), ["approve"]);
+    assert_eq!(read[0].agent_id.as_deref(), Some(other.as_str()), "the verdict of the round's own reviewer");
+    assert_eq!(reviewers(&turns).len(), 2, "no third review");
+    assert_eq!(worker_prompts(&turns).len(), 2, "the brief, then your comments");
     core.shutdown().await;
 }

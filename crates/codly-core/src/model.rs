@@ -1032,6 +1032,18 @@ pub struct PlanStep {
     pub status: String,
 }
 
+/// Something an agent's run left at work beside its own turns (`EventKind::BackgroundTasks`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundTask {
+    /// The CLI's id of it.
+    pub id: String,
+    /// "command" (a shell command in the background) | "helper" (a subagent) | "task"
+    pub kind: String,
+    /// The command, or what the helper was asked to do.
+    pub description: String,
+}
+
 // ───────────────────────────── approvals ─────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1559,6 +1571,11 @@ pub enum EventKind {
     Notice {
         text: String,
     },
+    /// What the run has at work in the background, as its CLI lists it: the whole list at
+    /// every change, empty when nothing is left (Claude Code's `background_tasks_changed`).
+    BackgroundTasks {
+        tasks: Vec<BackgroundTask>,
+    },
 
     // ── Codly domain events (from the orchestrator) ──
     AgentChanged {
@@ -1667,6 +1684,7 @@ impl EventKind {
             EventKind::Exited { .. } => "exited",
             EventKind::Unknown { .. } => "unknown",
             EventKind::Notice { .. } => "notice",
+            EventKind::BackgroundTasks { .. } => "background_tasks",
             EventKind::AgentChanged { .. } => "agent_changed",
             EventKind::PlanChanged { .. } => "plan_changed",
             EventKind::TaskChanged { .. } => "task_changed",

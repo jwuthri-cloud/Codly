@@ -192,6 +192,14 @@ again as a new session. A worker the circuit breaker constrains is paused
 until you resume it (one you hold already reads why on your Resume); a breaker stop says so on the
 task.
 
+**Nothing is checked under work that still runs.** A worker can end its turn while a command it
+started in the background still runs, or while a helper (a subagent) still works. The gate then
+waits (`orchestrator/background.rs`): the task says what it waits for, and its checks start when
+that work has ended. After 5 minutes Codly stops what still runs (Claude Code: its `stop_task`
+request), writes in the task's record what it stopped and what it could not stop, and checks the
+work as it is. For Codex, a subagent that is still in a turn counts; that part is built from the
+protocol's types and is not verified on a live run.
+
 **No agent sits "running" without end.** A watchdog looks at every live run each 15 s. A turn that
 gives no event for 10 minutes (60 with a tool call open; `Settings.watchdog`) is flagged on its
 task ("stalled: no output for 10 min") and you are notified. At twice that its turn is interrupted
@@ -533,6 +541,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       runs.rs ingest.rs                   agent runs; the one event pipeline
                       gate.rs rebrief.rs                  commit → verify → scope → review → merge queue; a worker's task
                                                           again after a context compaction
+                      background.rs                       a background command or a helper a worker left running: the gate waits
                       approvals.rs controls.rs ask_me.rs  approval policy, live agent controls, "ask me" cards
                       approval_rules.rs                   "always allow in this repo": saved approval rules
                       breaker.rs breaker_run.rs           circuit breaker: policy and enforcement

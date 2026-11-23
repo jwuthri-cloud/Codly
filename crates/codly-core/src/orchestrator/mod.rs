@@ -10,6 +10,7 @@
 //! - `retry`    a worker that failed starts again after a wait; what blocks instead
 //! - `stuck`    plans that cannot go on by themselves: the notice, keep what is merged
 //! - `gate`     commit → verify → scope → review → merge queue → done
+//! - `background` work a run left behind its turn (a background command, a helper): the gate waits for it
 //! - `tools`    the MCP `ToolHandler` (codly_* tools)
 //! - `workspace` open a repo + index, snapshot, solo agents, approvals, diffs, merge_plan
 //! - `preview`  try the work before a merge: your command in a plan's or an agent's worktree
@@ -79,6 +80,7 @@ pub mod takeover;
 pub mod required_checks;
 mod weak_checks;
 pub mod trust;
+mod background;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -198,6 +200,10 @@ struct Live {
     watch: watchdog::Watch,
     /// Who asked its turn to stop, and whether its adapter gave that turn up (interrupts.rs).
     interrupt: interrupts::Interrupt,
+    /// The turn that runs, or ran last, took no prompt: the CLI started it by itself.
+    self_started: bool,
+    /// What it has at work beside its own turns, and the gate's wait for it (background.rs).
+    background: background::Background,
 }
 
 /// A member's reply the Lead of `thread` waits for: the reply of turn number `due`.
@@ -272,6 +278,9 @@ struct Inner {
     /// How long Codly waits before it asks a worker whose turn failed to continue: one wait
     /// per retry, then the task is blocked (`ingest::TURN_RETRY_WAITS`; tests shorten them).
     turn_retry_waits: RwLock<Vec<Duration>>,
+    /// How long the gate waits for a worker's background work before Codly stops it
+    /// (`background::WAIT`; tests shorten it).
+    background_wait: RwLock<Duration>,
     /// Workers that failed lately: failures in a row per task, and when each starts again.
     retries: Mutex<retry::Retries>,
     /// The stuck plans Codly told you about: plan → the tasks that stopped it (`stuck.rs`).
@@ -451,6 +460,7 @@ impl Core {
             codex_usage_reads: AtomicBool::new(true),
             breaker,
             turn_retry_waits: RwLock::new(ingest::TURN_RETRY_WAITS.to_vec()),
+            background_wait: RwLock::new(background::WAIT),
             retries: Mutex::new(retry::Retries::default()),
             stuck_told: Mutex::new(HashMap::new()),
             merge_looks: Mutex::new(HashMap::new()),

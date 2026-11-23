@@ -3,7 +3,7 @@
 //! undone, the agent is told with its next prompt, a running turn refuses the restore (also the
 //! turn of another agent in the same worktree), an agent that works in the project folder
 //! itself has no checkpoints at all, and a turn the CLI starts by itself does not use up the
-//! note about a restore.
+//! note about a restore. Codly's commit after such a turn is not named for the last prompt.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -431,4 +431,29 @@ async fn an_agent_in_the_project_folder_has_no_checkpoints() {
     assert_eq!(std::fs::read_to_string(o.repo.join("notes.txt")).unwrap(), "mine\n");
     o.core.shutdown().await;
     assert_eq!(git(&o.repo, &["for-each-ref", "refs/codly"]), "", "no checkpoint was ever taken of your checkout");
+}
+
+/// Codly's commit after a turn the CLI started by itself is named for what it is too, not for
+/// the prompt of the turn before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_commit_after_a_turn_the_cli_started_by_itself_is_not_named_for_the_last_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = office(dir.path()).await;
+    let agent = o.core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let (id, wt) = (agent.id.clone(), PathBuf::from(agent.worktree.clone().unwrap()));
+    let last_commit = || git(&wt, &["log", "-1", "--format=%s"]).trim().to_string();
+    o.turn(&id, &wt, "add the form", &[("a.txt", Some("1\n"))]).await;
+    assert_eq!(last_commit(), format!("codly(solo/{}): add the form", agent.name));
+
+    // A background command of the agent ends and leaves a file; the CLI starts a turn by itself.
+    o.wake.notify_one();
+    wait_for("the checkpoint before the CLI's own turn", async || (o.points(&id).await.len() == 2).then_some(())).await;
+    std::fs::write(wt.join("b.txt"), "from the background\n").unwrap();
+    o.finish(&id, &wt).await;
+    assert_eq!(last_commit(), format!("codly(solo/{}): a turn the agent started by itself", agent.name));
+
+    // The next prompt names its own commit again.
+    o.turn(&id, &wt, "now the list", &[("c.txt", Some("c\n"))]).await;
+    assert_eq!(last_commit(), format!("codly(solo/{}): now the list", agent.name));
+    o.core.shutdown().await;
 }

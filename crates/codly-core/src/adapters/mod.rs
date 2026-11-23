@@ -146,6 +146,10 @@ pub enum SessionRequest {
     Model(String),
     /// `get_context_usage`: how full the context is.
     ContextUsage,
+    /// `stop_task`, with the id of a background task (`BackgroundTask::id`): the CLI ends it.
+    /// The answer is empty also when nothing was stopped (recorded, part 2 §6): the CLI's next
+    /// list of its background tasks says whether the task is gone.
+    StopTask(String),
 }
 
 /// Where the answer to a `SessionRequest` goes: the `response` object of the CLI's control

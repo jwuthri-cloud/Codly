@@ -132,6 +132,8 @@ impl Inner {
                     continue_owed: None,
                     watch: super::watchdog::Watch::new(),
                     interrupt: Default::default(),
+                    self_started: false,
+                    background: Default::default(),
                 },
             );
         }

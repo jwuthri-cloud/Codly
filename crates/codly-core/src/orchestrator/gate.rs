@@ -16,6 +16,9 @@
 //! A turn that ends with no report (`codly_submit_report`) may not be the worker's finish (it
 //! answered a message of yours, or stopped early): the worker is asked for its report once,
 //! and the end of that turn is checked as it is.
+//!
+//! A worker's run that still has a background command or a helper at work is not checked yet:
+//! the pass waits for that work, and Codly stops it when the wait runs out (`background.rs`).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -58,6 +61,9 @@ pub(super) struct Rounds {
     /// The worker was asked about what Codly's commit left out (`Inner::left_out_round`).
     /// Asked once, and it counts as no round.
     left_out: bool,
+    /// The reviewer run of the review round under way (`start_review`): only its verdict
+    /// counts. None between rounds, and while a round's reviewer is still starting.
+    review: Option<Id>,
 }
 
 pub(super) struct VerifyOut {
@@ -260,6 +266,12 @@ impl Inner {
         // No report at all: the turn may not be the worker's finish. Asked once; the end of
         // the turn that answers is checked as it is, with or without a report.
         if pass == Pass::Turn && report.is_null() && self.ask_for_report(&task, &worker, ws)? {
+            return Ok(());
+        }
+        // The worker's run still has a background command or a helper at work: what that
+        // writes next would miss the commit, and the checks would run under it. The pass
+        // waits for it (background.rs). (Your own pass has no worker run.)
+        if pass == Pass::Turn && self.hold_for_background(&task, &worker, ws)? {
             return Ok(());
         }
 
@@ -1059,6 +1071,9 @@ impl Inner {
         };
         let branch = task.branch.clone().ok_or_else(|| anyhow!("the task has no branch"))?;
         let diff = self.git.diff(Path::new(&ws.repo_path), base_ref, &branch).await?;
+        // A new round: no reviewer run has it yet, so what a run of an earlier round still
+        // reports from here on is not this round's verdict (`review_done_inner`).
+        lock(&self.fix_rounds).entry(task.id.clone()).or_default().review = None;
         self.update_task(&task.id, |t| {
             t.status = TaskStatus::Reviewing;
             t.status_reason = Some(format!("review by {} ({})", reviewer.name, provider.label()));
@@ -1108,21 +1123,25 @@ impl Inner {
             )?;
             started = self.spawn_run(req(&reviewer)).await;
         }
-        if let Err(e) = started {
-            // The worktree's files changed since the reviewer was picked: the task waits for
-            // your trust (the gate blocks it), it is not merged without its review.
-            if e.is::<super::trust::NotStarted>() {
-                return Err(e);
+        let run = match started {
+            Ok(run) => run,
+            Err(e) => {
+                // The worktree's files changed since the reviewer was picked: the task waits for
+                // your trust (the gate blocks it), it is not merged without its review.
+                if e.is::<super::trust::NotStarted>() {
+                    return Err(e);
+                }
+                self.decide(
+                    Some(ws_id),
+                    Some(&task.id),
+                    "review",
+                    format!("{}: review skipped, the reviewer could not start: {e}", task.key),
+                    json!({ "plan_id": task.plan_id }),
+                )?;
+                return self.merge_task(&task.id, 0).await;
             }
-            self.decide(
-                Some(ws_id),
-                Some(&task.id),
-                "review",
-                format!("{}: review skipped, the reviewer could not start: {e}", task.key),
-                json!({ "plan_id": task.plan_id }),
-            )?;
-            return self.merge_task(&task.id, 0).await;
-        }
+        };
+        lock(&self.fix_rounds).entry(task.id.clone()).or_default().review = Some(run);
         let brief = prompts::review_brief(&prompts::ReviewBrief {
             task,
             diff: &diff,
@@ -1143,7 +1162,11 @@ impl Inner {
 
     async fn review_done_inner(self: &Arc<Self>, task_id: &str, run_id: &str) -> Result<()> {
         let task = self.task(task_id)?;
-        if task.status != TaskStatus::Reviewing {
+        // Only the reviewer run of the round under way has this round's verdict. A run of an
+        // earlier round can still report after the next round began (it was told to stop, and
+        // the end of its turn comes late): it read the work as it was before.
+        let current = lock(&self.fix_rounds).get(task_id).and_then(|r| r.review.clone());
+        if task.status != TaskStatus::Reviewing || current.as_deref() != Some(run_id) {
             // Stopped or cancelled meanwhile: nobody reads this review, so its reviewer is free
             // (unless it runs something else by now).
             if let Ok(Some(r)) = self.store.run(run_id)
@@ -1531,7 +1554,7 @@ pub(super) async fn verify_in(wt: &Path, cmd: &str, env: Vec<(String, String)>, 
 }
 
 /// A time limit in words: "10 min", "90 s".
-fn span(d: Duration) -> String {
+pub(super) fn span(d: Duration) -> String {
     match d.as_secs() {
         s if s >= 60 && s % 60 == 0 => format!("{} min", s / 60),
         s => format!("{s} s"),
