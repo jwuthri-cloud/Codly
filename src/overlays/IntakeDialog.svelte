@@ -6,7 +6,7 @@
   be closed: the read cannot be stopped, and its end is told here or in the request it opens.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { intakeUi, startFromGithub } from '../lib/state/intake.svelte';
   import Dialog from '../components/Dialog.svelte';
 
@@ -24,7 +24,11 @@
     e.preventDefault();
     if (busy || !reference.trim()) return;
     problem = await startFromGithub(kind, reference, note);
-    if (!problem) close();
+    if (!problem) return close();
+    // The field was disabled while the read ran, and a disabled field loses the focus: it goes
+    // back there, where the reference is corrected.
+    await tick();
+    field?.focus();
   }
 </script>
 

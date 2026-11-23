@@ -28,7 +28,7 @@
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { diffStats, type DiffFile } from '../../lib/util/diff';
-  import { ago } from '../../lib/util/format';
+  import { ago, plural } from '../../lib/util/format';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import { oneAtATime } from '../../lib/util/oneAtATime';
   import { discardWords, editorPlace, heavy, HEAVY_LABEL, inTurn, offDiff, parseDiffKeeping, placeId, reviewBarWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
@@ -306,7 +306,7 @@
         </div>
       {/if}
       {#if files.length}
-        <p class="eyebrow files-h">{files.length} files · <span class="num"><span class="add">+{totals.added}</span> <span class="del">−{totals.removed}</span></span>{#if viewedCount} · {viewedCount} viewed{/if}</p>
+        <p class="eyebrow files-h">{plural(files.length, 'file')} ·<span class="num"><span class="add">+{totals.added}</span> <span class="del">−{totals.removed}</span></span>{#if viewedCount} · {viewedCount} viewed{/if}</p>
         <ul class="files">
           {#each files as f (f.path)}
             {@const o = owners.get(f.path)}

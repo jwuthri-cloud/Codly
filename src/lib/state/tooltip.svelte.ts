@@ -17,18 +17,26 @@ export function installTooltips() {
   let current: HTMLElement | null = null;
   let lastHidden = 0;
 
+  // The element a tip belongs to can leave the page under a pointer that does not move (a
+  // question that closes itself, a button its own click removes): the tip goes with it.
+  const gone = new MutationObserver(() => {
+    if (current && !current.isConnected) hide();
+  });
   const show = (el: HTMLElement) => {
+    if (!el.isConnected) return hide();
     tip.text = el.dataset.tip ?? '';
     tip.kbd = el.dataset.tipKbd ?? '';
     tip.rect = el.getBoundingClientRect();
     tip.visible = !!tip.text;
+    if (tip.visible) gone.observe(document.body, { childList: true, subtree: true });
   };
-  const hide = () => {
+  function hide() {
     clearTimeout(timer);
+    gone.disconnect();
     if (tip.visible) lastHidden = Date.now();
     tip.visible = false;
     current = null;
-  };
+  }
 
   const over = (e: PointerEvent) => {
     const el = (e.target as HTMLElement | null)?.closest?.('[data-tip]') as HTMLElement | null;
@@ -67,6 +75,7 @@ export function installTooltips() {
   document.addEventListener('scroll', hide, true);
   window.addEventListener('blur', hide);
   return () => {
+    gone.disconnect();
     document.removeEventListener('pointerover', over);
     document.removeEventListener('focusin', focusIn);
     document.removeEventListener('focusout', focusOut);

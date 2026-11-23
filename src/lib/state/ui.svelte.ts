@@ -151,6 +151,8 @@ class Ui {
   memoryEntity = $state<string | null>(null);
   /** ⇧⌘⌫ asks this approval card to open its "deny with a note" field. */
   denyNoteFor = $state<string | null>(null);
+  /** The first Esc on a running turn: that thread's composer row asks for a second one (`state/esc.ts`). */
+  escAsk = $state<{ thread: string; at: number } | null>(null);
   /** Sheet section to scroll to when it opens (e.g. a subagent companion → "subagents"). */
   sheetFocus = $state<string | null>(null);
   /** Approval card to scroll into view on Home (toast "Review"). */

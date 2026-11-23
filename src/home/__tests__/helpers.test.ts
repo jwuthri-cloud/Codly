@@ -149,6 +149,60 @@ describe("a helper's call that is open when the turn ends", () => {
   });
 });
 
+describe('a plan a Claude agent shows you', () => {
+  it('is said as that in the line of its work row, whatever kind of step the call is', () => {
+    const shown = (ts: number, call: string, activity: 'plan' | 'mcp') =>
+      ev(ts, { type: 'tool_started', call_id: call, name: 'ExitPlanMode', activity, target: { ...target, tool: 'ExitPlanMode' }, input: { plan: '1. Add the line' }, confidence: 'observed' });
+    apply(ev(10, { type: 'turn_started', input: 'Plan it' }), shown(11, 'p1', 'plan'));
+    expect(workSummary(works()[0].segs, 'claude')).toBe('Showed you its plan');
+    apply(completed(12, 'p1', false), shown(13, 'p2', 'mcp'), started(14, 'c1', 'Bash', 'execute'));
+    expect(workSummary(works()[0].segs, 'claude')).toBe('Ran echo hi · showed you its plan 2 times');
+    // From another CLI, or an agent Codly does not know, calls of that name are steps like any other.
+    expect(workSummary(works()[0].segs, 'codex')).toBe('Ran echo hi · updated its plan · 1 other step');
+    expect(workSummary(works()[0].segs)).toBe('Ran echo hi · updated its plan · 1 other step');
+  });
+});
+
+describe('a helper whose turn was interrupted or failed', () => {
+  const atWork = () => (store.live.l1?.subagents ?? []).filter((s) => s.status === 'running').map((s) => s.callId);
+  /** As `launchEarly`, but the turn does not end normally. */
+  function cut(status: 'interrupted' | 'failed') {
+    apply(
+      ev(10, { type: 'turn_started', input: 'Have a subagent run the tests' }),
+      helper(11, 'toolu-1', 'running'),
+      started(11, 'toolu-1', 'Agent', 'delegate'),
+      started(13, 'toolu-2', 'Bash', 'execute'),
+      progress(13, 'toolu-1', { tool_call_id: 'toolu-2' }),
+      ev(14, { type: 'turn_completed', status, result_text: null, duration_ms: null }),
+    );
+  }
+
+  it.each(['interrupted', 'failed'] as const)('is stopped with a turn that was %s, and so is its open call', (status) => {
+    cut(status);
+    expect(atWork()).toEqual([]);
+    expect(callOf('toolu-2')).toMatchObject({ end: 14, ok: null });
+    expect(store.now('l1')).toBeNull();
+    const [row] = works();
+    expect(row.helpers).toMatchObject([{ callId: 'toolu-1', status: 'stopped', ts: 14 }]);
+    expect(helperTitle(row.helpers[0], helperState(row.helpers[0], row.segs[0]))).toBe('Helper stopped');
+  });
+
+  it('a retry shows one helper at work, not the stopped one too', () => {
+    cut('interrupted');
+    apply(
+      ev(20, { type: 'turn_started', input: 'Have a subagent run the tests' }),
+      helper(21, 'toolu-9', 'running'),
+      started(21, 'toolu-9', 'Agent', 'delegate'),
+    );
+    expect(atWork()).toEqual(['toolu-9']);
+  });
+
+  it('a helper still at work when its turn ends normally goes on', () => {
+    launchEarly();
+    expect(atWork()).toEqual(['toolu-1']);
+  });
+});
+
 describe('a Codex helper', () => {
   // What the Codex adapter emits when the subagent's own turn starts before the `spawnAgent`
   // call names its thread: nothing for that turn's start, then the helper when the call ends,

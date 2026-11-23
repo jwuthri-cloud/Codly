@@ -126,7 +126,7 @@ impl Inner {
     fn block_interrupted(&self, run: &watchdog::Look, by: Option<Asker>, t: &Task) {
         let name = self.agent(&run.agent_id).map_or_else(|_| "its worker".into(), |a| a.name);
         let how = interrupted(by);
-        let reason = format!("{how}; the CLI did not stop, so Codly ended its process; move it to Ready to resume with {name}");
+        let reason = format!("{how}; the CLI did not stop, so Codly ended its process; Retry to resume with {name}");
         // Checked in the write: moved, stopped or cancelled by you meanwhile, it stays as it is.
         let mut blocked = false;
         let _ = self.update_task(&t.id, |t| {
@@ -147,7 +147,7 @@ impl Inner {
         let summary = format!("{name} was {how} on {} and did not stop. Codly ended its process and blocked its task.", t.key);
         let _ = self.decide(ws, Some(&t.id), "interrupt", summary, json!({ "plan_id": t.plan_id, "agent_id": run.agent_id, "run_id": run.run_id }));
         let text = format!(
-            "{name} was {how} on {} \"{}\" and did not stop, so Codly ended its process. The task is blocked until you move it to Ready.",
+            "{name} was {how} on {} \"{}\" and did not stop, so Codly ended its process. The task is blocked until you retry it.",
             t.key, t.title
         );
         let _ = self.chat(ws, &self.task_thread(t), "codly", &text, None);

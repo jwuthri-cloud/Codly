@@ -4,25 +4,45 @@ import type { Approval } from '../gen/Approval';
 import type { EventRow } from '../gen/EventRow';
 import type { Office } from '../gen/Office';
 import type { Provider } from '../gen/Provider';
-import { sandboxWants } from '../util/sandbox';
+import { showsPlan, wantsTo } from '../util/planRequest';
 import { oneLine } from '../util/sanitize';
 import { openWorkspace } from './actions';
 import { blockers } from './blockers.svelte';
 import { offices } from './offices.svelte';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
-import { ui } from './ui.svelte';
+import { ui, type Mode, type Room } from './ui.svelte';
+import { watch } from './watch.svelte';
 
 /** Whether you are reading that request's conversation right now. */
 const watching = (thread: string) => ui.room === 'home' && ui.mode !== 'office' && ui.mode !== 'map' && ui.thread === thread;
 
-/** What a request asks, as the one line of its toast. `provider`: the CLI of the agent that asks
- *  (none when Codly does not know the agent). A tool request says the tool's name. */
+/** Where you are looking: the room, the mode, the conversation on Home, and whether the window has the focus. */
+export type Looking = { room: Room; mode: Mode; thread: string; focused: boolean };
+
+/**
+ * Whether a request's card is in front of you: the window has the focus and Home shows one of
+ * the conversations that hold the card (`threads`: its request's, and the 1:1 with the agent
+ * that asked). The card is the notice then, and a toast would only repeat it.
+ */
+export function cardInView(at: Looking, threads: readonly string[]): boolean {
+  return at.focused && at.room === 'home' && at.mode !== 'office' && at.mode !== 'map' && threads.includes(at.thread);
+}
+
+const looking = (): Looking => ({ room: ui.room, mode: ui.mode, thread: ui.thread, focused: typeof document === 'undefined' || document.hasFocus() });
+
+/** The toast's first line for a request: who asks, and for what kind of answer. `provider`: the
+ *  CLI of the agent that asks (none when Codly does not know the agent). */
+export const asksTitle = (name: string, s: Approval['subject'], provider: Provider | null | undefined) =>
+  s.kind === 'question' ? `${name} has a question` : showsPlan(s, provider) ? `${name} shows you its plan` : `${name} needs your approval`;
+
+/** What a request asks, as the one line of its toast: a command as it is, the rest in words. A
+ *  Claude agent's plan is read in the conversation; every other tool request says the tool's name. */
 export function asks(s: Approval['subject'], provider: Provider | null | undefined): string {
   if (s.kind === 'command') return oneLine(s.command, 80);
   if (s.kind === 'question') return 'Answer it in the conversation';
-  if (s.kind === 'tool') return `Wants to ${sandboxWants(s, provider, 80) ?? `use ${oneLine(s.name, 60)}`}`;
-  return `Wants to ${s.kind.replace('_', ' ')}`;
+  if (showsPlan(s, provider)) return 'Read it in the conversation';
+  return `Wants to ${wantsTo(s, provider, 80)}`;
 }
 
 /** Something that waits for you in an office you are not looking at, and how to get to it once there. */
@@ -30,31 +50,33 @@ type Need = { line: string; body: string; open: () => void };
 
 export function installNotifications(): () => void {
   const seenPlanStatus = new Map<string, string>();
-  const approvalToast = new Map<string, number>();
+  /** approval → its toast, and the conversations that hold its card. */
+  const approvalToast = new Map<string, { toast: number; threads: string[] }>();
   const planToast = new Map<string, number>();
   const off = store.onEvent((ev: EventRow) => {
     arrived();
     const k = ev.kind;
     switch (k.type) {
       case 'approval_resolved': {
-        const id = approvalToast.get(k.approval_id);
-        if (id) toasts.dismiss(id);
+        const t = approvalToast.get(k.approval_id);
+        if (t) toasts.dismiss(t.toast);
         approvalToast.delete(k.approval_id);
         break;
       }
       case 'approval_requested': {
         const thread = store.approvalThread(k.approval);
-        if (watching(thread) || ui.selectedAgentId === k.approval.agent_id) return;
+        const threads = [thread, `agent:${k.approval.agent_id}`];
+        if (cardInView(looking(), threads) || ui.selectedAgentId === k.approval.agent_id) return;
         const a = store.agentMap.get(k.approval.agent_id);
         const s = k.approval.subject;
         const id = k.approval.id;
         const tid = toast({
           kind: 'attention',
-          title: s.kind === 'question' ? `${a?.name ?? 'An agent'} has a question` : `${a?.name ?? 'An agent'} needs your approval`,
+          title: asksTitle(a?.name ?? 'An agent', s, a?.provider),
           body: asks(s, a?.provider),
           action: { label: 'Review', run: () => { ui.openThread(thread); ui.revealApproval = id; } },
         });
-        approvalToast.set(id, tid);
+        approvalToast.set(id, { toast: tid, threads });
         break;
       }
       case 'plan_changed': {
@@ -86,6 +108,19 @@ export function installNotifications(): () => void {
         break;
     }
   });
+
+  // You opened the conversation that holds a card, or came back to the window: its toast goes.
+  const cardsSeen = () => {
+    const at = looking();
+    for (const [id, t] of approvalToast) {
+      if (!cardInView(at, t.threads)) continue;
+      toasts.dismiss(t.toast);
+      approvalToast.delete(id);
+    }
+  };
+  const offSeen = watch(cardsSeen);
+  const win = typeof window === 'undefined' ? null : window;
+  win?.addEventListener('focus', cardsSeen);
 
   // Your other offices keep working. What waits for you there (an approval, a blocking question,
   // a plan to approve) is pointed at too: one toast per office, and Review takes you there. Their
@@ -133,7 +168,7 @@ export function installNotifications(): () => void {
         const id = k.approval.id;
         key = `a:${id}`;
         need = {
-          line: `${name(k.approval.agent_id)} ${k.approval.subject.kind === 'question' ? 'has a question' : 'needs your approval'}`,
+          line: asksTitle(name(k.approval.agent_id), k.approval.subject, providers.get(k.approval.agent_id)),
           body: asks(k.approval.subject, providers.get(k.approval.agent_id)),
           open: () => {
             const ap = store.approvals.find((a) => a.id === id);
@@ -182,6 +217,8 @@ export function installNotifications(): () => void {
 
   return () => {
     off();
+    offSeen();
+    win?.removeEventListener('focus', cardsSeen);
     offElsewhere();
     clearTimeout(recount);
   };

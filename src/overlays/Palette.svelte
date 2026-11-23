@@ -19,6 +19,7 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { narrate } from '../lib/state/narration';
   import { ROOMS, ui } from '../lib/state/ui.svelte';
+  import { article } from '../lib/util/format';
   import { fuzzy, highlight } from '../lib/util/fuzzy';
   import { PROVIDER_LABEL, TASK_STATUS_LABEL, taskState } from '../lib/util/labels';
   import { modal } from '../lib/util/modal';
@@ -142,7 +143,7 @@
     }
     for (const c of store.clis)
       if (c.path && !c.problem)
-        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start a ${PROVIDER_LABEL[c.provider as Provider]} agent (1:1)`, icon: 'user-plus', run: () => (ui.modelDialog = { provider: c.provider as Provider, agentId: null }) });
+        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start ${article(PROVIDER_LABEL[c.provider as Provider])} ${PROVIDER_LABEL[c.provider as Provider]} agent (1:1)`, icon: 'user-plus', run: () => (ui.modelDialog = { provider: c.provider as Provider, agentId: null }) });
     for (const a of store.agents)
       if (narrate(a.id)?.tone === 'live') rows.push({ id: `int:${a.id}`, section: 'Agents', title: `Interrupt ${a.name}`, icon: 'pause', run: () => interruptAgent(a.id) });
     return rows;

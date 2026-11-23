@@ -152,7 +152,7 @@
         <span class="unit">errors</span>
       </div>
       <label class="row toggle">
-        <div class="r-text"><span class="r-title">Hard stop</span><span class="desc">Kill an agent that is still over a limit of its own (token velocity, repeated tool call, error storm) after being constrained. A used-up budget never kills: the agent stays constrained. Off: the breaker never goes past constraining. A stopped task is blocked until you move it to Ready.</span></div>
+        <div class="r-text"><span class="r-title">Hard stop</span><span class="desc">Kill an agent that is still over a limit of its own (token velocity, repeated tool call, error storm) after being constrained. A used-up budget never kills: the agent stays constrained. Off: the breaker never goes past constraining. A stopped task is blocked until you retry it.</span></div>
         <input type="checkbox" class="switch" checked={cfg.hard_stop} disabled={!cfg.enabled} aria-label="Hard stop" onchange={(e) => save({ hard_stop: e.currentTarget.checked })} />
       </label>
     </div>

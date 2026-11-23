@@ -90,6 +90,10 @@ export const sendNowTip = (name: string, provider: Provider | undefined) =>
 export const busyHint = (name: string, provider: Provider | undefined) =>
   readsMidTurn(provider) ? `${name} is mid-turn — it reads your message after its current step` : `${name} is mid-turn — your message queues and runs next`;
 
+/** The composer's placeholder while the agent's turn waits for your answer to a request shown above it. */
+export const waitingHint = (name: string, provider: Provider | undefined) =>
+  readsMidTurn(provider) ? `${name} waits for your answer above — it reads your message after that` : `${name} waits for your answer above — your message runs after this turn`;
+
 /** When a steer note reaches the agent. */
 export const steerHint = (provider: Provider | undefined) =>
   readsMidTurn(provider) ? 'Arrives as context during its current turn, or as its next turn' : 'Arrives as context on its next turn';

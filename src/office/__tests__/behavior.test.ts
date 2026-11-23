@@ -152,6 +152,21 @@ describe('events → behaviour', () => {
     expect(text(subject('WebFetch', { url: 'https://example.com' }))).toBe('use WebFetch');
   });
 
+  it('a Claude agent that shows its plan waits for you to read it: no tool name, and nothing to "run" or to allow', () => {
+    const plan = subject('ExitPlanMode', { plan: '1. Add the line' });
+    expect(approvalText(request('a-ada', plan), 'claude')).toBe('read its plan');
+    const asked = (agent: string) => {
+      const m = fresh();
+      reduce(m, row(1000, agent, { type: 'approval_requested', approval: request(agent, plan) }), live);
+      return sentence(m.agents.get(agent)!, T0 + 2000);
+    };
+    expect(asked('a-ada')).toMatchObject({ pre: 'Waiting for you: read its plan', code: null, tone: 'warn' });
+    // That request is Claude Code's own: from Bo (Codex), or an agent the office does not know, it is a tool by its name.
+    expect(approvalText(request('a-bo', plan), 'codex')).toBe('use ExitPlanMode');
+    expect(asked('a-bo').text).toBe('May I use ExitPlanMode?');
+    expect(asked('a-new').text).toBe('May I use ExitPlanMode?');
+  });
+
   it('that request is Claude Code’s own: from another CLI, or an agent the office does not know, it is a tool by its name', () => {
     const host = subject('SandboxNetworkAccess', { host: 'example.com' });
     expect(approvalText(request('a-bo', host), 'codex')).toBe('use SandboxNetworkAccess');

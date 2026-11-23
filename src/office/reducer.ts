@@ -10,6 +10,7 @@ import type { Approval } from '../lib/gen/Approval';
 import type { EventRow } from '../lib/gen/EventRow';
 import type { Provider } from '../lib/gen/Provider';
 import type { Task } from '../lib/gen/Task';
+import { PLAN_ASK, showsPlan } from '../lib/util/planRequest';
 import { sandboxWants } from '../lib/util/sandbox';
 import { columnOf, emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type ToolCall } from './model';
 import { basename, clean, commandHead, hash, host } from './text';
@@ -211,7 +212,8 @@ export function applyStatus(a: AgentState, status: AgentStatus, ts: number) {
 
 /**
  * What a request asks, in a few words: a command by its first words, every other request by
- * what the agent wants to do, so that it reads after "May I" and after "Waiting for you:".
+ * what the agent wants to do, so that it reads after "May I" and after "Waiting for you:". A
+ * Claude agent's plan is `PLAN_ASK`: what you do with it, since a plan is read, not allowed.
  * `provider`: the CLI of the agent that asks (null: the office does not know it).
  */
 export function approvalText(ap: Approval, provider: Provider | null): string {
@@ -222,8 +224,9 @@ export function approvalText(ap: Approval, provider: Provider | null): string {
     case 'file_change':
       return s.paths.length ? `edit ${clean(basename(s.paths[0]), 28)}${s.paths.length > 1 ? ` +${s.paths.length - 1}` : ''}` : 'change files';
     case 'tool':
-      // A command in Claude Code's sandbox wants a host: said as that, not by the request's tool name.
-      return sandboxWants(s, provider, 30) ?? `use ${clean(s.name, 30)}`;
+      // A Claude agent's plan to read, or a host that a command in Claude Code's sandbox wants:
+      // said as that, not by the request's tool name.
+      return showsPlan(s, provider) ? PLAN_ASK : (sandboxWants(s, provider, 30) ?? `use ${clean(s.name, 30)}`);
     case 'question':
       return 'ask a question';
     default:
@@ -508,6 +511,8 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
     case 'turn_completed':
       if (a) {
         clearWork(a);
+        // A turn that was interrupted or that failed takes its helpers with it.
+        if (k.status === 'interrupted' || k.status === 'failed') a.subagents.clear();
         if (k.status === 'failed') a.blocked = { reason: 'turn failed', since: at };
       }
       break;

@@ -14,6 +14,7 @@ import type { Task } from './gen/Task';
 import type { AgentLive, RateWindow, Seg } from './state/store.svelte';
 import type { DiffStat } from './state/diffstats.svelte';
 import { timer } from './util/format';
+import { isPlanCall, PLAN_ASK, planStep, showsPlan } from './util/planRequest';
 import { sandboxHost } from './util/sandbox';
 import { basename, oneLine, truncate } from './util/sanitize';
 
@@ -76,8 +77,10 @@ function toolName(s: Seg): string {
   return raw.replace(/^mcp__codly__/, '').replace(/^codly\./, '');
 }
 
-/** What an open tool call is doing, as parts. */
-export function activityParts(s: Seg): Part[] {
+/** What an open tool call is doing, as parts. `provider`: the CLI of the agent that makes the call. */
+export function activityParts(s: Seg, provider: Provider | null | undefined): Part[] {
+  // A Claude agent's plan shown to you is said as that, whatever kind of step the call is.
+  if (isPlanCall(s.name, provider)) return [txt(planStep(true))];
   switch (s.activity) {
     case 'read':
       return [txt('Reading '), code(fileOf(s))];
@@ -133,7 +136,9 @@ function approvalParts(ap: Approval, provider: Provider): Part[] {
     case 'file_change':
       return s.paths.length === 1 ? [txt('Waiting for you: change '), code(basename(s.paths[0]))] : [txt(`Waiting for you: change ${s.paths.length} files`)];
     case 'tool': {
-      // A command in Claude Code's sandbox wants a host: said as that, not by the request's tool name.
+      // A Claude agent's plan to read, or a host that a command in Claude Code's sandbox wants:
+      // said as that, not by the request's tool name.
+      if (showsPlan(s, provider)) return [txt(`Waiting for you: ${PLAN_ASK}`)];
       const host = sandboxHost(s, provider);
       if (host === null) return [txt('Waiting for you: use '), code(oneLine(s.name, 32))];
       return host ? [txt('Waiting for you: reach '), code(truncate(host, 44))] : [txt('Waiting for you: use the network')];
@@ -204,7 +209,7 @@ export function narrateFrom(i: NarrationInput): Narration {
   }
   if (open) {
     const slow = open.activity === 'execute' || open.activity === 'test';
-    return out(activityParts(open), 'live', open.start, slow);
+    return out(activityParts(open, a.provider), 'live', open.start, slow);
   }
 
   // 4 · Streaming.

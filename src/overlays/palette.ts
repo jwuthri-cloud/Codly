@@ -4,6 +4,7 @@
 // are one decision, not two: their repeats do nothing on such a row.
 import type { ApprovalSubject } from '../lib/gen/ApprovalSubject';
 import type { Provider } from '../lib/gen/Provider';
+import { showsPlan } from '../lib/util/planRequest';
 import { sandboxWants } from '../lib/util/sandbox';
 import { clean } from '../lib/util/sanitize';
 
@@ -43,8 +44,9 @@ export function wants(s: ApprovalSubject, provider: Provider | null | undefined)
     case 'file_change':
       return `change ${s.paths.map(clean).join(', ')}`;
     case 'tool':
-      // A command in Claude Code's sandbox wants a host: said as that, with the whole host.
-      return sandboxWants(s, provider) ?? `use the tool ${clean(s.name)}`;
+      // A Claude agent's plan, or a host that a command in Claude Code's sandbox wants (the whole
+      // host): said as that, not by the request's tool name.
+      return showsPlan(s, provider) ? 'show you its plan' : (sandboxWants(s, provider) ?? `use the tool ${clean(s.name)}`);
     case 'question':
       return 'ask you a question';
     case 'permissions':

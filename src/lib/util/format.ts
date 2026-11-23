@@ -70,6 +70,9 @@ export const pct = (f: number | null | undefined) => (f == null ? '–' : `${Mat
 
 export const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
+/** "a" or "an" before a name, by its first sound: "an OpenCode agent", "a Codex agent", "a user". */
+export const article = (name: string) => (/^[aeio]/i.test(name) || (/^u/i.test(name) && !/^u(?:ni|se|su|ti)/i.test(name)) ? 'an' : 'a');
+
 export const shortSha = (sha: string | null | undefined) => (sha ? sha.slice(0, 7) : '');
 
 /** "in 2 h 14 min" / "at 14:00" for rate-limit resets. */

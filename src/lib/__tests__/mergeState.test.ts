@@ -3,7 +3,7 @@ import { api } from '../api';
 import type { MergeState } from '../gen/MergeState';
 import type { PrSource } from '../gen/PrSource';
 import { mergeAgent, mergePlan } from '../state/actions';
-import { behindLine, fileList, loadMergeState, mergeByHand, mergeKey, mergeUi, resolveMergeConflict, stopResolvingMerge } from '../state/mergeState.svelte';
+import { behindLine, conflictsWith, fileList, loadMergeState, mergeByHand, mergeKey, mergeUi, resolveMergeConflict, stopResolvingMerge } from '../state/mergeState.svelte';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 
@@ -45,6 +45,19 @@ describe('a merge that cannot go straight in', () => {
     expect(mergeUi.states[mergeKey(plan)]).toBeUndefined();
     expect(core).toHaveBeenCalledTimes(2);
     expect(said()).toEqual([]);
+  });
+
+  it('a plan that conflicts names the branch it conflicts with, until the conflict is resolved', () => {
+    expect(conflictsWith(plan)).toBeNull(); // not read yet: nothing says it cannot merge
+    mergeUi.states[mergeKey(plan)] = conflict;
+    expect(conflictsWith(plan)).toBe('main');
+    // An agent is on it: still not ready.
+    mergeUi.states[mergeKey(plan)] = { ...conflict, resolving: 't9' };
+    expect(conflictsWith(plan)).toBe('main');
+    // Resolved (or only behind): the normal words come back.
+    mergeUi.states[mergeKey(plan)] = { ...clean, behind: 3 };
+    expect(conflictsWith(plan)).toBeNull();
+    expect(conflictsWith({ kind: 'plan', id: 'other' })).toBeNull();
   });
 
   it('a plan that conflicts is not sent to the Lead: an agent can resolve it, from the toast', async () => {

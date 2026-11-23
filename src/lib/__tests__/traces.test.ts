@@ -84,4 +84,17 @@ describe('buildTraces', () => {
     expect(buildTraces([], 'a')).toEqual([]);
     expect(summarize([])).toEqual({ calls: 0, failed: 0, running: 0, totalMs: 0 });
   });
+
+  it('a Claude agent’s call that showed a plan is named as that, and a plan sent back is not a failed call', () => {
+    const plan = (ts: number, call_id: string) => started('a', ts, call_id, 'ExitPlanMode');
+    const events = [plan(T0, 'p1'), done('a', T0 + 1000, 'p1', { ok: false }), plan(T0 + 2000, 'p2'), done('a', T0 + 3000, 'p2'), started('a', T0 + 4000, 'c1'), done('a', T0 + 5000, 'c1', { ok: false })];
+    const t = buildTraces(events, 'a', 'claude');
+    expect(t.map((c) => [c.name, c.label, c.ok, c.planSentBack])).toEqual([['Its plan', 'shown to you', false, true], ['Its plan', 'shown to you', true, false], ['Bash', 'pnpm test', false, false]]);
+    expect(summarize(t)).toMatchObject({ calls: 3, failed: 1 });
+    // Only for a Claude agent: from another CLI, or an agent Codly does not know, a call of that name is a call like any other.
+    for (const other of [buildTraces(events, 'a', 'codex'), buildTraces(events, 'a')]) {
+      expect(other.map((c) => [c.name, c.ok, c.planSentBack])).toEqual([['ExitPlanMode', false, false], ['ExitPlanMode', true, false], ['Bash', false, false]]);
+      expect(summarize(other)).toMatchObject({ calls: 3, failed: 2 });
+    }
+  });
 });

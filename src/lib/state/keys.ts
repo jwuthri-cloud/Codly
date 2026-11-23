@@ -1,15 +1,16 @@
 // Global keyboard map. ⌘K palette · ⌘F find in the conversation · ⌘1 full office · ⌘2 full work · ⌘. focus · ⌘, settings ·
 // ⌘N new request · ⌘[ / ⌘] previous / next request · ⇧⌘N new task · ⌘O open repo · ⌘↵ the one
 // primary action (approve / run plan) · ⌥⌘↵ allow for the session · ⌘⌫ deny · ⇧⌘⌫ deny with a
-// note · G-sequences to rooms · J/K lists · Esc (close, deselect, then stop the running turn) · ?.
+// note (both also from the empty composer) · G-sequences to rooms · J/K lists · Esc (close,
+// deselect, then stop the running turn: the first press asks, the second stops) · ?.
 // ponytail: hand-rolled instead of tinykeys — one listener, sequences included.
 import type { Approval } from '../gen/Approval';
-import { openWorkspace, resolveApprovals, runPlan, stopThread } from './actions';
+import { openWorkspace, resolveApprovals, runPlan, stopThreadByEsc } from './actions';
 import { twinsIn } from './approvalGroups';
-import { escStep } from './esc';
+import { denyKeyInField, escStep } from './esc';
 import { requests } from './requests.svelte';
 import { store } from './store.svelte';
-import { ROOMS, isClosedThread, isRequestThread, ui, type Room } from './ui.svelte';
+import { ROOMS, isClosedThread, isRequestThread, ui, type DiffTarget, type Room } from './ui.svelte';
 
 export type ListNav = { next: () => void; prev: () => void; open?: () => void };
 let navStack: ListNav[] = [];
@@ -66,6 +67,18 @@ export function keyTargetPlan(): string | null {
   return p && p.status === 'awaiting_approval' ? p.id : null;
 }
 
+/**
+ * What G C shows. From a request: that request's plan, when it has changes to show; a request
+ * without one (a draft) gets the room's own choice, not what you looked at last. From anywhere
+ * else: what you looked at last.
+ */
+export function keyTargetChanges(): DiffTarget {
+  if (ui.room !== 'home' || !isRequestThread(ui.thread)) return ui.diffTarget;
+  const p = store.planOf(ui.thread);
+  const shows = !!p && p.status !== 'cancelled' && store.tasks.some((t) => t.plan_id === p.id && (t.status === 'done' || !!t.branch));
+  return p && shows ? { kind: 'plan', id: p.id } : null;
+}
+
 const workspaceOpen = () => !!store.workspace;
 
 export function installKeys(): () => void {
@@ -103,7 +116,10 @@ export function installKeys(): () => void {
       }
       return;
     }
-    if (mod && e.key === 'Backspace' && !e.repeat && !overlay && !typing) {
+    // In a text field these keys delete text; in the empty composer there is nothing to delete.
+    const field = e.target as HTMLTextAreaElement | null;
+    const denyHere = !typing || denyKeyInField({ composer: !!field?.closest?.('[aria-label="Composer"]'), empty: !field?.value });
+    if (mod && e.key === 'Backspace' && !e.repeat && !overlay && denyHere) {
       const ap = keyTargetApproval();
       if (!ap || !ap.choices.includes('deny')) return;
       e.preventDefault();
@@ -192,7 +208,7 @@ export function installKeys(): () => void {
       else if (step === 'leave-office') ui.mode = 'blend';
       else if (step === 'close-find') ui.findOpen = false;
       else if (step === 'leave-closed') ui.openRequest(ui.request);
-      else if (step === 'stop') stopThread(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
+      else if (step === 'stop') stopThreadByEsc(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
       return;
     }
 
@@ -205,7 +221,10 @@ export function installKeys(): () => void {
       if (dest) {
         e.preventDefault();
         if (dest === 'settings') ui.settingsOpen = true;
-        else ui.go(dest);
+        else {
+          if (dest === 'changes') ui.diffTarget = keyTargetChanges();
+          ui.go(dest);
+        }
       }
       return;
     }
@@ -250,7 +269,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['⇧⌘N', 'New task'],
       ['⌘O', 'Open repository'],
       ['⌘,', 'Settings'],
-      ['Esc', 'Close · deselect · stop the running turn'],
+      ['Esc', 'Close · deselect · press twice to stop the running turn'],
       ['?', 'This sheet'],
     ],
   },
@@ -263,7 +282,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     items: [
       ['↵', 'Send (queues if the agent is mid-turn)'],
       ['⇧↵', 'New line'],
-      ['Esc', 'Stop the running turn (empty line)'],
+      ['Esc Esc', 'Stop the running turn (empty line)'],
       ['↑', 'Bring back what you sent (empty line)'],
       ['⇧⇥', 'Next mode: Ask · Plan · Auto · Direct'],
       ['⌫', 'Back to the request (empty line, 1:1)'],

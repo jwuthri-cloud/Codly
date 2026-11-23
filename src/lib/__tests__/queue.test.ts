@@ -12,7 +12,7 @@ import type { Task } from '../gen/Task';
 import type { Workspace } from '../gen/Workspace';
 import { installNotifications } from '../state/notify';
 import { offices } from '../state/offices.svelte';
-import { busyHint, queuedHint, sendNowTip, steerHint, STEER_GRACE, waitingOf, type Sent, type Turn } from '../state/queue';
+import { busyHint, queuedHint, sendNowTip, steerHint, STEER_GRACE, waitingHint, waitingOf, type Sent, type Turn } from '../state/queue';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 
@@ -100,6 +100,12 @@ describe('where a waiting message goes, in words', () => {
       expect(busyHint('Ada', provider)).toBe('Ada is mid-turn — your message queues and runs next');
       expect(steerHint(provider)).toBe('Arrives as context on its next turn');
     }
+  });
+
+  it('an agent that waits for your answer is not "mid-turn": the composer says what it waits for', () => {
+    expect(waitingHint('Eli', 'claude')).toBe('Eli waits for your answer above — it reads your message after that');
+    expect(waitingHint('Eli', 'gemini')).toBe('Eli waits for your answer above — your message runs after this turn');
+    for (const provider of ['claude', 'codex', 'gemini', undefined] as const) expect(waitingHint('Eli', provider)).not.toContain('mid-turn');
   });
 });
 

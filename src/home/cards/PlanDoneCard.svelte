@@ -1,17 +1,23 @@
 <!--
   The plan landed on its integration branch: what changed in total, what each task did, what
   the agents made, and the decision that is yours — merge into your branch, or keep the branch.
-  A merge that would conflict with your branch says so here, with the two ways out.
+  A merge that would conflict with your branch says so here, with the two ways out: until the
+  conflict is resolved the card does not say "ready to merge", and the one primary button is
+  the step's own "Have an agent resolve it". While a pull request for the plan is open with
+  checks still running, the primary button is to look at the pull request; Merge stays.
 -->
 <script lang="ts">
   import { keepBranch, mergePlan } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
+  import { conflictsWith } from '../../lib/state/mergeState.svelte';
+  import { checksState, prKey, prUi } from '../../lib/state/pullRequest.svelte';
   import { planSpent, spentVersion } from '../../lib/state/spent.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { PLAN_SPENT_TIP, spentLine } from '../../lib/util/cost';
-  import { shortSha } from '../../lib/util/format';
+  import { plural, shortSha } from '../../lib/util/format';
   import { idVar, GLOSSARY } from '../../lib/util/labels';
+  import { openExternal } from '../../lib/util/markdown';
   import ArtifactThumb from '../../components/ArtifactThumb.svelte';
   import Icon from '../../components/Icon.svelte';
   import MergeConflictStep from '../../components/MergeConflictStep.svelte';
@@ -38,6 +44,11 @@
   });
   const kept = $derived(ui.keptPlans.includes(planId) || !!store.planMap.get(planId)?.kept);
   const target = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main');
+  /** The branch it conflicts with: nothing can merge until that is resolved, and the step below has the ways out. */
+  const conflict = $derived(merged || kept ? null : conflictsWith({ kind: 'plan', id: planId }));
+  /** A pull request for it is open and its checks still run: look at those before you merge here. */
+  const pr = $derived(prUi.opened[prKey({ kind: 'plan', id: planId })] ?? null);
+  const prChecking = $derived(!!pr && pr.state === 'open' && !!pr.checks && checksState(pr.checks) === 'wait');
   let busy = $state(false);
   // `unchecked`: after the plan's checks failed on the merge result, you merge anyway.
   async function merge(unchecked = false) {
@@ -54,10 +65,10 @@
 
 {#if plan}
   <article class="card" class:open={!merged && !kept}>
-    <p class="eyebrow">{merged ? `Merged into ${target}` : kept ? 'Branch kept' : 'Plan finished · ready to merge'}</p>
+    <p class="eyebrow">{merged ? `Merged into ${target}` : kept ? 'Branch kept' : conflict ? `Plan finished · conflicts with ${conflict}` : 'Plan finished · ready to merge'}</p>
     <h3 class="serif">{plan.summary}</h3>
     <p class="stats num">
-      {#if stat}<span class="add">+{stat.added}</span> <span class="del">−{stat.removed}</span> across {stat.files} files ·{/if}
+      {#if stat}<span class="add">+{stat.added}</span> <span class="del">−{stat.removed}</span> across {plural(stat.files, 'file')} ·{/if}
       {tasks.filter((t) => t.status === 'done').length} of {tasks.length} tasks merged into <code data-tip={GLOSSARY.integration}>{plan.integration_branch ?? 'the integration branch'}</code>
     </p>
     {#if spent?.tokens}<p class="used num"><span data-tip={PLAN_SPENT_TIP}>Used {spentLine(spent)}</span></p>{/if}
@@ -86,7 +97,11 @@
         <span class="done"><Icon name="check" size={13} stroke={2} />Merged into <code>{target}</code> at <code>{shortSha(merged.sha)}</code></span>
         <button class="btn ghost sm" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {:else}
-        <button class="btn primary" disabled={busy || kept} onclick={() => merge()}><Icon name="merge" size={14} />Merge into {target}</button>
+        {#if prChecking && pr && !conflict}
+          {@const url = pr.url}
+          <button class="btn primary" onclick={() => openExternal(url)} data-tip="Its checks still run: look at them before you merge here"><Icon name="link" size={14} />View the pull request</button>
+        {/if}
+        <button class="btn" class:primary={!conflict && !prChecking} disabled={busy || kept} onclick={() => merge()}><Icon name="merge" size={14} />Merge into {target}</button>
         <button class="btn" disabled={busy || kept} onclick={keep}>Keep the branch</button>
         <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {/if}

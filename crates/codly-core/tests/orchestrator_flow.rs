@@ -1116,6 +1116,46 @@ async fn one_to_one_prefs_are_saved_in_the_agents_office() {
     core.shutdown().await;
 }
 
+/// Kill an agent while its request waits for you: the request is closed, and an answer that
+/// still arrives while its process ends is refused, not recorded as given.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_killed_agents_request_is_closed_and_takes_no_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            // Not a read or a test run: balanced mode asks you.
+            turn.ask_approval("node scripts/gen.js").await;
+        })
+    });
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    // Its process takes a while to end, like a real CLI's: the card is on screen meanwhile.
+    let core = start(dir.path(), SlowStop(FakeSpawner { log, lead: idle, worker }, Duration::from_secs(1))).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    core.send_chat(&format!("agent:{}", solo.id), "generate the file").await.unwrap();
+    let ask = wait_for("the request", 20, async || core.snapshot().await.unwrap().approvals.into_iter().find(|a| a.status == ApprovalStatus::Pending)).await;
+
+    core.stop_agent(&solo.id).await.unwrap();
+    let allow = || ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None };
+    let refused = core.resolve_approval(&ask.id, allow()).await.expect_err("a killed agent takes no answer").to_string();
+    assert_eq!(refused, "the agent that asked is no longer running; the request expired");
+    assert!(core.snapshot().await.unwrap().approvals.iter().all(|a| a.status != ApprovalStatus::Pending), "the card is closed");
+    let events = core.events(None, None, 2000).await.unwrap();
+    let ends: Vec<ApprovalStatus> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::ApprovalResolved { approval_id, status, .. } if *approval_id == ask.id => Some(*status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, [ApprovalStatus::Expired], "closed once, as expired: never as approved");
+    let again = core.resolve_approval(&ask.id, allow()).await.expect_err("a closed request takes no answer").to_string();
+    assert_eq!(again, "that approval was already expired");
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelling_mid_gate_stays_cancelled_and_merges_nothing() {
     let dir = tempfile::tempdir().unwrap();

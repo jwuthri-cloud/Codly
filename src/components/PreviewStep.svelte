@@ -121,7 +121,9 @@
       <span class="dot" class:live></span>
       <code class="ran truncate" data-tip={run.command}>{run.command}</code>
       <span class="state">{run.ended ?? 'running'}</span>
-      {#if url}<button class="link truncate" onclick={() => openExternal(url)} data-tip="Open in your browser">{url.replace(/^https?:\/\//, '')}</button>{/if}
+      <!-- The address answers only while the command runs: after that it is text, not a link. -->
+      {#if url && live}<button class="link truncate" onclick={() => openExternal(url)} data-tip="Open in your browser">{url.replace(/^https?:\/\//, '')}</button>
+      {:else if url}<span class="was truncate" data-tip="The command ended: nothing answers at this address now">{url.replace(/^https?:\/\//, '')}</span>{/if}
       {#if live}
         <button class="btn sm" disabled={busy} onclick={stop}><Icon name="stop" size={12} />Stop</button>
       {:else}
@@ -146,5 +148,6 @@
   .state { font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
   .link { max-width: 45%; text-align: left; font-size: var(--t-sm); color: var(--aurora-m); }
   .link:hover { text-decoration: underline; }
+  .was { max-width: 45%; font-size: var(--t-sm); color: var(--ink-3); user-select: text; }
   .log { max-height: 220px; overflow: auto; margin: 0; padding: 8px 10px; border-radius: var(--r-sm); background: var(--surface-1); font-family: var(--font-mono); font-size: 11.5px; line-height: 1.45; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 </style>

@@ -1,9 +1,10 @@
 <!--
   First run as a quest: five levels on a map, 100 XP each, all skippable, reopenable from Settings.
   The crew level completes itself the moment one CLI is ready (Continue alone never completes
-  it); the others when you press Continue. The Lead level needs a Lead to appoint: with no
-  agent ready there is none to pick, and Continue moves on, gives nothing and says what is
-  missing.
+  it); the others when you press Continue, and the last one when you open a repository. A
+  reward is for something that happened (`missing` in quest.ts is the one rule): a level whose
+  reward is not true yet (no agent ready, no OpenRouter key) moves on, gives nothing and says
+  what is missing.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -15,7 +16,7 @@
   import Icon from '../components/Icon.svelte';
   import Logo from '../components/Logo.svelte';
   import { blip } from './sound';
-  import { LEVELS, NO_LEAD, XP_PER_LEVEL, complete, crewReady, earned, levelIndex, nextLevel, progress, rank, xp, type LevelId } from './quest';
+  import { LEVELS, XP_PER_LEVEL, complete, crewReady, levelIndex, missing, nextLevel, openRouterOn, progress, rank, xp, type LevelId } from './quest';
   import LevelBrains from './LevelBrains.svelte';
   import LevelCreative from './LevelCreative.svelte';
   import LevelCrew from './LevelCrew.svelte';
@@ -45,10 +46,17 @@
   $effect(() => {
     if (crewReady(store.clis) && !untrack(() => ui.quest.includes('crew'))) award('crew');
   });
+  /** Leaving a level: its reward when what it says is true; else what is missing, and nothing is given. */
+  async function settle(id: LevelId) {
+    if (ui.quest.includes(id)) return;
+    // OpenRouter's switch is read when it counts: its level saves it without telling the quest.
+    const openRouter = id === 'brains' && openRouterOn(await api.byokStatus().catch(() => null));
+    const gap = missing(id, { clis: store.clis, openRouter });
+    if (gap) toast({ kind: 'info', ...gap });
+    else award(id);
+  }
   function next() {
-    // "Crew hired" is for a crew that exists: Continue with no ready CLI moves on without it.
-    if (earned(current, store.clis)) award(current);
-    else if (current === 'lead') toast({ kind: 'info', ...NO_LEAD });
+    void settle(current);
     blip('tap', sound);
     if (idx < LEVELS.length - 1) current = LEVELS[idx + 1].id;
   }
@@ -61,7 +69,7 @@
     ui.onboardingOpen = false;
   }
   function finish() {
-    award('mission');
+    void settle('mission');
     blip('done', sound);
     close();
   }

@@ -809,7 +809,7 @@ export class Story {
       const plan = t.plan_id ? sim.plans.get(t.plan_id) : null;
       // Only a task still in flight: one you stopped on the board (or retried since) keeps its status.
       if (['running', 'verifying', 'merging'].includes(t.status) && plan?.status !== 'cancelled')
-        sim.patchTask(t.id, { status: 'blocked', status_reason: 'Interrupted by you. Move it to Ready to retry.' });
+        sim.patchTask(t.id, { status: 'blocked', status_reason: 'Interrupted by you. Retry to resume.' });
       if (act.a.status !== 'offline') act.status('idle');
     } finally {
       this.running.delete(act.id);
@@ -1638,7 +1638,7 @@ export class Story {
     });
     sim.decision('merge', 'human', `you had an agent resolve the conflicts of ${branch} with ${target} in ${names}: task ${key}`, { plan_id: planId, files }, { task: task.id });
     sim.patchPlan(planId, { status: 'running', base_branch: target });
-    sim.chat(plan.thread, 'codly', `${target} and this plan both changed ${names}. Codly brought ${target} into the plan’s branch, in its own worktree (your checkout is not touched), and task ${key} resolves the conflicts there. Then the plan’s checks run again and you can merge it.`);
+    sim.chat(plan.thread, 'codly', `${target} and this plan both changed ${names}. Codly brought ${target} into the plan’s branch, in its own worktree (your checkout is not touched). An agent resolves the conflicts there: that is task ${key}. Then the plan’s checks run again and you can merge it.`);
     void this.runResolution(planId, task.id, target);
     return task;
   }
@@ -1976,6 +1976,13 @@ export class Story {
     const act = sim.actor(agentId);
     if (this.running.has(agentId) || this.busyLeads.has(agentId) || act.inTurn) sim.cancelled.add(agentId);
     else if (!stop) throw new Error(`${a.name} isn’t running anything.`);
+    // Like the core: what the agent asked you does not outlive its turn (its CLI takes the
+    // request back) or its process (Codly closes the request).
+    for (const ap of [...sim.approvals.values()].filter((ap) => ap.agent_id === agentId && ap.status === 'pending')) {
+      const [status, by] = stop ? (['expired', 'codly'] as const) : (['cancelled', 'provider'] as const);
+      sim.approvals.set(ap.id, { ...ap, status, decided_by: by });
+      sim.emit({ type: 'approval_resolved', approval_id: ap.id, status, by }, { agent: ap.agent_id, task: ap.task_id, run: ap.run_id });
+    }
     if (stop) {
       act.emit({ type: 'exited', code: 0 });
       act.set({ status: 'offline', activity: null, activity_label: null });

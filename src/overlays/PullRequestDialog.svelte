@@ -71,11 +71,11 @@
       {#if !pushOnly}
         <label class="field">
           <span class="eyebrow">Title</span>
-          <input bind:value={title} disabled={busy} />
+          <input bind:value={title} aria-label="Title" disabled={busy} />
         </label>
         <label class="field">
           <span class="eyebrow">Description</span>
-          <textarea bind:value={body} rows="12" spellcheck="false" disabled={busy}></textarea>
+          <textarea bind:value={body} rows="12" aria-label="Description" spellcheck="false" disabled={busy}></textarea>
         </label>
       {/if}
       {#if pushed}

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { escStep, type EscState } from '../state/esc';
+import type { Plan } from '../gen/Plan';
+import type { Task } from '../gen/Task';
+import { denyKeyInField, ESC_STOP_WINDOW, escStep, escStop, type EscState } from '../state/esc';
+import { keyTargetChanges } from '../state/keys';
+import { store } from '../state/store.svelte';
 import { ui } from '../state/ui.svelte';
 
 const home: EscState = { repeat: false, artifactOpen: false, selection: false, mode: 'blend', room: 'home', popupOpen: false, inOffice: false, findOpen: false, readingClosed: false };
@@ -49,6 +53,70 @@ describe('Esc outside a text field', () => {
     expect(escStep({ ...home, room: 'terminal' })).toBeNull();
     expect(escStep({ ...home, popupOpen: true })).toBeNull();
     expect(escStep({ ...home, inOffice: true })).toBeNull();
+  });
+});
+
+describe('Esc on a running turn', () => {
+  it('asks on the first press and stops on a second one for the same thread inside the window', () => {
+    expect(escStop(null, 'lead', 1000)).toBe('ask');
+    expect(escStop({ thread: 'lead', at: 1000 }, 'lead', 1001)).toBe('stop');
+    expect(escStop({ thread: 'lead', at: 1000 }, 'lead', 1000 + ESC_STOP_WINDOW)).toBe('stop');
+  });
+
+  it('asks again once the window is over, in another thread, or when the clock went back', () => {
+    expect(escStop({ thread: 'lead', at: 1000 }, 'lead', 1001 + ESC_STOP_WINDOW)).toBe('ask');
+    expect(escStop({ thread: 'lead', at: 1000 }, 'agent:a1', 1001)).toBe('ask');
+    expect(escStop({ thread: 'lead', at: 1000 }, 'lead', 999)).toBe('ask');
+  });
+});
+
+describe('⌘⌫ in a text field', () => {
+  it('denies only from the empty composer: with text in it, and in every other field, it deletes text', () => {
+    expect(denyKeyInField({ composer: true, empty: true })).toBe(true);
+    expect(denyKeyInField({ composer: true, empty: false })).toBe(false);
+    expect(denyKeyInField({ composer: false, empty: true })).toBe(false);
+  });
+});
+
+describe('G C', () => {
+  const plan = (id: string, thread: string, status: Plan['status']) => ({ id, thread, status, created_at: 1 }) as Plan;
+  const task = (id: string, planId: string, status: Task['status']) => ({ id, plan_id: planId, status, branch: null }) as Task;
+
+  afterEach(() => {
+    store.plans = [];
+    store.tasks = [];
+    ui.diffTarget = null;
+    ui.thread = 'lead';
+    ui.go('home');
+  });
+
+  it('opens Changes on the plan of the request you are on, not on what you looked at last', () => {
+    store.plans = [plan('p1', 'lead', 'done'), plan('p2', 'lead:b', 'running')];
+    store.tasks = [task('t1', 'p1', 'done'), task('u1', 'p2', 'done')];
+    ui.diffTarget = { kind: 'plan', id: 'p1' };
+    ui.thread = 'lead:b';
+    expect(keyTargetChanges()).toEqual({ kind: 'plan', id: 'p2' });
+  });
+
+  it('leaves the choice to the room for a request with nothing to show yet', () => {
+    store.plans = [plan('p1', 'lead', 'done'), plan('p2', 'lead:b', 'awaiting_approval')];
+    store.tasks = [task('t1', 'p1', 'done'), task('u1', 'p2', 'pending')];
+    ui.diffTarget = { kind: 'plan', id: 'p1' };
+    ui.thread = 'lead:b';
+    expect(keyTargetChanges()).toBeNull();
+    ui.thread = 'lead:draft';
+    expect(keyTargetChanges()).toBeNull();
+  });
+
+  it('keeps what you looked at last from a 1:1 chat and from another room', () => {
+    store.plans = [plan('p2', 'lead:b', 'done')];
+    store.tasks = [task('u1', 'p2', 'done')];
+    ui.diffTarget = { kind: 'task', id: 'u1' };
+    ui.thread = 'agent:a1';
+    expect(keyTargetChanges()).toEqual({ kind: 'task', id: 'u1' });
+    ui.thread = 'lead:b';
+    ui.go('plan');
+    expect(keyTargetChanges()).toEqual({ kind: 'task', id: 'u1' });
   });
 });
 

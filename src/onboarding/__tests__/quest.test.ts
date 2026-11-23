@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import type { ByokStatus } from '../../lib/gen/ByokStatus';
 import type { CliInfo } from '../../lib/gen/CliInfo';
 import { catalog } from '../catalog';
-import { LEVELS, NO_LEAD, XP_PER_LEVEL, complete, crewReady, earned, nextLevel, progress, rank, xp } from '../quest';
+import { LEVELS, XP_PER_LEVEL, complete, crewReady, missing, nextLevel, openRouterOn, progress, rank, xp } from '../quest';
 
 const cli = (over: Partial<CliInfo>): CliInfo => ({ provider: 'claude', path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: null, transport: 'stream-json', ...over }) as CliInfo;
 
@@ -32,23 +33,41 @@ describe('quest', () => {
   });
 });
 
-describe('what Continue rewards', () => {
-  it('the crew level only with a CLI that is ready to work', () => {
-    expect(earned('crew', [])).toBe(false);
-    expect(earned('crew', [cli({}), cli({ provider: 'codex', path: '/bin/codex', logged_in: false })])).toBe(false);
-    expect(earned('crew', [cli({ path: '/bin/claude', logged_in: true })])).toBe(true);
+describe('a reward is for something that happened', () => {
+  const none: CliInfo[] = [];
+  const notReady = [cli({}), cli({ provider: 'codex', path: '/bin/codex', logged_in: false })];
+  const claude = [cli({ path: '/bin/claude', logged_in: true })];
+  const withOpenCode = [...claude, cli({ provider: 'opencode', path: '/bin/opencode' })];
+  const ids = LEVELS.map((l) => l.id);
+
+  it('with no agent ready, no level gives its reward: each says what is missing', () => {
+    for (const clis of [none, notReady])
+      for (const id of ids) {
+        const gap = missing(id, { clis, openRouter: true });
+        expect(gap, id).not.toBeNull();
+        // It names what is missing, never the reward.
+        expect(`${gap!.title} ${gap!.body}`).not.toContain(LEVELS.find((l) => l.id === id)!.reward);
+      }
+    expect(missing('lead', { clis: none, openRouter: false })).toEqual({ title: 'No Lead yet', body: 'No agent is ready, so there is no Lead to appoint. Install or sign in to one on level 1, then pick your Lead.' });
+    expect(missing('mission', { clis: none, openRouter: false })?.title).toBe('No crew yet');
   });
-  it('the Lead level only with a Lead to appoint: a CLI that is ready', () => {
-    expect(earned('lead', [])).toBe(false);
-    expect(earned('lead', [cli({}), cli({ provider: 'codex', path: '/bin/codex', logged_in: false })])).toBe(false);
-    expect(earned('lead', [cli({ path: '/bin/claude', logged_in: true })])).toBe(true);
-    // What Continue says instead of the reward names what is missing, not the reward.
-    expect(NO_LEAD.title).toBe('No Lead yet');
-    expect(NO_LEAD.body).toContain('No agent is ready');
-    expect(`${NO_LEAD.title} ${NO_LEAD.body}`).not.toContain(LEVELS.find((l) => l.id === 'lead')!.reward);
+
+  it('one ready CLI earns the crew, the Lead, the creative stack and the first mission', () => {
+    for (const id of ['crew', 'lead', 'creative', 'mission'] as const) expect(missing(id, { clis: claude, openRouter: false }), id).toBeNull();
   });
-  it('every other level as you move on, with or without a CLI', () => {
-    for (const l of LEVELS.filter((x) => x.id !== 'crew' && x.id !== 'lead')) expect(earned(l.id, [])).toBe(true);
+
+  it('more brains needs OpenCode installed and an OpenRouter key that is on', () => {
+    expect(missing('brains', { clis: claude, openRouter: true })?.body).toContain('OpenCode is not installed');
+    expect(missing('brains', { clis: withOpenCode, openRouter: false })?.body).toContain('No OpenRouter key is saved and on');
+    expect(missing('brains', { clis: withOpenCode, openRouter: true })).toBeNull();
+  });
+
+  it('OpenRouter is on when its key is the source agents get', () => {
+    const status = (kind: 'key' | 'off', key_saved: boolean) => ({ vendors: [{ vendor: 'openrouter', source: { kind }, key_saved }] }) as ByokStatus;
+    expect(openRouterOn(status('key', true))).toBe(true);
+    expect(openRouterOn(status('off', true))).toBe(false); // saved, but switched off
+    expect(openRouterOn({ vendors: [] })).toBe(false);
+    expect(openRouterOn(null)).toBe(false);
   });
 });
 

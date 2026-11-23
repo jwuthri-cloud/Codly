@@ -9,7 +9,7 @@
   import { narrate } from '../../lib/state/narration';
   import { store, type Seg } from '../../lib/state/store.svelte';
   import { ui, wallNow } from '../../lib/state/ui.svelte';
-  import { clock, clockSec, dur } from '../../lib/util/format';
+  import { clock, clockSec, dur, plural } from '../../lib/util/format';
   import { uniqueKeys } from '../../lib/util/keys';
   import { activityClass, idVar, pastVerb, phrase } from '../../lib/util/labels';
   import { oneLine } from '../../lib/util/sanitize';
@@ -74,7 +74,7 @@
       const k = e.kind;
       if (k.type === 'approval_resolved' && !answered.has(k.approval_id)) answered.set(k.approval_id, e.ts);
       if (!e.agent_id) continue;
-      if (k.type === 'committed') steps.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'commit', ok: true, text: `Codly committed ${k.sha.slice(0, 7)} · ${k.files.length} files` });
+      if (k.type === 'committed') steps.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'commit', ok: true, text: `Codly committed ${k.sha.slice(0, 7)} · ${plural(k.files.length, 'file')}` });
       else if (k.type === 'verified') steps.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'verified', ok: k.ok, text: `${k.ok ? 'Verified' : 'Failed'}: ${k.command}` });
       else if (k.type === 'merged') steps.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'merged', ok: true, text: `Merged into ${k.branch}` });
       else if (k.type === 'artifact_added') steps.push({ agentId: e.agent_id, ts: e.ts, end: null, kind: 'artifact', ok: true, text: `Made ${k.artifact.title}` });
