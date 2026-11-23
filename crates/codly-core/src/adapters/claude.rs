@@ -155,6 +155,18 @@ pub fn settings_json(spec: &SpawnSpec) -> Option<Value> {
     (!doc.is_empty()).then(|| Value::Object(doc))
 }
 
+/// The settings files Claude loads: the user's own always; the project's with the user's
+/// setup; the working directory's local file only where the orchestrator says it is safe
+/// (`SpawnSpec::local_settings`).
+fn setting_sources(spec: &SpawnSpec) -> &'static str {
+    match (spec.use_user_setup, spec.local_settings) {
+        (true, true) => "user,project,local",
+        (true, false) => "user,project",
+        (false, true) => "user,local",
+        (false, false) => "user",
+    }
+}
+
 /// The full `claude` argv. `mcp_config_path` is a 0600 file holding [`mcp_config`] (a file,
 /// not an inline string, so the per-run MCP token never shows up in `ps`).
 pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&Path>) -> Vec<String> {
@@ -189,7 +201,7 @@ pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&P
         allowed.extend(default_mcp_allowed(spec));
         a.extend(["--allowedTools".into(), allowed.join(",")]);
     }
-    a.extend(["--setting-sources".into(), if spec.use_user_setup { "user,project,local" } else { "user,local" }.into()]);
+    a.extend(["--setting-sources".into(), setting_sources(spec).into()]);
     if !spec.system_prompt.trim().is_empty() {
         a.extend(["--append-system-prompt".into(), spec.system_prompt.clone()]);
     }
@@ -2097,6 +2109,7 @@ mod tests {
             mcp: Some(McpLaunch { command: "/Applications/Codly.app/Contents/MacOS/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), "t".into())] }),
             use_user_setup: false,
             sandbox_network: false,
+            local_settings: true,
             raw_log: PathBuf::from("/tmp/x/raw.ndjson"),
             byok_command: None,
             sandbox_shell: false,
@@ -2653,6 +2666,14 @@ mod tests {
         sp.use_user_setup = true;
         let a = joined(&sp);
         assert!(!a.contains("--strict-mcp-config") && a.contains("user,project,local") && a.contains("ToolSearch"));
+        // In a Codly worktree the local settings file never loads: an agent can write it.
+        sp.local_settings = false;
+        assert!(joined(&sp).contains("--setting-sources user,project --"));
+        // A folder whose own configuration is not trusted: the user's settings alone, and
+        // only Codly's MCP servers.
+        sp.use_user_setup = false;
+        let a = joined(&sp);
+        assert!(a.contains("--setting-sources user --") && a.contains("--strict-mcp-config") && !a.contains("ToolSearch"));
         // the Lead stays read-only either way
         let lead = joined(&SpawnSpec { use_user_setup: true, ..spec(Role::Lead, true) });
         assert!(lead.contains("Skill,LSP") && !lead.contains("Bash") && !lead.contains("Monitor"));

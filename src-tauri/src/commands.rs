@@ -599,6 +599,17 @@ pub async fn check_agent(state: State<'_, AppState>, agent_id: String) -> R<Vec<
     state.core().await?.check_agent(&agent_id).await.map_err(err)
 }
 
+/// What the open repo makes the agent CLIs load by themselves (project settings with hooks
+/// or allow rules, project MCP servers) and your choice about it. Pass `set` to trust the
+/// files you read, by their fingerprint, or to open the repo without them.
+#[tauri::command]
+pub async fn workspace_trust(
+    state: State<'_, AppState>,
+    set: Option<codly_core::orchestrator::trust::TrustChoice>,
+) -> R<codly_core::orchestrator::trust::WorkspaceTrust> {
+    state.core().await?.workspace_trust(set).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn list_connections(state: State<'_, AppState>) -> R<Vec<codly_core::housekeeping::connections::Connection>> {
     state.core().await?.connections().await.map_err(err)

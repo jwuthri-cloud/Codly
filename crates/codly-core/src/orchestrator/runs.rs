@@ -45,6 +45,8 @@ impl Inner {
         let provider = req.agent.provider;
         let cli = self.clis().into_iter().find(|c| c.provider == provider);
         let Some(cli) = cli.filter(|c| c.path.is_some()) else { bail!("{} is not installed", provider.label()) };
+        // What the folder itself would make the CLI load, and whether you trusted it (trust.rs).
+        let repo_config = self.repo_config(req.workspace_id.as_deref(), &req.cwd, provider).await?;
         let account = match (&req.account, &req.session) {
             (Some(a), _) => Some(a.clone()),
             (None, SessionMode::Resume { .. }) => self.agent_account(&req.agent),
@@ -196,8 +198,10 @@ impl Inner {
             system_prompt: req.system_prompt,
             read_only: req.read_only,
             mcp: Some(mcp.launch(&self.cfg.app_exe, &token)),
-            use_user_setup: self.settings().use_my_claude_setup,
+            // The folder's trust is about Claude's project files; a Codex agent's own servers are the user's.
+            use_user_setup: self.settings().use_my_claude_setup && (provider != Provider::Claude || repo_config.project),
             sandbox_network: self.settings().codex_network_access,
+            local_settings: repo_config.local,
             raw_log,
             byok_command,
             sandbox_shell: self.settings().claude_sandbox,

@@ -30,6 +30,8 @@ import type { WorktreeSetup } from './gen/WorktreeSetup';
 import type { CheckResult } from './gen/CheckResult';
 import type { ChecksChoice } from './gen/ChecksChoice';
 import type { RequiredChecks } from './gen/RequiredChecks';
+import type { TrustChoice } from './gen/TrustChoice';
+import type { WorkspaceTrust } from './gen/WorkspaceTrust';
 import type { StorageCleanup } from './gen/StorageCleanup';
 import type { StoragePolicy } from './gen/StoragePolicy';
 import type { StorageReport } from './gen/StorageReport';
@@ -523,6 +525,8 @@ export const api = {
   requiredChecks: (set: ChecksChoice | null = null) => call<RequiredChecks>('required_checks', { set }),
   /** Run the required checks in the worktree of an agent you chat with; each command's result. */
   checkAgent: (agentId: string) => call<CheckResult[]>('check_agent', { agentId }),
+  /** What the open repo makes the agent CLIs load by themselves, and your choice; pass `set` to trust the files you read or to open the repo without them. */
+  workspaceTrust: (set: TrustChoice | null = null) => call<WorkspaceTrust>('workspace_trust', { set }),
   /** Default MCP servers for new agents, with their switches and whether each key is stored. */
   listConnections: () => call<Connection[]>('list_connections'),
   /** Switch a server and/or store its key (Keychain; `value: null` removes it). Applies to the next spawn. */

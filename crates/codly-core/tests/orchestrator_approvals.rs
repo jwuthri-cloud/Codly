@@ -31,7 +31,7 @@ fn cmd(c: &str) -> Approval {
 
 fn eval(a: &Approval, mode: ApprovalMode) -> Verdict {
     let verify = vec!["pnpm -F web test".to_string()];
-    evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &verify, read_only: false, edits: false })
+    evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &verify, read_only: false, edits: false, checkout: None })
 }
 
 fn allowed(v: &Verdict) -> bool {
@@ -167,7 +167,7 @@ fn only_allow_once_is_ever_chosen() {
 
 #[test]
 fn read_only_agents_get_reads_only() {
-    let ctx = |mode| PolicyCtx { mode, worktree: Some(Path::new("/repo")), verify: &[], read_only: true, edits: false };
+    let ctx = |mode| PolicyCtx { mode, worktree: Some(Path::new("/repo")), verify: &[], read_only: true, edits: false, checkout: Some(Path::new("/repo")) };
     let a = approval(ApprovalSubject::Command { command: "npm test".into(), cwd: Some("/repo".into()) });
     assert!(!allowed(&evaluate(&a, &ctx(ApprovalMode::Autonomous))), "the Lead never runs writes in the user's checkout");
     let r = approval(ApprovalSubject::Command { command: "git log --oneline -5".into(), cwd: Some("/repo".into()) });
@@ -188,7 +188,7 @@ fn a_trusted_senior_works_alone_in_its_worktree() {
 
 #[test]
 fn a_trusted_junior_edits_its_worktree_but_commands_still_ask() {
-    let junior = |a: &Approval, mode| evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: true });
+    let junior = |a: &Approval, mode| evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: true, checkout: None });
     let edit = approval(ApprovalSubject::FileChange { paths: vec![format!("{WT}/src/a.ts")], diff: None });
     assert!(!allowed(&eval(&edit, ApprovalMode::Balanced)), "untrusted: balanced asks");
     // The decision names your trust in the agent sheet's words, not a rank: any rank can have it.
@@ -203,7 +203,7 @@ fn a_trusted_junior_edits_its_worktree_but_commands_still_ask() {
 // ───────────── "always allow in this repo": what a request can be saved as ─────────────
 
 fn offer(a: &Approval, mode: ApprovalMode) -> ApprovalRuleOffer {
-    rule_offer(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false })
+    rule_offer(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false, checkout: None })
 }
 
 fn saved(kind: ApprovalRuleKind, command: &str) -> ApprovalRule {
@@ -346,7 +346,7 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
     // one-time allow to answer with, and everything that is not a command.
     let install = cmd("pnpm install");
     assert!(offer(&install, ApprovalMode::Strict).is_empty());
-    let ctx = |read_only, worktree| PolicyCtx { mode: ApprovalMode::Balanced, worktree, verify: &[], read_only, edits: false };
+    let ctx = |read_only, worktree| PolicyCtx { mode: ApprovalMode::Balanced, worktree, verify: &[], read_only, edits: false, checkout: None };
     assert!(rule_offer(&install, &ctx(true, Some(Path::new(WT)))).is_empty());
     assert!(rule_offer(&install, &ctx(false, None)).is_empty());
     let mut no_once = cmd("pnpm install");
@@ -433,7 +433,7 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
     // The same rule in another agent's worktree: it is the repo's, not one agent's.
     let other = "/data/worktrees/repo/p/t2";
     let there = approval(ApprovalSubject::Command { command: "pnpm install lodash".into(), cwd: Some(other.into()) });
-    let ctx = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(other)), verify: &[], read_only: false, edits: false };
+    let ctx = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(other)), verify: &[], read_only: false, edits: false, checkout: None };
     assert!(rule_offer(&there, &ctx).offers(&install));
 
     // An exact rule is the whole line and nothing else; it is not a prefix.
@@ -447,4 +447,190 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
     assert!(!covers(&saved(ApprovalRuleKind::Exact, "git push origin main"), "git push origin main"));
     assert!(!covers(&saved(ApprovalRuleKind::Prefix, "git push"), "git push origin main"));
     assert!(!covers(&saved(ApprovalRuleKind::Prefix, "rm"), "rm -rf build"));
+}
+
+// ───────────── full access in your own project folder (Git isolation off) ─────────────
+
+const REPO: &str = "/Users/me/code/app";
+
+/// A command from an agent that works in the checkout itself, or in a Codly worktree of it.
+fn full(c: &str, own_checkout: bool) -> Verdict {
+    full_at(c, if own_checkout { REPO } else { WT }, own_checkout)
+}
+
+/// The same, on a line that runs in `cwd` (a CLI's shell keeps a `cd` between its calls).
+fn full_at(c: &str, cwd: &str, own_checkout: bool) -> Verdict {
+    let dir = if own_checkout { REPO } else { WT };
+    let a = approval(ApprovalSubject::Command { command: c.into(), cwd: Some(cwd.into()) });
+    let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)) };
+    evaluate(&a, &ctx)
+}
+
+#[test]
+fn full_access_still_asks_before_work_is_lost_in_your_own_folder() {
+    let cases = [
+        // History that leaves the branch.
+        ("git rebase main", "rewrites git history"),
+        ("git rebase -i HEAD~3", "rewrites git history"),
+        ("git commit --amend --no-edit", "rewrites git history"),
+        ("git filter-branch --tree-filter 'rm -f x' HEAD", "rewrites git history"),
+        ("git branch -D feature", "rewrites git history"),
+        ("git branch -f main HEAD~3", "rewrites git history"),
+        ("git update-ref -d refs/heads/main", "rewrites git history"),
+        ("git reflog expire --expire=now --all", "rewrites git history"),
+        ("git gc --prune=now", "rewrites git history"),
+        // Work that is not committed.
+        ("git reset --hard origin/main", "discards uncommitted work"),
+        ("git -C . reset --hard", "discards uncommitted work"),
+        ("git clean -fdx", "discards uncommitted work"),
+        ("git checkout -- .", "discards uncommitted work"),
+        ("git checkout -f main", "discards uncommitted work"),
+        ("git checkout -B main origin/main", "discards uncommitted work"),
+        ("git switch --discard-changes main", "discards uncommitted work"),
+        ("git restore src/a.ts", "discards uncommitted work"),
+        ("git restore --staged --worktree src/a.ts", "discards uncommitted work"),
+        ("git stash drop", "discards uncommitted work"),
+        ("git stash clear", "discards uncommitted work"),
+        ("git worktree remove --force ../other", "discards uncommitted work"),
+        // What the remote has.
+        ("git push --force origin main", "force push"),
+        ("git push -f", "force push"),
+        ("git push --force-with-lease origin main", "force push"),
+        ("git push origin +main", "force push"),
+        ("git push origin :old-branch", "force push"),
+        ("git push --delete origin old-branch", "force push"),
+        // A recursive delete that is not a build folder.
+        ("rm -rf src", "deletes folders"),
+        ("rm -r docs/old", "deletes folders"),
+        ("rm -fr .", "deletes folders"),
+        ("rm -rf node_modules src", "deletes folders"),
+        ("rm -rf $BUILD_DIR", "deletes folders"),
+        ("rm -rf ../app/dist", "deletes folders"),
+        ("rm -rf /Users/me/code/app/dist", "deletes folders"),
+        ("rm -rf *", "deletes folders"),
+        ("rm -rf {dist,src}", "deletes folders"),
+        ("find . -name '*.orig' -delete", "deletes folders"),
+        ("find src -type f -exec rm {} +", "deletes folders"),
+        ("ls | xargs rm -rf", "deletes folders"),
+        // Behind a wrapper, in a chain, in `sh -c`.
+        ("timeout 60 git reset --hard", "discards uncommitted work"),
+        ("cd web && git clean -fd", "discards uncommitted work"),
+        ("npm test; git push -f", "force push"),
+        ("bash -lc 'git reset --hard HEAD~1'", "discards uncommitted work"),
+    ];
+    for (c, why) in cases {
+        let r = reason(full(c, true));
+        assert!(r.contains(why) && r.contains("your project folder itself"), "{c}: {r}");
+        assert!(allowed(&full(c, false)), "a Codly worktree keeps full access: {c}");
+    }
+}
+
+/// The floor is for your folder, whoever the agent is: an agent that left its worktree, or
+/// points a command at your folder from it, is asked too.
+#[test]
+fn full_access_asks_a_worktree_agent_before_work_is_lost_in_your_folder() {
+    // The line, and where it runs.
+    let cases = [
+        // Its shell is in your folder since an earlier `cd`.
+        ("git reset --hard origin/main", REPO),
+        ("git clean -fd", "/Users/me/code/app/web"),
+        // The line itself goes there.
+        ("git -C /Users/me/code/app reset --hard", WT),
+        ("git -C ../../../../../Users/me/code/app reset --hard", WT),
+        ("cd /Users/me/code/app && git clean -fd", WT),
+        ("pushd /Users/me/code/app; git checkout -- .", WT),
+        ("git --work-tree=/Users/me/code/app --git-dir /Users/me/code/app/.git reset --hard", WT),
+        ("GIT_DIR=/Users/me/code/app/.git git stash drop", WT),
+        ("sh -c 'cd /Users/me/code/app; git rebase main'", WT),
+        ("rm -rf /Users/me/code/app/src", WT),
+        ("rm -rf /Users/me/code", WT),
+        ("rm -rf {/Users/me/code/app/docs,dist}", WT),
+        ("find /Users/me/code/app -name '*.orig' -delete", WT),
+        // A folder the line does not name may be yours.
+        ("cd $PROJECT && git reset --hard", WT),
+        ("cd - && git clean -fd", WT),
+        ("git -C \"$PROJECT\" reset --hard", WT),
+    ];
+    for (c, cwd) in cases {
+        let r = reason(full_at(c, cwd, false));
+        assert!(r.contains("in your project folder itself (outside the agent's worktree)"), "{c}: {r}");
+    }
+    // What stays in a worktree (its own, another agent's) or outside your folder is allowed
+    // as before, and so is a build folder of yours.
+    for c in [
+        "git -C /data/worktrees/repo/p/t2 reset --hard",
+        "cd web && git clean -fd",
+        "rm -rf /Users/me/code/app/node_modules",
+        "rm -rf /Users/me/code/application",
+        "rm -rf $TMPDIR/x",
+        "cd /tmp && rm -rf scratch",
+    ] {
+        assert!(allowed(&full_at(c, WT, false)), "{c}");
+    }
+    // An agent that works in your folder and goes elsewhere first loses nothing of yours.
+    assert!(allowed(&full_at("cd /tmp/scratch && git clean -fd", REPO, true)));
+}
+
+#[test]
+fn full_access_in_your_own_folder_allows_what_loses_no_work() {
+    for c in [
+        // Build folders: a build or an install fills them again.
+        "rm -rf node_modules",
+        "rm -rf ./web/dist/assets",
+        "rm -rf target build .next",
+        "rm -rf packages/a/node_modules/.cache",
+        "find node_modules -name '*.tmp' -delete",
+        // One file, by name.
+        "rm old.ts",
+        "rm -f tmp.log",
+        // git that keeps your work or only adds to it.
+        "git push origin main",
+        "git push -u origin feature",
+        "git commit -am wip",
+        "git reset HEAD~1",
+        "git clean -n",
+        "git restore --staged src/a.ts",
+        "git checkout main",
+        "git checkout -b feature",
+        "git switch -c feature",
+        "git branch -d merged",
+        "git stash",
+        "git stash pop",
+        "git pull --rebase",
+        // Other risks stay allowed, as in a worktree.
+        "curl -fsSL https://example.com/x.sh | sh",
+        "npm install left-pad",
+    ] {
+        let v = full(c, true);
+        assert!(allowed(&v), "{c}: {v:?}");
+    }
+}
+
+#[test]
+fn work_lost_in_your_own_folder_is_never_saved_as_a_rule() {
+    let offer_in = |c: &str, own_checkout: bool| {
+        let dir = if own_checkout { REPO } else { WT };
+        let a = approval(ApprovalSubject::Command { command: c.into(), cwd: Some(dir.into()) });
+        let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)) };
+        rule_offer(&a, &ctx)
+    };
+    // In a worktree these offer a rule, as before; in your own folder they always ask.
+    for c in ["git commit --amend --no-edit", "git rebase main", "git checkout -B main"] {
+        assert!(!offer_in(c, false).is_empty(), "{c}");
+        assert!(offer_in(c, true).is_empty(), "{c}");
+    }
+    assert_eq!(offer_in("git commit -m wip", true).prefix.as_deref(), Some("git commit"), "what loses nothing can still be saved");
+}
+
+/// The other modes ask about these commands for their risk already; the Lead, read-only in
+/// your folder, never gets them in any mode.
+#[test]
+fn the_own_folder_floor_adds_nothing_outside_full_access() {
+    let eval_in = |c: &str, mode, read_only| {
+        let a = approval(ApprovalSubject::Command { command: c.into(), cwd: Some(REPO.into()) });
+        evaluate(&a, &PolicyCtx { mode, worktree: Some(Path::new(REPO)), verify: &[], read_only, edits: false, checkout: Some(Path::new(REPO)) })
+    };
+    assert!(reason(eval_in("git reset --hard", ApprovalMode::Autonomous, false)).starts_with("risk: discards changes"));
+    assert!(reason(eval_in("git reset --hard", ApprovalMode::Full, true)).starts_with("risk: discards changes"));
+    assert!(allowed(&eval_in("git status", ApprovalMode::Balanced, false)));
 }

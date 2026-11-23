@@ -933,20 +933,40 @@ impl Inner {
                 && !in_terminal.contains(&a.id)
                 && a.task_id.as_deref().and_then(|t| tasks.iter().find(|x| x.id == t)).is_none_or(|t| !scheduler::is_active(t.status))
         };
+        let wt = PathBuf::from(task.worktree.clone().unwrap_or_default());
+        // A CLI that would load configuration of the task's worktree that you have not trusted
+        // is not started there (`trust.rs`), so it cannot review this task. The ones on this Mac:
+        let untrusted: Vec<Provider> = self.not_started_in(Some(ws_id), &wt).await?.into_iter().filter(|p| self.cli_usable(*p)).collect();
+        let can_review = |p: Provider| self.cli_usable(p) && !untrusted.contains(&p);
         // A reviewer on the team first (another vendor than the author's if possible).
         let mut members: Vec<&Agent> =
-            agents.iter().filter(|a| a.role == Role::Reviewer && a.member.is_some() && self.cli_usable(a.provider) && idle(a)).collect();
+            agents.iter().filter(|a| a.role == Role::Reviewer && a.member.is_some() && can_review(a.provider) && idle(a)).collect();
         // At work and rested first: only a tiebreak (the office's energy), never a refusal.
         let now = crate::model::now_ms();
         members.sort_by_key(|a| (super::kept_home(settings.game_rules, a, now).is_some(), super::tired(settings.game_rules, a, now)));
         let member = members.iter().find(|a| Some(a.provider) != worker_provider).or_else(|| members.first()).copied();
         let order: Vec<Provider> = settings.worker_providers.iter().copied().chain(Provider::ALL).collect();
-        let other = order.iter().copied().find(|p| Some(*p) != worker_provider && self.cli_usable(*p));
+        let other = order.iter().copied().find(|p| Some(*p) != worker_provider && can_review(*p));
         let (provider, why) = match (other, worker_provider) {
             _ if member.is_some() => (member.map_or(Provider::Claude, |m| m.provider), "on the team".to_string()),
             (Some(p), Some(w)) => (p, format!("another vendor than {}", w.label())),
             (Some(p), None) => (p, "first available".to_string()),
-            (None, Some(w)) if self.cli_usable(w) => (w, "no second vendor is signed in: same vendor, clean context".to_string()),
+            (None, Some(w)) if can_review(w) && untrusted.is_empty() => (w, "no second vendor is signed in: same vendor, clean context".to_string()),
+            (None, Some(w)) if can_review(w) => {
+                (w, "no other vendor starts in this worktree until you trust its CLI configuration: same vendor, clean context".to_string())
+            }
+            // A reviewer CLI is there, and the worktree's own files keep it out: the task waits
+            // for you. Merged without its review, a worker could skip the review with one file.
+            _ if !untrusted.is_empty() => {
+                let clis: Vec<&str> = untrusted.iter().map(|p| p.label()).collect();
+                let reason = format!(
+                    "blocked: no reviewer can start in the worktree of {}: it has CLI configuration for {} that you have not trusted. Trust it in Settings → Safety, then re-run the checks",
+                    task.key,
+                    clis.join(", ")
+                );
+                let worker = task.assignee.as_deref().unwrap_or_default();
+                return self.park(task, worker, reason, json!({ "plan_id": task.plan_id, "untrusted": untrusted })).await;
+            }
             _ => {
                 self.decide(
                     Some(ws_id),
@@ -986,7 +1006,6 @@ impl Inner {
             format!("{}: reviewer {} · {} ({why})", task.key, provider.label(), reviewer.name),
             json!({ "plan_id": task.plan_id, "provider": provider, "agent": reviewer.name }),
         )?;
-        let wt = PathBuf::from(task.worktree.clone().unwrap_or_default());
         let req = |reviewer: &Agent| RunReq {
             agent: reviewer.clone(),
             role: Role::Reviewer,
@@ -1025,6 +1044,11 @@ impl Inner {
             started = self.spawn_run(req(&reviewer)).await;
         }
         if let Err(e) = started {
+            // The worktree's files changed since the reviewer was picked: the task waits for
+            // your trust (the gate blocks it), it is not merged without its review.
+            if e.is::<super::trust::NotStarted>() {
+                return Err(e);
+            }
             self.decide(
                 Some(ws_id),
                 Some(&task.id),

@@ -51,6 +51,8 @@ import type { SetupChoice } from './gen/SetupChoice';
 import { ChecksDemo } from './demo/checks';
 import type { ChecksChoice } from './gen/ChecksChoice';
 import { checksLine } from './util/checks';
+import { WorkspaceTrustDemo } from './demo/workspaceTrust';
+import type { TrustChoice } from './gen/TrustChoice';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
 import { MockApprovalRules } from './demo/approvalRules';
@@ -180,9 +182,11 @@ export class MockTransport implements Transport {
   private hk: HousekeepingDemo | undefined;
   private worktrees = new WorktreeDemo();
   private checks = new ChecksDemo();
+  private workspaceTrust: WorkspaceTrustDemo;
 
   constructor() {
     const p = params();
+    this.workspaceTrust = new WorkspaceTrustDemo(p.get('trust') === 'ask');
     const theme = (() => {
       try {
         return localStorage.getItem('codly.theme') ?? 'system';
@@ -698,6 +702,8 @@ export class MockTransport implements Transport {
         sim.decision('gate', 'human', `you checked ${name}'s work: ${checksLine(results)}`, { agent_id: String(a.agentId), checks: results });
         return results;
       }
+      case 'workspace_trust':
+        return this.workspaceTrust.trust((a.set as TrustChoice | null) ?? null);
       case 'diagnostics':
         // The shape of the app's report (src-tauri/src/diagnostics.rs), about the scripted session.
         return {

@@ -993,13 +993,13 @@ pub(crate) fn options(args: &[String]) -> impl Iterator<Item = &str> {
 }
 
 /// A short-option cluster (`-o`, `-ro`, `-ofile`) holds one of `letters`.
-fn short_flag(args: &[String], letters: &str) -> bool {
+pub(crate) fn short_flag(args: &[String], letters: &str) -> bool {
     options(args).filter(|a| !a.starts_with("--")).any(|a| a[1..].contains(|c| letters.contains(c)))
 }
 
 /// `--name`, `--name=value` or an abbreviation of it (getopt_long and git accept unambiguous
 /// prefixes: `--out=f` is `--output=f`).
-fn long_flag(args: &[String], names: &[&str]) -> bool {
+pub(crate) fn long_flag(args: &[String], names: &[&str]) -> bool {
     options(args)
         .filter_map(|a| a.strip_prefix("--"))
         .map(|a| a.split('=').next().unwrap_or(a))

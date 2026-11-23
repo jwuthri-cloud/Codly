@@ -97,12 +97,17 @@ pub struct SpawnSpec {
     pub read_only: bool,
     pub mcp: Option<McpLaunch>,
     /// Load the user's own setup beside Codly's, instead of Codly's servers alone. Claude: their
-    /// MCP servers, plugins, skills and project settings. Codex: the MCP servers of their Codex
-    /// config (off = each is switched off for this thread). ACP agents ignore it.
+    /// MCP servers, plugins, skills and project settings; off while the folder's own CLI
+    /// configuration is not trusted (`orchestrator/trust.rs`). Codex: the MCP servers of their
+    /// Codex config (off = each is switched off for this thread). ACP agents ignore it.
     pub use_user_setup: bool,
     /// Codex only: commands in the workspace-write sandbox may use the network without asking
     /// (`Settings.codex_network_access`).
     pub sandbox_network: bool,
+    /// Claude only: load `.claude/settings.local.json` of the working directory. Only in the
+    /// user's own checkout, where that file is theirs or part of what they trusted; never in a
+    /// Codly worktree, where an agent can write it.
+    pub local_settings: bool,
     /// `<data>/runs/<run_id>/raw.ndjson`, append-only.
     pub raw_log: PathBuf,
     /// BYOK token command (byok.rs) the CLI runs itself, re-running it when the token expires:

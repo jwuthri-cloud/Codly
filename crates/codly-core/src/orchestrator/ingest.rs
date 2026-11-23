@@ -701,7 +701,9 @@ impl Inner {
                 && self.agent(&ctx.agent_id).is_ok_and(|a| matches!(a.role, Role::Worker | Role::Solo) && career::trusts(&a.career, r))
         };
         let mode = approvals::with_trust(base, trusts(Rank::Senior));
-        let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only, edits: trusts(Rank::Junior) };
+        // Your project folder: where an agent hired with Git isolation off works, and where any agent can point a command.
+        let checkout = ws.and_then(|w| self.store.workspace(w).ok().flatten()).map(|w| std::path::PathBuf::from(w.repo_path));
+        let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only, edits: trusts(Rank::Junior), checkout: checkout.as_deref() };
         let verdict = match approvals::evaluate(approval, &pctx) {
             Verdict::Allow { choice, rule } if mode != base => {
                 Verdict::Allow { choice, rule: format!("{rule} (you trust it to work on its own)") }

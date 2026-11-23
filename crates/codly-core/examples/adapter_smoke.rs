@@ -206,6 +206,7 @@ async fn main() {
         mcp,
         use_user_setup: false,
         sandbox_network: false,
+        local_settings: false,
         raw_log: raw_log.clone(),
         byok_command: None,
         sandbox_shell: false,

@@ -73,6 +73,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::worktree_setup,
             commands::required_checks,
             commands::check_agent,
+            commands::workspace_trust,
             commands::breaker_config,
             commands::set_breaker_config,
             commands::breaker_status,
@@ -275,6 +276,13 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert_eq!(invoke(&wv, "required_checks", json!({ "set": { "allow": null } })).unwrap()["on"], false);
     let e = invoke(&wv, "check_agent", json!({ "agentId": "nope" })).unwrap_err();
     assert!(e.to_string().contains("unknown agent"), "{e}");
+    // Workspace trust: this repo has no CLI configuration of its own, so there is nothing to
+    // decide, nothing to trust, and "open without" changes nothing.
+    let nothing = json!({ "state": "nothing", "changed": false, "files": [], "instructions": [], "fingerprint": null, "problem": null, "worktrees": [] });
+    assert_eq!(invoke(&wv, "workspace_trust", json!({ "set": null })).unwrap(), nothing);
+    let e = invoke(&wv, "workspace_trust", json!({ "set": { "trust": "abc" } })).unwrap_err();
+    assert!(e.to_string().contains("changed since you read it"), "{e}");
+    assert_eq!(invoke(&wv, "workspace_trust", json!({ "set": { "trust": null } })).unwrap(), nothing);
 
     // Budgets: the limits and the status with the fields Settings reads, and a plan's total by
     // the key the plan cards send.

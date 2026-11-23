@@ -268,7 +268,10 @@ not what a script or program then does, so this is a deny-list and not a sandbox
 agents have an OS sandbox) and **Full access**
 (auto-approve everything, risky commands included, except the hard floors: questions, permission
 changes, changes to the agent's own CLI settings, writes by read-only agents and Codly's own data
-dir still ask).
+dir still ask; and so does a command that can lose work in the user's own checkout: a history
+rewrite, `git reset --hard`, `git clean`, a force push, `rm -rf` outside the build folders,
+from an agent hired with Git isolation off or pointed there from a worktree by its `cwd`, a
+`cd`, `git -C` or a path. Acting in a Codly worktree those stay allowed).
 
 **Saved rules** (`orchestrator/approval_rules.rs`): "Always allow in this repo" on an approval card
 saves a rule in Codly's store (table `approval_rule`; not in the repo, not in a worktree) that the
@@ -405,7 +408,25 @@ that are new there are named (the index does not search them).
   you. From its card you re-run the checks or, when its checks stopped it, merge anyway; the
   failure stays in its record. A team member's task shares the member's worktree: while the
   member is on other work, the task goes back in line for it and keeps your choice.
-- Clean-room profile for untrusted repos (`--setting-sources`, `--strict-mcp-config`).
+- Workspace trust (`orchestrator/trust.rs`). A repo can carry configuration that a CLI loads
+  by itself when it starts in the folder, before any approval: Claude Code project settings
+  (hooks, allow rules), project MCP servers (`.mcp.json`), and `.codex/`, `.gemini/`,
+  `.opencode/`, `opencode.json`, `.cursor/`. Codly asks once when it opens a repo that has such
+  files in git, and again when they change: "Trust this folder" or "Open without the repo's own
+  CLI configuration". The consent is for the exact files (a fingerprint), and each run is
+  checked against the folder it starts in, so a worktree whose files an agent changed starts
+  without them. Until the files are trusted, Claude Code starts with `--setting-sources user`
+  and `--strict-mcp-config` (which also keeps the user's own MCP servers out); Codex keeps its
+  own project-trust gate, which Codly does not change; Gemini CLI, OpenCode and Cursor have no
+  switch Codly has verified, so an agent on one of them is not started while the folder has
+  files for that CLI: the start fails with a typed error that is not retried and costs the
+  agent no session, the scheduler gives its tasks to another CLI, and a review is done by a
+  CLI that can start in the task's worktree (none can: the task is blocked, never merged
+  without its review). A worktree whose files differ from the checkout's is remembered and
+  shown with its own files and fingerprint, to trust by itself. Every file is hashed whatever
+  its size; `.claude/worktrees/` (Claude Code's own worktrees) is not configuration. No worktree ever loads `.claude/settings.local.json`; in the checkout it
+  loads when it is the user's own (untracked) or trusted. Instruction files (CLAUDE.md,
+  AGENTS.md, GEMINI.md) are listed with the question and are not part of it.
 - By itself, Codly removes a worktree only when it is clean and merged, and deletes a
   `codly/…` branch only when its work is merged and its plan is over (merged, cancelled or
   failed) for a day: the housekeeping sweep, which can be switched off. A dirty or unmerged
@@ -511,6 +532,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
                       required_checks.rs weak_checks.rs   the owner's `.codly/checks` in the gate; verify commands that prove nothing
+                      trust.rs                            workspace trust: the repo's own CLI configuration loads once trusted
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
                       activity.rs                         the work under way now, for the shell (keep awake, quit question)
   store/            SQLite: schema.sql, later migrations (m2…m4), typed queries; backup.rs: a copy

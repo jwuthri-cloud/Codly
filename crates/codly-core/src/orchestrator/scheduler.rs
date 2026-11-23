@@ -60,7 +60,7 @@ pub struct AccountState {
     pub enabled: bool,
     /// None = unknown (no cheap status check).
     pub logged_in: Option<bool>,
-    /// Near its usage limit: why, e.g. "91% of its 5h window used".
+    /// Takes no task for now: why, e.g. "91% of its 5h window used".
     pub parked: Option<String>,
     /// Highest use of its live usage windows, 0..1.
     pub used: f64,

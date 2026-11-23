@@ -26,6 +26,7 @@
 //! - `takeover` "Open in my terminal": an idle agent's CLI session goes to you, and comes back
 //! - `merge_conflict` a conflict at the final merge: its files, an agent that resolves it, checks on the merge result
 //! - `required_checks` the repo owner's `.codly/checks`: run by the gate for every task and plan
+//! - `trust`    workspace trust: the repo's own CLI configuration loads only once you trusted it
 //! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`,
 //!   `weak_checks` (a verify command that proves nothing)
 
@@ -74,6 +75,7 @@ pub mod activity;
 pub mod takeover;
 pub mod required_checks;
 mod weak_checks;
+pub mod trust;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

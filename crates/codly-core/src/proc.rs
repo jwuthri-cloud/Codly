@@ -565,6 +565,7 @@ mod tests {
             mcp: Some(McpLaunch { command: "/x/codly".into(), args: vec!["mcp".into()], env: vec![("CODLY_MCP_TOKEN".into(), token.into())] }),
             use_user_setup: false,
             sandbox_network: false,
+            local_settings: false,
             raw_log: "/nonexistent/r/raw.ndjson".into(),
             byok_command: None,
             sandbox_shell: false,

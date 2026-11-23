@@ -29,6 +29,7 @@
   import TriggersSection from './TriggersSection.svelte';
   import WorktreeSection from './WorktreeSection.svelte';
   import RequiredChecksSection from './RequiredChecksSection.svelte';
+  import TrustSection from './TrustSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
   import DiagnosticsReport from '../components/DiagnosticsReport.svelte';
   import Dialog from '../components/Dialog.svelte';
@@ -99,7 +100,7 @@
     { id: 'balanced', title: 'Balanced', body: 'Codly’s rules settle the obvious cases; anything risky (rm -rf, git push, outside the worktree, network installs) asks you.' },
     { id: 'strict', title: 'Ask first', body: 'Every command and edit the CLI would ask about comes to you.' },
     { id: 'autonomous', title: 'Autonomous', body: 'Commands and edits run without asking unless Codly sees a risk in them (rm -rf, git push, network, paths outside the worktree). This is a list of risky commands, not a sandbox: Codly reads the command, not what a script or program does once it runs. Codex agents run in their own OS sandbox. Claude agents have one only with “Sandbox Claude’s shell” on (below). Gemini, OpenCode, Cursor and Copilot agents have none.' },
-    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, changes to an agent’s own CLI settings, Codly’s private data and read-only agents still ask.' },
+    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, changes to an agent’s own CLI settings, Codly’s private data and read-only agents still ask. So does a command that can lose work in your project folder itself: from an agent hired with Git isolation off, or from one that points the command there from its worktree.' },
   ];
   let confirmFull = $state(false);
   function pickMode(m: ApprovalMode) {
@@ -134,7 +135,7 @@
   const PLAN_TOGGLES = [
     ['auto_run_plans', 'Run plans without asking', 'New requests start in Auto instead of Plan (switch per request under the composer, or ⇧⇥). You can still cancel at any time.'],
     ['lead_followups', 'Lead follow-ups', 'The Lead hears about task and plan progress and reports back in chat.'],
-    ['use_my_claude_setup', 'Use my own CLI setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings. Codex agents also start the MCP servers of your Codex config. Off: agents get Codly’s tools and your Connections only. Applies to agents started after the change; approvals still go through Codly.'],
+    ['use_my_claude_setup', 'Use my own CLI setup', 'Claude agents also load your own MCP servers, plugins and skills, and the repo’s .claude settings once you trusted the folder (Safety). Codex agents also start the MCP servers of your Codex config. Off: agents get Codly’s tools and your Connections only. Applies to agents started after the change; approvals still go through Codly.'],
   ];
   const LONG_RUN_TOGGLES = [
     ['keep_awake', 'Keep the Mac awake while agents work', 'The Mac does not go to sleep by itself while an agent works or a plan runs. It may sleep when all work waits for you. Closing the lid still puts it to sleep.'],
@@ -357,6 +358,7 @@
     </section>
 
     <RequiredChecksSection />
+    <TrustSection />
 
     <WorktreeSection />
 

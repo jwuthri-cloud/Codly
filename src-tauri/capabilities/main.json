@@ -184,6 +184,7 @@
     "allow-cancel-task-tree",
     "allow-finish-plan",
     "allow-worktree-setup",
+    "allow-workspace-trust",
     "allow-pull-request",
     "allow-draft-pull-request",
     "allow-create-pull-request",

@@ -267,6 +267,7 @@ pub fn run() {
             commands::worktree_setup,
             commands::required_checks,
             commands::check_agent,
+            commands::workspace_trust,
             commands::list_connections,
             commands::update_connection,
             commands::storage_report,
