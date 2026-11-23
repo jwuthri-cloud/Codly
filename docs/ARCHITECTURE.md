@@ -439,8 +439,10 @@ that are new there are named (the index does not search them).
   switch Codly has verified, so an agent on one of them is not started while the folder has
   files for that CLI: the start fails with a typed error that is not retried and costs the
   agent no session, the scheduler gives its tasks to another CLI (a task that can go nowhere
-  else stays ready and says that it "waits for your choice about this folder's files", not
-  that the CLI is "parked", the word for a usage limit; it starts when you have chosen), and
+  else stays ready and says why, not that the CLI is "parked", the word for a usage limit: it
+  "waits for your choice about this folder's files" while the question is open, and after
+  "Open without", or while a file cannot be read, it says that the CLI "is not started" and
+  which of the two holds; it starts once the files are trusted), and
   a review is done by a CLI that can start in the task's worktree (none can: the task is
   blocked, never merged without its review). A worktree whose files differ from the checkout's is remembered and
   shown with its own files and fingerprint, to trust by itself. One kind of untracked file in

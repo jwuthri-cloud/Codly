@@ -96,9 +96,6 @@ const DECISION: &str = "workspace_trust";
 /// The words every `NotStarted` error has: `retry::needs_you` knows a start that only your
 /// choice can fix by them.
 pub(super) const NOT_STARTED: &str = "is not started in this folder";
-/// What a waiting task says, after the CLI's name, while that CLI is not started in the repo
-/// (`AccountState::waits_for_you`). Not a usage limit: no wait ends it, your choice does.
-const WAITS_FOR_CHOICE: &str = "waits for your choice about this folder's files: Settings → Safety";
 
 /// A CLI that Codly did not start: the folder has files of its own for it that you have not
 /// trusted, and the CLI has no switch to start without them (`Inner::repo_config`). Only your
@@ -298,6 +295,19 @@ impl FolderTrust {
     /// them.
     fn keeps_out(&self, provider: Provider) -> bool {
         !self.trusted() && !STARTS_WITHOUT.contains(&provider) && self.scan.files.iter().any(|file| file.cli == provider)
+    }
+
+    /// What a waiting task says, after the name of a CLI this folder keeps out
+    /// (`AccountState::waits_for_you`). Not a usage limit: no wait ends it. The words say
+    /// where the folder stands: a task "waits for your choice" only while you have not
+    /// chosen and a choice can start the CLI.
+    fn waits_for(&self) -> &'static str {
+        match (&self.scan.problem, self.state) {
+            // Trusting is refused: no choice starts the CLI while the files are like this.
+            (Some(_), _) => "is not started while this folder's files cannot be trusted as they are: Settings → Safety",
+            (None, TrustState::Without) => "is not started while this folder is open without its files: Settings → Safety",
+            (None, _) => "waits for your choice about this folder's files: Settings → Safety",
+        }
     }
 }
 
@@ -735,7 +745,7 @@ impl Inner {
 
     /// For the scheduler: the accounts of a CLI that Codly does not start in the repo as it
     /// is take no task (`AccountState::waits_for_you`), so a task goes to another CLI, or
-    /// waits and says that it waits for your choice. (A new worktree holds the files git
+    /// waits and says why (`FolderTrust::waits_for`). (A new worktree holds the files git
     /// tracks in your checkout.)
     pub(super) async fn park_untrusted(&self, ws: &Workspace, clis: &[CliInfo], mut accounts: Vec<AccountState>) -> Vec<AccountState> {
         let repo = Path::new(&ws.repo_path);
@@ -744,20 +754,22 @@ impl Inner {
         if !clis.iter().any(|c| c.path.is_some() && has_files(c.provider)) {
             return accounts;
         }
-        let kept_out = match self.not_started_in(Some(&ws.id), repo).await {
-            Ok(kept_out) => kept_out,
+        let folder = match self.folder_trust(Some(&ws.id), repo).await {
+            Ok(Some(folder)) => folder,
+            // The folder is gone: it supplies nothing.
+            Ok(None) => return accounts,
             // Not known: tasks are routed as before, and a start says what is wrong.
             Err(e) => {
                 tracing::warn!("could not read the CLI configuration of {}: {e:#}", ws.name);
                 return accounts;
             }
         };
-        for cli in clis.iter().filter(|c| c.path.is_some() && kept_out.contains(&c.provider)) {
+        for cli in clis.iter().filter(|c| c.path.is_some() && folder.keeps_out(c.provider)) {
             if !accounts.iter().any(|a| a.provider == cli.provider) {
                 accounts.push(AccountState::implicit(cli));
             }
             for account in accounts.iter_mut().filter(|a| a.provider == cli.provider) {
-                account.waits_for_you = Some(WAITS_FOR_CHOICE.to_string());
+                account.waits_for_you = Some(folder.waits_for().to_string());
             }
         }
         accounts
@@ -916,6 +928,26 @@ mod tests {
         std::os::unix::fs::symlink(checkout.join(".mcp.json"), worktree.join(".mcp.json")).unwrap();
         let linked = supplied(Some(&yours));
         assert!(linked.problem.as_deref().is_some_and(|p| p.contains(".mcp.json is not a regular file")), "{:?}", linked.problem);
+    }
+
+    /// A task that waits for a CLI the folder keeps out says where the folder stands. It
+    /// "waits for your choice" only while you have not chosen: after "Open without" and with
+    /// files that cannot be trusted, no question is open, and the words say so.
+    #[test]
+    fn a_cli_the_folder_keeps_out_says_why_in_each_state() {
+        let folder = |state: TrustState, problem: Option<&str>| FolderTrust {
+            ws: None,
+            kind: Folder::Checkout,
+            scan: Scan { files: vec![], fingerprint: Some("f".into()), problem: problem.map(String::from) },
+            state,
+        };
+        assert_eq!(folder(TrustState::Ask, None).waits_for(), "waits for your choice about this folder's files: Settings → Safety");
+        assert_eq!(folder(TrustState::Without, None).waits_for(), "is not started while this folder is open without its files: Settings → Safety");
+        // A link among the files: trusting is refused, whatever you chose before.
+        for state in [TrustState::Ask, TrustState::Without] {
+            let linked = folder(state, Some(".gemini/settings.json is not a regular file (a link or a folder)"));
+            assert_eq!(linked.waits_for(), "is not started while this folder's files cannot be trusted as they are: Settings → Safety");
+        }
     }
 
     #[test]

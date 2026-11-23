@@ -894,7 +894,9 @@ async fn a_task_is_not_merged_without_its_review_because_of_files_in_its_worktre
 
 /// The only worker CLI is one that Codly does not start in the repo until you trust its
 /// files: the task waits and says that it waits for your choice (not "parked", the word for a
-/// usage limit), no worker is started, and the task goes on when you have chosen.
+/// usage limit), and no worker is started. "Open without" is a choice that does not start
+/// that CLI: the task then says so, not that it waits for a choice. It goes on when you
+/// trust the files.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_task_for_a_cli_that_waits_for_your_trust_says_so_and_starts_when_you_chose() {
     let dir = tempfile::tempdir().unwrap();
@@ -913,6 +915,15 @@ async fn a_task_for_a_cli_that_waits_for_your_trust_says_so_and_starts_when_you_
     assert!(started(&specs, Role::Worker).is_empty());
 
     let asked = core.workspace_trust(None).await.unwrap();
+    let without = core.workspace_trust(Some(TrustChoice { trust: None })).await.unwrap();
+    assert_eq!(without.state, TrustState::Without);
+    let open_without = "waiting: no free worker (Gemini CLI is not started while this folder is open without its files: Settings → Safety)";
+    wait_for("t1 to say that the folder is open without its files", async || {
+        core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.key == "t1" && t.status == TaskStatus::Ready && t.status_reason.as_deref() == Some(open_without))
+    })
+    .await;
+    assert!(started(&specs, Role::Worker).is_empty());
+
     core.workspace_trust(Some(TrustChoice { trust: asked.fingerprint })).await.unwrap();
     wait_task(&core, TaskStatus::Done).await;
     assert_eq!(started(&specs, Role::Worker), [Provider::Gemini]);
