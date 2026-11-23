@@ -415,8 +415,10 @@
   .r-who { color: var(--ink-2); font-weight: var(--w-med); }
   .resolved code { flex: 1; font-size: 11.5px; color: var(--ink-3); }
   /* A row with your words (an answer, a note): what was asked takes the room of its own text, up
-     to 60 % of the row, and your words take the rest. Both are cut when they do not fit. */
+     to 60 % of the row, and your words take the rest, never less than a quarter of the row (in a
+     narrow column a long command would leave them no room at all). Both are cut when they do
+     not fit. */
   .resolved code.asked { flex: 0 1 auto; max-width: 60%; }
-  .r-a { flex: 1 1 0; min-width: 0; color: var(--ink-1); }
+  .r-a { flex: 1 1 0; min-width: 25%; color: var(--ink-1); }
   .resolved time { font-size: var(--t-xs); }
 </style>
