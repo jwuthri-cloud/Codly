@@ -4,7 +4,8 @@
   For a 1:1 Claude agent the menu has a second group, "How it works": ask for edits, accept
   edits, plan first (the agent's sheet has the same switch). The chip says the way it is in:
   in "plan first", until you accept its plan, only reads are approved for it, and the
-  permissions apply after that. A switch the core refuses changes nothing here, and a toast
+  permissions apply after that. ⇧⇥ in the composer switches to the next way (agentPicker.ts
+  `nextWay`, the same call). A switch the core refuses changes nothing here, and a toast
   says why. What the chip says and what the menu lists: agentPicker.ts.
 -->
 <script lang="ts">
@@ -48,7 +49,7 @@
 </script>
 
 <div class="controls">
-  <button class="chip" bind:this={btn} aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)} data-tip={chip.tip}>
+  <button class="chip" bind:this={btn} aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)} data-tip={chip.tip} data-tip-kbd={way ? '⇧⇥' : undefined}>
     <Icon name="lock" size={13} />{chip.text}{#if chip.sub}<span class="sub">{chip.sub}</span>{/if}<Icon name="chevron-down" size={12} />
   </button>
   <UsageChip {agent} />

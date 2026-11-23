@@ -20,10 +20,10 @@ import type { JsonValue } from '../lib/gen/serde_json/JsonValue';
 import { store, type AgentMsg, type Outgoing, type Seg, type SubAgent, type Thought } from '../lib/state/store.svelte';
 import { groupSame } from '../lib/state/approvalGroups';
 import { isSlotNote } from '../lib/state/queue';
-import { stoppedByYou } from '../lib/state/stops';
+import { killedAt, killLine, stoppedByYou } from '../lib/state/stops';
 import { isRequestThread } from '../lib/state/ui.svelte';
 import { noticeRows, type Note } from './notices';
-import { canRetry, messageOf, troublesOf, type TroubleKind } from './outcomes';
+import { canRetry, endedByKill, messageOf, troublesOf, type TroubleKind } from './outcomes';
 
 export type Item =
   | { kind: 'user'; key: string; ts: number; msg: ChatMessage; outgoing: Outgoing | null }
@@ -274,11 +274,16 @@ export function buildSpine(thread: string): Item[] {
 
     // ── what went wrong, where it happened (added last: a problem never splits a work row) ──
     const yours = chats.filter((c) => c.author === 'user');
+    // A turn you killed says so in its own line ("You killed …"): its end is not a trouble.
+    const kills = killedAt(owner.id);
     for (const t of troublesOf(store.events, owner.id, (start) => stoppedByYou(owner.id, start)))
-      items.push({
+      if (!endedByKill(t, kills)) items.push({
         kind: 'trouble', key: `e:${t.eventId}`, ts: t.ts, agentId: owner.id, eventId: t.eventId, what: t.what, reason: t.reason,
         retry: canRetry(t.what) ? messageOf(t.turn, yours) : null,
       });
+
+    // ── a Kill of yours: what you did, when ──
+    for (const at of kills) items.push({ kind: 'system', key: `k:${owner.id}:${at}`, ts: at, text: killLine(owner.name), card: null });
 
     // ── what its CLI told about the run: one row for a turn, where the newest was told (so
     // after the work it was told in) ──

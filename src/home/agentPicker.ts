@@ -69,3 +69,15 @@ export function groupsOf(permissions: Permission[], permission: ApprovalMode, wa
   if (!way) return [first];
   return [first, { kind: 'way', header: 'How it works', entries: PERMISSION_MODES.map((m) => ({ id: m.id, label: m.label, hint: WAY_HINT[m.id], checked: m.id === way })) }];
 }
+
+/**
+ * The way ⇧⇥ in the composer switches to: the next one of this menu's "How it works" group
+ * (`PERMISSION_MODES`, the sheet's select too), round. "Accept edits" is left out under "Ask
+ * first" permissions, where the core refuses it: the key would stop on a refusal and never
+ * reach "plan first". Only for an agent with a way to switch (`wayOf` not null).
+ */
+export function nextWay(way: PermissionMode, permission: ApprovalMode): PermissionMode {
+  const offered = PERMISSION_MODES.filter((m) => !(m.id === 'accept_edits' && permission === 'strict'));
+  const at = offered.findIndex((m) => m.id === way);
+  return offered[(at + 1) % offered.length].id;
+}

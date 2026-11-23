@@ -19,9 +19,9 @@
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { narrate } from '../lib/state/narration';
-  import { ROOMS, ui } from '../lib/state/ui.svelte';
+  import { ROOMS, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { article } from '../lib/util/format';
-  import { fuzzy, highlight } from '../lib/util/fuzzy';
+  import { highlight } from '../lib/util/fuzzy';
   import { PROVIDER_LABEL, TASK_STATUS_LABEL, taskState } from '../lib/util/labels';
   import { modal } from '../lib/util/modal';
   import type { Tone } from '../lib/narrate';
@@ -32,7 +32,8 @@
   import StateMark from '../components/StateMark.svelte';
   import { skillsUi } from '../lib/state/skills.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
-  import { bySection, noRow, press, wants } from './palette';
+  import { quickStart } from '../lib/state/hireWizard';
+  import { bySection, noRow, offersAsk, press, rankRows, wants } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
   type Row = {
@@ -155,7 +156,10 @@
     }
     for (const c of store.clis)
       if (c.path && !c.problem)
-        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start ${article(PROVIDER_LABEL[c.provider as Provider])} ${PROVIDER_LABEL[c.provider as Provider]} agent (1:1)`, icon: 'user-plus', run: () => (ui.modelDialog = { provider: c.provider as Provider, agentId: null }) });
+        rows.push(
+          { id: `quick:${c.provider}`, section: 'Agents', title: `Start an agent with ${PROVIDER_LABEL[c.provider as Provider]}`, sub: 'One step: its default look, name and model, then talk to it 1:1', icon: 'user-plus', run: () => void quickStart(c.provider as Provider) },
+          { id: `hire:${c.provider}`, section: 'Agents', title: `Start ${article(PROVIDER_LABEL[c.provider as Provider])} ${PROVIDER_LABEL[c.provider as Provider]} agent (1:1)…`, sub: 'Choose its name, look, model and brief', icon: 'user-plus', run: () => { ui.modelDialog = { provider: c.provider as Provider, agentId: null }; } },
+        );
     for (const a of store.agents)
       if (narrate(a.id)?.tone === 'live') rows.push({ id: `int:${a.id}`, section: 'Agents', title: `Interrupt ${a.name}`, icon: 'pause', run: () => interruptAgent(a.id) });
     return rows;
@@ -229,17 +233,7 @@
     // Ranked by score, then grouped: a section's header shows once, the best match stays first.
     const rank = (list: Row[], limit = 50): Scored[] => {
       if (!q) return bySection(list.slice(0, limit).map((r) => ({ ...r, hits: [] })));
-      return bySection(
-        list
-          .map((r) => {
-            const sub = r.sub ? fuzzy(q, r.sub) : null;
-            return { r, m: fuzzy(q, r.title) ?? (sub ? { score: sub.score / 3, hits: [] as number[] } : null) };
-          })
-          .filter((x) => x.m)
-          .sort((a, b) => b.m!.score - a.m!.score + (recents.indexOf(b.r.id) >= 0 ? 2 : 0) - (recents.indexOf(a.r.id) >= 0 ? 2 : 0))
-          .slice(0, limit)
-          .map((x) => ({ ...x.r, hits: x.m!.hits })),
-      );
+      return bySection(rankRows(list, q, recents, limit));
     };
     if (scope === '>') return rank(commands);
     if (scope === '@') return rank(agentRows);
@@ -272,7 +266,7 @@
 
   const withAsk = $derived.by((): Scored[] => {
     const q = query.trim();
-    if (!q || (scope && scope !== '>')) return rows;
+    if (!offersAsk(q, scope, isRequestThread(ui.thread))) return rows;
     return [
       ...rows,
       {

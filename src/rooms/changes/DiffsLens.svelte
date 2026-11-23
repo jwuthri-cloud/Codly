@@ -35,6 +35,7 @@
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
+  import { safeChoice } from '../../lib/util/confirm';
 
   const allPlans = $derived([...store.plans].filter((p) => p.status !== 'cancelled' && store.tasks.some((t) => t.plan_id === p.id && (t.status === 'done' || t.branch))).sort((a, b) => b.created_at - a.created_at));
   const allTasks = $derived([...store.tasks].filter((t) => t.branch || t.status === 'done').sort((a, b) => (a.plan_id ?? '~').localeCompare(b.plan_id ?? '~') || a.key.localeCompare(b.key, undefined, { numeric: true })));
@@ -231,6 +232,7 @@
   }
   /** Discard asks once more, and says where else the comments are (`draft`, read at the first press). */
   let discarding = $state<{ draft: ReviewDraft } | null>(null);
+  let discardBtn: HTMLButtonElement | undefined = $state();
   $effect(() => {
     void comments;
     discarding = null;
@@ -377,9 +379,9 @@
             <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {discarding ? discardWords(comments.length, discarding.draft) : reviewBarWords(comments.length, toWorker ? workerName : null, waiting ? review.inHand(notesKey) : null)}</p>
             {#if discarding}
               <button class="btn sm danger" onclick={() => discardReview(notesKey)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
-              <button class="btn sm ghost" onclick={() => (discarding = null)}>Keep</button>
+              <button class="btn sm ghost" use:safeChoice={{ keep: () => (discarding = null), back: () => discardBtn }} onclick={() => (discarding = null)}>Keep</button>
             {:else}
-              <button class="btn sm ghost" onclick={() => (discarding = { draft: reviewDraft(notesKey) })}>Discard</button>
+              <button class="btn sm ghost" bind:this={discardBtn} onclick={() => (discarding = { draft: reviewDraft(notesKey) })}>Discard</button>
               <button class="btn sm primary" disabled={sending} onclick={send}><Icon name="send" size={13} />Send back</button>
             {/if}
             {/if}

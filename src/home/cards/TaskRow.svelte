@@ -18,6 +18,7 @@
   import Markdown from '../../components/Markdown.svelte';
   import Portrait from '../../components/Portrait.svelte';
   import Say from '../../components/Say.svelte';
+  import { retryTarget } from '../../lib/util/retry';
   import StateMark from '../../components/StateMark.svelte';
 
   interface Props {
@@ -65,7 +66,8 @@
     }
   });
   const lit = $derived(ui.hover.taskId === task.id || (!!agent && ui.hover.agentId === agent.id));
-  const retry = $derived(detail && ['blocked', 'failed', 'cancelled'].includes(task.status));
+  // The plan room offers it for every stopped task; elsewhere, where the line says "Retry to resume".
+  const retry = $derived((detail && ['blocked', 'failed', 'cancelled'].includes(task.status)) || !!retryTarget(task));
   const queue = $derived(detail && !task.plan_id && task.status === 'pending');
 </script>
 

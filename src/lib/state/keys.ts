@@ -331,6 +331,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['Esc Esc', 'Stop the running turn (empty line)'],
       ['↑', 'Bring back what you sent (empty line)'],
       ['⇧⇥', 'Next mode: Ask · Plan · Auto · Direct'],
+      ['⇧⇥', 'In a 1:1 with Claude: its next mode (ask for edits · accept edits · plan first)'],
       ['⌫', 'Back to the request (empty line, 1:1)'],
       ['@', 'Talk to one agent · mention a file'],
       ['#', 'Mention a task'],

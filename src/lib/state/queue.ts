@@ -94,6 +94,9 @@ export const busyHint = (name: string, provider: Provider | undefined) =>
 export const waitingHint = (name: string, provider: Provider | undefined) =>
   readsMidTurn(provider) ? `${name} waits for your answer above — it reads your message after that` : `${name} waits for your answer above — your message runs after this turn`;
 
+/** The composer's placeholder in the 1:1 of an agent that is stopped (killed, or not started since Codly opened): a message starts it again, on its conversation. */
+export const stoppedHint = (name: string) => `${name} is stopped — a message starts it again`;
+
 /** When a steer note reaches the agent. */
 export const steerHint = (provider: Provider | undefined) =>
   readsMidTurn(provider) ? 'Arrives as context during its current turn, or as its next turn' : 'Arrives as context on its next turn';

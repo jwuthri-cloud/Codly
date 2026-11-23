@@ -7,6 +7,7 @@ import type { Provider } from '../lib/gen/Provider';
 import { permissionsAsked } from '../lib/util/permissionsAsked';
 import { showsPlan } from '../lib/util/planRequest';
 import { sandboxWants } from '../lib/util/sandbox';
+import { fuzzy } from '../lib/util/fuzzy';
 import { clean } from '../lib/util/sanitize';
 
 /**
@@ -19,6 +20,30 @@ export function press(row: { id: string; confirm?: string }, armed: string | nul
   if (armed === row.id) return { run: true, armed: null };
   return { run: false, armed: row.id };
 }
+
+/**
+ * The rows that match `q`, best first: a row whose title matches comes before every row that
+ * matches only by its description ("merge" offers "Merge into main" before "Go to Knowledge",
+ * whose description mentions merges). Within each group, by score; a recent row gets a small
+ * lift. `hits`: the title's matched letters (none for a description match).
+ */
+export function rankRows<T extends { id: string; title: string; sub?: string }>(list: T[], q: string, recents: string[], limit: number): (T & { hits: number[] })[] {
+  const lift = (r: T) => (recents.includes(r.id) ? 2 : 0);
+  return list
+    .map((r) => {
+      const title = fuzzy(q, r.title);
+      const sub = !title && r.sub ? fuzzy(q, r.sub) : null;
+      return { r, byTitle: !!title, score: (title ?? sub)?.score ?? 0, hits: title?.hits ?? [], hit: !!(title ?? sub) };
+    })
+    .filter((x) => x.hit)
+    .sort((a, b) => Number(b.byTitle) - Number(a.byTitle) || b.score + lift(b.r) - (a.score + lift(a.r)))
+    .slice(0, limit)
+    .map((x) => ({ ...x.r, hits: x.hits }));
+}
+
+/** Whether the last row "Ask the Lead: …" is offered: for a query, with no scope or in commands,
+ *  and only on a request (in a 1:1 there is no Lead you are talking to). */
+export const offersAsk = (q: string, scope: string | null, inRequest: boolean): boolean => !!q.trim() && (!scope || scope === '>') && inRequest;
 
 /**
  * Rows grouped by section, so each section's header shows once. The sections keep the order

@@ -25,7 +25,7 @@
   import { loadTakeover, openInTerminal, showTerminal, takeovers } from '../lib/state/takeover.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
   import { toast } from '../lib/state/toasts.svelte';
-  import { busy, busyHint, waitingHint } from '../lib/state/queue';
+  import { busy, busyHint, stoppedHint, waitingHint } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
   import { CLOSED_LIST, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { fuzzy } from '../lib/util/fuzzy';
@@ -38,6 +38,7 @@
   import Portrait from '../components/Portrait.svelte';
   import LeadControls, { MODES } from './LeadControls.svelte';
   import AgentControls from './AgentControls.svelte';
+  import { nextWay, wayOf } from './agentPicker';
   import { messageWithFiles } from './attached';
   import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from './drafts';
   import { recall, type Recalled } from './recall';
@@ -153,6 +154,7 @@
   const placeholder = $derived(
     waitsForYou ? waitingHint(agent?.name ?? 'The agent', agent?.provider)
     : isBusy ? busyHint(agent?.name ?? 'The agent', agent?.provider)
+    : oneToOne && agent?.status === 'offline' ? stoppedHint(agent.name)
     : oneToOne ? `Message ${agent?.name ?? 'the agent'} directly…`
     : fresh && thread !== 'lead' ? 'Describe the new request — its own Lead plans it in parallel…'
     : 'Ask the Lead to build, fix or explain — @ for a file, / for actions',
@@ -219,7 +221,10 @@
     requestMode: (mode) => void setRequestPrefs(thread, { mode }),
     agentMode: (a, mode) => void setPermissionMode(a.id, mode),
     leadModels: () => lead?.showModels(),
-    agentModel: (a) => (ui.modelDialog = { provider: a.provider, agentId: a.id }),
+    // A block body: an assignment's value would be the object, not the state's proxy of it.
+    agentModel: (a) => {
+      ui.modelDialog = { provider: a.provider, agentId: a.id };
+    },
     compact: (a) => void compactAgent(a.id, a.name),
     context: (a) => void showContext(a.id, a.name),
     changes: () => {
@@ -412,6 +417,14 @@
       e.preventDefault();
       const now = store.requestPrefs[thread]?.mode ?? (store.settings.auto_run_plans ? 'auto' : 'plan');
       setRequestPrefs(thread, { mode: MODES[(MODES.findIndex((m) => m.id === now) + 1) % MODES.length].id });
+      return;
+    }
+    // In a 1:1 with a Claude agent it cycles the way of the picker under the composer (one
+    // rule, agentPicker.ts; the same call as its menu and the agent's sheet).
+    const way = oneToOne ? wayOf(agent, !!workerRequest) : null;
+    if (e.key === 'Tab' && e.shiftKey && agent && way) {
+      e.preventDefault();
+      if (!e.repeat) void setPermissionMode(agent.id, nextWay(way, store.requestPrefs[thread]?.approval_mode ?? store.settings.approval_mode));
       return;
     }
     // ⌫ alone: with a modifier it is another key (⌘⌫ denies), and it never leaves the conversation.

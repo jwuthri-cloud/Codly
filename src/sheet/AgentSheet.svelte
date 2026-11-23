@@ -30,6 +30,8 @@
   import Portrait from '../components/Portrait.svelte';
   import Provenance from '../components/Provenance.svelte';
   import Say from '../components/Say.svelte';
+  import RetryButton from '../components/RetryButton.svelte';
+  import { safeChoice } from '../lib/util/confirm';
   import Section from '../components/Section.svelte';
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
@@ -330,20 +332,21 @@
     <div class="confirm">
       <span>Stop {agent.name}? The process ends; its worktree is kept.</span>
       <button class="btn sm danger" disabled={stopping} onclick={stop}>{stopping ? 'Stopping…' : 'Stop'}</button>
-      <button class="btn sm ghost" disabled={stopping} onclick={() => (confirmStop = false)}>Keep</button>
+      <button class="btn sm ghost" disabled={stopping} use:safeChoice={{ keep: () => (confirmStop = false) }} onclick={() => (confirmStop = false)}>Keep</button>
     </div>
   {/if}
   {#if confirmLetGo}
     <div class="confirm">
       <span>Let {agent.name} go? They leave the office as a ghost by the memory archive, with their career and memory; you can bring them back.</span>
       <button class="btn sm danger" onclick={() => { confirmLetGo = false; letGo(agent.id); }}>Let go</button>
-      <button class="btn sm ghost" onclick={() => (confirmLetGo = false)}>Keep</button>
+      <button class="btn sm ghost" use:safeChoice={{ keep: () => (confirmLetGo = false) }} onclick={() => (confirmLetGo = false)}>Keep</button>
     </div>
   {/if}
 
   <div class="sections">
     <Section id="now" title="Now">
       <p class="now tone-{n?.tone}">{#if n}<Say parts={n.parts} />{/if}</p>
+      <RetryButton {task} />
       <p class="now-meta num">{#if !n?.parts.some((p) => p.timer)}{n?.tone === 'live' ? `for ${timer(ui.now - since)}` : `since ${clock(since)}`}{#if agent.worktree}{' · '}{/if}{/if}{#if agent.worktree}<code data-tip={GLOSSARY.worktree}>{task?.branch ?? tildify(agent.worktree)}</code>{/if}</p>
       <div class="why"><Why lines={why} /></div>
     </Section>
