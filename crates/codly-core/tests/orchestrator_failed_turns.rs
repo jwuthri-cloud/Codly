@@ -630,7 +630,7 @@ async fn a_breaker_stop_is_not_reported_as_yours() {
     assert_eq!(task.status, TaskStatus::Blocked, "{:?}", task.status_reason);
     let reason = task.status_reason.clone().unwrap_or_default();
     assert!(reason.starts_with("stopped by the circuit breaker: it hit ") && reason.contains("errors in a row (limit 2)"), "{reason}");
-    assert!(reason.contains("move it to Ready to resume with") && !reason.contains("by you"), "{reason}");
+    assert!(reason.contains("; Retry to resume with") && !reason.contains("by you"), "{reason}");
     wait_for("the worker to exit", async || (seen.lock().unwrap().shutdowns == 1).then_some(())).await;
     assert!(!core.snapshot().await.unwrap().agents.iter().any(|a| a.id == worker && a.task_id.is_some()), "the worker is free");
     let said = chats(&core).await;
@@ -819,7 +819,7 @@ async fn a_turn_you_interrupt_that_does_not_stop_blocks_its_task_and_is_not_rest
     let blocked = task_ended(&core, &task.id).await;
     assert_eq!((blocked.status, blocked.attempt), (TaskStatus::Blocked, 1), "{:?}", blocked.status_reason);
     let reason = blocked.status_reason.clone().unwrap_or_default();
-    assert!(reason.starts_with("interrupted by you; the CLI did not stop, so Codly ended its process; move it to Ready to resume with"), "{reason}");
+    assert!(reason.starts_with("interrupted by you; the CLI did not stop, so Codly ended its process; Retry to resume with"), "{reason}");
     tokio::time::sleep(Duration::from_millis(400)).await; // a restart would have come by now
     {
         let seen = seen.lock().unwrap();
@@ -833,7 +833,7 @@ async fn a_turn_you_interrupt_that_does_not_stop_blocks_its_task_and_is_not_rest
     assert!(matches!(&said[..], [one] if one.contains("was interrupted by you") && one.contains("blocked its task")), "{said:?}");
     assert!(committed(&core, &blocked).await.is_empty(), "the half-done work was not checked");
 
-    // You move it to Ready: its worker comes back and finishes.
+    // You retry it (a move to Ready): its worker comes back and finishes.
     core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
     let task = task_ended(&core, &task.id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
@@ -868,7 +868,7 @@ async fn a_worker_the_breaker_pauses_that_does_not_stop_is_not_restarted() {
     tokio::time::sleep(Duration::from_millis(400)).await; // a restart would have come by now
     assert_eq!(seen.lock().unwrap().runs, 1, "the worker was not started again");
     let said = chats(&core).await;
-    assert!(said.iter().any(|t| t.contains("was interrupted by the circuit breaker") && t.contains("blocked until you move it to Ready")), "{said:?}");
+    assert!(said.iter().any(|t| t.contains("was interrupted by the circuit breaker") && t.contains("blocked until you retry it")), "{said:?}");
     core.shutdown().await;
 }
 

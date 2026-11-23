@@ -621,8 +621,8 @@ impl Inner {
             self.decide_by(ws_id, Some(&task.id), "merge", "human", summary, detail)?;
             format!(
                 "{target} and this plan both changed {}. Codly brought {target} into the plan's branch, in its own worktree \
-                 (your checkout is not touched), and task {} resolves the conflicts there. Then the plan's checks run again \
-                 and you can merge it.",
+                 (your checkout is not touched). An agent resolves the conflicts there: that is task {}. Then the plan's \
+                 checks run again and you can merge it.",
                 name_list(&files),
                 task.key
             )

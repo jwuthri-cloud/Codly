@@ -321,7 +321,7 @@ impl Inner {
         let held = agent.task_id.clone().or_else(|| lock(&self.live).get(agent_id).and_then(|l| l.task_id.clone()));
         if let Some(t) = held.and_then(|id| self.task(&id).ok()) {
             let reason = if t.assignee.as_deref() == Some(agent_id) {
-                format!("stopped by {by}; move it to Ready to resume with {}", agent.name)
+                format!("stopped by {by}; Retry to resume with {}", agent.name)
             } else {
                 format!("review stopped by {by}; Retry to re-check")
             };
@@ -414,8 +414,10 @@ impl Inner {
         let ws = self.store.agent_workspace(&a.agent_id)?;
         let sent = {
             let live = lock(&self.live);
+            // A run that is being stopped (you killed the agent, or Codly ended it) takes no
+            // answer while its process ends: what it asked goes with it, as once the process is gone.
             live.get(&a.agent_id)
-                .filter(|l| l.run_id == a.run_id)
+                .filter(|l| l.run_id == a.run_id && !l.stopping)
                 .is_some_and(|l| l.handle.send(AgentCmd::Approval { approval_id: a.id.clone(), decision: decision.clone() }))
         };
         let status = if !sent {

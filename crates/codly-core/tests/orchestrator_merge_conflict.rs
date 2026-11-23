@@ -399,7 +399,8 @@ async fn an_agent_resolves_a_plans_conflict_with_your_branch_and_the_merge_goes_
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (mine.clone(), String::new()));
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), "hello from main\n");
     let lines = said(&core, "lead").await;
-    assert!(lines.iter().any(|l| l.starts_with("main and this plan both changed greeting.txt. Codly brought main into the plan's branch")), "{lines:?}");
+    let brought = "main and this plan both changed greeting.txt. Codly brought main into the plan's branch";
+    assert!(lines.iter().any(|l| l.starts_with(brought) && l.contains("An agent resolves the conflicts there: that is task ")), "{lines:?}");
 
     // The plan builds on your branch as it is now: its diff is the plan's work, not yours.
     assert_eq!((again.base_commit.as_deref(), again.base_branch.as_deref()), (Some(mine.as_str()), Some("main")));
