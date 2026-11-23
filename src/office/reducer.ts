@@ -543,8 +543,11 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
     case 'turn_completed':
       if (a) {
         clearWork(a);
-        // A turn that was interrupted or that failed takes its helpers with it.
-        if (k.status === 'interrupted' || k.status === 'failed') a.subagents.clear();
+        // A turn that was interrupted or that failed takes its helpers with it. Not so for a
+        // Claude agent: a helper in the background works on, and its adapter says which helpers
+        // ended with the turn (a `sub_agent` row "stopped" for each). The store has the same rule.
+        const claude = a.providerKnown && a.provider === 'claude';
+        if (!claude && (k.status === 'interrupted' || k.status === 'failed')) a.subagents.clear();
         if (k.status === 'failed') a.blocked = { reason: 'turn failed', since: at };
       }
       break;
@@ -557,6 +560,8 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
       break;
     case 'exited':
       if (a && own) clearWork(a);
+      // Its helpers ran inside the process that is gone (of any run: the store says the same).
+      if (a) a.subagents.clear();
       break;
     case 'agent_changed': {
       const ag = ensureAgent(m, k.agent.id, at);
