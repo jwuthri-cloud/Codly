@@ -238,7 +238,7 @@
   const names: Names = { agent: (id) => store.agentMap.get(id)?.name, task: (id) => store.taskMap.get(id)?.key };
   /** A decision's summary keeps its first word when it is a task's key or an agent's name ("t1 …", "eli …"). */
   const isName = (word: string) => store.tasks.some((t) => t.key === word) || store.agents.some((a) => a.name === word);
-  function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
+  function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn'; tip?: string } {
     const k = e.kind;
     switch (k.type) {
       case 'tool_started': return { icon: 'play', text: toolStartLine(k, agent.provider) };
@@ -259,7 +259,9 @@
         // (the request's own row went into this one: it says what was asked, then the answer)
         const asked = store.approvals.find((a) => a.id === k.approval_id) ?? folded.asked.get(k.approval_id) ?? null;
         const settled = settledLine(k.status, k.by, asked, yourAnswers.get(k.approval_id) ?? null, agent.provider, savedRuleOf(store.decisions, k.approval_id));
-        return { icon: 'flag', text: closedLine(asked, settled, agent.provider), tone: k.status === 'approved' ? 'good' : 'bad' };
+        const text = closedLine(asked, settled, agent.provider);
+        // (the row is cut: the whole of a long request is on its tip)
+        return { icon: 'flag', text, tone: k.status === 'approved' ? 'good' : 'bad', tip: text };
       }
       case 'retrieval': return { icon: 'link', text: `Codly provided ${k.citations.length} citations for “${oneLine(k.query, 50)}”` };
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
@@ -588,7 +590,7 @@
           <button class="ev" class:hl={ui.selection?.kind === 'agent' && ui.selection.eventId === e.id} data-ev={e.id} onclick={() => (rawOpen = rawOpen === e.id ? null : e.id)}>
             <time class="num">{clockSec(e.ts)}</time>
             <span class="ev-ic tone-{d.tone ?? 'n'}"><Icon name={d.icon} size={12} /></span>
-            <span class="ev-t truncate">{d.text}</span>
+            <span class="ev-t truncate" data-tip={d.tip}>{d.text}</span>
             {#if e.kind.type === 'decision'}<Provenance kind={methodProvenance(e.kind.method)} compact />{/if}
           </button>
           {#if rawOpen === e.id}<pre class="raw selectable">{JSON.stringify(e, null, 2)}</pre>{/if}

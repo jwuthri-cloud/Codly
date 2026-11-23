@@ -235,11 +235,16 @@ export function decisionLine(k: Pick<DecisionRow, 'summary' | 'method' | 'decisi
 /** How close in time the rows of one act of yours are: the core writes them one right after the other. */
 export const ACT_MS = 2000;
 
-/** The request a decision is about, when it records an answer or a rule saved with one (`approval` / `approval_id` in its detail). */
+/**
+ * The request a decision repeats the answer of: a record of the answer (`approval` in its
+ * detail) or of a rule you saved with it (its `rule` is the saved rule, with the request's
+ * `approval_id`). Not the core's records of why Codly asked ("asking you: …") or which rule
+ * answered ("auto-allowed …"): their `rule` is that reason, in words, and says what the answer's
+ * row does not.
+ */
 function answerOf(k: Pick<DecisionRow, 'decision_type' | 'detail'>): string | null {
-  if (k.decision_type !== 'approval' && k.decision_type !== 'approval_policy') return null;
   const d = detailOf(k.detail);
-  const id = d.approval ?? d.approval_id;
+  const id = k.decision_type === 'approval' ? d.approval : k.decision_type === 'approval_policy' && typeof d.rule === 'object' && d.rule !== null ? d.approval_id : null;
   return typeof id === 'string' ? id : null;
 }
 
@@ -287,9 +292,15 @@ export function foldActs(rows: readonly EventRow[], planCalls: ReadonlySet<strin
   return { rows: rows.filter((r) => !drop.has(r)), asked };
 }
 
-/** The row of a closed request: what it asked, then how it ended ("Asked to change README.md · Denied by you"). A plan's row says only how it ended ("Plan sent back by you"): that names it. */
+/**
+ * The row of a closed request: how it ended, then what it asked ("Denied by you · asked to change
+ * README.md"). The answer comes first: a long request is cut at the end of the row. A plan's row
+ * says only how it ended ("Plan sent back by you"): that names it.
+ */
 export function closedLine(asked: Pick<Approval, 'subject'> | null, settled: string, provider: Provider | null): string {
-  return !asked || showsPlan(asked.subject, provider) ? settled : `${askedLine(asked, provider)} · ${settled}`;
+  if (!asked || showsPlan(asked.subject, provider)) return settled;
+  const what = askedLine(asked, provider);
+  return `${settled} · ${what[0].toLowerCase()}${what.slice(1)}`;
 }
 
 /** The rule you saved with your answer to a request, from the core's record of it (orchestrator/approval_rules.rs: its detail holds the rule and the request's id). */

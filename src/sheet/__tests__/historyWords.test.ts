@@ -215,9 +215,26 @@ describe('one act of yours is one row', () => {
     const rows = [asked(10, edit), answered(30, 'ap2', 'denied'), record];
     const folded = foldActs([...rows].reverse(), new Set());
     expect(folded.rows.map((r) => r.id)).toEqual([rows[1].id]);
-    expect(closedLine(folded.asked.get('ap2') ?? null, 'Denied by you', null)).toBe('Asked to change README.md · Denied by you');
+    // (the answer first: a long request is cut at the end of the row)
+    expect(closedLine(folded.asked.get('ap2') ?? null, 'Denied by you', null)).toBe('Denied by you · asked to change README.md');
     // A plan's answer names it already.
     expect(closedLine({ subject: { kind: 'tool', name: 'ExitPlanMode', input: { plan: 'x' } } }, 'Plan sent back by you', 'claude')).toBe('Plan sent back by you');
+  });
+
+  // The core's records of why Codly asked and of the rule that answered (orchestrator/ingest.rs)
+  // say what the answer's row does not; the record of a rule you saved repeats the answer.
+  it('keeps why Codly asked and which rule answered; drops the record of a rule you saved with the answer', () => {
+    const cmd = approval('ap5', { kind: 'command', command: 'rm x', cwd: null });
+    const policy = (ts: number, summary: string, rule: unknown, method = 'rule') =>
+      row(ts, { type: 'decision', id: `d${n}`, decision_type: 'approval_policy', method, summary, detail: { approval_id: 'ap5', mode: 'ask_risky', rule, subject: cmd.subject, read_only: false } });
+    const why = policy(11, 'asking you: it deletes files', 'it deletes files');
+    const saved = policy(29, 'you saved a rule: always allow rm x in this repo', { id: 'r1', kind: 'exact', command: 'rm x' }, 'human');
+    const rows = [asked(10, cmd), why, saved, answered(30, 'ap5', 'approved')];
+    expect(shown(rows)).toEqual([rows[3].id, why.id]);
+    const auto = approval('ap6', { kind: 'command', command: 'ls', cwd: null });
+    const allowed = row(21, { type: 'decision', id: 'd20', decision_type: 'approval_policy', method: 'rule', summary: 'auto-allowed read-only command', detail: { approval_id: 'ap6', mode: 'ask_risky', rule: 'read-only command', subject: auto.subject, read_only: true } });
+    const autoRows = [asked(20, auto), row(21, { type: 'approval_resolved', approval_id: 'ap6', status: 'approved', by: 'policy' }), allowed];
+    expect(shown(autoRows)).toEqual([allowed.id, autoRows[1].id]);
   });
 
   it('finds the rule you saved with an answer in the core’s record of it', () => {

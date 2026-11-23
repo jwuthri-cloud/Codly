@@ -8,7 +8,7 @@ import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Snapshot } from '../gen/Snapshot';
-import { HOLD_MS, MCP_ASK_WAIT_MS, MCP_BUSY, MCP_HINT, MCP_LABEL, STOP_WAIT_MS, backgroundKind, backgroundSummary, canReconnect, canRestart, canStop, mcpAskOnItsWay, mcpRowLocked, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, restartHint, restartMcp, signInSteps, startedWithoutFolderConfig, stopBackgroundTask, stopHint, stopLabel, stopOnItsWay, stopsSettling, switchMcp, waitedHelperStopHint, type McpAsk } from '../state/session';
+import { HOLD_MS, MCP_ASK_WAIT_MS, MCP_BUSY, MCP_HINT, MCP_LABEL, STOP_WAIT_MS, backgroundKind, backgroundSummary, canReconnect, canRestart, canStop, mcpAnswered, mcpAskOnItsWay, mcpAsked, mcpRowLocked, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, restartHint, restartMcp, signInSteps, startedWithoutFolderConfig, stopBackgroundTask, stopHint, stopLabel, stopOnItsWay, stopsSettling, switchMcp, waitedHelperStopHint } from '../state/session';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { mkAgent } from '../../office/demo/script';
@@ -169,26 +169,47 @@ describe('the MCP servers of an agent', () => {
 
   // Before, the button was free again as soon as Claude Code answered: a second press sent a
   // second request and wrote a second record.
-  it('a button stays busy until the server\'s next status row arrives, or 10 s pass', () => {
+  it('a button stays busy until the server\'s next status row arrives, or 10 s pass after the answer', () => {
     apply(server(1_000, 'r2', 'docs', 'connected'));
     const docs = () => ofLiveRun(live().mcp, bo.run_id)[0];
-    const ask: McpAsk = { what: 'off', seen: docs().ts, at: 1_000 };
+    const ask = mcpAsked(docs(), 'off');
     expect(mcpAskOnItsWay(docs(), undefined, 1_000)).toBeNull();
     expect(mcpAskOnItsWay(docs(), ask, 1_500)).toEqual(ask);
     expect(MCP_BUSY[ask.what]).toBe('Turning off…');
-    expect(mcpAskOnItsWay(docs(), ask, 1_000 + MCP_ASK_WAIT_MS - 1)).toEqual(ask);
-    expect(mcpAskOnItsWay(docs(), ask, 1_000 + MCP_ASK_WAIT_MS)).toBeNull();
+    const back = mcpAnswered(ask, 2_000, false);
+    expect(mcpAskOnItsWay(docs(), back, 2_000 + MCP_ASK_WAIT_MS - 1)).toEqual(back);
+    expect(mcpAskOnItsWay(docs(), back, 2_000 + MCP_ASK_WAIT_MS)).toBeNull();
     // The server reports: the row shows where it stands, and the request is no longer on its way.
     apply(server(3_000, 'r2', 'docs', 'disabled'));
-    expect(mcpAskOnItsWay(docs(), ask, 3_000)).toBeNull();
+    expect(mcpAskOnItsWay(docs(), back, 3_000)).toBeNull();
     expect([MCP_BUSY.reconnect, MCP_BUSY.restart, MCP_BUSY.on]).toEqual(['Reconnecting…', 'Restarting…', 'Turning on…']);
+  });
+
+  // A server that hangs at start: Claude Code answers when its try is over (30 s and more), and
+  // no status row comes meanwhile. A second press would send a second request.
+  it('a request Claude Code has not answered stays on its way, also after 10 s', () => {
+    apply(server(1_000, 'r2', 'tracker', 'failed', 'Connection closed'));
+    const tracker = () => ofLiveRun(live().mcp, bo.run_id)[0];
+    const ask = mcpAsked(tracker(), 'reconnect');
+    expect(mcpAskOnItsWay(tracker(), ask, 1_000 + MCP_ASK_WAIT_MS + 30_000)).toEqual(ask);
+    expect(mcpRowLocked(tracker(), ask, 1_000 + MCP_ASK_WAIT_MS + 30_000)).toBe(true);
+  });
+
+  // A restart leaves the server "connected": no status row follows, so its answer ends it.
+  it('a restart ends with its answer, and the row stays off for a moment only', () => {
+    apply(server(1_000, 'r2', 'docs', 'connected'));
+    const docs = () => ofLiveRun(live().mcp, bo.run_id)[0];
+    const done = mcpAnswered(mcpAsked(docs(), 'restart'), 1_200, true);
+    expect(mcpAskOnItsWay(docs(), done, 1_200)).toBeNull();
+    expect(mcpRowLocked(docs(), done, 1_200 + HOLD_MS - 1)).toBe(true);
+    expect(mcpRowLocked(docs(), done, 1_200 + HOLD_MS)).toBe(false);
   });
 
   // A row's buttons change with its state: the one under the pointer must not take a press meant for the one before.
   it('the row\'s buttons stay off while its request is on its way and for a moment after its state changed', () => {
     apply(server(1_000, 'r2', 'tracker', 'failed', 'Connection closed'));
     const tracker = () => ofLiveRun(live().mcp, bo.run_id)[0];
-    const ask: McpAsk = { what: 'reconnect', seen: tracker().ts, at: 1_000 };
+    const ask = mcpAnswered(mcpAsked(tracker(), 'reconnect'), 1_500, false);
     expect(mcpRowLocked(tracker(), undefined, 1_000)).toBe(false);
     expect(mcpRowLocked(tracker(), ask, 2_000)).toBe(true);
     // It connected: "Restart" and "Turn off" are there, and off for HOLD_MS.

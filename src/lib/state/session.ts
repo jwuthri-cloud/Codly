@@ -133,30 +133,49 @@ export const canRestart = (s: McpServer) => s.status === 'connected' && s.name !
 /** What "Restart" does, on its button (`agent`: the name of the server's agent). */
 export const restartHint = (agent: string): string => `Starts this server again for this run of ${agent}.`;
 
-/** A request about one server, from the press of its button until the server's next status row: what it asks, the state of the server it is about (`McpServer.ts` when you pressed), and when you pressed. */
-export type McpAsk = { what: 'reconnect' | 'restart' | 'off' | 'on'; seen: number; at: number };
+/**
+ * A request about one server, from the press of its button until the server's next status row:
+ * what it asks, the state of the server it is about (`McpServer.ts` when you pressed), and when
+ * Claude Code answered it (null: not yet). `done`: the answer itself says how it ended (a
+ * restart: the server stays "connected", so no status row follows).
+ */
+export type McpAsk = { what: 'reconnect' | 'restart' | 'off' | 'on'; seen: number; answeredAt: number | null; done: boolean };
 
 /** What a server's button reads while its request is on its way. */
 export const MCP_BUSY: Record<McpAsk['what'], string> = { reconnect: 'Reconnecting…', restart: 'Restarting…', off: 'Turning off…', on: 'Turning on…' };
 
-/** How long a button waits for the server's next status row before it can be pressed again: Claude Code may answer and report nothing new. */
+/** How long a button waits, after Claude Code answered, for the server's next status row before it can be pressed again: Claude Code may answer and report nothing new. */
 export const MCP_ASK_WAIT_MS = 10_000;
 
+/** The request just pressed: not answered yet. */
+export const mcpAsked = (s: McpServer, what: McpAsk['what']): McpAsk => ({ what, seen: s.ts, answeredAt: null, done: false });
+
+/** The request once Claude Code answered it at `now`; `done`: the answer says how it ended. */
+export const mcpAnswered = (ask: McpAsk, now: number, done: boolean): McpAsk => ({ ...ask, answeredAt: now, done });
+
 /**
- * The request still on its way for a server, if any: from the press until the server's next
- * status row arrives (the row then shows where it stands) or `MCP_ASK_WAIT_MS` pass. A second
- * press meanwhile would send a second request and write a second record.
+ * The request still on its way for a server, if any: while Claude Code has not answered it (a
+ * server that hangs at start can take 30 s and more), then until the server's next status row
+ * arrives (the row then shows where it stands) or `MCP_ASK_WAIT_MS` pass after the answer. A
+ * second press meanwhile would send a second request and write a second record.
  */
-export const mcpAskOnItsWay = (s: McpServer, ask: McpAsk | undefined, now: number): McpAsk | null =>
-  ask && ask.seen === s.ts && now - ask.at < MCP_ASK_WAIT_MS ? ask : null;
+export const mcpAskOnItsWay = (s: McpServer, ask: McpAsk | undefined, now: number): McpAsk | null => {
+  if (!ask || ask.done) return null;
+  if (ask.answeredAt == null) return ask;
+  return ask.seen === s.ts && now - ask.answeredAt < MCP_ASK_WAIT_MS ? ask : null;
+};
 
 /**
  * Whether a server's buttons are off: while its request is on its way, and for `HOLD_MS` after
- * its row changed because of it. The row's buttons change with its state ("Reconnect" gives way
- * to "Restart" and "Turn off"): one press too many never lands on the new button.
+ * its row changed because of it or after an answer that ended it. The row's buttons change with
+ * its state ("Reconnect" gives way to "Restart" and "Turn off"): one press too many never lands
+ * on the new button.
  */
 export const mcpRowLocked = (s: McpServer, ask: McpAsk | undefined, now: number): boolean =>
-  !!ask && (mcpAskOnItsWay(s, ask, now) != null || (ask.seen !== s.ts && now - s.ts < HOLD_MS));
+  !!ask &&
+  (mcpAskOnItsWay(s, ask, now) != null ||
+    (ask.seen !== s.ts && now - s.ts < HOLD_MS) ||
+    (ask.done && ask.answeredAt != null && now - ask.answeredAt < HOLD_MS));
 
 /** The start of the core's notice that a run started without the folder's own CLI configuration (orchestrator/runs.rs). */
 const WITHOUT_FOLDER_CONFIG = 'Started without this folder';
