@@ -35,6 +35,24 @@ pub(crate) fn says_signed_out(text: &str) -> bool {
     SIGNED_OUT.iter().any(|p| text.contains(p))
 }
 
+/// The start error of a run that was to resume a conversation its CLI no longer has (Claude
+/// Code's own words: `session_trouble`). It is the context of the CLI's error, so
+/// `Error::is` finds it. After this failure the conversation is known to be gone, and the
+/// orchestrator starts a new one in its place (`Inner::resume_or_new`).
+#[derive(Debug)]
+pub struct SessionGone;
+
+/// What a `SessionGone` error says.
+const SESSION_GONE: &str = "Claude Code no longer has this conversation";
+
+impl std::fmt::Display for SessionGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(SESSION_GONE)
+    }
+}
+
+impl std::error::Error for SessionGone {}
+
 /// What Claude Code says when it cannot open the conversation it was started for, in plain
 /// words (its texts: docs/research/cli-claude-stream-json-2.1.311.md §7). With `--resume` of a
 /// conversation it no longer has, and with `--session-id` of one it already has, it exits
@@ -42,7 +60,7 @@ pub(crate) fn says_signed_out(text: &str) -> bool {
 pub(crate) fn session_trouble(text: &str) -> Option<&'static str> {
     let text = text.to_lowercase();
     if text.contains("no conversation found with session id") {
-        Some("Claude Code no longer has this conversation")
+        Some(SESSION_GONE)
     } else if text.contains("session id") && text.contains("is already in use") {
         Some("Claude Code already has a conversation with the id Codly gave this new one")
     } else {
@@ -156,7 +174,8 @@ fn advice(provider: Provider, text: &str, version: Option<&str>, home: Option<&s
 /// unchanged otherwise (also when it already is that advice). A run with Claude Code's shell
 /// sandbox that ended because the sandbox cannot start is led by a `SandboxNotOn`, in the
 /// words of Codly's own check (`sandbox_trouble`): the CLI's advice names a setting that is
-/// not the user's to change in Codly.
+/// not the user's to change in Codly. A conversation that is gone
+/// leads as the typed `SessionGone`.
 pub(crate) fn explain(spec: &SpawnSpec, version: Option<&str>, raw: anyhow::Error) -> anyhow::Error {
     let text = format!("{raw:#}");
     if spec.provider == Provider::Claude
@@ -166,8 +185,10 @@ pub(crate) fn explain(spec: &SpawnSpec, version: Option<&str>, raw: anyhow::Erro
         return raw.context(not_on);
     }
     match advice(spec.provider, &text, version, account_home(spec), uses_own_key(spec), shell_sign_in(spec).as_deref()) {
-        Some(advice) if !text.contains(&advice) => raw.context(advice),
-        _ => raw,
+        Some(advice) if text.contains(&advice) => raw,
+        Some(advice) if advice == SESSION_GONE => raw.context(SessionGone),
+        Some(advice) => raw.context(advice),
+        None => raw,
     }
 }
 
@@ -266,11 +287,17 @@ mod tests {
         let e = explain(&claude, None, anyhow!("claude exited during startup (code 1): {gone}"));
         assert_eq!(e.to_string(), "Claude Code no longer has this conversation");
         assert!(format!("{e:#}").ends_with("claude exited during startup (code 1): No conversation found with session ID: sess-1"), "{e:#}");
+        // Typed: the orchestrator knows by it that the conversation is gone.
+        assert!(e.is::<SessionGone>());
+        let again = explain(&claude, None, e);
+        assert!(again.is::<SessionGone>() && again.chain().count() == 2, "explained once: {again:#}");
 
         let taken = stderr("session-id-in-use.ndjson");
         assert_eq!(taken, "Error: Session ID sess-1 is already in use.");
         let e = explain(&claude, None, anyhow!("claude exited during startup (code 1): {taken}"));
         assert_eq!(e.to_string(), "Claude Code already has a conversation with the id Codly gave this new one");
+        assert!(!e.is::<SessionGone>(), "that conversation is not gone");
+        assert!(!explain(&claude, None, anyhow!("claude did not answer the initialize request within 30 s")).is::<SessionGone>());
 
         // Claude Code's words only: another CLI's text stands as it is.
         assert_eq!(advice(Provider::Codex, &gone, None, None, false, None), None);

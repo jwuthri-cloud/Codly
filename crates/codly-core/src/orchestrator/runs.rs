@@ -136,6 +136,7 @@ impl Inner {
                     interrupt: Default::default(),
                     self_started: false,
                     background: Default::default(),
+                    session_rows: Default::default(),
                 },
             );
         }
@@ -277,15 +278,56 @@ impl Inner {
         e
     }
 
+    /// Start the run that goes on with an agent's conversation: `req` with the session to
+    /// resume. A conversation that cannot be resumed gives way to a new one (`req` with a new
+    /// session), and its thread says so (`resume_failed`). Every path that resumes a
+    /// conversation of its own starts here: a 1:1 chat, a Lead, a team member.
+    pub(super) async fn resume_or_new(self: &Arc<Self>, session_id: &str, req: impl Fn(SessionMode) -> RunReq) -> Result<Id> {
+        let resume = req(SessionMode::Resume { session_id: session_id.to_string() });
+        let (agent, role, ws, task_id) = (resume.agent.clone(), resume.role, resume.workspace_id.clone(), resume.task_id.clone());
+        let e = match self.spawn_run(resume).await {
+            Ok(run_id) => return Ok(run_id),
+            Err(e) => e,
+        };
+        if !self.gives_up_conversation(&agent, &e) {
+            return Err(e);
+        }
+        tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
+        // The old session stays on the agent until the new one has started: a start that
+        // fails here too (the CLI is signed out, say) loses no conversation.
+        let run_id = self.spawn_run(req(new_session(agent.provider))).await?;
+        self.resume_failed(&agent, role, ws.as_deref(), task_id.as_deref(), &e);
+        Ok(run_id)
+    }
+
+    /// A resume did not start. May a new conversation take the place of the old one? Yes when
+    /// the CLI said that it no longer has it (`SessionGone`). Not when Codly itself did not
+    /// start the CLI: the folder is not trusted, the shell sandbox is not on, the agent is in
+    /// your terminal, or another start of this agent won. That conversation is fine, and it is the one to keep. After
+    /// any other failure a new one is tried: no other answer of a CLI to a conversation it
+    /// cannot open is recorded, and an agent must not stay without one.
+    fn gives_up_conversation(&self, agent: &Agent, e: &anyhow::Error) -> bool {
+        if e.is::<crate::adapters::SessionGone>() {
+            return true;
+        }
+        // (a terminal mark that cannot be read counts as "in your terminal": nothing is given up)
+        !e.is::<super::trust::NotStarted>()
+            && !e.is::<crate::adapters::claude::SandboxNotOn>()
+            && !self.is_live(&agent.id)
+            && !self.in_terminal(&agent.id).unwrap_or(true)
+    }
+
     /// A resume failed and a new session took its place: the agent no longer knows what was
     /// said before. Say so where its conversation is (a Lead's request thread, the agent's
     /// own thread otherwise), with the reason, and record it.
     pub(super) fn resume_failed(&self, agent: &Agent, role: Role, ws: Option<&str>, task_id: Option<&str>, error: &anyhow::Error) {
         let why = super::prompts::clip(&error.to_string().split_whitespace().collect::<Vec<_>>().join(" "), 300);
-        let text = format!(
-            "{}'s earlier conversation could not be resumed ({why}). A new one started: {} does not know what was said before.",
-            agent.name, agent.name
-        );
+        let name = &agent.name;
+        let text = if error.is::<crate::adapters::SessionGone>() {
+            format!("Claude Code no longer has {name}'s earlier conversation. A new one started: {name} does not know what was said before.")
+        } else {
+            format!("{name}'s earlier conversation could not be resumed ({why}). A new one started: {name} does not know what was said before.")
+        };
         let thread = match role {
             Role::Lead => super::lead::thread_of(agent).to_string(),
             _ => format!("agent:{}", agent.id),

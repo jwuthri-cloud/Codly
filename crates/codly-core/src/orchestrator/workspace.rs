@@ -244,6 +244,7 @@ impl Inner {
             let t = guard("knowledge graph", || memory::query_triples(db, id, None, None, 300)).unwrap_or_default();
             Ok((m, t))
         })?;
+        let events = self.store.latest_events(id, 300)?;
         Ok(Snapshot {
             as_of,
             clis: self.clis(),
@@ -260,7 +261,8 @@ impl Inner {
             triples,
             accounts: self.accounts(),
             artifacts: self.store.artifacts(id, 200)?,
-            events: self.store.latest_events(id, 300)?,
+            session_events: self.session_rows(id, &events),
+            events,
         })
     }
 

@@ -1445,6 +1445,22 @@ pub enum TurnStatus {
     MaxTurns,
 }
 
+/// Where one MCP server of an agent's session stands, as its CLI reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum McpServerStatus {
+    Connected,
+    /// The CLI is still connecting to it.
+    Connecting,
+    /// It did not start, or it cannot be reached.
+    Failed,
+    /// It wants a sign-in that nobody made yet.
+    NeedsSignIn,
+    /// Switched off in the CLI.
+    Disabled,
+}
+
 /// The canonical event. Adapters produce the provider kinds; the orchestrator adds the
 /// domain kinds. Persisted to SQLite (except ephemeral deltas) and streamed to the UI.
 /// Both views (Workspace and World) are projections of this stream.
@@ -1577,6 +1593,22 @@ pub enum EventKind {
         tokens: Option<i64>,
         /// What it reported when it was done.
         report: Option<String>,
+    },
+    /// One MCP server of the agent's session changed its state (Claude Code: the user's own
+    /// servers and Connections, not Codly's). `error` is the CLI's own reason, when it gave one.
+    McpServer {
+        name: String,
+        status: McpServerStatus,
+        error: Option<String>,
+    },
+    /// A command the agent left running in the background (Claude Code `run_in_background`).
+    /// `task_id` is the CLI's id of it, `call_id` the tool call that started it. `status` is
+    /// "running", then the CLI's word when it is over ("completed", "stopped").
+    BackgroundCommand {
+        task_id: String,
+        call_id: String,
+        description: String,
+        status: String,
     },
     Compacting {
         pre_tokens: Option<i64>,
@@ -1711,6 +1743,8 @@ impl EventKind {
             EventKind::Retrying { .. } => "retrying",
             EventKind::SubAgent { .. } => "sub_agent",
             EventKind::SubAgentProgress { .. } => "sub_agent_progress",
+            EventKind::McpServer { .. } => "mcp_server",
+            EventKind::BackgroundCommand { .. } => "background_command",
             EventKind::Compacting { .. } => "compacting",
             EventKind::TurnCompleted { .. } => "turn_completed",
             EventKind::Error { .. } => "error",
@@ -2047,6 +2081,10 @@ pub struct Snapshot {
     pub artifacts: Vec<Artifact>,
     /// Most recent persisted events (for timeline, inspector and world replay).
     pub events: Vec<EventRow>,
+    /// What runs beside the live runs and is older than `events`: the last `mcp_server` event
+    /// of each of their servers, and the `background_command` event of each command that
+    /// still runs. Oldest first.
+    pub session_events: Vec<EventRow>,
 }
 
 /// Recent workspaces for the welcome screen.

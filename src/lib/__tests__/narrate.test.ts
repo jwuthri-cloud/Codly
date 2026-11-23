@@ -31,7 +31,7 @@ const live = (segments: Seg[], o: Partial<AgentLive> = {}): AgentLive => {
   segments.forEach((s, i) => s.end == null && (open[s.callId] = i));
   return {
     segments, open, todo: [], todoTs: 0, files: {}, messages: [], reasoning: [], retrievals: [], searches: [], session: null, turn: null, turns: [],
-    statusSince: T0, lastOutput: null, errors: [], subagents: [], firstTs: T0, lastTs: T0, ...o,
+    statusSince: T0, lastOutput: null, errors: [], subagents: [], mcp: [], background: [], firstTs: T0, lastTs: T0, ...o,
   };
 };
 

@@ -1,7 +1,8 @@
-//! A Claude agent's mode, model, thinking effort, "compact now" and context reading end to
-//! end, with a fake agent in place of the CLI. The fake answers session requests with the
-//! shapes Claude Code 2.1.311 was recorded to give (docs/research/cli-claude-stream-json-2.1.311.md
-//! §2, and scenario 13 of its part 2); the adapter's own tests replay the recordings themselves.
+//! A Claude agent's mode, model, thinking effort, "compact now", context reading, MCP reconnect
+//! and the stop of a background command end to end, with a fake agent in place of the CLI. The
+//! fake answers session requests with the shapes Claude Code 2.1.311 was recorded to give
+//! (docs/research/cli-claude-stream-json-2.1.311.md §2 and its part 2, §6, §18 and scenario
+//! 13); the adapter's own tests replay the recordings themselves.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -75,7 +76,10 @@ impl Seen {
 /// CLI leaving plan mode by itself, as Claude Code does when its plan is accepted. The turn of
 /// a prompt with "HOLD-THE-TURN" ends when the test says so (`Seen::release`), and one that
 /// ends in "ASK-TO-RUN: <command>" asks to run that command and ends with the answer. Session
-/// requests are answered during such a turn too, as the CLI answers them.
+/// requests are answered during such a turn too, as the CLI answers them. In the turn of a
+/// prompt with "LEAVE-RUNNING" its MCP servers report and it leaves a command running in the
+/// background; one with "MANY-STEPS" makes more events than a snapshot holds. A reconnect of
+/// the server "takes-its-time" is answered after 11 s.
 struct Fake(Arc<Mutex<Seen>>);
 
 impl Spawner for Fake {
@@ -132,6 +136,26 @@ impl Spawner for Fake {
                             if text.contains("plan accepted") {
                                 send(permission_mode_changed(PermissionMode::Ask));
                             }
+                            if text.contains("LEAVE-RUNNING") {
+                                let server = |name: &str, status, error: Option<&str>| EventKind::McpServer { name: name.into(), status, error: error.map(String::from) };
+                                let command = |task: &str, status: &str| EventKind::BackgroundCommand {
+                                    task_id: task.into(),
+                                    call_id: format!("toolu-{task}"),
+                                    description: "npm run dev".into(),
+                                    status: status.into(),
+                                };
+                                send(server("docs", McpServerStatus::Connected, None));
+                                send(server("linear", McpServerStatus::Connecting, None));
+                                send(server("linear", McpServerStatus::NeedsSignIn, Some("Dynamic Client Registration rejected (HTTP 401)")));
+                                send(command("tid-1", "running"));
+                                send(command("tid-2", "running"));
+                                send(command("tid-2", "completed"));
+                            }
+                            if text.contains("MANY-STEPS") {
+                                for _ in 0..320 {
+                                    send(EventKind::Unknown { raw_type: "step".into() });
+                                }
+                            }
                             if let Some((_, command)) = text.rsplit_once("ASK-TO-RUN: ") {
                                 let command = command.trim().to_string();
                                 let approval = Approval {
@@ -164,6 +188,9 @@ impl Spawner for Fake {
                             }
                         }
                         AgentCmd::Session { request, reply } => {
+                            if matches!(&request, SessionRequest::McpReconnect(server) if server == "takes-its-time") {
+                                tokio::time::sleep(Duration::from_secs(11)).await;
+                            }
                             let mut s = seen.lock().unwrap();
                             let answer = match request {
                                 SessionRequest::PermissionMode(mode) => {
@@ -199,9 +226,14 @@ impl Spawner for Fake {
                                         "autoCompactThreshold": 967000, "isAutoCompactEnabled": true,
                                     }))
                                 }
-                                // (no test here leaves a background task open)
-                                SessionRequest::StopTask(task) => {
-                                    s.log.push(format!("stop:{task}"));
+                                // (recorded: a server that still cannot connect answers with its reason)
+                                SessionRequest::McpReconnect(server) => {
+                                    s.log.push(format!("reconnect:{server}"));
+                                    Err("Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}".to_string())
+                                }
+                                // (recorded: `{}`, whether or not a task ended)
+                                SessionRequest::StopTask(task_id) => {
+                                    s.log.push(format!("stop-task:{task_id}"));
                                     Ok(json!({}))
                                 }
                             };
@@ -755,5 +787,121 @@ async fn the_context_reading_comes_from_the_live_session() {
     stop(&core, &id).await;
     let e = core.agent_context_usage(&id).await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
+    core.shutdown().await;
+}
+
+/// Your acts on a live agent, as the History shows them.
+async fn your_acts(core: &Core, id: &str) -> Vec<String> {
+    let mut events = core.events(Some(id), None, 500).await.unwrap();
+    events.sort_by_key(|e| e.id);
+    events
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Decision { decision_type, method, summary, .. } if decision_type == "agent_control" && method == "human" => Some(summary),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_reaches_the_live_session_and_its_answer_is_yours() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let name = agent(&core, &id).await.name;
+
+    // The server still does not connect: Claude Code's own reason is the error.
+    let e = core.reconnect_agent_mcp(&id, " linear ").await.unwrap_err().to_string();
+    assert_eq!(e, "Claude Code answered: Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}");
+    assert_eq!(last_seen(&seen), "reconnect:linear");
+    assert_eq!(your_acts(&core, &id).await, [format!("asked {name} to reconnect its MCP server linear")]);
+
+    // No server named: nothing reaches the CLI.
+    let e = core.reconnect_agent_mcp(&id, "  ").await.unwrap_err().to_string();
+    assert_eq!(e, "which MCP server?");
+    assert_eq!(last_seen(&seen), "reconnect:linear");
+
+    stop(&core, &id).await;
+    let e = core.reconnect_agent_mcp(&id, "linear").await.unwrap_err().to_string();
+    assert!(e.contains("is not running"), "{e}");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_background_command_is_stopped_through_the_live_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let name = agent(&core, &id).await.name;
+
+    core.stop_agent_task(&id, "tid-2").await.unwrap();
+    assert_eq!(last_seen(&seen), "stop-task:tid-2");
+    assert_eq!(your_acts(&core, &id).await, [format!("asked {name} to stop a command it left running in the background")]);
+    let e = core.stop_agent_task(&id, "").await.unwrap_err().to_string();
+    assert_eq!(e, "which background command?");
+
+    stop(&core, &id).await;
+    let e = core.stop_agent_task(&id, "tid-2").await.unwrap_err().to_string();
+    assert!(e.contains("is not running"), "{e}");
+    core.shutdown().await;
+}
+
+/// Claude Code answers a reconnect when its try to connect is over, and a server can take
+/// longer to start than the 10 s the other session requests have: its answer is still yours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_waits_for_a_server_that_is_slow_to_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+
+    let e = core.reconnect_agent_mcp(&id, "takes-its-time").await.unwrap_err().to_string();
+    assert_eq!(e, "Claude Code answered: Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}");
+
+    stop(&core, &id).await;
+    core.shutdown().await;
+}
+
+/// The rows of a snapshot's `session_events`, as "<server> <state>" and "<task id> <status>".
+fn session_lines(rows: &[EventRow]) -> Vec<String> {
+    rows.iter()
+        .map(|r| match &r.kind {
+            EventKind::McpServer { name, status, .. } => format!("{name} {status:?}"),
+            EventKind::BackgroundCommand { task_id, status, .. } => format!("{task_id} {status}"),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+/// A server's event comes when its state changes and a background command's when it starts,
+/// and a snapshot has only the workspace's newest events. A run that went on for long after
+/// them still has its servers and its running commands in a fresh snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_snapshot_has_the_servers_and_the_running_commands_of_a_long_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let session = |e: &EventRow| matches!(e.kind, EventKind::McpServer { .. } | EventKind::BackgroundCommand { .. });
+
+    // While the snapshot's own events still hold them, they are not given twice.
+    turn(&core, &id, "LEAVE-RUNNING").await;
+    let snap = core.snapshot().await.unwrap();
+    assert_eq!(snap.events.iter().filter(|e| session(e)).count(), 6, "three states of two servers, three of two commands");
+    assert_eq!(session_lines(&snap.session_events), Vec::<String>::new());
+
+    // The run goes on, and its events push them out of the snapshot's events: each server's
+    // last state and the command that still runs come with the snapshot. The command that
+    // ended is history.
+    turn(&core, &id, "MANY-STEPS").await;
+    let snap = core.snapshot().await.unwrap();
+    assert!(!snap.events.iter().any(session), "the snapshot's events no longer hold them");
+    assert_eq!(session_lines(&snap.session_events), ["docs Connected", "linear NeedsSignIn", "tid-1 running"]);
+    let run = agent(&core, &id).await.run_id;
+    assert!(run.is_some() && snap.session_events.iter().all(|r| r.run_id == run && r.agent_id.as_deref() == Some(id.as_str())));
+    let ids: Vec<i64> = snap.session_events.iter().map(|r| r.id).collect();
+    assert!(ids.is_sorted() && ids.iter().all(|i| *i > 0 && *i < snap.events[0].id), "{ids:?} before {}", snap.events[0].id);
+
+    // The process is gone, and its servers and commands with it.
+    stop(&core, &id).await;
+    assert_eq!(session_lines(&core.snapshot().await.unwrap().session_events), Vec::<String>::new());
     core.shutdown().await;
 }

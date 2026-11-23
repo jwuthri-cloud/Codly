@@ -46,6 +46,7 @@ import { targetLabel, type Provenance } from '../util/labels';
 import { transferredOut } from '../util/transfer';
 import { accounts } from './accounts.svelte';
 import { controls } from './control.svelte';
+import { withBackgroundCommand, withMcpServer, type BackgroundCommand, type McpServer } from './session';
 
 export const LOG_CAP = 5000;
 const SEG_CAP = 1500;
@@ -202,6 +203,9 @@ export type AgentLive = {
   lastOutput: { callId: string; text: string; ts: number; ok: boolean | null } | null;
   errors: { message: string; fatal: boolean; ts: number }[];
   subagents: SubAgent[];
+  /** Its MCP servers and the commands it left running in the background, of its last run that reported any (state/session.ts). */
+  mcp: McpServer[];
+  background: BackgroundCommand[];
   firstTs: number;
   lastTs: number;
 };
@@ -230,6 +234,8 @@ const emptyLive = (ts: number): AgentLive => ({
   lastOutput: null,
   errors: [],
   subagents: [],
+  mcp: [],
+  background: [],
   firstTs: ts,
   lastTs: ts,
 });
@@ -341,6 +347,9 @@ class CodlyStore {
   /** The oldest event the held state was built from (the start of the last snapshot that took
    *  the place of everything). The log may have been trimmed past it since. */
   private origin = 0;
+  /** The snapshot's `session_events`: the MCP servers and the running background commands of
+   *  the live runs, from before `origin`. An agent's state that is built again starts from them. */
+  private beside: EventRow[] = [];
   /** Per thread that was asked: is there earlier history, is a page loading. */
   earlier = $state.raw<Record<string, Earlier>>({});
   /** Per thread loaded further back: how far (an event id), and for which owner. */
@@ -541,8 +550,11 @@ class CodlyStore {
     this.events = evs.slice(-LOG_CAP);
     this.origin = evs[0]?.id ?? s.as_of + 1;
     this.sessionStart = evs[0]?.ts ?? Date.now();
+    // What runs beside the live runs and is older than the log: state, not rows of the log.
+    this.beside = [...(s.session_events ?? [])].sort((a, b) => a.id - b.id);
     // Replay the log into the derived structures only: entities are already current.
     this.owned.clear();
+    for (const ev of this.beside) this.derive(ev, true);
     for (const ev of evs) this.derive(ev, true);
     this.settle();
     this.rev++;
@@ -1011,6 +1023,12 @@ class CodlyStore {
           }
         }
         break;
+      case 'mcp_server':
+        if (l) l.mcp = withMcpServer(l.mcp, k, ev.run_id, ev.ts);
+        break;
+      case 'background_command':
+        if (l) l.background = withBackgroundCommand(l.background, k, ev.run_id, ev.ts);
+        break;
       case 'error':
         if (l) l.errors = [...l.errors, { message: k.message, fatal: k.fatal, ts: ev.ts }].slice(-20);
         break;
@@ -1151,6 +1169,7 @@ class CodlyStore {
     if (said.length) this.chats = [...this.chats, ...said].sort((a, b) => a.ts - b.ts);
     if (owner) {
       const all = new Map<number, EventRow>();
+      for (const ev of this.beside) if (ev.agent_id === owner) all.set(ev.id, ev);
       for (const ev of rows) if (ev.agent_id === owner) all.set(ev.id, ev);
       for (const ev of this.deep.get(owner) ?? []) all.set(ev.id, ev);
       const log = [...all.values()].sort((a, b) => a.id - b.id);

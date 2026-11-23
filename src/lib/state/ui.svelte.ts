@@ -170,6 +170,7 @@ class Ui {
     steps: true,
     files: false,
     subagents: true,
+    mcp: false,
     output: false,
     cost: false,
     history: false,

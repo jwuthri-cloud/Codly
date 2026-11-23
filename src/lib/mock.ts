@@ -421,6 +421,10 @@ export class MockTransport implements Transport {
         return this.ctl.compact(String(a.agentId));
       case 'agent_context_usage':
         return this.ctl.contextUsage(String(a.agentId));
+      case 'reconnect_agent_mcp':
+        return this.ctl.reconnectMcp(String(a.agentId), String(a.server ?? ''));
+      case 'stop_agent_task':
+        return this.ctl.stopTask(String(a.agentId));
       case 'agent_takeover':
         return this.takeovers.state(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
       case 'list_takeovers':

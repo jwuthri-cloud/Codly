@@ -164,6 +164,20 @@ export class MockControls {
     return { used_tokens: used, max_tokens: max, percent: Math.round((used / max) * 100), auto_compact_at: Math.round(max * 0.95), parts: [{ name: 'Messages', tokens: used }] };
   }
 
+  /** "Reconnect" on an MCP server of a Claude agent: in the demo it connects, and its state says so. */
+  reconnectMcp(id: string, server: string): null {
+    const a = this.agent(id);
+    if (a.provider !== 'claude') throw new Error('only a Claude agent takes this without a restart');
+    this.note(id, `asked ${a.name} to reconnect its MCP server ${server}`);
+    this.sim.emit({ type: 'mcp_server', name: server, status: 'connected', error: null }, { agent: id });
+    return null;
+  }
+
+  /** "Stop" on a background command. The demo's agents leave none running. */
+  stopTask(id: string): never {
+    throw new Error(`${this.agent(id).name} has no command running in the background`);
+  }
+
   /** The note reaches the agent on its next turn: it acknowledges it in its own thread. */
   private async deliver(id: string, text: string) {
     const act = this.sim.actor(id);

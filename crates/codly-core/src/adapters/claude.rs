@@ -35,11 +35,12 @@
 //!   `system/init` opens every turn, so one that comes while no turn is open is such a turn:
 //!   `TurnStarted` with no input.
 //!
-//! `AgentCmd::Session` (permission mode, model, reasoning effort, context use) is written at
-//! once as a control request: the CLI answers those between turns and during one. Request and
-//! answer shapes, and what a permission suggestion does when it is sent back, are recorded on
-//! 2.1.311 (docs/research/cli-claude-stream-json-2.1.311.md §2 and §10; the effort and the
-//! default model in its part 2, scenario 13).
+//! `AgentCmd::Session` (permission mode, model, reasoning effort, context use, reconnect an
+//! MCP server, stop a background task) is written at once as a control request: the CLI
+//! answers those between turns and during one. Request and answer shapes, and what a
+//! permission suggestion does when it is sent back, are recorded on 2.1.311
+//! (docs/research/cli-claude-stream-json-2.1.311.md §2, §8 and §10; its part 2: §6, §18, and
+//! the effort and the default model in scenario 13).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -57,7 +58,7 @@ use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SessionReply, Sess
 use crate::housekeeping::connections::{self, ReadyMcp};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, BackgroundTask, Billing,
-    EventKind, Id, MessagePhase, PermissionMode, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
+    EventKind, Id, McpServerStatus, MessagePhase, PermissionMode, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
 };
 use crate::proc::{self, Inbound, RawLog, StderrTail};
 
@@ -662,6 +663,10 @@ impl Actor {
                 self.on_sandbox_status(started, resp, ready).await;
             } else if let Some((request, reply)) = resp["request_id"].as_str().and_then(|id| self.session_replies.remove(id)) {
                 self.session_answered(request, reply, resp);
+                // (what the answer makes Codly ask next: the MCP servers' state after a reconnect)
+                for line in std::mem::take(&mut self.norm.outbox) {
+                    self.write(&line).await;
+                }
             } else {
                 let interrupt = self.interrupts.remove(resp["request_id"].as_str().unwrap_or_default());
                 if resp["subtype"] == "error" {
@@ -907,6 +912,7 @@ impl Actor {
             SessionRequest::PermissionMode(mode) => ("set_permission_mode", json!({ "mode": mode.cli() })),
             SessionRequest::Model(model) => ("set_model", json!({ "model": model })),
             SessionRequest::ContextUsage => ("get_context_usage", json!({})),
+            SessionRequest::McpReconnect(server) => ("mcp_reconnect", json!({ "serverName": server })),
             SessionRequest::StopTask(task) => ("stop_task", json!({ "task_id": task })),
             SessionRequest::Effort(level) => {
                 // The CLI would answer "success" and drop a word it does not know (recorded).
@@ -950,6 +956,9 @@ impl Actor {
                     self.norm.session_model_is(id);
                 }
             }
+            // Connected or not, the server's state may be another now: the CLI is asked, and
+            // the answer is reported like the one at the start of the run.
+            (SessionRequest::McpReconnect(_), _) => self.norm.ask_mcp_status(),
             _ => {}
         }
         // Nobody waits any more (the asker gave up): the request still took effect.
@@ -1105,8 +1114,24 @@ struct Helper {
     done: bool,
 }
 
-/// The id of the one `mcp_status` request a run sends (the actor's own ids are `codly-<n>`).
+/// The id of the `mcp_status` requests of a run (the actor's own ids are `codly-<n>`).
 const MCP_STATUS_REQUEST: &str = "codly-mcp-status";
+
+/// Where an MCP server stands, from the CLI's `status` word for it (`system/init` and the
+/// answer to `mcp_status`: cli-claude-stream-json-2.1.311 §8, part 2 §18 and §19) and its
+/// `error`. A server that wants a sign-in can show as "failed": the CLI tried to register
+/// with it and was refused, and its error names the HTTP 401. None = a word Codly does not know.
+fn mcp_state(status: &str, error: Option<&str>) -> Option<McpServerStatus> {
+    Some(match status {
+        "connected" => McpServerStatus::Connected,
+        "pending" => McpServerStatus::Connecting,
+        "needs-auth" => McpServerStatus::NeedsSignIn,
+        "failed" if error.is_some_and(|e| e.contains("HTTP 401")) => McpServerStatus::NeedsSignIn,
+        "failed" => McpServerStatus::Failed,
+        "disabled" => McpServerStatus::Disabled,
+        _ => return None,
+    })
+}
 
 struct PendingApproval {
     request_id: String,
@@ -1251,6 +1276,11 @@ pub struct ClaudeNormalizer {
     helpers: HashMap<String, Helper>,
     /// The user's MCP servers that `system/init` gave as failed, until `mcp_status` says why.
     mcp_failed: Vec<String>,
+    /// The user's MCP servers as the CLI last gave them, by name: its `status` word and its
+    /// reason. A server is reported when one of the two changes.
+    mcp: HashMap<String, (String, Option<String>)>,
+    /// The commands that run in the background, by the CLI's task id: what each one is.
+    background: HashMap<String, String>,
     plan: Vec<PlanItem>,
     pending_creates: HashMap<String, String>,
     approvals: HashMap<Id, PendingApproval>,
@@ -1300,6 +1330,8 @@ impl ClaudeNormalizer {
             tools_seen: HashSet::new(),
             helpers: HashMap::new(),
             mcp_failed: Vec::new(),
+            mcp: HashMap::new(),
+            background: HashMap::new(),
             plan: Vec::new(),
             pending_creates: HashMap::new(),
             approvals: HashMap::new(),
@@ -1445,7 +1477,10 @@ impl ClaudeNormalizer {
             "stream_event" => self.on_stream_event(v, &mut out),
             "assistant" => self.on_assistant(v, &mut out),
             "user" => self.on_user(v, &mut out),
-            "result" => self.on_result(v, &mut out),
+            "result" => {
+                self.on_result(v, &mut out);
+                self.ask_about_connecting_mcp();
+            }
             "rate_limit_event" => self.on_rate_limit(v, &mut out),
             "control_request" => self.on_control_request(v, &mut out),
             "control_cancel_request" => self.on_cancel(v, &mut out),
@@ -1467,7 +1502,10 @@ impl ClaudeNormalizer {
     fn on_system(&mut self, v: &Value, out: &mut Vec<EventKind>) {
         let subtype = v["subtype"].as_str().unwrap_or("");
         match subtype {
-            "init" => self.on_init(v, out),
+            "init" => {
+                self.on_init(v, out);
+                self.on_mcp_servers(&v["mcp_servers"], out);
+            }
             "status" => match v["status"].as_str() {
                 Some("requesting") => self.set_status(AgentStatus::Thinking, out),
                 Some("compacting") => out.push(EventKind::Compacting { pre_tokens: None, post_tokens: None }),
@@ -1604,25 +1642,63 @@ impl ClaudeNormalizer {
             let message = format!("Claude did not enable requested tools: {}", missing.join(", "));
             self.problem(message, false, out);
         }
-        // The user's own servers (Connections, their Claude setup) that did not start: one
-        // line for all of them, once `mcp_status` has said why (the init line gives no
-        // reason). A server that still connects, or that waits for a sign-in the user never
-        // made, is no failure of this run.
+        if let Some(codly) = v["mcp_servers"].as_array().into_iter().flatten().find(|s| s["name"] == "codly") {
+            let status = codly["status"].as_str().unwrap_or("unavailable");
+            if status != "connected" {
+                self.problem(format!("codly MCP server is {status}"), false, out);
+            }
+        }
+    }
+
+    /// `mcp_servers` of a `system/init` line (every turn starts with one): the user's own
+    /// servers (Connections, their Claude setup). Each is reported when its state changes
+    /// (`mcp_server`). The line gives no reason for a failed one, so that one is reported
+    /// when `mcp_status` has said why.
+    fn on_mcp_servers(&mut self, servers: &Value, out: &mut Vec<EventKind>) {
         let mut failed = Vec::new();
-        for s in v["mcp_servers"].as_array().into_iter().flatten() {
-            let status = s["status"].as_str().unwrap_or("unavailable");
-            if s["name"] == "codly" {
-                if status != "connected" {
-                    self.problem(format!("codly MCP server is {status}"), false, out);
-                }
-            } else if status == "failed" {
-                failed.push(s["name"].as_str().unwrap_or("unnamed").to_string());
+        for s in servers.as_array().into_iter().flatten() {
+            let (Some(name), Some(status)) = (s["name"].as_str(), s["status"].as_str()) else { continue };
+            if name == "codly" {
+                continue; // Codly's own server: `on_init` says when it is not there
+            }
+            if status != "failed" {
+                self.mcp_server(name, status, None, out);
+            } else if self.mcp.get(name).is_none_or(|(known, _)| known != "failed") {
+                failed.push(name.to_string());
             }
         }
         if !failed.is_empty() {
             self.mcp_failed = failed;
-            self.outbox.push(json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } }));
+            self.ask_mcp_status();
         }
+    }
+
+    /// Ask the CLI where its MCP servers stand. The actor writes the request (`outbox`) and
+    /// gives the answer back (`asked`).
+    pub fn ask_mcp_status(&mut self) {
+        self.outbox.push(json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } }));
+    }
+
+    /// A turn is over and a server was still connecting when the CLI last gave it: the CLI is
+    /// asked where its servers stand now. No line of the turn says how that ended, and a run
+    /// of one turn (a worker's task) has no next init line.
+    fn ask_about_connecting_mcp(&mut self) {
+        if self.mcp.values().any(|(status, _)| status == "pending") {
+            self.ask_mcp_status();
+        }
+    }
+
+    /// One MCP server as the CLI just gave it: an event when its state or its reason is new.
+    fn mcp_server(&mut self, name: &str, status: &str, error: Option<&str>, out: &mut Vec<EventKind>) {
+        let seen = (status.to_string(), error.map(str::to_owned));
+        if self.mcp.get(name) == Some(&seen) {
+            return;
+        }
+        match mcp_state(status, error) {
+            Some(state) => out.push(EventKind::McpServer { name: name.to_string(), status: state, error: seen.1.clone() }),
+            None => out.push(EventKind::Unknown { raw_type: format!("mcp_server/{status}") }),
+        }
+        self.mcp.insert(name.to_string(), seen);
     }
 
     /// Is `resp` (the `response` of a `control_response`) the answer to a request of the
@@ -1631,28 +1707,46 @@ impl ClaudeNormalizer {
         resp["request_id"] == MCP_STATUS_REQUEST
     }
 
-    /// The answer to `mcp_status`: one line for the user's servers that did not start, each
-    /// with the CLI's reason ("Connection closed"). When the CLI cannot answer, the names are
-    /// still said; a server that started since is left out.
+    /// The answer to `mcp_status`: where each of the user's servers stands, and one line for
+    /// the ones that did not start, each with the CLI's reason ("Connection closed"): the ones
+    /// the init line gave as failed, and the ones that were still connecting when the CLI last
+    /// gave them and are failed now. A server that started since is left out of that line. So
+    /// is one that wants a sign-in: it is the lasting state of a server nobody signed in to,
+    /// not a failure of this run, and its state says it. When the CLI cannot answer, the names
+    /// the init line gave as failed are still said.
     fn on_control_response(&mut self, resp: &Value, out: &mut Vec<EventKind>) {
         if !self.asked(resp) {
             return;
         }
-        let failed = std::mem::take(&mut self.mcp_failed);
-        let now = if resp["subtype"] == "success" { resp["response"]["mcpServers"].as_array() } else { None };
-        let lines: Vec<String> = failed
-            .into_iter()
-            .filter_map(|name| {
-                let Some(server) = now.and_then(|servers| servers.iter().find(|s| s["name"] == name.as_str())) else { return Some(name) };
-                if server["status"] != "failed" {
-                    return None;
+        let mut failed = std::mem::take(&mut self.mcp_failed);
+        let servers = if resp["subtype"] == "success" { resp["response"]["mcpServers"].as_array() } else { None };
+        let reason = |s: &Value| s["error"].as_str().map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned);
+        for s in servers.into_iter().flatten() {
+            if let (Some(name), Some(status)) = (s["name"].as_str(), s["status"].as_str())
+                && name != "codly"
+            {
+                let was_connecting = self.mcp.get(name).is_some_and(|(known, _)| known == "pending");
+                if status == "failed" && was_connecting && !failed.iter().any(|f| f == name) {
+                    failed.push(name.to_string());
                 }
-                Some(match server["error"].as_str().map(str::trim).filter(|e| !e.is_empty()) {
-                    Some(error) => format!("{name} ({error})"),
-                    None => name,
-                })
-            })
-            .collect();
+                self.mcp_server(name, status, reason(s).as_deref(), out);
+            }
+        }
+        let mut lines = Vec::new();
+        for name in failed {
+            match servers.and_then(|servers| servers.iter().find(|s| s["name"] == name.as_str())) {
+                Some(server) => match (server["status"].as_str(), reason(server)) {
+                    (Some("failed"), Some(error)) if mcp_state("failed", Some(&error)) == Some(McpServerStatus::Failed) => lines.push(format!("{name} ({error})")),
+                    (Some("failed"), None) => lines.push(name),
+                    _ => {}
+                },
+                // The CLI did not say: the server is failed, as the init line gave it.
+                None => {
+                    self.mcp_server(&name, "failed", None, out);
+                    lines.push(name);
+                }
+            }
+        }
         if !lines.is_empty() {
             self.problem(format!("These MCP servers did not start, so the agent works without their tools in this run: {}", lines.join(", ")), false, out);
         }
@@ -1660,9 +1754,11 @@ impl ClaudeNormalizer {
 
     /// `system/task_started`, `task_progress` and `task_notification`: the life of something
     /// that runs beside the agent's own calls. A subagent (`task_type: "local_agent"`) gets
-    /// its events; a long or background command (`local_bash`) already is a tool call.
+    /// its events. A command (`local_bash`) already is a tool call; one that is left running
+    /// in the background is said too, when it starts and when it is over.
     fn on_task(&mut self, subtype: &str, v: &Value, out: &mut Vec<EventKind>) {
         let Some(call_id) = v["tool_use_id"].as_str() else { return };
+        self.on_background_command(subtype, call_id, v, out);
         if subtype == "task_started" && v["task_type"] == "local_agent" && !self.helpers.contains_key(call_id) {
             // (its `Agent` call was in no line Codly saw: the subagent starts here)
             self.helper_started(call_id, v["description"].as_str().unwrap_or(""), out);
@@ -1686,6 +1782,27 @@ impl ClaudeNormalizer {
                 out.push(EventKind::SubAgent { call_id: call_id.into(), description: helper.description.clone(), status });
             }
         }
+    }
+
+    /// A command the agent left running in the background (`task_type: "local_bash"` with
+    /// `is_backgrounded`; part 2 §6): its `task_started` line, and the `task_notification`
+    /// that ends it, whether it ended by itself ("completed") or was stopped ("stopped").
+    /// `task_id` is the id the CLI's `stop_task` request takes.
+    fn on_background_command(&mut self, subtype: &str, call_id: &str, v: &Value, out: &mut Vec<EventKind>) {
+        let Some(task_id) = v["task_id"].as_str() else { return };
+        let (description, status) = match subtype {
+            "task_started" if v["task_type"] == "local_bash" && v["is_backgrounded"] == true => {
+                let description = v["description"].as_str().unwrap_or("").to_string();
+                self.background.insert(task_id.to_string(), description.clone());
+                (description, "running".to_string())
+            }
+            "task_notification" => {
+                let Some(description) = self.background.remove(task_id) else { return };
+                (description, v["status"].as_str().unwrap_or("completed").to_string())
+            }
+            _ => return,
+        };
+        out.push(EventKind::BackgroundCommand { task_id: task_id.to_string(), call_id: call_id.to_string(), description, status });
     }
 
     fn helper_started(&mut self, call_id: &str, description: &str, out: &mut Vec<EventKind>) {
@@ -3372,12 +3489,83 @@ mod tests {
             { "name": "slow", "status": "pending" }, { "name": "git", "status": "connected" }, { "name": "docs", "status": "failed" }
         ] })));
         assert!(errors(&ev).is_empty(), "{ev:?}");
+        // Each of the others has its state at once; a failed one waits for its reason.
+        use McpServerStatus::{Connected, Connecting, Failed, NeedsSignIn};
+        assert_eq!(mcp_states(&ev), [("linear", NeedsSignIn, None), ("slow", Connecting, None), ("git", Connected, None)]);
         assert_eq!(norm.outbox.last(), Some(&json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } })));
         // A CLI that does not know the request (its recorded answer to an unknown subtype):
         // the names are still said.
         let refused = json!({ "type": "control_response", "response": { "subtype": "error", "request_id": MCP_STATUS_REQUEST, "error": "Unsupported control request subtype: mcp_status" } });
         let ev = norm.on_message(&refused);
         assert_eq!(errors(&ev), [("These MCP servers did not start, so the agent works without their tools in this run: context7, docs", false)]);
+        assert_eq!(mcp_states(&ev), [("context7", Failed, None), ("docs", Failed, None)]);
+
+        // The next turn's init line: only what changed is said, and a server that is still
+        // failed is not asked about again. A status word Codly does not know is not dropped.
+        norm.outbox.clear();
+        let ev = norm.on_message(&system("init", json!({ "tools": [], "mcp_servers": [
+            { "name": "codly", "status": "connected" }, { "name": "context7", "status": "failed" }, { "name": "linear", "status": "needs-auth" },
+            { "name": "slow", "status": "connected" }, { "name": "git", "status": "sleeping" }, { "name": "docs", "status": "failed" }
+        ] })));
+        assert_eq!(mcp_states(&ev), [("slow", Connected, None)]);
+        assert!(matches!(&ev[..], [_, EventKind::Unknown { raw_type }] if raw_type == "mcp_server/sleeping"), "{ev:?}");
+        assert!(norm.outbox.is_empty());
+    }
+
+    /// A server that still connects at a turn's init line: the CLI is asked about it once more
+    /// when the turn is over (a run of one turn has no next init line), so the server does not
+    /// stay "connecting" for the whole run, and one that failed meanwhile is said. The init
+    /// line with `pending` was not recorded; the status word is (`r4-mcp-needs-auth`, `host-1`).
+    #[test]
+    fn a_server_that_was_still_connecting_is_asked_about_when_the_turn_is_over() {
+        use McpServerStatus::{Connected, Connecting, Failed};
+        let asked = json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } });
+        let init = json!({ "type": "system", "subtype": "init", "tools": [], "mcp_servers": [
+            { "name": "codly", "status": "connected" }, { "name": "slow", "status": "pending" }, { "name": "late", "status": "pending" }, { "name": "git", "status": "connected" }
+        ] });
+        let result = json!({ "type": "result", "subtype": "success", "is_error": false, "result": "done", "duration_ms": 5 });
+        // The answer in the recorded shape (`mcpServers`: name, status, and `error` on a failed one).
+        let answer = |servers: Value| json!({ "type": "control_response", "response": { "subtype": "success", "request_id": MCP_STATUS_REQUEST, "response": { "mcpServers": servers } } });
+
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.turn_started("go");
+        let ev = norm.on_message(&init);
+        assert_eq!(mcp_states(&ev), [("slow", Connecting, None), ("late", Connecting, None), ("git", Connected, None)]);
+        assert!(norm.outbox.is_empty(), "nothing failed: nothing to ask during the turn");
+        let ev = norm.on_message(&result);
+        assert!(matches!(ev.iter().find(|e| matches!(e, EventKind::TurnCompleted { .. })), Some(EventKind::TurnCompleted { status: TurnStatus::Completed, .. })), "{ev:?}");
+        assert_eq!(norm.outbox, [asked.clone()]);
+
+        // One failed meanwhile, one connected: each has its state, and the failure is said.
+        norm.outbox.clear();
+        let ev = norm.on_message(&answer(json!([
+            { "name": "slow", "status": "failed", "error": "Connection closed" }, { "name": "late", "status": "connected" }, { "name": "git", "status": "connected" }
+        ])));
+        assert_eq!(mcp_states(&ev), [("slow", Failed, Some("Connection closed")), ("late", Connected, None)]);
+        assert_eq!(errors(&ev), [("These MCP servers did not start, so the agent works without their tools in this run: slow (Connection closed)", false)]);
+        // No server connects any more: the next turn's end asks nothing.
+        norm.turn_started("again");
+        norm.on_message(&result);
+        assert!(norm.outbox.is_empty());
+
+        // A CLI that cannot answer: the server is not called failed, nothing is said, and the
+        // next turn's end asks again.
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.turn_started("go");
+        norm.on_message(&init);
+        norm.on_message(&result);
+        assert_eq!(norm.outbox, [asked.clone()]);
+        let refused = json!({ "type": "control_response", "response": { "subtype": "error", "request_id": MCP_STATUS_REQUEST, "error": "Unsupported control request subtype: mcp_status" } });
+        assert!(norm.on_message(&refused).is_empty());
+        norm.outbox.clear();
+        norm.turn_started("again");
+        norm.on_message(&result);
+        assert_eq!(norm.outbox, [asked]);
+    }
+
+    /// The MCP server events, as (name, state, reason).
+    fn mcp_states(events: &[EventKind]) -> Vec<(&str, McpServerStatus, Option<&str>)> {
+        events.iter().filter_map(|e| if let EventKind::McpServer { name, status, error } = e { Some((name.as_str(), *status, error.as_deref())) } else { None }).collect()
     }
 
     /// The CLI's stdout lines of a 2.1.311 recording (docs/research/fixtures/claude-2.1.311),
@@ -3583,6 +3771,10 @@ mod tests {
                 false
             )]
         );
+        // Each server's state, with the CLI's reason.
+        use McpServerStatus::{Disabled, Failed};
+        let enoent = "ENOENT: no such file or directory, posix_spawn 'stdio'";
+        assert_eq!(mcp_states(&ev), [("exits-at-once", Failed, Some("Connection closed")), ("no-such-command", Failed, Some(enoent))]);
         assert!(norm.on_message(&answer).is_empty(), "said once");
 
         // A server that is no longer failed when the CLI answers (`host-6`: one was switched
@@ -3593,6 +3785,94 @@ mod tests {
         answer["response"]["request_id"] = json!(MCP_STATUS_REQUEST);
         let ev = norm.on_message(&answer);
         assert_eq!(errors(&ev), [("These MCP servers did not start, so the agent works without their tools in this run: exits-at-once (Connection closed)", false)]);
+        assert_eq!(mcp_states(&ev), [("exits-at-once", Failed, Some("Connection closed")), ("no-such-command", Disabled, None)]);
+    }
+
+    /// Recording `r4-mcp-needs-auth`: a server that answers 401 to everything. The CLI gives
+    /// it as failed, and the reason names the refused sign-in step: it needs a sign-in, which
+    /// is no failure of the run. Recording `r4-project-mcp-project`: a server that connected.
+    #[test]
+    fn an_mcp_server_that_wants_a_sign_in_says_so() {
+        use McpServerStatus::{Connected, Connecting, Disabled, NeedsSignIn};
+        let lines = recorded("r4-mcp-needs-auth");
+        let refused = "Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}";
+        let ours = |host: &str| {
+            let mut answer = lines.iter().find(|l| l["response"]["request_id"] == host).unwrap_or_else(|| panic!("no answer {host}")).clone();
+            answer["response"]["request_id"] = json!(MCP_STATUS_REQUEST);
+            answer
+        };
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.turn_started("Reply with the single word: pong");
+        let inits: Vec<&Value> = lines.iter().filter(|l| l["subtype"] == "init").collect();
+        let ev = norm.on_message(inits[0]);
+        assert!(mcp_states(&ev).is_empty(), "the init line has no reason: {ev:?}");
+        assert_eq!(norm.outbox.len(), 1, "Codly asks why");
+
+        // `host-2`: failed, with the reason. No line about a server that "did not start".
+        let ev = norm.on_message(&ours("host-2"));
+        assert_eq!(mcp_states(&ev), [("needs-login", NeedsSignIn, Some(refused))]);
+        assert!(errors(&ev).is_empty(), "{ev:?}");
+        // The next turn's init line gives it as failed again: nothing new, nothing asked.
+        norm.outbox.clear();
+        assert!(mcp_states(&norm.on_message(inits[1])).is_empty());
+        assert!(norm.outbox.is_empty());
+        // `host-6`: switched off. `host-8`: on again, and refused again.
+        assert_eq!(mcp_states(&norm.on_message(&ours("host-6"))), [("needs-login", Disabled, None)]);
+        let ev = norm.on_message(&ours("host-8"));
+        assert_eq!(mcp_states(&ev), [("needs-login", NeedsSignIn, Some(refused))]);
+        assert!(errors(&ev).is_empty(), "{ev:?}");
+
+        // `host-1`, asked before the first turn: the CLI still tries.
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        assert_eq!(mcp_states(&norm.on_message(&ours("host-1"))), [("needs-login", Connecting, None)]);
+
+        // A project's server that started: connected, said once.
+        let lines = recorded("r4-project-mcp-project");
+        let init = lines.iter().find(|l| l["subtype"] == "init").unwrap();
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "sess-1".into());
+        assert_eq!(mcp_states(&norm.on_message(init)), [("ping-project", Connected, None)]);
+        assert!(norm.outbox.is_empty());
+        assert!(mcp_states(&norm.on_message(init)).is_empty());
+    }
+
+    /// The background command events, as "task call status: description".
+    fn background_lines(events: &[EventKind]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::BackgroundCommand { task_id, call_id, description, status } => Some(format!("{task_id} {call_id} {status}: {description}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Recording `r4-background-life`: one background command ends by itself, the next one is
+    /// stopped with `stop_task`. Each is said when it starts and when it is over, with the id
+    /// that `stop_task` takes.
+    #[test]
+    fn a_background_command_is_said_when_it_starts_and_when_it_is_over() {
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let mut events = norm.turn_started("go");
+        events.extend(replay(&mut norm, &recorded("r4-background-life")));
+        assert_eq!(
+            background_lines(&events),
+            [
+                "tid-1 toolu-1 running: sleep 8; echo woke",
+                "tid-1 toolu-1 completed: sleep 8; echo woke",
+                "tid-2 toolu-2 running: sleep 127; echo late",
+                "tid-2 toolu-2 stopped: sleep 127; echo late",
+            ]
+        );
+        assert_eq!(subagent_lines(&events), Vec::<String>::new(), "a command is no subagent");
+
+        // A command the agent waits for (`r4-tool-progress`: `is_backgrounded: false`) is its
+        // tool call and nothing more, and so is a subagent that works in the background.
+        for name in ["r4-tool-progress", "subagent"] {
+            let lines = recorded(name);
+            assert!(lines.iter().any(|l| l["subtype"] == "task_started"), "{name} has task lines");
+            let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+            assert_eq!(background_lines(&replay(&mut norm, &lines)), Vec::<String>::new(), "{name}");
+        }
     }
 
     /// Recordings `limits-max-turns` and `limits-max-budget`.
@@ -4489,6 +4769,42 @@ mod tests {
         let answer = ask_as_recorded(&mut actor, dir.path(), &lines, SessionRequest::StopTask("tid-2".into()), request).await;
         assert_eq!(answer, Ok(json!({})));
         assert!(actor.session_replies.is_empty());
+    }
+
+    /// Recording `r4-mcp-needs-auth`: "Reconnect" goes out as `mcp_reconnect`, the CLI's own
+    /// reason is the answer, and Codly then asks where the servers stand. Recording
+    /// `r4-background-life`: "Stop" of a background command goes out as `stop_task`.
+    #[tokio::test]
+    async fn a_reconnect_and_a_stop_of_a_background_command_go_out_as_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        let dir = dir.path();
+
+        let lines = recording("r4-mcp-needs-auth");
+        let request = json!({ "subtype": "mcp_reconnect", "serverName": "needs-login" });
+        let answer = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::McpReconnect("needs-login".into()), request).await;
+        let refused = "Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}";
+        assert_eq!(answer, Err(refused.to_string()));
+        assert!(emitted(&mut events).is_empty(), "the answer is the asker's, not a line of the timeline");
+        // Whatever the answer, the server's state is asked for: the recorded answer (`host-4`)
+        // comes back under Codly's id and is reported.
+        let asked = last_sent(dir);
+        assert_eq!(asked, json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } }));
+        let mut status = lines.iter().find(|l| l["response"]["request_id"] == "host-4").unwrap().clone();
+        status["response"]["request_id"] = json!(MCP_STATUS_REQUEST);
+        actor.on_json(status, "codly-0", &mut None).await;
+        let kinds = emitted(&mut events);
+        assert!(
+            matches!(&kinds[..], [EventKind::McpServer { name, status: McpServerStatus::NeedsSignIn, error: Some(error) }] if name == "needs-login" && error == refused),
+            "{kinds:?}"
+        );
+
+        let lines = recording("r4-background-life");
+        let request = json!({ "subtype": "stop_task", "task_id": "tid-2" });
+        let answer = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::StopTask("tid-2".into()), request).await;
+        assert_eq!(answer, Ok(json!({})));
+        assert_eq!(last_sent(dir)["request"]["subtype"], "stop_task", "nothing is asked after it: the task lines say what happened");
+        assert!(emitted(&mut events).is_empty() && actor.session_replies.is_empty());
     }
 
     /// The plan-mode recording: `ExitPlanMode` arrives as a request with the plan in it. Sent

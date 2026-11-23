@@ -1,14 +1,15 @@
 //! A resume that fails is never silent. With a fake agent in place of the CLI: a 1:1 agent's
 //! session cannot be resumed, Codly starts a new one, and the conversation says so with the
 //! reason. A resume that works says nothing. A task's worker says it the same way, and the
-//! decision is recorded on its task.
+//! decision is recorded on its task. A conversation the CLI no longer has is said as that, for
+//! a 1:1 agent and for a Lead. And when no new conversation starts either, the old one is kept.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
+use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionGone, SessionMode, SpawnSpec};
 use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::mpsc;
@@ -46,6 +47,7 @@ fn claude() -> CliInfo {
 }
 
 const GONE: &str = "claude exited during startup (code 1): No conversation found with session ID: sess-1";
+const SIGNED_OUT: &str = "claude exited during startup (code 1): Not logged in · Please run /login";
 
 #[derive(Default)]
 struct Seen {
@@ -53,8 +55,13 @@ struct Seen {
     prompts: Vec<String>,
     /// How each run was asked to start, in order: "new", or "resume <session id>".
     starts: Vec<String>,
-    /// Knob: a resume fails to start, as when the CLI no longer has the session.
+    /// Knob: a resume fails to start, with the CLI's words only.
     resume_fails: bool,
+    /// Knob: a resume fails to start as the Claude adapter reports a conversation the CLI no
+    /// longer has (`SessionGone`).
+    resume_gone: bool,
+    /// Knob: a new session does not start either (the CLI is signed out).
+    new_fails: bool,
     /// Knob: a turn stays open until the agent is stopped.
     turns_stay_open: bool,
 }
@@ -72,6 +79,9 @@ impl Spawner for Fake {
                 match &spec.session {
                     SessionMode::Resume { session_id } => {
                         s.starts.push(format!("resume {session_id}"));
+                        if s.resume_gone {
+                            return Err(anyhow::anyhow!(GONE).context(SessionGone));
+                        }
                         if s.resume_fails {
                             return Err(anyhow::anyhow!(GONE));
                         }
@@ -79,6 +89,9 @@ impl Spawner for Fake {
                     }
                     SessionMode::New { .. } => {
                         s.starts.push("new".into());
+                        if s.new_fails {
+                            return Err(anyhow::anyhow!(SIGNED_OUT));
+                        }
                         format!("sess-{}", s.starts.iter().filter(|start| *start == "new").count())
                     }
                 }
@@ -155,15 +168,35 @@ async fn say(core: &Core, seen: &Arc<Mutex<Seen>>, id: &str, text: &str) {
 
 /// What Codly itself said in the agent's conversation.
 async fn codly_said(core: &Core, id: &str) -> Vec<String> {
+    codly_said_in(core, &format!("agent:{id}")).await
+}
+
+/// What Codly itself said in a thread.
+async fn codly_said_in(core: &Core, thread: &str) -> Vec<String> {
     let mut events = core.events(None, None, 2000).await.unwrap();
     events.sort_by_key(|e| e.id);
     events
         .into_iter()
         .filter_map(|e| match e.kind {
-            EventKind::Chat { message } if message.author == "codly" && message.thread == format!("agent:{id}") => Some(message.text),
+            EventKind::Chat { message } if message.author == "codly" && message.thread == thread => Some(message.text),
             _ => None,
         })
         .collect()
+}
+
+/// A core on a new repo, with the fake agent in place of the Claude CLI.
+async fn core_with(dir: &Path, seen: &Arc<Mutex<Seen>>) -> Arc<Core> {
+    let repo = temp_repo(dir);
+    let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
+    let opts = StartOptions {
+        spawner: Some(Arc::new(Fake(seen.clone()))),
+        env: Some(std::env::vars().collect()),
+        clis: Some(vec![claude()]),
+        index: false,
+    };
+    let core = Core::start_with(cfg, opts).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -250,5 +283,89 @@ async fn a_worker_whose_resume_fails_says_so_and_the_decision_is_on_its_task() {
         _ => false,
     });
     assert!(on_task, "the decision is on the task");
+    core.shutdown().await;
+}
+
+/// The Claude adapter's typed start error: the CLI said that it no longer has the
+/// conversation. The thread says exactly that, and the new conversation is the agent's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conversation_the_cli_no_longer_has_is_said_as_that() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = core_with(dir.path(), &seen).await;
+    let agent = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let id = agent.id.clone();
+    say(&core, &seen, &id, "hello").await;
+    core.stop_agent(&id).await.unwrap();
+
+    seen.lock().unwrap().resume_gone = true;
+    say(&core, &seen, &id, "and now?").await;
+    assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1", "new"]);
+    let name = &agent.name;
+    let notice = format!("Claude Code no longer has {name}'s earlier conversation. A new one started: {name} does not know what was said before.");
+    wait_for("the notice", async || codly_said(&core, &id).await.contains(&notice).then_some(())).await;
+    assert_eq!(codly_said(&core, &id).await, [notice], "said once");
+    assert_eq!(agent_now(&core, &id).await.session_id.as_deref(), Some("sess-2"));
+    core.shutdown().await;
+}
+
+/// A resume fails and a new session does not start either (the CLI is signed out): nothing
+/// took the place of the conversation, so it is kept, the message fails with the reason, and
+/// the next message resumes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conversation_is_kept_when_no_new_one_starts_either() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = core_with(dir.path(), &seen).await;
+    let id = core.hire_agent(Provider::Claude, None, None).await.unwrap().id;
+    say(&core, &seen, &id, "hello").await;
+    core.stop_agent(&id).await.unwrap();
+
+    {
+        let mut s = seen.lock().unwrap();
+        (s.resume_fails, s.new_fails) = (true, true);
+    }
+    let e = core.send_chat(&format!("agent:{id}"), "are you there?").await.unwrap_err();
+    assert!(format!("{e:#}").contains("Not logged in"), "{e:#}");
+    assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1", "new"]);
+    assert_eq!(agent_now(&core, &id).await.session_id.as_deref(), Some("sess-1"), "the conversation is still the agent's");
+    assert!(codly_said(&core, &id).await.is_empty(), "no new conversation started: nothing to say about one");
+
+    // Signed in again: the same conversation goes on.
+    {
+        let mut s = seen.lock().unwrap();
+        (s.resume_fails, s.new_fails) = (false, false);
+    }
+    say(&core, &seen, &id, "and now?").await;
+    assert_eq!(seen.lock().unwrap().starts.last().map(String::as_str), Some("resume sess-1"));
+    assert!(codly_said(&core, &id).await.is_empty());
+    core.shutdown().await;
+}
+
+/// A Lead goes the same way as a 1:1 agent: its request thread says that its conversation is
+/// gone, and a new one takes the message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lead_whose_conversation_is_gone_says_so_in_its_request_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = core_with(dir.path(), &seen).await;
+    core.update_settings(Settings { lead_followups: false, ..Default::default() }).await.unwrap();
+    let lead = async || core.snapshot().await.unwrap().agents.into_iter().find(|a| a.role == Role::Lead);
+
+    core.send_chat("lead", "hello").await.unwrap();
+    wait_for("the Lead's first turn", async || (!seen.lock().unwrap().prompts.is_empty()).then_some(())).await;
+    let first = wait_for("the Lead to rest", async || lead().await.filter(|l| l.status == AgentStatus::Idle)).await;
+    assert_eq!(first.session_id.as_deref(), Some("sess-1"));
+    core.stop_agent(&first.id).await.unwrap();
+    wait_for("the Lead's process to end", async || lead().await.filter(|l| l.run_id.is_none())).await;
+
+    seen.lock().unwrap().resume_gone = true;
+    core.send_chat("lead", "are you there?").await.unwrap();
+    wait_for("the Lead's new conversation", async || (seen.lock().unwrap().starts.len() == 3).then_some(())).await;
+    assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1", "new"]);
+    let name = &first.name;
+    let notice = format!("Claude Code no longer has {name}'s earlier conversation. A new one started: {name} does not know what was said before.");
+    wait_for("the notice", async || codly_said_in(&core, "lead").await.contains(&notice).then_some(())).await;
+    wait_for("the new conversation on the Lead", async || lead().await.filter(|l| l.session_id.as_deref() == Some("sess-2"))).await;
     core.shutdown().await;
 }

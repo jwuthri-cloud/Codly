@@ -52,6 +52,7 @@ pub mod housekeeping;
 mod ingest;
 pub mod intake;
 mod lead;
+mod live_session;
 mod lots;
 pub mod merge_conflict;
 pub mod names;
@@ -208,6 +209,8 @@ struct Live {
     self_started: bool,
     /// What it has at work beside its own turns, and the gate's wait for it (background.rs).
     background: background::Background,
+    /// Its MCP servers and running background commands, for a snapshot (live_session.rs).
+    session_rows: live_session::SessionRows,
 }
 
 /// A member's reply the Lead of `thread` waits for: the reply of turn number `due`.

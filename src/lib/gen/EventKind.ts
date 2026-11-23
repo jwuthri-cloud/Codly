@@ -13,6 +13,7 @@ import type { Citation } from "./Citation";
 import type { Confidence } from "./Confidence";
 import type { ControlState } from "./ControlState";
 import type { JobOffer } from "./JobOffer";
+import type { McpServerStatus } from "./McpServerStatus";
 import type { Memory } from "./Memory";
 import type { MessagePhase } from "./MessagePhase";
 import type { Plan } from "./Plan";
@@ -74,7 +75,7 @@ tool_uses: number | null, tokens: number | null,
 /**
  * What it reported when it was done.
  */
-report: string | null, } | { "type": "compacting", pre_tokens: number | null, post_tokens: number | null, } | { "type": "turn_completed", status: TurnStatus, result_text: string | null, duration_ms: number | null, } | { "type": "error", message: string, fatal: boolean, } | { "type": "exited", code: number | null, } | { "type": "unknown", raw_type: string, } | { "type": "notice", text: string, } | { "type": "background_tasks", tasks: Array<BackgroundTask>, } | { "type": "agent_changed", agent: Agent, } | { "type": "plan_changed", plan: Plan, } | { "type": "task_changed", task: Task, } | { "type": "chat", message: ChatMessage, } | { "type": "decision", id: string, decision_type: string, 
+report: string | null, } | { "type": "mcp_server", name: string, status: McpServerStatus, error: string | null, } | { "type": "background_command", task_id: string, call_id: string, description: string, status: string, } | { "type": "compacting", pre_tokens: number | null, post_tokens: number | null, } | { "type": "turn_completed", status: TurnStatus, result_text: string | null, duration_ms: number | null, } | { "type": "error", message: string, fatal: boolean, } | { "type": "exited", code: number | null, } | { "type": "unknown", raw_type: string, } | { "type": "notice", text: string, } | { "type": "agent_changed", agent: Agent, } | { "type": "plan_changed", plan: Plan, } | { "type": "task_changed", task: Task, } | { "type": "chat", message: ChatMessage, } | { "type": "decision", id: string, decision_type: string, 
 /**
  * "rule" | "model" | "human"
  */

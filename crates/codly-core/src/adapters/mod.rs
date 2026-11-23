@@ -45,6 +45,8 @@ pub mod classify;
 pub mod codex;
 mod startup;
 
+pub use startup::SessionGone;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -138,9 +140,9 @@ pub enum AgentCmd {
 }
 
 /// What Codly asks of a live Claude session: the control requests that
-/// docs/research/cli-claude-stream-json-2.1.311.md §2 recorded (the effort, the settings and
-/// the default model: its part 2, scenario 13). The CLI answers them at once; the mode, the
-/// model and the context reading are recorded during a turn too.
+/// docs/research/cli-claude-stream-json-2.1.311.md (§2, §8) and its part 2 (§6, §18; the
+/// effort, the settings and the default model: scenario 13) recorded. The CLI answers them at
+/// once; the mode, the model and the context reading are recorded during a turn too.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionRequest {
     /// `set_permission_mode`.
@@ -151,6 +153,9 @@ pub enum SessionRequest {
     Model(String),
     /// `get_context_usage`: how full the context is.
     ContextUsage,
+    /// `mcp_reconnect`: try again to connect the MCP server of this name. Recorded for
+    /// servers that still could not connect: the answer is an error with the CLI's reason.
+    McpReconnect(String),
     /// `stop_task`, with the id of a background task (`BackgroundTask::id`): the CLI ends it.
     /// The answer is empty also when nothing was stopped (recorded, part 2 §6): the CLI's next
     /// list of its background tasks says whether the task is gone.

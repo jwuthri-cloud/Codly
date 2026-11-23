@@ -151,6 +151,7 @@ impl Inner {
                 self.restore_note_read(&ctx.agent_id); // the note came with that prompt
                 self.chat_prompt_read(&ctx.agent_id, input, false);
             }
+            EventKind::McpServer { .. } | EventKind::BackgroundCommand { .. } => self.session_row_seen(&ctx.agent_id, &r),
             EventKind::Decision { decision_type, detail, .. } if decision_type == crate::adapters::MODE_CHANGED => {
                 self.control_mode_changed(&ctx.agent_id, ctx.role, detail)
             }
