@@ -11,7 +11,7 @@ import { ui } from '../state/ui.svelte';
 import { parseDiff, type DiffFile } from '../util/diff';
 import {
   editorPlace, fileAnchor, fileMark, firstLines, followUpRequest, heavy, inOrder, LARGE_FILE, lineAnchor, lineCount, linePlace,
-  linesToDraw, offDiff, parseDiffKeeping, placeComments, placeId, reviewMessage, withComment, type ReviewComment,
+  inTurn, linesToDraw, offDiff, parseDiffKeeping, placeComments, placeId, reviewMessage, turnReadKey, withComment, type ReviewComment,
 } from '../util/review';
 
 const A = `diff --git a/src/a.ts b/src/a.ts
@@ -202,6 +202,22 @@ describe('large diffs', () => {
     expect(fileMark(parseDiff(B)[0])).toBe(fileMark(parseDiff(B)[0]));
     expect(fileMark(parseDiff(B.replace('+two', '+2'))[0])).not.toBe(fileMark(parseDiff(B)[0]));
     expect(fileMark(parseDiff(B.replace('+two', '-two'))[0])).not.toBe(fileMark(parseDiff(B)[0]));
+  });
+});
+
+describe('when the last turn of a task is read again', () => {
+  it('when a turn of its agent starts or ends, not on the steps inside a turn', () => {
+    const during = (['starting', 'thinking', 'working', 'waiting_approval', 'blocked', 'rate_limited'] as const).map((s) => turnReadKey('running', s));
+    const resting = (['idle', 'done', 'failed', 'offline', undefined] as const).map((s) => turnReadKey('running', s));
+    expect(new Set(during).size).toBe(1);
+    expect(new Set(resting).size).toBe(1);
+    expect(during[0]).not.toBe(resting[0]);
+    expect([inTurn('working'), inTurn('waiting_approval'), inTurn('idle'), inTurn(undefined)]).toEqual([true, true, false, false]);
+  });
+
+  it('when the task moves on', () => {
+    expect(turnReadKey('reviewing', 'idle')).not.toBe(turnReadKey('running', 'idle'));
+    expect(turnReadKey(undefined, undefined)).toBe(turnReadKey(undefined, 'offline'));
   });
 });
 

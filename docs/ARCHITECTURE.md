@@ -461,7 +461,8 @@ that are new there are named (the index does not search them).
   on a task has checkpoints of the task's worktree. What a commit leaves out (a huge new folder
   or file) is in no checkpoint: the list names it, and a restore that would write over it is
   refused. "Last turn" (`Core::last_turn`, in the Git tab and on a task's diff in the Changes
-  room) is the diff from the newest checkpoint before a turn to the files now.
+  room) is the diff from the newest checkpoint before a turn to the files now; an agent's
+  answer names the task when the turn is of a task's worktree, and the Git tab says so.
 - The user's branch: Codly commits and merges by itself only on `codly/…` branches. Four
   commands change the user's branch or its remote (commits, merges, push), each behind a
   button: `merge_plan` and `merge_agent` (merge into the checked-out branch),

@@ -4,6 +4,9 @@
   its diff. It is read when you pick it and when the Git tab reads the worktree again (the turn
   ended, you pressed Refresh, files were put back), one read at a time; while the agent works,
   Refresh shows the turn so far.
+  A 1:1 agent on a task works in the task's worktree, and its checkpoints are of that one: the
+  turn shown is then the last one there, and a line says so, because the branch and the files
+  of the rest of the Git tab are the agent's own worktree.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -54,8 +57,9 @@
 {:else if turn === undefined}
   <p class="small">Reading the last turn…</p>
 {:else if turn === null}
-  <p class="small">No turn to show: Codly has no checkpoint of a turn of {agent.name} in this worktree. Checkpoints, below, says what it keeps.</p>
+  <p class="small">No turn to show: Codly has no checkpoint of a turn of {agent.name} in the worktree it works in now (its task’s worktree while it is on a task). Checkpoints, below, says what it keeps.</p>
 {:else}
+  {#if turn.task}<p class="small">{agent.name} is on task {turn.task}: this is its last turn in that task’s worktree, not in its own worktree (the branch on top).</p>{/if}
   <p class="small">{files.length ? plural(files.length, 'file') : 'No file'} changed since the turn that started with “{turn.label}” ({ago(turn.ts, ui.now)}).</p>
   <div class="turn">
     {#each files as f (f.path)}

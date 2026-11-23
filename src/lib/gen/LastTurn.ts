@@ -16,4 +16,10 @@ ts: number,
  * Unified diff from the files before that turn to the files as they are now. Empty: the
  * turn changed no file, or its changes were put back.
  */
-diff: string, };
+diff: string, 
+/**
+ * For an agent's last turn: the key of the task whose worktree the turn ran in, when that
+ * is not the agent's own (a 1:1 agent on a task works there). None: the agent's own
+ * worktree, or the worktree of the task that was asked for.
+ */
+task: string | null, };

@@ -322,7 +322,7 @@ async fn one_file_goes_back_and_the_agent_is_told_which() {
     o.turn(&id, &wt, "add the form", &[("a.txt", Some("1\n")), ("b.txt", Some("b\n"))]).await;
 
     let turn = last_turn().await.unwrap();
-    assert_eq!(turn.label, "add the form");
+    assert_eq!((turn.label.as_str(), turn.task.as_deref()), ("add the form", None), "a turn in its own worktree");
     assert!(turn.diff.contains("diff --git a/a.txt b/a.txt") && turn.diff.contains("+1\n") && turn.diff.contains("diff --git a/b.txt b/b.txt"), "{}", turn.diff);
     assert!(!turn.diff.contains("README.md"), "only what the turn changed: {}", turn.diff);
 
@@ -367,8 +367,8 @@ async fn one_file_goes_back_and_the_agent_is_told_which() {
 }
 
 /// A 1:1 agent that takes a task works in the task's worktree, not in its own. Its turns
-/// there are kept too: its list is the one of the task's worktree and says so, and the task's
-/// last turn shows what the turn wrote so far.
+/// there are kept too: its list is the one of the task's worktree and says so, and so does its
+/// last turn, which shows what the turn wrote so far (as the task's last turn does).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_1_to_1_agent_on_a_task_has_checkpoints_of_the_task_worktree() {
     let dir = tempfile::tempdir().unwrap();
@@ -394,9 +394,11 @@ async fn a_1_to_1_agent_on_a_task_has_checkpoints_of_the_task_worktree() {
     std::fs::write(task_wt.join("hello.txt"), "hello\n").unwrap();
     let view = o.core.agent_checkpoints(&id).await.unwrap();
     assert_eq!(view.checkpoints[0].files, files(&["hello.txt"]), "the point is of the task's worktree");
-    for source in [TurnSource::Task(task.id.clone()), TurnSource::Agent(id.clone())] {
+    // The agent's Git tab shows its own worktree: only the agent's answer has to name the task.
+    for (source, named) in [(TurnSource::Task(task.id.clone()), None), (TurnSource::Agent(id.clone()), Some(task.key.as_str()))] {
         let turn = o.core.last_turn(&source).await.unwrap().unwrap();
         assert!(turn.diff.contains("diff --git a/hello.txt b/hello.txt") && turn.diff.contains("+hello\n"), "{source:?}: {}", turn.diff);
+        assert_eq!(turn.task.as_deref(), named, "{source:?}");
     }
     assert!(!own.join("hello.txt").exists());
 

@@ -55,7 +55,7 @@ describe('DemoCheckpoints', () => {
     const demo = new DemoCheckpoints();
     const ada = agent({});
     const turn = demo.lastTurn(ada, NOW)!;
-    expect(turn).toMatchObject({ label: 'Wire the theme toggle into the header', ts: NOW - 4 * 60_000 });
+    expect(turn).toMatchObject({ label: 'Wire the theme toggle into the header', ts: NOW - 4 * 60_000, task: null });
     expect(turn.diff).toContain('diff --git a/src/theme/ThemeProvider.tsx b/src/theme/ThemeProvider.tsx');
     // Its files went back: the turn is still the last one, and nothing of it is left.
     demo.restore(ada, 3, NOW + 1);

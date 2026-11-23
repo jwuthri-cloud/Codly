@@ -152,6 +152,10 @@ pub struct LastTurn {
     /// Unified diff from the files before that turn to the files as they are now. Empty: the
     /// turn changed no file, or its changes were put back.
     pub diff: String,
+    /// For an agent's last turn: the key of the task whose worktree the turn ran in, when that
+    /// is not the agent's own (a 1:1 agent on a task works there). None: the agent's own
+    /// worktree, or the worktree of the task that was asked for.
+    pub task: Option<String>,
 }
 
 /// What a checkpoint's commit message records besides the files.
@@ -328,7 +332,7 @@ async fn last_turn(git: &Git, wt: &Path, agent: Option<&str>) -> Result<Option<L
     let Some((before, meta)) = turns.max_by_key(|(e, _)| (e.ts, e.n)) else { return Ok(None) };
     let now = git.worktree_tree(wt).await?;
     let diff = if before.tree == now { String::new() } else { git.diff_trees(wt, &before.tree, &now).await? };
-    Ok(Some(LastTurn { label: meta.label.clone(), ts: before.ts, diff }))
+    Ok(Some(LastTurn { label: meta.label.clone(), ts: before.ts, diff, task: None }))
 }
 
 /// A restore that was done: what changed, the way back, and the checkpoint it went to.
@@ -603,7 +607,9 @@ impl Inner {
                 let agent = self.agent(id)?;
                 // No checkpoints there (the Git tab says why): no turn to show.
                 let Ok(spot) = self.checkpoint_worktree(&agent).await? else { return Ok(None) };
-                last_turn(&self.git, &spot.wt, Some(id.as_str())).await
+                let turn = last_turn(&self.git, &spot.wt, Some(id.as_str())).await?;
+                // The Git tab shows the agent's own worktree: the answer says when this is another one.
+                Ok(turn.map(|turn| LastTurn { task: spot.task, ..turn }))
             }
             TurnSource::Task(id) => {
                 let task = self.task(id)?;
@@ -690,6 +696,8 @@ impl Core {
 
     /// "Last turn": what the last turn of an agent, or the last turn in a task's worktree,
     /// changed in the files, as a diff from the checkpoint before that turn to the files now.
+    /// An agent's is the one in the worktree its checkpoints are of (`agent_checkpoints`): the
+    /// task's worktree while a 1:1 agent is on a task, and the answer names that task.
     /// None: no turn was kept there (no checkpoints, or the worktree is on other work now).
     /// Moves no ref and changes no file.
     pub async fn last_turn(&self, of: &TurnSource) -> Result<Option<LastTurn>> {

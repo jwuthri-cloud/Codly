@@ -10,9 +10,12 @@
   stays in the bar above Send back, where you can read and remove it.
   A task's diff has a second scope, "Last turn": only what the last turn in the task's worktree
   changed, committed or not (from the checkpoint Codly kept before that turn). It is for
-  reading: comments go on the whole task's diff, and the ones you wrote wait there.
+  reading: comments go on the whole task's diff, and the ones you wrote wait there. Each read
+  of it takes a snapshot of the worktree, so it is read one at a time, and when a turn starts or
+  ends, not on each file the agent writes.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { ide } from '../../ide/ide.svelte';
   import { api } from '../../lib/api';
   import type { Agent } from '../../lib/gen/Agent';
@@ -26,7 +29,8 @@
   import { diffStats, type DiffFile } from '../../lib/util/diff';
   import { ago } from '../../lib/util/format';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
-  import { editorPlace, heavy, HEAVY_LABEL, offDiff, parseDiffKeeping, placeId, type DiffParts, type ReviewComment } from '../../lib/util/review';
+  import { oneAtATime } from '../../lib/util/oneAtATime';
+  import { editorPlace, heavy, HEAVY_LABEL, inTurn, offDiff, parseDiffKeeping, placeId, turnReadKey, type DiffParts, type ReviewComment } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
@@ -106,12 +110,43 @@
     void store.rev;
     if (target.kind === 'plan') return store.tasks.filter((t) => t.plan_id === target.id).map((t) => `${t.id}:${t.status}`).join(',');
     const t = store.taskMap.get(target.id);
+    // The last turn is not read again on each file the agent writes: see `turnReadKey`.
+    if (lastTurn) return turnReadKey(t?.status, t?.assignee ? store.agentMap.get(t.assignee)?.status : undefined);
     const l = t?.assignee ? store.live[t.assignee] : null;
     return `${t?.status}:${l ? Object.values(l.files).filter((f) => f.modified).length : 0}`;
   });
   let seq = 0;
   /** Try again: bumps to load the same diff once more. */
   let retry = $state(0);
+  /** One read (the one numbered `my`) of the diff named `name`: its answer is drawn, unless a newer read started since. */
+  async function draw(my: number, name: string, read: Promise<{ text: string; turn: LastTurn | null }>) {
+    try {
+      const got = await read;
+      if (my !== seq) return;
+      const text = got.text;
+      error = null;
+      loaded = name;
+      turn = got.turn;
+      // The same text again (a task changed status, the code did not): nothing to draw.
+      if (drawn?.text === text) return;
+      // Files whose part of the text did not change keep their objects, so only the others are drawn again.
+      const parsed = parseDiffKeeping(text, drawn?.parts ?? new Map());
+      drawn = { key: name, text, parts: parsed.parts };
+      files = parsed.files;
+      if (!files.find((f) => f.path === active)) active = files[0]?.path ?? null;
+    } catch (e) {
+      if (my === seq) error = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (my === seq) loading = false;
+    }
+  }
+  // A read of the last turn starts git in the worktree and takes a snapshot of it: never two
+  // at once. It reads what is asked for when it starts (the newest `seq`), not when it was asked.
+  const readTurn = oneAtATime(async () => {
+    const t = target;
+    if (!t || !lastTurn) return;
+    await draw(seq, key, api.lastTurnDiff({ kind: 'task', id: t.id }).then((kept) => ({ text: kept?.diff ?? '', turn: kept })));
+  });
   $effect(() => {
     const t = target;
     void version;
@@ -126,30 +161,17 @@
       loaded = null;
     }
     loading = true;
-    const read: Promise<{ text: string; turn: LastTurn | null }> = lastTurn
-      ? api.lastTurnDiff({ kind: 'task', id: t.id }).then((kept) => ({ text: kept?.diff ?? '', turn: kept }))
-      : (t.kind === 'plan' ? api.planDiff(t.id) : api.taskDiff(t.id)).then((text) => ({ text, turn: null }));
-    read
-      .then((got) => {
-        if (my !== seq) return;
-        const text = got.text;
-        error = null;
-        loaded = name;
-        turn = got.turn;
-        // The same text again (a task changed status, the code did not): nothing to draw.
-        if (drawn?.text === text) return;
-        // Files whose part of the text did not change keep their objects, so only the others are drawn again.
-        const parsed = parseDiffKeeping(text, drawn?.parts ?? new Map());
-        drawn = { key: name, text, parts: parsed.parts };
-        files = parsed.files;
-        if (!files.find((f) => f.path === active)) active = files[0]?.path ?? null;
-      })
-      .catch((e) => my === seq && (error = e instanceof Error ? e.message : String(e)))
-      .finally(() => my === seq && (loading = false));
+    if (lastTurn) untrack(() => void readTurn());
+    else void draw(my, name, (t.kind === 'plan' ? api.planDiff(t.id) : api.taskDiff(t.id)).then((text) => ({ text, turn: null })));
   });
   const totals = $derived(diffStats(files));
 
   const targetTask = $derived(target?.kind === 'task' ? (store.taskMap.get(target.id) ?? null) : null);
+  /** In the "Last turn" scope while a turn of the task's agent is on: the diff on screen is not read on each step of it. */
+  const turnNote = $derived.by(() => {
+    const worker = lastTurn && targetTask?.assignee ? store.agentMap.get(targetTask.assignee) : null;
+    return worker && inTurn(worker.status) ? ` ${worker.name} is working: this is read again when its turn ends.` : '';
+  });
   /** Which task (and agent) wrote each file: from Codly's commits, then from what its agent
    *  changes now. One pass for the whole diff; the first task of the scope that has a file owns it. */
   const owners = $derived.by(() => {
@@ -301,11 +323,11 @@
     <div class="main" bind:this={main}>
       {#if error}<p class="err">Couldn’t load the diff: {error}<button class="btn sm" disabled={loading} onclick={() => retry++}>Try again</button></p>
       {:else if loading && !files.length}<EmptyState compact title="Loading the diff…" />
-      {:else if lastTurn && !turn && !loading}<EmptyState compact title="No turn to show for this task." body="Codly keeps the files before each turn in the task’s worktree. That worktree is gone or holds other work now, or no turn ran there yet." />
-      {:else if lastTurn && turn && !files.length && !loading}<EmptyState compact title="The last turn changed no file." body={`It started with “${turn.label}” (${ago(turn.ts, ui.now)}).`} />
+      {:else if lastTurn && !turn && !loading}<EmptyState compact title="No turn to show for this task." body={`Codly keeps the files before each turn in the task’s worktree. That worktree is gone or holds other work now, or no turn ran there yet.${turnNote}`} />
+      {:else if lastTurn && turn && !files.length && !loading}<EmptyState compact title="The last turn changed no file." body={`It started with “${turn.label}” (${ago(turn.ts, ui.now)}).${turnNote}`} />
       {:else if !files.length && !loading}<EmptyState compact title="No changes in this scope yet." />
       {:else}
-        {#if lastTurn && turn}<p class="turn-h">Since the turn that started with “{turn.label}” ({ago(turn.ts, ui.now)}). To comment, switch to Whole task.</p>{/if}
+        {#if lastTurn && turn}<p class="turn-h">Since the turn that started with “{turn.label}” ({ago(turn.ts, ui.now)}). To comment, switch to Whole task.{turnNote}</p>{/if}
         {#each files as f (f.path)}
           {@const o = owners.get(f.path)}
           {@const why = heavy(f)}

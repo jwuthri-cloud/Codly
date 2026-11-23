@@ -1,9 +1,12 @@
 // Reviewing a diff: where a comment sits, the one message "Send back" builds from all of them,
-// which files open collapsed, how many lines a file draws, and where a file opens in the editor.
+// which files open collapsed, how many lines a file draws, when a task's last turn is read
+// again, and where a file opens in the editor.
 // Pure functions; what you wrote and ticked in this session lives in review.svelte.ts.
 import type { Agent } from '../gen/Agent';
+import type { AgentStatus } from '../gen/AgentStatus';
 import type { Plan } from '../gen/Plan';
 import type { Task } from '../gen/Task';
+import type { TaskStatus } from '../gen/TaskStatus';
 import { parseDiff, type DiffFile, type DiffHunk, type DiffLine } from './diff';
 
 /** Where a comment sits: a line of a file's diff (in the new file, or in the old one for a line
@@ -179,6 +182,23 @@ export function fileMark(f: DiffFile): string {
     }
   }
   return `${f.status}:${f.added}:${f.removed}:${f.hunks.length}:${h >>> 0}`;
+}
+
+// ───────────── the last turn of a task ─────────────
+
+const AT_REST: AgentStatus[] = ['idle', 'done', 'failed', 'offline'];
+
+/** Is a turn of the agent on? It starts, thinks, works, or waits (for you, or for a limit). */
+export const inTurn = (status: AgentStatus | undefined): boolean => status != null && !AT_REST.includes(status);
+
+/**
+ * The "Last turn" diff of a task is read again when this value changes: the task moved on, or
+ * a turn of its agent started or ended. Not on each file the agent writes, as the whole task's
+ * diff is: a read of the last turn takes a snapshot of the worktree (git hashes every changed
+ * file there, also one that is half-written). The steps inside a turn are one value.
+ */
+export function turnReadKey(task: TaskStatus | undefined, agent: AgentStatus | undefined): string {
+  return `${task}:${inTurn(agent) ? 'turn' : 'rest'}`;
 }
 
 // ───────────── open in the editor ─────────────

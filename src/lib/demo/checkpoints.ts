@@ -69,6 +69,6 @@ export class DemoCheckpoints {
   lastTurn(agent: Agent | undefined, now: number): LastTurn | null {
     if (!agent?.worktree) return null;
     const turn = this.points(agent, now).find((c) => c.kind === 'turn');
-    return turn ? { label: turn.label, ts: turn.ts, diff: turn.changed ? TURN_DIFF : '' } : null;
+    return turn ? { label: turn.label, ts: turn.ts, diff: turn.changed ? TURN_DIFF : '', task: null } : null;
   }
 }
