@@ -2,8 +2,10 @@
   The plan card: the clearest thing in the conversation. What you asked (your words), the Lead's
   plan as a checklist (each task: title, who does it, what it waits on, its state), open
   questions highlighted, and the one action that matters: Run plan ⌘↵. Tasks with no real check
-  are marked (WeakChecks), before the plan runs and after. While the plan runs the same checklist
-  stays here and updates live; once it is over it folds to one line you can open.
+  are marked (WeakChecks), before the plan runs and after. A plan that did not start by itself
+  although its request runs plans at once says why above Run plan (WaitReason). While the plan
+  runs the same checklist stays here and updates live; once it is over it folds to one line you
+  can open.
   A running plan that cannot go on by itself says so here, with Keep what is merged.
 -->
 <script lang="ts">
@@ -18,6 +20,7 @@
   import Icon from '../../components/Icon.svelte';
   import Why, { type WhyLine } from '../../components/Why.svelte';
   import TaskRow from './TaskRow.svelte';
+  import WaitReason from './WaitReason.svelte';
   import WeakChecks from './WeakChecks.svelte';
 
   interface Props {
@@ -135,6 +138,7 @@
       {/if}
 
       {#if deciding}
+        <WaitReason {plan} />
         <footer>
           <button class="btn primary" disabled={busy || plan.status !== 'awaiting_approval'} onclick={() => act(() => runPlan(planId))}>
             <Icon name="play" size={13} />{starting ? 'Starting…' : 'Run plan'}<span class="k">⌘↵</span>

@@ -678,54 +678,32 @@ impl Store {
         Ok(s.and_then(|s| serde_json::from_str::<ChatMessage>(&s).ok()).map(|m| m.text))
     }
 
-    /// `thread` read newest first, up to the user's last own words there: a message they wrote,
-    /// or a schedule of theirs that fired (`triggers::is_schedule`). `outside` gets each message
-    /// that came from outside Codly (a webhook, Slack: an `inbound` attachment) on the way, and
-    /// ends the read by answering false. Returns the user's words when the read got to them.
-    /// The read stops there, so its cost follows what came in since, not the length of the
-    /// thread.
-    fn read_since_user(&self, workspace_id: Option<&str>, thread: &str, mut outside: impl FnMut(ChatMessage) -> bool) -> Result<Option<ChatMessage>> {
+    /// The user's last own words in `thread` (None: they said nothing there), and the messages
+    /// that came from outside Codly (a webhook, Slack: an `inbound` attachment) after them,
+    /// newest first: what a plan made now answers. The user's own words are a message they
+    /// wrote, or a schedule of theirs that fired (`triggers::is_schedule`). The read stops at
+    /// them, so its cost follows what came in since, not the length of the thread.
+    pub fn since_user(&self, workspace_id: Option<&str>, thread: &str) -> Result<(Option<ChatMessage>, Vec<ChatMessage>)> {
         let conn = self.conn();
         let mut newest_first = conn.prepare_cached("SELECT json FROM chat WHERE workspace_id IS ?1 AND thread = ?2 ORDER BY ts DESC, rowid DESC")?;
         let mut rows = newest_first.query(params![workspace_id, thread])?;
+        let mut inbound = vec![];
         while let Some(row) = rows.next()? {
             let Ok(m) = serde_json::from_str::<ChatMessage>(&row.get::<_, String>(0)?) else { continue };
             if m.author == "user" || crate::triggers::is_schedule(m.attachment.as_ref()) {
-                return Ok(Some(m));
+                return Ok((Some(m), inbound));
             }
-            if crate::inbound::is_inbound(m.attachment.as_ref()) && !outside(m) {
-                return Ok(None);
+            if crate::inbound::is_inbound(m.attachment.as_ref()) {
+                inbound.push(m);
             }
         }
-        Ok(None)
-    }
-
-    /// The user's last own words in `thread` (None: they said nothing there), and the messages
-    /// from outside Codly that came after them, newest first: what a plan made now answers.
-    pub fn since_user(&self, workspace_id: Option<&str>, thread: &str) -> Result<(Option<ChatMessage>, Vec<ChatMessage>)> {
-        let mut inbound = vec![];
-        let own = self.read_since_user(workspace_id, thread, |m| {
-            inbound.push(m);
-            true
-        })?;
-        Ok((own, inbound))
+        Ok((None, inbound))
     }
 
     /// The messages of `thread` that came from outside Codly after the user's last own words
     /// there, newest first (`since_user`).
     pub fn inbound_since_user(&self, workspace_id: Option<&str>, thread: &str) -> Result<Vec<ChatMessage>> {
         Ok(self.since_user(workspace_id, thread)?.1)
-    }
-
-    /// Whether a message from outside Codly came into `thread` after the user's last own words
-    /// there. Reads no further than the newest such message.
-    pub fn inbound_after_user(&self, workspace_id: Option<&str>, thread: &str) -> Result<bool> {
-        let mut found = false;
-        self.read_since_user(workspace_id, thread, |_| {
-            found = true;
-            false
-        })?;
-        Ok(found)
     }
 
     pub fn task_workspace(&self, id: &str) -> Result<Option<String>> {
@@ -1462,7 +1440,6 @@ mod tests {
         };
         let since = |thread: &str| -> Vec<String> {
             let found = store.inbound_since_user(None, thread).unwrap();
-            assert_eq!(store.inbound_after_user(None, thread).unwrap(), !found.is_empty(), "{thread}");
             found.iter().map(|m| m.attachment.as_ref().unwrap()["inbound"]["source"].as_str().unwrap().to_string()).collect()
         };
         // The text of your last own words in a thread.

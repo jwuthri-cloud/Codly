@@ -261,6 +261,7 @@ impl Inner {
         };
         if removed {
             self.control_clear(agent_id); // controls do not outlive the run
+            self.chat_prompts_lost(agent_id);
         }
         let _ = self.update_agent(agent_id, |a| {
             if a.run_id.as_deref() == Some(run_id) {

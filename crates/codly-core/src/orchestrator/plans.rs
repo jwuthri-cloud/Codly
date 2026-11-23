@@ -128,9 +128,6 @@ impl Inner {
         // alone. Without them the plan carries the user's words: for a schedule, its own line.
         let (own, outside) = self.store.since_user(Some(&ws.id), &thread)?;
         let outside_waits = outside.iter().any(|m| crate::inbound::needs_ok(m.attachment.as_ref()));
-        // Words that started from an issue or a pull request ask for what GitHub's text says,
-        // and other people write that text: the plan waits for Run plan, whatever the mode.
-        let from_github = own.as_ref().is_some_and(|m| super::intake::is_intake(m.attachment.as_ref()));
         let request = if outside.is_empty() { own.map(|m| m.text).unwrap_or_default() } else { String::new() };
 
         let plan_id = new_id();
@@ -152,6 +149,11 @@ impl Inner {
             created_at: now,
             updated_at: now,
         };
+        // A request that started from an issue or a pull request asks for what GitHub's text
+        // says, and other people write that text: its plans wait for Run plan, whatever the
+        // mode and whatever was said in the request since (a schedule that fired, the user's
+        // own note), until a plan made for it is done (`plan_intake`).
+        let from_github = self.plan_intake(&plan)?.is_some();
         let ids: HashMap<String, Id> = valid.plan.tasks.iter().map(|t| (t.id.clone(), new_id())).collect();
         let tasks: Vec<Task> = valid
             .plan

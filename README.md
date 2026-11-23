@@ -357,16 +357,18 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   (your `gh` then opens the pull request, and reads its state and checks when you press Refresh), to read
   an issue or a pull request with your `gh` when you start a request from one (**From issue…**, **From
   pull request…**: the Lead gets its text as quoted data, nothing is written to GitHub, and because other
-  people write that text, a plan made from it waits for Run plan in every mode), and for two
+  people write that text, the plans of that request wait for Run plan in every mode until one of them is
+  done; the plan's card says why), and for two
   features that
   are off until you turn them on: dictation (audio goes to Groq with your key) and Show Claude usage.
   The voice relay in `voice/` talks to OpenAI, and only if you run it.
 - Inbound webhooks listen on this Mac only (loopback) and are created switched off. A webhook message
   shows under its endpoint's name, not as yours, and a plan made from it waits for Run plan unless you
-  let that endpoint run plans without asking. Until your next message, the Lead is also stopped before
-  it messages a team member or reassigns a task, and a 1:1 agent that answers webhook messages asks as
-  its approval mode says, whatever trust you gave it. `codly serve` also listens on this Mac only,
-  unless you pass `--host`.
+  let that endpoint run plans without asking; the plan's card says why it waits. Until your next
+  message, the Lead is also stopped before it messages a team member or reassigns a task. An agent you
+  pick to answer webhook messages asks as its approval mode says, whatever trust you gave it, from the
+  turn that reads such a message until a turn that your own message to it starts. `codly serve` also
+  listens on this Mac only, unless you pass `--host`.
 
 Provider terms change. Check them before heavy parallel use.
 

@@ -12,6 +12,7 @@
   import { GLOSSARY, PLAN_STATUS_LABEL } from '../../lib/util/labels';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
+  import WaitReason from '../../home/cards/WaitReason.svelte';
   import WeakChecks from '../../home/cards/WeakChecks.svelte';
   import RoomHead from '../RoomHead.svelte';
   import FlowLens from './FlowLens.svelte';
@@ -90,7 +91,7 @@
   </div>
 {/if}
 
-{#if plan}<WeakChecks {plan} room />{/if}
+{#if plan}<WaitReason {plan} room /><WeakChecks {plan} room />{/if}
 
 {#if ui.planLens === 'list'}
   <ListLens {plan} {tasks} />

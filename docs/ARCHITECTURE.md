@@ -303,20 +303,26 @@ connected yet, so Codly takes no Slack token). An inbound message is never the u
 source's name, the Lead reads it as quoted untrusted data, and a plan made after it waits for Run plan
 unless you let that endpoint run plans without asking (off for every new endpoint). Your next message
 in the thread, or a schedule of yours that fires there, ends the wait for the plans that follow. Until
-then the Lead's `codly_message_member` and `codly_reassign` are refused by the same test, and Codly
-says in the request what it stopped (`tools.rs`, `ask_user_first`). A plan made for a schedule carries
+then the Lead's `codly_message_member` and `codly_reassign` are refused by the same test, once the
+member or the task is found, and Codly says in the request what it stopped, with the member's name and
+the task's key as it has them on record (`tools.rs`, `ask_user_first`). A plan made for a schedule carries
 the schedule's line as its "You asked", not the message you typed before it. One
-agent picked to answer instead of the Lead makes no plan, so this gate does not cover it; for a 1:1
-agent, the trust you gave it answers nothing after such a message until your next one in its chat: the
-approval mode alone judges its requests (the broker in `ingest.rs`). A request can
+agent picked to answer instead of the Lead makes no plan, so this gate does not cover it. For that
+agent, whatever its role (a 1:1 agent, a team member at work on a task), the trust you gave it answers
+nothing from the turn that reads such a message until a turn that your own message to it starts: the
+approval mode alone judges its requests (`orchestrator/outside.rs`, read by the broker in `ingest.rs`).
+What you write while that turn runs does not change it. The mark is kept in memory and ends when Codly
+quits, as the turn does. A request can
 also start from GitHub on your click (`orchestrator/intake.rs`, "From issue…" and "From pull request…"
 in the composer's `/` menu and the palette): your `gh` reads the issue or the pull request, your message
 in the thread holds only the link and your own note, and the Lead gets GitHub's text (description,
 comments, and for a pull request its reviews, comments on the code and failing checks) inside one
 `<untrusted>` block with a cap on each part and on the whole. The words are yours, but the work is what
-GitHub's text says, and other people write that text: a plan made for them waits for Run plan in every
-mode (`submit_plan_inner`), until your next own message in the request. For an issue, the pull-request
-step ends that plan's description with "Closes #N". Secrets live in the
+GitHub's text says, and other people write that text: the plans of that request wait for Run plan in
+every mode (`submit_plan_inner`), until one of them is done (`plan_intake`). What is said in the request
+meanwhile, your own note or a schedule that fires, does not end the wait. A plan that waits for one of
+these two reasons says so on its card, above Run plan (`WaitReason.svelte`). For an issue, the
+pull-request step ends that plan's description with "Closes #N". Secrets live in the
 Keychain. `dictation.rs` is opt-in voice input: a clip goes to Groq Whisper with your own key and the
 transcript lands in the composer draft, never auto-sent.
 
@@ -558,6 +564,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
                       required_checks.rs weak_checks.rs   the owner's `.codly/checks` in the gate; verify commands that prove nothing
                       trust.rs                            workspace trust: the repo's own CLI configuration loads once trusted
+                      outside.rs                          which turns of an agent work for a message from outside Codly
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
                       activity.rs                         the work under way now, for the shell (keep awake, quit question)
   store/            SQLite: schema.sql, later migrations (m2…m4), typed queries; backup.rs: a copy

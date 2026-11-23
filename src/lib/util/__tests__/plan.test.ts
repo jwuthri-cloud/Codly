@@ -3,7 +3,7 @@ import type { Plan } from '../../gen/Plan';
 import type { JsonValue } from '../../gen/serde_json/JsonValue';
 import type { Task } from '../../gen/Task';
 import type { Decision } from '../../state/store.svelte';
-import { keyList, stuckPlan, waitingOn, weakAdvice, weakTasks } from '../plan';
+import { keyList, stuckPlan, waitingOn, waitReason, weakAdvice, weakTasks } from '../plan';
 
 const plan = (o: Partial<Plan> = {}): Plan => ({
   id: 'p1', workspace_id: 'ws', thread: 'lead', request: '', summary: 'Sign-in', assumptions: [], open_questions: [], status: 'running',
@@ -62,12 +62,13 @@ describe('waitingOn', () => {
   });
 });
 
+let n = 0;
+const decision = (type: string, detail: JsonValue): Decision => {
+  n += 1;
+  return { id: `d${n}`, type, method: 'rule', summary: '', detail, ts: n, agentId: null, taskId: null, eventId: n };
+};
+
 describe('weakTasks', () => {
-  let n = 0;
-  const decision = (type: string, detail: JsonValue): Decision => {
-    n += 1;
-    return { id: `d${n}`, type, method: 'rule', summary: '', detail, ts: n, agentId: null, taskId: null, eventId: n };
-  };
   const weak = (planId: string, key: string, checks: JsonValue) => decision('plan_validate', { plan_id: planId, rule: 'weak_verify', task: key, checks });
 
   it('reads the tasks the planner marked, with each check and why it proves nothing', () => {
@@ -91,6 +92,32 @@ describe('weakTasks', () => {
     ];
     expect(weakTasks(decisions, 'p1')).toEqual([]);
     expect(weakTasks(decisions, 'p2').map((w) => w.task)).toEqual(['t1']);
+  });
+});
+
+describe('waitReason', () => {
+  const INBOUND = 'A message from outside Codly came in after your last one, so this plan did not start by itself. Read it, then run it if it is what you want.';
+  const INTAKE = 'This request started from GitHub, and other people write there, so this plan did not start by itself. Read it, then run it if it is what you want.';
+
+  it('says why a plan did not start by itself, however many decisions the planner made before', () => {
+    // A plan with many planner fixes: the reason comes after them and after "accepted plan".
+    const fixes = Array.from({ length: 8 }, (_, i) => decision('plan_validate', { plan_id: 'p1', rule: 'brief_shape', task: `t${i + 1}` }));
+    const accepted = decision('plan_validate', { plan_id: 'p1', rule: 'validated', tasks: ['t1'], fixes: 8 });
+    expect(waitReason([...fixes, accepted, decision('plan_validate', { plan_id: 'p1', rule: 'inbound', sources: ['webhook “CI”'] })], 'p1')).toBe(INBOUND);
+    expect(waitReason([...fixes, accepted, decision('plan_validate', { plan_id: 'p1', rule: 'intake' })], 'p1')).toBe(INTAKE);
+  });
+
+  it('is null for a plan that waits because its request asks first, or for its open questions', () => {
+    const decisions = [
+      decision('plan_validate', { plan_id: 'p1', rule: 'validated', tasks: ['t1'], fixes: 0 }),
+      decision('plan_validate', { plan_id: 'p1', rule: 'open_questions' }),
+      // Another plan's reason, and the same rule under another decision type.
+      decision('plan_validate', { plan_id: 'p2', rule: 'intake' }),
+      decision('route', { plan_id: 'p1', rule: 'inbound' }),
+      decision('plan_validate', 'inbound'),
+    ];
+    expect(waitReason(decisions, 'p1')).toBeNull();
+    expect(waitReason(decisions, 'p2')).toBe(INTAKE);
   });
 });
 

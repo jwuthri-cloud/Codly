@@ -108,14 +108,10 @@ impl Inner {
             t::MESSAGE_MEMBER => {
                 let to = s(&args, "to").ok_or_else(|| anyhow!("to is required: a team member's name"))?;
                 let text = s(&args, "text").ok_or_else(|| anyhow!("text is required"))?;
-                self.ask_user_first(&ctx.agent_id, &format!("message {to}"))?;
                 self.message_member(&ctx.agent_id, to, text).await
             }
             t::QUICK_TASK => self.quick_task(&ctx.agent_id, args).await,
-            t::REASSIGN => {
-                self.ask_user_first(&ctx.agent_id, &format!("reassign {}", s(&args, "task").unwrap_or("a task")))?;
-                self.reassign(&ctx.agent_id, &args)
-            }
+            t::REASSIGN => self.reassign(&ctx.agent_id, &args),
             t::SUBMIT_REVIEW => {
                 let verdict = s(&args, "verdict").ok_or_else(|| anyhow!("verdict is required"))?;
                 if !matches!(verdict, "approve" | "request_changes" | "reject") {
@@ -133,28 +129,28 @@ impl Inner {
     /// user's last own words there. It is the test a plan made then waits by
     /// (`submit_plan_inner`), so an endpoint the user lets run plans alone holds nothing back.
     /// The call is refused with what the Lead has to do, and Codly itself says in the request
-    /// what was stopped (`what`: "message Ana"), so the user learns it whatever the Lead
-    /// answers. The user's next message in the request is the go-ahead, as for a plan.
-    fn ask_user_first(&self, lead_id: &str, what: &str) -> Result<()> {
-        let lead = self.agent(lead_id)?;
-        let thread = super::lead::thread_of(&lead);
-        let ws = self.store.agent_workspace(lead_id)?.ok_or_else(|| anyhow!("no workspace"))?;
-        let outside = self.store.inbound_since_user(Some(&ws), thread)?;
+    /// what was stopped, so the user learns it whatever the Lead answers. The user's next
+    /// message in the request is the go-ahead, as for a plan.
+    ///
+    /// `what` goes into a line under Codly's own name right after the Lead read a stranger's
+    /// text: the caller builds it from what Codly has on record (a member's name, a task's
+    /// key), never from the Lead's arguments, and calls this once the call could go through.
+    pub(super) fn ask_user_first(&self, lead: &Agent, ws: &str, what: &str) -> Result<()> {
+        let thread = super::lead::thread_of(lead);
+        let outside = self.store.inbound_since_user(Some(ws), thread)?;
         if !outside.iter().any(|m| crate::inbound::needs_ok(m.attachment.as_ref())) {
             return Ok(());
         }
-        // The Lead's own words (a name, a task key): one short line of them.
-        let what = prompts::clip(&what.split_whitespace().collect::<Vec<_>>().join(" "), 80);
         let line = format!(
             "{} wanted to {what}, and Codly stopped it: a message from outside Codly came in after your last one. Say here what {} should do.",
             lead.name, lead.name
         );
         // Said once: a call the Lead repeats adds no second line.
-        if self.store.last_chat_by(Some(&ws), thread, "codly")?.as_deref() != Some(line.as_str()) {
-            self.chat(Some(&ws), thread, "codly", &line, None)?;
+        if self.store.last_chat_by(Some(ws), thread, "codly")?.as_deref() != Some(line.as_str()) {
+            self.chat(Some(ws), thread, "codly", &line, None)?;
             let sources: Vec<&str> = outside.iter().filter_map(|m| m.attachment.as_ref()?["inbound"]["source"].as_str()).collect();
             self.decide(
-                Some(&ws),
+                Some(ws),
                 None,
                 "route",
                 format!("stopped {} before it could {what}: a message from outside Codly came in after your last one, so it waits for you", lead.name),

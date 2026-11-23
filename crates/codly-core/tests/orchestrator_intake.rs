@@ -18,6 +18,7 @@ use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, Spa
 use codly_core::model::*;
 use codly_core::orchestrator::intake::{IntakeKind, IntakeSource};
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
+use codly_core::triggers::Schedule;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -441,7 +442,8 @@ async fn a_lead_that_cannot_start_is_told_in_the_request_and_to_the_caller() {
 
 /// Other people write what is on GitHub. In a request that runs plans at once, the plan made
 /// from an issue still waits for Run plan, in Auto and in Direct mode, and its line and its
-/// decision say why. Your next own message in the request is the go-ahead for what follows.
+/// decision say why. What is said in the request afterwards does not start it either: the Lead
+/// still plans from GitHub's text when a schedule of yours fires there, or when you add a note.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_plan_made_from_an_issue_waits_for_run_plan_in_every_mode() {
     let w = world(true).await;
@@ -474,9 +476,20 @@ async fn a_plan_made_from_an_issue_waits_for_run_plan_in_every_mode() {
     assert_eq!(newest_plan().await.status, PlanStatus::AwaitingApproval);
     assert_eq!(w.chats().await.iter().filter(|c| c.author == "codly" && c.text.ends_with(WHY)).count(), 2);
 
-    // Your own message is your request: the plan made for it starts at once.
-    w.core.send_chat("lead", "Go ahead, and keep the old cookie name working.").await.unwrap();
-    assert_eq!(w.answer(3).await, "running");
-    assert_eq!(newest_plan().await.request, "Go ahead, and keep the old cookie name working.");
+    // A schedule of yours fires in the request while its plan waits: the next plan waits too.
+    let mut cfg = w.core.triggers().await.unwrap();
+    cfg.schedules.push(Schedule { id: "nightly".into(), name: "Nightly".into(), prompt: "Refresh the docs.".into(), every_minutes: 60, ..Default::default() });
+    w.core.set_triggers(cfg).await.unwrap();
+    w.core.fire_due_schedules().await.unwrap();
+    assert_eq!(w.answer(3).await, "awaiting_approval");
+    let plan = newest_plan().await;
+    assert_eq!((plan.status, plan.request.as_str()), (PlanStatus::AwaitingApproval, "Scheduled “Nightly”: Refresh the docs."));
+
+    // So does the plan the Lead makes after your own note: Run plan is the go-ahead, not a message.
+    w.core.send_chat("lead", "Keep the old cookie name working.").await.unwrap();
+    assert_eq!(w.answer(4).await, "awaiting_approval");
+    let plan = newest_plan().await;
+    assert_eq!((plan.status, plan.request.as_str()), (PlanStatus::AwaitingApproval, "Keep the old cookie name working."));
+    assert_eq!(w.chats().await.iter().filter(|c| c.author == "codly" && c.text.ends_with(WHY)).count(), 4);
     w.core.shutdown().await;
 }

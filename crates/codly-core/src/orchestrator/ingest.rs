@@ -141,8 +141,16 @@ impl Inner {
         match &r.kind {
             EventKind::TurnCompleted { .. } => self.control_turn_done(&ctx.agent_id),
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
-            EventKind::TurnStarted { input } => self.checkpoint_turn(&ctx.agent_id, &ctx.run_id, input.is_some()), // the files before the turn
-            EventKind::PromptSteered { .. } => self.restore_note_read(&ctx.agent_id), // the note came with that prompt
+            EventKind::TurnStarted { input } => {
+                self.checkpoint_turn(&ctx.agent_id, &ctx.run_id, input.is_some()); // the files before the turn
+                if let Some(input) = input {
+                    self.chat_prompt_read(&ctx.agent_id, input, true); // whose words the turn works for
+                }
+            }
+            EventKind::PromptSteered { input } => {
+                self.restore_note_read(&ctx.agent_id); // the note came with that prompt
+                self.chat_prompt_read(&ctx.agent_id, input, false);
+            }
             EventKind::Decision { decision_type, detail, .. } if decision_type == crate::adapters::MODE_CHANGED => {
                 self.control_mode_changed(&ctx.agent_id, ctx.role, detail)
             }
@@ -704,10 +712,10 @@ impl Inner {
             !read_only
                 && self.agent(&ctx.agent_id).is_ok_and(|a| matches!(a.role, Role::Worker | Role::Solo) && career::trusts(&a.career, r))
         };
-        // A 1:1 agent whose chat got a message from outside Codly after the user's last own
-        // words there may be working for what a stranger wrote: until the user writes to it
-        // again, their trust in it answers nothing, and the approval mode alone judges.
-        let held_back = ctx.role == Role::Solo && trusted(Rank::Junior) && self.answers_outside(&ctx.agent_id);
+        // An agent whose turn reads a message from outside Codly may be working for what a
+        // stranger wrote: until a turn that the user's own message to it starts, their trust
+        // in it answers nothing, and the approval mode alone judges (outside.rs).
+        let held_back = trusted(Rank::Junior) && self.works_for_outside(&ctx.agent_id);
         let trusts = |r| !held_back && trusted(r);
         let mode = approvals::with_trust(base, trusts(Rank::Senior));
         // Your project folder: where an agent hired with Git isolation off works, and where any agent can point a command.
@@ -773,18 +781,6 @@ impl Inner {
         }
     }
 
-    /// Did a message from outside Codly come into this agent's 1:1 chat after the user's last
-    /// own words there (`Core::send_inbound` to "agent:<id>")? Read where `chat_agent_from`
-    /// records that chat: in the agent's office. A chat that cannot be read counts as yes: the
-    /// broker then asks, which is the safe answer.
-    fn answers_outside(&self, agent_id: &str) -> bool {
-        let read = self.store.agent_workspace(agent_id).and_then(|ws| self.store.inbound_after_user(ws.as_deref(), &format!("agent:{agent_id}")));
-        read.unwrap_or_else(|e| {
-            tracing::warn!("the chat of {agent_id} was not read, so the user's trust in it answers nothing for this request: {e}");
-            true
-        })
-    }
-
     fn on_exit(self: &Arc<Self>, ctx: &Ctx, code: Option<i64>) {
         let removed = {
             let mut live = lock(&self.live);
@@ -798,6 +794,7 @@ impl Inner {
         }
         if removed.is_some() {
             self.control_clear(&ctx.agent_id); // controls do not outlive the process
+            self.chat_prompts_lost(&ctx.agent_id);
         }
         let stopping = removed.as_ref().is_none_or(|l| l.stopping);
         // Its adapter ended it because the turn did not stop after an interrupt: Codly's doing
