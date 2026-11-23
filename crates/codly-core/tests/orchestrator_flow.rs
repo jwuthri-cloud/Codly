@@ -78,6 +78,9 @@ struct FakeTurn {
     prompt: String,
     events: mpsc::UnboundedSender<AdapterEvent>,
     cmds: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AgentCmd>>>,
+    /// The turn itself read that its run is told to stop (it was waiting for a command): the
+    /// run ends in the middle of this turn.
+    stopped: Arc<AtomicBool>,
 }
 
 impl FakeTurn {
@@ -142,7 +145,28 @@ impl FakeTurn {
         let mut rx = self.cmds.lock().await;
         match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
             Ok(Some(AgentCmd::Approval { decision, .. })) => Some(decision.choice),
+            // Told to stop while it waited for the answer: no answer comes, and the run ends.
+            Ok(Some(AgentCmd::Shutdown)) => {
+                self.stopped.store(true, Ordering::SeqCst);
+                None
+            }
             _ => None,
+        }
+    }
+
+    /// A turn that never ends by itself (a worker that stays on its task): it lasts until its
+    /// run is told to stop, and the run then ends in the middle of it, like a CLI that is shut
+    /// down while it works. A turn that waits for nothing instead keeps its run alive through
+    /// `Core::shutdown`, and the last resort of that is to kill every process group this test
+    /// process started: the check commands of the tests that run beside it too, which then
+    /// fail as "killed".
+    async fn work_until_stopped(&self) {
+        let mut cmds = self.cmds.lock().await;
+        while let Some(cmd) = cmds.recv().await {
+            if matches!(cmd, AgentCmd::Shutdown) {
+                self.stopped.store(true, Ordering::SeqCst);
+                break;
+            }
         }
     }
 }
@@ -205,11 +229,16 @@ impl Spawner for FakeSpawner {
             let cmds = Arc::new(tokio::sync::Mutex::new(rx));
             let (spec2, events2, cmds2) = (spec.clone(), events.clone(), cmds.clone());
             tokio::spawn(async move {
+                let stopped = Arc::new(AtomicBool::new(false));
                 loop {
                     let cmd = { cmds2.lock().await.recv().await };
                     let Some(cmd) = cmd else { break };
                     let send = |kind| {
                         let _ = events2.send(AdapterEvent { agent_id: spec2.agent_id.clone(), run_id: spec2.run_id.clone(), kind });
+                    };
+                    let exit = || {
+                        log.lock().unwrap().shutdowns.push(spec2.agent_id.clone());
+                        send(EventKind::Exited { code: Some(0) });
                     };
                     match cmd {
                         AgentCmd::Prompt(text) => {
@@ -220,14 +249,18 @@ impl Spawner for FakeSpawner {
                             }
                             send(EventKind::TurnStarted { input: Some(text.clone()) });
                             send(EventKind::StatusChanged { status: AgentStatus::Thinking });
-                            let turn = FakeTurn { spec: spec2.clone(), prompt: text, events: events2.clone(), cmds: cmds2.clone() };
+                            let turn = FakeTurn { spec: spec2.clone(), prompt: text, events: events2.clone(), cmds: cmds2.clone(), stopped: stopped.clone() };
                             behavior(turn).await;
+                            // The turn read the Shutdown itself: the run ends without a turn end.
+                            if stopped.load(Ordering::SeqCst) {
+                                exit();
+                                break;
+                            }
                             send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(5) });
                             send(EventKind::StatusChanged { status: AgentStatus::Idle });
                         }
                         AgentCmd::Shutdown => {
-                            log.lock().unwrap().shutdowns.push(spec2.agent_id.clone());
-                            send(EventKind::Exited { code: Some(0) });
+                            exit();
                             break;
                         }
                         AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. } => {}
@@ -1540,6 +1573,25 @@ async fn a_task_that_is_merging_cannot_be_cancelled() {
     let (task, _) = wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
     assert_eq!(task.status, TaskStatus::Done);
     core.shutdown().await;
+}
+
+/// Quit while a start is on its way: a run that comes up after Codly began to quit is told to
+/// stop, like the runs that were up when the quit began. Not told, it works on until the
+/// quit's deadline, where every process group that Codly started is killed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_that_comes_up_while_codly_quits_is_told_to_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let stay: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.work_until_stopped().await }));
+    let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: stay.clone(), worker: stay }).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    core.shutdown().await;
+    // The quit has begun (and is over: no run was up to wait for). This message's run starts now.
+    let _ = core.send_chat(&format!("agent:{}", solo.id), "are you there?").await;
+    wait_for("the late run to be told to stop", 10, async || log.lock().unwrap().shutdowns.contains(&solo.id).then_some(())).await;
+    assert!(log.lock().unwrap().runs.iter().any(|r| r.0 == solo.id), "the run did come up");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4250,7 +4302,7 @@ async fn two_offices_work_at_once_and_share_the_worker_slots() {
     let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));
     let log = Arc::new(Mutex::new(Log::default()));
     // Workers stay on their task: each holds a slot until the test ends.
-    let hold: Behavior = Arc::new(|_turn: FakeTurn| Box::pin(std::future::pending::<()>()));
+    let hold: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.work_until_stopped().await }));
     let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
     let core = start(dir.path(), FakeSpawner { log, lead: idle, worker: hold }).await;
     core.update_settings(Settings { paused: true, max_parallel: 1, ..core.settings() }).await.unwrap();
@@ -4285,7 +4337,7 @@ async fn a_paused_office_starts_nothing_while_the_others_work() {
     let dir = tempfile::tempdir().unwrap();
     let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));
     let log = Arc::new(Mutex::new(Log::default()));
-    let hold: Behavior = Arc::new(|_turn: FakeTurn| Box::pin(std::future::pending::<()>()));
+    let hold: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.work_until_stopped().await }));
     let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
     let core = start(dir.path(), FakeSpawner { log, lead: idle, worker: hold }).await;
     core.update_settings(Settings { paused: true, max_parallel: 2, max_per_provider: 2, ..core.settings() }).await.unwrap();
@@ -4335,7 +4387,7 @@ async fn code_search_follows_the_files_and_says_what_differs_in_a_worktree() {
                 reply = turn.tool("codly_search", json!({ "query": "demo" })).await;
             }
             *seen.lock().unwrap() = Some(reply);
-            std::future::pending::<()>().await;
+            turn.work_until_stopped().await;
         })
     });
     let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
@@ -4396,7 +4448,7 @@ async fn a_task_brief_points_at_the_code_as_the_tasks_worktree_has_it() {
         Box::pin(async move {
             if turn.prompt.contains("[Codly] Task t2:") {
                 // The test reads this brief; the task stays in progress.
-                return std::future::pending::<()>().await;
+                return turn.work_until_stopped().await;
             }
             turn.write("billing.rs", "// Totals are in cents.\n\npub fn compute_invoice_total() -> u64 {\n    0\n}\n");
             let report = json!({ "status": "done", "summary": "Said that totals are in cents.", "files_changed": ["billing.rs"] });
@@ -4472,7 +4524,7 @@ async fn a_background_office_keeps_its_code_index() {
                 reply = turn.tool("codly_search", json!({ "query": "demo" })).await;
             }
             *seen.lock().unwrap() = Some(reply);
-            std::future::pending::<()>().await;
+            turn.work_until_stopped().await;
         })
     });
     let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
