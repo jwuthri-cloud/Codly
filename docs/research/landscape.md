@@ -3,7 +3,7 @@
 > Research date: **2026-10-25**. Author: research subagent for Codly.
 > Scope: Munder Difflin (deep), Pixel Agents (deep), Vibe Kanban / Claude Squad / Crystal / Agent of Empires (source-level), and about 20 other orchestrators (architecture-level).
 > Source clones (read-only, nothing built or executed) live in
-> `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/research-src/`.
+> `/tmp/scratch/research-src/`.
 
 ## Evidence legend
 

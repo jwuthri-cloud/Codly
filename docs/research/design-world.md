@@ -531,7 +531,7 @@ html { font-family: var(--font-ui); font-size: var(--text-13); line-height: var(
 - Output is a CSS file per theme plus a JSON file for the canvas world palette. Runtime switching is just swapping `data-theme`.
 - **No relative color syntax at runtime.** It needs Safari 18 [V-local, MDN BCD], which ties Codly to macOS 13+ users who have updated Safari [U].
 
-The calculation script used for this report is at `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scripts/tokens.py`. It converts OKLCH to sRGB and computes WCAG and APCA-W3 0.0.98G. Port it to TypeScript (or use `culori` 4.0.2, MIT) inside the token build.
+The calculation script used for this report is at `/tmp/scratch/scripts/tokens.py`. It converts OKLCH to sRGB and computes WCAG and APCA-W3 0.0.98G. Port it to TypeScript (or use `culori` 4.0.2, MIT) inside the token build.
 
 ### 5.3 Contrast verification (computed today)
 

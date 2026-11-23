@@ -2441,7 +2441,7 @@ mod tests {
     /// an interrupt) through the normalizer, answering approvals like the probe did.
     #[test]
     fn replays_the_app_server_fixture() {
-        let mut norm = CodexNormalizer::new("a1", "r1", PathBuf::from("/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/fixture-repo"), false);
+        let mut norm = CodexNormalizer::new("a1", "r1", PathBuf::from("/tmp/scratch/fixture-repo"), false);
         let mut events = Vec::new();
         let mut replies = Vec::new();
         for line in fixture() {

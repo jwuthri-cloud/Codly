@@ -119,7 +119,7 @@
           </form>
         {:else if shown(v.id) === 'command'}
           <form class="row" onsubmit={(e) => { e.preventDefault(); void saveCommand(v.id); }}>
-            <input class="field wide mono" type="text" bind:value={commands[v.id]} placeholder="a command that prints one token, e.g. ~/bin/wif-token {v.id}" spellcheck="false" autocomplete="off" aria-label="{v.label} token command" disabled={busy} />
+            <input class="field wide mono" type="text" bind:value={commands[v.id]} placeholder="a command that prints one token, e.g. ~/bin/get-token {v.id}" spellcheck="false" autocomplete="off" aria-label="{v.label} token command" disabled={busy} />
             <button class="btn" type="submit" disabled={busy || !commands[v.id].trim()}>Save</button>
           </form>
           <p class="desc">Runs with <code>/bin/sh -c</code> in your login environment, no input, and must print only the token. {v.id === 'openrouter' ? 'Codly runs it once per agent start.' : `${v.cli} runs it again before the token expires.`}</p>
