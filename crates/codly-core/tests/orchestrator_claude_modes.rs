@@ -1,7 +1,7 @@
-//! A Claude agent's mode, model, "compact now" and context reading end to end, with a fake
-//! agent in place of the CLI. The fake answers session requests with the shapes Claude Code
-//! 2.1.311 was recorded to give (docs/research/cli-claude-stream-json-2.1.311.md §2); the
-//! adapter's own tests replay the recordings themselves.
+//! A Claude agent's mode, model, thinking effort, "compact now" and context reading end to
+//! end, with a fake agent in place of the CLI. The fake answers session requests with the
+//! shapes Claude Code 2.1.311 was recorded to give (docs/research/cli-claude-stream-json-2.1.311.md
+//! §2, and scenario 13 of its part 2); the adapter's own tests replay the recordings themselves.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,9 +49,13 @@ fn claude() -> CliInfo {
 #[derive(Default)]
 struct Seen {
     /// What reached the agent, in order: "prompt:<text>", "mode:<cli name>", "model:<name>",
-    /// "context", and the answer to a command it asked about: "allowed:<command>" or
-    /// "denied:<command>".
+    /// "effort:<level>", "context", and the answer to a command it asked about:
+    /// "allowed:<command>" or "denied:<command>".
     log: Vec<String>,
+    /// The effort the session works with, once one was set (Claude Code starts with "medium").
+    effort: Option<String>,
+    /// Knob: the CLI drops the effort level it is asked for. It answers "success" all the same.
+    drops_effort: bool,
     /// The run id of every spawn, in order.
     runs: Vec<String>,
     shutdowns: u32,
@@ -170,10 +174,20 @@ impl Spawner for Fake {
                                     s.log.push(format!("model:{name}"));
                                     if name == "no-such-model" {
                                         Err(format!("Model '{name}' not found"))
+                                    } else if name == "default" {
+                                        Ok(json!({ "model": "claude-opus-5-5" }))
                                     } else {
                                         Ok(json!({ "model": format!("claude-{name}-5-5") }))
                                     }
                                 }
+                                SessionRequest::Effort(level) => {
+                                    s.log.push(format!("effort:{level}"));
+                                    if !s.drops_effort {
+                                        s.effort = Some(level);
+                                    }
+                                    Ok(serde_json::Value::Null)
+                                }
+                                SessionRequest::Settings => Ok(json!({ "applied": { "effort": s.effort.as_deref().unwrap_or("medium") } })),
                                 SessionRequest::ContextUsage => {
                                     s.log.push("context".into());
                                     Ok(json!({
@@ -394,13 +408,81 @@ async fn a_live_claude_agent_changes_its_model_without_a_restart() {
     assert!(e.contains("Model 'no-such-model' not found"), "{e}");
     assert_eq!(agent(&core, &id).await.model.as_deref(), Some("sonnet"));
 
-    // Another reasoning effort is set when the process starts: that switch still restarts.
+    // Another model with another thinking effort: both change in place, the model first.
     let a = core.set_agent_model(&id, Some("opus:high".into())).await.unwrap();
     assert_eq!(a.model.as_deref(), Some("opus:high"));
     {
         let s = seen.lock().unwrap();
-        assert!(!s.log.iter().any(|l| l.starts_with("model:opus")), "{:?}", s.log);
+        assert_eq!(s.log[s.log.len() - 2..], ["model:opus", "effort:high"], "{:?}", s.log);
+        assert_eq!((s.runs.len(), s.shutdowns), (1, 0), "the same process goes on");
+    }
+    assert!(codly_said(&core, &id, "now works with opus and thinking effort high, in the same conversation").await);
+    core.shutdown().await;
+}
+
+/// Does the agent's thread have a line of Codly's with this text?
+async fn codly_said(core: &Core, id: &str, text: &str) -> bool {
+    let events = core.events(Some(id), None, 500).await.unwrap();
+    events.iter().any(|e| matches!(&e.kind, EventKind::Chat { message } if message.author == "codly" && message.text.contains(text)))
+}
+
+/// Before, another thinking effort and Claude Code's default model had no live request: both
+/// stopped the process. Recorded since: `apply_flag_settings` sets the effort, `get_settings`
+/// says which one the session works with, and `set_model` takes "default".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_claude_agent_changes_its_effort_and_takes_the_default_model_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let tail = |n: usize| {
+        let s = seen.lock().unwrap();
+        s.log[s.log.len() - n..].to_vec()
+    };
+    let model = async || agent(&core, &id).await.model;
+
+    // Claude Code's default model: the agent shows the model the CLI named for it.
+    core.set_agent_model(&id, Some("sonnet".into())).await.unwrap();
+    let a = core.set_agent_model(&id, None).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(tail(2), ["model:sonnet", "model:default"]);
+    assert!(codly_said(&core, &id, "now works with Claude Code's default model (claude-opus-5-5), in the same conversation").await);
+
+    // A model with an effort, then another effort alone: the model is not asked for again.
+    core.set_agent_model(&id, Some("sonnet:high".into())).await.unwrap();
+    let a = core.set_agent_model(&id, Some("sonnet:low".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("sonnet:low"));
+    assert_eq!(tail(3), ["model:sonnet", "effort:high", "effort:low"]);
+    assert!(codly_said(&core, &id, "now works with thinking effort low, in the same conversation: no restart was needed.").await);
+
+    // Claude Code answers "success" for a level it then drops. Codly reads the level back:
+    // the switch is refused with what the session really works with, and nothing changes.
+    seen.lock().unwrap().drops_effort = true;
+    let e = core.set_agent_model(&id, Some("sonnet:max".into())).await.unwrap_err().to_string();
+    assert!(e.contains("did not take the effort level \"max\"") && e.contains("it works with \"low\""), "{e}");
+    assert_eq!(model().await.as_deref(), Some("sonnet:low"));
+    // With another model too: the model changed, the effort did not, and the agent says so.
+    let e = format!("{:#}", core.set_agent_model(&id, Some("opus:max".into())).await.unwrap_err());
+    assert!(e.contains("changed its model, but not its thinking effort") && e.contains("did not take the effort level \"max\""), "{e}");
+    assert_eq!(model().await.as_deref(), Some("opus:low"));
+    assert_eq!(tail(2), ["model:opus", "effort:max"]);
+    seen.lock().unwrap().drops_effort = false;
+    assert_eq!(seen.lock().unwrap().shutdowns, 0, "all of it in the same process");
+
+    // A word that is no level of Claude Code is not sent to the session, and a level cannot
+    // be taken away from it: those switches still restart.
+    let a = core.set_agent_model(&id, Some("opus".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus"));
+    {
+        let s = seen.lock().unwrap();
+        assert_eq!(s.log.last().map(String::as_str), Some("effort:max"), "nothing was asked of the session: {:?}", s.log);
         assert_eq!(s.shutdowns, 1);
+    }
+    turn(&core, &id, "again").await;
+    core.set_agent_model(&id, Some("opus:minimal".into())).await.unwrap();
+    {
+        let s = seen.lock().unwrap();
+        assert!(!s.log.iter().any(|l| l == "effort:minimal"), "{:?}", s.log);
+        assert_eq!(s.shutdowns, 2);
     }
     core.shutdown().await;
 }
@@ -423,6 +505,12 @@ async fn a_model_switch_reaches_the_live_session_during_a_turn() {
     assert_eq!(turns_done(&core, &id).await, 1, "the turn it was switched in is not over");
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
     assert_eq!(agent(&core, &id).await.run_id, run, "the same run goes on");
+
+    // The effort request is recorded between turns only: during one it is not sent.
+    let e = core.set_agent_model(&id, Some("sonnet:high".into())).await.unwrap_err().to_string();
+    assert!(e.contains("is still working: stop its turn first"), "{e}");
+    assert_eq!(last_seen(&seen), "model:sonnet");
+    assert_eq!(seen.lock().unwrap().shutdowns, 0);
 
     // The turn ends as any other, in the same process.
     seen.lock().unwrap().release.notify_one();
@@ -454,9 +542,14 @@ async fn a_1_to_1_agent_on_a_task_changes_its_model_without_a_restart() {
     let after = agent(&core, &id).await;
     assert_eq!((after.run_id, after.task_id), (before.run_id, before.task_id), "the same run, still on its task");
 
-    // The CLI's default model has no live request: on a task that switch is still refused.
-    let e = core.set_agent_model(&id, None).await.unwrap_err().to_string();
+    // So does Claude Code's default model (before, no request named it: the switch was refused).
+    let a = core.set_agent_model(&id, None).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(last_seen(&seen), "model:default");
+    // Another effort waits for the end of the turn, and a task's run is not restarted for it.
+    let e = core.set_agent_model(&id, Some("opus:high".into())).await.unwrap_err().to_string();
     assert!(e.contains("is on a task"), "{e}");
+    assert_eq!(last_seen(&seen), "model:default");
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
     core.shutdown().await;
 }
@@ -568,6 +661,43 @@ async fn accept_edits_is_refused_and_ends_where_every_change_asks_you() {
     core.set_request_prefs(&thread, own(ApprovalMode::Strict)).await.unwrap();
     assert_eq!(mode().await, Some(PermissionMode::Ask));
     assert_eq!(modes_asked(&seen).len(), asked);
+    core.shutdown().await;
+}
+
+/// An agent in "accept edits" moves to an office where every change asks you. Its first run
+/// there starts in "ask for edits", the mode a run starts in: its CLI is asked for no mode, and
+/// the agent's switch says so, on record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_edits_does_not_follow_an_agent_into_an_office_where_every_change_asks_you() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let thread = format!("agent:{id}");
+
+    // In this office the conversation has permissions of its own, so the agent may accept
+    // edits although the Settings say "Ask first".
+    core.set_request_prefs(&thread, RequestPrefs { approval_mode: Some(ApprovalMode::Balanced), ..Default::default() }).await.unwrap();
+    core.update_settings(Settings { approval_mode: ApprovalMode::Strict, ..core.settings() }).await.unwrap();
+    core.set_agent_permission_mode(&id, PermissionMode::AcceptEdits).await.unwrap();
+    assert_eq!(modes_asked(&seen), ["acceptEdits"]);
+
+    // Another office, where the conversation has none: there the Settings count.
+    let there = core.open_workspace(temp_repo(&dir.path().join("there")).to_str().unwrap()).await.unwrap();
+    core.open_workspace(dir.path().join("repo").to_str().unwrap()).await.unwrap();
+    core.transfer_agent(&id, &there.id).await.unwrap();
+    core.open_workspace(&there.repo_path).await.unwrap();
+    assert_eq!(agent(&core, &id).await.permission_mode, Some(PermissionMode::AcceptEdits), "it has not run there yet");
+
+    turn(&core, &id, "hello from the new office").await;
+    assert_eq!(agent(&core, &id).await.permission_mode, Some(PermissionMode::Ask));
+    assert_eq!(seen.lock().unwrap().runs.len(), 2);
+    assert_eq!(modes_asked(&seen), ["acceptEdits"], "the new run was asked for no mode");
+    let events = core.events(Some(&id), None, 200).await.unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.kind, EventKind::Decision { decision_type, summary, .. }
+            if decision_type == "agent_control" && summary.contains("asks for edits again") && summary.contains("\"Ask first\""))),
+        "the change is on record in the new office: {events:?}"
+    );
     core.shutdown().await;
 }
 

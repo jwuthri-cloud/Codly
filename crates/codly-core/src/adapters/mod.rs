@@ -135,17 +135,25 @@ pub enum AgentCmd {
 }
 
 /// What Codly asks of a live Claude session: the control requests that
-/// docs/research/cli-claude-stream-json-2.1.311.md §2 recorded. The CLI answers them at
-/// once, between turns and during one.
+/// docs/research/cli-claude-stream-json-2.1.311.md §2 recorded (the effort, the settings and
+/// the default model: its part 2, scenario 13). The CLI answers them at once; the mode, the
+/// model and the context reading are recorded during a turn too.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionRequest {
     /// `set_permission_mode`.
     PermissionMode(PermissionMode),
-    /// `set_model`, with a name of the CLI's model list ("sonnet") or a model id. The next
-    /// request to the model uses it.
+    /// `set_model`, with a name of the CLI's model list ("sonnet"), a model id, or "default"
+    /// for the CLI's own default model (`claude::DEFAULT_MODEL`). The answer names the model
+    /// it resolves to, and the next request to the model uses it.
     Model(String),
     /// `get_context_usage`: how full the context is.
     ContextUsage,
+    /// `apply_flag_settings` with `effortLevel`: the reasoning effort of the session, one of
+    /// `claude::EFFORT_LEVELS` (the adapter sends no other word). The CLI answers "success"
+    /// also for a level it then drops, so `Settings` is asked after it.
+    Effort(String),
+    /// `get_settings`: what the session works with now (`applied.model`, `applied.effort`).
+    Settings,
 }
 
 /// Where the answer to a `SessionRequest` goes: the `response` object of the CLI's control

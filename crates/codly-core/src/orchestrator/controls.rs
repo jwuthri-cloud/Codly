@@ -11,24 +11,31 @@
 //!   turn, Claude and Codex steer it into the turn. Nothing is typed into a terminal.
 //! - **Kill** is the existing `stop_agent` (shutdown ladder), which also clears the controls.
 //!
-//! For a Claude agent, three more go to the live session as the control requests its CLI
-//! takes without a restart (`SessionRequest`; docs/research/cli-claude-stream-json-2.1.311.md):
+//! For a Claude agent, more go to the live session as the control requests its CLI takes
+//! without a restart (`SessionRequest`; docs/research/cli-claude-stream-json-2.1.311.md and
+//! its part 2):
 //!
 //! - **Mode** (a 1:1 agent): ask for edits, accept edits, or plan first. It is kept on the
 //!   agent and set again on every run. It changes what the CLI asks about, never what Codly
 //!   answers: every request the CLI sends still goes through the approval broker, and a plan
 //!   is always yours to accept. Two rules keep a mode under your permissions:
 //!   - In "accept edits" the CLI does not ask about edits inside the worktree, nor about shell
-//!     commands that write files there (recorded: `echo hi > inside.txt` ran with no request,
-//!     a `touch` outside the worktree asked; deleting or moving a file with a command was not
-//!     recorded in this mode, and Codly counts it as not asked either). The broker never sees
-//!     those. So the mode is refused where your permissions are "ask first" (strict: every
-//!     change asks you), and it ends when you choose them (`permissions_changed`).
+//!     commands that change, move or delete files there (recorded: `echo hi > inside.txt`,
+//!     `mv`, `rm` and `rm -rf sub && mkdir sub` ran with no request; a `touch` outside the
+//!     worktree asked, and so did an edit of the folder's own `.claude/settings.local.json`).
+//!     The broker never sees what the CLI does not ask about. So the mode is refused where
+//!     your permissions are "ask first" (strict: every change asks you), and it ends when you
+//!     choose them (`permissions_changed`).
 //!   - In "plan first" the broker approves only reads, in every approval mode, until you accept
-//!     the plan (ingest.rs `broker`).
-//! - **Compact now** (a 1:1 agent): `/compact` as a turn of its own, between turns.
-//! - **Context** reads how full the context is. The model switch (`set_agent_model`, runs.rs)
-//!   uses the same path.
+//!     the plan (ingest.rs `broker`). You can change the plan before you accept it: the CLI
+//!     takes your text as the plan (recorded).
+//! - **Compact now** (a 1:1 agent): `/compact` as a turn of its own, between turns. A
+//!   conversation with nothing to compact ends that turn at once, with the CLI's words
+//!   (recorded: there is always a result).
+//! - **Context** reads how full the context is.
+//! - **Model and thinking effort** (`set_agent_model`, runs.rs; `switch_live_model` here): the
+//!   model, the CLI's default model included, and the effort change in the live session. The
+//!   CLI answers "success" for an effort level it then drops, so Codly reads the level back.
 //!
 //! `AgentControl` is the pure state machine (unit-tested below); the `impl Inner`/`impl Core`
 //! blocks are the glue the ingest pipeline and `send_prompt` call.
@@ -43,7 +50,7 @@ use tokio::sync::mpsc;
 use super::approvals::is_codly_tool;
 use super::interrupts::Asker;
 use super::{Inner, lock, row};
-use crate::adapters::{AgentCmd, SessionRequest};
+use crate::adapters::{AgentCmd, SessionRequest, classify};
 use crate::model::*;
 
 /// Held steer notes / prompts per agent; the oldest drop first.
@@ -71,6 +78,26 @@ fn context_usage(answer: &Value) -> Option<ContextUsage> {
             .filter_map(|c| Some(ContextPart { name: c["name"].as_str()?.to_string(), tokens: c["tokens"].as_i64()? }))
             .collect(),
     })
+}
+
+/// What a change of model asks of a live Claude session (`Inner::live_model_switch`).
+pub(super) struct LiveSwitch {
+    /// The name for `set_model` (`claude::DEFAULT_MODEL` for the CLI's own default). None: the
+    /// model stays, only the effort changes.
+    pub model: Option<String>,
+    /// The effort level to set. None: the session keeps its effort.
+    pub effort: Option<String>,
+    /// The effort the session works with now: what it started with, or its last live change.
+    pub effort_now: Option<String>,
+}
+
+/// A model and a reasoning effort as one model string ("opus:high"; `classify::split_model_effort`
+/// reads it back).
+fn model_string(name: Option<String>, effort: Option<&str>) -> Option<String> {
+    match (name, effort) {
+        (name, None) => name,
+        (name, Some(effort)) => Some(format!("{}:{effort}", name.unwrap_or_default())),
+    }
 }
 
 /// What to do with a `ToolStarted` while tools may be blocked.
@@ -401,6 +428,74 @@ impl Inner {
         }
     }
 
+    /// Give a live Claude session another model, another reasoning effort or both, with no
+    /// restart. `model` is what the user picked, `switch` what that asks of the session
+    /// (`live_model_switch`). The model goes first, as recorded. If the session then does not
+    /// take the effort, the agent keeps what its session really works with (the new model and
+    /// the effort it had) and the caller gets the reason.
+    pub(super) async fn switch_live_model(&self, agent: &Agent, model: Option<String>, switch: LiveSwitch) -> Result<Agent> {
+        let id = agent.id.as_str();
+        let (name, mut effort) = classify::split_model_effort(model.as_deref());
+        // The model the CLI's answer names: for its default model, the only name there is.
+        let mut resolved = None;
+        if let Some(ask) = &switch.model {
+            let answer = self.ask_session(id, SessionRequest::Model(ask.clone()))?;
+            resolved = Self::session_answer(answer).await?["model"].as_str().map(str::to_owned);
+        }
+        let mut effort_kept = None;
+        if let Some(level) = &switch.effort
+            && let Err(e) = self.set_live_effort(id, level).await
+        {
+            if switch.model.is_none() {
+                return Err(e); // nothing changed
+            }
+            effort = switch.effort_now.clone();
+            effort_kept = Some(e);
+        }
+        if let Some(l) = lock(&self.live).get_mut(id) {
+            l.model = model_string(name.clone(), effort.as_deref());
+        }
+        let mut now = Vec::new();
+        if switch.model.is_some() {
+            now.push(match (&name, &resolved) {
+                (Some(name), _) => name.clone(),
+                (None, Some(resolved)) => format!("Claude Code's default model ({resolved})"),
+                (None, None) => "Claude Code's default model".into(),
+            });
+        }
+        if let Some(level) = switch.effort.as_ref().filter(|_| effort_kept.is_none()) {
+            now.push(format!("thinking effort {level}"));
+        }
+        // (Recorded: after a model switch the next request reads the conversation with no cached tokens.)
+        let reads_again = if switch.model.is_some() { " Its next turn reads the whole conversation again with the new model." } else { "" };
+        let text = format!("{} now works with {}, in the same conversation: no restart was needed.{reads_again}", agent.name, now.join(" and "));
+        let ws = self.store.agent_workspace(id)?;
+        self.chat(ws.as_deref(), &format!("agent:{id}"), "codly", &text, None)?;
+        // The agent's row: the name the user picked; for the CLI's default, the model the CLI
+        // named; for a change of effort alone, the model it had.
+        let shown = name.or(resolved).or_else(|| classify::split_model_effort(agent.model.as_deref()).0);
+        let changed = self.update_agent(id, |a| a.model = model_string(shown, effort.as_deref()))?;
+        match effort_kept {
+            Some(e) => Err(e.context(format!("{} changed its model, but not its thinking effort", agent.name))),
+            None => Ok(changed),
+        }
+    }
+
+    /// Set the reasoning effort of a live Claude session, then read it back: Claude Code
+    /// answers "success" also for a level it drops (recorded), and only its settings say what
+    /// the session works with.
+    async fn set_live_effort(&self, agent_id: &str, level: &str) -> Result<()> {
+        let answer = self.ask_session(agent_id, SessionRequest::Effort(level.to_string()))?;
+        Self::session_answer(answer).await?;
+        let answer = self.ask_session(agent_id, SessionRequest::Settings)?;
+        let settings = Self::session_answer(answer).await?;
+        match settings["applied"]["effort"].as_str() {
+            Some(applied) if applied == level => Ok(()),
+            Some(applied) => bail!("Claude Code did not take the effort level \"{level}\": it works with \"{applied}\""),
+            None => bail!("Claude Code did not say which effort level it works with"),
+        }
+    }
+
     /// Put a 1:1 Claude agent in another permission mode: its live session now, every later
     /// run when it starts (`restore_permission_mode`).
     pub(super) async fn set_permission_mode(&self, agent_id: &str, mode: PermissionMode) -> Result<Agent> {
@@ -725,6 +820,16 @@ mod tests {
         off["isAutoCompactEnabled"] = json!(false);
         assert_eq!(context_usage(&off).unwrap().auto_compact_at, None);
         assert_eq!(context_usage(&json!({ "categories": [] })), None);
+    }
+
+    #[test]
+    fn a_model_and_an_effort_make_one_model_string() {
+        assert_eq!(model_string(Some("opus".into()), Some("high")).as_deref(), Some("opus:high"));
+        assert_eq!(model_string(Some("opus".into()), None).as_deref(), Some("opus"));
+        assert_eq!(model_string(None, None), None);
+        // The CLI's default model with an effort, as the model string is read back.
+        assert_eq!(model_string(None, Some("high")).as_deref(), Some(":high"));
+        assert_eq!(classify::split_model_effort(Some(":high")), (None, Some("high".to_string())));
     }
 
     #[test]
