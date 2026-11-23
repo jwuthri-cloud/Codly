@@ -39,8 +39,8 @@ function unhide(o: string | null, thread: string): void {
   ui.closingRequests = ui.closingRequests.filter((c) => !(c.office === o && c.thread === thread));
 }
 
-/** What a close asks first: the question, and what becomes of the work in a few more words. */
-export type CloseQuestion = { ask: string; detail: string };
+/** What a close asks first: the question, what is lost or kept in a few more words, and the word on the button that goes on. */
+export type CloseQuestion = { ask: string; detail: string; yes: 'Close' | 'Discard' };
 
 /**
  * What closing a request asks before anything happens. Null: it leaves nothing behind, so it
@@ -48,10 +48,15 @@ export type CloseQuestion = { ask: string; detail: string };
  * but every branch and worktree stays, a finished plan stays in Changes (where it can still be
  * merged), and a pull request is not touched. The request's tab is where that work is merged
  * from, though: a close with finished work that is not merged, or with a pull request still
- * open, first says what becomes of them.
+ * open, first says what becomes of them. A new request with nothing asked in it has no work:
+ * it asks only when its composer holds text you did not send.
  */
 export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
-  if (r.phase === 'running') return { ask: 'Cancel its running plan and close?', detail: 'Its unfinished tasks are cancelled. Nothing is deleted: what is done so far stays on its branch.' };
+  if (r.phase === 'new') {
+    const holdsText = ui.draftRequests.some((d) => d.thread === r.thread && d.kept);
+    return holdsText ? { ask: 'Discard this draft?', detail: 'What you wrote in it was not sent: it goes with the tab.', yes: 'Discard' } : null;
+  }
+  if (r.phase === 'running') return { ask: 'Cancel its running plan and close?', detail: 'Its unfinished tasks are cancelled. Nothing is deleted: what is done so far stays on its branch.', yes: 'Close' };
   const finished = store.plans.filter((p) => (p.thread || 'lead') === r.thread && p.status === 'done');
   const pr = (planId: string) => prKey({ kind: 'plan', id: planId });
   // Their pull requests, from Codly's own record (no network), where nothing read them yet.
@@ -61,12 +66,12 @@ export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
   const open = finished.some((p) => prUi.opened[pr(p.id)]?.state === 'open');
   if (!unmerged.length && !open) return null;
   const stays = 'The pull request stays open: Codly does not close or merge it.';
-  if (!unmerged.length) return { ask: 'Its pull request stays open. Close?', detail: stays };
+  if (!unmerged.length) return { ask: 'Its pull request stays open. Close?', detail: stays, yes: 'Close' };
   const branch = unmerged.length === 1 ? unmerged[0].integration_branch : null;
   const kept = `Nothing is deleted: ${branch ?? 'its work'} stays, and you can still merge it in Changes.`;
   return open
-    ? { ask: 'Not merged yet: its branch and pull request stay. Close?', detail: `${kept} ${stays}` }
-    : { ask: 'Not merged yet: its branch stays. Close?', detail: kept };
+    ? { ask: 'Not merged yet: its branch and pull request stay. Close?', detail: `${kept} ${stays}`, yes: 'Close' }
+    : { ask: 'Not merged yet: its branch stays. Close?', detail: kept, yes: 'Close' };
 }
 
 /** Close a request's tab, with Undo for a few seconds. You land on the tab beside it (a new request if it was the only one). */
