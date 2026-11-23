@@ -39,6 +39,7 @@ failed_checks: Array<string>,
 checks_not_run: string | null, 
 /**
  * How many commits the checked-out branch has that the Codly branch was not built on: it
- * is behind by that many, and the merge brings the two together.
+ * is behind by that many, and the merge brings the two together. 0 when the Codly branch
+ * has nothing to merge: it is merged already, or it has no commit of its own.
  */
 behind: number, };

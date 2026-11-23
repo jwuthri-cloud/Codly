@@ -891,7 +891,8 @@ impl Git {
 
     /// Start merging `branch` into the worktree without committing, leaving conflict markers
     /// for an agent to resolve. Returns the conflicted paths (empty = merged cleanly, still
-    /// uncommitted until `commit_all`). Used when a task branch falls behind integration.
+    /// uncommitted until `commit_all` or `conclude_merge`). Used when a task branch falls
+    /// behind integration.
     pub async fn merge_for_resolution(&self, wt: &Path, branch: &str) -> Result<Vec<String>> {
         let mut args = self.internal_flags(wt).await?;
         args.extend(["merge", "--no-ff", "--no-commit", "--no-verify", branch].map(String::from));
@@ -1306,6 +1307,25 @@ impl Git {
     pub async fn set_ref(&self, repo: &Path, name: &str, sha: &str) -> Result<()> {
         let [c1, hooks, c2, fsmonitor] = Self::SAFE;
         self.ok(repo, &[c1, hooks, c2, fsmonitor, "update-ref", name, sha], false).await.map(drop)
+    }
+
+    /// Commit the merge that is open in a worktree as git made it (`merge_for_resolution`
+    /// without a conflict): the index is committed as it is and nothing is added, so a new
+    /// (untracked) file of the worktree stays out of the merge commit and stays untracked. An
+    /// error when no merge is open, or when a file of it is still in conflict.
+    pub async fn conclude_merge(&self, wt: &Path, message: &str) -> Result<Commit> {
+        if !self.in_merge(wt).await {
+            bail!("no merge is open in {}, so there is none to commit", wt.display());
+        }
+        let [c1, hooks, c2, fsmonitor] = Self::SAFE;
+        let files =
+            split_z(&self.ok(wt, &[c1, hooks, c2, fsmonitor, "diff", "--cached", "--name-only", "--no-renames", "-z"], false).await?);
+        let mut args = self.internal_flags(wt).await?;
+        args.extend(["commit", "--no-verify", "--quiet", "-m", message].map(String::from));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.ok(wt, &args, false).await?;
+        let sha = self.head(wt).await?.ok_or_else(|| anyhow!("commit produced no HEAD"))?;
+        Ok(Commit { sha, files })
     }
 }
 
@@ -2227,5 +2247,32 @@ mod tests {
         let second = git.head(&repo).await.unwrap().unwrap();
         git.set_ref(&repo, "refs/codly/before-merge", &second).await.unwrap();
         assert_eq!(git.rev_parse(&repo, "refs/codly/before-merge").await.unwrap(), Some(second));
+    }
+
+    /// A merge without a conflict is committed as git made it: a new file that was in the
+    /// worktree stays untracked and is not in the merge commit, and nobody changed the merge
+    /// by hand. Without an open merge there is nothing to commit.
+    #[tokio::test]
+    async fn conclude_merge_commits_the_merge_and_adds_nothing() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        branch_with(&repo, "plan", "e.txt", Some("e\n"));
+        commit_file(&repo, "f.txt", "f\n");
+        sh(&repo, &["checkout", "-q", "plan"]);
+        let before = git.head(&repo).await.unwrap().unwrap();
+        std::fs::write(repo.join("junit.xml"), "<testsuite/>\n").unwrap();
+        let err = git.conclude_merge(&repo, "merge main").await.unwrap_err().to_string();
+        assert!(err.starts_with("no merge is open in"), "{err}");
+        assert_eq!(git.head(&repo).await.unwrap().unwrap(), before);
+
+        assert!(git.merge_for_resolution(&repo, "main").await.unwrap().is_empty());
+        let merge = git.conclude_merge(&repo, "merge main").await.unwrap();
+        assert_eq!((git.head(&repo).await.unwrap().as_ref(), &merge.files[..]), (Some(&merge.sha), &["f.txt".to_string()][..]));
+        assert!(!git.in_merge(&repo).await);
+        assert_eq!(git.rev_parse(&repo, "HEAD^1").await.unwrap(), Some(before.clone()));
+        assert_eq!(git.rev_parse(&repo, "HEAD^2").await.unwrap(), git.rev_parse(&repo, "main").await.unwrap());
+        assert_eq!(git.untracked(&repo).await.unwrap(), ["junit.xml"]);
+        assert!(!git.ls_files(&repo).await.unwrap().contains(&"junit.xml".to_string()));
+        assert_eq!(git.resolution_diff(&repo, &before, "plan").await.unwrap().trim(), "");
     }
 }

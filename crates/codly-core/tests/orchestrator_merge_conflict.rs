@@ -580,6 +580,9 @@ async fn a_solo_agent_resolves_the_conflict_of_its_own_branch() {
     let wt = PathBuf::from(solo.worktree.clone().unwrap());
     std::fs::write(wt.join("greeting.txt"), "hello from the agent\n").unwrap();
     let mine = commit(&repo, "greeting.txt", "hello from main\n");
+    // Its branch has no commit of its own yet: there is nothing to merge, so it is not "behind".
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((state.conflicts.len(), state.behind), (0, 0));
 
     // Merge: refused, with the file and both ways out.
     let err = core.merge_agent(&solo.id).await.unwrap_err().to_string();
@@ -589,6 +592,7 @@ async fn a_solo_agent_resolves_the_conflict_of_its_own_branch() {
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), mine);
     let state = core.merge_state(&source).await.unwrap();
     assert_eq!((state.target.as_str(), state.branch.as_str(), &state.conflicts), ("main", branch.as_str(), &vec!["greeting.txt".to_string()]));
+    assert_eq!(state.behind, 1, "its work is committed now, and main has your one commit that it was not built on");
 
     // Have the agent resolve it: the merge is started in its own worktree and it is asked in its conversation.
     core.resolve_merge_conflict(&source).await.unwrap();
@@ -634,6 +638,11 @@ async fn a_solo_agent_resolves_the_conflict_of_its_own_branch() {
     .await;
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), sha);
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), "hello from main and the agent\n");
+    // Merged: main has the merge commit, which the agent's branch does not have, but there is
+    // nothing left to merge, so its Git tab does not say "behind".
+    assert_ne!(sh(&repo, &["rev-parse", &branch]), sha);
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((state.conflicts.len(), state.resolving, state.behind), (0, None, 0));
     core.shutdown().await;
 }
 
@@ -1159,7 +1168,8 @@ async fn an_agent_fixes_checks_that_fail_on_the_merge_result() {
 
 /// The agent cannot make the check pass and you cancel its task: the merge of your branch is
 /// taken off the plan's branch, the file the agent left in the plan's worktree goes, and the
-/// plan is done as it was, with the same choice as before.
+/// plan is done as it was, with the same choice as before. A new file that was in the plan's
+/// worktree before (a check's output) is not in the merge Codly commits, and it stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fix_of_the_checks_that_does_not_finish_takes_the_merge_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -1171,6 +1181,8 @@ async fn a_fix_of_the_checks_that_does_not_finish_takes_the_merge_back() {
     let branch = plan.integration_branch.clone().unwrap();
     let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
     let tip = sh(&repo, &["rev-parse", &branch]);
+    // In the plan's worktree before the fix: what a check left there.
+    std::fs::write(integ_wt.join("junit.xml"), "<testsuite/>\n").unwrap();
     let bad = commit(&repo, "mode.txt", "bad\n");
     core.merge_plan(&plan.id).await.unwrap_err();
 
@@ -1178,6 +1190,10 @@ async fn a_fix_of_the_checks_that_does_not_finish_takes_the_merge_back() {
     let task = task_with(&core, "fix-checks", TaskStatus::Blocked).await;
     assert!(git(&repo, &["merge-base", "--is-ancestor", &bad, &branch]).status.success(), "the merge of main is on the plan's branch");
     assert!(integ_wt.join("attempt.txt").exists());
+    // The merge is committed as git made it: the plan's tip and main, and no file of the worktree.
+    assert_eq!(sh(&repo, &["rev-parse", &format!("{branch}^1"), &format!("{branch}^2")]), format!("{tip}\n{bad}"));
+    assert_eq!(sh(&repo, &["ls-tree", "--name-only", &branch, "junit.xml"]), "", "the check's output is not in the merge commit");
+    assert_eq!(sh(&integ_wt, &["status", "--porcelain", "--", "junit.xml"]), "?? junit.xml");
     let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
     assert!(err.contains("the plan is still running"), "{err}");
 
@@ -1185,7 +1201,8 @@ async fn a_fix_of_the_checks_that_does_not_finish_takes_the_merge_back() {
     let again = wait_plan(&core, PlanStatus::Done).await;
     assert_eq!(sh(&repo, &["rev-parse", &branch]), tip, "the plan's branch is back where it was");
     assert_eq!((&again.base_commit, &again.base_branch), (&plan.base_commit, &plan.base_branch));
-    assert_eq!(sh(&integ_wt, &["status", "--porcelain"]), "", "the file the agent left is gone with the merge");
+    assert_eq!(sh(&integ_wt, &["status", "--porcelain"]), "?? junit.xml", "the file the agent left is gone with the merge, the one from before is still there");
+    assert_eq!(std::fs::read_to_string(integ_wt.join("junit.xml")).unwrap(), "<testsuite/>\n");
     assert_eq!(std::fs::read_to_string(integ_wt.join("mode.txt")).unwrap(), "good\n");
     let lines = said(&core, "lead").await;
     assert!(lines.iter().any(|l| l.starts_with("The plan's checks still fail with your branch merged in. Codly took that merge back")), "{lines:?}");

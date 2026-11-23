@@ -69,7 +69,8 @@ pub struct MergeState {
     /// once either branch moved.
     pub checks_not_run: Option<String>,
     /// How many commits the checked-out branch has that the Codly branch was not built on: it
-    /// is behind by that many, and the merge brings the two together.
+    /// is behind by that many, and the merge brings the two together. 0 when the Codly branch
+    /// has nothing to merge: it is merged already, or it has no commit of its own.
     pub behind: u32,
 }
 
@@ -349,6 +350,9 @@ impl Inner {
         let head = self.git.head(&repo).await?;
         let tip = self.git.rev_parse(&repo, &branch).await?;
         let (conflicts, behind) = match &tip {
+            // Everything on the branch is in the checked-out one already (it was merged, or it
+            // has no commit of its own): there is no merge to make, so it is not behind.
+            Some(tip) if self.git.is_ancestor(&repo, tip, "HEAD").await? => (vec![], 0),
             Some(tip) => (self.git.merge_tree_check(&repo, "HEAD", tip).await?.conflicts, self.git.commits_ahead(&repo, tip, "HEAD").await?),
             // The branch was deleted: there is nothing to merge, so nothing conflicts.
             None => (vec![], 0),
@@ -440,7 +444,8 @@ impl Inner {
         if self.git.is_ancestor(&wt, &was.tip, "HEAD").await? {
             self.git.reset_to(&wt, &was.tip).await?;
             // The new files its worker left, which are on no branch, go too: the plan's checks
-            // must not see them. What was there before the task started stays.
+            // must not see them. What was new there before the task started stays, unless a
+            // commit of the task's own work took it in: then it went with that commit.
             if let Some(before) = &was.untracked {
                 removed = remove_new(&wt, &self.git.untracked(&wt).await?, before)?;
             }
@@ -592,7 +597,8 @@ impl Inner {
         if failed.is_empty() && self.git.merge_tree_check(&repo, &before, &head).await.is_ok_and(|check| check.clean) {
             bail!("{branch} and {target} merge without a conflict now, so there is nothing to resolve; merge the plan (Codly runs its checks on the result first)");
         }
-        // What worktree setup and the checks left there: it stays if the task does not finish.
+        // What worktree setup and the checks left there: it stays out of the merge Codly
+        // commits here, and it stays if the task does not finish.
         let untracked = self.git.untracked(&wt).await?;
         let files = self.git.merge_for_resolution(&wt, &theirs).await?;
         let ws_id = Some(ws.id.as_str());
@@ -600,9 +606,9 @@ impl Inner {
         detail[BRINGS_IN] = json!(target);
         let text = if files.is_empty() {
             let message = format!("codly: merge {target} into {branch}");
-            if let Some(c) = self.git.commit_all(&wt, &message).await? {
-                self.emit(ws_id, row(None, None, None, EventKind::Committed { sha: c.sha, files: c.files, message }))?;
-            }
+            // The merge as git made it, and nothing else that is in the worktree.
+            let c = self.git.conclude_merge(&wt, &message).await?;
+            self.emit(ws_id, row(None, None, None, EventKind::Committed { sha: c.sha, files: c.files, message }))?;
             self.decide_by(ws_id, None, "merge", "human", format!("you had {target} brought into {branch}; it merged without a conflict"), detail)?;
             format!(
                 "Codly brought {target} into the plan's branch, in its own worktree: no conflict after all. The plan's checks \
