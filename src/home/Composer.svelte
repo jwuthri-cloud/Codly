@@ -119,6 +119,13 @@
     untrack(() => ui.holdDraft(here, holds));
   });
 
+  /** The line was emptied by a pick that may leave this conversation in the same moment (/new,
+   *  "@Ada" at the start). The effect above then runs for the next conversation only, so a new
+   *  request is told now that it holds no text: left empty, it is dropped, not kept as a tab. */
+  function emptied() {
+    ui.holdDraft(thread, files.length > 0);
+  }
+
   $effect(() => {
     if (ui.composerFocus) tick().then(() => ta?.focus());
   });
@@ -248,6 +255,7 @@
       // The line was only the action's name: it runs, and nothing is sent.
       mention = null;
       text = '';
+      emptied();
       tick().then(resize);
       o.run();
       return;
@@ -257,6 +265,7 @@
       const rest = text.slice(end).trimStart();
       mention = null;
       text = '';
+      emptied();
       ui.openThread(store.threadOf(o.agentId));
       tick().then(() => {
         text = rest;

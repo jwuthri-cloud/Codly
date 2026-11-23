@@ -386,6 +386,61 @@ describe('Send back', () => {
     expect(waitingRequest(key)).toBeNull();
   });
 
+  it('sending the message takes only the comments that are in it: one written or changed since stays on the diff', async () => {
+    vi.spyOn(api, 'sendChat').mockResolvedValue();
+    finished();
+    write();
+    review.comment(key, fileAnchor('b.txt'), 'Why two lines?');
+    await sendBack(target, ['src/a.ts', 'b.txt']);
+    const draft = ui.request;
+    const first = ui.composerSeed!.text;
+
+    // Back in Changes: one comment more, one changed, one saved again as it was. Send back is
+    // not pressed again, so the message in the request is still the first one.
+    review.comment(key, fileAnchor('src/a.ts'), 'And add a test.');
+    review.comment(key, lineAnchor('src/a.ts', fresh), 'Call it `after`.');
+    review.comment(key, fileAnchor('b.txt'), 'Why two lines?');
+    sendChat(draft, first);
+    expect(review.comments(key).map((c) => c.text)).toEqual(['And add a test.', 'Call it `after`.']);
+    expect(waitingRequest(key)).toBeNull();
+  });
+
+  it('another message sent from that request sends no comment: they all stay on the diff, and Send back opens a new request', async () => {
+    vi.spyOn(api, 'sendChat').mockResolvedValue();
+    finished();
+    write();
+    await sendBack(target, ['src/a.ts']);
+    const draft = ui.request;
+    const first = ui.composerSeed!.text;
+    ui.composerSeed = null; // the composer took it
+
+    sendChat(draft, 'Something else');
+    expect(review.comments(key)).toHaveLength(1);
+    expect(waitingRequest(key)).toBeNull();
+
+    expect(await sendBack(target, ['src/a.ts'])).toBe(true);
+    expect(ui.request).not.toBe(draft);
+    expect(ui.composerSeed).toMatchObject({ thread: ui.request, text: first, replaces: null });
+  });
+
+  it('Send back again opens a new request with the comments when the first one was emptied', async () => {
+    finished();
+    write();
+    await sendBack(target, ['src/a.ts']);
+    const draft = ui.request;
+    const first = ui.composerSeed!.text;
+    ui.composerSeed = null; // the composer took it
+    ui.holdDraft(draft, false); // and you cleared it there
+    expect(waitingRequest(key)).toBeNull(); // the comments are not in a request any more
+
+    // From Changes, with the comments as they were: they are put in a composer again.
+    expect(await sendBack(target, ['src/a.ts'])).toBe(true);
+    expect(ui.request).not.toBe(draft);
+    expect(ui.composerSeed).toMatchObject({ thread: ui.request, text: first, replaces: null });
+    expect(ui.draftRequests.map((d) => d.thread)).toEqual([ui.request]); // the emptied one is dropped
+    expect(waitingRequest(key)).toBe(ui.request);
+  });
+
   it('Send back again goes to the same request, and brings the comments as they are now', async () => {
     finished();
     write();

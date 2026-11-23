@@ -145,8 +145,9 @@ export function sendChat(thread: string, text: string): boolean {
   const t = text.trim();
   if (!t) return false;
   const id = store.queueOutgoing(thread, t, wallNow());
-  // Review comments that waited in this request's composer are sent now: they leave their diff.
-  review.sent(store.workspace?.id ?? null, thread);
+  // Review comments that waited in this request's composer and are in this message are sent
+  // now: they leave their diff.
+  review.sent(store.workspace?.id ?? null, thread, t);
   void deliver(id, thread, t);
   return true;
 }
@@ -375,7 +376,9 @@ export async function acceptTask(taskId: string) {
 /** The request whose composer holds a diff's comments since Send back (`reviewKey`), while it is still a tab. */
 export function waitingRequest(key: string): string | null {
   const to = review.handedTo(key);
-  return to && store.isOpen(to.office) && requests.get(to.thread) ? to.thread : null;
+  if (!to || !store.isOpen(to.office) || !requests.get(to.thread)) return null;
+  // A new request whose composer was emptied since holds nothing: the comments are not there.
+  return ui.draftRequests.some((d) => d.thread === to.thread && !d.kept) ? null : to.thread;
 }
 
 /**
@@ -412,7 +415,7 @@ export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, pa
     ui.seedComposer(ui.request, text);
   } else if (was === text) ui.openRequest(waiting);
   else ui.seedComposer(waiting, text, false, was);
-  review.hand(key, { office: store.workspace?.id ?? null, thread: ui.request, text });
+  review.hand(key, { office: store.workspace?.id ?? null, thread: ui.request, text, comments: list });
   return true;
 }
 

@@ -4,14 +4,15 @@
 // Comments on finished work are sent as the message of a new request: Send back puts them in
 // that request's composer (`hand`), and they stay on the diff until the message is sent.
 import type { DiffFile } from '../util/diff';
-import { fileMark, heavy, withComment, type Anchor, type ReviewComment } from '../util/review';
+import { fileMark, heavy, sameSpot, withComment, type Anchor, type ReviewComment } from '../util/review';
 
 /** A diff's name here: "task:<id>" or "plan:<id>". */
 export const reviewKey = (t: { kind: 'plan' | 'task'; id: string }): string => `${t.kind}:${t.id}`;
 
 /** The request whose composer holds a diff's comments: its office and thread (thread names
- *  repeat across offices), and the message that was put there (`text`). */
-type Handed = { office: string | null; thread: string; text: string };
+ *  repeat across offices), the message that was put there (`text`), and the comments that
+ *  message was built from (`comments`). */
+type Handed = { office: string | null; thread: string; text: string; comments: ReviewComment[] };
 
 const NONE: ReviewComment[] = [];
 const without = <T>(o: Record<string, T>, key: string): Record<string, T> => Object.fromEntries(Object.entries(o).filter(([k]) => k !== key));
@@ -52,9 +53,21 @@ class Review {
     return this.handed[key] ?? null;
   }
 
-  /** A message was sent in a request: the comments its composer held are sent, and leave their diffs. */
-  sent(office: string | null, thread: string) {
-    for (const [key, to] of Object.entries(this.handed)) if (to.office === office && to.thread === thread) this.clear(key);
+  /**
+   * A message (`text`) was sent in a request. Where it has the message Send back put in the
+   * request's composer, the comments of that message are sent and leave their diff: a comment
+   * you wrote or changed since is not in it, and stays. A message without it sent no comment:
+   * they all stay on their diff, and the request does not hold them any more.
+   */
+  sent(office: string | null, thread: string, text: string) {
+    for (const [key, to] of Object.entries(this.handed)) {
+      if (to.office !== office || to.thread !== thread) continue;
+      if (text.includes(to.text)) {
+        const left = this.comments(key).filter((c) => !to.comments.some((s) => sameSpot(s, c) && s.text === c.text));
+        this.drafts = left.length ? { ...this.drafts, [key]: left } : without(this.drafts, key);
+      }
+      this.handed = without(this.handed, key);
+    }
   }
 
   /** A request was closed with nothing sent: the comments its composer held stay on their diffs, as before Send back. */

@@ -40,6 +40,16 @@ describe('a new request that has no message yet', () => {
     expect(ui.draftRequests).toEqual([]);
   });
 
+  it('is dropped when an action typed on its line empties the composer and opens another request', () => {
+    ui.newRequest();
+    const draft = ui.request;
+    ui.holdDraft(draft, true); // "/new" is on its line
+    ui.holdDraft(draft, false); // picked: the composer says at once that the line is empty
+    ui.newRequest(); // the action
+    expect(ui.request).not.toBe(draft);
+    expect(tabs()).toEqual([ui.request]);
+  });
+
   it('holds the text another surface hands it, before its composer is on screen', () => {
     ui.newRequest();
     const draft = ui.request;
