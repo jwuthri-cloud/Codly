@@ -14,9 +14,8 @@
   import PullRequestDialog from './overlays/PullRequestDialog.svelte';
   import { prUi } from './lib/state/pullRequest.svelte';
   import IdeOverlay from './ide/IdeOverlay.svelte';
-  import DiagnosticsReport from './components/DiagnosticsReport.svelte';
-  import EmptyState from './components/EmptyState.svelte';
   import Logo from './components/Logo.svelte';
+  import StartFailed from './components/StartFailed.svelte';
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
   import DragGhost from './components/DragGhost.svelte';
@@ -70,11 +69,7 @@
 {:else if store.error}
   <!-- The first snapshot never arrived: say why, instead of an empty Welcome. -->
   <div class="boot center" data-tauri-drag-region>
-    <EmptyState title="Codly couldn’t start." body={store.error}>
-      <button class="btn primary" onclick={() => store.retry()}>Try again</button>
-      <!-- Something to attach to a bug report: it is built without the core that just failed. -->
-      <DiagnosticsReport />
-    </EmptyState>
+    <StartFailed />
   </div>
 {:else if ui.onboarded}
   <Welcome />

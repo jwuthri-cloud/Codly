@@ -129,6 +129,17 @@ pub(super) async fn sweeper(inner: Arc<Inner>) {
         for problem in inner.storage_sweep_at(now_ms()).await.problems {
             tracing::warn!("storage sweep: {problem}");
         }
+        // The daily copy of the database (it reads all of it: off the async threads).
+        let copied = tokio::task::spawn_blocking({
+            let inner = inner.clone();
+            move || inner.store.backup_if_due(now_ms())
+        });
+        match copied.await {
+            Ok(Ok(Some(copy))) => tracing::info!("database backup written: {}", copy.path),
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => tracing::warn!("database backup failed: {e:#}"),
+            Err(e) => tracing::warn!("database backup did not finish: {e}"),
+        }
         tokio::time::sleep(SWEEP_EVERY).await;
     }
 }

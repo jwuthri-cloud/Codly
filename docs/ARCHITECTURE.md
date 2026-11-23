@@ -513,7 +513,10 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       required_checks.rs weak_checks.rs   the owner's `.codly/checks` in the gate; verify commands that prove nothing
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
                       activity.rs                         the work under way now, for the shell (keep awake, quit question)
-  store/            SQLite: schema.sql, later migrations (m2…m4), typed queries
+  store/            SQLite: schema.sql, later migrations (m2…m4), typed queries; backup.rs: a copy
+                    of the database once a day and before a migration (`<data dir>/backups/`), and
+                    the way back from a database that cannot be used (it is moved aside, never deleted;
+                    a start with no data moves the copies aside too, as `backups.before-<time>/`)
   git.rs            worktrees, commits, merges, push (shells out to the user's git)
   mcp/              server.rs (Unix socket), bridge.rs (`codly mcp`), tools.rs (tool specs)
   index/            code retrieval: FTS5 over paths, symbols and chunks; pointer packs
@@ -540,7 +543,8 @@ crates/codly-core/        build.rs (builds in the ready-made lots), skills/catal
 src-tauri/src/            the macOS shell
   main.rs lib.rs    entry point; window, plugins, the command list
   cli.rs            what `codly <arguments>` asks for, decided before a window or a server starts
-  boot.rs           starts the core, and starts it again after a failed start (`retry_core`)
+  boot.rs           starts the core, and starts it again after a failed start (`retry_core`); when
+                    the database cannot be used: `start_problem`, `recover_database`
   awake.rs quit.rs  long runs: no idle sleep while agents work (`caffeinate`); the question before a quit
                     that would stop them
   logging.rs        the log file (`<data dir>/logs/codly.log`) and the panic hook

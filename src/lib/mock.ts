@@ -245,6 +245,8 @@ export class MockTransport implements Transport {
     switch (cmd) {
       case 'ui_set_visible':
       case 'retry_core': // the demo's core never fails to start
+      case 'start_problem':
+      case 'recover_database':
         return null;
       case 'detect_clis':
         // Like the core: a CLI's badge says so while its vendor's own credential is in use.

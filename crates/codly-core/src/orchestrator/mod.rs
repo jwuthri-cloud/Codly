@@ -250,6 +250,9 @@ struct Inner {
     quota: Mutex<HashMap<String, Vec<UsageWindow>>>,
     /// Artifact files already announced (absolute path + size), so rewrites re-announce.
     artifacts_seen: Mutex<HashSet<String>>,
+    /// Files to copy into `artifacts/` and announce (`ingest::copy_artifacts` does it, so a
+    /// copy never runs on the ingest task).
+    artifact_copies: mpsc::UnboundedSender<ingest::ArtifactCopy>,
     /// Open (and just-closed) job offers, by task.
     offers: Mutex<HashMap<Id, JobOffer>>,
     /// How long a job offer stays up (ms); 0 = hire at once (the default, and in tests).
@@ -385,7 +388,7 @@ impl Core {
             std::fs::set_permissions(cfg.data_dir.join("runs"), std::fs::Permissions::from_mode(0o700))?;
         }
         approvals::protect_dir(&cfg.data_dir);
-        let store = Store::open(&cfg.data_dir.join("codly.sqlite"))?;
+        let store = Store::open(&cfg.data_dir.join(store::FILE))?;
         let settings = store.settings()?;
         let base_env = match opts.env {
             Some(e) => e,
@@ -403,6 +406,7 @@ impl Core {
         let quota = accounts::stored_limits(&store);
         let breaker = Mutex::new(breaker_run::Runtime::load(&store));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (artifact_copies, artifact_jobs) = mpsc::unbounded_channel();
         let (bus, _) = broadcast::channel(4096);
         let inner = Arc::new(Inner {
             cfg: cfg.clone(),
@@ -435,6 +439,7 @@ impl Core {
             accounts: RwLock::new(accounts),
             quota: Mutex::new(quota),
             artifacts_seen: Mutex::new(HashSet::new()),
+            artifact_copies,
             offers: Mutex::new(HashMap::new()),
             hiring_window_ms: std::sync::atomic::AtomicU64::new(0),
             models: Mutex::new(HashMap::new()),
@@ -450,6 +455,7 @@ impl Core {
         let _ = inner.mcp.set(mcp);
         inner.recover().await;
         tokio::spawn(ingest::run(inner.clone(), events_rx));
+        tokio::spawn(ingest::copy_artifacts(inner.clone(), artifact_jobs));
         tokio::spawn(plans::scheduler_loop(inner.clone()));
         tokio::spawn(triggers::run(inner.clone()));
         tokio::spawn(breaker_run::beat_loop(inner.clone()));

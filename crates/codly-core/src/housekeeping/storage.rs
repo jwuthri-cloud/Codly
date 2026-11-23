@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::git::{Git, WorktreeInfo};
+use crate::store::backup::DbBackup;
 
 /// Uncommitted files named per worktree in a report (the count is always complete).
 const DIRTY_SHOWN: usize = 20;
@@ -142,6 +143,8 @@ pub struct StorageReport {
     pub logs: DirUsage,
     /// Copies of the files agents made, of every office (`artifacts/`).
     pub artifacts: DirUsage,
+    /// Copies of Codly's database, newest first (`backups/`).
+    pub backups: Vec<DbBackup>,
 }
 
 /// What a cleanup removed.

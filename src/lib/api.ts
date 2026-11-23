@@ -33,6 +33,7 @@ import type { RequiredChecks } from './gen/RequiredChecks';
 import type { StorageCleanup } from './gen/StorageCleanup';
 import type { StoragePolicy } from './gen/StoragePolicy';
 import type { StorageReport } from './gen/StorageReport';
+import type { StartProblem } from './gen/StartProblem';
 import type { RepoSync } from './gen/RepoSync';
 import type { MergeState } from './gen/MergeState';
 import type { MergeWarning } from './gen/MergeWarning';
@@ -228,6 +229,10 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 export const api = {
   /** "Try again" on the start-up error screen: start the core again if its start failed. Subscribe again after it. */
   retryCore: () => call<void>('retry_core'),
+  /** The start-up error screen: what to say and offer when the start failed because the database cannot be used. null = another reason. */
+  startProblem: () => call<StartProblem | null>('start_problem'),
+  /** Start from `backup` (the path of one `startProblem` offered) or with no data (null). The app moves the database aside, never deletes it, and starts the core again. Subscribe again after it. */
+  recoverDatabase: (backup: string | null) => call<void>('recover_database', { backup }),
   setVisible: (visible: boolean) => call<void>('ui_set_visible', { visible }),
   detectClis: () => call<CliInfo[]>('detect_clis'),
   /** Every sign-in of every installed CLI, with quota windows. `refresh` re-probes sign-in state. */

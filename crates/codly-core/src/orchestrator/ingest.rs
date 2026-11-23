@@ -38,6 +38,42 @@ pub(super) async fn run(inner: Arc<Inner>, mut rx: mpsc::UnboundedReceiver<Adapt
     }
 }
 
+/// A file to copy into `artifacts/` and announce.
+pub(super) struct ArtifactCopy {
+    from: std::path::PathBuf,
+    ws: Option<Id>,
+    run_id: Option<Id>,
+    /// As it is announced once the copy exists: `abs_path` is where the copy goes.
+    artifact: Artifact,
+}
+
+/// Copies the files `detect_artifacts` found and announces each one, in the order they were
+/// found. A copy can be slow (a large file whose copy is on another disk than the repository),
+/// so it runs here and not on the ingest task, where every agent's events would wait for it.
+pub(super) async fn copy_artifacts(inner: Arc<Inner>, mut jobs: mpsc::UnboundedReceiver<ArtifactCopy>) {
+    while let Some(ArtifactCopy { from, ws, run_id, artifact }) = jobs.recv().await {
+        let to = std::path::PathBuf::from(&artifact.abs_path);
+        let copied = tokio::task::spawn_blocking(move || {
+            if let Some(dir) = to.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::copy(&from, &to)
+        })
+        .await;
+        match copied {
+            Ok(Ok(_)) => {
+                let (agent, task) = (artifact.agent_id.clone(), artifact.task_id.clone());
+                let announced = row(agent.as_deref(), task.as_deref(), run_id.as_deref(), EventKind::ArtifactAdded { artifact });
+                if let Err(e) = inner.emit(ws.as_deref(), announced) {
+                    tracing::debug!("artifact not recorded: {e}");
+                }
+            }
+            Ok(Err(e)) => tracing::debug!("artifact not copied: {e}"),
+            Err(e) => tracing::debug!("artifact copy did not finish: {e}"),
+        }
+    }
+}
+
 /// Who an event belongs to.
 struct Ctx {
     agent_id: Id,
@@ -160,22 +196,16 @@ impl Inner {
                 .unwrap_or_else(|| abs.to_string_lossy().into_owned());
             let title = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| display.clone());
             // Snapshot it: task worktrees are removed after merge, and generated images can be
-            // anywhere. The copy is what the UI reads.
+            // anywhere. The copy is what the UI reads; `copy_artifacts` makes it and announces it.
             let id = new_id();
-            let dir = self.cfg.data_dir.join("artifacts");
             let ext = abs.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-            let copy = dir.join(format!("{id}.{ext}"));
-            if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&abs, &copy)) {
-                tracing::debug!("artifact not copied: {e}");
-                continue;
-            }
-            let abs = copy;
+            let copy = self.cfg.data_dir.join("artifacts").join(format!("{id}.{ext}"));
             let artifact = Artifact {
                 id,
                 kind,
                 mime: mime.into(),
                 path: display,
-                abs_path: abs.to_string_lossy().into_owned(),
+                abs_path: copy.to_string_lossy().into_owned(),
                 title,
                 bytes: meta.len() as i64,
                 agent_id: r.agent_id.clone(),
@@ -183,8 +213,8 @@ impl Inner {
                 caption: caption.clone(),
                 created_at: now_ms(),
             };
-            if let Err(e) = self.emit(ws, row(r.agent_id.as_deref(), r.task_id.as_deref(), r.run_id.as_deref(), EventKind::ArtifactAdded { artifact })) {
-                tracing::debug!("artifact not recorded: {e}");
+            if self.artifact_copies.send(ArtifactCopy { from: abs, ws: ws.map(String::from), run_id: r.run_id.clone(), artifact }).is_err() {
+                tracing::debug!("artifact not copied: the copier has stopped");
             }
         }
     }

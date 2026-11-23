@@ -193,6 +193,8 @@
     "allow-resolve-merge-conflict",
     "allow-stop-resolving-merge",
     "allow-required-checks",
-    "allow-check-agent"
+    "allow-check-agent",
+    "allow-start-problem",
+    "allow-recover-database"
   ]
 }

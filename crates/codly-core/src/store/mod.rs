@@ -8,11 +8,16 @@
 //! and are saved on its row without an `agent_changed` event.
 //! Memories and triples are written by `crate::memory` inside the caller's transaction.
 //!
-//! ponytail: one `Mutex<Connection>` shared by readers and the writer instead of a batching
+//! ponytail: one `Mutex<Connection>` for the writer and the short reads instead of a batching
 //! writer actor plus a read pool (CRITIQUE D3). Every call is a short local transaction;
-//! move to an actor when profiles show lock contention.
+//! move to an actor when profiles show lock contention. The reads that grow with the history
+//! (pages of the event log) use a second, read-only connection: see `Store::read`.
+//!
+//! Copies of the database and the way back from one that cannot be used: `backup`.
 
-use std::path::Path;
+pub mod backup;
+
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, Result, anyhow};
@@ -50,18 +55,42 @@ pub struct RunRow {
     pub ended_at: Option<i64>,
 }
 
+/// The database file in Codly's data folder.
+pub const FILE: &str = "codly.sqlite";
+
 pub struct Store {
     conn: Mutex<Connection>,
+    /// A second, read-only connection to the same file (`read`). None for a database in
+    /// memory, which has one connection.
+    reader: Option<Mutex<Connection>>,
+    /// The database file. None for a database in memory.
+    path: Option<PathBuf>,
 }
 
 impl Store {
-    /// Open (or create) the database, set the pragmas and run pending migrations.
+    /// Open (or create) the database, set the pragmas and run pending migrations. A file with
+    /// data is copied before a migration changes it. A file that cannot be used fails with a
+    /// `backup::StoreError` and is left as it is.
     pub fn open(path: &Path) -> Result<Store> {
+        Self::open_with(path, &migrations())
+    }
+
+    /// `open` with the migrations given (tests: an update that fails).
+    fn open_with(path: &Path, migrations: &Migrations<'_>) -> Result<Store> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-        Self::init(conn)
+        let mut conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        Self::pragmas(&conn).map_err(backup::read_error)?;
+        backup::update(&mut conn, path, migrations)?;
+        let reader = Connection::open(path).with_context(|| format!("open {} to read", path.display()))?;
+        reader.execute_batch(
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA query_only = ON;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA mmap_size = 268435456;",
+        )?;
+        Ok(Store { conn: Mutex::new(conn), reader: Some(Mutex::new(reader)), path: Some(path.to_path_buf()) })
     }
 
     pub fn open_in_memory() -> Result<Store> {
@@ -69,6 +98,12 @@ impl Store {
     }
 
     fn init(mut conn: Connection) -> Result<Store> {
+        Self::pragmas(&conn)?;
+        migrations().to_latest(&mut conn).context("migrate codly.sqlite")?;
+        Ok(Store { conn: Mutex::new(conn), reader: None, path: None })
+    }
+
+    fn pragmas(conn: &Connection) -> rusqlite::Result<()> {
         // tauri-stack §5.4. journal_mode must be set outside a transaction.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(
@@ -77,15 +112,24 @@ impl Store {
              PRAGMA foreign_keys = ON;
              PRAGMA temp_store = MEMORY;
              PRAGMA mmap_size = 268435456;",
-        )?;
-        migrations().to_latest(&mut conn).context("migrate codly.sqlite")?;
-        Ok(Store { conn: Mutex::new(conn) })
+        )
     }
 
     /// The connection, recovering from poisoning: a panic in one caller (e.g. a module
     /// that is still `todo!()`) must not take the whole store down with it.
     pub fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The connection for the reads that grow with the history: pages of the event log. On a
+    /// file it is a second connection that cannot write. Under WAL it reads while a write is
+    /// in progress, so a long page does not make the event ingest wait for the store, and it
+    /// sees every write that returned before the read began.
+    fn read(&self) -> MutexGuard<'_, Connection> {
+        match &self.reader {
+            Some(reader) => reader.lock().unwrap_or_else(|e| e.into_inner()),
+            None => self.conn(),
+        }
     }
 
     pub fn with<R>(&self, f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
@@ -119,7 +163,7 @@ impl Store {
 
     /// A workspace's career events (commits, checks, reviews, merges) since `ts`, oldest first.
     pub fn work_since(&self, workspace_id: &str, ts: i64) -> Result<Vec<EventRow>> {
-        let conn = self.conn();
+        let conn = self.read();
         let mut st = conn.prepare_cached(
             "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event
              WHERE workspace_id = ?1 AND ts >= ?2 AND type IN ('committed', 'verified', 'reviewed', 'merged')
@@ -131,7 +175,7 @@ impl Store {
 
     /// Newest first, for paging the timeline. Events with no workspace (CLI-level) are included.
     pub fn events(&self, workspace_id: Option<&str>, agent_id: Option<&str>, before: Option<i64>, limit: i64) -> Result<Vec<EventRow>> {
-        let conn = self.conn();
+        let conn = self.read();
         // The cursor is a plain range (no "?3 IS NULL OR"), so a page starts at `before` instead
         // of reading every newer row first; one agent's page walks `event_agent`.
         let (before, limit) = (before.unwrap_or(i64::MAX), limit.clamp(1, 5000));
@@ -184,7 +228,7 @@ impl Store {
             rows.truncate(limit as usize);
         };
         {
-            let conn = self.conn();
+            let conn = self.read();
             let tasks = if request {
                 Some((
                     "SELECT t.id FROM task t LEFT JOIN plan p ON p.id = t.plan_id
@@ -258,7 +302,7 @@ impl Store {
 
     /// Artifacts announced by `artifact_added` events, newest first.
     pub fn artifacts(&self, workspace_id: Option<&str>, limit: i64) -> Result<Vec<Artifact>> {
-        let conn = self.conn();
+        let conn = self.read();
         let mut st = conn.prepare_cached(EVENTS_OF_TYPE_SQL)?;
         let rows = st.query_map(params!["artifact_added", workspace_id, limit], |r| r.get::<_, String>(0))?;
         let mut out = vec![];
@@ -283,7 +327,7 @@ impl Store {
     /// Memories announced by `memory_added` events, newest first. A read path for the
     /// blackboard that does not depend on the memory module's FTS tables.
     pub fn memory_events(&self, workspace_id: Option<&str>, limit: i64) -> Result<Vec<Memory>> {
-        let conn = self.conn();
+        let conn = self.read();
         let mut st = conn.prepare_cached(EVENTS_OF_TYPE_SQL)?;
         let rows = st.query_map(params!["memory_added", workspace_id, limit], |r| r.get::<_, String>(0))?;
         let mut out = vec![];
@@ -1763,6 +1807,28 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(plan.iter().any(|step| step.contains("event_agent")), "{plan:?}");
+    }
+
+    #[test]
+    fn a_file_database_reads_its_history_while_a_write_is_in_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(&tmp.path().join(FILE)).unwrap();
+        let w = ws(&store);
+        let event = EventRow { agent_id: Some("worker".into()), ..row(EventKind::StatusChanged { status: AgentStatus::Working }) };
+        let id = store.append_event(Some(&w.id), &event).unwrap();
+        // A write that is not committed yet, and that holds the store's own connection.
+        let writer = store.conn();
+        writer.execute_batch("BEGIN IMMEDIATE; INSERT INTO kv (key, value) VALUES ('k', 'v');").unwrap();
+        // The log is read all the same, with every write that returned before.
+        let page: Vec<i64> = store.events(Some(&w.id), None, None, 10).unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(page, [id]);
+        assert_eq!(store.work_since(&w.id, 0).unwrap().len(), 0);
+        writer.execute_batch("COMMIT;").unwrap();
+        drop(writer);
+        assert!(store.read().execute("DELETE FROM event", []).is_err(), "the reading connection cannot write");
+        assert_eq!(store.last_event_id().unwrap(), id);
+        // A database in memory has one connection for both.
+        assert!(Store::open_in_memory().unwrap().reader.is_none());
     }
 
     #[test]

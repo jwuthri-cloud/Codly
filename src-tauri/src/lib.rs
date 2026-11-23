@@ -78,7 +78,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState { core: core_rx, bus: bus.clone(), pty: Default::default(), shell_env: OnceCell::new() })
         .manage(inbound::InboundHandle { hub: hub_rx })
-        .manage(boot::Boot { core: core_tx, hub: hub_tx, bus })
+        .manage(boot::Boot { core: core_tx, hub: hub_tx, bus, problem: Default::default() })
         .manage(quit::Asking::default())
         .on_menu_event(|app, event| quit::on_menu(app, event.id().as_ref()))
         .setup(move |app| {
@@ -111,6 +111,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             boot::retry_core,
+            boot::start_problem,
+            boot::recover_database,
             commands::ui_subscribe,
             commands::ui_set_visible,
             commands::detect_clis,

@@ -31,6 +31,7 @@ fn main() {
         "pull_request", "draft_pull_request", "create_pull_request", "push_pr_branch", "refresh_pull_request",
         "merge_state", "resolve_merge_conflict", "stop_resolving_merge",
         "required_checks", "check_agent",
+        "start_problem", "recover_database",
     ])))
     .expect("tauri-build failed");
 }
