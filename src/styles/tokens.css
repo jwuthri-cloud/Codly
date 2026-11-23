@@ -59,7 +59,9 @@
   --night: #0a0d14;
   --night-2: #0d111a;
   --night-glow: #13203a;
-  --glass: rgba(18, 22, 32, 0.72);
+  /* 0.9: dark enough that 12 px --ink-3 keeps 4.5:1 over the brightest office, a day scene
+     behind the night theme (src/styles/__tests__/contrast.test.ts). */
+  --glass: rgba(18, 22, 32, 0.9);
   --glass-strong: rgba(15, 19, 28, 0.9);
   --glass-solid: #121722;
   --glass-blur: blur(22px) saturate(150%);

@@ -1,8 +1,9 @@
 // A used-up budget holds new work: no task starts until you raise the budget or reset the
-// counters (Settings → Safety → Autonomy & Budgets). The core says so once, with a `breaker`
+// counters (Settings → Safety → Limits). The core says so once, with a `breaker`
 // decision ("budget"), and once more when work goes on ("budget_cleared"); what holds right now
 // is `breaker_status`. The top bar's mark shows `hold`, and one toast says it when it happens.
 // The toast goes when the hold goes: it never says a budget holds work that has room again.
+import { safetyLink } from '../../overlays/settingsPages';
 import { api } from '../api';
 import type { EventRow } from '../gen/EventRow';
 import { store } from './store.svelte';
@@ -24,8 +25,6 @@ class Budget {
   private why = $state<string | null>(null);
   /** The "Budget reached" toast, to take back when work goes on. */
   private said: number | undefined;
-  /** Settings was opened from here: its budget section comes into view, once. */
-  reveal = $state(false);
   private started = false;
 
   /** Why no new task starts ("the team has used … over the budget of …"); null: work goes on. */
@@ -73,8 +72,7 @@ class Budget {
 
   /** Settings on the Safety tab, at the budgets. */
   openSettings() {
-    this.reveal = true;
-    ui.settingsTab = 'safety';
+    ui.settingsTab = safetyLink('budgets');
     ui.settingsOpen = true;
   }
 }

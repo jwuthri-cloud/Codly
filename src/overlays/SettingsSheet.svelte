@@ -2,8 +2,24 @@
   Settings sheet. Changes apply immediately (optimistic, reverted with a toast if the core
   refuses). Tabs by topic; every option says what it does in a sentence.
 -->
+<script module lang="ts">
+  import type { SafetyPage } from './settingsPages';
+
+  /** The Safety page you were on, for the session. */
+  let lastPage: SafetyPage = 'approvals';
+</script>
+
 <script lang="ts">
+  import { onDestroy, untrack } from 'svelte';
   import type { ApprovalMode } from '../lib/gen/ApprovalMode';
+  import type { BreakerConfig } from '../lib/gen/BreakerConfig';
+  import type { RequiredChecks } from '../lib/gen/RequiredChecks';
+  import type { WorktreeSetup } from '../lib/gen/WorktreeSetup';
+  import { api } from '../lib/api';
+  import { workspaceTrust } from '../lib/state/workspaceTrust.svelte';
+  import { holdAtTop } from '../lib/util/holdAtTop';
+  import { MODE_TITLE, SAFETY_PAGES, approvalsLine, checksLine, limitsLine, openAt, sandboxLine, trustLine, worktreesLine } from './settingsPages';
+  import MoreAbout from './MoreAbout.svelte';
   import type { Provider } from '../lib/gen/Provider';
   import type { ResumeOnLaunch } from '../lib/gen/ResumeOnLaunch';
   import type { Settings } from '../lib/gen/Settings';
@@ -90,11 +106,12 @@
     set({ worker_providers: list });
   }
 
-  const MODES: { id: ApprovalMode; title: string; body: string }[] = [
-    { id: 'balanced', title: 'Balanced', body: 'Codly’s rules settle the obvious cases; anything risky (rm -rf, git push, outside the worktree, network installs) asks you.' },
-    { id: 'strict', title: 'Ask first', body: 'Every command and edit the CLI would ask about comes to you.' },
-    { id: 'autonomous', title: 'Autonomous', body: 'Commands and edits run without asking unless Codly sees a risk in them (rm -rf, git push, network, paths outside the worktree). This is a list of risky commands, not a sandbox: Codly reads the command, not what a script or program does once it runs. Codex agents run in their own OS sandbox. Claude agents have one only with “Sandbox Claude’s shell” on (below). Gemini, OpenCode, Cursor and Copilot agents have none.' },
-    { id: 'full', title: 'Full access', body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, changes to an agent’s own CLI settings, Codly’s private data and read-only agents still ask. So does a command that can lose work in your project folder itself: from an agent hired with Git isolation off, or from one that points the command there from its worktree.' },
+  // `more`: the rest of a mode's help, under the cards ("More about this").
+  const MODES: { id: ApprovalMode; title: string; body: string; more?: string }[] = [
+    { id: 'balanced', title: MODE_TITLE.balanced, body: 'Codly’s rules settle the obvious cases; anything risky (rm -rf, git push, outside the worktree, network installs) asks you.' },
+    { id: 'strict', title: MODE_TITLE.strict, body: 'Every command and edit the CLI would ask about comes to you.' },
+    { id: 'autonomous', title: MODE_TITLE.autonomous, body: 'Commands and edits run without asking unless Codly sees a risk in them (rm -rf, git push, network, paths outside the worktree). This is a list of risky commands, not a sandbox: Codly reads the command, not what a script or program does once it runs.', more: 'Codex agents run in their own OS sandbox. Claude agents have one only with “Sandbox Claude’s shell” on (the Sandbox page). Gemini, OpenCode, Cursor and Copilot agents have none.' },
+    { id: 'full', title: MODE_TITLE.full, body: 'Workers never wait on you for commands or edits, risky ones included. Questions, permission changes, changes to an agent’s own CLI settings, Codly’s private data and read-only agents still ask.', more: 'So does a command that can lose work in your project folder itself: from an agent hired with Git isolation off, or from one that points the command there from its worktree.' },
   ];
   let confirmFull = $state(false);
   function pickMode(m: ApprovalMode) {
@@ -115,13 +132,60 @@
     { id: 'automation', label: 'Automation', icon: 'bolt' },
     { id: 'developer', label: 'Developer', icon: 'code' },
   ];
-  let tab = $state(ui.settingsTab ?? 'general');
+  const target = openAt(ui.settingsTab);
   ui.settingsTab = null;
-  // Another tab starts at its top, not where the last one was scrolled to.
+  let tab = $state(target.tab);
+  // Safety in pages: the one a link names, else the one you were on last.
+  let page = $state<SafetyPage>(target.page ?? lastPage);
+  $effect(() => {
+    lastPage = page;
+  });
+  // Another tab or page starts at its top, not where the last one was scrolled to.
   let panel: HTMLDivElement | undefined = $state();
   $effect(() => {
     void tab;
+    void page;
     if (panel) panel.scrollTop = 0;
+  });
+  // A link that names a section opens at it, and keeps it there while the sections around it
+  // read the repo, until you scroll, click or press a key.
+  let letGo: (() => void) | undefined;
+  $effect(() => {
+    const el = target.section && panel?.querySelector<HTMLElement>(`[data-section="${target.section}"]`);
+    if (el) untrack(() => (letGo = holdAtTop(el)));
+  });
+  onDestroy(() => letGo?.());
+
+  // The line under each Safety page's name. The repo's rules, checks, setup script and the
+  // circuit breaker are read here as well as in their sections, again when you change pages
+  // and every 5 s, so the line follows a change made on the page. A part that cannot be read
+  // (no repo open) is left out of the line: its section shows why.
+  let ruleCount = $state<number | null>(null);
+  let checks = $state<RequiredChecks | null>(null);
+  let setup = $state<WorktreeSetup | null>(null);
+  let breaker = $state<BreakerConfig | null>(null);
+  async function readLines() {
+    const [r, c, w, b] = await Promise.allSettled([api.approvalRules(), api.requiredChecks(), api.worktreeSetup(), api.breakerConfig()]);
+    ruleCount = r.status === 'fulfilled' ? r.value.length : null;
+    checks = c.status === 'fulfilled' ? c.value : null;
+    setup = w.status === 'fulfilled' ? w.value : null;
+    breaker = b.status === 'fulfilled' ? b.value : null;
+  }
+  $effect(() => {
+    if (tab !== 'safety') return;
+    void page;
+    void store.workspace?.id;
+    void readLines();
+    const t = setInterval(readLines, 5000);
+    return () => clearInterval(t);
+  });
+  const pageLines = $derived<Record<SafetyPage, string>>({
+    approvals: approvalsLine(s.approval_mode, ruleCount),
+    sandbox: sandboxLine(s),
+    checks: checksLine(s.review_gate, checks),
+    trust: trustLine(workspaceTrust.value),
+    worktrees: worktreesLine(setup),
+    limits: limitsLine(breaker, s.watchdog),
   });
   // Office sound (kept on this machine, not in the core's settings).
   let soundOn = $state(!sound.muted);
@@ -152,13 +216,24 @@
   const checkLimits = $derived([...new Set([300, 600, 1200, 1800, 3600, 7200, s.verify_timeout_secs])].sort((a, b) => a - b));
 </script>
 
-<Dialog label="Settings" width={820} style="height: min(760px, calc(100vh - 64px))" onclose={() => (ui.settingsOpen = false)}>
+<Dialog label="Settings" width={820} style="height: min(760px, calc(100vh - 48px))" onclose={() => (ui.settingsOpen = false)}>
   <div class="main">
     <nav class="tabs" role="tablist" aria-label="Settings sections">
       {#each TABS as t (t.id)}
         <button role="tab" aria-selected={tab === t.id} class:on={tab === t.id} onclick={() => (tab = t.id)}><Icon name={t.icon} size={15} />{t.label}</button>
       {/each}
     </nav>
+    <div class="pane">
+    {#if tab === 'safety'}
+      <div class="pages" role="tablist" aria-label="Safety pages">
+        {#each SAFETY_PAGES as p (p.id)}
+          <button role="tab" aria-selected={page === p.id} class:on={page === p.id} onclick={() => (page = p.id)}>
+            <span class="p-name">{p.label}</span>
+            <span class="p-line">{pageLines[p.id]}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
     <div class="body" role="tabpanel" bind:this={panel}>
     {#snippet toggles(list: string[][])}
       {#each list as [k, title, body] (k)}
@@ -317,7 +392,8 @@
 
     <ApiKeysSection />
     {:else if tab === 'safety'}
-    <section>
+    {#if page === 'approvals'}
+    <section data-section="approval-mode">
       <h3 class="eyebrow">Approvals</h3>
       <p class="desc">The default; a request can choose its own under the composer.</p>
       <div class="modes">
@@ -328,41 +404,34 @@
           </button>
         {/each}
       </div>
+      <MoreAbout id="approval-modes">
+        {#each MODES.filter((m) => m.more) as m (m.id)}<p class="desc"><b>{m.title}:</b> {m.more}</p>{/each}
+      </MoreAbout>
       {#if confirmFull}<FullAccessConfirm onconfirm={() => ((confirmFull = false), set({ approval_mode: 'full' }))} oncancel={() => (confirmFull = false)} />{/if}
     </section>
-
-    <section>
-      <h3 class="eyebrow">Claude Code</h3>
-      <!-- Not <label>s: only the switch itself changes these, never a click on the text. -->
+    <div data-section="approval-rules"><ApprovalRulesSection /></div>
+    {:else if page === 'sandbox'}
+    <section data-section="sandbox">
+      <h3 class="eyebrow">Sandbox</h3>
+      <!-- Not a <label>: only the switch itself changes it, never a click on the text. -->
       <div class="row">
         <div class="r-text">
           <span class="r-title">Sandbox Claude’s shell</span>
-          <!-- One long help text, in short paragraphs: what the switch does, what a sandboxed command may do, how it sits with the approval rules, what it does not cover. -->
+          <!-- What the switch does; then, one press away: what a sandboxed command may do, how it sits with the approval rules, what it does not cover. -->
           <span class="desc">For Claude Code agents that have a shell: workers and 1:1 agents. Off: a shell command runs with your account’s rights, and Codly’s approval rules are the only check. On: Claude Code runs each shell command in its own OS sandbox.</span>
-          <span class="desc">A sandboxed command can write only in the agent’s folder, a temporary folder and the repository’s git data. It can still read your other files. It can reach only the hosts that your Claude Code settings allow: for another host Codly asks you, in every mode except Full access. {HOST_ALLOW_LASTS}</span>
-          <span class="desc">Commands still go through Codly’s approval rules, as they do with the switch off: the sandbox is a second check under the rules, not a way around them. So a command can ask you once for itself and once more for a host. A command that Claude wants to run outside the sandbox asks you first, in every mode except Full access.</span>
-          <span class="desc">If Claude Code does not turn its sandbox on, the agent does not start, and Codly tells you why. File edits and tool servers are not sandboxed.</span>
-          <span class="desc">Codex agents always run in Codex’s own sandbox. Gemini, OpenCode, Cursor and Copilot agents have no sandbox. Applies to agents started after the change.</span>
+          <MoreAbout id="claude-sandbox">
+            <span class="desc">A sandboxed command can write only in the agent’s folder, a temporary folder and the repository’s git data. It can still read your other files. It can reach only the hosts that your Claude Code settings allow: for another host Codly asks you, in every mode except Full access. {HOST_ALLOW_LASTS}</span>
+            <span class="desc">Commands still go through Codly’s approval rules, as they do with the switch off: the sandbox is a second check under the rules, not a way around them. So a command can ask you once for itself and once more for a host. A command that Claude wants to run outside the sandbox asks you first, in every mode except Full access.</span>
+            <span class="desc">If Claude Code does not turn its sandbox on, the agent does not start, and Codly tells you why. File edits and tool servers are not sandboxed.</span>
+            <span class="desc">Codex agents always run in Codex’s own sandbox. Gemini, OpenCode, Cursor and Copilot agents have no sandbox. Applies to agents started after the change.</span>
+          </MoreAbout>
         </div>
         <input type="checkbox" class="switch" checked={s.claude_sandbox} aria-label="Sandbox Claude’s shell" onchange={(e) => set({ claude_sandbox: e.currentTarget.checked })} />
       </div>
-      <div class="row">
-        <div class="r-text">
-          <span class="r-title">Use my shell’s Claude sign-in</span>
-          <span class="desc">Off: Codly takes <code>CLAUDE_CODE_USE_BEDROCK</code>, <code>CLAUDE_CODE_USE_VERTEX</code> and <code>CLAUDE_CODE_OAUTH_TOKEN</code> out of an agent’s environment, so Claude agents use only the sign-in of <code>claude auth login</code>. On: Claude agents keep these variables from your login shell, as Claude Code does in your terminal, and that account pays: Amazon Bedrock, Google Vertex AI, or the subscription of the token. Codly does not store the token. For a token from <code>claude setup-token</code>, check Anthropic’s terms first: they may not allow another app to use it. Applies to agents started after the change.</span>
-        </div>
-        <input type="checkbox" class="switch" checked={s.claude_shell_auth} aria-label="Use my shell’s Claude sign-in" onchange={(e) => setShellAuth(e.currentTarget.checked)} />
-      </div>
-    </section>
-
-    <ApprovalRulesSection />
-
-    <section>
-      <h3 class="eyebrow">Sandbox</h3>
       {@render toggles(SANDBOX_TOGGLES)}
     </section>
-
-    <section>
+    {:else if page === 'checks'}
+    <section data-section="review">
       <h3 class="eyebrow">Review</h3>
       {@render toggles(REVIEW_TOGGLES)}
       <div class="row">
@@ -376,14 +445,30 @@
       </div>
     </section>
 
-    <RequiredChecksSection />
-    <TrustSection />
-
-    <WorktreeSection />
-
-    <BreakerSection />
-
-    <WatchdogSection />
+    <div data-section="required-checks"><RequiredChecksSection /></div>
+    {:else if page === 'trust'}
+    <div data-section="trust"><TrustSection /></div>
+    <section data-section="shell-auth">
+      <h3 class="eyebrow">Claude sign-in</h3>
+      <!-- Not a <label>: only the switch itself changes it, never a click on the text. -->
+      <div class="row">
+        <div class="r-text">
+          <span class="r-title">Use my shell’s Claude sign-in</span>
+          <!-- Both sides show at once: with the switch on, another account pays. -->
+          <span class="desc">Off: Codly takes <code>CLAUDE_CODE_USE_BEDROCK</code>, <code>CLAUDE_CODE_USE_VERTEX</code> and <code>CLAUDE_CODE_OAUTH_TOKEN</code> out of an agent’s environment, so Claude agents use only the sign-in of <code>claude auth login</code>. On: Claude agents keep these variables from your login shell, as Claude Code does in your terminal, and that account pays: Amazon Bedrock, Google Vertex AI, or the subscription of the token.</span>
+          <MoreAbout id="claude-shell-auth">
+            <span class="desc">Codly does not store the token. For a token from <code>claude setup-token</code>, check Anthropic’s terms first: they may not allow another app to use it. Applies to agents started after the change.</span>
+          </MoreAbout>
+        </div>
+        <input type="checkbox" class="switch" checked={s.claude_shell_auth} aria-label="Use my shell’s Claude sign-in" onchange={(e) => setShellAuth(e.currentTarget.checked)} />
+      </div>
+    </section>
+    {:else if page === 'worktrees'}
+    <div data-section="worktrees"><WorktreeSection /></div>
+    {:else}
+    <div data-section="budgets"><BreakerSection /></div>
+    <div data-section="watchdog"><WatchdogSection /></div>
+    {/if}
     {:else if tab === 'automation'}
     <FreeFlowSection />
     <TriggersSection />
@@ -392,6 +477,7 @@
     {:else if tab === 'developer'}
     <DeveloperSection />
     {/if}
+    </div>
     </div>
   </div>
 </Dialog>
@@ -402,8 +488,16 @@
   .tabs button { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 12px; border-radius: var(--r-md); color: var(--ink-3); font-weight: var(--w-med); text-align: left; }
   .tabs button:hover { background: var(--surface-1); color: var(--ink-1); }
   .tabs button.on { background: var(--surface-3); color: var(--ink-1); }
-  .body { flex: 1; min-width: 0; overflow-y: auto; padding: 4px 26px 24px; }
-  @media (max-width: 640px) { .main { flex-direction: column; } .tabs { width: auto; flex-direction: row; overflow-x: auto; box-shadow: inset 0 -1px 0 var(--line); } }
+  .pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  /* The Safety pages: three by two, each with the line that says where it stands. */
+  .pages { flex-shrink: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 10px 16px; box-shadow: inset 0 -1px 0 var(--line); }
+  .pages button { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 6px 10px; border-radius: var(--r-md); text-align: left; }
+  .pages button:hover { background: var(--surface-1); }
+  .pages button.on { background: var(--surface-3); }
+  .p-name { font-weight: var(--w-med); color: var(--ink-1); }
+  .p-line { min-height: var(--lh-sm); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); overflow-wrap: anywhere; }
+  .body { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; padding: 4px 26px 24px; }
+  @media (max-width: 640px) { .main { flex-direction: column; } .tabs { width: auto; flex-direction: row; overflow-x: auto; box-shadow: inset 0 -1px 0 var(--line); } .pages { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   section { padding: 20px 0; box-shadow: inset 0 -1px 0 var(--line); display: flex; flex-direction: column; gap: 12px; }
   .desc { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .small { font-size: var(--t-sm); }
@@ -436,6 +530,7 @@
   .mode.on { background: var(--surface-3); box-shadow: inset 0 0 0 1.5px var(--ink-2); }
   .m-title { display: inline-flex; align-items: center; gap: 8px; font-weight: var(--w-semi); }
   .mode .desc { padding-left: 21px; }
+  .desc b { color: var(--ink-2); font-weight: var(--w-med); }
   input[type='checkbox']:not(.switch) { accent-color: var(--aurora-m); }
   .volume { width: 160px; accent-color: var(--aurora-m); }
 </style>

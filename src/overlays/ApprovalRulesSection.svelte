@@ -10,6 +10,7 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { ruleWords } from '../lib/util/approvalRules';
   import Icon from '../components/Icon.svelte';
+  import MoreAbout from './MoreAbout.svelte';
 
   let rules = $state<ApprovalRule[] | null>(null);
 
@@ -41,9 +42,14 @@
     <h3 class="eyebrow">Always allowed in this repo</h3>
     <p class="desc">
       Commands and tools of MCP servers you saved from an approval card with “Always allow in this repo”. Codly approves them for every agent in
-      {store.workspace?.name ?? 'this repo'} without asking. It still asks about deletes, <code>git push</code>, <code>sudo</code>, secrets and
-      anything outside the agent’s worktree, and about everything in the “Ask first” mode. Remove a rule and Codly asks again.
+      {store.workspace?.name ?? 'this repo'} without asking.
     </p>
+    <MoreAbout id="approval-rules">
+      <p class="desc">
+        It still asks about deletes, <code>git push</code>, <code>sudo</code>, secrets and anything outside the agent’s worktree, and about everything
+        in the “Ask first” mode. Remove a rule and Codly asks again.
+      </p>
+    </MoreAbout>
     {#if rules.length}
       <ul class="rules">
         {#each rules as r (r.id)}

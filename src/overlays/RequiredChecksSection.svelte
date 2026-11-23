@@ -16,6 +16,7 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { checksTurnTrouble, setupChoices } from '../lib/util/worktree';
   import LoadError from '../components/LoadError.svelte';
+  import MoreAbout from './MoreAbout.svelte';
 
   const checks = new Loader<RequiredChecks>(() => api.requiredChecks());
   const s = $derived(checks.value);
@@ -57,12 +58,18 @@
     <h3 class="eyebrow">Required checks</h3>
     <p class="desc">
       The Lead writes the checks of each task. Required checks are yours: commands that must pass for every task and every finished plan in
-      {store.workspace.name}, whatever the plan says. Write them in a <code>.codly/checks</code> file at the top of the repo, one command on each line
-      (a line that starts with <code>#</code> is a comment), for example <code>pnpm check</code> and <code>pnpm test</code>.
+      {store.workspace.name}, whatever the plan says.
     </p>
+    <MoreAbout id="required-checks">
+      <p class="desc">
+        Write them in a <code>.codly/checks</code> file at the top of the repo, one command on each line (a line that starts with <code>#</code> is a
+        comment), for example <code>pnpm check</code> and <code>pnpm test</code>.
+      </p>
+    </MoreAbout>
     {#if s}
       {@const can = setupChoices(s)}
-      <label class="row toggle">
+      <!-- Not a <label>: only the switch itself changes it, never a click on the text. -->
+      <div class="row">
         <div class="r-text">
           <span class="r-title">Run the repo’s required checks</span>
           <span class="desc">
@@ -72,10 +79,14 @@
               This repo has no <code>.codly/checks</code> with a command in it.
             {:else}
               Codly reads <code>.codly/checks</code> from your checkout and runs each command in the task’s worktree, after the task’s own checks, and again on
-              the finished plan. A command that fails goes back to the worker like any failed check. For an agent you chat with, its Git tab has Check the work.
-              Each command has the time limit for checks above.
+              the finished plan. A command that fails goes back to the worker like any failed check.
             {/if}
           </span>
+          {#if !s.problem && s.text !== null}
+            <MoreAbout id="required-checks-run">
+              <span class="desc">For an agent you chat with, its Git tab has Check the work. Each command has the time limit for checks above.</span>
+            </MoreAbout>
+          {/if}
         </div>
         {#if busy && !can.ask}<span class="busy" role="status">Saving…</span>{/if}
         <input
@@ -86,7 +97,7 @@
           aria-label="Run the repo’s required checks"
           onchange={(e) => flip(e.currentTarget, can.on)}
         />
-      </label>
+      </div>
       {#if can.ask}
         <div class="changed" role="status">
           <p>
@@ -112,8 +123,10 @@
         </ul>
         <p class="desc">
           These commands come from the repo, and once they are on they run without asking again, also the ones with a risk shown beside them.
-          You turn on these commands as they are written now: if the file changes, they are off until Codly has asked you again.
         </p>
+        <MoreAbout id="required-checks-text">
+          <p class="desc">You turn on these commands as they are written now: if the file changes, they are off until Codly has asked you again.</p>
+        </MoreAbout>
       {/if}
     {:else if checks.error}
       <LoadError what="the required checks" error={checks.error} loading={checks.loading} onretry={() => checks.load()} />

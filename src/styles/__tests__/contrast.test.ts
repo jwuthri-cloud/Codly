@@ -86,3 +86,16 @@ describe.each([
     for (let i = 1; i < ratios.length; i++) expect(ratios[i - 1] / ratios[i]).toBeGreaterThanOrEqual(1.15);
   });
 });
+
+// The pills over the office (search, crew, "Talk to the Lead") are --glass. The office keeps its
+// own hour, so in the night theme it can be a bright day scene: white is the worst case.
+describe('secondary text on the night glass', () => {
+  const t = block(':root, [data-theme="dark"]');
+  it.each([
+    ['a white scene', [255, 255, 255] as Rgb],
+    ['a black scene', [0, 0, 0] as Rgb],
+  ])('--ink-3 is readable on --glass over %s', (_scene, scene) => {
+    const bg = over(color(t.get('--glass')!), scene);
+    expect(contrast(color(t.get('--ink-3')!).rgb, bg)).toBeGreaterThanOrEqual(AA_TEXT);
+  });
+});
