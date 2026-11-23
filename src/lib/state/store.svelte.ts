@@ -45,6 +45,7 @@ import type { Provider } from '../gen/Provider';
 import { targetLabel, type Provenance } from '../util/labels';
 import { transferredOut } from '../util/transfer';
 import { accounts } from './accounts.svelte';
+import { recordSaid } from './answers';
 import { controls } from './control.svelte';
 import { withBackgroundTasks, withMcpServer, type BackgroundWork, type McpServer } from './session';
 
@@ -61,7 +62,7 @@ const EARLIER_PAGE = 500;
 /** Event kinds whose derivation is no part of one agent's own state (`AgentLive`). */
 const SHARED_KINDS: ReadonlySet<EventKind['type']> = new Set([
   'control_changed', 'text_delta', 'reasoning_delta', 'tool_output', 'rate_limit', 'decision',
-  'approval_requested', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged',
+  'approval_requested', 'approval_said', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged',
 ]);
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -1060,6 +1061,10 @@ class CodlyStore {
         // was asked, then as it was answered.
         if (replay) this.pastApproval(k.approval);
         break;
+      case 'approval_said':
+        // What you said with an answer: the closed card and the history show it from here.
+        recordSaid(k);
+        break;
       case 'approval_resolved': {
         const a = replay ? this.approvals.find((x) => x.id === k.approval_id) : undefined;
         if (a) this.approvals = upsert(this.approvals, { ...a, status: k.status, decided_by: k.by });
@@ -1178,6 +1183,7 @@ class CodlyStore {
       const mark = markOf(ev);
       if (k.type === 'chat' && k.message.thread === thread && !known.has(k.message.id)) said.push(k.message);
       else if (k.type === 'approval_requested') this.pastApproval(k.approval); // the core sends it as it ended
+      else if (k.type === 'approval_said') recordSaid(k);
       else if (mark && ev.task_id) this.addMark(ev.task_id, mark);
     }
     if (said.length) this.chats = [...this.chats, ...said].sort((a, b) => a.ts - b.ts);

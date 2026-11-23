@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { Approval } from '../../gen/Approval';
-import { answerText, askedLine, firstQuestion, outcomeBy, outcomeWord, settledLine } from '../outcome';
+import { yourWords } from '../../state/answers';
+import { answerText, askedLine, firstQuestion, outcomeBy, outcomeWord, settledLine, settledWord, wordsOf } from '../outcome';
 
 const command = { subject: { kind: 'command', command: 'pnpm install', cwd: null } } satisfies Pick<Approval, 'subject'>;
 const question = {
@@ -21,7 +22,7 @@ describe('how a settled request reads', () => {
 
   it('puts the answers a question card sends on one line', () => {
     expect(answerText({ 'Keep the localStorage fallback?': 'Keep it' })).toBe('Keep it');
-    expect(answerText({ Colour: 'Red', Sizes: ['Small', 'Fast'] })).toBe('Red · Small, Fast');
+    expect(answerText({ Colour: 'Red', Sizes: ['Small', 'Fast'] })).toBe('Red; Small, Fast');
     expect(answerText({ answer: '  use the settings API  ' })).toBe('use the settings API');
     // Nothing picked, nothing typed, or no answers at all (an approval, a skipped question).
     expect([answerText({ a: '', b: [] }), answerText(null), answerText(undefined), answerText('yes'), answerText(['yes'])]).toEqual([null, null, null, null, null]);
@@ -49,7 +50,7 @@ describe('an agent’s history', () => {
 
   it('an answered question reads "Answered by you" with the answer, never "Approval approved"', () => {
     expect(settledLine('approved', 'user', question, 'Keep it')).toBe('Answered by you: Keep it');
-    // Answered before this window opened: the core keeps no copy of the answer.
+    // Answered before the core kept a copy of the answer.
     expect(settledLine('approved', 'user', question, null)).toBe('Answered by you');
     expect(settledLine('denied', 'user', question, null)).toBe('Skipped by you');
     expect(settledLine('cancelled', 'provider', question, 'Keep it')).toBe('Stopped by its CLI');
@@ -74,5 +75,47 @@ describe('an agent’s history', () => {
     expect(settledLine('cancelled', 'user', plan, null, 'claude')).toBe('Stopped by you');
     expect(settledLine('denied', 'user', plan, null, 'codex')).toBe('Denied by you');
     expect(settledLine('approved', 'user', plan, null)).toBe('Approved by you');
+  });
+});
+
+describe('what you said with an answer', () => {
+  afterEach(() => yourWords.clear());
+  const held = (id: string, a: Pick<Approval, 'subject'>) => ({ id, ...a });
+
+  it('the note of a "no" ends the line of the request it went with, cut to fit', () => {
+    yourWords.set('ap1', { note: 'use pnpm, not npm', planChanged: false });
+    expect(settledLine('denied', 'user', held('ap1', command), null)).toBe('Denied by you: use pnpm, not npm');
+    expect(settledLine('denied', 'user', held('ap2', command), null)).toBe('Denied by you');
+    yourWords.set('ap3', { note: `Say which file changes.\n${'x'.repeat(200)}`, planChanged: false });
+    const line = settledLine('denied', 'user', held('ap3', plan), null, 'claude');
+    expect(line.startsWith('Plan sent back by you: Say which file changes. xxx')).toBe(true);
+    expect(line).toHaveLength('Plan sent back by you: '.length + 80);
+  });
+
+  it('a plan you changed before you accepted it says so, on the card and in the history', () => {
+    yourWords.set('ap1', { note: null, planChanged: true });
+    expect(settledLine('approved', 'user', held('ap1', plan), null, 'claude')).toBe('Plan accepted with your changes by you');
+    expect(settledLine('approved', 'user', held('ap2', plan), null, 'claude')).toBe('Plan accepted by you');
+    // The closed card puts the same word before "by you".
+    expect(settledWord('approved', plan, 'claude', true)).toBe('Plan accepted with your changes');
+    expect(settledWord('approved', plan, 'claude', false)).toBe('Plan accepted');
+    expect(settledWord('denied', plan, 'claude', false)).toBe('Plan sent back');
+    // Every other request, and a plan of another CLI, reads as before.
+    expect(settledWord('approved', plan, 'codex', true)).toBe('Approved');
+    expect(settledWord('denied', command, 'claude', false)).toBe('Denied');
+    expect(settledWord('approved', question, null, false)).toBe('Answered');
+    expect(settledWord('expired', null, null, false)).toBe('Closed');
+  });
+
+  it('shows only on a row that reads "by you", and only for a request that is still known', () => {
+    yourWords.set('ap1', { note: 'use pnpm', planChanged: false });
+    expect(wordsOf(held('ap1', command), 'user')).toEqual({ note: 'use pnpm', planChanged: false });
+    // Its CLI took the request back, or Codly closed it, while your answer was on its way.
+    expect(wordsOf(held('ap1', command), 'provider')).toBeNull();
+    expect(settledLine('cancelled', 'provider', held('ap1', command), null)).toBe('Stopped by its CLI');
+    expect(settledLine('expired', 'codly', held('ap1', command), null)).toBe('Closed by Codly');
+    expect(wordsOf(command, 'user')).toBeNull();
+    expect(wordsOf(null, 'user')).toBeNull();
+    expect(wordsOf(held('ap2', command), 'user')).toBeNull();
   });
 });

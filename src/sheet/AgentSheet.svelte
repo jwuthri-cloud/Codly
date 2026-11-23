@@ -186,6 +186,8 @@
     for (let i = store.events.length - 1; i >= 0 && out.length < 250; i--) {
       const e = store.events[i];
       if (e.agent_id !== agent.id && !(task && e.task_id === task.id && e.kind.type === 'decision')) continue;
+      // (what you said with an answer is no row of its own: the answer's row ends with it)
+      if (e.kind.type === 'approval_said') continue;
       const t = e.kind.type;
       // (a helper's progress is no step of its own: its calls and its end are rows already)
       if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed' || t === 'control_changed' || t === 'sub_agent_progress') continue;

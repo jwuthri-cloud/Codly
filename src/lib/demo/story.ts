@@ -32,6 +32,7 @@ import { ChecksDemo } from './checks';
 import { DEMO_MCP, MODE_LABEL } from './controls';
 import { BILLING } from './office';
 import { BILLING_FILES, diffOf, INDEX, INDEX_AFTER, NEXT_BUMP, TASK_FILES, type RepoFile } from './repo';
+import { saidWith } from './said';
 import { Actor, Cancelled, HOME, REPO, Sim, WORKTREES, sha, uid, type ToolSpec } from './sim';
 import type { AskKind } from './states';
 import { waitingOn } from '../util/plan';
@@ -1233,6 +1234,9 @@ export class Story {
     if (message) this.notes.set(id, message);
     const status = choice === 'deny' || choice === 'cancel' ? (choice === 'cancel' ? 'cancelled' : 'denied') : 'approved';
     sim.approvals.set(id, { ...ap, status, decided_by: 'user' });
+    // Like the core: what you said with the answer is a row of its own, just before the answer.
+    const said = saidWith(ap, sim.agents.get(ap.agent_id)?.provider, choice, message, answers);
+    if (said) sim.emit({ type: 'approval_said', approval_id: id, ...said }, { agent: ap.agent_id, task: ap.task_id, run: ap.run_id });
     sim.emit({ type: 'approval_resolved', approval_id: id, status, by: 'user' }, { agent: ap.agent_id, task: ap.task_id, run: ap.run_id });
     if (message) sim.decision('approval', 'human', `You denied ${'command' in ap.subject ? '`' + ap.subject.command + '`' : 'the request'}: “${message}”`, { approval: id }, { agent: ap.agent_id, task: ap.task_id });
   }

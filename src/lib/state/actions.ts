@@ -337,7 +337,8 @@ export async function resolveApproval(approvalId: string, choice: ApprovalChoice
     await api.resolveApproval(approvalId, { choice, message, answers: (answers ?? null) as never });
     return true;
   });
-  // The core keeps no copy of an answer: the closed card and the history show it from here.
+  // The core puts the answer on record (`approval_said`); until that row is here, the closed
+  // card and the history show it from this.
   const said = sent ? answerText(answers) : null;
   if (said) yourAnswers.set(approvalId, said);
 }

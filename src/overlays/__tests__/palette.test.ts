@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bySection, press, wants } from '../palette';
+import { bySection, noRow, press, wants } from '../palette';
 
 describe('palette sections', () => {
   const row = (id: string, section: string) => ({ id, section });
@@ -61,5 +61,16 @@ describe('palette confirmation', () => {
     expect(wants(plan, 'claude')).toBe('show you its plan');
     expect(wants(plan, 'codex')).toBe('use the tool ExitPlanMode');
     expect(wants(plan, undefined)).toBe('use the tool ExitPlanMode');
+  });
+
+  it('has no plain "no" for a plan: its row opens the note field', () => {
+    const plan = { kind: 'tool', name: 'ExitPlanMode', input: { plan: '1. Add the line' } } as const;
+    expect(noRow(plan, 'claude', 'Eli', 'tool')).toEqual({ title: "Send Eli's plan back with a note…", note: true });
+    // Every other request is denied from the palette (after its confirmation), as before.
+    expect(noRow({ kind: 'command', command: 'ls', cwd: null }, 'claude', 'Eli', 'ls')).toEqual({ title: 'Deny Eli: ls', note: false });
+    expect(noRow({ kind: 'tool', name: 'WebFetch', input: null }, 'claude', 'Eli', 'tool')).toEqual({ title: 'Deny Eli: tool', note: false });
+    // A request with the plan's name from another CLI, or from an agent Codly does not know, is a tool by its name.
+    expect(noRow(plan, 'codex', 'Eli', 'tool')).toEqual({ title: 'Deny Eli: tool', note: false });
+    expect(noRow(plan, undefined, 'agent', 'tool')).toEqual({ title: 'Deny agent: tool', note: false });
   });
 });
