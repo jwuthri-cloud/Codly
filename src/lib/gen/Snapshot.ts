@@ -32,8 +32,9 @@ request_prefs: { [key in string]: RequestPrefs }, agents: Array<Agent>, plans: A
  */
 events: Array<EventRow>, 
 /**
- * What runs beside the live runs and is older than `events`: the last `mcp_server` event
- * of each of their servers, and the `background_command` event of each command that
- * still runs. Oldest first.
+ * What runs beside the live runs and is not in `events`: the last `mcp_server` event of
+ * each of their servers, and each run's last `background_tasks` event. Oldest first. A
+ * row with id 0 is a server that stands where an earlier run of its agent recorded it:
+ * the log has no row of it for this run.
  */
 session_events: Array<EventRow>, };

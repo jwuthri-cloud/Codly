@@ -83,8 +83,10 @@ impl Seen {
 /// ends in "ASK-TO-RUN: <command>" asks to run that command and ends with the answer. Session
 /// requests are answered during such a turn too, as the CLI answers them. In the turn of a
 /// prompt with "LEAVE-RUNNING" its MCP servers report and it leaves a command running in the
-/// background; one with "MANY-STEPS" makes more events than a snapshot holds. A reconnect of
-/// the server "takes-its-time" is answered after 11 s.
+/// background; one with "SAME-SERVERS" reports the servers where that turn left them, as a
+/// new run does when it starts, and one with "DOCS-FAILS" reports one server that changed; one
+/// with "MANY-STEPS" makes more events than a snapshot holds. A reconnect of the server
+/// "takes-its-time" is answered after 11 s.
 struct Fake(Arc<Mutex<Seen>>);
 
 impl Spawner for Fake {
@@ -142,20 +144,30 @@ impl Spawner for Fake {
                             if text.contains("plan accepted") {
                                 send(permission_mode_changed(PermissionMode::Ask));
                             }
+                            let server = |name: &str, status, error: Option<&str>| EventKind::McpServer { name: name.into(), status, error: error.map(String::from) };
+                            const REFUSED: Option<&str> = Some("Dynamic Client Registration rejected (HTTP 401)");
                             if text.contains("LEAVE-RUNNING") {
-                                let server = |name: &str, status, error: Option<&str>| EventKind::McpServer { name: name.into(), status, error: error.map(String::from) };
-                                let command = |task: &str, status: &str| EventKind::BackgroundCommand {
-                                    task_id: task.into(),
-                                    call_id: format!("toolu-{task}"),
-                                    description: "npm run dev".into(),
-                                    status: status.into(),
+                                // Claude Code's whole list of background tasks, at each change.
+                                let listed = |ids: &[&str], ended: &[&str]| EventKind::BackgroundTasks {
+                                    tasks: ids.iter().map(|id| BackgroundTask { id: (*id).into(), kind: "command".into(), description: "npm run dev".into() }).collect(),
+                                    ended: ended
+                                        .iter()
+                                        .map(|id| BackgroundEnded { id: (*id).into(), kind: "command".into(), description: "npm run dev".into(), status: "completed".into() })
+                                        .collect(),
                                 };
                                 send(server("docs", McpServerStatus::Connected, None));
                                 send(server("linear", McpServerStatus::Connecting, None));
-                                send(server("linear", McpServerStatus::NeedsSignIn, Some("Dynamic Client Registration rejected (HTTP 401)")));
-                                send(command("tid-1", "running"));
-                                send(command("tid-2", "running"));
-                                send(command("tid-2", "completed"));
+                                send(server("linear", McpServerStatus::NeedsSignIn, REFUSED));
+                                send(listed(&["tid-1"], &[]));
+                                send(listed(&["tid-1", "tid-2"], &[]));
+                                send(listed(&["tid-1"], &["tid-2"]));
+                            }
+                            if text.contains("SAME-SERVERS") {
+                                send(server("docs", McpServerStatus::Connected, None));
+                                send(server("linear", McpServerStatus::NeedsSignIn, REFUSED));
+                            }
+                            if text.contains("DOCS-FAILS") {
+                                send(server("docs", McpServerStatus::Failed, Some("Connection closed")));
                             }
                             if text.contains("MANY-STEPS") {
                                 for _ in 0..320 {
@@ -907,47 +919,105 @@ async fn a_reconnect_waits_for_a_server_that_is_slow_to_connect() {
     core.shutdown().await;
 }
 
-/// The rows of a snapshot's `session_events`, as "<server> <state>" and "<task id> <status>".
+/// The rows of a snapshot's `session_events`, as "<server> <state>" and, for a list of
+/// background tasks, "runs <task ids>; ended <task ids>".
 fn session_lines(rows: &[EventRow]) -> Vec<String> {
+    let ids = |ids: Vec<&str>| if ids.is_empty() { "nothing".to_string() } else { ids.join(" ") };
     rows.iter()
         .map(|r| match &r.kind {
             EventKind::McpServer { name, status, .. } => format!("{name} {status:?}"),
-            EventKind::BackgroundCommand { task_id, status, .. } => format!("{task_id} {status}"),
+            EventKind::BackgroundTasks { tasks, ended } => {
+                format!("runs {}; ended {}", ids(tasks.iter().map(|t| t.id.as_str()).collect()), ids(ended.iter().map(|t| t.id.as_str()).collect()))
+            }
             other => format!("{other:?}"),
         })
         .collect()
 }
 
-/// A server's event comes when its state changes and a background command's when it starts,
-/// and a snapshot has only the workspace's newest events. A run that went on for long after
-/// them still has its servers and its running commands in a fresh snapshot.
+fn is_session_row(e: &EventRow) -> bool {
+    matches!(e.kind, EventKind::McpServer { .. } | EventKind::BackgroundTasks { .. })
+}
+
+/// A server's event comes when its state changes and the list of background tasks when it
+/// changes, and a snapshot has only the workspace's newest events. A run that went on for
+/// long after them still has its servers and its last list in a fresh snapshot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_fresh_snapshot_has_the_servers_and_the_running_commands_of_a_long_run() {
+async fn a_fresh_snapshot_has_the_servers_and_the_background_work_of_a_long_run() {
     let dir = tempfile::tempdir().unwrap();
     let seen = Arc::new(Mutex::new(Seen::default()));
     let (core, id) = live_agent(dir.path(), &seen).await;
-    let session = |e: &EventRow| matches!(e.kind, EventKind::McpServer { .. } | EventKind::BackgroundCommand { .. });
 
     // While the snapshot's own events still hold them, they are not given twice.
     turn(&core, &id, "LEAVE-RUNNING").await;
     let snap = core.snapshot().await.unwrap();
-    assert_eq!(snap.events.iter().filter(|e| session(e)).count(), 6, "three states of two servers, three of two commands");
+    assert_eq!(snap.events.iter().filter(|e| is_session_row(e)).count(), 6, "three states of two servers, three lists");
     assert_eq!(session_lines(&snap.session_events), Vec::<String>::new());
 
     // The run goes on, and its events push them out of the snapshot's events: each server's
-    // last state and the command that still runs come with the snapshot. The command that
-    // ended is history.
+    // last state and the run's last list come with the snapshot. The lists before it are
+    // history.
     turn(&core, &id, "MANY-STEPS").await;
     let snap = core.snapshot().await.unwrap();
-    assert!(!snap.events.iter().any(session), "the snapshot's events no longer hold them");
-    assert_eq!(session_lines(&snap.session_events), ["docs Connected", "linear NeedsSignIn", "tid-1 running"]);
+    assert!(!snap.events.iter().any(is_session_row), "the snapshot's events no longer hold them");
+    assert_eq!(session_lines(&snap.session_events), ["docs Connected", "linear NeedsSignIn", "runs tid-1; ended tid-2"]);
     let run = agent(&core, &id).await.run_id;
     assert!(run.is_some() && snap.session_events.iter().all(|r| r.run_id == run && r.agent_id.as_deref() == Some(id.as_str())));
     let ids: Vec<i64> = snap.session_events.iter().map(|r| r.id).collect();
     assert!(ids.is_sorted() && ids.iter().all(|i| *i > 0 && *i < snap.events[0].id), "{ids:?} before {}", snap.events[0].id);
 
-    // The process is gone, and its servers and commands with it.
+    // The process is gone, and its servers and its background work with it.
     stop(&core, &id).await;
     assert_eq!(session_lines(&core.snapshot().await.unwrap().session_events), Vec::<String>::new());
+    core.shutdown().await;
+}
+
+/// Every run reports each of its MCP servers when it starts. A server that stands where the
+/// agent's last row has it gets no new row: the open window still gets the event, a snapshot
+/// during that run still has the server, and a server that changed gets its one row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_run_with_the_same_servers_writes_no_rows_and_still_shows_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let server_rows = async || {
+        let mut rows = core.events(Some(&id), None, 500).await.unwrap();
+        rows.retain(|e| matches!(e.kind, EventKind::McpServer { .. }));
+        rows.sort_by_key(|e| e.id);
+        rows
+    };
+
+    // The first run: every state of its servers is on record.
+    turn(&core, &id, "LEAVE-RUNNING").await;
+    let first_run = agent(&core, &id).await.run_id;
+    assert_eq!(session_lines(&server_rows().await), ["docs Connected", "linear Connecting", "linear NeedsSignIn"]);
+    stop(&core, &id).await;
+
+    // A second run, and its servers stand as the first run left them.
+    let mut window = core.subscribe();
+    turn(&core, &id, "SAME-SERVERS").await;
+    let second_run = agent(&core, &id).await.run_id;
+    assert!(second_run.is_some() && second_run != first_run);
+    assert_eq!(server_rows().await.len(), 3, "no new row: nothing changed");
+    // The open window got them all the same, as events that are in no log (id 0).
+    let shown: Vec<EventRow> = std::iter::from_fn(|| window.try_recv().ok()).filter(|e| matches!(e.kind, EventKind::McpServer { .. })).collect();
+    assert_eq!(session_lines(&shown), ["docs Connected", "linear NeedsSignIn"]);
+    assert!(shown.iter().all(|e| e.id == 0 && e.run_id == second_run), "{shown:?}");
+    // And a snapshot taken now has the servers of this run.
+    let snap = core.snapshot().await.unwrap();
+    assert_eq!(session_lines(&snap.session_events), ["docs Connected", "linear NeedsSignIn"]);
+    assert!(snap.session_events.iter().all(|r| r.id == 0 && r.run_id == second_run && r.agent_id.as_deref() == Some(id.as_str())));
+    assert!(!snap.events.iter().any(|e| e.run_id == second_run && matches!(e.kind, EventKind::McpServer { .. })));
+
+    // A server that changes its state gets exactly one row, and the snapshot's events hold it.
+    turn(&core, &id, "DOCS-FAILS").await;
+    let rows = server_rows().await;
+    assert_eq!(session_lines(&rows[3..]), ["docs Failed"]);
+    assert_eq!(rows[3].run_id, second_run);
+    let snap = core.snapshot().await.unwrap();
+    assert_eq!(session_lines(&snap.session_events), ["linear NeedsSignIn"], "the server that did not change");
+    // The same state again, in the same run: said once.
+    turn(&core, &id, "DOCS-FAILS").await;
+    assert_eq!(server_rows().await.len(), 4);
+    stop(&core, &id).await;
     core.shutdown().await;
 }

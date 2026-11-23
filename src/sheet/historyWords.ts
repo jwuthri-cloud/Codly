@@ -1,13 +1,16 @@
-// Words for rows of an agent's History that are built from ids: a fact of the knowledge graph
-// and a task that changed. And what a row needs to know about the agent's other events: which
-// calls showed a plan, and which conversation rows only repeat a reply.
+// Words for rows of an agent's History that are built from ids or lists: a fact of the knowledge
+// graph, a task that changed, a change of what runs in the background. Which rows of a task say
+// something new. And what a row needs to know about the agent's other events: which calls
+// showed a plan, and which conversation rows only repeat a reply.
 // Pure, so the sheet and the tests agree; the sheet passes the names.
+import type { EventKind } from '../lib/gen/EventKind';
 import type { EventRow } from '../lib/gen/EventRow';
 import type { Provider } from '../lib/gen/Provider';
 import type { Task } from '../lib/gen/Task';
 import type { Triple } from '../lib/gen/Triple';
 import { TASK_STATUS_LABEL } from '../lib/util/labels';
 import { isPlanCall } from '../lib/util/planRequest';
+import { oneLine } from '../lib/util/sanitize';
 
 /** How the sheet looks up what an id is called: an agent's name, a task's key ("t1"). */
 export type Names = { agent: (id: string) => string | undefined; task: (id: string) => string | undefined };
@@ -58,4 +61,42 @@ export function repeatsReply(e: EventRow, agentId: string, facts: HistoryFacts):
 /** "Task t1 is now In review" */
 export function taskChangedLine(task: Pick<Task, 'key' | 'status'>): string {
   return `Task ${task.key} is now ${TASK_STATUS_LABEL[task.status]}`;
+}
+
+/**
+ * History rows (newest first) without the `task_changed` rows that say nothing new. The core
+ * writes one for every update of a task (a new assignee, a branch, a summary), and the row
+ * says only the status: a row shows when its status is not the one of that task's row before
+ * it. The oldest row of a task in the list always shows.
+ */
+export function withoutRepeatedTaskRows<T extends { kind: EventKind }>(rows: T[]): T[] {
+  const last = new Map<string, string>();
+  const keep: T[] = [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const k = rows[i].kind;
+    if (k.type === 'task_changed') {
+      const same = last.get(k.task.id) === k.task.status;
+      last.set(k.task.id, k.task.status);
+      if (same) continue;
+    }
+    keep.push(rows[i]);
+  }
+  return keep.reverse();
+}
+
+type BackgroundTasks = Extract<EventKind, { type: 'background_tasks' }>;
+
+/** "Background command", "Helper": what a piece of background work is called in a row. */
+const backgroundWord = (kind: string) => (kind === 'command' ? 'Background command' : kind === 'helper' ? 'Helper' : 'Background task');
+
+/**
+ * One change of what an agent runs in the background, as its CLI lists it: what ended, with the
+ * CLI's word for it, then what still runs. "Background command stopped: npm run dev · still
+ * runs: npm test"; with nothing ended, "Runs in the background: npm run dev".
+ */
+export function backgroundLine(k: Pick<BackgroundTasks, 'tasks' | 'ended'>): string {
+  const runs = oneLine(k.tasks.map((t) => t.description).join(', '), 120);
+  if (!k.ended.length) return k.tasks.length ? `Runs in the background: ${runs}` : 'Nothing runs in the background';
+  const ended = k.ended.map((e) => `${backgroundWord(e.kind)} ${e.status}: ${oneLine(e.description, 90)}`).join('; ');
+  return k.tasks.length ? `${ended} · still runs: ${runs}` : ended;
 }

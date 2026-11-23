@@ -126,7 +126,11 @@ impl Inner {
         }
         // Only what is on record is shown (as `emit` does): a row the store refused would be a card
         // nobody can answer, gone at the next resync. The run's bookkeeping below still follows it.
-        match self.store.append_event(ctx.ws.as_deref(), &r) {
+        // One event is shown and not recorded (id 0): an MCP server that stands where the
+        // agent's last row has it, as every new run reports each server (live_session.rs).
+        let repeat = self.mcp_server_repeats(&ctx.agent_id, &r.kind);
+        let stored = if repeat { Ok(0) } else { self.store.append_event(ctx.ws.as_deref(), &r) };
+        match stored {
             Ok(id) => {
                 r.id = id;
                 self.publish(ctx.ws.as_deref(), &r);
@@ -151,7 +155,7 @@ impl Inner {
                 self.restore_note_read(&ctx.agent_id); // the note came with that prompt
                 self.chat_prompt_read(&ctx.agent_id, input, false);
             }
-            EventKind::McpServer { .. } | EventKind::BackgroundCommand { .. } => self.session_row_seen(&ctx.agent_id, &r),
+            EventKind::McpServer { .. } | EventKind::BackgroundTasks { .. } if repeat || r.id > 0 => self.session_row_seen(&ctx.agent_id, &r),
             EventKind::Decision { decision_type, detail, .. } if decision_type == crate::adapters::MODE_CHANGED => {
                 self.control_mode_changed(&ctx.agent_id, ctx.role, detail)
             }
@@ -243,9 +247,9 @@ impl Inner {
                 l.last_text = None;
                 l.last_error = None;
                 l.self_started = input.is_none();
-                l.background.turn_started();
+                l.background.turn_started(std::time::Instant::now());
             }
-            EventKind::BackgroundTasks { tasks } => l.background.listed(tasks),
+            EventKind::BackgroundTasks { tasks, .. } => l.background.listed(tasks),
             // A Codex subagent works on a thread of its own, and its turn can go on after the
             // agent's own ended ("running" until that turn ends). From the types of codex-cli
             // 0.166.0: not verified on a live run. (Claude Code lists its helpers itself.)

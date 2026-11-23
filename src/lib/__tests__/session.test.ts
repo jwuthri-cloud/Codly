@@ -1,13 +1,14 @@
-// What runs beside a live agent's own calls: its MCP servers and the commands it left running
-// in the background. The store keeps them from the agent's events; the sheet shows the ones of
-// its live run, with "Reconnect" and "Stop".
+// What runs beside a live agent's own calls: its MCP servers and what it left at work in the
+// background (commands and helpers, as Claude Code lists them at every change). The store keeps
+// them from the agent's events; the sheet shows the ones of its live run, with "Reconnect" and
+// "Stop".
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Snapshot } from '../gen/Snapshot';
-import { MCP_HINT, MCP_LABEL, backgroundSummary, canReconnect, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, stopBackgroundCommand } from '../state/session';
+import { MCP_HINT, MCP_LABEL, backgroundKind, backgroundSummary, canReconnect, canStop, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, stopBackgroundTask } from '../state/session';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { mkAgent } from '../../office/demo/script';
@@ -17,10 +18,11 @@ const apply = (...evs: EventRow[]) => (store as unknown as { applyEvents(evs: Ev
 
 let id = 0;
 /** A snapshot takes the place of everything the store holds. */
-const fresh = (o: Partial<Snapshot> = {}) => {
-  const snap = { as_of: 0, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [bo], plans: [], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [], ...o };
-  (store as unknown as { applySnapshot(s: Snapshot): void }).applySnapshot(snap as unknown as Snapshot);
-};
+const snapshot = (o: Partial<Snapshot>) =>
+  ({ as_of: 0, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [bo], plans: [], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [], ...o }) as unknown as Snapshot;
+const fresh = (o: Partial<Snapshot> = {}) => (store as unknown as { applySnapshot(s: Snapshot): void }).applySnapshot(snapshot(o));
+/** A snapshot of the office that is open (the event stream fell behind, or connected again): it is merged into what the store holds. `missed`: the stored rows since. */
+const merge = (o: Partial<Snapshot>, missed: EventRow[] = []) => (store as unknown as { mergeSnapshot(s: Snapshot, missed: EventRow[]): void }).mergeSnapshot(snapshot(o), missed);
 beforeEach(() => {
   id = 0;
   fresh();
@@ -29,8 +31,10 @@ afterEach(() => vi.restoreAllMocks());
 
 const ev = (ts: number, run: string, kind: EventKind): EventRow => ({ id: ++id, ts, agent_id: 'a1', task_id: null, run_id: run, kind });
 const server = (ts: number, run: string, name: string, status: McpServerStatus, error: string | null = null) => ev(ts, run, { type: 'mcp_server', name, status, error });
-const command = (ts: number, run: string, task: string, status: string) =>
-  ev(ts, run, { type: 'background_command', task_id: task, call_id: `toolu-${task}`, description: `sleep 127; echo ${task}`, status });
+const task = (id: string, kind = 'command') => ({ id, kind, description: kind === 'command' ? `sleep 127; echo ${id}` : `Look at ${id}` });
+/** Claude Code's whole list of background tasks (commands, by id), with what left it since the list before: [id, Claude Code's word]. */
+const list = (ts: number, run: string, tasks: string[], ended: [string, string][] = []) =>
+  ev(ts, run, { type: 'background_tasks', tasks: tasks.map((id) => task(id)), ended: ended.map(([id, status]) => ({ ...task(id), status })) });
 const live = () => store.live.a1;
 const REFUSED = 'Dynamic Client Registration rejected (HTTP 401): {"error":"unauthorized"}';
 
@@ -94,70 +98,152 @@ describe('the MCP servers of an agent', () => {
 
 describe('a snapshot of a run that went on for long', () => {
   const said = (n: number): EventRow => ({ id: n, ts: 1000 + n, agent_id: 'a1', task_id: null, run_id: 'r2', kind: { type: 'message', item_id: `m${n}`, text: 'on it', phase: 'final' } as EventKind });
-  /** The run's servers and its running command, from before the snapshot's own events. */
-  const beside = () => [server(10, 'r2', 'docs', 'connected'), server(11, 'r2', 'linear', 'needs_sign_in', REFUSED), command(12, 'r2', 'tid-1', 'running')];
+  /** The run's servers and its last list of background tasks, from before the snapshot's own events. */
+  const beside = () => [server(10, 'r2', 'docs', 'connected'), server(11, 'r2', 'linear', 'needs_sign_in', REFUSED), list(12, 'r2', ['tid-1'])];
 
-  it('still has the run\'s servers and its running commands, though their events left the log', () => {
+  it('still has the run\'s servers and what it runs in the background, though their events left the log', () => {
     fresh({ as_of: 900, events: [said(899), said(900)], session_events: beside() });
     expect(ofLiveRun(live().mcp, bo.run_id).map((s) => [s.name, s.status, s.error, s.ts])).toEqual([
       ['docs', 'connected', null, 10],
       ['linear', 'needs_sign_in', REFUSED, 11],
     ]);
-    expect(ofLiveRun(live().background, bo.run_id).map((c) => [c.taskId, c.status, c.startedAt])).toEqual([['tid-1', 'running', 12]]);
+    expect(ofLiveRun(live().background, bo.run_id).map((w) => [w.id, w.status, w.startedAt])).toEqual([['tid-1', 'running', 12]]);
     // They are state, not rows of the log: the log starts where the snapshot's events start.
     expect(store.events.map((e) => e.id)).toEqual([899, 900]);
     // What comes live lands on them.
-    apply({ ...command(20_000, 'r2', 'tid-1', 'stopped'), id: 901 }, { ...server(20_001, 'r2', 'linear', 'connected'), id: 902 });
+    apply({ ...list(20_000, 'r2', [], [['tid-1', 'stopped']]), id: 901 }, { ...server(20_001, 'r2', 'linear', 'connected'), id: 902 });
     expect(live().mcp.map((s) => [s.name, s.status])).toEqual([['docs', 'connected'], ['linear', 'connected']]);
-    expect(live().background.map((c) => [c.taskId, c.status, c.startedAt])).toEqual([['tid-1', 'stopped', 12]]);
+    expect(live().background.map((w) => [w.id, w.status, w.startedAt, w.endedAt])).toEqual([['tid-1', 'stopped', 12, 20_000]]);
   });
 
   it('keeps them when the agent\'s earlier history is loaded and its state is built again', async () => {
     fresh({ as_of: 900, events: [said(899), said(900)], session_events: beside() });
-    // One page of the thread's older rows (newest first): none of them is a server's or a command's.
+    // One page of the thread's older rows (newest first): none of them is a server's or a list.
     vi.spyOn(api, 'threadEvents').mockResolvedValue([said(898), said(897)]);
     await store.loadEarlier('agent:a1');
     expect(live().messages).toHaveLength(4);
     expect(ofLiveRun(live().mcp, bo.run_id).map((s) => s.name)).toEqual(['docs', 'linear']);
-    expect(ofLiveRun(live().background, bo.run_id).map((c) => c.taskId)).toEqual(['tid-1']);
+    expect(ofLiveRun(live().background, bo.run_id).map((w) => w.id)).toEqual(['tid-1']);
+  });
+
+  // Every run reports each of its servers when it starts. One that stands where an earlier run
+  // recorded it gets no new row in the log: its event has id 0, live and in a snapshot.
+  describe('with servers that stand where an earlier run recorded them', () => {
+    /** The earlier run's rows, and the live run's servers that changed nothing. */
+    const earlier = () => [{ ...server(5, 'r1', 'docs', 'connected'), id: 898 }, said(899), said(900)];
+    const unchanged = () => [{ ...server(50, 'r2', 'docs', 'connected'), id: 0 }, { ...server(50, 'r2', 'linear', 'needs_sign_in', REFUSED), id: 0 }];
+    const servers = () => ofLiveRun(live().mcp, bo.run_id).map((s) => [s.name, s.status]);
+
+    it('shows them for the live run, with no row in the log', () => {
+      fresh({ as_of: 900, events: earlier(), session_events: unchanged() });
+      // The earlier run's row is in the snapshot's events: it does not take their place.
+      expect(servers()).toEqual([['docs', 'connected'], ['linear', 'needs_sign_in']]);
+      expect(store.events.map((e) => e.id)).toEqual([898, 899, 900]);
+    });
+
+    it('takes one that comes live, and adds no row for it', () => {
+      fresh({ as_of: 900, events: earlier() });
+      expect(servers()).toEqual([]); // the earlier run's server is not the live run's
+      apply(...unchanged());
+      expect(servers()).toEqual([['docs', 'connected'], ['linear', 'needs_sign_in']]);
+      expect(store.events.map((e) => e.id)).toEqual([898, 899, 900]);
+      // A server that changes has its row, and lands on the same list.
+      apply({ ...server(60, 'r2', 'docs', 'failed', 'Connection closed'), id: 901 });
+      expect(servers()).toEqual([['docs', 'failed'], ['linear', 'needs_sign_in']]);
+      expect(store.events.map((e) => e.id)).toEqual([898, 899, 900, 901]);
+    });
+
+    // The run started while the open office's event stream fell behind: its servers' live events
+    // are lost, and no stored row holds them. The snapshot that catches up has them.
+    it('shows them when their live events were lost and a snapshot is merged into the open office', () => {
+      fresh({ as_of: 900, events: earlier() });
+      expect(servers()).toEqual([]);
+      merge({ as_of: 900, events: earlier(), session_events: unchanged() });
+      expect(servers()).toEqual([['docs', 'connected'], ['linear', 'needs_sign_in']]);
+      expect(store.events.map((e) => e.id)).toEqual([898, 899, 900]);
+    });
+
+    it('a merged snapshot gives a server that changed from its missed row, and the others beside it', () => {
+      fresh({ as_of: 900, events: earlier() });
+      // "docs" failed in the live run: that is a stored row. "linear" stands as recorded.
+      const failed = { ...server(60, 'r2', 'docs', 'failed', 'Connection closed'), id: 901 };
+      merge({ as_of: 901, events: [...earlier(), failed], session_events: [unchanged()[1]] }, [failed]);
+      expect(servers()).toEqual([['docs', 'failed'], ['linear', 'needs_sign_in']]);
+      expect(store.events.map((e) => e.id)).toEqual([898, 899, 900, 901]);
+    });
+
+    it('keeps them when the agent\'s earlier history is loaded and its state is built again', async () => {
+      fresh({ as_of: 900, events: earlier(), session_events: unchanged() });
+      vi.spyOn(api, 'threadEvents').mockResolvedValue([said(897), { ...server(4, 'r1', 'old', 'failed', 'Connection closed'), id: 896 }]);
+      await store.loadEarlier('agent:a1');
+      expect(live().messages).toHaveLength(3);
+      expect(servers()).toEqual([['docs', 'connected'], ['linear', 'needs_sign_in']]);
+    });
   });
 });
 
-describe('the commands an agent left running in the background', () => {
-  it('a command runs until its own event says it is over, in Claude Code\'s word', () => {
-    apply(command(10, 'r2', 'tid-1', 'running'), command(20, 'r2', 'tid-2', 'running'));
+describe('what an agent left at work in the background', () => {
+  const rows = () => live().background.map((w) => [w.id, w.status, w.startedAt, w.endedAt]);
+
+  it('work runs while Claude Code lists it, and ends in Claude Code\'s word when the list drops it', () => {
+    apply(list(10, 'r2', ['tid-1']), list(20, 'r2', ['tid-1', 'tid-2']));
     expect(backgroundSummary(live().background)).toBe('2 running');
-    apply(command(18_000, 'r2', 'tid-1', 'completed'));
-    apply(command(25_000, 'r2', 'tid-2', 'stopped'));
-    expect(live().background.map((c) => [c.taskId, c.callId, c.status, c.startedAt, c.ts])).toEqual([
-      ['tid-1', 'toolu-tid-1', 'completed', 10, 18_000],
-      ['tid-2', 'toolu-tid-2', 'stopped', 20, 25_000],
-    ]);
-    expect(backgroundSummary(live().background)).toBe('2 commands ended');
+    // A row starts with the first list that names it, and keeps that time across the lists.
+    expect(rows()).toEqual([['tid-1', 'running', 10, null], ['tid-2', 'running', 20, null]]);
+    apply(list(18_000, 'r2', ['tid-2'], [['tid-1', 'completed']]));
+    expect(rows()).toEqual([['tid-2', 'running', 20, null], ['tid-1', 'completed', 10, 18_000]]);
+    apply(list(25_000, 'r2', [], [['tid-2', 'stopped']]));
+    expect(rows()).toEqual([['tid-1', 'completed', 10, 18_000], ['tid-2', 'stopped', 20, 25_000]]);
+    expect(backgroundSummary(live().background)).toBe('2 ended');
   });
 
-  it('a command of an earlier run does not show as running: its process is gone', () => {
-    apply(command(5, 'r1', 'tid-9', 'running'));
+  it('a helper is listed beside the commands, and only a command that runs has "Stop"', () => {
+    const tasks = [task('tid-1'), task('tid-3', 'helper'), task('tid-4', 'remote')];
+    apply(ev(10, 'r2', { type: 'background_tasks', tasks, ended: [] }));
+    expect(live().background.map((w) => [w.id, backgroundKind(w), canStop(w)])).toEqual([['tid-1', null, true], ['tid-3', 'helper', false], ['tid-4', 'task', false]]);
+    apply(list(20, 'r2', [], [['tid-1', 'completed']]));
+    expect(live().background.filter(canStop)).toEqual([]);
+  });
+
+  it('work that a list drops without a word is over too, and work that was never seen running has no start', () => {
+    apply(list(10, 'r2', ['tid-1', 'tid-2']));
+    // The list of its end is not at hand (the window missed it): the next list is still the whole list.
+    apply(list(30, 'r2', ['tid-2']));
+    expect(rows()).toEqual([['tid-2', 'running', 10, null], ['tid-1', 'ended', 10, 30]]);
+    // The list at hand is the first one, and it says what ended before it.
+    apply(list(40, 'r2', ['tid-2'], [['tid-9', 'completed']]));
+    expect(rows()).toEqual([['tid-2', 'running', 10, null], ['tid-1', 'ended', 10, 30], ['tid-9', 'completed', null, 40]]);
+  });
+
+  it('work of an earlier run does not show as running: its process is gone', () => {
+    apply(list(5, 'r1', ['tid-9']));
     expect(ofLiveRun(live().background, bo.run_id)).toEqual([]);
-    apply(command(10, 'r2', 'tid-1', 'running'));
-    expect(live().background.map((c) => c.taskId)).toEqual(['tid-1']);
+    apply(list(10, 'r2', ['tid-1']));
+    expect(live().background.map((w) => w.id)).toEqual(['tid-1']);
   });
 
-  it('keeps every running command and only the last ended ones', () => {
-    apply(command(1, 'r2', 'long', 'running'));
-    for (let i = 0; i < 12; i++) apply(command(10 + i, 'r2', `t${i}`, 'running'), command(20 + i, 'r2', `t${i}`, 'completed'));
+  it('keeps everything that runs and only the last 8 that ended', () => {
+    apply(list(1, 'r2', ['long']));
+    for (let i = 0; i < 12; i++) apply(list(10 + i, 'r2', ['long', `t${i}`]), list(20 + i, 'r2', ['long'], [[`t${i}`, 'completed']]));
     const kept = live().background;
-    expect(kept.filter((c) => c.status === 'running').map((c) => c.taskId)).toEqual(['long']);
-    expect(kept.filter((c) => c.status !== 'running').map((c) => c.taskId)).toEqual(['t4', 't5', 't6', 't7', 't8', 't9', 't10', 't11']);
+    expect(kept.filter((w) => w.status === 'running').map((w) => [w.id, w.startedAt])).toEqual([['long', 1]]);
+    expect(kept.filter((w) => w.status !== 'running').map((w) => w.id)).toEqual(['t4', 't5', 't6', 't7', 't8', 't9', 't10', 't11']);
+  });
+
+  it('has one row per id, also when a list names one twice', () => {
+    apply(list(10, 'r2', ['tid-1', 'tid-1']));
+    expect(rows()).toEqual([['tid-1', 'running', 10, null]]);
+    apply(list(20, 'r2', [], [['tid-1', 'stopped']]), list(30, 'r2', [], [['tid-1', 'stopped']]));
+    expect(rows()).toEqual([['tid-1', 'stopped', null, 30]]);
   });
 
   it('"Stop" names the command by Claude Code\'s id, and a refusal says why', async () => {
     for (const t of toasts.list) toasts.dismiss(t.id);
     const stop = vi.spyOn(api, 'stopAgentTask').mockResolvedValueOnce(undefined).mockRejectedValueOnce('Bo is not running');
-    expect(await stopBackgroundCommand('a1', 'tid-2')).toBe(true);
+    expect(await stopBackgroundTask('a1', 'tid-2')).toBe(true);
     expect(stop).toHaveBeenCalledWith('a1', 'tid-2');
     expect(toasts.list).toHaveLength(0);
-    expect(await stopBackgroundCommand('a1', 'tid-2')).toBe(false);
+    expect(await stopBackgroundTask('a1', 'tid-2')).toBe(false);
     expect(toasts.list.map((t) => [t.title, t.body])).toEqual([['Couldn’t stop the command', 'Bo is not running']]);
     for (const t of toasts.list) toasts.dismiss(t.id);
   });

@@ -46,7 +46,7 @@ import { targetLabel, type Provenance } from '../util/labels';
 import { transferredOut } from '../util/transfer';
 import { accounts } from './accounts.svelte';
 import { controls } from './control.svelte';
-import { withBackgroundCommand, withMcpServer, type BackgroundCommand, type McpServer } from './session';
+import { withBackgroundTasks, withMcpServer, type BackgroundWork, type McpServer } from './session';
 
 export const LOG_CAP = 5000;
 const SEG_CAP = 1500;
@@ -204,9 +204,9 @@ export type AgentLive = {
   lastOutput: { callId: string; text: string; ts: number; ok: boolean | null } | null;
   errors: { message: string; fatal: boolean; ts: number }[];
   subagents: SubAgent[];
-  /** Its MCP servers and the commands it left running in the background, of its last run that reported any (state/session.ts). */
+  /** Its MCP servers and what it left at work in the background, of its last run that reported any (state/session.ts). */
   mcp: McpServer[];
-  background: BackgroundCommand[];
+  background: BackgroundWork[];
   firstTs: number;
   lastTs: number;
 };
@@ -348,8 +348,9 @@ class CodlyStore {
   /** The oldest event the held state was built from (the start of the last snapshot that took
    *  the place of everything). The log may have been trimmed past it since. */
   private origin = 0;
-  /** The snapshot's `session_events`: the MCP servers and the running background commands of
-   *  the live runs, from before `origin`. An agent's state that is built again starts from them. */
+  /** The stored rows of the snapshot's `session_events`: the MCP servers and the last list of
+   *  background tasks of the live runs, from before `origin`. An agent's state that is built
+   *  again starts from them. */
   private beside: EventRow[] = [];
   /** Per thread that was asked: is there earlier history, is a page loading. */
   earlier = $state.raw<Record<string, Earlier>>({});
@@ -510,6 +511,10 @@ class CodlyStore {
    *  the place of ours. Nothing older is dropped, and nothing remounts (`epoch` stays). */
   private mergeSnapshot(s: Snapshot, missed: EventRow[]) {
     this.applyEvents(missed);
+    // A server that stands where an earlier run recorded it has no row in any log (id 0), so
+    // the missed rows do not hold it, and its live event may be lost with what was missed. It
+    // is the newest word about that server, of the run that is live: it lands last.
+    for (const ev of s.session_events ?? []) if (ev.id === 0) this.derive(ev, true);
     this.adopt(s);
     // Approvals: the snapshot has the ones that wait. Answered ones are in no snapshot: ours stay.
     const waiting = new Set(s.approvals.map((a) => a.id));
@@ -551,12 +556,16 @@ class CodlyStore {
     this.events = evs.slice(-LOG_CAP);
     this.origin = evs[0]?.id ?? s.as_of + 1;
     this.sessionStart = evs[0]?.ts ?? Date.now();
-    // What runs beside the live runs and is older than the log: state, not rows of the log.
-    this.beside = [...(s.session_events ?? [])].sort((a, b) => a.id - b.id);
+    // What runs beside the live runs and is not in the log: state, not rows of the log.
+    const beside = s.session_events ?? [];
+    this.beside = beside.filter((e) => e.id !== 0).sort((a, b) => a.id - b.id);
     // Replay the log into the derived structures only: entities are already current.
     this.owned.clear();
     for (const ev of this.beside) this.derive(ev, true);
     for (const ev of evs) this.derive(ev, true);
+    // A server that stands where an earlier run recorded it has no row in any log (id 0). It
+    // is the newest word about that server, of the run that is live: it lands last.
+    for (const ev of beside) if (ev.id === 0) this.derive(ev, true);
     this.settle();
     this.rev++;
     this.liveRev++;
@@ -1031,8 +1040,8 @@ class CodlyStore {
       case 'mcp_server':
         if (l) l.mcp = withMcpServer(l.mcp, k, ev.run_id, ev.ts);
         break;
-      case 'background_command':
-        if (l) l.background = withBackgroundCommand(l.background, k, ev.run_id, ev.ts);
+      case 'background_tasks':
+        if (l) l.background = withBackgroundTasks(l.background, k, ev.run_id, ev.ts);
         break;
       case 'error':
         if (l) l.errors = [...l.errors, { message: k.message, fatal: k.fatal, ts: ev.ts }].slice(-20);
@@ -1186,6 +1195,9 @@ class CodlyStore {
       this.settle();
       // Output that only came as live chunks is in no stored row.
       if (prev?.lastOutput && (!l.lastOutput || l.lastOutput.ts <= prev.lastOutput.ts)) l.lastOutput = prev.lastOutput;
+      // Nor is a server that stands where an earlier run recorded it. The servers as held are
+      // the newest there are: older rows add nothing to them.
+      if (prev) l.mcp = prev.mcp;
       this.live[owner] = l;
       this.bump(this.revBy, [owner]);
     }

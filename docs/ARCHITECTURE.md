@@ -220,8 +220,15 @@ started in the background still runs, or while a helper (a subagent) still works
 waits (`orchestrator/background.rs`): the task says what it waits for, and its checks start when
 that work has ended. After 5 minutes Codly stops what still runs (Claude Code: its `stop_task`
 request), writes in the task's record what it stopped and what it could not stop, and checks the
-work as it is. For Codex, a subagent that is still in a turn counts; that part is built from the
-protocol's types and is not verified on a live run.
+work as it is. The 5 minutes are one budget for a run of the worker: a turn of the worker in the
+middle (a test run that ended woke the CLI) does not start them again, and a retry of the task
+has 5 minutes of its own. A worker that ended its turn with no report is asked for one only
+after this wait. For Codex, a subagent that is still in a turn counts; that part is built from the
+protocol's types and is not verified on a live run. Claude Code says its whole list of
+background tasks at every change, and that list is the one record of this work
+(`EventKind::BackgroundTasks`, with what left the list and how it ended): the gate waits on it,
+and the agent sheet shows it, with Stop on a command. The sheet also shows the run's MCP
+servers; a new run whose servers stand as the agent's last run recorded them writes no rows.
 
 **No agent sits "running" without end.** A watchdog looks at every live run each 15 s. A turn that
 gives no event for 10 minutes (60 with a tool call open; `Settings.watchdog`) is flagged on its
@@ -649,7 +656,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       preview.rs                          try work before a merge: your command in a plan's or an agent's worktree
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
                       takeover.rs                         "Open in my terminal": a session goes to you, and comes back
-                      live_session.rs                     a live Claude session from the agent sheet: reconnect an MCP server, stop a background command; its servers and running commands for a snapshot
+                      live_session.rs                     a live Claude session from the agent sheet: reconnect an MCP server, stop a background command; its servers and its last list of background tasks for a snapshot
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script

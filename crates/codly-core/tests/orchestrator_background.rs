@@ -8,7 +8,11 @@
 //!   Codex subagent: an interrupt), and the task's record says what Codly stopped and what it
 //!   could not stop;
 //! - a turn of the worker while Codly stops that work does not leave the task waiting for work
-//!   that nobody waits for any more.
+//!   that nobody waits for any more;
+//! - a worker that waits for its own command is not asked for its report before the wait: the
+//!   one question comes after it, when the worker's last turn still gave no report;
+//! - the wait is one budget for a run: a turn of the worker in the middle does not start it
+//!   again.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -62,6 +66,12 @@ fn background(id: &str, kind: &str, description: &str) -> BackgroundTask {
     BackgroundTask { id: id.into(), kind: kind.into(), description: description.into() }
 }
 
+/// Claude Code's whole list of background tasks, as it says it at every change. (What ended
+/// is for the agent sheet: the gate reads the list.)
+fn listed(tasks: Vec<BackgroundTask>) -> EventKind {
+    EventKind::BackgroundTasks { tasks, ended: vec![] }
+}
+
 fn helper(status: &str) -> EventKind {
     EventKind::SubAgent { call_id: "thread-1".into(), description: HELPER.into(), status: status.into() }
 }
@@ -94,6 +104,16 @@ fn emit(cli: &Cli, kind: EventKind) {
 fn worktree(cli: &Cli) -> PathBuf {
     cli.lock().unwrap().run.as_ref().expect("the worker runs").0.cwd.clone()
 }
+
+/// A turn that the worker's CLI starts by itself, for the test to act in: it has the worker's
+/// tools, and its start and its end are the test's to say (`emit`).
+fn own_turn(cli: &Cli) -> FakeTurn {
+    let cli = cli.lock().unwrap();
+    let (spec, events) = cli.run.as_ref().expect("the worker runs");
+    FakeTurn { spec: spec.clone(), prompt: String::new(), events: events.clone() }
+}
+
+const REPORT_QUESTION: &str = "[Codly] You ended your turn without a report.";
 
 #[derive(Clone)]
 struct FakeTurn {
@@ -194,15 +214,15 @@ impl Spawner for FakeSpawner {
                         // As recorded for Claude Code: the task's last lines, then the answer,
                         // which is the same whether anything was stopped or not.
                         AgentCmd::Session { request: SessionRequest::StopTask(id), reply } => {
-                            let listed = {
+                            let left = {
                                 let mut cli = cli.lock().unwrap();
                                 cli.stops.push(id.clone());
                                 let ends = cli.stoppable.contains(&id);
                                 cli.open.retain(|t| !(ends && t.id == id));
                                 ends.then(|| cli.open.clone())
                             };
-                            if let Some(tasks) = listed {
-                                send(EventKind::BackgroundTasks { tasks });
+                            if let Some(tasks) = left {
+                                send(listed(tasks));
                             }
                             let _ = reply.send(Ok(json!({})));
                         }
@@ -326,7 +346,7 @@ async fn a_task_is_not_checked_while_its_worker_has_a_background_command() {
     let worker: Behavior = Arc::new(|turn: FakeTurn| {
         Box::pin(async move {
             let command = background("tid-1", "command", "sleep 8; echo hello > hello.txt");
-            turn.work("draft\n", EventKind::BackgroundTasks { tasks: vec![command] }).await;
+            turn.work("draft\n", listed(vec![command])).await;
         })
     });
     let core = start(dir.path(), Provider::Claude, worker, &cli, None).await;
@@ -351,7 +371,7 @@ async fn a_task_is_not_checked_while_its_worker_has_a_background_command() {
     // The command ends: its file is there, the list is empty, and Claude Code starts a turn
     // by itself. The end of that turn is what runs the gate.
     std::fs::write(worktree(&cli).join("hello.txt"), "hello\n").unwrap();
-    emit(&cli, EventKind::BackgroundTasks { tasks: vec![] });
+    emit(&cli, listed(vec![]));
     emit(&cli, EventKind::TurnStarted { input: None });
     emit(&cli, EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("The command finished.".into()), duration_ms: Some(5) });
     wait_plan_done(&core).await;
@@ -403,7 +423,7 @@ async fn background_work_that_does_not_end_is_stopped_when_the_wait_runs_out() {
     }
     let worker: Behavior = Arc::new(move |turn: FakeTurn| {
         let open = open.clone();
-        Box::pin(async move { turn.work("hello\n", EventKind::BackgroundTasks { tasks: open }).await })
+        Box::pin(async move { turn.work("hello\n", listed(open)).await })
     });
     let core = start(dir.path(), Provider::Claude, worker, &cli, Some(Duration::from_secs(1))).await;
 
@@ -445,19 +465,19 @@ async fn a_turn_while_codly_stops_the_work_does_not_leave_the_task_waiting() {
     cli.lock().unwrap().open = open.clone();
     let worker: Behavior = Arc::new(move |turn: FakeTurn| {
         let open = open.clone();
-        Box::pin(async move { turn.work("hello\n", EventKind::BackgroundTasks { tasks: open }).await })
+        Box::pin(async move { turn.work("hello\n", listed(open)).await })
     });
-    // Longer than the 5 s the CLI gets to say what is gone: the wait that begins in those
-    // seconds (below) runs out after them.
     let core = start(dir.path(), Provider::Claude, worker, &cli, Some(Duration::from_secs(6))).await;
 
     wait_held(&core).await;
     // The wait runs out, and Codly asks the CLI to stop the helper. While Codly looks at what
-    // is left, the CLI starts a short turn by itself: the pass at its end waits for the helper
-    // anew.
+    // is left, the CLI starts a short turn by itself. The pass at its end finds the helper
+    // still listed and nothing left of the run's wait: the stop that is under way is its stop.
     wait_for("Codly to ask the CLI to stop the helper", 20, async || (!cli.lock().unwrap().stops.is_empty()).then_some(())).await;
     emit(&cli, EventKind::TurnStarted { input: None });
     emit(&cli, EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("Still at it.".into()), duration_ms: Some(5) });
+    let again = |t: &Task| t.status_reason.as_deref() == Some("its worker left the helper `Run the tests` running; Codly stops it now and checks the work");
+    wait_for("the turn's pass to wait for the stop", 20, async || the_task(&core).await.filter(again)).await;
 
     // The helper is still listed, and nobody waits for it a second time: the task is checked
     // as it is, at once, and does not stay in a wait that nothing ends.
@@ -467,7 +487,132 @@ async fn a_turn_while_codly_stops_the_work_does_not_leave_the_task_waiting() {
     let said: Vec<String> = background_decisions(&after).into_iter().map(|(summary, _)| summary).collect();
     let waits = "t1: not checked yet, its worker left the helper `Run the tests` running; Codly checks the work when that ends, and stops it after 6 s";
     let stopped = "t1: the helper `Run the tests` still ran after 6 s. Codly could not stop it, and checks the work as it is";
-    assert_eq!(said, [waits, waits, stopped], "the first pass waits, the turn's pass waits, the stop ends both waits");
+    assert_eq!(said, [waits, stopped], "the first pass waits its 6 s, and the stop ends that wait and the wait of the turn's pass");
+    assert_eq!(verified(&after), [true]);
+    assert_eq!(cli.lock().unwrap().prompts.len(), 1);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_that_waits_for_its_own_command_is_not_asked_for_a_report_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::default();
+    // The turn ends with a draft, a command still at work and no report: the worker means to
+    // report when its command is done.
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            std::fs::write(turn.spec.cwd.join("hello.txt"), "draft\n").unwrap();
+            turn.emit(listed(vec![background("tid-1", "command", "sleep 8; echo hello > hello.txt")]));
+        })
+    });
+    let core = start(dir.path(), Provider::Claude, worker, &cli, None).await;
+
+    // The pass waits for the command. It does not ask for the report first.
+    wait_held(&core).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(cli.lock().unwrap().prompts.len(), 1, "no question while the worker's command runs");
+
+    // The command ends, and the turn Claude Code starts by itself gives the report.
+    std::fs::write(worktree(&cli).join("hello.txt"), "hello\n").unwrap();
+    emit(&cli, listed(vec![]));
+    emit(&cli, EventKind::TurnStarted { input: None });
+    let reply = own_turn(&cli).tool("codly_submit_report", json!({ "status": "done", "summary": "Did it." })).await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    emit(&cli, EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("The command finished.".into()), duration_ms: Some(5) });
+    wait_plan_done(&core).await;
+    let after = events(&core).await;
+    assert_eq!(verified(&after), [true]);
+    assert_eq!(cli.lock().unwrap().prompts.len(), 1, "the worker was never asked for its report");
+    assert!(!after.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("without a report"))));
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_question_about_a_missing_report_comes_once_after_the_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::default();
+    // A dev server that `stop_task` ends. The worker leaves it running and gives no report,
+    // until Codly asks for one.
+    let open = vec![background("tid-1", "command", "npm run dev")];
+    {
+        let mut cli = cli.lock().unwrap();
+        cli.open = open.clone();
+        cli.stoppable = vec!["tid-1".into()];
+    }
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let open = open.clone();
+        Box::pin(async move {
+            if turn.prompt.starts_with(REPORT_QUESTION) {
+                turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Did it." })).await;
+            } else {
+                std::fs::write(turn.spec.cwd.join("hello.txt"), "hello\n").unwrap();
+                turn.emit(listed(open));
+            }
+        })
+    });
+    let core = start(dir.path(), Provider::Claude, worker, &cli, Some(Duration::from_secs(1))).await;
+
+    wait_plan_done(&core).await;
+    let after = events(&core).await;
+    // First the wait and the stop of the server, then the one question, then the checks.
+    let at = |words: &str| {
+        let found = after.iter().position(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains(words)));
+        found.unwrap_or_else(|| panic!("no decision says {words:?}"))
+    };
+    let (waits, stopped, asked) = (at("not checked yet"), at("still ran after 1 s. Codly stopped it"), at("without a report; Codly asked for it"));
+    let committed = after.iter().position(|e| matches!(e.kind, EventKind::Committed { .. })).unwrap();
+    assert!(waits < stopped && stopped < asked && asked < committed, "{waits} {stopped} {asked} {committed}");
+    let prompts = cli.lock().unwrap().prompts.clone();
+    assert_eq!(prompts.len(), 2, "the task, and one question: {prompts:?}");
+    assert!(prompts[1].starts_with(REPORT_QUESTION), "{}", prompts[1]);
+    assert_eq!(cli.lock().unwrap().stops, ["tid-1"]);
+    assert_eq!(verified(&after), [true]);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_wait_for_background_work_is_one_budget_for_a_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::default();
+    // A dev server that never ends by itself (`stop_task` ends it), and a test run that ends
+    // by itself and wakes the CLI.
+    let (server, tests) = (background("tid-1", "command", "npm run dev"), background("tid-2", "command", "npm test"));
+    let open = vec![server.clone(), tests];
+    {
+        let mut cli = cli.lock().unwrap();
+        cli.open = open.clone();
+        cli.stoppable = vec!["tid-1".into()];
+    }
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let open = open.clone();
+        Box::pin(async move { turn.work("hello\n", listed(open)).await })
+    });
+    let core = start(dir.path(), Provider::Claude, worker, &cli, Some(Duration::from_secs(6))).await;
+
+    let held = wait_held(&core).await;
+    assert!(held.status_reason.as_deref().is_some_and(|r| r.ends_with("and stops them after 6 s")), "{:?}", held.status_reason);
+    // 4 of the 6 seconds later the tests end, and Claude Code starts a turn by itself. The
+    // pass at the end of that turn waits for the server with the time that is left.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    cli.lock().unwrap().open = vec![server.clone()];
+    emit(&cli, listed(vec![server]));
+    emit(&cli, EventKind::TurnStarted { input: None });
+    emit(&cli, EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("The tests pass.".into()), duration_ms: Some(5) });
+
+    wait_plan_done(&core).await;
+    assert_eq!(cli.lock().unwrap().stops, ["tid-1"]);
+    let after = events(&core).await;
+    let said = background_decisions(&after);
+    assert_eq!(said.len(), 3, "{said:?}");
+    assert_eq!((&said[0].1["wait_secs"], said[0].0.ends_with("and stops them after 6 s")), (&json!(6), true), "{}", said[0].0);
+    let left = said[1].1["wait_secs"].as_u64().unwrap();
+    assert!((1..=2).contains(&left), "the second wait has what the first left of the 6 s: {}", said[1].0);
+    assert!(said[1].0.ends_with(&format!("running; Codly checks the work when that ends, and stops it after {left} s")), "{}", said[1].0);
+    assert_eq!(said[2].0, "t1: the background command `npm run dev` still ran after Codly waited 6 s in all. Codly stopped it and checks the work now");
+    // The server was stopped about 6 s after the first wait began: not 4 s and 6 more.
+    let at = |summary: &str| after.iter().find(|e| matches!(&e.kind, EventKind::Decision { summary: s, .. } if s == summary)).unwrap().ts;
+    let took = at(&said[2].0) - at(&said[0].0);
+    assert!((5_500..8_500).contains(&took), "stopped {took} ms after the first wait began");
     assert_eq!(verified(&after), [true]);
     assert_eq!(cli.lock().unwrap().prompts.len(), 1);
     core.shutdown().await;

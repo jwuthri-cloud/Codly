@@ -6,6 +6,7 @@ import type { ContextUsage } from '../gen/ContextUsage';
 import type { ControlState } from '../gen/ControlState';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { PermissionMode } from '../gen/PermissionMode';
+import { demoBackground } from './background';
 import type { Sim } from './sim';
 
 const MAX_HELD = 32;
@@ -197,9 +198,16 @@ export class MockControls {
     return null;
   }
 
-  /** "Stop" on a background command. The demo's agents leave none running. */
-  stopTask(id: string): never {
-    throw new Error(`${this.agent(id).name} has no command running in the background`);
+  /** "Stop" on a background command: its CLI ends it, and the agent's next list says "stopped".
+   *  (An agent of the demo leaves one command running at most, so the request names none.) */
+  stopTask(id: string): null {
+    const a = this.agent(id);
+    const background = demoBackground(this.sim);
+    const running = background.of(id);
+    if (!running.length) throw new Error(`${a.name} has no command running in the background`);
+    this.note(id, `asked ${a.name} to stop a command it left running in the background`);
+    for (const task of running) background.end(id, task.id, 'stopped');
+    return null;
   }
 
   /** The note reaches the agent on its next turn: it acknowledges it in its own thread. */

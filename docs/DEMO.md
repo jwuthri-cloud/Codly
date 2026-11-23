@@ -81,6 +81,11 @@ request of one office is there again when you come back to it.
   starts: `codly` is connected, `linear` needs a sign-in, `postgres` did not start. Its sheet shows
   the section "MCP servers". Reconnect connects `postgres` after a second; `linear` still needs
   its sign-in, and the row says so.
+- A command an agent leaves running in the background: in her first task Ada starts a type check
+  (`npx tsc --noEmit --watch`) and stops it before she reports. While it runs, her sheet lists it
+  under "In the background" with Stop, and her History has one row for each change of the list.
+  Without `?autoplay=1` it stays until you answer her `npm install` request: run the first plan
+  (`?skip=20`), open Ada's sheet, and press Stop.
 
 ## What the demo cannot show
 

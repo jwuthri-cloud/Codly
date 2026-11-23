@@ -35,7 +35,7 @@
   import UsageBars from '../components/UsageBars.svelte';
   import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
-  import { historyFacts, repeatsReply, taskChangedLine, tripleLine, type Names } from './historyWords';
+  import { backgroundLine, historyFacts, repeatsReply, taskChangedLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
   import { isPlanCall, planCallEnd, planStep } from '../lib/util/planRequest';
   import AgentMcp from './AgentMcp.svelte';
   import AgentTakeover from './AgentTakeover.svelte';
@@ -196,7 +196,8 @@
       if (repeatsReply(e, agent.id, facts)) continue;
       out.push(e);
     }
-    return out;
+    // (a task's row says its status: one that repeats the row before it says nothing)
+    return withoutRepeatedTaskRows(out);
   });
   const names: Names = { agent: (id) => store.agentMap.get(id)?.name, task: (id) => store.taskMap.get(id)?.key };
   function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
@@ -220,10 +221,9 @@
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
       case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
       case 'mcp_server': return { icon: 'link', text: `MCP server ${k.name}: ${MCP_LABEL[k.status].toLowerCase()}${k.error ? ` (${oneLine(k.error, 90)})` : ''}` };
-      case 'background_command': return { icon: 'terminal', text: `Background command ${k.status}: ${oneLine(k.description, 90)}` };
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
       case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
-      case 'background_tasks': return { icon: 'info', text: k.tasks.length ? `Runs in the background: ${oneLine(k.tasks.map((t) => t.description).join(', '), 120)}` : 'Nothing runs in the background any more' };
+      case 'background_tasks': return { icon: 'terminal', text: backgroundLine(k) };
       case 'decision': return { icon: 'help', text: k.summary };
       case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${plural(k.files.length, 'file')}` };
       case 'verified': return { icon: k.ok ? 'check-circle' : 'x-circle', text: `Verified ${k.command}`, tone: k.ok ? 'good' : 'bad' };
