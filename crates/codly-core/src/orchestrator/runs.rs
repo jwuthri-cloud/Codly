@@ -239,6 +239,12 @@ impl Inner {
                 Some(l) => {
                     l.handle = handle;
                     l.waited = l.starting.take().unwrap_or_default();
+                    // Quitting: `shutdown` told the runs to stop that were in the live table when
+                    // it began (it sets its flag, then reads the table). A run that came into the
+                    // table after that is told here, so it ends in order and not at the deadline.
+                    if self.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+                        l.stopping = true;
+                    }
                     if l.stopping {
                         l.handle.send(AgentCmd::Shutdown); // stopped while it started
                     }
