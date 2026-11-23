@@ -995,7 +995,7 @@ impl Core {
     /// commands that still need your OK (then nothing ran); empty = the checks are running, or
     /// the task is Ready again for a team member that is on other work in the same worktree.
     pub async fn recheck_task(&self, task_id: &str, allow: Vec<String>) -> anyhow::Result<Vec<HeldCheck>> {
-        self.inner.recheck_task(task_id, allow).await
+        self.inner.recheck_task(task_id, allow, gate::Rerun::You).await
     }
 
     /// Merge anyway, from the card of a task that its checks stopped (one failed its last fix

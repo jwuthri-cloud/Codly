@@ -94,6 +94,25 @@ enum Pass {
     User,
 }
 
+/// Who starts a pass of the gate with no worker turn first, for the task's record.
+#[derive(Clone, Copy)]
+pub(super) enum Rerun {
+    /// You, from the task's card.
+    You,
+    /// Codly, after you turned the required checks on or off (`required_checks.rs`).
+    Codly,
+}
+
+impl Rerun {
+    /// Whose decision the record shows: yours, or one Codly made by a rule.
+    fn method(self) -> &'static str {
+        match self {
+            Rerun::You => "human",
+            Rerun::Codly => "rule",
+        }
+    }
+}
+
 /// What you decided about a task's checks from its card. Kept in the store until the task is
 /// done, so a restart, a retry or a later pass of the gate does not ask again.
 #[derive(Default, Serialize, Deserialize)]
@@ -357,7 +376,12 @@ impl Inner {
                     if self.steered(pass, &worker, turns) {
                         return self.wait_for_turn(task_id);
                     }
-                    let reason = format!("blocked: {} Then re-run the checks, or merge anyway.", required_checks::not_run(&why));
+                    // Turning them on or off re-runs this task's checks with no click
+                    // (`required_checks.rs`), and the reason says so.
+                    let reason = format!(
+                        "blocked: {} Codly then checks this task again by itself; Re-run checks does it now. Or merge anyway.",
+                        required_checks::not_run(&why)
+                    );
                     return self.park(&task, &worker, reason, json!({ "plan_id": task.plan_id, "required": why })).await;
                 }
             };
@@ -395,22 +419,25 @@ impl Inner {
 
         // 4. Scope: changed files ⊆ write_scope ∪ declared exceptions.
         let plan = task.plan_id.as_deref().map(|p| self.plan(p)).transpose()?;
-        // A task that resolves a conflict with your branch committed on the plan's own branch:
-        // its work is measured from where that branch was, and what the merge brought in from
-        // your branch has no write scope to stay in.
+        // A task that resolves a conflict with your branch (or makes the plan's checks pass on
+        // the merge with it) committed on the plan's own branch: its work is measured from
+        // where that branch was. What the merge brought in from your branch has no write scope
+        // to stay in, so the scope is checked on what the task changed by hand, the files its
+        // reviewer reads. They stay in its write scope or are declared, as for every task.
         let in_place = plan.as_ref().is_some_and(|p| merge_conflict::in_place(&task, p).is_some());
         let base_ref = match plan.as_ref().and_then(|p| p.integration_branch.clone()).filter(|_| !in_place) {
             Some(b) => b,
             None => self.store.task_commits(task_id)?.0.ok_or_else(|| anyhow!("the task has no base commit"))?,
         };
         let files = self.git.changed_files(&wt, &base_ref).await?;
-        let scope: &[String] = if in_place { &[] } else { &task.write_scope };
-        let matcher = ScopeMatcher::new(scope).map_err(|e| anyhow!(e))?;
+        let by_hand = self.changed_by_hand(&task, &repo, &base_ref).await?;
+        let checked = by_hand.as_ref().unwrap_or(&files);
+        let matcher = ScopeMatcher::new(&task.write_scope).map_err(|e| anyhow!(e))?;
         let exceptions: Vec<String> = report["scope_exceptions"]
             .as_array()
             .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let outside: Vec<String> = matcher.outside(&files).into_iter().cloned().collect();
+        let outside: Vec<String> = matcher.outside(checked).into_iter().cloned().collect();
         let (declared, undeclared): (Vec<String>, Vec<String>) =
             outside.into_iter().partition(|f| exceptions.iter().any(|e| e.contains(f.as_str())));
         if !undeclared.is_empty() {
@@ -421,7 +448,7 @@ impl Inner {
             false => format!("verify passed ({} command{})", results.len(), if results.len() == 1 { "" } else { "s" }),
         };
         let mut summary =
-            format!("{}: {checks}, {} file{} changed within scope", task.key, files.len(), if files.len() == 1 { "" } else { "s" });
+            format!("{}: {checks}, {} file{} changed within scope", task.key, checked.len(), if checked.len() == 1 { "" } else { "s" });
         if !declared.is_empty() {
             summary.push_str(&format!(" plus {} declared exception(s)", declared.len()));
         }
@@ -430,7 +457,7 @@ impl Inner {
             Some(task_id),
             "gate",
             summary,
-            json!({ "plan_id": task.plan_id, "verify": results, "files": files, "declared_exceptions": declared }),
+            json!({ "plan_id": task.plan_id, "verify": results, "files": checked, "declared_exceptions": declared }),
         )?;
 
         // 5. Not if the worker got a new message meanwhile (a user steer): that turn's work is
@@ -752,8 +779,9 @@ impl Inner {
     /// again, with no worker turn first. `allow` names the task's risky verify commands you
     /// OK'd. Returns the commands that still need your OK (then nothing ran and nothing
     /// changed); empty = the checks are running, or wait for the task's team member (see
-    /// `user_pass`).
-    pub(super) async fn recheck_task(self: &Arc<Self>, task_id: &str, allow: Vec<String>) -> Result<Vec<HeldCheck>> {
+    /// `user_pass`). `by`: who re-runs them. Codly does it by itself after you changed the
+    /// required checks, and the task's record says which of the two it was.
+    pub(super) async fn recheck_task(self: &Arc<Self>, task_id: &str, allow: Vec<String>, by: Rerun) -> Result<Vec<HeldCheck>> {
         let (task, wt) = self.stopped_task(task_id, "only a blocked or failed task can be checked again")?;
         let reported = self.store.latest_task_run(task_id, Some(Role::Worker))?.and_then(|r| r.report);
         if let Some(s) = reported.as_ref().and_then(|r| r["status"].as_str()).filter(|s| matches!(*s, "blocked" | "failed")) {
@@ -773,11 +801,14 @@ impl Inner {
         }
         // Re-run checks after Merge anyway means: run them after all.
         let choice = (choice.skip || !allowed.is_empty()).then(|| CheckChoice { allowed: ok, skip: false });
-        let what = match allowed.is_empty() {
-            true => format!("you re-ran the checks of {}", task.key),
-            false => format!("you re-ran the checks of {} and allowed {}", task.key, allowed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")),
+        let mut what = match by {
+            Rerun::You => format!("you re-ran the checks of {}", task.key),
+            Rerun::Codly => format!("Codly re-ran the checks of {} (you changed the required checks)", task.key),
         };
-        self.user_pass(&task, choice, what, json!({ "allowed": allowed })).await?;
+        if !allowed.is_empty() {
+            what.push_str(&format!(" and allowed {}", allowed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")));
+        }
+        self.user_pass(&task, choice, by, what, json!({ "allowed": allowed })).await?;
         Ok(vec![])
     }
 
@@ -803,15 +834,16 @@ impl Inner {
             ),
             None => (format!("you chose to merge {} anyway, without its checks", task.key), json!({ "not_run": task.verify })),
         };
-        self.user_pass(&task, Some(choice), what, detail).await
+        self.user_pass(&task, Some(choice), Rerun::You, what, detail).await
     }
 
-    /// Start a pass of the gate for a stopped task, recorded as your decision. `choice` =
+    /// Start a pass of the gate for a stopped task, recorded as the decision of who asked for
+    /// it (`by`): yours, or Codly's own after you changed the required checks. `choice` =
     /// what you decided about its checks, when that changed. A team member's task shares the
     /// member's worktree with its other tasks: while the member is on other work there, the
     /// pass cannot have it, so the task goes back in line for the member (Ready) and the gate
     /// after its next turn uses your choice.
-    async fn user_pass(self: &Arc<Self>, task: &Task, choice: Option<CheckChoice>, what: String, detail: Value) -> Result<Task> {
+    async fn user_pass(self: &Arc<Self>, task: &Task, choice: Option<CheckChoice>, by: Rerun, what: String, detail: Value) -> Result<Task> {
         // One gate per task at a time: take it before anything changes.
         {
             let mut g = lock(&self.gating);
@@ -820,7 +852,7 @@ impl Inner {
             }
             g.insert(task.id.clone(), false);
         }
-        let begun = self.begin_user_pass(task, choice.as_ref(), &what, &detail).await;
+        let begun = self.begin_user_pass(task, choice.as_ref(), by, &what, &detail).await;
         if let Ok(Begun::Now(_)) = &begun {
             tokio::spawn(self.clone().gate_passes(task.id.clone(), Pass::User));
         } else {
@@ -829,11 +861,11 @@ impl Inner {
         }
         match begun? {
             Begun::Now(t) => Ok(t),
-            Begun::Busy(who) => self.requeue_for_member(task, &who, choice.as_ref(), &what, detail),
+            Begun::Busy(who) => self.requeue_for_member(task, &who, choice.as_ref(), by, &what, detail),
         }
     }
 
-    async fn begin_user_pass(&self, task: &Task, choice: Option<&CheckChoice>, what: &str, detail: &Value) -> Result<Begun> {
+    async fn begin_user_pass(&self, task: &Task, choice: Option<&CheckChoice>, by: Rerun, what: &str, detail: &Value) -> Result<Begun> {
         // A worker that still holds the task (it waits for your answer) lets go first: this
         // pass has no worker turn, and feedback goes to the task's next run. New rounds too.
         self.release_task_agents(task);
@@ -866,7 +898,7 @@ impl Inner {
         let ws = self.store.task_workspace(&task.id)?;
         let mut detail = detail.clone();
         detail["plan_id"] = json!(task.plan_id);
-        self.decide_by(ws.as_deref(), Some(&task.id), "gate", "human", what, detail)?;
+        self.decide_by(ws.as_deref(), Some(&task.id), "gate", by.method(), what, detail)?;
         Ok(Begun::Now(t))
     }
 
@@ -905,15 +937,15 @@ impl Inner {
     }
 
     /// Your pass cannot run now (see `user_pass`): the task is Ready for its team member
-    /// again, with your choice about its checks kept and your decision on record.
-    fn requeue_for_member(&self, task: &Task, who: &str, choice: Option<&CheckChoice>, what: &str, mut detail: Value) -> Result<Task> {
+    /// again, with your choice about its checks kept and the decision on record.
+    fn requeue_for_member(&self, task: &Task, who: &str, choice: Option<&CheckChoice>, by: Rerun, what: &str, mut detail: Value) -> Result<Task> {
         let reason = format!("waiting: {who} is on other work in the same worktree; Codly checks {} after {who}'s next turn on it", task.key);
         let t = self.move_with_choice(task, choice, TaskStatus::Ready, reason)?;
         let ws = self.store.task_workspace(&task.id)?;
         detail["plan_id"] = json!(task.plan_id);
         detail["waits_for"] = json!(who);
         let summary = format!("{what}; {who} is on other work in the same worktree, so {} goes back to {who} first", task.key);
-        self.decide_by(ws.as_deref(), Some(&task.id), "gate", "human", summary, detail)?;
+        self.decide_by(ws.as_deref(), Some(&task.id), "gate", by.method(), summary, detail)?;
         self.kick();
         Ok(t)
     }
@@ -1137,7 +1169,7 @@ impl Inner {
             scope_exceptions: declared,
         });
         if resolution.is_some() {
-            brief.push_str(merge_conflict::REVIEW_NOTE);
+            brief.push_str(merge_conflict::review_note(task));
         }
         self.send_prompt(&reviewer.id, brief)
     }

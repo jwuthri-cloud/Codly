@@ -413,7 +413,8 @@ impl Inner {
     /// not ignore, which the next `git add -A` there would take into a commit. The copy is
     /// made beside the worktrees and moved in when complete, so a copy that fails or runs out
     /// of time leaves nothing half-made in the worktree. It is on the worktree's record
-    /// before it is there: no copy without a record.
+    /// before it is there: no copy without a record. A copy that was not made goes off the
+    /// record again: a file the agent later creates under that name is the agent's work.
     async fn seed_path(&self, repo: &Path, wt: &Path, rel: &str) -> Result<bool> {
         let (src, dst) = (repo.join(rel), wt.join(rel));
         let Ok(meta) = std::fs::symlink_metadata(&src) else { return Ok(false) };
@@ -438,7 +439,11 @@ impl Inner {
         if let Err(e) = tokio::fs::remove_dir_all(&stage).await {
             tracing::warn!("could not remove {}: {e}", stage.display());
         }
-        moved.map(|()| true)
+        let Err(not_copied) = moved else { return Ok(true) };
+        if let Err(e) = self.git.forget_copied(wt, rel).await {
+            bail!("{not_copied:#}. It stays on the worktree's record of copies, so Codly would leave a file of that name out of its commits: {e:#}");
+        }
+        Err(not_copied)
     }
 
     /// Give `wt` the lowest port block no live worktree holds. A worktree that is gone
@@ -723,13 +728,49 @@ mod tests {
         // The worktree's next branch has older rules: git no longer hides the copies there.
         write(&wt.join(".gitignore"), "");
         write(&wt.join("work.txt"), "work\n");
-        let commit = core.inner.commit_noted(Some(&ws.id), None, None, "t1", &wt, "codly(t1): work").await.unwrap().unwrap();
+        let commit = core.inner.commit_noted(Some(&ws.id), None, "t1", &wt, "codly(t1): work").await.unwrap().unwrap();
         assert_eq!(commit.files, [".gitignore", "work.txt"], "the work, and no copy");
         assert_eq!(sh(&wt, &["status", "--porcelain", "-uall"]), "?? .env\n?? node_modules/dep/index.js\n?? secrets/dev.env", "the copies stay, untracked");
         let said = decisions(&core, &ws);
         let left = "t1: Codly did not commit .env (copied in by Codly), node_modules/ (copied in by Codly), secrets/dev.env (copied in by Codly).";
         let record = said.iter().find(|s| s.starts_with(left)).unwrap_or_else(|| panic!("{said:?}"));
         assert!(record.contains("it belongs in .gitignore") && !record.contains("25 MB"), "{record}");
+        core.shutdown().await;
+    }
+
+    /// A copy that was not made does not stay on the worktree's record of copies: a file the
+    /// agent later creates under that name is its work, and Codly commits it like any other.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_copy_that_was_not_made_is_not_on_the_record_of_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = temp_repo(dir.path(), ".env\n/secrets/\n");
+        write(&repo.join(".env"), "API_URL=http://localhost\n");
+        write(&repo.join("secrets/dev.env"), "TOKEN=dev\n");
+        write(&repo.join(INCLUDE_FILE), "secrets/dev.env\n");
+        let (core, ws) = start(dir.path(), &repo).await;
+        let wt = new_worktree(&core, &ws, "t1").await;
+        // In the way of one copy: a file where that copy needs a folder.
+        write(&wt.join("secrets"), "not a folder\n");
+
+        core.inner.prepare_worktree(&ws, &wt, None, None).await.unwrap();
+        assert!(wt.join(".env").exists(), "the other copy is made");
+        assert_eq!(std::fs::read_to_string(wt.join("secrets")).unwrap(), "not a folder\n", "nothing was written over");
+        let said = decisions(&core, &ws);
+        let problem = said.iter().find(|s| s.starts_with("could not copy")).unwrap_or_else(|| panic!("{said:?}"));
+        assert!(problem.contains("secrets/dev.env: "), "{problem}");
+        assert!(!problem.contains("git does not ignore it") && !problem.contains("record of copies"), "the copy itself failed, after it was put on record: {problem}");
+
+        // The agent makes room and writes a file of that name itself. On a branch that does
+        // not ignore it, that file is work; the copy that was made still stays out.
+        std::fs::remove_file(wt.join("secrets")).unwrap();
+        write(&wt.join("secrets/dev.env"), "TOKEN=from-the-agent\n");
+        write(&wt.join(".gitignore"), "");
+        let commit = core.inner.commit_noted(Some(&ws.id), None, "t1", &wt, "codly(t1): work").await.unwrap().unwrap();
+        assert_eq!(commit.files, [".gitignore", "secrets/dev.env"]);
+        assert_eq!(sh(&wt, &["status", "--porcelain", "-uall"]), "?? .env");
+        let said = decisions(&core, &ws);
+        let left = said.iter().find(|s| s.starts_with("t1: Codly did not commit")).unwrap_or_else(|| panic!("{said:?}"));
+        assert!(left.starts_with("t1: Codly did not commit .env (copied in by Codly).") && !left.contains("secrets"), "{left}");
         core.shutdown().await;
     }
 

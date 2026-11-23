@@ -825,10 +825,19 @@ impl Git {
             return Ok(());
         }
         record.push(rel.to_string());
-        // Written beside and moved in: a write that stops half-way does not lose the record.
-        let (file, new) = (dir.join(COPIED_FILE), dir.join(format!("{COPIED_FILE}.new")));
-        let written = std::fs::write(&new, record.join("\0")).and_then(|()| std::fs::rename(&new, &file));
-        written.map_err(|e| anyhow!("cannot write {}: {e}", file.display()))
+        write_copied(&dir, &record)
+    }
+
+    /// Take `rel` off that record again (`note_copied`): the copy was not made, so what is at
+    /// that path later is not Codly's.
+    pub async fn forget_copied(&self, wt: &Path, rel: &str) -> Result<()> {
+        let dir = self.git_path(wt, "--git-dir").await?;
+        let record = read_copied(&dir)?;
+        if !record.iter().any(|r| r == rel) {
+            return Ok(());
+        }
+        let left: Vec<String> = record.into_iter().filter(|r| r != rel).collect();
+        write_copied(&dir, &left)
     }
 
     /// The new (untracked, not ignored) paths of a worktree that are not work: what Codly
@@ -1001,7 +1010,7 @@ fn subcommand<'a>(args: &[&'a str]) -> &'a str {
 /// with the network (`GIT_LONG_TIMEOUT`)? A checkout, `add -A`, a commit, a merge, a push.
 fn long_running(args: &[&str]) -> bool {
     match subcommand(args) {
-        "add" | "commit" | "merge" | "switch" | "reset" | "read-tree" | "push" => true,
+        "add" | "commit" | "merge" | "switch" | "checkout" | "reset" | "read-tree" | "push" => true,
         // `worktree add` checks every file out and `worktree remove` deletes them; `prune` and
         // `list` only read the list of worktrees.
         "worktree" => args.iter().skip_while(|a| **a != "worktree").nth(1).is_some_and(|a| matches!(*a, "add" | "remove")),
@@ -1051,6 +1060,14 @@ fn read_copied(dir: &Path) -> Result<Vec<String>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
         Err(e) => bail!("cannot read {}: {e}", file.display()),
     }
+}
+
+/// Write the record of what Codly copied into a worktree, in its git dir `dir`.
+fn write_copied(dir: &Path, record: &[String]) -> Result<()> {
+    // Written beside and moved in: a write that stops half-way does not lose the record.
+    let (file, new) = (dir.join(COPIED_FILE), dir.join(format!("{COPIED_FILE}.new")));
+    let written = std::fs::write(&new, record.join("\0")).and_then(|()| std::fs::rename(&new, &file));
+    written.map_err(|e| anyhow!("cannot write {}: {e}", file.display()))
 }
 
 /// The entries of `record` (what Codly copied into a worktree) that are among `files`, the
@@ -2165,31 +2182,28 @@ mod tests {
 
     /// A file rewritten with the same size, in the second in which the worktree's index was
     /// written, has the stats that index knows. Git reads such a file again because the index
-    /// file is as new as the file. The private index keeps that time, so a checkpoint taken a
-    /// second later has the file as it is now.
+    /// file is as new as the file. The private index keeps that time, so a checkpoint taken
+    /// later has the file as it is now.
+    /// The test sets that one second itself, on the file as committed, on its rewrite and on
+    /// the index, so it does not depend on when it runs. The time a file's inode changed is
+    /// the one stat no program can set: the repository tells git not to go by it.
     #[tokio::test]
     async fn a_worktree_tree_has_a_same_size_rewrite_made_in_the_second_of_the_last_commit() {
         let (_d, repo) = repo();
         let git = Git::from_process_env();
+        sh(&repo, &["config", "core.trustctime", "false"]);
         let file = repo.join("a.txt");
-        let second = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        // The file, its commit and its rewrite in one second: again when a second ended in between.
-        let mut n = 0;
-        let now = loop {
-            n += 1;
-            std::fs::write(&file, format!("{n} as committed\n")).unwrap();
-            let made = second(&file);
-            git.commit_work(&repo, "work").await.unwrap().commit.expect("a commit");
-            let now = format!("{n} rewritten ok\n");
-            std::fs::write(&file, &now).unwrap();
-            if second(&repo.join(".git/index")) == made && second(&file) == made {
-                break now;
-            }
-            assert!(n < 9, "the commit and the rewrite never fell in one second");
-        };
-        tokio::time::sleep(Duration::from_millis(1100)).await; // the checkpoint is taken in a later second
+        let second = std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        let made_then = |p: &Path| std::fs::File::options().write(true).open(p).unwrap().set_modified(second).unwrap();
+        std::fs::write(&file, "as committed\n").unwrap();
+        made_then(&file);
+        git.commit_work(&repo, "work").await.unwrap().commit.expect("a commit");
+        std::fs::write(&file, "rewritten ok\n").unwrap();
+        made_then(&file);
+        made_then(&repo.join(".git/index"));
+        // The checkpoint is taken now, years after that second.
         let tree = git.worktree_tree(&repo).await.unwrap();
-        assert_eq!(out(&repo, &["show", &format!("{tree}:a.txt")]), now);
+        assert_eq!(out(&repo, &["show", &format!("{tree}:a.txt")]), "rewritten ok\n");
     }
 
     /// Restore: changed and deleted files come back, files made later go, ignored files stay,
@@ -2309,7 +2323,7 @@ mod tests {
         assert_eq!(subcommand(&[c1, hooks, c2, fsmonitor, "add", "-A"]), "add");
         assert_eq!(subcommand(&["status", "--porcelain=v1"]), "status");
         assert_eq!(subcommand(&[]), "");
-        let long: [&[&str]; 7] = [
+        let long: [&[&str]; 8] = [
             &["push", "--set-upstream", "origin", "x:refs/heads/x"],
             &[c1, hooks, c2, fsmonitor, "worktree", "add", "-b", "t1", "/w", "main"],
             &["worktree", "remove", "--force", "/w"],
@@ -2317,6 +2331,8 @@ mod tests {
             &[c1, hooks, "commit", "--no-verify", "-m", "x"],
             &["merge", "--abort"],
             &[c1, hooks, c2, fsmonitor, "switch", "t1"],
+            // One file of a checkpoint goes back (`restore_path`).
+            &[c1, hooks, c2, fsmonitor, "checkout", "--no-overlay", "tree", "--", ":(literal)a.rs"],
         ];
         for args in long {
             assert!(long_running(args), "{args:?}");
