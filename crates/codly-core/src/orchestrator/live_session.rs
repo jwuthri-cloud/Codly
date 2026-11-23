@@ -12,9 +12,10 @@
 //!   saves the switch (`r5-mcp-reconnect-toggle` is one process; none was started after an
 //!   "off"), so nothing here says how the agent's next run starts that server. Codly's own
 //!   server stays on: the agent reports through it.
-//! - **Stop** a background command or helper (`stop_task`). The CLI answers the same whether
-//!   or not something ended; its next list of background tasks (`BackgroundTasks`) says that
-//!   it was stopped.
+//! - **Stop** a background command or helper (`stop_task`), or a helper whose agent still
+//!   waits for it, by the id of its call: the agent's turn goes on (recorded, part 4 §2). The
+//!   CLI answers the same whether or not something ended; its next list of background tasks
+//!   (`BackgroundTasks`), or the helper's own row, says that it was stopped.
 //!
 //! The sheet knows the servers and the background work from the run's events: a server's
 //! `McpServer` event when its state changes, and the CLI's whole list of background tasks at
@@ -158,9 +159,17 @@ impl Inner {
         // What the run's last list calls it: a command, or a helper.
         let named = lock(&self.live).get(agent_id).and_then(|l| l.session_rows.background_task(task_id));
         let answer = self.ask_session(agent_id, SessionRequest::StopTask(task_id.to_string()))?;
-        let what = named.map(|description| format!(": {description}")).unwrap_or_default();
-        self.control_decision(agent_id, format!("asked {} to stop what it left running in the background{what}", agent.name));
-        Self::session_answer(answer).await?;
+        // The record follows the answer: the adapter refuses an id that names nothing running
+        // any more (the list on record can be behind its own), and then nothing reached the CLI.
+        // In no list on record: the call id of a helper at work, which the adapter knows (and
+        // names in its answer), or a task of a list that is not on record yet.
+        let said = Self::session_answer(answer).await?;
+        let summary = match (named, said["helper"].as_str()) {
+            (Some(description), _) => format!("asked {} to stop what it left running in the background: {description}", agent.name),
+            (None, Some(helper)) => format!("asked {} to stop its helper: {helper}", agent.name),
+            (None, None) => format!("asked {} to stop what it left running in the background", agent.name),
+        };
+        self.control_decision(agent_id, summary);
         Ok(())
     }
 }
@@ -183,8 +192,9 @@ impl super::Core {
     }
 
     /// Stop what a live Claude agent left running in the background: a command or a helper
-    /// (`task_id`: its id in the agent's `BackgroundTasks` event). The agent's next event of
-    /// that kind says that it was stopped.
+    /// (`task_id`: its id in the agent's `BackgroundTasks` event), or any helper at work (the
+    /// `call_id` of its `SubAgent` event). The agent's next event of that kind says that it
+    /// was stopped. Err for an id that names neither.
     pub async fn stop_agent_task(&self, agent_id: &str, task_id: &str) -> Result<()> {
         self.inner.stop_background_task(agent_id, task_id).await
     }
@@ -204,7 +214,7 @@ mod tests {
     }
 
     fn list(ids: &[&str]) -> EventKind {
-        let tasks = ids.iter().map(|id| BackgroundTask { id: (*id).into(), kind: "command".into(), description: "npm run dev".into() }).collect();
+        let tasks = ids.iter().map(|id| BackgroundTask { id: (*id).into(), kind: "command".into(), description: "npm run dev".into(), started_at: None }).collect();
         EventKind::BackgroundTasks { tasks, ended: vec![] }
     }
 

@@ -109,8 +109,10 @@ its worktree: the branch, the uncommitted files, Codly's last commit and its las
 agent's process is gone, what is left in its process group is ended (`proc::reap`). That is not
 everything an agent started. Claude Code runs each shell command in a process group of its own
 (recorded: docs/research/cli-claude-stream-json-2.1.311-part2.md §7), so a stop goes through the
-CLI: Codly interrupts the turn, has the CLI drop the messages that still wait in it, asks it to
-stop the background commands it tracks (`stop_task`), and closes its input only then; a CLI that
+CLI: Codly interrupts the turn (also with no turn running when a helper works in the
+background: the interrupt ends every helper and starts no turn), has the CLI drop the messages
+that still wait in it, asks it to stop the background commands it tracks (`stop_task`), and
+closes its input only then; a CLI that
 does not exit gets SIGTERM, at which it ends those commands itself. Two things Codly cannot
 end: a process that a command left behind with `&` (`npm run dev &`) is in no list of the CLI
 and in no group Codly knows, so it runs on until it ends or you end it; and a background
@@ -242,9 +244,10 @@ task.
 **Nothing is checked under work that still runs.** A worker can end its turn while a command it
 started in the background still runs, or while a helper (a subagent) still works. The gate then
 waits (`orchestrator/background.rs`): the task says what it waits for, and its checks start when
-that work has ended. After 5 minutes Codly stops what still runs (Claude Code: its `stop_task`
-request), writes in the task's record what it stopped and what it could not stop, and checks the
-work as it is. The 5 minutes are one budget each time the worker hands in its work: a turn of
+that work has ended. After 5 minutes Codly stops what still runs (Claude Code: `stop_task` for a
+command, one interrupt for the helpers, which starts no turn), writes in the task's record what
+it stopped and what it could not stop, and checks the work as it is, or first asks the worker
+for its report when it gave none. The 5 minutes are one budget each time the worker hands in its work: a turn of
 the worker in the middle (a test run that ended woke the CLI) does not start them again. They
 are whole again when Codly sends the work back (a failed check, a file outside the scope, a
 reviewer's request, a merge conflict), when you send it back from the diff, and for a retry of

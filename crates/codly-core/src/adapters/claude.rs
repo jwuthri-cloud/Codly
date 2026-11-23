@@ -103,6 +103,11 @@ pub const DEFAULT_MODEL: &str = "default";
 /// (`SessionRequest::Settings`).
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
+/// The adapter's own answer to a `stop_task` for an id that names nothing running beside the
+/// agent (a task that left the list, or a helper that ended, a moment before): nothing is sent
+/// to the CLI. Whoever asked shows it as it is: it is not Claude Code's answer.
+pub const NOT_RUNNING: &str = "that work is not running any more";
+
 /// The model an `assistant` line names when the CLI wrote its text itself (the output of a
 /// local command such as `/compact`): no model ran.
 const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -118,6 +123,11 @@ const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(8);
 /// asked it to stop are gone (recorded: at once, part 2 §6). Past it the CLI gets SIGTERM, at
 /// which it ends them itself. Short, so that both fit in the time the app waits at exit.
 const STOP_TASKS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long the interrupt that starts the stop of an agent has to do its work: end the running
+/// turn (its `result`), or, with no turn running, end the background helpers (the list without
+/// them). Recorded: 0.02 to 0.09 s for both (part 4 §1 and §2).
+const STOP_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn tools_for(spec: &SpawnSpec) -> Vec<&'static str> {
     let mut t = if spec.read_only { READ_ONLY_TOOLS } else { WORKER_TOOLS }.to_vec();
@@ -238,6 +248,9 @@ impl SandboxNotOn {
     /// The words every text has: `retry::needs_you` knows by them a start that only you can
     /// fix (no wait turns a sandbox on).
     pub(crate) const NOT_STARTED: &'static str = "did not start this agent";
+    /// The words of the one text that a later start can get past (`no_answer`): the CLI was
+    /// slow, not the sandbox off. `retry::needs_you` lets the task try again by itself.
+    pub(crate) const NO_ANSWER: &'static str = "did not answer Codly's check of its sandbox";
 
     /// Claude Code did not turn its sandbox on and gave no reason: the CLI said so
     /// (`sandbox_refusal`), or it ended at its start because of it (`startup::explain`).
@@ -249,7 +262,7 @@ impl SandboxNotOn {
     /// (`get_sandbox_dialog`) before the time for a start was over.
     fn no_answer() -> Self {
         let waited = INIT_TIMEOUT.as_secs();
-        Self(format!("Claude Code did not answer Codly's check of its sandbox within {waited} s, so Codly did not start this agent. Try again, or {}", Self::SWITCH))
+        Self(format!("Claude Code {} within {waited} s, so Codly did not start this agent. Try again, or {}", Self::NO_ANSWER, Self::SWITCH))
     }
 }
 
@@ -514,6 +527,9 @@ enum Stage {
     Running,
     /// Shutdown asked while a turn ran: interrupt sent, waiting for its `result`.
     Interrupting,
+    /// Shutdown asked while no turn ran and the CLI's last list named a helper: interrupt
+    /// sent, waiting for the list without helpers.
+    StoppingHelpers,
     /// Shutdown, the turn is over: `stop_task` sent for each background command, waiting for
     /// the CLI to say that none is left.
     StoppingTasks,
@@ -737,10 +753,21 @@ impl Actor {
         // The agent is being stopped and its turn is over. What the CLI does from here (a turn
         // for a prompt it still held, a turn of its own) is not shown as this agent's work.
         // Its list of background tasks is still followed: the stop waits for it (`wind_down`).
+        // While the stop waits for its helpers to end, their task lines and the list are still
+        // shown: the helper rows end as the CLI says.
         if self.stage != Stage::Running && !self.turn_active {
-            if listed {
+            let helpers_end = self.stage == Stage::StoppingHelpers
+                && v["type"] == "system"
+                && matches!(v["subtype"].as_str(), Some("task_updated" | "task_notification" | "background_tasks_changed"));
+            if helpers_end {
+                for e in self.norm.on_message(&v) {
+                    self.emit(e);
+                }
+            } else if listed {
                 self.norm.on_background_tasks(&v["tasks"], &mut Vec::new());
-                self.on_background_tasks();
+            }
+            if listed {
+                self.on_background_tasks().await;
             }
             return;
         }
@@ -768,7 +795,7 @@ impl Actor {
             self.write(&reply).await;
         }
         if listed {
-            self.on_background_tasks();
+            self.on_background_tasks().await;
         }
         if turn_done {
             self.turn_active = false;
@@ -850,10 +877,12 @@ impl Actor {
 
     /// The CLI said its list of background tasks again (`system/background_tasks_changed`,
     /// part 2 §6; the normalizer holds the list). A stop of the agent that waits for its
-    /// commands to end goes on when none is left.
-    fn on_background_tasks(&mut self) {
-        if self.stage == Stage::StoppingTasks && self.norm.commands_in_background().is_empty() {
-            self.close_stdin();
+    /// helpers or its commands to end goes on when none is left.
+    async fn on_background_tasks(&mut self) {
+        match self.stage {
+            Stage::StoppingHelpers if !self.norm.helpers_in_background() => self.wind_down().await,
+            Stage::StoppingTasks if self.norm.commands_in_background().is_empty() => self.close_stdin(),
+            _ => {}
         }
     }
 
@@ -972,13 +1001,20 @@ impl Actor {
             SessionRequest::ContextUsage => ("get_context_usage", json!({})),
             SessionRequest::McpReconnect(server) => ("mcp_reconnect", json!({ "serverName": server })),
             SessionRequest::McpEnabled(server, on) => ("mcp_toggle", json!({ "serverName": server, "enabled": on })),
-            SessionRequest::StopTask(task) => ("stop_task", json!({ "task_id": task })),
+            SessionRequest::StopTask(id) => match self.norm.task_to_stop(id) {
+                Some(task) => ("stop_task", json!({ "task_id": task })),
+                None => {
+                    let _ = reply.send(Err(NOT_RUNNING.to_string()));
+                    return;
+                }
+            },
             SessionRequest::Effort(level) => {
                 // The CLI would answer "success" and drop a word it does not know (recorded).
-                if !EFFORT_LEVELS.contains(&level.as_str()) {
+                if let Some(level) = level.as_deref().filter(|l| !EFFORT_LEVELS.contains(l)) {
                     let _ = reply.send(Err(format!("Claude Code has no effort level \"{level}\"")));
                     return;
                 }
+                // (None: `effortLevel: null` takes the level away; the CLI's default follows)
                 ("apply_flag_settings", json!({ "settings": { "effortLevel": level } }))
             }
             SessionRequest::Settings => ("get_settings", json!({})),
@@ -999,12 +1035,12 @@ impl Actor {
     /// The CLI answered a session request: the answer goes to whoever asked (an error too: it
     /// is theirs to show, not a line of the timeline).
     fn session_answered(&mut self, request: SessionRequest, reply: SessionReply, resp: &Value) {
-        let answer = if resp["subtype"] == "success" {
+        let mut answer = if resp["subtype"] == "success" {
             Ok(resp["response"].clone())
         } else {
             Err(resp["error"].as_str().map_or_else(|| resp["error"].to_string(), str::to_owned))
         };
-        match (&request, &answer) {
+        match (&request, &mut answer) {
             // A refused switch leaves the CLI in the mode it had, which this request overwrote
             // here: its next status line says which one it is.
             (SessionRequest::PermissionMode(_), Err(_)) => self.norm.permission_mode = None,
@@ -1017,6 +1053,13 @@ impl Actor {
             // body), so the CLI is asked, and its answer is reported like the one at the
             // start of the run.
             (SessionRequest::McpReconnect(_) | SessionRequest::McpEnabled(..), _) => self.norm.ask_mcp_status(),
+            // A helper stopped by the id of its call: whoever asked gets its description with
+            // the CLI's (empty) answer, for the record of the stop.
+            (SessionRequest::StopTask(id), Ok(said)) => {
+                if let (Some(helper), Some(said)) = (self.norm.helpers.get(id.as_str()), said.as_object_mut()) {
+                    said.insert("helper".into(), json!(helper.description));
+                }
+            }
             _ => {}
         }
         // Nobody waits any more (the asker gave up): the request still took effect.
@@ -1047,17 +1090,35 @@ impl Actor {
         }
     }
 
-    /// Shutdown ladder: interrupt (≤ 5 s for the result) → stop the background commands (≤ 2 s)
-    /// → close stdin (≤ 3 s) → SIGTERM → SIGKILL. With a prompt that still waits in the CLI, or
-    /// a background command it did not report as stopped, the CLI would not exit when stdin
-    /// closes: there SIGTERM comes at once.
+    /// Shutdown ladder: interrupt (≤ 5 s for the result, or with no turn running for the end
+    /// of the background helpers) → stop the background commands (≤ 2 s) → close stdin (≤ 3 s)
+    /// → SIGTERM → SIGKILL. With a prompt that still waits in the CLI, or a background command
+    /// it did not report as stopped, the CLI would not exit when stdin closes: there SIGTERM
+    /// comes at once.
+    ///
+    /// The interrupt ends every helper, background ones too, with or without a turn running,
+    /// and starts no turn (part 4 §1 and §2: `r6-shutdown-helper-sequence-*` with a turn,
+    /// `-idle-interrupt-*` without, n=2 each; with a turn the helpers are gone before its
+    /// `result`). So with no turn running it is sent only when the CLI's last list names a
+    /// helper. A helper never gets `stop_task` here: after it the CLI starts a turn by itself,
+    /// which runs to its end also when stdin is closed at once (`-idle-close-now-*`, n=2).
     async fn begin_shutdown(&mut self) {
         if self.stage != Stage::Running {
             return;
         }
         self.queue.clear();
         if !self.turn_active {
-            return self.wind_down().await;
+            // (A prompt that still waits in the CLI ends the process at once: `wind_down`.)
+            if !self.norm.helpers_in_background() || !self.waiting.is_empty() {
+                return self.wind_down().await;
+            }
+            self.control("interrupt", json!({})).await;
+            if self.stdin.is_none() {
+                return self.wind_down().await; // (it did not reach the CLI: no list will come)
+            }
+            self.stage = Stage::StoppingHelpers;
+            self.deadline = Some(tokio::time::Instant::now() + STOP_INTERRUPT_TIMEOUT);
+            return;
         }
         self.norm.interrupt_requested = true;
         // `cancel_queued`: the CLI drops the prompts that wait in it, and its `cancelled` line
@@ -1066,20 +1127,19 @@ impl Actor {
         let request = if self.cancels_queued && !self.waiting.is_empty() { json!({ "cancel_queued": true }) } else { json!({}) };
         self.control("interrupt", request).await;
         self.stage = Stage::Interrupting;
-        self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+        self.deadline = Some(tokio::time::Instant::now() + STOP_INTERRUPT_TIMEOUT);
     }
 
-    /// The stopped agent's turn is over, or none ran: end the background commands the CLI
-    /// still tracks, then close stdin. With one of them open the CLI does not exit when stdin
-    /// closes: it waits for the command and then runs a turn (recorded: 43 s, part 2 §7).
-    /// `stop_task` ends a running command at once and starts no turn (part 2 §6). The steps
-    /// are recorded as one run (part 3 §4, `r5-stop-sequence`, n=1): the interrupt, `stop_task`
-    /// right after the stopped turn's `result`, stdin closed once the list is empty, and the
-    /// exit a second later with nothing left running. The commands are the ones of the CLI's
-    /// last list. A background subagent is left to the later steps of the stop: `stop_task`
-    /// ends it too (part 3 §1, `r5-stop-subagent-1` and `-2`), but the CLI then starts a turn
-    /// by itself, and a stop that ends or outwaits that turn before stdin closes is not
-    /// recorded as one run.
+    /// The stopped agent's turn is over, or none ran, and its helpers are ended
+    /// (`begin_shutdown`): end the background commands the CLI still tracks, then close stdin.
+    /// With one of them open the CLI does not exit when stdin closes: it waits for the command
+    /// and then runs a turn (recorded: 43 s, part 2 §7). An interrupt does not end such a
+    /// command (part 3 §4); `stop_task` ends it at once and starts no turn (part 2 §6). The
+    /// steps are recorded as one run (part 3 §4, `r5-stop-sequence`, n=1): the interrupt,
+    /// `stop_task` right after the stopped turn's `result`, stdin closed once the list is
+    /// empty, and the exit a second later with nothing left running. The commands are the ones
+    /// of the CLI's last list. (A helper and a command at work at once at a stop is not
+    /// recorded as one run.)
     async fn wind_down(&mut self) {
         self.drop_unsent();
         let commands = self.norm.commands_in_background();
@@ -1135,6 +1195,9 @@ impl Actor {
                 self.drop_unsent();
                 self.close_stdin();
             }
+            // A helper is still listed: the commands are stopped as in any stop, and the steps
+            // after them end what is left (at SIGTERM the CLI ends what it tracks).
+            Stage::StoppingHelpers => self.wind_down().await,
             // A command is still open as far as the CLI says. With stdin closed the CLI would
             // wait for it; at SIGTERM it ends it.
             Stage::StoppingTasks => {
@@ -1186,6 +1249,8 @@ struct Helper {
     /// The CLI's id of it as a task, once its `task_started` line said it: the id that the
     /// list of background tasks names.
     task_id: Option<String>,
+    /// Why it failed, once a `task_updated` line said it (`patch.error`).
+    error: Option<String>,
     done: bool,
 }
 
@@ -1643,11 +1708,11 @@ impl ClaudeNormalizer {
                 self.problem("The model refused this request, and Claude Code has no fallback model to go on with".into(), false, out)
             }
             // Bookkeeping the timeline has no use for (the user's hooks, command lists, the
-            // session title, the CLI's own summaries, a task's change of state that its
-            // `task_notification` says again, a commit that its tool call already shows):
-            // known lines, kept in the raw log only.
+            // session title, the CLI's own summaries, a commit that its tool call already
+            // shows): known lines, kept in the raw log only.
             "hook_started" | "hook_progress" | "hook_response" | "commands_changed" | "session_title_changed" | "files_persisted"
-            | "post_turn_summary" | "task_updated" | "vcs_state_changed" => {}
+            | "post_turn_summary" | "vcs_state_changed" => {}
+            "task_updated" => self.on_task_updated(v),
             // The whole list of what the CLI still runs in the background, said at every change
             // (cli-claude-stream-json-2.1.311-part2 §6). No request reads it: Codly keeps the last one.
             "background_tasks_changed" => self.on_background_tasks(&v["tasks"], out),
@@ -1705,10 +1770,11 @@ impl ClaudeNormalizer {
     /// switch is no news of the CLI's. Recorded (part 3 §8, `r5-model-midturn`, n=1): a
     /// switch during a turn takes effect at the next model request of that same turn, so the
     /// turn's later lines name the new model while its `system/init` named the old one, and
-    /// the next turn's `system/init` names the new one. (A line that was still being written
-    /// when the switch came is not recorded.) So nothing is said about the model of a line
-    /// before the next turn's `system/init` names the session's model again: no "now runs on"
-    /// for the model Codly asked for, and no "runs on … again" after it.
+    /// the next turn's `system/init` names the new one. A switch while an answer is being
+    /// written leaves the rest of that answer and its line on the old model (part 4 §5,
+    /// `r6-model-while-streaming-1` and `-2`, n=2). So nothing is said about the model of a
+    /// line before the next turn's `system/init` names the session's model again: no "now
+    /// runs on" for the model Codly asked for, and no "runs on … again" after it.
     fn model_switched(&mut self) {
         self.session_model = None;
         self.turn_model = None;
@@ -1875,10 +1941,15 @@ impl ClaudeNormalizer {
     /// its events. A command (`local_bash`) already is a tool call; one that is left running
     /// in the background is in the CLI's list of background tasks (`on_background_tasks`),
     /// and the word of its `task_notification` says there how it ended. The recorded words:
-    /// "completed", "failed" for a command that ends with another exit code than 0 (part 3
-    /// §2, `r5-background-fail`, n=1) and "stopped" after `stop_task`, for a command (part 2
-    /// §6) and for a background subagent (part 3 §1, `r5-stop-subagent-1` and `-2`). The word
-    /// of a subagent that fails is not recorded.
+    /// "completed"; "failed" for a command that ends with another exit code than 0 (part 3
+    /// §2, `r5-background-fail`, n=1), for a command whose shell is killed by SIGTERM or
+    /// SIGKILL (part 4 §3, `r6-fails-signal-term` and `-kill`, n=1 each: there is no word for
+    /// a signal) and for a subagent that fails by itself (part 4 §3, `r6-fails-helper-*`, n=1
+    /// each); "stopped" after `stop_task`, for a command (part 2 §6) and for a subagent (part
+    /// 3 §1, part 4 §2), and after an interrupt for every subagent (part 4 §1). A command the
+    /// agent waits for that has run a while is a task too (`local_bash`, `is_backgrounded`
+    /// false): its `task_notification` (its own task id, an empty `output_file`) ends no
+    /// subagent and no listed task (part 4 §1).
     fn on_task(&mut self, subtype: &str, v: &Value, out: &mut Vec<EventKind>) {
         if subtype == "task_notification"
             && let (Some(task_id), Some(word)) = (v["task_id"].as_str(), v["status"].as_str())
@@ -1892,7 +1963,8 @@ impl ClaudeNormalizer {
             self.helper_started(call_id, v["description"].as_str().unwrap_or(""), out);
         }
         self.helper_named(call_id, v["subagent_type"].as_str(), out);
-        let Some(helper) = self.helpers.get_mut(call_id) else { return };
+        // (a subagent's end is said once: its row was closed before, by its list)
+        let Some(helper) = self.helpers.get_mut(call_id).filter(|h| !h.done) else { return };
         let (tool_uses, tokens) = (v["usage"]["tool_uses"].as_i64(), v["usage"]["total_tokens"].as_i64());
         let text = |key: &str| v[key].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
         match subtype {
@@ -1906,16 +1978,28 @@ impl ClaudeNormalizer {
             }
             // task_notification: it ended, and `summary` is what it reported. The line of a
             // subagent that was stopped has the subagent's description there (recorded,
-            // `r5-stop-subagent-1` and `-2`): it reported nothing.
+            // `r5-stop-subagent-1` and `-2`): it reported nothing. One that failed reports why:
+            // the error of its `task_updated` line, which `summary` repeats (recorded).
             _ => {
                 helper.done = true;
-                let report = text("summary").filter(|said| *said != helper.description);
+                let report = helper.error.take().or_else(|| text("summary").filter(|said| *said != helper.description));
                 if report.is_some() || tool_uses.is_some() || tokens.is_some() {
                     out.push(EventKind::SubAgentProgress { call_id: call_id.into(), name: None, step: None, tool_call_id: None, tool_uses, tokens, report });
                 }
                 let status = v["status"].as_str().unwrap_or("completed").to_string();
                 out.push(EventKind::SubAgent { call_id: call_id.into(), description: helper.description.clone(), status });
             }
+        }
+    }
+
+    /// `system/task_updated`: a task's change of state, which its `task_notification` then
+    /// says again. Only the reason of a subagent that failed is kept from it: `patch.error`,
+    /// recorded only beside `patch.status` "failed" (part 4 §3, `r6-fails-helper-background`
+    /// and `-foreground`, n=1 each). Its end row reports it (`on_task`).
+    fn on_task_updated(&mut self, v: &Value) {
+        let (Some(task_id), Some(error)) = (v["task_id"].as_str(), v["patch"]["error"].as_str().map(str::trim).filter(|e| !e.is_empty())) else { return };
+        if let Some(helper) = self.helpers.values_mut().find(|h| !h.done && h.task_id.as_deref() == Some(task_id)) {
+            helper.error = Some(error.to_string());
         }
     }
 
@@ -1928,8 +2012,12 @@ impl ClaudeNormalizer {
     /// nothing open. What is listed (part 3 §2, `r5-background-fail`, n=1): a background
     /// command, a background subagent, and a foreground command from the moment the CLI is
     /// told to move it to the background. A foreground subagent or command is in no list.
+    /// A task starts with the first list that names it: it keeps that time in later lists.
     fn on_background_tasks(&mut self, tasks: &Value, out: &mut Vec<EventKind>) {
-        let tasks = background_tasks(tasks);
+        let mut tasks = background_tasks(tasks);
+        for t in &mut tasks {
+            t.started_at = self.background.iter().find(|known| known.id == t.id).map_or(Some(now_ms()), |known| known.started_at);
+        }
         let gone: Vec<BackgroundTask> = self.background.iter().filter(|t| !tasks.iter().any(|now| now.id == t.id)).cloned().collect();
         // A background subagent that left the list with no `task_notification` (not recorded:
         // at `stop_task` and at its own end that line comes first): its row is closed here,
@@ -1960,8 +2048,25 @@ impl ClaudeNormalizer {
         self.background.iter().filter(|t| t.kind == "command").map(|t| t.id.clone()).collect()
     }
 
+    /// Does the CLI's last list of background tasks name a helper?
+    fn helpers_in_background(&self) -> bool {
+        self.background.iter().any(|t| t.kind == "helper")
+    }
+
+    /// The task id that `stop_task` takes for `id`: a task of the CLI's last list as it is, or
+    /// the call id of a helper at work, whose task id its `task_started` line said. `stop_task`
+    /// with that id ends a helper whose `Agent` call still waits: the call returns an error
+    /// result and the turn goes on (part 4 §2, `r6-shutdown-helper-foreground-stop-*`, n=2).
+    /// None: nothing by that id runs beside the agent.
+    fn task_to_stop(&self, id: &str) -> Option<String> {
+        if self.background.iter().any(|t| t.id == id) {
+            return Some(id.to_string());
+        }
+        self.helpers.get(id).filter(|h| !h.done).and_then(|h| h.task_id.clone())
+    }
+
     fn helper_started(&mut self, call_id: &str, description: &str, out: &mut Vec<EventKind>) {
-        let helper = Helper { description: description.to_string(), name: None, background: false, task_id: None, done: false };
+        let helper = Helper { description: description.to_string(), name: None, background: false, task_id: None, error: None, done: false };
         self.helpers.insert(call_id.to_string(), helper);
         out.push(EventKind::SubAgent { call_id: call_id.to_string(), description: description.to_string(), status: "running".into() });
     }
@@ -2204,7 +2309,11 @@ impl ClaudeNormalizer {
                 if structured["status"] == "async_launched" {
                     // The call only started it: `task_notification` says when it is done.
                     helper.background = true;
-                } else if !helper.done {
+                } else if !helper.done && (ok || helper.task_id.is_none()) {
+                    // (A call that failed does not end a subagent whose task lines Codly
+                    // follows: an interrupt rejects the call BEFORE those lines say "killed" /
+                    // "stopped": part 4 §1, `r6-interrupt-helper-foreground-*`, n=2. They end
+                    // it, or the end of the turn does when none comes.)
                     helper.done = true;
                     let status = if ok { "completed" } else { "failed" };
                     out.push(EventKind::SubAgent { call_id: id, description: helper.description.clone(), status: status.into() });
@@ -2398,8 +2507,14 @@ impl ClaudeNormalizer {
         });
         self.interrupt_requested = false;
         self.blocks.clear();
-        // A background subagent works on past the end of the turn: it and its open calls stay.
-        // One whose `Agent` call still waited for it is over with the turn.
+        // A background subagent works on past the end of a turn that ends as completed: it and
+        // its open calls stay. One whose `Agent` call still waited for it is over with the turn.
+        // An interrupted turn takes every subagent with it, background ones too, and the stream
+        // says so itself before the turn's `result` (`task_notification` "stopped", the list
+        // without them: part 4 §1, 6 of 6 recordings, each with ONE subagent in the middle of a
+        // Bash call), so none is left here. Not recorded: a turn that FAILS by itself (an API
+        // error, a limit) while a background subagent works; such a subagent stays here, as
+        // after a completed turn.
         self.helpers.retain(|id, h| {
             if !h.done && !h.background {
                 out.push(EventKind::SubAgent { call_id: id.clone(), description: h.description.clone(), status: "stopped".into() });
@@ -2640,7 +2755,8 @@ fn background_tasks(tasks: &Value) -> Vec<BackgroundTask> {
             Some("local_agent") => "helper",
             _ => "task",
         };
-        Some(BackgroundTask { id: t["task_id"].as_str()?.to_string(), kind: kind.into(), description: t["description"].as_str().unwrap_or_default().to_string() })
+        let description = t["description"].as_str().unwrap_or_default().to_string();
+        Some(BackgroundTask { id: t["task_id"].as_str()?.to_string(), kind: kind.into(), description, started_at: None })
     };
     tasks.as_array().into_iter().flatten().filter_map(task).collect()
 }
@@ -5155,8 +5271,10 @@ mod tests {
         assert!(!cli.actor.turn_active && cli.actor.session_replies.is_empty());
     }
 
-    /// A background command the CLI does not report as stopped is not waited for without end,
-    /// and a CLI that still holds a message is asked for nothing more: its process is ended.
+    /// A background helper and a command that the CLI does not report as stopped are not
+    /// waited for without end, and a CLI that still holds a message is asked for nothing more:
+    /// its process is ended. (The lists are written here: no recording has a CLI that ignores
+    /// the stop.)
     #[tokio::test]
     async fn a_background_command_that_does_not_stop_does_not_hold_the_stop() {
         let tasks = json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [
@@ -5174,8 +5292,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut actor, _events, _child) = silent_actor(dir.path());
         actor.on_json(tasks.clone(), "codly-0", &mut None).await;
-        assert_eq!(actor.norm.commands_in_background(), ["tid-1"], "the command; a subagent is left to the later steps of the stop");
+        assert_eq!(actor.norm.commands_in_background(), ["tid-1"], "the command; the helper gets no `stop_task`");
+        // The helper first: the interrupt. Its list does not come in time: the command is
+        // stopped all the same.
         actor.on_cmd(AgentCmd::Shutdown).await;
+        assert_eq!((interrupts_sent(dir.path()), actor.stage), (1, Stage::StoppingHelpers));
+        assert!(stops_sent(dir.path()).is_empty());
+        actor.on_deadline().await;
         assert_eq!(stops_sent(dir.path()), [json!("tid-1")]);
         assert_eq!(actor.stage, Stage::StoppingTasks);
         actor.on_deadline().await;
@@ -5344,6 +5467,12 @@ mod tests {
         assert_eq!(answer.try_recv().unwrap(), Err("Claude Code is shutting down".to_string()));
     }
 
+    /// The recorded list line of `lines` that names the background task `id`.
+    fn list_naming(lines: &[Value], id: &str) -> Value {
+        let names = |l: &&Value| l["subtype"] == "background_tasks_changed" && l["tasks"].as_array().is_some_and(|t| t.iter().any(|t| t["task_id"] == id));
+        lines.iter().find(names).unwrap_or_else(|| panic!("no recorded list names {id}")).clone()
+    }
+
     /// Recording `r4-background-life`: `stop_task` on a background command that runs. The
     /// answer is empty: the CLI's list of its background tasks says that the task is gone.
     #[tokio::test]
@@ -5351,6 +5480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut actor, _events, _child) = silent_actor(dir.path());
         let lines = recording("r4-background-life");
+        actor.on_json(list_naming(&lines, "tid-2"), "codly-0", &mut None).await;
         let request = json!({ "subtype": "stop_task", "task_id": "tid-2" });
         let answer = ask_as_recorded(&mut actor, dir.path(), &lines, SessionRequest::StopTask("tid-2".into()), request).await;
         assert_eq!(answer, Ok(json!({})));
@@ -5386,6 +5516,8 @@ mod tests {
         );
 
         let lines = recording("r4-background-life");
+        actor.on_json(list_naming(&lines, "tid-2"), "codly-0", &mut None).await;
+        emitted(&mut events);
         let request = json!({ "subtype": "stop_task", "task_id": "tid-2" });
         let answer = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::StopTask("tid-2".into()), request).await;
         assert_eq!(answer, Ok(json!({})));
@@ -5584,7 +5716,7 @@ mod tests {
         // An effort level: the answer is a bare success, and the settings say what the session
         // works with.
         let request = json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": "low" } });
-        let set = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::Effort("low".into()), request).await;
+        let set = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::Effort(Some("low".into())), request).await;
         assert_eq!(set, Ok(Value::Null));
         let (reply, mut answer) = mpsc::unbounded_channel();
         actor.on_cmd(AgentCmd::Session { request: SessionRequest::Settings, reply }).await;
@@ -5602,7 +5734,7 @@ mod tests {
         assert_eq!(answer_to("host-9")["response"]["subtype"], "success");
         assert_eq!(answer_to("host-10")["response"]["response"]["applied"]["effort"], "low");
         let (reply, mut answer) = mpsc::unbounded_channel();
-        actor.on_cmd(AgentCmd::Session { request: SessionRequest::Effort("not-a-level".into()), reply }).await;
+        actor.on_cmd(AgentCmd::Session { request: SessionRequest::Effort(Some("not-a-level".into())), reply }).await;
         assert_eq!(answer.try_recv().unwrap(), Err("Claude Code has no effort level \"not-a-level\"".to_string()));
         assert_eq!(last_sent(dir), wrote, "nothing was written");
         assert!(actor.session_replies.is_empty());
@@ -5870,5 +6002,267 @@ mod tests {
         let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "s".into());
         let ev = norm.on_message(&json!({ "type": "user", "message": { "role": "user", "content": "<local-command-stdout>x</local-command-stdout>" } }));
         assert!(matches!(&ev[..], [EventKind::Unknown { raw_type }] if raw_type == "user"), "{ev:?}");
+    }
+
+    // ───── helpers and the stop, as part 4 of the 2.1.311 recordings has them (`r6-*`) ─────
+
+    /// The subtypes of the control requests Codly wrote to the CLI so far, in order.
+    fn requests_sent(dir: &Path) -> Vec<String> {
+        let log = std::fs::read_to_string(dir.join("raw.ndjson")).unwrap();
+        log.lines().filter_map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"]["request"]["subtype"].as_str().map(str::to_owned)).collect()
+    }
+
+    /// The ends of the subagent rows, one line each: "<call id> <status>: <description>".
+    fn subagent_ends(events: &[EventKind]) -> Vec<String> {
+        subagent_lines(events).into_iter().filter(|l| [" completed: ", " stopped: ", " failed: "].iter().any(|end| l.contains(end))).collect()
+    }
+
+    /// Recordings `r6-shutdown-helper-sequence-1` and `-2` (part 4 §2, n=2; the first is
+    /// played here): a helper in the background and a turn that runs a command, then the
+    /// stop. The interrupt ends both: the helper's row ends as "stopped" and its list empties
+    /// before the turn's `result`, and stdin is closed right after that result. No `stop_task`
+    /// is written (the recorded driver's one after the result answered `{}` and changed
+    /// nothing; the process then exited with nothing left running).
+    #[tokio::test]
+    async fn a_stop_with_a_helper_and_a_turn_at_work_is_one_interrupt_as_recorded() {
+        let mut cli = Replay::of("r6-shutdown-helper-sequence-1");
+        let mut kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "interrupt").await;
+        assert_eq!(turns(&kinds), ["start:Use", "end:Completed", "start:Run"]);
+        assert!(cli.actor.norm.helpers_in_background() && cli.actor.norm.commands_in_background().is_empty());
+
+        cli.in_place_of_the_drivers_request(AgentCmd::Shutdown).await;
+        assert_eq!(cli.actor.stage, Stage::Interrupting);
+        kinds.extend(cli.play(|l| l["type"] == "result").await);
+        assert_eq!(turns(&kinds), ["start:Use", "end:Completed", "start:Run", "end:Interrupted"]);
+        assert_eq!(subagent_ends(&kinds), ["toolu-1 stopped: Run delayed echo command"]);
+        assert_eq!(background_lines(&kinds).last().map(String::as_str), Some("- | tid-1 helper stopped: Run delayed echo command"));
+        assert!(cli.actor.stage == Stage::Closing && cli.actor.stdin.is_none(), "{:?}", cli.actor.stage);
+
+        let rest = cli.play(|_| false).await;
+        assert!(rest.is_empty(), "{rest:?}");
+        assert_eq!(requests_sent(cli.dir.path()), ["interrupt"]);
+    }
+
+    /// Recordings `r6-shutdown-helper-idle-interrupt-1` and `-2` (part 4 §2, n=2; the first
+    /// is played here): a helper in the background and NO turn running, then the stop. Before,
+    /// the stop closed stdin at once and left the helper to the later steps. Now the interrupt
+    /// comes first: the helper's row ends as "stopped", the list empties, no turn starts, and
+    /// stdin is closed when the list has no helper (the recorded process exited 0.53 s later).
+    #[tokio::test]
+    async fn a_stop_with_a_helper_and_no_turn_interrupts_first_as_recorded() {
+        let mut cli = Replay::of("r6-shutdown-helper-idle-interrupt-1");
+        let kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "interrupt").await;
+        assert_eq!(turns(&kinds), ["start:Use", "end:Completed"]);
+        assert!(!cli.actor.turn_active && cli.actor.norm.helpers_in_background());
+
+        cli.in_place_of_the_drivers_request(AgentCmd::Shutdown).await;
+        assert!(cli.actor.stage == Stage::StoppingHelpers && cli.actor.stdin.is_some() && cli.actor.deadline.is_some(), "{:?}", cli.actor.stage);
+        let kinds = cli.play(|l| l["subtype"] == "background_tasks_changed").await;
+        assert_eq!(subagent_ends(&kinds), ["toolu-1 stopped: Run echo begin/sleep/end"]);
+        assert_eq!(background_lines(&kinds), ["- | tid-1 helper stopped: Run echo begin/sleep/end"]);
+        assert!(turns(&kinds).is_empty(), "no turn: {kinds:?}");
+        assert!(cli.actor.stage == Stage::Closing && cli.actor.stdin.is_none(), "{:?}", cli.actor.stage);
+
+        let rest = cli.play(|_| false).await;
+        assert!(rest.is_empty(), "{rest:?}");
+        assert_eq!(requests_sent(cli.dir.path()), ["interrupt"], "the helper gets no `stop_task`");
+    }
+
+    /// Recordings `r6-interrupt-helper-*-1` (part 4 §1; with the `-2` runs n=2 each, and each
+    /// has ONE helper in the middle of a Bash call). An interrupt ends every helper: one whose
+    /// `Agent` call still waits (`foreground`), one in the background while another turn runs
+    /// (`background`) and one in the background with no turn running (`idle`). Each helper row
+    /// ends once, as "stopped", the list empties, and no turn starts by itself. The
+    /// `task_notification` of a Bash call that had become a task (its own task id, an empty
+    /// `output_file`) ends nothing. Before, the foreground helper ended twice: "failed" at the
+    /// rejected `Agent` call, then "stopped".
+    #[tokio::test]
+    async fn an_interrupt_ends_every_helper_once_as_recorded() {
+        let cases = [
+            ("r6-interrupt-helper-foreground-1", "Run timed echo/sleep command", vec!["start:Use", "end:Interrupted", "start:Reply", "end:Completed"]),
+            ("r6-interrupt-helper-background-1", "Run delayed echo command", vec!["start:Use", "end:Completed", "start:Run", "end:Interrupted", "start:Reply", "end:Completed"]),
+            ("r6-interrupt-helper-idle-1", "Run sleep echo test", vec!["start:Use", "end:Completed", "start:Reply", "end:Completed"]),
+        ];
+        for (name, helper, turns_said) in cases {
+            let lines = recorded(name);
+            let bash_task = |l: &Value| l["subtype"] == "task_notification" && l["output_file"] == "" && l["task_id"] == "tid-2";
+            assert!(lines.iter().any(bash_task), "{name}: the helper's own Bash call is a task, and its end is said");
+
+            let mut cli = Replay::of(name);
+            let mut kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "interrupt").await;
+            cli.in_place_of_the_drivers_request(AgentCmd::Interrupt).await;
+            kinds.extend(cli.play(|_| false).await);
+            assert_eq!(turns(&kinds), turns_said, "{name}");
+            assert_eq!(subagent_ends(&kinds), [format!("toolu-1 stopped: {helper}")], "{name}");
+            let listed = background_lines(&kinds);
+            if name.ends_with("foreground-1") {
+                assert!(listed.is_empty(), "a helper the agent waits for is in no list: {listed:?}");
+            } else {
+                assert_eq!(listed, [format!("tid-1 helper: {helper} | -"), format!("- | tid-1 helper stopped: {helper}")], "{name}");
+            }
+            assert!(cli.actor.norm.background.is_empty() && cli.actor.norm.helpers.is_empty(), "{name}: nothing is left open");
+            assert!(!kinds.iter().any(|k| matches!(k, EventKind::Unknown { .. })), "{name}: {kinds:?}");
+            assert_eq!(cli.actor.stage, Stage::Running, "{name}");
+        }
+    }
+
+    /// Recordings `r6-fails-helper-background` and `-foreground` (part 4 §3, n=1 each): a
+    /// helper whose model request is refused. Its row ends as "failed", with the reason of its
+    /// `task_updated` line as its report; the background one leaves the list as "failed" too.
+    /// Recording `r6-fails-signal-term` (n=1): a background command whose shell got SIGTERM
+    /// leaves the list as "failed" (there is no word for a signal).
+    #[test]
+    fn a_helper_that_fails_says_why_and_a_killed_command_ends_as_failed_as_recorded() {
+        for (name, helper) in [("r6-fails-helper-background", "Run echo hi"), ("r6-fails-helper-foreground", "Run echo hi via no-model")] {
+            let lines = recorded(name);
+            let updated = lines.iter().find(|l| l["subtype"] == "task_updated").expect("the recorded task_updated line");
+            assert_eq!(updated["patch"]["status"], "failed", "{name}");
+            let error = updated["patch"]["error"].as_str().expect("its reason");
+            assert!(error.starts_with("Agent terminated early due to an API error"), "{error}");
+
+            let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+            let mut events = norm.turn_started("go");
+            events.extend(replay(&mut norm, &lines));
+            let reported: Vec<&str> = events.iter().filter_map(|e| if let EventKind::SubAgentProgress { report: Some(r), .. } = e { Some(r.as_str()) } else { None }).collect();
+            assert_eq!(reported, [error], "{name}");
+            assert_eq!(subagent_ends(&events), [format!("toolu-1 failed: {helper}")], "{name}: once, the tool result after it adds nothing");
+            if name.ends_with("background") {
+                assert_eq!(background_lines(&events), [format!("tid-1 helper: {helper} | -"), format!("- | tid-1 helper failed: {helper}")]);
+            } else {
+                assert!(background_lines(&events).is_empty());
+            }
+            assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{name}: {events:?}");
+        }
+
+        // In both recordings the `summary` of the `task_notification` repeats the error, so they
+        // alone do not show where the report comes from. Written lines in the recorded shape
+        // (`r6-fails-helper-foreground` lines 21, 27, 28) with a `summary` that is the helper's
+        // description, then with none: the report is still the error of `task_updated`.
+        let description = "Run echo hi via no-model";
+        let error = "Agent terminated early due to an API error: the model was not found";
+        for summary in [json!(description), Value::Null] {
+            let lines = [
+                json!({ "type": "system", "subtype": "task_started", "task_id": "tid-1", "tool_use_id": "toolu-1", "description": description, "subagent_type": "no-model", "is_backgrounded": false, "task_type": "local_agent" }),
+                json!({ "type": "system", "subtype": "task_updated", "task_id": "tid-1", "patch": { "status": "failed", "error": error } }),
+                json!({ "type": "system", "subtype": "task_notification", "task_id": "tid-1", "tool_use_id": "toolu-1", "status": "failed", "summary": summary }),
+            ];
+            let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+            let mut events = norm.turn_started("go");
+            events.extend(replay(&mut norm, &lines));
+            let reported: Vec<&str> = events.iter().filter_map(|e| if let EventKind::SubAgentProgress { report: Some(r), .. } = e { Some(r.as_str()) } else { None }).collect();
+            assert_eq!(reported, [error], "summary {summary}");
+            assert_eq!(subagent_ends(&events), [format!("toolu-1 failed: {description}")], "summary {summary}");
+        }
+
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let mut events = norm.turn_started("go");
+        events.extend(replay(&mut norm, &recorded("r6-fails-signal-term")));
+        let command = "Run delayed echo sequence in background";
+        assert_eq!(background_lines(&events), [format!("tid-1 command: {command} | -"), format!("- | tid-1 command failed: {command}")]);
+        assert!(subagent_lines(&events).is_empty(), "a command is no helper");
+    }
+
+    /// Recording `r6-shutdown-helper-foreground-stop-1` (part 4 §2, n=2 with `-2`): "Stop" on
+    /// a helper whose `Agent` call still waits. Codly gets the helper by the id of its call
+    /// (the id its row has) and sends its task id, as recorded. The helper's row ends as
+    /// "stopped", whoever asked gets its description with the CLI's answer, and the agent's
+    /// turn goes on to its own end. An id that is neither a listed task nor a helper at work
+    /// is refused, and nothing reaches the CLI.
+    #[tokio::test]
+    async fn a_helper_at_work_is_stopped_by_the_id_of_its_call_as_recorded() {
+        let mut cli = Replay::of("r6-shutdown-helper-foreground-stop-1");
+        let mut kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "stop_task").await;
+        assert_eq!(turns(&kinds), ["start:Use"]);
+        assert!(background_lines(&kinds).is_empty(), "a helper the agent waits for is in no list");
+
+        // An id that names nothing running: refused, and nothing is written.
+        let before = requests_sent(cli.dir.path());
+        for unknown in ["toolu-9", "tid-9", "toolu-2"] {
+            let (reply, mut answer) = mpsc::unbounded_channel();
+            cli.actor.on_cmd(AgentCmd::Session { request: SessionRequest::StopTask(unknown.into()), reply }).await;
+            let refused = answer.try_recv().expect("an answer at once").unwrap_err();
+            assert_eq!(refused, NOT_RUNNING, "{unknown}");
+        }
+        assert_eq!(requests_sent(cli.dir.path()), before);
+
+        let (reply, mut answer) = mpsc::unbounded_channel();
+        cli.in_place_of_the_drivers_request(AgentCmd::Session { request: SessionRequest::StopTask("toolu-1".into()), reply }).await;
+        kinds.extend(cli.play(|l| l["type"] == "result").await);
+        assert_eq!(answer.try_recv().expect("the CLI's answer reaches whoever asked"), Ok(json!({ "helper": "Run sleep echo command" })));
+        assert_eq!(subagent_ends(&kinds), ["toolu-1 stopped: Run sleep echo command"]);
+        assert!(kinds.iter().any(|k| matches!(k, EventKind::ToolCompleted { call_id, ok: false, .. } if call_id == "toolu-1")), "the Agent call returns an error");
+        assert_eq!(turns(&kinds), ["start:Use", "end:Completed"], "the turn went on to its own end");
+        // Once it ended, its call id names nothing any more.
+        let (reply, mut answer) = mpsc::unbounded_channel();
+        cli.actor.on_cmd(AgentCmd::Session { request: SessionRequest::StopTask("toolu-1".into()), reply }).await;
+        assert!(answer.try_recv().unwrap().is_err());
+    }
+
+    /// Recording `r6-effort-null-first-fresh` (part 4 §4, n=2 with `-after-turn`): a process
+    /// started with `--effort high`, and `effortLevel: null` as the first such request. It goes
+    /// out as recorded, and the settings then say "medium": the level is taken away with no
+    /// restart.
+    #[tokio::test]
+    async fn an_effort_is_taken_away_as_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        let lines = recording("r6-effort-null-first-fresh");
+        let dir = dir.path();
+        let set = ask_in_place_of(&mut actor, dir, &lines, SessionRequest::Effort(None), "host-3").await;
+        assert_eq!(set, Ok(Value::Null), "a bare success");
+        assert_eq!(last_sent(dir)["request"], json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": null } }));
+        let settings = ask_in_place_of(&mut actor, dir, &lines, SessionRequest::Settings, "host-4").await.unwrap();
+        assert_eq!(settings["applied"]["effort"], "medium");
+        assert!(emitted(&mut events).is_empty() && actor.session_replies.is_empty());
+    }
+
+    /// Recording `r6-model-while-streaming-1` (part 4 §5, n=2 with `-2`): `set_model sonnet`
+    /// while an answer on haiku is written, a turn on sonnet, then `set_model haiku` and a turn
+    /// on it. The rest of the first answer stays on haiku. Each switch is Codly's own: no row
+    /// says that Claude Code "runs on" another model.
+    #[tokio::test]
+    async fn a_model_switch_while_an_answer_is_written_makes_no_rows_about_the_model_as_recorded() {
+        let mut cli = Replay::of("r6-model-while-streaming-1");
+        let lines = recording("r6-model-while-streaming-1");
+        assert_eq!(models_said(&lines), ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+        let mut kinds = Vec::new();
+        for (model, resolved) in [("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5")] {
+            kinds.extend(cli.play(|l| l["_sent"]["request"]["subtype"] == "set_model").await);
+            let (reply, mut answer) = mpsc::unbounded_channel();
+            cli.in_place_of_the_drivers_request(AgentCmd::Session { request: SessionRequest::Model(model.into()), reply }).await;
+            kinds.extend(cli.play(|l| l["type"] == "control_response").await);
+            assert_eq!(answer.try_recv().expect("the CLI's answer reaches whoever asked"), Ok(json!({ "model": resolved })), "{model}");
+        }
+        kinds.extend(cli.play(|_| false).await);
+        assert_eq!(turns(&kinds), ["start:Write", "end:Completed", "start:Reply", "end:Completed", "start:Reply", "end:Completed"]);
+        let notices: Vec<&str> = kinds.iter().filter_map(|k| if let EventKind::Notice { text } = k { Some(text.as_str()) } else { None }).collect();
+        assert_eq!(notices, Vec::<&str>::new());
+        assert!(!kinds.iter().any(|k| matches!(k, EventKind::Unknown { .. })), "{kinds:?}");
+    }
+
+    /// A background task starts with the first list that names it: every later list that
+    /// names it carries that time, so a row read again from a later list still has its timer.
+    /// (Lists written here, in the recorded shape.)
+    #[test]
+    fn a_background_task_keeps_the_time_of_the_first_list_that_named_it() {
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let task = |id: &str| json!({ "task_id": id, "task_type": "local_bash", "description": "npm run dev" });
+        let starts = |events: Vec<EventKind>| -> Vec<(String, Option<i64>)> {
+            let Some(EventKind::BackgroundTasks { tasks, .. }) = events.into_iter().find(|e| matches!(e, EventKind::BackgroundTasks { .. })) else { panic!("a list event") };
+            tasks.into_iter().map(|t| (t.id, t.started_at)).collect()
+        };
+        let before = now_ms();
+        let first = starts(norm.on_message(&list_line(json!([task("tid-1")]))));
+        let started = first[0].1.expect("a start time");
+        assert!(started >= before);
+        std::thread::sleep(Duration::from_millis(5));
+        let second = starts(norm.on_message(&list_line(json!([task("tid-1"), task("tid-2")]))));
+        assert_eq!(second[0], ("tid-1".to_string(), Some(started)), "one start time for one task");
+        assert!(second[1].1.is_some_and(|t| t > started), "{second:?}");
+        // Gone, then named again: that is work that starts anew.
+        starts(norm.on_message(&list_line(json!([]))));
+        std::thread::sleep(Duration::from_millis(5));
+        let again = starts(norm.on_message(&list_line(json!([task("tid-1")]))));
+        assert!(again[0].1.is_some_and(|t| t > started), "{again:?}");
     }
 }

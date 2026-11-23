@@ -477,20 +477,22 @@ impl Inner {
     /// turns and, for a named model, during one; for the CLI's default model it is recorded
     /// between turns only (part 2 of the 2.1.311 recordings, scenario 13) and is sent during
     /// a turn all the same. The effort request is recorded between turns only, and is sent
-    /// only then. None = the switch needs the restart: another CLI, no live process, a new
-    /// effort while the agent works, an effort level Claude Code does not list, or no effort
-    /// for a session that has one (taking a level away is recorded only for a process that
-    /// started without one).
+    /// only then: a new level, and no level for a session that has one (`effortLevel: null`
+    /// takes the level away at once and for the next turns: part 4 §4, n=2, recorded only on
+    /// a process started with `--effort high`; it is sent for any level). None = the switch
+    /// needs the restart: another CLI, no live process, a change of effort while the agent
+    /// works, or an effort level Claude Code does not list.
     fn live_model_switch(&self, agent: &Agent, model: Option<&str>) -> Option<LiveSwitch> {
         let (name, effort) = classify::split_model_effort(model);
         let live = lock(&self.live);
         let l = live.get(&agent.id).filter(|l| l.provider == Provider::Claude && l.starting.is_none() && !l.stopping)?;
         let (name_now, effort_now) = classify::split_model_effort(l.model.as_deref());
-        if effort.is_none() && effort_now.is_some() {
-            return None;
-        }
-        let effort = effort.filter(|e| effort_now.as_ref() != Some(e));
-        if effort.as_ref().is_some_and(|e| !claude::EFFORT_LEVELS.contains(&e.as_str()) || l.turn_active || l.queued > 0) {
+        let effort = match effort {
+            None => effort_now.is_some().then_some(None),
+            Some(e) => (effort_now.as_ref() != Some(&e)).then_some(Some(e)),
+        };
+        let unknown = |e: &Option<String>| e.as_ref().is_some_and(|e| !claude::EFFORT_LEVELS.contains(&e.as_str()));
+        if effort.as_ref().is_some_and(|e| unknown(e) || l.turn_active || l.queued > 0) {
             return None;
         }
         // The session's model has two names: the one the run was started with or last

@@ -149,7 +149,10 @@ impl Spawner for Fake {
                             if text.contains("LEAVE-RUNNING") {
                                 // Claude Code's whole list of background tasks, at each change.
                                 let listed = |ids: &[&str], ended: &[&str]| EventKind::BackgroundTasks {
-                                    tasks: ids.iter().map(|id| BackgroundTask { id: (*id).into(), kind: "command".into(), description: "npm run dev".into() }).collect(),
+                                    tasks: ids
+                                        .iter()
+                                        .map(|id| BackgroundTask { id: (*id).into(), kind: "command".into(), description: "npm run dev".into(), started_at: None })
+                                        .collect(),
                                     ended: ended
                                         .iter()
                                         .map(|id| BackgroundEnded { id: (*id).into(), kind: "command".into(), description: "npm run dev".into(), status: "completed".into() })
@@ -225,10 +228,11 @@ impl Spawner for Fake {
                                         Ok(json!({ "model": format!("claude-{name}-5-5") }))
                                     }
                                 }
+                                // (recorded: no level of its own gives Claude Code's default, "medium")
                                 SessionRequest::Effort(level) => {
-                                    s.log.push(format!("effort:{level}"));
+                                    s.log.push(format!("effort:{}", level.as_deref().unwrap_or("none")));
                                     if !s.drops_effort {
-                                        s.effort = Some(level);
+                                        s.effort = level;
                                     }
                                     Ok(serde_json::Value::Null)
                                 }
@@ -256,10 +260,20 @@ impl Spawner for Fake {
                                     s.log.push(format!("mcp-{}:{server}", if on { "on" } else { "off" }));
                                     if server == "does-not-start" { Err("Connection closed".to_string()) } else { Ok(serde_json::Value::Null) }
                                 }
-                                // (recorded: `{}`, whether or not a task ended)
+                                // (recorded: `{}`, whether or not a task ended; for a helper found
+                                // by the id of its call the adapter adds its description; one that
+                                // was stopped before has ended, and the adapter refuses it)
                                 SessionRequest::StopTask(task_id) => {
-                                    s.log.push(format!("stop-task:{task_id}"));
-                                    Ok(json!({}))
+                                    let asked = format!("stop-task:{task_id}");
+                                    let ended = s.log.contains(&asked);
+                                    s.log.push(asked);
+                                    if ended {
+                                        Err(codly_core::adapters::claude::NOT_RUNNING.to_string())
+                                    } else if task_id.starts_with("toolu-") {
+                                        Ok(json!({ "helper": "Run the tests" }))
+                                    } else {
+                                        Ok(json!({}))
+                                    }
                                 }
                             };
                             let _ = reply.send(answer);
@@ -535,25 +549,56 @@ async fn a_live_claude_agent_changes_its_effort_and_takes_the_default_model_with
     assert!(!codly_said(&core, &id, "now works with thinking effort max").await, "nothing changed in place");
     seen.lock().unwrap().drops_effort = false;
 
-    // A word that is no level of Claude Code is not sent to the session, and a level cannot
-    // be taken away from it: those switches still restart.
+    // A word that is no level of Claude Code is not sent to the session: that switch still
+    // restarts. (Taking a level away does not: the next test.)
     turn(&core, &id, "again").await;
     assert_eq!(seen.lock().unwrap().runs.len(), 2, "the next message starts the agent again");
-    let asked = seen.lock().unwrap().log.len();
-    let a = core.set_agent_model(&id, Some("opus".into())).await.unwrap();
-    assert_eq!(a.model.as_deref(), Some("opus"));
-    {
-        let s = seen.lock().unwrap();
-        assert_eq!(s.log.len(), asked, "nothing was asked of the session: {:?}", s.log);
-        assert_eq!(s.shutdowns, 2);
-    }
-    turn(&core, &id, "once more").await;
     core.set_agent_model(&id, Some("opus:minimal".into())).await.unwrap();
     {
         let s = seen.lock().unwrap();
         assert!(!s.log.iter().any(|l| l == "effort:minimal"), "{:?}", s.log);
-        assert_eq!(s.shutdowns, 3);
+        assert_eq!(s.shutdowns, 2);
     }
+    core.shutdown().await;
+}
+
+/// Before, a thinking effort could not be taken away from a live session: the agent was
+/// stopped, and its next message started a new process. Recorded since (part 4 §4, n=2, on a
+/// process started with `--effort high`): `effortLevel: null` takes it away at once. Between
+/// turns the same run goes on; during a turn the change waits for the agent to rest, as a new
+/// effort does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_claude_agent_gives_up_its_effort_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = hired_agent(dir.path(), &seen).await;
+    core.set_agent_model(&id, Some("opus:high".into())).await.unwrap();
+    turn(&core, &id, "hello").await;
+    let run = agent(&core, &id).await.run_id;
+    assert!(run.is_some());
+
+    // During a turn: the agent must rest first, and nothing reaches the session.
+    core.send_chat(&format!("agent:{id}"), "HOLD-THE-TURN").await.unwrap();
+    wait_for("the turn to start", async || (turns_started(&core, &id).await == 2).then_some(())).await;
+    let e = core.set_agent_model(&id, Some("opus".into())).await.unwrap_err().to_string();
+    assert!(e.contains("is still working: stop its turn first"), "{e}");
+    assert!(!seen.lock().unwrap().log.iter().any(|l| l.starts_with("effort:")), "{:?}", seen.lock().unwrap().log);
+    seen.lock().unwrap().release.notify_one();
+    settled(&core, &id, 2).await;
+
+    // Between turns: the level goes away in the same run.
+    let a = core.set_agent_model(&id, Some("opus".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus"), "the row shows no effort");
+    assert_eq!(last_seen(&seen), "effort:none");
+    assert!(!seen.lock().unwrap().log.iter().any(|l| l.starts_with("model:")), "the model was not asked for again");
+    assert_eq!(agent(&core, &id).await.run_id, run, "the same run goes on");
+    assert_eq!(seen.lock().unwrap().shutdowns, 0);
+    assert!(codly_said(&core, &id, "now works with Claude Code's default thinking effort, in the same conversation: no restart was needed.").await);
+
+    // Its next run starts with no effort.
+    stop(&core, &id).await;
+    turn(&core, &id, "again").await;
+    assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("opus".to_string())));
     core.shutdown().await;
 }
 
@@ -907,13 +952,25 @@ async fn a_background_command_is_stopped_through_the_live_session() {
     // the record names nothing.
     core.stop_agent_task(&id, "tid-2").await.unwrap();
     assert_eq!(last_seen(&seen), "stop-task:tid-2");
+    // A helper at work, by the id of its call (the id of its row): the adapter finds it, and
+    // its answer names it for the record.
+    core.stop_agent_task(&id, "toolu-1").await.unwrap();
+    assert_eq!(last_seen(&seen), "stop-task:toolu-1");
     assert_eq!(
         your_acts(&core, &id).await,
         [
             format!("asked {name} to stop what it left running in the background: npm run dev"),
             format!("asked {name} to stop what it left running in the background"),
+            format!("asked {name} to stop its helper: Run the tests"),
         ]
     );
+    // Work that ended a moment before (the list on record still names "tid-1"), and a helper
+    // that ended: the adapter refuses, in its own words, and no stop is on record.
+    for gone in ["tid-1", "toolu-1"] {
+        let e = core.stop_agent_task(&id, gone).await.unwrap_err().to_string();
+        assert_eq!(e, "that work is not running any more", "{gone}");
+    }
+    assert_eq!(your_acts(&core, &id).await.len(), 3, "a refused stop is not on record");
     let e = core.stop_agent_task(&id, "").await.unwrap_err().to_string();
     assert_eq!(e, "which background command?");
 

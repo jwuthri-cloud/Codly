@@ -67,8 +67,11 @@ impl Failure {
 /// A start error only you can fix: no wait installs a CLI, signs you in, turns an account on,
 /// trusts a folder's own CLI configuration or turns Claude Code's shell sandbox on. (The
 /// texts are `runs.rs`'s, `trust.rs`'s and the Claude adapter's `SandboxNotOn`. One this list
-/// does not know is retried, then blocks with its own words.)
+/// does not know is retried, then blocks with its own words.) Claude Code that did not answer
+/// the check of its sandbox in time is retried too: it was slow, which a later start can get
+/// past.
 pub(super) fn needs_you(error: &str) -> bool {
+    use crate::adapters::claude::SandboxNotOn;
     const CAUSES: [&str; 7] = [
         "not installed",
         "not signed in",
@@ -76,9 +79,12 @@ pub(super) fn needs_you(error: &str) -> bool {
         "no longer available",
         "binary not found",
         super::trust::NOT_STARTED,
-        crate::adapters::claude::SandboxNotOn::NOT_STARTED,
+        SandboxNotOn::NOT_STARTED,
     ];
     let e = error.to_lowercase();
+    if e.contains(&SandboxNotOn::NO_ANSWER.to_lowercase()) {
+        return false;
+    }
     CAUSES.iter().any(|c| e.contains(c))
 }
 
@@ -363,12 +369,18 @@ mod tests {
             "Gemini CLI is not started in this folder: it has its own Gemini CLI configuration that you have not trusted",
             // (the Claude adapter's refusal of a run whose shell sandbox is not on)
             "Claude Code did not turn its sandbox on, so Codly did not start this agent. Check Claude Code's sandbox on this computer, or turn off \"Sandbox Claude's shell\" in Settings → Safety",
-            "Claude Code did not answer Codly's check of its sandbox within 90 s, so Codly did not start this agent. Try again, or turn off \"Sandbox Claude's shell\" in Settings → Safety",
         ] {
             assert!(needs_you(e), "{e}");
             assert!(Failure::Start(e.into()).needs_you(), "{e}");
         }
-        for e in ["Ada is already running", "Ada did not leave its chat in time", "Claude Code exited during startup", "the agent did not finish the handshake"] {
+        for e in [
+            "Ada is already running",
+            "Ada did not leave its chat in time",
+            "Claude Code exited during startup",
+            "the agent did not finish the handshake",
+            // (the Claude adapter's check of the sandbox that got no answer in time: a later start can get it)
+            "Claude Code did not answer Codly's check of its sandbox within 90 s, so Codly did not start this agent. Try again, or turn off \"Sandbox Claude's shell\" in Settings → Safety",
+        ] {
             assert!(!needs_you(e), "{e}");
         }
         // Only a start can need you: an exit is retried whatever the CLI said last.

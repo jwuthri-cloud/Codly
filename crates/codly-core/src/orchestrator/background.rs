@@ -7,8 +7,9 @@
 //!   (recorded for Claude Code 2.1.311: cli-claude-stream-json-2.1.311-part2 §6), as after
 //!   any other turn of the worker;
 //! - when nothing is left open and no such turn came (`background_changed`);
-//! - after `WAIT` at the latest: Codly stops what still runs, says in the task's record what
-//!   it stopped, and checks the work as it is (`background_wait_over`).
+//! - after `WAIT` at the latest: Codly stops what still runs (Claude Code: `stop_task` for each
+//!   command, one interrupt for the helpers, which starts no turn), says in the task's record
+//!   what it stopped, and checks the work as it is (`background_wait_over`).
 //!
 //! `WAIT` is one budget for a round of the worker, not a time per wait. A round is the work
 //! the worker hands in once: it begins with the task's brief, when the gate sends the work
@@ -84,7 +85,7 @@ impl Background {
     pub(super) fn helper(&mut self, id: &str, description: &str, at_work: bool) {
         self.open.retain(|t| t.id != id);
         if at_work {
-            self.open.push(BackgroundTask { id: id.into(), kind: "helper".into(), description: description.into() });
+            self.open.push(BackgroundTask { id: id.into(), kind: "helper".into(), description: description.into(), started_at: None });
         }
         self.forget_gone();
     }
@@ -223,11 +224,14 @@ impl Inner {
             let begun = l.background.begin_hold(now);
             (open, begun, l.background.left(now, budget), l.run_id.clone())
         };
+        // What the pass does once the wait is over: it asks for a report that is missing before
+        // it checks anything (`gate.rs`), as the record of a stop says too.
+        let next = if self.report_comes_first(&task.id, &run_id) { "asks the worker for its report" } else { "checks the work" };
         let reason = if left.is_zero() {
-            format!("its worker left {} running; Codly stops {} now and checks the work", names(&open), it_or_them(&open))
+            format!("its worker left {} running; Codly stops {} now and {next}", names(&open), it_or_them(&open))
         } else {
             format!(
-                "its worker left {} running; Codly checks the work when that ends, and stops {} after {}",
+                "its worker left {} running; Codly {next} when that ends, and stops {} after {}",
                 names(&open),
                 it_or_them(&open),
                 gate::span(whole_secs(left))
@@ -313,8 +317,11 @@ impl Inner {
             let left = l.background.waited_for();
             let asked = l.background.stop_now(&left);
             // An idle Codex agent takes an interrupt as: stop the turns of my subagents
-            // (codex.rs `interrupt`; from the types, not verified on a live run).
-            if l.provider == Provider::Codex && !asked.is_empty() {
+            // (codex.rs `interrupt`; from the types, not verified on a live run). An idle
+            // Claude Code takes it as: end every helper, and start no turn (recorded: part 4
+            // §1 and §2, n=4 with no turn running). It does not end a background command.
+            let helpers = asked.iter().any(|t| t.kind == "helper");
+            if (l.provider == Provider::Codex && !asked.is_empty()) || (l.provider == Provider::Claude && helpers) {
                 l.handle.send(AgentCmd::Interrupt);
             }
             (left, asked, l.provider)
@@ -331,12 +338,12 @@ impl Inner {
             return;
         }
         if provider == Provider::Claude {
-            // `stop_task` is recorded on a background command (part 2 §6) and on a background
-            // subagent (part 3 §1): both leave the list. Its answer is the same whether
-            // anything was stopped or not, so nobody waits for it: the CLI's next list of its
-            // background tasks is what Codly reads below. (After the stop of a subagent the
-            // CLI starts a turn by itself: its end runs the gate, as any turn's end does.)
-            for t in &asked {
+            // The commands get `stop_task` (recorded, part 2 §6): they leave the list. Its
+            // answer is the same whether anything was stopped or not, so nobody waits for it:
+            // the CLI's next list of its background tasks is what Codly reads below. The
+            // helpers had the interrupt above: `stop_task` would end one too, but the CLI then
+            // starts a turn by itself (part 3 §1), whose end would run the gate a second time.
+            for t in asked.iter().filter(|t| t.kind != "helper") {
                 if let Err(e) = self.ask_session(&worker, SessionRequest::StopTask(t.id.clone())) {
                     tracing::debug!("background task {} not stopped: {e}", t.id);
                 }
@@ -455,7 +462,7 @@ mod tests {
     use super::*;
 
     fn task(id: &str, kind: &str, description: &str) -> BackgroundTask {
-        BackgroundTask { id: id.into(), kind: kind.into(), description: description.into() }
+        BackgroundTask { id: id.into(), kind: kind.into(), description: description.into(), started_at: None }
     }
 
     #[test]

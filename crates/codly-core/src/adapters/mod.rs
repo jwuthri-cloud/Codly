@@ -163,14 +163,19 @@ pub enum SessionRequest {
     /// whether the CLI saves the switch (no process was started after an "off"), and what it
     /// answers for a server that does not start or that it does not know.
     McpEnabled(String, bool),
-    /// `stop_task`, with the id of a background task (`BackgroundTask::id`): the CLI ends it.
-    /// The answer is empty also when nothing was stopped (recorded, part 2 §6): the CLI's next
-    /// list of its background tasks says whether the task is gone.
+    /// `stop_task`, with the id of a background task (`BackgroundTask::id`), or the call id of
+    /// a helper at work (`EventKind::SubAgent::call_id`, in the background or not): the CLI
+    /// ends it. The answer is empty also when nothing was stopped (recorded, part 2 §6): the
+    /// CLI's next list of its background tasks, and a helper's own row, say what ended. For a
+    /// helper found by its call id the adapter adds its description (`helper`). An id that is
+    /// neither is refused, and nothing reaches the CLI.
     StopTask(String),
     /// `apply_flag_settings` with `effortLevel`: the reasoning effort of the session, one of
-    /// `claude::EFFORT_LEVELS` (the adapter sends no other word). The CLI answers "success"
-    /// also for a level it then drops, so `Settings` is asked after it.
-    Effort(String),
+    /// `claude::EFFORT_LEVELS` (the adapter sends no other word), or None for no level of its
+    /// own (`null`: the CLI's default, recorded as "medium" on a process started with
+    /// `--effort high`, part 4 §4, n=2). The CLI answers "success" also for a level it then
+    /// drops, so `Settings` is asked after it.
+    Effort(Option<String>),
     /// `get_settings`: what the session works with now (`applied.model`, `applied.effort`).
     Settings,
 }

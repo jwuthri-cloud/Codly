@@ -87,8 +87,9 @@ pub(super) struct LiveSwitch {
     /// The name for `set_model` (`claude::DEFAULT_MODEL` for the CLI's own default). None: the
     /// model stays, only the effort changes.
     pub model: Option<String>,
-    /// The effort level to set. None: the session keeps its effort.
-    pub effort: Option<String>,
+    /// The effort level to set; Some(None) takes the session's level away (the CLI's default
+    /// then). None: the session keeps its effort.
+    pub effort: Option<Option<String>>,
     /// The effort the session works with now: what it started with, or its last live change.
     pub effort_now: Option<String>,
 }
@@ -429,6 +430,8 @@ impl Inner {
     pub(super) async fn session_answer_within(mut answer: mpsc::UnboundedReceiver<Result<Value, String>>, limit: Duration) -> Result<Value> {
         match tokio::time::timeout(limit, answer.recv()).await {
             Ok(Some(Ok(v))) => Ok(v),
+            // (the adapter's own refusal: nothing reached the CLI, so it is no answer of Claude Code)
+            Ok(Some(Err(e))) if e == crate::adapters::claude::NOT_RUNNING => bail!(e),
             Ok(Some(Err(e))) => bail!("Claude Code answered: {e}"),
             Ok(None) => bail!("the agent's process ended before it answered"),
             Err(_) => bail!("Claude Code did not answer within {} s", limit.as_secs()),
@@ -453,12 +456,12 @@ impl Inner {
         }
         let mut effort_kept = None;
         if let Some(level) = &switch.effort
-            && let Err(e) = self.set_live_effort(id, level).await
+            && let Err(e) = self.set_live_effort(id, level.as_deref()).await
         {
             if switch.model.is_none() {
                 // The request is recorded on a process that started with no `--effort`. Whether
                 // a process that started with one takes it is not: the restart always does.
-                tracing::info!("{} restarts for the thinking effort {level}: {e:#}", agent.name);
+                tracing::info!("{} restarts for the thinking effort {level:?}: {e:#}", agent.name);
                 return Ok(None);
             }
             effort = switch.effort_now.clone();
@@ -476,7 +479,7 @@ impl Inner {
             });
         }
         if let Some(level) = switch.effort.as_ref().filter(|_| effort_kept.is_none()) {
-            now.push(format!("thinking effort {level}"));
+            now.push(level.as_ref().map_or_else(|| "Claude Code's default thinking effort".to_string(), |level| format!("thinking effort {level}")));
         }
         // (Recorded: after a model switch the next request reads the conversation with no cached tokens.)
         let reads_again = if switch.model.is_some() { " Its next turn reads the whole conversation again with the new model." } else { "" };
@@ -495,10 +498,12 @@ impl Inner {
 
     /// Set the reasoning effort of a live Claude session, then read it back: Claude Code
     /// answers "success" also for a level it drops (recorded), and only its settings say what
-    /// the session works with.
-    async fn set_live_effort(&self, agent_id: &str, level: &str) -> Result<()> {
-        let answer = self.ask_session(agent_id, SessionRequest::Effort(level.to_string()))?;
+    /// the session works with. None takes the session's level away: the CLI's default for its
+    /// model follows, which Codly does not know, so there is nothing to read back.
+    async fn set_live_effort(&self, agent_id: &str, level: Option<&str>) -> Result<()> {
+        let answer = self.ask_session(agent_id, SessionRequest::Effort(level.map(str::to_owned)))?;
         Self::session_answer(answer).await?;
+        let Some(level) = level else { return Ok(()) };
         let answer = self.ask_session(agent_id, SessionRequest::Settings)?;
         let settings = Self::session_answer(answer).await?;
         match settings["applied"]["effort"].as_str() {
