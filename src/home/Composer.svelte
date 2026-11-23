@@ -17,6 +17,7 @@
   import Icon from '../components/Icon.svelte';
   import DictationButton from './DictationButton.svelte';
   import VoiceButton from './VoiceButton.svelte';
+  import VoiceStrip from './VoiceStrip.svelte';
   import { appendTranscript } from '../lib/util/freeflow';
   import Portrait from '../components/Portrait.svelte';
   import LeadControls, { MODES } from './LeadControls.svelte';
@@ -264,6 +265,7 @@
       {/each}
     </ul>
   {/if}
+  <VoiceStrip {thread} />
   <div class="composer" class:has={canSend} class:one={oneToOne} style:--hue={idVar(agent?.color ?? 0)}>
     {#if oneToOne && agent}
       <button class="to" onclick={() => ui.openRequest(ui.request)} data-tip="Back to the request (⌫ on an empty line)">
