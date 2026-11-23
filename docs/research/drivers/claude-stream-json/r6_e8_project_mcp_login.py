@@ -9,12 +9,22 @@ argv[1]: enable-all-false  --setting-sources user,project, --settings '{"enableA
          user-only         --setting-sources user (the project's settings are not a source), nothing in --settings
          user-only-home    the same with a THROW-AWAY HOME (no login: it shows what is loaded, not a tool call)
          user-local-home   --setting-sources user,local with a THROW-AWAY HOME (no login)
+         user-local-file-home   the same, and the work folder has a `.claude/settings.local.json` that turns the
+                           project's servers on (`enableAllProjectMcpServers:true`, `enabledMcpjsonServers` naming
+                           the server: what an earlier approval of a repo's servers leaves there). The file also has
+                           two harmless hooks (as `hooks-on`): a hook that ran shows that the CLI read the file
+         user-local-file   --setting-sources user,local and the same file, with the REAL login (the hooks of the
+                           file do not run: `disableAllHooks`, as in every logged-in run)
          hooks-on, hooks-off   a check of this script's own safety, with a THROW-AWAY HOME whose settings.json has two
                            harmless hooks (SessionStart, UserPromptSubmit: each appends a line to a file in the work
                            folder): `hooks-off` adds `"disableAllHooks":true` to --settings, as the logged-in runs do
+argv[2]: a label (1, 2: the same scenario again), added to the fixture's name
 
-THE LOGGED-IN RUNS (the first four) READ YOUR OWN USER SETTINGS: `--setting-sources user` is the question. So that they
-change nothing of yours:
+A run with `local` as a source reads the WORK FOLDER's `.claude/settings.local.json`, a file of the scenario; no
+file of yours.
+
+THE LOGGED-IN RUNS (the first four and `user-local-file`) READ YOUR OWN USER SETTINGS: `--setting-sources user` is the
+question. So that they change nothing of yours:
 - `"disableAllHooks":true` is in --settings: your hooks do not run (checked with `hooks-on` / `hooks-off` first);
 - the claude.ai connectors are off (setting + environment variable), as in r5_e11 and r5_e12;
 - the driver allows ONE tool, `mcp__ping-project__ping`, and denies every other request, so no tool of your own
@@ -26,7 +36,7 @@ import json, os, sys, time
 from drv import Session, make_repo, OUT
 from r5_lib import lines_of, next_turn, ping_server, stdio_server
 variant = sys.argv[1] if len(sys.argv) > 1 else "user-only-home"
-name = "r6-project-mcp-" + variant
+name = "r6-project-mcp-" + variant + ("-" + sys.argv[2] if len(sys.argv) > 2 else "")
 cwd = make_repo(name)
 ping_server(cwd)
 marker, hook_file = os.path.join(cwd, "started.txt"), os.path.join(cwd, "hook-ran.txt")
@@ -35,6 +45,13 @@ for p in (marker, hook_file):
         os.remove(p)
 with open(os.path.join(cwd, ".mcp.json"), "w") as f:
     json.dump({"mcpServers": {"ping-project": stdio_server("started.txt")}}, f)
+HOOK = {"hooks": [{"type": "command", "command": "echo ran >> " + hook_file}]}
+local_file = None
+if variant.startswith("user-local-file"):
+    local_file = {"enableAllProjectMcpServers": True, "enabledMcpjsonServers": ["ping-project"], "hooks": {"SessionStart": [HOOK], "UserPromptSubmit": [HOOK]}}
+    os.makedirs(os.path.join(cwd, ".claude"), exist_ok=True)
+    with open(os.path.join(cwd, ".claude", "settings.local.json"), "w") as f:
+        json.dump(local_file, f)
 TOOL = "mcp__ping-project__ping"
 seen = []
 
@@ -49,24 +66,26 @@ def handler(req):
 kw = dict(mode="manual", hard_timeout=120, on_can_use_tool=handler, strict_mcp=False)
 flag = {"enable-all-false": {"enableAllProjectMcpServers": False}, "enabled-other": {"enabledMcpjsonServers": ["another-server"]},
         "disabled": {"disabledMcpjsonServers": ["ping-project"]}}.get(variant, {})
-login = variant in ("enable-all-false", "enabled-other", "disabled", "user-only")
+login = variant in ("enable-all-false", "enabled-other", "disabled", "user-only", "user-local-file")
+sources = "user,project" if flag else "user,local" if variant.startswith("user-local") else "user"
 if login:
     flag.update(disableAllHooks=True, disableClaudeAiConnectors=True)
-    s = Session(name, extra=["--tools", "Bash", "--settings", json.dumps(flag)], setting_sources="user" if variant == "user-only" else "user,project",
+    s = Session(name, extra=["--tools", "Bash", "--settings", json.dumps(flag)], setting_sources=sources,
                 env={"ENABLE_CLAUDEAI_MCP_SERVERS": "false"}, **kw)
 else:
     home = os.path.join(OUT, "work", name + "-home")
     os.makedirs(os.path.join(home, ".claude"), exist_ok=True)
     if variant.startswith("hooks"):
-        hook = {"hooks": [{"type": "command", "command": "echo ran >> " + hook_file}]}
         with open(os.path.join(home, ".claude", "settings.json"), "w") as f:
-            json.dump({"hooks": {"SessionStart": [hook], "UserPromptSubmit": [hook]}}, f)
+            json.dump({"hooks": {"SessionStart": [HOOK], "UserPromptSubmit": [HOOK]}}, f)
         if variant == "hooks-off":
             flag = {"disableAllHooks": True}
     s = Session(name, extra=["--tools", "Bash"] + (["--settings", json.dumps(flag)] if flag else []),
-                setting_sources="user,local" if variant == "user-local-home" else "user", env={"HOME": home}, **kw)
+                setting_sources=sources, env={"HOME": home}, **kw)
 
 time.sleep(3.0)
+if local_file:
+    s.note(settings_local_json_of_the_work_folder=local_file)
 s.note(before_first_message=True, server_started=os.path.exists(marker))
 print("turn:", next_turn(s, "If you have a tool named exactly `%s`, call it once and reply with exactly what it returned. "
                             "If you have no tool with exactly that name, reply with the single word: none" % TOOL, 90))

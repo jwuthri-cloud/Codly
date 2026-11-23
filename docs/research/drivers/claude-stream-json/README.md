@@ -48,20 +48,22 @@ Python 3.11 or newer, standard library only. They start the real `claude` CLI wi
 
 Part 4 (`r6_*.py`), what is new:
 
-- Cost at list price: 0.12 USD for the committed recordings (about 0.20 USD with the runs that were recorded again).
+- Cost at list price: 0.13 USD for the committed recordings (about 0.21 USD with the runs that were recorded again).
   0.05 USD of it is `r6_c5_model_while_streaming.py`, the one script that leaves haiku on purpose (one tiny turn on
-  sonnet per recording), and 0.03 USD are the four runs of `r6_e8` that load your own setup (a longer first request).
-  `cost.py` prints 0.13 for part 4: it counts a session once per recording that resumes it (sections 9 and 10).
-- FOUR RUNS READ YOUR OWN USER SETTINGS with your real login: `r6_e8_project_mcp_login.py` with `enable-all-false`,
-  `enabled-other`, `disabled` or `user-only` (`--setting-sources user…`, no `--strict-mcp-config`: that is the
-  question they answer). So that they change nothing of yours, each adds `"disableAllHooks":true` to `--settings`
-  (your hooks do not run), turns the claude.ai connectors off, allows one tool (`mcp__ping-project__ping`) and denies
-  every other request, and sends no `mcp_status`. Run `hooks-on` and `hooks-off` first: they check, with a throw-away
-  HOME, that the hook switch works on your CLI version. Your own stdio MCP servers are still started by the CLI, as in
-  any session of yours. The sanitizer removes them from the fixtures and replaces the name of your output style; read
-  the four fixtures before you commit them.
-- Throw-away HOME (no login, no cost): `r6_e8_project_mcp_login.py` (`user-only-home`, `user-local-home`, `hooks-on`,
-  `hooks-off`) and `r6_e11_mcp_clash_user.py`.
+  sonnet per recording), and 0.05 USD are the five runs of `r6_e8` that load your own setup (a longer first request).
+  `cost.py` prints 0.15 for part 4: it counts a session once per recording that resumes it (sections 9 and 10).
+- FIVE RUNS READ YOUR OWN USER SETTINGS with your real login: `r6_e8_project_mcp_login.py` with `enable-all-false`,
+  `enabled-other`, `disabled`, `user-only` or `user-local-file` (`--setting-sources user…`, no `--strict-mcp-config`:
+  that is the question they answer). So that they change nothing of yours, each adds `"disableAllHooks":true` to
+  `--settings` (your hooks do not run), turns the claude.ai connectors off, allows one tool
+  (`mcp__ping-project__ping`) and denies every other request, and sends no `mcp_status`. Run `hooks-on` and
+  `hooks-off` first: they check, with a throw-away HOME, that the hook switch works on your CLI version. Your own
+  stdio MCP servers are still started by the CLI, as in any session of yours. The sanitizer removes them from the
+  fixtures and replaces the name of your output style; read the five fixtures before you commit them.
+- Throw-away HOME (no login, no cost): `r6_e8_project_mcp_login.py` (`user-only-home`, `user-local-home`,
+  `user-local-file-home`, `hooks-on`, `hooks-off`) and `r6_e11_mcp_clash_user.py`.
+- The `user-local-file` variants of `r6_e8` write a `.claude/settings.local.json` into the scenario's WORK FOLDER (it
+  turns the project's servers on, and has two harmless hooks that show the CLI read it). No file of yours.
 - Processes: `r6_a1`, `r6_a2` and `r6_a3` start a long `sleep` through the CLI (`sleep 127`, `43`, `59`, `139`, `67`,
   `131`) and kill what is left of it, found by its command line as before. `r6_a3_helper_fails.py signal-*` sends ONE
   signal to a process of the scenario's own background command: the shell that the CLI started for it (a child of the
@@ -200,7 +202,7 @@ Part 4 scenarios (`r6_*.py` -> fixtures `r6-*`; the number in a script's name is
 | `r6_c5_model_while_streaming.py` | a label (1, 2) | `r6-model-while-streaming-*` | 5 |
 | `r6_d6_network_deny.py` | a label (1, 2) | `r6-sandbox-network-deny-*` | 6 |
 | `r6_e7_mcp_live_server.py` | status-first, call-first | `r6-mcp-live-server-*` | 7 |
-| `r6_e8_project_mcp_login.py` | enable-all-false, enabled-other, disabled, user-only (real login, your user settings: see "Before you run"), user-only-home, user-local-home, hooks-on, hooks-off | `r6-project-mcp-*` | 8 |
+| `r6_e8_project_mcp_login.py` | enable-all-false, enabled-other, disabled, user-only, user-local-file (real login, your user settings: see "Before you run"), user-only-home, user-local-home, user-local-file-home (then a label: 1, 2), hooks-on, hooks-off | `r6-project-mcp-*` | 8 |
 | `r6_f9_resume_elsewhere_damaged.py` | (ten runs in one call) | `r6-resume-source`, `r6-resume-other-folder-1` … `-3`, `r6-resume-damaged-tail-1` … `-3`, `r6-resume-damaged-mid-1` … `-3` | 9 |
 | `r6_f10_budget_midturn_resumed.py` | a label (1, 2) | `r6-budget-midturn-<label>-a`, `-b`, `-c1` … | 10 |
 | `r6_e11_mcp_clash_user.py` | clash, strict; then a label (1, 2) | `r6-mcp-user-*` | 11 |

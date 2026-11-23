@@ -85,7 +85,7 @@ Differences from the part 3 method:
   gone is a note of its own (`process_exited`, written by a thread that waits for the process).
 - A scenario that stops a running command waits until it SEES the command's process (`sleep N`), then the stated
   seconds. The `tool_use` line of a call can come seconds before its process exists.
-- Four recordings of section 8 run with the REAL login AND the user's own settings (`--setting-sources user…`, no
+- Five recordings of section 8 run with the REAL login AND the user's own settings (`--setting-sources user…`, no
   `--strict-mcp-config`), because that is the question. For these the run adds `"disableAllHooks":true` to
   `--settings` (so the user's hooks do not run; checked first with a throw-away HOME, `r6-project-mcp-hooks-on` and
   `-hooks-off`), turns the claude.ai connectors off, allows only the scenario's one tool and denies every other
@@ -243,6 +243,14 @@ for n in N1I:
     check(not meta(n, "the_helper_ended_by_itself") and note(n, "at_the_end")["results"] == 2 and exit_code(n) == 0, "the end of " + n)
     T1I.append(note(n, "seconds_from_the_interrupt_request"))
 check(all(t["task_updated"] <= t["answer"] < 0.2 for t in T1B + T1I), "the helper's end lines come before the answer, within 0.2 s")
+# Whose call a `task_notification` after an interrupt names: a helper's line has the id of the helper's `Agent` call,
+# a Bash call's line the id of that Bash call.
+for n in N1F + N1B + N1I + N2["sequence"] + N2["idle-interrupt"]:
+    lines = fx(n)
+    calls = {b["id"]: b["name"] for l in lines if l.get("type") == "assistant" for b in l["message"]["content"] if b["type"] == "tool_use"}
+    tasks = {l["task_id"]: {"local_agent": "Agent", "local_bash": "Bash"}[l["task_type"]] for l in lines if sub(l) == "task_started"}
+    ended = [l for l in lines[request_at(n, "interrupt"):] if sub(l) == "task_notification"]
+    check(ended and all(calls[l["tool_use_id"]] == tasks[l["task_id"]] for l in ended), "the tool_use_id of the task_notification lines in " + n)
 # Every recording of sections 1 and 2 stops something: in how many had a Bash call become a task before the stop?
 STOPS = [(n, "interrupt") for n in N1F + N1B + N1I + N2["sequence"] + N2["idle-interrupt"]] + [
     (n, "stop_task") for v in ("idle-close-now", "idle-interrupt-again", "idle-outwait", "foreground-stop") for n in N2[v]]
@@ -272,8 +280,11 @@ without a turn: n=4, the two here and the two `idle-interrupt` recordings of sec
   interrupt left running and listed (it needed `stop_task`). An interrupt ends helpers and foreground calls, not
   background commands.
 - For the host: a turn that ends as interrupted takes EVERY helper with it, background ones too, and the stream says so
-  itself (`task_notification` `stopped` for each, the list line). A host that keeps a background helper as "still at
-  work" after an interrupted turn is wrong.
+  itself: `task_notification` `stopped` for each helper, with the `tool_use_id` of its `Agent` call, and the list
+  line. In the six recordings with a turn these lines come before the turn's `result`. So a host that ends a helper
+  at the helper's own `task_notification` has no helper left open when the interrupted turn ends, and needs no rule
+  of its own for it. (Only a host that did not follow that line and kept a background helper as "still at work"
+  would be wrong.)
 """ % (secs([t["answer"] for t in T1B + T1I]), WITH_BASH, len(STOPS), len(STOPS)))
 
 # ================================================================= 2
@@ -641,41 +652,60 @@ w("""What the adapter can rely on (n=2):
 # ================================================================= 8
 w("## 8. A project `.mcp.json` server with the app's flags and the REAL login\n")
 w("Question: one tool call each with `enableAllProjectMcpServers:false`, with an `enabledMcpjsonServers` list that does not name the server, and with "
-  "`disabledMcpjsonServers` naming it (all through `--settings`); and with `--setting-sources user` and no `--strict-mcp-config`: is the server loaded, can its tool be called?\n")
-V8 = ["enable-all-false", "enabled-other", "disabled", "user-only", "user-only-home", "user-local-home"]
+  "`disabledMcpjsonServers` naming it (all through `--settings`); and with `--setting-sources user` and no `--strict-mcp-config`: is the server loaded, can its tool be called? "
+  "Added after a review: the same with `--setting-sources user,local` when the folder's own `.claude/settings.local.json` turns the project's servers on.\n")
+V8 = ["enable-all-false", "enabled-other", "disabled", "user-only", "user-only-home", "user-local-home", "user-local-file", "user-local-file-home-1", "user-local-file-home-2"]
 N8 = ["r6-project-mcp-" + v for v in V8]
+FILE8 = [n for n in N8 if "-user-local-file" in n]
 w("Fixtures: `r6-project-mcp-enable-all-false`, `-enabled-other`, `-disabled` (real login; %s), `-user-only` (real login; %s), `-user-only-home` and "
-  "`-user-local-home` (a throw-away HOME, no login), and the two checks `-hooks-on`, `-hooks-off`. No run has `--strict-mcp-config`. "
-  "The work folder's `.mcp.json` defines `ping-project`.\n" % (flags(N8[0]), flags(N8[3])))
+  "`-user-local-home` (a throw-away HOME, no login), `-user-local-file` (real login; %s), `-user-local-file-home-1` and `-2` (a throw-away HOME, no login), "
+  "and the two checks `-hooks-on`, `-hooks-off`. No run has `--strict-mcp-config`. "
+  "The work folder's `.mcp.json` defines `ping-project`.\n" % (flags(N8[0]), flags(N8[3]), flags(N8[6])))
 w("`enable-all-false`: the driver's notes, the init line, the request and the tool result:\n")
 LOAD8 = lambda l: sub(l) == "init" or (kind(l) == "meta" and not closing(l)) or kind(l) == "control_request" or is_tool_result(l)
 w(block(tl(N8[0], LOAD8, maxlist=9)))
 w("`user-only` (the user's own settings are the only source), the same lines:\n")
 w(block(tl(N8[3], LOAD8, maxlist=9)))
-SET8 = {"enable-all-false": ("`user,project`", '`{"enableAllProjectMcpServers":false}`', "real"),
-        "enabled-other": ("`user,project`", '`{"enabledMcpjsonServers":["another-server"]}`', "real"),
-        "disabled": ("`user,project`", '`{"disabledMcpjsonServers":["ping-project"]}`', "real"),
-        "user-only": ("`user`", "none", "real"), "user-only-home": ("`user`", "none", "none (throw-away HOME)"),
-        "user-local-home": ("`user,local`", "none", "none (throw-away HOME)")}
-w("| run | `--setting-sources` | the setting in `--settings` | login | server started | init entry | the tool call | the user's own servers in init |")
-w("|---|---|---|---|---|---|---|---|")
+w("`user-local-file-home-1` (`--setting-sources user,local`, no login): the lines of the `SessionStart` hook, the init line and the driver's notes. "
+  "One note has the folder's `.claude/settings.local.json` (the driver wrote the file before the start and the note 3 s after it):\n")
+w(block(tl(FILE8[1], lambda l: LOAD8(l) or sub(l) in ("hook_started", "hook_response"), maxlist=9, maxstr=700)))
+NO_HOME = "none (throw-away HOME)"
+SET8 = {"enable-all-false": ("user,project", '`{"enableAllProjectMcpServers":false}`', "real"),
+        "enabled-other": ("user,project", '`{"enabledMcpjsonServers":["another-server"]}`', "real"),
+        "disabled": ("user,project", '`{"disabledMcpjsonServers":["ping-project"]}`', "real"),
+        "user-only": ("user", "none", "real"), "user-only-home": ("user", "none", NO_HOME), "user-local-home": ("user,local", "none", NO_HOME),
+        "user-local-file": ("user,local", "none", "real"), "user-local-file-home-1": ("user,local", "none", NO_HOME),
+        "user-local-file-home-2": ("user,local", "none", NO_HOME)}
+w("| run | `--setting-sources` | the setting in `--settings` | `.claude/settings.local.json` in the folder | login | server started | init entry | the tool call | the user's own servers in init |")
+w("|---|---|---|---|---|---|---|---|---|")
 for v, n in zip(V8, N8):
-    m = meta(n, "server_starts")[0]
+    m, argv = meta(n, "server_starts")[0], fx(n)[0]["_argv"]
     loaded = v in ("enable-all-false", "enabled-other")
+    check(argv[argv.index("--setting-sources") + 1] == SET8[v][0] and "--strict-mcp-config" not in argv, "the setting sources of " + n)
     check((m["server_starts"] > 0) == loaded and bool(m["init_entry_for_this_server"]) == loaded and m["tool_in_init"] == loaded, "is the server loaded in " + n)
-    check(m["hook_lines_in_the_stream"] == 0 and m["hook_file_lines"] == 0, "no hook ran in " + n)
+    local = meta(n, "settings_local_json_of_the_work_folder")
+    check(len(local) == (n in FILE8), "the local settings file of " + n)
+    if local:
+        on = local[0]["settings_local_json_of_the_work_folder"]
+        check(on["enableAllProjectMcpServers"] is True and on["enabledMcpjsonServers"] == ["ping-project"] and sorted(on["hooks"]) == ["SessionStart", "UserPromptSubmit"],
+              "what the local settings file of %s turns on" % n)
+    # Hooks: none in a logged-in run (`disableAllHooks`) and none where no file has one. The two hooks of the local
+    # file ran in the runs without a login: the CLI did read that file.
+    hooks = 2 if n in FILE8 and SET8[v][2] != "real" else 0
+    check(m["hook_lines_in_the_stream"] == hooks and m["hook_file_lines"] == hooks, "the hooks that ran in " + n)
     check(m["servers_of_the_users_own_setup_in_init"] == (SET8[v][2] == "real"), "the user's own servers in " + n)
     check(m["result"] == ("pong" if loaded else "none" if SET8[v][2] == "real" else "Not logged in · Please run /login"), "the result of " + n)
     check(m["can_use_tool_requests"] == ([["mcp__ping-project__ping", {"name": "ping-project", "source": "project"}, "allowed"]] if loaded else []), "the requests of " + n)
     call = "called: `pong`" if loaded else "the model answered `none`" if SET8[v][2] == "real" else "not possible (no login)"
-    w("| `%s` | %s | %s | %s | %s | %s | %s | %s |" % (v, SET8[v][0], SET8[v][1], SET8[v][2], "yes" if m["server_starts"] else "no",
-                                                    "`%s`" % j(m["init_entry_for_this_server"][0]) if m["init_entry_for_this_server"] else "none", call,
-                                                    "yes" if m["servers_of_the_users_own_setup_in_init"] else "no"))
+    w("| `%s` | `%s` | %s | %s | %s | %s | %s | %s | %s |" % (v, SET8[v][0], SET8[v][1], "turns the project's servers on" if local else "none", SET8[v][2],
+                                                           "yes" if m["server_starts"] else "no",
+                                                           "`%s`" % j(m["init_entry_for_this_server"][0]) if m["init_entry_for_this_server"] else "none", call,
+                                                           "yes" if m["servers_of_the_users_own_setup_in_init"] else "no"))
 w("")
 h_on, h_off = meta("r6-project-mcp-hooks-on", "server_starts")[0], meta("r6-project-mcp-hooks-off", "server_starts")[0]
 check(h_on["hook_file_lines"] == 2 and h_on["hook_lines_in_the_stream"] == 2 and h_off["hook_file_lines"] == 0 and h_off["hook_lines_in_the_stream"] == 0,
       "disableAllHooks in --settings stops the hooks of the user's settings")
-w("""What the adapter can rely on (n=1 per row):
+w("""What the adapter can rely on (n=1 per row; the two `user-local-file-home` rows are the same scenario twice):
 - With the real login the three keys do what part 3 (section 12) saw without a login. `enableAllProjectMcpServers:false`
   and an `enabledMcpjsonServers` list that does not name the server do NOT keep it out: it was started, is `connected`
   with `"source":"project"`, and its tool was called (`pong`). `disabledMcpjsonServers` naming it DOES keep it out:
@@ -683,14 +713,25 @@ w("""What the adapter can rely on (n=1 per row):
 - `--setting-sources user` with NO `--strict-mcp-config`: the project's `.mcp.json` server is NOT loaded (not started,
   not in `init.mcp_servers`, not in `init.tools`; the model answered `none`), while the servers of the user's own
   setup ARE in the init line. The same without a login, and with `--setting-sources user,local` (no login).
-- So the project's `.mcp.json` is read only when `project` is one of the setting sources. In an untrusted folder
-  (user settings alone) the host does not need `--strict-mcp-config` to keep the repo's servers out, and without it
-  the user's own servers stay.
-- Weakness: `user,local` was recorded without a login only; the logged-in `user` run and the two no-login runs agree.
-  A LOCAL-scope server (`claude mcp add` without a scope, kept in `~/.claude.json` under the project) was not tested.
+- `--setting-sources user,local` when the folder's `.claude/settings.local.json` turns the project's servers on
+  (`"enableAllProjectMcpServers":true` and `"enabledMcpjsonServers":["ping-project"]`, the keys an earlier approval of
+  a repo's servers leaves in that file): the server is still NOT loaded. Not started, not in `init.mcp_servers`, not
+  in `init.tools`, in all three recordings (no login: n=2; real login: n=1, the model answered `none` and the user's
+  own servers were in the init line). In the two runs without a login the CLI did read that file: the file's two
+  hooks ran (2 lines in the hooks' file; in the stream the `hook_started` and `hook_response` lines of the
+  `SessionStart` hook, and no line for `UserPromptSubmit`). In the logged-in run the hooks are off
+  (`disableAllHooks`, as in every logged-in run), so that run has no sign of its own that the file was read; it has
+  the same sources as the other two.
+- So in these recordings the project's `.mcp.json` is read only when `project` is one of the setting sources; the two
+  keys in a local settings file do not bring it back. In an untrusted folder (`user`, or `user,local`) the host does
+  not need `--strict-mcp-config` to keep the repo's servers out, and without it the user's own servers stay.
+- Weakness: one logged-in recording for `user` and one for `user,local` (n=1 each), on one machine and one CLI
+  version. Not recorded: an approval of the repo's servers that is kept in the user's `~/.claude.json` (under the
+  project's path) and not in the local settings file; a LOCAL-scope server (`claude mcp add` without a scope, kept
+  in `~/.claude.json` under the project); `user,local` with a local file that has only one of the two keys.
 - The check of this section's own safety: with a throw-away HOME whose `settings.json` has a `SessionStart` and a
   `UserPromptSubmit` hook, both ran (2 hook lines in the stream, 2 lines in the hooks' file); with
-  `"disableAllHooks":true` in `--settings`, none (0 and 0). The four logged-in runs had no hook line either.
+  `"disableAllHooks":true` in `--settings`, none (0 and 0). The five logged-in runs had no hook line either.
 """)
 
 # ================================================================= 9
@@ -870,14 +911,14 @@ w("""## Can the waiting code be built now? (as of the day of recording)
 
 | # | the code that waits | can it be built now? |
 |---|---|---|
-| 1 | The end of helpers with an interrupted turn (the Claude adapter's turn end; the store's `turn_completed`) | yes, and it must change: an interrupt ends EVERY helper, background ones too (`killed` / `stopped`, list `[]`, before the answer). Keeping a background helper "at work" after an interrupted turn is wrong; after a turn that ends normally it stays right. To build in: a `task_notification` can also be for a foreground Bash call (its own task id, empty `output_file`). A turn that FAILS by itself is not recorded |
+| 1 | The end of helpers with an interrupted turn (the Claude adapter's turn end; the store's `turn_completed`) | yes: nothing has to change for an interrupt. The stream ends each helper itself, background ones too (`task_updated` `killed`, `task_notification` `stopped` with the `Agent` call's `tool_use_id`, list `[]`), before the turn's `result` (6 of 6 recordings with a turn). The adapter already ends a helper at that line, so no background helper is kept past an interrupted turn, and the store's rule is confirmed for `interrupted`. A `task_notification` of a foreground Bash call (the Bash call's `tool_use_id`, empty `output_file`) belongs to no helper: the adapter already ends nothing for it. Open: a turn that FAILS by itself (the store's rule for `failed`) |
 | 2 | `wind_down` (the stop of helpers at shutdown); a Stop button for foreground helpers | yes: `interrupt` first (also with no turn running) ends the helpers and starts no turn; then `stop_task` for commands; then close. `stop_task` on a foreground helper works and the turn goes on. Not to build: `stop_task` on a helper followed by stdin close (the self-started turn then runs to its end) |
 | 3 | The end words of helper rows and background rows | yes: a helper that fails says `failed` (with `patch.error`); a command whose shell is killed says `failed` too. There is no word for a signal, and an empty list does not mean that no process is left |
 | 4 | The restart that takes an effort level away | yes: `effortLevel:null` as the first request gives `medium` on a `--effort high` process (n=2). No restart is needed. Still not visible: the level a model request carries |
 | 5 | `model_switched` (what to say about a line's model after a switch) | yes: a switch takes effect at the next model request. During an answer the rest of that answer stays on the old model; during a tool call the next assistant line is on the new one (part 3) |
 | 6 | The approval card's sentence about a deny | yes: a deny is for that one command; the next command to the host asks again (4 of 4). Only an allow is remembered |
 | 7 | Reconnect in the sheet; the state of a server that died | partly: Reconnect on a connected server is a restart and can be offered. A dead stdio server cannot be shown: `mcp_status` keeps saying `connected` and no line comes; the next call starts it again. A server that cannot start again: not recorded |
-| 8 | Keeping your own MCP servers in an untrusted folder (`--strict-mcp-config` there) | yes: with `--setting-sources user` the repo's `.mcp.json` is not loaded and your own servers are (real login, n=1; no login, n=1). `disabledMcpjsonServers` is the key that works when `project` is a source. Not tested: a local-scope server |
+| 8 | Keeping your own MCP servers in an untrusted folder (`--strict-mcp-config` there) | partly. Recorded for both forms of the untrusted start: with `--setting-sources user` the repo's `.mcp.json` is not loaded and your own servers are (real login, n=1; no login, n=1); with `user,local` it is not loaded either, with no local settings file (no login, n=1) and with a local file that turns the project's servers on (real login, n=1; no login, n=2). One logged-in recording per form is thin for a safety switch: record each again before `--strict-mcp-config` goes. Not recorded: an approval kept in `~/.claude.json`; a local-scope server. `disabledMcpjsonServers` is the key that works when `project` is a source |
 | 9 | Which resume failures give the conversation up (`SessionGone` against "any other failure") | partly: the two cases are not failures (9 of 9 starts succeed), so nothing new to tell apart. New risks to know: a resume from another folder finds the session, and a damaged file loses its tail without a word |
 | 10 | Passing the rest of Codly's cost budget to the CLI | yes: the limit works mid-turn on a resumed process and counts the process alone. To build in: the limit is passed by up to one model request, the pending tool call is dropped, `total_cost_usd` is the session's, and the process is dead for further turns |
 | 11 | The comment about a server of your own setup with the name of one of Codly's | partly: Codly's definition is the one that loads and the entry says `dynamic` (`init`, `mcp_status`). The request for its tool is not recorded (no login) |
@@ -895,7 +936,7 @@ w("""## Table: question -> answer -> fixture
 | 5 | `set_model` while an answer streams | The rest of the answer and its `assistant` line stay on the old model, `modelUsage` has the old model only; the next turn is on the new one | 2 | `r6-model-while-streaming-1`, `-2` |
 | 6 | A host denied once | The next command to the host is asked about again (4 of 4); after an allow it is not; no rule is written | 2 | `r6-sandbox-network-deny-1`, `-2` |
 | 7 | `mcp_reconnect` on a connected server; a killed stdio server | Reconnect: success with no body, the server is started again. Killed: no line, `mcp_status` still `connected` 8 s later, the next call returns `pong` (the CLI started the server again by itself) | 2 | `r6-mcp-live-server-status-first`, `-call-first` |
-| 8 | Project server, real login | `enableAllProjectMcpServers:false`, foreign `enabledMcpjsonServers`: loaded, tool called. `disabledMcpjsonServers`: kept out. `--setting-sources user` without `--strict-mcp-config`: not loaded, the user's own servers are | 1 per row | `r6-project-mcp-enable-all-false`, `-enabled-other`, `-disabled`, `-user-only`, `-user-only-home`, `-user-local-home` (checks: `-hooks-on`, `-hooks-off`) |
+| 8 | Project server, real login | `enableAllProjectMcpServers:false`, foreign `enabledMcpjsonServers`: loaded, tool called. `disabledMcpjsonServers`: kept out. `--setting-sources user` without `--strict-mcp-config`: not loaded, the user's own servers are. `user,local`: not loaded either, also when the folder's `.claude/settings.local.json` turns the project's servers on | 1 per row (the local file without a login: 2) | `r6-project-mcp-enable-all-false`, `-enabled-other`, `-disabled`, `-user-only`, `-user-only-home`, `-user-local-home`, `-user-local-file`, `-user-local-file-home-1`, `-2` (checks: `-hooks-on`, `-hooks-off`) |
 | 9 | `--resume` from another folder; a damaged transcript | Both start: `initialize` answered, exit code 0 (9 of 9). Another folder: the session is found, the file stays in the first folder. Damaged: read up to the damage, no error | 3 per row | `r6-resume-source`, `r6-resume-other-folder-1` … `-3`, `r6-resume-damaged-tail-1` … `-3`, `r6-resume-damaged-mid-1` … `-3` |
 | 10 | Budget reached mid-turn on a resumed process | `error_max_budget_usd` right after a model request: in 3 of 4 after a `tool_use` line whose call does not run, in 1 after a text answer; `total_cost_usd` is the session's; the next turn fails at once with the same result and no model request; the process stays alive | 4 (2 after a tool call) | `r6-budget-midturn-1-a` … `-1-c3`, `r6-budget-midturn-2-a` … `-2-c1` |
 | 11 | Same name in `--mcp-config` and the user's setup | The `--mcp-config` one is loaded (one start), the user's is not started; `source` `dynamic` in `init` and `mcp_status`. No tool call (no login) | 2 (+1 control) | `r6-mcp-user-clash-1`, `-2`, `r6-mcp-user-strict-1` |
@@ -939,7 +980,9 @@ Open after these recordings:
 - 7: a server that cannot be started again when its tool is called; a server that exits by itself with an error
   (here it was killed); an http server that goes away; how long `mcp_status` keeps saying `connected`.
 - 8: a local-scope MCP server (`~/.claude.json` under the project) with `--setting-sources user`; a server from a
-  plugin; `user,local` with a login.
+  plugin; an approval of the project's servers that is kept in `~/.claude.json` under the project's path;
+  `user,local` with a local settings file that has only `enableAllProjectMcpServers` or only
+  `enabledMcpjsonServers`; the logged-in `user` and `user,local` runs a second time (n=1 each).
 - 9: a resume from a folder that is not next to the first one (another disk, another user's path); a transcript cut
   in the middle of an assistant line that holds a tool call; an EMPTY transcript file; a file with the right name
   and no valid line.
