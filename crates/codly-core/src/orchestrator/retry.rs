@@ -192,15 +192,17 @@ impl Inner {
             }
             (n, wait, reason)
         };
-        // A run of this task that is still up (its turn failed, or its brief did not go out)
-        // stops, and the agent is free for the retry.
-        self.release_worker(agent_id, task_id);
+        // On record right after the task's write, before anything slower: whoever sees the
+        // task waiting or blocked finds why in the decisions.
         let ws = self.store.task_workspace(task_id).ok().flatten();
         let detail = json!({
             "plan_id": task.plan_id, "error": failure.error(), "failures": n,
             "retry_in_ms": wait.map(|w| w.as_millis() as u64), "new_session": full,
         });
         let _ = self.decide(ws.as_deref(), Some(task_id), "retry", reason.clone(), detail);
+        // A run of this task that is still up (its turn failed, or its brief did not go out)
+        // stops, and the agent is free for the retry.
+        self.release_worker(agent_id, task_id);
         let me = self.clone();
         match (wait, ws) {
             (Some(w), _) => {

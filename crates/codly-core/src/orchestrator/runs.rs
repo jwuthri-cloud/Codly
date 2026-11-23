@@ -294,14 +294,31 @@ impl Inner {
     /// two happens is the adapter's call, so every prompt counts as queued until one of those
     /// events says where it went.
     pub(super) fn send_prompt(&self, agent_id: &str, text: String) -> Result<()> {
+        self.send_prompt_then(agent_id, text, |_| {})
+    }
+
+    /// `send_prompt`, and `then` on the agent's run in one step with the send: no event of the
+    /// run is counted in between. `then` sees the run with this prompt as the last one sent,
+    /// and what it notes there is in place before the turn that reads the prompt can end. (A
+    /// prompt that is held for your Resume was not sent: `then` sees the run as it is.)
+    pub(super) fn send_prompt_then(&self, agent_id: &str, text: String, then: impl FnOnce(&mut Live)) -> Result<()> {
         // A pending "stop after this step" or a pause holds every prompt until the resume.
-        let Some(text) = self.route_prompt(agent_id, text) else { return Ok(()) };
-        self.deliver_prompt(agent_id, text)
+        let Some(text) = self.route_prompt(agent_id, text) else {
+            if let Some(l) = lock(&self.live).get_mut(agent_id) {
+                then(l);
+            }
+            return Ok(());
+        };
+        self.deliver_then(agent_id, text, then)
     }
 
     /// `send_prompt` past the agent's controls: for what it must read although it is held (the
     /// circuit breaker's note to a worker it pauses).
     pub(super) fn deliver_prompt(&self, agent_id: &str, text: String) -> Result<()> {
+        self.deliver_then(agent_id, text, |_| {})
+    }
+
+    fn deliver_then(&self, agent_id: &str, text: String, then: impl FnOnce(&mut Live)) -> Result<()> {
         let wrapped = self.with_briefing(agent_id, &text); // a hired agent's standing goal, on every prompt
         let wrapped = self.with_task_rules(agent_id, wrapped); // a worker's task again, after a compaction
         let wrapped = self.with_restore_note(agent_id, wrapped); // files you put back since its last turn (checkpoints.rs)
@@ -316,6 +333,7 @@ impl Inner {
         // Still in its handshake: it goes out once the CLI is up, behind the run's first prompt.
         if let Some(waiting) = &mut l.starting {
             waiting.push(wrapped);
+            then(l);
             return Ok(());
         }
         if !l.handle.send(AgentCmd::Prompt(wrapped)) {
@@ -329,6 +347,7 @@ impl Inner {
         for prompt in std::mem::take(&mut l.waited) {
             l.handle.send(AgentCmd::Prompt(prompt));
         }
+        then(l);
         Ok(())
     }
 

@@ -260,9 +260,9 @@ async fn answering_a_blocking_card_resumes_the_worker_and_the_plan_finishes() {
     assert_eq!(cards.len(), 2, "{cards:?}");
     assert!(cards.iter().any(|b| b.severity == BlockerSeverity::HeadsUp && b.title == "Tests are slow"));
     assert_eq!(card.body, "Formal or casual hello?");
-    let task = task_of(&core).await;
+    // The card is saved first, then its task is parked: waited for.
+    let task = wait_for("the task to wait for you", 10, async || Some(task_of(&core).await).filter(|t| t.status == TaskStatus::Blocked)).await;
     assert_eq!(card.task_id.as_deref(), Some(task.id.as_str()));
-    assert_eq!(task.status, TaskStatus::Blocked);
     assert!(task.status_reason.as_deref().unwrap().starts_with("waiting for you:"), "{task:?}");
 
     // The worker's turn has ended, yet the gate must not commit, verify or merge a parked task.

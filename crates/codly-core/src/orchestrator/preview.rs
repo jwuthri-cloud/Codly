@@ -438,8 +438,9 @@ impl Inner {
                 bail!("a command already runs in this worktree; stop it first");
             }
             self.store.kv_set(&command_key(&place.ws), command)?;
-            // The output of a run whose worktree is gone is of no use any more.
-            previews.retain(|wt, run| run.end.borrow().is_none() || wt.is_dir());
+            // The output of a run whose worktree is gone is of no use any more. This Core's runs
+            // only: another Core in the same process still reads its own.
+            previews.retain(|wt, run| run.owner != self.cfg.data_dir || run.end.borrow().is_none() || wt.is_dir());
             let run = spawn(&self.cfg.data_dir, &place.wt, command, env)?;
             previews.insert(place.wt.clone(), run);
         }
@@ -765,6 +766,32 @@ mod tests {
         assert_eq!(ended(&wt_b), None, "another Core's preview goes on");
         core_b.shutdown().await;
         assert_eq!(ended(&wt_b).as_deref(), Some("stopped"));
+    }
+
+    /// A start forgets the ended runs of worktrees that are gone. Those of its own Core only:
+    /// another Core in the same process (in these tests, another test) still reads its own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_forgets_the_ended_runs_of_its_own_core_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo_a, repo_b) = (temp_repo(dir.path(), "a"), temp_repo(dir.path(), "b"));
+        let (core_a, ws_a) = start(&dir.path().join("data-a"), &repo_a).await;
+        let (core_b, ws_b) = start(&dir.path().join("data-b"), &repo_b).await;
+        let (source_a, wt_a) = plan(&core_a, &ws_a, "aa33", PlanStatus::Done).await;
+        let (gone_b, wt_b) = plan(&core_b, &ws_b, "bb44", PlanStatus::Done).await;
+        let (source_b, _) = plan(&core_b, &ws_b, "bb55", PlanStatus::Done).await;
+        for (core, source, wt) in [(&core_a, &source_a, &wt_a), (&core_b, &gone_b, &wt_b)] {
+            run_in(core, source, "echo up; sleep 300").await.unwrap();
+            until(core, source, |run| run.lines.contains(&"up".to_string())).await;
+            std::fs::remove_dir_all(wt).unwrap();
+            until(core, source, |run| run.ended.is_some()).await;
+        }
+
+        run_in(&core_b, &source_b, "echo up").await.unwrap();
+        let kept = core_a.preview(&source_a, None, None).await.unwrap().run.expect("the other Core's run is still there");
+        assert_eq!(kept.ended.as_deref(), Some("stopped: its worktree was removed"));
+        assert!(core_b.preview(&gone_b, None, None).await.unwrap().run.is_none(), "its own ended run in a worktree that is gone is forgotten");
+        core_a.shutdown().await;
+        core_b.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

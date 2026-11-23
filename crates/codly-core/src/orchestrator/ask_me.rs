@@ -211,6 +211,13 @@ impl Inner {
                     }
                     Ok(())
                 })?;
+                // The answer went out before this write. A turn that read it and ended in
+                // between found the task still Blocked, and its end checked nothing: the gate
+                // runs now. It looks again by itself (the task is Running, no turn runs or
+                // waits). Not for a worker you hold: your answer waits with it for your Resume.
+                if self.works_on(&b.agent_id, &task.id) && self.is_quiet(&b.agent_id) && !self.control_holding(&b.agent_id) {
+                    tokio::spawn(self.clone().gate(task.id.clone()));
+                }
             }
             return Ok(());
         }

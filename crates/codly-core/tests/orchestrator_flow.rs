@@ -1191,27 +1191,44 @@ async fn a_plan_cancelled_while_integrating_stays_cancelled() {
             turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote it." })).await;
         })
     });
-    let lead: Behavior = Arc::new(|turn: FakeTurn| {
+    // The integration check says when it runs and lasts until the test says so: after the
+    // cancel. Both through files outside the worktree.
+    let (checking, checked) = (dir.path().join("checking"), dir.path().join("checked"));
+    let check = format!("touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done", checking.display(), checked.display());
+    let task = json!({ "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt containing hello",
+        "consultant": { "title": "Backend" }, "acceptance_criteria": ["hello.txt contains hello"], "write_scope": ["hello.txt"],
+        "depends_on": [], "verify": ["grep -q hello hello.txt"], "size": "M" });
+    let plan = json!({ "summary": "Add a hello file", "tasks": [task], "integration_checks": [&check] });
+    let lead: Behavior = Arc::new(move |turn: FakeTurn| {
+        let plan = plan.clone();
         Box::pin(async move {
             if turn.prompt.contains("[Codly]") {
                 return turn.say("Noted.");
             }
-            let task = json!({ "id": "t1", "title": "Create hello.txt", "goal": "Create hello.txt containing hello",
-                "consultant": { "title": "Backend" }, "acceptance_criteria": ["hello.txt contains hello"], "write_scope": ["hello.txt"],
-                "depends_on": [], "verify": ["grep -q hello hello.txt"], "size": "M" });
-            let plan = json!({ "summary": "Add a hello file", "tasks": [task], "integration_checks": ["sleep 2"] });
             let reply = turn.tool("codly_submit_plan", plan).await;
             assert_eq!(reply["ok"], true, "{reply}");
         })
     });
     let core = start(dir.path(), FakeSpawner { log, lead, worker }).await;
-    core.update_settings(Settings { auto_run_plans: true, lead_followups: false, ..Default::default() }).await.unwrap();
+    // Full access: Codly runs a check that touches files outside the worktree without asking.
+    let settings = Settings { auto_run_plans: true, lead_followups: false, approval_mode: ApprovalMode::Full, ..Default::default() };
+    core.update_settings(settings).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     core.send_chat("lead", "Please add a hello file").await.unwrap();
-    let (_, plan) =
-        wait_for("the integration checks to start", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Integrating)).await;
+    wait_for("the integration check to run", 30, async || checking.exists().then_some(())).await;
+    let (_, plan) = task_status(&core).await.unwrap();
+    assert_eq!(plan.status, PlanStatus::Integrating);
     core.cancel_plan(&plan.id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(3000)).await; // the integration check finishes meanwhile
+    assert_eq!(task_status(&core).await.unwrap().1.status, PlanStatus::Cancelled);
+    // The check ends only now. What the end of a plan writes comes after this event, with no
+    // sign of its own for a cancelled plan: the unit test in plans.rs waits for that end
+    // itself (`checks_that_end_after_a_cancel_change_nothing`).
+    std::fs::write(&checked, "").unwrap();
+    wait_for("the integration check to end", 30, async || {
+        let events = core.events(None, None, 2000).await.unwrap();
+        events.iter().any(|e| matches!(&e.kind, EventKind::Verified { command, .. } if *command == check)).then_some(())
+    })
+    .await;
     let snap = core.snapshot().await.unwrap();
     assert_eq!(snap.plans[0].status, PlanStatus::Cancelled, "a finished check never brings a cancelled plan back");
     assert!(!snap.chats.iter().any(|c| c.text.starts_with("Plan done")), "no \"Plan done\" for a cancelled plan");

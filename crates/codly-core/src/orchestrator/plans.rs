@@ -392,10 +392,20 @@ impl Inner {
         // next pass finishes it again as it was (`settle_resolution` takes the merge back).
         let resolving = plan.status == PlanStatus::Running && self.open_resolution(plan)?.is_some();
         if !resolving {
+            // Checked in the write: `plan` is as the caller read it, before the wait above. A
+            // plan that finished since stays finished: it said "Plan done", and its work is
+            // yours to merge.
+            let mut over = false;
             self.update_plan(&plan.id, |p| {
-                p.status = PlanStatus::Cancelled;
+                over = matches!(p.status, PlanStatus::Done | PlanStatus::Cancelled);
+                if !over {
+                    p.status = PlanStatus::Cancelled;
+                }
                 Ok(())
             })?;
+            if over {
+                return Ok(());
+            }
         }
         let what = if resolving { "conflict resolution" } else { "plan" };
         for t in self.store.plan_tasks(&plan.id)? {
@@ -1424,5 +1434,105 @@ mod tests {
         let before = head_stamp(dir.path()).expect("a reflog gives a stamp");
         std::fs::write(logs.join("HEAD"), "a\nb\n").unwrap();
         assert_ne!(head_stamp(dir.path()), Some(before));
+    }
+
+    /// A Core with one office that has no folder: no scheduling pass touches its plans.
+    async fn office(root: &Path) -> (Arc<crate::orchestrator::Core>, Workspace) {
+        use crate::orchestrator::{Core, CoreConfig, StartOptions};
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: root.join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let ws = Workspace {
+            id: new_id(),
+            repo_path: root.join("gone").to_string_lossy().into_owned(),
+            name: "repo".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: now_ms(),
+        };
+        core.inner.store.upsert_workspace(&ws).unwrap();
+        (core, ws)
+    }
+
+    /// A plan of that office with no task, saved. `worktree`: its integration worktree.
+    fn saved_plan(inner: &Inner, ws: &Workspace, status: PlanStatus, worktree: Option<&Path>) -> Plan {
+        let plan: Plan = serde_json::from_value(json!({
+            "id": new_id(), "workspace_id": ws.id, "request": "Add a hello file", "summary": "Add a hello file",
+            "assumptions": [], "open_questions": [], "status": status, "base_commit": null,
+            "integration_branch": null, "integration_worktree": worktree, "created_at": now_ms(), "updated_at": now_ms(),
+        }))
+        .unwrap();
+        inner.emit(Some(&ws.id), row(None, None, None, EventKind::PlanChanged { plan: plan.clone() })).unwrap();
+        plan
+    }
+
+    /// A cancel works on the plan as its caller read it, and it can wait behind a merge. A
+    /// plan whose last check ended meanwhile is done: the cancel that comes after changes
+    /// nothing. One that is still integrating is cancelled.
+    #[tokio::test]
+    async fn a_cancel_that_comes_after_the_plan_finished_changes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let (core, ws) = office(root.path()).await;
+        let inner = &core.inner;
+        let cancelled = |p: &Plan| {
+            let said = format!("plan \"{}\" cancelled by you", p.summary);
+            let events = inner.store.events(Some(&ws.id), None, None, 100).unwrap();
+            events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, detail, .. } if *summary == said && detail["plan_id"] == p.id.as_str()))
+        };
+
+        // Read while its checks ran; they ended before the cancel went on.
+        let done = saved_plan(inner, &ws, PlanStatus::Done, None);
+        let read = Plan { status: PlanStatus::Integrating, ..done.clone() };
+        inner.cancel_plan_inner(&read, "cancelled by you").await.unwrap();
+        assert_eq!(inner.plan(&read.id).unwrap().status, PlanStatus::Done);
+        assert!(!cancelled(&read), "nothing says that a finished plan was cancelled");
+
+        let running = saved_plan(inner, &ws, PlanStatus::Integrating, None);
+        inner.cancel_plan_inner(&running, "cancelled by you").await.unwrap();
+        assert_eq!(inner.plan(&running.id).unwrap().status, PlanStatus::Cancelled);
+        assert!(cancelled(&running));
+        core.shutdown().await;
+    }
+
+    /// The other order: you cancel a plan while its integration checks run. When they end,
+    /// the plan's end writes no status over the cancel and says nothing in the chat. The
+    /// test waits for that end itself, so it has no time to guess.
+    #[tokio::test]
+    async fn checks_that_end_after_a_cancel_change_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let (core, ws) = office(root.path()).await;
+        let inner = &core.inner;
+        // Full access: the check runs whatever the approval rules see in its text.
+        core.update_settings(Settings { approval_mode: ApprovalMode::Full, ..core.settings() }).await.unwrap();
+        // The check says when it runs (`started`) and lasts until `go` is in its folder.
+        let wt = root.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        let check = "touch started; while [ ! -f go ]; do sleep 0.05; done";
+        let plan = saved_plan(inner, &ws, PlanStatus::Running, Some(&wt));
+        inner.store.with(|db| store::set_plan_json(db, &plan.id, &json!({ "integration_checks": [check] }))).unwrap();
+
+        let finishing = tokio::spawn({
+            let (inner, id) = (inner.clone(), plan.id.clone());
+            async move { inner.complete_plan(&id).await }
+        });
+        let until = tokio::time::Instant::now() + Duration::from_secs(30);
+        while !wt.join("started").exists() {
+            assert!(tokio::time::Instant::now() < until, "the integration check did not start");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let read = inner.plan(&plan.id).unwrap();
+        assert_eq!(read.status, PlanStatus::Integrating);
+        inner.cancel_plan_inner(&read, "cancelled by you").await.unwrap();
+        assert_eq!(inner.plan(&plan.id).unwrap().status, PlanStatus::Cancelled);
+
+        std::fs::write(wt.join("go"), "").unwrap();
+        finishing.await.unwrap();
+        let events = inner.store.events(Some(&ws.id), None, None, 100).unwrap();
+        let ran = |e: &EventRow| matches!(&e.kind, EventKind::Verified { command, ok: true, .. } if command == check);
+        assert!(events.iter().any(ran), "the check ran to its end");
+        assert_eq!(inner.plan(&plan.id).unwrap().status, PlanStatus::Cancelled, "a finished check never brings a cancelled plan back");
+        assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Chat { .. })), "no \"Plan done\" for a cancelled plan");
+        core.shutdown().await;
     }
 }
