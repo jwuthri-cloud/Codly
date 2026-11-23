@@ -5,6 +5,7 @@
  */
 export type ResumeOffer = { 
 /**
- * Tasks that were in work when Codly last closed. 0: work was only about to start.
+ * Tasks that were in work when Codly last closed and still wait (not the ones you
+ * cancelled since). 0: work was only about to start.
  */
 tasks: number, };

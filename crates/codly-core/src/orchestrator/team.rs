@@ -202,6 +202,7 @@ impl Inner {
             a.activity_label = None;
             a.worktree = None; // the task's worktree goes with the plan; a ghost brought back gets a new one
         })?;
+        self.forget_agent(&a.id); // what the store kept about its work in that worktree (`resume.rs`)
         let who = if a.consultant { "consultant " } else { "" };
         self.decide(Some(ws_id), None, "staff", format!("let {who}{} go: {why}", a.name), json!({ "agent": a.id, "consultant": a.consultant }))?;
         Ok(())

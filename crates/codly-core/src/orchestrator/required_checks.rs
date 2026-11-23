@@ -144,7 +144,9 @@ fn checks_key(ws_id: &str) -> String {
     format!("required_checks:{ws_id}")
 }
 
-fn checked_key(agent_id: &str) -> String {
+/// Where the store keeps the result of an agent's last "Check the work", until the agent's
+/// files change or the agent is let go (`Inner::forget_agent`).
+pub(super) fn checked_key(agent_id: &str) -> String {
     format!("agent_check:{agent_id}")
 }
 
@@ -591,7 +593,18 @@ impl Inner {
             if self.at_work(&agent) {
                 return Ok(nothing);
             }
-            let checked: Checked = serde_json::from_str(&saved)?;
+            let checked: Checked = match serde_json::from_str(&saved) {
+                Ok(checked) => checked,
+                // A result that cannot be read is no result. The row goes, so this is said
+                // once; a result that took its place meanwhile is the one to look at.
+                Err(e) => {
+                    if self.store.kv_delete_if(&key, &saved)? {
+                        tracing::warn!("the result of {}'s last check cannot be read, so it is dropped: {e}", agent.name);
+                        return Ok(nothing);
+                    }
+                    continue;
+                }
+            };
             let same = match agent.worktree.as_deref().map(Path::new).filter(|wt| wt.is_dir()) {
                 Some(_) => {
                     let (_, wt) = self.work_place(&agent).await?;

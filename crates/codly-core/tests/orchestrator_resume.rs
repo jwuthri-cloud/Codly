@@ -2,15 +2,20 @@
 //! session cannot be resumed, Codly starts a new one, and the conversation says so with the
 //! reason. A resume that works says nothing. A task's worker says it the same way, and the
 //! decision is recorded on its task. A conversation the CLI no longer has is said as that, for
-//! a 1:1 agent and for a Lead. And when no new conversation starts either, the old one is kept.
+//! a 1:1 agent, a Lead and a team member. And when no new conversation starts either, the old
+//! one is kept. A start that Codly itself refused (the sandbox is not on, the folder's own
+//! files are not trusted) says nothing against the conversation: a worker and a team member
+//! keep theirs, and no new one is tried.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use codly_core::adapters::claude::SandboxNotOn;
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionGone, SessionMode, SpawnSpec};
 use codly_core::model::*;
+use codly_core::orchestrator::trust::TrustChoice;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::mpsc;
 
@@ -31,9 +36,9 @@ fn temp_repo(root: &Path) -> PathBuf {
     repo
 }
 
-fn claude() -> CliInfo {
+fn cli(provider: Provider) -> CliInfo {
     CliInfo {
-        provider: Provider::Claude,
+        provider,
         path: Some("/usr/bin/true".into()),
         version: Some("fake".into()),
         logged_in: Some(true),
@@ -41,9 +46,13 @@ fn claude() -> CliInfo {
         plan: None,
         problem: None,
         transport: "fake".into(),
-        install: codly_core::env::install_hint(Provider::Claude),
+        install: codly_core::env::install_hint(provider),
         default_model: None,
     }
+}
+
+fn claude() -> CliInfo {
+    cli(Provider::Claude)
 }
 
 const GONE: &str = "claude exited during startup (code 1): No conversation found with session ID: sess-1";
@@ -55,8 +64,13 @@ struct Seen {
     prompts: Vec<String>,
     /// How each run was asked to start, in order: "new", or "resume <session id>".
     starts: Vec<String>,
+    /// The folder the last run was asked to start in.
+    cwd: Option<PathBuf>,
     /// Knob: a resume fails to start, with the CLI's words only.
     resume_fails: bool,
+    /// Knob: a resume is not started because Claude Code's sandbox is not on, as the Claude
+    /// adapter reports it (`SandboxNotOn`).
+    resume_refused: bool,
     /// Knob: a resume fails to start as the Claude adapter reports a conversation the CLI no
     /// longer has (`SessionGone`).
     resume_gone: bool,
@@ -76,9 +90,13 @@ impl Spawner for Fake {
         Box::pin(async move {
             let session = {
                 let mut s = seen.lock().unwrap();
+                s.cwd = Some(spec.cwd.clone());
                 match &spec.session {
                     SessionMode::Resume { session_id } => {
                         s.starts.push(format!("resume {session_id}"));
+                        if s.resume_refused {
+                            return Err(SandboxNotOn("Claude Code did not turn its sandbox on, so Codly did not start this agent".into()).into());
+                        }
                         if s.resume_gone {
                             return Err(anyhow::anyhow!(GONE).context(SessionGone));
                         }
@@ -367,5 +385,145 @@ async fn a_lead_whose_conversation_is_gone_says_so_in_its_request_thread() {
     let notice = format!("Claude Code no longer has {name}'s earlier conversation. A new one started: {name} does not know what was said before.");
     wait_for("the notice", async || codly_said_in(&core, "lead").await.contains(&notice).then_some(())).await;
     wait_for("the new conversation on the Lead", async || lead().await.filter(|l| l.session_id.as_deref() == Some("sess-2"))).await;
+    core.shutdown().await;
+}
+
+/// A core on a new repo with these CLIs and settings, and the fake agent in place of each CLI.
+async fn core_on(dir: &Path, seen: &Arc<Mutex<Seen>>, providers: &[Provider], settings: Settings) -> Arc<Core> {
+    let repo = temp_repo(dir);
+    let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
+    let opts = StartOptions {
+        spawner: Some(Arc::new(Fake(seen.clone()))),
+        env: Some(std::env::vars().collect()),
+        clis: Some(providers.iter().map(|p| cli(*p)).collect()),
+        index: false,
+    };
+    let core = Core::start_with(cfg, opts).await.unwrap();
+    core.update_settings(Settings { lead_followups: false, ..settings }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    core
+}
+
+/// A task whose worker was in its first turn (session "sess-1") when you stopped it: the task
+/// waits for you. Returns (task, worker id).
+async fn stopped_task(core: &Core, seen: &Arc<Mutex<Seen>>) -> (Task, Id) {
+    let task = core.create_task("Write the greeting", "Create hello.txt containing hello").await.unwrap();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    wait_for("the worker's first turn", async || (seen.lock().unwrap().prompts.len() == 1).then_some(())).await;
+    let worker = task_now(core, &task.id).await.assignee.expect("the task has a worker");
+    core.stop_agent(&worker).await.unwrap();
+    let task = wait_for("the task to wait for you", async || Some(task_now(core, &task.id).await).filter(|t| t.status == TaskStatus::Blocked)).await;
+    (task, worker)
+}
+
+/// A worker's resume that Codly itself did not let start (here: Claude Code's sandbox is not
+/// on) says nothing against the session. No new one is tried, nothing is said about a lost
+/// conversation, and the next start resumes the same session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_whose_resume_codly_refused_keeps_its_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen { turns_stay_open: true, ..Default::default() }));
+    let core = core_on(dir.path(), &seen, &[Provider::Claude], Settings::default()).await;
+    let (task, worker) = stopped_task(&core, &seen).await;
+
+    seen.lock().unwrap().resume_refused = true;
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    let refused = |t: &Task| t.status_reason.as_deref().is_some_and(|r| r.contains("could not start the worker: Claude Code did not turn its sandbox on"));
+    wait_for("the refused start on the task", async || Some(task_now(&core, &task.id).await).filter(refused)).await;
+    assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1"], "no new session was tried");
+    assert!(codly_said(&core, &worker).await.is_empty(), "no conversation was lost: nothing to say about one");
+
+    // The sandbox is on again: the start Codly tries next resumes the same session.
+    seen.lock().unwrap().resume_refused = false;
+    wait_for("the worker's next turn", async || (seen.lock().unwrap().prompts.len() == 2).then_some(())).await;
+    assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1", "resume sess-1"]);
+    assert!(codly_said(&core, &worker).await.is_empty());
+    core.shutdown().await;
+}
+
+/// A worker's CLI is not started in its worktree any more: the worktree got configuration
+/// for that CLI that you have not trusted. Nothing is wrong with the session: the task waits
+/// for you with the reason, no new session is tried, and once you trusted the files, Retry
+/// resumes the same session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_keeps_its_session_while_its_worktree_waits_for_your_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen { turns_stay_open: true, ..Default::default() }));
+    let settings = Settings { worker_providers: vec![Provider::Gemini], ..Default::default() };
+    let core = core_on(dir.path(), &seen, &[Provider::Claude, Provider::Gemini], settings).await;
+    let (task, _) = stopped_task(&core, &seen).await;
+    let worktree = PathBuf::from(task.worktree.clone().expect("the task has a worktree"));
+    std::fs::create_dir_all(worktree.join(".gemini")).unwrap();
+    std::fs::write(worktree.join(".gemini/settings.json"), r#"{ "mcpServers": {} }"#).unwrap();
+
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    let refused = |t: &Task| t.status == TaskStatus::Blocked && t.status_reason.as_deref().is_some_and(|r| r.contains("Gemini CLI is not started in this folder"));
+    wait_for("the refused start on the task", async || Some(task_now(&core, &task.id).await).filter(refused)).await;
+    assert_eq!(seen.lock().unwrap().starts, ["new"], "nothing was started, in the old session or in a new one");
+
+    let asked = core.workspace_trust(None).await.unwrap();
+    assert_eq!(asked.worktrees.len(), 1, "the worktree's files wait for your choice");
+    core.workspace_trust(Some(TrustChoice { trust: Some(asked.worktrees[0].fingerprint.clone()) })).await.unwrap();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    wait_for("the worker's next turn", async || (seen.lock().unwrap().prompts.len() == 2).then_some(())).await;
+    assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1"]);
+    core.shutdown().await;
+}
+
+/// The team's agent called `name`.
+async fn member(core: &Core, name: &str) -> Agent {
+    wait_for("the team's agent", async || core.snapshot().await.unwrap().agents.into_iter().find(|a| a.member.is_some() && a.name == name)).await
+}
+
+/// A team member goes the same way as a 1:1 agent: its own thread says that its conversation
+/// is gone, and a new one takes the message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_team_member_whose_conversation_is_gone_says_so_in_its_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let team = vec![TeamMember { name: "Ana".into(), role: "Backend".into(), ..Default::default() }];
+    let core = core_on(dir.path(), &seen, &[Provider::Claude], Settings { team, ..Default::default() }).await;
+    let ana = member(&core, "Ana").await.id;
+    say(&core, &seen, &ana, "hello").await;
+    assert_eq!(agent_now(&core, &ana).await.session_id.as_deref(), Some("sess-1"));
+    core.stop_agent(&ana).await.unwrap();
+
+    seen.lock().unwrap().resume_gone = true;
+    say(&core, &seen, &ana, "and now?").await;
+    assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1", "new"]);
+    let notice = "Claude Code no longer has Ana's earlier conversation. A new one started: Ana does not know what was said before.".to_string();
+    wait_for("the notice", async || codly_said(&core, &ana).await.contains(&notice).then_some(())).await;
+    assert_eq!(codly_said(&core, &ana).await, [notice], "said once");
+    assert_eq!(agent_now(&core, &ana).await.session_id.as_deref(), Some("sess-2"));
+    core.shutdown().await;
+}
+
+/// A team member's CLI is not started in its worktree while the worktree has configuration
+/// for it that you have not trusted. The member keeps its conversation: the message fails
+/// with the reason, nothing is started, and once you trusted the files the same conversation
+/// goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_team_member_keeps_its_conversation_while_its_folder_waits_for_your_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let team = vec![TeamMember { name: "Gil".into(), role: "Backend".into(), provider: Provider::Gemini, ..Default::default() }];
+    let core = core_on(dir.path(), &seen, &[Provider::Claude, Provider::Gemini], Settings { team, ..Default::default() }).await;
+    let gil = member(&core, "Gil").await.id;
+    say(&core, &seen, &gil, "hello").await;
+    core.stop_agent(&gil).await.unwrap();
+    let worktree = seen.lock().unwrap().cwd.clone().expect("the member's run started in its worktree");
+    std::fs::create_dir_all(worktree.join(".gemini")).unwrap();
+    std::fs::write(worktree.join(".gemini/settings.json"), r#"{ "mcpServers": {} }"#).unwrap();
+
+    let refused = core.send_chat(&format!("agent:{gil}"), "are you there?").await.unwrap_err().to_string();
+    assert!(refused.contains("Gemini CLI is not started in this folder"), "{refused}");
+    assert_eq!(seen.lock().unwrap().starts, ["new"], "nothing was started, in the old conversation or in a new one");
+    assert_eq!(agent_now(&core, &gil).await.session_id.as_deref(), Some("sess-1"), "the conversation is still the member's");
+
+    let asked = core.workspace_trust(None).await.unwrap();
+    assert_eq!(asked.worktrees.len(), 1, "the worktree's files wait for your choice");
+    core.workspace_trust(Some(TrustChoice { trust: Some(asked.worktrees[0].fingerprint.clone()) })).await.unwrap();
+    say(&core, &seen, &gil, "and now?").await;
+    assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1"]);
     core.shutdown().await;
 }

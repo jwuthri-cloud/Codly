@@ -7,7 +7,9 @@
 //!   its checks, review or merge is not checked again, until `Core::resume_work`. The app
 //!   shows one question for "ask" and only the Resume work button for "never". With "always"
 //!   the work goes on at once. Nothing is held when nothing would start: no task was in
-//!   work, and every plan waits for you, for its paused office or for a budget.
+//!   work, and every plan waits for you, for its paused office, for a budget or for a repo
+//!   folder that is not there. A hold ends by itself the same way: when you cancelled every
+//!   task it held and nothing else would start (`Inner::held`).
 //!   The hold is in the store too (`HOLD`): when Codly closes before your answer, the next
 //!   start waits for the same tasks, whatever they say by then, and a task that only had its
 //!   checks left still gets no worker turn. If you chose "always" meanwhile, they go on at
@@ -15,6 +17,9 @@
 //! - **"Resumed after restart"**: each task that goes on gets that line in its history.
 //! - **Round counters**: the fix and conflict rounds a task has used are in the store, so a
 //!   restart does not give it new ones (`count_rounds`, `forget_rounds`).
+//! - **Rows that outlive their owner**: what the store kept for an agent that is let go, and
+//!   for the tasks of an office that is closed, goes with them (`forget_agent`,
+//!   `forget_office_tasks`).
 //! - **The files of a task that waits for your answer**: its worker's process is gone after a
 //!   restart, but its question is still open, so the scheduler keeps its write scope
 //!   (`Inner::tasks_asking`).
@@ -22,6 +27,7 @@
 //!   started, so it does not tell you again about a task that was blocked before the quit.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -29,20 +35,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use ts_rs::TS;
 
-use super::{Core, Inner, ask_me, gate, lock};
+use super::{Core, Inner, ask_me, gate, lock, required_checks};
 use crate::blockers::{self, BlockerSeverity, BlockerStatus};
 use crate::model::*;
 use crate::store::{self, Store};
 
 /// Why no task starts while the work of the last run waits for your Resume. Each waiting
-/// task shows it.
-const HELD: &str = "paused: Codly restarted. Nothing starts until you press Resume";
+/// task shows it. It names the button by its label and its place: the app has other Resume
+/// controls (a paused agent's, a paused office's).
+pub const HELD: &str = "paused: Codly restarted. Nothing starts until you press 'Resume work' at the top of the window";
 /// Why a task whose worker goes on was not running (the worker's first prompt says it).
 const RESUMING: &str = "resuming after Codly restarted";
 const CHECKING: &str = "checking the work again after Codly restarted";
 
 /// The work of the last run, while it waits for your Resume.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct Hold {
     /// The tasks that were in work when Codly closed.
     tasks: Vec<Id>,
@@ -57,7 +64,8 @@ const HOLD: &str = "resume_hold";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ResumeOffer {
-    /// Tasks that were in work when Codly last closed. 0: work was only about to start.
+    /// Tasks that were in work when Codly last closed and still wait (not the ones you
+    /// cancelled since). 0: work was only about to start.
     pub tasks: u32,
 }
 
@@ -107,10 +115,38 @@ fn goes_on(tasks: &[Task], may_start: bool) -> bool {
 }
 
 impl Inner {
-    /// Why no task starts: the work of the last run waits for your Resume. The scheduler asks
-    /// at every pass.
+    /// Why no task starts: the work of the last run waits for your Resume. None when no hold
+    /// is on, also when the one that was on ended at this look (`held`). The scheduler asks at
+    /// every pass.
     pub(super) fn launch_hold(&self) -> Option<String> {
-        lock(&self.held_work).is_some().then(|| HELD.to_string())
+        self.held().map(|_| HELD.to_string())
+    }
+
+    /// The hold as it stands now: how many of its tasks still wait for your Resume (ready,
+    /// whatever reason they show: a paused office writes its own). None: no hold is on.
+    /// A hold that waits for nothing any more ends here, by itself: you cancelled every task
+    /// it held (or put it back in the backlog) and nothing else would start
+    /// (`starts_by_itself`), so the scheduler is free and work you start from here on needs
+    /// no Resume. None of its tasks is resumed then, so this needs no scheduler lock.
+    fn held(&self) -> Option<u32> {
+        let hold = lock(&self.held_work).clone()?;
+        let looked = (|| -> Result<Option<u32>> {
+            let ready = self.store.tasks_with_status(&[TaskStatus::Ready])?;
+            let tasks = ready.iter().filter(|t| hold.tasks.contains(&t.id)).count() as u32;
+            if tasks > 0 || self.starts_by_itself()? {
+                return Ok(Some(tasks));
+            }
+            *lock(&self.held_work) = None;
+            // No task of the hold is among `ready`: the ones that only showed its reason
+            // lose it, and the store forgets the hold.
+            self.end_hold(&hold, &ready);
+            Ok(None)
+        })();
+        looked.unwrap_or_else(|e| {
+            // Not known: the hold stays, for the tasks as the start found them.
+            tracing::warn!("could not tell what still waits for your Resume: {e}");
+            Some(hold.tasks.len() as u32)
+        })
     }
 
     /// Recovery that asks first: a task that was in work waits, Ready, for your Resume.
@@ -126,6 +162,9 @@ impl Inner {
     /// A task that was in work goes on: its gate runs again (`gate_only`: it is Running, and
     /// the caller starts the gate), or the scheduler resumes its worker (Ready). Its history
     /// says so. A task that moved on since `was` was read (you cancelled it) is left alone.
+    /// Ok = the task goes on: once its status is written, a history line that cannot be
+    /// written does not stop it. (An error here keeps the caller from starting the gate, and
+    /// a task that is Running with no gate has nobody on it until the next restart.)
     pub(super) fn resume_task(&self, was: &Task, gate_only: bool) -> Result<()> {
         self.update_task(&was.id, |t| {
             if t.status != was.status {
@@ -137,9 +176,13 @@ impl Inner {
             };
             Ok(())
         })?;
-        let ws = self.store.task_workspace(&was.id)?;
         let how = if gate_only { "Codly checks its work again" } else { "its worker goes on where it stopped" };
-        self.decide(ws.as_deref(), Some(&was.id), "retry", format!("Resumed after restart: {how}"), json!({ "plan_id": was.plan_id }))?;
+        let said = self.store.task_workspace(&was.id).and_then(|ws| {
+            self.decide(ws.as_deref(), Some(&was.id), "retry", format!("Resumed after restart: {how}"), json!({ "plan_id": was.plan_id }))
+        });
+        if let Err(e) = said {
+            tracing::warn!("task {} goes on after the restart, but its history does not say so: {e}", was.key);
+        }
         Ok(())
     }
 
@@ -219,22 +262,40 @@ impl Inner {
 
     /// Would work start by itself now? A running plan that goes on (`goes_on`; one that was
     /// in its integration checks runs them again), or a ready task of no plan. Nothing starts
-    /// in a paused office or past a budget.
+    /// in a paused office or past a budget, and nothing at all in an office the scheduler
+    /// passes over because its repo folder is not there (`scheduled`).
     fn starts_by_itself(&self) -> Result<bool> {
         let settings = self.settings();
         let over_budget = self.budget_hold().is_some();
         let may_start = |ws: &str| !over_budget && !settings.paused && !settings.paused_offices.iter().any(|id| id == ws);
+        let mut offices = HashMap::new();
         for plan in self.store.plans_with_status(&[PlanStatus::Running, PlanStatus::Integrating])? {
-            if goes_on(&self.store.plan_tasks(&plan.id)?, may_start(&plan.workspace_id)) {
+            if self.scheduled(&mut offices, &plan.workspace_id)? && goes_on(&self.store.plan_tasks(&plan.id)?, may_start(&plan.workspace_id)) {
                 return Ok(true);
             }
         }
         for t in self.store.tasks_with_status(&[TaskStatus::Ready])?.iter().filter(|t| t.plan_id.is_none()) {
-            if self.store.task_workspace(&t.id)?.is_some_and(|ws| may_start(&ws)) {
+            if let Some(ws) = self.store.task_workspace(&t.id)?
+                && may_start(&ws)
+                && self.scheduled(&mut offices, &ws)?
+            {
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    /// Does the scheduler work in this office? The test of `schedule_pass`: the open office
+    /// always, another one only while its repo folder is there (not on a disk that is not
+    /// mounted, say). `seen` keeps the answer for one look at every office.
+    fn scheduled(&self, seen: &mut HashMap<Id, bool>, ws_id: &str) -> Result<bool> {
+        if let Some(known) = seen.get(ws_id) {
+            return Ok(*known);
+        }
+        let there = self.workspace().is_some_and(|open| open.id == ws_id)
+            || self.store.workspace(ws_id)?.is_some_and(|ws| Path::new(&ws.repo_path).is_dir());
+        seen.insert(ws_id.to_string(), there);
+        Ok(there)
     }
 
     /// Your Resume: the hold ends (`end_hold`), and the gates of the tasks that only had
@@ -262,7 +323,10 @@ impl Inner {
         let mut regate = vec![];
         for t in waiting {
             let was_in_work = hold.tasks.contains(&t.id);
-            let gate_only = was_in_work && hold.regate.contains(&t.id);
+            // Only its checks were left when the hold began, and its worktree is still there.
+            // One whose worktree is gone by now (a hold can be days old) has nothing to check:
+            // its worker goes on, in a new worktree on the task's branch.
+            let gate_only = was_in_work && hold.regate.contains(&t.id) && t.worktree.as_deref().is_some_and(|wt| Path::new(wt).is_dir());
             let res = if was_in_work {
                 // Whatever it says by now (a paused office writes its own reason).
                 self.resume_task(t, gate_only)
@@ -326,12 +390,47 @@ impl Inner {
             tracing::warn!("the round count of task {task_id} stays in the store: {e}");
         }
     }
+
+    /// An agent is let go: what the store kept about its work goes with it. The result of
+    /// its last "Check the work" (`required_checks.rs`), what Codly's commits left out in its
+    /// worktree (`left_out.rs`) and the note about files you put back (`checkpoints.rs`, which
+    /// drops it with `restore_note_read`) are all about a worktree the agent no longer has.
+    /// A row that cannot be removed is a leftover, not a reason to keep the agent.
+    pub(super) fn forget_agent(&self, agent_id: &str) {
+        let forgotten = self.store.kv_write(&[(required_checks::checked_key(agent_id), None)]).and_then(|()| self.forget_left_out(agent_id));
+        if let Err(e) = forgotten {
+            tracing::warn!("rows of agent {agent_id}, which was let go, stay in the store: {e}");
+        }
+        self.restore_note_read(agent_id);
+    }
+
+    /// An office is closed: its tasks are all over (`close_office` refuses otherwise), so the
+    /// rounds they used and what Codly's commits left out for them are not kept. A row that
+    /// cannot be removed is a leftover, not a reason to keep the office.
+    pub(super) fn forget_office_tasks(&self, ws_id: &str) {
+        let forgotten = (|| -> Result<()> {
+            let tasks = self.store.tasks(ws_id)?;
+            // Each row goes from the store whatever this run knows of it: a count that could
+            // not be read at the start is a row too.
+            {
+                let mut known = lock(&self.fix_rounds);
+                tasks.iter().for_each(|t| drop(known.remove(&t.id)));
+            }
+            self.store.kv_write(&tasks.iter().map(|t| (rounds_key(&t.id), None)).collect::<Vec<_>>())?;
+            tasks.iter().try_for_each(|t| self.forget_left_out(&t.id))
+        })();
+        if let Err(e) = forgotten {
+            tracing::warn!("rows of the tasks of office {ws_id}, which was closed, stay in the store: {e}");
+        }
+    }
 }
 
 impl Core {
-    /// The work of the last run that waits for your Resume. None: nothing waits.
+    /// The work of the last run that waits for your Resume, as it stands now: a task you
+    /// cancelled since Codly opened is not counted. None: nothing waits (any more), and
+    /// nothing is held (`Inner::held`).
     pub fn resume_offer(&self) -> Option<ResumeOffer> {
-        lock(&self.inner.held_work).as_ref().map(|hold| ResumeOffer { tasks: hold.tasks.len() as u32 })
+        self.inner.held().map(|tasks| ResumeOffer { tasks })
     }
 
     /// Your Resume: the work that was under way when Codly last closed goes on.
@@ -352,6 +451,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrator::{CoreConfig, StartOptions};
 
     fn task(id: &str, status: &str, deps: &[&str]) -> Task {
         serde_json::from_value(json!({
@@ -403,5 +503,158 @@ mod tests {
         assert_eq!(read.len(), 2, "a count that cannot be read starts from zero: {read:?}");
         assert_eq!(read["t1"], json!({ "fix": 2, "conflict": 1, "left_out": true }));
         assert_eq!(read["t2"], json!({ "fix": 1, "conflict": 0, "left_out": false }));
+    }
+
+    fn sh(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A core with one open repo of one commit, and no CLI.
+    async fn start(root: &Path) -> (Arc<Core>, Workspace) {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        sh(&repo, &["config", "user.name", "Test"]);
+        sh(&repo, &["config", "user.email", "test@example.com"]);
+        std::fs::write(repo.join("app.txt"), "app\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-qm", "init"]);
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: root.join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let ws = core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+        (core, ws)
+    }
+
+    /// A task of the open office that waits for your Resume, with its worktree at `worktree`.
+    async fn held_task(core: &Core, title: &str, worktree: &Path) -> Task {
+        let made = core.create_task(title, "").await.unwrap();
+        let held = |t: &mut Task| {
+            (t.status, t.status_reason) = (TaskStatus::Ready, Some(HELD.into()));
+            t.worktree = Some(worktree.to_string_lossy().into_owned());
+            Ok(())
+        };
+        core.inner.update_task(&made.id, held).unwrap()
+    }
+
+    /// The store takes no decision from here on: a history line cannot be written.
+    const NO_DECISIONS: &str =
+        "CREATE TRIGGER no_decisions BEFORE INSERT ON event WHEN NEW.type = 'decision' BEGIN SELECT RAISE(ABORT, 'no room for a decision'); END";
+
+    /// A task that only had its checks left is resumed, and the line that says so cannot be
+    /// written. Its status is written by then (Running), so the task still counts as resumed:
+    /// the end of the hold hands it to the caller, which starts its gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resumed_task_reaches_its_gate_when_its_history_line_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, ws) = start(dir.path()).await;
+        let inner = &core.inner;
+        let pass = inner.sched_lock.lock().await; // no scheduling pass writes to the task meanwhile
+        let task = held_task(&core, "Add sign-in", Path::new(&ws.repo_path)).await;
+        let hold = Hold { tasks: vec![task.id.clone()], regate: vec![task.id.clone()] };
+        inner.store.with(|db| Ok(db.execute_batch(NO_DECISIONS)?)).unwrap();
+        assert!(inner.decide(Some(&ws.id), Some(&task.id), "retry", "a line", json!({})).is_err(), "the store takes no decision");
+
+        assert_eq!(inner.end_hold(&hold, &[task.clone()]), [task.id.clone()], "its gate starts");
+        let now = inner.task(&task.id).unwrap();
+        assert_eq!((now.status, now.status_reason.as_deref()), (TaskStatus::Running, Some(CHECKING)));
+        inner.store.with(|db| Ok(db.execute_batch("DROP TRIGGER no_decisions")?)).unwrap();
+        drop(pass);
+        core.shutdown().await;
+    }
+
+    /// A hold can be days old. A task that only had its checks left when it began, and whose
+    /// worktree is gone by its end, is not sent to checks that have nothing to run on: its
+    /// worker goes on. One whose worktree is there gets its gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_whose_worktree_is_gone_goes_on_through_its_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, ws) = start(dir.path()).await;
+        let inner = &core.inner;
+        let pass = inner.sched_lock.lock().await; // no scheduling pass writes to the tasks meanwhile
+        let there = held_task(&core, "Add sign-in", Path::new(&ws.repo_path)).await;
+        let gone = held_task(&core, "Add sign-out", &dir.path().join("removed")).await;
+        let hold = Hold { tasks: vec![there.id.clone(), gone.id.clone()], regate: vec![there.id.clone(), gone.id.clone()] };
+
+        assert_eq!(inner.end_hold(&hold, &[there.clone(), gone.clone()]), [there.id.clone()]);
+        let now = inner.task(&gone.id).unwrap();
+        assert_eq!((now.status, now.status_reason.as_deref()), (TaskStatus::Ready, Some(RESUMING)));
+        assert_eq!(inner.task(&there.id).unwrap().status, TaskStatus::Running);
+        drop(pass);
+        core.shutdown().await;
+    }
+
+    /// An agent you let go leaves nothing behind in the store: the result of its last check,
+    /// what Codly's commits left out in its worktree, the note about files you put back.
+    /// Another agent's rows stay.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_agent_that_is_let_go_leaves_no_rows_in_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, ws) = start(dir.path()).await;
+        let store = &core.inner.store;
+        let hire = |name: &str| core.inner.create_agent(&ws.id, name, Provider::Claude, Role::Solo, 0, None).unwrap();
+        let (ada, bo) = (hire("ada"), hire("bo"));
+        // As `required_checks.rs`, `left_out.rs` and `checkpoints.rs` name them.
+        let rows_of = |id: &str| [required_checks::checked_key(id), format!("left_out:{id}:/work/tree"), format!("checkpoint_note:{id}")];
+        for key in rows_of(&ada.id).iter().chain(&rows_of(&bo.id)) {
+            store.kv_set(key, "kept").unwrap();
+        }
+
+        core.let_go(&ada.id).await.unwrap();
+        for key in rows_of(&ada.id) {
+            assert_eq!(store.kv_get(&key).unwrap(), None, "{key}");
+        }
+        for key in rows_of(&bo.id) {
+            assert_eq!(store.kv_get(&key).unwrap().as_deref(), Some("kept"), "{key}");
+        }
+        core.shutdown().await;
+    }
+
+    /// The stored result of an agent's last check cannot be read (written by another version,
+    /// or damaged). It counts as no result and the row goes, so the Git tab's question is
+    /// answered now and at every later look.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_check_result_that_cannot_be_read_counts_as_none_and_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, ws) = start(dir.path()).await;
+        let ada = core.inner.create_agent(&ws.id, "ada", Provider::Claude, Role::Solo, 0, None).unwrap();
+        let key = required_checks::checked_key(&ada.id);
+        core.inner.store.kv_set(&key, "not a result").unwrap();
+
+        let nothing = required_checks::AgentCheck { running: false, last: None };
+        assert_eq!(core.agent_check_state(&ada.id).await.unwrap(), nothing);
+        assert_eq!(core.inner.store.kv_get(&key).unwrap(), None, "the row is gone");
+        assert_eq!(core.agent_check_state(&ada.id).await.unwrap(), nothing);
+        core.shutdown().await;
+    }
+
+    /// An office you close leaves no rows of its tasks in the store: the rounds they used
+    /// (also a count this run could not read) and what Codly's commits left out for them.
+    /// The rows of a task of another office stay.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_office_leaves_no_rows_of_its_tasks_in_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, ws) = start(dir.path()).await;
+        let inner = &core.inner;
+        let mut over = vec![];
+        for title in ["Add sign-in", "Add sign-out"] {
+            let task = core.create_task(title, "").await.unwrap();
+            core.move_task(&task.id, TaskStatus::Cancelled).await.unwrap();
+            over.push(task.id);
+        }
+        inner.count_rounds(&over[0], |_| ()).unwrap();
+        inner.store.kv_set(&rounds_key(&over[1]), "not json").unwrap();
+        inner.store.kv_set(&format!("left_out:{}:/work/tree", over[0]), "[]").unwrap();
+        let elsewhere = [rounds_key("elsewhere"), "left_out:elsewhere:/work/tree".to_string()];
+        for key in &elsewhere {
+            inner.store.kv_set(key, "{}").unwrap();
+        }
+        let rows = || -> Vec<String> { [ROUNDS, "left_out:"].iter().flat_map(|prefix| inner.store.kv_prefixed(prefix).unwrap()).map(|row| row.0).collect() };
+        assert_eq!(rows().len(), 5);
+
+        core.close_office(&ws.id).await.unwrap();
+        assert_eq!(rows(), elsewhere);
+        assert!(lock(&inner.fix_rounds).is_empty(), "this run forgot the counts too");
+        core.shutdown().await;
     }
 }

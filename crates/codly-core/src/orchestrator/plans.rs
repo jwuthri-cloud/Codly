@@ -851,6 +851,9 @@ impl Inner {
         let started = match resume {
             Some((session_id, how)) => match self.spawn_run(req(SessionMode::Resume { session_id })).await {
                 Ok(_) => how,
+                // A start that Codly itself refused says nothing against the session: it is
+                // kept for the next start, like a chat's (`gives_up_conversation`).
+                Err(e) if !self.gives_up_conversation(&agent, &e) => return Err(e),
                 Err(e) => {
                     tracing::warn!("resuming {} on {} failed ({e}); starting a new session", agent.name, task.key);
                     self.spawn_run(req(new_session(agent.provider))).await?;

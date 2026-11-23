@@ -306,7 +306,7 @@ impl Inner {
     /// your terminal, or another start of this agent won. That conversation is fine, and it is the one to keep. After
     /// any other failure a new one is tried: no other answer of a CLI to a conversation it
     /// cannot open is recorded, and an agent must not stay without one.
-    fn gives_up_conversation(&self, agent: &Agent, e: &anyhow::Error) -> bool {
+    pub(super) fn gives_up_conversation(&self, agent: &Agent, e: &anyhow::Error) -> bool {
         if e.is::<crate::adapters::SessionGone>() {
             return true;
         }
