@@ -429,7 +429,7 @@ impl Inner {
         if agent.model == model {
             return Ok(agent);
         }
-        if let Some(switch) = self.live_model_switch(agent_id, model.as_deref())
+        if let Some(switch) = self.live_model_switch(&agent, model.as_deref())
             && let Some(changed) = self.switch_live_model(&agent, model.as_deref(), switch).await?
         {
             return Ok(changed);
@@ -450,15 +450,17 @@ impl Inner {
 
     /// What to ask of a live Claude session so that it changes its model, its reasoning effort
     /// or both with no restart (`switch_live_model`). The model request is recorded between
-    /// turns and during one, the CLI's default model included; the effort request between
-    /// turns only. None = the switch needs the restart: another CLI, no live process, a new
+    /// turns and, for a named model, during one; for the CLI's default model it is recorded
+    /// between turns only (part 2 of the 2.1.311 recordings, scenario 13) and is sent during
+    /// a turn all the same. The effort request is recorded between turns only, and is sent
+    /// only then. None = the switch needs the restart: another CLI, no live process, a new
     /// effort while the agent works, an effort level Claude Code does not list, or no effort
     /// for a session that has one (taking a level away is recorded only for a process that
     /// started without one).
-    fn live_model_switch(&self, agent_id: &str, model: Option<&str>) -> Option<LiveSwitch> {
+    fn live_model_switch(&self, agent: &Agent, model: Option<&str>) -> Option<LiveSwitch> {
         let (name, effort) = classify::split_model_effort(model);
         let live = lock(&self.live);
-        let l = live.get(agent_id).filter(|l| l.provider == Provider::Claude && l.starting.is_none() && !l.stopping)?;
+        let l = live.get(&agent.id).filter(|l| l.provider == Provider::Claude && l.starting.is_none() && !l.stopping)?;
         let (name_now, effort_now) = classify::split_model_effort(l.model.as_deref());
         if effort.is_none() && effort_now.is_some() {
             return None;
@@ -467,8 +469,13 @@ impl Inner {
         if effort.as_ref().is_some_and(|e| !claude::EFFORT_LEVELS.contains(&e.as_str()) || l.turn_active || l.queued > 0) {
             return None;
         }
+        // The session's model has two names: the one the run was started with or last
+        // switched to ("opus"), and the id the CLI gave for it, which the agent's row shows
+        // ("claude-opus-5-5") and the model picker sends back with a new effort.
+        let (shown, _) = classify::split_model_effort(agent.model.as_deref());
+        let same_model = name == name_now || name == shown;
         // A change of effort alone does not ask for the model again.
-        let model = (effort.is_none() || name != name_now).then(|| name.unwrap_or_else(|| claude::DEFAULT_MODEL.into()));
+        let model = (effort.is_none() || !same_model).then(|| name.unwrap_or_else(|| claude::DEFAULT_MODEL.into()));
         Some(LiveSwitch { model, effort, effort_now })
     }
 

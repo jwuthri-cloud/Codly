@@ -1279,7 +1279,9 @@ impl CodexAgent {
         // (`notSubscribed`, `notLoaded`); either way there is nothing left to do.
         for thread in self.server.subagent_threads(&self.route) {
             if !self.request("thread/unsubscribe", json!({ "threadId": thread }), Pending::SubagentUnsubscribe).await {
-                break; // the server takes no more lines: the agent's own request says so too
+                // The server takes no more lines, and the error of this request said so: the
+                // agent's own request would only fail with the same words.
+                return self.finish();
             }
         }
         match self.thread_id.clone() {
@@ -1740,7 +1742,7 @@ impl CodexNormalizer {
                 let who = self.subagent_label(thread);
                 out = self.own_notification(method, p);
                 for e in &mut out {
-                    if let EventKind::Error { message, .. } | EventKind::Retrying { reason: message, .. } = e {
+                    if let EventKind::Error { message, .. } | EventKind::Retrying { reason: message, .. } | EventKind::Notice { text: message } = e {
                         *message = format!("{who}: {message}");
                     }
                 }
@@ -1758,7 +1760,10 @@ impl CodexNormalizer {
     fn own_notification(&mut self, method: &str, p: &Value) -> Vec<EventKind> {
         let mut out = Vec::new();
         match method {
-            // (`thread/name/updated`: the name Codly gave the thread itself, `name_thread`.)
+            // (`thread/name/updated`: from the codex-cli 0.166.0 types, `ThreadNameUpdatedNotification`,
+            // not verified live. The thread has another name: the one Codly gave it itself
+            // (`name_thread`), and the same notification also comes when the user renames the
+            // thread in Codex. Neither is news for the timeline.)
             "thread/started" | "thread/closed" | "thread/name/updated" | "turn/diff/updated" | "item/reasoning/summaryPartAdded" | "item/plan/delta"
             | "item/fileChange/patchUpdated" | "item/mcpToolCall/progress" | "item/commandExecution/terminalInteraction" => {}
             "turn/started" => {
@@ -1896,9 +1901,12 @@ impl CodexNormalizer {
                 }
             }
             // From the codex-cli 0.166.0 types (`ModelReroutedNotification`), not verified live.
+            // A notice, as the MCP server that did not start: the turn goes on, on another
+            // model. An error would be read as the reason of a turn that fails later, and as
+            // one of the errors in a row that stop an agent.
             "model/rerouted" => {
-                let message = rerouted_text(&s(p, "fromModel"), &s(p, "toModel"), p["reason"].as_str());
-                out.push(EventKind::Error { message, fatal: false });
+                let text = rerouted_text(&s(p, "fromModel"), &s(p, "toModel"), p["reason"].as_str());
+                out.push(EventKind::Notice { text });
             }
             "warning" | "configWarning" | "guardianWarning" | "deprecationNotice" => {
                 let message = p["message"].as_str().or(p["summary"].as_str()).map(str::to_owned).unwrap_or_else(|| p.to_string());
@@ -2296,14 +2304,17 @@ fn mcp_start_failed(name: &str, error: Option<&str>, failure_reason: Option<&str
         return EventKind::Error { message: format!("codly MCP server failed to start: {}", error.unwrap_or("unknown error")), fatal: false };
     }
     let text = match (failure_reason, error.map(str::trim).filter(|e| !e.is_empty())) {
-        (Some("reauthenticationRequired"), _) => format!("MCP server {name} did not start: it needs you to sign in again. This agent works without its tools."),
+        // (Codly has no sign-in for it: the server is from the user's own Codex configuration.)
+        (Some("reauthenticationRequired"), _) => {
+            format!("MCP server {name} did not start: it needs you to sign in again in Codex (the server comes from your own Codex settings). This agent works without its tools.")
+        }
         (_, Some(error)) => format!("MCP server {name} did not start, so this agent works without its tools: {}", classify::truncate_chars(error, MCP_ERROR_MAX)),
         (_, None) => format!("MCP server {name} did not start, so this agent works without its tools."),
     };
     EventKind::Notice { text }
 }
 
-/// The warning for a turn Codex ran on another model than the thread's (`ModelRerouteReason`).
+/// The notice for a turn Codex ran on another model than the thread's (`ModelRerouteReason`).
 fn rerouted_text(from: &str, to: &str, reason: Option<&str>) -> String {
     match reason {
         Some("highRiskCyberActivity") => format!("Codex ran this turn on {to} instead of {from}: it took the request for high-risk security work."),
@@ -2703,7 +2714,10 @@ mod tests {
         assert!(norm.on_notification("mcpServer/startupStatus/updated", &update(Value::Null, "linear", "failed", json!("again"), Value::Null)).is_empty());
         // another server, first heard of on a subagent's thread
         let ev = norm.on_notification("mcpServer/startupStatus/updated", &update(json!("sub"), "figma", "failed", json!("401"), json!("reauthenticationRequired")));
-        assert_eq!(notices(&ev), ["MCP server figma did not start: it needs you to sign in again. This agent works without its tools."]);
+        assert_eq!(
+            notices(&ev),
+            ["MCP server figma did not start: it needs you to sign in again in Codex (the server comes from your own Codex settings). This agent works without its tools."]
+        );
         let ev = norm.on_notification("mcpServer/startupStatus/updated", &update(json!("main"), "notes", "failed", Value::Null, Value::Null));
         assert_eq!(notices(&ev), ["MCP server notes did not start, so this agent works without its tools."]);
         // Codly's own server is an error, once
@@ -2714,17 +2728,20 @@ mod tests {
     }
 
     /// Codex ran a turn on another model than the one the agent has: the user is told which,
-    /// and why when Codex says. (Lines written from the codex-cli 0.166.0 schema types:
-    /// ModelReroutedNotification, ModelRerouteReason. Not verified live.)
+    /// and why when Codex says, in a quiet line. Before, the line was an error: a rerouted turn
+    /// that failed later was shown as failed because of the reroute, and the reroute counted
+    /// as one of the errors in a row that stop an agent. (Lines written from the codex-cli
+    /// 0.166.0 schema types: ModelReroutedNotification, ModelRerouteReason, and for the turn
+    /// that fails TurnCompletedNotification, Turn, TurnError. Not verified live.)
     #[test]
-    fn a_rerouted_turn_is_a_warning_that_names_both_models() {
+    fn a_rerouted_turn_is_a_notice_that_names_both_models() {
         let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
         norm.thread = Some("main".into());
         let rerouted = |thread: &str, reason: Value| {
             json!({ "threadId": thread, "turnId": "u1", "fromModel": "gpt-6.2-sol", "toModel": "gpt-6.1-luna", "reason": reason })
         };
         let warning = |ev: Vec<EventKind>| match &ev[..] {
-            [EventKind::Error { message, fatal: false }] => message.clone(),
+            [EventKind::Notice { text }] => text.clone(),
             other => panic!("{other:?}"),
         };
         assert_eq!(
@@ -2741,6 +2758,12 @@ mod tests {
             warning(norm.on_notification("model/rerouted", &rerouted("sub", json!("highRiskCyberActivity")))),
             "A subagent: Codex ran this turn on gpt-6.1-luna instead of gpt-6.2-sol: it took the request for high-risk security work."
         );
+        // the rerouted turn then fails: the only error is the turn's own reason
+        let failed = json!({ "threadId": "main", "turn": { "id": "u1", "items": [], "status": "failed", "error": { "message": "stream disconnected before completion" } } });
+        let ev = norm.on_notification("turn/completed", &failed);
+        let errors: Vec<&str> = ev.iter().filter_map(|e| if let EventKind::Error { message, .. } = e { Some(message.as_str()) } else { None }).collect();
+        assert_eq!(errors, ["stream disconnected before completion"]);
+        assert!(ev.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Failed, .. })), "{ev:?}");
     }
 
     /// A goal and a hook are rows a person can read. No capture has them: the lines are written
@@ -3470,6 +3493,32 @@ mod tests {
         let mut left: Vec<String> = server.state.lock().unwrap().routes.keys().cloned().collect();
         left.sort();
         assert_eq!(left, ["o1", "other"]);
+    }
+
+    /// The app-server takes no more lines when an agent with subagents ends: one cause, said
+    /// once. Before, the request for the first subagent's thread failed, and then the agent's
+    /// own failed with the same words: two equal errors. (`thread/started` lines written from
+    /// the codex-cli 0.166.0 schema types. Not verified live.)
+    #[tokio::test]
+    async fn a_server_that_takes_no_more_lines_is_said_once_when_an_agent_with_subagents_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = fake_server(dir.path()); // every write fails
+        let (mut agent, mut events) = fake_agent(&server);
+        (agent.started, agent.thread_id) = (true, Some("t".into()));
+        agent.norm.thread = agent.thread_id.clone();
+        server.state.lock().unwrap().routes.insert("t".into(), agent.route.clone());
+        for thread in ["s1", "s2"] {
+            server.route_line(format!(r#"{{"method":"thread/started","params":{{"thread":{{"id":"{thread}","parentThreadId":"t"}}}}}}"#).as_bytes());
+        }
+        assert_eq!(server.subagent_threads(&agent.route), ["s1", "s2"]);
+
+        agent.on_cmd(AgentCmd::Shutdown).await;
+        assert_eq!(agent.stage, Stage::Done, "nothing to wait for: no request went out");
+        let kinds = emitted(&mut events);
+        let errors: Vec<&str> = kinds.iter().filter_map(|e| if let EventKind::Error { message, .. } = e { Some(message.as_str()) } else { None }).collect();
+        assert_eq!(errors, ["thread/unsubscribe: codex app-server stdin is closed"]);
+        assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
+        assert!(server.state.lock().unwrap().routes.is_empty(), "the agent's threads are let go");
     }
 
     /// A subagent's turn ends on its own thread: the agent's turn goes on. Its end is neither
