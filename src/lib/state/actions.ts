@@ -22,7 +22,7 @@ import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { trustOf } from '../util/career';
 import { withModel } from '../util/team';
-import { followUpRequest, reviewMessage, type ReviewDraft } from '../util/review';
+import { followUpRequest, reviewMessage, sameSpot, type ReviewDraft } from '../util/review';
 import { answerText } from '../util/outcome';
 import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
 import { accounts } from './accounts.svelte';
@@ -80,6 +80,14 @@ export async function openWorkspace(path?: string) {
   const last = ui.enterOffice(ws.id);
   const list = requests.list;
   ui.openRequest((list.find((r) => r.thread === last) ?? list[0])?.thread ?? 'lead');
+}
+
+/** Codly starts on the office the core had open: you are on the request you last had open
+ *  there, when it is still one, and in the room you were in. */
+export function reopenLastRequest() {
+  const office = store.workspace?.id;
+  const last = office ? ui.lastRequest(office) : null;
+  if (last && requests.get(last)) ui.resumeRequest(last);
 }
 
 export async function updateSettings(patch: Partial<Settings>) {
@@ -394,7 +402,9 @@ export function waitingRequest(key: string): string | null {
 /**
  * Send back: every comment you wrote on a diff, as one message (file, line, the quoted line, the
  * comment). A task that is not done gets them through the core: its worker reads them and Codly
- * checks the work again. Merged or finished work (a done task, a whole plan) opens a new request
+ * checks the work again; they leave the diff when the core took them, and one you wrote or
+ * changed while the call was on its way stays. Merged or finished work (a done task, a whole
+ * plan) opens a new request
  * with the comments ready to send: they stay on the diff until you send that message, and Send
  * back again goes to the same request (with the comments as they are now). `paths`: the diff's
  * files, in order. True: the comments went to the worker, or are in a request's composer; false:
@@ -412,7 +422,11 @@ export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, pa
     const t = await attempt('send your comments back', () => api.sendBackTask(task.id, reviewMessage(list, paths)), 'your comments stay on the diff.');
     if (!t) return false;
     if (store.isOpen(ws)) store.upsertTask(t);
-    review.clear(key);
+    // The worker got `list`. A comment written or changed while the call was on its way is
+    // not in it: it stays on the diff.
+    const now = review.comments(key);
+    for (const c of list) if (now.some((n) => sameSpot(n, c) && n.text === c.text)) review.comment(key, c, '');
+    if (!review.comments(key).length) review.clear(key);
     const who = (t.assignee && store.agentMap.get(t.assignee)?.name) || 'its worker';
     toast({ kind: 'success', title: `${t.key} sent back to ${who}`, body: list.length === 1 ? '1 comment' : `${list.length} comments` });
     return true;

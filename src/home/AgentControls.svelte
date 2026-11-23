@@ -1,17 +1,21 @@
 <!--
   A 1:1 chat's own picker under the composer: how much the agent asks you. It works in its own
   worktree, so Autonomous lets it change anything there without asking. Unset follows Settings.
-  A 1:1 Claude agent in the mode "plan first" says so first: until you accept its plan, only
-  reads are approved for it, and the permissions apply after that.
+  For a 1:1 Claude agent the menu has a second group, "How it works": ask for edits, accept
+  edits, plan first (the agent's sheet has the same switch). The chip says the way it is in:
+  in "plan first", until you accept its plan, only reads are approved for it, and the
+  permissions apply after that. A switch the core refuses changes nothing here, and a toast
+  says why. What the chip says and what the menu lists: agentPicker.ts.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
   import type { ApprovalMode } from '../lib/gen/ApprovalMode';
   import { setRequestPrefs } from '../lib/state/actions';
-  import { PERMISSION_MODES } from '../lib/state/control.svelte';
+  import { setPermissionMode } from '../lib/state/control.svelte';
   import { store } from '../lib/state/store.svelte';
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
+  import { chipOf, groupsOf, wayOf } from './agentPicker';
   import { PERMISSIONS } from './LeadControls.svelte';
   import UsageChip from './UsageChip.svelte';
 
@@ -27,21 +31,25 @@
   const own = $derived(store.requestPrefs[thread]?.approval_mode ?? null);
   const perm = $derived<ApprovalMode>(own ?? store.settings.approval_mode);
   const label = $derived(PERMISSIONS.find((p) => p.id === perm)?.label ?? perm);
-  /** A 1:1 Claude agent in the mode "plan first": only reads are approved for it until you accept its plan, whatever the permissions. */
-  const planFirst = $derived(!request && agent?.role === 'solo' && agent.provider === 'claude' && agent.permission_mode === 'plan');
-  const planLabel = PERMISSION_MODES.find((m) => m.id === 'plan')!.label;
+  /** How a 1:1 Claude agent works with edits; null for an agent with no such switch here. */
+  const way = $derived(wayOf(agent, request));
+  const chip = $derived(chipOf(label, { own: own != null, request, way }));
 
   let open = $state(false);
   let btn: HTMLButtonElement | undefined = $state();
-  const items = $derived<MenuItem[]>([
-    { kind: 'header', label: planFirst ? 'Permissions, once you accept its plan' : 'Permissions' },
-    ...PERMISSIONS.map((p) => ({ label: p.label, hint: p.hint, checked: p.id === perm, run: () => setRequestPrefs(thread, { approval_mode: p.id }) })),
-  ]);
+  const items = $derived<MenuItem[]>(
+    groupsOf(PERMISSIONS, perm, way).flatMap((g): MenuItem[] => [
+      { kind: 'header', label: g.header },
+      ...(g.kind === 'permissions'
+        ? g.entries.map((e) => ({ label: e.label, hint: e.hint, checked: e.checked, run: () => void setRequestPrefs(thread, { approval_mode: e.id }) }))
+        : g.entries.map((e) => ({ label: e.label, hint: e.hint, checked: e.checked, run: () => void (agent && setPermissionMode(agent.id, e.id)) }))),
+    ]),
+  );
 </script>
 
 <div class="controls">
-  <button class="chip" bind:this={btn} aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)} data-tip={request ? 'How much every agent on this request asks you before it acts' : planFirst ? 'It reads and plans first: until you accept its plan, only reads are approved for it. After that, this is how much it asks you before it acts' : 'How much this agent asks you before it acts'}>
-    <Icon name="lock" size={13} />{#if planFirst}{planLabel}<span class="sub">· then {label}</span>{:else}{label}{#if request}<span class="sub">· whole request</span>{:else if !own}<span class="sub">· Settings</span>{/if}{/if}<Icon name="chevron-down" size={12} />
+  <button class="chip" bind:this={btn} aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)} data-tip={chip.tip}>
+    <Icon name="lock" size={13} />{chip.text}{#if chip.sub}<span class="sub">{chip.sub}</span>{/if}<Icon name="chevron-down" size={12} />
   </button>
   <UsageChip {agent} />
 </div>
