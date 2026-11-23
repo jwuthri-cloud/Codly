@@ -41,6 +41,17 @@ export function seedDraft(draft: string, seed: { text: string; keep: boolean; re
   return { text: kept ? draft : seed.text, kept };
 }
 
+/**
+ * A draft without the text a seed put in it (your review comments, discarded since): what you
+ * wrote around that text stays. Null: the draft does not hold the text as it was put there
+ * (you changed it), so nothing can be taken out.
+ */
+export function withoutSeed(draft: string, seed: string): string | null {
+  const at = draft.indexOf(seed);
+  if (at < 0) return null;
+  return [draft.slice(0, at).trimEnd(), draft.slice(at + seed.length).trimStart()].filter(Boolean).join('\n\n');
+}
+
 /** Keep a draft; an empty one is forgotten. `files` is kept as given, so an upload still on its way lands in it. */
 export function saveDraft(slot: string, text: string, files: Att[]): void {
   if (text || files.length) drafts.set(slot, { text, files });

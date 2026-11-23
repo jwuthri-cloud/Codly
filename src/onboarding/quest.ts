@@ -37,9 +37,14 @@ export const crewReady = (clis: readonly CliInfo[]) => clis.some(cliOk);
 
 /**
  * Continue rewards the level you leave only when it is earned. The crew level is earned by one
- * ready CLI, never by the button; every other level is optional and earned by moving on.
+ * ready CLI, never by the button. The Lead level is earned by a Lead to appoint, and only a
+ * ready CLI can lead (the first one does until you pick; a CLI picked earlier that is not ready
+ * any more leads nothing). Every other level is optional and earned by moving on.
  */
-export const earned = (id: LevelId, clis: readonly CliInfo[]) => id !== 'crew' || crewReady(clis);
+export const earned = (id: LevelId, clis: readonly CliInfo[]) => (id !== 'crew' && id !== 'lead') || crewReady(clis);
+
+/** What Continue says in place of "Lead appointed" when it leaves the Lead level with no Lead to appoint. */
+export const NO_LEAD = { title: 'No Lead yet', body: 'No agent is ready, so there is no Lead to appoint. Install or sign in to one on level 1, then pick your Lead.' };
 
 /** Mark a level done once, in map order. */
 export function complete(done: readonly string[], id: LevelId): string[] {

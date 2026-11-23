@@ -197,9 +197,9 @@ describe('what a close asks first', () => {
 
   it('finished work that is not merged asks first, and says that its branch stays', async () => {
     store.plans = [plan()];
-    expect(await closeQuestion(request())).toEqual({ ask: 'Not merged yet: its branch stays. Close?', detail: kept });
+    expect(await closeQuestion(request())).toEqual({ ask: 'Not merged yet: its branch stays. Close?', detail: kept, yes: 'Close' });
     // Also while its Lead answers a later message (the tab then says "Thinking").
-    expect(await closeQuestion(request({ phase: 'planning' }))).toEqual({ ask: 'Not merged yet: its branch stays. Close?', detail: kept });
+    expect(await closeQuestion(request({ phase: 'planning' }))).toEqual({ ask: 'Not merged yet: its branch stays. Close?', detail: kept, yes: 'Close' });
     // An earlier plan of the request counts too.
     store.plans = [plan(), plan({ id: 'p2', created_at: 2, merged_sha: 'abc1234' })];
     expect((await closeQuestion(request({ phase: 'merged' })))?.ask).toBe('Not merged yet: its branch stays. Close?');
@@ -208,11 +208,11 @@ describe('what a close asks first', () => {
   it('an open pull request asks first, with unmerged work and without', async () => {
     record.mockResolvedValue(pr('open'));
     store.plans = [plan()];
-    expect(await closeQuestion(request())).toEqual({ ask: 'Not merged yet: its branch and pull request stay. Close?', detail: `${kept} ${stays}` });
+    expect(await closeQuestion(request())).toEqual({ ask: 'Not merged yet: its branch and pull request stay. Close?', detail: `${kept} ${stays}`, yes: 'Close' });
     expect(record).toHaveBeenCalledWith({ kind: 'plan', id: 'p1' });
 
     store.plans = [plan({ merged_sha: 'abc1234' })];
-    expect(await closeQuestion(request({ phase: 'merged' }))).toEqual({ ask: 'Its pull request stays open. Close?', detail: stays });
+    expect(await closeQuestion(request({ phase: 'merged' }))).toEqual({ ask: 'Its pull request stays open. Close?', detail: stays, yes: 'Close' });
     expect(record).toHaveBeenCalledTimes(1); // on record here already: not read again
 
     // Merged or closed on its host, as last read: nothing of it is left open.
@@ -222,7 +222,20 @@ describe('what a close asks first', () => {
 
   it('a running plan asks as before, and reads nothing', async () => {
     store.plans = [plan({ status: 'running' })];
-    expect((await closeQuestion(request({ phase: 'running' })))?.ask).toBe('Cancel its running plan and close?');
+    expect(await closeQuestion(request({ phase: 'running' }))).toMatchObject({ ask: 'Cancel its running plan and close?', yes: 'Close' });
     expect(record).not.toHaveBeenCalled();
+  });
+
+  it('a draft asks only while its composer holds text, and the button says Discard', async () => {
+    ui.newRequest();
+    const draft = request({ thread: ui.request, title: 'New request', phase: 'new' });
+    expect(await closeQuestion(draft)).toBeNull(); // empty: it closes at once
+    ui.holdDraft(draft.thread, true); // you typed in it
+    expect(await closeQuestion(draft)).toEqual({ ask: 'Discard this draft?', detail: 'What you wrote in it was not sent: it goes with the tab.', yes: 'Discard' });
+    ui.holdDraft(draft.thread, false); // and cleared it again
+    expect(await closeQuestion(draft)).toBeNull();
+    expect(record).not.toHaveBeenCalled();
+    ui.draftRequests = [];
+    ui.openRequest('lead');
   });
 });

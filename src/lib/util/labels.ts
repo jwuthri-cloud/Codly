@@ -282,7 +282,7 @@ export const COMPANY_LABEL: Record<Provider, string> = {
   codex: 'OpenAI',
   gemini: 'Google',
   opencode: 'Open source',
-  cursor: 'xAI',
+  cursor: 'Anysphere',
   copilot: 'GitHub',
 };
 

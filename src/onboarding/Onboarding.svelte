@@ -1,7 +1,9 @@
 <!--
   First run as a quest: five levels on a map, 100 XP each, all skippable, reopenable from Settings.
   The crew level completes itself the moment one CLI is ready (Continue alone never completes
-  it); the others when you press Continue.
+  it); the others when you press Continue. The Lead level needs a Lead to appoint: with no
+  agent ready there is none to pick, and Continue moves on, gives nothing and says what is
+  missing.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -13,7 +15,7 @@
   import Icon from '../components/Icon.svelte';
   import Logo from '../components/Logo.svelte';
   import { blip } from './sound';
-  import { LEVELS, XP_PER_LEVEL, complete, crewReady, earned, levelIndex, nextLevel, progress, rank, xp, type LevelId } from './quest';
+  import { LEVELS, NO_LEAD, XP_PER_LEVEL, complete, crewReady, earned, levelIndex, nextLevel, progress, rank, xp, type LevelId } from './quest';
   import LevelBrains from './LevelBrains.svelte';
   import LevelCreative from './LevelCreative.svelte';
   import LevelCrew from './LevelCrew.svelte';
@@ -46,6 +48,7 @@
   function next() {
     // "Crew hired" is for a crew that exists: Continue with no ready CLI moves on without it.
     if (earned(current, store.clis)) award(current);
+    else if (current === 'lead') toast({ kind: 'info', ...NO_LEAD });
     blip('tap', sound);
     if (idx < LEVELS.length - 1) current = LEVELS[idx + 1].id;
   }
@@ -140,7 +143,8 @@
   .bar i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--aurora-a), var(--aurora-m), var(--aurora-b)); transition: width var(--d-5) var(--spring); }
   .pts { font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); white-space: nowrap; }
   .right { display: flex; align-items: center; gap: 8px; }
-  .map { position: relative; width: min(1040px, calc(100vw - 48px)); margin: 18px auto 0; display: flex; align-items: flex-start; justify-content: space-between; }
+  /* The map and all under it give way to the toast stack ("+100 XP"), which sits under the top row. */
+  .map { position: relative; width: min(1040px, calc(100vw - 48px)); margin: calc(18px + var(--toast-room)) auto 0; display: flex; align-items: flex-start; justify-content: space-between; }
   .node { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 110px; color: var(--ink-3); transition: color var(--d-2); }
   .node:hover { color: var(--ink-1); }
   .dot { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; background: var(--surface-1); box-shadow: inset 0 0 0 1px var(--line-2); transition: transform var(--d-3) var(--spring), box-shadow var(--d-3), background-color var(--d-3); }

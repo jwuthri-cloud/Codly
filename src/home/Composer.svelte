@@ -10,6 +10,9 @@
   Esc on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
   draft (text and files) is kept when the composer leaves the screen, and Edit on an earlier
   message does not replace it. A new request that holds a draft stays a tab when you leave it.
+  The hint in the empty field is an element of its own, not the field's `placeholder`: a hint
+  longer than the field ends in an ellipsis in every engine (a textarea's placeholder is cut
+  mid-letter in Chromium).
 -->
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
@@ -418,19 +421,21 @@
         <Portrait {agent} size={18} />{agent.name}<Icon name="x" size={11} stroke={2} />
       </button>
     {/if}
-    <textarea
-      bind:this={ta}
-      bind:value={text}
-      rows="1"
-      {placeholder}
-      spellcheck="true"
-      aria-label={placeholder}
-      oninput={() => { resize(); detect(); }}
-      onkeydown={key}
-      onclick={detect}
-      onpaste={paste}
-      onblur={() => setTimeout(() => (mention = null), 120)}
-    ></textarea>
+    <div class="field">
+      <textarea
+        bind:this={ta}
+        bind:value={text}
+        rows="1"
+        spellcheck="true"
+        aria-label={placeholder}
+        oninput={() => { resize(); detect(); }}
+        onkeydown={key}
+        onclick={detect}
+        onpaste={paste}
+        onblur={() => setTimeout(() => (mention = null), 120)}
+      ></textarea>
+      {#if !text}<span class="hint" aria-hidden="true">{placeholder}</span>{/if}
+    </div>
     <input bind:this={picker} type="file" multiple hidden onchange={() => { addFiles([...(picker?.files ?? [])]); if (picker) picker.value = ''; }} />
     <button class="attach" onclick={() => picker?.click()} aria-label="Attach files" data-tip="Attach images or files — or paste or drop them"><Icon name="paperclip" size={15} stroke={1.6} /></button>
     <DictationButton target={ta} thread={slot} onText={dictated} />
@@ -460,9 +465,11 @@
   .composer.one { padding-left: 8px; }
   .to { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px 0 7px; margin-bottom: 1px; border-radius: var(--r-full); background: color-mix(in srgb, var(--hue) 18%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hue) 45%, transparent); font-size: var(--t-sm); font-weight: var(--w-semi); white-space: nowrap; flex-shrink: 0; }
   .to :global(svg:last-child) { color: var(--ink-3); }
-  /* A placeholder longer than the field ends in an ellipsis: a second line would be cut by the one-row field. */
-  textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  textarea { flex: 1; min-width: 0; resize: none; border: 0; outline: none; box-shadow: none; background: transparent; padding: 7px 0 6px; min-height: 34px; max-height: 200px; font-size: var(--t-lg); line-height: 21px; color: var(--ink-1); user-select: text; -webkit-user-select: text; }
+  /* The field and its hint lie on each other. A hint longer than the field ends in an ellipsis: a second line would be cut by the one-row field. */
+  .field { flex: 1; min-width: 0; display: grid; }
+  .field > * { grid-area: 1 / 1; min-width: 0; }
+  .hint { align-self: start; padding: 7px 0 6px; font-size: var(--t-lg); line-height: 21px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  textarea { width: 100%; resize: none; border: 0; outline: none; box-shadow: none; background: transparent; padding: 7px 0 6px; min-height: 34px; max-height: 200px; font-size: var(--t-lg); line-height: 21px; color: var(--ink-1); user-select: text; -webkit-user-select: text; }
   .send { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: var(--ink-3); background: var(--surface-2); flex-shrink: 0; transition: background var(--d-2), color var(--d-2), transform var(--d-2) var(--spring); }
   .send:disabled { opacity: 1; }
   .has .send { background: var(--aurora); color: var(--on-aurora); transform: scale(1.04); }

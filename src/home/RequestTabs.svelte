@@ -3,11 +3,14 @@
   running in parallel. Title = your first words; the dot says where its plan is (planning ·
   waiting for you · running · done), amber when it needs you. ⌘[ / ⌘] switch, ⌘N starts one.
   × closes a request (its Lead stops). It asks first when the close leaves work behind: a
-  running plan (closing cancels it), finished work that is not merged, an open pull request.
+  running plan (closing cancels it), finished work that is not merged, an open pull request,
+  a draft whose composer holds text. The question takes the keyboard: it opens on Keep, Esc
+  keeps too, and the keyboard is back on a tab after the answer.
   A close can be taken back: the tab leaves at once and a toast offers Undo for a few seconds
   (lib/state/closing.ts). The clock at the end opens the requests you closed, to read again.
 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import { closeRequest } from '../lib/state/actions';
   import { closeQuestion, closeWithUndo, type CloseQuestion } from '../lib/state/closing';
   import { requests, type Request } from '../lib/state/requests.svelte';
@@ -21,6 +24,8 @@
   /** The request waiting for "Close" / "Keep" with its question, and the empty one being closed. */
   let asking = $state<({ thread: string } & CloseQuestion) | null>(null);
   let closing = $state<string | null>(null);
+  /** The question's Keep button: the keyboard starts on it, so Enter keeps. */
+  let keepBtn: HTMLButtonElement | undefined = $state();
   /** The requests whose × is being looked into: a second press meanwhile asks nothing new. */
   const checking = new Set<string>();
 
@@ -35,21 +40,46 @@
   }
 
   async function close(r: Request) {
+    const asked = asking?.thread === r.thread;
     asking = null;
     // A new request that holds text you did not send can come back too.
-    if (r.phase !== 'new' || ui.draftRequests.some((d) => d.thread === r.thread && d.kept)) return closeWithUndo(r.thread, r.title);
-    // Nothing was asked in it: there is nothing to bring back.
-    closing = r.thread;
-    await closeRequest(r.thread);
-    closing = null;
+    if (r.phase !== 'new' || ui.draftRequests.some((d) => d.thread === r.thread && d.kept)) closeWithUndo(r.thread, r.title);
+    else {
+      // Nothing was asked in it: there is nothing to bring back.
+      closing = r.thread;
+      await closeRequest(r.thread);
+      closing = null;
+    }
+    // The question's buttons are gone with the tab: the keyboard goes to the tab you are on now.
+    if (asked) await focusTab('[aria-selected="true"]');
+  }
+
+  /** Keep (the button, or Esc): the question goes and the keyboard is back on the request's tab. */
+  async function keep() {
+    const thread = asking?.thread;
+    asking = null;
+    if (thread) await focusTab(`[data-thread="${CSS.escape(thread)}"]`);
+  }
+  async function focusTab(which: string) {
+    await tick();
+    bar?.querySelector<HTMLElement>(`[role="tab"]${which}`)?.focus();
+  }
+  function askKey(e: KeyboardEvent) {
+    if (e.key !== 'Escape') return;
+    // This Esc answers the question: it closes no sheet and stops no turn.
+    e.preventDefault();
+    e.stopPropagation();
+    void keep();
   }
   $effect(() => {
     void ui.request;
     bar?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   });
-  // A question is wider than its tab was: it comes into view with its buttons.
+  // A question is wider than its tab was: it comes into view with its buttons, and takes the keyboard.
   $effect(() => {
-    if (asking) bar?.querySelector('.ask')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (!asking) return;
+    bar?.querySelector('.ask')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    keepBtn?.focus();
   });
 </script>
 
@@ -60,8 +90,8 @@
       {#if asking?.thread === r.thread}
         <div class="ask" role="group" aria-label="Close {r.title}">
           <span data-tip={asking.detail}>{asking.ask}</span>
-          <button class="btn sm danger" onclick={() => close(r)}>Close</button>
-          <button class="btn sm ghost" onclick={() => (asking = null)}>Keep</button>
+          <button class="btn sm danger" onclick={() => close(r)} onkeydown={askKey}>{asking.yes}</button>
+          <button class="btn sm ghost" bind:this={keepBtn} onclick={keep} onkeydown={askKey}>Keep</button>
         </div>
       {:else}
         <div class="tab p-{r.phase}" class:on class:amber={r.needsYou} class:closing={closing === r.thread} role="presentation">
@@ -69,6 +99,7 @@
             role="tab"
             aria-selected={on}
             class="pick"
+            data-thread={r.thread}
             onclick={() => ui.openRequest(r.thread)}
             aria-label="{r.title} — {r.status}"
             data-tip="{r.lead && r.lead.name !== 'Lead' ? `${r.lead.name} · ` : ''}{r.status}"

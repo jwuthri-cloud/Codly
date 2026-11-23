@@ -68,7 +68,8 @@
 <p class="sr-only" aria-live="polite">{announce}</p>
 
 <style>
-  .strip { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 2px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%); }
+  /* 12px at each end, the width of the fade: scrolled to an end, the first pill and "Start an agent" are clear of it. */
+  .strip { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 12px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%); }
   .strip::-webkit-scrollbar { display: none; }
   /* Centred while it fits; when it overflows it scrolls from the start (the Leads), which
      justify-content: center would put out of reach. */

@@ -1,6 +1,8 @@
 <!--
   The sheet: slides in from the right only when something is selected (agent, task or file),
   and slides away on Esc or ×. The stage makes room for it; nothing is covered.
+  The frame itself never scrolls (`overflow: clip`): only the body inside does, so × and the
+  name stay where they are whatever a jump to a section scrolls.
 -->
 <script lang="ts">
   import { cubicIn } from 'svelte/easing';
@@ -34,9 +36,11 @@
 {/if}
 
 <style>
-  .sheet { position: fixed; z-index: var(--z-sheet); top: var(--gutter); right: var(--gutter); bottom: var(--gutter); width: var(--sheet-w); border-radius: var(--r-xl); background: var(--glass-strong); display: flex; flex-direction: column; overflow: hidden; animation: sheet-in var(--d-4) var(--spring); }
+  .sheet { position: fixed; z-index: var(--z-sheet); top: var(--gutter); right: var(--gutter); bottom: var(--gutter); width: var(--sheet-w); border-radius: var(--r-xl); background: var(--glass-strong); display: flex; flex-direction: column; overflow: clip; animation: sheet-in var(--d-4) var(--spring); }
   @keyframes sheet-in { from { transform: translateX(calc(100% + 24px)); } to { transform: none; } }
-  .close { position: absolute; top: 14px; right: 14px; z-index: 2; }
+  .close { position: absolute; top: 14px; right: 14px; z-index: 2; transition: top var(--d-2) var(--ease-out); }
+  /* The agent sheet's pinned name bar is 44px high: × moves onto its centre line while it shows. */
+  .sheet:has(:global(.pin.on)) .close { top: 7px; }
   .body { flex: 1; min-height: 0; display: flex; flex-direction: column; animation: fade-in var(--d-3) var(--ease-out); }
   .gone { padding: 60px 24px; color: var(--ink-3); text-align: center; }
 </style>
