@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { StorageDemo } from '../demo/storage';
 import type { StorageCleanup } from '../gen/StorageCleanup';
 import type { StorageReport } from '../gen/StorageReport';
-import { backupText, branchLossText, bytes, cleanupText, lossText, stateText } from '../util/storage';
+import { backupLossText, backupText, branchLossText, bytes, cleanupText, lossText, setAsideText, stateText } from '../util/storage';
 
 describe('storage words', () => {
   it('sizes read as in Finder', () => {
@@ -33,6 +33,14 @@ describe('storage words', () => {
   it('a backup says when Codly made it', () => {
     expect(backupText({ kind: 'daily' })).toBe('Daily copy');
     expect(backupText({ kind: 'update' })).toBe('Copy from before an update');
+  });
+
+  it('what was moved aside is named, and the confirm of a backup says what is left', () => {
+    expect(setAsideText({ kind: 'backups' })).toBe('Backups of the data you had before');
+    expect(setAsideText({ kind: 'database' })).toBe('Database that Codly could not use');
+    expect(backupLossText(3)).toBe('Codly can no longer start from this copy. 3 other backups stay.');
+    expect(backupLossText(1)).toBe('Codly can no longer start from this copy. 1 other backup stays.');
+    expect(backupLossText(0)).toBe('This is the only backup. Until Codly makes the next one, there is no copy to start from if its data is damaged.');
   });
 
   it('a cleanup says what went', () => {
@@ -69,6 +77,25 @@ describe('the demo follows the core’s storage rules', () => {
     expect(before.map((b) => b.created_at)).toEqual([...before.map((b) => b.created_at)].sort((a, b) => b - a));
     d.handle('storage_clean', {}, NOW);
     expect(backups()).toEqual(before);
+  });
+
+  it('a backup can be deleted, a database cannot', () => {
+    const d = new StorageDemo(NOW);
+    const report = () => d.handle('storage_report', {}, NOW) as StorageReport;
+    const before = report();
+    expect(before.set_aside.map((s) => s.kind)).toEqual(['backups', 'database']);
+    const [folder, database] = before.set_aside;
+    // Not a backup: the database that was moved aside, the database in use, a path that is not listed.
+    for (const path of [database.path, database.path.replace(/codly\.broken-\d+/, 'codly'), '/etc/hosts']) {
+      expect(() => d.handle('storage_delete_backup', { path }, NOW)).toThrow(/not a backup/);
+    }
+    expect(report()).toEqual(before);
+
+    d.handle('storage_delete_backup', { path: before.backups[0].path }, NOW);
+    expect(report().backups).toEqual(before.backups.slice(1));
+    d.handle('storage_delete_backup', { path: folder.path }, NOW);
+    expect(report().set_aside).toEqual([database]);
+    expect(() => d.handle('storage_delete_backup', { path: folder.path }, NOW)).toThrow(/not a backup/);
   });
 
   it('logs stay for ever when the limit is 0', () => {

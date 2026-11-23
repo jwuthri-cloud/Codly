@@ -2,6 +2,7 @@
 // lose. The core decides what may go (crates/codly-core/src/housekeeping/storage.rs); this
 // only says it.
 import type { DbBackup } from '../gen/DbBackup';
+import type { SetAside } from '../gen/SetAside';
 import type { StorageCleanup } from '../gen/StorageCleanup';
 import type { StoredBranch } from '../gen/StoredBranch';
 import type { StoredWorktree } from '../gen/StoredWorktree';
@@ -16,6 +17,18 @@ export function bytes(n: number): string {
 
 /** What a copy of Codly's database is: made once a day, or before an update changed the data. */
 export const backupText = (b: Pick<DbBackup, 'kind'>): string => (b.kind === 'daily' ? 'Daily copy' : 'Copy from before an update');
+
+/** What a start from a backup, or with no data, moved aside: the older backups, or the database Codly could not use. */
+export const setAsideText = (s: Pick<SetAside, 'kind'>): string => (s.kind === 'backups' ? 'Backups of the data you had before' : 'Database that Codly could not use');
+
+/** What deleting the backups that a start with no data moved aside loses, for the confirm. */
+export const setAsideLossText = 'You lose every backup of the data you had before you started with no data. They cannot be brought back.';
+
+/** What deleting one backup loses, for the confirm. `others`: how many more backups stay. */
+export function backupLossText(others: number): string {
+  if (others > 0) return `Codly can no longer start from this copy. ${plural(others, 'other backup')} ${others === 1 ? 'stays' : 'stay'}.`;
+  return 'This is the only backup. Until Codly makes the next one, there is no copy to start from if its data is damaged.';
+}
 
 /** One line for the list: "Merged, clean", "3 files not committed, 2 commits not merged". */
 export function stateText(w: Pick<StoredWorktree, 'state' | 'dirty_count' | 'unmerged_commits'>): string {

@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+use super::request::{self, Line, MAX_LINE};
 use super::{ToolCtx, ToolHandler, tools};
 use crate::adapters::McpLaunch;
 
@@ -122,9 +123,12 @@ impl McpServer {
 
     async fn serve_conn(&self, stream: UnixStream, handler: ToolHandler) -> anyhow::Result<()> {
         let (r, mut w) = stream.into_split();
-        let mut lines = BufReader::new(r).lines();
-        while let Some(line) = lines.next_line().await? {
-            let reply = self.handle_line(&line, &handler).await;
+        let mut requests = BufReader::new(r);
+        while let Some(line) = request::read_line(&mut requests, MAX_LINE).await? {
+            let reply = match line {
+                Line::Bytes(line) => self.handle_line(&line, &handler).await,
+                Line::TooLong => json!({ "ok": false, "error": request::too_long() }),
+            };
             let mut out = serde_json::to_vec(&reply)?;
             out.push(b'\n');
             w.write_all(&out).await?;
@@ -132,8 +136,8 @@ impl McpServer {
         Ok(())
     }
 
-    async fn handle_line(&self, line: &str, handler: &ToolHandler) -> Value {
-        let req: Value = match serde_json::from_str(line) {
+    async fn handle_line(&self, line: &[u8], handler: &ToolHandler) -> Value {
+        let req: Value = match serde_json::from_slice(line) {
             Ok(v) => v,
             Err(e) => return json!({ "ok": false, "error": format!("bad request: {e}") }),
         };
@@ -149,7 +153,10 @@ impl McpServer {
         if !allowed {
             return json!({ "ok": false, "error": format!("tool {tool} is not available to this agent") });
         }
-        let args = req.get("args").cloned().unwrap_or(json!({}));
+        let args = match request::arguments(req.get("args")) {
+            Ok(args) => args,
+            Err(error) => return json!({ "ok": false, "error": error }),
+        };
         let limit = (self.time_limit)(&tool);
         // The call runs as a task of its own: when the limit passes, the caller is answered
         // and the call still runs to its end. Cutting it in the middle could leave half of
@@ -172,6 +179,8 @@ impl McpServer {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncBufReadExt;
+
     use super::*;
     use crate::model::Role;
 
@@ -219,6 +228,49 @@ mod tests {
         assert_eq!(bad["ok"], false);
         let list = call(json!({ "token": token, "tool": "__list" })).await;
         assert!(list["result"].as_array().unwrap().len() >= 9);
+    }
+
+    #[tokio::test]
+    async fn a_request_that_is_too_long_or_whose_arguments_are_not_an_object_is_refused() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let handler: ToolHandler = Arc::new(move |_ctx, _tool, args| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(args) })
+        });
+        let srv = McpServer::start(dir.path().join("t.sock"), handler).await.unwrap();
+        let token = srv.register(ToolCtx { agent_id: "a1".into(), run_id: "r1".into(), task_id: None, role: Role::Worker });
+
+        // One connection: a refused request does not end it.
+        let stream = UnixStream::connect(srv.sock_path()).await.unwrap();
+        let (r, mut w) = stream.into_split();
+        let mut lines = BufReader::new(r).lines();
+        let mut ask = async |line: String| {
+            w.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+            let answer = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await.expect("the server answers").unwrap().unwrap();
+            serde_json::from_str::<Value>(&answer).unwrap()
+        };
+        let call = |args: Value| json!({ "token": token, "tool": "codly_board", "args": args }).to_string();
+
+        for not_an_object in [json!("all"), json!(["all"]), json!(1)] {
+            let refused = ask(call(not_an_object)).await;
+            assert_eq!(refused["ok"], false);
+            assert!(refused["error"].as_str().unwrap().contains("must be a JSON object"), "{refused}");
+        }
+        // A request longer than the limit: its token is not even read.
+        let long = ask(call(json!({ "text": "x".repeat(MAX_LINE) }))).await;
+        assert_eq!(long, json!({ "ok": false, "error": request::too_long() }));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no refused request reached a tool");
+
+        // A call without arguments has an empty object, and a large one under the limit passes.
+        assert_eq!(ask(call(Value::Null)).await, json!({ "ok": true, "result": {} }));
+        assert_eq!(ask(json!({ "token": token, "tool": "codly_board" }).to_string()).await, json!({ "ok": true, "result": {} }));
+        let big = "x".repeat(MAX_LINE / 2);
+        assert_eq!(ask(call(json!({ "text": big }))).await["result"]["text"], json!(big));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

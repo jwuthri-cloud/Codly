@@ -9,9 +9,11 @@
 //! Wire format on the socket: one JSON line per request
 //! `{"token": "...", "tool": "codly_board", "args": {...}}` and one JSON line back
 //! `{"ok": true, "result": <json>}` or `{"ok": false, "error": "..."}`. `tool: "__list"`
-//! returns the role-filtered tool specs.
+//! returns the role-filtered tool specs. A request line is at most 1 MiB and `args` is a JSON
+//! object, on stdio and on the socket (`request`): anything else is answered with an error.
 
 pub mod bridge;
+mod request;
 pub mod server;
 pub mod tools;
 

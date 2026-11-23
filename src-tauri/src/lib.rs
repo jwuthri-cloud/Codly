@@ -275,6 +275,7 @@ pub fn run() {
             commands::storage_clean,
             commands::storage_delete_worktree,
             commands::storage_delete_branch,
+            commands::storage_delete_backup,
             onboarding_commands::install_cli,
             onboarding_commands::byok_status,
             onboarding_commands::byok_configure,

@@ -255,7 +255,8 @@ impl Core {
     }
 
     /// What Codly holds on disk and in each repository: worktrees with their state and size,
-    /// `codly/…` branches without a worktree, run logs, artifact copies and database backups.
+    /// `codly/…` branches without a worktree, run logs, artifact copies, database backups and
+    /// what a start from a backup or with no data moved aside.
     pub async fn storage(&self) -> anyhow::Result<StorageReport> {
         let mut offices = vec![];
         for office in self.inner.store.offices()? {
@@ -266,7 +267,23 @@ impl Core {
             logs: storage::measure(self.inner.data("runs")).await,
             artifacts: storage::measure(self.inner.data("artifacts")).await,
             backups: self.inner.store.backups(),
+            set_aside: self.inner.store.set_aside(),
         })
+    }
+
+    /// Remove one backup of Codly's database that the report listed: a copy (`backups`), or a
+    /// folder of older copies that a start with no data moved aside (`set_aside`). It is your
+    /// own click, after a confirm. The database is never removed, and neither is one that
+    /// was moved aside.
+    pub async fn delete_backup(&self, path: &str) -> anyhow::Result<()> {
+        let (inner, path) = (self.inner.clone(), PathBuf::from(path));
+        let bytes = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || inner.store.remove_backup(&path)
+        })
+        .await??;
+        tracing::info!("you removed the database backup {} ({bytes} bytes)", path.display());
+        Ok(())
     }
 
     /// "Clean up now": what the background sweep removes, without its day of waiting and
@@ -530,6 +547,34 @@ mod tests {
         let copy = core.inner.store.backup_if_due(now_ms()).unwrap().expect("no copy yet: one is due");
         assert!(copy.bytes > 0);
         assert_eq!(core.storage().await.unwrap().backups, [copy]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_backup_you_remove_is_gone_and_the_database_stays() {
+        let (dir, core, _ws, _repo) = start().await;
+        let data = dir.path().join("data");
+        let copy = core.inner.store.backup_if_due(now_ms()).unwrap().expect("no copy yet: one is due");
+        // What an earlier start with no data left in the data folder.
+        let (kept, broken) = (data.join("backups.before-5"), data.join("codly.broken-5.sqlite"));
+        std::fs::create_dir(&kept).unwrap();
+        std::fs::write(kept.join("codly-4-v1-daily.sqlite"), b"an older copy").unwrap();
+        std::fs::write(&broken, b"not readable").unwrap();
+        let report = core.storage().await.unwrap();
+        let aside: Vec<(&str, i64)> = report.set_aside.iter().map(|s| (s.path.as_str(), s.bytes)).collect();
+        assert_eq!(aside, [(kept.to_str().unwrap(), 13), (broken.to_str().unwrap(), 12)]);
+
+        // Only a backup can go: not the database in use, and not one that was moved aside.
+        let live = data.join(crate::store::FILE);
+        for refused in [&live, &broken] {
+            let e = core.delete_backup(refused.to_str().unwrap()).await.unwrap_err().to_string();
+            assert!(e.contains("is not a backup of Codly's data"), "{e}");
+        }
+        core.delete_backup(&copy.path).await.unwrap();
+        core.delete_backup(kept.to_str().unwrap()).await.unwrap();
+        let report = core.storage().await.unwrap();
+        assert!(report.backups.is_empty() && !kept.exists());
+        assert_eq!(report.set_aside.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(), [broken.to_str().unwrap()]);
+        assert!(live.exists() && broken.exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

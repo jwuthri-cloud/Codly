@@ -558,7 +558,8 @@ crates/codly-core/src/    the engine: no Tauri dependency
                     the way back from a database that cannot be used (it is moved aside, never deleted;
                     a start with no data moves the copies aside too, as `backups.before-<time>/`)
   git.rs            worktrees, commits, merges, push (shells out to the user's git)
-  mcp/              server.rs (Unix socket), bridge.rs (`codly mcp`), tools.rs (tool specs)
+  mcp/              server.rs (Unix socket), bridge.rs (`codly mcp`), tools.rs (tool specs),
+                    request.rs (what both take: a line of at most 1 MiB, arguments that are an object)
   index/            code retrieval: FTS5 over paths, symbols and chunks; pointer packs
   memory/           memories, triples, packs; panel.rs feeds the Knowledge room
   pty.rs            terminals

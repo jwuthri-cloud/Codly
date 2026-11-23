@@ -553,6 +553,8 @@ export const api = {
   /** Delete a `codly/…` branch that no worktree has checked out. Commits that no other branch has need `force`. */
   storageDeleteBranch: (officeId: string, branch: string, head: string, force: boolean) =>
     call<null>('storage_delete_branch', { officeId, branch, head, force }),
+  /** Remove one backup of Codly's data that the storage report listed (`path`): a copy, or a folder of older copies that was moved aside. The database is never removed. */
+  storageDeleteBackup: (path: string) => call<null>('storage_delete_backup', { path }),
   /** Onboarding: run the vendor's install or update line for a CLI in a visible terminal (attach with `ptyAttach`). The core picks the text from (provider, rung); nothing typed here is ever run. */
   installCli: (provider: Provider, rung: InstallRung) => call<InstallRun>('install_cli', { provider, rung }),
   /** Your own API credentials per vendor (opt-in): Anthropic → Claude, OpenAI → Codex, OpenRouter → OpenCode.

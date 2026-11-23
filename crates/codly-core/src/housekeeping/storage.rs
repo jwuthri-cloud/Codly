@@ -6,6 +6,9 @@
 //! - `codly/…` branches that no worktree has checked out;
 //! - raw run logs (`<data>/runs/<run id>/`) and artifact copies (`<data>/artifacts/`).
 //!
+//! The report also lists the copies of Codly's own database and what a start from a copy, or
+//! with no data, moved aside (`crate::store::backup` makes, lists and removes them).
+//!
 //! What "nothing to lose" means (`WorkState::Merged`): no uncommitted file (ignored files do
 //! not count: build output, installed dependencies), and every commit is contained in the
 //! branch the user has checked out, in the repository's default branch, or, for a task of a
@@ -35,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::git::{Git, WorktreeInfo};
-use crate::store::backup::DbBackup;
+use crate::store::backup::{DbBackup, SetAside};
 
 /// Uncommitted files named per worktree in a report (the count is always complete).
 const DIRTY_SHOWN: usize = 20;
@@ -145,6 +148,9 @@ pub struct StorageReport {
     pub artifacts: DirUsage,
     /// Copies of Codly's database, newest first (`backups/`).
     pub backups: Vec<DbBackup>,
+    /// What a start from a backup, or with no data, moved aside in Codly's data folder, newest
+    /// first: folders of older backups, and databases that could not be used.
+    pub set_aside: Vec<SetAside>,
 }
 
 /// What a cleanup removed.

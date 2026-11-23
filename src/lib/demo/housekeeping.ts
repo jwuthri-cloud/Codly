@@ -107,6 +107,7 @@ export class HousekeepingDemo {
       case 'storage_clean':
       case 'storage_delete_worktree':
       case 'storage_delete_branch':
+      case 'storage_delete_backup':
         return this.storage.handle(cmd, a, now);
     }
     throw new Error(`Unknown command ${cmd}`);

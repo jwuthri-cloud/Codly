@@ -2,6 +2,7 @@
 import type { DbBackup } from "./DbBackup";
 import type { DirUsage } from "./DirUsage";
 import type { OfficeStorage } from "./OfficeStorage";
+import type { SetAside } from "./SetAside";
 
 export type StorageReport = { offices: Array<OfficeStorage>, 
 /**
@@ -15,4 +16,9 @@ artifacts: DirUsage,
 /**
  * Copies of Codly's database, newest first (`backups/`).
  */
-backups: Array<DbBackup>, };
+backups: Array<DbBackup>, 
+/**
+ * What a start from a backup, or with no data, moved aside in Codly's data folder, newest
+ * first: folders of older backups, and databases that could not be used.
+ */
+set_aside: Array<SetAside>, };

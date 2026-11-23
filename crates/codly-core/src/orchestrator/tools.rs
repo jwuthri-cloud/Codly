@@ -50,8 +50,12 @@ impl Inner {
                 let triples = self
                     .store
                     .with(|db| guard("knowledge graph", || memory::query_triples(db, ws, s(&args, "entity"), s(&args, "predicate"), 50)))?;
+                // A fact that Codly did not observe and the user did not write is text an agent
+                // wrote (`codly_kg_add`). A fact has no author on record, so the caller's own
+                // facts are marked too.
                 Ok(json!({ "triples": triples.iter().map(|t| json!({
                     "subject": t.subject, "predicate": t.predicate, "object": t.object, "source": t.source, "since": t.valid_from,
+                    "untrusted": !matches!(t.source.as_str(), "observed" | "user"),
                 })).collect::<Vec<_>>() }))
             }
             t::KG_ADD => {
@@ -274,5 +278,42 @@ impl Inner {
             let _ = me.send_to_lead(&ws, &thread, body, Some(agent_id)).await;
         });
         Ok(json!({ "ok": true, "note": "Sent to the lead. The answer arrives as a later message; continue meanwhile if you can." }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::{Core, CoreConfig, StartOptions};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fact_an_agent_wrote_is_marked_untrusted_in_a_graph_query() {
+        let root = tempfile::tempdir().unwrap();
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: root.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let inner = &core.inner;
+        let ctx = ToolCtx { agent_id: "a1".into(), run_id: "r1".into(), task_id: None, role: Role::Worker };
+
+        // One fact an agent wrote with codly_kg_add, and one Codly saw happen.
+        let written = json!({ "subject": "concept:auth", "predicate": "implemented_in", "object": "file:src/auth.ts" });
+        assert_eq!(inner.call_tool(ctx.clone(), t::KG_ADD, written).await.unwrap()["added"], true);
+        let seen = Triple {
+            id: String::new(),
+            workspace_id: None,
+            subject: "agent:Ada".into(),
+            predicate: "works_on".into(),
+            object: "concept:auth".into(),
+            source: "observed".into(),
+            source_event: None,
+            confidence: 1.0,
+            valid_from: 0,
+            valid_to: None,
+        };
+        assert!(inner.add_triple(None, seen, None).unwrap().is_some());
+
+        let found = inner.call_tool(ctx, t::KG_QUERY, json!({ "entity": "concept:auth" })).await.unwrap();
+        let mut marks: Vec<(&str, bool)> = found["triples"].as_array().unwrap().iter().map(|f| (f["source"].as_str().unwrap(), f["untrusted"].as_bool().unwrap())).collect();
+        marks.sort_unstable();
+        assert_eq!(marks, [("agent", true), ("observed", false)], "{found}");
     }
 }

@@ -2,8 +2,10 @@
 // with a worktree in each state, kept in memory, with the same rules as
 // crates/codly-core/src/housekeeping/storage.rs (the tested original): a cleanup removes only
 // what is finished, merged, clean and not in use; a dirty or unmerged worktree goes only with
-// `force`, and keeps its branch unless the branch is asked for too.
+// `force`, and keeps its branch unless the branch is asked for too. Of Codly's own data, only
+// a backup can be deleted: a copy, or a folder of copies that was moved aside.
 import type { DbBackup } from '../gen/DbBackup';
+import type { SetAside } from '../gen/SetAside';
 import type { StorageCleanup } from '../gen/StorageCleanup';
 import type { StoragePolicy } from '../gen/StoragePolicy';
 import type { StorageReport } from '../gen/StorageReport';
@@ -27,6 +29,8 @@ export class StorageDemo {
   private logs: number[];
   /** Copies of the database, newest first: the last daily ones and one from before an update. */
   private backups: DbBackup[];
+  /** What a start with no data moved aside five weeks ago: the backups it had, and its database. */
+  private setAside: SetAside[];
 
   constructor(now: number) {
     const wt = (name: string, owner: string, days: number, size: number, more: Partial<Kept<StoredWorktree>>): Kept<StoredWorktree> => ({
@@ -57,6 +61,11 @@ export class StorageDemo {
     this.logs = Array.from({ length: 46 }, (_, i) => now - i * 1.5 * DAY);
     const copy = (kind: DbBackup['kind'], at: number, schema: number, size: number): DbBackup => ({ path: `${DATA}/backups/codly-${at}-v${schema}-${kind}.sqlite`, kind, created_at: at, schema, bytes: size });
     this.backups = [copy('daily', now - 0.2 * DAY, 6, 48e6), copy('daily', now - 1.2 * DAY, 6, 47e6), copy('daily', now - 2.2 * DAY, 6, 45e6), copy('update', now - 9 * DAY, 5, 31e6)];
+    const moved = now - 35 * DAY;
+    this.setAside = [
+      { path: `${DATA}/backups.before-${moved}`, kind: 'backups', moved_at: moved, bytes: 88e6 },
+      { path: `${DATA}/codly.broken-${moved}.sqlite`, kind: 'database', moved_at: moved, bytes: 52e6 },
+    ];
   }
 
   handle(cmd: string, a: Record<string, unknown>, now: number): unknown {
@@ -75,6 +84,8 @@ export class StorageDemo {
         return this.deleteWorktree(String(a.path), a.force === true, a.deleteBranch === true);
       case 'storage_delete_branch':
         return this.deleteBranch(String(a.branch), a.force === true);
+      case 'storage_delete_backup':
+        return this.deleteBackup(String(a.path));
     }
     throw new Error(`Unknown command ${cmd}`);
   }
@@ -86,6 +97,7 @@ export class StorageDemo {
       logs: { items: this.logs.length, bytes: this.logs.length * LOG },
       artifacts: { items: 37, bytes: 61e6 },
       backups: this.backups,
+      set_aside: this.setAside,
     };
   }
 
@@ -128,6 +140,16 @@ export class StorageDemo {
     if (!b) throw new Error(`${name} does not exist any more, or a worktree has it checked out`);
     if (b.unmerged_commits > 0 && !force) throw new Error(`not deleted: ${name} has commits that no other branch has; confirm that this can go`);
     this.branches = this.branches.filter((x) => x !== b);
+    return null;
+  }
+
+  /** Only a copy, or a folder of copies that was moved aside: never a database. */
+  private deleteBackup(path: string): null {
+    const copies = this.backups.filter((b) => b.path !== path);
+    const aside = this.setAside.filter((s) => !(s.kind === 'backups' && s.path === path));
+    if (copies.length === this.backups.length && aside.length === this.setAside.length) throw new Error(`${path} is not a backup of Codly's data`);
+    this.backups = copies;
+    this.setAside = aside;
     return null;
   }
 }

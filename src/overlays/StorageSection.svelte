@@ -4,7 +4,9 @@
   cleaned up by the core: a day after the plan ended, or at once with "Clean up now". The list
   is loaded when you ask for it, because it measures every worktree. A delete that loses work
   asks first and names what is lost; the core refuses it without that confirm. The list also
-  shows the backups of Codly's own database (the core makes and removes them).
+  shows the backups of Codly's own database (the core makes them and keeps the last few), and
+  what a start from a backup or with no data moved aside. A backup can be deleted after a
+  confirm. A database is never deleted here: one that was moved aside is shown in Finder.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -13,10 +15,11 @@
   import type { StorageReport } from '../lib/gen/StorageReport';
   import type { StoredBranch } from '../lib/gen/StoredBranch';
   import type { StoredWorktree } from '../lib/gen/StoredWorktree';
+  import { revealInFinder } from '../lib/state/actions';
   import { Loader } from '../lib/state/loader.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { ago, plural } from '../lib/util/format';
-  import { backupText, branchLossText, bytes, cleanupText, lossText, stateText } from '../lib/util/storage';
+  import { backupLossText, backupText, branchLossText, bytes, cleanupText, lossText, setAsideLossText, setAsideText, stateText } from '../lib/util/storage';
   import Icon from '../components/Icon.svelte';
   import LoadError from '../components/LoadError.svelte';
 
@@ -32,7 +35,7 @@
   const daysLabel = (d: number) => (d === 0 ? 'For ever' : d === 365 ? '1 year' : `${d} days`);
 
   let busy = $state(false);
-  /** The row whose delete waits for your confirm: `<office id>:<worktree path or branch name>`. */
+  /** The row whose delete waits for your confirm: `<office id>:<worktree path or branch name>`, or `backup:<path>`. */
   let confirming = $state<string | null>(null);
   let withBranch = $state(false);
 
@@ -98,6 +101,14 @@
     });
   }
 
+  /** Delete a backup of Codly's data, after the confirm: one copy, or a folder of copies that was moved aside. */
+  function removeBackup(path: string, what: 'copy' | 'folder') {
+    void change('delete the backup', async () => {
+      await api.storageDeleteBackup(path);
+      return what === 'copy' ? 'Deleted the backup' : 'Deleted the older backups';
+    });
+  }
+
   /** The last two parts of a worktree's path: "<plan>/<task>". */
   const shortPath = (path: string) => path.split('/').slice(-2).join('/');
 </script>
@@ -156,18 +167,61 @@
       {#if r.backups.length}
         <ul class="items" aria-label="Backups of Codly’s data">
           {#each r.backups as b (b.path)}
+            {@const key = `backup:${b.path}`}
             <li>
               <div class="i-top">
                 <span class="i-name" title={b.path}>{backupText(b)}</span>
                 <span class="grow"></span>
                 <span class="muted small num">{bytes(b.bytes)}</span>
+                {#if confirming !== key}
+                  <button class="btn sm ghost rm" disabled={busy} onclick={() => ask(key)}><Icon name="trash" size={13} />Delete…</button>
+                {/if}
               </div>
               <span class="muted small">made {ago(b.created_at)}</span>
+              {#if confirming === key}
+                <div class="confirm" role="group" aria-label="Confirm the delete">
+                  <span class="small">{backupLossText(r.backups.length - 1)}</span>
+                  <div class="c-actions">
+                    <button class="btn sm danger" disabled={busy} onclick={() => removeBackup(b.path, 'copy')}>Delete the backup</button>
+                    <button class="btn sm ghost" onclick={() => (confirming = null)}>Keep</button>
+                  </div>
+                </div>
+              {/if}
             </li>
           {/each}
         </ul>
       {:else}
         <p class="desc">No backup yet. The first one is made a moment after Codly starts.</p>
+      {/if}
+      {#if r.set_aside.length}
+        <span class="muted small">Moved aside when Codly started from a backup or with no data. Codly never deletes these by itself.</span>
+        <ul class="items" aria-label="Moved aside by a start from a backup or with no data">
+          {#each r.set_aside as s (s.path)}
+            {@const key = `backup:${s.path}`}
+            <li>
+              <div class="i-top">
+                <span class="i-name" title={s.path}>{setAsideText(s)}</span>
+                <span class="grow"></span>
+                <span class="muted small num">{bytes(s.bytes)}</span>
+                {#if s.kind === 'database'}
+                  <button class="btn sm ghost" onclick={() => revealInFinder(s.path)}><Icon name="folder" size={13} />Show in Finder</button>
+                {:else if confirming !== key}
+                  <button class="btn sm ghost rm" disabled={busy} onclick={() => ask(key)}><Icon name="trash" size={13} />Delete…</button>
+                {/if}
+              </div>
+              <span class="muted small">moved aside {ago(s.moved_at)}{#if s.kind === 'database'} · Codly keeps it. Delete it in Finder when you no longer need it.{/if}</span>
+              {#if confirming === key}
+                <div class="confirm" role="group" aria-label="Confirm the delete">
+                  <span class="small">{setAsideLossText}</span>
+                  <div class="c-actions">
+                    <button class="btn sm danger" disabled={busy} onclick={() => removeBackup(s.path, 'folder')}>Delete the older backups</button>
+                    <button class="btn sm ghost" onclick={() => (confirming = null)}>Keep</button>
+                  </div>
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
       {/if}
     </div>
     {#each r.offices as o (o.office_id)}

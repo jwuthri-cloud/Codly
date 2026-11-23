@@ -695,6 +695,7 @@ export class MockTransport implements Transport {
       case 'storage_clean':
       case 'storage_delete_worktree':
       case 'storage_delete_branch':
+      case 'storage_delete_backup':
         return (this.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
       case 'worktree_setup':
         return this.worktrees.setup((a.set as SetupChoice | null) ?? null);
