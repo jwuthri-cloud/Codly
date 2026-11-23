@@ -1628,7 +1628,7 @@ pub fn activity_label(kind: ActivityKind, target: &Target) -> String {
     truncate_chars(&raw, 28)
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
+pub(super) fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }

@@ -1527,6 +1527,11 @@ pub enum EventKind {
     Unknown {
         raw_type: String,
     },
+    /// Something the CLI tells about the run that is neither the agent's words nor an error
+    /// (Codex: what a hook did, a change of the thread's goal).
+    Notice {
+        text: String,
+    },
 
     // ── Codly domain events (from the orchestrator) ──
     AgentChanged {
@@ -1633,6 +1638,7 @@ impl EventKind {
             EventKind::Error { .. } => "error",
             EventKind::Exited { .. } => "exited",
             EventKind::Unknown { .. } => "unknown",
+            EventKind::Notice { .. } => "notice",
             EventKind::AgentChanged { .. } => "agent_changed",
             EventKind::PlanChanged { .. } => "plan_changed",
             EventKind::TaskChanged { .. } => "task_changed",
