@@ -13,6 +13,8 @@
 //! - a huge new folder the repository does not ignore (a dependency folder) is left out of
 //!   Codly's commit: the task says so once, the worker is asked about it once before the checks
 //!   run, and the folder costs no fix round;
+//! - what a commit leaves out when no worker turn follows goes to the Lead: on your own pass,
+//!   after the worker's one answer, and at a merge that Codly concludes in the task's worktree;
 //! - a turn that failed while the work was reviewed is not checked when the review ends: the
 //!   worker is asked to continue first, and a turn that ended on the usage limit (nobody is
 //!   asked to continue) does not leave the task waiting;
@@ -836,6 +838,15 @@ async fn a_huge_new_folder_is_left_out_of_the_commit_and_the_worker_is_asked_onc
     core.shutdown().await;
 }
 
+/// What the Lead was told about paths that a commit left out, once it was told.
+async fn lead_heard(turns: &Turns) -> Vec<String> {
+    wait_for("the Lead to hear it", 20, async || {
+        let lead: Vec<String> = turns.lock().unwrap().iter().filter(|t| t.0 == Role::Lead && t.2.contains("Codly did not commit")).map(|t| t.2.clone()).collect();
+        (!lead.is_empty()).then_some(lead)
+    })
+    .await
+}
+
 /// The dependency folder appears after the worker's turn, and you re-run the task's checks from
 /// its card. That pass has no worker turn to ask in: the task's record says what Codly's commit
 /// left out, the Lead hears it, and the task is merged without the folder.
@@ -866,11 +877,7 @@ async fn what_your_own_pass_leaves_out_goes_to_the_lead() {
     assert_eq!(said.len(), 1, "said once in the task: {:?}", decisions(&all));
     assert_eq!(said[0].2["left_out"], json!(["node_modules/"]));
     assert_eq!(worker_prompts(&turns).len(), 1, "your own pass asks no worker");
-    let heard = wait_for("the Lead to hear it", 20, async || {
-        let lead: Vec<String> = turns.lock().unwrap().iter().filter(|t| t.0 == Role::Lead && t.2.contains("Codly did not commit")).map(|t| t.2.clone()).collect();
-        (!lead.is_empty()).then_some(lead)
-    })
-    .await;
+    let heard = lead_heard(&turns).await;
     assert_eq!(heard.len(), 1, "{heard:?}");
     assert!(heard[0].contains("Task t1 \"Create hello.txt\": Codly did not commit 1 new path(s)") && heard[0].contains("goes on without them"), "{}", heard[0]);
     assert!(heard[0].contains("node_modules/ (2001 new files)"), "{}", heard[0]);
@@ -878,6 +885,116 @@ async fn what_your_own_pass_leaves_out_goes_to_the_lead() {
     let branch = core.snapshot().await.unwrap().plans.remove(0).integration_branch.unwrap();
     let merged = String::from_utf8(git(&dir.path().join("repo"), &["ls-tree", "-r", "--name-only", &branch]).stdout).unwrap();
     assert!(merged.contains("hello.txt") && !merged.contains("node_modules"), "{merged}");
+    core.shutdown().await;
+}
+
+/// A new file one byte over what a commit takes (sparse: nothing is written).
+fn big_file(path: &Path) {
+    std::fs::File::create(path).unwrap().set_len(codly_core::git::MAX_NEW_FILE_BYTES + 1).unwrap();
+}
+
+/// The worker is asked about a file that Codly's commit left out, and its answer turn leaves
+/// another one. A worker is asked once: the task's record names the new file, the Lead hears
+/// it, and the task is checked and merged without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_the_workers_answer_leaves_out_goes_to_the_lead() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            turn.write("hello.txt", "hello\n");
+            if turn.prompt.contains("did not commit") {
+                std::fs::remove_file(turn.spec.cwd.join("dump.bin")).unwrap();
+                big_file(&turn.spec.cwd.join("core.bin"));
+            } else {
+                big_file(&turn.spec.cwd.join("dump.bin"));
+            }
+            turn.done().await;
+        })
+    });
+    let spawner = FakeSpawner { lead: lead_with(hello_plan()), worker, turns: turns.clone() };
+    let core = start(dir.path(), spawner, Settings { lead_followups: true, ..auto() }).await;
+
+    wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(task_by_key(&core, "t1").await.unwrap().status, TaskStatus::Done);
+    let all = events(&core).await;
+    let said: Vec<_> = decisions(&all).into_iter().filter(|d| d.1.starts_with("t1: Codly did not commit")).collect();
+    assert_eq!(said.len(), 2, "each list is said once: {:?}", decisions(&all));
+    assert_eq!((&said[0].2["left_out"], &said[1].2["left_out"]), (&json!(["dump.bin"]), &json!(["core.bin"])));
+    let prompts = worker_prompts(&turns);
+    assert_eq!(prompts.len(), 2, "the brief, then one question and no second one: {prompts:?}");
+    assert!(prompts[1].contains("dump.bin (25 MB)"), "{}", prompts[1]);
+    let heard = lead_heard(&turns).await;
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert!(heard[0].contains("Task t1 \"Create hello.txt\": Codly did not commit 1 new path(s)") && heard[0].contains("goes on without them"), "{}", heard[0]);
+    assert!(heard[0].contains("core.bin (25 MB)") && !heard[0].contains("dump.bin"), "{}", heard[0]);
+    assert_eq!(verified(&all), [(HELLO_CHECK.to_string(), true)], "the checks ran once, after the worker's answer");
+    let branch = core.snapshot().await.unwrap().plans.remove(0).integration_branch.unwrap();
+    let merged = String::from_utf8(git(&dir.path().join("repo"), &["ls-tree", "-r", "--name-only", &branch]).stdout).unwrap();
+    assert!(merged.contains("hello.txt") && !merged.contains("core.bin"), "{merged}");
+    core.shutdown().await;
+}
+
+/// t2's merge into the plan's branch conflicts with t1's shared.txt where Codly tries it, and
+/// is clean inside t2's worktree: only t2's branch has the union merge rule for that file. Codly
+/// concludes that merge itself, with no worker turn. Its commit leaves out the big file that
+/// t2's check made after the task's commit: the task's record says so, the Lead hears it, and
+/// the plan's branch gets the merge without the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_merge_that_codly_concludes_says_what_its_commit_left_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    // `rm` is a risk for the approval rules: t2 waits for you with its work committed. Its
+    // check runs when the test allows it, once t1 is merged.
+    let check = "rm -f stale.txt && truncate -s 27M dump.bin";
+    let mut t2 = task("t2", "t2.txt", check);
+    t2["write_scope"] = json!(["t2.txt", ".gitattributes"]);
+    let plan = json!({ "summary": "Add files", "tasks": [task("t1", "t1.txt", "test -f t1.txt"), t2] });
+    // t1 waits until t2 has its worktree: both are cut before t1's merge.
+    let t2_up = Arc::new(AtomicBool::new(false));
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let t2_up = t2_up.clone();
+        Box::pin(async move {
+            if turn.prompt.contains("[Codly] Task t2:") {
+                t2_up.store(true, Ordering::SeqCst);
+                turn.write("t2.txt", "ok\n");
+                turn.write("shared.txt", "from t2\n");
+                turn.write(".gitattributes", "shared.txt merge=union\n");
+            } else {
+                until(|| t2_up.load(Ordering::SeqCst)).await;
+                turn.write("t1.txt", "x\n");
+                turn.write("shared.txt", "from t1\n");
+            }
+            turn.done().await;
+        })
+    });
+    let spawner = FakeSpawner { lead: lead_with(plan), worker, turns: turns.clone() };
+    let core = start(dir.path(), spawner, Settings { lead_followups: true, ..auto() }).await;
+
+    wait_task(&core, "t1", TaskStatus::Done).await;
+    let t2 = wait_task(&core, "t2", TaskStatus::Blocked).await;
+    assert!(core.recheck_task(&t2.id, vec![check.into()]).await.unwrap().is_empty());
+    wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(task_by_key(&core, "t2").await.unwrap().status, TaskStatus::Done);
+    let all = events(&core).await;
+    let said = decisions(&all);
+    assert!(said.iter().any(|d| d.1.starts_with("t2: conflicts with ") && d.1.contains(" in shared.txt")), "the first try conflicted: {said:?}");
+    assert_eq!(worker_prompts(&turns).len(), 2, "one brief each: no worker resolved the merge");
+    let left: Vec<_> = said.iter().filter(|d| d.1.starts_with("t2: Codly did not commit")).collect();
+    assert_eq!(left.len(), 1, "said once in the task: {said:?}");
+    assert!(left[0].1.contains("dump.bin (27 MB)"), "{}", left[0].1);
+    assert_eq!(left[0].2["left_out"], json!(["dump.bin"]));
+    let heard = lead_heard(&turns).await;
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert!(heard[0].contains("Task t2 \"Create t2.txt\": Codly did not commit 1 new path(s)") && heard[0].contains("dump.bin (27 MB)"), "{}", heard[0]);
+    // The plan's branch has both tasks, with both lines of shared.txt, and not the big file.
+    let repo = dir.path().join("repo");
+    let branch = core.snapshot().await.unwrap().plans.remove(0).integration_branch.unwrap();
+    let merged = String::from_utf8(git(&repo, &["ls-tree", "-r", "--name-only", &branch]).stdout).unwrap();
+    assert!(merged.contains("t1.txt") && merged.contains("t2.txt") && !merged.contains("dump.bin"), "{merged}");
+    let shared = String::from_utf8(git(&repo, &["show", &format!("{branch}:shared.txt")]).stdout).unwrap();
+    assert!(shared.contains("from t1") && shared.contains("from t2"), "{shared}");
+    assert!(PathBuf::from(t2.worktree.unwrap()).join("dump.bin").exists(), "left where it was");
     core.shutdown().await;
 }
 

@@ -1375,7 +1375,7 @@ impl Inner {
         self.fix_round(&task, &worker, Fix::Conflict { files, integration: integ, sha }).await
     }
 
-    async fn finish_task(self: &Arc<Self>, task: &Task, merged: Option<(String, i64)>) -> Result<()> {
+    pub(super) async fn finish_task(self: &Arc<Self>, task: &Task, merged: Option<(String, i64)>) -> Result<()> {
         let ws_id = self.store.task_workspace(&task.id)?;
         let ws = ws_id.as_deref();
         let worker = task.assignee.clone().unwrap_or_default();

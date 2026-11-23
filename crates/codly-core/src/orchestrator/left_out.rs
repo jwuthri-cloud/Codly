@@ -28,6 +28,21 @@ fn key(owner: &str, wt: &Path) -> String {
     format!("left_out:{owner}:{}", wt.display())
 }
 
+/// What you can do about the paths in `left`, for the record. A copy of Codly's is not to
+/// delete or to commit: the agent's commands in the worktree need it, and it can hold your
+/// local settings.
+fn what_to_do(left: &[LeftOut]) -> &'static str {
+    let copied = left.iter().filter(|l| matches!(l, LeftOut::Copied { .. })).count();
+    if copied == 0 {
+        "It is still in the worktree: add it to .gitignore or delete it, or commit it yourself if it is work."
+    } else if copied == left.len() {
+        "It is still in the worktree, and the agent's commands need it there: add it to .gitignore, and do not delete or commit it."
+    } else {
+        "They are still in the worktree. What Codly copied in: add it to .gitignore, and do not delete or commit it (the agent's \
+         commands need it there). The rest: add it to .gitignore or delete it, or commit it yourself if it is work."
+    }
+}
+
 impl Inner {
     /// `Git::commit_work` in `wt`, with what it left out on record (`note_left_out`, which
     /// the other arguments are for). The commit, None when nothing changed.
@@ -57,11 +72,7 @@ impl Inner {
         }
         self.store.kv_set(&key, &paths.to_string())?;
         let list = left.iter().map(LeftOut::to_string).collect::<Vec<_>>().join(", ");
-        let summary = format!(
-            "{who}: Codly did not commit {list}. {} It is still in the worktree: add it to .gitignore or delete it, or commit it \
-             yourself if it is work.",
-            prompts::left_out_why(left)
-        );
+        let summary = format!("{who}: Codly did not commit {list}. {} {}", prompts::left_out_why(left), what_to_do(left));
         let detail = json!({ "plan_id": task.and_then(|t| t.plan_id.clone()), "left_out": paths, "worktree": wt.to_string_lossy() });
         let kind = EventKind::Decision { id: new_id(), decision_type: "commit".into(), method: "rule".into(), summary, detail };
         self.emit(ws, row(agent, task.map(|t| t.id.as_str()), None, kind))?;
@@ -205,14 +216,15 @@ mod tests {
         core.shutdown().await;
     }
 
-    /// A task's rows go when the task is done; another task's and an agent's stay.
+    /// A task's rows go when the task is done (`finish_task`); another task's and an agent's
+    /// stay.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_done_task_keeps_no_row() {
         let dir = tempfile::tempdir().unwrap();
         let (core, ws) = start(dir.path()).await;
         let inner = &core.inner;
         let (ada, wt) = solo(&core, &ws, "ada").await;
-        let task = |key: &str| Task {
+        let task = |key: &str, status: TaskStatus| Task {
             id: new_id(),
             plan_id: None,
             key: key.into(),
@@ -222,7 +234,7 @@ mod tests {
             write_scope: vec![],
             verify: vec![],
             depends_on: vec![],
-            status: TaskStatus::Blocked,
+            status,
             assignee: None,
             agent_hint: None,
             account_hint: None,
@@ -236,7 +248,8 @@ mod tests {
             created_at: now_ms(),
             updated_at: now_ms(),
         };
-        let (t1, t2) = (task("t1"), task("t2"));
+        // t1 is at its merge, the step that ends a task.
+        let (t1, t2) = (task("t1", TaskStatus::Merging), task("t2", TaskStatus::Blocked));
         for t in [&t1, &t2] {
             inner.emit(Some(&ws.id), row(None, Some(&t.id), None, EventKind::TaskChanged { task: t.clone() })).unwrap();
         }
@@ -253,9 +266,15 @@ mod tests {
         assert!(record[0].0.starts_with("t1: Codly did not commit .env (copied in by Codly), dump.bin (30 MB). A new folder with more than"), "{}", record[0].0);
         assert!(record[0].0.contains("What Codly copied into the worktree"), "{}", record[0].0);
         assert!(!record[1].0.contains("25 MB") && record[1].0.contains("What Codly copied into the worktree"), "{}", record[1].0);
+        // A copy is not to delete or to commit; a path that is too big can be both.
+        assert!(record[0].0.ends_with("The rest: add it to .gitignore or delete it, or commit it yourself if it is work."), "{}", record[0].0);
+        assert!(record[0].0.contains("What Codly copied in: add it to .gitignore, and do not delete or commit it"), "{}", record[0].0);
+        assert!(record[1].0.ends_with("add it to .gitignore, and do not delete or commit it."), "{}", record[1].0);
+        assert!(!record[1].0.contains("or delete it") && !record[1].0.contains("commit it yourself"), "{}", record[1].0);
         assert_eq!(rows(&core).len(), 4);
 
-        inner.forget_left_out(&t1.id).unwrap();
+        inner.finish_task(&t1, None).await.unwrap();
+        assert_eq!(inner.task(&t1.id).unwrap().status, TaskStatus::Done);
         let kept: Vec<String> = rows(&core).into_iter().map(|(key, _)| key).collect();
         let mut expected = vec![key(&t2.id, &wt), key(&ada.id, &wt)];
         expected.sort();

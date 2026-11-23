@@ -23,7 +23,8 @@
 //! dependencies, local settings: `orchestrator/worktree_setup.rs`). It is copied only where
 //! the branch ignores it, but a worktree outlives that branch and a branch can lose an ignore
 //! rule. Each copy is on the worktree's record (`note_copied`), and a commit or a checkpoint
-//! on a branch that does not ignore it leaves it out and reports it like the rest.
+//! on a branch that does not ignore it leaves it out and reports it like the rest. A file
+//! that the branch tracks in a copied folder is the branch's own: its changes are committed.
 //!
 //! The user's checkout is theirs too: Codly never merges into it while they are in the middle
 //! of a merge, rebase or cherry-pick of their own, only aborts a merge it started itself, and
@@ -113,7 +114,8 @@ pub enum LeftOut {
     /// A new file of more than `MAX_NEW_FILE_BYTES`.
     File { path: String, bytes: u64 },
     /// A file or folder (`path` ends in `/`) that Codly copied into the worktree
-    /// (`Git::note_copied`), on a branch that does not ignore it.
+    /// (`Git::note_copied`), on a branch that does not ignore it. Of a folder, only the new
+    /// files: a change to a file in it that the branch tracks is work, and is committed.
     Copied { path: String },
 }
 
@@ -794,10 +796,11 @@ impl Git {
         if !left_out.is_empty() {
             tracing::info!("commit in {}: left out: {}", wt.display(), left_out.iter().map(LeftOut::to_string).collect::<Vec<_>>().join(", "));
         }
-        let add = add_all_but(&left_out);
-        let mut args = vec![c1, hooks, c2, fsmonitor];
-        args.extend(add.iter().map(String::as_str));
-        self.ok(wt, &args, false).await?;
+        for add in add_all_but(&left_out) {
+            let mut args = vec![c1, hooks, c2, fsmonitor];
+            args.extend(add.iter().map(String::as_str));
+            self.ok(wt, &args, false).await?;
+        }
         let files =
             split_z(&self.ok(wt, &[c1, hooks, c2, fsmonitor, "diff", "--cached", "--name-only", "--no-renames", "-z"], false).await?);
         let merging = self.in_merge(wt).await;
@@ -1060,14 +1063,22 @@ fn copied_among(record: &[String], files: &[String]) -> Vec<String> {
     record.iter().filter_map(found).collect()
 }
 
-/// `git add -A` for everything in a worktree but the paths in `left_out`.
-fn add_all_but(left_out: &[LeftOut]) -> Vec<String> {
-    let mut add = vec!["add".to_string(), "-A".to_string()];
-    if !left_out.is_empty() {
-        add.extend(["--".to_string(), ".".to_string()]);
-        add.extend(left_out.iter().map(|l| format!(":(exclude,literal){}", l.path())));
+/// The `git add` calls, in order, that stage everything in a worktree but the paths in
+/// `left_out`: `add -A` without them. A folder that is too big is new as a whole, but a folder
+/// that Codly copied in can hold files that the branch tracks (an older branch of the same
+/// worktree, a file that somebody staged), and leaving the folder out leaves their changes
+/// out too. So with such a folder, `add -u` first takes every change to a tracked file,
+/// wherever it is: only the new files of the folder stay out.
+fn add_all_but(left_out: &[LeftOut]) -> Vec<Vec<String>> {
+    let mut all = vec!["add".to_string(), "-A".to_string()];
+    if left_out.is_empty() {
+        return vec![all];
     }
-    add
+    all.extend(["--".to_string(), ".".to_string()]);
+    all.extend(left_out.iter().map(|l| format!(":(exclude,literal){}", l.path())));
+    let copied_folder = left_out.iter().any(|l| matches!(l, LeftOut::Copied { path } if path.ends_with('/')));
+    let tracked = copied_folder.then(|| vec!["add".to_string(), "-u".to_string()]);
+    tracked.into_iter().chain([all]).collect()
 }
 
 /// The new folders with more than `max` files, as (folder, files in it). `roots`: the
@@ -1245,7 +1256,8 @@ impl Drop for ScratchIndex {
 impl Git {
     /// Everything in the worktree, staged in a private index: tracked and untracked files, no
     /// ignored one, and nothing that `commit_work` leaves out (a huge new folder or file is
-    /// not stored, and not read again at every checkpoint; nor is what Codly copied in). The
+    /// not stored, and not read again at every checkpoint; nor is what Codly copied in, apart
+    /// from the files of a copied folder that the branch tracks). The
     /// index starts as a copy of the worktree's own, whose file stats keep git from reading
     /// the files that did not change.
     async fn stage_apart(&self, wt: &Path) -> Result<ScratchIndex> {
@@ -1257,8 +1269,9 @@ impl Git {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // nothing was ever staged there
             Err(e) => bail!("cannot copy the index of {}: {e}", wt.display()),
         }
-        let add = add_all_but(&left_out);
-        self.on_index(wt, &index, &add.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+        for add in add_all_but(&left_out) {
+            self.on_index(wt, &index, &add.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+        }
         Ok(index)
     }
 
@@ -1617,6 +1630,46 @@ mod tests {
         let e = git.commit_work(&repo, "more").await.unwrap_err().to_string();
         assert!(e.contains("cannot read") && e.contains(COPIED_FILE), "{e}");
         assert_eq!(git.read(&repo, &["status", "--porcelain=v1", "-z"]).await.unwrap(), "?? .env\0?? c.txt\0?? node_modules/\0");
+    }
+
+    /// A folder that Codly copied in can hold files that the branch tracks. A change to one
+    /// of them is work: the checkpoint and the commit have it, and only the new files of the
+    /// folder stay out.
+    #[tokio::test]
+    async fn a_change_to_a_tracked_file_in_a_copied_folder_is_committed() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        // This branch tracks two files of the folder and ignores nothing.
+        std::fs::create_dir(repo.join("conf")).unwrap();
+        std::fs::write(repo.join("conf/app.json"), "{}\n").unwrap();
+        std::fs::write(repo.join("conf/old.json"), "{}\n").unwrap();
+        sh(&repo, &["add", "conf"]);
+        sh(&repo, &["commit", "-qm", "conf"]);
+        git.note_copied(&repo, "conf").await.unwrap();
+        std::fs::write(repo.join("conf/local.env"), "TOKEN=1\n").unwrap();
+
+        // The agent's work: one tracked file of the folder changed, one deleted.
+        std::fs::write(repo.join("conf/app.json"), "{\"a\": 1}\n").unwrap();
+        std::fs::remove_file(repo.join("conf/old.json")).unwrap();
+        std::fs::write(repo.join("b.txt"), "work\n").unwrap();
+        let tree = git.worktree_tree(&repo).await.unwrap();
+        let kept = git.read(&repo, &["ls-tree", "-r", "--name-only", &tree]).await.unwrap();
+        assert_eq!(kept.lines().collect::<Vec<_>>(), ["a.txt", "b.txt", "conf/app.json"], "the checkpoint has the work, not the copy");
+        assert_eq!(git.read(&repo, &["show", &format!("{tree}:conf/app.json")]).await.unwrap().trim(), "{\"a\": 1}");
+        let snap = git.commit_work(&repo, "work").await.unwrap();
+        assert_eq!(snap.left_out, [LeftOut::Copied { path: "conf/".into() }]);
+        assert_eq!(snap.commit.unwrap().files, ["b.txt", "conf/app.json", "conf/old.json"]);
+        assert_eq!(git.read(&repo, &["show", "HEAD:conf/app.json"]).await.unwrap().trim(), "{\"a\": 1}");
+        assert_eq!(git.read(&repo, &["status", "--porcelain=v1", "-z"]).await.unwrap(), "?? conf/local.env\0");
+
+        // A file that somebody staged there is tracked from then on: a later edit is work too.
+        std::fs::write(repo.join("conf/new.ts"), "export {};\n").unwrap();
+        sh(&repo, &["add", "conf/new.ts"]);
+        std::fs::write(repo.join("conf/new.ts"), "export const a = 1;\n").unwrap();
+        let snap = git.commit_work(&repo, "more").await.unwrap();
+        assert_eq!(snap.left_out, [LeftOut::Copied { path: "conf/".into() }]);
+        assert_eq!(snap.commit.unwrap().files, ["conf/new.ts"]);
+        assert_eq!(git.read(&repo, &["show", "HEAD:conf/new.ts"]).await.unwrap().trim(), "export const a = 1;");
     }
 
     /// Codly's own commits never run a configured fsmonitor program.

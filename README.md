@@ -302,7 +302,8 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   line first, or the task says that the file was not copied. To copy one file from a folder that git
   ignores as a whole, write its path (`secrets/dev.env`), not only its name. Codly remembers what it
   copied into each worktree: on a branch that does not ignore a copy, its commit leaves the copy out
-  and says so.
+  and says so. The worker is then asked for the `.gitignore` line only, never to delete or commit the
+  copy.
 - To try work before you merge it, a finished plan and a solo agent's Git tab have **Run…** and **Open
   in terminal**. Run… runs a command you type (for example `pnpm dev --port $CODLY_PORT_BASE`) in that
   worktree and shows its output. Codly keeps your last command for the repo and never picks one for

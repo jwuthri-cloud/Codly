@@ -409,13 +409,38 @@ pub fn left_out(left: &[LeftOut]) -> String {
     }
     format!(
         "[Codly] Codly did not commit these new paths in your worktree. {}\n{}\n\
-         What is not committed is not merged: the task would end without it. For each path: if it is not work, add it to \
-         .gitignore (outside your write scope, list it in scope_exceptions) or delete it. If it is work, stage it with \
-         `git add <path>` and Codly commits it with the rest. Then call codly_submit_report again. This is not a fix \
-         round. Do not commit.",
+         What is not committed is not merged: the task would end without it. {} Then call codly_submit_report again. This is \
+         not a fix round. Do not commit.",
         left_out_why(left),
-        list.join("\n")
+        list.join("\n"),
+        left_out_answer(left)
     )
+}
+
+/// What the worker does about the paths in `left`. A copy of Codly's has one answer, the
+/// ignore rule. The worktree is set up once: with the copy deleted, the checks of this task
+/// and of the next ones there fail, and staged, your local settings are in a commit that is
+/// merged and pushed.
+fn left_out_answer(left: &[LeftOut]) -> String {
+    const IGNORE: &str = "add it to .gitignore (outside your write scope, list it in scope_exceptions)";
+    let copied = left.iter().filter(|l| matches!(l, LeftOut::Copied { .. })).count();
+    let mixed = copied > 0 && copied < left.len();
+    let mut answer = vec![];
+    if copied > 0 {
+        answer.push(format!(
+            "For each path{}: {IGNORE}. Leave it where it is and do not stage it: the checks in this worktree need it, and \
+             local settings do not belong in a commit.",
+            if mixed { " that Codly copied in" } else { "" }
+        ));
+    }
+    if copied < left.len() {
+        answer.push(format!(
+            "For each {}path: if it is not work, {IGNORE} or delete it. If it is work, stage it with `git add <path>` and Codly \
+             commits it with the rest.",
+            if mixed { "other " } else { "" }
+        ));
+    }
+    answer.join(" ")
 }
 
 /// Why Codly's commit leaves these paths out (`Git::commit_work`), in words for the user and
@@ -857,7 +882,7 @@ mod tests {
     }
 
     /// What Codly's commit left out, as the worker reads it: each path with its size, and the
-    /// three things it can do.
+    /// three things it can do. For a copy of Codly's there is one: the ignore rule.
     #[test]
     fn a_left_out_prompt_names_the_paths_and_what_to_do() {
         let left = [LeftOut::Folder { path: "web/node_modules/".into(), files: 20_000 }, LeftOut::File { path: "data.bin".into(), bytes: 31 << 20 }];
@@ -870,6 +895,15 @@ mod tests {
         let copy = left_out(&[LeftOut::Copied { path: ".env".into() }]);
         assert!(copy.contains("\n  - .env (copied in by Codly)\nWhat is not committed"), "{copy}");
         assert!(copy.contains("copied into the worktree") && copy.contains("belongs in .gitignore") && !copy.contains("25 MB"), "{copy}");
+        // Deleted, the copy is gone for every later check in the worktree; staged, it is in a commit.
+        assert!(copy.contains("For each path: add it to .gitignore") && copy.contains("do not stage it"), "{copy}");
+        assert!(!copy.contains("delete it") && !copy.contains("git add"), "{copy}");
+        // Both kinds in one list: each has its own answer.
+        let both = left_out(&[LeftOut::Copied { path: "node_modules/".into() }, left[1].clone()]);
+        let (copies, rest) = both.split_once("For each other path: ").expect("the paths that are too big come second");
+        assert!(copies.contains("For each path that Codly copied in: add it to .gitignore"), "{both}");
+        assert!(!copies.contains("delete it") && !copies.contains("git add"), "{both}");
+        assert!(rest.contains("or delete it") && rest.contains("`git add <path>`"), "{both}");
     }
 
     /// What the Lead hears when no worker is asked: the task goes on without the paths, which
