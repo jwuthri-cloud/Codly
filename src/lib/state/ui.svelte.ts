@@ -18,7 +18,8 @@ export type Selection =
   | { kind: 'file'; id: string }
   | null;
 export type Hover = { agentId: string | null; taskId: string | null; path: string | null };
-export type DiffTarget = { kind: 'plan' | 'task'; id: string } | null;
+/** What the Changes room shows: a plan's whole diff, a task's, or a 1:1 agent's (its own worktree). */
+export type DiffTarget = { kind: 'plan' | 'task' | 'agent'; id: string } | null;
 /** List (default): the plan's tasks grouped by status · Flow: the DAG · Timeline: agent lanes. */
 export type PlanLens = 'list' | 'flow' | 'timeline';
 export type ChangesLens = 'diffs' | 'artifacts';

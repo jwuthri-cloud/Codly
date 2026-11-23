@@ -1,6 +1,7 @@
 // Reviewing a diff: where a comment sits, the one message "Send back" builds from all of them,
 // which files open collapsed, how many lines a file draws, when a task's last turn is read
-// again, and where a file opens in the editor.
+// again, where a file opens in the editor, what the Changes room lists (plans, tasks, 1:1
+// agents), and where Send back takes each comment of a plan's diff.
 // Pure functions; what you wrote and ticked in this session lives in review.svelte.ts.
 import type { Agent } from '../gen/Agent';
 import type { AgentStatus } from '../gen/AgentStatus';
@@ -278,4 +279,96 @@ export function editorPlace(task: Task | null, plan: Plan | null, worker: Agent 
   if (plan?.merged_sha && lead && !lead.worktree) return { agentId: lead.id, tip: 'Opens the file in your repository: the plan is merged' };
   const branch = plan?.integration_branch ?? task?.branch;
   return { agentId: null, tip: branch ? `This work is only on the branch ${branch} for now` : 'No worktree has this file' };
+}
+
+/** Where a file of a 1:1 agent's diff opens: its own worktree (your project folder for an agent
+ *  that works there), as it is now. */
+export function agentEditorPlace(agent: Agent | null, projectFolder: string | null): EditorPlace {
+  if (!agent?.worktree) return { agentId: null, tip: 'No worktree has this file' };
+  return { agentId: agent.id, tip: agent.worktree === projectFolder ? 'Opens the file in your project folder' : `Opens the file in ${agent.name}’s worktree` };
+}
+
+// ───────────── what the Changes room lists ─────────────
+
+/** The chip of the Changes room that lists the 1:1 agents (the others are a plan's id, 'loose' and 'merged'). */
+export const AGENTS_GROUP = 'agents';
+
+/**
+ * The chip a diff is under: a plan's id (a plan you have not merged), 'loose' (a task with no
+ * plan shown), 'merged' (a plan in your branch, or kept on its own) or `AGENTS_GROUP` (a 1:1
+ * agent's work). `planOfTask`: the plan of a task; `settled`: the merged or kept plans;
+ * `shown`: a plan that has a chip of its own.
+ */
+export function diffGroup(
+  target: { kind: 'plan' | 'task' | 'agent'; id: string } | null,
+  planOfTask: (taskId: string) => string | null | undefined,
+  settled: ReadonlySet<string>,
+  shown: (planId: string) => boolean,
+): string | null {
+  if (!target) return null;
+  if (target.kind === 'agent') return AGENTS_GROUP;
+  const pid = target.kind === 'plan' ? target.id : planOfTask(target.id);
+  if (pid && settled.has(pid)) return 'merged';
+  return pid && shown(pid) ? pid : 'loose';
+}
+
+/**
+ * The 1:1 agents the Changes room lists: each one with a worktree that changed files there, as
+ * far as Codly saw (`changed`; the diff itself says the rest). The one you opened (`picked`, from
+ * its sheet) is listed too, so its diff is never off the list while you read it.
+ */
+export function agentsWithChanges(agents: readonly Agent[], changed: (a: Agent) => boolean, picked: string | null): Agent[] {
+  return agents.filter((a) => a.role === 'solo' && !a.archived && !!a.worktree && (a.id === picked || changed(a)));
+}
+
+/** Which task wrote each file of a diff: the first task of `scope` that names it (`filesOf`: the
+ *  files of its commits, then the ones its agent changes now). */
+export function fileOwners(scope: readonly Task[], filesOf: (t: Task) => Iterable<string>): Map<string, Task> {
+  const out = new Map<string, Task>();
+  for (const t of scope) for (const path of filesOf(t)) if (!out.has(path)) out.set(path, t);
+  return out;
+}
+
+/** A task still at work takes review comments itself; a done or cancelled one does not. */
+const takesComments = (t: Task) => t.status !== 'done' && t.status !== 'cancelled';
+
+/**
+ * Send back on a plan's whole diff: each comment goes where its file's work is. The comments on
+ * a file of a task still at work go to that task (`tasks`, in the order of their first comment);
+ * the ones on a file of a done or cancelled task, or of no task, go to a new request (`rest`).
+ */
+export function splitByTask(list: readonly ReviewComment[], owners: ReadonlyMap<string, Task>): { tasks: { task: Task; comments: ReviewComment[] }[]; rest: ReviewComment[] } {
+  const tasks: { task: Task; comments: ReviewComment[] }[] = [];
+  const rest: ReviewComment[] = [];
+  for (const c of list) {
+    const t = owners.get(c.path);
+    if (!t || !takesComments(t)) {
+      rest.push(c);
+      continue;
+    }
+    const to = tasks.find((x) => x.task.id === t.id);
+    if (to) to.comments.push(c);
+    else tasks.push({ task: t, comments: [c] });
+  }
+  return { tasks, rest };
+}
+
+/** One part of a split Send back: how many comments go to whom, and the task they are on. */
+export type SplitPart = { n: number; who: string; key: string };
+
+/**
+ * Where a split Send back takes the comments: "2 comments to Ada (t1), 1 to Bo (t2); 1 is in a
+ * new request". `sent`: false says it before the press ("…; 1 goes to a new request").
+ */
+export function splitWords(parts: readonly SplitPart[], rest: number, sent: boolean): string {
+  const to = parts.map((p, i) => `${p.n}${i ? '' : p.n === 1 ? ' comment' : ' comments'} to ${p.who} (${p.key})`).join(', ');
+  if (!rest) return to;
+  const req = sent ? `${rest === 1 ? 'is' : 'are'} in a new request` : `${rest === 1 ? 'goes' : 'go'} to a new request`;
+  return to ? `${to}; ${rest} ${req}` : `${rest} ${req}`;
+}
+
+/** What the review bar says after "N comments not sent." on a 1:1 agent's diff. */
+export function agentBarWords(total: number, agent: string): string {
+  const them = total === 1 ? 'it' : 'them';
+  return `Send gives ${them} to ${agent} as one message in your 1:1 chat; if ${agent} is working, it reads ${them} when its turn ends.`;
 }

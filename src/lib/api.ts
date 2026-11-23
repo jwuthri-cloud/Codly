@@ -491,6 +491,9 @@ export const api = {
   dictationTranscribe: (audio: string, mime: string) => call<string>('dictation_transcribe', { audio, mime }),
   /** Read-only git state (status, branches, recent log) of an agent's worktree. */
   agentGit: (agentId: string) => call<AgentGit>('agent_git', { agentId }),
+  /** A 1:1 agent's whole work as one diff: its commits, its uncommitted edits and its new files,
+   *  from where its branch left yours. Empty: no worktree, or nothing changed. */
+  agentDiff: (agentId: string) => call<string>('agent_diff', { agentId }),
   /** An agent's checkpoints: the files of its worktree before each of its turns, newest first. */
   agentCheckpoints: (agentId: string) => call<AgentCheckpoints>('agent_checkpoints', { agentId }),
   /** Put the files of the agent's worktree back to a checkpoint, or with `path` that one file
