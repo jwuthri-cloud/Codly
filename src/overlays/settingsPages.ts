@@ -1,5 +1,7 @@
 // Settings → Safety in six short pages: which page each section is on, where a link opens the
-// sheet, and the one line under each page's name that says where its settings stand.
+// sheet, and the one line under each page's name that says where its settings stand. A line
+// must fit one row of its entry (184 px in a small window, about 31 characters): a second row
+// makes the whole list taller and pushes a page's first control out of view.
 
 import type { ApprovalMode } from '../lib/gen/ApprovalMode';
 import type { BreakerConfig } from '../lib/gen/BreakerConfig';
@@ -85,20 +87,23 @@ export function approvalsLine(mode: ApprovalMode, rules: number | null): string 
   return `${MODE_TITLE[mode]} · ${rules ? count(rules, 'saved rule', 'saved rules') : 'no saved rules'}`;
 }
 
-/** "Claude: on · Codex network: off". */
+/** "Claude on · Codex network off". */
 export function sandboxLine(s: Pick<Settings, 'claude_sandbox' | 'codex_network_access'>): string {
   const word = (on: boolean) => (on ? 'on' : 'off');
-  return `Claude: ${word(s.claude_sandbox)} · Codex network: ${word(s.codex_network_access)}`;
+  return `Claude ${word(s.claude_sandbox)} · Codex network ${word(s.codex_network_access)}`;
 }
 
 /** "Review on · 2 required checks". `checks` null: not known. */
 export function checksLine(reviewGate: boolean, checks: Pick<RequiredChecks, 'on' | 'changed' | 'commands'> | null): string {
   const review = reviewGate ? 'Review on' : 'Review off';
   if (!checks) return review;
-  if (checks.changed) return `${review} · required checks changed`;
+  if (checks.changed) return `${review} · checks changed`;
   if (checks.on) return `${review} · ${count(checks.commands.length, 'required check', 'required checks')}`;
-  return `${review} · ${checks.commands.length ? 'required checks off' : 'no required checks'}`;
+  return `${review} · ${checks.commands.length ? 'checks off' : 'no required checks'}`;
 }
+
+/** The line of a page whose settings are the open repo's, with no repo open. */
+export const NO_REPO_LINE = 'No repository open';
 
 /** "This folder: trusted". `t` null: not known ('' shows no line). */
 export function trustLine(t: Pick<WorkspaceTrust, 'state' | 'changed'> | null): string {
@@ -128,11 +133,11 @@ export function limitsLine(b: Pick<BreakerConfig, 'enabled' | 'token_budget' | '
   const watchdog = `watchdog ${w.quiet_secs ? limitLabel(w.quiet_secs) : 'off'}`;
   if (!b) return watchdog;
   const breaker = !b.enabled
-    ? 'Circuit breaker off'
+    ? 'Breaker off'
     : b.cost_budget_usd > 0
       ? `Budget ${usd(b.cost_budget_usd)}`
       : b.token_budget > 0
-        ? `Budget ${tokens(b.token_budget)} tokens`
+        ? `${tokens(b.token_budget)} tokens`
         : 'No budget';
   return `${breaker} · ${watchdog}`;
 }

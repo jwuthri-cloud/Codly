@@ -7,7 +7,7 @@
   on, or turn the script off (without first turning the new text on).
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { api } from '../lib/api';
   import type { WorktreeSetup } from '../lib/gen/WorktreeSetup';
   import { Loader } from '../lib/state/loader.svelte';
@@ -17,8 +17,16 @@
   import LoadError from '../components/LoadError.svelte';
   import MoreAbout from './MoreAbout.svelte';
 
+  /** Called with each value the section shows, as it is read or saved: the line under the
+   *  page's name in the list follows it. */
+  let { onvalue }: { onvalue?: (setup: WorktreeSetup) => void } = $props();
+
   const setup = new Loader<WorktreeSetup>(() => api.worktreeSetup());
   const s = $derived(setup.value);
+  $effect(() => {
+    const now = s;
+    if (now) untrack(() => onvalue?.(now));
+  });
   onMount(() => {
     if (store.workspace) void setup.load();
   });

@@ -4,6 +4,8 @@ import type { Approval } from '../gen/Approval';
 import type { Office } from '../gen/Office';
 import type { Plan } from '../gen/Plan';
 import type { Workspace } from '../gen/Workspace';
+import { followLinks } from '../../overlays/settingsLink';
+import type { SettingsTarget } from '../../overlays/settingsPages';
 import { openWorkspace } from '../state/actions';
 import { blockers } from '../state/blockers.svelte';
 import { offices } from '../state/offices.svelte';
@@ -39,7 +41,7 @@ describe('opening what a notification names', () => {
     ui.revealApproval = null;
     ui.settingsOpen = false;
     ui.settingsTab = null;
-      blockers.panel = false;
+    blockers.panel = false;
     ui.openRequest('lead');
   });
 
@@ -86,6 +88,17 @@ describe('opening what a notification names', () => {
     // At the budgets, not at the top of the tab: the same way as the toast and the mark in the top bar.
     expect(ui.settingsTab).toBe('safety/budgets');
     expect(openWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('a budget clicked while Settings is open moves the open sheet to the budgets', async () => {
+    ui.settingsOpen = true;
+    const went: SettingsTarget[] = [];
+    const stop = followLinks((to) => went.push(to));
+    await openNotice({ workspace_id: null, kind: 'budgets' });
+    stop();
+    expect(went).toEqual([{ tab: 'safety', page: 'limits', section: 'budgets' }]);
+    // Nothing is left for the next time Settings opens: that one opens on General again.
+    expect(ui.settingsTab).toBeNull();
   });
 
   // The click is a guess (Codly came to the front while the notification showed): it must not

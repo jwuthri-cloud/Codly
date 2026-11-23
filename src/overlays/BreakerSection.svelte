@@ -22,6 +22,10 @@
   import { ago, tokens, usd } from '../lib/util/format';
   import MoreAbout from './MoreAbout.svelte';
 
+  /** Called with each value the section shows, as it is read or saved: the line under the
+   *  page's name in the list follows it. */
+  let { onvalue }: { onvalue?: (cfg: BreakerConfig) => void } = $props();
+
   let cfg = $state<BreakerConfig | null>(null);
   let status = $state<BreakerStatus | null>(null);
 
@@ -77,6 +81,10 @@
   $effect(() => {
     const now = status;
     if (now) untrack(() => budget.setHold(now.hold));
+  });
+  $effect(() => {
+    const now = cfg;
+    if (now) untrack(() => onvalue?.(now));
   });
   const agentName = (id: string | null) => store.agents.find((a) => a.id === id)?.name ?? 'An agent';
   /** The latest breaker decisions, newest first. */

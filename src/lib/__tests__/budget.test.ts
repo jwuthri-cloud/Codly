@@ -91,7 +91,7 @@ describe('the budget mark', () => {
     expect([ui.settingsOpen, ui.settingsTab]).toEqual([true, 'safety/budgets']);
     ui.settingsOpen = false;
     ui.settingsTab = null;
-      budget.observe(reached());
+    budget.observe(reached());
     toasts.list[0].action!.run();
     expect([ui.settingsOpen, ui.settingsTab]).toEqual([true, 'safety/budgets']);
   });

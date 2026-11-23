@@ -3,7 +3,7 @@
   refuses). Tabs by topic; every option says what it does in a sentence.
 -->
 <script module lang="ts">
-  import type { SafetyPage } from './settingsPages';
+  import type { SafetyPage, SafetySection } from './settingsPages';
 
   /** The Safety page you were on, for the session. */
   let lastPage: SafetyPage = 'approvals';
@@ -12,13 +12,16 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import type { ApprovalMode } from '../lib/gen/ApprovalMode';
+  import type { ApprovalRule } from '../lib/gen/ApprovalRule';
   import type { BreakerConfig } from '../lib/gen/BreakerConfig';
   import type { RequiredChecks } from '../lib/gen/RequiredChecks';
   import type { WorktreeSetup } from '../lib/gen/WorktreeSetup';
   import { api } from '../lib/api';
+  import { Loader } from '../lib/state/loader.svelte';
   import { workspaceTrust } from '../lib/state/workspaceTrust.svelte';
   import { holdAtTop } from '../lib/util/holdAtTop';
-  import { MODE_TITLE, SAFETY_PAGES, approvalsLine, checksLine, limitsLine, openAt, sandboxLine, trustLine, worktreesLine } from './settingsPages';
+  import { MODE_TITLE, NO_REPO_LINE, SAFETY_PAGES, approvalsLine, checksLine, limitsLine, openAt, sandboxLine, trustLine, worktreesLine } from './settingsPages';
+  import { followLinks } from './settingsLink';
   import MoreAbout from './MoreAbout.svelte';
   import type { Provider } from '../lib/gen/Provider';
   import type { ResumeOnLaunch } from '../lib/gen/ResumeOnLaunch';
@@ -140,6 +143,16 @@
   $effect(() => {
     lastPage = page;
   });
+  /** The section a link named, to hold at the top (a new object for each link, even to the same one). */
+  let reveal = $state<{ section: SafetySection } | null>(target.section ? { section: target.section } : null);
+  // A link that comes while the sheet is open (a notification clicked) goes there too.
+  onDestroy(
+    followLinks((to) => {
+      tab = to.tab;
+      if (to.page) page = to.page;
+      reveal = to.section ? { section: to.section } : null;
+    }),
+  );
   // Another tab or page starts at its top, not where the last one was scrolled to.
   let panel: HTMLDivElement | undefined = $state();
   $effect(() => {
@@ -151,41 +164,47 @@
   // read the repo, until you scroll, click or press a key.
   let letGo: (() => void) | undefined;
   $effect(() => {
-    const el = target.section && panel?.querySelector<HTMLElement>(`[data-section="${target.section}"]`);
-    if (el) untrack(() => (letGo = holdAtTop(el)));
+    const el = reveal && panel?.querySelector<HTMLElement>(`[data-section="${reveal.section}"]`);
+    if (!el) return;
+    untrack(() => {
+      letGo?.();
+      letGo = holdAtTop(el);
+    });
   });
   onDestroy(() => letGo?.());
 
   // The line under each Safety page's name. The repo's rules, checks, setup script and the
-  // circuit breaker are read here as well as in their sections, again when you change pages
-  // and every 5 s, so the line follows a change made on the page. A part that cannot be read
-  // (no repo open) is left out of the line: its section shows why.
-  let ruleCount = $state<number | null>(null);
-  let checks = $state<RequiredChecks | null>(null);
-  let setup = $state<WorktreeSetup | null>(null);
-  let breaker = $state<BreakerConfig | null>(null);
-  async function readLines() {
-    const [r, c, w, b] = await Promise.allSettled([api.approvalRules(), api.requiredChecks(), api.worktreeSetup(), api.breakerConfig()]);
-    ruleCount = r.status === 'fulfilled' ? r.value.length : null;
-    checks = c.status === 'fulfilled' ? c.value : null;
-    setup = w.status === 'fulfilled' ? w.value : null;
-    breaker = b.status === 'fulfilled' ? b.value : null;
-  }
+  // circuit breaker are read here when you open Safety, change pages or repos; the section on
+  // the page hands up each value it reads or saves, so the line changes with it. Each part keeps
+  // only its newest answer. A part that cannot be read is left out of the line; with no repo
+  // open, the repo's pages say so.
+  const rules = new Loader<ApprovalRule[]>(() => api.approvalRules());
+  const checks = new Loader<RequiredChecks>(() => api.requiredChecks());
+  const setup = new Loader<WorktreeSetup>(() => api.worktreeSetup());
+  const breaker = new Loader<BreakerConfig>(() => api.breakerConfig());
   $effect(() => {
     if (tab !== 'safety') return;
     void page;
-    void store.workspace?.id;
-    void readLines();
-    const t = setInterval(readLines, 5000);
-    return () => clearInterval(t);
+    const repo = store.workspace?.id;
+    untrack(() => {
+      void breaker.load();
+      if (!repo) return;
+      void rules.load();
+      void checks.load();
+      void setup.load();
+    });
   });
+  /** The value of a part, or null when its last read failed. */
+  function known<T>(l: Loader<T>): T | null {
+    return l.error ? null : l.value;
+  }
   const pageLines = $derived<Record<SafetyPage, string>>({
-    approvals: approvalsLine(s.approval_mode, ruleCount),
+    approvals: approvalsLine(s.approval_mode, store.workspace ? (known(rules)?.length ?? null) : null),
     sandbox: sandboxLine(s),
-    checks: checksLine(s.review_gate, checks),
-    trust: trustLine(workspaceTrust.value),
-    worktrees: worktreesLine(setup),
-    limits: limitsLine(breaker, s.watchdog),
+    checks: checksLine(s.review_gate, store.workspace ? known(checks) : null),
+    trust: store.workspace ? trustLine(workspaceTrust.value) : NO_REPO_LINE,
+    worktrees: store.workspace ? worktreesLine(known(setup)) : NO_REPO_LINE,
+    limits: limitsLine(known(breaker), s.watchdog),
   });
   // Office sound (kept on this machine, not in the core's settings).
   let soundOn = $state(!sound.muted);
@@ -242,6 +261,13 @@
           <input type="checkbox" class="switch" checked={s[k as 'auto_run_plans']} aria-label={title} onchange={(e) => set({ [k]: (e.currentTarget as HTMLInputElement).checked })} />
         </label>
       {/each}
+    {/snippet}
+    <!-- A Safety section that is the open repo's, with no repo open. -->
+    {#snippet noRepo(title: string, what: string)}
+      <section>
+        <h3 class="eyebrow">{title}</h3>
+        <p class="desc">Open a repository to {what}.</p>
+      </section>
     {/snippet}
 
     {#if tab === 'general'}
@@ -409,7 +435,9 @@
       </MoreAbout>
       {#if confirmFull}<FullAccessConfirm onconfirm={() => ((confirmFull = false), set({ approval_mode: 'full' }))} oncancel={() => (confirmFull = false)} />{/if}
     </section>
-    <div data-section="approval-rules"><ApprovalRulesSection /></div>
+    <div data-section="approval-rules">
+      {#if store.workspace}<ApprovalRulesSection onvalue={(v) => rules.set(v)} />{:else}{@render noRepo('Always allowed in this repo', 'see the commands it always allows')}{/if}
+    </div>
     {:else if page === 'sandbox'}
     <section data-section="sandbox">
       <h3 class="eyebrow">Sandbox</h3>
@@ -445,9 +473,13 @@
       </div>
     </section>
 
-    <div data-section="required-checks"><RequiredChecksSection /></div>
+    <div data-section="required-checks">
+      {#if store.workspace}<RequiredChecksSection onvalue={(v) => checks.set(v)} />{:else}{@render noRepo('Required checks', 'see its required checks')}{/if}
+    </div>
     {:else if page === 'trust'}
-    <div data-section="trust"><TrustSection /></div>
+    <div data-section="trust">
+      {#if store.workspace}<TrustSection />{:else}{@render noRepo('This folder’s own CLI configuration', 'choose whether the CLIs load its own configuration')}{/if}
+    </div>
     <section data-section="shell-auth">
       <h3 class="eyebrow">Claude sign-in</h3>
       <!-- Not a <label>: only the switch itself changes it, never a click on the text. -->
@@ -464,9 +496,11 @@
       </div>
     </section>
     {:else if page === 'worktrees'}
-    <div data-section="worktrees"><WorktreeSection /></div>
+    <div data-section="worktrees">
+      {#if store.workspace}<WorktreeSection onvalue={(v) => setup.set(v)} />{:else}{@render noRepo('New worktrees', 'see its worktree setup')}{/if}
+    </div>
     {:else}
-    <div data-section="budgets"><BreakerSection /></div>
+    <div data-section="budgets"><BreakerSection onvalue={(v) => breaker.set(v)} /></div>
     <div data-section="watchdog"><WatchdogSection /></div>
     {/if}
     {:else if tab === 'automation'}

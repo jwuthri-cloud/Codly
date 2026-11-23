@@ -3,12 +3,12 @@
 // decision ("budget"), and once more when work goes on ("budget_cleared"); what holds right now
 // is `breaker_status`. The top bar's mark shows `hold`, and one toast says it when it happens.
 // The toast goes when the hold goes: it never says a budget holds work that has room again.
+import { openSettings } from '../../overlays/settingsLink';
 import { safetyLink } from '../../overlays/settingsPages';
 import { api } from '../api';
 import type { EventRow } from '../gen/EventRow';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
-import { ui } from './ui.svelte';
 
 /** What a `breaker` decision says about the budgets: why no task starts, or null when work goes
  *  on again. Undefined for every other event (an agent over a limit of its own, say). */
@@ -70,10 +70,9 @@ class Budget {
     }
   }
 
-  /** Settings on the Safety tab, at the budgets. */
+  /** Settings on the Safety tab, at the budgets (also when Settings is open already). */
   openSettings() {
-    ui.settingsTab = safetyLink('budgets');
-    ui.settingsOpen = true;
+    openSettings(safetyLink('budgets'));
   }
 }
 

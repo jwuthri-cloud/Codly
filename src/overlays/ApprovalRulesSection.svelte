@@ -4,6 +4,7 @@
   rule makes Codly ask again. A rule is only ever added from a card, never typed here.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { ApprovalRule } from '../lib/gen/ApprovalRule';
   import { api } from '../lib/api';
   import { store } from '../lib/state/store.svelte';
@@ -12,7 +13,15 @@
   import Icon from '../components/Icon.svelte';
   import MoreAbout from './MoreAbout.svelte';
 
+  /** Called with each value the section shows, as it is read or saved: the line under the
+   *  page's name in the list follows it. */
+  let { onvalue }: { onvalue?: (rules: ApprovalRule[]) => void } = $props();
+
   let rules = $state<ApprovalRule[] | null>(null);
+  $effect(() => {
+    const now = rules;
+    if (now) untrack(() => onvalue?.(now));
+  });
 
   async function load() {
     try {

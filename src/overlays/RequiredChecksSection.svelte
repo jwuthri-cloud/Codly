@@ -8,7 +8,7 @@
   for it go on: the core checks them again.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { api } from '../lib/api';
   import type { RequiredChecks } from '../lib/gen/RequiredChecks';
   import { Loader } from '../lib/state/loader.svelte';
@@ -18,8 +18,16 @@
   import LoadError from '../components/LoadError.svelte';
   import MoreAbout from './MoreAbout.svelte';
 
+  /** Called with each value the section shows, as it is read or saved: the line under the
+   *  page's name in the list follows it. */
+  let { onvalue }: { onvalue?: (checks: RequiredChecks) => void } = $props();
+
   const checks = new Loader<RequiredChecks>(() => api.requiredChecks());
   const s = $derived(checks.value);
+  $effect(() => {
+    const now = s;
+    if (now) untrack(() => onvalue?.(now));
+  });
   onMount(() => {
     if (store.workspace) void checks.load();
   });
