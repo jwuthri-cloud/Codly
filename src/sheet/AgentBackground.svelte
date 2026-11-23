@@ -1,13 +1,16 @@
 <!--
   What the agent left at work in the background in its live run, as Claude Code lists it: the
   commands it started with `run_in_background` and its helpers. They go on after the turn that
-  started them. "Stop" ends a command (orchestrator/live_session.rs); Claude Code's next list
-  no longer names it, and the row shows how it ended, in Claude Code's own word. A helper has no
-  "Stop": Claude Code's request is known to stop a command only.
+  started them. "Stop" ends a command or a helper (orchestrator/live_session.rs); Claude Code's
+  next list no longer names it, and the row shows how it ended, in Claude Code's own word. After
+  the stop of a helper Claude Code starts a turn of the agent by itself (recorded:
+  docs/research/cli-claude-stream-json-2.1.311-part3.md, section 1), and the button says so.
+  A row whose start is not known (session.ts: its first list came from a snapshot) shows
+  "running" with no timer.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
-  import { backgroundKind, backgroundSummary, canStop, ofLiveRun, stopBackgroundTask } from '../lib/state/session';
+  import { backgroundKind, backgroundSummary, canStop, ofLiveRun, stopBackgroundTask, stopHint, stopOnItsWay, type BackgroundWork } from '../lib/state/session';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { dur, timer } from '../lib/util/format';
@@ -27,13 +30,18 @@
   });
   const running = $derived(work.filter((w) => w.status === 'running'));
   const ended = $derived(work.filter((w) => w.status !== 'running'));
-  /** The commands a stop is on its way for (by the CLI's task id), until Claude Code answered. Its
-   *  answer does not say whether the command ended: its next list does, and moves the row. */
-  let stopping = $state<string[]>([]);
-  async function stop(taskId: string) {
-    stopping = [...stopping, taskId];
-    await stopBackgroundTask(agent.id, taskId);
-    stopping = stopping.filter((id) => id !== taskId);
+  /** The work a stop is on its way for, by the CLI's task id: `sent` until Claude Code answers,
+   *  then `taken` (with when it took the stop). Its answer does not say whether the work ended:
+   *  its next list does, and moves the row. Until then the button reads "Stopping…"
+   *  (`stopOnItsWay`); a request Claude Code did not take gives "Stop" back at once. */
+  let sent = $state<string[]>([]);
+  let taken = $state<Record<string, number>>({});
+  const stopping = (w: BackgroundWork) => sent.includes(w.id) || stopOnItsWay(taken[w.id], ui.now);
+  async function stop(w: BackgroundWork) {
+    sent = [...sent, w.id];
+    const took = await stopBackgroundTask(agent.id, w);
+    sent = sent.filter((id) => id !== w.id);
+    if (took) taken = { ...taken, [w.id]: ui.now };
   }
 </script>
 
@@ -47,7 +55,7 @@
           <code class="what truncate selectable" data-tip={clean(w.description)}>{clean(w.description)}</code>
           <span class="meta num">{kind ? `${kind} · ` : ''}{w.startedAt == null ? 'running' : timer(ui.now - w.startedAt)}</span>
           {#if canStop(w)}
-            <button class="btn sm ghost" disabled={stopping.includes(w.id)} onclick={() => stop(w.id)}><Icon name="stop" size={12} />{stopping.includes(w.id) ? 'Stopping…' : 'Stop'}</button>
+            <button class="btn sm ghost" disabled={stopping(w)} data-tip={stopHint(w, agent.name)} onclick={() => stop(w)}><Icon name="stop" size={12} />{stopping(w) ? 'Stopping…' : 'Stop'}</button>
           {/if}
         </li>
       {/each}
