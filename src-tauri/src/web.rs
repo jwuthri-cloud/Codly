@@ -24,6 +24,7 @@ use hyper_util::rt::TokioIo;
 use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponse, InvokeResponseBody};
 use tauri::webview::InvokeRequest;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_opener::OpenerExt;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::commands::AppState;
@@ -114,7 +115,10 @@ async fn serve(app: AppHandle, s: Serve, open: bool) -> anyhow::Result<()> {
     let url = format!("http://{host}:{}/?token={token}", s.port);
     println!("Codly is running at {url}\nPress Ctrl+C to stop.");
     if open {
-        let _ = std::process::Command::new("open").arg(&url).spawn();
+        // The system's own opener: `open` on macOS, `xdg-open` (or the desktop's tool) on Linux.
+        if let Err(e) = app.opener().open_url(&url, None::<&str>) {
+            tracing::warn!("could not open the browser: {e}");
+        }
     }
     loop {
         let (stream, _) = listener.accept().await?;
