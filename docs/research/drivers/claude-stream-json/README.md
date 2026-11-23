@@ -1,8 +1,9 @@
 # Drivers for the Claude Code stream-json recordings
 
-These scripts made the fixtures in `docs/research/fixtures/claude-2.1.311/` and the two documents
-`docs/research/cli-claude-stream-json-2.1.311.md` (part 1, scripts `s*.py`) and
-`docs/research/cli-claude-stream-json-2.1.311-part2.md` (part 2, scripts `r4_*.py`).
+These scripts made the fixtures in `docs/research/fixtures/claude-2.1.311/` and the three documents
+`docs/research/cli-claude-stream-json-2.1.311.md` (part 1, scripts `s*.py`),
+`docs/research/cli-claude-stream-json-2.1.311-part2.md` (part 2, scripts `r4_*.py`) and
+`docs/research/cli-claude-stream-json-2.1.311-part3.md` (part 3, scripts `r5_*.py`).
 Python 3.11 or newer, standard library only. They start the real `claude` CLI with your own login: read
 "Before you run" first.
 
@@ -11,20 +12,35 @@ Python 3.11 or newer, standard library only. They start the real `claude` CLI wi
 - Every run spends tokens of the logged-in account. All scripts pass `--model haiku` and use tiny prompts. At list
   price (sum of `total_cost_usd` of the `result` lines) part 1 cost 0.12 USD and part 2 cost 0.18 USD (0.19 USD with
   the runs that were recorded again); 0.11 USD of part 2 is one plan-mode turn that the CLI ran on sonnet by itself.
-  `cost.py` sums your recordings.
+  Part 3 cost 0.17 USD (about 0.22 USD with the runs that were recorded again); 0.08 USD of it is
+  `r5_c8_model_switch.py midturn`, the one script that leaves haiku on purpose (two model requests on sonnet, one on
+  the account's default model), and 0.03 USD are two one-turn starts on `claude-haiku-4-5`.
+  `cost.py` sums your recordings (a session that is resumed in several recordings is counted once per recording,
+  with its running total: for part 3 it prints 0.18).
 - The driver removes every `CLAUDE*` and `ANTHROPIC*` variable from the CLI's environment (a CLI started from
   inside a Claude Code session must not inherit that session's variables). It never reads or prints credentials.
 - No script uses `bypassPermissions`. Each run works in a throw-away git repo under `$CAPTURE_DIR/work`.
 - All runs pass `--strict-mcp-config --setting-sources local`, so your own skills, plugins, hooks and MCP servers stay
   out. One exception, on purpose: `r4_e19_project_mcp.py project` runs without `--strict-mcp-config`; the CLI then
   also connects your own MCP servers. That script sends no `mcp_status`, and the sanitizer drops every server that
-  is not the scenario's own.
-- `r4_b7_process_groups.py` and `r4_b6_background_life.py` start `sleep` processes through the CLI and kill what
-  they started. They never touch a process that existed before the run.
+  is not the scenario's own. Part 3 has two more of this kind: `r5_e11_mcp_sources.py clash` and
+  `r5_e12_project_mcp_user_flags.py login-flag-disabled`. Both turn the claude.ai connectors off for the run (the
+  `disableClaudeAiConnectors` setting and `ENABLE_CLAUDEAI_MCP_SERVERS=false`); no server of the user's own setup
+  was in their init lines.
+- Throw-away HOME: `r5_e11_mcp_sources.py user` and `r5_e12_project_mcp_user_flags.py` (all variants but
+  `login-flag-disabled`) start the CLI with `HOME` set to a new folder under `$CAPTURE_DIR/work`, so that "user
+  settings" are the scenario's own files and never yours. Such a CLI is not logged in: its turns end with "Not
+  logged in" and cost nothing. No script copies or reads credentials to get around that.
+- `r4_b7_process_groups.py`, `r4_b6_background_life.py` and the part 3 scripts that start `sleep` or a tick script
+  through the CLI (`r5_a4`, `r5_b1`, `r5_b2`, `r5_f15`) kill what they started. They never touch a process that
+  existed before the run.
 - `r4_e18_mcp_needs_auth.py` listens on `127.0.0.1:48731` (`FAKE_MCP_PORT` changes it) for the time of the run.
-- Sandbox scripts (`s09`, `r4_d14` … `r4_d17`): the CLI's sandbox lets commands write under its own temp folder
-  (`/tmp/claude-<uid>/`). If `CAPTURE_DIR` is inside that folder, "outside the work dir" probes prove nothing
-  (part 2, scenario 17). Put `CAPTURE_DIR` somewhere else for those.
+- Sandbox scripts (`s09`, `r4_d14` … `r4_d17`, `r5_c13`, `r5_d6`): the CLI's sandbox lets commands write under its
+  own temp folder (`/tmp/claude-<uid>/`). If `CAPTURE_DIR` is inside that folder, "outside the work dir" probes prove
+  nothing (part 2, scenario 17). Put `CAPTURE_DIR` somewhere else for those (part 3 was recorded under the system's
+  per-user temp folder, `$(getconf DARWIN_USER_TEMP_DIR)`).
+- `r5_c7_effort_started_high.py` makes the CLI write a debug log to `$CAPTURE_DIR/raw/<scenario>.debug.log`. It has
+  paths of your machine: never commit it.
 
 ## Layout
 
@@ -50,6 +66,7 @@ python3 tl.py r4-queue-interrupt-plain        # timeline of the raw recording (t
 
 python3 sanitize.py                           # raw/*.ndjson -> fixtures/*.ndjson
 python3 make_notes_part2.py out.md            # part 2 document from the r4-* fixtures
+python3 make_notes_part3.py out.md            # part 3 document from the r5-* fixtures (it checks its own statements)
 python3 cost.py                               # list-price cost of everything in raw/
 ```
 
@@ -84,9 +101,11 @@ cd "$CAPTURE_DIR/fixtures"
 | `tl.py`, `tlq.py` | timeline viewers for a raw recording |
 | `cost.py` | sum of `total_cost_usd` over the recordings |
 | `notes_lib.py`, `make_notes_part2.py` | build the part 2 document; every quoted line is copied from a fixture |
+| `make_notes_part3.py` | builds the part 3 document the same way, and fails when a number or word its text states is not what the fixtures say |
 | `make_notes.py` | builds the part 1 document |
 | `bgrep.py` | finds a text in the CLI binary (for statements marked "bundle, not recorded") |
-| `mcp_ping_server.py` | minimal stdio MCP server used by `r4_e19_project_mcp.py` |
+| `mcp_ping_server.py` | minimal stdio MCP server used by `r4_e19_project_mcp.py` and the part 3 MCP scripts (options: a label in the answer, a slow tool, a file it needs to start) |
+| `r5_lib.py` | helpers shared by the `r5_*.py` scripts |
 
 Part 1 scenarios (`s*.py` -> fixtures without prefix): `s00_smoke`, `s01_mid_turn` (plain, uuid, uuid-now,
 uuid-next, uuid-later), `s02_control`, `s03_image`, `s04_subagent`, `s05_background`, `s06_limits`,
@@ -117,6 +136,25 @@ Part 2 scenarios (`r4_*.py` -> fixtures `r4-*`):
 | `r4_e19_project_mcp.py` | project, strict | `r4-project-mcp-*` | 19 |
 | `r4_f20_big_image.py` | | `r4-big-image` | 20 |
 
+Part 3 scenarios (`r5_*.py` -> fixtures `r5-*`; the number in a script's name is the section of part 3):
+
+| script | variants | fixtures | part 3 section |
+|---|---|---|---|
+| `r5_b1_stop_subagent.py` | 1, 2 (a label: the same scenario twice) | `r5-stop-subagent-*` | 1 |
+| `r5_b2_background_fail.py` | | `r5-background-fail` | 2 |
+| `r5_b3_tool_progress_other.py` | mcp, subagent, webfetch | `r5-tool-progress-*` | 3 |
+| `r5_a4_stop_sequence.py` | sequence, three-plain, three-cancel, folded-plain, folded-cancel | `r5-stop-*` | 4 |
+| `r5_c13_commands_that_ask.py` | off, noauto, manual-off, manual-noauto | `r5-commands-*` | 5, 13 |
+| `r5_d6_sandbox_network_again.py` | once, rule-local, rule-session | `r5-sandbox-network-*` | 6 |
+| `r5_c7_effort_started_high.py` | high, none | `r5-effort-started-*` | 7 |
+| `r5_c8_model_switch.py` | midturn, start-alias, start-full, start-dated, start-undated | `r5-model-*` | 8 |
+| `r5_f9_resume_missing.py` | (five runs in one call) | `r5-resume-missing-1` … `-5` | 9 |
+| `r5_e10_mcp_reconnect_toggle.py` | | `r5-mcp-reconnect-toggle` | 10 |
+| `r5_e11_mcp_sources.py` | config, clash, user | `r5-mcp-source-*` | 11 |
+| `r5_e12_project_mcp_user_flags.py` | plain, flag-disabled, flag-enable-all-false, flag-enabled-other, user-disabled, login-flag-disabled | `r5-project-mcp-*` | 12 |
+| `r5_f14_budget_resume.py` | (four runs in one call) | `r5-budget-resume-a` … `-d` | 14 |
+| `r5_f15_background_wording.py` | rule-1 … rule-3, plain-1 … plain-3 | `r5-background-wording-*` | 15 |
+
 Notes for whoever records again:
 
 - The model does not always do what the prompt says (it adds an `ls`, it refuses a retry). Read the timeline before
@@ -125,3 +163,9 @@ Notes for whoever records again:
   command with something else.
 - `r4_c10_plan_from_default.py` writes a plan file under `~/.claude/plans/`; every run leaves a session transcript
   under `~/.claude/projects/<work dir name>/`. Delete them yourself if you want them gone.
+- The model skips a step it thinks is pointless: it did not call the Write tool for content the file already had,
+  and not after a shell write to the same file had been blocked (`r5_c13` asks for new content, tool first).
+- `r5_f14_budget_resume.py` stops when its budget does not fit between one turn and the session's earlier cost
+  (the cache makes turn costs move): run it again.
+- `r5_c13_commands_that_ask.py` sets up its work repo once (a bare repo inside it, a first push). Delete
+  `$CAPTURE_DIR/work/r5-commands-*` before you record it again, or the commit and the push have nothing to do.
