@@ -104,6 +104,15 @@ impl Background {
         self.hold = Some(self.holds);
         self.hold
     }
+
+    /// The wait `hold` ran out, Codly asked the CLI to stop the work, and `kept` is still
+    /// listed: nobody waits for it a second time. True = a pass of the gate is due now: that
+    /// wait is still the run's, or a later one has nothing left to wait for (a turn started
+    /// and ended meanwhile, and the pass at its end waits for the same work).
+    fn give_up(&mut self, hold: u64, kept: &[BackgroundTask]) -> bool {
+        self.let_go.extend(kept.iter().map(|t| t.id.clone()));
+        self.hold == Some(hold) || self.settled().is_some()
+    }
 }
 
 /// "the background command `npm run dev`", "the helper `Run the tests`".
@@ -129,11 +138,18 @@ fn it_or_them(tasks: &[BackgroundTask]) -> &'static str {
 impl Inner {
     /// Before the gate commits a worker's files: does the worker's run still have work open
     /// in the background? True = this pass waits for it. The task says so, and Codly stops
-    /// the work when the wait runs out.
+    /// the work when the wait runs out. True also when a turn of the worker started since the
+    /// pass began: the pass ends here, and the end of that turn runs the gate.
     pub(super) fn hold_for_background(self: &Arc<Self>, task: &Task, worker: &str, ws: Option<&str>) -> Result<bool> {
         let (open, begun, run_id) = {
             let mut live = lock(&self.live);
             let Some(l) = live.get_mut(worker).filter(|l| l.task_id.as_deref() == Some(task.id.as_str())) else { return Ok(false) };
+            // A turn started since this pass began (`ingest` runs beside it), or a prompt is
+            // on its way. No wait begins under a turn: the turn's end would find that wait
+            // and begin none of its own, and nothing would end it once its time ran out.
+            if l.turn_active || l.queued > 0 {
+                return Ok(true);
+            }
             let open = l.background.waited_for();
             if open.is_empty() {
                 l.background.hold = None;
@@ -189,6 +205,10 @@ impl Inner {
     /// Codly asks the CLI to stop each piece, looks at what the CLI then says is left, writes
     /// both in the task's record, and runs the gate on the work as it is. The wait stands
     /// until the gate runs, so the watchdog does not take the worker for idle meanwhile.
+    ///
+    /// Nothing else bounds the wait. So every way out of here, while the run lives, ends the
+    /// wait or runs the gate, unless the wait is not this one any more: a turn's start ended
+    /// it, and a later wait has its own time.
     async fn background_wait_over(self: Arc<Self>, task_id: Id, worker: Id, run_id: Id, hold: u64, wait: Duration) {
         tokio::time::sleep(wait).await;
         if self.shutting_down.load(Ordering::SeqCst) {
@@ -198,24 +218,25 @@ impl Inner {
         let (left, provider) = {
             let mut live = lock(&self.live);
             let Some(l) = live.get_mut(&worker).filter(|l| l.run_id == run_id && !l.stopping && l.background.hold == Some(hold)) else { return };
-            // A worker you hold stays out of the gate: your Resume runs it, and it waits anew.
-            if you_hold {
+            // A worker you hold stays out of the gate: your Resume runs it. A prompt on its
+            // way: the end of its turn runs the gate. That pass waits anew, with its own time.
+            if you_hold || l.turn_active || l.queued > 0 {
                 l.background.hold = None;
                 return;
             }
             let left = l.background.waited_for();
-            // Nothing left: the pass goes on by itself (`background_changed`). A prompt on
-            // its way: the end of its turn runs the gate.
-            if left.is_empty() || l.turn_active || l.queued > 0 {
-                return;
-            }
             // An idle Codex agent takes an interrupt as: stop the turns of my subagents
             // (codex.rs `interrupt`; from the types, not verified on a live run).
-            if l.provider == Provider::Codex {
+            if l.provider == Provider::Codex && !left.is_empty() {
                 l.handle.send(AgentCmd::Interrupt);
             }
             (left, l.provider)
         };
+        // Nothing is left, and no pass came for it (`background_changed` runs one only a
+        // moment after a change, when the run is quiet then): the pass goes on now.
+        if left.is_empty() {
+            return self.pass_goes_on(&worker, &run_id, task_id).await;
+        }
         if provider == Provider::Claude {
             // `stop_task` is recorded on a background command (part 2 §6), not on a subagent.
             // Its answer is the same whether anything was stopped or not, so nobody waits for
@@ -240,39 +261,60 @@ impl Inner {
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
         // What is still there is not waited for a second time. The pass goes on now, unless
-        // a turn started meanwhile: the end of that turn runs the gate.
+        // a turn runs or a prompt is on its way: the end of that turn runs the gate.
         let go_on = {
             let mut live = lock(&self.live);
             let Some(l) = live.get_mut(&worker).filter(|l| l.run_id == run_id) else { return };
-            l.background.let_go.extend(kept.iter().map(|t| t.id.clone()));
-            l.background.hold == Some(hold)
+            let due = l.background.give_up(hold, &kept);
+            let quiet = !l.turn_active && l.queued == 0;
+            if due && !quiet {
+                l.background.hold = None;
+            }
+            due && quiet
         };
-        let Ok(task) = self.task(&task_id) else { return };
+        self.say_stopped(&task_id, &left, &kept, wait, go_on);
+        if go_on {
+            self.pass_goes_on(&worker, &run_id, task_id).await;
+        }
+    }
+
+    /// The task's record says what Codly stopped of `left` when the wait ran out, and what it
+    /// could not stop (`kept`).
+    fn say_stopped(&self, task_id: &str, left: &[BackgroundTask], kept: &[BackgroundTask], wait: Duration, go_on: bool) {
+        let task = match self.task(task_id) {
+            Ok(task) => task,
+            Err(e) => {
+                tracing::warn!("the stop of {task_id}'s background work was not recorded: {e}");
+                return;
+            }
+        };
         let stopped: Vec<&BackgroundTask> = left.iter().filter(|t| !kept.contains(t)).collect();
         let acted = match (stopped.is_empty(), kept.is_empty()) {
-            (false, true) => format!("Codly stopped {}", it_or_them(&left)),
-            (false, false) => format!("Codly stopped {}. It could not stop {}", names(stopped.iter().copied()), names(&kept)),
-            (true, _) => format!("Codly could not stop {}", it_or_them(&left)),
+            (false, true) => format!("Codly stopped {}", it_or_them(left)),
+            (false, false) => format!("Codly stopped {}. It could not stop {}", names(stopped.iter().copied()), names(kept)),
+            (true, _) => format!("Codly could not stop {}", it_or_them(left)),
         };
         let next = match (go_on, kept.is_empty()) {
             (false, _) => "",
             (true, true) => " and checks the work now",
             (true, false) => ", and checks the work as it is",
         };
-        let summary = format!("{}: {} still ran after {}. {acted}{next}", task.key, names(&left), gate::span(wait));
-        let ws = self.store.task_workspace(&task_id).ok().flatten();
+        let summary = format!("{}: {} still ran after {}. {acted}{next}", task.key, names(left), gate::span(wait));
+        let ws = self.store.task_workspace(task_id).ok().flatten();
         let detail = json!({ "plan_id": task.plan_id, "stopped": stopped, "not_stopped": kept, "wait_secs": wait.as_secs() });
-        if let Err(e) = self.decide(ws.as_deref(), Some(&task_id), "gate", summary, detail) {
+        if let Err(e) = self.decide(ws.as_deref(), Some(task_id), "gate", summary, detail) {
             tracing::warn!("the stop of {}'s background work was not recorded: {e}", task.key);
         }
-        if go_on {
-            // This wait ends with the pass that starts now: it waits anew for work that the
-            // run got meanwhile.
-            if let Some(l) = lock(&self.live).get_mut(&worker).filter(|l| l.run_id == run_id && l.background.hold == Some(hold)) {
-                l.background.hold = None;
-            }
-            self.gate(task_id).await;
+    }
+
+    /// The wait of a pass of the gate is over, and the pass goes on. The wait stood until
+    /// here (the watchdog); the pass that starts waits anew, with its own time, for work
+    /// that the run got meanwhile.
+    async fn pass_goes_on(self: Arc<Self>, worker: &str, run_id: &str, task_id: Id) {
+        if let Some(l) = lock(&self.live).get_mut(worker).filter(|l| l.run_id == run_id) {
+            l.background.hold = None;
         }
+        self.gate(task_id).await;
     }
 }
 
@@ -323,6 +365,51 @@ mod tests {
         // Gone from the list: forgotten, so the same id later would be new work.
         b.listed(&[]);
         assert!(b.let_go.is_empty());
+    }
+
+    #[test]
+    fn a_pass_is_due_when_the_stop_left_a_later_wait_with_nothing_to_wait_for() {
+        let helper = task("tid-2", "helper", "Run the tests");
+        let mut b = Background::default();
+        b.listed(std::slice::from_ref(&helper));
+        let first = b.begin_hold().unwrap();
+        // The wait ran out and Codly asked the CLI to stop the helper. While Codly looks at
+        // what is left, a short turn of the worker starts and ends, and the pass at its end
+        // waits for the same helper.
+        b.turn_started();
+        let second = b.begin_hold().unwrap();
+        assert_ne!(first, second);
+        // The helper is still listed, and nobody waits for it a second time: the later wait
+        // has nothing left, so a pass is due now, not when that wait's own time runs out.
+        assert!(b.give_up(first, std::slice::from_ref(&helper)));
+        assert!(b.waited_for().is_empty());
+        assert_eq!(b.settled(), Some(second));
+    }
+
+    #[test]
+    fn a_pass_is_due_after_the_stop_only_for_a_wait_that_nobody_else_ends() {
+        let server = task("tid-1", "command", "npm run dev");
+        // No turn since the wait began: the pass goes on, with or without the work.
+        let mut b = Background::default();
+        b.listed(std::slice::from_ref(&server));
+        let hold = b.begin_hold().unwrap();
+        assert!(b.give_up(hold, std::slice::from_ref(&server)));
+        // A turn started and still runs: its end runs the gate.
+        let mut b = Background::default();
+        b.listed(std::slice::from_ref(&server));
+        let hold = b.begin_hold().unwrap();
+        b.turn_started();
+        assert!(!b.give_up(hold, std::slice::from_ref(&server)));
+        // A later wait is for work the run got meanwhile: it runs out at its own time.
+        let mut b = Background::default();
+        b.listed(std::slice::from_ref(&server));
+        let hold = b.begin_hold().unwrap();
+        b.turn_started();
+        b.listed(&[server.clone(), task("tid-3", "command", "cargo watch")]);
+        let later = b.begin_hold().unwrap();
+        assert!(!b.give_up(hold, std::slice::from_ref(&server)));
+        assert_eq!(b.waited_for(), [task("tid-3", "command", "cargo watch")]);
+        assert_eq!((b.settled(), b.hold), (None, Some(later)));
     }
 
     #[test]

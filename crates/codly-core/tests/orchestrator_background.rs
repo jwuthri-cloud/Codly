@@ -6,7 +6,9 @@
 //!   with no turn of the worker;
 //! - work that does not end is stopped when the wait runs out (Claude Code: `stop_task`, a
 //!   Codex subagent: an interrupt), and the task's record says what Codly stopped and what it
-//!   could not stop.
+//!   could not stop;
+//! - a turn of the worker while Codly stops that work does not leave the task waiting for work
+//!   that nobody waits for any more.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -430,6 +432,43 @@ async fn background_work_that_does_not_end_is_stopped_when_the_wait_runs_out() {
     let stopped = after.iter().position(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("still ran after"))).unwrap();
     let committed = after.iter().position(|e| matches!(e.kind, EventKind::Committed { .. })).unwrap();
     assert!(stopped < committed, "Codly committed after it stopped the command");
+    assert_eq!(cli.lock().unwrap().prompts.len(), 1);
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_while_codly_stops_the_work_does_not_leave_the_task_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::default();
+    // A helper that `stop_task` does not end.
+    let open = vec![background("tid-2", "helper", "Run the tests")];
+    cli.lock().unwrap().open = open.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let open = open.clone();
+        Box::pin(async move { turn.work("hello\n", EventKind::BackgroundTasks { tasks: open }).await })
+    });
+    // Longer than the 5 s the CLI gets to say what is gone: the wait that begins in those
+    // seconds (below) runs out after them.
+    let core = start(dir.path(), Provider::Claude, worker, &cli, Some(Duration::from_secs(6))).await;
+
+    wait_held(&core).await;
+    // The wait runs out, and Codly asks the CLI to stop the helper. While Codly looks at what
+    // is left, the CLI starts a short turn by itself: the pass at its end waits for the helper
+    // anew.
+    wait_for("Codly to ask the CLI to stop the helper", 20, async || (!cli.lock().unwrap().stops.is_empty()).then_some(())).await;
+    emit(&cli, EventKind::TurnStarted { input: None });
+    emit(&cli, EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("Still at it.".into()), duration_ms: Some(5) });
+
+    // The helper is still listed, and nobody waits for it a second time: the task is checked
+    // as it is, at once, and does not stay in a wait that nothing ends.
+    wait_plan_done(&core).await;
+    assert_eq!(cli.lock().unwrap().stops, ["tid-2"], "asked to stop once");
+    let after = events(&core).await;
+    let said: Vec<String> = background_decisions(&after).into_iter().map(|(summary, _)| summary).collect();
+    let waits = "t1: not checked yet, its worker left the helper `Run the tests` running; Codly checks the work when that ends, and stops it after 6 s";
+    let stopped = "t1: the helper `Run the tests` still ran after 6 s. Codly could not stop it, and checks the work as it is";
+    assert_eq!(said, [waits, waits, stopped], "the first pass waits, the turn's pass waits, the stop ends both waits");
+    assert_eq!(verified(&after), [true]);
     assert_eq!(cli.lock().unwrap().prompts.len(), 1);
     core.shutdown().await;
 }
