@@ -700,10 +700,15 @@ impl Inner {
         };
         let verify = task.map(|t| t.verify).unwrap_or_default();
         let base = self.approval_mode_for(ws, thread.as_deref());
-        let trusts = |r| {
+        let trusted = |r| {
             !read_only
                 && self.agent(&ctx.agent_id).is_ok_and(|a| matches!(a.role, Role::Worker | Role::Solo) && career::trusts(&a.career, r))
         };
+        // A 1:1 agent whose chat got a message from outside Codly after the user's last own
+        // words there may be working for what a stranger wrote: until the user writes to it
+        // again, their trust in it answers nothing, and the approval mode alone judges.
+        let held_back = ctx.role == Role::Solo && trusted(Rank::Junior) && self.answers_outside(&ctx.agent_id);
+        let trusts = |r| !held_back && trusted(r);
         let mode = approvals::with_trust(base, trusts(Rank::Senior));
         // Your project folder: where an agent hired with Git isolation off works, and where any agent can point a command.
         let checkout = ws.and_then(|w| self.store.workspace(w).ok().flatten()).map(|w| std::path::PathBuf::from(w.repo_path));
@@ -752,9 +757,32 @@ impl Inner {
             }
             Verdict::Ask { reason } => {
                 let reason = if planning { format!("{reason} (its mode is \"plan first\")") } else { reason };
+                // The user's trust in it would have answered this one: say why it asks.
+                let trust_answers = held_back
+                    && matches!(
+                        approvals::evaluate(approval, &PolicyCtx { mode: approvals::with_trust(base, trusted(Rank::Senior)), edits: true, ..pctx }),
+                        Verdict::Allow { .. }
+                    );
+                let reason = if trust_answers {
+                    format!("{reason} (a message from outside Codly came into its chat: what you trust it to do alone waits for your next message to it)")
+                } else {
+                    reason
+                };
                 let _ = self.decide(ws, ctx.task_id.as_deref(), "approval_policy", format!("asking you: {reason}"), detail(&reason));
             }
         }
+    }
+
+    /// Did a message from outside Codly come into this agent's 1:1 chat after the user's last
+    /// own words there (`Core::send_inbound` to "agent:<id>")? Read where `chat_agent_from`
+    /// records that chat: in the agent's office. A chat that cannot be read counts as yes: the
+    /// broker then asks, which is the safe answer.
+    fn answers_outside(&self, agent_id: &str) -> bool {
+        let read = self.store.agent_workspace(agent_id).and_then(|ws| self.store.inbound_after_user(ws.as_deref(), &format!("agent:{agent_id}")));
+        read.unwrap_or_else(|e| {
+            tracing::warn!("the chat of {agent_id} was not read, so the user's trust in it answers nothing for this request: {e}");
+            true
+        })
     }
 
     fn on_exit(self: &Arc<Self>, ctx: &Ctx, code: Option<i64>) {

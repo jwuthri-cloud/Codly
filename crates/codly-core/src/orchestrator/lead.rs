@@ -674,7 +674,9 @@ impl Inner {
             }
             // Not your message: recorded under its source's name, read as quoted data. One
             // agent makes no plan, so no Run plan click stands between it and the work: it is
-            // told to report and suggest, whatever the endpoint's "Run plans without asking".
+            // told to report and suggest, whatever the endpoint's "Run plans without asking",
+            // and until the user's next message here their trust in it answers no request of
+            // its (the broker, `Inner::answers_outside`).
             Said::Outside(msg) => {
                 self.chat(ws_id.as_deref(), &thread, "codly", &msg.shown(), Some(msg.attachment()))?;
                 prompts::inbound_message(&msg.source, &msg.text, false)

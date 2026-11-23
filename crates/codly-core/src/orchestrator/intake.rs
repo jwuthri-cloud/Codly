@@ -10,7 +10,10 @@
 //! - the user's own words (the request to work on it, and what they add) stay outside that
 //!   block, and no text from GitHub is stored as the user's message;
 //! - the link stays with the request (the `intake` attachment of the user's message), so the
-//!   pull-request step can end its description with "Closes #N".
+//!   pull-request step can end its description with "Closes #N";
+//! - the work itself is described by GitHub's text, so a plan made for these words never
+//!   starts by itself: it waits for the user's Run plan in every mode (`is_intake`, read by
+//!   `Inner::submit_plan_inner`), until the user writes their next own message in the request.
 //!
 //! Every `gh` argv comes from a builder (`view_args`, `code_comments_args`, and
 //! `pull_request::checks_args`), so a test can check what would run without running `gh`.
@@ -102,6 +105,13 @@ pub struct Intake {
     /// Why the Lead could not start, after the user's message was recorded: the Lead did not
     /// read the text from GitHub, and the request says why too. None: the Lead has it.
     pub lead_problem: Option<String>,
+}
+
+/// Whether a chat message's attachment says the message is a "From issue…" / "From pull
+/// request…" one. Its words are the user's, but the work they ask for is what GitHub's text
+/// says, and other people write that text: a plan made for it waits for the user's Run plan.
+pub(super) fn is_intake(attachment: Option<&serde_json::Value>) -> bool {
+    attachment.is_some_and(|a| a["intake"].is_object())
 }
 
 // ───────────── what the user named ─────────────

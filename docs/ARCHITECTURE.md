@@ -302,14 +302,21 @@ created switched off) and Slack over Socket Mode (config and gating exist; the s
 connected yet, so Codly takes no Slack token). An inbound message is never the user's: the thread stores and shows it under its
 source's name, the Lead reads it as quoted untrusted data, and a plan made after it waits for Run plan
 unless you let that endpoint run plans without asking (off for every new endpoint). Your next message
-in the thread, or a schedule of yours that fires there, ends the wait for the plans that follow. One
-agent picked to answer instead of the Lead makes no plan, so this gate does not cover it. A request can
+in the thread, or a schedule of yours that fires there, ends the wait for the plans that follow. Until
+then the Lead's `codly_message_member` and `codly_reassign` are refused by the same test, and Codly
+says in the request what it stopped (`tools.rs`, `ask_user_first`). A plan made for a schedule carries
+the schedule's line as its "You asked", not the message you typed before it. One
+agent picked to answer instead of the Lead makes no plan, so this gate does not cover it; for a 1:1
+agent, the trust you gave it answers nothing after such a message until your next one in its chat: the
+approval mode alone judges its requests (the broker in `ingest.rs`). A request can
 also start from GitHub on your click (`orchestrator/intake.rs`, "From issue…" and "From pull request…"
 in the composer's `/` menu and the palette): your `gh` reads the issue or the pull request, your message
 in the thread holds only the link and your own note, and the Lead gets GitHub's text (description,
 comments, and for a pull request its reviews, comments on the code and failing checks) inside one
-`<untrusted>` block with a cap on each part and on the whole. It is your request, so its plan follows the
-request's mode; for an issue, the pull-request step ends that plan's description with "Closes #N". Secrets live in the
+`<untrusted>` block with a cap on each part and on the whole. The words are yours, but the work is what
+GitHub's text says, and other people write that text: a plan made for them waits for Run plan in every
+mode (`submit_plan_inner`), until your next own message in the request. For an issue, the pull-request
+step ends that plan's description with "Closes #N". Secrets live in the
 Keychain. `dictation.rs` is opt-in voice input: a clip goes to Groq Whisper with your own key and the
 transcript lands in the composer draft, never auto-sent.
 

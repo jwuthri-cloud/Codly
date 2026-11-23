@@ -438,3 +438,45 @@ async fn a_lead_that_cannot_start_is_told_in_the_request_and_to_the_caller() {
     assert!(w.lead_turn(1).await.ends_with("Try again."));
     w.core.shutdown().await;
 }
+
+/// Other people write what is on GitHub. In a request that runs plans at once, the plan made
+/// from an issue still waits for Run plan, in Auto and in Direct mode, and its line and its
+/// decision say why. Your next own message in the request is the go-ahead for what follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_made_from_an_issue_waits_for_run_plan_in_every_mode() {
+    let w = world(true).await;
+    let newest_plan = async || w.core.snapshot().await.unwrap().plans.into_iter().max_by_key(|p| p.created_at).expect("a plan");
+    const WHY: &str = "This request started from GitHub, and other people write there, so it waits for you: review it on the board, then click Run plan.";
+
+    // Auto: as when "Run plans without asking" is on.
+    w.core.update_settings(Settings { auto_run_plans: true, ..w.core.settings() }).await.unwrap();
+    w.core.start_from_github("lead", IntakeKind::Issue, "12", "Only the cookie part.").await.unwrap();
+    assert_eq!(w.answer(1).await, "awaiting_approval");
+    let plan = newest_plan().await;
+    assert_eq!((plan.status, plan.request.as_str()), (PlanStatus::AwaitingApproval, ISSUE_WORDS));
+    let chats = w.chats().await;
+    let ready = chats.iter().find(|c| c.author == "codly" && c.text.starts_with("Plan ready:")).expect("the plan's line");
+    assert!(ready.text.ends_with(WHY), "{}", ready.text);
+    assert_eq!(ready.attachment, Some(json!({ "plan_id": plan.id })), "the line that carries the plan's card");
+    // The decision the plan's card shows under "Why?".
+    let why = w.core.events(None, None, 2000).await.unwrap().into_iter().find_map(|e| match e.kind {
+        EventKind::Decision { decision_type, summary, detail, .. } if decision_type == "plan_validate" && detail["rule"] == "intake" => Some((summary, detail)),
+        _ => None,
+    });
+    let (summary, detail) = why.expect("a decision says why the plan did not start");
+    assert_eq!(summary, "not auto-running: this request started from GitHub, and other people write there, so the plan waits for you");
+    assert_eq!(detail["plan_id"], json!(plan.id));
+
+    // Direct: the same.
+    w.core.set_request_prefs("lead", RequestPrefs { mode: Some(LeadMode::Direct), ..Default::default() }).await.unwrap();
+    w.core.start_from_github("lead", IntakeKind::PullRequest, "7", "").await.unwrap();
+    assert_eq!(w.answer(2).await, "awaiting_approval");
+    assert_eq!(newest_plan().await.status, PlanStatus::AwaitingApproval);
+    assert_eq!(w.chats().await.iter().filter(|c| c.author == "codly" && c.text.ends_with(WHY)).count(), 2);
+
+    // Your own message is your request: the plan made for it starts at once.
+    w.core.send_chat("lead", "Go ahead, and keep the old cookie name working.").await.unwrap();
+    assert_eq!(w.answer(3).await, "running");
+    assert_eq!(newest_plan().await.request, "Go ahead, and keep the old cookie name working.");
+    w.core.shutdown().await;
+}
