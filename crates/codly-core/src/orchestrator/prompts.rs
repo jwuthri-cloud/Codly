@@ -525,6 +525,9 @@ pub struct Board<'a> {
     /// The office rules are on (`Settings::game_rules`): the team lines say who is at home or
     /// tired. Off: the Lead is never told, home and tired are only shown in the office.
     pub game_rules: bool,
+    /// The user's required checks, in one line (`required_checks::board_line`): the commands
+    /// Codly runs for every task, or that it runs none of them now. None: they are off.
+    pub required_checks: Option<&'a str>,
 }
 
 /// The board's first line: what the request's mode lets the Lead do.
@@ -611,6 +614,8 @@ pub fn board_header(b: &Board) -> String {
         let clis: Vec<&str> = b.consultant_clis.iter().map(|p| p.as_str()).collect();
         lines.push(format!("Consultant harnesses: {}", clis.join(", ")));
     }
+    // Before the plans, so a long board never cuts what the user requires of every task.
+    lines.extend(b.required_checks.map(String::from));
     let is_live = |p: &&Plan| matches!(p.status, PlanStatus::AwaitingApproval | PlanStatus::Running | PlanStatus::Integrating);
     let mine = |p: &&Plan| p.thread == b.thread;
     let live: Vec<&Plan> = b.plans.iter().filter(is_live).filter(mine).collect();
@@ -967,6 +972,7 @@ mod tests {
             consultant_clis: &[],
             mode: LeadMode::Plan,
             game_rules: false,
+            required_checks: None,
         });
         for line in board.lines().filter(|l| l.contains("ignore your")) {
             let at = line.find("ignore your").unwrap();
@@ -1004,7 +1010,7 @@ mod tests {
             task(json!({ "id": "b", "plan_id": "p2", "key": "t1", "title": "Login", "status": "running", "write_scope": ["src/auth.ts"] })),
             task(json!({ "id": "c", "plan_id": "p2", "key": "t2", "title": "Tests", "status": "pending", "write_scope": ["src/auth.ts", "test/**"] })),
         ];
-        let board = |thread: &str| board_header(&Board { workspace: &ws, thread, plans: &plans, tasks: &tasks, agents: std::slice::from_ref(&lead2), approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan, game_rules: false });
+        let board = |thread: &str| board_header(&Board { workspace: &ws, thread, plans: &plans, tasks: &tasks, agents: std::slice::from_ref(&lead2), approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan, game_rules: false, required_checks: None });
         let mine = board("lead");
         assert!(mine.contains("Plan \"Dark mode\" (yours) — running, 0/1 done") && mine.contains("t1 running — Theme"), "{mine}");
         assert!(
@@ -1107,8 +1113,11 @@ mod tests {
         .unwrap();
         let tasks: Vec<Task> =
             (0..40).map(|i| task(json!({ "id": format!("t{i}"), "key": format!("t{i}"), "status": "ready", "status_reason": "x ".repeat(60) }))).collect();
-        let b = board_header(&Board { workspace: &ws, thread: "lead", plans: &[], tasks: &tasks, agents: &[], approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan, game_rules: false });
+        let required = "Required by the user (.codly/checks): `pnpm check`";
+        let b = board_header(&Board { workspace: &ws, thread: "lead", plans: &[], tasks: &tasks, agents: &[], approvals: &[], notes: &[], accounts: &[], consultant_clis: &[], mode: LeadMode::Plan, game_rules: false, required_checks: Some(required) });
         assert!(b.len() <= BOARD_BUDGET, "{}", b.len());
         assert_eq!(b.matches("<untrusted>").count(), b.matches("</untrusted>").count());
+        // What the user requires of every task comes before the tasks: it is on every board.
+        assert!(b.contains(&format!("\n{required}\n  task t0 ")), "{b}");
     }
 }

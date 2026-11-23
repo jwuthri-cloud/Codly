@@ -945,6 +945,11 @@ pub struct Plan {
     pub summary: String,
     pub assumptions: Vec<String>,
     pub open_questions: Vec<String>,
+    /// The tasks the planner marked when it accepted the plan (`weak_checks.rs`): none of their
+    /// verify commands can fail on the work, so the gate passes them whatever the worker did.
+    /// The plan's card shows them, before the plan runs and after.
+    #[serde(default)]
+    pub weak_checks: Vec<WeakTask>,
     pub status: PlanStatus,
     pub base_commit: Option<String>,
     /// The branch that was checked out when the plan started (None: a detached HEAD, or a plan
@@ -961,6 +966,24 @@ pub struct Plan {
     pub kept: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A task of a plan whose verify commands prove nothing about the work (`Plan::weak_checks`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WeakTask {
+    /// The task's key in the plan ("t1").
+    pub task: String,
+    /// Each of its verify commands, and why it proves nothing.
+    pub checks: Vec<WeakCheck>,
+}
+
+/// One verify command that cannot fail on the work, and why ("always passes").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WeakCheck {
+    pub command: String,
+    pub why: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

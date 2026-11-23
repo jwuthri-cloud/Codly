@@ -71,7 +71,7 @@
   </div>
   <!-- A solo agent's own worktree only: a task's worktree is the gate's (also while a solo agent has the task), and in your project folder your own terminal is the place. -->
   {#if agent.role === 'solo' && !agent.task_id && view?.worktree && view.worktree !== store.workspace?.repo_path}<PreviewStep source={{ kind: 'agent', id: agent.id }} worktree={view.worktree} agentId={agent.id} />{/if}
-  {#if agent.role === 'solo' && view?.worktree}<AgentChecks {agent} {resting} />{/if}
+  {#if agent.role === 'solo' && view?.worktree}<AgentChecks {agent} {resting} refresh={view} />{/if}
   {#if agent.role === 'solo' && view?.branch}<MergeConflictStep source={{ kind: 'agent', id: agent.id }} refresh={`${merges}:${agent.status}`} who={agent.name} wait={resting ? null : 'Wait until its turn ends'} />{/if}
   {#if agent.role === 'solo'}<RepoSyncBar refresh={merges} agentId={agent.id} />{/if}
   <!-- Only for Codly's own branch: the core pushes no other one from here. -->

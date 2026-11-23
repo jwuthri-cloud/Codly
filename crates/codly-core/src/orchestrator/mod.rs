@@ -183,6 +183,8 @@ struct Live {
     turn_messages: u32,
     /// First line of the latest user message (solo commit messages).
     last_prompt: Option<String>,
+    /// A prompt of this run carried the agent's career block (`with_briefing`): once in a run.
+    briefed: bool,
     /// Lead messages (codly_message_member) whose answer goes back to that Lead.
     answers: Vec<Answer>,
     /// Started only to answer the Lead: shut down once every answer went out.

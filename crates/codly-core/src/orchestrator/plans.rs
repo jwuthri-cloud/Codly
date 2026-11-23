@@ -134,6 +134,14 @@ impl Inner {
         };
 
         let plan_id = new_id();
+        // The planner's marks (`weak_verify`) stay on the plan itself: its card has them at any
+        // time, also when the decisions that carry them are far back in the history.
+        let weak_checks: Vec<WeakTask> = valid
+            .fixes
+            .iter()
+            .filter(|f| f.detail["rule"] == "weak_verify")
+            .map(|f| serde_json::from_value(f.detail.clone()))
+            .collect::<serde_json::Result<_>>()?;
         let plan = Plan {
             id: plan_id.clone(),
             workspace_id: ws.id.clone(),
@@ -142,6 +150,7 @@ impl Inner {
             summary: valid.plan.summary.clone(),
             assumptions: valid.plan.assumptions.clone(),
             open_questions: valid.plan.open_questions.clone(),
+            weak_checks,
             status: PlanStatus::AwaitingApproval,
             base_commit: None,
             base_branch: None,
@@ -236,7 +245,7 @@ impl Inner {
         let n = tasks.len();
         // Tasks the planner marked (`weak_verify`): said here too, because a plan that runs at
         // once never waits with its card open.
-        let weak: Vec<&str> = valid.fixes.iter().filter(|f| f.detail["rule"] == "weak_verify").filter_map(|f| f.detail["task"].as_str()).collect();
+        let weak: Vec<&str> = plan.weak_checks.iter().map(|w| w.task.as_str()).collect();
         let weak = match weak.len() {
             0 => String::new(),
             1 => format!(" {} has no check that can fail on the work: the plan card says why.", weak[0]),

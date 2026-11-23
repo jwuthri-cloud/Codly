@@ -29,6 +29,7 @@ fn plan(id: &str, status: PlanStatus, created_at: i64) -> Plan {
         summary: id.into(),
         assumptions: vec![],
         open_questions: vec![],
+        weak_checks: vec![],
         status,
         base_commit: None,
         base_branch: None,

@@ -264,3 +264,50 @@ async fn an_exported_agent_comes_back_with_its_career_traits_and_memory() {
     assert!(core2.memory_file(&b.id).await.unwrap().text.contains("make docs"));
     core2.shutdown().await;
 }
+
+/// What a career adds (the traits' work rules, the track record) is said once in a run, on its
+/// first prompt: on every later message it only costs tokens. The standing goal stays on every
+/// prompt, and a new run is told again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_career_block_is_on_the_first_prompt_of_a_run_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let (core, log) = start(dir.path()).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let mut m = manifest("Mina");
+    m.traits = vec!["perfectionist".into()];
+    let a = core.hire_from_manifest(m, false).await.unwrap();
+    let thread = format!("agent:{}", a.id);
+    let block = "[Who you are at work]\nPerfectionist: Before you say you are done";
+
+    core.send_chat(&thread, "check the docs").await.unwrap();
+    wait_until("the first prompt", || log.lock().unwrap().prompts.len() == 1).await;
+    core.send_chat(&thread, "and the changelog").await.unwrap();
+    wait_until("the second prompt", || log.lock().unwrap().prompts.len() == 2).await;
+    {
+        let l = log.lock().unwrap();
+        assert_eq!(l.spawns.len(), 1, "both messages went to one run");
+        assert!(l.prompts[0].contains(block), "{}", l.prompts[0]);
+        assert!(!l.prompts[1].contains("Who you are at work") && !l.prompts[1].contains("Perfectionist"), "{}", l.prompts[1]);
+        assert!(l.prompts.iter().all(|p| p.contains("Your standing goal")), "the standing goal is on every prompt");
+    }
+
+    // A new run of the agent starts without it: its first prompt says it again.
+    core.stop_agent(&a.id).await.unwrap();
+    let mut ended = false;
+    for _ in 0..200 {
+        ended = core.snapshot().await.unwrap().agents.iter().any(|x| x.id == a.id && x.run_id.is_none());
+        if ended {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(ended, "the stopped run ended");
+    core.send_chat(&thread, "one more thing").await.unwrap();
+    wait_until("the third prompt", || log.lock().unwrap().prompts.len() == 3).await;
+    let l = log.lock().unwrap();
+    assert_eq!(l.spawns.len(), 2, "a new run");
+    assert!(l.prompts[2].contains(block), "{}", l.prompts[2]);
+    drop(l);
+    core.shutdown().await;
+}

@@ -30,7 +30,7 @@ fn main() {
         "closed_requests", "closed_request",
         "pull_request", "draft_pull_request", "create_pull_request", "push_pr_branch", "refresh_pull_request",
         "merge_state", "resolve_merge_conflict", "stop_resolving_merge",
-        "required_checks", "check_agent",
+        "required_checks", "check_agent", "agent_check_state",
         "start_problem", "recover_database",
         "start_from_github",
     ])))

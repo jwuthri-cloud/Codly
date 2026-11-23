@@ -1352,6 +1352,7 @@ mod tests {
             summary: "s".into(),
             assumptions: vec![],
             open_questions: vec![],
+            weak_checks: vec![],
             status: PlanStatus::AwaitingApproval,
             base_commit: None,
             base_branch: None,

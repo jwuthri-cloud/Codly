@@ -73,6 +73,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::worktree_setup,
             commands::required_checks,
             commands::check_agent,
+            commands::agent_check_state,
             commands::workspace_trust,
             crate::preview_commands::preview,
             commands::breaker_config,
@@ -277,6 +278,8 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("no .codly/checks"), "{e}");
     assert_eq!(invoke(&wv, "required_checks", json!({ "set": { "allow": null } })).unwrap()["on"], false);
     let e = invoke(&wv, "check_agent", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent"), "{e}");
+    let e = invoke(&wv, "agent_check_state", json!({ "agentId": "nope" })).unwrap_err();
     assert!(e.to_string().contains("unknown agent"), "{e}");
     // Workspace trust: this repo has no CLI configuration of its own, so there is nothing to
     // decide, nothing to trust, and "open without" changes nothing.

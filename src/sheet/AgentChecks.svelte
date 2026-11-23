@@ -3,14 +3,14 @@
   merge its branch. This runs the repo's required checks (`.codly/checks`, turned on in Settings →
   Safety) in the agent's worktree and shows each command's result, with the output of the ones
   that failed. It stops no merge: the result is yours to read.
-  A run and its result outlive this tab: the run is in `agentChecks`, the result is the decision
-  the core records for it. A result goes when the agent works again: it was about other files.
+  The core keeps the run and its result (`agentChecks`), so both outlive this tab and a reload of
+  the window. A result goes when the agent's files are not the checked ones any more: the agent
+  worked, you put files back, a branch was merged in, or you changed a file yourself.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
   import { agentChecks } from '../lib/state/agentChecks.svelte';
-  import { store } from '../lib/state/store.svelte';
-  import { checkLine, checksLine, lastAgentCheck } from '../lib/util/checks';
+  import { checkLine, checksLine } from '../lib/util/checks';
   import { clock } from '../lib/util/format';
   import Icon from '../components/Icon.svelte';
 
@@ -18,26 +18,40 @@
     agent: Agent;
     /** Its turn is over: the files do not change while the checks run. */
     resting: boolean;
+    /** Changes when the Git tab read the worktree again (opened, refreshed, after a merge or
+     *  restored files): the checked files may not be the ones in it any more. */
+    refresh: unknown;
   }
-  let { agent, resting }: Props = $props();
+  let { agent, resting, refresh }: Props = $props();
 
-  const running = $derived(agentChecks.running[agent.id] ?? false);
+  const running = $derived(agentChecks.state[agent.id]?.running ?? false);
+  const shown = $derived(running ? null : (agentChecks.state[agent.id]?.last ?? null));
   const error = $derived(agentChecks.failed[agent.id] ?? null);
-  const last = $derived.by(() => {
-    void store.rev;
-    return lastAgentCheck(store.decisions, agent.id, store.live[agent.id]?.turn?.startedAt ?? null);
+  const unread = $derived(agentChecks.unread[agent.id] ?? null);
+
+  $effect(() => {
+    void refresh;
+    void resting;
+    void agentChecks.load(agent.id);
   });
-  const shown = $derived(running ? null : last);
+  // A run on its way (also one started before the window was reloaded): ask until it ends.
+  $effect(() => {
+    if (!running) return;
+    const id = agent.id;
+    const timer = setInterval(() => void agentChecks.load(id), 2000);
+    return () => clearInterval(timer);
+  });
 </script>
 
 <div class="checks">
   <div class="head">
-    <span class="what" role="status">{running ? 'Running your required checks…' : shown ? `${checksLine(shown.results)} · checked at ${clock(shown.ts)}` : 'Codly has not checked this work.'}</span>
+    <span class="what" role="status">{running ? 'Running your required checks…' : shown ? `${checksLine(shown.results)} · checked at ${clock(shown.at)}` : 'Codly has not checked this work as it is now.'}</span>
     <button class="btn sm" disabled={running || !resting} onclick={() => agentChecks.run(agent.id)} data-tip={resting ? 'Run the repo’s required checks (.codly/checks) in this worktree' : 'Wait until its turn ends'}>
       <Icon name="check" size={12} />Check the work
     </button>
   </div>
   {#if error && !running}<p class="bad">Couldn’t check the work: {error}</p>{/if}
+  {#if unread}<p class="bad">Couldn’t read the last check: {unread}</p>{/if}
   {#if shown}
     <ul>
       {#each shown.results as r (r.command)}

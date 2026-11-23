@@ -4,12 +4,13 @@
 //!   (you turned that text on), and a failure goes back to the worker like any failed check;
 //!   they run again on the finished plan;
 //! - a checks file that is not the text you turned on runs nothing and passes nothing: the
-//!   task waits until you read the new text;
+//!   task waits until you turn the new text on, or the checks off, and then goes on by itself;
 //! - a required check that fails on the merged work fails the plan;
 //! - "Check the work" runs them in the worktree of an agent you chat with: one run for an
-//!   agent at a time, and no result when the agent worked while the commands ran;
-//! - a plan whose task has only checks that prove nothing is marked, and a plan that runs at
-//!   once says so in its chat line.
+//!   agent at a time, no result when the agent worked while the commands ran, and a result
+//!   that lasts as long as the agent's files are the checked ones;
+//! - a plan whose task has only checks that prove nothing is marked on the plan itself, and a
+//!   plan that runs at once says so in its chat line.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,7 +20,7 @@ use std::time::Duration;
 
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
 use codly_core::model::*;
-use codly_core::orchestrator::required_checks::{CheckResult, ChecksChoice, RequiredChecks};
+use codly_core::orchestrator::required_checks::{AgentCheck, CheckResult, CheckedWork, ChecksChoice, RequiredChecks};
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -283,6 +284,9 @@ async fn the_gate_runs_your_required_checks_for_each_task_and_for_the_plan() {
     assert_eq!(prompts.len(), 2, "the brief and one fix round");
     assert!(prompts[0].contains("The owner of this repo requires these checks") && prompts[0].contains(&format!("  - {required}\n")), "{}", prompts[0]);
     assert!(prompts[1].contains(&format!("Verification failed (fix round 1/2): `{required}` exited 1")), "{}", prompts[1]);
+    // The Lead plans with them in sight: its board names what you require of every task.
+    let lead = turns.lock().unwrap().iter().find(|t| t.0 == Role::Lead).map(|t| t.1.clone()).expect("the Lead got the request");
+    assert!(lead.contains(&format!("\nRequired by the user (.codly/checks; Codly runs these for every task after its verify commands, and for every finished plan): `{required}`\n")), "{lead}");
     core.shutdown().await;
 }
 
@@ -300,12 +304,26 @@ async fn a_plan_that_runs_at_once_says_which_task_has_no_real_check() {
     let snap = core.snapshot().await.unwrap();
     let ready = snap.chats.iter().find(|c| c.author == "codly" && c.text.starts_with("Plan ready:")).expect("the plan's line");
     assert_eq!(ready.text, "Plan ready: Add a hello file (1 task). t1 has no check that can fail on the work: the plan card says why. Running it now.");
-    // The mark is the plan's: its card shows it while the plan runs and when it is done.
+    // The mark is the plan's: its card shows it while the plan runs and when it is done, from
+    // the plan's own record (the decision can be far back in a long history).
+    let marked = vec![WeakTask { task: "t1".into(), checks: vec![WeakCheck { command: own.into(), why: "only checks that a file is there".into() }] }];
+    assert_eq!(snap.plans[0].weak_checks, marked);
     let all = events(&core).await;
     let weak = decisions(&all).into_iter().find(|d| d["rule"] == "weak_verify").expect("the weak check is marked");
     assert_eq!((&weak["task"], &weak["plan_id"]), (&json!("t1"), &json!(snap.plans[0].id)));
     assert_eq!(weak["checks"], json!([{ "command": own, "why": "only checks that a file is there" }]));
+    // Every later state of the plan carries it (running, done), not only the first.
+    let states: Vec<&Plan> = all.iter().filter_map(|e| if let EventKind::PlanChanged { plan } = &e.kind { Some(plan) } else { None }).collect();
+    assert!(states.len() > 1 && states.iter().all(|p| p.weak_checks == marked), "{states:?}");
     core.shutdown().await;
+}
+
+#[test]
+fn a_plan_from_before_the_mark_was_kept_on_it_still_loads() {
+    let old = json!({ "id": "p", "workspace_id": "ws", "thread": "lead", "request": "", "summary": "Sign-in", "assumptions": [], "open_questions": [],
+        "status": "running", "base_commit": null, "integration_branch": null, "integration_worktree": null, "created_at": 0, "updated_at": 0 });
+    let plan: Plan = serde_json::from_value(old).unwrap();
+    assert!(plan.weak_checks.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -331,9 +349,9 @@ async fn a_checks_file_that_changed_stops_the_task_until_you_read_it() {
     let shown = core.required_checks(None).await.unwrap();
     assert!(!shown.on && shown.changed, "{shown:?}");
 
-    // You read the new text, turn it on and re-run the checks: no worker turn, and the task lands.
+    // You read the new text and turn it on. That is all: Codly checks the task again by itself
+    // (no click on its card, no worker turn), and the task lands.
     turn_on(&core).await;
-    assert!(core.recheck_task(&t.id, vec![]).await.unwrap().is_empty());
     wait_plan(&core, PlanStatus::Done).await;
     let after = events(&core).await;
     // A required check the task has as its own verify command runs once for the task.
@@ -341,6 +359,39 @@ async fn a_checks_file_that_changed_stops_the_task_until_you_read_it() {
     assert_eq!(for_task, [own, "test -f hello.txt"]);
     assert!(verified(&after).iter().all(|v| v.1), "{:?}", verified(&after));
     assert_eq!(worker_prompts(&turns).len(), 1);
+    assert!(decisions(&after).iter().any(|d| d["rechecked"] == json!(["t1"]) && d["still_waiting"] == json!([])), "the re-run is on record");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turning_the_checks_off_lets_the_tasks_that_waited_go_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let own = "grep -q hello hello.txt";
+    let repo = temp_repo(dir.path(), "test -f hello.txt\n");
+    let turns = Turns::default();
+    let core = start(dir.path(), &repo, FakeSpawner { lead: lead_with(own), worker: hello_worker(), turns: turns.clone() }).await;
+    turn_on(&core).await;
+    // The file is gone after you turned it on (another branch is checked out): nothing passes.
+    std::fs::remove_file(repo.join(CHECKS_FILE)).unwrap();
+
+    core.send_chat("lead", "Please do it").await.unwrap();
+    let t = wait_task(&core, TaskStatus::Blocked).await;
+    assert!(t.status_reason.unwrap().contains(".codly/checks has no command any more"));
+    assert!(verified(&events(&core).await).is_empty());
+
+    // You turn the checks off: the task is checked again, with its own check only, and lands.
+    let off = core.required_checks(Some(ChecksChoice { allow: None })).await.unwrap();
+    assert!(!off.on && !off.changed, "{off:?}");
+    wait_plan(&core, PlanStatus::Done).await;
+    let after = events(&core).await;
+    assert_eq!(verified(&after), [(own, true, true)], "the task's own check, once; no required check runs when they are off");
+    assert_eq!(worker_prompts(&turns).len(), 1, "no worker turn");
+    assert!(decisions(&after).iter().any(|d| d["rechecked"] == json!(["t1"])), "the re-run is on record");
+
+    // Nothing waits any more: turning them off again re-runs nothing.
+    core.required_checks(Some(ChecksChoice { allow: None })).await.unwrap();
+    let rechecks = decisions(&events(&core).await).into_iter().filter(|d| !d["rechecked"].is_null()).count();
+    assert_eq!(rechecks, 1);
     core.shutdown().await;
 }
 
@@ -377,15 +428,28 @@ async fn check_the_work_runs_your_required_checks_in_a_solo_agents_worktree() {
     // Off: nothing runs, and the error says where to turn them on.
     let e = core.check_agent(&solo.id).await.unwrap_err().to_string();
     assert!(e.contains("no required checks turned on") && e.contains(".codly/checks") && e.contains("Settings → Safety → Required checks"), "{e}");
+    let nothing = AgentCheck { running: false, last: None };
+    assert_eq!(core.agent_check_state(&solo.id).await.unwrap(), nothing, "Codly has not checked this work");
     turn_on(&core).await;
 
     // All of them run, also after a failure: you see every result, with its output.
     let first = core.check_agent(&solo.id).await.unwrap();
     assert_eq!(first.iter().map(|r| (r.command.as_str(), r.ok, r.exit_code)).collect::<Vec<_>>(), [("grep -q hello hello.txt", false, Some(2)), ("test -f hello.txt", false, Some(1))]);
     assert!(first[0].tail.contains("hello.txt") && !first[0].timed_out, "{first:?}");
+    // The core keeps the result, so the Git tab has it after a reload of the window too.
+    let kept = core.agent_check_state(&solo.id).await.unwrap();
+    assert!(!kept.running && kept.last.as_ref().map(|w| &w.results) == Some(&first), "{kept:?}");
+    // You change a file yourself, with no turn of the agent: the result was about other
+    // files. It is dropped, and stays dropped.
     std::fs::write(wt.join("hello.txt"), "hello\n").unwrap();
+    assert_eq!(core.agent_check_state(&solo.id).await.unwrap(), nothing);
+    assert_eq!(core.agent_check_state(&solo.id).await.unwrap(), nothing);
     let results = core.check_agent(&solo.id).await.unwrap();
     assert!(results.len() == 2 && results.iter().all(|r| r.ok && r.exit_code == Some(0)), "{results:?}");
+    // The new result stays for as long as the files are the checked ones, however often the tab asks.
+    let now: CheckedWork = core.agent_check_state(&solo.id).await.unwrap().last.expect("the new result is kept");
+    assert_eq!(now.results, results);
+    assert_eq!(core.agent_check_state(&solo.id).await.unwrap().last, Some(now));
 
     let said: Vec<String> = core.snapshot().await.unwrap().chats.into_iter().filter(|c| c.thread == thread && c.author == "codly").map(|c| c.text).collect();
     let failed = format!("Checked {}'s work: 2 of 2 required checks failed: `grep -q hello hello.txt` (exit 2), `test -f hello.txt` (exit 1).", solo.name);
@@ -394,7 +458,7 @@ async fn check_the_work_runs_your_required_checks_in_a_solo_agents_worktree() {
     let all = events(&core).await;
     let runs = all.iter().filter(|e| matches!(e.kind, EventKind::Verified { .. }) && e.agent_id.as_deref() == Some(solo.id.as_str())).count();
     assert_eq!(runs, 4, "each run is in the agent's record");
-    // Each result is on record in full, output too: the agent's Git tab reads the last one from there.
+    // Each result is on record in full, output too.
     let checked: Vec<&Value> = decisions(&all).into_iter().filter(|d| d["agent_id"] == json!(solo.id)).collect();
     assert_eq!(checked.len(), 2);
     assert_eq!((&checked[0]["checks"], &checked[1]["checks"]), (&serde_json::to_value(&first).unwrap(), &serde_json::to_value(&results).unwrap()));
@@ -403,6 +467,11 @@ async fn check_the_work_runs_your_required_checks_in_a_solo_agents_worktree() {
     std::fs::write(repo.join(CHECKS_FILE), "true\n").unwrap();
     let e = core.check_agent(&solo.id).await.unwrap_err().to_string();
     assert!(e.starts_with("Codly did not run your required checks: .codly/checks changed since you turned them on."), "{e}");
+    // The agent's files are still the checked ones (the checks file is in your checkout).
+    assert!(core.agent_check_state(&solo.id).await.unwrap().last.is_some());
+    // A file that goes (files put back to an earlier point, a merge) drops the result as an edit does.
+    std::fs::remove_file(wt.join("hello.txt")).unwrap();
+    assert_eq!(core.agent_check_state(&solo.id).await.unwrap(), nothing);
     core.shutdown().await;
 }
 
@@ -433,6 +502,8 @@ async fn check_the_work_is_one_run_for_an_agent_at_a_time() {
     // Two clicks (the Git tab was closed and opened again while the checks ran).
     let (first, second) = (check_in_background(&core, &solo), check_in_background(&core, &solo));
     wait_for("one of the two to be refused", 20, async || (first.is_finished() || second.is_finished()).then_some(())).await;
+    // The core says that the run is on its way: a window that was reloaded meanwhile asks it.
+    assert_eq!(core.agent_check_state(&solo.id).await.unwrap(), AgentCheck { running: true, last: None });
     std::fs::write(wt.join("go"), "").unwrap();
     let (ran, refused): (Vec<_>, Vec<_>) = [first.await.unwrap(), second.await.unwrap()].into_iter().partition(|r| r.is_ok());
     assert_eq!((ran.len(), refused.len()), (1, 1), "{ran:?} {refused:?}");
@@ -440,6 +511,8 @@ async fn check_the_work_is_one_run_for_an_agent_at_a_time() {
     assert!(ran[0].as_ref().unwrap().iter().all(|r| r.ok), "{ran:?}");
     let all = events(&core).await;
     assert_eq!(verified(&all).len(), 1, "the commands ran once: {:?}", verified(&all));
+    let over = core.agent_check_state(&solo.id).await.unwrap();
+    assert!(!over.running && over.last.is_some(), "{over:?}");
 
     // The run is over: the next click runs them again.
     assert!(core.check_agent(&solo.id).await.unwrap().iter().all(|r| r.ok));
@@ -466,6 +539,7 @@ async fn check_the_work_keeps_no_result_when_the_agent_worked_meanwhile() {
     let said = |snap: &Snapshot| snap.chats.iter().filter(|c| c.thread == thread && c.author == "codly" && c.text.starts_with("Checked")).count();
     assert_eq!(said(&core.snapshot().await.unwrap()), 0, "no result is said");
     assert!(!decisions(&events(&core).await).iter().any(|d| d["agent_id"] == json!(solo.id)), "and none is on record");
+    assert_eq!(core.agent_check_state(&solo.id).await.unwrap().last, None, "and none is kept for its Git tab");
 
     // Its turn is over: the next run is about the files as they are, and it counts.
     let results = wait_for("the agent to rest", 20, async || core.check_agent(&solo.id).await.ok()).await;

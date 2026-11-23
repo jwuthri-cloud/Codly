@@ -594,6 +594,13 @@ pub async fn check_agent(state: State<'_, AppState>, agent_id: String) -> R<Vec<
     state.core().await?.check_agent(&agent_id).await.map_err(err)
 }
 
+/// What "Check the work" has for an agent now: whether its checks run, and the last result
+/// while the agent's files are still the ones that were checked.
+#[tauri::command]
+pub async fn agent_check_state(state: State<'_, AppState>, agent_id: String) -> R<codly_core::orchestrator::required_checks::AgentCheck> {
+    state.core().await?.agent_check_state(&agent_id).await.map_err(err)
+}
+
 /// What the open repo makes the agent CLIs load by themselves (project settings with hooks
 /// or allow rules, project MCP servers) and your choice about it. Pass `set` to trust the
 /// files you read, by their fingerprint, or to open the repo without them.

@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Plan } from '../../gen/Plan';
-import type { JsonValue } from '../../gen/serde_json/JsonValue';
 import type { Task } from '../../gen/Task';
-import type { Decision } from '../../state/store.svelte';
-import { keyList, stuckPlan, waitingOn, weakAdvice, weakTasks } from '../plan';
+import { keyList, stuckPlan, waitingOn, weakAdvice } from '../plan';
 
 const plan = (o: Partial<Plan> = {}): Plan => ({
-  id: 'p1', workspace_id: 'ws', thread: 'lead', request: '', summary: 'Sign-in', assumptions: [], open_questions: [], status: 'running',
+  id: 'p1', workspace_id: 'ws', thread: 'lead', request: '', summary: 'Sign-in', assumptions: [], open_questions: [], weak_checks: [], status: 'running',
   base_commit: null, base_branch: null, integration_branch: null, integration_worktree: null, merged_sha: null, kept: false, created_at: 0, updated_at: 0, ...o,
 });
 
@@ -59,38 +57,6 @@ describe('waitingOn', () => {
     expect(keys(waitingOn(tasks, 't1'))).toEqual(['t2', 't3', 't5']);
     expect(keys(waitingOn(tasks, 't4'))).toEqual(['t5']);
     expect(waitingOn(tasks, 't5')).toEqual([]);
-  });
-});
-
-describe('weakTasks', () => {
-  let n = 0;
-  const decision = (type: string, detail: JsonValue): Decision => {
-    n += 1;
-    return { id: `d${n}`, type, method: 'rule', summary: '', detail, ts: n, agentId: null, taskId: null, eventId: n };
-  };
-  const weak = (planId: string, key: string, checks: JsonValue) => decision('plan_validate', { plan_id: planId, rule: 'weak_verify', task: key, checks });
-
-  it('reads the tasks the planner marked, with each check and why it proves nothing', () => {
-    const decisions = [
-      decision('plan_validate', { plan_id: 'p1', rule: 'validated', tasks: ['t1', 't2'], fixes: 1 }),
-      weak('p1', 't2', [{ command: 'true', why: 'always passes' }, { command: 'test -f a.ts', why: 'only checks that a file is there' }]),
-    ];
-    expect(weakTasks(decisions, 'p1')).toEqual([
-      { task: 't2', checks: [{ command: 'true', why: 'always passes' }, { command: 'test -f a.ts', why: 'only checks that a file is there' }] },
-    ]);
-  });
-
-  it('reads only this plan’s marks, and nothing it does not understand', () => {
-    const decisions = [
-      weak('p2', 't1', [{ command: 'true', why: 'always passes' }]),
-      // The same rule under another decision type, and marks without a readable check.
-      decision('gate', { plan_id: 'p1', rule: 'weak_verify', task: 't1', checks: [{ command: 'true', why: 'always passes' }] }),
-      weak('p1', 't3', [{ command: 'true' }, 'echo ok', null]),
-      weak('p1', 't4', 'true'),
-      decision('plan_validate', 'weak_verify'),
-    ];
-    expect(weakTasks(decisions, 'p1')).toEqual([]);
-    expect(weakTasks(decisions, 'p2').map((w) => w.task)).toEqual(['t1']);
   });
 });
 

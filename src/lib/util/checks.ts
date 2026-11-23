@@ -1,9 +1,8 @@
-// Codly's check runs in words: a task's checks on its sheet, and the result of "Check the work"
-// (an agent's Git tab), which runs the repo's required checks.
+// Codly's check runs in words: a task's checks on its sheet and on its Done card, and the result
+// of "Check the work" (an agent's Git tab), which runs the repo's required checks.
 
 import type { CheckResult } from '../gen/CheckResult';
-import type { JsonValue } from '../gen/serde_json/JsonValue';
-import type { Decision, Seg, TaskMark } from '../state/store.svelte';
+import type { Seg, TaskMark } from '../state/store.svelte';
 
 /** One check of a task, as its sheet shows it. */
 export type TaskCheck = {
@@ -12,6 +11,8 @@ export type TaskCheck = {
   detail: string;
   /** Who ran it last: Codly (the gate), or the task's agent in its own turn. */
   by: 'codly' | 'agent' | null;
+  /** Yours: a required check of the repo (`.codly/checks`), not one of the task's own. */
+  required: boolean;
   /** When the agent's run of it started, while it runs. */
   since?: number;
 };
@@ -28,28 +29,47 @@ export function taskChecks(verify: string[], marks: TaskMark[], segs: Seg[], wai
   const own = [...new Set(verify)];
   const last = new Map<string, TaskMark>();
   for (const m of marks) if (m.kind === 'verified') last.set(m.text, m);
-  const codly = (m: TaskMark, who: string): TaskCheck => ({ cmd: m.text, state: m.ok ? 'pass' : 'fail', detail: `${m.ok ? 'passed' : 'failed'} · ${who}`, by: 'codly' });
+  const codly = (m: TaskMark, required: boolean): TaskCheck => ({
+    cmd: m.text, state: m.ok ? 'pass' : 'fail', detail: `${m.ok ? 'passed' : 'failed'} · Codly${required ? ' · required by you' : ''}`, by: 'codly', required,
+  });
 
   const rows = own.map((cmd): TaskCheck => {
     const m = last.get(cmd);
-    if (m) return codly(m, 'Codly');
+    if (m) return codly(m, false);
     // The agent's own run of it may be wrapped (`cd app && pnpm test`): any command that holds it.
     const s = [...segs].reverse().find((x) => (x.target.command ?? '').includes(cmd) || cmd.includes(x.target.command ?? '\u0000'));
-    if (!s) return { cmd, state: 'none', detail: 'not run yet', by: null };
-    if (s.end == null && waits(s.callId)) return { cmd, state: 'wait', detail: 'needs your approval', by: 'agent' };
-    if (s.end == null) return { cmd, state: 'running', detail: 'running now', by: 'agent', since: s.start };
+    if (!s) return { cmd, state: 'none', detail: 'not run yet', by: null, required: false };
+    if (s.end == null && waits(s.callId)) return { cmd, state: 'wait', detail: 'needs your approval', by: 'agent', required: false };
+    if (s.end == null) return { cmd, state: 'running', detail: 'running now', by: 'agent', required: false, since: s.start };
     const counts = s.testsPassed != null ? (s.testsFailed ? `${s.testsFailed} failed, ${s.testsPassed} passed` : `${s.testsPassed} passed`) : s.ok ? 'passed' : 'failed';
-    return { cmd, state: s.ok === false || s.testsFailed ? 'fail' : 'pass', detail: `${counts} · its run`, by: 'agent' };
+    return { cmd, state: s.ok === false || s.testsFailed ? 'fail' : 'pass', detail: `${counts} · its run`, by: 'agent', required: false };
   });
 
   const ownRan = Math.max(0, ...own.map((cmd) => last.get(cmd)?.eventId ?? 0));
   const required = [...last.values()].filter((m) => !own.includes(m.text) && m.eventId > ownRan).sort((a, b) => a.eventId - b.eventId);
-  return [...rows, ...required.map((m) => codly(m, 'Codly · required by you'))];
+  return [...rows, ...required.map((m) => codly(m, true))];
 }
 
 /** Did Codly's own run of every check pass? Then the task's acceptance criteria are ticked. */
 export function checksPassed(checks: TaskCheck[]): boolean {
   return checks.length > 0 && checks.every((c) => c.state === 'pass' && c.by === 'codly');
+}
+
+/** Codly's check runs on the card of a finished task: the task's own check to show (one that
+ *  failed, else the last one Codly ran), and your required checks of the same pass.
+ *  `marks`: the task's finished steps, oldest first. */
+export function doneChecks(verify: string[], marks: TaskMark[]): { own: TaskCheck | null; required: TaskCheck[] } {
+  const ran = taskChecks(verify, marks, [], () => false).filter((c) => c.by === 'codly');
+  const own = ran.filter((c) => !c.required);
+  return { own: own.find((c) => c.state === 'fail') ?? own.at(-1) ?? null, required: ran.filter((c) => c.required) };
+}
+
+/** A task's required checks in one line: "Required by you: 2 checks passed", "Required by you: 1
+ *  of 2 checks failed". */
+export function requiredLine(checks: TaskCheck[]): string {
+  const all = `${checks.length} ${checks.length === 1 ? 'check' : 'checks'}`;
+  const failed = checks.filter((c) => c.state === 'fail').length;
+  return `Required by you: ${failed ? `${failed} of ${all} failed` : `${all} passed`}`;
 }
 
 /** How one check ended: "passed", "failed (exit 1)", "ran out of time", "did not finish". */
@@ -64,30 +84,4 @@ export function checksLine(results: CheckResult[]): string {
   const checks = `${results.length} required ${results.length === 1 ? 'check' : 'checks'}`;
   const failed = results.filter((r) => !r.ok).length;
   return failed ? `${failed} of ${checks} failed` : `${checks} passed`;
-}
-
-/** One `CheckResult` of a decision's detail; nothing for a value that is not one. */
-function readResult(c: JsonValue): CheckResult[] {
-  if (!c || typeof c !== 'object' || Array.isArray(c)) return [];
-  const { command, ok, exit_code, timed_out, tail } = c;
-  if (typeof command !== 'string' || typeof ok !== 'boolean' || typeof timed_out !== 'boolean' || typeof tail !== 'string') return [];
-  if (exit_code !== null && typeof exit_code !== 'number') return [];
-  return [{ command, ok, exit_code, timed_out, tail }];
-}
-
-/** The last "Check the work" of an agent: each command's result, and when Codly ran them. Read
- *  from the `gate` decision the core records for it (`check_agent`), so the Git tab still has it
- *  when you come back.
- *  Null: Codly did not check this work, or the agent got a turn since (`turnStartedAt`, ms): that
- *  result is about files it may have changed. */
-export function lastAgentCheck(decisions: Decision[], agentId: string, turnStartedAt: number | null): { results: CheckResult[]; ts: number } | null {
-  let found: { ts: number; eventId: number; checks: JsonValue[] } | null = null;
-  for (const d of decisions) {
-    if (d.type !== 'gate' || !d.detail || typeof d.detail !== 'object' || Array.isArray(d.detail)) continue;
-    const { agent_id, checks } = d.detail;
-    if (agent_id === agentId && Array.isArray(checks) && (!found || d.eventId > found.eventId)) found = { ts: d.ts, eventId: d.eventId, checks };
-  }
-  if (!found || (turnStartedAt !== null && turnStartedAt > found.ts)) return null;
-  const results = found.checks.flatMap(readResult);
-  return results.length === found.checks.length ? { results, ts: found.ts } : null;
 }
