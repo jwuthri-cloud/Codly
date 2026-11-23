@@ -1190,8 +1190,9 @@ const READ_BY_NAME: &[&str] = &[
 /// CLIs, not from a recording.
 ///
 /// A path counts by its last part only where a program may stand (`uv run ./bin/docker ps`):
-/// the first word after `run`, a word behind the runner's own options (`runner_starts`), and
-/// the word right after a `--`, a wrapper or a `NAME=value` (`uv run env CI=1 ./bin/npm …`).
+/// the first word after `run`, a word behind the runner's own options (`runner_starts`), the
+/// word right after a `--`, a wrapper or a `NAME=value`, and the program behind a wrapper at
+/// one of those places (`uv run timeout 60 ./bin/npm …`, `uv run env -u X ./bin/docker …`).
 /// Elsewhere a path is an argument of the program (`uv run pytest tests/docker`), and only a
 /// bare name counts.
 fn env_runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a [String]> {
@@ -1200,7 +1201,7 @@ fn env_runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a [String]> 
     }
     let runs = |word: &String| matches!(word.as_str(), "run" | "exec") || (prog == "mise" && word == "x");
     let Some(run) = args.iter().position(runs) else { return vec![] };
-    let program_places: HashSet<usize> = runner_starts(&args[run + 1..], false)
+    let mut starts: Vec<usize> = runner_starts(&args[run + 1..], false)
         .0
         .into_iter()
         .filter_map(|started| match started {
@@ -1208,9 +1209,29 @@ fn env_runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a [String]> 
             Started::ShellLine(_) => None,
         })
         .collect();
+    starts.extend((run + 1..args.len()).filter(|&at| args[at - 1] == "--"));
+    starts.sort_unstable();
+    starts.dedup();
+    // Behind a wrapper, the program stands past the wrapper's options and values
+    // (`uv run timeout 60 ./bin/npm`). Each word is read once: a place inside a wrapper read
+    // already belongs to it. Past a program built at run time (`env -S`), any word may be one.
+    let (mut program_places, mut read_to, mut any_after) = (HashSet::new(), 0, args.len());
+    for at in starts {
+        program_places.insert(at);
+        if at < read_to {
+            continue;
+        }
+        match classify::command_start(&args[at..]) {
+            Some(start) => {
+                program_places.insert(at + start);
+                read_to = at + start;
+            }
+            None => (any_after, read_to) = (at, args.len()),
+        }
+    }
     let program_place = |at: usize| {
         let before = args[at - 1].as_str();
-        program_places.contains(&at) || before == "--" || classify::is_wrapper(before) || classify::is_assignment(before)
+        at > any_after || program_places.contains(&at) || classify::is_wrapper(before) || classify::is_assignment(before)
     };
     let names_a_program = |at: usize| {
         let word = args[at].as_str();
@@ -1241,8 +1262,10 @@ fn started_by<'a>(prog: &str, args: &'a [String]) -> Vec<Started<'a>> {
 
 /// The most commands that the commands of one line may start, counted over the whole line:
 /// through package runners and other runners, shells, `find -exec`, and the lines inside the
-/// line. A daily line starts a few. A line that starts more is not read further: it asks as
-/// "runs dynamic code" and offers no rule, so the time a line takes to read stays small.
+/// line. A daily line starts a few. In a line that starts more, what its commands start is not
+/// looked for any more: it asks as "runs dynamic code" and offers no rule, so the time a line
+/// takes to read stays small. The words and the program of each of its commands are still
+/// read, for the risks that Full access asks about too.
 const MAX_STARTED: usize = 24;
 
 /// Counts one more started command: true when the line has started more than `MAX_STARTED`.
@@ -1429,8 +1452,7 @@ fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8,
     }
     // Where the next simple command runs: `cd` moves it.
     let mut dir = base.map(Path::to_path_buf);
-    // Left at once when the line starts more commands than `MAX_STARTED`.
-    'segments: for seg in &p.segments {
+    for seg in &p.segments {
         let texts: Vec<String> = seg.iter().map(|w| w.text.clone()).collect();
         let start = classify::command_start(&texts);
         let at = start.unwrap_or(texts.len());
@@ -1495,9 +1517,15 @@ fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8,
         // (`uv run uv run npm publish`: the same `npm publish` behind the first `uv` and
         // behind the second).
         let mut places: HashSet<*const [String]> = runs.iter().map(|(_, args)| std::ptr::from_ref(*args)).collect();
+        // Once the line has started more than `MAX_STARTED` commands, what a command starts is
+        // not looked for any more, but each command's own words and program are still read
+        // (a path in Codly's data folder, the agent's settings).
         let mut read = 0;
-        while let Some(&(runner, runner_args)) = runs.get(read) {
+        'runners: while let Some(&(runner, runner_args)) = runs.get(read) {
             read += 1;
+            if reading.started > MAX_STARTED {
+                break;
+            }
             for command in started_by(runner, runner_args) {
                 let words = match command {
                     Started::Program(words) => words,
@@ -1505,13 +1533,10 @@ fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8,
                     Started::ShellLine(line) if depth < 3 => {
                         if one_more(&mut reading.started) {
                             add("runs dynamic code");
-                            break 'segments;
+                            break 'runners;
                         }
                         for r in inner_risks(&line, cwd, worktree, depth + 1, reading) {
                             add(&r);
-                        }
-                        if reading.started > MAX_STARTED {
-                            break 'segments;
                         }
                         continue;
                     }
@@ -1533,7 +1558,7 @@ fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8,
                 if places.insert(std::ptr::from_ref(started_args)) {
                     if one_more(&mut reading.started) {
                         add("runs dynamic code");
-                        break 'segments;
+                        break 'runners;
                     }
                     runs.push((basename(name), started_args));
                 }
@@ -1585,16 +1610,14 @@ fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8,
                 "docker" | "podman" => add("containers"),
                 "eval" | "source" | "." => add("runs dynamic code"),
                 p if classify::SHELLS.contains(&p) => match classify::shell_run(a) {
+                    // Past `MAX_STARTED`, the line for the shell is not read.
                     ShellRun::Command(line) if depth < 3 => {
                         if one_more(&mut reading.started) {
                             add("runs dynamic code");
-                            break 'segments;
-                        }
-                        for r in inner_risks(line, cwd, worktree, depth + 1, reading) {
-                            add(&r);
-                        }
-                        if reading.started > MAX_STARTED {
-                            break 'segments;
+                        } else {
+                            for r in inner_risks(line, cwd, worktree, depth + 1, reading) {
+                                add(&r);
+                            }
                         }
                     }
                     ShellRun::Command(_) => add("runs dynamic code"),
@@ -2330,6 +2353,26 @@ mod tests {
         let wt = Path::new("/home/me/Library/Codly/worktrees/repo/p/t1");
         assert!(command_risks("cat src/a.rs", Some(wt), Some(wt), 0).is_empty(), "a worktree inside the data dir is the agent's");
         assert!(command_risks("cat ../../../../runs/r1/claude-mcp.json", Some(wt), Some(wt), 0).iter().any(|x| x == "outside worktree"));
+    }
+
+    /// Past `MAX_STARTED`, each command's own words are still read: a path in Codly's data
+    /// folder and the agent's settings, which Full access asks about too, are found after the
+    /// cut and in the command that crossed it.
+    #[test]
+    fn a_line_past_the_count_still_shows_what_full_access_asks_about() {
+        protect_dir(Path::new("/home/me/Library/Codly"));
+        let wt = Path::new("/home/me/w/t1");
+        let r = |c: &str| command_risks(c, Some(wt), Some(wt), 0);
+        let runners = "uv run ".repeat(26);
+        for (c, risk) in [
+            (format!("{runners}true; cat /home/me/Library/Codly/runs/r1/claude-mcp.json"), CODLY_DATA),
+            (format!("{runners}cat /home/me/Library/Codly/runs/r1/claude-mcp.json"), CODLY_DATA),
+            (format!("{runners}true; cp x .claude/settings.json"), classify::AGENT_SETTINGS),
+            (format!("{runners}true; sh -c 'true'; git push"), "push"),
+        ] {
+            let found = r(&c);
+            assert!(found.iter().any(|x| x == risk) && found.iter().any(|x| x == "runs dynamic code"), "{c}: {found:?}");
+        }
     }
 
     #[test]
@@ -3357,6 +3400,14 @@ mod tests {
             ("uv run ./bin/docker ps", "containers"),
             ("uv run env CI=1 ./bin/docker ps", "containers"),
             ("mise exec node@20 -- ./bin/gh pr create", "network"),
+            // and so does one behind a wrapper's options and values
+            ("uv run timeout 60 ./bin/docker ps", "containers"),
+            ("uv run nice -n 5 ./bin/gh pr create", "network"),
+            ("uv run env -u X ./bin/docker ps", "containers"),
+            ("uv run timeout 60 ./node_modules/.bin/npm publish", "publish"),
+            ("uv run pytest -- timeout 60 ./bin/docker ps", "containers"),
+            // past a program built at run time, any path may be the program
+            ("uv run env -S x -- timeout 60 ./bin/docker ps", "containers"),
             // A bare word that only looks like a program asks once too often.
             ("uv run pytest -k docker", "containers"),
             // Shells, `rm`, the programs that fetch, npx and sudo are read by their name too.

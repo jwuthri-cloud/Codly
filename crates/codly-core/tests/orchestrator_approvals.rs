@@ -542,6 +542,18 @@ fn a_line_that_starts_24_commands_is_read_to_the_end() {
     }
 }
 
+/// Past 24 started commands, a later command that changes the agent's settings still asks in
+/// Full access, as it does in a short line.
+#[test]
+fn a_line_past_the_count_still_asks_in_full_access_about_agent_settings() {
+    let runners = "uv run ".repeat(26);
+    let settings = format!("{runners}true; cp x .claude/settings.json");
+    let full = eval(&cmd(&settings), ApprovalMode::Full);
+    assert!(!allowed(&full), "{full:?}");
+    assert!(reason(full).contains("changes agent settings"));
+    assert!(allowed(&eval(&cmd(&format!("{runners}true; true")), ApprovalMode::Full)));
+}
+
 #[test]
 fn a_saved_rule_allows_only_the_requests_that_offer_it() {
     let covers = |rule: &ApprovalRule, c: &str| offer(&cmd(c), ApprovalMode::Balanced).offers(rule);
