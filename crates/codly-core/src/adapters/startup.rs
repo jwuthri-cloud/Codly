@@ -163,6 +163,7 @@ mod tests {
     fn spec(provider: Provider, env: &[(&str, &str)]) -> SpawnSpec {
         SpawnSpec {
             agent_id: "a".into(),
+            agent_name: "Ada".into(),
             run_id: "r".into(),
             provider,
             role: Role::Worker,

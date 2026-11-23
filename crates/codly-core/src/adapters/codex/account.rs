@@ -48,6 +48,7 @@ impl AccountQuery {
     fn spec(&self) -> SpawnSpec {
         SpawnSpec {
             agent_id: String::new(),
+            agent_name: String::new(),
             run_id: String::new(),
             provider: Provider::Codex,
             role: Role::Solo,

@@ -192,6 +192,7 @@ async fn main() {
     let model = args.model.clone().unwrap_or_else(|| default_model(args.provider).to_string());
     let spec = SpawnSpec {
         agent_id: new_id(),
+        agent_name: "Smoke".into(),
         run_id: run_id.clone(),
         provider: args.provider,
         role: args.role.unwrap_or(default_role(args.provider)),

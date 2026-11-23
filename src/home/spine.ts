@@ -1,7 +1,8 @@
 // The conversation spine: everything important lands in the thread as an item, in order.
 // A request thread ("lead" / "lead:<id>") = your messages, its Lead's replies and (folded) work,
 // approvals from the agents on its plan where they happened, questions they asked its Lead,
-// task-done and plan-done cards. A 1:1 thread = the same for one agent.
+// task-done and plan-done cards, and what its agent's CLI told about the run (a hook's word, a
+// goal, an MCP server that did not start). A 1:1 thread = the same for one agent.
 // Each request is its own thread: another request's plan, approvals and cards never show here.
 //
 // The list is built again only when something of this thread changed (`buildSpine`), and a row
@@ -54,7 +55,9 @@ export type Item =
       reason: string | null;
       /** Your message to send again (null: sending again cannot help, or no message of yours started that turn). */
       retry: string | null;
-    };
+    }
+  // What the agent's CLI told about the run, in its own words (`eventId`: the event behind it).
+  | { kind: 'notice'; key: string; ts: number; agentId: string; eventId: number; text: string };
 
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
 /** `norm` of a message's text, worked out once (a message object is never changed). */
@@ -77,7 +80,7 @@ export const planIdOf = (att: JsonValue | null | undefined): string | null => {
 
 // Same millisecond: a message's ts is when it finished, a work row's when its first call
 // started, so the message comes first.
-const RANK: Record<Item['kind'], number> = { user: 0, system: 1, say: 2, ask: 2, work: 3, trouble: 4, approval: 5, 'task-done': 6 };
+const RANK: Record<Item['kind'], number> = { user: 0, system: 1, say: 2, ask: 2, work: 3, trouble: 4, notice: 4, approval: 5, 'task-done': 6 };
 
 export function buildSpine(thread: string): Item[] {
   const owner = store.threadAgent(thread);
@@ -196,6 +199,11 @@ export function buildSpine(thread: string): Item[] {
         kind: 'trouble', key: `e:${t.eventId}`, ts: t.ts, agentId: owner.id, eventId: t.eventId, what: t.what, reason: t.reason,
         retry: canRetry(t.what) ? messageOf(t.turn, yours) : null,
       });
+
+    // ── what its CLI told about the run, where it was told ──
+    for (const ev of store.events)
+      if (ev.agent_id === owner.id && ev.kind.type === 'notice')
+        items.push({ kind: 'notice', key: `n:${ev.id}`, ts: ev.ts, agentId: owner.id, eventId: ev.id, text: ev.kind.text });
   }
 
   // ── approvals, where they happened (a worker's land in its plan's request) ──

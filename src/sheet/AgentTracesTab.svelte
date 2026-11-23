@@ -33,6 +33,7 @@
           <span class="ic" class:bad={c.ok === false} class:run={c.ok === null}><Icon name={c.ok === null ? 'play' : c.ok ? 'check' : 'x-circle'} size={12} /></span>
           <span class="nm">{c.name}</span>
           <span class="lb truncate">{c.label}</span>
+          {#if c.subagent}<span class="sub">{c.subagent}</span>{/if}
           <time class="num" data-tip={c.source === 'reported' ? 'Duration reported by the CLI' : c.source === 'measured' ? 'Measured by Codly between start and finish' : 'Still running'}>{c.durationMs == null ? 'running' : dur(c.durationMs)}</time>
         </div>
         <div class="bar" aria-hidden="true"><i style:width="{c.durationMs == null ? 0 : Math.max(2, (c.durationMs / slowest) * 100)}%" class:bad={c.ok === false}></i></div>
@@ -55,6 +56,7 @@
   .ic.run { color: var(--live); }
   .nm { font-weight: var(--w-med); color: var(--ink-1); }
   .lb { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); }
+  .sub { font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
   time { font-size: var(--t-xs); color: var(--ink-2); white-space: nowrap; }
   .bar { height: 3px; margin: 3px 0 2px 20px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--ink-3); border-radius: 2px; }

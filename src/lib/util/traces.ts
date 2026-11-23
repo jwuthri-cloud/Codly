@@ -4,7 +4,7 @@
 // completion yet is still running and has no duration.
 import type { ActivityKind } from '../gen/ActivityKind';
 import type { EventRow } from '../gen/EventRow';
-import { targetLabel } from './labels';
+import { subagentTag, targetLabel } from './labels';
 
 export interface TraceCall {
   callId: string;
@@ -12,6 +12,8 @@ export interface TraceCall {
   activity: ActivityKind;
   /** What it touched: file, command or query, shortened. */
   label: string;
+  /** "subagent Ada (explorer)" when one of the agent's subagents made the call; '' for its own. */
+  subagent: string;
   start: number;
   /** null while running. */
   durationMs: number | null;
@@ -40,7 +42,7 @@ export function buildTraces(events: readonly EventRow[], agentId: string): Trace
     const k = e.kind;
     if (k.type === 'tool_started') {
       calls.set(k.call_id, {
-        callId: k.call_id, name: k.name, activity: k.activity, label: targetLabel(k.target, k.activity), start: e.ts,
+        callId: k.call_id, name: k.name, activity: k.activity, label: targetLabel(k.target, k.activity), subagent: subagentTag(k.input), start: e.ts,
         durationMs: null, source: null, ok: null, exitCode: null, testsPassed: null, testsFailed: null,
       });
     } else if (k.type === 'tool_completed') {

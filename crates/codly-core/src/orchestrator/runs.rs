@@ -186,6 +186,7 @@ impl Inner {
         .map_err(|e| self.spawn_failed(&req.agent.id, &run_id, &token, e))?;
         let spec = SpawnSpec {
             agent_id: req.agent.id.clone(),
+            agent_name: req.agent.name.clone(),
             run_id: run_id.clone(),
             provider,
             role: req.role,
