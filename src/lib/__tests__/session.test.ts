@@ -8,7 +8,7 @@ import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Snapshot } from '../gen/Snapshot';
-import { MCP_HINT, MCP_LABEL, STOP_WAIT_MS, backgroundKind, backgroundSummary, canReconnect, canStop, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, stopBackgroundTask, stopHint, stopOnItsWay, switchMcp } from '../state/session';
+import { HOLD_MS, MCP_ASK_WAIT_MS, MCP_BUSY, MCP_HINT, MCP_LABEL, STOP_WAIT_MS, backgroundKind, backgroundSummary, canReconnect, canRestart, canStop, mcpAnswered, mcpAskOnItsWay, mcpAsked, mcpRowLocked, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, restartHint, restartMcp, signInSteps, startedWithoutFolderConfig, stopBackgroundTask, stopHint, stopLabel, stopOnItsWay, stopsSettling, switchMcp, waitedHelperStopHint } from '../state/session';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { mkAgent } from '../../office/demo/script';
@@ -139,6 +139,94 @@ describe('the MCP servers of an agent', () => {
     expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t turn docs on', 'Claude Code answered: Connection closed']]);
     for (const t of toasts.list) toasts.dismiss(t.id);
   });
+
+  // Recorded (docs/research/cli-claude-stream-json-2.1.311-part4.md, section 7): a reconnect of a
+  // connected server answers and starts it again. Before, a connected server had no such button.
+  it('a connected server can be restarted; one that did not start keeps Reconnect; Codly\'s own has neither', () => {
+    apply(server(10, 'r2', 'codly', 'connected'), server(10, 'r2', 'docs', 'connected'), server(11, 'r2', 'tracker', 'failed', 'Connection closed'), server(12, 'r2', 'linear', 'needs_sign_in', REFUSED), server(13, 'r2', 'old', 'disabled'), server(14, 'r2', 'slow', 'connecting'));
+    const servers = ofLiveRun(live().mcp, bo.run_id);
+    expect(servers.map((s) => [s.name, canRestart(s), canReconnect(s)])).toEqual([
+      ['codly', false, false],
+      ['docs', true, false],
+      ['tracker', false, true],
+      ['linear', false, true],
+      ['old', false, false],
+      ['slow', false, false],
+    ]);
+    expect(restartHint('Bo')).toBe('Starts this server again for this run of Bo.');
+  });
+
+  it('a restart is the request of Reconnect; one that does not take is said with Claude Code\'s reason', async () => {
+    for (const t of toasts.list) toasts.dismiss(t.id);
+    const again = vi.spyOn(api, 'reconnectAgentMcp').mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Claude Code answered: spawn npx ENOENT'));
+    expect(await restartMcp('a1', 'docs')).toBe(true);
+    expect(again).toHaveBeenLastCalledWith('a1', 'docs');
+    expect(toasts.list).toEqual([]);
+    expect(await restartMcp('a1', 'docs')).toBe(false);
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t restart docs', 'Claude Code answered: spawn npx ENOENT']]);
+    for (const t of toasts.list) toasts.dismiss(t.id);
+  });
+
+  // Before, the button was free again as soon as Claude Code answered: a second press sent a
+  // second request and wrote a second record.
+  it('a button stays busy until the server\'s next status row arrives, or 10 s pass after the answer', () => {
+    apply(server(1_000, 'r2', 'docs', 'connected'));
+    const docs = () => ofLiveRun(live().mcp, bo.run_id)[0];
+    const ask = mcpAsked(docs(), 'off');
+    expect(mcpAskOnItsWay(docs(), undefined, 1_000)).toBeNull();
+    expect(mcpAskOnItsWay(docs(), ask, 1_500)).toEqual(ask);
+    expect(MCP_BUSY[ask.what]).toBe('Turning off…');
+    const back = mcpAnswered(ask, 2_000, false);
+    expect(mcpAskOnItsWay(docs(), back, 2_000 + MCP_ASK_WAIT_MS - 1)).toEqual(back);
+    expect(mcpAskOnItsWay(docs(), back, 2_000 + MCP_ASK_WAIT_MS)).toBeNull();
+    // The server reports: the row shows where it stands, and the request is no longer on its way.
+    apply(server(3_000, 'r2', 'docs', 'disabled'));
+    expect(mcpAskOnItsWay(docs(), back, 3_000)).toBeNull();
+    expect([MCP_BUSY.reconnect, MCP_BUSY.restart, MCP_BUSY.on]).toEqual(['Reconnecting…', 'Restarting…', 'Turning on…']);
+  });
+
+  // A server that hangs at start: Claude Code answers when its try is over (30 s and more), and
+  // no status row comes meanwhile. A second press would send a second request.
+  it('a request Claude Code has not answered stays on its way, also after 10 s', () => {
+    apply(server(1_000, 'r2', 'tracker', 'failed', 'Connection closed'));
+    const tracker = () => ofLiveRun(live().mcp, bo.run_id)[0];
+    const ask = mcpAsked(tracker(), 'reconnect');
+    expect(mcpAskOnItsWay(tracker(), ask, 1_000 + MCP_ASK_WAIT_MS + 30_000)).toEqual(ask);
+    expect(mcpRowLocked(tracker(), ask, 1_000 + MCP_ASK_WAIT_MS + 30_000)).toBe(true);
+  });
+
+  // A restart leaves the server "connected": no status row follows, so its answer ends it.
+  it('a restart ends with its answer, and the row stays off for a moment only', () => {
+    apply(server(1_000, 'r2', 'docs', 'connected'));
+    const docs = () => ofLiveRun(live().mcp, bo.run_id)[0];
+    const done = mcpAnswered(mcpAsked(docs(), 'restart'), 1_200, true);
+    expect(mcpAskOnItsWay(docs(), done, 1_200)).toBeNull();
+    expect(mcpRowLocked(docs(), done, 1_200 + HOLD_MS - 1)).toBe(true);
+    expect(mcpRowLocked(docs(), done, 1_200 + HOLD_MS)).toBe(false);
+  });
+
+  // A row's buttons change with its state: the one under the pointer must not take a press meant for the one before.
+  it('the row\'s buttons stay off while its request is on its way and for a moment after its state changed', () => {
+    apply(server(1_000, 'r2', 'tracker', 'failed', 'Connection closed'));
+    const tracker = () => ofLiveRun(live().mcp, bo.run_id)[0];
+    const ask = mcpAnswered(mcpAsked(tracker(), 'reconnect'), 1_500, false);
+    expect(mcpRowLocked(tracker(), undefined, 1_000)).toBe(false);
+    expect(mcpRowLocked(tracker(), ask, 2_000)).toBe(true);
+    // It connected: "Restart" and "Turn off" are there, and off for HOLD_MS.
+    apply(server(4_000, 'r2', 'tracker', 'connected'));
+    expect(mcpRowLocked(tracker(), ask, 4_000 + HOLD_MS - 1)).toBe(true);
+    expect(mcpRowLocked(tracker(), ask, 4_000 + HOLD_MS)).toBe(false);
+  });
+
+  it('says when the live run started without the folder\'s own CLI configuration', () => {
+    const notice = (run: string, text: string) => ev(5, run, { type: 'notice', text });
+    const TEXT = 'Started without this folder\'s Claude Code configuration (its settings, hooks and MCP servers): you have not trusted these files. See Settings → Safety.';
+    expect(startedWithoutFolderConfig([notice('r2', TEXT)], 'a1', 'r2')).toBe(true);
+    // A run started later loads what you trusted since: an earlier run's notice is not about it.
+    expect(startedWithoutFolderConfig([notice('r1', TEXT)], 'a1', 'r2')).toBe(false);
+    expect(startedWithoutFolderConfig([notice('r2', 'Goal: ship it')], 'a1', 'r2')).toBe(false);
+    expect(startedWithoutFolderConfig([notice('r2', TEXT)], 'a1', null)).toBe(false);
+  });
 });
 
 describe('a snapshot of a run that went on for long', () => {
@@ -240,7 +328,8 @@ describe('what an agent left at work in the background', () => {
     expect(rows()).toEqual([['tid-2', 'running', 20, null], ['tid-1', 'completed', 10, 18_000]]);
     apply(list(25_000, 'r2', [], [['tid-2', 'stopped']]));
     expect(rows()).toEqual([['tid-1', 'completed', 10, 18_000], ['tid-2', 'stopped', 20, 25_000]]);
-    expect(backgroundSummary(live().background)).toBe('2 ended');
+    // Closed, the section says how the work ended, as its rows do (not "2 ended").
+    expect(backgroundSummary(live().background)).toBe('1 completed · 1 stopped');
   });
 
   // Recorded (docs/research/cli-claude-stream-json-2.1.311-part3.md, section 1): `stop_task` stops a
@@ -259,6 +348,23 @@ describe('what an agent left at work in the background', () => {
     const [command, helper] = live().background;
     expect(stopHint(helper, 'Bo')).toBe('Stops this helper. Bo is told and goes on with a turn of its own.');
     expect(stopHint(command, 'Bo')).toBeNull();
+    // A helper its agent still waits for: its turn goes on.
+    expect(waitedHelperStopHint('Bo')).toBe('Stops this helper. Bo’s turn goes on.');
+  });
+
+  it('each "Stop" says what it stops, to a screen reader', () => {
+    expect(stopLabel({ kind: 'command', description: 'npm run dev' })).toBe('Stop the command npm run dev');
+    expect(stopLabel({ kind: 'helper', description: 'Run the tests' })).toBe('Stop the helper Run the tests');
+  });
+
+  // Before, a stopped row left the list at once, and the next row's "Stop" took its place under the pointer.
+  it('the "Stop" buttons are off for a moment after a row you stopped left the running ones', () => {
+    const ended = [{ id: 'tid-1', endedAt: 10_000 }, { id: 'tid-2', endedAt: 4_000 }];
+    expect(stopsSettling(ended, new Set(['tid-1']), 10_000 + HOLD_MS - 1)).toBe(true);
+    expect(stopsSettling(ended, new Set(['tid-1']), 10_000 + HOLD_MS)).toBe(false);
+    // Work that ended by itself, or that you stopped long ago, holds nothing back.
+    expect(stopsSettling(ended, new Set(), 10_000)).toBe(false);
+    expect(stopsSettling(ended, new Set(['tid-2']), 10_000)).toBe(false);
   });
 
   it('a row reads "Stopping…" from the stop Claude Code took until its list drops the work, for 10 s at most', () => {

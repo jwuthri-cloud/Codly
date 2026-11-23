@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { EventKind } from '../../lib/gen/EventKind';
 import type { EventRow } from '../../lib/gen/EventRow';
 import type { TaskStatus } from '../../lib/gen/TaskStatus';
-import { backgroundLine, compactionRowLine, entityWord, helperRowLine, historyFacts, repeatsReply, taskChangedLine, tripleLine, withoutRepeatedTaskRows, type Names } from '../historyWords';
+import type { Approval } from '../../lib/gen/Approval';
+import type { JsonValue } from '../../lib/gen/serde_json/JsonValue';
+import { backgroundLine, closedLine, compactionRowLine, decisionLine, entityWord, foldActs, helperRowLine, historyFacts, historySentence, repeatsReply, savedRuleOf, stoppedWithHelper, taskChangedLine, toolStartLine, tripleLine, withoutRepeatedTaskRows, type Names } from '../historyWords';
 
 let eid = 0;
 const ev = (agent: string, kind: unknown): EventRow => ({ id: ++eid, ts: eid, agent_id: agent, task_id: null, run_id: null, kind: kind as EventKind });
@@ -109,6 +111,22 @@ describe('a change of what an agent runs in the background', () => {
   it('a list that ends only a helper has nothing left to say: it is no row', () => {
     expect(backgroundLine({ tasks: [], ended: [ended('helper', 'Run the tests', 'stopped')] })).toBeNull();
     expect(backgroundLine({ tasks: [task('command', 'npm run dev')], ended: [ended('helper', 'Run the tests', 'completed'), ended('helper', 'Read the docs', 'ended')] })).toBeNull();
+    // What ran before (the list before it named it) is not new either.
+    expect(backgroundLine({ tasks: [task('command', 'npm run dev')], ended: [ended('helper', 'Run the tests', 'completed')] }, new Set(['npm run dev', 'Run the tests']))).toBeNull();
+  });
+
+  // Before, such a row was dropped, and nothing said that the new command started.
+  it('a list that ends a helper and starts a command in the same row says the new command', () => {
+    const k = { tasks: [task('command', 'npm run dev'), task('command', 'npm test')], ended: [ended('helper', 'Run the tests', 'completed')] };
+    expect(backgroundLine(k, new Set(['npm run dev', 'Run the tests']))).toBe('Runs in the background: npm test');
+  });
+
+  it('knows what the list before named, in the same run', () => {
+    let id = 0;
+    const list = (run: string, ids: string[]): EventRow => ({ id: ++id, ts: id, agent_id: 'eli', task_id: null, run_id: run, kind: { type: 'background_tasks', tasks: ids.map((i) => task('command', i)), ended: [] } });
+    const rows = [list('r1', ['a']), list('r1', ['a', 'b']), list('r2', ['c'])];
+    const before = historyFacts(rows, 'eli').backgroundBefore;
+    expect([before.get(1), before.get(2), before.get(3)]).toEqual([null, new Set(['a']), null]);
   });
 });
 
@@ -133,9 +151,161 @@ describe('the row of a compaction', () => {
     expect(compactionRowLine({ pre_tokens: null, post_tokens: null }, 'claude')).toBe('Compaction started');
   });
 
+  // Claude Code's boundary line has the size before and comes when the compaction is done.
+  it('a Claude row with the size before only says that the context was compacted', () => {
+    expect(compactionRowLine({ pre_tokens: 180_000, post_tokens: null }, 'claude')).toBe('Compacted context, 180k tokens before');
+    expect(compactionRowLine({ pre_tokens: 180_000, post_tokens: null }, 'codex')).toBe('Context compaction');
+  });
+
   it('a row with no numbers from another CLI can be the start or the end: it says neither', () => {
     for (const cli of ['codex', 'gemini', 'opencode', null] as const) {
       expect(compactionRowLine({ pre_tokens: null, post_tokens: null }, cli)).toBe('Context compaction');
     }
+  });
+});
+
+describe('one act of yours is one row', () => {
+  let n = 0;
+  /** A history row at `ts` (ms), of task `task` when it has one. */
+  const row = (ts: number, kind: unknown, task: string | null = null): EventRow => ({ id: ++n, ts, agent_id: 'eli', task_id: task, run_id: 'r1', kind: kind as EventKind });
+  const COMMENTS = 'Review comments (3):\n\n1. a.ts:4\n   Use the v2 client\n\n2. b.ts:9\n   Keep the test\n\n3. c.ts:1\n   Rename it';
+  const sentBack = (ts: number, task = 'task-1', key = 't1') =>
+    row(ts, { type: 'decision', id: `d${n}`, decision_type: 'review', method: 'human', summary: `you sent ${key} back with review comments; its worker reads them now`, detail: { plan_id: 'p1', comments: COMMENTS } }, task);
+  const status = (ts: number, task: string, s: TaskStatus) => row(ts, { type: 'task_changed', task: { id: task, key: task, status: s } });
+  const yourChat = (ts: number, text: string) => row(ts, { type: 'chat', message: { id: `c${n}`, thread: 'agent:eli', author: 'user', text, attachment: null, ts } });
+  /** Newest first, as History lists them; the numbers of the rows that show. */
+  const shown = (oldestFirst: EventRow[], planCalls: string[] = []) => foldActs([...oldestFirst].reverse(), new Set(planCalls)).rows.map((r) => r.id);
+
+  it('a send-back is one row: its status and your comments are part of it', () => {
+    const rows = [yourChat(1000, COMMENTS), status(1010, 'task-1', 'changes_requested'), sentBack(1020)];
+    expect(shown(rows)).toEqual([rows[2].id]);
+    const line = decisionLine(rows[2].kind as Extract<EventKind, { type: 'decision' }>, () => false);
+    expect(line).toBe('You sent t1 back with 3 review comments; its worker reads them now');
+  });
+
+  it('the worker’s turn that takes your comments is part of it, also when it starts a moment after', () => {
+    const turn = row(1500, { type: 'turn_started', input: `[Codly] The user reviewed your work on task t1 and sent it back with the comments below.\n\n${COMMENTS}` });
+    const rows = [yourChat(1000, COMMENTS), status(1010, 'task-1', 'changes_requested'), sentBack(1020), turn];
+    expect(shown(rows)).toEqual([rows[2].id]);
+  });
+
+  it('rows of another task between them stay, and so do rows from before the act', () => {
+    const early = status(-5000, 'task-1', 'reviewing');
+    const other = status(1005, 'task-2', 'running');
+    const yourOther = yourChat(1008, 'and the docs too');
+    const rows = [early, yourChat(1000, COMMENTS), other, yourOther, status(1010, 'task-1', 'changes_requested'), sentBack(1020)];
+    expect(shown(rows)).toEqual([rows[5].id, yourOther.id, other.id, early.id]);
+  });
+
+  const approval = (id: string, subject: unknown, call: string | null = null) => ({ id, agent_id: 'eli', run_id: 'r1', task_id: null, call_id: call, subject, reason: null, choices: [], risks: [], status: 'pending', decided_by: null, created_at: 0 }) as unknown as Approval;
+  const asked = (ts: number, a: Approval) => row(ts, { type: 'approval_requested', approval: a });
+  const answered = (ts: number, id: string, s: string) => row(ts, { type: 'approval_resolved', approval_id: id, status: s, by: 'user' });
+
+  it('a plan sent back keeps its answer’s row: the request and its call go once it is closed', () => {
+    const plan = approval('ap1', { kind: 'tool', name: 'ExitPlanMode', input: { plan: '1. Add it' } }, 'p1');
+    const rows = [row(10, { type: 'tool_started', call_id: 'p1', name: 'ExitPlanMode', activity: 'plan', target: null, input: {}, confidence: 'observed' }), asked(11, plan), answered(40, 'ap1', 'denied'), row(41, { type: 'tool_completed', call_id: 'p1', ok: false, exit_code: null, tests_passed: null, tests_failed: null, duration_ms: 30 })];
+    expect(shown(rows, ['p1'])).toEqual([rows[2].id]);
+    // While it waits, it is its own row.
+    expect(shown(rows.slice(0, 2), ['p1'])).toEqual([rows[1].id, rows[0].id]);
+  });
+
+  it('a closed request is one row that says what was asked and how it ended; a record of the answer goes too', () => {
+    const edit = approval('ap2', { kind: 'file_change', paths: ['README.md'], diff: null });
+    const record = row(31, { type: 'decision', id: 'd9', decision_type: 'approval', method: 'human', summary: 'You denied the request', detail: { approval: 'ap2' } });
+    const rows = [asked(10, edit), answered(30, 'ap2', 'denied'), record];
+    const folded = foldActs([...rows].reverse(), new Set());
+    expect(folded.rows.map((r) => r.id)).toEqual([rows[1].id]);
+    // (the answer first: a long request is cut at the end of the row)
+    expect(closedLine(folded.asked.get('ap2') ?? null, 'Denied by you', null)).toBe('Denied by you · asked to change README.md');
+    // A plan's answer names it already.
+    expect(closedLine({ subject: { kind: 'tool', name: 'ExitPlanMode', input: { plan: 'x' } } }, 'Plan sent back by you', 'claude')).toBe('Plan sent back by you');
+  });
+
+  // The core's records of why Codly asked and of the rule that answered (orchestrator/ingest.rs)
+  // say what the answer's row does not; the record of a rule you saved repeats the answer.
+  it('keeps why Codly asked and which rule answered; drops the record of a rule you saved with the answer', () => {
+    const cmd = approval('ap5', { kind: 'command', command: 'rm x', cwd: null });
+    const policy = (ts: number, summary: string, rule: unknown, method = 'rule') =>
+      row(ts, { type: 'decision', id: `d${n}`, decision_type: 'approval_policy', method, summary, detail: { approval_id: 'ap5', mode: 'ask_risky', rule, subject: cmd.subject, read_only: false } });
+    const why = policy(11, 'asking you: it deletes files', 'it deletes files');
+    const saved = policy(29, 'you saved a rule: always allow rm x in this repo', { id: 'r1', kind: 'exact', command: 'rm x' }, 'human');
+    const rows = [asked(10, cmd), why, saved, answered(30, 'ap5', 'approved')];
+    expect(shown(rows)).toEqual([rows[3].id, why.id]);
+    const auto = approval('ap6', { kind: 'command', command: 'ls', cwd: null });
+    const allowed = row(21, { type: 'decision', id: 'd20', decision_type: 'approval_policy', method: 'rule', summary: 'auto-allowed read-only command', detail: { approval_id: 'ap6', mode: 'ask_risky', rule: 'read-only command', subject: auto.subject, read_only: true } });
+    const autoRows = [asked(20, auto), row(21, { type: 'approval_resolved', approval_id: 'ap6', status: 'approved', by: 'policy' }), allowed];
+    expect(shown(autoRows)).toEqual([allowed.id, autoRows[1].id]);
+  });
+
+  it('finds the rule you saved with an answer in the core’s record of it', () => {
+    const decisions: { type: string; detail: JsonValue }[] = [
+      { type: 'approval_policy', detail: { rule: { id: 'r1', kind: 'prefix', command: 'npm install' }, approval_id: 'ap3' } },
+      { type: 'approval_policy', detail: { rule: { id: 'r2', kind: 'exact', command: 'ls' } } },
+    ];
+    expect(savedRuleOf(decisions, 'ap3')).toEqual({ kind: 'prefix', command: 'npm install' });
+    expect(savedRuleOf(decisions, 'ap4')).toBeNull();
+  });
+});
+
+describe('every History row is a sentence', () => {
+  const keeps = (w: string) => ['t1', 'Ada', 'eli'].includes(w);
+  it('a request Codly sent for you says that you asked', () => {
+    expect(historySentence('asked Lead to reconnect its MCP server linear', 'human', keeps)).toBe('You asked Lead to reconnect its MCP server linear');
+    expect(historySentence('asked Eli to compact its conversation', 'human', keeps)).toBe('You asked Eli to compact its conversation');
+    expect(historySentence('asked Ada to stop what it left running in the background: npm run dev', 'human', keeps)).toBe('You asked Ada to stop what it left running in the background: npm run dev');
+    expect(historySentence('asked Ada to stop', 'rule', keeps)).toBe('Codly asked Ada to stop');
+  });
+
+  it('another starts with a capital, unless it starts with a name or a task key', () => {
+    expect(historySentence("you turned postgres off for Lead's run", 'human', keeps)).toBe("You turned postgres off for Lead's run");
+    expect(historySentence('tools blocked for Ada', 'human', keeps)).toBe('Tools blocked for Ada');
+    expect(historySentence('t1 merged into main', 'rule', keeps)).toBe('t1 merged into main');
+    expect(historySentence("eli's plan is in", 'rule', keeps)).toBe("eli's plan is in");
+  });
+});
+
+describe('the row of a tool call', () => {
+  const start = (name: string, target: unknown = null, input: unknown = {}) => ({ name, activity: 'mcp', target, input }) as unknown as Parameters<typeof toolStartLine>[0];
+  const mcp = (server: string, tool: string) => ({ path: null, paths: [], command: null, query: null, url: null, server, tool });
+
+  it('names a Codly tool in words only, and another MCP tool by its server and its name', () => {
+    expect(toolStartLine(start('mcp__codly__codly_submit_plan', mcp('codly', 'codly_submit_plan')), 'claude')).toBe('Submitting the plan');
+    expect(toolStartLine(start('mcp__codly__codly_new_thing', mcp('codly', 'codly_new_thing')), 'claude')).toBe('Using Codly’s new thing tool');
+    expect(toolStartLine(start('mcp__linear__create_issue', mcp('linear', 'create_issue')), 'claude')).toBe('Using linear: create_issue');
+    // A name the adapter gave no target for.
+    expect(toolStartLine(start('mcp__linear__create_issue'), 'claude')).toBe('Using linear: create_issue');
+  });
+
+  it('no row shows mcp__', () => {
+    for (const k of [start('mcp__codly__codly_kg_add', mcp('codly', 'codly_kg_add')), start('mcp__docs__search', mcp('docs', 'search')), start('mcp__x__y')]) {
+      expect(toolStartLine(k, 'claude')).not.toContain('mcp__');
+    }
+  });
+
+  it('a CLI’s own tool keeps what it does and its name; a helper’s call says so', () => {
+    const bash = { ...start('Bash', { path: null, paths: [], command: 'npm test', query: null, url: null, server: null, tool: null }, { subagent: { thread: 't', name: 'Ada' } }), activity: 'execute' } as Parameters<typeof toolStartLine>[0];
+    expect(toolStartLine(bash, 'codex')).toBe('Running npm test · Bash · helper Ada');
+  });
+});
+
+describe('a call of a helper you stopped', () => {
+  let n = 0;
+  const row = (kind: unknown): EventRow => ({ id: ++n, ts: n, agent_id: 'eli', task_id: null, run_id: 'r1', kind: kind as EventKind });
+  const events = [
+    row({ type: 'tool_started', call_id: 'h1', name: 'Agent', activity: 'other', target: null, input: {}, confidence: 'observed' }),
+    row({ type: 'sub_agent', call_id: 'h1', description: 'Look at the docs', status: 'running' }),
+    row({ type: 'tool_started', call_id: 'g1', name: 'Glob', activity: 'search', target: null, input: {}, confidence: 'observed' }),
+    row({ type: 'sub_agent_progress', call_id: 'h1', name: null, step: null, tool_call_id: 'g1', tool_uses: null, tokens: null, report: null }),
+    row({ type: 'sub_agent', call_id: 'h1', description: 'Look at the docs', status: 'stopped' }),
+    row({ type: 'sub_agent', call_id: 'h2', description: 'Run the tests', status: 'failed' }),
+  ];
+  const facts = historyFacts(events, 'eli', 'claude');
+
+  it('is no failed call: the helper’s own call goes, a call it made stopped with it', () => {
+    expect(stoppedWithHelper('h1', facts)).toBe('helper');
+    expect(stoppedWithHelper('g1', facts)).toBe('own');
+    // A helper that failed by itself, and the agent's own calls, are as they were.
+    expect(stoppedWithHelper('h2', facts)).toBeNull();
+    expect(stoppedWithHelper('c9', facts)).toBeNull();
   });
 });

@@ -8,9 +8,13 @@
   Claude agent: its CLI sums up the conversation between turns (the core says when it may start).
   The button reads "Compacting…" while the request is on its way, and the row then shows what
   the live run last said about a compaction, with the time.
+  "Model" names the model and its thinking effort, also when the agent is not running, and
+  "Change…" opens the same dialog as the sheet's menu entry "Change model…".
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
+  import { ui } from '../lib/state/ui.svelte';
+  import { modelChangeOff, modelLine } from './modelRow';
   import type { ContextUsage } from '../lib/gen/ContextUsage';
   import type { PermissionMode } from '../lib/gen/PermissionMode';
   import { stopAgent } from '../lib/state/actions';
@@ -24,8 +28,11 @@
 
   interface Props {
     agent: Agent;
+    /** Its model in words, as the sheet's head names it. */
+    model: string;
   }
-  let { agent }: Props = $props();
+  let { agent, model }: Props = $props();
+  const modelOff = $derived(modelChangeOff(agent));
 
   const c = $derived(controls.of(agent.id));
   const live = $derived(!!agent.run_id && agent.status !== 'offline');
@@ -91,6 +98,13 @@
 </script>
 
 <Section id="controls" title="Controls" {summary}>
+  <div class="row model">
+    <span class="txt">
+      <b>Model</b>
+      <span class="sub">{modelLine(model, agent.model)}{modelOff ? ` · ${modelOff}` : ''}</span>
+    </span>
+    <button class="btn sm" disabled={modelOff != null} data-tip={modelOff} onclick={() => (ui.modelDialog = { provider: agent.provider, agentId: agent.id })}>Change…</button>
+  </div>
   {#if hasMode}
     <label class="row mode">
       <span class="txt">
@@ -186,7 +200,7 @@
   .small { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .ctl { display: flex; flex-direction: column; gap: 14px; }
   .row { display: flex; align-items: center; gap: 12px; }
-  .mode { margin-bottom: 14px; }
+  .mode, .model { margin-bottom: 14px; }
   .field { width: 150px; flex: none; font-size: var(--t-sm); }
   .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .txt b, .steer b { font-weight: var(--w-med); font-size: var(--t-md); color: var(--ink-1); }

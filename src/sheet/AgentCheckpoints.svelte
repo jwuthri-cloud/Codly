@@ -88,7 +88,7 @@
 </script>
 
 {#if view}
-  <h4 class="eyebrow">Checkpoints{view.off ? '' : ` · ${view.checkpoints.length}`}</h4>
+  <h4 class="eyebrow" data-section="checkpoints">Checkpoints{view.off ? '' : ` · ${view.checkpoints.length}`}</h4>
   {#if view.off}
     <p class="small">{view.off}</p>
   {:else}

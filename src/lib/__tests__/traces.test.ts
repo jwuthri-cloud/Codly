@@ -128,7 +128,7 @@ describe('buildTraces', () => {
   it("says which calls a subagent made, and leaves the agent's own unmarked", () => {
     const by = (input: unknown) => ev('a', T0, { type: 'tool_started', call_id: `c${id}`, name: 'commandExecution', activity: 'execute', target, input, confidence: 'observed' });
     const t = buildTraces([by({ command: 'ls' }), by({ command: 'ls', subagent: { thread: 't1', name: 'Ada (explorer)' } }), by({ command: 'ls', subagent: { thread: 't2', name: null } })], 'a');
-    expect(t.map((c) => c.subagent)).toEqual(['', 'subagent Ada (explorer)', 'subagent']);
+    expect(t.map((c) => c.subagent)).toEqual(['', 'helper Ada (explorer)', 'helper']);
   });
 
   it('summarizes calls, failures, running and total time; empty for no events', () => {

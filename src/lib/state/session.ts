@@ -7,6 +7,7 @@
 // "Stop" (requests to the live Claude session).
 import { api } from '../api';
 import type { EventKind } from '../gen/EventKind';
+import type { EventRow } from '../gen/EventRow';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import { clean } from '../util/sanitize';
 import { toast } from './toasts.svelte';
@@ -123,6 +124,76 @@ export const canReconnect = (s: McpServer) => s.status === 'failed' || s.status 
 /** Codly's own MCP server in every run: the agent reports to Codly through it, so it stays on. */
 const CODLY_SERVER = 'codly';
 
+/**
+ * A connected server Codly can ask Claude Code to start again: the same request as Reconnect
+ * (`mcp_reconnect`), which on a connected server answers and starts it again (recorded:
+ * docs/research/cli-claude-stream-json-2.1.311-part4.md, section 7). Not Codly's own server.
+ * A server whose process died still reads "connected" (Claude Code starts it again at its next
+ * call), so this is how you start one again that you think is stuck.
+ */
+export const canRestart = (s: McpServer) => s.status === 'connected' && s.name !== CODLY_SERVER;
+
+/** What "Restart" does, on its button (`agent`: the name of the server's agent). */
+export const restartHint = (agent: string): string => `Starts this server again for this run of ${agent}.`;
+
+/**
+ * A request about one server, from the press of its button until the server's next status row:
+ * what it asks, the state of the server it is about (`McpServer.ts` when you pressed), and when
+ * Claude Code answered it (null: not yet). `done`: the answer itself says how it ended (a
+ * restart: the server stays "connected", so no status row follows).
+ */
+export type McpAsk = { what: 'reconnect' | 'restart' | 'off' | 'on'; seen: number; answeredAt: number | null; done: boolean };
+
+/** What a server's button reads while its request is on its way. */
+export const MCP_BUSY: Record<McpAsk['what'], string> = { reconnect: 'Reconnecting…', restart: 'Restarting…', off: 'Turning off…', on: 'Turning on…' };
+
+/** How long a button waits, after Claude Code answered, for the server's next status row before it can be pressed again: Claude Code may answer and report nothing new. */
+export const MCP_ASK_WAIT_MS = 10_000;
+
+/** The request just pressed: not answered yet. */
+export const mcpAsked = (s: McpServer, what: McpAsk['what']): McpAsk => ({ what, seen: s.ts, answeredAt: null, done: false });
+
+/** The request once Claude Code answered it at `now`; `done`: the answer says how it ended. */
+export const mcpAnswered = (ask: McpAsk, now: number, done: boolean): McpAsk => ({ ...ask, answeredAt: now, done });
+
+/**
+ * The request still on its way for a server, if any: while Claude Code has not answered it (a
+ * server that hangs at start can take 30 s and more), then until the server's next status row
+ * arrives (the row then shows where it stands) or `MCP_ASK_WAIT_MS` pass after the answer. A
+ * second press meanwhile would send a second request and write a second record.
+ */
+export const mcpAskOnItsWay = (s: McpServer, ask: McpAsk | undefined, now: number): McpAsk | null => {
+  if (!ask || ask.done) return null;
+  if (ask.answeredAt == null) return ask;
+  return ask.seen === s.ts && now - ask.answeredAt < MCP_ASK_WAIT_MS ? ask : null;
+};
+
+/**
+ * Whether a server's buttons are off: while its request is on its way, and for `HOLD_MS` after
+ * its row changed because of it or after an answer that ended it. The row's buttons change with
+ * its state ("Reconnect" gives way to "Restart" and "Turn off"): one press too many never lands
+ * on the new button.
+ */
+export const mcpRowLocked = (s: McpServer, ask: McpAsk | undefined, now: number): boolean =>
+  !!ask &&
+  (mcpAskOnItsWay(s, ask, now) != null ||
+    (ask.seen !== s.ts && now - s.ts < HOLD_MS) ||
+    (ask.done && ask.answeredAt != null && now - ask.answeredAt < HOLD_MS));
+
+/** The start of the core's notice that a run started without the folder's own CLI configuration (orchestrator/runs.rs). */
+const WITHOUT_FOLDER_CONFIG = 'Started without this folder';
+
+/**
+ * Whether the agent's live run started without the folder's own CLI configuration (its MCP
+ * servers among it), because you had not trusted those files: the core says so once per run,
+ * in a notice. A run keeps what it started with: trusting the folder later changes the next run.
+ */
+export const startedWithoutFolderConfig = (events: readonly EventRow[], agentId: string, runId: string | null): boolean =>
+  runId != null && events.some((e) => e.agent_id === agentId && e.run_id === runId && e.kind.type === 'notice' && e.kind.text.startsWith(WITHOUT_FOLDER_CONFIG));
+
+/** The line of the MCP section for such a run. */
+export const WITHOUT_FOLDER_CONFIG_LINE = 'This run started without the folder’s own MCP servers and settings: you had not trusted them. Settings → Safety shows them.';
+
 /** The switch of a server's row: its button, the button while the request is on its way, and what the request turns the server to. */
 export type McpSwitch = { label: string; busy: string; enabled: boolean };
 
@@ -191,10 +262,13 @@ export function mcpSummary(list: McpServer[]): string {
   return parts.filter(([count]) => count > 0).map(([count, text]) => `${count} ${text}`).join(' · ');
 }
 
-/** The section's line when it is closed: "2 running", else "3 ended". */
+/** The section's line when it is closed: "2 running", else how the work ended, in the words of its rows: "1 completed · 1 stopped". */
 export function backgroundSummary(list: BackgroundWork[]): string {
   const running = list.filter((w) => w.status === 'running').length;
-  return running ? `${running} running` : `${list.length} ended`;
+  if (running) return `${running} running`;
+  const ended = new Map<string, number>();
+  for (const w of list) ended.set(w.status, (ended.get(w.status) ?? 0) + 1);
+  return [...ended].map(([word, n]) => `${n} ${word}`).join(' · ');
 }
 
 /** What a row calls its piece of work, when it is no command: "helper", "task". */
@@ -210,6 +284,31 @@ export const canStop = (w: BackgroundWork) => w.status === 'running' && (w.kind 
 /** What "Stop" does to a helper, on its button (`agent`: the name of the helper's agent). A command just ends: no hint. */
 export const stopHint = (w: BackgroundWork, agent: string): string | null =>
   w.kind === 'helper' ? `Stops this helper. ${agent} is told and goes on with a turn of its own.` : null;
+
+/**
+ * What "Stop" does to a helper its agent still waits for (not in the background list): its
+ * call returns to the agent, and the turn goes on (recorded:
+ * docs/research/cli-claude-stream-json-2.1.311-part4.md, section 2).
+ */
+export const waitedHelperStopHint = (agent: string): string => `Stops this helper. ${agent}’s turn goes on.`;
+
+/** The accessible name of a "Stop" button: what it stops ("Stop the helper Run the tests", "Stop the command npm run dev"). */
+export const stopLabel = (w: Pick<BackgroundWork, 'kind' | 'description'>): string =>
+  `Stop the ${w.kind === 'helper' ? 'helper' : w.kind === 'command' ? 'command' : 'task'} ${clean(w.description)}`;
+
+/**
+ * How long the buttons of a list stay off after a row you acted on changed: the row moves or
+ * shows another button, and the press after yours must not land on what took its place.
+ */
+export const HOLD_MS = 1500;
+
+/**
+ * Whether the "Stop" buttons of a list are off for a moment: one of the rows you stopped
+ * (`stopped`, by id) ended less than `HOLD_MS` ago (`endedAt`, `now`: the clock of the screen),
+ * and the list closed up under the pointer.
+ */
+export const stopsSettling = (rows: readonly { id: string; endedAt: number | null }[], stopped: ReadonlySet<string>, now: number): boolean =>
+  rows.some((w) => stopped.has(w.id) && w.endedAt != null && now - w.endedAt < HOLD_MS);
 
 /**
  * How long a row reads "Stopping…" after Claude Code took the stop. Claude Code writes the
@@ -235,6 +334,16 @@ export async function reconnectMcp(agentId: string, server: string): Promise<str
   } catch (e) {
     return msg(e);
   }
+}
+
+/**
+ * Ask Claude Code to start a connected MCP server again (the request of Reconnect). Returns
+ * whether it did; an answer that it did not is said in a toast, with Claude Code's reason.
+ */
+export async function restartMcp(agentId: string, server: string): Promise<boolean> {
+  const failed = await reconnectMcp(agentId, server);
+  if (failed != null) toast({ kind: 'error', title: `Couldn’t restart ${clean(server)}`, body: failed });
+  return failed == null;
 }
 
 /** Stop a background command or helper. Returns whether Claude Code took the request; its next list of background tasks says that the work stopped. */

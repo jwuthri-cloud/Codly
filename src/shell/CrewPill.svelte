@@ -90,7 +90,7 @@
     {#if subs.length}
       <span class="subs">
         {#each subs.slice(0, 3) as s (s.callId)}
-          <button class="sub" aria-label="Subagent: {s.description}" data-tip="Subagent · {s.description}" onclick={openSub}></button>
+          <button class="sub" aria-label="Helper: {s.description}" data-tip="Helper · {s.description}" onclick={openSub}></button>
         {/each}
       </span>
     {/if}

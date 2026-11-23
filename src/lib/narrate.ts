@@ -62,7 +62,7 @@ const fileOf = (s: Seg) => {
 };
 const cmdOf = (s: Seg) => oneLine(s.target.command ?? s.label ?? s.name, 44);
 
-const CODLY_TOOL: Record<string, string> = {
+export const CODLY_TOOL: Record<string, string> = {
   codly_memory_write: 'Saving a memory for the team',
   codly_memory_search: 'Searching the team’s memory',
   codly_post_note: 'Posting a note for the team',

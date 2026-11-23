@@ -13,12 +13,12 @@
   import { accounts } from '../lib/state/accounts.svelte';
   import { yourAnswers } from '../lib/state/answers';
   import { narrate } from '../lib/state/narration';
-  import { MCP_LABEL } from '../lib/state/session';
+  import { MCP_LABEL, HOLD_MS, ofLiveRun, stopBackgroundTask, stopOnItsWay } from '../lib/state/session';
   import { store, type FileTouch } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
   import { clock, clockSec, dur, pct, plural, resetsIn, timer, tokens } from '../lib/util/format';
-  import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, subagentMark, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
+  import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, prettyModel, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
   import { askedLine, settledLine } from '../lib/util/outcome';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
   import ApprovalCard from '../home/cards/ApprovalCard.svelte';
@@ -37,8 +37,11 @@
   import UsageBars from '../components/UsageBars.svelte';
   import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
-  import { helperEndWord, helpersSummary } from './helperRows';
-  import { backgroundLine, compactionRowLine, helperRowLine, historyFacts, repeatsReply, taskChangedLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
+  import { helperEndWord, helperStop, helpersSummary } from './helperRows';
+  import { backgroundLine, closedLine, compactionRowLine, decisionLine, foldActs, helperRowLine, historyFacts, repeatsReply, savedRuleOf, stoppedWithHelper, taskChangedLine, toolStartLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
+  import { FOCUS_LOOK_MS, FOCUS_LOOK_TRIES, focusPlace } from './sheetFocus';
+  import { modelChangeOff } from './modelRow';
+  import { splitModel } from '../lib/util/team';
   import { isPlanCall, planCallEnd, planStep } from '../lib/util/planRequest';
   import AgentMcp from './AgentMcp.svelte';
   import AgentTakeover from './AgentTakeover.svelte';
@@ -73,8 +76,9 @@
   const inConversation = $derived(ui.room === 'home' && ui.mode !== 'office' && !!approvals.length && approvals.every((a) => store.approvalThread(a) === ui.thread));
   const cli = $derived(store.clis.find((c) => c.provider === agent.provider) ?? null);
   /** The model picked for it, else the one its CLI reported at session start, else the one its CLI
-   *  runs by default (its config, else its built-in default: `env::default_model`). */
-  const model = $derived(prettyModel(agent.model ?? live?.session?.model ?? cli?.default_model) || 'default model');
+   *  runs by default (its config, else its built-in default: `env::default_model`). A model
+   *  picked with a thinking effort ("opus:high") is named without it: Controls says the effort. */
+  const model = $derived(prettyModel(splitModel(agent.model).name || live?.session?.model || cli?.default_model) || 'default model');
   const todo = $derived(live?.todo ?? []);
   const todoDone = $derived(todo.filter((s) => s.status === 'completed').length);
   const step = $derived(todo.findIndex((s) => s.status === 'in_progress'));
@@ -125,6 +129,24 @@
   const subsRunning = $derived(subs.filter((s) => s.status === 'running'));
   /** The ones that are over, however they ended: each row says its own word (helperRows.ts). */
   const subsEnded = $derived(subs.filter((s) => s.status !== 'running'));
+  /** The live run's background work: a helper in it is stopped by its id there (`helperStop`). */
+  const background = $derived(ofLiveRun(live?.background ?? [], agent.run_id));
+  /** A stop is a request to the agent's live Claude session: another CLI's helper has no "Stop". */
+  const canStopHelpers = $derived(agent.provider === 'claude' && !!agent.run_id);
+  /** The helpers a stop is on its way for, by call id: `helperSent` until Claude Code answers, then
+   *  `helperTaken` with when it took the stop. The row reads "Stopping…" until the helper ends
+   *  (its row leaves the running ones) or 10 s pass (`stopOnItsWay`). */
+  let helperSent = $state<string[]>([]);
+  let helperTaken = $state<Record<string, number>>({});
+  const helperStopping = (callId: string) => helperSent.includes(callId) || stopOnItsWay(helperTaken[callId], ui.now);
+  /** A helper you stopped just ended and the rows closed up: the "Stop" now under the pointer is off for a moment. */
+  const helpersSettling = $derived(subsEnded.some((s) => (helperSent.includes(s.callId) || s.callId in helperTaken) && ui.now - s.ts < HOLD_MS));
+  async function stopHelper(callId: string, id: string) {
+    helperSent = [...helperSent, callId];
+    const took = await stopBackgroundTask(agent.id, { id, kind: 'helper' });
+    helperSent = helperSent.filter((c) => c !== callId);
+    if (took) helperTaken = { ...helperTaken, [callId]: ui.now };
+  }
   let moreSubs = $state(false);
   let moreFiles = $state(false);
   const SHOW = 4;
@@ -184,7 +206,7 @@
     void store.revBy.get(agent.id);
     return historyFacts(store.events, agent.id, agent.provider);
   });
-  const log = $derived.by(() => {
+  const folded = $derived.by(() => {
     void store.rev;
     const out: EventRow[] = [];
     for (let i = store.events.length - 1; i >= 0 && out.length < 250; i--) {
@@ -198,22 +220,31 @@
       if (filter === 'tools' && t !== 'tool_started' && t !== 'tool_completed') continue;
       if (filter === 'files' && t !== 'files_changed' && !(t === 'tool_started' && ['read', 'edit', 'create', 'delete'].includes((e.kind as { activity: string }).activity))) continue;
       if (filter === 'decisions' && t !== 'decision') continue;
-      if (filter === 'errors' && t !== 'error' && !(e.kind.type === 'tool_completed' && !e.kind.ok && !facts.planCalls.has(e.kind.call_id))) continue;
+      // (a call that ended because you stopped its helper did not fail)
+      const withHelper = e.kind.type === 'tool_completed' && !e.kind.ok ? stoppedWithHelper(e.kind.call_id, facts) : null;
+      if (filter === 'errors' && t !== 'error' && !(e.kind.type === 'tool_completed' && !e.kind.ok && !facts.planCalls.has(e.kind.call_id) && !withHelper)) continue;
+      // (the end of the call that started a helper you stopped: the helper's own row says it stopped)
+      if (withHelper === 'helper') continue;
       if (repeatsReply(e, agent.id, facts)) continue;
       // (a list of background work that only drops a helper says nothing: the helper's own row says its end)
-      if (e.kind.type === 'background_tasks' && backgroundLine(e.kind) == null) continue;
+      if (e.kind.type === 'background_tasks' && backgroundLine(e.kind, facts.backgroundBefore.get(e.id) ?? null) == null) continue;
       out.push(e);
     }
-    // (a task's row says its status: one that repeats the row before it says nothing)
-    return withoutRepeatedTaskRows(out);
+    // (a task's row says its status: one that repeats the row before it says nothing; an act of
+    // yours is one row: a send-back, a request and its answer)
+    return foldActs(withoutRepeatedTaskRows(out), facts.planCalls);
   });
+  const log = $derived(folded.rows);
   const names: Names = { agent: (id) => store.agentMap.get(id)?.name, task: (id) => store.taskMap.get(id)?.key };
-  function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
+  /** A decision's summary keeps its first word when it is a task's key or an agent's name ("t1 …", "eli …"). */
+  const isName = (word: string) => store.tasks.some((t) => t.key === word) || store.agents.some((a) => a.name === word);
+  function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn'; tip?: string } {
     const k = e.kind;
     switch (k.type) {
-      case 'tool_started': return { icon: 'play', text: isPlanCall(k.name, agent.provider) ? planStep(false) : `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
+      case 'tool_started': return { icon: 'play', text: toolStartLine(k, agent.provider) };
       case 'tool_completed':
         if (facts.planCalls.has(k.call_id)) return { icon: k.ok ? 'check' : 'refresh', text: `${planCallEnd(k.ok, store.approvals.find((a) => a.call_id === k.call_id)?.status ?? null)}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}` };
+        if (!k.ok && stoppedWithHelper(k.call_id, facts) === 'own') return { icon: 'stop', text: 'Stopped with its helper' };
         return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
       case 'files_changed': return { icon: 'diff', text: `Changed ${k.paths.map(basename).join(', ')}` };
       case 'message': return { icon: 'chat', text: oneLine(k.text, 120) };
@@ -224,15 +255,22 @@
       case 'status_changed': return { icon: 'refresh', text: `Status → ${k.status.replace('_', ' ')}` };
       case 'plan_updated': return { icon: 'list', text: `Its list: ${k.steps.filter((s) => s.status === 'completed').length} of ${k.steps.length} done` };
       case 'approval_requested': return { icon: 'flag', text: askedLine(k.approval, agent.provider), tone: 'warn' };
-      case 'approval_resolved': return { icon: 'flag', text: settledLine(k.status, k.by, store.approvals.find((a) => a.id === k.approval_id) ?? null, yourAnswers.get(k.approval_id) ?? null, agent.provider), tone: k.status === 'approved' ? 'good' : 'bad' };
+      case 'approval_resolved': {
+        // (the request's own row went into this one: it says what was asked, then the answer)
+        const asked = store.approvals.find((a) => a.id === k.approval_id) ?? folded.asked.get(k.approval_id) ?? null;
+        const settled = settledLine(k.status, k.by, asked, yourAnswers.get(k.approval_id) ?? null, agent.provider, savedRuleOf(store.decisions, k.approval_id));
+        const text = closedLine(asked, settled, agent.provider);
+        // (the row is cut: the whole of a long request is on its tip)
+        return { icon: 'flag', text, tone: k.status === 'approved' ? 'good' : 'bad', tip: text };
+      }
       case 'retrieval': return { icon: 'link', text: `Codly provided ${k.citations.length} citations for “${oneLine(k.query, 50)}”` };
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
       case 'sub_agent': return { icon: 'crew', text: helperRowLine(k) };
       case 'mcp_server': return { icon: 'link', text: `MCP server ${k.name}: ${MCP_LABEL[k.status].toLowerCase()}${k.error ? ` (${oneLine(k.error, 90)})` : ''}` };
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
       case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
-      case 'background_tasks': return { icon: 'terminal', text: backgroundLine(k) ?? '' }; // (one with nothing to say is not in `log`)
-      case 'decision': return { icon: 'help', text: k.summary };
+      case 'background_tasks': return { icon: 'terminal', text: backgroundLine(k, facts.backgroundBefore.get(e.id) ?? null) ?? '' }; // (one with nothing to say is not in `log`)
+      case 'decision': return { icon: 'help', text: decisionLine(k, isName) };
       case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${plural(k.files.length, 'file')}` };
       case 'verified': return { icon: k.ok ? 'check-circle' : 'x-circle', text: `Verified ${k.command}`, tone: k.ok ? 'good' : 'bad' };
       case 'merged': return { icon: 'merge', text: `Merged into ${k.branch}`, tone: 'good' };
@@ -257,12 +295,30 @@
     filter = 'all';
     tick().then(() => root?.querySelector(`[data-ev="${id}"]`)?.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
   });
+  /** The newest focus: a place inside a tab that is still loading stops being looked for when another focus comes. */
+  let focusRun = 0;
   $effect(() => {
     const f = ui.sheetFocus;
     if (!f) return;
     ui.sheetFocus = null;
-    if (ui.sections[f] === false) ui.toggleSection(f);
-    tick().then(() => root?.querySelector(`[data-section="${f}"]`)?.scrollIntoView({ block: 'start', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
+    // A section inside a tab (the Git tab's checkpoints): that tab opens first.
+    const at = focusPlace(f);
+    if (at.tab) ui.sheetTab = at.tab;
+    if (ui.sections[at.section] === false) ui.toggleSection(at.section);
+    const behavior = ui.reducedMotion ? 'auto' : 'smooth';
+    const run = ++focusRun;
+    tick().then(() => root?.querySelector(`[data-section="${at.section}"]`)?.scrollIntoView({ block: 'start', behavior }));
+    // The place inside the tab shows once the tab has read what it shows (the Git tab reads the worktree first).
+    const inner = at.inner;
+    if (inner) {
+      const look = (tries: number) => {
+        if (run !== focusRun) return;
+        const el = root?.querySelector(`[data-section="${inner}"]`);
+        if (el) el.scrollIntoView({ block: 'start', behavior });
+        else if (tries > 0) setTimeout(() => look(tries - 1), FOCUS_LOOK_MS);
+      };
+      tick().then(() => look(FOCUS_LOOK_TRIES));
+    }
   });
 
   /** The agent's name in the head has scrolled out of view: a slim bar keeps saying whose sheet this is. */
@@ -294,7 +350,7 @@
   const moreItems = $derived<MenuItem[]>([
     { label: 'Open a terminal in its worktree', icon: 'terminal', disabled: !agent.worktree, run: () => { ui.terminalTakeover = null; ui.terminalCwd = agent.worktree; ui.go('terminal'); } },
     { label: 'Copy worktree path', icon: 'copy', disabled: !agent.worktree, run: () => copyText(agent.worktree ?? '', 'Path copied') },
-    { label: 'Change model…', icon: 'sparkle', disabled: agent.role !== 'solo', run: () => (ui.modelDialog = { provider: agent.provider, agentId: agent.id }) },
+    { label: 'Change model…', icon: 'sparkle', disabled: modelChangeOff(agent) != null, run: () => (ui.modelDialog = { provider: agent.provider, agentId: agent.id }) },
     { kind: 'separator' },
     { label: 'Interrupt this turn', icon: 'pause', disabled: !working || interrupting, run: interrupt },
     { label: 'Stop the agent…', icon: 'stop', danger: true, disabled: agent.status === 'offline', run: () => (confirmStop = true) },
@@ -378,7 +434,7 @@
 
     {#if canTrust(agent.role)}<AgentTrust {agent} />{/if}
 
-    <AgentControls {agent} />
+    <AgentControls {agent} {model} />
 
     <!-- The Lead works through Codly's own tools, which a terminal does not have: it never goes. -->
     {#if agent.role !== 'lead'}<AgentTakeover {agent} />{/if}
@@ -432,6 +488,7 @@
       <Section id="subagents" title="Helpers" summary={helpersSummary(subs)}>
         <ul class="subs">
           {#each moreSubs ? subsRunning : subsRunning.slice(0, SHOW) as s (s.callId)}
+            {@const halt = canStopHelpers ? helperStop(s, background, clean(agent.name)) : null}
             <li>
               <div class="s-row">
                 <Icon name="crew" size={15} />
@@ -439,6 +496,9 @@
                 <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
                 <span class="s-meta num">{timer(ui.now - s.startedAt)}</span>
                 <span class="s-dot on"></span>
+                {#if halt}
+                  <button class="btn sm ghost" disabled={helperStopping(s.callId) || helpersSettling} aria-label="Stop the helper {clean(s.description)}" data-tip={halt.hint} onclick={() => stopHelper(s.callId, halt.id)}><Icon name="stop" size={12} />{helperStopping(s.callId) ? 'Stopping…' : 'Stop'}</button>
+                {/if}
               </div>
               {#if helperLine(s)}<p class="s-now truncate">{helperLine(s)}</p>{/if}
             </li>
@@ -446,7 +506,7 @@
         </ul>
         {#if subsRunning.length > SHOW}<button class="more" onclick={() => (moreSubs = !moreSubs)}>{moreSubs ? 'Show less' : 'Show more'}</button>{/if}
         {#if subsEnded.length}
-          <button class="more done" onclick={() => (moreSubs = !moreSubs)}><Icon name="crew" size={15} />{subsEnded.length} ended</button>
+          <button class="more done" onclick={() => (moreSubs = !moreSubs)}><Icon name="crew" size={15} />{helpersSummary(subsEnded)}</button>
           {#if moreSubs}
             <ul class="subs">
               {#each subsEnded as s (s.callId)}
@@ -530,7 +590,7 @@
           <button class="ev" class:hl={ui.selection?.kind === 'agent' && ui.selection.eventId === e.id} data-ev={e.id} onclick={() => (rawOpen = rawOpen === e.id ? null : e.id)}>
             <time class="num">{clockSec(e.ts)}</time>
             <span class="ev-ic tone-{d.tone ?? 'n'}"><Icon name={d.icon} size={12} /></span>
-            <span class="ev-t truncate">{d.text}</span>
+            <span class="ev-t truncate" data-tip={d.tip}>{d.text}</span>
             {#if e.kind.type === 'decision'}<Provenance kind={methodProvenance(e.kind.method)} compact />{/if}
           </button>
           {#if rawOpen === e.id}<pre class="raw selectable">{JSON.stringify(e, null, 2)}</pre>{/if}

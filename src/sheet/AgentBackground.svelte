@@ -6,11 +6,13 @@
   the stop of a helper Claude Code starts a turn of the agent by itself (recorded:
   docs/research/cli-claude-stream-json-2.1.311-part3.md, section 1), and the button says so.
   A row whose start is not known (session.ts: its first list came from a snapshot) shows
-  "running" with no timer.
+  "running" with no timer. When a row you stopped leaves the running ones, the list closes up
+  under the pointer: its "Stop" buttons stay off for a moment (`stopsSettling`), so a second
+  press never stops the next row.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
-  import { backgroundKind, backgroundSummary, canStop, ofLiveRun, stopBackgroundTask, stopHint, stopOnItsWay, type BackgroundWork } from '../lib/state/session';
+  import { backgroundKind, backgroundSummary, canStop, ofLiveRun, stopBackgroundTask, stopHint, stopLabel, stopOnItsWay, stopsSettling, type BackgroundWork } from '../lib/state/session';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { dur, timer } from '../lib/util/format';
@@ -37,6 +39,7 @@
   let sent = $state<string[]>([]);
   let taken = $state<Record<string, number>>({});
   const stopping = (w: BackgroundWork) => sent.includes(w.id) || stopOnItsWay(taken[w.id], ui.now);
+  const settling = $derived(stopsSettling(ended, new Set([...sent, ...Object.keys(taken)]), ui.now));
   async function stop(w: BackgroundWork) {
     sent = [...sent, w.id];
     const took = await stopBackgroundTask(agent.id, w);
@@ -55,7 +58,7 @@
           <code class="what truncate selectable" data-tip={clean(w.description)}>{clean(w.description)}</code>
           <span class="meta num">{kind ? `${kind} · ` : ''}{w.startedAt == null ? 'running' : timer(ui.now - w.startedAt)}</span>
           {#if canStop(w)}
-            <button class="btn sm ghost" disabled={stopping(w)} data-tip={stopHint(w, agent.name)} onclick={() => stop(w)}><Icon name="stop" size={12} />{stopping(w) ? 'Stopping…' : 'Stop'}</button>
+            <button class="btn sm ghost" disabled={stopping(w) || settling} aria-label={stopLabel(w)} data-tip={stopHint(w, agent.name)} onclick={() => stop(w)}><Icon name="stop" size={12} />{stopping(w) ? 'Stopping…' : 'Stop'}</button>
           {/if}
         </li>
       {/each}

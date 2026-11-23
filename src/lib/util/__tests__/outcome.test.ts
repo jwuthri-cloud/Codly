@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Approval } from '../../gen/Approval';
 import { yourWords } from '../../state/answers';
-import { answerText, askedLine, firstQuestion, outcomeBy, outcomeWord, settledLine, settledWord, wordsOf } from '../outcome';
+import { answerText, askedLine, firstQuestion, outcomeBy, outcomeWord, savedRuleWords, settledLine, settledWord, wordsOf } from '../outcome';
 
 const command = { subject: { kind: 'command', command: 'pnpm install', cwd: null } } satisfies Pick<Approval, 'subject'>;
 const question = {
@@ -40,13 +40,13 @@ describe('how a settled request reads', () => {
 describe('an agent’s history', () => {
   it('says what was asked: an approval, or a question in its own words', () => {
     expect(askedLine(command)).toBe('Asked for approval: pnpm install');
-    expect(askedLine({ subject: { kind: 'file_change', paths: ['a.ts'], diff: null } })).toBe('Asked for approval');
+    expect(askedLine({ subject: { kind: 'file_change', paths: ['a.ts'], diff: null } })).toBe('Asked to change a.ts');
     expect(askedLine(question)).toBe('Asked you: Keep the localStorage fallback?');
     expect(askedLine({ subject: { kind: 'question', questions: [] } })).toBe('Asked you a question');
     expect(askedLine(plan, 'claude')).toBe('Asked you to read its plan');
     // Only a Claude agent shows a plan this way: from another CLI it is an approval like any other.
-    expect(askedLine(plan, 'codex')).toBe('Asked for approval');
-    expect(askedLine(plan)).toBe('Asked for approval');
+    expect(askedLine(plan, 'codex')).toBe('Asked to use ExitPlanMode');
+    expect(askedLine(plan)).toBe('Asked to use ExitPlanMode');
   });
 
   it('a permissions request says what it asked for; one Codly cannot read says so', () => {
@@ -107,7 +107,7 @@ describe('what you said with an answer', () => {
 
   it('a plan you changed before you accepted it says so, on the card and in the history', () => {
     yourWords.set('ap1', { note: null, planChanged: true });
-    expect(settledLine('approved', 'user', held('ap1', plan), null, 'claude')).toBe('Plan accepted with your changes by you');
+    expect(settledLine('approved', 'user', held('ap1', plan), null, 'claude')).toBe('Plan accepted by you, with your changes');
     expect(settledLine('approved', 'user', held('ap2', plan), null, 'claude')).toBe('Plan accepted by you');
     // The closed card puts the same word before "by you".
     expect(settledWord('approved', plan, 'claude', true)).toBe('Plan accepted with your changes');
@@ -130,5 +130,34 @@ describe('what you said with an answer', () => {
     expect(wordsOf(command, 'user')).toBeNull();
     expect(wordsOf(null, 'user')).toBeNull();
     expect(wordsOf(held('ap2', command), 'user')).toBeNull();
+  });
+});
+
+// Before, a file change and a tool read "Asked for approval", with nothing that said for what.
+describe('what an agent asked for, in its history', () => {
+  it('a file change names the file, or how many files', () => {
+    expect(askedLine({ subject: { kind: 'file_change', paths: ['/repo/README.md'], diff: null } })).toBe('Asked to change README.md');
+    expect(askedLine({ subject: { kind: 'file_change', paths: ['a.ts', 'b.ts', 'c.ts'], diff: null } })).toBe('Asked to change 3 files');
+  });
+
+  it('a tool is named in words: an MCP tool by its server and its name, never as mcp__…', () => {
+    expect(askedLine({ subject: { kind: 'tool', name: 'mcp__linear__create_issue', input: {} } })).toBe('Asked to use linear: create_issue');
+    expect(askedLine({ subject: { kind: 'tool', name: 'mcp__codly__codly_submit_plan', input: {} } })).toBe('Asked to use Codly’s submit plan tool');
+    expect(askedLine({ subject: { kind: 'tool', name: 'WebFetch', input: { url: 'https://example.com' } } })).toBe('Asked to use WebFetch');
+  });
+
+  it('a command keeps its own line', () => {
+    expect(askedLine(command)).toBe('Asked for approval: pnpm install');
+  });
+});
+
+describe('a rule saved with an approval', () => {
+  it('is named at the end of the approval’s line, as a sentence', () => {
+    expect(settledLine('approved', 'user', command, null, null, { kind: 'prefix', command: 'npm install' })).toBe('Approved by you, and from now on: commands that start with npm install');
+    expect(settledLine('approved', 'user', command, null, null, { kind: 'exact', command: 'pnpm test' })).toBe('Approved by you, and from now on: the command pnpm test');
+    expect(savedRuleWords({ kind: 'exact', command: 'mcp__linear__create_issue' })).toBe('the tool create_issue of the MCP server linear');
+    // No rule: the line as before. A rule is only ever saved with a yes.
+    expect(settledLine('approved', 'user', command, null)).toBe('Approved by you');
+    expect(settledLine('denied', 'user', command, null, null, { kind: 'prefix', command: 'npm install' })).toBe('Denied by you');
   });
 });
