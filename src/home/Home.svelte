@@ -56,7 +56,7 @@
   </div>
 {:else}
   <div class="home">
-    <section class="column glass" aria-label="Conversation" bind:this={column}>
+    <section class="column glass" data-toast-beside aria-label="Conversation" bind:this={column}>
       {#if tabs || closed}<RequestTabs />{/if}
       {#if ui.findOpen}<FindBar thread={closed ?? thread} scope={column} />{/if}
       {#if closed}

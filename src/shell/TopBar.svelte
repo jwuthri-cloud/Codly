@@ -39,6 +39,10 @@
   let actionsW = $state(0);
   /** The gap between the bar's three parts, in px (`column-gap` of `.top`). */
   const GAP = 12;
+  /** The bar's own box, measured (in the app it has a padding that `frameW` does not know). */
+  let bar = $state<DOMRectReadOnly>();
+  /** The most the repo pill may take, in px: what the actions leave of the bar. A longer name is cut. */
+  const whereMax = $derived((bar?.width ?? frameW) - actionsW - 2 * GAP);
   const items = $derived<MenuItem[]>([
     { kind: 'header', label: 'Recent' },
     ...recent.slice(0, 6).map((r) => ({ label: r.name, hint: tildify(r.repo_path), icon: 'repo', checked: r.repo_path === ws?.repo_path, run: () => openWorkspace(r.repo_path) })),
@@ -50,9 +54,9 @@
   ]);
 </script>
 
-<header class="top" class:tauri data-tauri-drag-region>
-  <div class="where" bind:clientWidth={whereW} data-tauri-drag-region>
-    <button class="ws" bind:this={wsBtn} onclick={toggleMenu} aria-haspopup="menu" aria-expanded={wsMenu} data-tip={tildify(ws?.repo_path)}>
+<header class="top" class:tauri bind:contentRect={bar} data-tauri-drag-region>
+  <div class="where" bind:clientWidth={whereW} style:max-width="{whereMax}px" data-tauri-drag-region>
+    <button class="ws" bind:this={wsBtn} onclick={toggleMenu} aria-haspopup="menu" aria-expanded={wsMenu} data-tip={ws ? `${ws.name} · ${tildify(ws.repo_path)}` : undefined}>
       <span class="name serif">{ws?.name ?? 'Codly'}</span>
       {#if !narrow}<span class="branch"><Icon name="branch" size={12} />{branch}</span>{/if}
     </button>
@@ -77,16 +81,17 @@
   /* Three parts: where you are, the crew, the actions. With room to spare the two sides are
      equally wide, so the crew is centred on the stage (and so on the conversation column). In
      a narrow bar each side is as wide as what it holds and the crew strip gets all the rest,
-     where it scrolls sideways. */
+     where it scrolls sideways. A name longer than what the actions leave of the bar (the
+     max-width of `.where`) ends in an ellipsis inside its pill: the actions never leave the bar. */
   .top { display: grid; grid-template-columns: minmax(max-content, 1fr) minmax(0, max-content) minmax(max-content, 1fr); align-items: center; column-gap: 12px; height: var(--top-h); }
-  .where { display: flex; align-items: center; justify-self: start; }
+  .where { display: flex; align-items: center; justify-self: start; min-width: 0; }
   /* The office behind the bar keeps its own hour (a bright scene under the night theme, a dark
      one under the day theme), so the name and the branch stand on a backing of the app's theme:
      the inks hold AA on --glass-strong over any scene (src/styles/__tests__/contrast.test.ts). */
   .ws { display: inline-flex; align-items: baseline; gap: 10px; height: 34px; padding: 0 14px; border-radius: var(--r-full); min-width: 0; background: var(--glass-strong); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-edge); }
   .ws:hover { box-shadow: var(--glass-edge), inset 0 0 0 1px var(--line-3); }
-  .name { font-size: 22px; line-height: 34px; font-style: italic; color: var(--ink-1); white-space: nowrap; }
-  .branch { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+  .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 22px; line-height: 34px; font-style: italic; color: var(--ink-1); white-space: nowrap; }
+  .branch { display: inline-flex; flex-shrink: 0; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
   .crew { min-width: 0; height: 100%; display: flex; align-items: center; }
   .crew > :global(.strip) { min-width: 0; }
   .actions { display: flex; justify-self: end; align-items: center; gap: 8px; }
