@@ -1102,10 +1102,14 @@ impl Core {
         self.inner.store.with(|db| guard("knowledge graph", || memory::query_triples(db, ws.as_deref(), entity, None, 500)))
     }
 
-    /// Files of the open workspace for the 3D codebase city (from the code index).
+    /// Files of the open workspace for the 3D codebase city and the composer's `@` menu (from
+    /// the code index, brought up to date with the files on disk first, like a search).
     pub async fn repo_map(&self) -> anyhow::Result<Vec<RepoFile>> {
         match self.inner.index_of(None) {
-            Some(ix) => tokio::task::spawn_blocking(move || ix.files()).await?,
+            Some(ix) => {
+                self.inner.freshen(&ix).await;
+                tokio::task::spawn_blocking(move || ix.files()).await?
+            }
             None => Ok(Vec::new()),
         }
     }

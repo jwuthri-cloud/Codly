@@ -23,7 +23,7 @@
     type HireTemplate,
   } from '../lib/util/hire';
   import { COMPANY_LABEL, PROVIDER_LABEL, idVar } from '../lib/util/labels';
-  import { effortLabel, effortsFor, keptEffort, optionLabel, sourceNote } from '../lib/util/models';
+  import { effortLabel, effortsFor, keptEffort, optionLabel, sourceNote, troubleNote } from '../lib/util/models';
   import { ROLE_TITLES, joinModel, splitModel } from '../lib/util/team';
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
@@ -51,6 +51,8 @@
   let brief = $state('');
   let asking: AbortController | null = $state(null);
   let catalog = $state<ModelCatalog | null>(null);
+  /** Why the catalog could not be read: said under the model field (typing a name still works). */
+  let catalogFailed = $state<string | null>(null);
   let preview = $state<LaunchPreview | null>(null);
   let review = $state<HireReview | null>(null);
   /** The person accepted the shell metacharacters in a custom command. */
@@ -116,15 +118,23 @@
   $effect(() => {
     const p = m.provider;
     catalog = null;
+    catalogFailed = null;
     if (p === CUSTOM) return;
     let live = true;
-    api.modelCatalog(p as Provider).then((c) => live && (catalog = c)).catch(() => {}); // typing a name still works
+    api.modelCatalog(p as Provider).then(
+      (c) => live && (catalog = c),
+      (e) => live && (catalogFailed = e instanceof Error ? e.message : String(e)),
+    );
     return () => (live = false);
   });
   // The model is "name:effort" in the manifest; the wizard picks the two apart.
   const picked = $derived(splitModel(m.model));
   const efforts = $derived(custom ? [] : effortsFor(catalog, m.provider as Provider, picked.name));
-  const modelNote = $derived(custom ? null : sourceNote(catalog, PROVIDER_LABEL[m.provider as Provider]));
+  const modelNote = $derived.by(() => {
+    if (custom) return null;
+    const cli = PROVIDER_LABEL[m.provider as Provider];
+    return troubleNote(catalog, catalogFailed, cli) ?? sourceNote(catalog, cli);
+  });
   /** Another model keeps the effort only if it takes that level. */
   function pickModel(name: string) {
     m.model = joinModel(name, custom ? '' : keptEffort(catalog, m.provider as Provider, name.trim(), picked.effort));

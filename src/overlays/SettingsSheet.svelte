@@ -6,19 +6,22 @@
   import type { ApprovalMode } from '../lib/gen/ApprovalMode';
   import type { Provider } from '../lib/gen/Provider';
   import type { Settings } from '../lib/gen/Settings';
-  import { api } from '../lib/api';
   import { redetect, refreshAccounts, updateSettings } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
+  import { ModelCatalogs } from '../lib/state/modelCatalogs.svelte';
   import { usable as accountUsable } from '../lib/util/accounts';
   import { skillsUi } from '../lib/state/skills.svelte';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { COMPANY_LABEL, PROVIDER_LABEL } from '../lib/util/labels';
+  import { defaultEffortLabel, effortOptions, keptEffort, optionLabel, troubleNote } from '../lib/util/models';
+  import { joinModel, splitModel } from '../lib/util/team';
   import AccountsSection from './AccountsSection.svelte';
   import ApiKeysSection from './ApiKeysSection.svelte';
   import ApprovalRulesSection from './ApprovalRulesSection.svelte';
   import FreeFlowSection from './FreeFlowSection.svelte';
   import BreakerSection from './BreakerSection.svelte';
+  import WatchdogSection from './WatchdogSection.svelte';
   import InboundSection from './InboundSection.svelte';
   import NotificationsSection from './NotificationsSection.svelte';
   import ConnectionsSection from './ConnectionsSection.svelte';
@@ -62,27 +65,16 @@
   }
 
   // The Lead's model and thinking effort, stored as one string: "opus:high" (the core's format).
-  // ponytail: each CLI's levels today, by hand; Gemini and OpenCode take none through Codly.
-  const EFFORTS: Partial<Record<Provider, string[]>> = {
-    claude: ['low', 'medium', 'high', 'xhigh', 'max'],
-    codex: ['low', 'medium', 'high', 'xhigh'],
-  };
-  const ALL_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
-  const leadModel = $derived.by(() => {
-    const m = s.lead_model ?? '';
-    const i = m.lastIndexOf(':');
-    return i >= 0 && ALL_EFFORTS.includes(m.slice(i + 1)) ? { name: m.slice(0, i), effort: m.slice(i + 1) } : { name: m, effort: '' };
-  });
-  function setLeadModel(name: string, effort: string) {
-    const n = name.trim();
-    set({ lead_model: n || effort ? `${n}${effort ? `:${effort}` : ''}` : null });
-  }
-  let leadModels = $state<string[]>([]);
-  $effect(() => {
-    const p = leadCli;
-    leadModels = [];
-    api.listModels(p).then((l) => p === leadCli && (leadModels = l)).catch(() => {}); // typing a name still works
-  });
+  // The names and the efforts each model takes are its CLI's catalog; any other name can be typed.
+  const leadModel = $derived(splitModel(s.lead_model));
+  const catalogs = new ModelCatalogs();
+  const leadCatalog = $derived(catalogs.of(leadCli));
+  const leadEfforts = $derived(effortOptions(leadCatalog, leadCli, leadModel.name, leadModel.effort));
+  const leadListTrouble = $derived(troubleNote(leadCatalog, catalogs.failure(leadCli), PROVIDER_LABEL[leadCli]));
+  $effect(() => catalogs.ask(leadCli));
+  const setLeadModel = (name: string, effort: string) => set({ lead_model: joinModel(name, effort) });
+  /** Another model keeps the effort only if it takes that level. */
+  const pickLeadModel = (name: string) => setLeadModel(name, keptEffort(leadCatalog, leadCli, name.trim(), leadModel.effort));
   function move(p: Provider, d: number) {
     const list = [...s.worker_providers];
     const i = list.indexOf(p);
@@ -148,7 +140,10 @@
     ['confirm_quit', 'Ask before quitting while agents work', 'Agents stop when Codly quits. They resume when you open Codly again.'],
   ];
   const SANDBOX_TOGGLES = [['codex_network_access', 'Let Codex agents use the network', 'Commands a Codex agent runs in its sandbox can reach the internet (package installs, downloads) without asking you. Codly’s approval rules (git push, curl | sh, package downloads) are not asked for these commands either. Off: each one asks first. Applies to agents started after the change.']];
-  const OFFICE_TOGGLES = [['game_rules', 'Office rules affect work', 'Agents can be at home or tired, and new hires wait for a job offer.']];
+  const OFFICE_TOGGLES = [
+    ['game_rules', 'Office rules affect work', 'Agents can be at home or tired, and new hires wait for a job offer.'],
+    ['world_ambient', 'Keep the office moving behind the chat', 'Idle agents keep moving and the break-room games play while the office shows behind the chat. Off: there the office is drawn only when something happens, which saves battery. With your system’s “Reduce motion” on, it never moves by itself.'],
+  ];
   const REVIEW_TOGGLES = [['review_gate', 'Cross-vendor review before merge', 'Another provider reviews each task’s diff before it merges.']];
   // Seconds; the value in use is always one of the choices.
   const checkLimits = $derived([...new Set([300, 600, 1200, 1800, 3600, 7200, s.verify_timeout_secs])].sort((a, b) => a - b));
@@ -188,18 +183,19 @@
           <span class="r-title">Model</span>
           <span class="desc">Empty uses {PROVIDER_LABEL[leadCli]}’s default. A request can pick its own under the composer. Leads switch on their next message and keep their conversation.</span>
         </div>
-        <input class="field" list="lead-models" value={leadModel.name} placeholder="Default" spellcheck="false" autocomplete="off" aria-label="Lead model" onchange={(e) => setLeadModel(e.currentTarget.value, leadModel.effort)} />
-        <datalist id="lead-models">{#each leadModels as m (m)}<option value={m}></option>{/each}</datalist>
+        <input class="field" list="lead-models" value={leadModel.name} placeholder="Default" spellcheck="false" autocomplete="off" aria-label="Lead model" onchange={(e) => pickLeadModel(e.currentTarget.value)} />
+        <datalist id="lead-models">{#each leadCatalog?.models ?? [] as m (m.id)}<option value={m.id}>{optionLabel(m)}</option>{/each}</datalist>
       </div>
-      {#if EFFORTS[leadCli]}
+      {#if leadListTrouble}<p class="desc warn" role="status">{leadListTrouble} <button class="link" onclick={() => catalogs.ask(leadCli, true)}>Try again</button></p>{/if}
+      {#if leadEfforts.length}
         <div class="row">
           <div class="r-text">
             <span class="r-title">Thinking effort</span>
             <span class="desc">How long it reasons before answering. Higher plans better, slower, and uses more of your quota.</span>
           </div>
           <select class="field" value={leadModel.effort} aria-label="Lead thinking effort" onchange={(e) => setLeadModel(leadModel.name, e.currentTarget.value)}>
-            <option value="">Default</option>
-            {#each EFFORTS[leadCli] ?? [] as e (e)}<option value={e}>{e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1)}</option>{/each}
+            <option value="">{defaultEffortLabel(leadCatalog, leadModel.name)}</option>
+            {#each leadEfforts as e (e.id)}<option value={e.id}>{e.label}</option>{/each}
           </select>
         </div>
       {/if}
@@ -369,6 +365,8 @@
     <WorktreeSection />
 
     <BreakerSection />
+
+    <WatchdogSection />
     {:else if tab === 'automation'}
     <FreeFlowSection />
     <TriggersSection />
@@ -392,6 +390,8 @@
   section { padding: 20px 0; box-shadow: inset 0 -1px 0 var(--line); display: flex; flex-direction: column; gap: 12px; }
   .desc { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .small { font-size: var(--t-sm); }
+  .warn { color: var(--amber-ink); }
+  .link { color: var(--ink-1); font-weight: var(--w-med); text-decoration: underline; text-decoration-color: var(--line-3); text-underline-offset: 3px; }
   .choices { display: flex; flex-wrap: wrap; gap: 6px; }
   .choice { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px 0 12px; border-radius: var(--r-full); background: var(--surface-1); font-weight: var(--w-med); }
   .choice:hover { background: var(--surface-2); }

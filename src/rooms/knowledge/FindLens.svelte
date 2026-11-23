@@ -136,6 +136,7 @@
       </section>
       <section>
         <h2 class="eyebrow">Code {#if meaning.code}<span class="num">{meaning.code.citations.length}</span><Provenance kind="observed" compact />{/if}</h2>
+        {#each meaning.code?.warnings ?? [] as w (w)}<p class="warn" role="status">{w}</p>{/each}
         {#each meaning.code?.citations ?? [] as c (c.id)}
           <button class="cite" onpointerenter={() => ui.setHover({ path: c.path })} onpointerleave={() => ui.setHover(null)} onclick={() => ui.selectFile(c.path)}>
             <code>{c.path}<span class="muted">:{c.start_line}–{c.end_line}</span></code>{#if c.symbol}<span class="sym">{c.symbol}</span>{/if}
@@ -187,5 +188,6 @@
   .sym { font-size: var(--t-sm); color: var(--aurora-m); }
   .fact { display: flex; gap: 8px; padding: 6px 14px; font-size: var(--t-md); color: var(--ink-1); }
   .pred { color: var(--ink-3); }
+  .warn { padding: 0 14px 6px; font-size: var(--t-sm); color: var(--amber-ink); }
   .none { padding: 4px 14px; font-size: var(--t-sm); color: var(--ink-3); }
 </style>

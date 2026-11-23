@@ -389,6 +389,8 @@
     </div>
 
     <div class="list" id="palette-list" role="listbox" bind:this={listEl}>
+      <!-- Why the matches may not be the files on disk: the index is behind them. -->
+      {#each search?.warnings ?? [] as w (w)}<p class="warn" role="status">{w}</p>{/each}
       {#if searchError}
         <p class="hint-empty">Search failed: {searchError}</p>
       {:else if scope === '/' && !search && query.trim().length < 2}
@@ -467,6 +469,7 @@
   .alt { display: inline-flex; align-items: center; gap: 5px; font-size: var(--t-sm); color: var(--ink-3); white-space: nowrap; }
   .confirm { margin: 2px 12px 8px 44px; padding: 8px 12px; border-radius: var(--r-md); background: color-mix(in srgb, var(--amber) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 45%, transparent); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-1); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
   .how { display: block; margin-top: 4px; color: var(--ink-3); }
+  .warn { padding: 10px 16px 0; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--amber-ink); }
   .hint-empty { padding: 20px 16px; font-size: var(--t-md); color: var(--ink-3); line-height: var(--lh-md); }
   .foot { display: flex; align-items: center; gap: 14px; height: 38px; padding: 0 16px; box-shadow: inset 0 1px 0 var(--line); font-size: var(--t-sm); color: var(--ink-3); flex-shrink: 0; overflow: hidden; white-space: nowrap; }
   .foot span { display: inline-flex; align-items: center; gap: 4px; }
