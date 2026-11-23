@@ -5,9 +5,11 @@
   Click → the plan's checklist in the conversation; the arrow opens the Plan room.
   While it runs, Cancel plan stops every worker (it asks first, like the Plan room).
   A plan that cannot go on by itself says "Needs you": its card has the ways out.
+  A finished plan that conflicts with your branch says so, and not "ready for <branch>".
 -->
 <script lang="ts">
   import { cancelPlan } from '../../lib/state/actions';
+  import { conflictsWith } from '../../lib/state/mergeState.svelte';
   import { requests } from '../../lib/state/requests.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
@@ -31,9 +33,15 @@
   const waiting = $derived(requests.get(plan?.thread || 'lead')?.waiting ?? 0);
   /** Running, but only you can move it on: a task stopped, and the rest waits for it. */
   const stuck = $derived(plan ? stuckPlan(plan, tasks) : null);
+  /** Finished, but it cannot merge yet: your branch and the plan changed the same files. */
+  const conflict = $derived.by(() => {
+    void store.rev;
+    return finished && !store.mergeOf(planId) ? conflictsWith({ kind: 'plan', id: planId }) : null;
+  });
   const status = $derived(
     waiting ? `${waiting === 1 ? 'Waiting for you' : `${waiting} waiting for you`} · ${done} of ${tasks.length} done`
     : stuck ? `Needs you · ${done} of ${tasks.length} done`
+    : conflict ? `${done === tasks.length ? `All ${tasks.length} done` : `${done} of ${tasks.length} done`} · conflicts with ${conflict}`
     : finished ? (done === tasks.length ? `All ${tasks.length} merged · ready for ${target}` : `${done} of ${tasks.length} done · ready for ${target}`)
     : plan?.status === 'integrating' ? `${done} of ${tasks.length} done · integrating`
     : `${done} of ${tasks.length} done${live ? ` · ${live} working` : ''}`,
@@ -53,7 +61,7 @@
 </script>
 
 {#if plan}
-  <div class="ph" class:finished class:wait={waiting > 0 || !!stuck}>
+  <div class="ph" class:finished class:wait={waiting > 0 || !!stuck || !!conflict}>
     <button class="main" onclick={() => (ui.revealPlan = planId)} aria-label="Show the plan: {plan.summary}, {status}">
       <span class="title serif truncate">{plan.summary}</span>
       <span class="bar" aria-hidden="true">

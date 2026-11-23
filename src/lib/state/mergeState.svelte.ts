@@ -17,6 +17,16 @@ export const mergeUi = new MergeUi();
 
 export const mergeKey = (source: PrSource) => `${source.kind}:${source.id}`;
 
+/**
+ * The branch that a finished plan (or a solo agent's branch) conflicts with, while the core's
+ * last word is that the conflict is not resolved. Null: it can merge, as far as Codly knows.
+ * A header or a button that offers the merge reads this first: it must not say "ready".
+ */
+export function conflictsWith(source: PrSource): string | null {
+  const merge = mergeUi.states[mergeKey(source)];
+  return merge?.conflicts.length ? merge.target : null;
+}
+
 const msg = (e: unknown) => (e instanceof Error ? e.message : typeof e === 'string' ? e : 'Unknown error');
 
 /** "a.rs, b.rs, c.rs and 9 more". */
