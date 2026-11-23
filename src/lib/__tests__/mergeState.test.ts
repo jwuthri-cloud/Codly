@@ -104,13 +104,15 @@ describe('a merge that cannot go straight in', () => {
     expect(core).toHaveBeenCalledWith(agent, null);
     expect(said().at(-1)).toEqual(['success', 'An agent is resolving the conflict', 'Ada resolves it in its conversation. Merge again when its turn ends.']);
     expect(await resolveMergeConflict(agent, 'Ada')).toBe(false);
-    expect(said().at(-1)).toEqual(['error', 'Couldn’t have an agent resolve it', 'Ada is still working; ask again when its turn ends']);
+    expect(said().at(-1)).toEqual(['error', 'Couldn’t start the agent', 'Ada is still working; ask again when its turn ends']);
   });
 
   it('a plan that started from another branch is resolved only after you confirm that branch', async () => {
     const warning = { target: 'feature-x', message: 'This plan started from main, and your checkout is on feature-x now.' };
     const warn = vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(warning);
     const resolve = vi.spyOn(api, 'resolveMergeConflict').mockResolvedValue({ ...conflict, target: 'feature-x', resolving: 't9' });
+    // The core last said that files conflict.
+    mergeUi.states[mergeKey(plan)] = conflict;
     expect(await resolveMergeConflict(plan)).toBe(false);
     expect(resolve).not.toHaveBeenCalled();
     const ask = toasts.list.find((t) => t.title === 'Bring feature-x into this plan?');
@@ -124,6 +126,39 @@ describe('a merge that cannot go straight in', () => {
     ask!.action!.run();
     await vi.waitFor(() => expect(resolve).toHaveBeenCalledWith(plan, 'feature-x'));
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('the question before another branch comes in says what the agent is for: a conflict, or checks that failed', async () => {
+    const warning = { target: 'feature-x', message: 'This plan started from main, and your checkout is on feature-x now.' };
+    vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(warning);
+    const resolve = vi.spyOn(api, 'resolveMergeConflict');
+    const asked = async (last: MergeState | null) => {
+      for (const t of [...toasts.list]) toasts.dismiss(t.id);
+      if (last) mergeUi.states[mergeKey(plan)] = last;
+      else delete mergeUi.states[mergeKey(plan)];
+      expect(await resolveMergeConflict(plan)).toBe(false);
+      return toasts.list.find((t) => t.title === 'Bring feature-x into this plan?')?.body;
+    };
+    const rest = 'brings feature-x into the plan’s branch: from then on the plan builds on feature-x.';
+    expect(await asked(conflict)).toBe(`${warning.message} To resolve the conflict, an agent ${rest}`);
+    // Nothing conflicts and checks failed on the merge result: no conflict is named.
+    expect(await asked({ ...clean, failed_checks: ['npm test'] })).toBe(`${warning.message} To make the checks pass, an agent ${rest}`);
+    // Files conflict and checks failed: the conflict comes first.
+    expect(await asked({ ...conflict, failed_checks: ['npm test'] })).toBe(`${warning.message} To resolve the conflict, an agent ${rest}`);
+    // The state was not read: the question promises neither.
+    expect(await asked(null)).toBe(`${warning.message} An agent ${rest}`);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('a warning that cannot be read, or an agent that does not start, says that the agent did not start', async () => {
+    vi.spyOn(api, 'mergePlanWarning').mockRejectedValueOnce(new Error('no repository is open')).mockResolvedValue(null);
+    vi.spyOn(api, 'resolveMergeConflict').mockRejectedValue(new Error('no Lead is free to plan the fix'));
+    expect(await resolveMergeConflict(plan)).toBe(false);
+    expect(said().at(-1)).toEqual(['error', 'Couldn’t start the agent', 'no repository is open']);
+    // The same title when checks failed and nothing conflicts: there is no conflict to "resolve".
+    mergeUi.states[mergeKey(plan)] = { ...clean, failed_checks: ['npm test'] };
+    expect(await resolveMergeConflict(plan)).toBe(false);
+    expect(said().at(-1)).toEqual(['error', 'Couldn’t start the agent', 'no Lead is free to plan the fix']);
   });
 
   it('checks that could not run on the merge result stop the merge until you choose Merge anyway', async () => {

@@ -11,6 +11,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import type { ModelCatalog } from '../lib/gen/ModelCatalog';
   import { PROVIDER_LABEL } from '../lib/util/labels';
+  import { switchNote } from '../lib/util/modelNotes';
   import { effortLabel, effortsFor, keptEffort, optionLabel, optionOf, sourceNote } from '../lib/util/models';
   import { joinModel, splitModel } from '../lib/util/team';
   import Dialog from '../components/Dialog.svelte';
@@ -57,7 +58,7 @@
   <Dialog label="Change {agent.name}’s model" width={480} onclose={close}>
     <form onsubmit={submit}>
       <div class="body">
-        <p class="desc">{PROVIDER_LABEL[provider]}. The next message resumes the same conversation on the new model.</p>
+        <p class="desc">{PROVIDER_LABEL[provider]}. {switchNote(store.agentMap.get(agent.id) ?? agent)}</p>
         <label class="field">
           <span class="eyebrow">Model</span>
           <input list="model-options" bind:value={model} placeholder={loading ? 'Loading models…' : 'CLI default'} spellcheck="false" autocomplete="off" />

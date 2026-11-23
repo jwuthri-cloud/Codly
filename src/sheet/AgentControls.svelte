@@ -6,14 +6,17 @@
   for its next runs, so it shows when the agent is not running too) and a context reading. They
   reach its live session with no restart. "Compact now" is one row for a Codex agent and a 1:1
   Claude agent: its CLI sums up the conversation between turns (the core says when it may start).
+  The button reads "Compacting…" while the request is on its way, and the row then shows what
+  the live run last said about a compaction, with the time.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
   import type { ContextUsage } from '../lib/gen/ContextUsage';
   import type { PermissionMode } from '../lib/gen/PermissionMode';
   import { stopAgent } from '../lib/state/actions';
-  import { PERMISSION_MODES, canCompact, compactAgent, compactHint, compactWait, contextLine, controls, readContext, resumeAgent, setBlockTools, setPermissionMode, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
+  import { PERMISSION_MODES, canCompact, compactAgent, compactHint, compactWait, compactionLine, contextLine, controls, readContext, resumeAgent, setBlockTools, setPermissionMode, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
   import { steerHint } from '../lib/state/queue';
+  import { store } from '../lib/state/store.svelte';
   import { tokens } from '../lib/util/format';
   import Icon from '../components/Icon.svelte';
   import Section from '../components/Section.svelte';
@@ -54,6 +57,11 @@
     reading = false;
   }
   const compactWhy = $derived(compactWait(agent));
+  /** The sign at the button that a compaction happened: what the live run last said about one. */
+  const compacted = $derived.by(() => {
+    void store.revBy.get(agent.id);
+    return compactionLine(store.events, agent);
+  });
   async function compact() {
     if (compacting) return;
     compacting = true;
@@ -144,8 +152,9 @@
           <span class="txt">
             <b>Compact conversation</b>
             <span class="sub">{compactWhy ?? compactHint(agent.provider)}</span>
+            {#if compacted}<span class="sub">{compacted}</span>{/if}
           </span>
-          <button class="btn sm" disabled={!!compactWhy || compacting} onclick={compact}><Icon name="layers" size={12} />Compact now</button>
+          <button class="btn sm" disabled={!!compactWhy || compacting} onclick={compact}><Icon name="layers" size={12} />{compacting ? 'Compacting…' : 'Compact now'}</button>
         </div>
       {/if}
 

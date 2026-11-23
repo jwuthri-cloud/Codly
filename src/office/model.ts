@@ -36,6 +36,8 @@ export interface AgentState {
   id: string;
   name: string;
   provider: Provider;
+  /** The roster or a session start named its CLI. An agent first seen in another event is drawn as a Claude agent until then, which says nothing about its CLI. */
+  providerKnown: boolean;
   role: Role;
   /** Team title ("Backend dev") or "Consultant"; null for the rest. */
   badge: string | null;
@@ -58,7 +60,8 @@ export interface AgentState {
   replyingSince: number | null;
   compactingSince: number | null;
   retrying: { attempt: number; since: number } | null;
-  approval: { id: string; text: string; since: number } | null;
+  /** What it waits for you with. `command`: `text` is a command line ("May I run …?"); any other text starts with what it wants to do ("edit x.ts"). */
+  approval: { id: string; text: string; command: boolean; since: number } | null;
   blocked: { reason: string; since: number } | null;
   /** The last fatal error, kept for the "Stuck: …" line while the status says blocked. */
   lastError: string | null;

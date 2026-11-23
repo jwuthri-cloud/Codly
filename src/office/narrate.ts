@@ -97,7 +97,9 @@ export function sentence(a: AgentState, now: number): Sentence {
   if (!a.present) return make('Offline', null, '', 'muted');
   if (a.approval) {
     if (a.approval.id.startsWith('q:')) return make('Your turn:', a.approval.text, '', 'warn');
-    return a.approval.text ? make('May I run', a.approval.text, '?', 'warn') : make('Waiting for you', null, '', 'warn');
+    if (!a.approval.text) return make('Waiting for you', null, '', 'warn');
+    // "May I run <command>?" only for a command: any other request says itself what it wants to do.
+    return make(a.approval.command ? 'May I run' : 'May I', a.approval.text, '?', 'warn');
   }
   if (a.rateLimited || a.status === 'rate_limited') {
     const r = a.rateLimited?.resetsAt;

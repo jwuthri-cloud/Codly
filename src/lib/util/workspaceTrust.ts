@@ -67,7 +67,7 @@ function withoutTrustOf(cli: Provider): string {
 /** What does not wait for the choice, because it is yours and not the repo's (the core's
  *  runs.rs: a Codex agent's own servers follow "Use my own CLI setup" alone). */
 export const CODEX_OWN_SERVERS =
-  'A Codex agent starts the MCP servers of your own Codex config in every folder, trusted or not: they are yours, not this repo’s. “Use my own CLI setup” in Settings turns them off.';
+  'A Codex agent starts the MCP servers of your own Codex config in every folder, trusted or not: they are yours, not this repo’s. To keep them out, turn off “Use my own CLI setup” in Settings.';
 
 /** Do Codex agents start the MCP servers of your own Codex config? Only then is there
  *  something to say about them: "Use my own CLI setup" is on and Codex is installed. */

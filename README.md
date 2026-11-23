@@ -294,7 +294,8 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   started in that repo: it takes no task and reviews none. A worktree whose files are not the ones
   of your folder (an agent changed them there) is shown with its own files, to trust by itself.
   The choice is about the repo's files, not yours: a Codex agent starts the MCP servers of your own
-  Codex config in every folder, trusted or not ("Use my own CLI setup" turns them off).
+  Codex config in every folder, trusted or not. To keep them out, turn off "Use my own CLI setup" in
+  Settings.
 - An agent that wants to run `git push` itself must ask you first, in every approval mode except Full
   access, which approves it. That holds with **Sandbox Claude's shell** on too (below).
 - By itself, Codly removes a worktree only when it is clean and merged, and deletes a `codly/…` branch
