@@ -1,4 +1,5 @@
 // The quest: five levels, 100 XP each. Pure so the map, the toasts and the tests agree.
+import type { ByokStatus } from '../lib/gen/ByokStatus';
 import type { CliInfo } from '../lib/gen/CliInfo';
 import { cliOk } from '../lib/util/cli';
 
@@ -35,16 +36,41 @@ export const rank = (points: number) => RANKS.find(([min]) => points >= min)![1]
 /** Level 1 completes by itself as soon as one CLI is ready to work. */
 export const crewReady = (clis: readonly CliInfo[]) => clis.some(cliOk);
 
-/**
- * Continue rewards the level you leave only when it is earned. The crew level is earned by one
- * ready CLI, never by the button. The Lead level is earned by a Lead to appoint, and only a
- * ready CLI can lead (the first one does until you pick; a CLI picked earlier that is not ready
- * any more leads nothing). Every other level is optional and earned by moving on.
- */
-export const earned = (id: LevelId, clis: readonly CliInfo[]) => (id !== 'crew' && id !== 'lead') || crewReady(clis);
+/** Whether OpenRouter is on: its key is saved, and agents get it. */
+export const openRouterOn = (s: ByokStatus | null | undefined) => s?.vendors.find((v) => v.vendor === 'openrouter')?.source.kind === 'key';
 
-/** What Continue says in place of "Lead appointed" when it leaves the Lead level with no Lead to appoint. */
-export const NO_LEAD = { title: 'No Lead yet', body: 'No agent is ready, so there is no Lead to appoint. Install or sign in to one on level 1, then pick your Lead.' };
+/** What is true on this machine: what the levels' rewards speak about. */
+export type QuestFacts = { clis: readonly CliInfo[]; openRouter: boolean };
+
+/** What is said in place of a reward: what is missing, and where to get it. */
+export type Missing = { title: string; body: string };
+
+const HIRE = 'Install or sign in to one on level 1';
+
+/**
+ * The one rule for every level: a reward ("+100 XP · Crew hired") is for something that
+ * happened. Null: the level's reward is true, so it is earned. Otherwise what is missing: the
+ * quest says that, moves on (every level is optional), and gives nothing.
+ * A crew, a Lead, a creative stack and the first mission all need one CLI that is ready to
+ * work (only a ready CLI can lead: the first one does until you pick). More brains needs
+ * OpenCode installed and an OpenRouter key that is on.
+ */
+export function missing(id: LevelId, facts: QuestFacts): Missing | null {
+  const ready = crewReady(facts.clis);
+  switch (id) {
+    case 'crew':
+      return ready ? null : { title: 'No crew yet', body: 'No agent CLI is installed and signed in. Install one here and sign in: the level completes by itself then.' };
+    case 'lead':
+      return ready ? null : { title: 'No Lead yet', body: `No agent is ready, so there is no Lead to appoint. ${HIRE}, then pick your Lead.` };
+    case 'brains':
+      if (!facts.clis.some((c) => c.provider === 'opencode' && !!c.path)) return { title: 'No extra models yet', body: 'OpenCode is not installed, and the other models run through it. Install it on level 1, then save an OpenRouter key here.' };
+      return facts.openRouter ? null : { title: 'No extra models yet', body: 'No OpenRouter key is saved and on, so no other model is unlocked. Save one here, or later in Settings.' };
+    case 'creative':
+      return ready ? null : { title: 'No creative stack yet', body: `No agent is ready, so none of these models can run for you. ${HIRE}.` };
+    case 'mission':
+      return ready ? null : { title: 'No crew yet', body: `Your repository is open, but no agent is ready to work in it. Open this quest again from Settings: ${HIRE.toLowerCase()}.` };
+  }
+}
 
 /** Mark a level done once, in map order. */
 export function complete(done: readonly string[], id: LevelId): string[] {

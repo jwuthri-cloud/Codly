@@ -10,12 +10,13 @@
   import { openExternal } from '../lib/util/markdown';
   import Icon from '../components/Icon.svelte';
   import { catalog } from './catalog';
+  import { openRouterOn } from './quest';
 
   /** OpenRouter's slice of the BYOK status (Settings → API keys has every vendor). */
   let st = $state({ enabled: false, key_saved: false });
   const slice = (s: ByokStatus) => {
     const v = s.vendors.find((x) => x.vendor === 'openrouter');
-    return { enabled: v?.source.kind === 'key', key_saved: v?.key_saved ?? false };
+    return { enabled: openRouterOn(s), key_saved: v?.key_saved ?? false };
   };
   let key = $state('');
   let busy = $state(false);
