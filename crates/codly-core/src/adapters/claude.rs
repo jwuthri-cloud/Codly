@@ -3188,12 +3188,12 @@ mod tests {
             EventKind::TextDelta { item_id, text } => Some((item_id.clone(), text.clone())),
             _ => None,
         });
-        assert_eq!(delta, Some(("msg_011CgPgZ5DraWXssRR4rfPzQ:0".into(), "DONE".into())));
+        assert_eq!(delta, Some(("msg-2:0".into(), "DONE".into())));
         let msg = events.iter().find_map(|e| match e {
             EventKind::Message { item_id, text, phase } => Some((item_id.clone(), text.clone(), *phase)),
             _ => None,
         });
-        assert_eq!(msg, Some(("msg_011CgPgZ5DraWXssRR4rfPzQ:0".into(), "DONE".into(), MessagePhase::Final)));
+        assert_eq!(msg, Some(("msg-2:0".into(), "DONE".into(), MessagePhase::Final)));
 
         assert!(events.iter().any(|e| matches!(e, EventKind::RateLimit { window, .. } if window == "five_hour")));
         // Usage after each of the two API calls, then the result's own numbers: the same totals.
