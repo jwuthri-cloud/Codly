@@ -33,11 +33,11 @@
     {#each shown as { c, key } (key)}
       <li>
         <div class="row">
-          <span class="ic" class:bad={c.ok === false && !c.planSentBack} class:quiet={c.planSentBack} class:run={c.ok === null}><Icon name={c.ok === null ? 'play' : c.ok ? 'check' : c.planSentBack ? 'refresh' : 'x-circle'} size={12} /></span>
+          <span class="ic" class:bad={c.ok === false && !c.planSentBack} class:quiet={c.planSentBack || c.stopped} class:run={c.ok === null && !c.stopped}><Icon name={c.stopped ? 'stop' : c.ok === null ? 'play' : c.ok ? 'check' : c.planSentBack ? 'refresh' : 'x-circle'} size={12} /></span>
           <span class="nm">{c.name}</span>
           <span class="lb truncate">{c.label}</span>
           {#if c.subagent}<span class="sub">{c.subagent}</span>{/if}
-          <time class="num" data-tip={c.source === 'reported' ? 'Duration reported by the CLI' : c.source === 'measured' ? 'Measured by Codly between start and finish' : 'Still running'}>{c.durationMs == null ? 'running' : dur(c.durationMs)}</time>
+          <time class="num" data-tip={c.source === 'reported' ? 'Duration reported by the CLI' : c.source === 'measured' ? 'Measured by Codly between start and finish' : c.stopped ? 'Stopped before a result came' : 'Still running'}>{c.durationMs != null ? dur(c.durationMs) : c.stopped ? 'stopped' : 'running'}</time>
         </div>
         <div class="bar" aria-hidden="true"><i style:width="{c.durationMs == null ? 0 : Math.max(2, (c.durationMs / slowest) * 100)}%" class:bad={c.ok === false && !c.planSentBack}></i></div>
         <p class="meta num">{clockSec(c.start)}{c.planSentBack ? ' · you sent it back' : ''}{c.exitCode != null && c.exitCode !== 0 ? ` · exit ${c.exitCode}` : ''}{c.testsPassed != null ? ` · ${c.testsPassed} passed${c.testsFailed ? `, ${c.testsFailed} failed` : ''}` : ''}{c.source === 'measured' ? ' · measured' : ''}</p>

@@ -7,25 +7,40 @@
   import type { SearchResult } from '../../lib/gen/SearchResult';
   import { copyText } from '../../lib/state/actions';
   import { ui } from '../../lib/state/ui.svelte';
+  import { searchEnd } from '../../lib/util/search';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import Provenance from '../../components/Provenance.svelte';
 
   let q = $state('');
   let res = $state<SearchResult | null>(null);
+  /** Why the last search gave no result; null when it gave one, and when nothing is asked. */
+  let failed = $state<string | null>(null);
   let busy = $state(false);
   let el: HTMLInputElement | undefined = $state();
   let seq = 0;
+  /** Try again: the same search once more. */
+  let again = $state(0);
   $effect(() => {
     const query = q.trim();
+    void again;
     if (query.length < 2) {
+      // Nothing is asked any more: a search still on its way must not answer (or fail) here.
+      seq++;
       res = null;
+      failed = null;
+      busy = false;
       return;
     }
     const my = ++seq;
     busy = true;
     const t = setTimeout(() => {
-      api.search(query).then((r) => my === seq && (res = r)).catch(() => my === seq && (res = null)).finally(() => my === seq && (busy = false));
+      void searchEnd(api.search(query)).then((end) => {
+        if (my !== seq) return;
+        res = end.res;
+        failed = end.failed;
+        busy = false;
+      });
     }, 160);
     return () => clearTimeout(t);
   });
@@ -38,7 +53,9 @@
 <div class="sl">
   <label class="q"><Icon name="search" size={16} /><input bind:this={el} bind:value={q} placeholder="Search the code — a symbol, a path, an idea" spellcheck="false" />{#if busy}<span class="muted">Searching…</span>{/if}</label>
   <div class="scroll">
-    {#if !res}
+    {#if failed}
+      <p class="failed" role="alert"><span>{failed}</span><button class="btn sm" disabled={busy} onclick={() => again++}>Try again</button></p>
+    {:else if !res}
       <EmptyState compact title="Ask the index." body="The same search agents use: paths, symbols and 60-line chunks, ranked, with the evidence for every hit." />
     {:else}
       <p class="head"><span class="conf c-{res.confidence}">{CONF[res.confidence]}</span><span class="muted num">{res.citations.length} hits · {res.took_ms} ms</span></p>
@@ -77,6 +94,9 @@
   .c-medium { color: var(--amber-ink); }
   .c-low { color: var(--bad); }
   .warn { margin-bottom: 10px; font-size: var(--t-sm); color: var(--amber-ink); }
+  .failed { display: flex; align-items: center; gap: 10px; font-size: var(--t-sm); color: var(--ink-2); }
+  .failed span { min-width: 0; overflow-wrap: anywhere; }
+  .failed .btn { flex-shrink: 0; }
   .hits { display: flex; flex-direction: column; gap: 4px; }
   .hits li { position: relative; }
   .hit { display: flex; align-items: center; gap: 14px; width: 100%; padding: 10px 90px 10px 14px; border-radius: var(--r-md); text-align: left; }
