@@ -121,11 +121,18 @@ describe('Claude session controls', () => {
     expect(compactionLine(before, bo)).toBeNull();
     // Claude Code says first that it compacts, then, when it is done, from how many tokens to how many.
     const started = [...before, row(4, 'bo', 'r2', compacting(null, null))];
-    expect(compactionLine(started, bo)).toBe(`Compaction started at ${clock(T + 4 * 60_000)}`);
+    expect(compactionLine(started, bo)).toBe(`Last compaction: ${clock(T + 4 * 60_000)}`);
     const done = [...started, row(5, 'bo', 'r2', compacting(5955, 1197))];
     expect(compactionLine(done, bo)).toBe(`Compacted at ${clock(T + 5 * 60_000)} · 6k → 1.2k tokens`);
     // The newest one is the one shown.
     expect(compactionLine([...done, row(6, 'bo', 'r2', compacting(null, 800))], bo)).toBe(`Compacted at ${clock(T + 6 * 60_000)}`);
+    // Codex says the same thing twice, with no numbers: when it begins and when it is done. Before,
+    // the line read "Compaction started at" with the time the compaction ended.
+    const codexStart = [...before, row(7, 'bo', 'r2', compacting(null, null))];
+    expect(compactionLine(codexStart, bo)).toBe(`Last compaction: ${clock(T + 7 * 60_000)}`);
+    const codexEnd = [...codexStart, row(8, 'bo', 'r2', compacting(null, null))];
+    expect(compactionLine(codexEnd, bo)).toBe(`Last compaction: ${clock(T + 8 * 60_000)}`);
+    expect(compactionLine(codexEnd, bo)).not.toMatch(/started|Compacted/);
     // An agent with no live run has no sign: its process is gone.
     expect(compactionLine(done, { id: 'bo', run_id: null })).toBeNull();
   });

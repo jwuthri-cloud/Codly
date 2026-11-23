@@ -139,9 +139,10 @@ export async function compactAgent(agentId: string, name: string): Promise<boole
 /**
  * The sign of a compaction in the row of "Compact now": what the agent's live run last said
  * about one (`events`: the log, oldest first). Claude Code says from how many tokens to how
- * many the conversation went when a compaction is done. An event without those numbers says
- * only that one began (Codex says no more), so the line does not call it done. Null: the live
- * run said nothing of the kind.
+ * many the conversation went when a compaction is done. An event without those numbers can
+ * be a start or an end: Claude Code sends one when it begins, Codex one when it begins and one
+ * when it is done, and nothing tells them apart. So that line gives the time and calls it
+ * neither started nor done. Null: the live run said nothing of the kind.
  */
 export function compactionLine(events: EventRow[], agent: Pick<Agent, 'id' | 'run_id'>): string | null {
   if (!agent.run_id) return null;
@@ -149,7 +150,7 @@ export function compactionLine(events: EventRow[], agent: Pick<Agent, 'id' | 'ru
     const e = events[i];
     if (e.kind.type !== 'compacting' || e.agent_id !== agent.id || e.run_id !== agent.run_id) continue;
     const { pre_tokens: pre, post_tokens: post } = e.kind;
-    if (post == null) return `Compaction started at ${clock(e.ts)}`;
+    if (post == null) return `Last compaction: ${clock(e.ts)}`;
     return `Compacted at ${clock(e.ts)}${pre == null ? '' : ` · ${tokens(pre)} → ${tokens(post)} tokens`}`;
   }
   return null;
