@@ -11,7 +11,7 @@
   today's total is shown beside it.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import type { BreakerConfig } from '../lib/gen/BreakerConfig';
   import type { BreakerStatus } from '../lib/gen/BreakerStatus';
   import { api } from '../lib/api';
@@ -20,6 +20,7 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { spentLine } from '../lib/util/cost';
   import { ago, tokens, usd } from '../lib/util/format';
+  import { holdAtTop } from '../lib/util/holdAtTop';
 
   let cfg = $state<BreakerConfig | null>(null);
   let status = $state<BreakerStatus | null>(null);
@@ -71,17 +72,23 @@
     }
   }
 
-  // The top bar's budget mark says the same as this section: it follows what is read here.
+  // The top bar's budget mark says the same as this section: it follows what is read here
+  // (untracked: with room again the toast is taken back, and this effect does not follow toasts).
   $effect(() => {
-    if (status) budget.hold = status.hold;
+    const now = status;
+    if (now) untrack(() => budget.setHold(now.hold));
   });
-  // That mark opens Settings here.
+  // That mark opens Settings here. The sections above show their rows after this one is in
+  // place, so it is held there until you scroll, click or press a key.
   let el: HTMLElement | undefined = $state();
+  let letGo: (() => void) | undefined;
   $effect(() => {
     if (!el || !budget.reveal) return;
     budget.reveal = false;
-    el.scrollIntoView({ block: 'start' });
+    letGo?.();
+    letGo = holdAtTop(el);
   });
+  onDestroy(() => letGo?.());
 
   const agentName = (id: string | null) => store.agents.find((a) => a.id === id)?.name ?? 'An agent';
   /** The latest breaker decisions, newest first. */

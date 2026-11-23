@@ -25,7 +25,7 @@ const status = (hold: string | null): BreakerStatus => ({ used: { tokens: 0, cos
 afterEach(() => {
   vi.restoreAllMocks();
   for (const t of toasts.list) toasts.dismiss(t.id);
-  budget.hold = null;
+  budget.setHold(null);
   budget.reveal = false;
   ui.settingsOpen = false;
   ui.settingsTab = null;
@@ -40,7 +40,25 @@ describe('the budget mark', () => {
 
     budget.observe(cleared());
     expect(budget.hold).toBeNull();
-    expect(toasts.list).toHaveLength(1); // room again is no news that needs you
+    expect(toasts.list).toEqual([]); // the toast does not say a budget holds work that has room again
+  });
+
+  it('takes the toast back when Settings reads that nothing holds (Reset counters), and says the next time anew', async () => {
+    budget.observe(reached());
+    budget.setHold(null); // the budget section of Settings read the core
+    expect(toasts.list).toEqual([]);
+
+    budget.observe(reached());
+    expect(toasts.list).toHaveLength(1);
+    vi.spyOn(api, 'breakerStatus').mockResolvedValue(status(null));
+    await budget.refresh();
+    expect(toasts.list).toEqual([]);
+  });
+
+  it('shows one toast when the core says a reached budget again', () => {
+    budget.observe(reached());
+    budget.observe(reached());
+    expect(toasts.list).toHaveLength(1);
   });
 
   it('is not moved by an agent over a limit of its own, or by any other decision', () => {
@@ -62,7 +80,7 @@ describe('the budget mark', () => {
     await budget.refresh();
     expect(budget.hold).toBeNull();
     // The core does not answer: the mark keeps what it last knew.
-    budget.hold = WHY;
+    budget.setHold(WHY);
     core.mockRejectedValue(new Error('not connected'));
     vi.spyOn(console, 'error').mockImplementation(() => {});
     await budget.refresh();

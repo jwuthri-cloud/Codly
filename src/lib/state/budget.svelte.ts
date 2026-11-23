@@ -2,10 +2,11 @@
 // counters (Settings → Safety → Autonomy & Budgets). The core says so once, with a `breaker`
 // decision ("budget"), and once more when work goes on ("budget_cleared"); what holds right now
 // is `breaker_status`. The top bar's mark shows `hold`, and one toast says it when it happens.
+// The toast goes when the hold goes: it never says a budget holds work that has room again.
 import { api } from '../api';
 import type { EventRow } from '../gen/EventRow';
 import { store } from './store.svelte';
-import { toast } from './toasts.svelte';
+import { toast, toasts } from './toasts.svelte';
 import { ui } from './ui.svelte';
 
 /** What a `breaker` decision says about the budgets: why no task starts, or null when work goes
@@ -20,11 +21,23 @@ export function budgetChange(ev: EventRow): string | null | undefined {
 }
 
 class Budget {
-  /** Why no new task starts ("the team has used … over the budget of …"); null: work goes on. */
-  hold = $state<string | null>(null);
-  /** Settings was opened from here: its budget section scrolls into view, once. */
+  private why = $state<string | null>(null);
+  /** The "Budget reached" toast, to take back when work goes on. */
+  private said: number | undefined;
+  /** Settings was opened from here: its budget section comes into view, once. */
   reveal = $state(false);
   private started = false;
+
+  /** Why no new task starts ("the team has used … over the budget of …"); null: work goes on. */
+  get hold() {
+    return this.why;
+  }
+
+  /** What holds now, as the core or Settings last read it. Room again takes the toast back. */
+  setHold(why: string | null) {
+    this.why = why;
+    if (!why) this.unsay();
+  }
 
   /** Listen for the core's word (once). */
   start() {
@@ -33,18 +46,26 @@ class Budget {
     store.onEvent((ev) => this.observe(ev));
   }
 
-  /** A budget is reached: the mark shows and a toast says it. Room again: the mark goes. */
+  /** A budget is reached: the mark shows and a toast says it. Room again: both go. */
   observe(ev: EventRow) {
     const change = budgetChange(ev);
     if (change === undefined) return;
-    this.hold = change;
-    if (change) toast({ kind: 'attention', title: 'Budget reached', body: `No new task starts: ${change}.`, action: { label: 'Open Settings', run: () => this.openSettings() } });
+    this.setHold(change);
+    if (!change) return;
+    this.unsay();
+    this.said = toast({ kind: 'attention', title: 'Budget reached', body: `No new task starts: ${change}.`, action: { label: 'Open Settings', run: () => this.openSettings() } });
+  }
+
+  private unsay() {
+    if (this.said === undefined) return;
+    toasts.dismiss(this.said);
+    this.said = undefined;
   }
 
   /** What holds now, from the core: a budget used up before you quit still holds when you are back. */
   async refresh() {
     try {
-      this.hold = (await api.breakerStatus()).hold;
+      this.setHold((await api.breakerStatus()).hold);
     } catch (e) {
       console.error('[codly] could not read whether a budget holds new work', e);
     }
