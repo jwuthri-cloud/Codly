@@ -426,8 +426,9 @@ impl Inner {
         }
         self.git.note_copied(wt, rel).await?;
         let stage = self.data("worktrees").join(".copying").join(new_id());
-        tokio::fs::create_dir_all(&stage).await.context("create a folder for the copy")?;
+        // Every step that can fail from here on is in `moved`: the path is on the record.
         let moved = async {
+            tokio::fs::create_dir_all(&stage).await.context("create a folder for the copy")?;
             let staged = stage.join("copy");
             copy_path(&src, &staged).await?;
             if let Some(dir) = dst.parent() {
@@ -436,8 +437,11 @@ impl Inner {
             tokio::fs::rename(&staged, &dst).await.context("move the copy into the worktree")
         }
         .await;
-        if let Err(e) = tokio::fs::remove_dir_all(&stage).await {
-            tracing::warn!("could not remove {}: {e}", stage.display());
+        match tokio::fs::remove_dir_all(&stage).await {
+            // The folder for the copy was never made.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("could not remove {}: {e}", stage.display()),
+            Ok(()) => {}
         }
         let Err(not_copied) = moved else { return Ok(true) };
         if let Err(e) = self.git.forget_copied(wt, rel).await {
@@ -771,6 +775,36 @@ mod tests {
         let said = decisions(&core, &ws);
         let left = said.iter().find(|s| s.starts_with("t1: Codly did not commit")).unwrap_or_else(|| panic!("{said:?}"));
         assert!(left.starts_with("t1: Codly did not commit .env (copied in by Codly).") && !left.contains("secrets"), "{left}");
+        core.shutdown().await;
+    }
+
+    /// The same when Codly could not even make the folder it copies into first (a full disk, a
+    /// data folder it cannot write): that step is after the record too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_copy_with_no_folder_to_make_it_in_is_not_on_the_record_of_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = temp_repo(dir.path(), ".env\n");
+        write(&repo.join(".env"), "API_URL=http://localhost\n");
+        let (core, ws) = start(dir.path(), &repo).await;
+        let wt = new_worktree(&core, &ws, "t1").await;
+        // In the way of every copy: a file where Codly makes its folders for copies.
+        write(&core.inner.data("worktrees").join(".copying"), "not a folder\n");
+
+        core.inner.prepare_worktree(&ws, &wt, None, None).await.unwrap();
+        assert!(!wt.join(".env").exists(), "the copy was not made");
+        let said = decisions(&core, &ws);
+        let problem = said.iter().find(|s| s.starts_with("could not copy")).unwrap_or_else(|| panic!("{said:?}"));
+        assert!(problem.contains(".env: create a folder for the copy"), "{problem}");
+        assert!(!problem.contains("record of copies"), "{problem}");
+
+        // A file the agent writes under that name is its work, on a branch that does not
+        // ignore it.
+        write(&wt.join(".env"), "API_URL=from-the-agent\n");
+        write(&wt.join(".gitignore"), "");
+        let commit = core.inner.commit_noted(Some(&ws.id), None, "t1", &wt, "codly(t1): work").await.unwrap().unwrap();
+        assert_eq!(commit.files, [".env", ".gitignore"]);
+        assert_eq!(sh(&wt, &["status", "--porcelain", "-uall"]), "");
+        assert!(!decisions(&core, &ws).iter().any(|s| s.starts_with("t1: Codly did not commit")), "{:?}", decisions(&core, &ws));
         core.shutdown().await;
     }
 

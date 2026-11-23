@@ -303,6 +303,17 @@ fn fix_task(plan: &Plan, key: String, target: &str, failed: &[String], scope: &[
     }
 }
 
+/// The files of `changed` that are outside the write scope of a task that works on its plan's
+/// own branch. That scope is a list of file names as git gives them (`resolve_task`,
+/// `fix_task`), not of globs: a name like `routes/[id]/page.tsx` is compared as text. As in
+/// every write scope, a name stands for that path and what is under it, and an empty scope is
+/// unrestricted.
+pub(super) fn outside_scope(scope: &[String], changed: &[String]) -> Vec<String> {
+    let under = |file: &str, name: &str| file.strip_prefix(name).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+    let within = |file: &str| scope.is_empty() || scope.iter().any(|name| under(file, name.as_str()));
+    changed.iter().filter(|file| !within(file.as_str())).cloned().collect()
+}
+
 /// Remove what is new in one of Codly's own worktrees: the untracked paths `now` that were not
 /// there `before` (both as `Git::untracked` lists them). A path under a folder that was there
 /// before stays, and so does a folder that holds a path from before. Returns what was removed.
@@ -1166,6 +1177,19 @@ mod tests {
         assert_eq!(task.verify, ["npm test", "npm run lint"]);
         assert_eq!(task.acceptance, ["`npm test` passes", "The plan's work and the changes on main are both kept and work together"]);
         assert!(task.goal.contains("merge without a conflict") && task.goal.contains("these checks fail: `npm test`") && task.goal.contains("Do not run git commands"), "{}", task.goal);
+    }
+
+    /// The write scope of these tasks names files, and a file name can hold what a glob reads
+    /// as a pattern (a route folder like `[id]`, a brace with no end): it is its own scope.
+    #[test]
+    fn the_scope_of_a_task_in_place_is_file_names_not_patterns() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        let scope = s(&["src/routes/[slug]/+page.svelte", "app/{draft/page.tsx", "docs/a*.md", "src/lib"]);
+        assert_eq!(outside_scope(&scope, &scope), Vec::<String>::new());
+        // A name is no pattern for other files. It stands for what is under it, as a folder.
+        let changed = s(&["src/routes/s/+page.svelte", "docs/about.md", "src/lib/api.ts", "src/library.ts", "docs/a*.md"]);
+        assert_eq!(outside_scope(&scope, &changed), s(&["src/routes/s/+page.svelte", "docs/about.md", "src/library.ts"]));
+        assert_eq!(outside_scope(&[], &changed), Vec::<String>::new(), "no scope: unrestricted");
     }
 
     /// A fix of the checks worked on a merge without a conflict: neither what its reviewer

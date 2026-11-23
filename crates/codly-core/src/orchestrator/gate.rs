@@ -432,12 +432,16 @@ impl Inner {
         let files = self.git.changed_files(&wt, &base_ref).await?;
         let by_hand = self.changed_by_hand(&task, &repo, &base_ref).await?;
         let checked = by_hand.as_ref().unwrap_or(&files);
-        let matcher = ScopeMatcher::new(&task.write_scope).map_err(|e| anyhow!(e))?;
+        let outside: Vec<String> = match &by_hand {
+            // Its scope is a list of file names as git gives them, not of globs: a name like
+            // `routes/[id]/page.tsx` is no pattern.
+            Some(changed) => merge_conflict::outside_scope(&task.write_scope, changed),
+            None => ScopeMatcher::new(&task.write_scope).map_err(|e| anyhow!(e))?.outside(&files).into_iter().cloned().collect(),
+        };
         let exceptions: Vec<String> = report["scope_exceptions"]
             .as_array()
             .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let outside: Vec<String> = matcher.outside(checked).into_iter().cloned().collect();
         let (declared, undeclared): (Vec<String>, Vec<String>) =
             outside.into_iter().partition(|f| exceptions.iter().any(|e| e.contains(f.as_str())));
         if !undeclared.is_empty() {

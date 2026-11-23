@@ -27,7 +27,8 @@
 //! - a resolution (or a fix of the checks) that could not start takes its merge back: the
 //!   user's branch is never in the plan's branch with no task on it and no check of the result;
 //! - the task that works on the plan's own branch stays in its write scope with what it
-//!   changed by hand, or declares the exception; what git merged by itself is not counted;
+//!   changed by hand, or declares the exception; what git merged by itself is not counted, and
+//!   a file name in that scope is no pattern;
 //! - with reviews on, a fix of the checks that changed no file goes on with no reviewer run.
 
 use std::path::{Path, PathBuf};
@@ -206,11 +207,16 @@ impl Spawner for FakeSpawner {
 
 /// A Lead that submits a one-task plan for every request: t1 writes `content` to `file`.
 fn lead_with(file: &str, verify: &str, integration: &[&str]) -> Behavior {
+    lead_scoped(file, file, verify, integration)
+}
+
+/// The same, where the write scope of t1 is `scope` and not the file's own name.
+fn lead_scoped(file: &str, scope: &str, verify: &str, integration: &[&str]) -> Behavior {
     let plan = json!({
         "summary": "Change the greeting",
         "tasks": [{
             "id": "t1", "title": format!("Write {file}"), "goal": format!("Write {file}"), "consultant": { "title": "Backend" },
-            "acceptance_criteria": [format!("{file} is right")], "write_scope": [file], "depends_on": [], "verify": [verify], "size": "M",
+            "acceptance_criteria": [format!("{file} is right")], "write_scope": [scope], "depends_on": [], "verify": [verify], "size": "M",
         }],
         "integration_checks": integration,
     });
@@ -1485,6 +1491,49 @@ async fn a_resolution_that_touches_another_file_gets_a_scope_round() {
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
     assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "# demo\nmine\n");
+    core.shutdown().await;
+}
+
+/// A file's name can hold what a write scope reads as a pattern: a route folder like `[id]`.
+/// The write scope of the task that resolves a conflict in such a file is that name as it is,
+/// so the file is in its scope and the task uses no fix round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resolution_in_a_file_whose_name_reads_as_a_pattern_is_in_its_scope() {
+    const PAGE: &str = "routes/[id]/page.txt";
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.read(PAGE).contains("<<<<<<<") {
+                turn.write(PAGE, RESOLVED);
+            } else if turn.prompt.contains("Task t1") {
+                turn.write(PAGE, "hello from the plan\n");
+            }
+            turn.done().await;
+        })
+    });
+    let repo = temp_repo(dir.path());
+    std::fs::create_dir_all(repo.join("routes/[id]")).unwrap();
+    commit(&repo, PAGE, "hello\n");
+    // The plan's own task has the folder as its scope: there, `[id]` would be a pattern.
+    let lead = lead_scoped(PAGE, "routes/", "grep -q plan 'routes/[id]/page.txt'", &[]);
+    let core = boot(dir.path(), &repo, lead, worker, turns.clone()).await;
+    core.send_chat("lead", "Please change the page").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    commit(&repo, PAGE, "hello from main\n");
+    assert_eq!(core.merge_state(&source).await.unwrap().conflicts, [PAGE]);
+
+    core.resolve_merge_conflict(&source).await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    let task = task_with(&core, "resolve", TaskStatus::Done).await;
+    assert_eq!(task.write_scope, [PAGE]);
+    let record = decisions(&core).await;
+    assert!(record.iter().any(|d| d == "resolve: verify passed (1 command), 1 file changed within scope"), "{record:?}");
+    assert!(!record.iter().any(|d| d.contains("outside the write scope")), "the file with the conflict is in the scope: {record:?}");
+    assert_eq!(scope_rounds(&turns), Vec::<String>::new());
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join(PAGE)).unwrap(), RESOLVED);
     core.shutdown().await;
 }
 
