@@ -429,7 +429,7 @@ impl Inner {
             return Ok(None);
         }
         let mark = self.store.task_events(&task.id, "decision")?.last().map_or(0, |e| e.id);
-        let held = self.recheck_task(&task.id, vec![]).await?;
+        let held = self.recheck_task(&task.id, vec![], super::gate::Rerun::Codly).await?;
         if !held.is_empty() {
             let cmds: Vec<String> = held.iter().map(|h| format!("`{}`", prompts::clip(&h.command, 80))).collect();
             return Ok(Some(Rechecked::Waits(format!("needs your OK for {}", cmds.join(", ")))));

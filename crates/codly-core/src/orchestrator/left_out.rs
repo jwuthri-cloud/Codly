@@ -44,11 +44,12 @@ fn what_to_do(left: &[LeftOut]) -> &'static str {
 }
 
 impl Inner {
-    /// `Git::commit_work` in `wt`, with what it left out on record (`note_left_out`, which
-    /// the other arguments are for). The commit, None when nothing changed.
-    pub(super) async fn commit_noted(&self, ws: Option<&str>, agent: Option<&str>, task: Option<&Task>, who: &str, wt: &Path, message: &str) -> Result<Option<Commit>> {
+    /// `Git::commit_work` in `wt` of work that is no task's, with what it left out on record
+    /// (`note_left_out`, which the other arguments are for). The commit, None when nothing
+    /// changed.
+    pub(super) async fn commit_noted(&self, ws: Option<&str>, agent: Option<&str>, who: &str, wt: &Path, message: &str) -> Result<Option<Commit>> {
         let snap = self.git.commit_work(wt, message).await?;
-        self.note_left_out(ws, agent, task, who, wt, &snap.left_out)?;
+        self.note_left_out(ws, agent, None, who, wt, &snap.left_out)?;
         Ok(snap.commit)
     }
 
@@ -186,7 +187,7 @@ mod tests {
         core.merge_agent(&ada.id).await.unwrap();
         assert!(rows(&core).is_empty(), "{:?}", rows(&core));
         fill(&wt.join("node_modules"));
-        let commit = core.inner.commit_noted(Some(&ws.id), Some(&ada.id), None, &ada.name, &wt, "codly(solo/ada): again").await.unwrap();
+        let commit = core.inner.commit_noted(Some(&ws.id), Some(&ada.id), &ada.name, &wt, "codly(solo/ada): again").await.unwrap();
         assert_eq!(commit, None, "nothing but the folder is new");
         assert_eq!(said(&core, &ws).len(), 2);
         core.shutdown().await;

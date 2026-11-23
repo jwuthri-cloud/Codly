@@ -316,6 +316,18 @@ fn said(events: &[EventRow]) -> Vec<&str> {
         .collect()
 }
 
+/// (whose decision, summary) of every decision, oldest first: "human" is yours, "rule" is
+/// one Codly made by itself.
+fn recorded(events: &[EventRow]) -> Vec<(&str, &str)> {
+    events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Decision { method, summary, .. } => Some((method.as_str(), summary.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// What became of the tasks that waited for your required checks, after your `nth` choice
 /// that found tasks waiting (1 = the first): Codly writes it when all of them are through.
 async fn rechecked(core: &Core, nth: usize) -> Value {
@@ -420,6 +432,8 @@ async fn a_checks_file_that_changed_stops_the_task_until_you_read_it() {
     let reason = t.status_reason.clone().unwrap();
     assert!(reason.contains("Codly did not run your required checks: .codly/checks changed since you turned them on"), "{reason}");
     assert!(reason.contains("Settings → Safety → Required checks") && reason.contains("merge anyway"), "{reason}");
+    // It says what happens next: nothing is left to click once you turned them on or off.
+    assert!(reason.ends_with(" Codly then checks this task again by itself; Re-run checks does it now. Or merge anyway."), "{reason}");
     let before = events(&core).await;
     assert!(verified(&before).is_empty(), "no check runs before all of them may: {:?}", verified(&before));
     assert!(decisions(&before).iter().any(|d| d["required"] == ".codly/checks changed since you turned them on"), "the task's card offers Merge anyway");
@@ -440,6 +454,10 @@ async fn a_checks_file_that_changed_stops_the_task_until_you_read_it() {
     // The re-run is on record.
     assert_eq!(rechecked(&core, 1).await, json!({ "rechecked": ["t1"], "back_to_member": [], "still_waiting": [] }));
     assert!(said(&events(&core).await).contains(&"after you turned the required checks on: Codly checked t1 again"));
+    // In the task's record the re-run is Codly's own, after your change: you clicked nothing.
+    let after = events(&core).await;
+    assert!(recorded(&after).contains(&("rule", "Codly re-ran the checks of t1 (you changed the required checks)")), "{:?}", recorded(&after));
+    assert!(!recorded(&after).iter().any(|d| d.1.starts_with("you re-ran")), "{:?}", recorded(&after));
     core.shutdown().await;
 }
 
@@ -537,6 +555,8 @@ async fn a_waiting_task_goes_back_to_its_team_member_who_is_on_other_work() {
     let all = events(&core).await;
     assert!(said(&all).contains(&"after you turned the required checks on: t1 goes back to Ana first (Ana is on other work in the same worktree)"), "{:?}", said(&all));
     assert!(verified(&all).is_empty(), "no check of t1 ran: {:?}", verified(&all));
+    let back = "Codly re-ran the checks of t1 (you changed the required checks); Ana is on other work in the same worktree, so t1 goes back to Ana first";
+    assert!(recorded(&all).contains(&("rule", back)), "the task's record names Codly, not you: {:?}", recorded(&all));
 
     // Ana finishes t2, then takes t1 again: the gate after that turn runs its checks.
     go.notify_one();
@@ -611,6 +631,11 @@ async fn a_waiting_task_that_cannot_be_checked_again_stays_and_the_record_says_w
     assert!(core.recheck_task(&t.id, vec![own.into()]).await.unwrap().is_empty());
     wait_plan(&core, PlanStatus::Done).await;
     assert_eq!(worker_prompts(&turns).len(), 1, "no worker turn");
+    // That click is yours, and the record says so. Codly's own try started no pass: it is not there.
+    let all = events(&core).await;
+    let yours = format!("you re-ran the checks of t1 and allowed `{own}`");
+    assert!(recorded(&all).contains(&("human", yours.as_str())), "{:?}", recorded(&all));
+    assert!(!recorded(&all).iter().any(|d| d.1.starts_with("Codly re-ran")), "{:?}", recorded(&all));
     core.shutdown().await;
 }
 

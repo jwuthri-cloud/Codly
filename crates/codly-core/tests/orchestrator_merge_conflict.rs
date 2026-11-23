@@ -22,7 +22,14 @@
 //!   of the plan makes them pass, and one that does not finish takes the merge back;
 //! - a resolution that does not finish takes its worker's new files out of the plan's worktree;
 //! - before a merge writes to the user's branch, a ref keeps the branch as it was, until the
-//!   next merge or the undo; the state says how far the Codly branch is behind the user's.
+//!   next merge or the undo, for a plan's branch and for a solo agent's; the state says how far
+//!   the Codly branch is behind the user's;
+//! - a resolution (or a fix of the checks) that could not start takes its merge back: the
+//!   user's branch is never in the plan's branch with no task on it and no check of the result;
+//! - the task that works on the plan's own branch stays in its write scope with what it
+//!   changed by hand, or declares the exception; what git merged by itself is not counted, and
+//!   a file name in that scope is no pattern;
+//! - with reviews on, a fix of the checks that changed no file goes on with no reviewer run.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -200,11 +207,16 @@ impl Spawner for FakeSpawner {
 
 /// A Lead that submits a one-task plan for every request: t1 writes `content` to `file`.
 fn lead_with(file: &str, verify: &str, integration: &[&str]) -> Behavior {
+    lead_scoped(file, file, verify, integration)
+}
+
+/// The same, where the write scope of t1 is `scope` and not the file's own name.
+fn lead_scoped(file: &str, scope: &str, verify: &str, integration: &[&str]) -> Behavior {
     let plan = json!({
         "summary": "Change the greeting",
         "tasks": [{
             "id": "t1", "title": format!("Write {file}"), "goal": format!("Write {file}"), "consultant": { "title": "Backend" },
-            "acceptance_criteria": [format!("{file} is right")], "write_scope": [file], "depends_on": [], "verify": [verify], "size": "M",
+            "acceptance_criteria": [format!("{file} is right")], "write_scope": [scope], "depends_on": [], "verify": [verify], "size": "M",
         }],
         "integration_checks": integration,
     });
@@ -395,6 +407,10 @@ async fn an_agent_resolves_a_plans_conflict_with_your_branch_and_the_merge_goes_
     assert_eq!(runs.iter().filter(|(t, c, ok)| t.is_none() && c == "test -f greeting.txt" && *ok).count(), 1, "for the plan, only when it first finished");
     let skipped = "`grep -q plan greeting.txt`, `test -f greeting.txt` passed in task resolve on the plan's branch as it is: the plan does not run them a second time";
     assert!(decisions(&core).await.iter().any(|d| d == skipped), "{:?}", decisions(&core).await);
+    // Its write scope is the file with the conflict, and that is the one file it changed by
+    // hand: README.md, which the merge brought in from main by itself, is not counted.
+    let in_scope = "resolve: verify passed (2 commands), 1 file changed within scope";
+    assert!(decisions(&core).await.iter().any(|d| d == in_scope), "{:?}", decisions(&core).await);
     // All along, your checkout was not touched.
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (mine.clone(), String::new()));
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), "hello from main\n");
@@ -1081,7 +1097,9 @@ async fn the_reviewer_of_a_resolution_reads_the_resolution_only() {
 const FIXED: &str = "good with the feature on\nand mode bad\n";
 
 /// A plan's worker for a check that fails once main moved: t1 adds the feature, and the task
-/// that fixes the checks makes mode.txt good again. `fixes` = false: that task gives up.
+/// that fixes the checks makes mode.txt good again. mode.txt is not a file the plan changed,
+/// so it is outside that task's write scope, and the report says so. `fixes` = false: that
+/// task gives up.
 fn feature_worker(fixes: bool) -> Behavior {
     Arc::new(move |turn: FakeTurn| {
         Box::pin(async move {
@@ -1090,6 +1108,9 @@ fn feature_worker(fixes: bool) -> Behavior {
             } else if fixes {
                 // What it finds there: the plan's work and main's change, merged.
                 turn.write("mode.txt", &format!("good with the feature {}and mode {}", turn.read("feature.txt"), turn.read("mode.txt")));
+                let report = json!({ "status": "done", "summary": "Did it.", "scope_exceptions": ["mode.txt: the check reads it"] });
+                turn.tool("codly_submit_report", report).await;
+                return;
             } else {
                 turn.write("attempt.txt", "half an idea\n");
                 turn.tool("codly_submit_report", json!({ "status": "blocked", "summary": "I cannot tell which mode you want." })).await;
@@ -1153,6 +1174,9 @@ async fn an_agent_fixes_checks_that_fail_on_the_merge_result() {
     }
     let runs = verified(&core).await;
     assert_eq!(runs.last().unwrap(), &(Some(task.id.clone()), check.to_string(), true), "the check passed in the task's gate, on the merge");
+    // mode.txt is outside its write scope (the files the plan changed) and was declared.
+    let in_scope = "fix-checks: verify passed (1 command), 1 file changed within scope plus 1 declared exception(s)";
+    assert!(decisions(&core).await.iter().any(|d| d == in_scope), "{:?}", decisions(&core).await);
     // All along, your checkout was not touched.
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (bad.clone(), String::new()));
 
@@ -1258,5 +1282,341 @@ async fn the_new_files_of_a_resolution_that_did_not_finish_go() {
     assert_eq!(std::fs::read_to_string(integ_wt.join("local.env")).unwrap(), "PORT=1\n");
     assert_eq!(sh(&integ_wt, &["status", "--porcelain"]), "?? cache/\n?? local.env".to_string());
     assert_eq!(std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap(), "hello from the plan\n");
+    core.shutdown().await;
+}
+
+/// Makes the store refuse one write of a resolution's start (`write`: the trigger's event, in
+/// SQL), or lets every write through again (None).
+fn store_refuses(root: &Path, write: Option<&str>) {
+    let db = rusqlite::Connection::open(root.join("data/codly.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let sql = match write {
+        Some(write) => format!("CREATE TRIGGER refused BEFORE {write} BEGIN SELECT RAISE(ABORT, 'the disk is full'); END"),
+        None => "DROP TRIGGER refused".to_string(),
+    };
+    db.execute_batch(&sql).unwrap();
+}
+
+/// The record a resolution keeps of where the plan stood: its first write once the merge is in
+/// the plan's worktree, before the task exists.
+const THE_RECORD: &str = "INSERT ON kv WHEN NEW.key LIKE 'resolution:%'";
+/// The commit a new task's work is measured from: written after the task exists.
+const THE_TASKS_BASE: &str = "UPDATE OF base_commit ON task";
+
+/// Codly merged your branch into the plan's branch and committed the merge, and then the task
+/// that fixes the checks could not be made. The merge is taken back at once: left there, the
+/// next Merge would find your branch in the plan's already and check nothing. So the next
+/// Merge runs the plan's check on the result again, and refuses again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fix_of_the_checks_that_cannot_start_leaves_no_unchecked_merge_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let check = "grep -q good mode.txt";
+    let (core, repo) = start(dir.path(), lead_with("feature.txt", check, &[]), feature_worker(true), Default::default()).await;
+    core.send_chat("lead", "Please add the feature").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    let tip = sh(&repo, &["rev-parse", &branch]);
+    let bad = commit(&repo, "mode.txt", "bad\n");
+    core.merge_plan(&plan.id).await.unwrap_err();
+
+    store_refuses(dir.path(), Some(THE_RECORD));
+    let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
+    assert!(err.contains("the disk is full") && err.ends_with(&format!(". Codly took the merge of main back: {branch} is as it was")), "{err}");
+    assert_eq!(sh(&repo, &["rev-parse", &branch]), tip, "the plan's branch is where it was before the call");
+    assert_eq!((in_merge(&integ_wt), sh(&integ_wt, &["status", "--porcelain"])), (false, String::new()));
+    let s = core.snapshot().await.unwrap();
+    assert_eq!(s.plans.iter().find(|p| p.id == plan.id).unwrap().status, PlanStatus::Done);
+    assert!(!s.tasks.iter().any(|t| t.key.starts_with("fix-checks")), "no task was made");
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((&state.failed_checks, state.resolving, state.behind), (&vec![check.to_string()], None, 1));
+    let record = decisions(&core).await;
+    let taken_back = format!("; {branch} is back where it was before it");
+    assert!(record.iter().any(|d| d.starts_with(&format!("bringing main into {branch} did not start (")) && d.ends_with(&taken_back)), "{record:?}");
+
+    // The next Merge finds the plan as it was: the check runs on the result, and fails.
+    let runs = verified(&core).await.len();
+    let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
+    assert_eq!(err, format!("with the plan merged into main, `{check}` failed, so nothing was merged and main is unchanged"));
+    assert_eq!(verified(&core).await.len(), runs + 1, "the check ran on the merge result again");
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["rev-parse", &branch])), (bad, tip));
+
+    // The store takes writes again: the fix starts as if nothing had happened.
+    store_refuses(dir.path(), None);
+    core.resolve_merge_conflict(&source).await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    task_with(&core, "fix-checks", TaskStatus::Done).await;
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("mode.txt")).unwrap(), FIXED);
+    core.shutdown().await;
+}
+
+/// The same with a conflict: the merge is open in the plan's worktree, with its markers, the
+/// task that resolves it exists, and then its start fails. The merge is taken out, the task
+/// is cancelled, and the plan is done as it was. A second try gets a task of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resolution_that_cannot_start_leaves_no_open_merge_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let lead = lead_with("greeting.txt", "grep -q plan greeting.txt", &[]);
+    let (core, repo) = start(dir.path(), lead, plan_worker(), Default::default()).await;
+    core.send_chat("lead", "Please change the greeting").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    let tip = sh(&repo, &["rev-parse", &branch]);
+    let mine = commit(&repo, "greeting.txt", "hello from main\n");
+
+    store_refuses(dir.path(), Some(THE_TASKS_BASE));
+    let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
+    assert!(err.contains("the disk is full") && err.ends_with(&format!(". Codly took the merge of main back: {branch} is as it was")), "{err}");
+    assert_eq!((sh(&repo, &["rev-parse", &branch]), in_merge(&integ_wt), sh(&integ_wt, &["status", "--porcelain"])), (tip, false, String::new()));
+    assert_eq!(std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap(), "hello from the plan\n", "no marker is left");
+    let s = core.snapshot().await.unwrap();
+    let again = s.plans.iter().find(|p| p.id == plan.id).unwrap();
+    assert_eq!((again.status, &again.base_commit, &again.base_branch), (PlanStatus::Done, &plan.base_commit, &plan.base_branch));
+    let task = s.tasks.iter().find(|t| t.key == "resolve").expect("the task had reached the store");
+    assert_eq!((task.status, task.status_reason.as_deref()), (TaskStatus::Cancelled, Some("Codly could not start it")));
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((&state.conflicts, state.resolving), (&vec!["greeting.txt".to_string()], None));
+    assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), mine);
+
+    store_refuses(dir.path(), None);
+    let state = core.resolve_merge_conflict(&source).await.unwrap();
+    let second = core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.key == "resolve-2").expect("a second resolving task");
+    assert_eq!(state.resolving.as_deref(), Some(second.id.as_str()));
+    wait_plan(&core, PlanStatus::Done).await;
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
+    core.shutdown().await;
+}
+
+/// What the workers were told in their scope rounds.
+fn scope_rounds(turns: &Turns) -> Vec<String> {
+    let turns = turns.lock().unwrap();
+    turns.iter().filter(|(role, _, prompt)| *role == Role::Worker && prompt.contains("Scope check failed")).map(|(_, _, prompt)| prompt.clone()).collect()
+}
+
+/// The task that fixes the checks has a write scope, the files the plan changed, and the gate
+/// holds it to that scope: a file outside it costs a scope round, until the worker declares
+/// it. What the merge brought in from your branch is yours: it is not counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fix_of_the_checks_outside_the_plans_files_needs_a_declared_exception() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("Scope check failed") {
+                // Asked about mode.txt: the fix needs it, and now the report says so.
+                let report = json!({ "status": "done", "summary": "Did it.", "scope_exceptions": ["mode.txt: the check reads it"] });
+                turn.tool("codly_submit_report", report).await;
+                return;
+            }
+            if turn.prompt.contains("Task fix-checks") {
+                turn.write("mode.txt", FIXED);
+            } else {
+                turn.write("feature.txt", "on\n");
+            }
+            turn.done().await;
+        })
+    });
+    let check = "grep -q good mode.txt";
+    let (core, repo) = start(dir.path(), lead_with("feature.txt", check, &[]), worker, turns.clone()).await;
+    core.send_chat("lead", "Please add the feature").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    // On main: the change that fails the check, and a file of your own.
+    std::fs::write(repo.join("README.md"), "# demo\nmine\n").unwrap();
+    commit(&repo, "mode.txt", "bad\n");
+    core.merge_plan(&plan.id).await.unwrap_err();
+
+    core.resolve_merge_conflict(&source).await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    let task = task_with(&core, "fix-checks", TaskStatus::Done).await;
+    assert_eq!(task.write_scope, ["feature.txt"]);
+    let record = decisions(&core).await;
+    assert!(record.iter().any(|d| d == "fix-checks: fix round 1/2: 1 file(s) outside the write scope"), "the undeclared file cost one round: {record:?}");
+    assert!(record.iter().any(|d| d == "fix-checks: verify passed (1 command), 1 file changed within scope plus 1 declared exception(s)"), "{record:?}");
+    let told = scope_rounds(&turns);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("these files are outside your write scope (feature.txt):\n  - mode.txt\n"), "{}", told[0]);
+    assert!(!told[0].contains("README.md"), "your own file came with the merge: it is not the task's change: {}", told[0]);
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("mode.txt")).unwrap(), FIXED);
+    core.shutdown().await;
+}
+
+/// The task that resolves a conflict is held to its write scope too, the files with the
+/// conflict: other files that it changes and does not declare cost a scope round. It takes
+/// them back (a new file goes, a file of yours is as the merge brought it in again), and the
+/// next pass finds nothing outside the scope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resolution_that_touches_another_file_gets_a_scope_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("Scope check failed") {
+                std::fs::remove_file(turn.spec.cwd.join("notes.txt")).unwrap();
+                turn.write("README.md", "# demo\nmine\n");
+            } else if turn.read("greeting.txt").contains("<<<<<<<") {
+                turn.write("greeting.txt", RESOLVED);
+                turn.write("notes.txt", "what I found\n");
+                turn.write("README.md", "# demo\nmine\nand a line of the agent\n");
+            } else if turn.prompt.contains("Task t1") {
+                turn.write("greeting.txt", "hello from the plan\n");
+            }
+            turn.done().await;
+        })
+    });
+    let lead = lead_with("greeting.txt", "grep -q plan greeting.txt", &[]);
+    let (core, repo) = start(dir.path(), lead, worker, turns.clone()).await;
+    core.send_chat("lead", "Please change the greeting").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    std::fs::write(repo.join("README.md"), "# demo\nmine\n").unwrap();
+    commit(&repo, "greeting.txt", "hello from main\n");
+
+    core.resolve_merge_conflict(&source).await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    task_with(&core, "resolve", TaskStatus::Done).await;
+    let record = decisions(&core).await;
+    assert!(record.iter().any(|d| d == "resolve: fix round 1/2: 2 file(s) outside the write scope"), "{record:?}");
+    assert!(record.iter().any(|d| d == "resolve: verify passed (1 command), 1 file changed within scope"), "taken back, the two files are no change any more: {record:?}");
+    let told = scope_rounds(&turns);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("these files are outside your write scope (greeting.txt):\n  - README.md\n  - notes.txt\n"), "{}", told[0]);
+    assert_eq!(sh(&repo, &["ls-tree", "--name-only", &branch, "notes.txt"]), "", "the file is not in the plan's branch");
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
+    assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "# demo\nmine\n");
+    core.shutdown().await;
+}
+
+/// A file's name can hold what a write scope reads as a pattern: a route folder like `[id]`.
+/// The write scope of the task that resolves a conflict in such a file is that name as it is,
+/// so the file is in its scope and the task uses no fix round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resolution_in_a_file_whose_name_reads_as_a_pattern_is_in_its_scope() {
+    const PAGE: &str = "routes/[id]/page.txt";
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.read(PAGE).contains("<<<<<<<") {
+                turn.write(PAGE, RESOLVED);
+            } else if turn.prompt.contains("Task t1") {
+                turn.write(PAGE, "hello from the plan\n");
+            }
+            turn.done().await;
+        })
+    });
+    let repo = temp_repo(dir.path());
+    std::fs::create_dir_all(repo.join("routes/[id]")).unwrap();
+    commit(&repo, PAGE, "hello\n");
+    // The plan's own task has the folder as its scope: there, `[id]` would be a pattern.
+    let lead = lead_scoped(PAGE, "routes/", "grep -q plan 'routes/[id]/page.txt'", &[]);
+    let core = boot(dir.path(), &repo, lead, worker, turns.clone()).await;
+    core.send_chat("lead", "Please change the page").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    commit(&repo, PAGE, "hello from main\n");
+    assert_eq!(core.merge_state(&source).await.unwrap().conflicts, [PAGE]);
+
+    core.resolve_merge_conflict(&source).await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    let task = task_with(&core, "resolve", TaskStatus::Done).await;
+    assert_eq!(task.write_scope, [PAGE]);
+    let record = decisions(&core).await;
+    assert!(record.iter().any(|d| d == "resolve: verify passed (1 command), 1 file changed within scope"), "{record:?}");
+    assert!(!record.iter().any(|d| d.contains("outside the write scope")), "the file with the conflict is in the scope: {record:?}");
+    assert_eq!(scope_rounds(&turns), Vec::<String>::new());
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join(PAGE)).unwrap(), RESOLVED);
+    core.shutdown().await;
+}
+
+/// With reviews on, a fix of the checks that changed no file by hand (the check passes on the
+/// merge as it is by now) goes on with no reviewer run: there is nothing to read, and the
+/// task's record says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fix_of_the_checks_that_changed_nothing_is_not_reviewed() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if !turn.prompt.contains("Task fix-checks") {
+                turn.write("feature.txt", "on\n");
+            }
+            turn.done().await;
+        })
+    });
+    // The check passes with a good mode.txt, or once this file is there.
+    let fixed_elsewhere = dir.path().join("fixed-elsewhere");
+    let check = format!("grep -q good mode.txt || test -f '{}'", fixed_elsewhere.display());
+    let (core, repo) = start(dir.path(), lead_with("feature.txt", &check, &[]), with_reviewer(worker), turns.clone()).await;
+    // Codly runs the check by itself, whatever the approval rules see in its path.
+    core.update_settings(Settings { review_gate: true, approval_mode: ApprovalMode::Full, ..core.settings() }).await.unwrap();
+    core.send_chat("lead", "Please add the feature").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    commit(&repo, "mode.txt", "bad\n");
+    core.merge_plan(&plan.id).await.unwrap_err();
+
+    // What made the check fail is put right outside the repository, and the agent finds
+    // nothing to change.
+    std::fs::write(&fixed_elsewhere, "").unwrap();
+    core.resolve_merge_conflict(&source).await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    task_with(&core, "fix-checks", TaskStatus::Done).await;
+    let record = decisions(&core).await;
+    assert!(record.iter().any(|d| d == "fix-checks: no review, nothing was changed by hand in the merge with your branch"), "{record:?}");
+    assert!(record.iter().any(|d| d == "fix-checks: verify passed (1 command), 0 files changed within scope"), "{record:?}");
+    assert!(!record.iter().any(|d| d.starts_with("fix-checks: reviewer ") || d.starts_with("fix-checks: review verdict")), "{record:?}");
+    let reviews = turns.lock().unwrap().iter().filter(|(role, _, _)| *role == Role::Reviewer).count();
+    assert_eq!(reviews, 1, "t1 was reviewed, the fix of the checks was not");
+    core.merge_plan(&plan.id).await.unwrap();
+    assert!(repo.join("feature.txt").exists());
+    core.shutdown().await;
+}
+
+/// A merge of a solo agent's branch keeps your branch as it was under the same ref as a merge
+/// of a plan: written before the merge, taken away when the merge is not made or is undone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_merge_of_a_solo_agents_branch_keeps_your_branch_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let (core, repo) = start(dir.path(), idle.clone(), idle, Default::default()).await;
+    let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let wt = PathBuf::from(solo.worktree.clone().unwrap());
+    std::fs::write(wt.join("greeting.txt"), "hello from the agent\n").unwrap();
+    let mine = commit(&repo, "greeting.txt", "hello from main\n");
+
+    // A merge that conflicts is not made: no ref of it is left.
+    let err = core.merge_agent(&solo.id).await.unwrap_err().to_string();
+    assert!(err.contains("merging into main conflicts in greeting.txt"), "{err}");
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (mine.clone(), None));
+
+    // You take your change back: the merge is made, and main as it was is kept under the ref.
+    let yours = commit(&repo, "greeting.txt", "hello\n");
+    let sha = core.merge_agent(&solo.id).await.unwrap();
+    assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), sha);
+    assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), "hello from the agent\n");
+    assert_eq!(kept_before_merge(&repo).as_deref(), Some(yours.as_str()));
+    let last = core.repo_sync().await.unwrap().last_merge.unwrap();
+    assert_eq!((last.sha.as_str(), last.agent_id.as_deref(), last.blocked, last.kept.as_deref()), (sha.as_str(), Some(solo.id.as_str()), None, Some(BEFORE_MERGE)));
+
+    // Undo: main is back there, and nothing is left to keep.
+    core.undo_merge(&sha).await.unwrap();
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (yours.clone(), None));
+
+    // Merged again, the ref is of this merge; a second click merges nothing and leaves it.
+    let again = core.merge_agent(&solo.id).await.unwrap();
+    assert_eq!(kept_before_merge(&repo).as_deref(), Some(yours.as_str()));
+    let err = core.merge_agent(&solo.id).await.unwrap_err().to_string();
+    assert!(err.starts_with("main already has everything on "), "{err}");
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (again, Some(yours)));
     core.shutdown().await;
 }
