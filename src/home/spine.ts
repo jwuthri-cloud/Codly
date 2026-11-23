@@ -20,7 +20,7 @@ import type { JsonValue } from '../lib/gen/serde_json/JsonValue';
 import { store, type AgentMsg, type Outgoing, type Seg, type SubAgent, type Thought } from '../lib/state/store.svelte';
 import { groupSame } from '../lib/state/approvalGroups';
 import { isSlotNote } from '../lib/state/queue';
-import { killedAt, killLine, stoppedByYou } from '../lib/state/stops';
+import { killedAt, killLine, stoppedByYou, stoppedTurns } from '../lib/state/stops';
 import { isRequestThread } from '../lib/state/ui.svelte';
 import { noticeRows, type Note } from './notices';
 import { canRetry, endedByKill, messageOf, troublesOf, type TroubleKind } from './outcomes';
@@ -167,6 +167,8 @@ export function buildSpine(thread: string): Item[] {
   const owner = store.threadAgent(thread);
   const isLead = isRequestThread(thread);
   const items: Item[] = [];
+  /** When a notice row or a task-done card began (its first note, its first mark): see `lastOfPlan`. */
+  const began = new Map<Item, number>();
 
   // ── persisted chat ──
   const chats = store.chats.filter((c) => c.thread === thread);
@@ -285,10 +287,23 @@ export function buildSpine(thread: string): Item[] {
     // ── a Kill of yours: what you did, when ──
     for (const at of kills) items.push({ kind: 'system', key: `k:${owner.id}:${at}`, ts: at, text: killLine(owner.name), card: null });
 
+    // ── a turn you stopped while it waited for your answer: the card's closed row says the
+    // CLI stopped it, which is how the CLI tells it; this line says that you did ──
+    const stopped = stoppedTurns(owner.id);
+    for (const turn of live?.turns ?? []) {
+      const end = turn.end;
+      if (end == null || !stopped.includes(turn.start)) continue;
+      const waited = store.approvals.some((ap) => ap.agent_id === owner.id && ap.status === 'cancelled' && ap.created_at >= turn.start && ap.created_at <= end);
+      if (waited) items.push({ kind: 'system', key: `s:${owner.id}:${turn.start}`, ts: end, text: `You stopped ${owner.name} while it waited for your answer`, card: null });
+    }
+
     // ── what its CLI told about the run: one row for a turn, where the newest was told (so
     // after the work it was told in) ──
-    for (const notes of noticeRows(store.events, owner.id))
-      items.push({ kind: 'notice', key: `n:${notes[0].eventId}`, ts: notes[notes.length - 1].ts, agentId: owner.id, notes });
+    for (const notes of noticeRows(store.events, owner.id)) {
+      const row: Item = { kind: 'notice', key: `n:${notes[0].eventId}`, ts: notes[notes.length - 1].ts, agentId: owner.id, notes };
+      items.push(row);
+      began.set(row, notes[0].ts);
+    }
   }
 
   // ── approvals, where they happened (a worker's land in its plan's request) ──
@@ -302,10 +317,13 @@ export function buildSpine(thread: string): Item[] {
     if (isLead ? store.taskThread(t.id) !== thread : t.assignee !== owner?.id) continue;
     const marks = store.taskMarks[t.id];
     if (!marks?.length) continue;
-    items.push({ kind: 'task-done', key: `d:${t.id}`, ts: marks[marks.length - 1].ts, taskId: t.id });
+    const row: Item = { kind: 'task-done', key: `d:${t.id}`, ts: marks[marks.length - 1].ts, taskId: t.id };
+    items.push(row);
+    began.set(row, marks[0].ts);
   }
 
   items.sort((a, b) => a.ts - b.ts || RANK[a.kind] - RANK[b.kind]);
+  lastOfPlan(items, began);
   uniqueKeys(items);
   // Who speaks is shown once for messages in a row (a work row between two does not count).
   let before: Item | null = null;
@@ -315,6 +333,24 @@ export function buildSpine(thread: string): Item[] {
     before = it;
   }
   return items;
+}
+
+/**
+ * A finished plan's card is the last row of its plan: a notice row or a task-done card that
+ * began before the plan's done message goes above the card, also when its last note or mark is
+ * newer (it rides on that). Rows that began later stay below. `items`: sorted; changed in place.
+ */
+function lastOfPlan(items: Item[], began: Map<Item, number>) {
+  for (let i = 0; i < items.length; i++) {
+    const card = items[i];
+    if ((card.kind !== 'system' && card.kind !== 'say') || card.card?.type !== 'plan-done') continue;
+    const earlier = items.slice(i + 1).filter((it) => (began.get(it) ?? Infinity) < card.ts);
+    if (!earlier.length) continue;
+    const moved = new Set(earlier);
+    const after = items.slice(i + 1).filter((it) => !moved.has(it));
+    items.splice(i, items.length - i, ...earlier, card, ...after);
+    i += earlier.length;
+  }
 }
 
 /** The same value, the same list of the same objects, or an object with the same fields. */

@@ -8,6 +8,8 @@ import type { Snapshot } from '../../lib/gen/Snapshot';
 import { store } from '../../lib/state/store.svelte';
 import { mkAgent } from '../../office/demo/script';
 import { buildSpine, keepRows, streamText, type Item } from '../spine';
+import type { Approval } from '../../lib/gen/Approval';
+import { noteStop } from '../../lib/state/stops';
 
 const lead = { ...mkAgent('l1', 'Mira', 'claude', 'lead', 0, 'working', 'lead'), run_id: 'r1' };
 const solo = mkAgent('s1', 'Cleo', 'claude', 'solo', 1, 'working');
@@ -185,5 +187,54 @@ describe('a row key', () => {
     const rows = buildSpine('lead');
     expect(rows.map((r) => r.kind)).toEqual(['work', 'say', 'work']);
     expect(keys(rows)).toEqual(['w:call-1', 'say:m1', 'w:call-1#2']);
+  });
+});
+
+describe('a turn you stopped while a card waited', () => {
+  const card = (status: Approval['status'], created_at: number): Approval =>
+    ({ id: `ap-${created_at}`, agent_id: 's1', run_id: 'r', task_id: null, call_id: null, subject: { kind: 'command', command: 'ls', cwd: null }, reason: null, choices: [], risks: [], status, decided_by: 'provider', created_at }) as Approval;
+  const lines = (rows: Item[]) => rows.flatMap((r) => (r.kind === 'system' ? [r.text] : []));
+
+  it('says that you stopped it, after the card', () => {
+    apply(turn('s1'));
+    noteStop('s1');
+    store.approvals = [card('cancelled', clock + 1)];
+    apply(turnEnd('s1'));
+    const rows = buildSpine('agent:s1');
+    expect(lines(rows)).toEqual(['You stopped Cleo while it waited for your answer']);
+    expect(rows.map((r) => r.kind)).toEqual(['approval', 'system']);
+  });
+
+  it('says nothing for a turn you did not stop, or one with no card that waited', () => {
+    clock = 5000; // the stops you made are remembered by turn start: not the turn of the test above
+    apply(turn('s1'));
+    store.approvals = [card('cancelled', clock + 1)];
+    apply(turnEnd('s1'), turn('s1'));
+    noteStop('s1');
+    apply(turnEnd('s1'));
+    expect(lines(buildSpine('agent:s1'))).toEqual([]);
+  });
+});
+
+describe('the finished card of a plan', () => {
+  const planChat = (cid: string, text: string, ts: number) => ev(null, { type: 'chat', message: { id: cid, thread: 'lead', author: 'codly', text, attachment: { plan_id: 'p1' }, ts } }, ts);
+  const noticeAt = (text: string, ts: number) => ev('l1', { type: 'notice', text }, ts);
+  const order = (rows: Item[]) => rows.map((r) => (r.kind === 'system' ? `system:${r.card?.type}` : r.kind === 'notice' ? `notice:${r.notes[0].text}` : r.kind));
+  beforeEach(() => {
+    const plan = { id: 'p1', thread: 'lead', status: 'done', summary: 'Dark mode' };
+    const snap = { as_of: 0, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [lead, solo], plans: [plan], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [] };
+    (store as unknown as { applySnapshot(s: Snapshot): void }).applySnapshot(snap as unknown as Snapshot);
+  });
+
+  it('is below a notice row that began before the done message, though its last note is newer', () => {
+    apply(turn('l1'), turnEnd('l1'), planChat('c-ready', 'Plan ready', 1100), noticeAt('Goal: ship it', 1200), planChat('c-done', 'Plan done', 1300), noticeAt('Goal: ship it', 1400));
+    const rows = buildSpine('lead');
+    expect(order(rows)).toEqual(['system:plan', 'notice:Goal: ship it', 'system:plan-done']);
+    expect(rows[1].ts).toBe(1400);
+  });
+
+  it('is above a row that begins after the done message', () => {
+    apply(turn('l1'), turnEnd('l1'), planChat('c-ready', 'Plan ready', 1100), noticeAt('Goal: ship it', 1200), planChat('c-done', 'Plan done', 1300), noticeAt('Goal: ship it', 1400), noticeAt('MCP server linear did not start', 1500));
+    expect(order(buildSpine('lead'))).toEqual(['system:plan', 'notice:Goal: ship it', 'system:plan-done', 'notice:MCP server linear did not start']);
   });
 });

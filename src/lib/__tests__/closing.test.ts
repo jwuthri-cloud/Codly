@@ -265,6 +265,19 @@ describe('what a close asks first', () => {
     expect(record).not.toHaveBeenCalled();
   });
 
+  it('a Lead at work asks first: in a turn, or starting before it, or before it answered your message', async () => {
+    const working = { ask: 'The Lead is working: close and stop it?', detail: 'Its turn stops where it is. Nothing is deleted.', yes: 'Close' };
+    // The Lead starts or thinks and no turn of it runs yet, in a request with no plan: the request says "planning".
+    expect(await closeQuestion(request({ phase: 'planning' }))).toEqual(working);
+    // Your message is in, and the Lead has not begun: nothing answered it.
+    store.chats = [asked('lead:a', 'Explain sessions', 5)];
+    expect(await closeQuestion(request({ phase: 'talking' }))).toEqual({ ask: 'Your message has no answer yet: close anyway?', detail: 'The Lead stops before it answers. Nothing is deleted.', yes: 'Close' });
+    // Answered: it closes at once.
+    store.chats = [...store.chats, { ...asked('lead:a', 'Sessions live in Postgres.', 6), author: 'l3' }];
+    expect(await closeQuestion(request({ phase: 'talking' }))).toBeNull();
+    store.chats = [];
+  });
+
   it('a draft asks only while its composer holds text, and the button says Discard', async () => {
     ui.newRequest();
     const draft = request({ thread: ui.request, title: 'New request', phase: 'new' });

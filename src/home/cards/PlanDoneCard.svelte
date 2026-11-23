@@ -3,14 +3,15 @@
   the agents made, and the decision that is yours — merge into your branch, or keep the branch.
   A merge that would conflict with your branch says so here, with the two ways out: until the
   conflict is resolved the card does not say "ready to merge", and the one primary button is
-  the step's own "Have an agent resolve it". While a pull request for the plan is open with
-  checks still running, the primary button is to look at the pull request; Merge stays.
+  the step's own "Have an agent resolve it". While a pull request for the plan is open and its
+  checks are not read yet, still run or failed, the primary button is to look at the pull
+  request; Merge stays.
 -->
 <script lang="ts">
   import { keepBranch, mergePlan } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
   import { conflictsWith } from '../../lib/state/mergeState.svelte';
-  import { checksState, prKey, prUi } from '../../lib/state/pullRequest.svelte';
+  import { prKey, prUi } from '../../lib/state/pullRequest.svelte';
   import { planSpent, spentVersion } from '../../lib/state/spent.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
@@ -24,6 +25,7 @@
   import RepoSyncBar from '../../components/RepoSyncBar.svelte';
   import PullRequestStep from '../../components/PullRequestStep.svelte';
   import PreviewStep from '../../components/PreviewStep.svelte';
+  import { pullRequestFirst, pullRequestTip } from '../mergeChoice';
 
   interface Props {
     planId: string;
@@ -46,9 +48,9 @@
   const target = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main');
   /** The branch it conflicts with: nothing can merge until that is resolved, and the step below has the ways out. */
   const conflict = $derived(merged || kept ? null : conflictsWith({ kind: 'plan', id: planId }));
-  /** A pull request for it is open and its checks still run: look at those before you merge here. */
+  /** A pull request for it is open and its checks are not read, still run or failed: look at those before you merge here. */
   const pr = $derived(prUi.opened[prKey({ kind: 'plan', id: planId })] ?? null);
-  const prChecking = $derived(!!pr && pr.state === 'open' && !!pr.checks && checksState(pr.checks) === 'wait');
+  const prChecking = $derived(pullRequestFirst(pr));
   let busy = $state(false);
   // `unchecked`: after the plan's checks failed on the merge result, you merge anyway.
   async function merge(unchecked = false) {
@@ -99,7 +101,7 @@
       {:else}
         {#if prChecking && pr && !conflict}
           {@const url = pr.url}
-          <button class="btn primary" onclick={() => openExternal(url)} data-tip="Its checks still run: look at them before you merge here"><Icon name="link" size={14} />View the pull request</button>
+          <button class="btn primary" onclick={() => openExternal(url)} data-tip={pullRequestTip(pr)}><Icon name="link" size={14} />View the pull request</button>
         {/if}
         <button class="btn" class:primary={!conflict && !prChecking} disabled={busy || kept} onclick={() => merge()}><Icon name="merge" size={14} />Merge into {target}</button>
         <button class="btn" disabled={busy || kept} onclick={keep}>Keep the branch</button>

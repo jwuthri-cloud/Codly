@@ -10,6 +10,7 @@
   import { housekeeping as hk } from '../../lib/state/housekeeping.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
+  import { isHeld } from '../../lib/util/held';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import TaskRow from '../../home/cards/TaskRow.svelte';
@@ -28,6 +29,7 @@
   const waitingAgents = $derived(new Set(store.pendingApprovals.map((a) => a.agent_id)));
   const groupOf = (t: Task): string => {
     if (t.assignee && waitingAgents.has(t.assignee) && store.agentMap.get(t.assignee)?.task_id === t.id) return 'you';
+    if (isHeld(t)) return 'held';
     switch (t.status) {
       case 'blocked': case 'failed': case 'changes_requested': return 'you';
       case 'running': case 'verifying': case 'reviewing': case 'merging': case 'ready': return 'now';
@@ -38,10 +40,11 @@
   };
   const order = (a: Task, b: Task) => a.key.localeCompare(b.key, undefined, { numeric: true });
   const groups = $derived.by((): Group[] => {
-    const by: Record<string, Task[]> = { you: [], now: [], next: [], done: [], cancelled: [] };
+    const by: Record<string, Task[]> = { you: [], held: [], now: [], next: [], done: [], cancelled: [] };
     for (const t of board) by[groupOf(t)].push(t);
     const out: Group[] = [
       { id: 'you', title: 'Needs you', hint: 'Waiting for your answer, or stuck', tasks: by.you.sort(order) },
+      { id: 'held', title: 'On hold', hint: 'Since Codly restarted: nothing starts until you press “Resume work”', tasks: by.held.sort(order) },
       { id: 'now', title: 'In progress', hint: 'An agent is on it', tasks: by.now.sort(order) },
       { id: 'next', title: plan?.status === 'awaiting_approval' ? 'Proposed' : 'Up next', hint: plan?.status === 'awaiting_approval' ? 'Starts when you run the plan' : 'Starts when what it waits on is merged', tasks: by.next.sort(order) },
       { id: 'done', title: 'Done', hint: 'Merged into the integration branch', tasks: by.done.sort(order) },
@@ -97,9 +100,9 @@
   header, .ah { display: flex; align-items: baseline; gap: 8px; padding: 0 14px 6px; }
   .ah { align-items: center; text-align: left; border-radius: var(--r-md); padding: 6px 14px; color: var(--ink-2); }
   .ah:hover { background: var(--surface-2); }
-  h2 { font-size: var(--t-md); font-weight: var(--w-semi); color: var(--ink-1); }
+  h2 { font-size: var(--t-md); font-weight: var(--w-semi); color: var(--ink-1); white-space: nowrap; }
   .n { font-size: var(--t-sm); color: var(--ink-3); }
-  .hint { font-size: var(--t-sm); color: var(--ink-4); margin-left: 4px; }
+  .hint { min-width: 0; font-size: var(--t-sm); color: var(--ink-4); margin-left: 4px; }
   .g-you h2 { color: var(--amber-ink); }
   ol { display: flex; flex-direction: column; gap: 4px; }
   .group :global(.row) { background: var(--surface-1); }

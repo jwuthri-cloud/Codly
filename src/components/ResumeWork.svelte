@@ -7,8 +7,8 @@
   The bar is not a toast: it is there from the launch until you answer. It has room of its own
   under the top bar: while it shows, the stage starts below it (shell/Shell.svelte), so it
   covers nothing of the page, and it is as wide as the stage at most. It lies on no sheet and
-  not on the Ask me panel: while one of them is open the bar ends left of it, its text gets
-  shorter (the whole text is in the tooltip), its buttons stay. It is drawn above the first-run
+  not on the Ask me panel: while one of them is open the bar ends left of it, the question takes
+  both lines and the line under it goes (the whole text is in the tooltip), its buttons stay. It is drawn above the first-run
   quest, so the question can be answered there too.
 -->
 <script lang="ts" module>
@@ -54,8 +54,8 @@
   <div class="bar" class:beside-sheet={ui.sheetOpen} class:beside-ask={blockers.panel} style:--start={start} style:top="calc(var(--top-h) + {OVER}px)" style:height="{HEIGHT}px" role="region" aria-label="Resume work">
     <span class="ic"><Icon name="pause" size={15} /></span>
     <div class="txt" role="status" data-tip={beside ? `${title} ${sub}` : undefined}>
-      <p class="title truncate">{title}</p>
-      <p class="sub truncate">{sub}</p>
+      <p class="title" class:truncate={!beside} class:two={beside}>{title}</p>
+      {#if !beside}<p class="sub truncate">{sub}</p>{/if}
     </div>
     {#if asking}
       <button class="btn sm" disabled={resumeWork.busy} onclick={() => resumeWork.notNow()}>Not now</button>
@@ -80,6 +80,7 @@
   .ic { flex-shrink: 0; color: var(--amber); }
   .txt { flex: 1; min-width: 0; }
   .title { font-weight: var(--w-med); color: var(--ink-1); }
+  .title.two { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: var(--lh-sm); }
   .sub { margin-top: 2px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); }
   .btn { flex-shrink: 0; }
 </style>
