@@ -15,7 +15,9 @@
 //! a dependency folder or a download that the repository forgot to ignore (`node_modules`,
 //! `target`, `coverage`), not work. A plain `add -A` would put it in the commit, in the diff
 //! and in the scope check. The commit takes the rest and reports what it left
-//! (`WorkCommit::left_out`); the files stay in the worktree.
+//! (`WorkCommit::left_out`); the files stay in the worktree. "New" is untracked: a path that
+//! somebody staged (`git add`) is work, whatever its size, and is committed. A checkpoint
+//! (`snapshot`) leaves out the same paths.
 //!
 //! The user's checkout is theirs too: Codly never merges into it while they are in the middle
 //! of a merge, rebase or cherry-pick of their own, only aborts a merge it started itself, and
@@ -31,7 +33,7 @@
 //! Callers serialize mutations of one repository (the orchestrator holds a per-workspace
 //! lock); reads may run concurrently.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -704,14 +706,13 @@ impl Git {
     pub async fn commit_work(&self, wt: &Path, message: &str) -> Result<WorkCommit> {
         let [c1, hooks, c2, fsmonitor] = Self::SAFE;
         let left_out = self.too_big(wt).await?;
-        let keep_out: Vec<String> = left_out.iter().map(|l| format!(":(exclude,literal){}", l.path())).collect();
-        let mut add = vec![c1, hooks, c2, fsmonitor, "add", "-A"];
-        if !keep_out.is_empty() {
+        if !left_out.is_empty() {
             tracing::info!("commit in {}: left out: {}", wt.display(), left_out.iter().map(LeftOut::to_string).collect::<Vec<_>>().join(", "));
-            add.extend(["--", "."]);
-            add.extend(keep_out.iter().map(String::as_str));
         }
-        self.ok(wt, &add, false).await?;
+        let add = add_all_but(&left_out);
+        let mut args = vec![c1, hooks, c2, fsmonitor];
+        args.extend(add.iter().map(String::as_str));
+        self.ok(wt, &args, false).await?;
         let files =
             split_z(&self.ok(wt, &[c1, hooks, c2, fsmonitor, "diff", "--cached", "--name-only", "--no-renames", "-z"], false).await?);
         let merging = self.in_merge(wt).await;
@@ -732,7 +733,7 @@ impl Git {
     }
 
     /// The new (untracked, not ignored) folders and files of a worktree that are too big to
-    /// be work: what `commit_work` leaves out.
+    /// be work: what `commit_work` and `snapshot` leave out.
     async fn too_big(&self, wt: &Path) -> Result<Vec<LeftOut>> {
         let [c1, hooks, c2, fsmonitor] = Self::SAFE;
         let list = [c1, hooks, c2, fsmonitor, "ls-files", "-z", "--others", "--exclude-standard"];
@@ -874,42 +875,55 @@ fn split_z(s: &str) -> Vec<String> {
     s.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
 
+/// `git add -A` for everything in a worktree but the paths in `left_out`.
+fn add_all_but(left_out: &[LeftOut]) -> Vec<String> {
+    let mut add = vec!["add".to_string(), "-A".to_string()];
+    if !left_out.is_empty() {
+        add.extend(["--".to_string(), ".".to_string()]);
+        add.extend(left_out.iter().map(|l| format!(":(exclude,literal){}", l.path())));
+    }
+    add
+}
+
 /// The new folders with more than `max` files, as (folder, files in it). `roots`: the
 /// untracked paths, where a folder that is new as a whole is one entry ending in `/`;
-/// `files`: every untracked file. In such a folder, what goes is the smallest folder that
-/// still holds nearly all of the files (nine in ten), so a new package keeps its sources and
-/// loses its dependency folder: `packages/new/node_modules/` goes, `packages/new/src/` stays.
+/// `files`: every untracked file. The files of a sub-folder that goes do not count for the
+/// folders around it, so a new package keeps its sources and loses its dependency folder and
+/// its build output: `web/node_modules/` and `web/.next/` go, `web/src/` stays. A dependency
+/// folder goes as a whole, also when one package in it is over the limit by itself.
 fn oversized_folders(roots: &[String], files: &[String], max: usize) -> Vec<(String, usize)> {
     let mut out = vec![];
     for root in roots.iter().filter(|r| r.ends_with('/')) {
-        let mut rest: Vec<&str> = files.iter().map(String::as_str).filter(|f| f.starts_with(root.as_str())).collect();
-        while rest.len() > max {
-            let (mut dir, mut inside) = (root.clone(), rest.clone());
-            while let Some((child, n)) = biggest_child(&dir, &inside)
-                && n > max
-                && n * 10 >= inside.len() * 9
-            {
-                inside.retain(|f| f.starts_with(child.as_str()));
-                dir = child;
-            }
-            rest.retain(|f| !f.starts_with(dir.as_str()));
-            out.push((dir, inside.len()));
-        }
+        let inside: Vec<&str> = files.iter().map(String::as_str).filter(|f| f.starts_with(root.as_str())).collect();
+        oversized_in(root, &inside, max, &mut out);
     }
     out
 }
 
-/// The sub-folder of `dir` that holds the most of `files` (all of them inside `dir`), and how
-/// many it holds.
-fn biggest_child(dir: &str, files: &[&str]) -> Option<(String, usize)> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+/// `oversized_folders` for the new folder `dir` and the files in it: adds the folders that go
+/// to `out`, and returns how many of `files` are in them.
+fn oversized_in(dir: &str, files: &[&str], max: usize, out: &mut Vec<(String, usize)>) -> usize {
+    if files.len() <= max {
+        return 0;
+    }
+    // By sub-folder, in the order of their names, so the answer does not change by run.
+    let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for f in files {
         if let Some((child, _)) = f[dir.len()..].split_once('/') {
-            *counts.entry(child).or_default() += 1;
+            children.entry(child).or_default().push(*f);
         }
     }
-    // The most files; the name decides between equals, so the answer does not change by run.
-    counts.into_iter().max_by_key(|&(name, n)| (n, std::cmp::Reverse(name))).map(|(name, n)| (format!("{dir}{name}/"), n))
+    let (found, mut gone) = (out.len(), 0);
+    for (child, inside) in &children {
+        gone += oversized_in(&format!("{dir}{child}/"), inside, max, out);
+    }
+    if files.len() - gone <= max {
+        return gone;
+    }
+    // Still too many without them: the folder goes as a whole, with the ones found in it.
+    out.truncate(found);
+    out.push((dir.to_string(), files.len()));
+    files.len()
 }
 
 /// Canonical path for comparisons (macOS: /var → /private/var); the input if it fails.
@@ -1044,10 +1058,12 @@ impl Drop for ScratchIndex {
 /// the worktree's own index: the files are staged in a private index file. Like every git call
 /// in an agent's worktree, these come after `check_worktree`.
 impl Git {
-    /// Everything in the worktree, staged in a private index: tracked and untracked files, and
-    /// no ignored one (as `add -A`). The index starts as a copy of the worktree's own, whose
-    /// file stats keep git from reading the files that did not change.
+    /// Everything in the worktree, staged in a private index: tracked and untracked files, no
+    /// ignored one, and nothing that `commit_work` leaves out (a huge new folder or file is
+    /// not stored, and not read again at every checkpoint). The index starts as a copy of the
+    /// worktree's own, whose file stats keep git from reading the files that did not change.
     async fn stage_apart(&self, wt: &Path) -> Result<ScratchIndex> {
+        let left_out = self.too_big(wt).await?;
         let dir = self.git_path(wt, "--git-dir").await?;
         let index = ScratchIndex(dir.join(format!("codly-index-{}", uuid::Uuid::new_v4())));
         match std::fs::copy(dir.join("index"), &index.0) {
@@ -1055,7 +1071,8 @@ impl Git {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // nothing was ever staged there
             Err(e) => bail!("cannot copy the index of {}: {e}", wt.display()),
         }
-        self.on_index(wt, &index, &["add", "-A"]).await?;
+        let add = add_all_but(&left_out);
+        self.on_index(wt, &index, &add.iter().map(String::as_str).collect::<Vec<_>>()).await?;
         Ok(index)
     }
 
@@ -1070,9 +1087,10 @@ impl Git {
         Ok(out.stdout)
     }
 
-    /// Everything in the worktree now (tracked and untracked files, no ignored one), read once.
-    /// This is the slow part of a checkpoint: git reads every file that changed. It writes
-    /// objects only: files and folders that did not change are already stored.
+    /// Everything in the worktree now (tracked and untracked files, no ignored one, and
+    /// nothing that `commit_work` leaves out), read once. This is the slow part of a
+    /// checkpoint: git reads every file that changed. It writes objects only: files and
+    /// folders that did not change are already stored.
     pub async fn snapshot(&self, wt: &Path) -> Result<Snapshot> {
         let index = self.stage_apart(wt).await?;
         let tree = self.on_index(wt, &index, &["write-tree"]).await?.trim().to_string();
@@ -1111,11 +1129,13 @@ impl Git {
     }
 
     /// Put the worktree's files back to `tree`: files that changed or were deleted since come
-    /// back, files that are not in `tree` are removed, and ignored files are left alone. HEAD,
-    /// the branch and the worktree's own index stay as they are, so the difference shows as
-    /// uncommitted changes. `present` is the worktree as it is (`snapshot`): its tree is what
-    /// to keep if the present state must not be lost, and with the files already read, this
-    /// call only writes the files that differ.
+    /// back, files that are not in `tree` are removed, and ignored files are left alone. So
+    /// is what `present` left out (a huge new folder or file; `tree` can only write a file
+    /// there that it has itself): it is not kept, so it must not be removed. HEAD, the branch
+    /// and the worktree's own index stay as they are, so the difference shows as uncommitted
+    /// changes. `present` is the worktree as it is (`snapshot`): its tree is what to keep if
+    /// the present state must not be lost, and with the files already read, this call only
+    /// writes the files that differ.
     pub async fn restore_tree(&self, wt: &Path, present: Snapshot, tree: &str) -> Result<()> {
         self.on_index(wt, &present.index, &["read-tree", "--reset", "-u", tree]).await.map(drop)
     }
@@ -1227,19 +1247,20 @@ mod tests {
         assert!(fresh.contains("+hello") && fresh.contains("new file mode"), "{fresh}");
     }
 
-    /// Which new folders are too big to be work: the folder that holds the files goes, not
-    /// the new package around it.
+    /// Which new folders are too big to be work: the folders that hold the files go, and the
+    /// new package around them stays, with its sources.
     #[test]
     fn oversized_folders_are_the_ones_that_hold_the_files() {
         let names = |dir: &str, n: usize| (0..n).map(|i| format!("{dir}{i}.js")).collect::<Vec<_>>();
         let strings = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let roots = strings(&["coverage/", "notes.md", "pkg/", "small/", "target/"]);
+        let found = |roots: &[&str], files: &[String]| oversized_folders(&strings(roots), files, 10);
+        let gone = |name: &str, files: usize| (name.to_string(), files);
         let mut files = strings(&["notes.md", "pkg/package.json", "pkg/src/index.ts"]);
         // A dependency folder inside a new package: many small folders, none of them big.
         for m in 0..4 {
             files.extend(names(&format!("pkg/node_modules/m{m}/"), 5));
         }
-        // Build output in two halves: neither holds nearly all, so their folder goes.
+        // Build output in two halves, neither of them big: the folder that holds both goes.
         files.extend(names("target/debug/deps/", 8));
         files.extend(names("target/debug/build/", 8));
         files.push("target/CACHEDIR.TAG".into());
@@ -1248,24 +1269,41 @@ mod tests {
         files.extend(names("small/", 10));
         files.sort();
         assert_eq!(
-            oversized_folders(&roots, &files, 10),
-            [("coverage/".to_string(), 11), ("pkg/node_modules/".to_string(), 20), ("target/debug/".to_string(), 16)],
+            found(&["coverage/", "notes.md", "pkg/", "small/", "target/"], &files),
+            [gone("coverage/", 11), gone("pkg/node_modules/", 20), gone("target/debug/", 16)],
         );
         // New files next to tracked ones are not a new folder, however many they are.
         assert!(oversized_folders(&strings(&["src/a.rs", "src/b.rs", "src/c.rs"]), &strings(&["src/a.rs", "src/b.rs", "src/c.rs"]), 2).is_empty());
-        // Two heavy folders in one new folder, where the first does not hold nearly all:
-        // the whole folder goes.
+
+        // A new package with two heavy folders, neither of which holds nearly all the files:
+        // both go, and the sources next to them are work.
+        let mut web = strings(&["web/package.json"]);
+        web.extend(names("web/node_modules/big/", 15));
+        for m in 0..37 {
+            web.extend(names(&format!("web/node_modules/m{m}/"), 5));
+        }
+        web.extend(names("web/.next/", 30));
+        web.extend(names("web/src/", 5));
+        let left = found(&["web/"], &web);
+        // The dependency folder goes as a whole, not only the one package that is big by itself.
+        assert_eq!(left, [gone("web/.next/", 30), gone("web/node_modules/", 200)]);
+        assert!(!left.iter().any(|(folder, _)| "web/src/0.js".starts_with(folder.as_str()) || "web/package.json".starts_with(folder.as_str())));
+
+        // Two heavy folders and nothing else: the folder around them is not what goes.
         let mut two = names("gen/a/", 30);
         two.extend(names("gen/b/", 12));
-        assert_eq!(oversized_folders(&strings(&["gen/"]), &two, 10), [("gen/".to_string(), 42)]);
-        // One folder holds nearly all, and what is left is still too much: both go.
+        assert_eq!(found(&["gen/"], &two), [gone("gen/a/", 30), gone("gen/b/", 12)]);
+        // A folder that is still too big without its heavy folder goes as a whole.
         let mut rest = names("out/cache/", 100);
-        rest.extend(names("out/logs/", 11));
-        assert_eq!(oversized_folders(&strings(&["out/"]), &rest, 10), [("out/cache/".to_string(), 100), ("out/logs/".to_string(), 11)]);
+        for m in 0..3 {
+            rest.extend(names(&format!("out/day{m}/"), 4));
+        }
+        assert_eq!(found(&["out/"], &rest), [gone("out/", 112)]);
     }
 
     /// Codly's commit takes the work and leaves out what is too big to be work: the files
-    /// stay in the worktree, untracked, and the result says what was left.
+    /// stay in the worktree, untracked, and the result says what was left. A checkpoint leaves
+    /// out the same, and what somebody staged is work.
     #[tokio::test]
     async fn a_commit_leaves_out_huge_new_folders_and_files() {
         let (_d, repo) = repo();
@@ -1277,8 +1315,10 @@ mod tests {
                 std::fs::write(sub.join(format!("{i}.js")), "x").unwrap();
             }
         };
-        // A new package: its sources are work, its dependency folder is not.
+        // A new package: its sources are work, its dependency folder and its build output
+        // are not (two heavy folders: neither holds nearly all of the package's files).
         fill("pkg/node_modules", MAX_NEW_FOLDER_FILES + 1);
+        fill("pkg/.next", MAX_NEW_FOLDER_FILES + 1);
         std::fs::create_dir_all(repo.join("pkg/src")).unwrap();
         std::fs::write(repo.join("pkg/src/index.ts"), "export {};\n").unwrap();
         // A new folder at the limit is work (fixtures, generated code).
@@ -1289,27 +1329,48 @@ mod tests {
 
         let snap = git.commit_work(&repo, "snapshot").await.unwrap();
         let left = [
+            LeftOut::Folder { path: "pkg/.next/".into(), files: MAX_NEW_FOLDER_FILES + 1 },
             LeftOut::Folder { path: "pkg/node_modules/".into(), files: MAX_NEW_FOLDER_FILES + 1 },
             LeftOut::File { path: "dump.bin".into(), bytes: MAX_NEW_FILE_BYTES + 1 },
         ];
         assert_eq!(snap.left_out, left);
-        assert_eq!(left.iter().map(LeftOut::to_string).collect::<Vec<_>>(), ["pkg/node_modules/ (2001 new files)", "dump.bin (25 MB)"]);
+        assert_eq!(left[1..].iter().map(LeftOut::to_string).collect::<Vec<_>>(), ["pkg/node_modules/ (2001 new files)", "dump.bin (25 MB)"]);
         let committed = snap.commit.unwrap().files;
         assert_eq!(committed.len(), MAX_NEW_FOLDER_FILES + 2, "the fixtures, a.txt and the package's source");
         assert!(committed.contains(&"a.txt".to_string()) && committed.contains(&"pkg/src/index.ts".to_string()));
-        assert!(!committed.iter().any(|f| f.starts_with("pkg/node_modules/") || f == "dump.bin"));
+        assert!(!committed.iter().any(|f| f.starts_with("pkg/node_modules/") || f.starts_with("pkg/.next/") || f == "dump.bin"));
         // Nothing was deleted or staged: the files are still there, untracked.
         assert!(repo.join("dump.bin").exists() && repo.join("pkg/node_modules/m0/0.js").exists());
-        assert_eq!(git.read(&repo, &["ls-files", "--", "pkg/node_modules", "dump.bin"]).await.unwrap(), "");
-        assert_eq!(git.read(&repo, &["status", "--porcelain=v1", "-z"]).await.unwrap(), "?? dump.bin\0?? pkg/node_modules/\0");
+        assert_eq!(git.read(&repo, &["ls-files", "--", "pkg/node_modules", "pkg/.next", "dump.bin"]).await.unwrap(), "");
+        let untracked = "?? dump.bin\0?? pkg/.next/\0?? pkg/node_modules/\0";
+        assert_eq!(git.read(&repo, &["status", "--porcelain=v1", "-z"]).await.unwrap(), untracked);
 
         // The next one has nothing to commit, and says the same.
         let again = git.commit_work(&repo, "snapshot").await.unwrap();
         assert_eq!((again.commit, again.left_out.as_slice()), (None, &left[..]));
         assert_eq!(git.commit_all(&repo, "snapshot").await.unwrap(), None);
 
-        // Once the repository ignores them, there is nothing to leave out.
-        std::fs::write(repo.join(".gitignore"), "node_modules/\n*.bin\n").unwrap();
+        // A checkpoint leaves the same paths out (they are not stored, and not read again at
+        // every turn), and a restore leaves them where they are.
+        let tree = git.worktree_tree(&repo).await.unwrap();
+        let kept = git.read(&repo, &["ls-tree", "-r", "--name-only", &tree]).await.unwrap();
+        assert_eq!(kept.lines().count(), MAX_NEW_FOLDER_FILES + 2, "what the commit has, and no more");
+        assert!(kept.contains("pkg/src/index.ts") && !kept.contains("node_modules") && !kept.contains(".next") && !kept.contains("dump.bin"));
+        std::fs::write(repo.join("later.txt"), "made later\n").unwrap();
+        let present = git.snapshot(&repo).await.unwrap();
+        git.restore_tree(&repo, present, &tree).await.unwrap();
+        assert!(!repo.join("later.txt").exists(), "the restore ran");
+        assert!(repo.join("dump.bin").exists() && repo.join("pkg/node_modules/m0/0.js").exists() && repo.join("pkg/.next/m0/0.js").exists());
+        assert_eq!(git.read(&repo, &["status", "--porcelain=v1", "-z"]).await.unwrap(), untracked);
+
+        // What somebody staged is work, whatever its size: it is committed.
+        sh(&repo, &["add", "dump.bin"]);
+        let staged = git.commit_work(&repo, "staged").await.unwrap();
+        assert_eq!(staged.commit.unwrap().files, ["dump.bin"]);
+        assert_eq!(staged.left_out, left[..2]);
+
+        // Once the repository ignores the rest, there is nothing to leave out.
+        std::fs::write(repo.join(".gitignore"), "node_modules/\n.next/\n").unwrap();
         let ignored = git.commit_work(&repo, "ignore").await.unwrap();
         assert_eq!(ignored.commit.unwrap().files, [".gitignore"]);
         assert!(ignored.left_out.is_empty());

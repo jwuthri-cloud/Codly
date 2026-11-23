@@ -222,7 +222,8 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   plan's integration branch after the task's checks pass.
 - Codly's commit of an agent's work leaves out a new folder with more than 2,000 files and a new file
   over 25 MB (build output or a dependency folder that the repository does not ignore). The task says
-  what was left out, and the files stay in the worktree.
+  what was left out, its worker is asked once to ignore it, delete it or stage it (`git add`) as work
+  before the checks run, and the files stay in the worktree. Checkpoints leave the same paths out.
 - Codly changes your branch only when you press a button: **Merge** (a plan's integration branch, or one
   agent's branch, into the branch you have checked out), **Commit** (your own uncommitted changes) and
   **Push** (the branch you have checked out, to its remote, through your own SSH agent).
