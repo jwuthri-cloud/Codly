@@ -1,8 +1,9 @@
 <!--
   Work was under way when Codly last closed, and nothing of it starts before you say so
   (Settings → Long runs → "Resume work when Codly opens"). With Ask this is the question:
-  Resume, or Not now. After Not now, and with Never, it is one line with the Resume work
-  button. It stays until you press it: the waiting tasks name this button.
+  Resume work, or Not now. After Not now, and with Never, it is one line with the Resume work
+  button. It stays until you press it: the waiting tasks name this button by its label, so
+  the label is the same in both states (orchestrator/resume.rs, HELD).
 -->
 <script lang="ts">
   import { resumeWork } from '../lib/state/resumeWork.svelte';
@@ -28,7 +29,7 @@
     </div>
     {#if asking}
       <button class="btn sm" disabled={resumeWork.busy} onclick={() => resumeWork.notNow()}>Not now</button>
-      <button class="btn sm primary" disabled={resumeWork.busy} onclick={() => resumeWork.resume()}>Resume</button>
+      <button class="btn sm primary" disabled={resumeWork.busy} onclick={() => resumeWork.resume()}>Resume work</button>
     {:else}
       <button class="btn sm primary" disabled={resumeWork.busy} onclick={() => resumeWork.resume()}>Resume work</button>
     {/if}
