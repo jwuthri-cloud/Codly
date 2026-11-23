@@ -259,7 +259,7 @@ const MANY_TARGETS: &[&str] = &["make", "just", "task", "gradle", "mvn"];
 const OWN_ACCOUNT: &[&str] = &["config", "login", "logout", "publish"];
 
 /// Does the line run one of the `OWN_ACCOUNT` subcommands (`cargo login x`,
-/// `npm config set …`, `git config …`), behind a wrapper or `sh -c` too?
+/// `npm config set …`, `npm c set …`, `git config …`), behind a wrapper or `sh -c` too?
 fn own_account(cmd: &str, depth: u8) -> bool {
     parse(cmd).segments.iter().any(|seg| {
         let texts: Vec<String> = seg.iter().map(|w| w.text.clone()).collect();
@@ -271,7 +271,7 @@ fn own_account(cmd: &str, depth: u8) -> bool {
         }
         // Behind an option's value too (`npm --prefix web config set …`).
         let subs = if prog == "git" { git_sub(args).0.into_iter().collect() } else { subcommands(prog, args) };
-        SUBCOMMAND_TOOLS.contains(&prog) && subs.iter().any(|sub| OWN_ACCOUNT.contains(sub))
+        SUBCOMMAND_TOOLS.contains(&prog) && subs.iter().any(|sub| OWN_ACCOUNT.contains(sub) || names_config(prog, sub))
     })
 }
 
@@ -822,9 +822,10 @@ fn package_flag(args: &[String]) -> bool {
     options(args).any(|a| a.starts_with("--package") || (a.starts_with("-p") && !a.starts_with("--")))
 }
 
-/// `npx -c 'cmd'` / `npm exec --call 'cmd'`: runs a shell command string.
+/// `npx -c 'cmd'` / `npm exec --call 'cmd'` / `pnpm exec --shell-mode 'cmd'`: runs a shell
+/// command string.
 fn call_flag(args: &[String]) -> bool {
-    options(args).any(|a| a == "-c" || a.starts_with("--call"))
+    options(args).any(|a| a == "-c" || a.starts_with("--call") || a == "--shell-mode")
 }
 
 /// Does a package command install for your account or the whole machine, not into the project
@@ -969,35 +970,84 @@ fn pm_subs<'a>(prog: &str, args: &'a [String]) -> Vec<(&'a str, &'a [String])> {
     found
 }
 
-/// The commands a package runner starts, each as its words: what follows `npx` or `bunx`,
-/// and what follows the `exec` (`x`, `dlx`) of npm, pnpm, yarn or bun. The runner's own
-/// options are not part of it: `-p pkg`, `--package pkg`, `-c 'cmd'` and `--call 'cmd'` take
-/// the next word, and a `--` ends them.
-fn runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a [String]> {
-    let command = |words: &'a [String]| {
-        let mut i = 0;
-        while let Some(option) = words.get(i).map(String::as_str).filter(|word| word.starts_with('-')) {
-            i += if matches!(option, "-p" | "--package" | "-c" | "--call") { 2 } else { 1 };
-            if option == "--" {
+/// What a package runner starts.
+enum Started<'a> {
+    /// A program, with its arguments.
+    Program(&'a [String]),
+    /// A line for a shell (`npx -c 'npm publish'`, `bun exec 'npm publish && ls'`).
+    ShellLine(String),
+}
+
+/// Options of npx, bunx and `npm exec` that take no value: the word after one is the program.
+const RUNNER_SWITCHES: &[&str] = &["-y", "--yes", "--no", "--no-install", "-q", "--quiet", "--bun"];
+
+/// What the words after a package runner start (`runner_commands`). The runner's own options
+/// stand first, and a `--` ends them. `-p pkg` and `--package pkg` take the next word;
+/// `-c 'cmd'` and `--call 'cmd'` take a line for a shell. Which other options take a value is
+/// not listed, so the word after one that holds no `=` and is not in `RUNNER_SWITCHES` is read
+/// both ways: as the program, and as the option's value with the program behind it
+/// (`npm exec -w web npm publish`: `web`, then `npm publish`).
+///
+/// With `shell_line`, what the runner starts is a line for a shell, not a program.
+fn runner_starts<'a>(words: &'a [String], shell_line: bool) -> Vec<Started<'a>> {
+    let start = |command: &'a [String]| if shell_line { Started::ShellLine(command.join(" ")) } else { Started::Program(command) };
+    let (mut found, mut i, mut may_be_value) = (vec![], 0, false);
+    while let Some(word) = words.get(i).map(String::as_str) {
+        i += 1;
+        match word {
+            "--" => {
+                found.extend(words.get(i..).filter(|rest| !rest.is_empty()).map(&start));
                 break;
             }
+            "-p" | "--package" => (i, may_be_value) = (i + 1, false),
+            "-c" | "--call" => {
+                found.extend(words.get(i).map(|line| Started::ShellLine(line.clone())));
+                (i, may_be_value) = (i + 1, false);
+            }
+            _ if word.starts_with("--call=") => {
+                found.push(Started::ShellLine(word["--call=".len()..].to_string()));
+                may_be_value = false;
+            }
+            _ if word.starts_with('-') => may_be_value = !word.contains('=') && !RUNNER_SWITCHES.contains(&word),
+            _ => {
+                found.push(start(&words[i - 1..]));
+                if !may_be_value {
+                    break;
+                }
+                may_be_value = false;
+            }
         }
-        words.get(i..).filter(|command| !command.is_empty())
-    };
+    }
+    found
+}
+
+/// What a package runner starts: what follows `npx` or `bunx`, and what follows the `exec`
+/// (`x`, `dlx`) of npm, pnpm, yarn or bun (`runner_starts`). bun's `exec` takes a line for a
+/// shell, not a program and its arguments (`bun exec 'npm publish && ls'`).
+fn runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<Started<'a>> {
     match prog {
-        "npx" | "bunx" => command(args).into_iter().collect(),
-        "npm" | "pnpm" | "yarn" | "bun" => {
-            pm_subs(prog, args).into_iter().filter(|(sub, _)| matches!(*sub, "exec" | "x" | "dlx")).filter_map(|(_, rest)| command(rest)).collect()
-        }
+        "npx" | "bunx" => runner_starts(args, false),
+        "npm" | "pnpm" | "yarn" | "bun" => pm_subs(prog, args)
+            .into_iter()
+            .filter(|(sub, _)| matches!(*sub, "exec" | "x" | "dlx"))
+            .flat_map(|(sub, rest)| runner_starts(rest, prog == "bun" && sub == "exec"))
+            .collect(),
         _ => vec![],
     }
 }
 
-/// The words after a package manager's `config` subcommand, when the line has one, behind an
-/// option's value too (`subcommands`).
-fn config_args<'a>(prog: &str, args: &'a [String]) -> Option<&'a [String]> {
-    let at = args.iter().position(|a| a == "config")?;
-    subcommands(prog, &args[..=at]).contains(&"config").then(|| &args[at + 1..])
+/// Is this word the `config` subcommand of the program? npm and pnpm also call it `c`.
+fn names_config(prog: &str, word: &str) -> bool {
+    word == "config" || (word == "c" && matches!(prog, "npm" | "pnpm"))
+}
+
+/// The words after a package manager's `config` subcommand, for each word of the line that
+/// can be it: behind an option's value too (`subcommands`), where a word named like it may be
+/// that value instead (`npm --prefix c config set …`).
+fn config_args<'a>(prog: &str, args: &'a [String]) -> impl Iterator<Item = &'a [String]> {
+    (0..args.len())
+        .filter(move |&at| names_config(prog, &args[at]) && subcommands(prog, &args[..=at]).last() == Some(&args[at].as_str()))
+        .map(move |at| &args[at + 1..])
 }
 
 /// Does a package manager's command write its settings (`npm config set registry …`,
@@ -1007,13 +1057,14 @@ fn config_args<'a>(prog: &str, args: &'a [String]) -> Option<&'a [String]> {
 fn changes_settings(prog: &str, args: &[String]) -> bool {
     /// What `config` is told to do when it writes.
     const WRITES: &[&str] = &["set", "delete", "del", "rm", "unset", "edit", "fix"];
-    let config_writes = || config_args(prog, args).is_some_and(|rest| first_non_flag(rest).is_some_and(|action| WRITES.contains(&action)));
+    // What it is told to do, behind an option's value too (`npm config --location global set …`).
+    let config_writes = || config_args(prog, args).any(|rest| subcommands(prog, rest).iter().any(|action| WRITES.contains(action)));
     match prog {
         // `npm set key value` is `npm config set key value`.
         "npm" | "pnpm" => config_writes() || pm_subs(prog, args).iter().any(|(sub, _)| *sub == "set"),
         "yarn" | "pip" | "pip3" => config_writes(),
         // poetry has no `set`: a key with a value writes it, and `--unset` removes it.
-        "poetry" => config_args(prog, args).is_some_and(|rest| has(rest, &["--unset"]) || rest.iter().filter(|a| !a.starts_with('-')).count() >= 2),
+        "poetry" => config_args(prog, args).any(|rest| has(rest, &["--unset"]) || rest.iter().filter(|a| !a.starts_with('-')).count() >= 2),
         // `gem sources` lists them; `--add`, `--remove` and the like change the list.
         "gem" => first_non_flag(args) == Some("sources") && options(args).any(|option| !matches!(option, "-l" | "--list")),
         _ => false,
@@ -1178,7 +1229,21 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
         let mut read = 0;
         while let Some((runner, runner_args)) = runs.get(read).cloned() {
             read += 1;
-            for words in runner_commands(&runner, &runner_args) {
+            for command in runner_commands(&runner, &runner_args) {
+                let words = match command {
+                    Started::Program(words) => words,
+                    // A line for a shell is read as `sh -c` is.
+                    Started::ShellLine(line) if depth < 3 => {
+                        for r in command_risks(&line, cwd, worktree, depth + 1) {
+                            add(&r);
+                        }
+                        continue;
+                    }
+                    Started::ShellLine(_) => {
+                        add("runs dynamic code");
+                        continue;
+                    }
+                };
                 // Past a wrapper in front of it (`pnpm exec env CI=1 npm publish`).
                 let Some(at) = classify::command_start(words) else {
                     add("runs dynamic code");
@@ -2596,6 +2661,27 @@ mod tests {
             "pnpm exec cargo publish",
             "pnpm exec npm token create",
             "npx npm login",
+            // behind the runner's own options, with a value or without
+            "npm exec -w web -- npm publish",
+            "npm exec --workspace web -- npm publish",
+            "npm exec --prefix web -- npm publish",
+            "npm exec -w web npm publish",
+            "npm exec --workspace=web npm publish",
+            "npx --registry http://localhost:4873 npm publish",
+            "npx --registry http://localhost:4873 -- npm publish",
+            "npx --no-install npm publish",
+            // a line for a shell
+            "npx -c 'npm publish'",
+            "bunx -c 'npm publish'",
+            "npx --call 'npm publish'",
+            "npx --call='npm publish'",
+            "npx -y -c 'cd web && npm publish'",
+            "npm exec -c 'npm publish'",
+            "bun exec 'npm publish'",
+            "bun exec npm publish",
+            "bun exec 'ls && npm publish'",
+            "bun --cwd web exec 'npm publish'",
+            "bun exec -- 'npm publish'",
         ] {
             assert!(risks(c).iter().any(|r| r == "publish"), "{c}: {:?}", risks(c));
         }
@@ -2626,8 +2712,23 @@ mod tests {
             "pnpm exec echo publish",
             "npx prettier --check .",
             "npx -p npm publish-docs",
+            "npx -c 'npm run build'",
+            "npx eslint -c publish.json .",
+            "pnpm exec vitest run -- publish",
+            "bun exec 'npm run build'",
+            "bun exec 'echo npm publish'",
         ] {
             assert!(!risks(c).iter().any(|r| r == "publish"), "{c}: {:?}", risks(c));
+        }
+        // A line for a shell that is nested too deep to read is dynamic code.
+        assert!(command_risks("bun exec 'npm publish'", None, None, 3).iter().any(|r| r == "runs dynamic code"));
+        // The tool's own options and arguments are not the runner's: nothing is read from them.
+        for c in ["npx -y prettier --check .", "npx eslint -c .eslintrc.json .", "npx --no-install eslint -- .", "pnpm exec eslint -- ."] {
+            assert!(!risks(c).iter().any(|r| r == "runs dynamic code"), "{c}: {:?}", risks(c));
+        }
+        // pnpm runs the words in a shell with `--shell-mode`, as with `-c`.
+        for c in ["pnpm --shell-mode exec 'npm publish'", "pnpm exec --shell-mode 'npm publish'", "pnpm -c exec 'npm publish'"] {
+            assert!(risks(c).iter().any(|r| r == "runs dynamic code"), "{c}: {:?}", risks(c));
         }
         // `cargo login` is your account, not a download a saved rule may cover.
         assert_eq!(risks("cargo login abc"), ["publish"]);
@@ -2672,6 +2773,9 @@ mod tests {
             "pnpm exec pip install requests",
             "pnpm exec env CI=1 npm ci",
             "npx npx npm install left-pad",
+            "npm exec -w web -- npm install left-pad",
+            "npx -c 'npm install left-pad'",
+            "bun exec 'npm install left-pad'",
         ] {
             assert!(risks(c).iter().any(|r| r == PACKAGE_INSTALL), "{c}: {:?}", risks(c));
         }
@@ -2701,6 +2805,8 @@ mod tests {
             ("yarn --cwd web global add typescript", "outside worktree"),
             ("pnpm exec sudo npm install", "sudo"),
             ("pnpm exec git push", "push"),
+            ("bun exec 'git push'", "push"),
+            ("npx -c 'git push'", "push"),
             ("npx rm -rf dist", "deletes files"),
         ] {
             assert!(risks(c).iter().any(|r| r == risk), "{c}: {:?}", risks(c));
@@ -2745,6 +2851,17 @@ mod tests {
             "sh -c 'pip config set global.index-url http://localhost:3141'",
             "pnpm exec npm config set registry http://localhost:4873",
             "cd web && npm config set registry http://localhost:4873",
+            // `c` is npm's and pnpm's short name for `config`
+            "npm c set registry http://localhost:4873",
+            "pnpm c set store-dir .pnpm-store",
+            "npm --prefix web c set registry http://localhost:4873",
+            "npm --prefix c config set registry http://localhost:4873",
+            "npm c delete registry",
+            // what it is told to do stands behind an option's value
+            "npm config --location global set registry http://localhost:4873",
+            "npm config --location project delete registry",
+            "pip config --editor vi edit",
+            "bun exec 'npm config set registry http://localhost:4873'",
         ] {
             assert!(risks(c).iter().any(|r| r == OWN_SETUP), "{c}: {:?}", risks(c));
             for mode in [ApprovalMode::Balanced, ApprovalMode::Autonomous] {
@@ -2784,12 +2901,21 @@ mod tests {
             "gem sources -l",
             "npm run config set registry",
             "npm run set-version",
+            "npm c get registry",
+            "npm c list",
+            "pnpm c get store-dir",
+            "npm config --json list",
+            "npm config --location project get registry",
+            "npm run c set registry",
+            "cargo c",
+            "yarn c set registry",
         ] {
             assert!(risks(c).is_empty(), "{c}: {:?}", risks(c));
             let v = eval_in(wt, ApprovalMode::Autonomous, false, command(c, wt));
             assert!(matches!(v, Verdict::Allow { .. }), "{c}: {v:?}");
         }
         assert!(!risks("npm install config").iter().any(|r| r == OWN_SETUP), "a package named config");
+        assert!(!risks("npm install c").iter().any(|r| r == OWN_SETUP), "a package named c");
     }
 
     #[test]

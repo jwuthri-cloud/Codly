@@ -294,6 +294,8 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         ("pnpm install 2>&1 | tail -5", Some("pnpm install")),
         ("pnpm install --frozen-lockfile 2>&1 | grep -v WARN | head -40", Some("pnpm install")),
         ("cd web && cargo test -p core 2>&1 | tail -20", Some("cargo test")),
+        // `c` is `config` for npm and pnpm only: for cargo it is `check`.
+        ("cargo c -p core", Some("cargo c")),
         ("git add -A && git status", Some("git add")),
         ("pnpm install || true", Some("pnpm install")),
         ("pnpm install && echo done", Some("pnpm install")),
@@ -369,6 +371,17 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
         "npx npm publish",
         "pnpm --filter web exec npm publish",
         "pnpm exec npm config set registry http://localhost:4873",
+        // Behind the runner's own options, and as a line for a shell.
+        "npm exec -w web -- npm publish",
+        "npm exec --prefix web -- npm publish",
+        "npx -c 'npm publish'",
+        "bunx -c 'npm publish'",
+        "bun exec 'npm publish'",
+        "pnpm --shell-mode exec 'npm publish'",
+        // npm's short name for `config`, and an option's value in front of what it is told to do.
+        "npm c set registry http://localhost:4873",
+        "npm c get registry",
+        "npm config --location global set registry http://localhost:4873",
         // An install for your account or the whole machine writes outside the worktree.
         "npm install -g some-pkg",
         "npm install --location=global some-pkg",
