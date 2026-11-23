@@ -166,6 +166,7 @@ export class Sim {
       triples: this.triples,
       artifacts: [...this.artifacts.values()],
       events: this.log.slice(-2000),
+      session_events: [], // the demo's agents have no MCP servers and leave no command running
     };
   }
 

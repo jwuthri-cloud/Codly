@@ -1223,7 +1223,10 @@ impl ClaudeNormalizer {
             "stream_event" => self.on_stream_event(v, &mut out),
             "assistant" => self.on_assistant(v, &mut out),
             "user" => self.on_user(v, &mut out),
-            "result" => self.on_result(v, &mut out),
+            "result" => {
+                self.on_result(v, &mut out);
+                self.ask_about_connecting_mcp();
+            }
             "rate_limit_event" => self.on_rate_limit(v, &mut out),
             "control_request" => self.on_control_request(v, &mut out),
             "control_cancel_request" => self.on_cancel(v, &mut out),
@@ -1394,6 +1397,15 @@ impl ClaudeNormalizer {
         self.outbox.push(json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } }));
     }
 
+    /// A turn is over and a server was still connecting when the CLI last gave it: the CLI is
+    /// asked where its servers stand now. No line of the turn says how that ended, and a run
+    /// of one turn (a worker's task) has no next init line.
+    fn ask_about_connecting_mcp(&mut self) {
+        if self.mcp.values().any(|(status, _)| status == "pending") {
+            self.ask_mcp_status();
+        }
+    }
+
     /// One MCP server as the CLI just gave it: an event when its state or its reason is new.
     fn mcp_server(&mut self, name: &str, status: &str, error: Option<&str>, out: &mut Vec<EventKind>) {
         let seen = (status.to_string(), error.map(str::to_owned));
@@ -1414,21 +1426,27 @@ impl ClaudeNormalizer {
     }
 
     /// The answer to `mcp_status`: where each of the user's servers stands, and one line for
-    /// the ones the init line gave as failed, each with the CLI's reason ("Connection
-    /// closed"). A server that started since is left out of that line. So is one that wants a
-    /// sign-in: it is the lasting state of a server nobody signed in to, not a failure of
-    /// this run, and its state says it. When the CLI cannot answer, the names are still said.
+    /// the ones that did not start, each with the CLI's reason ("Connection closed"): the ones
+    /// the init line gave as failed, and the ones that were still connecting when the CLI last
+    /// gave them and are failed now. A server that started since is left out of that line. So
+    /// is one that wants a sign-in: it is the lasting state of a server nobody signed in to,
+    /// not a failure of this run, and its state says it. When the CLI cannot answer, the names
+    /// the init line gave as failed are still said.
     fn on_control_response(&mut self, resp: &Value, out: &mut Vec<EventKind>) {
         if !self.asked(resp) {
             return;
         }
-        let failed = std::mem::take(&mut self.mcp_failed);
+        let mut failed = std::mem::take(&mut self.mcp_failed);
         let servers = if resp["subtype"] == "success" { resp["response"]["mcpServers"].as_array() } else { None };
         let reason = |s: &Value| s["error"].as_str().map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned);
         for s in servers.into_iter().flatten() {
             if let (Some(name), Some(status)) = (s["name"].as_str(), s["status"].as_str())
                 && name != "codly"
             {
+                let was_connecting = self.mcp.get(name).is_some_and(|(known, _)| known == "pending");
+                if status == "failed" && was_connecting && !failed.iter().any(|f| f == name) {
+                    failed.push(name.to_string());
+                }
                 self.mcp_server(name, status, reason(s).as_deref(), out);
             }
         }
@@ -3030,6 +3048,57 @@ mod tests {
         assert_eq!(mcp_states(&ev), [("slow", Connected, None)]);
         assert!(matches!(&ev[..], [_, EventKind::Unknown { raw_type }] if raw_type == "mcp_server/sleeping"), "{ev:?}");
         assert!(norm.outbox.is_empty());
+    }
+
+    /// A server that still connects at a turn's init line: the CLI is asked about it once more
+    /// when the turn is over (a run of one turn has no next init line), so the server does not
+    /// stay "connecting" for the whole run, and one that failed meanwhile is said. The init
+    /// line with `pending` was not recorded; the status word is (`r4-mcp-needs-auth`, `host-1`).
+    #[test]
+    fn a_server_that_was_still_connecting_is_asked_about_when_the_turn_is_over() {
+        use McpServerStatus::{Connected, Connecting, Failed};
+        let asked = json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } });
+        let init = json!({ "type": "system", "subtype": "init", "tools": [], "mcp_servers": [
+            { "name": "codly", "status": "connected" }, { "name": "slow", "status": "pending" }, { "name": "late", "status": "pending" }, { "name": "git", "status": "connected" }
+        ] });
+        let result = json!({ "type": "result", "subtype": "success", "is_error": false, "result": "done", "duration_ms": 5 });
+        // The answer in the recorded shape (`mcpServers`: name, status, and `error` on a failed one).
+        let answer = |servers: Value| json!({ "type": "control_response", "response": { "subtype": "success", "request_id": MCP_STATUS_REQUEST, "response": { "mcpServers": servers } } });
+
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.turn_started("go");
+        let ev = norm.on_message(&init);
+        assert_eq!(mcp_states(&ev), [("slow", Connecting, None), ("late", Connecting, None), ("git", Connected, None)]);
+        assert!(norm.outbox.is_empty(), "nothing failed: nothing to ask during the turn");
+        let ev = norm.on_message(&result);
+        assert!(matches!(ev.iter().find(|e| matches!(e, EventKind::TurnCompleted { .. })), Some(EventKind::TurnCompleted { status: TurnStatus::Completed, .. })), "{ev:?}");
+        assert_eq!(norm.outbox, [asked.clone()]);
+
+        // One failed meanwhile, one connected: each has its state, and the failure is said.
+        norm.outbox.clear();
+        let ev = norm.on_message(&answer(json!([
+            { "name": "slow", "status": "failed", "error": "Connection closed" }, { "name": "late", "status": "connected" }, { "name": "git", "status": "connected" }
+        ])));
+        assert_eq!(mcp_states(&ev), [("slow", Failed, Some("Connection closed")), ("late", Connected, None)]);
+        assert_eq!(errors(&ev), [("These MCP servers did not start, so the agent works without their tools in this run: slow (Connection closed)", false)]);
+        // No server connects any more: the next turn's end asks nothing.
+        norm.turn_started("again");
+        norm.on_message(&result);
+        assert!(norm.outbox.is_empty());
+
+        // A CLI that cannot answer: the server is not called failed, nothing is said, and the
+        // next turn's end asks again.
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.turn_started("go");
+        norm.on_message(&init);
+        norm.on_message(&result);
+        assert_eq!(norm.outbox, [asked.clone()]);
+        let refused = json!({ "type": "control_response", "response": { "subtype": "error", "request_id": MCP_STATUS_REQUEST, "error": "Unsupported control request subtype: mcp_status" } });
+        assert!(norm.on_message(&refused).is_empty());
+        norm.outbox.clear();
+        norm.turn_started("again");
+        norm.on_message(&result);
+        assert_eq!(norm.outbox, [asked]);
     }
 
     /// The MCP server events, as (name, state, reason).

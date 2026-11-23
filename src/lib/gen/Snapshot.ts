@@ -30,4 +30,10 @@ request_prefs: { [key in string]: RequestPrefs }, agents: Array<Agent>, plans: A
 /**
  * Most recent persisted events (for timeline, inspector and world replay).
  */
-events: Array<EventRow>, };
+events: Array<EventRow>, 
+/**
+ * What runs beside the live runs and is older than `events`: the last `mcp_server` event
+ * of each of their servers, and the `background_command` event of each command that
+ * still runs. Oldest first.
+ */
+session_events: Array<EventRow>, };

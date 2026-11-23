@@ -199,6 +199,8 @@ struct Live {
     watch: watchdog::Watch,
     /// Who asked its turn to stop, and whether its adapter gave that turn up (interrupts.rs).
     interrupt: interrupts::Interrupt,
+    /// Its MCP servers and running background commands, for a snapshot (live_session.rs).
+    session_rows: live_session::SessionRows,
 }
 
 /// A member's reply the Lead of `thread` waits for: the reply of turn number `due`.

@@ -2025,6 +2025,10 @@ pub struct Snapshot {
     pub artifacts: Vec<Artifact>,
     /// Most recent persisted events (for timeline, inspector and world replay).
     pub events: Vec<EventRow>,
+    /// What runs beside the live runs and is older than `events`: the last `mcp_server` event
+    /// of each of their servers, and the `background_command` event of each command that
+    /// still runs. Oldest first.
+    pub session_events: Vec<EventRow>,
 }
 
 /// Recent workspaces for the welcome screen.

@@ -143,6 +143,7 @@ impl Inner {
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
             EventKind::TurnStarted { input } => self.checkpoint_turn(&ctx.agent_id, &ctx.run_id, input.is_some()), // the files before the turn
             EventKind::PromptSteered { .. } => self.restore_note_read(&ctx.agent_id), // the note came with that prompt
+            EventKind::McpServer { .. } | EventKind::BackgroundCommand { .. } => self.session_row_seen(&ctx.agent_id, &r),
             EventKind::Decision { decision_type, detail, .. } if decision_type == crate::adapters::MODE_CHANGED => {
                 self.control_mode_changed(&ctx.agent_id, ctx.role, detail)
             }

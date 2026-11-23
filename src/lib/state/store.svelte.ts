@@ -347,6 +347,9 @@ class CodlyStore {
   /** The oldest event the held state was built from (the start of the last snapshot that took
    *  the place of everything). The log may have been trimmed past it since. */
   private origin = 0;
+  /** The snapshot's `session_events`: the MCP servers and the running background commands of
+   *  the live runs, from before `origin`. An agent's state that is built again starts from them. */
+  private beside: EventRow[] = [];
   /** Per thread that was asked: is there earlier history, is a page loading. */
   earlier = $state.raw<Record<string, Earlier>>({});
   /** Per thread loaded further back: how far (an event id), and for which owner. */
@@ -547,8 +550,11 @@ class CodlyStore {
     this.events = evs.slice(-LOG_CAP);
     this.origin = evs[0]?.id ?? s.as_of + 1;
     this.sessionStart = evs[0]?.ts ?? Date.now();
+    // What runs beside the live runs and is older than the log: state, not rows of the log.
+    this.beside = [...(s.session_events ?? [])].sort((a, b) => a.id - b.id);
     // Replay the log into the derived structures only: entities are already current.
     this.owned.clear();
+    for (const ev of this.beside) this.derive(ev, true);
     for (const ev of evs) this.derive(ev, true);
     this.settle();
     this.rev++;
@@ -1163,6 +1169,7 @@ class CodlyStore {
     if (said.length) this.chats = [...this.chats, ...said].sort((a, b) => a.ts - b.ts);
     if (owner) {
       const all = new Map<number, EventRow>();
+      for (const ev of this.beside) if (ev.agent_id === owner) all.set(ev.id, ev);
       for (const ev of rows) if (ev.agent_id === owner) all.set(ev.id, ev);
       for (const ev of this.deep.get(owner) ?? []) all.set(ev.id, ev);
       const log = [...all.values()].sort((a, b) => a.id - b.id);

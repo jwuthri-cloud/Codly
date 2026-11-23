@@ -49,7 +49,8 @@ use crate::model::*;
 /// Held steer notes / prompts per agent; the oldest drop first.
 const MAX_HELD: usize = 32;
 
-/// How long a CLI has to answer a session request. Claude answers at once, also during a turn.
+/// How long a CLI has to answer a session request. Claude answers at once, also during a turn
+/// (a reconnect of an MCP server has its own limit: live_session.rs).
 const SESSION_ANSWER_LIMIT: Duration = Duration::from_secs(10);
 
 /// Claude Code's own command that summarizes the conversation to free context. Sent as a user
@@ -392,12 +393,17 @@ impl Inner {
     }
 
     /// Wait for the CLI's answer to `ask_session`.
-    pub(super) async fn session_answer(mut answer: mpsc::UnboundedReceiver<Result<Value, String>>) -> Result<Value> {
-        match tokio::time::timeout(SESSION_ANSWER_LIMIT, answer.recv()).await {
+    pub(super) async fn session_answer(answer: mpsc::UnboundedReceiver<Result<Value, String>>) -> Result<Value> {
+        Self::session_answer_within(answer, SESSION_ANSWER_LIMIT).await
+    }
+
+    /// As `session_answer`, for a request the CLI answers only when work of its own is over.
+    pub(super) async fn session_answer_within(mut answer: mpsc::UnboundedReceiver<Result<Value, String>>, limit: Duration) -> Result<Value> {
+        match tokio::time::timeout(limit, answer.recv()).await {
             Ok(Some(Ok(v))) => Ok(v),
             Ok(Some(Err(e))) => bail!("Claude Code answered: {e}"),
             Ok(None) => bail!("the agent's process ended before it answered"),
-            Err(_) => bail!("Claude Code did not answer within {} s", SESSION_ANSWER_LIMIT.as_secs()),
+            Err(_) => bail!("Claude Code did not answer within {} s", limit.as_secs()),
         }
     }
 

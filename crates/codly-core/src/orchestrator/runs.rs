@@ -132,6 +132,7 @@ impl Inner {
                     continue_owed: None,
                     watch: super::watchdog::Watch::new(),
                     interrupt: Default::default(),
+                    session_rows: Default::default(),
                 },
             );
         }

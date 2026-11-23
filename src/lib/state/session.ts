@@ -73,6 +73,23 @@ export const MCP_HINT: Record<McpServerStatus, string> = {
 /** A server Codly can ask Claude Code to connect again. */
 export const canReconnect = (s: McpServer) => s.status === 'failed' || s.status === 'needs_sign_in';
 
+/**
+ * What a reconnect that did not connect the server came back with: Claude Code's own answer,
+ * or why it gave none. `seen` is the state of the server it is about (`McpServer.ts` when you
+ * asked).
+ */
+export type ReconnectAnswer = { text: string; seen: number };
+
+/**
+ * The answer to show under a server, beside the server's own reason. An event of the server
+ * that came since you asked says where it stands now (Codly asks Claude Code after every
+ * reconnect), so the answer gives way to it. One that only repeats the reason is not said twice.
+ */
+export function reconnectAnswer(s: McpServer, answer: ReconnectAnswer | undefined): string | null {
+  if (!answer || answer.seen !== s.ts || !canReconnect(s)) return null;
+  return s.error && answer.text.includes(s.error) ? null : answer.text;
+}
+
 /** The section's line when it is closed: "2 connected · 1 needs sign-in". */
 export function mcpSummary(list: McpServer[]): string {
   const n = (status: McpServerStatus) => list.filter((s) => s.status === status).length;
