@@ -4,18 +4,21 @@ import type { Agent } from '../gen/Agent';
 import type { Provider } from '../gen/Provider';
 import type { TeamMember } from '../gen/TeamMember';
 
-/** Each CLI's thinking-effort levels (Gemini and OpenCode take none through Codly). */
+/** The thinking-effort levels of a CLI that lists none itself: Claude Code. Codex's come with
+ *  its model list, per model (`api.modelCatalog`, see ./models.ts); Gemini and OpenCode take
+ *  none through Codly. */
 export const EFFORTS: Partial<Record<Provider, string[]>> = {
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
-  codex: ['low', 'medium', 'high', 'xhigh'],
 };
-const ALL_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+/** Every level the "model:effort" format carries, weakest first (the core's list,
+ *  `classify::split_model_effort`). Another word after the colon is part of the model's name. */
+export const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
 /** "opus:high" → { name: "opus", effort: "high" }; a colon that is not an effort stays in the name. */
 export function splitModel(m: string | null): { name: string; effort: string } {
   const s = m ?? '';
   const i = s.lastIndexOf(':');
-  return i >= 0 && ALL_EFFORTS.includes(s.slice(i + 1)) ? { name: s.slice(0, i), effort: s.slice(i + 1) } : { name: s, effort: '' };
+  return i >= 0 && EFFORT_LEVELS.includes(s.slice(i + 1)) ? { name: s.slice(0, i), effort: s.slice(i + 1) } : { name: s, effort: '' };
 }
 
 export function joinModel(name: string, effort: string): string | null {

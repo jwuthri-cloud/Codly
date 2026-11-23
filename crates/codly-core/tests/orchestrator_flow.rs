@@ -4371,6 +4371,25 @@ async fn a_task_brief_points_at_the_code_as_the_tasks_worktree_has_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_code_map_follows_the_files_without_a_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let log = Arc::new(Mutex::new(Log::default()));
+    let idle: Behavior = Arc::new(|turn: FakeTurn| Box::pin(async move { turn.say("ok") }));
+    let core = start_full(dir.path(), FakeSpawner { log, lead: idle.clone(), worker: idle }, vec![claude()], true).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let listed = async |path: &str| core.repo_map().await.is_ok_and(|files| files.iter().any(|f| f.path == path));
+    // The index loads in the background: its first build has the repo's files.
+    wait_for("the code map", 15, async || listed("README.md").await.then_some(())).await;
+
+    // You add a file in your checkout while Codly runs. Nothing searches the code: the map
+    // itself (the office's code city, the composer's `@` menu) has the file when it is read.
+    std::fs::write(repo.join("late.rs"), "pub fn late_arrival() {}\n").unwrap();
+    wait_for("the new file on the code map", 15, async || listed("late.rs").await.then_some(())).await;
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_background_office_keeps_its_code_index() {
     let dir = tempfile::tempdir().unwrap();
     let (a, b) = (temp_repo(&dir.path().join("a")), temp_repo(&dir.path().join("b")));

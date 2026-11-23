@@ -7,13 +7,14 @@
   import type { MemberKind } from '../lib/gen/MemberKind';
   import type { Provider } from '../lib/gen/Provider';
   import type { TeamMember } from '../lib/gen/TeamMember';
-  import { api } from '../lib/api';
   import { saveWorkspaceTeam, updateSettings } from '../lib/state/actions';
+  import { ModelCatalogs } from '../lib/state/modelCatalogs.svelte';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { moveItem } from '../lib/util/accounts';
   import { PROVIDER_LABEL } from '../lib/util/labels';
-  import { EFFORTS, PRESETS, ROLE_TITLES, fromPreset, joinModel, memberTitle, splitModel, teamProblem } from '../lib/util/team';
+  import { defaultEffortLabel, effortOptions, keptEffort, optionLabel, troubleNote } from '../lib/util/models';
+  import { PRESETS, ROLE_TITLES, fromPreset, joinModel, memberTitle, splitModel, teamProblem } from '../lib/util/team';
   import Icon from '../components/Icon.svelte';
 
   const HARNESSES: Provider[] = ['claude', 'codex', 'gemini', 'opencode'];
@@ -65,15 +66,20 @@
     save(list.filter((_, j) => j !== i));
   }
 
-  // Model names per CLI, for the model field's suggestions (typing any name still works).
-  let models = $state<Partial<Record<Provider, string[]>>>({});
+  // Each CLI's catalog: the model field's suggestions and the efforts each model takes (typing
+  // any name still works).
+  const catalogs = new ModelCatalogs();
+  const harnesses = $derived([...new Set(list.map((m) => m.provider))]);
   $effect(() => {
-    for (const p of new Set(list.map((m) => m.provider)))
-      if (!(p in models)) {
-        models[p] = [];
-        api.listModels(p).then((l) => (models[p] = l)).catch(() => {});
-      }
+    for (const p of harnesses) catalogs.ask(p);
   });
+  /** One line per CLI whose own model list is not what the fields suggest, with the reason. */
+  const listTroubles = $derived(
+    harnesses.flatMap((cli) => {
+      const text = troubleNote(catalogs.of(cli), catalogs.failure(cli), PROVIDER_LABEL[cli]);
+      return text ? [{ cli, text }] : [];
+    }),
+  );
   const agentOf = (id: string) => store.agents.find((a) => a.member === id);
 </script>
 
@@ -108,10 +114,15 @@
     <p class="r-title">Only in {store.workspace?.name}</p>
   {/if}
 
+  {#each listTroubles as t (t.cli)}
+    <p class="small warn" role="status">{t.text} <button class="link" onclick={() => catalogs.ask(t.cli, true)}>Try again</button></p>
+  {/each}
   {#if list.length}
     <ul class="members">
       {#each list as m, i (m.id || i)}
         {@const model = splitModel(m.model)}
+        {@const catalog = catalogs.of(m.provider)}
+        {@const efforts = effortOptions(catalog, m.provider, model.name, model.effort)}
         {@const agent = agentOf(m.id)}
         <li class="member" class:off={!m.enabled}>
           <div class="m-top">
@@ -141,15 +152,15 @@
             </label>
             <label class="field">
               <span class="f-label">Model</span>
-              <input class="input" list={`models-${i}`} value={model.name} placeholder="Default" spellcheck="false" autocomplete="off" onchange={(e) => patch(i, { model: joinModel(e.currentTarget.value, model.effort) })} />
-              <datalist id={`models-${i}`}>{#each models[m.provider] ?? [] as x (x)}<option value={x}></option>{/each}</datalist>
+              <input class="input" list={`models-${i}`} value={model.name} placeholder="Default" spellcheck="false" autocomplete="off" onchange={(e) => patch(i, { model: joinModel(e.currentTarget.value, keptEffort(catalog, m.provider, e.currentTarget.value.trim(), model.effort)) })} />
+              <datalist id={`models-${i}`}>{#each catalog?.models ?? [] as x (x.id)}<option value={x.id}>{optionLabel(x)}</option>{/each}</datalist>
             </label>
-            {#if EFFORTS[m.provider]}
+            {#if efforts.length}
               <label class="field">
                 <span class="f-label">Effort</span>
                 <select class="input" value={model.effort} onchange={(e) => patch(i, { model: joinModel(model.name, e.currentTarget.value) })}>
-                  <option value="">Default</option>
-                  {#each EFFORTS[m.provider] ?? [] as x (x)}<option value={x}>{x === 'xhigh' ? 'Extra high' : x[0].toUpperCase() + x.slice(1)}</option>{/each}
+                  <option value="">{defaultEffortLabel(catalog, model.name)}</option>
+                  {#each efforts as x (x.id)}<option value={x.id}>{x.label}</option>{/each}
                 </select>
               </label>
             {/if}
@@ -198,6 +209,7 @@
   .muted { color: var(--ink-3); font-weight: var(--w-reg); }
   .small { font-size: var(--t-sm); }
   .warn { color: var(--amber-ink); }
+  .link { color: var(--ink-1); font-weight: var(--w-med); text-decoration: underline; text-decoration-color: var(--line-3); text-underline-offset: 3px; }
   .grow { flex: 1; }
   .r-title { font-weight: var(--w-med); }
   .seg { display: inline-flex; align-self: flex-start; gap: 2px; padding: 2px; border-radius: var(--r-full); background: var(--surface-1); }

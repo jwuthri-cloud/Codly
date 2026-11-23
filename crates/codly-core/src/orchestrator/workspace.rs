@@ -154,11 +154,11 @@ impl Inner {
         });
     }
 
-    /// Bring an index up to date with the files on disk before a search: edits in your editor,
-    /// a pull or a branch switch reach it without a restart. Waits `INDEX_WAIT` at most; a
-    /// refresh that takes longer (a first build) goes on, and search results say that the
-    /// index is behind until it ends.
-    async fn freshen(&self, idx: &Arc<Index>) {
+    /// Bring an index up to date with the files on disk before a search or a read of the code
+    /// map: edits in your editor, a pull or a branch switch reach it without a restart. Waits
+    /// `INDEX_WAIT` at most; a refresh that takes longer (a first build) goes on, and search
+    /// results say that the index is behind until it ends.
+    pub(super) async fn freshen(&self, idx: &Arc<Index>) {
         let index = idx.clone();
         // Taken here, not on the thread that refreshes: when this search stops waiting, the
         // index knows that the refresh is a long one.
