@@ -432,13 +432,22 @@ that are new there are named (the index does not search them).
   checked against the folder it starts in, so a worktree whose files an agent changed starts
   without them. Until the files are trusted, Claude Code starts with `--setting-sources user`
   and `--strict-mcp-config` (which also keeps the user's own MCP servers out); Codex keeps its
-  own project-trust gate, which Codly does not change; Gemini CLI, OpenCode and Cursor have no
+  own project-trust gate, which Codly does not change, and the MCP servers of the user's own
+  Codex config start in every folder, trusted or not: they are the user's, not the repo's, so
+  only "Use my own CLI setup" turns them off (`SpawnSpec::use_user_setup` follows the folder's
+  trust for Claude Code alone); Gemini CLI, OpenCode and Cursor have no
   switch Codly has verified, so an agent on one of them is not started while the folder has
   files for that CLI: the start fails with a typed error that is not retried and costs the
-  agent no session, the scheduler gives its tasks to another CLI, and a review is done by a
-  CLI that can start in the task's worktree (none can: the task is blocked, never merged
-  without its review). A worktree whose files differ from the checkout's is remembered and
-  shown with its own files and fingerprint, to trust by itself. Every file is hashed whatever
+  agent no session, the scheduler gives its tasks to another CLI (a task that can go nowhere
+  else stays ready and says that it "waits for your choice about this folder's files", not
+  that the CLI is "parked", the word for a usage limit; it starts when you have chosen), and
+  a review is done by a CLI that can start in the task's worktree (none can: the task is
+  blocked, never merged without its review). A worktree whose files differ from the checkout's is remembered and
+  shown with its own files and fingerprint, to trust by itself. One kind of untracked file in
+  a worktree is not the worktree's: a byte-for-byte copy of a file that git does not track in
+  the checkout either (`.worktreeinclude` copies the user's git-ignored files into each new
+  worktree). It is the user's own there as in the checkout, so a trusted repo needs no second
+  choice for it; once an agent changes the copy it counts. Every file is hashed whatever
   its size; `.claude/worktrees/` (Claude Code's own worktrees) is not configuration. No worktree ever loads `.claude/settings.local.json`; in the checkout it
   loads when it is the user's own (untracked) or trusted. Instruction files (CLAUDE.md,
   AGENTS.md, GEMINI.md) are listed with the question and are not part of it.

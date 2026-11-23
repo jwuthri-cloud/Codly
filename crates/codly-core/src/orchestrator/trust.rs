@@ -13,8 +13,11 @@
 //! agent starts in:
 //! - in your checkout, the ones git tracks. A file git does not track there is your own
 //!   (Claude Code writes your `.claude/settings.local.json`), not the repo's;
-//! - in a Codly worktree, every file, tracked or not: an agent may have written it. Only an
-//!   untracked `.claude/settings.local.json` is left out, because no run there loads it.
+//! - in a Codly worktree, every file, tracked or not: an agent may have written it. Two kinds
+//!   of untracked file are left out: `.claude/settings.local.json`, because no run there loads
+//!   it, and a file that is, byte for byte, a file of your checkout that git does not track
+//!   either (`Yours`). That one is your own, as in your checkout: Codly copies the git-ignored
+//!   files that `.worktreeinclude` names into each new worktree.
 //!
 //! `.claude/worktrees/` is left out everywhere: Claude Code keeps its own worktrees (whole
 //! checkouts) there, and loads no configuration from it.
@@ -29,7 +32,9 @@
 //!   settings unless that file is your own, and only Codly's MCP servers (the one switch that
 //!   keeps the repo's `.mcp.json` out, `--strict-mcp-config`, keeps your own servers out too);
 //! - Codex keeps its own gate: it loads a project's `.codex/` only in a folder you trusted in
-//!   Codex itself, and Codly changes nothing there;
+//!   Codex itself, and Codly changes nothing there. The MCP servers of your own Codex config
+//!   are yours, not the folder's: they start whatever you chose here (`runs.rs` ties
+//!   `use_user_setup` to this choice for Claude Code only);
 //! - Gemini CLI, OpenCode and Cursor have no switch that Codly has verified, so an agent on
 //!   one of them is not started while the folder has files for that CLI.
 //!
@@ -43,7 +48,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -91,6 +96,9 @@ const DECISION: &str = "workspace_trust";
 /// The words every `NotStarted` error has: `retry::needs_you` knows a start that only your
 /// choice can fix by them.
 pub(super) const NOT_STARTED: &str = "is not started in this folder";
+/// What a waiting task says, after the CLI's name, while that CLI is not started in the repo
+/// (`AccountState::waits_for_you`). Not a usage limit: no wait ends it, your choice does.
+const WAITS_FOR_CHOICE: &str = "waits for your choice about this folder's files: Settings → Safety";
 
 /// A CLI that Codly did not start: the folder has files of its own for it that you have not
 /// trusted, and the CLI has no switch to start without them (`Inner::repo_config`). Only your
@@ -199,6 +207,36 @@ enum Folder {
     Worktree,
     /// Not a folder of a repo Codly has open: every file counts, and nothing is trusted.
     Plain,
+}
+
+/// Your checkout, for the scan of one of its worktrees: a file there that git does not track
+/// is yours when it is a copy of one of your checkout's own files.
+#[derive(Clone)]
+struct Yours {
+    checkout: PathBuf,
+    /// What git tracks in the checkout under the names of `CONFIG`: the repo's, not yours.
+    tracked: Vec<String>,
+}
+
+impl Yours {
+    /// Is `path`, a file of the worktree `dir` that git does not track there, your own: the
+    /// same bytes as the file at that path in your checkout, which git does not track either?
+    /// A link, a file your checkout does not have and a file that cannot be read are the
+    /// worktree's own.
+    fn has(&self, dir: &Path, path: &str) -> bool {
+        if self.tracked.iter().any(|t| t.eq_ignore_ascii_case(path)) {
+            return false;
+        }
+        let same = || -> std::io::Result<bool> {
+            let (copy, mine) = (dir.join(path), self.checkout.join(path));
+            let (copied, own) = (std::fs::symlink_metadata(&copy)?, std::fs::symlink_metadata(&mine)?);
+            if !copied.is_file() || !own.is_file() || copied.len() != own.len() {
+                return Ok(false);
+            }
+            Ok(digest(&copy, copied.len())?.0 == digest(&mine, own.len())?.0)
+        };
+        same().unwrap_or(false)
+    }
 }
 
 /// The CLI configuration one folder supplies.
@@ -320,13 +358,19 @@ fn digest(file: &Path, len: u64) -> std::io::Result<(Vec<u8>, Option<Vec<u8>>)> 
 }
 
 /// The CLI configuration `dir` supplies, read and hashed whatever its size. `tracked`: what
-/// git lists there under the names of `CONFIG`. Blocking: a set can be large.
-fn read_set(dir: &Path, tracked: &[String], kind: Folder) -> Result<Scan> {
+/// git lists there under the names of `CONFIG`. `yours`: your checkout, when `dir` is one of
+/// its worktrees. Blocking: a set can be large.
+fn read_set(dir: &Path, tracked: &[String], kind: Folder, yours: Option<&Yours>) -> Result<Scan> {
     let mut paths: BTreeSet<String> = tracked.iter().cloned().collect();
     if kind != Folder::Checkout {
         let is_tracked = |path: &str| tracked.iter().any(|t| t.eq_ignore_ascii_case(path));
-        // What no run in a worktree loads, and what git lists already under another case.
-        let counts = |path: &String| !is_tracked(path.as_str()) && !(kind == Folder::Worktree && path.eq_ignore_ascii_case(CLAUDE_LOCAL));
+        // Left out: what git lists already under another case, what no run in a worktree
+        // loads, and your own files that were copied there.
+        let counts = |path: &String| {
+            !is_tracked(path.as_str())
+                && !(kind == Folder::Worktree && path.eq_ignore_ascii_case(CLAUDE_LOCAL))
+                && !yours.is_some_and(|yours| yours.has(dir, path))
+        };
         let found = on_disk(dir).with_context(|| format!("read the CLI configuration in {}", dir.display()))?;
         paths.extend(found.into_iter().filter(counts));
     }
@@ -475,15 +519,27 @@ fn describe(path: &str, bytes: &[u8]) -> Vec<String> {
 }
 
 impl Inner {
-    /// The CLI configuration the folder `dir` supplies.
-    async fn scan(&self, dir: &Path, kind: Folder) -> Result<Scan> {
+    /// What git tracks in the checkout `dir` under the names of `CONFIG`.
+    async fn tracked_config(&self, dir: &Path) -> Result<Vec<String>> {
         let roots: Vec<&str> = CONFIG.iter().map(|(name, _)| *name).collect();
+        self.git.tracked(dir, &roots).await.context("list the CLI configuration files git tracks")
+    }
+
+    /// Your checkout of `ws`, for the scan of one of its worktrees.
+    async fn yours(&self, ws: &Workspace) -> Result<Yours> {
+        let checkout = PathBuf::from(&ws.repo_path);
+        Ok(Yours { tracked: self.tracked_config(&checkout).await?, checkout })
+    }
+
+    /// The CLI configuration the folder `dir` supplies. `yours`: your checkout, when `dir` is
+    /// one of its worktrees.
+    async fn scan(&self, dir: &Path, kind: Folder, yours: Option<Yours>) -> Result<Scan> {
         let tracked = match kind {
             Folder::Plain => vec![],
-            Folder::Checkout | Folder::Worktree => self.git.tracked(dir, &roots).await.context("list the CLI configuration files git tracks")?,
+            Folder::Checkout | Folder::Worktree => self.tracked_config(dir).await?,
         };
         let dir = dir.to_path_buf();
-        tokio::task::spawn_blocking(move || read_set(&dir, &tracked, kind)).await.context("read the CLI configuration")?
+        tokio::task::spawn_blocking(move || read_set(&dir, &tracked, kind, yours.as_ref())).await.context("read the CLI configuration")?
     }
 
     fn saved_trust(&self, ws_id: &str) -> Result<Saved> {
@@ -507,13 +563,14 @@ impl Inner {
     /// worktree that holds your checkout's files is left out: the checkout's question is its
     /// question.
     async fn untrusted_worktrees(&self, ws: &Workspace, checkout: &Scan, saved: &Saved) -> Result<Vec<(String, Scan)>> {
+        let folders: Vec<String> = self.noted(&ws.id)?.into_keys().filter(|folder| *folder != ws.repo_path && Path::new(folder).is_dir()).collect();
+        if folders.is_empty() {
+            return Ok(vec![]);
+        }
+        let yours = self.yours(ws).await?;
         let mut out = vec![];
-        for folder in self.noted(&ws.id)?.into_keys() {
-            let dir = Path::new(&folder);
-            if folder == ws.repo_path || !dir.is_dir() {
-                continue;
-            }
-            let set = match self.scan(dir, Folder::Worktree).await {
+        for folder in folders {
+            let set = match self.scan(Path::new(&folder), Folder::Worktree, Some(yours.clone())).await {
                 Ok(set) => set,
                 // No checkout any more (its worktree was removed by hand): no agent starts there.
                 Err(e) => {
@@ -530,7 +587,7 @@ impl Inner {
 
     async fn trust_status(&self, ws: &Workspace) -> Result<WorkspaceTrust> {
         let repo = Path::new(&ws.repo_path);
-        let scan = self.scan(repo, Folder::Checkout).await?;
+        let scan = self.scan(repo, Folder::Checkout, None).await?;
         let saved = self.saved_trust(&ws.id)?;
         let state = saved.state(&scan);
         let changed = state == TrustState::Ask && (!saved.trusted.is_empty() || saved.without.is_some());
@@ -544,7 +601,7 @@ impl Inner {
     }
 
     async fn choose_trust(&self, ws: &Workspace, choice: TrustChoice) -> Result<()> {
-        let scan = self.scan(Path::new(&ws.repo_path), Folder::Checkout).await?;
+        let scan = self.scan(Path::new(&ws.repo_path), Folder::Checkout, None).await?;
         let mut saved = self.saved_trust(&ws.id)?;
         let (summary, detail) = match choice.trust {
             None => {
@@ -593,6 +650,7 @@ impl Inner {
         };
         self.store.kv_set(&saved_key(&ws.id), &serde_json::to_string(&saved)?)?;
         self.decide_by(Some(&ws.id), None, DECISION, "human", summary, detail)?;
+        self.kick(); // a task that waits for this choice starts now, not at the scheduler's next look
         Ok(())
     }
 
@@ -612,7 +670,11 @@ impl Inner {
             Some(_) => Folder::Worktree,
             None => Folder::Plain,
         };
-        let scan = self.scan(cwd, kind).await?;
+        let yours = match (&ws, kind) {
+            (Some(ws), Folder::Worktree) => Some(self.yours(ws).await?),
+            _ => None,
+        };
+        let scan = self.scan(cwd, kind, yours).await?;
         let state = match &ws {
             Some(ws) => self.saved_trust(&ws.id)?.state(&scan),
             None => Saved::default().state(&scan),
@@ -651,7 +713,7 @@ impl Inner {
         let cli = provider.label();
         // A worktree that waits for a choice of its own holds other files than your checkout.
         let differs = match (&folder.ws, folder.kind, folder.state) {
-            (Some(ws), Folder::Worktree, TrustState::Ask) => match self.scan(Path::new(&ws.repo_path), Folder::Checkout).await {
+            (Some(ws), Folder::Worktree, TrustState::Ask) => match self.scan(Path::new(&ws.repo_path), Folder::Checkout, None).await {
                 Ok(checkout) => checkout.fingerprint != folder.scan.fingerprint,
                 Err(e) => {
                     tracing::warn!("could not read the CLI configuration of {}: {e:#}", ws.name);
@@ -672,8 +734,9 @@ impl Inner {
     }
 
     /// For the scheduler: the accounts of a CLI that Codly does not start in the repo as it
-    /// is are parked, so a task goes to another CLI, or waits and says why. (A new worktree
-    /// holds the files git tracks in your checkout.)
+    /// is take no task (`AccountState::waits_for_you`), so a task goes to another CLI, or
+    /// waits and says that it waits for your choice. (A new worktree holds the files git
+    /// tracks in your checkout.)
     pub(super) async fn park_untrusted(&self, ws: &Workspace, clis: &[CliInfo], mut accounts: Vec<AccountState>) -> Vec<AccountState> {
         let repo = Path::new(&ws.repo_path);
         // Most repos have no file of a CLI without a switch: then there is nothing to read.
@@ -693,9 +756,8 @@ impl Inner {
             if !accounts.iter().any(|a| a.provider == cli.provider) {
                 accounts.push(AccountState::implicit(cli));
             }
-            // An account that is parked already keeps its own reason.
-            for account in accounts.iter_mut().filter(|a| a.provider == cli.provider && a.parked.is_none()) {
-                account.parked = Some("its files in this repo wait for your trust: Settings → Safety".to_string());
+            for account in accounts.iter_mut().filter(|a| a.provider == cli.provider) {
+                account.waits_for_you = Some(WAITS_FOR_CHOICE.to_string());
             }
         }
         accounts
@@ -799,6 +861,61 @@ mod tests {
         assert_eq!(cli_of(".cursor/mcp.json"), Some(Provider::Cursor));
         assert_eq!(cli_of("src/.claude/settings.json"), None, "only the top of the folder a CLI starts in");
         assert_eq!(cli_of("CLAUDE.md"), None);
+    }
+
+    /// One file under `dir`, with its folders.
+    fn put(dir: &Path, rel: &str, text: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// Codly copies your git-ignored files into a new worktree (`.worktreeinclude`). A copy is
+    /// still yours there, so the worktree supplies what your checkout supplies and needs no
+    /// second choice. A file an agent wrote or changed is the worktree's own.
+    #[test]
+    fn your_own_files_copied_into_a_worktree_stay_yours() {
+        const SERVERS: &str = r#"{ "mcpServers": { "db": { "command": "npx" } } }"#;
+        let dir = tempfile::tempdir().unwrap();
+        let (checkout, worktree) = (dir.path().join("checkout"), dir.path().join("worktree"));
+        // The repo's settings (git tracks them in both folders) and your own MCP servers (git
+        // ignores the file).
+        for folder in [&checkout, &worktree] {
+            put(folder, ".claude/settings.json", "{}");
+            put(folder, ".mcp.json", SERVERS);
+        }
+        let tracked = vec![".claude/settings.json".to_string()];
+        let yours = Yours { checkout: checkout.clone(), tracked: tracked.clone() };
+        let supplied = |yours: Option<&Yours>| read_set(&worktree, &tracked, Folder::Worktree, yours).unwrap();
+        let paths = |set: Scan| set.files.into_iter().map(|file| file.path).collect::<Vec<_>>();
+        let in_checkout = read_set(&checkout, &tracked, Folder::Checkout, None).unwrap().fingerprint;
+
+        // With nothing to compare with, every file of the worktree counts.
+        assert_eq!(paths(supplied(None)), [".claude/settings.json", ".mcp.json"]);
+        // The copy is yours: the worktree supplies exactly what your checkout supplies.
+        assert_eq!(paths(supplied(Some(&yours))), [".claude/settings.json"]);
+        assert_eq!(supplied(Some(&yours)).fingerprint, in_checkout);
+
+        // An agent changed the copy, to a text of the same length or of another: its own file.
+        for changed in [SERVERS.replace("npx", "sh "), format!("{SERVERS}\n")] {
+            put(&worktree, ".mcp.json", &changed);
+            assert_eq!(paths(supplied(Some(&yours))), [".claude/settings.json", ".mcp.json"], "{changed}");
+            assert_ne!(supplied(Some(&yours)).fingerprint, in_checkout);
+        }
+        put(&worktree, ".mcp.json", SERVERS);
+        // A file your checkout does not have is the worktree's own.
+        put(&worktree, ".claude/commands/deploy.md", "deploy");
+        assert_eq!(paths(supplied(Some(&yours))), [".claude/commands/deploy.md", ".claude/settings.json"]);
+        std::fs::remove_file(worktree.join(".claude/commands/deploy.md")).unwrap();
+        // A file git tracks in your checkout is the repo's, not yours: it counts in a worktree
+        // whose branch does not track it.
+        let repos = Yours { checkout: checkout.clone(), tracked: vec![".claude/settings.json".to_string(), ".MCP.json".to_string()] };
+        assert_eq!(paths(supplied(Some(&repos))), [".claude/settings.json", ".mcp.json"]);
+        // A link is never a copy, even one that points at your own file.
+        std::fs::remove_file(worktree.join(".mcp.json")).unwrap();
+        std::os::unix::fs::symlink(checkout.join(".mcp.json"), worktree.join(".mcp.json")).unwrap();
+        let linked = supplied(Some(&yours));
+        assert!(linked.problem.as_deref().is_some_and(|p| p.contains(".mcp.json is not a regular file")), "{:?}", linked.problem);
     }
 
     #[test]

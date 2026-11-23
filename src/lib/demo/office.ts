@@ -322,8 +322,8 @@ export function demoLook(sim: Sim, id: string, lookSeed: string): Agent {
 const TRUST_ALLOWS: Record<Rank, string | null> = {
   intern: null,
   junior: 'edit files inside its own worktree without asking',
-  senior: 'work inside its own worktree without asking',
-  staff: 'work inside its own worktree without asking, and to merge without the cross-vendor review',
+  senior: 'work on its own where the approval rules see no risk (they read the command line, not what a script does)',
+  staff: 'work on its own where the approval rules see no risk (they read the command line, not what a script does), and to merge without the cross-vendor review',
 };
 
 /** Set how much you trust an agent: same rules as the core's `set_trust` (any level whatever

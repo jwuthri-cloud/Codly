@@ -69,12 +69,15 @@ export const titleOf = (c: Career) => (c.legend ? 'Legend' : rankLabel(c.rank));
 /** How much you let an agent do without asking (`career.trust`, mirror of `career::trust_allows`):
  *  a safety setting you set per agent, whatever its rank. The levels reuse the rank names in
  *  saved data and each includes the ones below it. `allows` says when a level changes anything,
- *  in a sentence that stands alone: a toast, a tooltip and the office show it without the list. */
+ *  in a sentence that stands alone: a toast, a tooltip and the office show it without the list.
+ *  It promises only what the approval rules keep: a file edit names its paths, so "inside its
+ *  own worktree" holds for edits; what a command does is not checked, so working on its own
+ *  is "where the rules see no risk". */
 export const TRUST: { level: Rank; label: string; allows: string }[] = [
   { level: 'intern', label: 'No extra trust', allows: 'It asks as your permissions say, like every other agent.' },
   { level: 'junior', label: 'Edits on its own', allows: 'Where permissions are Balanced, it edits files inside its own worktree without asking. Commands still ask.' },
-  { level: 'senior', label: 'Works on its own', allows: 'Where permissions are Balanced, it works inside its own worktree without asking. Risky actions still ask.' },
-  { level: 'staff', label: 'Works on its own, no review', allows: 'Where permissions are Balanced, it works inside its own worktree without asking (risky actions still ask). Whatever the permissions, its work merges without the cross-vendor review.' },
+  { level: 'senior', label: 'Works on its own', allows: 'Where permissions are Balanced, it works on its own where the approval rules see no risk. The rules read the command line, not what a script does: this is not a sandbox.' },
+  { level: 'staff', label: 'Works on its own, no review', allows: 'Where permissions are Balanced, it works on its own where the approval rules see no risk (they read the command line, not what a script does). Whatever the permissions, its work merges without the cross-vendor review.' },
 ];
 export const trustOf = (level: Rank) => TRUST.find((t) => t.level === level) ?? TRUST[0];
 /** Only an agent that writes on its own can be trusted: the Lead and reviewers always ask. */

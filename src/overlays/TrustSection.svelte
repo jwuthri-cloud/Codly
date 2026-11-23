@@ -8,12 +8,13 @@
   import { onMount } from 'svelte';
   import { store } from '../lib/state/store.svelte';
   import { workspaceTrust } from '../lib/state/workspaceTrust.svelte';
-  import { trustChoices, trustStatus, withoutTrust } from '../lib/util/workspaceTrust';
+  import { startsOwnCodexServers, trustChoices, trustStatus, withoutTrust } from '../lib/util/workspaceTrust';
   import LoadError from '../components/LoadError.svelte';
   import TrustFiles from './TrustFiles.svelte';
   import TrustWorktree from './TrustWorktree.svelte';
 
   const t = $derived(workspaceTrust.value);
+  const codexOwn = $derived(startsOwnCodexServers(store.settings, store.clis));
   let loading = $state(false);
 
   async function load() {
@@ -31,7 +32,7 @@
     <p class="desc">
       A repo can carry configuration that an agent CLI loads by itself when it starts there, before any approval: project settings with
       hooks or allow rules, and project MCP servers. Codly lets the CLIs load the files that git tracks in {store.workspace.name} only once you
-      trusted them.
+      trusted them. The choice is about the repo’s files: your own files that Codly copies into a new worktree stay yours there.
     </p>
     {#if t}
       {@const can = trustChoices(t)}
@@ -39,7 +40,7 @@
       {#if t.state !== 'nothing'}
         <TrustFiles files={t.files} problem={t.problem} instructions={t.instructions} />
         {#if t.state !== 'trusted'}
-          <ul class="desc">{#each withoutTrust(t) as line (line)}<li>{line}</li>{/each}</ul>
+          <ul class="desc">{#each withoutTrust(t, codexOwn) as line (line)}<li>{line}</li>{/each}</ul>
         {/if}
         <div class="choices">
           {#if can.trust}<button class="btn sm" onclick={() => workspaceTrust.choose(can.trust)}>Trust this folder</button>{/if}

@@ -144,7 +144,7 @@ describe('setTrust', () => {
     expect(await setTrust('a1', 'senior')).toBe(true);
     expect(core).toHaveBeenCalledWith('a1', 'senior');
     expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([
-      ['success', 'Ana: works on its own', 'Where permissions are Balanced, it works inside its own worktree without asking. Risky actions still ask.'],
+      ['success', 'Ana: works on its own', 'Where permissions are Balanced, it works on its own where the approval rules see no risk. The rules read the command line, not what a script does: this is not a sandbox.'],
     ]);
   });
 
