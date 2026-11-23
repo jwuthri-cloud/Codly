@@ -32,10 +32,12 @@ Each of these opens `acme/web` at once, except `?trust=ask` and `?hour=`.
 | `?trust=ask` | The repo has CLI settings of its own, and you were never asked about them. | Open `acme/web`: the trust dialog. |
 | `?merge=conflict` | Your branch changed a file that each finished plan changed too. Merge is refused. "Have an agent resolve it" gives the plan one more task; when it is done, the plan merges. | The plan's finished card: `?merge=conflict&autoplay=1&skip=180` |
 | `?preview=running` | A command you started earlier runs in each worktree you look at. | "Try it before you merge" on a finished plan's card (`?preview=running&autoplay=1&skip=180`), or on the Git tab of a 1:1 agent. |
-| `?intake=issue`, `?intake=pr` | The "From issue…" (or "From pull request…") dialog is open, and the scripted requests do not start: yours is the first. Any number works. Run the plan, then "Create pull request…": the description ends with `Closes #N`. | The dialog, then the request it opens. |
+| `?intake=issue`, `?intake=pr` | The "From issue…" (or "From pull request…") dialog is open, and the scripted requests do not start: yours is the first. Any number works. "Run plans without asking" is on in this state, and the plan waits all the same, because its request started from GitHub: its card says why above "Run plan". Run the plan, then "Create pull request…": the description ends with `Closes #N`. | The dialog, then the request it opens. |
 | `?helper=slow` | The helper (sub-agent) that Ada starts in her first task works for about a minute, not three seconds. | Ada's work in the first request: `?helper=slow&autoplay=1&skip=20` |
 | `?checks=on` | The repo's required checks are on, so Codly runs them for each task after the task's own checks. | A finished task's sheet, under its checks ("required by you"): `?checks=on&autoplay=1&skip=180` |
 | `?mode=plan` | Eli, a 1:1 Claude agent in the mode "plan first", was asked for a small change and shows a plan. Send it back with a note and it comes again; accept it and Eli asks before the edit. | Eli's conversation; the mode switch is in Eli's sheet, under Controls. |
+| `?resume=ask` | Codly "closed" while the first plan ran: two of its tasks were in work and wait, and nothing starts. The bar at the top asks. "Resume work" starts them; "Not now" keeps them waiting, with the button; cancel a waiting task and the bar counts one less. (`billing-api` plays its own script: it is not held.) | The bar at the top of the window, and the two tasks on the board. |
+| `?background=on` | Eli, a 1:1 Claude agent, ended its turn with two things at work in the background: a dev server and a helper. "Stop" ends the one you press it on. After the helper's stop Eli says so in a short turn of its own, as Claude Code does; after the command's stop no turn follows. Left alone, the helper reports after about three minutes. | Eli's sheet, under "In the background". |
 | `?hour=13` | The demo's clock says 13:00 when the page loads, and goes on from there (from `0`, below `24`; `21.5` is 21:30). The office and the map are lit for the hour of the clock, so this sets their light; every time on screen follows. It opens no repo. | The office and the map: `?hour=13&ws=1` with the app's dark theme (a bright office under a dark app), `?hour=23&ws=1` with its light theme. |
 
 ### A kind of request (`?approval=`)
@@ -62,7 +64,7 @@ and it is as you left it, plus what its agents did meanwhile: both offices keep 
 request that waits in the one you are not looking at shows as a notice. A draft you typed in a
 request of one office is there again when you come back to it.
 
-`docs-site`, the third office, is a tab with numbers only: opening it changes nothing.
+The wallet is one for both offices: XP and coins are the same whichever office is open.
 
 ## What the demo does as the app does
 
@@ -76,18 +78,20 @@ request of one office is there again when you come back to it.
 - A 1:1 Claude agent you hire works in its mode: "plan first" shows a plan, "ask for edits" asks
   before the edit, "accept edits" edits without a question.
 - Close office (on the map) refuses while the office has unfinished work or an agent is in a turn.
-  In the demo, `billing-api` has agents at work, `docs-site` closes, and `acme/web` closes once its
-  open tasks are done or cancelled.
+  In the demo, `billing-api` has agents at work, and `acme/web` closes once its open tasks are
+  done or cancelled.
 - MCP servers: the first Lead of an office (a Claude Code one) reports three when its session
   starts: `codly` is connected, `linear` needs a sign-in, `postgres` did not start. Its sheet shows
   the section "MCP servers". Reconnect connects `postgres` after a second; `linear` still needs
-  its sign-in, and the row says so.
+  its sign-in, and the row says so. Stop the Lead and the section is gone with its process, as in
+  the app; it is back when the Lead works again.
 - A command an agent leaves running in the background: in her first task Ada starts a type check
   (`npx tsc --noEmit --watch`) and stops it before she reports. While it runs, her sheet lists it
   under "In the background" with Stop, and her History has one row for each change of the list.
   Without `?autoplay=1` it stays until you answer her `npm install` request and then her
   question about the `localStorage` fallback: run the first plan (`?skip=20`), open Ada's sheet,
-  and press Stop.
+  and press Stop. Stop Ada herself and the section is gone: the
+  command ended with her process, as in the app.
 
 ## Other demo pages
 

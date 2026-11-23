@@ -7,7 +7,7 @@ in isolated git worktrees, with two synchronized views of the same truth: a **Wo
 animated three.js office where every motion is a real event).
 
 Research behind every decision: `docs/research/` (8 reports, `CRITIQUE.md`, the
-consolidated decision list, and three documents of Claude Code 2.1.311 recordings,
+consolidated decision list, and four documents of Claude Code 2.1.311 recordings,
 `cli-claude-stream-json-2.1.311*.md`) and `docs/research/munder/` (a source-level teardown of
 Munder Difflin). Fixtures captured from the real CLIs: `docs/research/fixtures/` (the Claude Code 2.1.311
 recordings in `fixtures/claude-2.1.311/`, with the scripts that made them in
@@ -97,8 +97,9 @@ opens": ask, always or never; ask is the default). Until your Resume the schedul
 task, no plan runs its integration checks and no task is checked again; the app shows one
 question (ask) or only the Resume work button (never). The tasks that wait are in the store:
 a start you leave without an answer asks again for the same ones. The question counts the
-tasks that still wait; once you cancelled them all and nothing else would start, the hold ends
-by itself. Each task that goes on gets a
+tasks that still wait; once you cancelled them all and nothing else could start, the hold ends
+by itself. A pause or a reached budget does not end it, in this run or at the next start: what
+starts when they end still waits for Resume work. Each task that goes on gets a
 "Resumed after restart" line in its history. A restart also keeps the fix and conflict rounds a
 task has used (in the store), the files of a task that waits for your answer (while its
 question is open), and what you were already told: the shell's notifier starts from the tasks
@@ -243,23 +244,31 @@ started in the background still runs, or while a helper (a subagent) still works
 waits (`orchestrator/background.rs`): the task says what it waits for, and its checks start when
 that work has ended. After 5 minutes Codly stops what still runs (Claude Code: its `stop_task`
 request), writes in the task's record what it stopped and what it could not stop, and checks the
-work as it is. The 5 minutes are one budget for a run of the worker: a turn of the worker in the
-middle (a test run that ended woke the CLI) does not start them again, and a retry of the task
-has 5 minutes of its own. A worker that ended its turn with no report is asked for one only
-after this wait. For Codex, a subagent that is still in a turn counts; that part is built from the
-protocol's types and is not verified on a live run. Claude Code says its whole list of
-background tasks at every change, and that list is the one record of this work
+work as it is. The 5 minutes are one budget each time the worker hands in its work: a turn of
+the worker in the middle (a test run that ended woke the CLI) does not start them again. They
+are whole again when Codly sends the work back (a failed check, a file outside the scope, a
+reviewer's request, a merge conflict), when you send it back from the diff, and for a retry of
+the task. A worker that ended its turn
+with no report is asked for one only after this wait, and the record of a stop says which comes
+next: that question, or the checks. For Codex, a subagent that is still in a turn counts; that
+part is built from the protocol's types and is not verified on a live run. Claude Code says its
+whole list of background tasks at every change, and that list is the one record of this work
 (`EventKind::BackgroundTasks`, with what left the list and how it ended): the gate waits on it,
 and the agent sheet shows it, with Stop on a command. The sheet also shows the run's MCP
 servers; a new run whose servers stand as the agent's last run recorded them writes no rows.
 
 **No agent sits "running" without end.** A watchdog looks at every live run each 15 s. A turn that
-gives no event for 10 minutes (60 with a tool call open; `Settings.watchdog`) is flagged on its
+gives no event for 10 minutes (60 with a tool call open that gives no sign of life;
+`Settings.watchdog`) is flagged on its
 task ("stalled: no output for 10 min") and you are notified. At twice that its turn is interrupted
 and the agent is asked to continue, once. Silent for as long again, the run is stopped: a worker's
 task goes back in line (blocked from its third start on), a Lead or a 1:1 agent resumes with your
 next message. A turn that waits for your answer is not silent, and neither is a long command
-under Claude Code: the CLI says every 30 s that the call still runs, and that counts as output. A
+under Claude Code: the CLI says every 30 s that the call still runs, and that counts as output.
+That heartbeat is recorded for a command, a tool of an MCP server and the call that waits for a
+helper. So a Claude run with only such calls open keeps the 10 minutes: a call that hangs is
+noticed after 20 missed heartbeats, not after an hour. Any other open tool (WebFetch, WebSearch:
+not recorded) and every other CLI keep the 60. A
 worker that sits between turns
 for 2 minutes on a task that still runs (you interrupted it) is flagged as idle; nothing is done
 to it. Below that, each adapter gives Stop a limit: a turn that has not ended 8 s (Claude) or 15 s
@@ -562,7 +571,10 @@ that are new there are named (the index does not search them).
   choice for it; once an agent changes the copy it counts. Every file is hashed whatever
   its size; `.claude/worktrees/` (Claude Code's own worktrees) is not configuration. No worktree ever loads `.claude/settings.local.json`; in the checkout it
   loads when it is the user's own (untracked) or trusted. Instruction files (CLAUDE.md,
-  AGENTS.md, GEMINI.md) are listed with the question and are not part of it.
+  AGENTS.md, GEMINI.md) are listed with the question and are not part of it. A choice is for
+  the next start: a Claude run that started without the folder's files because they were not
+  trusted says so on its own record (one notice per run, `runs.rs`), and goes on without them
+  until the agent starts again.
 - By itself, Codly removes a worktree only when it is clean and merged, and deletes a
   `codly/…` branch only when its work is merged and its plan is over (merged, cancelled or
   failed) for a day: the housekeeping sweep, which can be switched off. A dirty or unmerged
@@ -617,6 +629,10 @@ that are new there are named (the index does not search them).
   left it against its resolution, then the later commits), not the user's commits; the checks
   its gate ran on the plan's branch as it is are not run again when the plan finishes; and one
   that does not finish also takes its worker's new files out of the integration worktree.
+  Codly writes the start of such a task down before the merge, so a start that Codly was closed
+  in the middle of is taken back before the plan is merged, finished or resolved again. The
+  task's commits leave out the new files that were in the integration worktree before it
+  started (they are on no branch), and its record names them.
 - The workspace IDE saves files where its agent works (`ide_write`, `ide_create`): in the
   agent's worktree, or in the user's checkout when the agent has none (the Lead, or an agent
   hired with Git isolation off). It never commits.
@@ -683,7 +699,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       preview.rs                          try work before a merge: your command in a plan's or an agent's worktree
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
                       takeover.rs                         "Open in my terminal": a session goes to you, and comes back
-                      live_session.rs                     a live Claude session from the agent sheet: reconnect an MCP server, stop a background command; its servers and its last list of background tasks for a snapshot
+                      live_session.rs                     a live Claude session from the agent sheet: reconnect an MCP server, turn one off or on, stop a background command; its servers and its last list of background tasks for a snapshot
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
@@ -734,7 +750,7 @@ src-tauri/src/            the macOS shell
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
   merge_commands.rs onboarding_commands.rs pr_commands.rs preview_commands.rs    the other commands, one file per topic
   takeover_commands.rs  "Open in my terminal": the take-over commands and the terminal they open
-  session_commands.rs   the agent sheet's "Reconnect" (an MCP server) and "Stop" (a background command)
+  session_commands.rs   the agent sheet's "Reconnect", "Turn off" and "Turn on" (an MCP server) and "Stop" (a background command)
   ui_bus.rs         one ordered Channel of coalesced event batches per webview
   notify.rs         native notifications: event → notice, one per kind within a few seconds, the switches
   web.rs            `codly serve`: the same UI over HTTP; passes /api/voice/ws to the voice relay

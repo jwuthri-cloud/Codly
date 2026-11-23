@@ -1,6 +1,6 @@
 """Codly voice relay: talk to one Codly agent through OpenAI Realtime.
 
-Runs next to `codly serve` on the same machine (the devbox). `codly serve` proxies its
+Runs next to `codly serve` on the same machine (a remote host). `codly serve` proxies its
 `/api/voice/ws` to this relay's `/ws`, so the browser needs no extra tunnel. The relay takes a
 connection only from `codly serve`: it must carry the token this relay wrote at its start (a file
 only this user reads) and no browser Origin (guard.py). Auth to OpenAI is workload identity

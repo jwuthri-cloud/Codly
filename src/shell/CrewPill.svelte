@@ -17,6 +17,7 @@
   import Orbit from '../components/Orbit.svelte';
   import Portrait from '../components/Portrait.svelte';
   import Say from '../components/Say.svelte';
+  import RetryButton from '../components/RetryButton.svelte';
   import { agentTitle } from '../lib/util/team';
 
   interface Props {
@@ -101,6 +102,7 @@
       <span class="who"><span class="name">{agent.name}</span>{#if agentTitle(agent)}<span class="prov truncate">{agentTitle(agent)}</span>{/if}</span>
       <span class="say truncate">{#if n}<Say parts={n.parts} />{/if}</span>
     </span>
+    <RetryButton task={agent.task_id ? store.taskMap.get(agent.task_id) : null} />
   {/if}
 </div>
 
@@ -112,6 +114,8 @@
   .pill.lead.selected .ln { color: var(--ink-1); }
   .pill.amber { background: color-mix(in srgb, var(--amber) 16%, var(--glass)); box-shadow: var(--glass-edge), inset 0 0 0 1px color-mix(in srgb, var(--amber) 55%, transparent); }
   .pill.amber .ln { color: var(--amber-ink); }
+  /* Above the pill's own hit area: it retries, it does not open the agent. */
+  .pill > :global(.retry) { position: relative; z-index: 1; }
   .hit { position: absolute; inset: 0; border-radius: inherit; z-index: 0; }
   .hit:focus-visible { outline-offset: 1px; border-radius: var(--r-full); }
   .face { position: relative; z-index: 1; pointer-events: none; }

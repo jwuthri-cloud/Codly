@@ -31,6 +31,19 @@ src-tauri/gen/schemas
 
 # Tool artifacts
 .playwright-mcp/
+__pycache__/
+*.pyc
+
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+
+# Claude Code's per-machine state (the shared launch.json and skills stay tracked)
+.claude/settings.local.json
+.claude/worktrees/
+.claude/checkpoints/
+.claude/scheduled_tasks.*
 
 # Overrides a global "research/" ignore: these docs and the adapter test fixtures belong in the repo
 !docs/research/

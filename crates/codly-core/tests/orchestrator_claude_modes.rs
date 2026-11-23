@@ -249,6 +249,13 @@ impl Spawner for Fake {
                                     s.log.push(format!("reconnect:{server}"));
                                     Err("Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}".to_string())
                                 }
+                                // (recorded: a success with no body, off and on. Not recorded: a
+                                // switch the CLI refuses; the error here is the connect error that a
+                                // reconnect of a dead stdio server answers with.)
+                                SessionRequest::McpEnabled(server, on) => {
+                                    s.log.push(format!("mcp-{}:{server}", if on { "on" } else { "off" }));
+                                    if server == "does-not-start" { Err("Connection closed".to_string()) } else { Ok(serde_json::Value::Null) }
+                                }
                                 // (recorded: `{}`, whether or not a task ended)
                                 SessionRequest::StopTask(task_id) => {
                                     s.log.push(format!("stop-task:{task_id}"));
@@ -891,15 +898,67 @@ async fn a_background_command_is_stopped_through_the_live_session() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let (core, id) = live_agent(dir.path(), &seen).await;
     let name = agent(&core, &id).await.name;
+    // The run left work in the background: its last list names one command, "npm run dev".
+    turn(&core, &id, "LEAVE-RUNNING").await;
 
+    core.stop_agent_task(&id, "tid-1").await.unwrap();
+    assert_eq!(last_seen(&seen), "stop-task:tid-1");
+    // One the last list does not name (it ended meanwhile): the request still goes out, and
+    // the record names nothing.
     core.stop_agent_task(&id, "tid-2").await.unwrap();
     assert_eq!(last_seen(&seen), "stop-task:tid-2");
-    assert_eq!(your_acts(&core, &id).await, [format!("asked {name} to stop a command it left running in the background")]);
+    assert_eq!(
+        your_acts(&core, &id).await,
+        [
+            format!("asked {name} to stop what it left running in the background: npm run dev"),
+            format!("asked {name} to stop what it left running in the background"),
+        ]
+    );
     let e = core.stop_agent_task(&id, "").await.unwrap_err().to_string();
     assert_eq!(e, "which background command?");
 
     stop(&core, &id).await;
     let e = core.stop_agent_task(&id, "tid-2").await.unwrap_err().to_string();
+    assert!(e.contains("is not running"), "{e}");
+    core.shutdown().await;
+}
+
+/// "Turn off" and "Turn on" of an MCP server reach the live session, and each is on record
+/// as your act once Claude Code answered. A switch it refused is on record as what you asked,
+/// with its reason. Codly's own server stays on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_mcp_server_is_turned_off_and_on_through_the_live_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let name = agent(&core, &id).await.name;
+
+    core.set_agent_mcp_enabled(&id, " docs ", false).await.unwrap();
+    assert_eq!(last_seen(&seen), "mcp-off:docs");
+    core.set_agent_mcp_enabled(&id, "docs", true).await.unwrap();
+    assert_eq!(last_seen(&seen), "mcp-on:docs");
+    assert_eq!(your_acts(&core, &id).await, [format!("you turned docs off for {name}'s run"), format!("you turned docs on for {name}'s run")]);
+
+    // Claude Code refuses a switch: its reason is yours, and the record says what you asked
+    // and what came back. It does not say "you turned": the server was not turned on.
+    let e = core.set_agent_mcp_enabled(&id, "does-not-start", true).await.unwrap_err().to_string();
+    assert_eq!(e, "Claude Code answered: Connection closed");
+    assert_eq!(last_seen(&seen), "mcp-on:does-not-start");
+    let acts = your_acts(&core, &id).await;
+    assert_eq!(acts.len(), 3, "{acts:?}");
+    assert_eq!(acts[2], format!("asked {name} to turn does-not-start on: Claude Code answered: Connection closed"));
+    assert!(!acts.iter().any(|a| a.starts_with("you turned does-not-start")), "{acts:?}");
+
+    // Codly's own server, and no server named: nothing reaches the CLI, nothing is on record.
+    let e = core.set_agent_mcp_enabled(&id, "codly", false).await.unwrap_err().to_string();
+    assert_eq!(e, format!("codly is Codly's own server: {name} reports to Codly through it, so it stays on"));
+    let e = core.set_agent_mcp_enabled(&id, "  ", true).await.unwrap_err().to_string();
+    assert_eq!(e, "which MCP server?");
+    assert_eq!(last_seen(&seen), "mcp-on:does-not-start");
+    assert_eq!(your_acts(&core, &id).await.len(), 3);
+
+    stop(&core, &id).await;
+    let e = core.set_agent_mcp_enabled(&id, "docs", false).await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
     core.shutdown().await;
 }

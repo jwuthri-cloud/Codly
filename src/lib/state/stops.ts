@@ -38,3 +38,18 @@ export function stopping(agentId: string): boolean {
   const start = openTurn(agentId);
   return start != null && !!asked.get(agentId)?.some((s) => s.start === start);
 }
+
+/** agent → when you killed it (Kill in its sheet), this session: its conversation says so. */
+const kills = new SvelteMap<string, number[]>();
+
+/** Remember that you killed the agent now (`at`: the wall clock). Call the result if the core refused. */
+export function noteKill(agentId: string, at: number): () => void {
+  kills.set(agentId, [...(kills.get(agentId) ?? []), at].slice(-KEPT));
+  return () => kills.set(agentId, (kills.get(agentId) ?? []).filter((t) => t !== at));
+}
+
+/** When you killed the agent, oldest first. */
+export const killedAt = (agentId: string): number[] => kills.get(agentId) ?? [];
+
+/** The conversation's line for a kill of yours. */
+export const killLine = (name: string): string => `You killed ${name}`;

@@ -59,7 +59,9 @@ describe('a command in Claude Code’s sandbox wants a host', () => {
     }
   });
 
-  it('says how long an allow lasts without a promise that nothing recorded backs', () => {
-    expect(HOST_ALLOW_LASTS).toBe('Approve once lets this command connect. Claude Code can keep the host allowed until this agent’s session ends, so it may not ask again for it.');
+  it('says how long an allow lasts as the recordings show it: while the agent keeps running, not after it starts again', () => {
+    expect(HOST_ALLOW_LASTS).toBe(
+      'Approve once lets this command connect. Claude Code then does not ask again for this host while this agent keeps running. When the agent starts again (Codly restarts, or a change that restarts the agent) it asks again.',
+    );
   });
 });

@@ -252,6 +252,9 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         // A program with subcommands of its own, started by another: the exact command only.
         ("pnpm exec npm install left-pad", None),
         ("uv run cargo test", None),
+        ("uv run npm install left-pad", None),
+        ("pnpm exec git add -A", None),
+        ("uv run git add -A", None),
         // The subcommand behind an option's value: the exact command only.
         ("pnpm --filter web add left-pad", None),
         // Not a program that takes a subcommand, or no plain subcommand: the exact command only.
@@ -273,7 +276,29 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         ("git switch --force-create main", None),
         ("git checkout -f main", None),
         ("git switch --discard-changes main", None),
+        // make: options that say how to build, not what, stand beside the one target.
+        ("make test -j 8", Some("make test")),
+        ("make test -j8", Some("make test")),
+        ("make test -j", Some("make test")),
+        ("make test -k", Some("make test")),
+        ("make test -s", Some("make test")),
+        ("make test -kj 2", Some("make test")),
+        ("make test --jobs 4", Some("make test")),
+        ("make test --jobs=4 --keep-going", Some("make test")),
+        // An option that changes what runs, or a variable: the exact command only.
+        ("make test -C web", None),
+        ("make test -Cweb", None),
+        ("make test -f ci.mk", None),
+        ("make test --file=ci.mk", None),
+        ("make test --directory web", None),
+        ("make test -I inc", None),
+        ("make test --eval=x", None),
+        ("make test -B", None),
+        ("make test -n", None),
+        ("make test V=1", None),
         // A second target on the line is a second command.
+        ("make test -j 8 deploy", None),
+        ("make test -j deploy", None),
         ("make docs deploy", None),
         ("just build web", None),
         ("task a b", None),
@@ -378,6 +403,27 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
         "bunx -c 'npm publish'",
         "bun exec 'npm publish'",
         "pnpm --shell-mode exec 'npm publish'",
+        // Your own account or settings behind a package runner, with no other risk on the line.
+        "pnpm exec git config user.name me",
+        "npx git config user.name me",
+        "npm exec -- git config user.name me",
+        "npx -c 'git config user.name me'",
+        "bun exec 'git config user.name me'",
+        "pnpm exec env CI=1 git config user.name me",
+        "pnpm exec sh -c 'git config user.name me'",
+        "npx npx git config user.name me",
+        // Behind another runner, where the command is read by its name.
+        "uv run git config user.name me",
+        "bundle exec git config user.name me",
+        "uv run npm publish",
+        "poetry run twine upload dist/pkg.tar.gz",
+        "bundle exec gem push pkg.gem",
+        "uv run git push",
+        // More writers of a package manager's settings.
+        "bundle config set path vendor/bundle",
+        "bundle config path vendor/bundle",
+        "composer config minimum-stability dev",
+        "composer global require phpunit/phpunit",
         // npm's short name for `config`, and an option's value in front of what it is told to do.
         "npm c set registry http://localhost:4873",
         "npm c get registry",
@@ -429,6 +475,39 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
     for a in [edit, fetch, question] {
         assert!(offer(&a, ApprovalMode::Balanced).is_empty(), "{:?}", a.subject);
     }
+}
+
+/// Runners that each start the next (`uv run uv run … x`): the command behind each is found
+/// again behind every runner in front of it, and is still read once, so a long line gets its
+/// answer at once. The same for a line for a shell that stands behind many of them.
+#[test]
+fn a_long_line_of_runners_gets_its_offer_at_once() {
+    let behind = |runner: &str, last: &str| format!("{}{last}", runner.repeat(40));
+    let cases = [
+        (behind("uv run ", "true"), true),
+        // The word after an option npx does not know is read both ways.
+        (behind("npx --a ", "true"), true),
+        // The command at the end of the line is still read.
+        (behind("uv run ", "git config user.name me"), false),
+        // Each `bun exec` takes the rest of the line as a line for a shell, and that line
+        // holds the next one: each is read once too. Lines so deep inside each other are
+        // not checked, so nothing is offered.
+        (behind("uv run bun exec ", "true"), false),
+    ];
+    let mut late = vec![];
+    for (line, offered) in cases {
+        let (done, answer) = std::sync::mpsc::channel();
+        let request = cmd(&line);
+        std::thread::spawn(move || {
+            // Nobody waits for an answer that comes too late.
+            let _ = done.send(offer(&request, ApprovalMode::Balanced));
+        });
+        match answer.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(o) => assert_eq!((o.exact, o.prefix), (offered.then(|| line.clone()), None), "{line}"),
+            Err(_) => late.push(line),
+        }
+    }
+    assert!(late.is_empty(), "no offer after 10 seconds: {late:#?}");
 }
 
 #[test]
@@ -495,6 +574,11 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
         ("uv pip install", "uv pip install --system some-pkg"),
         ("cargo publish", "cargo publish"),
         ("make docs", "make docs deploy"),
+        ("make test", "make test -j 8 deploy"),
+        ("make test", "make test -C web"),
+        ("make test", "make test -f other.mk"),
+        ("make test", "make test --eval=x"),
+        ("make test", "make test CC=other"),
         ("mvn test", "mvn test deploy"),
         ("gradle check", "gradle check publish"),
         ("task a", "task a b"),
@@ -514,6 +598,8 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
         ("pip install", "pip install requests"),
         ("git checkout", "git checkout feature"),
         ("make docs", "make docs -j4"),
+        ("make test", "make test -j 8"),
+        ("make test", "make test -k -s"),
         ("uv tool run ruff", "uv tool run ruff check src"),
     ] {
         assert!(covers(&saved(ApprovalRuleKind::Prefix, rule), c), "`{rule}` covers `{c}`");
@@ -912,4 +998,238 @@ fn the_own_folder_floor_adds_nothing_outside_full_access() {
     assert!(reason(eval_in("git reset --hard", ApprovalMode::Autonomous, false)).starts_with("risk: discards changes"));
     assert!(reason(eval_in("git reset --hard", ApprovalMode::Full, true)).starts_with("risk: discards changes"));
     assert!(allowed(&eval_in("git status", ApprovalMode::Balanced, false)));
+}
+
+/// What you said with an answer, end to end with a fake agent in place of the CLI: your words
+/// are a row of the log just before the answer, and only when the answer went to the agent.
+mod what_you_said {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SpawnSpec};
+    use codly_core::model::*;
+    use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
+    use serde_json::{Value, json};
+    use tokio::sync::mpsc;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    fn temp_repo(root: &Path) -> PathBuf {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        std::fs::write(repo.join("README.md"), "# demo\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        repo
+    }
+
+    /// What a message "ask: <what>" makes the fake agent ask you.
+    fn subject(what: &str) -> Option<ApprovalSubject> {
+        match what {
+            // Not a read or a test run: balanced mode asks you.
+            "command" => Some(ApprovalSubject::Command { command: "node scripts/gen.js".into(), cwd: None }),
+            "plan" => Some(ApprovalSubject::Tool { name: "ExitPlanMode".into(), input: json!({ "plan": "1. Add the line" }) }),
+            "question" => Some(ApprovalSubject::Question { questions: json!([{ "question": "Which sizes?", "multiSelect": true }, { "question": "Colour?" }]) }),
+            _ => None,
+        }
+    }
+
+    /// A fake Claude agent: a message "ask: command", "ask: plan" or "ask: question" makes it
+    /// ask you that, and its turn ends when the answer arrives. Its process takes a second to
+    /// end, like a real CLI's: a card is still on screen meanwhile.
+    struct Fake;
+
+    impl Spawner for Fake {
+        fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
+            Box::pin(async move {
+                let (tx, mut rx) = mpsc::unbounded_channel::<AgentCmd>();
+                let (agent_id, run_id) = (spec.agent_id.clone(), spec.run_id.clone());
+                let send = {
+                    let (agent_id, run_id) = (agent_id.clone(), run_id.clone());
+                    move |kind| {
+                        let _ = events.send(AdapterEvent { agent_id: agent_id.clone(), run_id: run_id.clone(), kind });
+                    }
+                };
+                send(EventKind::SessionStarted {
+                    provider: spec.provider,
+                    model: None,
+                    cwd: spec.cwd.to_string_lossy().into_owned(),
+                    cli_version: None,
+                    session_id: Some("sess".into()),
+                    billing: Billing::Subscription,
+                    tools: vec![],
+                });
+                let handle = AgentHandle { agent_id: agent_id.clone(), run_id: run_id.clone(), tx };
+                tokio::spawn(async move {
+                    while let Some(cmd) = rx.recv().await {
+                        match cmd {
+                            AgentCmd::Prompt(text) => {
+                                send(EventKind::TurnStarted { input: Some(text.clone()) });
+                                let asked = text.rsplit_once("ask: ").and_then(|(_, what)| subject(what.lines().next().unwrap_or_default().trim()));
+                                if let Some(subject) = asked {
+                                    let approval = Approval {
+                                        id: new_id(),
+                                        agent_id: agent_id.clone(),
+                                        run_id: run_id.clone(),
+                                        task_id: None,
+                                        call_id: Some("c1".into()),
+                                        subject,
+                                        reason: None,
+                                        choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny],
+                                        risks: vec![],
+                                        status: ApprovalStatus::Pending,
+                                        decided_by: None,
+                                        created_at: now_ms(),
+                                    };
+                                    send(EventKind::ApprovalRequested { approval });
+                                    // The answer arrives as the next command; a stop ends the process.
+                                    if let Some(AgentCmd::Shutdown) = rx.recv().await {
+                                        tokio::time::sleep(Duration::from_secs(1)).await;
+                                        send(EventKind::Exited { code: Some(0) });
+                                        break;
+                                    }
+                                }
+                                send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
+                            }
+                            AgentCmd::Shutdown => {
+                                send(EventKind::Exited { code: Some(0) });
+                                break;
+                            }
+                            AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. } => {}
+                        }
+                    }
+                });
+                Ok(handle)
+            })
+        }
+    }
+
+    async fn wait_for<T>(what: &str, mut f: impl AsyncFnMut() -> Option<T>) -> T {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(v) = f().await {
+                return v;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// A started core with one hired 1:1 Claude agent (balanced mode, the default).
+    async fn one_agent(dir: &Path) -> (Arc<Core>, String) {
+        let repo = temp_repo(dir);
+        let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
+        let claude = CliInfo {
+            provider: Provider::Claude,
+            path: Some("/usr/bin/true".into()),
+            version: Some("fake".into()),
+            logged_in: Some(true),
+            billing: Billing::Subscription,
+            plan: None,
+            problem: None,
+            transport: "fake".into(),
+            install: codly_core::env::install_hint(Provider::Claude),
+            default_model: None,
+        };
+        let opts = StartOptions { spawner: Some(Arc::new(Fake)), env: Some(std::env::vars().collect()), clis: Some(vec![claude]), index: false };
+        let core = Core::start_with(cfg, opts).await.unwrap();
+        core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+        let agent = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+        (core, agent.id)
+    }
+
+    /// Make the agent ask (once its last turn is over), and wait for the request.
+    async fn ask(core: &Core, agent: &str, what: &str) -> Approval {
+        wait_for("the agent to be free", async || {
+            let a = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == agent)?;
+            matches!(a.status, AgentStatus::Idle | AgentStatus::Offline).then_some(())
+        })
+        .await;
+        core.send_chat(&format!("agent:{agent}"), &format!("ask: {what}")).await.unwrap();
+        wait_for("the request to wait for you", async || core.snapshot().await.unwrap().approvals.into_iter().find(|a| a.status == ApprovalStatus::Pending)).await
+    }
+
+    /// The rows of the log about a request's answer, oldest first, as the app gets them.
+    async fn rows(core: &Core, approval: &Approval) -> Vec<Value> {
+        let mut events = core.events(None, None, 2000).await.unwrap();
+        events.sort_by_key(|e| e.id);
+        events
+            .into_iter()
+            .filter(|e| matches!(&e.kind, EventKind::ApprovalSaid { approval_id, .. } | EventKind::ApprovalResolved { approval_id, .. } if *approval_id == approval.id))
+            .map(|e| serde_json::to_value(&e.kind).unwrap())
+            .collect()
+    }
+
+    fn resolved(approval: &Approval, status: &str) -> Value {
+        json!({ "type": "approval_resolved", "approval_id": approval.id, "status": status, "by": "user" })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_no_with_a_note_is_on_record_just_before_the_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, agent) = one_agent(dir.path()).await;
+
+        let command = ask(&core, &agent, "command").await;
+        core.resolve_approval(&command.id, ApprovalDecision { choice: ApprovalChoice::Deny, message: Some("  use pnpm run gen  ".into()), answers: None }).await.unwrap();
+        let said = json!({ "type": "approval_said", "approval_id": command.id, "note": "use pnpm run gen", "answer": null, "plan_changed": false });
+        assert_eq!(rows(&core, &command).await, [said.clone(), resolved(&command, "denied")]);
+        // The row is in the agent's own thread too, where "Load earlier" reads it.
+        let thread = core.thread_events(&format!("agent:{agent}"), Some(&agent), None, 2000).await.unwrap();
+        assert!(thread.iter().any(|e| serde_json::to_value(&e.kind).unwrap() == said));
+
+        // An answer with no words is one row, as before.
+        let again = ask(&core, &agent, "command").await;
+        core.resolve_approval(&again.id, ApprovalDecision { choice: ApprovalChoice::Deny, message: None, answers: None }).await.unwrap();
+        assert_eq!(rows(&core, &again).await, [resolved(&again, "denied")]);
+        core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_answers_to_a_question_and_a_changed_plan_are_on_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, agent) = one_agent(dir.path()).await;
+
+        let question = ask(&core, &agent, "question").await;
+        let answers = json!({ "Colour?": "Red", "Which sizes?": ["Small", "Fast"] });
+        core.resolve_approval(&question.id, ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: Some(answers) }).await.unwrap();
+        // One line, in the order the questions were asked.
+        let said = json!({ "type": "approval_said", "approval_id": question.id, "note": null, "answer": "Small, Fast; Red", "plan_changed": false });
+        assert_eq!(rows(&core, &question).await, [said, resolved(&question, "approved")]);
+
+        let plan = ask(&core, &agent, "plan").await;
+        let changed = json!({ "plan": "1. Add two lines" });
+        core.resolve_approval(&plan.id, ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: Some(changed) }).await.unwrap();
+        let said = json!({ "type": "approval_said", "approval_id": plan.id, "note": null, "answer": null, "plan_changed": true });
+        assert_eq!(rows(&core, &plan).await, [said, resolved(&plan, "approved")]);
+
+        // A plan accepted as it is says nothing more.
+        let plain = ask(&core, &agent, "plan").await;
+        core.resolve_approval(&plain.id, ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).await.unwrap();
+        assert_eq!(rows(&core, &plain).await, [resolved(&plain, "approved")]);
+        core.shutdown().await;
+    }
+
+    /// The agent was killed while its request waited: an answer that still arrives is refused,
+    /// and the note that came with it is not recorded as said. The agent never read it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_that_expired_has_no_words_on_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, agent) = one_agent(dir.path()).await;
+
+        let command = ask(&core, &agent, "command").await;
+        core.stop_agent(&agent).await.unwrap();
+        let no = ApprovalDecision { choice: ApprovalChoice::Deny, message: Some("use pnpm run gen".into()), answers: None };
+        let refused = core.resolve_approval(&command.id, no).await.expect_err("a killed agent takes no answer").to_string();
+        assert_eq!(refused, "the agent that asked is no longer running; the request expired");
+        assert_eq!(rows(&core, &command).await, [resolved(&command, "expired")]);
+        core.shutdown().await;
+    }
 }

@@ -31,10 +31,11 @@
   import { ago, plural } from '../../lib/util/format';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import { oneAtATime } from '../../lib/util/oneAtATime';
-  import { discardWords, editorPlace, heavy, HEAVY_LABEL, inTurn, offDiff, parseDiffKeeping, placeId, reviewBarWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
+  import { commentKeys, discardWords, editorPlace, heavy, HEAVY_LABEL, inTurn, offDiff, parseDiffKeeping, reviewBarWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
+  import { safeChoice } from '../../lib/util/confirm';
 
   const allPlans = $derived([...store.plans].filter((p) => p.status !== 'cancelled' && store.tasks.some((t) => t.plan_id === p.id && (t.status === 'done' || t.branch))).sort((a, b) => b.created_at - a.created_at));
   const allTasks = $derived([...store.tasks].filter((t) => t.branch || t.status === 'done').sort((a, b) => (a.plan_id ?? '~').localeCompare(b.plan_id ?? '~') || a.key.localeCompare(b.key, undefined, { numeric: true })));
@@ -206,6 +207,7 @@
   /** Comments on files that left the diff since you wrote them: no file on screen shows them.
    *  (The last turn shows a part of the task's diff: a file that is not in it did not leave.) */
   const gone = $derived(!lastTurn && loaded === key && !error ? offDiff(comments, files.map((f) => f.path)) : NONE);
+  const goneKeys = $derived(commentKeys(gone));
   const viewedCount = $derived(files.filter((f) => review.viewed(key, f)).length);
   /** Where a file opens in the editor: the worktree of the task that wrote it, or your
    *  repository once the plan is merged (see `editorPlace`). */
@@ -230,6 +232,7 @@
   }
   /** Discard asks once more, and says where else the comments are (`draft`, read at the first press). */
   let discarding = $state<{ draft: ReviewDraft } | null>(null);
+  let discardBtn: HTMLButtonElement | undefined = $state();
   $effect(() => {
     void comments;
     discarding = null;
@@ -358,7 +361,7 @@
         <div class="review" role="region" aria-label="Your review">
           {#if gone.length}
             <ul class="gone" aria-label="Comments on files that left the diff">
-              {#each gone as c (c.path + ' ' + placeId(c) + c.quote)}
+              {#each gone as c, i (goneKeys[i])}
                 <li>
                   <p class="g-w"><span class="mono">{c.path}{c.line == null ? '' : `:${c.line}`}</span> is not in this diff any more. Send back still sends your comment{c.quote == null ? '' : ', with the line as it was'}.</p>
                   {#if c.quote != null}<p class="g-q">{c.quote}</p>{/if}
@@ -376,9 +379,9 @@
             <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {discarding ? discardWords(comments.length, discarding.draft) : reviewBarWords(comments.length, toWorker ? workerName : null, waiting ? review.inHand(notesKey) : null)}</p>
             {#if discarding}
               <button class="btn sm danger" onclick={() => discardReview(notesKey)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
-              <button class="btn sm ghost" onclick={() => (discarding = null)}>Keep</button>
+              <button class="btn sm ghost" use:safeChoice={{ keep: () => (discarding = null), back: () => discardBtn }} onclick={() => (discarding = null)}>Keep</button>
             {:else}
-              <button class="btn sm ghost" onclick={() => (discarding = { draft: reviewDraft(notesKey) })}>Discard</button>
+              <button class="btn sm ghost" bind:this={discardBtn} onclick={() => (discarding = { draft: reviewDraft(notesKey) })}>Discard</button>
               <button class="btn sm primary" disabled={sending} onclick={send}><Icon name="send" size={13} />Send back</button>
             {/if}
             {/if}

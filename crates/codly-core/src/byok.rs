@@ -339,7 +339,7 @@ mod tests {
         assert!(validate_source(ByokSource::Key, false).is_err());
         assert_eq!(validate_source(ByokSource::Key, true).unwrap(), ByokSource::Key);
         assert_eq!(validate_source(ByokSource::Off, false).unwrap(), ByokSource::Off);
-        assert_eq!(validate_source(cmd("  wif-token anthropic \n"), false).unwrap(), cmd("wif-token anthropic"));
+        assert_eq!(validate_source(cmd("  get-token anthropic \n"), false).unwrap(), cmd("get-token anthropic"));
         assert!(validate_source(cmd("  "), false).is_err());
         assert!(validate_source(cmd("a\nb"), false).is_err());
         assert!(validate_source(cmd(&"a".repeat(2049)), false).is_err());

@@ -84,6 +84,12 @@
     tick().then(place);
   });
 
+  // An open menu hides the controls under it: the toast stack looks again when it comes and when it goes.
+  onMount(() => {
+    ui.layoutRev++;
+    return () => void ui.layoutRev++;
+  });
+
   onMount(() => {
     // Rendered under <body>: a transformed or filtered ancestor would otherwise become the
     // containing block of `position: fixed` and clip the menu at its own edge.

@@ -34,6 +34,35 @@ export function toastTop(stack: Box, controls: Box[], top: number, maxMoves: num
   }
 }
 
+/** A height the stack can have, and how far under `top` a stack of that height may go (`reachDown`), in px. */
+export type Shape = { height: number; reach: number };
+
+/**
+ * Where the stack goes, and whether it folds.
+ *
+ * The whole stack looks for a place first (`toastTop`). When it finds none that is free within
+ * its reach, it folds: one toast shows, with a line "+2 more" under it, and that smaller stack
+ * looks for a place the same way. With no free place for it either it stays folded at the last
+ * place it tried: it covers less than the whole stack would. `folded` is the shape of the folded
+ * stack, null for a stack that cannot fold (one toast).
+ */
+export function stackPlace(sides: { left: number; right: number }, whole: Shape, folded: Shape | null, controls: Box[], top: number, maxMoves: number): { top: number; folded: boolean } {
+  const look = (shape: Shape) => {
+    const at = toastTop({ ...sides, top, bottom: top + shape.height }, controls, top, maxMoves, shape.reach);
+    const box: Box = { ...sides, top: at, bottom: at + shape.height };
+    return { at, free: !controls.some((c) => overlap(c, box)) };
+  };
+  const all = look(whole);
+  if (all.free || !folded) return { top: all.at, folded: false };
+  return { top: look(folded).at, folded: true };
+}
+
+/**
+ * The one toast of a folded stack: the newest, or the newest error when the stack has one (an
+ * error is never the one that is hidden). `newestFirst`: the stack's toasts, the newest first.
+ */
+export const frontToast = <T extends { kind: string }>(newestFirst: T[]): T | undefined => newestFirst.find((t) => t.kind === 'error') ?? newestFirst[0];
+
 /**
  * How far under `top` the stack may go, in px: `part` of the window's height, and never so far
  * that its bottom edge comes nearer than `edge` px to the window's bottom (a toast moved down
@@ -82,6 +111,22 @@ export type Seen = {
 export const counts = (c: Seen): boolean => !c.inStack && !c.above && !c.disabled && c.visibility === 'visible' && c.pointerEvents !== 'none' && c.onTop;
 
 /**
+ * The box a control counts with, null when it does not count.
+ *
+ * A control that is wider than twice the stack can never be more than half under it. It counts
+ * by what it shows: `content()` gives the smallest box around its text and its pictures, null
+ * when it shows nothing of its own (the press area that lies over a whole row). So a toast at
+ * the right stays at the top over a whole-width row whose label is at the left. Any narrower
+ * control counts with its whole box (`part`: the part of it that shows), and so does a field you
+ * type in: its text can be anywhere in it.
+ */
+export function countedBox(part: Box, stackWidth: number, field: boolean, content: () => Box | null): Box | null {
+  if (field || part.right - part.left <= 2 * stackWidth) return part;
+  const shown = content();
+  return shown && visiblePart(shown, [part]);
+}
+
+/**
  * Is `el` what a press at a point reaches? `hits` is everything at that point, the topmost
  * first (document.elementsFromPoint). What is `aside` is left out: the toast stack itself (the
  * question is what is there without it) and the layers above it (a dialog goes away again, and
@@ -98,6 +143,59 @@ export function ms(time: string): number {
   const read = /^\s*(\d*\.?\d+)(ms|s)\s*$/.exec(time);
   if (!read) throw new Error(`Not a CSS time: "${time}"`);
   return Number(read[1]) * (read[2] === 's' ? 1000 : 1);
+}
+
+/**
+ * `run`, at most once in `every` ms. The first call runs at once; calls in the `every` ms after a
+ * run make one more run when that time is up. `stop` drops a run that waits.
+ */
+export function paced(run: () => void, every: number): { (): void; stop(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let again = false;
+  const go = () => {
+    again = false;
+    run();
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (again) go();
+    }, every);
+  };
+  const call = () => {
+    if (timer === undefined) go();
+    else again = true;
+  };
+  call.stop = () => {
+    clearTimeout(timer);
+    timer = undefined;
+    again = false;
+  };
+  return call;
+}
+
+/**
+ * The look that comes after the look at once: when the page has come to rest, `wait()` ms later.
+ *
+ * `after(false)`: the stack changed and the page's layout did not (a toast came, one changed its
+ * text). A look that already waits is kept: it comes at the end of the first wait, once, also
+ * when toasts change faster than the wait is long. `after(true)`: the page's layout changed, and
+ * its boxes move from now on, so the wait starts over. `stop` drops a look that waits.
+ */
+export function restLook(wait: () => number, look: () => void): { after(moved: boolean): void; stop(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stop = () => {
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  return {
+    after(moved) {
+      if (moved) stop();
+      timer ??= setTimeout(() => {
+        timer = undefined;
+        look();
+      }, wait());
+    },
+    stop,
+  };
 }
 
 // From here on: what reads the page.
@@ -151,13 +249,48 @@ function clips(el: Element): Box[] {
   return frames;
 }
 
+/** What you type in: it counts with its whole box (see `countedBox`). */
+const FIELDS = 'input, select, textarea';
+/** What a control shows beside its text. */
+const PICTURES = 'svg, img, canvas, video';
+
+/** Puts into `out` the boxes of what `el` shows: each line of its text, and its pictures. */
+function shownIn(el: Element, range: Range, out: DOMRect[]) {
+  for (const node of el.childNodes) {
+    if (node instanceof Text) {
+      if (!node.data.trim()) continue;
+      range.selectNodeContents(node);
+      out.push(...range.getClientRects());
+    } else if (node instanceof Element) {
+      if (node.matches(PICTURES)) out.push(node.getBoundingClientRect());
+      else shownIn(node, range, out);
+    }
+  }
+}
+
+/** The smallest box around what `el` shows (its text and its pictures); null: it shows nothing of its own. */
+function contentBox(el: Element): Box | null {
+  const found: DOMRect[] = [];
+  shownIn(el, document.createRange(), found);
+  const boxes = found.filter((b) => b.width > 0 && b.height > 0);
+  if (!boxes.length) return null;
+  return {
+    left: Math.min(...boxes.map((b) => b.left)),
+    top: Math.min(...boxes.map((b) => b.top)),
+    right: Math.max(...boxes.map((b) => b.right)),
+    bottom: Math.max(...boxes.map((b) => b.bottom)),
+  };
+}
+
 /**
  * The boxes of the page's controls that show inside `area` and that a toast must keep off
  * (see `counts`). A box is the part of the control that shows: not what is scrolled out of its
- * list or lies outside the window.
+ * list or lies outside the window. A control much wider than the stack counts by what it shows
+ * (see `countedBox`).
  */
 export function controlBoxes(stack: HTMLElement, area: Box): Box[] {
   const above = layers(stack);
+  const stackWidth = stack.offsetWidth;
   const boxes: Box[] = [];
   for (const el of document.querySelectorAll<HTMLElement>(CONTROLS)) {
     const box = boxOf(el);
@@ -173,7 +306,63 @@ export function controlBoxes(stack: HTMLElement, area: Box): Box[] {
       pointerEvents: own.pointerEvents,
       onTop: reached(el, part, stack, above),
     };
-    if (counts(seen)) boxes.push(part);
+    if (!counts(seen)) continue;
+    const counted = countedBox(part, stackWidth, el.matches(FIELDS), () => contentBox(el));
+    if (counted && overlap(counted, area)) boxes.push(counted);
   }
   return boxes;
+}
+
+/** Puts into `out` every box in `el` (or `el` itself) that scrolls up and down, and what is in it.
+ *  It does not look inside such a box: what scrolls in it is its content. */
+function scrollBoxes(el: Element, out: Element[]) {
+  const flow = getComputedStyle(el).overflowY;
+  if (flow === 'auto' || flow === 'scroll') out.push(el, ...el.children);
+  else for (const child of el.children) scrollBoxes(child, out);
+}
+
+/**
+ * Tells when what is in the page's main column gets higher or lower: text that streams in, a
+ * card that arrives, rows that load. A control can then be under a toast that was put there
+ * before. It watches the boxes that scroll in each `main` of the page and what is in them
+ * (`scrollBoxes`), and calls `changed` when the height of one changes. Not when one is seen for
+ * the first time, and not when the page scrolls.
+ *
+ * `look()` reads the page again (after a change of layout other boxes scroll); `stop()` ends
+ * the watch.
+ */
+export function contentWatch(changed: () => void): { look(): void; stop(): void } {
+  /** What is watched, with the height it had last (none before its first report). */
+  const heights = new Map<Element, number | undefined>();
+  const observer = new ResizeObserver((entries) => {
+    let any = false;
+    for (const entry of entries) {
+      const before = heights.get(entry.target);
+      const now = entry.contentRect.height;
+      if (before !== undefined && before !== now) any = true;
+      heights.set(entry.target, now);
+    }
+    if (any) changed();
+  });
+  return {
+    look() {
+      const found: Element[] = [];
+      for (const main of document.querySelectorAll('main')) scrollBoxes(main, found);
+      const now = new Set(found);
+      for (const el of [...heights.keys()]) {
+        if (now.has(el)) continue;
+        observer.unobserve(el);
+        heights.delete(el);
+      }
+      for (const el of now) {
+        if (heights.has(el)) continue;
+        heights.set(el, undefined);
+        observer.observe(el);
+      }
+    },
+    stop() {
+      observer.disconnect();
+      heights.clear();
+    },
+  };
 }

@@ -23,6 +23,7 @@
   import Markdown from '../components/Markdown.svelte';
   import Portrait from '../components/Portrait.svelte';
   import Say from '../components/Say.svelte';
+  import RetryButton from '../components/RetryButton.svelte';
   import ApprovalCard from './cards/ApprovalCard.svelte';
   import AskCard from './cards/AskCard.svelte';
   import NoticeRow from './cards/NoticeRow.svelte';
@@ -173,6 +174,7 @@
         <p class="o-name">1:1 with <b>{owner.name}</b><span class="o-prov">{PROVIDER_LABEL[owner.provider]} ({COMPANY_LABEL[owner.provider]}){owner.model ? ` · ${prettyModel(owner.model)}` : ''}</span></p>
         {#if ownerNow}<p class="o-now truncate"><Say parts={ownerNow.parts} /></p>{/if}
       </div>
+      <RetryButton task={owner.task_id ? store.taskMap.get(owner.task_id) : null} />
       <button class="btn ghost sm" onclick={() => ui.selectAgent(owner.id)}>Details</button>
       <button class="btn ghost sm" onclick={() => ui.openRequest(backTo)}><Icon name="arrow-left" size={12} />Back to the request</button>
     </header>

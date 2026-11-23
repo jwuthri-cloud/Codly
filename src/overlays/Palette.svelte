@@ -9,6 +9,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { api } from '../lib/api';
+  import type { Approval } from '../lib/gen/Approval';
   import type { Citation } from '../lib/gen/Citation';
   import type { Provider } from '../lib/gen/Provider';
   import type { SearchResult } from '../lib/gen/SearchResult';
@@ -18,9 +19,9 @@
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { narrate } from '../lib/state/narration';
-  import { ROOMS, ui } from '../lib/state/ui.svelte';
+  import { ROOMS, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { article } from '../lib/util/format';
-  import { fuzzy, highlight } from '../lib/util/fuzzy';
+  import { highlight } from '../lib/util/fuzzy';
   import { PROVIDER_LABEL, TASK_STATUS_LABEL, taskState } from '../lib/util/labels';
   import { modal } from '../lib/util/modal';
   import type { Tone } from '../lib/narrate';
@@ -31,7 +32,8 @@
   import StateMark from '../components/StateMark.svelte';
   import { skillsUi } from '../lib/state/skills.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
-  import { bySection, press, wants } from './palette';
+  import { quickStart } from '../lib/state/hireWizard';
+  import { bySection, noRow, offersAsk, press, rankRows, wants } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
   type Row = {
@@ -97,6 +99,12 @@
     ui.paletteOpen = false;
     ui.paletteSeed = '';
   }
+  /** Go to the request's card and open its note field: the "no" is sent from there, with your note. */
+  function openDenyNote(ap: Approval) {
+    ui.openThread(store.approvalThread(ap));
+    ui.revealApproval = ap.id;
+    ui.denyNoteFor = ap.id;
+  }
 
   // ───────────── sources ─────────────
   const commands = $derived.by((): Row[] => {
@@ -135,15 +143,23 @@
     }
     for (const ap of store.pendingApprovals) {
       const a = store.agentMap.get(ap.agent_id);
-      const what = ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : ap.subject.kind;
+      const what = ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : oneLine(wants(ap.subject, a?.provider), 50);
       // The title shows 50 characters: the confirmation shows all of what is asked.
       const full = `${a?.name ?? 'An agent'} wants to ${wants(ap.subject, a?.provider)}`;
       if (ap.choices.includes('allow_once')) rows.push({ id: `ap:ok:${ap.id}`, section: 'Needs you', title: `Approve ${a?.name ?? 'agent'}: ${what}`, icon: 'check', run: () => resolveApproval(ap.id, 'allow_once'), confirm: `Approve once? ${full}` });
-      if (ap.choices.includes('deny')) rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: `Deny ${a?.name ?? 'agent'}: ${what}`, icon: 'x', run: () => resolveApproval(ap.id, 'deny'), confirm: `Deny? ${full}` });
+      if (ap.choices.includes('deny')) {
+        const no = noRow(ap.subject, a?.provider, a?.name ?? 'agent', what);
+        // A row that opens the note field answers nothing yet: it needs no second ↵.
+        if (no.note) rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: no.title, icon: 'x', run: () => openDenyNote(ap) });
+        else rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: no.title, icon: 'x', run: () => resolveApproval(ap.id, 'deny'), confirm: `Deny? ${full}` });
+      }
     }
     for (const c of store.clis)
       if (c.path && !c.problem)
-        rows.push({ id: `hire:${c.provider}`, section: 'Agents', title: `Start ${article(PROVIDER_LABEL[c.provider as Provider])} ${PROVIDER_LABEL[c.provider as Provider]} agent (1:1)`, icon: 'user-plus', run: () => (ui.modelDialog = { provider: c.provider as Provider, agentId: null }) });
+        rows.push(
+          { id: `quick:${c.provider}`, section: 'Agents', title: `Start an agent with ${PROVIDER_LABEL[c.provider as Provider]}`, sub: 'One step: its default look, name and model, then talk to it 1:1', icon: 'user-plus', run: () => void quickStart(c.provider as Provider) },
+          { id: `hire:${c.provider}`, section: 'Agents', title: `Start ${article(PROVIDER_LABEL[c.provider as Provider])} ${PROVIDER_LABEL[c.provider as Provider]} agent (1:1)…`, sub: 'Choose its name, look, model and brief', icon: 'user-plus', run: () => { ui.modelDialog = { provider: c.provider as Provider, agentId: null }; } },
+        );
     for (const a of store.agents)
       if (narrate(a.id)?.tone === 'live') rows.push({ id: `int:${a.id}`, section: 'Agents', title: `Interrupt ${a.name}`, icon: 'pause', run: () => interruptAgent(a.id) });
     return rows;
@@ -217,17 +233,7 @@
     // Ranked by score, then grouped: a section's header shows once, the best match stays first.
     const rank = (list: Row[], limit = 50): Scored[] => {
       if (!q) return bySection(list.slice(0, limit).map((r) => ({ ...r, hits: [] })));
-      return bySection(
-        list
-          .map((r) => {
-            const sub = r.sub ? fuzzy(q, r.sub) : null;
-            return { r, m: fuzzy(q, r.title) ?? (sub ? { score: sub.score / 3, hits: [] as number[] } : null) };
-          })
-          .filter((x) => x.m)
-          .sort((a, b) => b.m!.score - a.m!.score + (recents.indexOf(b.r.id) >= 0 ? 2 : 0) - (recents.indexOf(a.r.id) >= 0 ? 2 : 0))
-          .slice(0, limit)
-          .map((x) => ({ ...x.r, hits: x.m!.hits })),
-      );
+      return bySection(rankRows(list, q, recents, limit));
     };
     if (scope === '>') return rank(commands);
     if (scope === '@') return rank(agentRows);
@@ -249,7 +255,7 @@
           .map((p) => ({ id: `go:plan:${p.id}`, section: 'Suggested', title: `${p.status === 'done' ? 'Ready to merge' : 'Ready to run'}: ${p.summary}`, icon: 'plan', hits: [], run: () => ui.openPlan(p.id, p.thread) })),
         ...store.pendingApprovals
           .filter((ap) => ap.choices.includes('allow_once'))
-          .map((ap) => ({ id: `go:ap:${ap.id}`, section: 'Suggested', title: `${store.agentMap.get(ap.agent_id)?.name ?? 'An agent'} needs you: ${ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : ap.subject.kind}`, icon: 'check', hits: [], run: () => ui.selectAgent(ap.agent_id) })),
+          .map((ap) => ({ id: `go:ap:${ap.id}`, section: 'Suggested', title: `${store.agentMap.get(ap.agent_id)?.name ?? 'An agent'} needs you: ${ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : oneLine(wants(ap.subject, store.agentMap.get(ap.agent_id)?.provider), 50)}`, icon: 'check', hits: [], run: () => ui.selectAgent(ap.agent_id) })),
       ];
       const suggested = agentRows.slice(0, 6).map((r) => ({ ...r, hits: [] }));
       const seen = new Set([...rec, ...needs].map((r) => r.id));
@@ -260,7 +266,7 @@
 
   const withAsk = $derived.by((): Scored[] => {
     const q = query.trim();
-    if (!q || (scope && scope !== '>')) return rows;
+    if (!offersAsk(q, scope, isRequestThread(ui.thread))) return rows;
     return [
       ...rows,
       {

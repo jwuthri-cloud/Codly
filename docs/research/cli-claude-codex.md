@@ -45,7 +45,7 @@
 ## 1. Method and environment
 
 **Installed versions [V-local]:**
-- `claude` 2.1.309: `/Users/julien/.local/bin/claude`, a symlink to `~/.local/share/claude/versions/2.1.309`.
+- `claude` 2.1.309: `/Users/me/.local/bin/claude`, a symlink to `~/.local/share/claude/versions/2.1.309`.
 - `codex-cli` 0.161.0: an nvm global, `~/.nvm/versions/node/v22.23.3/bin/codex`, which is a symlink to `@openai/codex/bin/codex.js`, a Node shim. The shim spawns `@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex`.
 
 **Latest versions published today [V-local via `npm view` / `gh api`]:**
@@ -71,7 +71,7 @@ Both CLIs ship roughly weekly, so treat every shape below as versioned.
 - the `@anthropic-ai/claude-agent-sdk@0.3.310` tarball, read via `npm pack` (no install scripts run)
 - the Codex protocol generated from the *installed* binary with `codex app-server generate-ts --out …` and `generate-json-schema --out …` (96 TS files plus 642 v2 types)
 
-**Paid invocations: 4 of 4 used.** All ran in a throwaway git repo at `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/fixture-repo`, which contains `README.md` and `math_utils.py`. Each run had a 120 s timeout.
+**Paid invocations: 4 of 4 used.** All ran in a throwaway git repo at `/tmp/scratch/fixture-repo`, which contains `README.md` and `math_utils.py`. Each run had a 120 s timeout.
 
 | # | Fixture | Command (abridged) | Result |
 |---|---|---|---|
@@ -506,7 +506,7 @@ The other SDKs follow the same split: `@openai/codex-sdk@0.164.0` (TypeScript) s
 
 ```json
 → {"method":"initialize","id":0,"params":{"clientInfo":{"name":"codly","title":"Codly","version":"0.1.0"},"capabilities":{"experimentalApi":false}}}
-← {"id":0,"result":{"userAgent":"codly_probe/0.161.0 (Mac OS 26.5.2; arm64) dumb (codly_probe; 0.0.1)","codexHome":"/Users/julien/.codex","platformFamily":"unix","platformOs":"macos"}}
+← {"id":0,"result":{"userAgent":"codly_probe/0.161.0 (Mac OS 26.5.2; arm64) dumb (codly_probe; 0.0.1)","codexHome":"/Users/me/.codex","platformFamily":"unix","platformOs":"macos"}}
 → {"method":"initialized"}
 ← {"method":"remoteControl/status/changed","params":{"status":"disabled",…},"emittedAtMs":…}
 ← {"method":"account/updated","params":{"authMode":"chatgpt","planType":"plus"},"emittedAtMs":…}

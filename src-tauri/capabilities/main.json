@@ -23,6 +23,7 @@
     "allow-compact-agent",
     "allow-agent-context-usage",
     "allow-reconnect-agent-mcp",
+    "allow-set-agent-mcp-enabled",
     "allow-stop-agent-task",
     "allow-agent-takeover",
     "allow-list-takeovers",

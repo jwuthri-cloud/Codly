@@ -22,11 +22,11 @@ import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { trustOf } from '../util/career';
 import { withModel } from '../util/team';
-import { followUpRequest, reviewMessage, type ReviewDraft } from '../util/review';
+import { followUpRequest, reviewMessage, sameSpot, type ReviewDraft } from '../util/review';
 import { answerText } from '../util/outcome';
 import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
 import { accounts } from './accounts.svelte';
-import { yourAnswers } from './answers';
+import { yourAnswers, yourChoice } from './answers';
 import { diffstats } from './diffstats.svelte';
 import { fileList, loadMergeState, resolveMergeConflict } from './mergeState.svelte';
 import { flushClosing } from './closing';
@@ -34,7 +34,7 @@ import { ESC_STOP_WINDOW, escStop } from './esc';
 import { busy } from './queue';
 import { requests } from './requests.svelte';
 import { review, reviewKey } from './review.svelte';
-import { noteStop, stopping } from './stops';
+import { noteKill, noteStop, stopping } from './stops';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
 import { ui, wallNow } from './ui.svelte';
@@ -80,6 +80,14 @@ export async function openWorkspace(path?: string) {
   const last = ui.enterOffice(ws.id);
   const list = requests.list;
   ui.openRequest((list.find((r) => r.thread === last) ?? list[0])?.thread ?? 'lead');
+}
+
+/** Codly starts on the office the core had open: you are on the request you last had open
+ *  there, when it is still one, and in the room you were in. */
+export function reopenLastRequest() {
+  const office = store.workspace?.id;
+  const last = office ? ui.lastRequest(office) : null;
+  if (last && requests.get(last)) ui.resumeRequest(last);
 }
 
 export async function updateSettings(patch: Partial<Settings>) {
@@ -337,9 +345,11 @@ export async function resolveApproval(approvalId: string, choice: ApprovalChoice
     await api.resolveApproval(approvalId, { choice, message, answers: (answers ?? null) as never });
     return true;
   });
-  // The core keeps no copy of an answer: the closed card and the history show it from here.
+  // The core puts the answer on record (`approval_said`); until that row is here, the closed
+  // card and the history show it from this.
   const said = sent ? answerText(answers) : null;
   if (said) yourAnswers.set(approvalId, said);
+  if (sent) yourChoice.set(approvalId, choice);
 }
 
 /** One answer for the requests that share a card: the same command asked by several agents. */
@@ -394,7 +404,9 @@ export function waitingRequest(key: string): string | null {
 /**
  * Send back: every comment you wrote on a diff, as one message (file, line, the quoted line, the
  * comment). A task that is not done gets them through the core: its worker reads them and Codly
- * checks the work again. Merged or finished work (a done task, a whole plan) opens a new request
+ * checks the work again; they leave the diff when the core took them, and one you wrote or
+ * changed while the call was on its way stays. Merged or finished work (a done task, a whole
+ * plan) opens a new request
  * with the comments ready to send: they stay on the diff until you send that message, and Send
  * back again goes to the same request (with the comments as they are now). `paths`: the diff's
  * files, in order. True: the comments went to the worker, or are in a request's composer; false:
@@ -412,7 +424,11 @@ export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, pa
     const t = await attempt('send your comments back', () => api.sendBackTask(task.id, reviewMessage(list, paths)), 'your comments stay on the diff.');
     if (!t) return false;
     if (store.isOpen(ws)) store.upsertTask(t);
-    review.clear(key);
+    // The worker got `list`. A comment written or changed while the call was on its way is
+    // not in it: it stays on the diff.
+    const now = review.comments(key);
+    for (const c of list) if (now.some((n) => sameSpot(n, c) && n.text === c.text)) review.comment(key, c, '');
+    if (!review.comments(key).length) review.clear(key);
     const who = (t.assignee && store.agentMap.get(t.assignee)?.name) || 'its worker';
     toast({ kind: 'success', title: `${t.key} sent back to ${who}`, body: list.length === 1 ? '1 comment' : `${list.length} comments` });
     return true;
@@ -486,13 +502,25 @@ export async function createTask(title: string, goal = '') {
  *  resumes the conversation on the new model with its next message. The core's refusal says
  *  what to do (stop its turn first, wait for its task, pick a model the CLI knows). */
 export async function setAgentModel(agent: Agent, model: string | null): Promise<boolean> {
-  const label = model ?? 'the default model';
+  const why = await switchAgentModel(agent, model);
+  if (why) toast({ kind: 'error', title: `Couldn’t switch ${agent.name} to ${model ?? 'the default model'}`, body: why });
+  return !why;
+}
+
+/** `setAgentModel` for the model dialog, which says the reason itself: null when the agent
+ *  switched, else why not. An answer with no agent in it is a failure too, never a silent one. */
+export async function switchAgentModel(agent: Agent, model: string | null): Promise<string | null> {
   const ws = store.workspace?.id;
-  const a = await attempt(`switch ${agent.name} to ${label}`, () => api.setAgentModel(agent.id, model));
-  if (!a) return false;
+  let a: Agent | null;
+  try {
+    a = await api.setAgentModel(agent.id, model);
+  } catch (e) {
+    return msg(e);
+  }
+  if (!a) return 'Codly got no answer for the switch. Try again.';
   if (store.isOpen(ws)) store.upsertAgent(a);
-  toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${label}` });
-  return true;
+  toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${model ?? 'the default model'}` });
+  return null;
 }
 
 /** Give an agent another model (a new Legend's bigger context window; you clicked it): a 1:1
@@ -567,13 +595,18 @@ export function stopThreadByEsc(thread: string): boolean {
   return true;
 }
 
+/** Kill: the process ends now. The agent's conversation says that you killed it. */
 export async function stopAgent(agentId: string) {
   const undo = noteStop(agentId);
+  const unkill = noteKill(agentId, wallNow());
   const ok = await attempt('stop the agent', async () => {
     await api.stopAgent(agentId);
     return true;
   });
-  if (!ok) undo();
+  if (!ok) {
+    undo();
+    unkill();
+  }
 }
 
 /** Let go an agent you hired: it joins the ghosts by the memory archive (you can bring it back). */

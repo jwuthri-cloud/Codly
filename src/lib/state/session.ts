@@ -3,11 +3,12 @@
 // (`background_tasks` events, the CLI's whole list at every change, with what left the list).
 // Both belong to one run of the agent: the process that holds the servers and runs the
 // commands. The store keeps them per agent (store.svelte.ts feeds these functions); the agent
-// sheet shows the ones of the agent's live run, with "Reconnect" and "Stop" (requests to the
-// live Claude session).
+// sheet shows the ones of the agent's live run, with "Reconnect", "Turn off", "Turn on" and
+// "Stop" (requests to the live Claude session).
 import { api } from '../api';
 import type { EventKind } from '../gen/EventKind';
 import type { McpServerStatus } from '../gen/McpServerStatus';
+import { clean } from '../util/sanitize';
 import { toast } from './toasts.svelte';
 
 /** One MCP server of an agent's run, as the CLI last gave it. `error` is the CLI's own reason. */
@@ -17,9 +18,10 @@ export type McpServer = { name: string; status: McpServerStatus; error: string |
  * One piece of work of an agent's run in the background: a command it left running ("command":
  * "Stop" names it by `id`, the CLI's id of it), a helper ("helper"), or another task of the CLI.
  * `status` is "running", then the CLI's word for how it ended ("completed", "stopped"; "ended"
- * when the CLI did not say). `startedAt`: when the first list of the run that names it came,
- * as far back as the events at hand go (null: it was never seen running). `endedAt`: when the
- * list that no longer names it came.
+ * when the CLI did not say). `startedAt`: when the list in which it started came (null: that
+ * list is not known: the work was never seen running, or the first list at hand that names it
+ * was read from a snapshot and may not be the first one that did). `endedAt`: when the list
+ * that no longer names it came.
  */
 export type BackgroundWork = { id: string; kind: string; description: string; status: string; runId: string | null; startedAt: number | null; endedAt: number | null };
 
@@ -46,13 +48,22 @@ export function withMcpServer(list: McpServer[], k: McpEvent, runId: string | nu
  * its end. The list is the whole list each time, so work that ran and is in neither part of
  * the event is over too (the event of its end is not at hand: "ended"). The work of an earlier
  * run is gone with that run's process. Of the ended work the last ones are kept.
+ *
+ * The event has no start time: work starts with the list that names it first. `replayed`: the
+ * list was read from a snapshot or from stored rows (the store says so), not as it came. Such
+ * a list with nothing of its run before it (the window was loaded again) can be a late list
+ * of a long run: the work it names started at a time nobody knows, and its row shows no timer.
  */
-export function withBackgroundTasks(list: BackgroundWork[], k: TasksEvent, runId: string | null, ts: number): BackgroundWork[] {
+export function withBackgroundTasks(list: BackgroundWork[], k: TasksEvent, runId: string | null, ts: number, replayed = false): BackgroundWork[] {
   const same = list.filter((w) => w.runId === runId);
   const ran = new Map(same.filter((w) => w.status === 'running').map((w) => [w.id, w]));
+  const startsHere = !replayed || same.length > 0;
   // One row per id, in each part: the rows are keyed by it.
   const running = new Map<string, BackgroundWork>();
-  for (const t of k.tasks) running.set(t.id, { id: t.id, kind: t.kind, description: t.description, status: 'running', runId, startedAt: ran.get(t.id)?.startedAt ?? ts, endedAt: null });
+  for (const t of k.tasks) {
+    const was = ran.get(t.id);
+    running.set(t.id, { id: t.id, kind: t.kind, description: t.description, status: 'running', runId, startedAt: was ? was.startedAt : startsHere ? ts : null, endedAt: null });
+  }
   const said = new Set([...k.tasks, ...k.ended].map((t) => t.id));
   const lost = [...ran.values()].filter((w) => !said.has(w.id)).map((w): BackgroundWork => ({ ...w, status: 'ended', endedAt: ts }));
   const ended = k.ended.map((e): BackgroundWork => ({ id: e.id, kind: e.kind, description: e.description, status: e.status, runId, startedAt: ran.get(e.id)?.startedAt ?? null, endedAt: ts }));
@@ -62,6 +73,17 @@ export function withBackgroundTasks(list: BackgroundWork[], k: TasksEvent, runId
     over.set(w.id, w);
   }
   return [...running.values(), ...[...over.values()].slice(-ENDED_KEPT)];
+}
+
+/**
+ * Background work that was built again from an agent's stored rows (`built`), with the start
+ * times the window knew before (`held`): a start it saw is not in doubt because the rows were
+ * read again.
+ */
+export function withKnownStarts(built: BackgroundWork[], held: BackgroundWork[]): BackgroundWork[] {
+  const key = (w: BackgroundWork) => `${w.runId ?? ''} ${w.id}`;
+  const known = new Map(held.map((w) => [key(w), w.startedAt]));
+  return built.map((w) => (w.startedAt != null ? w : { ...w, startedAt: known.get(key(w)) ?? null }));
 }
 
 /** What belongs to the agent's live run (nothing when it has none: its process is gone). */
@@ -83,7 +105,7 @@ export const MCP_HINT: Record<McpServerStatus, string> = {
   connecting: 'Claude Code is still connecting to this server.',
   failed: 'The agent works without this server’s tools. Reconnect tries again.',
   needs_sign_in: 'The agent works without this server’s tools until you sign in to it in Claude Code’s own MCP settings. Then press Reconnect.',
-  disabled: 'This server is switched off in Claude Code.',
+  disabled: 'This server is switched off: the agent works without its tools. Turn on starts it again.',
 };
 
 /** How to sign in to a server that needs it, under its row. Codly cannot do it for you: the
@@ -94,6 +116,47 @@ export const signInSteps = (name: string): string =>
 
 /** A server Codly can ask Claude Code to connect again. */
 export const canReconnect = (s: McpServer) => s.status === 'failed' || s.status === 'needs_sign_in';
+
+/** Codly's own MCP server in every run: the agent reports to Codly through it, so it stays on. */
+const CODLY_SERVER = 'codly';
+
+/** The switch of a server's row: its button, the button while the request is on its way, and what the request turns the server to. */
+export type McpSwitch = { label: string; busy: string; enabled: boolean };
+
+/**
+ * The switch a server's row offers: "Turn off" on one that is connected, "Turn on" on one
+ * that is switched off, none in any other state (a server that did not start has Reconnect)
+ * and none on Codly's own server.
+ */
+export function mcpSwitch(s: McpServer): McpSwitch | null {
+  if (s.name === CODLY_SERVER) return null;
+  if (s.status === 'connected') return { label: 'Turn off', busy: 'Turning off…', enabled: false };
+  if (s.status === 'disabled') return { label: 'Turn on', busy: 'Turning on…', enabled: true };
+  return null;
+}
+
+/**
+ * What the switch is for, on its button. Not recorded: whether Claude Code saves the switch
+ * (docs/research has one process that turns a server off and on, and no process started
+ * after an "off"). So the line promises nothing about the agent's next run, and says that
+ * the switch can stay.
+ */
+export const mcpSwitchHint = (agent: string): string => `Switches this server for ${agent}. Claude Code may keep the switch after this run.`;
+
+/**
+ * Turn an MCP server of the agent's live run off or on. Returns whether Claude Code took
+ * the request; the server's next `mcp_server` event says where it stands. A refusal (Codly's
+ * own server, a server that does not start again) is said in a toast, with the reason.
+ */
+export async function switchMcp(agentId: string, server: string, enabled: boolean): Promise<boolean> {
+  try {
+    await api.setAgentMcpEnabled(agentId, server, enabled);
+    return true;
+  } catch (e) {
+    toast({ kind: 'error', title: `Couldn’t turn ${clean(server)} ${enabled ? 'on' : 'off'}`, body: msg(e) });
+    return false;
+  }
+}
 
 /**
  * What a reconnect that did not connect the server came back with: Claude Code's own answer,
@@ -134,8 +197,27 @@ export function backgroundSummary(list: BackgroundWork[]): string {
 /** What a row calls its piece of work, when it is no command: "helper", "task". */
 export const backgroundKind = (w: BackgroundWork): string | null => (w.kind === 'command' ? null : w.kind === 'helper' ? 'helper' : 'task');
 
-/** "Stop" is Claude Code's `stop_task` request, which is recorded for a command only. */
-export const canStop = (w: BackgroundWork) => w.status === 'running' && w.kind === 'command';
+/**
+ * "Stop" is Claude Code's `stop_task` request. It is recorded for a command and for a helper
+ * of the list (docs/research/cli-claude-stream-json-2.1.311-part3.md, section 1), not for
+ * another kind of task.
+ */
+export const canStop = (w: BackgroundWork) => w.status === 'running' && (w.kind === 'command' || w.kind === 'helper');
+
+/** What "Stop" does to a helper, on its button (`agent`: the name of the helper's agent). A command just ends: no hint. */
+export const stopHint = (w: BackgroundWork, agent: string): string | null =>
+  w.kind === 'helper' ? `Stops this helper. ${agent} is told and goes on with a turn of its own.` : null;
+
+/**
+ * How long a row reads "Stopping…" after Claude Code took the stop. Claude Code writes the
+ * list that no longer names the work before it answers (recorded: both in the same 10 ms),
+ * so the row moves to the ended ones at once. A row that still runs after this wait was not
+ * stopped by that request: "Stop" is there again.
+ */
+export const STOP_WAIT_MS = 10_000;
+
+/** Whether a stop that Claude Code took at `takenAt` is still on its way (`now`: the clock of the screen; no time: none was taken). */
+export const stopOnItsWay = (takenAt: number | undefined, now: number): boolean => takenAt != null && now - takenAt < STOP_WAIT_MS;
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : typeof e === 'string' ? e : 'Unknown error');
 
@@ -152,13 +234,13 @@ export async function reconnectMcp(agentId: string, server: string): Promise<str
   }
 }
 
-/** Stop a background command. Returns whether Claude Code took the request; its next list of background tasks says that the command stopped. */
-export async function stopBackgroundTask(agentId: string, taskId: string): Promise<boolean> {
+/** Stop a background command or helper. Returns whether Claude Code took the request; its next list of background tasks says that the work stopped. */
+export async function stopBackgroundTask(agentId: string, work: Pick<BackgroundWork, 'id' | 'kind'>): Promise<boolean> {
   try {
-    await api.stopAgentTask(agentId, taskId);
+    await api.stopAgentTask(agentId, work.id);
     return true;
   } catch (e) {
-    toast({ kind: 'error', title: 'Couldn’t stop the command', body: msg(e) });
+    toast({ kind: 'error', title: work.kind === 'helper' ? 'Couldn’t stop the helper' : 'Couldn’t stop the command', body: msg(e) });
     return false;
   }
 }

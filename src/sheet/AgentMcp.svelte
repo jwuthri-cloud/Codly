@@ -4,11 +4,13 @@
   list: closed, the section's line says how many are in each state. "Reconnect" asks Claude
   Code to try again (orchestrator/live_session.rs), which can take as long as the server takes
   to start. When the server still does not connect, the answer shows under the server, beside
-  the server's reason, until the server reports again.
+  the server's reason, until the server reports again. "Turn off" on a connected server and
+  "Turn on" on a switched-off one go to the agent's live run. Not recorded: whether Claude
+  Code saves the switch, so the button's hint promises nothing about the agent's next run.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
-  import { MCP_HINT, MCP_LABEL, canReconnect, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, type McpServer, type ReconnectAnswer } from '../lib/state/session';
+  import { MCP_HINT, MCP_LABEL, canReconnect, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, switchMcp, type McpServer, type ReconnectAnswer } from '../lib/state/session';
   import { store } from '../lib/state/store.svelte';
   import { clean } from '../lib/util/sanitize';
   import Provenance from '../components/Provenance.svelte';
@@ -27,7 +29,7 @@
   });
   /** A server of this run (the sheet shows one agent after another). */
   const key = (name: string) => `${agent.run_id}:${name}`;
-  /** The server a reconnect is on its way for. */
+  /** The server a request (a reconnect, a switch) is on its way for. */
   let busy = $state<string | null>(null);
   /** What the last reconnect of a server came back with, when the server still did not connect. */
   let answers = $state<Record<string, ReconnectAnswer>>({});
@@ -40,6 +42,12 @@
     answers = text == null ? rest : { ...rest, [k]: { text, seen } };
     busy = null;
   }
+  /** Turn the server off or on. Its row changes when the server reports where it stands. */
+  async function flip(s: McpServer, enabled: boolean) {
+    busy = key(s.name);
+    await switchMcp(agent.id, s.name, enabled);
+    busy = null;
+  }
 </script>
 
 {#if servers.length}
@@ -47,6 +55,7 @@
     <ul class="servers">
       {#each servers as s (s.name)}
         {@const answer = reconnectAnswer(s, answers[key(s.name)])}
+        {@const flips = mcpSwitch(s)}
         <li class="st-{s.status}">
           <div class="row">
             <span class="dot" aria-hidden="true"></span>
@@ -54,6 +63,9 @@
             <span class="state" data-tip={MCP_HINT[s.status]}>{MCP_LABEL[s.status]}</span>
             {#if canReconnect(s)}
               <button class="btn sm ghost" disabled={busy != null} onclick={() => reconnect(s)}>{busy === key(s.name) ? 'Reconnecting…' : 'Reconnect'}</button>
+            {/if}
+            {#if flips}
+              <button class="btn sm ghost" disabled={busy != null} data-tip={mcpSwitchHint(clean(agent.name))} onclick={() => flip(s, flips.enabled)}>{busy === key(s.name) ? flips.busy : flips.label}</button>
             {/if}
           </div>
           {#if s.status === 'needs_sign_in'}<p class="why">{signInSteps(clean(s.name))}</p>{/if}

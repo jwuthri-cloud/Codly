@@ -1,7 +1,7 @@
 <!--
   The agent sheet. First screen answers: what is it doing (the same sentence as everywhere) and
   why, does it need me, what is its task. Then its own steps, the files it touched (and why),
-  its subagents, live output, honest cost, and the full history. Every fact carries its
+  its helpers (subagents), live output, honest cost, and the full history. Every fact carries its
   provenance: Observed (CLI event) · Inferred (Codly heuristic) · Provided (Codly put it in
   context) · Model-stated (its own words).
 -->
@@ -30,12 +30,15 @@
   import Portrait from '../components/Portrait.svelte';
   import Provenance from '../components/Provenance.svelte';
   import Say from '../components/Say.svelte';
+  import RetryButton from '../components/RetryButton.svelte';
+  import { safeChoice } from '../lib/util/confirm';
   import Section from '../components/Section.svelte';
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
   import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
-  import { backgroundLine, historyFacts, repeatsReply, taskChangedLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
+  import { helperEndWord, helpersSummary } from './helperRows';
+  import { backgroundLine, compactionRowLine, helperRowLine, historyFacts, repeatsReply, taskChangedLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
   import { isPlanCall, planCallEnd, planStep } from '../lib/util/planRequest';
   import AgentMcp from './AgentMcp.svelte';
   import AgentTakeover from './AgentTakeover.svelte';
@@ -117,10 +120,11 @@
   }
   const fileState = (f: FileTouch) => (f.created ? 'created' : f.deleted ? 'deleted' : f.modified ? 'changed' : f.read ? 'read' : 'provided');
 
-  // ── subagents ──
+  // ── helpers (subagents) ──
   const subs = $derived(live?.subagents ?? []);
   const subsRunning = $derived(subs.filter((s) => s.status === 'running'));
-  const subsDone = $derived(subs.filter((s) => s.status !== 'running'));
+  /** The ones that are over, however they ended: each row says its own word (helperRows.ts). */
+  const subsEnded = $derived(subs.filter((s) => s.status !== 'running'));
   let moreSubs = $state(false);
   let moreFiles = $state(false);
   const SHOW = 4;
@@ -186,6 +190,8 @@
     for (let i = store.events.length - 1; i >= 0 && out.length < 250; i--) {
       const e = store.events[i];
       if (e.agent_id !== agent.id && !(task && e.task_id === task.id && e.kind.type === 'decision')) continue;
+      // (what you said with an answer is no row of its own: the answer's row ends with it)
+      if (e.kind.type === 'approval_said') continue;
       const t = e.kind.type;
       // (a helper's progress is no step of its own: its calls and its end are rows already)
       if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed' || t === 'control_changed' || t === 'sub_agent_progress') continue;
@@ -194,6 +200,8 @@
       if (filter === 'decisions' && t !== 'decision') continue;
       if (filter === 'errors' && t !== 'error' && !(e.kind.type === 'tool_completed' && !e.kind.ok && !facts.planCalls.has(e.kind.call_id))) continue;
       if (repeatsReply(e, agent.id, facts)) continue;
+      // (a list of background work that only drops a helper says nothing: the helper's own row says its end)
+      if (e.kind.type === 'background_tasks' && backgroundLine(e.kind) == null) continue;
       out.push(e);
     }
     // (a task's row says its status: one that repeats the row before it says nothing)
@@ -219,11 +227,11 @@
       case 'approval_resolved': return { icon: 'flag', text: settledLine(k.status, k.by, store.approvals.find((a) => a.id === k.approval_id) ?? null, yourAnswers.get(k.approval_id) ?? null, agent.provider), tone: k.status === 'approved' ? 'good' : 'bad' };
       case 'retrieval': return { icon: 'link', text: `Codly provided ${k.citations.length} citations for “${oneLine(k.query, 50)}”` };
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
-      case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
+      case 'sub_agent': return { icon: 'crew', text: helperRowLine(k) };
       case 'mcp_server': return { icon: 'link', text: `MCP server ${k.name}: ${MCP_LABEL[k.status].toLowerCase()}${k.error ? ` (${oneLine(k.error, 90)})` : ''}` };
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
       case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
-      case 'background_tasks': return { icon: 'terminal', text: backgroundLine(k) };
+      case 'background_tasks': return { icon: 'terminal', text: backgroundLine(k) ?? '' }; // (one with nothing to say is not in `log`)
       case 'decision': return { icon: 'help', text: k.summary };
       case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${plural(k.files.length, 'file')}` };
       case 'verified': return { icon: k.ok ? 'check-circle' : 'x-circle', text: `Verified ${k.command}`, tone: k.ok ? 'good' : 'bad' };
@@ -233,14 +241,14 @@
       case 'triple_added': return { icon: 'graph', text: tripleLine(k.triple, names) };
       case 'task_changed': return { icon: 'plan', text: taskChangedLine(k.task) };
       case 'exited': return { icon: 'stop', text: `Process exited${k.code != null ? ` (${k.code})` : ''}` };
-      case 'compacting': return { icon: 'layers', text: `Compacted context${k.pre_tokens ? ` ${tokens(k.pre_tokens)} → ${tokens(k.post_tokens)}` : ''}` };
+      case 'compacting': return { icon: 'layers', text: compactionRowLine(k, agent.provider) };
       case 'retrying': return { icon: 'refresh', text: `Retrying (${k.attempt}): ${k.reason}`, tone: 'warn' };
       case 'chat': return { icon: 'chat', text: oneLine(k.message.text, 100) };
       default: return { icon: 'info', text: k.type.replace(/_/g, ' ') };
     }
   }
 
-  // Jump targets: a timeline click (eventId) opens History; a subagent companion opens Subagents.
+  // Jump targets: a timeline click (eventId) opens History; a helper's companion opens Helpers.
   let root: HTMLDivElement | undefined = $state();
   $effect(() => {
     const id = ui.selection?.kind === 'agent' ? ui.selection.eventId : undefined;
@@ -324,20 +332,21 @@
     <div class="confirm">
       <span>Stop {agent.name}? The process ends; its worktree is kept.</span>
       <button class="btn sm danger" disabled={stopping} onclick={stop}>{stopping ? 'Stopping…' : 'Stop'}</button>
-      <button class="btn sm ghost" disabled={stopping} onclick={() => (confirmStop = false)}>Keep</button>
+      <button class="btn sm ghost" disabled={stopping} use:safeChoice={{ keep: () => (confirmStop = false) }} onclick={() => (confirmStop = false)}>Keep</button>
     </div>
   {/if}
   {#if confirmLetGo}
     <div class="confirm">
       <span>Let {agent.name} go? They leave the office as a ghost by the memory archive, with their career and memory; you can bring them back.</span>
       <button class="btn sm danger" onclick={() => { confirmLetGo = false; letGo(agent.id); }}>Let go</button>
-      <button class="btn sm ghost" onclick={() => (confirmLetGo = false)}>Keep</button>
+      <button class="btn sm ghost" use:safeChoice={{ keep: () => (confirmLetGo = false) }} onclick={() => (confirmLetGo = false)}>Keep</button>
     </div>
   {/if}
 
   <div class="sections">
     <Section id="now" title="Now">
       <p class="now tone-{n?.tone}">{#if n}<Say parts={n.parts} />{/if}</p>
+      <RetryButton {task} />
       <p class="now-meta num">{#if !n?.parts.some((p) => p.timer)}{n?.tone === 'live' ? `for ${timer(ui.now - since)}` : `since ${clock(since)}`}{#if agent.worktree}{' · '}{/if}{/if}{#if agent.worktree}<code data-tip={GLOSSARY.worktree}>{task?.branch ?? tildify(agent.worktree)}</code>{/if}</p>
       <div class="why"><Why lines={why} /></div>
     </Section>
@@ -420,7 +429,7 @@
     </Section>
 
     {#if subs.length}
-      <Section id="subagents" title="Subagents" summary={subsRunning.length ? `${subsRunning.length} running` : `${subs.length} finished`}>
+      <Section id="subagents" title="Helpers" summary={helpersSummary(subs)}>
         <ul class="subs">
           {#each moreSubs ? subsRunning : subsRunning.slice(0, SHOW) as s (s.callId)}
             <li>
@@ -436,17 +445,17 @@
           {/each}
         </ul>
         {#if subsRunning.length > SHOW}<button class="more" onclick={() => (moreSubs = !moreSubs)}>{moreSubs ? 'Show less' : 'Show more'}</button>{/if}
-        {#if subsDone.length}
-          <button class="more done" onclick={() => (moreSubs = !moreSubs)}><Icon name="crew" size={15} />{subsDone.length} finished</button>
+        {#if subsEnded.length}
+          <button class="more done" onclick={() => (moreSubs = !moreSubs)}><Icon name="crew" size={15} />{subsEnded.length} ended</button>
           {#if moreSubs}
             <ul class="subs">
-              {#each subsDone as s (s.callId)}
+              {#each subsEnded as s (s.callId)}
                 <li class="fin">
                   <div class="s-row">
                     <Icon name={s.status === 'completed' ? 'check' : 'x-circle'} size={15} />
                     {#if s.name}<span class="s-kind">{clean(s.name)}</span>{/if}
                     <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
-                    <span class="s-meta num">{dur(s.ts - s.startedAt)}</span>
+                    <span class="s-meta num">{helperEndWord(s.status)} · {dur(s.ts - s.startedAt)}</span>
                   </div>
                   {#if helperLine(s)}<p class="s-now truncate">{helperLine(s)}</p>{/if}
                   {#if clean(s.report).trim()}<p class="s-report selectable">{clean(s.report).trim()}</p>{/if}
@@ -609,7 +618,7 @@
   .s-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-4); flex-shrink: 0; }
   .s-dot.on { background: color-mix(in srgb, var(--hue) 75%, white); box-shadow: 0 0 8px var(--hue); }
   .s-txt { flex: 1; min-width: 0; font-size: var(--t-md); }
-  .s-meta { font-size: var(--t-xs); color: var(--ink-3); }
+  .s-meta { font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
   .subs li { flex-direction: column; align-items: stretch; gap: 2px; }
   .s-row { display: flex; gap: 10px; align-items: center; min-width: 0; }
   .s-row > :global(svg) { flex-shrink: 0; color: var(--ink-3); }

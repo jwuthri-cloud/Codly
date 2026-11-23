@@ -152,6 +152,20 @@ export class MockControls {
     return this.sim.patchAgent(id, { permission_mode: mode });
   }
 
+  /** A 1:1 agent's model, as the core answers it (`set_agent_model`): only a 1:1 agent, the same
+   *  model is no change, an agent on a task or in a turn refuses (a live Claude session switches
+   *  in place, so it may be mid-turn), otherwise the agent comes back with the new model. */
+  setModel(id: string, model: string | null): Agent {
+    const a = this.sim.agents.get(id);
+    if (!a) throw new Error('Unknown agent');
+    if (a.role !== 'solo') throw new Error("only a 1:1 agent's model can be changed");
+    if ((a.model ?? null) === model) return a;
+    if (a.task_id) throw new Error(`${a.name} is on a task: its model can change when the task is done`);
+    if (a.provider !== 'claude' && this.sim.actor(id).inTurn) throw new Error(`${a.name} is still working: stop its turn first`);
+    this.note(id, `${a.name} now runs on ${model ?? 'its CLI’s default model'}`);
+    return this.sim.patchAgent(id, { model });
+  }
+
   /** "Compact now", as in the core: a Codex agent between turns and off a task, a Claude agent
    *  between turns (the demo agent's context shrinks to a quarter). */
   compact(id: string): null {
@@ -198,15 +212,31 @@ export class MockControls {
     return null;
   }
 
-  /** "Stop" on a background command: its CLI ends it, and the agent's next list says "stopped".
-   *  (An agent of the demo leaves one command running at most, so the request names none.) */
-  stopTask(id: string): null {
+  /**
+   * "Turn off" and "Turn on" on an MCP server of a Claude agent's live run: the server's
+   * state says "switched off", or "connected" again. Codly's own server stays on.
+   */
+  setMcpEnabled(id: string, server: string, enabled: boolean): null {
     const a = this.agent(id);
+    if (a.provider !== 'claude') throw new Error('only a Claude agent takes this without a restart');
+    if (server === 'codly') throw new Error(`codly is Codly's own server: ${a.name} reports to Codly through it, so it stays on`);
+    this.note(id, `you turned ${server} ${enabled ? 'on' : 'off'} for ${a.name}'s run`);
+    this.sim.actor(id).emit({ type: 'mcp_server', name: server, status: enabled ? 'connected' : 'disabled', error: null });
+    return null;
+  }
+
+  /** "Stop" on a background command: its CLI ends it, and the agent's next list says "stopped".
+   *  A helper is stopped the same way, and the agent is then told in a turn of its own
+   *  (demo/background.ts). `taskId`: the id the agent's list gives the one to stop. Like Claude
+   *  Code, a stop of something that is over already answers and changes nothing. */
+  stopTask(id: string, taskId: string): null {
+    const a = this.agent(id);
+    if (!taskId.trim()) throw new Error('which background command?');
     const background = demoBackground(this.sim);
-    const running = background.of(id);
-    if (!running.length) throw new Error(`${a.name} has no command running in the background`);
-    this.note(id, `asked ${a.name} to stop a command it left running in the background`);
-    for (const task of running) background.end(id, task.id, 'stopped');
+    const task = background.of(id).find((t) => t.id === taskId);
+    if (!task) return null;
+    this.note(id, `asked ${a.name} to stop what it left running in the background: ${task.description}`);
+    background.end(id, task.id, 'stopped');
     return null;
   }
 

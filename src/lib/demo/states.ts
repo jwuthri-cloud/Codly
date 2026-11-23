@@ -27,6 +27,10 @@ export type DemoStates = {
   approval: AskKind | null;
   /** `?hour=13`: the hour of the day (from 0, below 24) the demo's clock starts at. */
   hour: number | null;
+  /** `?resume=ask`: work was under way when Codly last closed, and waits for your Resume. */
+  resumeAsk: boolean;
+  /** `?background=on`: a 1:1 Claude agent left a command and a helper at work in the background. */
+  background: boolean;
 };
 
 export function demoStates(params: URLSearchParams): DemoStates {
@@ -43,6 +47,8 @@ export function demoStates(params: URLSearchParams): DemoStates {
     intake: intake === 'issue' ? 'issue' : intake === 'pr' ? 'pull_request' : null,
     approval: ASK_KINDS.find((k) => k === params.get('approval')) ?? null,
     hour: hour >= 0 && hour < 24 ? hour : null,
+    resumeAsk: params.get('resume') === 'ask',
+    background: params.get('background') === 'on',
   };
 }
 
@@ -51,5 +57,5 @@ export function demoStates(params: URLSearchParams): DemoStates {
  * asked when you open the repo. `?hour=` does not either: it only moves the clock.
  */
 export function opensRepo(s: DemoStates): boolean {
-  return s.mergeConflict || s.previewRunning || s.checksOn || s.slowHelper || s.planMode || s.intake !== null || s.approval !== null;
+  return s.mergeConflict || s.previewRunning || s.checksOn || s.slowHelper || s.planMode || s.intake !== null || s.approval !== null || s.resumeAsk || s.background;
 }

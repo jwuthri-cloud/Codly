@@ -196,6 +196,7 @@ describe('events → behaviour', () => {
     expect(asked(subject('WebFetch', { url: 'https://example.com' }))).toBe('May I use WebFetch?');
     expect(asked({ kind: 'question', questions: [] })).toBe('May I ask a question?');
     expect(asked({ kind: 'permissions', detail: {} })).toBe('May I get more permissions?');
+    expect(asked({ kind: 'permissions' as const, detail: { cwd: '/Users/someone/Code/acme', reason: null, permissions: { network: null, fileSystem: { read: null, write: ['/Users/someone/Code/acme-docs'] } } } })).toBe('May I write in ../acme-docs?');
   });
 
   it('blocked slumps under a rain cloud; rate limited sleeps (zZ); long idle falls asleep at 10 min', () => {

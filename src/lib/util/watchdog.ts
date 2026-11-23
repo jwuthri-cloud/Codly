@@ -19,7 +19,7 @@ export const WATCHDOG_LIMITS: Limit[] = [
   {
     key: 'quiet_tool_secs',
     title: 'No output while a tool runs',
-    body: 'The limit for the same three steps while a command or another tool call is open. A build or a test suite can be silent for a long time.',
+    body: 'The limit for the same three steps while a tool call is open that gives no sign of life: a build or a test suite can be silent for a long time. A Claude agent’s commands, MCP tools and helpers say every 30 s that they still run, so the limit above counts for them.',
     choices: [0, 1800, 3600, 7200, 14400],
   },
   {

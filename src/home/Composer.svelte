@@ -4,7 +4,8 @@
   `@agent` to talk to one agent 1:1 (the thread switches and shows as a chip); `@` mid-sentence
   mentions an agent or a file of the repo (its path, which the agent reads), `#` refers to a task.
   `/` alone on the line lists Codly's own actions (new request, from an issue or a pull request,
-  stop, mode, model, clear…) and ↵
+  stop, mode, model, clear…) and the controls of the agent you talk to (compact, context, its
+  way of working, undo, your terminal, its MCP servers: composerActions.ts), and ↵
   runs one; it is not sent. One that cannot run right now (stop, with nothing running) says why
   and is not sent either. A CLI's own slash commands are not offered: Codly cannot run them.
   Esc twice on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
@@ -17,10 +18,14 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
   import { api } from '../lib/api';
+  import type { Agent } from '../lib/gen/Agent';
   import { sendChat, setRequestPrefs, stopThread, stopThreadByEsc } from '../lib/state/actions';
+  import { compactAgent, setPermissionMode, showContext } from '../lib/state/control.svelte';
+  import { ofLiveRun } from '../lib/state/session';
+  import { loadTakeover, openInTerminal, showTerminal, takeovers } from '../lib/state/takeover.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
   import { toast } from '../lib/state/toasts.svelte';
-  import { busy, busyHint, waitingHint } from '../lib/state/queue';
+  import { busy, busyHint, stoppedHint, waitingHint } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
   import { CLOSED_LIST, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { fuzzy } from '../lib/util/fuzzy';
@@ -33,10 +38,12 @@
   import Portrait from '../components/Portrait.svelte';
   import LeadControls, { MODES } from './LeadControls.svelte';
   import AgentControls from './AgentControls.svelte';
+  import { nextWay, wayOf } from './agentPicker';
   import { messageWithFiles } from './attached';
   import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from './drafts';
   import { recall, type Recalled } from './recall';
-  import { fileMention, filterSlash, rankFiles, triggerAt, type SlashCommand, type Trigger } from './composerMenu';
+  import { noTurn, slashCommands, type SlashDo } from './composerActions';
+  import { fileMention, filterSlash, rankFiles, triggerAt, type Trigger } from './composerMenu';
   import { repoFiles } from './repoFiles';
 
   interface Props {
@@ -147,6 +154,7 @@
   const placeholder = $derived(
     waitsForYou ? waitingHint(agent?.name ?? 'The agent', agent?.provider)
     : isBusy ? busyHint(agent?.name ?? 'The agent', agent?.provider)
+    : oneToOne && agent?.status === 'offline' ? stoppedHint(agent.name)
     : oneToOne ? `Message ${agent?.name ?? 'the agent'} directly…`
     : fresh && thread !== 'lead' ? 'Describe the new request — its own Lead plans it in parallel…'
     : 'Ask the Lead to build, fix or explain — @ for a file, / for actions',
@@ -187,41 +195,69 @@
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
     files = [];
   }
-  /**
-   * What `/` offers: Codly's actions. Every name is listed in every conversation, so that a
-   * known name is never sent to the agent as a message; an action that cannot run here or
-   * right now says why instead.
-   */
-  const commands = $derived.by((): SlashCommand[] => {
-    const inRequest = 'Only in a request';
-    const list: SlashCommand[] = [{ name: 'new', label: 'New request', hint: 'Its own Lead, in parallel', icon: 'plus', run: () => ui.newRequest() }];
-    list.push(
-      { name: 'issue', label: 'From issue…', hint: 'A GitHub link or number', icon: 'link', run: () => (intakeUi.dialog = 'issue') },
-      { name: 'pr', label: 'From pull request…', hint: 'Its reviews and failing checks', icon: 'merge', run: () => (intakeUi.dialog = 'pull_request') },
-    );
-    const stop = { name: 'stop', label: `Stop ${agent?.name ?? 'the agent'}`, icon: 'stop' };
-    list.push(isBusy ? { ...stop, hint: 'Ends the running turn', run: () => void stopThread(thread) } : { ...stop, off: 'Nothing is running' });
-    for (const m of MODES) {
-      const mode = { name: m.id, label: `${m.label} mode`, icon: m.icon };
-      list.push(oneToOne ? { ...mode, off: inRequest } : { ...mode, hint: m.hint, run: () => void setRequestPrefs(thread, { mode: m.id }) });
-    }
-    const model = { name: 'model', label: 'Model', icon: 'sparkle' };
+  /** What the core keeps of the agent's turns, for `/undo`: read when `/` opens the menu (the read starts git). */
+  let turns = $state<{ agent: string; off: string | null } | null>(null);
+  /** `/` opened the menu: ask the core what only it knows about the agent you talk to. */
+  function loadControls() {
     const a = agent;
-    if (!oneToOne) list.push({ ...model, hint: 'The Lead’s CLI, model and thinking', run: () => lead?.showModels() });
-    else if (a?.role === 'solo') list.push({ ...model, hint: `${a.name}’s model`, run: () => (ui.modelDialog = { provider: a.provider, agentId: a.id }) });
-    else list.push({ ...model, off: 'Not for this agent' });
-    const diff = { name: 'diff', label: 'View the changes', icon: 'diff' };
-    const p = plan;
-    if (oneToOne) list.push({ ...diff, off: inRequest });
-    else if (p?.integration_branch) list.push({ ...diff, hint: 'What this request’s plan changed', run: () => ui.openDiff({ kind: 'plan', id: p.id }) });
-    else list.push({ ...diff, off: 'This request has no changes yet' });
-    list.push(
-      { name: 'clear', label: 'Clear the draft', hint: 'The text and the attached files', icon: 'trash', run: clearDraft },
-      { name: 'closed', label: 'Closed requests', hint: 'Read them again', icon: 'clock', run: () => ui.openThread(CLOSED_LIST) },
-      { name: 'settings', label: 'Settings', hint: '⌘,', icon: 'settings', run: () => (ui.settingsOpen = true) },
-      { name: 'shortcuts', label: 'Keyboard shortcuts', hint: '?', icon: 'keyboard', run: () => (ui.shortcutsOpen = true) },
+    if (!a) return;
+    void loadTakeover(a.id);
+    api.agentCheckpoints(a.id).then(
+      (kept) => (turns = { agent: a.id, off: noTurn(kept, a.name) }),
+      (e) => (turns = { agent: a.id, off: e instanceof Error ? e.message : String(e) }),
     );
-    return list;
+  }
+  /** The agent's sheet, open at one of its sections. */
+  function openSheet(a: Agent, section: string) {
+    ui.sheetFocus = section;
+    ui.selectAgent(a.id);
+  }
+  /** What each action of `/` does. */
+  const actions: SlashDo = {
+    newRequest: () => ui.newRequest(),
+    fromIssue: () => (intakeUi.dialog = 'issue'),
+    fromPullRequest: () => (intakeUi.dialog = 'pull_request'),
+    stop: () => void stopThread(thread),
+    requestMode: (mode) => void setRequestPrefs(thread, { mode }),
+    agentMode: (a, mode) => void setPermissionMode(a.id, mode),
+    leadModels: () => lead?.showModels(),
+    // A block body: an assignment's value would be the object, not the state's proxy of it.
+    agentModel: (a) => {
+      ui.modelDialog = { provider: a.provider, agentId: a.id };
+    },
+    compact: (a) => void compactAgent(a.id, a.name),
+    context: (a) => void showContext(a.id, a.name),
+    changes: () => {
+      if (plan) ui.openDiff({ kind: 'plan', id: plan.id });
+    },
+    // Its checkpoints are in the Git tab of the sheet's last section: the sheet opens there.
+    undo: (a) => openSheet(a, 'tabs'),
+    terminal: (a) => void openInTerminal(a.id),
+    showTerminal: (a) => showTerminal(a.id),
+    mcp: (a) => openSheet(a, 'mcp'),
+    clear: clearDraft,
+    closed: () => ui.openThread(CLOSED_LIST),
+    settings: () => (ui.settingsOpen = true),
+    shortcuts: () => (ui.shortcutsOpen = true),
+  };
+  /** What `/` offers: Codly's actions and the agent's controls (composerActions.ts). */
+  const commands = $derived.by(() => {
+    const a = agent;
+    // The servers of its live run change with its events, which the store counts per agent.
+    if (a) void [store.revBy.get(a.id), store.liveRevBy.get(a.id)];
+    return slashCommands(
+      {
+        oneToOne,
+        agent: a,
+        busy: isBusy,
+        changes: !!plan?.integration_branch,
+        modes: MODES,
+        mcp: a ? ofLiveRun(store.live[a.id]?.mcp ?? [], a.run_id) : [],
+        takeover: a ? takeovers.of(a.id) : null,
+        turns: a && turns?.agent === a.id ? turns : null,
+      },
+      actions,
+    );
   });
 
   const options = $derived.by((): Opt[] => {
@@ -248,6 +284,7 @@
     if (!ta) return;
     const next = triggerAt(text, ta.selectionStart ?? 0);
     if (next?.trigger === '@' && mention?.trigger !== '@') loadFiles();
+    if (next?.trigger === '/' && mention?.trigger !== '/') loadControls();
     mention = next;
     if (next) mi = 0;
   }
@@ -288,6 +325,15 @@
       ta?.setSelectionRange(caret, caret);
       resize();
     });
+  }
+
+  /** The menu scrolls when it is long (every action, in a low window): the row the arrow keys are on stays in view. */
+  let menu: HTMLUListElement | undefined = $state();
+  function showActive() {
+    const row = menu?.querySelector<HTMLElement>('.opt.active');
+    if (!menu || !row) return;
+    if (row.offsetTop < menu.scrollTop) menu.scrollTop = row.offsetTop;
+    else if (row.offsetTop + row.offsetHeight > menu.scrollTop + menu.clientHeight) menu.scrollTop = row.offsetTop + row.offsetHeight - menu.clientHeight;
   }
 
   function resize() {
@@ -346,8 +392,8 @@
   function key(e: KeyboardEvent) {
     if (e.isComposing) return; // IME: Enter confirms the composition, it doesn't send
     if (mention && options.length) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); mi = (mi + 1) % options.length; return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); mi = (mi - 1 + options.length) % options.length; return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); mi = (mi + 1) % options.length; tick().then(showActive); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); mi = (mi - 1 + options.length) % options.length; tick().then(showActive); return; }
       // A held key runs no action: its repeats would run the next one too.
       if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); if (!(e.repeat && options[mi].kind === 'command')) pick(options[mi]); return; }
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); mention = null; return; }
@@ -373,6 +419,14 @@
       setRequestPrefs(thread, { mode: MODES[(MODES.findIndex((m) => m.id === now) + 1) % MODES.length].id });
       return;
     }
+    // In a 1:1 with a Claude agent it cycles the way of the picker under the composer (one
+    // rule, agentPicker.ts; the same call as its menu and the agent's sheet).
+    const way = oneToOne ? wayOf(agent, !!workerRequest) : null;
+    if (e.key === 'Tab' && e.shiftKey && agent && way) {
+      e.preventDefault();
+      if (!e.repeat) void setPermissionMode(agent.id, nextWay(way, store.requestPrefs[thread]?.approval_mode ?? store.settings.approval_mode));
+      return;
+    }
     // ⌫ alone: with a modifier it is another key (⌘⌫ denies), and it never leaves the conversation.
     if (e.key === 'Backspace' && !text && oneToOne && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
       e.preventDefault();
@@ -393,14 +447,14 @@
   ondragleave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) dragging = false; }}
   ondrop={(e) => { if (!hasFiles(e)) return; e.preventDefault(); dragging = false; addFiles([...(e.dataTransfer?.files ?? [])]); }}>
   {#if mention && (options.length || noFiles)}
-    <ul class="mentions" class:actions={mention.trigger === '/'} role="listbox" aria-label={mention.trigger === '/' ? 'Actions' : mention.trigger === '#' ? 'Mention a task' : mention.atStart ? 'Talk to an agent, or mention a file' : 'Mention an agent or a file'}>
+    <ul class="mentions" bind:this={menu} class:actions={mention.trigger === '/'} role="listbox" aria-label={mention.trigger === '/' ? 'Actions' : mention.trigger === '#' ? 'Mention a task' : mention.atStart ? 'Talk to an agent, or mention a file' : 'Mention an agent or a file'}>
       {#each options as o, i (o.id)}
         {#if o.kind === 'agent' && i === 0 && mention?.atStart}<li class="mh eyebrow">Talk 1:1 with</li>{/if}
         {#if o.kind === 'file' && options[i - 1]?.kind !== 'file'}<li class="mh eyebrow">Files</li>{/if}
         <li>
           <button class="opt" class:active={i === mi} class:off={o.kind === 'command' && !o.run} role="option" aria-selected={i === mi} aria-disabled={o.kind === 'command' && !o.run} onpointerenter={() => (mi = i)} onmousedown={(e) => { e.preventDefault(); pick(o); }}>
             {#if o.kind === 'agent'}<Portrait agent={store.agentMap.get(o.agentId)} size={20} />{:else}<Icon name={o.kind === 'command' ? o.icon : o.kind === 'file' ? 'file' : 'plan'} size={14} />{/if}
-            <span class="ol truncate">{o.label}{#if o.kind === 'command'}<span class="oh">{o.hint}</span>{/if}</span>
+            <span class="ol" class:truncate={o.kind !== 'command'}>{o.label}{#if o.kind === 'command'}<span class="oh">{o.hint}</span>{/if}</span>
             <span class="os truncate">{o.sub}</span>
           </button>
         </li>
@@ -477,9 +531,13 @@
   .send { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: var(--ink-3); background: var(--surface-2); flex-shrink: 0; transition: background var(--d-2), color var(--d-2), transform var(--d-2) var(--spring); }
   .send:disabled { opacity: 1; }
   .has .send { background: var(--aurora); color: var(--on-aurora); transform: scale(1.04); }
-  .mentions { position: absolute; left: 6px; bottom: calc(100% + 8px); width: min(360px, calc(100% - 12px)); padding: 5px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); z-index: var(--z-pop); animation: rise-in var(--d-3) var(--spring); }
-  /* An action's row also says what it does: room for the whole sentence. */
+  /* Every action is listed: in a low window the list scrolls, and never grows past the top of the page. */
+  .mentions { position: absolute; left: 6px; bottom: calc(100% + 8px); width: min(360px, calc(100% - 12px)); max-height: min(440px, 55vh); overflow-y: auto; padding: 5px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); z-index: var(--z-pop); animation: rise-in var(--d-3) var(--spring); }
+  /* An action's row also says what it does, or why it cannot run now, in full: a long sentence takes a second line. */
   .mentions.actions { width: min(480px, calc(100% - 12px)); }
+  .actions .opt { height: auto; min-height: 36px; padding: 6px 10px; }
+  .actions .ol { min-width: 0; line-height: 18px; }
+  .actions .os { flex-shrink: 0; }
   .mh { padding: 6px 10px 4px; }
   .mh.bad { font-size: var(--t-sm); color: var(--bad); }
   .opt { display: flex; align-items: center; gap: 9px; width: 100%; height: 36px; padding: 0 10px; border-radius: var(--r-md); text-align: left; }

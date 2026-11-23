@@ -203,7 +203,7 @@ impl Store {
     /// One page of a conversation's history, newest first (the "Load earlier" control). A thread
     /// shows more than one agent's events, so its page is the newest `limit` rows before `before` of:
     /// - every event of `owner`, the agent the thread belongs to (a request's Lead, a 1:1's agent);
-    /// - approvals (asked and answered) and results (commits, checks, reviews, merges) of the
+    /// - approvals (asked, what you said, answered) and results (commits, checks, reviews, merges) of the
     ///   thread's tasks, by whoever did them: a request's tasks are its plans' (tasks with no
     ///   plan belong to "lead"), a 1:1's are the ones assigned to its agent;
     /// - a request's messages. A closed request's messages moved to its archive thread, so the
@@ -242,7 +242,7 @@ impl Store {
                 let mut st = conn.prepare_cached(&format!(
                     "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event
                      WHERE task_id IN ({tasks}) AND id < ?3
-                       AND type IN ('approval_requested', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged')
+                       AND type IN ('approval_requested', 'approval_said', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged')
                      ORDER BY id DESC LIMIT ?4"
                 ))?;
                 let found = st.query_map(params![workspace_id, of, before, limit], event_from_row)?;
@@ -1783,6 +1783,43 @@ mod tests {
         assert_eq!(t.page("lead:x", None, None, 50), vec![lead_said, checked, answered, asked, worker_asked, user_said]);
         // A 1:1 thread: everything its agent did, and the results of the tasks assigned to it.
         assert_eq!(t.page("agent:worker", Some("worker"), None, 50).len(), 5, "its message, its work, the approval (asked, answered) and the check");
+    }
+
+    /// What you said with an answer is a row of the request's thread, like the answer: a page
+    /// of the Lead's thread has the note you gave a worker.
+    #[test]
+    fn a_thread_page_has_what_you_said_to_its_tasks_requests() {
+        let t = Threads::new();
+        let approval = Approval {
+            id: new_id(),
+            agent_id: "worker".into(),
+            run_id: "r".into(),
+            task_id: Some("t1".into()),
+            call_id: None,
+            subject: ApprovalSubject::Command { command: "npm install".into(), cwd: None },
+            reason: None,
+            choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny],
+            risks: vec![],
+            status: ApprovalStatus::Pending,
+            decided_by: None,
+            created_at: now_ms(),
+        };
+        let asked = t.add(Some("worker"), Some("t1"), EventKind::ApprovalRequested { approval: approval.clone() });
+        let said = EventKind::ApprovalSaid { approval_id: approval.id.clone(), note: Some("use pnpm".into()), answer: None, plan_changed: false };
+        let said = t.add(Some("worker"), Some("t1"), said);
+        // The row changes nothing: the request still waits for its answer.
+        assert_eq!(t.store.approval(&approval.id).unwrap().unwrap().status, ApprovalStatus::Pending);
+        let answer = EventKind::ApprovalResolved { approval_id: approval.id.clone(), status: ApprovalStatus::Denied, by: "user".into() };
+        let answered = t.add(Some("worker"), Some("t1"), answer);
+
+        assert_eq!(t.page("lead:x", Some("lead"), None, 50), vec![answered, said, asked]);
+        let page = t.store.thread_events(&t.ws, "lead:x", Some("lead"), None, 50).unwrap();
+        let note = page.iter().find_map(|e| match &e.kind {
+            EventKind::ApprovalSaid { note, .. } => note.clone(),
+            _ => None,
+        });
+        assert_eq!(note.as_deref(), Some("use pnpm"), "the row comes back from the log as it was written");
+        assert!(t.page("lead:y", Some("other-lead"), None, 50).is_empty(), "not in another request's thread");
     }
 
     #[test]

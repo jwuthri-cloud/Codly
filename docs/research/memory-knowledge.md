@@ -12,7 +12,7 @@
 - **[Claim]** an author's or vendor's claim I could not check independently.
 - **[I]** my inference or design proposal.
 
-**Method.** Munder Difflin ("MD") was read from the shallow clone at `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/research-src/munder-difflin` (commit `d3460de`, 2026-10-25; origin `github.com/chaitanyagiri/munder-difflin`, also listed as `github.com/HarnessMD/munder-difflin`). MemPalace, the Python memory engine MD shells out to, was shallow-cloned read-only next to it (`/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/research-src/mempalace`, commit `84582fb`, 2026-10-25), because MD's memory can't be described without it. No script or binary from either repository was run, and text inside them was treated as data. Everything else comes from primary pages fetched today. No paid LLM prompt was run. The two local micro-benchmarks (std-only Rust, Python stdlib `sqlite3`) live in `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scripts/`.
+**Method.** Munder Difflin ("MD") was read from the shallow clone at `/tmp/scratch/research-src/munder-difflin` (commit `d3460de`, 2026-10-25; origin `github.com/chaitanyagiri/munder-difflin`, also listed as `github.com/HarnessMD/munder-difflin`). MemPalace, the Python memory engine MD shells out to, was shallow-cloned read-only next to it (`/tmp/scratch/research-src/mempalace`, commit `84582fb`, 2026-10-25), because MD's memory can't be described without it. No script or binary from either repository was run, and text inside them was treated as data. Everything else comes from primary pages fetched today. No paid LLM prompt was run. The two local micro-benchmarks (std-only Rust, Python stdlib `sqlite3`) live in `/tmp/scratch/scripts/`.
 
 **Related reports:** [context-engineering.md](./context-engineering.md) (code retrieval, the `codly-mcp` sidecar, the pointer pack), [agents-backend-orchestration.md](./agents-backend-orchestration.md) (SQLite data model, task board, cheap CLI calls), [cli-claude-codex.md](./cli-claude-codex.md), [cli-others-acp.md](./cli-others-acp.md), [design-world.md](./design-world.md), [munder/](./munder/).
 
@@ -783,7 +783,7 @@ SELECT eid, MIN(depth) AS depth FROM walk GROUP BY eid;
 
 The SQLite documentation confirms both points: multiple recursive SELECTs "added in version 3.34.0", and UNION being used "to prevent the recursion from entering an infinite loop if the graph contains cycles" ([lang_with](https://www.sqlite.org/lang_with.html)). [V-doc]
 
-**Measurements.** [V-local; scripts: `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scripts/sqlbench.py`, `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scripts/sqlbench2.py`]
+**Measurements.** [V-local; scripts: `/tmp/scratch/scripts/sqlbench.py`, `/tmp/scratch/scripts/sqlbench2.py`]
 
 Setup: 50k entities, 250k edges (80 % current), skewed degree distribution, in-memory database, Python `sqlite3` with SQLite 3.51.0, the same 60 seeds for every formulation, partial indexes `(subject_id, predicate)` and `(object_id, predicate)` where the edge is current.
 
@@ -868,7 +868,7 @@ Published, reproducible benchmark ([jerrythomas/rust-embedding-bench](https://gi
 
 ### 4.4 Vector storage
 
-**Measured brute force.** [V-local; script: `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scripts/vecbench/`]
+**Measured brute force.** [V-local; script: `/tmp/scratch/scripts/vecbench/`]
 
 Setup: std-only Rust 1.96 with `lto = "fat"`, Apple M5 Pro, random L2-normalized 384-d vectors, top-20 results, 60 queries. Multi-threaded runs spawn their threads per query, so they include spawn cost. The p95 spikes reflect a busy machine; p50 is the stable signal.
 
@@ -1736,4 +1736,4 @@ pub fn fts_query(text: &str) -> Option<String> {
 - crates.io API (versions and licences queried 2026-10-25): https://crates.io/api/v1/crates/<name> for fastembed, ort, candle-*, model2vec-rs, sqlite-vec, rusqlite, usearch, hnsw_rs, instant-distance, tantivy, tokenizers, hf-hub, rmcp, kuzu, lbug, cozo, oxigraph, surrealdb, helix-db, lancedb, arroy, simsimd, petgraph, mempal, tiktoken-rs
 
 **Local measurements (this report)**
-- `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scripts/vecbench/` (brute-force vectors) · `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scripts/sqlbench.py` and `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scripts/sqlbench2.py` (FTS5 and graph CTEs)
+- `/tmp/scratch/scripts/vecbench/` (brute-force vectors) · `/tmp/scratch/scripts/sqlbench.py` and `/tmp/scratch/scripts/sqlbench2.py` (FTS5 and graph CTEs)

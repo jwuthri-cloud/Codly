@@ -13,14 +13,16 @@ const noteOf = new WeakMap<EventRow, Note>();
  * The agent's notices as the rows that show them, oldest first (in a row: oldest first too).
  * Everything told between the start and the end of one turn is one row. A notice outside any
  * turn is a row of its own; the same words told again right after it join its row.
- * The log may begin inside a turn: what was told before the first turn end it holds, with no
- * turn start before it, was told in that turn.
+ * The log may begin inside a turn whose start it does not hold any more (a long turn): until
+ * the log says that a turn started or ended, what is told is one row too, as in a turn. Nothing
+ * between those notices says that they are of different turns, and the row lists them all.
  */
 export function noticeRows(events: EventRow[], agentId: string): Note[][] {
   const rows: Note[][] = [];
-  /** unknown: nothing in the log says yet whether a turn runs. */
-  let turn: 'unknown' | 'open' | 'none' = 'unknown';
-  /** The row of the turn that runs. */
+  /** The log says that no turn runs: a turn or the process ended, and no turn started since.
+   *  At the log's start it does not say so: a turn may run whose start left the log. */
+  let outside = false;
+  /** The row of the turn that runs, or that may run. */
   let inTurn: Note[] | null = null;
   /** The newest row outside a turn, while nothing came after it. */
   let alone: Note[] | null = null;
@@ -29,22 +31,21 @@ export function noticeRows(events: EventRow[], agentId: string): Note[][] {
     const k = ev.kind;
     switch (k.type) {
       case 'turn_started':
-        turn = 'open';
+        outside = false;
         inTurn = alone = null;
         break;
       case 'turn_completed':
-        if (turn === 'unknown' && rows.length > 1) rows.splice(0, rows.length, rows.flat());
-        turn = 'none';
+        outside = true;
         inTurn = alone = null;
         break;
       case 'exited':
-        turn = 'none';
+        outside = true;
         inTurn = null;
         break;
       case 'notice': {
         let note = noteOf.get(ev);
         if (!note) noteOf.set(ev, (note = { eventId: ev.id, ts: ev.ts, text: k.text }));
-        if (turn === 'open') {
+        if (!outside) {
           if (!inTurn) rows.push((inTurn = []));
           inTurn.push(note);
         } else if (alone && alone[0].text === note.text) alone.push(note);

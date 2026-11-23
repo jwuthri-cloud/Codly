@@ -195,6 +195,9 @@ pub(super) struct RepoConfig {
     pub project: bool,
     /// Claude Code's local settings file.
     pub local: bool,
+    /// The folder has configuration files for the run's CLI (`project` says whether the run
+    /// may load them).
+    pub has_files: bool,
 }
 
 /// The folder a run starts in.
@@ -701,14 +704,15 @@ impl Inner {
     /// CLI configuration. Err (`NotStarted`) = a CLI that would load files you have not
     /// trusted, and that Codly cannot start without them.
     pub(super) async fn repo_config(&self, ws_id: Option<&str>, cwd: &Path, provider: Provider) -> Result<RepoConfig> {
-        let Some(folder) = self.folder_trust(ws_id, cwd).await? else { return Ok(RepoConfig { project: false, local: false }) };
+        let Some(folder) = self.folder_trust(ws_id, cwd).await? else { return Ok(RepoConfig { project: false, local: false, has_files: false }) };
         if folder.keeps_out(provider) {
             return Err(self.not_started(&folder, provider).await.into());
         }
         let trusted = folder.trusted();
         // In your checkout an untracked local settings file is your own, trusted repo or not.
         let local_is_the_repos = folder.scan.files.iter().any(|file| file.path.eq_ignore_ascii_case(CLAUDE_LOCAL));
-        Ok(RepoConfig { project: trusted, local: folder.kind == Folder::Checkout && (trusted || !local_is_the_repos) })
+        let has_files = folder.scan.files.iter().any(|file| file.cli == provider);
+        Ok(RepoConfig { project: trusted, local: folder.kind == Folder::Checkout && (trusted || !local_is_the_repos), has_files })
     }
 
     /// The CLIs Codly does not start in `cwd` as it is (`repo_config` refuses them): for a

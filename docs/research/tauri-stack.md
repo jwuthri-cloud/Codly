@@ -5,10 +5,10 @@ Machine used: macOS 26.5.2 (arm64, Apple M5 Pro), rustc/cargo 1.96.0, node 22.23
 
 **Evidence labels** used throughout:
 
-- **[V-src]**: I read it in the upstream source code. Clones are in `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/research-src/{tauri,tauri-v3,plugins-workspace,create-tauri-app,fix-path-env-rs}`.
+- **[V-src]**: I read it in the upstream source code. Clones are in `/tmp/scratch/research-src/{tauri,tauri-v3,plugins-workspace,create-tauri-app,fix-path-env-rs}`.
 - **[V-docs]**: I read it in official docs on the date above.
 - **[V-reg]**: I checked it on the npm or crates.io registry on the date above.
-- **[V-local]**: I ran it on this machine. Scaffolds are in `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scaffold-test/`.
+- **[V-local]**: I ran it on this machine. Scaffolds are in `/tmp/scratch/scaffold-test/`.
 - **[Claim]**: project-reported, community or experience-based. Not verified today.
 
 Rust code snippets in this report have **not been compiled**. I deliberately did not run `cargo build` or `cargo check` on downloaded code. Treat them as design sketches that are close to correct.
@@ -518,10 +518,10 @@ Defer it to the "explainable orchestration v2" milestone, when symbol-level cont
 The problem was verified locally:
 
 ```
-claude:   /Users/julien/.local/bin/claude
-codex:    /Users/julien/.nvm/versions/node/v22.23.3/bin/codex
-gemini:   /Users/julien/.nvm/versions/node/v22.23.3/bin/gemini
-opencode: /Users/julien/.nvm/versions/node/v22.23.2/bin/opencode   # different nvm version!
+claude:   /Users/me/.local/bin/claude
+codex:    /Users/me/.nvm/versions/node/v22.23.3/bin/codex
+gemini:   /Users/me/.nvm/versions/node/v22.23.3/bin/gemini
+opencode: /Users/me/.nvm/versions/node/v22.23.2/bin/opencode   # different nvm version!
 ```
 
 An app launched from Finder or the Dock gets launchd's minimal PATH, so none of these resolve. Guessing a single nvm version would still miss `opencode`. **You must use the user's real shell PATH.** `zsh -ilc 'env -0'` took **0.28 s** on this machine, and `/usr/bin/env -0` works on macOS [V-local].

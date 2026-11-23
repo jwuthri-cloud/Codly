@@ -121,8 +121,13 @@ to a consultant the Lead hires for one task.
 What an agent wants to do and Codly's rules do not settle comes to you as a card in the
 conversation. Codly reads each request against its rules first (for example: it deletes files, it
 reaches outside the agent's worktree, it uses the network), then asks you: **Approve once**,
-**Allow for this session** or **Deny** (⌘↵, ⌥⌘↵, ⌘⌫). Questions an agent asks you come the same
-way. See [Safety](#safety) for the approval modes and the saved rules.
+**Allow for this session** or **Deny** (⌘↵, ⌥⌘↵, ⌘⌫; ⇧⌘⌫ denies with a note). A Codex request for
+more permissions says in words which folders or network it wants and which are outside its
+worktree. Questions an agent asks you come the same way: 1 to 9 pick an option and ⌘↵ sends the
+answer. A plan a Claude agent shows you has no plain "no": you send it back with a note, since
+without one Claude Code shows the same plan again. What you said with an answer (a note, an
+answer, a changed plan) stays on the closed card. See [Safety](#safety) for the approval modes
+and the saved rules.
 
 ![Approval request for a shell command, with Approve once, Allow for this session and Deny](site/shots/approval.jpg)
 
@@ -157,9 +162,15 @@ the agent's Git tab) puts the files back, and can itself be undone.
 ### Talk to one agent
 
 Besides requests to the Lead, you can hire a long-term 1:1 agent and chat with it, as in its own
-CLI. It works in its own worktree (or, with **Git isolation** off, in your project folder), and its
-Git tab has merge, push, pull request and checkpoints. For a Claude Code agent you can switch its
-mode and model, compact its conversation, and read its context use without a restart. **Open in my
+CLI. **Quick start with …** on the add-agent wizard's first step, or "Start an agent with …" in the
+palette (⌘K), starts one with the CLI's defaults. It works in its own worktree (or, with **Git
+isolation** off, in your project folder), and its Git tab has merge, push, pull request and
+checkpoints. The composer's `/` menu has the agent's controls, as its CLI's slash commands do:
+compact, context, mode, model, undo the last turn, your terminal, its MCP servers. For a Claude
+Code agent ⇧⇥ switches its mode (ask for edits, accept edits, plan first), and a mode or model
+change needs no restart. Its sheet lists its MCP servers with Reconnect, **Turn off** and **Turn
+on**, and its background commands and helpers (subagents) with **Stop**. Codly opens on the
+request you left. **Open in my
 terminal** hands a Claude Code agent's session to your terminal (`claude --resume`), and **Give it
 back** returns it to Codly.
 
@@ -180,13 +191,17 @@ workers can also use `codly_ask_user` to ask you a decision.
 - **Ask before quitting while agents work** (on by default). Agents are child processes of Codly:
   they stop when it quits.
 - **Resume work when Codly opens** (Ask by default): work that was under way when Codly closed does
-  not go on by itself. Codly asks once; until you answer, no task starts. Always and Never are the
-  other choices.
-- Silent agents: a turn with no output for 10 minutes (60 while a tool call is open) is flagged and
-  you are notified; at twice that, the turn is interrupted once; after as long again, the run is
-  stopped. Settings → Safety → Silent agents sets the times.
+  not go on by itself. A bar at the top asks once: **Resume work** or **Not now**; until you
+  resume, no task starts, also after a pause or a budget ends. Always and Never are the other
+  choices.
+- Silent agents: a turn with no output for 10 minutes is flagged and you are notified; at twice
+  that, the turn is interrupted once; after as long again, the run is stopped. A tool call that
+  gives no sign of life gets 60 minutes; Claude Code says every 30 s that a command, an MCP tool
+  or a helper still runs, so a hung one of those is noticed after 10. Settings → Safety → Silent
+  agents sets the times.
 - A worker turn that fails is retried after a wait; at its third failure in a row the task is
-  blocked with the error. A plan that cannot go on says so in its thread.
+  blocked with the error, and **Retry** is on the row that says so. A plan that cannot go on says
+  so in its thread.
 - Notifications (Settings → General → Notifications): one switch per kind, and by default only
   while Codly is not in front.
 - Budgets (Settings → Safety → Autonomy & Budgets): a token budget and a cost budget for all agents
@@ -236,9 +251,10 @@ Settings → Safety lists the rules so you can remove them.
     the repository's git data. It can still read your other files.
   - It can reach only the hosts that your Claude Code settings allow. Codly adds no host and no
     folder. When a command wants another host, Codly asks you, in every approval mode except Full
-    access: the approval card names the host. If you allow it, the host stays allowed for the rest
-    of that agent's session, for every later command. If you deny it, the command gets a network
-    error.
+    access: the approval card names the host. Approve once lets this command connect. Claude Code
+    then does not ask again for this host while this agent keeps running. When the agent starts
+    again (Codly restarts, or a change that restarts the agent) it asks again. If you deny it, the
+    command gets a network error.
   - Commands still go through the approval rules, as they do with the switch off: what the rules
     ask about (a `git push`, an `rm -rf`, a download) still asks you first. The sandbox is a second
     check under the rules, not a way around them. So one command can ask twice: once for itself,
@@ -261,7 +277,9 @@ MCP servers, and the like for the other CLIs) loads only after you trusted the f
 when it opens such a repo and again when those files change. Until then Claude Code starts without
 them, and a CLI that Codly cannot start without them (Gemini CLI, OpenCode, Cursor) is not started
 in that repo: it takes no task and reviews none. A worktree whose files are not the ones of your
-folder (an agent changed them there) is shown with its own files, to trust by itself.
+folder (an agent changed them there) is shown with its own files, to trust by itself. A choice
+counts from an agent's next start: a Claude run that started without the folder's files says so
+in its record, and goes on without them until the agent starts again.
 
 The choice is about the repo's files, not yours: a Codex agent starts the MCP servers of your own
 Codex config in every folder, trusted or not. To keep them out, turn off **Use my own CLI setup**
@@ -391,9 +409,9 @@ What works with each:
 
 - Every CLI: plans, tasks, worktrees, the gate, approvals through Codly's broker, Codly's MCP
   tools, merge and pull request.
-- Claude Code only: the opt-in OS sandbox, **Open in my terminal**, a message that reaches the agent
-  in the middle of its turn, the MCP server list with Reconnect, Stop for a background command, and
-  saved rules for MCP tools.
+- Claude Code only: the opt-in OS sandbox, **Open in my terminal**, the mode switch, the MCP
+  server list with Reconnect and Turn off / Turn on, Stop for a background command or a helper, and
+  saved rules for MCP tools. A message sent mid-turn reaches the agent during the turn.
 - Codex: its own OS sandbox, Compact now, usage windows read with its own sign-in, subagents shown
   as rows. A message sent mid-turn reaches it in the turn too.
 - Gemini CLI, OpenCode, Cursor and Copilot: no OS sandbox and no take-over to your terminal.
@@ -429,7 +447,7 @@ matters most:
 | Cross-vendor review before merge | Safety → Review | Off |
 | Time limit for checks | Safety → Review | 10 minutes |
 | Circuit breaker | Safety → Autonomy & Budgets | On; token and cost budgets off |
-| Silent agents | Safety → Silent agents | Flag after 10 min (60 with a tool call open), idle after 2 min |
+| Silent agents | Safety → Silent agents | Flag after 10 min (60 with a silent tool call open), idle after 2 min |
 | Webhooks | Automation | Each new endpoint off |
 
 ## Keyboard shortcuts
@@ -441,11 +459,12 @@ Press `?` in the app for the full sheet. The main ones:
 | ⌘K | Search and commands |
 | ⌘N, ⌘[ / ⌘] | New request; previous / next request |
 | ⌘F | Find in the conversation |
-| ⌘↵ | Approve once, or run the plan |
+| ⌘↵ | Approve once, send a question's answer, or run the plan |
+| 1 … 9 | Pick an option of the question that waits |
 | ⌥⌘↵ | Allow for this session |
 | ⌘⌫, ⇧⌘⌫ | Deny; deny with a note |
 | Esc | Close, deselect; press twice to stop the running turn |
-| ⇧⇥ | Next request mode: Ask, Plan, Auto, Direct |
+| ⇧⇥ | Next request mode: Ask, Plan, Auto, Direct; in a 1:1 with Claude, its next mode |
 | ⌘1, ⌘2, ⌘3 | Full office, full work, the neighbourhood map |
 | G then H, P, C, K, T, S | Home, Plan, Changes, Knowledge, Terminal, Settings |
 | ⌘O, ⌘, | Open repository; Settings |

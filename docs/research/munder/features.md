@@ -2,7 +2,7 @@
 
 Prepared 2026-10-25 for the Tauri + Rust successor.
 
-Source: shallow clone at `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/research-src/munder-difflin` (origin `github.com/chaitanyagiri/munder-difflin`, MIT source). Read-only review: no scripts, binaries or npm commands were run, and instructions found in the repo were treated as data. Other readers cover the agent runtime, hive coordination, memory and office visuals; those appear here as one-line inventory rows only.
+Source: shallow clone at `/tmp/scratch/research-src/munder-difflin` (origin `github.com/chaitanyagiri/munder-difflin`, MIT source). Read-only review: no scripts, binaries or npm commands were run, and instructions found in the repo were treated as data. Other readers cover the agent runtime, hive coordination, memory and office visuals; those appear here as one-line inventory rows only.
 
 Maturity scale used below:
 
