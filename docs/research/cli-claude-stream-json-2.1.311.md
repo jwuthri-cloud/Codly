@@ -556,6 +556,8 @@ Verified facts:
 - `end_session` answers success and the process exits by itself with code 0 (stdin still open).
 
 Not verified:
+- `interrupt` while a user message with a `uuid` still waits in the CLI's queue (section 1): what `still_queued` then
+  lists, what an entry looks like, and which `command_lifecycle` lines follow. Every recorded answer is `[]`.
 - `stop_task` and `get_task_output` on a real task id, `background_tasks` on a running foreground task.
 - The other subtypes found in the bundle were not sent (they write state, need the network or an account, or drive a
   UI): `mcp_set_servers`, `mcp_call`, `mcp_authenticate`, `mcp_clear_auth`, `apply_flag_settings`, `update_settings`,

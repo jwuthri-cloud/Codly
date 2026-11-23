@@ -30,9 +30,11 @@
 //! - Adapters emit `ApprovalResolved` only for a request whose answer never reached the CLI
 //!   (it cancelled, or the write failed); the orchestrator emits it for user/policy
 //!   decisions. The store lets by = "provider" replace an earlier decision, and nothing else.
-//! - Codex assigns its own thread ids (a pre-assigned session id is ignored); Claude and ACP
-//!   agents queue a prompt sent mid-turn (one prompt = one turn), Codex steers it into the
-//!   running turn (no separate turn events).
+//! - Codex assigns its own thread ids (a pre-assigned session id is ignored); ACP agents queue
+//!   a prompt sent mid-turn (one prompt = one turn), Codex and Claude steer it into the
+//!   running turn (`PromptSteered`, no separate turn events) or, when that turn ends first,
+//!   run it as a turn of its own.
+//! - Claude and Codex can start a turn by themselves: `TurnStarted` with no input.
 //! - Reasoning effort rides on the model string as a suffix (`"haiku:high"`, `"gpt-6-luna:low"`).
 //! - The shared Codex app-server must be stopped at exit: `codex::shutdown_server()`.
 

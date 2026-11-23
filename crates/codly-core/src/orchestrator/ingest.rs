@@ -105,7 +105,8 @@ impl Inner {
         match &r.kind {
             EventKind::TurnCompleted { .. } => self.control_turn_done(&ctx.agent_id),
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
-            EventKind::TurnStarted { .. } => self.checkpoint_turn(&ctx.agent_id, &ctx.run_id), // the files before the turn
+            EventKind::TurnStarted { input } => self.checkpoint_turn(&ctx.agent_id, &ctx.run_id, input.is_some()), // the files before the turn
+            EventKind::PromptSteered { .. } => self.restore_note_read(&ctx.agent_id), // the note came with that prompt
             _ => {}
         }
         if let Err(e) = self.project_agent(&ctx, &r.kind) {
@@ -190,15 +191,25 @@ impl Inner {
         let Some(l) = live.get_mut(&ctx.agent_id).filter(|l| l.run_id == ctx.run_id) else { return };
         l.interrupt.seen(kind);
         match kind {
-            EventKind::TurnStarted { .. } => {
+            EventKind::TurnStarted { input } => {
                 l.turn_active = true;
-                l.queued = l.queued.saturating_sub(1);
+                // A turn the CLI started by itself (no input) took no prompt off the count.
+                if input.is_some() {
+                    l.queued = l.queued.saturating_sub(1);
+                }
                 l.turn_messages = 0;
                 l.last_text = None;
                 l.last_error = None;
             }
-            // Delivered into the running turn: no turn of its own will take it off the count.
-            EventKind::PromptSteered { .. } => l.queued = l.queued.saturating_sub(1),
+            // Delivered into the running turn: no turn of its own will take it off the count,
+            // and the answers owed by the turns behind the running one come a turn sooner.
+            EventKind::PromptSteered { .. } => {
+                l.queued = l.queued.saturating_sub(1);
+                let running = l.turns + 1;
+                for a in l.answers.iter_mut().filter(|a| a.due > running) {
+                    a.due -= 1;
+                }
+            }
             EventKind::Message { text, .. } if !text.trim().is_empty() => {
                 l.last_text = Some(text.clone());
                 l.turn_messages += 1;
@@ -367,6 +378,7 @@ impl Inner {
             }
             EventKind::ApprovalRequested { approval } => self.broker(ctx, approval),
             EventKind::Exited { code } => self.on_exit(ctx, *code),
+            EventKind::PromptSteered { .. } if ctx.role == Role::Lead => lock(&self.leads).steered(&ctx.agent_id),
             _ => {}
         }
     }

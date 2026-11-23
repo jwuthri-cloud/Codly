@@ -12,7 +12,7 @@ import type { Task } from '../gen/Task';
 import type { Workspace } from '../gen/Workspace';
 import { installNotifications } from '../state/notify';
 import { offices } from '../state/offices.svelte';
-import { STEER_GRACE, waitingOf, type Sent, type Turn } from '../state/queue';
+import { busyHint, queuedHint, sendNowTip, steerHint, STEER_GRACE, waitingOf, type Sent, type Turn } from '../state/queue';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 
@@ -48,6 +48,22 @@ describe('waitingOf', () => {
     expect(keys(waitingOf([turn(100, 400), turn(401, null, null)], sent, 410))).toEqual(['b']);
   });
 
+  it('a message the running turn took in stops waiting, and the one behind it does not', () => {
+    const sent = [msg('a', 150, 'also do X'), msg('b', 160, 'and Y')];
+    const running: Turn = { ...turn(100, null, 'plan it'), steers: [{ ts: 170, input: '[User] also do X' }] };
+    expect(keys(waitingOf([running], sent, 180))).toEqual(['b']);
+    // What it took in at 170 says nothing about a message sent after that.
+    expect(keys(waitingOf([running], [msg('c', 175, 'also do X')], 180))).toEqual(['c']);
+  });
+
+  it('the store keeps what a turn took in with that turn', () => {
+    apply(row({ type: 'turn_started', input: 'plan it' }, { agent_id: 'q1' }), row({ type: 'prompt_steered', input: '[User] also do X' }, { agent_id: 'q1' }));
+    const turns = store.live.q1.turns;
+    expect(turns.map((t) => [t.input, t.steers?.map((s) => s.input)])).toEqual([['plan it', ['[User] also do X']]]);
+    expect(keys(waitingOf(turns, [msg('a', turns[0].start + 0.5, 'also do X')], turns[0].start + 5))).toEqual([]);
+    store.live = {};
+  });
+
   it('steered into the running turn: nothing waits once the agent has been idle a while', () => {
     const sent = [msg('a', 150)];
     const turns = [turn(100, 400, 'go')];
@@ -61,6 +77,26 @@ describe('waitingOf', () => {
     expect(keys(r)).toEqual(['a', 'b']);
     // Once the Lead starts, the note no longer holds anything.
     expect(waitingOf([turn(600, null, 'a')], [msg('a', 100)], 700, { ts: 105 }).slot).toBe(false);
+  });
+});
+
+describe('where a waiting message goes, in words', () => {
+  it('Claude Code and Codex read it during the turn that runs', () => {
+    for (const provider of ['claude', 'codex'] as const) {
+      expect(queuedHint('Ada', provider)).toBe('Ada reads it after its current step');
+      expect(sendNowTip('Ada', provider)).toBe('Stop what Ada is doing so it reads this now');
+      expect(busyHint('Ada', provider)).toBe('Ada is mid-turn — it reads your message after its current step');
+      expect(steerHint(provider)).toBe('Arrives as context during its current turn, or as its next turn');
+    }
+  });
+
+  it('the other CLIs run it as the next turn', () => {
+    for (const provider of ['gemini', 'opencode', undefined] as const) {
+      expect(queuedHint('Ada', provider)).toBe('runs when Ada finishes this turn');
+      expect(sendNowTip('Ada', provider)).toBe('Interrupt Ada’s turn so this runs next');
+      expect(busyHint('Ada', provider)).toBe('Ada is mid-turn — your message queues and runs next');
+      expect(steerHint(provider)).toBe('Arrives as context on its next turn');
+    }
   });
 });
 

@@ -180,6 +180,9 @@ fn turn_label(prompt: Option<&str>) -> String {
     if flat.is_empty() { "a turn".into() } else { prompts::clip(&flat, 120) }
 }
 
+/// The label of a turn that no prompt started: the CLI began it by itself.
+const SELF_STARTED: &str = "a turn the agent started by itself";
+
 /// Keep `tree` (the files of `wt`, from `Git::worktree_tree`) as the agent's next checkpoint.
 /// Returns its number.
 async fn record(git: &Git, wt: &Path, agent_id: &str, kind: CheckpointKind, label: &str, tree: &str) -> Result<u32> {
@@ -352,14 +355,19 @@ impl Inner {
         Ok(Ok((ws_id, wt)))
     }
 
-    /// A turn of `agent_id` starts (the one call in `ingest`): the note about a restore has
-    /// reached the agent with this turn's prompt, and the files as they are now become a
-    /// checkpoint if the run can write in the agent's own worktree. Never waits on git.
-    pub(super) fn checkpoint_turn(self: &Arc<Self>, agent_id: &str, run_id: &str) {
-        self.restore_note_read(agent_id);
+    /// A turn of `agent_id` starts (the one call in `ingest`): the files as they are now become
+    /// a checkpoint if the run can write in the agent's own worktree. Never waits on git.
+    /// `prompted`: a prompt of Codly's started the turn, so the note about a restore has reached
+    /// the agent with it. A turn the CLI started by itself (a background task of it ended) read
+    /// no prompt: the note stays for the next one, and the checkpoint is named for what it is,
+    /// not for the prompt of the turn before.
+    pub(super) fn checkpoint_turn(self: &Arc<Self>, agent_id: &str, run_id: &str, prompted: bool) {
+        if prompted {
+            self.restore_note_read(agent_id);
+        }
         let run = lock(&self.live).get(agent_id).filter(|l| l.run_id == run_id).and_then(|l| {
             let writes = matches!(l.role, Role::Worker | Role::Solo) && !l.read_only;
-            writes.then(|| (l.cwd.clone(), l.last_prompt.clone()))
+            writes.then(|| (l.cwd.clone(), if prompted { l.last_prompt.clone() } else { Some(SELF_STARTED.to_string()) }))
         });
         let Some((cwd, prompt)) = run else { return };
         let (me, agent_id) = (self.clone(), agent_id.to_string());
@@ -446,8 +454,8 @@ impl Inner {
     }
 
     /// `text` with the note about files the user put back since the agent's last turn in
-    /// front, if there is one. The note stays until a turn starts (`restore_note_read`), so a
-    /// prompt that never reaches the agent does not take it along.
+    /// front, if there is one. The note stays until a turn takes a prompt (`restore_note_read`),
+    /// so a prompt that never reaches the agent does not take it along.
     pub(super) fn with_restore_note(&self, agent_id: &str, text: String) -> String {
         match self.store.kv_get(&note_key(agent_id)) {
             Ok(Some(note)) => format!("{note}\n\n{text}"),
@@ -459,9 +467,10 @@ impl Inner {
         }
     }
 
-    /// A turn started: its prompt carried the note. Restore is refused while a prompt is on
-    /// its way, so no note is written between a prompt and the start of its turn.
-    fn restore_note_read(&self, agent_id: &str) {
+    /// A prompt reached the agent (it started a turn, or the running turn took it in): it
+    /// carried the note. Restore is refused while a prompt is on its way, so no note is written
+    /// between a prompt and the turn that takes it.
+    pub(super) fn restore_note_read(&self, agent_id: &str) {
         let key = note_key(agent_id);
         let cleared = self.store.kv_get(&key).and_then(|note| match note {
             Some(_) => self.store.kv_write(&[(key, None)]),

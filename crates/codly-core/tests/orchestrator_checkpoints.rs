@@ -1,8 +1,9 @@
 //! Checkpoints end to end, with a fake agent in place of the CLI: the files of a 1:1 agent's
 //! worktree are kept before each turn, "Restore files to this point" puts them back and can be
 //! undone, the agent is told with its next prompt, a running turn refuses the restore (also the
-//! turn of another agent in the same worktree), and an agent that works in the project folder
-//! itself has no checkpoints at all.
+//! turn of another agent in the same worktree), an agent that works in the project folder
+//! itself has no checkpoints at all, and a turn the CLI starts by itself does not use up the
+//! note about a restore.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -64,14 +65,17 @@ struct Seen {
 }
 
 /// A fake agent. A turn starts, waits for the test's `go`, edits files in its folder, ends.
+/// On the test's `wake` it starts a turn by itself, as a CLI does when a background task of
+/// it ends: no prompt, and a prompt that comes while that turn runs goes into it.
 struct Fake {
     seen: Arc<Mutex<Seen>>,
     go: Arc<Notify>,
+    wake: Arc<Notify>,
 }
 
 impl Spawner for Fake {
     fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
-        let (seen, go) = (self.seen.clone(), self.go.clone());
+        let (seen, go, wake) = (self.seen.clone(), self.go.clone(), self.wake.clone());
         Box::pin(async move {
             let (tx, mut rx) = mpsc::unbounded_channel::<AgentCmd>();
             let (agent_id, run_id, cwd) = (spec.agent_id.clone(), spec.run_id.clone(), spec.cwd.clone());
@@ -88,9 +92,27 @@ impl Spawner for Fake {
                 tools: vec![],
             });
             tokio::spawn(async move {
-                while let Some(cmd) = rx.recv().await {
+                loop {
+                    let cmd = tokio::select! {
+                        cmd = rx.recv() => cmd,
+                        _ = wake.notified() => {
+                            send(EventKind::TurnStarted { input: None });
+                            loop {
+                                tokio::select! {
+                                    _ = go.notified() => break,
+                                    Some(cmd) = rx.recv() => if let AgentCmd::Prompt(text) = cmd {
+                                        seen.lock().unwrap().prompts.push(text.clone());
+                                        send(EventKind::PromptSteered { input: text });
+                                    },
+                                }
+                            }
+                            seen.lock().unwrap().done += 1;
+                            send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
+                            continue;
+                        }
+                    };
                     match cmd {
-                        AgentCmd::Prompt(text) => {
+                        Some(AgentCmd::Prompt(text)) => {
                             seen.lock().unwrap().prompts.push(text.clone());
                             send(EventKind::TurnStarted { input: Some(text) });
                             go.notified().await;
@@ -104,11 +126,12 @@ impl Spawner for Fake {
                             seen.lock().unwrap().done += 1;
                             send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
                         }
-                        AgentCmd::Shutdown => {
+                        Some(AgentCmd::Shutdown) => {
                             send(EventKind::Exited { code: Some(0) });
                             break;
                         }
-                        _ => {}
+                        Some(_) => {}
+                        None => break,
                     }
                 }
             });
@@ -132,15 +155,16 @@ struct Office {
     core: Arc<Core>,
     seen: Arc<Mutex<Seen>>,
     go: Arc<Notify>,
+    wake: Arc<Notify>,
     repo: PathBuf,
 }
 
 async fn office(dir: &Path) -> Office {
     let repo = temp_repo(dir);
-    let (seen, go) = (Arc::new(Mutex::new(Seen::default())), Arc::new(Notify::new()));
+    let (seen, go, wake) = (Arc::new(Mutex::new(Seen::default())), Arc::new(Notify::new()), Arc::new(Notify::new()));
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
-        spawner: Some(Arc::new(Fake { seen: seen.clone(), go: go.clone() })),
+        spawner: Some(Arc::new(Fake { seen: seen.clone(), go: go.clone(), wake: wake.clone() })),
         env: Some(std::env::vars().collect()),
         clis: Some(vec![claude()]),
         index: false,
@@ -148,7 +172,7 @@ async fn office(dir: &Path) -> Office {
     let core = Core::start_with(cfg, opts).await.unwrap();
     // The path as Codly knows it (git's own spelling of it).
     let repo = PathBuf::from(core.open_workspace(repo.to_str().unwrap()).await.unwrap().repo_path);
-    Office { core, seen, go, repo }
+    Office { core, seen, go, wake, repo }
 }
 
 impl Office {
@@ -321,6 +345,44 @@ async fn no_restore_under_another_agent_at_work_in_the_same_worktree() {
                 <untrusted>add the form</untrusted>. 1 file changed: <untrusted>a.txt</untrusted>.";
     assert!(told.starts_with(note) && told.contains("\n\n[User] and on"), "{told}");
     drop(seen);
+    o.core.shutdown().await;
+}
+
+/// A turn the CLI starts by itself read no prompt, so it did not read the note about a
+/// restore either: the note stays for the next prompt. That prompt can go into the running
+/// turn, and then the note went with it. The checkpoint before the CLI's own turn is named for
+/// what it is, not for the prompt of the turn before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_the_cli_starts_by_itself_leaves_the_note_for_the_next_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = office(dir.path()).await;
+    let agent = o.core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let (id, wt) = (agent.id.clone(), PathBuf::from(agent.worktree.clone().unwrap()));
+    o.turn(&id, &wt, "add the form", &[("a.txt", Some("1\n"))]).await;
+    o.core.restore_checkpoint(&id, 1).await.unwrap();
+    assert!(!wt.join("a.txt").exists());
+
+    // The CLI wakes by itself: a turn with no prompt.
+    o.wake.notify_one();
+    wait_for("the checkpoint before the CLI's own turn", async || (o.points(&id).await.len() == 3).then_some(())).await;
+    let newest = o.points(&id).await.remove(0);
+    assert_eq!((newest.0, newest.1, newest.2.as_str()), (3, CheckpointKind::Turn, "a turn the agent started by itself"));
+
+    // Your next message goes into that turn, and carries the note.
+    o.core.send_chat(&format!("agent:{id}"), "go on").await.unwrap();
+    wait_for("the message to reach the agent", async || (o.seen.lock().unwrap().prompts.len() == 2).then_some(())).await;
+    {
+        let seen = o.seen.lock().unwrap();
+        let note = "[Codly] The user put the files in your worktree back to how they were before the turn that started with \
+                    <untrusted>add the form</untrusted>. 1 file changed: <untrusted>a.txt</untrusted>.";
+        assert!(seen.prompts[1].starts_with(note) && seen.prompts[1].contains("\n\n[User] go on"), "{}", seen.prompts[1]);
+    }
+    o.finish(&id, &wt).await;
+
+    // Once: the prompt after that has no note.
+    o.turn(&id, &wt, "and on", &[]).await;
+    let last = o.seen.lock().unwrap().prompts[2].clone();
+    assert!(!last.contains("put the files") && last.starts_with("[User] and on"), "{last}");
     o.core.shutdown().await;
 }
 

@@ -2,8 +2,9 @@
   The conversation: the spine of the product. Everything important lands here as a rich,
   actionable card, in order. Streaming text grows in place; the view stays pinned to the newest
   line while you are there, and never jumps while you read further up.
-  You can always write: a message to a busy agent shows as Queued (in order) until its turn
-  starts; the first one offers Send now (interrupt the turn, so it runs next).
+  You can always write: a message to a busy agent shows as Queued (in order) until the agent
+  takes it (Claude Code and Codex after their current step, the other CLIs as the next turn);
+  the first one offers Send now (interrupt the turn, so the agent reads it at once).
   An error or a turn that failed is a line of its own, where it happened, with the reason.
   Hover a message (or tab to it) to copy it; one of yours can go back to the composer.
 -->
@@ -31,7 +32,7 @@
   import NextRow from './NextRow.svelte';
   import { buildSpine, keepRows, openStreams, streamText, thinkingText, type Item } from './spine';
   import { copyText, resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
-  import { busy, queued, type Sent } from '../lib/state/queue';
+  import { busy, queued, queuedHint, sendNowTip, type Sent } from '../lib/state/queue';
   import { isRequestThread } from '../lib/state/ui.svelte';
 
   interface Props {
@@ -53,7 +54,7 @@
     return (rows = keepRows(rows, buildSpine(thread)));
   });
 
-  // ── your messages that wait for the agent's current turn to end ──
+  // ── your messages that the agent has not taken yet ──
   const waiting = $derived.by(() => {
     void ui.now;
     const sent: Sent[] = items.flatMap((it) => (it.kind === 'user' && !it.outgoing?.error ? [{ key: it.key, ts: it.ts, text: it.msg.text }] : []));
@@ -203,9 +204,9 @@
                 {#if q}
                   <div class="qmeta" role="status">
                     <Icon name="clock" size={12} />
-                    <span><b>Queued{q.total > 1 ? ` · ${q.position} of ${q.total}` : ''}</b> — {q.reason ? q.reason : q.position === 1 ? `runs when ${ownerName} finishes this turn` : 'runs after the one above'}</span>
+                    <span><b>Queued{q.total > 1 ? ` · ${q.position} of ${q.total}` : ''}</b> — {q.reason ? q.reason : q.position === 1 ? queuedHint(ownerName, owner?.provider) : 'runs after the one above'}</span>
                     {#if q.position === 1 && q.agentId}
-                      <button class="now" disabled={stopping === it.key} onclick={() => q.agentId && sendNow(it.key, q.agentId)} data-tip="Interrupt {ownerName}’s turn so this runs next">{stopping === it.key ? `Stopping ${ownerName}…` : 'Send now'}</button>
+                      <button class="now" disabled={stopping === it.key} onclick={() => q.agentId && sendNow(it.key, q.agentId)} data-tip={sendNowTip(ownerName, owner?.provider)}>{stopping === it.key ? `Stopping ${ownerName}…` : 'Send now'}</button>
                     {/if}
                   </div>
                 {:else if failed}

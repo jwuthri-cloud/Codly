@@ -15,7 +15,7 @@
   import { api } from '../lib/api';
   import { sendChat, setRequestPrefs, stopThread } from '../lib/state/actions';
   import { toast } from '../lib/state/toasts.svelte';
-  import { busy } from '../lib/state/queue';
+  import { busy, busyHint } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
   import { CLOSED_LIST, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { fuzzy } from '../lib/util/fuzzy';
@@ -124,7 +124,7 @@
   const isBusy = $derived(busy(thread));
   const fresh = $derived(!oneToOne && !agent && !store.chats.some((c) => c.thread === thread) && !store.outbox.some((o) => o.thread === thread));
   const placeholder = $derived(
-    isBusy ? `${agent?.name ?? 'The agent'} is mid-turn — your message queues and runs next`
+    isBusy ? busyHint(agent?.name ?? 'The agent', agent?.provider)
     : oneToOne ? `Message ${agent?.name ?? 'the agent'} directly…`
     : fresh && thread !== 'lead' ? 'Describe the new request — its own Lead plans it in parallel…'
     : 'Ask the Lead to build, fix or explain — @ for a file, / for actions',

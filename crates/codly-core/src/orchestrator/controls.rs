@@ -7,8 +7,8 @@
 //! - **Stop after this step** lets the current turn (a "step") finish, then holds every prompt
 //!   Codly would send (steer notes, chat, gate fix rounds) and keeps a worker out of the gate
 //!   until you resume. Idle agents pause at once.
-//! - **Steer** is an ordinary prompt tagged as a steer note: Claude/ACP queue it behind the
-//!   running turn, Codex steers it into the turn. Nothing is typed into a terminal.
+//! - **Steer** is an ordinary prompt tagged as a steer note: ACP queues it behind the running
+//!   turn, Claude and Codex steer it into the turn. Nothing is typed into a terminal.
 //! - **Kill** is the existing `stop_agent` (shutdown ladder), which also clears the controls.
 //!
 //! `AgentControl` is the pure state machine (unit-tested below); the `impl Inner`/`impl Core`

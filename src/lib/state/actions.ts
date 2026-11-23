@@ -161,13 +161,13 @@ export function resendChat(id: string) {
   sendChat(o.thread, o.text);
 }
 
-/** Send now: stop the agent's current turn; Codly then runs your oldest queued message. */
+/** Send now: stop the agent's current turn, so that it reads your oldest queued message at once. */
 export async function sendQueuedNow(agentId: string) {
   const undo = noteStop(agentId);
   const ok = await attempt('interrupt the agent', async () => {
     await api.interruptAgent(agentId);
     return true;
-  }, 'Your message stays queued and runs when the turn ends.');
+  }, 'Your message stays queued.');
   if (!ok) undo();
 }
 

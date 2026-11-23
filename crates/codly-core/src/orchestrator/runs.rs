@@ -270,10 +270,11 @@ impl Inner {
         let _ = self.decide(ws, task_id, "retry", text, serde_json::json!({ "agent": agent.id, "error": why }));
     }
 
-    /// Send a user turn to a live agent. Claude and ACP adapters queue it behind a running
-    /// turn (it gets its own TurnStarted/TurnCompleted); Codex steers it into the running turn
-    /// (PromptSteered). Which of the two happens is the adapter's call, so every prompt counts
-    /// as queued until one of those events says where it went.
+    /// Send a user turn to a live agent. ACP adapters queue it behind a running turn (it gets
+    /// its own TurnStarted/TurnCompleted); Codex and Claude steer it into the running turn
+    /// (PromptSteered), or give it a turn of its own when that turn ends first. Which of the
+    /// two happens is the adapter's call, so every prompt counts as queued until one of those
+    /// events says where it went.
     pub(super) fn send_prompt(&self, agent_id: &str, text: String) -> Result<()> {
         // A pending "stop after this step" or a pause holds every prompt until the resume.
         let Some(text) = self.route_prompt(agent_id, text) else { return Ok(()) };
@@ -311,11 +312,6 @@ impl Inner {
             l.handle.send(AgentCmd::Prompt(prompt));
         }
         Ok(())
-    }
-
-    /// Would a prompt sent now be steered into the running turn (no turn of its own)?
-    pub(super) fn would_steer(&self, agent_id: &str) -> bool {
-        lock(&self.live).get(agent_id).is_some_and(|l| l.provider == Provider::Codex && l.turn_active)
     }
 
     /// Ask a live run to shut down. Returns false if the agent had no live run.

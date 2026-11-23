@@ -7,6 +7,7 @@
   import type { Agent } from '../lib/gen/Agent';
   import { stopAgent } from '../lib/state/actions';
   import { controls, resumeAgent, setBlockTools, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
+  import { steerHint } from '../lib/state/queue';
   import Icon from '../components/Icon.svelte';
   import Section from '../components/Section.svelte';
 
@@ -76,7 +77,7 @@
         <b>Steer note</b>
         <textarea rows="2" placeholder="e.g. use the v2 client, not v1" bind:value={note} onkeydown={onKey} aria-label="Steer note"></textarea>
         <div class="steer-foot">
-          <span class="sub">{c.paused || c.stop_requested ? 'Held until it resumes. ' : ''}Arrives as context on its next turn; nothing is typed into its terminal.</span>
+          <span class="sub">{c.paused || c.stop_requested ? 'Held until it resumes. ' : ''}{steerHint(agent.provider)}; nothing is typed into its terminal.</span>
           <button class="btn sm" disabled={!note.trim() || sending} onclick={send}><Icon name="send" size={12} />Send</button>
         </div>
       </div>

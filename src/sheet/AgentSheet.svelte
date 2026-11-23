@@ -193,6 +193,7 @@
       case 'message': return { icon: 'chat', text: oneLine(k.text, 120) };
       case 'reasoning': return { icon: 'chat', text: `Thought: ${oneLine(k.text, 110)}` };
       case 'turn_started': return { icon: 'arrow-right', text: `Turn started${k.input ? `: ${oneLine(k.input, 80)}` : ''}` };
+      case 'prompt_steered': return { icon: 'arrow-right', text: `Took a message into its turn: ${oneLine(k.input, 80)}` };
       case 'turn_completed': return { icon: 'check-circle', text: `Turn ${k.status}${k.duration_ms ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.status === 'completed' ? undefined : 'warn' };
       case 'status_changed': return { icon: 'refresh', text: `Status → ${k.status.replace('_', ' ')}` };
       case 'plan_updated': return { icon: 'list', text: `Its list: ${k.steps.filter((s) => s.status === 'completed').length} of ${k.steps.length} done` };
