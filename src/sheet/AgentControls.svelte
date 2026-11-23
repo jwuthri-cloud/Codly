@@ -16,6 +16,7 @@
   import { stopAgent } from '../lib/state/actions';
   import { PERMISSION_MODES, canCompact, compactAgent, compactHint, compactWait, compactionLine, contextLine, controls, readContext, resumeAgent, setBlockTools, setPermissionMode, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
   import { steerHint } from '../lib/state/queue';
+  import { safeChoice } from '../lib/util/confirm';
   import { store } from '../lib/state/store.svelte';
   import { tokens } from '../lib/util/format';
   import Icon from '../components/Icon.svelte';
@@ -72,6 +73,7 @@
   let note = $state('');
   let sending = $state(false);
   let confirmKill = $state(false);
+  let killBtn: HTMLButtonElement | undefined = $state();
 
   async function send() {
     const text = note.trim();
@@ -171,10 +173,10 @@
         <div class="kill-confirm">
           <span>Kill {agent.name}? The process ends now; its worktree is kept.</span>
           <button class="btn sm danger" onclick={() => { confirmKill = false; stopAgent(agent.id); }}>Kill</button>
-          <button class="btn sm ghost" onclick={() => (confirmKill = false)}>Keep</button>
+          <button class="btn sm ghost" use:safeChoice={{ keep: () => (confirmKill = false), back: () => killBtn }} onclick={() => (confirmKill = false)}>Keep</button>
         </div>
       {:else}
-        <button class="btn sm danger kill" onclick={() => (confirmKill = true)}><Icon name="stop" size={12} />Kill agent…</button>
+        <button class="btn sm danger kill" bind:this={killBtn} onclick={() => (confirmKill = true)}><Icon name="stop" size={12} />Kill agent…</button>
       {/if}
     </div>
   {/if}

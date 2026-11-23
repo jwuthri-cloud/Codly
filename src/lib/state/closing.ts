@@ -8,6 +8,7 @@
 import type { Plan } from '../gen/Plan';
 import { closeRequest } from './actions';
 import { loadPullRequest, prKey, prUi } from './pullRequest.svelte';
+import { busy } from './queue';
 import { requests, type Request } from './requests.svelte';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
@@ -59,6 +60,8 @@ export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
     return holdsText ? { ask: 'Discard this draft?', detail: 'What you wrote in it was not sent: it goes with the tab.', yes: 'Discard' } : null;
   }
   if (r.phase === 'running') return { ask: 'Cancel its running plan and close?', detail: 'Its unfinished tasks are cancelled. Nothing is deleted: what is done so far stays on its branch.', yes: 'Close' };
+  // Its Lead is in a turn (planning, answering): the close stops it mid-way.
+  if (busy(r.thread)) return { ask: 'The Lead is working: close and stop it?', detail: 'Its turn stops where it is. Nothing is deleted.', yes: 'Close' };
   const finished = store.plans.filter((p) => (p.thread || 'lead') === r.thread && p.status === 'done');
   const pr = (planId: string) => prKey({ kind: 'plan', id: planId });
   // Their pull requests, from Codly's own record (no network), where nothing read them yet.
