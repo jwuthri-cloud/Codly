@@ -27,6 +27,7 @@
   import { ModelCatalogs } from '../lib/state/modelCatalogs.svelte';
   import { store } from '../lib/state/store.svelte';
   import { PROVIDER_LABEL } from '../lib/util/labels';
+  import { listTroubleRows } from '../lib/util/modelNotes';
   import { defaultEffortLabel, effortOptions, keptEffort, listTrouble } from '../lib/util/models';
   import { findModels, joinModel, splitModel } from '../lib/util/team';
   import Icon from '../components/Icon.svelte';
@@ -84,6 +85,14 @@
   const SHOWN = 8;
   let query = $state('');
   const found = $derived(findModels(models, query, SHOWN));
+  /** The rows of that trouble: what failed (the row tries again), the reason, and, when Codly's
+   *  own names are listed all the same, that the names below are those. */
+  const troubleItems = $derived.by((): MenuItem[] => {
+    if (!trouble) return [];
+    const [failed, ...notes] = listTroubleRows(PROVIDER_LABEL[cli], catalog?.source === 'built_in' && models.length > 0);
+    const note = (label: string): MenuItem => ({ label, disabled: true, run: () => {} });
+    return [{ label: failed, hint: 'Try again', icon: 'alert', stay: true, run: () => catalogs.ask(cli, true) }, note(trouble), ...notes.map(note)];
+  });
   const modelItems = $derived<MenuItem[]>([
     ...(clis.length > 1
       ? [
@@ -94,12 +103,7 @@
       : []),
     { kind: 'header', label: `${PROVIDER_LABEL[cli]} model` },
     { label: 'Default', checked: !model.name, stay: true, run: () => pickModel('') },
-    ...(trouble
-      ? [
-          { label: 'Couldn’t list the models', hint: 'Try again', icon: 'alert', stay: true, run: () => catalogs.ask(cli, true) },
-          { label: trouble, disabled: true, run: () => {} },
-        ]
-      : []),
+    ...troubleItems,
     ...[...new Set([...(model.name && !query ? [model.name] : []), ...found.shown])].map((m) => ({ label: m, checked: m === model.name, stay: true, run: () => pickModel(m) })),
     ...(found.total > found.shown.length ? [{ label: `${found.total - found.shown.length} more`, hint: 'type to search', disabled: true, run: () => {} }] : []),
     ...(query.trim() && !models.includes(query.trim()) ? [{ label: `Use “${query.trim()}”`, stay: true, run: () => pickModel(query.trim()) }] : []),

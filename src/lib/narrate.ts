@@ -9,6 +9,7 @@
 // `narrateFrom` is pure (unit-tested); `narrate(agentId)` binds it to the live store.
 import type { Agent } from './gen/Agent';
 import type { Approval } from './gen/Approval';
+import type { Provider } from './gen/Provider';
 import type { Task } from './gen/Task';
 import type { AgentLive, RateWindow, Seg } from './state/store.svelte';
 import type { DiffStat } from './state/diffstats.svelte';
@@ -123,7 +124,8 @@ export function activityParts(s: Seg): Part[] {
   }
 }
 
-function approvalParts(ap: Approval): Part[] {
+/** `provider`: the CLI of the agent that asks. */
+function approvalParts(ap: Approval, provider: Provider): Part[] {
   const s = ap.subject;
   switch (s.kind) {
     case 'command':
@@ -132,7 +134,7 @@ function approvalParts(ap: Approval): Part[] {
       return s.paths.length === 1 ? [txt('Waiting for you: change '), code(basename(s.paths[0]))] : [txt(`Waiting for you: change ${s.paths.length} files`)];
     case 'tool': {
       // A command in Claude Code's sandbox wants a host: said as that, not by the request's tool name.
-      const host = sandboxHost(s);
+      const host = sandboxHost(s, provider);
       if (host === null) return [txt('Waiting for you: use '), code(oneLine(s.name, 32))];
       return host ? [txt('Waiting for you: reach '), code(truncate(host, 44))] : [txt('Waiting for you: use the network')];
     }
@@ -175,7 +177,7 @@ export function narrateFrom(i: NarrationInput): Narration {
 
   // 1 · It needs you: say exactly what is asked.
   const ap = [...i.approvals].sort((x, y) => y.created_at - x.created_at)[0];
-  if (ap) return out(approvalParts(ap), 'wait', ap.created_at, true);
+  if (ap) return out(approvalParts(ap, a.provider), 'wait', ap.created_at, true);
   if (a.status === 'waiting_approval') return out([txt('Waiting for you')], 'wait', live?.statusSince ?? null, true);
 
   // 2 · It can't move.

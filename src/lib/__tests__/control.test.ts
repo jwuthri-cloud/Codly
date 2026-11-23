@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import { AgentControl } from '../demo/controls';
 import type { Agent } from '../gen/Agent';
-import { PERMISSION_MODES, canCompact, changedPlan, compactAgent, compactHint, compactWait, contextLine, readContext, setPermissionMode } from '../state/control.svelte';
+import type { EventKind } from '../gen/EventKind';
+import type { EventRow } from '../gen/EventRow';
+import { PERMISSION_MODES, canCompact, changedPlan, compactAgent, compactHint, compactWait, compactionLine, contextLine, readContext, setPermissionMode } from '../state/control.svelte';
 import { toasts } from '../state/toasts.svelte';
+import { clock } from '../util/format';
 
 // The demo's state machine mirrors orchestrator/controls.rs; these are the same cases.
 describe('AgentControl', () => {
@@ -105,6 +108,33 @@ describe('Claude session controls', () => {
     expect(core).toHaveBeenCalledWith('bo');
     expect(toasts.list.map((t) => [t.kind, t.title])).toEqual([['success', 'Compacting Bo’s conversation']]);
     for (const t of toasts.list) toasts.dismiss(t.id);
+  });
+
+  // Before, the button gave no sign: only the agent's history said that a compaction happened.
+  it('shows at the button what the live run last said about a compaction, with the time', () => {
+    const T = 1_760_000_000_000;
+    const row = (id: number, agent: string, run: string, kind: EventKind): EventRow => ({ id, ts: T + id * 60_000, agent_id: agent, task_id: null, run_id: run, kind });
+    const compacting = (pre: number | null, post: number | null): EventKind => ({ type: 'compacting', pre_tokens: pre, post_tokens: post });
+    const bo = { id: 'bo', run_id: 'r2' };
+    // Nothing of the kind yet, in another run, or from another agent.
+    const before = [row(1, 'bo', 'r1', compacting(9000, 1000)), row(2, 'ada', 'r2', compacting(9000, 1000)), row(3, 'bo', 'r2', { type: 'notice', text: 'hello' })];
+    expect(compactionLine(before, bo)).toBeNull();
+    // Claude Code says first that it compacts, then, when it is done, from how many tokens to how many.
+    const started = [...before, row(4, 'bo', 'r2', compacting(null, null))];
+    expect(compactionLine(started, bo)).toBe(`Last compaction: ${clock(T + 4 * 60_000)}`);
+    const done = [...started, row(5, 'bo', 'r2', compacting(5955, 1197))];
+    expect(compactionLine(done, bo)).toBe(`Compacted at ${clock(T + 5 * 60_000)} · 6k → 1.2k tokens`);
+    // The newest one is the one shown.
+    expect(compactionLine([...done, row(6, 'bo', 'r2', compacting(null, 800))], bo)).toBe(`Compacted at ${clock(T + 6 * 60_000)}`);
+    // Codex says the same thing twice, with no numbers: when it begins and when it is done. Before,
+    // the line read "Compaction started at" with the time the compaction ended.
+    const codexStart = [...before, row(7, 'bo', 'r2', compacting(null, null))];
+    expect(compactionLine(codexStart, bo)).toBe(`Last compaction: ${clock(T + 7 * 60_000)}`);
+    const codexEnd = [...codexStart, row(8, 'bo', 'r2', compacting(null, null))];
+    expect(compactionLine(codexEnd, bo)).toBe(`Last compaction: ${clock(T + 8 * 60_000)}`);
+    expect(compactionLine(codexEnd, bo)).not.toMatch(/started|Compacted/);
+    // An agent with no live run has no sign: its process is gone.
+    expect(compactionLine(done, { id: 'bo', run_id: null })).toBeNull();
   });
 
   // Recorded: Claude Code takes a changed plan in the answer as the plan. Before, the card

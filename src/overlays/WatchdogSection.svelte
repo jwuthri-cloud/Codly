@@ -7,7 +7,7 @@
   import type { WatchdogSettings } from '../lib/gen/WatchdogSettings';
   import { updateSettings } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
-  import { WATCHDOG_LIMITS, limitChoices, limitLabel, withLimit } from '../lib/util/watchdog';
+  import { WATCHDOG_DETAIL, WATCHDOG_LIMITS, limitChoices, limitLabel, withLimit } from '../lib/util/watchdog';
 
   const w = $derived(store.settings.watchdog);
   const set = (key: keyof WatchdogSettings, secs: number) => updateSettings({ watchdog: withLimit(w, key, secs) });
@@ -28,6 +28,7 @@
       </select>
     </div>
   {/each}
+  <p class="desc">{WATCHDOG_DETAIL}</p>
 </section>
 
 <style>

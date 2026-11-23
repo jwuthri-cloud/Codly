@@ -3,6 +3,7 @@
 // second one runs it. Any other key, or a different row, disarms. A held ↵ and a double-click
 // are one decision, not two: their repeats do nothing on such a row.
 import type { ApprovalSubject } from '../lib/gen/ApprovalSubject';
+import type { Provider } from '../lib/gen/Provider';
 import { sandboxWants } from '../lib/util/sandbox';
 import { clean } from '../lib/util/sanitize';
 
@@ -31,8 +32,11 @@ export function bySection<T extends { section: string }>(rows: T[]): T[] {
   return [...groups.values()].flat();
 }
 
-/** What an approval asks for, in full, after "<agent> wants to" (a row's title shows 50 characters of it). */
-export function wants(s: ApprovalSubject): string {
+/**
+ * What an approval asks for, in full, after "<agent> wants to" (a row's title shows 50 characters
+ * of it). `provider`: the CLI of the agent that asks (none when Codly does not know the agent).
+ */
+export function wants(s: ApprovalSubject, provider: Provider | null | undefined): string {
   switch (s.kind) {
     case 'command':
       return `run ${clean(s.command)}${s.cwd ? `\nin ${clean(s.cwd)}` : ''}`;
@@ -40,7 +44,7 @@ export function wants(s: ApprovalSubject): string {
       return `change ${s.paths.map(clean).join(', ')}`;
     case 'tool':
       // A command in Claude Code's sandbox wants a host: said as that, with the whole host.
-      return sandboxWants(s) ?? `use the tool ${clean(s.name)}`;
+      return sandboxWants(s, provider) ?? `use the tool ${clean(s.name)}`;
     case 'question':
       return 'ask you a question';
     case 'permissions':

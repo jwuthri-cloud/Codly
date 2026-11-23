@@ -8,9 +8,10 @@ import { api } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { ContextUsage } from '../gen/ContextUsage';
 import type { ControlState } from '../gen/ControlState';
+import type { EventRow } from '../gen/EventRow';
 import type { PermissionMode } from '../gen/PermissionMode';
 import type { Provider } from '../gen/Provider';
-import { tokens } from '../util/format';
+import { clock, tokens } from '../util/format';
 import { toast } from './toasts.svelte';
 
 export const NO_CONTROL: ControlState = { block_tools: false, stop_requested: false, paused: false, held: 0 };
@@ -133,4 +134,24 @@ export async function compactAgent(agentId: string, name: string): Promise<boole
     toast({ kind: 'error', title: 'Couldn’t compact its conversation', body: msg(e) });
     return false;
   }
+}
+
+/**
+ * The sign of a compaction in the row of "Compact now": what the agent's live run last said
+ * about one (`events`: the log, oldest first). Claude Code says from how many tokens to how
+ * many the conversation went when a compaction is done. An event without those numbers can
+ * be a start or an end: Claude Code sends one when it begins, Codex one when it begins and one
+ * when it is done, and nothing tells them apart. So that line gives the time and calls it
+ * neither started nor done. Null: the live run said nothing of the kind.
+ */
+export function compactionLine(events: EventRow[], agent: Pick<Agent, 'id' | 'run_id'>): string | null {
+  if (!agent.run_id) return null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.kind.type !== 'compacting' || e.agent_id !== agent.id || e.run_id !== agent.run_id) continue;
+    const { pre_tokens: pre, post_tokens: post } = e.kind;
+    if (post == null) return `Last compaction: ${clock(e.ts)}`;
+    return `Compacted at ${clock(e.ts)}${pre == null ? '' : ` · ${tokens(pre)} → ${tokens(post)} tokens`}`;
+  }
+  return null;
 }

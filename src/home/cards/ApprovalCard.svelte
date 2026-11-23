@@ -6,6 +6,9 @@
   A plan (Claude's plan mode asks to leave it with `ExitPlanMode`) renders as the plan itself:
   accept it, accept it with your changes (Claude Code takes your text as the plan), or send it
   back with a note.
+  The plan card and the card for a host that Claude Code's sandbox blocks are for Claude agents
+  only: these two tool names are Claude Code's own, and for any other CLI a request with such a
+  name shows as every other tool request, by its name and its input.
   The same command asked by several agents is one card (`twins`): one answer goes to all.
   "Always allow in this repo" saves a rule in Codly for every agent of the repo; the card
   offers it only when the core says the request can be saved (never for what Codly always asks):
@@ -28,7 +31,8 @@
   import { clock, timer } from '../../lib/util/format';
   import { idVar } from '../../lib/util/labels';
   import { outcomeBy, outcomeWord } from '../../lib/util/outcome';
-  import { sandboxHost, sandboxWants } from '../../lib/util/sandbox';
+  import { shownPlan } from '../../lib/util/planRequest';
+  import { HOST_ALLOW_LASTS, sandboxHost, sandboxWants } from '../../lib/util/sandbox';
   import { oneLine, tildify } from '../../lib/util/sanitize';
   import Icon from '../../components/Icon.svelte';
   import Markdown from '../../components/Markdown.svelte';
@@ -60,20 +64,16 @@
   let noteEl: HTMLInputElement | undefined = $state();
   let el: HTMLElement | undefined = $state();
 
-  /** The plan a Claude agent in plan mode shows you before it changes anything. */
-  const plan = $derived.by(() => {
-    if (subject.kind !== 'tool' || subject.name !== 'ExitPlanMode') return null;
-    const input = subject.input as { plan?: unknown } | null;
-    return typeof input?.plan === 'string' ? input.plan : null;
-  });
+  /** The plan a Claude agent in plan mode shows you before it changes anything; null for every other request and every other CLI. */
+  const plan = $derived(shownPlan(subject, agent?.provider));
 
-  /** The host a command in Claude Code's sandbox wants to reach, whole ('' = it names none); null for every other request. */
-  const netHost = $derived(sandboxHost(subject));
+  /** The host a command in Claude Code's sandbox wants to reach, whole ('' = it names none); null for every other request and every other CLI. */
+  const netHost = $derived(sandboxHost(subject, agent?.provider));
 
   const headline = $derived.by(() => {
     const who = agent?.name ?? 'An agent';
     if (plan !== null) return `${who} shows you its plan`;
-    const net = sandboxWants(subject, 80);
+    const net = sandboxWants(subject, agent?.provider, 80);
     if (net !== null) return `${who} wants to ${net}`;
     switch (subject.kind) {
       case 'command':
@@ -233,6 +233,8 @@
   const by = $derived(outcomeBy(approval.decided_by));
   const answer = $derived(subject.kind === 'question' && approval.status === 'approved' ? (yourAnswers.get(approval.id) ?? null) : null);
   const what = $derived(subject.kind === 'command' ? subject.command : subject.kind === 'question' ? (questions[0]?.question ?? 'a question') : subject.kind === 'file_change' ? subject.paths.join(', ') : subject.kind === 'tool' ? (plan !== null ? 'its plan' : netHost !== null ? (netHost ? `network access to ${netHost}` : 'network access') : subject.name) : 'permissions');
+  /** The closed row of an answered question cuts both to fit: the whole question and answer, for its tooltip. */
+  const asked = $derived(answer ? `${oneLine(what, Infinity)} “${oneLine(answer, Infinity)}”` : null);
 </script>
 
 {#if !pending}
@@ -240,8 +242,13 @@
     <Icon name={approval.status === 'approved' ? 'check' : 'x'} size={12} stroke={2} />
     <span class="r-l">{outcome} {by}</span>
     {#if agent}<span class="r-who">{agent.name}</span>{/if}
-    <code class="truncate">{oneLine(what, 120)}</code>
-    {#if answer}<span class="r-a truncate" data-tip={answer}>“{oneLine(answer, 80)}”</span>{/if}
+    {#if answer}
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (the row cuts the question and the answer: focus shows both whole, as hover does) -->
+      <code class="truncate asked" tabindex="0" data-tip={asked}>{oneLine(what, 120)}</code>
+      <span class="r-a truncate" data-tip={asked}>“{oneLine(answer, 80)}”</span>
+    {:else}
+      <code class="truncate">{oneLine(what, 120)}</code>
+    {/if}
     <time class="num">{clock(approval.created_at)}</time>
   </div>
 {:else}
@@ -273,7 +280,7 @@
         <div class="plan selectable"><Markdown text={plan} brief /></div>
       {/if}
     {:else if netHost !== null}
-      <p class="net selectable">A shell command of {agent?.name ?? 'the agent'}, inside Claude Code’s sandbox, wants to connect to {#if netHost}<code>{netHost}</code>{:else}a host on the network{/if}. The sandbox blocks this host until you allow it. If you deny, the command gets a network error.</p>
+      <p class="net selectable">A shell command of {agent?.name ?? 'the agent'}, inside Claude Code’s sandbox, wants to connect to {#if netHost}<code>{netHost}</code>{:else}a host on the network{/if}. {HOST_ALLOW_LASTS} If you deny, the command gets a network error.</p>
     {:else if subject.kind === 'tool'}
       <pre class="diff selectable">{subject.name}({JSON.stringify(subject.input, null, 2)})</pre>
     {:else if subject.kind === 'question'}
@@ -398,6 +405,9 @@
   .r-l { color: var(--ink-2); white-space: nowrap; }
   .r-who { color: var(--ink-2); font-weight: var(--w-med); }
   .resolved code { flex: 1; font-size: 11.5px; color: var(--ink-3); }
-  .r-a { flex: 0 1 auto; max-width: 50%; color: var(--ink-1); }
+  /* An answered question keeps 40 % of the row: a long answer gives way first (its shrink factor takes
+     nearly all of the cut, hence the 1px over), and a short one leaves the question the rest. */
+  .resolved code.asked { flex: 1 1 calc(40% + 1px); }
+  .r-a { flex: 0 9999 auto; color: var(--ink-1); }
   .resolved time { font-size: var(--t-xs); }
 </style>

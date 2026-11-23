@@ -66,9 +66,15 @@ export const MCP_HINT: Record<McpServerStatus, string> = {
   connected: 'The agent can use this server’s tools.',
   connecting: 'Claude Code is still connecting to this server.',
   failed: 'The agent works without this server’s tools. Reconnect tries again.',
-  needs_sign_in: 'The agent works without this server’s tools until you sign in to it in Claude Code. Then reconnect.',
+  needs_sign_in: 'The agent works without this server’s tools until you sign in to it in Claude Code’s own MCP settings. Then press Reconnect.',
   disabled: 'This server is switched off in Claude Code.',
 };
+
+/** How to sign in to a server that needs it, under its row. Codly cannot do it for you: the
+ *  sign-in is Claude Code's own (no recording in docs/research names the command for it, so
+ *  the line names the place, not a command). */
+export const signInSteps = (name: string): string =>
+  `Open Claude Code in a terminal and sign in to ${name} in Claude Code’s own MCP settings. Then press Reconnect here. If this server uses an API key, check the key in its settings instead.`;
 
 /** A server Codly can ask Claude Code to connect again. */
 export const canReconnect = (s: McpServer) => s.status === 'failed' || s.status === 'needs_sign_in';

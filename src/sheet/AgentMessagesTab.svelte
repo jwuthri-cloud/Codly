@@ -52,7 +52,8 @@
         <p class="tx selectable">{clean(l.text)}</p>
       </div>
     {:else}
-      <p class="empty">No messages with {agent.name} yet.</p>
+      <!-- This list holds the finished messages of the thread. Home shows the same thread with what the agent writes and does right now, so it can have more. -->
+      <p class="empty">No messages with {agent.name} in this list yet. Your chat with {agent.name} is on Home.</p>
     {/each}
   </div>
   <div class="reply">

@@ -3,6 +3,7 @@
 import type { Approval } from '../gen/Approval';
 import type { EventRow } from '../gen/EventRow';
 import type { Office } from '../gen/Office';
+import type { Provider } from '../gen/Provider';
 import { sandboxWants } from '../util/sandbox';
 import { oneLine } from '../util/sanitize';
 import { openWorkspace } from './actions';
@@ -15,8 +16,14 @@ import { ui } from './ui.svelte';
 /** Whether you are reading that request's conversation right now. */
 const watching = (thread: string) => ui.room === 'home' && ui.mode !== 'office' && ui.mode !== 'map' && ui.thread === thread;
 
-const asks = (s: Approval['subject']) =>
-  s.kind === 'command' ? oneLine(s.command, 80) : s.kind === 'question' ? 'Answer it in the conversation' : `Wants to ${sandboxWants(s, 80) ?? s.kind.replace('_', ' ')}`;
+/** What a request asks, as the one line of its toast. `provider`: the CLI of the agent that asks
+ *  (none when Codly does not know the agent). A tool request says the tool's name. */
+export function asks(s: Approval['subject'], provider: Provider | null | undefined): string {
+  if (s.kind === 'command') return oneLine(s.command, 80);
+  if (s.kind === 'question') return 'Answer it in the conversation';
+  if (s.kind === 'tool') return `Wants to ${sandboxWants(s, provider, 80) ?? `use ${oneLine(s.name, 60)}`}`;
+  return `Wants to ${s.kind.replace('_', ' ')}`;
+}
 
 /** Something that waits for you in an office you are not looking at, and how to get to it once there. */
 type Need = { line: string; body: string; open: () => void };
@@ -44,7 +51,7 @@ export function installNotifications(): () => void {
         const tid = toast({
           kind: 'attention',
           title: s.kind === 'question' ? `${a?.name ?? 'An agent'} has a question` : `${a?.name ?? 'An agent'} needs your approval`,
-          body: asks(s),
+          body: asks(s, a?.provider),
           action: { label: 'Review', run: () => { ui.openThread(thread); ui.revealApproval = id; } },
         });
         approvalToast.set(id, tid);
@@ -84,8 +91,9 @@ export function installNotifications(): () => void {
   // a plan to approve) is pointed at too: one toast per office, and Review takes you there. Their
   // finished and failed work stays quiet: the tab's count and the office itself show it.
   const away = new Map<string, { toast: number; needs: Map<string, Need> }>();
-  /** Their agents are not in this view: names come from their own `agent_changed` events. */
+  /** Their agents are not in this view: names and CLIs come from their own `agent_changed` events. */
   const names = new Map<string, string>();
+  const providers = new Map<string, Provider>();
   let recount: ReturnType<typeof setTimeout> | undefined;
   const name = (agentId: string) => names.get(agentId) ?? 'An agent';
   /** The office you are in now: what waited there is in front of you, not behind a toast. */
@@ -119,13 +127,14 @@ export function installNotifications(): () => void {
     switch (k.type) {
       case 'agent_changed':
         names.set(k.agent.id, k.agent.name);
+        providers.set(k.agent.id, k.agent.provider);
         return;
       case 'approval_requested': {
         const id = k.approval.id;
         key = `a:${id}`;
         need = {
           line: `${name(k.approval.agent_id)} ${k.approval.subject.kind === 'question' ? 'has a question' : 'needs your approval'}`,
-          body: asks(k.approval.subject),
+          body: asks(k.approval.subject, providers.get(k.approval.agent_id)),
           open: () => {
             const ap = store.approvals.find((a) => a.id === id);
             ui.openThread(ap ? store.approvalThread(ap) : 'lead');
