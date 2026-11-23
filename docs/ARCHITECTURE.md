@@ -595,6 +595,10 @@ that are new there are named (the index does not search them).
   left it against its resolution, then the later commits), not the user's commits; the checks
   its gate ran on the plan's branch as it is are not run again when the plan finishes; and one
   that does not finish also takes its worker's new files out of the integration worktree.
+  Codly writes the start of such a task down before the merge, so a start that Codly was closed
+  in the middle of is taken back before the plan is merged, finished or resolved again. The
+  task's commits leave out the new files that were in the integration worktree before it
+  started (they are on no branch), and its record names them.
 - The workspace IDE saves files where its agent works (`ide_write`, `ide_create`): in the
   agent's worktree, or in the user's checkout when the agent has none (the Lead, or an agent
   hired with Git isolation off). It never commits.

@@ -651,6 +651,92 @@ async fn the_note_about_a_restore_waits_for_a_prompt_in_that_worktree() {
     o.core.shutdown().await;
 }
 
+/// Where the note about a restore waits for the agent's next prompt in the worktree `wt`.
+fn note_key(agent: &str, wt: &Path) -> String {
+    format!("checkpoint_note:{agent}:{}", wt.display())
+}
+
+/// A note is for the task it was written for. That task ends with no prompt after the
+/// restore, and a later task of the same agent works in the same path (a team member has one
+/// worktree for all its tasks): its prompt does not start with the note about the old
+/// restore, and the note is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_note_about_a_restore_is_not_given_to_another_task_in_the_same_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = office(dir.path()).await;
+    let agent = o.core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let id = agent.id.clone();
+    let store = Store::open(&dir.path().join("data/codly.sqlite")).unwrap();
+    // A task you give the agent. Its first turn stays open: Codly has the checkpoint of the
+    // files before it, so the turn's start is on record.
+    let points = async || o.core.agent_checkpoints(&id).await.unwrap().checkpoints.len();
+    let on_task = async |title: &str| {
+        let had = points().await;
+        let task = o.core.create_task(title, "Write hello.txt").await.unwrap();
+        o.core.assign_task(&task.id, Some(&id)).await.unwrap();
+        wait_for("the checkpoint before the task's first turn", async || (points().await == had + 1).then_some(())).await;
+        o.core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap()
+    };
+    // The first task writes a file (here the test is the agent's hands). You stop the agent,
+    // and the task still holds it: the state the note test above makes by hand.
+    let first = on_task("Say hello").await;
+    let first_wt = PathBuf::from(first.worktree.clone().unwrap());
+    std::fs::write(first_wt.join("hello.txt"), "hello\n").unwrap();
+    o.core.stop_agent(&id).await.unwrap();
+    run_over(&o, &id).await;
+    let mut row = store.agent(&id).unwrap().unwrap();
+    row.task_id = Some(first.id.clone());
+    store.with(|db| codly_core::store::save_live_agent(db, &row)).unwrap();
+
+    // You put the file back there: the note waits, and it names the task.
+    o.core.restore_checkpoint_file(&id, 1, "hello.txt").await.unwrap();
+    let note = store.kv_get(&note_key(&id, &first_wt)).unwrap().expect("a note waits in the task's worktree");
+    let read: serde_json::Value = serde_json::from_str(&note).unwrap();
+    assert_eq!(read["for"], first.id.as_str(), "{note}");
+    assert!(read["text"].as_str().unwrap().starts_with("[Codly] The user put one file in your worktree back"), "{note}");
+
+    // The task ends with no further prompt there, and the agent takes another task.
+    o.core.move_task(&first.id, TaskStatus::Cancelled).await.unwrap();
+    let second = on_task("Say goodbye").await;
+    let second_wt = PathBuf::from(second.worktree.clone().unwrap());
+    // That state, made by hand: the second task works in the path the first one had, so the
+    // note of the first waits where the second one's prompts are read.
+    store.kv_write(&[(note_key(&id, &second_wt), Some(note)), (note_key(&id, &first_wt), None)]).unwrap();
+
+    // A message that goes to the run of the second task.
+    o.core.send_chat(&format!("agent:{id}"), "and now?").await.unwrap();
+    assert_eq!(store.kv_get(&note_key(&id, &second_wt)).unwrap(), None, "the note of the first task is gone");
+    o.go.notify_one();
+    let told = wait_for("the message to reach the agent", async || o.seen.lock().unwrap().prompts.iter().find(|p| p.contains("[User] and now?")).cloned()).await;
+    assert!(!told.contains("The user put"), "{told}");
+    assert_eq!(o.seen.lock().unwrap().read_in.last(), Some(&second_wt));
+    o.core.shutdown().await;
+}
+
+/// A note that waited under the key of before notes were kept by worktree says nothing about
+/// which run it was for: it is not read, and the agent's next prompt removes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_note_under_the_old_key_is_dropped_at_the_agents_next_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = office(dir.path()).await;
+    let agent = o.core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    let (id, wt) = (agent.id.clone(), PathBuf::from(agent.worktree.clone().unwrap()));
+    let store = Store::open(&dir.path().join("data/codly.sqlite")).unwrap();
+    let old = format!("checkpoint_note:{id}");
+    store.kv_set(&old, "[Codly] The user put the files in your worktree back to how they were before an earlier restore.").unwrap();
+
+    o.turn(&id, &wt, "add the form", &[("a.txt", Some("1\n"))]).await;
+    let first = o.seen.lock().unwrap().prompts[0].clone();
+    assert!(first.starts_with("[User] add the form") && !first.contains("The user put"), "{first}");
+    assert_eq!(store.kv_get(&old).unwrap(), None);
+    // A note of today still reaches the agent.
+    o.core.restore_checkpoint(&id, 1).await.unwrap();
+    o.turn(&id, &wt, "go on", &[]).await;
+    let second = o.seen.lock().unwrap().prompts[1].clone();
+    assert!(second.starts_with("[Codly] The user put the files in your worktree back") && second.contains("\n\n[User] go on"), "{second}");
+    o.core.shutdown().await;
+}
+
 /// An agent that reviews a task reads the task's files and changes none, and no turn of a
 /// review is kept. Its Git tab says so: it does not promise checkpoints that never come.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

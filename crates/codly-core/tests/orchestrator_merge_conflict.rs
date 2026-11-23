@@ -26,6 +26,12 @@
 //!   the Codly branch is behind the user's;
 //! - a resolution (or a fix of the checks) that could not start takes its merge back: the
 //!   user's branch is never in the plan's branch with no task on it and no check of the result;
+//!   the same after Codly was closed in the middle of a start, and the error says the branch is
+//!   back also when that could not be written down;
+//! - a cancelled plan says in plain words what is left for you to do, a fix of its checks or a
+//!   conflict, also when what its last merge check said cannot be read;
+//! - a new file that was in the plan's worktree before a task on the plan's own branch started
+//!   stays out of that task's commit, on record, and stays on disk;
 //! - the task that works on the plan's own branch stays in its write scope with what it
 //!   changed by hand, or declares the exception; what git merged by itself is not counted, and
 //!   a file name in that scope is no pattern;
@@ -1389,6 +1395,251 @@ async fn a_resolution_that_cannot_start_leaves_no_open_merge_behind() {
     wait_plan(&core, PlanStatus::Done).await;
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
+    core.shutdown().await;
+}
+
+/// The rows of Codly's store whose key starts with `prefix`, read through a connection of the
+/// test's own.
+fn kv_rows(root: &Path, prefix: &str) -> Vec<(String, String)> {
+    let db = rusqlite::Connection::open(root.join("data/codly.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let mut st = db.prepare("SELECT key, value FROM kv WHERE key LIKE ?1 ORDER BY key").unwrap();
+    let rows = st.query_map([format!("{prefix}%")], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect();
+    rows
+}
+
+/// What a start keeps on record while it is under way, and what a resolution keeps until it
+/// is settled.
+fn start_records(root: &Path) -> Vec<String> {
+    let rows = kv_rows(root, "merge_start:").into_iter().chain(kv_rows(root, "resolution:"));
+    rows.map(|(key, _)| key).collect()
+}
+
+/// Codly was closed in the middle of a start: it had written the start down, merged your
+/// branch into the plan's branch and committed the merge, and no task was made yet. Nothing
+/// else is on record. The next Merge takes that merge back first: left there, it would find
+/// your branch in the plan's already and check nothing. So the plan's check runs on the
+/// result again, and the record says what happened. A start that completes leaves no record
+/// of itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_start_that_codly_was_closed_in_the_middle_of_is_taken_back_before_the_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let check = "grep -q good mode.txt";
+    let (core, repo) = start(dir.path(), lead_with("feature.txt", check, &[]), feature_worker(true), Default::default()).await;
+    core.send_chat("lead", "Please add the feature").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    let tip = sh(&repo, &["rev-parse", &branch]);
+    let bad = commit(&repo, "mode.txt", "bad\n");
+    core.merge_plan(&plan.id).await.unwrap_err();
+
+    // That state, made by hand: the start on record (from another run of Codly), and the
+    // merge of main committed on the plan's branch.
+    let start = json!({ "tip": tip, "target": "main", "head": bad, "run": "an earlier run" });
+    let db = rusqlite::Connection::open(dir.path().join("data/codly.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute("INSERT INTO kv (key, value) VALUES (?1, ?2)", [format!("merge_start:{}", plan.id), start.to_string()]).unwrap();
+    drop(db);
+    sh(&integ_wt, &["merge", "-q", "--no-ff", "-m", &format!("codly: merge main into {branch}"), "main"]);
+    assert!(git(&repo, &["merge-base", "--is-ancestor", &bad, &branch]).status.success(), "main is in the plan's branch");
+    assert!(!core.snapshot().await.unwrap().tasks.iter().any(|t| t.key.starts_with("fix-checks")), "no task is on it");
+
+    // The next Merge finds the plan as it was before the start: the check runs on the result.
+    let runs = verified(&core).await.len();
+    let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
+    assert_eq!(err, format!("with the plan merged into main, `{check}` failed, so nothing was merged and main is unchanged"));
+    assert_eq!(verified(&core).await.len(), runs + 1, "the check ran on the merge result again");
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["rev-parse", &branch])), (bad.clone(), tip.clone()));
+    assert_eq!((in_merge(&integ_wt), sh(&integ_wt, &["status", "--porcelain"])), (false, String::new()));
+    let record = decisions(&core).await;
+    let taken_back = format!("bringing main into {branch} did not finish when Codly closed; {branch} is back where it was before it");
+    assert_eq!(record.iter().filter(|d| **d == taken_back).count(), 1, "{record:?}");
+    let lines = said(&core, "lead").await;
+    assert!(lines.iter().any(|l| l.starts_with("Bringing main into the plan's branch did not finish when Codly closed. Codly took that merge back")), "{lines:?}");
+    assert_eq!(start_records(dir.path()), Vec::<String>::new(), "the start is not on record any more");
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((&state.failed_checks, state.resolving, state.behind), (&vec![check.to_string()], None, 1));
+
+    // The fix starts as if nothing had happened, and a start that completes leaves no record.
+    core.resolve_merge_conflict(&source).await.unwrap();
+    assert_eq!(kv_rows(dir.path(), "merge_start:"), vec![], "{:?}", start_records(dir.path()));
+    wait_plan(&core, PlanStatus::Done).await;
+    task_with(&core, "fix-checks", TaskStatus::Done).await;
+    assert_eq!(start_records(dir.path()), Vec::<String>::new());
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("mode.txt")).unwrap(), FIXED);
+    core.shutdown().await;
+}
+
+/// Every record of a merge that Codly keeps in the store, the first one a start writes after
+/// the merge and the one a take-back writes.
+const A_MERGE_RECORD: &str = "INSERT ON decision WHEN NEW.type = 'merge'";
+
+/// A start fails after the merge, Codly takes the merge back, and then it cannot write down
+/// that it did: the store refuses that too. The error says what is true: the plan's branch
+/// is back where it was. It does not say that the branch may have your branch merged in, and
+/// it gives no git command to run. What could not be written down then is written down
+/// before the next Merge, and that Merge checks the plan as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_take_back_that_cannot_be_written_down_still_says_the_branch_is_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let lead = lead_with("greeting.txt", "grep -q plan greeting.txt", &[]);
+    let (core, repo) = start(dir.path(), lead, plan_worker(), Default::default()).await;
+    core.send_chat("lead", "Please change the greeting").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    let tip = sh(&repo, &["rev-parse", &branch]);
+    let mine = commit(&repo, "greeting.txt", "hello from main\n");
+
+    store_refuses(dir.path(), Some(A_MERGE_RECORD));
+    let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
+    let back = format!(". Codly took the merge of main back: {branch} is as it was. It could not write that down: ");
+    let (why, not_written) = err.split_once(&back).unwrap_or_else(|| panic!("{err}"));
+    assert!(why.contains("the disk is full") && not_written.contains("the disk is full"), "{err}");
+    assert!(!err.contains("could not take the merge") && !err.contains("may have main merged in") && !err.contains("reset --hard"), "{err}");
+    assert_eq!((sh(&repo, &["rev-parse", &branch]), in_merge(&integ_wt), sh(&integ_wt, &["status", "--porcelain"])), (tip.clone(), false, String::new()));
+    assert_eq!(std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap(), "hello from the plan\n", "no marker is left");
+    let s = core.snapshot().await.unwrap();
+    let again = s.plans.iter().find(|p| p.id == plan.id).unwrap();
+    assert_eq!((again.status, &again.base_commit, &again.base_branch), (PlanStatus::Done, &plan.base_commit, &plan.base_branch));
+    let task = s.tasks.iter().find(|t| t.key == "resolve").expect("the task had reached the store");
+    assert_eq!((task.status, task.status_reason.as_deref()), (TaskStatus::Cancelled, Some("Codly could not start it")));
+    assert_eq!(core.merge_state(&source).await.unwrap().resolving, None);
+    assert_eq!(start_records(dir.path()).len(), 2, "the start is still on record: {:?}", start_records(dir.path()));
+
+    // The store takes writes again. The next Merge writes down what happened, in words that
+    // fit this run of Codly (it was not closed), and finds the plan as it was: the conflict.
+    store_refuses(dir.path(), None);
+    let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
+    assert!(err.contains("merging into main conflicts in greeting.txt"), "{err}");
+    let record = decisions(&core).await;
+    let taken_back = format!("bringing main into {branch} did not finish; {branch} is back where it was before it");
+    assert_eq!(record.iter().filter(|d| **d == taken_back).count(), 1, "{record:?}");
+    assert_eq!(start_records(dir.path()), Vec::<String>::new());
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["rev-parse", &branch])), (mine, tip));
+
+    // A second try gets a task of its own, and the merge goes through.
+    let state = core.resolve_merge_conflict(&source).await.unwrap();
+    let second = core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.key == "resolve-2").expect("a second resolving task");
+    assert_eq!(state.resolving.as_deref(), Some(second.id.as_str()));
+    wait_plan(&core, PlanStatus::Done).await;
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
+    core.shutdown().await;
+}
+
+/// No agent works on a cancelled plan any more, and the refusal says what is left for you to
+/// do: resolve a conflict, or, when the plan's checks failed on this very merge, fix the
+/// checks. When that cannot be read, the refusal is the same plain words, not the error of
+/// the read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_plan_says_what_is_left_for_you_to_do() {
+    const CANCELLED: &str = "this plan was cancelled, so no agent works on it any more";
+    let dir = tempfile::tempdir().unwrap();
+    // The plan's last check passes only once this file is there: the plan fails, and you
+    // cancel it. Its branch has the work of its one task.
+    let released = dir.path().join("released");
+    let last = format!("test -f '{}'", released.display());
+    let check = "grep -q good mode.txt";
+    let (core, repo) = start(dir.path(), lead_with("feature.txt", check, &[last.as_str()]), feature_worker(true), Default::default()).await;
+    // Codly runs the check by itself, whatever the approval rules see in its path.
+    core.update_settings(Settings { approval_mode: ApprovalMode::Full, ..core.settings() }).await.unwrap();
+    core.send_chat("lead", "Please add the feature").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Failed).await;
+    core.cancel_plan(&plan.id).await.unwrap();
+    wait_plan(&core, PlanStatus::Cancelled).await;
+    let source = PrSource::Plan(plan.id.clone());
+    assert!(plan.integration_branch.is_some());
+    std::fs::write(&released, "").unwrap();
+    commit(&repo, "mode.txt", "bad\n");
+
+    // No check is known to fail on this merge: what is left is called a conflict.
+    let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
+    assert_eq!(err, format!("{CANCELLED}; resolve the conflict yourself"));
+
+    // You try the merge: the plan's check fails on the result, and that is on record.
+    core.merge_plan(&plan.id).await.unwrap_err();
+    assert_eq!(core.merge_state(&source).await.unwrap().failed_checks, [check]);
+    let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
+    assert_eq!(err, format!("{CANCELLED}; fix the checks yourself"));
+
+    // What that merge check said cannot be read any more (the row, damaged by hand): the same
+    // plain words, in the conflict form, and not the error of the read.
+    let db = rusqlite::Connection::open(dir.path().join("data/codly.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(db.execute("UPDATE kv SET value = 'not a record' WHERE key = ?1", [format!("merge_check:{}", plan.id)]).unwrap(), 1);
+    drop(db);
+    let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
+    assert_eq!(err, format!("{CANCELLED}; resolve the conflict yourself"));
+    core.shutdown().await;
+}
+
+/// A new file that was in the plan's worktree before a fix of the checks started (a check's
+/// output, a note) is on no branch and is not the task's work. Codly's commit of the task
+/// leaves it out, with what is under a folder that was there, and the task's record says so.
+/// What the worker makes is committed, a new file too. The files from before stay on disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_that_was_in_the_plans_worktree_before_a_fix_stays_out_of_its_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.prompt.contains("Task fix-checks") {
+                // A tracked file, a new file, and one more file in a folder that was there.
+                turn.write("mode.txt", FIXED);
+                turn.write("new.txt", "made by the task\n");
+                turn.write("cache/more.txt", "later\n");
+                let exceptions = json!(["mode.txt: the check reads it", "new.txt: the fix needs it"]);
+                turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Did it.", "scope_exceptions": exceptions })).await;
+                return;
+            }
+            turn.write("feature.txt", "on\n");
+            turn.done().await;
+        })
+    });
+    let check = "grep -q good mode.txt";
+    let (core, repo) = start(dir.path(), lead_with("feature.txt", check, &[]), worker, turns.clone()).await;
+    core.send_chat("lead", "Please add the feature").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    // In the plan's worktree before the fix: what a check or worktree setup left there.
+    std::fs::create_dir_all(integ_wt.join("cache")).unwrap();
+    std::fs::write(integ_wt.join("cache/built.txt"), "from a check\n").unwrap();
+    std::fs::write(integ_wt.join("notes.tmp"), "from before\n").unwrap();
+    commit(&repo, "mode.txt", "bad\n");
+    core.merge_plan(&plan.id).await.unwrap_err();
+
+    core.resolve_merge_conflict(&source).await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    task_with(&core, "fix-checks", TaskStatus::Done).await;
+    // The task's commit has its work, a new file too, and nothing of what was there before.
+    assert_eq!(sh(&repo, &["show", "--name-only", "--format=", &branch]), "mode.txt\nnew.txt");
+    assert_eq!(sh(&repo, &["ls-tree", "-r", "--name-only", &branch, "--", "notes.tmp", "cache"]), "", "on no branch, as before");
+    assert_eq!(sh(&integ_wt, &["status", "--porcelain"]), "?? cache/\n?? notes.tmp");
+    assert_eq!(std::fs::read_to_string(integ_wt.join("notes.tmp")).unwrap(), "from before\n");
+    assert_eq!(std::fs::read_to_string(integ_wt.join("cache/more.txt")).unwrap(), "later\n");
+    // Its record names them, once, and its brief said so beforehand.
+    let record = decisions(&core).await;
+    let left = "fix-checks: Codly did not commit cache/, notes.tmp (was there before the task). What was in the plan's worktree before \
+                the task started and is on no branch is not the task's work. It is still in the worktree.";
+    assert_eq!(record.iter().filter(|d| *d == left).count(), 1, "{record:?}");
+    assert!(record.iter().any(|d| d == "fix-checks: verify passed (1 command), 2 files changed within scope plus 2 declared exception(s)"), "{record:?}");
+    {
+        let turns = turns.lock().unwrap();
+        let (_, _, brief) = turns.iter().find(|(role, _, prompt)| *role == Role::Worker && prompt.contains("Task fix-checks")).expect("the fixing task's brief");
+        assert!(brief.contains("Files that were in this worktree before you started and are on no branch are not committed."), "{brief}");
+    }
+
+    // The merge brings the task's files to your branch, and not the others.
+    core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("new.txt")).unwrap(), "made by the task\n");
+    assert!(!repo.join("notes.tmp").exists() && !repo.join("cache").exists());
     core.shutdown().await;
 }
 

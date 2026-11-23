@@ -791,12 +791,20 @@ impl Git {
     /// work is this one, and the orchestrator puts what it reports on record
     /// (`orchestrator/left_out.rs`).
     pub async fn commit_work(&self, wt: &Path, message: &str) -> Result<WorkCommit> {
+        self.commit_work_without(wt, message, &[]).await
+    }
+
+    /// `commit_work` that also leaves out the new paths `kept_out`, as `untracked` lists
+    /// them (a folder ends in `/` and stands for what is under it): they are not the work
+    /// this commit is for. They stay untracked. The caller knows them and puts them on
+    /// record, so they are not in `left_out`.
+    pub async fn commit_work_without(&self, wt: &Path, message: &str, kept_out: &[String]) -> Result<WorkCommit> {
         let [c1, hooks, c2, fsmonitor] = Self::SAFE;
         let left_out = self.not_work(wt, &self.git_path(wt, "--git-dir").await?).await?;
         if !left_out.is_empty() {
             tracing::info!("commit in {}: left out: {}", wt.display(), left_out.iter().map(LeftOut::to_string).collect::<Vec<_>>().join(", "));
         }
-        for add in add_all_but(&left_out) {
+        for add in add_all_but(&left_out, kept_out) {
             let mut args = vec![c1, hooks, c2, fsmonitor];
             args.extend(add.iter().map(String::as_str));
             self.ok(wt, &args, false).await?;
@@ -1082,18 +1090,20 @@ fn copied_among(record: &[String], files: &[String]) -> Vec<String> {
 }
 
 /// The `git add` calls, in order, that stage everything in a worktree but the paths in
-/// `left_out`: `add -A` without them. A folder that is too big is new as a whole, but a folder
+/// `left_out` and the new paths `kept_out` (`commit_work_without`): `add -A` without them.
+/// A folder that is too big is new as a whole, but a folder
 /// that Codly copied in can hold files that the branch tracks (an older branch of the same
 /// worktree, a file that somebody staged), and leaving the folder out leaves their changes
 /// out too. So with such a folder, `add -u` first takes every change to a tracked file,
 /// wherever it is: only the new files of the folder stay out.
-fn add_all_but(left_out: &[LeftOut]) -> Vec<Vec<String>> {
+fn add_all_but(left_out: &[LeftOut], kept_out: &[String]) -> Vec<Vec<String>> {
     let mut all = vec!["add".to_string(), "-A".to_string()];
-    if left_out.is_empty() {
+    if left_out.is_empty() && kept_out.is_empty() {
         return vec![all];
     }
     all.extend(["--".to_string(), ".".to_string()]);
-    all.extend(left_out.iter().map(|l| format!(":(exclude,literal){}", l.path())));
+    let paths = left_out.iter().map(LeftOut::path).chain(kept_out.iter().map(String::as_str));
+    all.extend(paths.map(|path| format!(":(exclude,literal){path}")));
     let copied_folder = left_out.iter().any(|l| matches!(l, LeftOut::Copied { path } if path.ends_with('/')));
     let tracked = copied_folder.then(|| vec!["add".to_string(), "-u".to_string()]);
     tracked.into_iter().chain([all]).collect()
@@ -1306,7 +1316,7 @@ impl Git {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // nothing was ever staged there
             Err(e) => bail!("cannot copy the index of {}: {e}", wt.display()),
         }
-        for add in add_all_but(&left_out) {
+        for add in add_all_but(&left_out, &[]) {
             self.on_index(wt, &index, &add.iter().map(String::as_str).collect::<Vec<_>>()).await?;
         }
         Ok((index, left_out))
@@ -2545,6 +2555,36 @@ mod tests {
             std::fs::write(repo.join(file), "x\n").unwrap();
         }
         assert_eq!(git.untracked(&repo).await.unwrap(), ["note.txt", "out/"]);
+    }
+
+    /// A commit can leave out new paths that are not its work: a file and a folder that were
+    /// in the worktree before stay untracked, with what is under the folder, and everything
+    /// else is committed, a new file too. A path among them that is gone is no error.
+    #[tokio::test]
+    async fn commit_work_without_leaves_the_named_new_paths_out() {
+        let (_d, repo) = repo();
+        let git = Git::from_process_env();
+        std::fs::create_dir_all(repo.join("cache")).unwrap();
+        for file in ["notes.tmp", "cache/built.txt"] {
+            std::fs::write(repo.join(file), "from before\n").unwrap();
+        }
+        let before = git.untracked(&repo).await.unwrap();
+        assert_eq!(before, ["cache/", "notes.tmp"]);
+
+        // The work: a tracked file changed, a new file, and one more file in the old folder.
+        std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        std::fs::write(repo.join("cache/more.txt"), "later\n").unwrap();
+        let kept_out: Vec<String> = before.into_iter().chain(["gone.txt".to_string()]).collect();
+        let snap = git.commit_work_without(&repo, "work", &kept_out).await.unwrap();
+        assert_eq!((snap.commit.unwrap().files, snap.left_out), (vec!["a.txt".to_string(), "new.txt".to_string()], vec![]));
+        assert_eq!(git.untracked(&repo).await.unwrap(), ["cache/", "notes.tmp"]);
+        assert_eq!(std::fs::read_to_string(repo.join("notes.tmp")).unwrap(), "from before\n");
+
+        // Nothing but those paths is new: no commit. Without the list, they are work.
+        assert_eq!(git.commit_work_without(&repo, "again", &kept_out).await.unwrap().commit, None);
+        let all = git.commit_work(&repo, "all").await.unwrap().commit.unwrap();
+        assert_eq!(all.files, ["cache/built.txt", "cache/more.txt", "notes.tmp"]);
     }
 
     /// A ref that is set again moves, where `create_ref` would refuse.
