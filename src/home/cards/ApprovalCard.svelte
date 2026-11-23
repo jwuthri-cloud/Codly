@@ -4,7 +4,8 @@
   takes the keyboard: ⌘↵ once · ⌥⌘↵ session · ⌘⌫ deny · ⇧⌘⌫ deny with a note.
   Questions (AskUserQuestion / requestUserInput) render as a choice to answer.
   A plan (Claude's plan mode asks to leave it with `ExitPlanMode`) renders as the plan itself:
-  accept it, or send it back with a note.
+  accept it, accept it with your changes (Claude Code takes your text as the plan), or send it
+  back with a note.
   The same command asked by several agents is one card (`twins`): one answer goes to all.
   "Always allow in this repo" saves a rule in Codly for every agent of the repo; the card
   offers it only when the core says the request can be saved (never for what Codly always asks):
@@ -20,6 +21,7 @@
   import { api } from '../../lib/api';
   import { copyText, resolveApprovals, saveApprovalRule } from '../../lib/state/actions';
   import { yourAnswers } from '../../lib/state/answers';
+  import { changedPlan } from '../../lib/state/control.svelte';
   import { keyTargetApproval } from '../../lib/state/keys';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
@@ -119,6 +121,31 @@
     await resolveApprovals([approval, ...twins].map((a) => a.id), choice, message, answers);
     busy = false;
     noteOpen = false;
+    editOpen = false;
+  }
+
+  // ── a plan you change before you accept it ──
+  let editOpen = $state(false);
+  let edited = $state('');
+  let editEl: HTMLTextAreaElement | undefined = $state();
+  function openEdit() {
+    if (plan === null) return;
+    edited = plan;
+    editOpen = true;
+    tick().then(() => editEl?.focus());
+  }
+  /** Accept the plan with your text. Left as it was, it is a plain accept. */
+  function acceptEdited() {
+    if (plan !== null && edited.trim()) decide('allow_once', null, changedPlan(plan, edited));
+  }
+  function onEditKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      editOpen = false;
+    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      acceptEdited();
+    }
   }
 
   // ── "Always allow in this repo" ──
@@ -155,6 +182,7 @@
   }
   function openNote() {
     if (!offered.has('deny')) return;
+    editOpen = false;
     noteOpen = true;
     tick().then(() => noteEl?.focus());
   }
@@ -239,7 +267,11 @@
       <ul class="paths">{#each subject.paths as p, pi (pi)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
       {#if subject.diff}<pre class="diff selectable">{subject.diff}</pre>{/if}
     {:else if plan !== null}
-      <div class="plan selectable"><Markdown text={plan} brief /></div>
+      {#if editOpen}
+        <textarea bind:this={editEl} class="plan-edit" rows="12" bind:value={edited} spellcheck="true" aria-label="The plan, with your changes" onkeydown={onEditKey}></textarea>
+      {:else}
+        <div class="plan selectable"><Markdown text={plan} brief /></div>
+      {/if}
     {:else if netHost !== null}
       <p class="net selectable">A shell command of {agent?.name ?? 'the agent'}, inside Claude Code’s sandbox, wants to connect to {#if netHost}<code>{netHost}</code>{:else}a host on the network{/if}. The sandbox blocks this host until you allow it. If you deny, the command gets a network error.</p>
     {:else if subject.kind === 'tool'}
@@ -286,6 +318,12 @@
           onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (noteOpen = false))} />
         <button class="btn" type="submit" disabled={busy}>{plan !== null ? 'Send the plan back' : 'Deny with note'}</button>
       </form>
+    {:else if editOpen}
+      <footer>
+        <button class="btn primary" disabled={busy || !edited.trim()} onclick={acceptEdited}>Accept with my changes</button>
+        <button class="btn ghost" disabled={busy} onclick={() => (editOpen = false)}>Keep its plan</button>
+      </footer>
+      <p class="same">{agent?.name ?? 'The agent'} then works from your text: Claude Code takes it as the plan.</p>
     {:else}
       <footer>
         {#each ORDER.filter((c) => offered.has(c)) as c (c)}
@@ -293,6 +331,7 @@
             {choiceLabel(c)}{#if isKeyTarget && CHOICE[c].kbd}<span class="k">{CHOICE[c].kbd}</span>{/if}
           </button>
         {/each}
+        {#if plan !== null && offered.has('allow_once')}<button class="btn" disabled={busy} onclick={openEdit}>Change the plan…</button>{/if}
         {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={openNote}>{plan !== null ? 'Send it back with a note…' : 'Deny with a note…'}{#if isKeyTarget}<span class="k">⇧⌘⌫</span>{/if}</button>{/if}
       </footer>
       {#if rulePrefix || ruleExact}
@@ -341,6 +380,8 @@
   .net { font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-2); }
   .net code { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-1); word-break: break-all; }
   .plan { max-height: 360px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-1); }
+  .plan-edit { resize: vertical; min-height: 120px; max-height: 360px; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-family: var(--font-mono); font-size: 12.5px; line-height: 19px; color: var(--ink-1); }
+  .plan-edit:focus-visible { outline: 2px solid var(--live); outline-offset: 1px; }
   .q { border: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   legend { font-size: 16px; line-height: 24px; color: var(--ink-1); margin-bottom: 6px; padding: 0; }
   .opt { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-1); transition: background-color var(--d-2) var(--ease-out), box-shadow var(--d-2); }

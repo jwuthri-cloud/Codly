@@ -9,8 +9,9 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
+use super::controls::LiveSwitch;
 use super::{Inner, Live, guard, lock, read};
-use crate::adapters::{AgentCmd, AgentHandle, SessionMode, SessionRequest, SpawnSpec, classify};
+use crate::adapters::{AgentCmd, AgentHandle, SessionMode, SpawnSpec, classify, claude};
 use crate::mcp::ToolCtx;
 use crate::model::*;
 use crate::store::RunRow;
@@ -372,9 +373,10 @@ impl Inner {
         }
     }
 
-    /// Switch a 1:1 agent's model. A live Claude session takes the new model as it is
-    /// (`live_model_switch`). Otherwise the session resumes on the next message with the new
-    /// model, so a live process is stopped first; a turn in progress must finish or be stopped.
+    /// Switch a 1:1 agent's model and reasoning effort. A live Claude session takes them as it
+    /// is (`live_model_switch`). Otherwise, or when that session did not take a new effort, the
+    /// session resumes on the next message with the new model, so a live process is stopped
+    /// first; a turn in progress must finish or be stopped.
     pub(super) async fn set_agent_model(&self, agent_id: &str, model: Option<String>) -> Result<Agent> {
         let agent = self.agent(agent_id)?;
         if agent.role != Role::Solo {
@@ -383,21 +385,10 @@ impl Inner {
         if agent.model == model {
             return Ok(agent);
         }
-        if let Some(name) = self.live_model_switch(agent_id, model.as_deref()) {
-            let answer = self.ask_session(agent_id, SessionRequest::Model(name))?;
-            Self::session_answer(answer).await?;
-            if let Some(l) = lock(&self.live).get_mut(agent_id) {
-                l.model = model.clone();
-            }
-            let ws = self.store.agent_workspace(agent_id)?;
-            // (Recorded: after a switch the next request reads the conversation with no cached tokens.)
-            let text = format!(
-                "{} now works with {}, in the same conversation: no restart was needed. Its next turn reads the whole conversation again with the new model.",
-                agent.name,
-                model.as_deref().unwrap_or_default()
-            );
-            self.chat(ws.as_deref(), &format!("agent:{agent_id}"), "codly", &text, None)?;
-            return self.update_agent(agent_id, |a| a.model = model);
+        if let Some(switch) = self.live_model_switch(agent_id, model.as_deref())
+            && let Some(changed) = self.switch_live_model(&agent, model.as_deref(), switch).await?
+        {
+            return Ok(changed);
         }
         // Its run of a task is not a chat to restart: stopping it would strand the task.
         if agent.task_id.is_some() {
@@ -413,15 +404,28 @@ impl Inner {
         self.update_agent(agent_id, |a| a.model = model)
     }
 
-    /// The name to give a live Claude session so that it changes its model with no restart
-    /// (`SessionRequest::Model`: recorded between turns and during one). None = the switch
-    /// needs the restart: another CLI, no live process, the CLI's default model (no recorded
-    /// request names it), or another reasoning effort (it is set when the process starts).
-    fn live_model_switch(&self, agent_id: &str, model: Option<&str>) -> Option<String> {
+    /// What to ask of a live Claude session so that it changes its model, its reasoning effort
+    /// or both with no restart (`switch_live_model`). The model request is recorded between
+    /// turns and during one, the CLI's default model included; the effort request between
+    /// turns only. None = the switch needs the restart: another CLI, no live process, a new
+    /// effort while the agent works, an effort level Claude Code does not list, or no effort
+    /// for a session that has one (taking a level away is recorded only for a process that
+    /// started without one).
+    fn live_model_switch(&self, agent_id: &str, model: Option<&str>) -> Option<LiveSwitch> {
         let (name, effort) = classify::split_model_effort(model);
         let live = lock(&self.live);
         let l = live.get(agent_id).filter(|l| l.provider == Provider::Claude && l.starting.is_none() && !l.stopping)?;
-        name.filter(|_| classify::split_model_effort(l.model.as_deref()).1 == effort)
+        let (name_now, effort_now) = classify::split_model_effort(l.model.as_deref());
+        if effort.is_none() && effort_now.is_some() {
+            return None;
+        }
+        let effort = effort.filter(|e| effort_now.as_ref() != Some(e));
+        if effort.as_ref().is_some_and(|e| !claude::EFFORT_LEVELS.contains(&e.as_str()) || l.turn_active || l.queued > 0) {
+            return None;
+        }
+        // A change of effort alone does not ask for the model again.
+        let model = (effort.is_none() || name != name_now).then(|| name.unwrap_or_else(|| claude::DEFAULT_MODEL.into()));
+        Some(LiveSwitch { model, effort, effort_now })
     }
 
     /// Stop an agent's live run and wait (≤ 5 s) for its process to exit. False = still running.

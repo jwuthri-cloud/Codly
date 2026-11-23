@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import { AgentControl } from '../demo/controls';
 import type { Agent } from '../gen/Agent';
-import { PERMISSION_MODES, compactNow, contextLine, readContext, setPermissionMode } from '../state/control.svelte';
+import { PERMISSION_MODES, canCompact, changedPlan, compactAgent, compactHint, compactWait, contextLine, readContext, setPermissionMode } from '../state/control.svelte';
 import { toasts } from '../state/toasts.svelte';
 
 // The demo's state machine mirrors orchestrator/controls.rs; these are the same cases.
@@ -49,10 +49,12 @@ describe('Claude session controls', () => {
 
   it('says what each mode takes out of your permissions, and what it does not', () => {
     const hint = (id: string) => PERMISSION_MODES.find((m) => m.id === id)?.hint ?? '';
-    // Recorded (Claude Code 2.1.311): in "accept edits" a shell command that writes a file in
-    // the worktree runs with no request, so Codly's permissions never see it.
-    expect(hint('accept_edits')).toContain('shell commands that change files in its worktree');
+    // Recorded (Claude Code 2.1.311): in "accept edits" a shell command that writes, moves or
+    // deletes a file in the worktree runs with no request, so Codly's permissions never see
+    // it. An edit of the folder's own .claude settings still comes as a request.
+    expect(hint('accept_edits')).toContain('shell commands that change, move or delete files in its worktree');
     expect(hint('accept_edits')).toContain('your permissions do not see them');
+    expect(hint('accept_edits')).toContain('A change to its own Claude Code settings there (.claude) still asks you');
     expect(hint('accept_edits')).toContain('Not available with “Ask first” permissions');
     expect(hint('accept_edits')).not.toContain('Commands still follow your permissions');
     // "Plan first" promises what the core enforces: only reads are approved before the plan is.
@@ -72,7 +74,7 @@ describe('Claude session controls', () => {
     vi.spyOn(api, 'compactAgent').mockRejectedValue('Bo is still working: compact it when its turn ends');
     vi.spyOn(api, 'agentContextUsage').mockRejectedValue('Bo is not running');
     expect(await setPermissionMode('bo', 'plan')).toBe(false);
-    expect(await compactNow('bo')).toBe(false);
+    expect(await compactAgent('bo', 'Bo')).toBe(false);
     expect(await readContext('bo')).toBeNull();
     expect(toasts.list.map((t) => [t.kind, t.body])).toEqual([
       ['error', 'Bo is on a task: its mode can change when the task is done'],
@@ -80,6 +82,38 @@ describe('Claude session controls', () => {
       ['error', 'Bo is not running'],
     ]);
     for (const t of toasts.list) toasts.dismiss(t.id);
+  });
+
+  // Before, a Claude agent had its own "Compact now" button in the Context row and a Codex
+  // agent a row of its own, with two functions that called the same command.
+  it('has one "Compact now" for a Codex agent and a 1:1 Claude agent, with one way to ask', async () => {
+    const who = (provider: Agent['provider'], role: Agent['role']) => canCompact({ provider, role });
+    expect([who('codex', 'solo'), who('codex', 'worker'), who('claude', 'solo')]).toEqual([true, true, true]);
+    // The core refuses a Claude worker, reviewer or Lead (the end of a turn starts its check), and the other CLIs.
+    expect([who('claude', 'worker'), who('claude', 'lead'), who('gemini', 'solo')]).toEqual([false, false, false]);
+    expect(compactHint('codex')).toContain('Codex sums up the conversation so far');
+    expect(compactHint('claude')).toContain('Claude replaces the conversation so far with a summary');
+
+    // The button waits for the same things for both: a task, a turn.
+    expect(compactWait({ task_id: 't1', status: 'idle' })).toBe('It is on a task. Compact it between tasks.');
+    expect(compactWait({ task_id: null, status: 'working' })).toBe('Wait until its turn ends.');
+    expect(compactWait({ task_id: null, status: 'idle' })).toBeNull();
+
+    for (const t of toasts.list) toasts.dismiss(t.id);
+    const core = vi.spyOn(api, 'compactAgent').mockResolvedValue(undefined);
+    expect(await compactAgent('bo', 'Bo')).toBe(true);
+    expect(core).toHaveBeenCalledWith('bo');
+    expect(toasts.list.map((t) => [t.kind, t.title])).toEqual([['success', 'Compacting Bo’s conversation']]);
+    for (const t of toasts.list) toasts.dismiss(t.id);
+  });
+
+  // Recorded: Claude Code takes a changed plan in the answer as the plan. Before, the card
+  // could only accept the plan as it was or send it back.
+  it('sends a changed plan with the accept, and nothing for a plan left as it was', () => {
+    const plan = '1. Add the line `world`.\n';
+    expect(changedPlan(plan, '1. Add the line `planet`.\n')).toEqual({ plan: '1. Add the line `planet`.\n' });
+    expect(changedPlan(plan, plan)).toBeNull();
+    expect(changedPlan(plan, '  \n')).toBeNull();
   });
 
   it('sends the mode the user picked and reports the switch', async () => {

@@ -35,10 +35,11 @@
 //!   `system/init` opens every turn, so one that comes while no turn is open is such a turn:
 //!   `TurnStarted` with no input.
 //!
-//! `AgentCmd::Session` (permission mode, model, context use) is written at once as a control
-//! request: the CLI answers those between turns and during one. Request and answer shapes,
-//! and what a permission suggestion does when it is sent back, are recorded on 2.1.311
-//! (docs/research/cli-claude-stream-json-2.1.311.md §2 and §10).
+//! `AgentCmd::Session` (permission mode, model, reasoning effort, context use) is written at
+//! once as a control request: the CLI answers those between turns and during one. Request and
+//! answer shapes, and what a permission suggestion does when it is sent back, are recorded on
+//! 2.1.311 (docs/research/cli-claude-stream-json-2.1.311.md §2 and §10; the effort and the
+//! default model in its part 2, scenario 13).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -74,15 +75,36 @@ pub const WORKER_TOOLS: &[&str] = &[
 ];
 /// Lead, reviewers and other read-only roles: no Bash, no edits.
 pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Skill", "LSP"];
-/// Tools whose presence depends on the CLI's version or the user's setup (LSP needs a language
-/// server, Skill needs skills): asked for, but never reported as "not enabled".
-const OPTIONAL_TOOLS: &[&str] = &["Monitor", "TaskStop", "Skill", "LSP", TOOL_SEARCH];
+/// Tools the CLI may leave out of `init.tools` although they were asked for: never reported as
+/// "not enabled". The CLI drops a name without a word (part 2 of the 2.1.311 recordings,
+/// scenario 10), so only a tool the agent cannot work without is worth a line.
+/// - Its version or the user's setup decides: LSP needs a language server, Skill needs skills.
+/// - `WebFetch` and `LSP` were not in `init.tools` of a run with the 1:1 tool list (recorded,
+///   same scenario; the recording does not say why).
+/// - `ExitPlanMode` is only needed in plan mode (`ClaudeNormalizer::may_be_missing`): a CLI
+///   that does not know the name runs every other mode as before.
+const OPTIONAL_TOOLS: &[&str] = &["Monitor", "TaskStop", "Skill", "LSP", TOOL_SEARCH, "WebFetch", EXIT_PLAN_MODE];
 /// Needed to reach the user's own MCP servers when there are many of them.
 const TOOL_SEARCH: &str = "ToolSearch";
 /// How Claude shows its plan in plan mode: the call arrives as a `can_use_tool` request with
 /// the plan text (cli-claude-stream-json-2.1.311 §10). Left out of `--tools`, the CLI denies
 /// the call by a rule of its own and a plan could never be accepted.
 pub const EXIT_PLAN_MODE: &str = "ExitPlanMode";
+
+/// The name `set_model` takes for the CLI's own default model (part 2 of the 2.1.311
+/// recordings, scenario 13: the answer names the model it resolves to).
+pub const DEFAULT_MODEL: &str = "default";
+
+/// The reasoning-effort levels Claude Code lists for its models (`supportedEffortLevels` in the
+/// `initialize` answer of the 2.1.311 recordings). `apply_flag_settings` answers "success" for
+/// any other word and drops it (part 2, scenario 13), so no other word is sent. `low` and
+/// `high` are the levels recorded with that request: whoever sets a level reads it back
+/// (`SessionRequest::Settings`).
+pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// The model an `assistant` line names when the CLI wrote its text itself (the output of a
+/// local command such as `/compact`): no model ran.
+const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -108,9 +130,13 @@ pub fn tools_for(spec: &SpawnSpec) -> Vec<&'static str> {
     t
 }
 
-/// Workers edit freely inside their own worktree (Bash still asks, with the shell sandbox
-/// too: `settings_json`). Solo agents work in the user's checkout and read-only roles
-/// have nothing to accept, so both ask for everything.
+/// Workers edit freely inside their own worktree. In `acceptEdits` the CLI asks about neither
+/// an edit there nor a shell command that changes, moves or deletes files there (recorded:
+/// `mv`, `rm` and `rm -rf sub && mkdir sub && mv …` ran with no request; part 2 of the 2.1.311
+/// recordings, scenario 9). It still asks about an edit of the folder's own `.claude`
+/// settings (same scenario), a write outside the folder, and the other shell commands (with
+/// the shell sandbox too: `settings_json`). Solo agents work in the user's checkout and
+/// read-only roles have nothing to accept, so both ask for everything.
 pub fn permission_mode(spec: &SpawnSpec) -> &'static str {
     if spec.role == Role::Worker && !spec.read_only { "acceptEdits" } else { "manual" }
 }
@@ -882,6 +908,15 @@ impl Actor {
             SessionRequest::Model(model) => ("set_model", json!({ "model": model })),
             SessionRequest::ContextUsage => ("get_context_usage", json!({})),
             SessionRequest::StopTask(task) => ("stop_task", json!({ "task_id": task })),
+            SessionRequest::Effort(level) => {
+                // The CLI would answer "success" and drop a word it does not know (recorded).
+                if !EFFORT_LEVELS.contains(&level.as_str()) {
+                    let _ = reply.send(Err(format!("Claude Code has no effort level \"{level}\"")));
+                    return;
+                }
+                ("apply_flag_settings", json!({ "settings": { "effortLevel": level } }))
+            }
+            SessionRequest::Settings => ("get_settings", json!({})),
         };
         let id = self.control(subtype, body).await;
         if self.stdin.is_none() {
@@ -908,7 +943,13 @@ impl Actor {
             // A refused switch leaves the CLI in the mode it had, which this request overwrote
             // here: its next status line says which one it is.
             (SessionRequest::PermissionMode(_), Err(_)) => self.norm.permission_mode = None,
-            (SessionRequest::Model(model), Ok(_)) => self.norm.model = Some(model.clone()),
+            (SessionRequest::Model(model), Ok(answer)) => {
+                self.norm.model = Some(model.clone()).filter(|m| m != DEFAULT_MODEL);
+                // The answer names the model the session is on now (`{"model": "<id>"}`).
+                if let Some(id) = answer["model"].as_str() {
+                    self.norm.session_model_is(id);
+                }
+            }
             _ => {}
         }
         // Nobody waits any more (the asker gave up): the request still took effect.
@@ -1183,6 +1224,12 @@ pub struct ClaudeNormalizer {
     worker: bool,
     session_id: String,
     model: Option<String>,
+    /// The model id the CLI says the session is on: `system/init` of every turn, and the answer
+    /// to a model switch.
+    session_model: Option<String>,
+    /// The other model the agent's own lines last named, once the timeline said so
+    /// (`on_turn_model`). None: they name the session's model.
+    turn_model: Option<String>,
     /// The permission mode the session is in, when known: from the handshake, from a switch
     /// Codly asked for (the actor sets it), from the CLI's status lines.
     permission_mode: Option<PermissionMode>,
@@ -1239,6 +1286,8 @@ impl ClaudeNormalizer {
             worker: spec.role == Role::Worker,
             session_id,
             model: classify::split_model_effort(spec.model.as_deref()).0,
+            session_model: None,
+            turn_model: None,
             permission_mode: None,
             sign_in: startup::sign_in_advice(spec),
             own_key: startup::uses_own_key(spec),
@@ -1508,7 +1557,26 @@ impl ClaudeNormalizer {
         }
     }
 
+    /// May the CLI leave this tool out without a line in the timeline (`OPTIONAL_TOOLS`)? Not
+    /// the plan tool of a session that plans: without it the CLI denies the call that shows the
+    /// plan, and no plan could be accepted.
+    fn may_be_missing(&self, tool: &str) -> bool {
+        OPTIONAL_TOOLS.contains(&tool) && !(tool == EXIT_PLAN_MODE && self.permission_mode == Some(PermissionMode::Plan))
+    }
+
+    /// The CLI named the session's model: `system/init` of a turn, or the answer to a switch.
+    /// After a change, a line on that model is no news (`on_turn_model`).
+    fn session_model_is(&mut self, model: &str) {
+        if self.session_model.as_deref() != Some(model) {
+            self.session_model = Some(model.to_string());
+            self.turn_model = None;
+        }
+    }
+
     fn on_init(&mut self, v: &Value, out: &mut Vec<EventKind>) {
+        if let Some(model) = v["model"].as_str() {
+            self.session_model_is(model);
+        }
         if self.init_seen {
             return;
         }
@@ -1531,7 +1599,7 @@ impl ClaudeNormalizer {
         // Unknown --tools names are dropped silently (CRITIQUE G5): say which ones.
         // `Agent` is listed under its alias `Task`
         let has = |t: &str| tools.iter().any(|x| x == t || (t == "Agent" && x == "Task"));
-        let missing: Vec<&str> = self.requested_tools.iter().map(String::as_str).filter(|t| !has(t) && !OPTIONAL_TOOLS.contains(t)).collect();
+        let missing: Vec<&str> = self.requested_tools.iter().map(String::as_str).filter(|t| !has(t) && !self.may_be_missing(t)).collect();
         if !tools.is_empty() && !missing.is_empty() {
             let message = format!("Claude did not enable requested tools: {}", missing.join(", "));
             self.problem(message, false, out);
@@ -1713,6 +1781,26 @@ impl ClaudeNormalizer {
         }
     }
 
+    /// The model one of the agent's own lines ran on. `system/init` names the session's model,
+    /// but a turn can run on another one: recorded in plan mode, where a session on haiku
+    /// planned on sonnet while `init.model` said haiku all the time, and went back to haiku
+    /// when the plan was accepted (part 2 of the 2.1.311 recordings, scenario 10). The timeline
+    /// says so, once per change. The agent's own model, which its next run starts with, stays
+    /// the one the user picked.
+    fn on_turn_model(&mut self, model: Option<&str>, out: &mut Vec<EventKind>) {
+        let (Some(model), Some(session)) = (model.filter(|m| *m != SYNTHETIC_MODEL), self.session_model.as_deref()) else { return };
+        if same_model(model, self.turn_model.as_deref().unwrap_or(session)) {
+            return;
+        }
+        if same_model(model, session) {
+            self.turn_model = None;
+            out.push(EventKind::Notice { text: format!("Claude Code runs on {session} again") });
+        } else {
+            out.push(EventKind::Notice { text: format!("Claude Code now runs on {model}, not on {session}") });
+            self.turn_model = Some(model.to_string());
+        }
+    }
+
     fn on_assistant(&mut self, v: &Value, out: &mut Vec<EventKind>) {
         let msg = &v["message"];
         let msg_id = msg["id"].as_str().unwrap_or("").to_string();
@@ -1720,6 +1808,10 @@ impl ClaudeNormalizer {
         // the result of the `Agent` call (and the user as the report of `task_notification`).
         let subagent = !v["parent_tool_use_id"].is_null();
         let helper = v["parent_tool_use_id"].as_str().filter(|id| self.helpers.contains_key(*id)).map(str::to_owned);
+        // (A subagent has a model of its own.)
+        if !subagent {
+            self.on_turn_model(msg["model"].as_str(), out);
+        }
         for (pos, block) in msg["content"].as_array().into_iter().flatten().enumerate() {
             match block["type"].as_str().unwrap_or("") {
                 "text" if !subagent => {
@@ -2198,6 +2290,14 @@ impl ClaudeNormalizer {
                 if p.tool_name == "AskUserQuestion" {
                     input["answers"] = d.answers.clone().unwrap_or_else(|| json!({}));
                 }
+                // A plan the user changed before accepting it (`answers.plan`). The CLI takes the
+                // changed text as the plan, rewrites its plan file and tells the model that the
+                // user edited it (part 2 of the 2.1.311 recordings, scenario 11).
+                if p.tool_name == EXIT_PLAN_MODE
+                    && let Some(plan) = d.answers.as_ref().and_then(|a| a["plan"].as_str())
+                {
+                    input["plan"] = json!(plan);
+                }
                 let mut r = json!({ "behavior": "allow", "updatedInput": input });
                 match d.choice {
                     ApprovalChoice::AllowAlways if !p.suggestions.is_empty() => r["updatedPermissions"] = Value::Array(p.suggestions),
@@ -2270,6 +2370,25 @@ fn background_tasks(tasks: &Value) -> Vec<BackgroundTask> {
         Some(BackgroundTask { id: t["task_id"].as_str()?.to_string(), kind: kind.into(), description: t["description"].as_str().unwrap_or_default().to_string() })
     };
     tasks.as_array().into_iter().flatten().filter_map(task).collect()
+}
+
+/// Do two model names mean one model? A name of the CLI's model list can end in a mark for its
+/// context window that a model id does not have ("claude-fable-5-1[1m]" in the `initialize`
+/// answer of testdata/claude-interrupt-live.jsonl). Whether `system/init` keeps that mark is
+/// not recorded, so it never makes two names differ.
+///
+/// Nor does a name that is part of the other one. Every recording is of Anthropic's own API,
+/// where `system/init` and the agent's lines spell a model the same way. Another provider is
+/// not recorded, and there the two can differ for one model: the id the session was set up
+/// with (a region and vendor in front, a version behind) and the plain id of the answer, or a
+/// short name and its dated id. A false "now runs on" in every run would be worse than a
+/// missed one for two models where one's name starts the other's.
+fn same_model(a: &str, b: &str) -> bool {
+    fn id(m: &str) -> &str {
+        m.split('[').next().unwrap_or(m)
+    }
+    let (a, b) = (id(a), id(b));
+    a.contains(b) || b.contains(a)
 }
 
 /// A `user` line the CLI wrote itself, not something the user or a tool said (recorded,
@@ -4486,6 +4605,161 @@ mod tests {
         // Asked for, the CLI lists it among its tools (recorded): no "not enabled" line follows.
         let init = recording("permission-plan-mode").into_iter().find(|l| l["subtype"] == "init").expect("the recorded init line");
         assert!(init["tools"].as_array().unwrap().contains(&json!(EXIT_PLAN_MODE)));
+    }
+
+    /// The recorded model and effort requests (part 2, scenario 13). Before, no request named
+    /// the CLI's default model or set an effort, so both changes restarted the process.
+    #[tokio::test]
+    async fn the_default_model_and_the_effort_go_out_and_come_back_as_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut events, _child) = silent_actor(dir.path());
+        let lines = recording("r4-model-effort-fallback");
+        let dir = dir.path();
+        // The CLI's answer to the request the recording's driver sent under this id.
+        let answer_to = |id: &str| {
+            lines
+                .iter()
+                .find(|l| l["type"] == "control_response" && l["response"]["request_id"] == id)
+                .unwrap_or_else(|| panic!("no recorded answer to {id}"))
+                .clone()
+        };
+
+        // The default model has a name, and the answer says which model it is.
+        let request = json!({ "subtype": "set_model", "model": DEFAULT_MODEL });
+        let model = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::Model(DEFAULT_MODEL.into()), request).await;
+        assert_eq!(model, Ok(json!({ "model": "claude-opus-5-5" })));
+        assert_eq!(actor.norm.model, None, "\"default\" is not a model name to show");
+        assert_eq!(actor.norm.session_model.as_deref(), Some("claude-opus-5-5"));
+
+        // An effort level: the answer is a bare success, and the settings say what the session
+        // works with.
+        let request = json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": "low" } });
+        let set = ask_as_recorded(&mut actor, dir, &lines, SessionRequest::Effort("low".into()), request).await;
+        assert_eq!(set, Ok(Value::Null));
+        let (reply, mut answer) = mpsc::unbounded_channel();
+        actor.on_cmd(AgentCmd::Session { request: SessionRequest::Settings, reply }).await;
+        let wrote = last_sent(dir);
+        assert_eq!(wrote["request"], json!({ "subtype": "get_settings" }));
+        let mut settings = answer_to("host-8"); // the driver's `get_settings` after its "low"
+        settings["response"]["request_id"] = wrote["request_id"].clone();
+        actor.on_json(settings, "codly-0", &mut None).await;
+        assert_eq!(answer.try_recv().unwrap().unwrap()["applied"]["effort"], "low");
+
+        // A word that is no level: the recorded CLI answered "success" and kept the effort it
+        // had. Codly does not send such a word, and says so.
+        let bad = lines.iter().find(|l| l["_sent"]["request_id"] == "host-9").expect("the driver's request");
+        assert_eq!(bad["_sent"]["request"]["settings"]["effortLevel"], "not-a-level");
+        assert_eq!(answer_to("host-9")["response"]["subtype"], "success");
+        assert_eq!(answer_to("host-10")["response"]["response"]["applied"]["effort"], "low");
+        let (reply, mut answer) = mpsc::unbounded_channel();
+        actor.on_cmd(AgentCmd::Session { request: SessionRequest::Effort("not-a-level".into()), reply }).await;
+        assert_eq!(answer.try_recv().unwrap(), Err("Claude Code has no effort level \"not-a-level\"".to_string()));
+        assert_eq!(last_sent(dir), wrote, "nothing was written");
+        assert!(actor.session_replies.is_empty());
+        let kinds = emitted(&mut events);
+        assert!(kinds.is_empty(), "{kinds:?}");
+    }
+
+    /// Plan mode on a session started as Codly starts a 1:1 agent (part 2, scenarios 10 and
+    /// 11). Before, a plan could only be accepted as it was or sent back, and nothing said that
+    /// the plan was made by another model than the session's.
+    #[test]
+    fn a_changed_plan_is_accepted_as_the_plan_and_the_timeline_names_the_model_that_planned() {
+        let lines = recording("r4-plan-from-default");
+        let mut s = spec(Role::Solo, false);
+        s.cwd = PathBuf::from("/tmp/work/r4-plan-from-default");
+        let mut norm = ClaudeNormalizer::new(&s, "sess-1".into());
+        norm.permission_mode = Some(PermissionMode::Plan); // as after Codly's own switch
+        // Codly's answers, as the recording's driver gave them: the plan sent back with a
+        // note, the next plan accepted with another text, the edit that follows allowed once.
+        let note = "Not yet: add a final step that reads the file back to check it. Then present the plan again.";
+        let changed = "# Plan changed by the host\n\n1. Append the line `planet` (not `world`) to hello.txt.\n2. Read the file back.\n";
+        let once = |answers: Option<Value>| ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers };
+        let sent_back = ApprovalDecision { choice: ApprovalChoice::Deny, message: Some(note.into()), answers: None };
+        let mut decisions = vec![sent_back, once(Some(json!({ "plan": changed }))), once(None)].into_iter();
+        let mut events = norm.turn_started("plan it");
+        for (i, line) in lines.iter().enumerate().filter(|(_, l)| l["type"].is_string()) {
+            let out = norm.on_message(line);
+            if let Some(EventKind::ApprovalRequested { approval }) = out.iter().find(|e| matches!(e, EventKind::ApprovalRequested { .. })) {
+                let (reply, _) = norm.answer(&approval.id, &decisions.next().expect("three requests")).unwrap();
+                assert_eq!(reply, lines[i + 1]["_sent"], "Codly's answer is the recorded one");
+            }
+            events.extend(out);
+        }
+        assert!(decisions.next().is_none(), "three requests: two plans and an edit");
+        // The CLI took the changed text as the plan (its tool result says who edited it).
+        let approved = lines.iter().find(|l| l["tool_use_result"]["planWasEdited"] == true).expect("the recorded approval");
+        assert_eq!(approved["tool_use_result"]["plan"], changed);
+
+        // `init.model` said haiku all the time; the plan was made on sonnet.
+        assert!(events.iter().any(|e| matches!(e, EventKind::SessionStarted { model: Some(m), .. } if m == "claude-haiku-5-5")));
+        let notices: Vec<&str> = events.iter().filter_map(|e| if let EventKind::Notice { text } = e { Some(text.as_str()) } else { None }).collect();
+        assert_eq!(notices, ["Claude Code now runs on claude-sonnet-5-5, not on claude-haiku-5-5", "Claude Code runs on claude-haiku-5-5 again"]);
+        // A mark for the context window is no other model.
+        assert!(same_model("claude-fable-5-1[1m]", "claude-fable-5-1") && !same_model("claude-sonnet-5-5", "claude-haiku-5-5"));
+        // Nor is another spelling of one model (not recorded: names in the style of a cloud
+        // provider's ids, and a short name with its dated id). No line says the model changed.
+        let (cloud, plain) = ("us.anthropic.claude-sonnet-5-5-20261001-v1:0", "claude-sonnet-5-5-20261001");
+        assert!(same_model(cloud, plain) && same_model(plain, cloud) && same_model("claude-sonnet-5-5", plain));
+        assert!(!same_model(cloud, "claude-haiku-5-5-20261001"));
+        norm.session_model_is(cloud);
+        let mut said = Vec::new();
+        norm.on_turn_model(Some(plain), &mut said);
+        assert!(said.is_empty(), "{said:?}");
+        norm.on_turn_model(Some("claude-haiku-5-5-20261001"), &mut said);
+        let other = format!("Claude Code now runs on claude-haiku-5-5-20261001, not on {cloud}");
+        assert!(matches!(said.as_slice(), [EventKind::Notice { text }] if *text == other), "{said:?}");
+    }
+
+    /// `init.tools` is the only place where a dropped tool shows (recorded). Before, a 1:1 run
+    /// said "did not enable requested tools: WebFetch" although the CLI leaves that tool out by
+    /// itself. A tool the agent cannot work without is still reported, and the plan tool
+    /// counts only for a session that plans.
+    #[test]
+    fn a_missing_tool_is_reported_only_when_the_agent_needs_it() {
+        let recorded = recording("r4-plan-from-default").into_iter().find(|l| l["subtype"] == "init").expect("the recorded init line");
+        let without = |gone: &[&str]| {
+            let mut init = recorded.clone();
+            init["tools"].as_array_mut().unwrap().retain(|t| !gone.contains(&t.as_str().unwrap()));
+            init
+        };
+        let said = |mode: PermissionMode, init: &Value| -> Vec<String> {
+            let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "sess-1".into());
+            norm.permission_mode = Some(mode);
+            errors(&norm.on_message(init)).into_iter().map(|(message, _)| message.to_string()).collect()
+        };
+        let nothing = Vec::<String>::new();
+
+        // As recorded, with the tool list of a 1:1 agent: no WebFetch, no LSP, and no line.
+        let listed = |tool: &str| recorded["tools"].as_array().unwrap().contains(&json!(tool));
+        assert!(!listed("WebFetch") && !listed("LSP") && listed(EXIT_PLAN_MODE));
+        assert_eq!(said(PermissionMode::Ask, &recorded), nothing);
+        // A CLI without the plan tool: nothing to say for an agent that does not plan. One that
+        // plans could never have its plan accepted.
+        assert_eq!(said(PermissionMode::Ask, &without(&[EXIT_PLAN_MODE])), nothing);
+        assert_eq!(said(PermissionMode::Plan, &without(&[EXIT_PLAN_MODE])), ["Claude did not enable requested tools: ExitPlanMode"]);
+        // A tool the work needs is always reported.
+        assert_eq!(said(PermissionMode::Ask, &without(&["Bash", "Edit"])), ["Claude did not enable requested tools: Bash, Edit"]);
+    }
+
+    /// `/compact` with nothing to compact (part 2, scenario 12): the CLI always writes a
+    /// result, so the turn of "Compact now" ends, and the CLI's own words say why nothing
+    /// happened. A compaction that does run is reported with its token counts.
+    #[test]
+    fn compact_with_nothing_to_compact_ends_its_turn() {
+        let lines = recording("r4-compact-empty");
+        let end = lines.iter().position(|l| l["type"] == "result").expect("the result of the first /compact");
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "sess-1".into());
+        let mut events = norm.turn_started("/compact");
+        events.extend(lines[..=end].iter().filter(|l| l["type"].is_string()).flat_map(|l| norm.on_message(l)));
+        assert!(events.iter().any(|e| matches!(e, EventKind::Message { text, .. } if text == "Error: No messages to compact")), "{events:?}");
+        assert!(events.iter().any(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Completed, .. })), "{events:?}");
+        // The CLI's own text names no model, and nothing was compacted.
+        assert!(!events.iter().any(|e| matches!(e, EventKind::Notice { .. } | EventKind::Compacting { .. })), "{events:?}");
+
+        let rest: Vec<EventKind> = lines[end + 1..].iter().filter(|l| l["type"].is_string()).flat_map(|l| norm.on_message(l)).collect();
+        assert!(rest.iter().any(|e| matches!(e, EventKind::Compacting { pre_tokens: Some(5765), post_tokens: Some(934) })), "{rest:?}");
+        assert_eq!(rest.iter().filter(|e| matches!(e, EventKind::TurnCompleted { status: TurnStatus::Completed, .. })).count(), 3);
     }
 
     /// What the CLI writes back after a model switch and around a compaction is known: no
