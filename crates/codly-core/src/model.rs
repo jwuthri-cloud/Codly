@@ -1130,7 +1130,8 @@ pub struct ApprovalDecision {
     pub choice: ApprovalChoice,
     /// Feedback for the agent on deny.
     pub message: Option<String>,
-    /// Answers for Question approvals (provider-shaped JSON).
+    /// Answers for Question approvals (provider-shaped JSON), or the edited plan of a plan
+    /// card (`{ plan }`).
     pub answers: Option<Value>,
 }
 

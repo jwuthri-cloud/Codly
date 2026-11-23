@@ -11,6 +11,7 @@ export type ApprovalDecision = { choice: ApprovalChoice,
  */
 message: string | null, 
 /**
- * Answers for Question approvals (provider-shaped JSON).
+ * Answers for Question approvals (provider-shaped JSON), or the edited plan of a plan
+ * card (`{ plan }`).
  */
 answers: JsonValue | null, };

@@ -319,8 +319,13 @@ impl Inner {
                         a.session_id = Some(s.clone());
                     }
                     // A member keeps its configured model (with its effort suffix) for the next run.
-                    if model.is_some() && a.member.is_none() {
-                        a.model = model.clone();
+                    // Any other agent takes the id the CLI reports, which names no effort, and
+                    // keeps the effort its row had: its next run starts with it again.
+                    if let Some(id) = model
+                        && a.member.is_none()
+                    {
+                        let (_, effort) = crate::adapters::classify::split_model_effort(a.model.as_deref());
+                        a.model = Some(effort.map_or_else(|| id.clone(), |effort| format!("{id}:{effort}")));
                     }
                     if a.status == AgentStatus::Starting {
                         a.status = AgentStatus::Idle;
